@@ -1,0 +1,68 @@
+[workspace]
+name = "mtest"
+version = "0.1.0"
+description = "A pytest-like test runner for Mojo that orchestrates the stdlib's per-file TestSuite"
+channels = ["https://conda.modular.com/max/", "conda-forge"]
+# Linux is the gate platform; macOS is a v1 target and shares the same POSIX
+# process surface the runner depends on. Bumping the platform set is an
+# Ask-first decision — the transcript goldens are stamped with os/arch and a
+# regeneration on a foreign platform diffs loudly by design.
+platforms = ["linux-64", "osx-arm64"]
+
+[dependencies]
+# The toolchain IS the oracle: the golden transcripts pin TestSuite's behavior
+# at exactly this Mojo version, and the version appears in every transcript
+# header. Bumping mojo is an Ask-first decision (CI must match local; a bump can
+# silently change valid syntax AND the pinned protocol — regenerate transcripts
+# and read the diff as the changelog). See AGENTS.md.
+mojo = "==1.0.0b2,<2"
+# Python is a BUILD-TIME tool only — the transcript generator and check scripts
+# live under scripts/ and use nothing but the standard library. The runner
+# itself is pure Mojo with ZERO runtime dependencies; there is no
+# [pypi-dependencies] section on purpose.
+python = "3.12.*"
+
+[tasks]
+# Print the pinned Mojo version — first CI step, fails fast on a broken toolchain
+# and stamps the exact build into the log next to the transcript headers.
+mojo-version = "mojo --version"
+
+# Precompile the src/mtest package into build/mtest.mojopkg. This is the
+# package-compiles GATE: an empty-but-broken package fails here before any test
+# does. `mojo package` does not exist in 1.0.0b2 — only `mojo precompile`, which
+# produces the same artifact.
+build = "bash scripts/build_pkg.sh"
+
+# Rewrite Mojo files in place — run locally before committing. Covers the runner
+# package, the probe fixtures, and the tests.
+fmt = "mojo format src fixtures tests"
+# CI gate: format, then fail if anything changed (never edits in CI). A format
+# that shifts a fixture's `At <path>:<line>:<col>` coordinates is an oracle-side
+# change — regenerate transcripts, do not fight the gate.
+fmt-check = "mojo format src fixtures tests && git diff --exit-code"
+
+# Regenerate the golden transcripts IN PLACE from the committed fixtures at the
+# pinned toolchain. Local use only (updating the committed goldens); never run in
+# CI. The generator self-verifies (hard asserts) before writing.
+transcripts = "python scripts/gen_transcripts.py"
+# CI gate: regenerate every transcript into a temp dir and diff byte-for-byte
+# against goldens/transcripts/ (MANIFEST included) — byte-identical or red. This
+# is the protocol pin: a red diff after a repo change indicts THE CHANGE; a red
+# diff after a mojo re-pin is the protocol changelog. Hermetic.
+transcripts-check = "bash scripts/transcripts_check.sh"
+
+# Mojo test runner over tests/: builds the package first (fail-fast), then BUILDS
+# each tests/test_*.mojo and EXECUTES the binary directly. `mojo run` never
+# appears in the gate — it masks crash exit codes to 1 and can JIT-crash in CI
+# (#6413). The repo eats the same build-then-execute rule the runner enforces.
+test = "bash scripts/test_all.sh"
+
+# The aggregate gate CI runs. Ordered fail-fast: formatting, then the package
+# compile gate, then the protocol-transcript diff, then the Mojo tests.
+[tasks.ci]
+depends-on = [
+    "fmt-check",
+    "build",
+    "transcripts-check",
+    "test",
+]
