@@ -61,21 +61,6 @@ results, and reporting them the way CI expects.
 - **No runtime dependencies.** The runner is pure Mojo; Python appears only in
   build-time tooling.
 
-## Roadmap
-
-`mtest` is built in phases; v1 is the end of the sequence.
-
-| Phase | Delivers |
-|-------|----------|
-| 0 | Scaffold, the CLI contract, and a golden-transcript harness that pins `TestSuite`'s actual per-file protocol at the pinned toolchain |
-| 1 | Walking skeleton: process adapter, hand-rolled argument parser, recursive discovery, sequential build+execute, file-level results, a console reporter |
-| 2 | Per-test results: collection, the report parser, node ids, `-k` filtering, `collect`, per-test selection — and `mtest` running its own test suite |
-| 3 | Parallelism and resilience: worker pool, timeouts with signal-first kills, process-tree cleanup, retries for crash-class steps, interrupt handling |
-| 4 | Reporters and packaging: JUnit XML, GitHub annotations, and a consumable distribution |
-| 5 | Publish: docs, a frozen contract, a tagged release |
-
-The command-line contract is specified in [docs/cli-contract.md](docs/cli-contract.md)
-(DRAFT until the v1.0 freeze).
 
 ## Toolchain
 
