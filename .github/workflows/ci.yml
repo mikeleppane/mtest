@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# A newer push to the same branch/PR cancels the older, still-running job.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The default token only needs to read the repo.
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: fmt + transcripts + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          # Install exactly what pixi.lock pins; fail if the lock is stale. This
+          # is the ONLY network step — everything after is hermetic (the
+          # fixtures and transcripts are committed; the generator builds and
+          # runs the fixtures with the locked toolchain).
+          locked: true
+          # Cache the solved environment keyed on pixi.lock.
+          cache: true
+
+      - name: Mojo version
+        run: pixi run mojo-version
+
+      # The aggregate gate, fail-fast in order:
+      #   fmt-check         — mojo format then `git diff --exit-code` (never edits in CI)
+      #   build             — precompile src/mtest (the package-compiles gate)
+      #   transcripts-check — regenerate every transcript to a temp dir and diff
+      #                       byte-for-byte against the committed goldens (also a
+      #                       toolchain-drift detector via the pinned header)
+      #   test              — build each tests/test_*.mojo and EXECUTE the binary
+      #                       directly (never `mojo run`, which masks crash codes)
+      # No network is touched here.
+      - name: CI gate (fmt-check -> build -> transcripts-check -> test)
+        run: pixi run ci
