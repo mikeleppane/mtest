@@ -38,6 +38,7 @@ def frozen_inventory() -> List[InvRow]:
         InvRow("--exclude", 1, True, True),
         InvRow("-I", 1, True, True),
         InvRow("--build-arg", 1, True, True),
+        InvRow("--gate", 1, True, True),
         InvRow("--precompile", 1, True, True),
         InvRow("--mojo", 1, False, True),
         InvRow("-x", 0, False, True),
@@ -58,7 +59,6 @@ def frozen_inventory() -> List[InvRow]:
         InvRow("--workers", 1, False, False),
         InvRow("--compile-timeout", 1, False, False),
         InvRow("--retries", 1, False, False),
-        InvRow("--gate", 1, True, False),
         InvRow("--junit-xml", 1, False, False),
         InvRow("--gh-annotations", 1, False, False),
         InvRow("--collect-only", 0, False, False),
@@ -151,8 +151,12 @@ def test_refuse_retries() raises:
     _assert_refused("--retries")
 
 
-def test_refuse_gate() raises:
-    _assert_refused("--gate")
+def test_gate_is_served_and_accumulates() raises:
+    var argv: List[String] = ["--gate", "x", "--gate", "y"]
+    var r = parse_args(argv)
+    assert_equal(len(r.config.gates), 2)
+    assert_equal(r.config.gates[0], "x")
+    assert_equal(r.config.gates[1], "y")
 
 
 def test_refuse_junit_xml() raises:

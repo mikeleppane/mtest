@@ -4,8 +4,9 @@ bad-value case.
 
 The available arity-1 spellings are enumerated, not sampled: `--exclude`, `-I`,
 `--build-arg`, `--precompile`, `--mojo`, `--timeout`, `--show-output`,
-`--color`. Each proves that omitting the value is a located usage error and that
-the `--flag=value` spelling lands the same value as `--flag value`.
+`--color`, `--gate`. Each proves that omitting the value is a located usage
+error and that the `--flag=value` spelling lands the same value as `--flag
+value`.
 """
 from std.testing import assert_equal, assert_raises, assert_true, TestSuite
 
@@ -64,6 +65,12 @@ def test_color_missing_value() raises:
         _ = parse_args(argv)
 
 
+def test_gate_missing_value() raises:
+    var argv: List[String] = ["--gate"]
+    with assert_raises(contains="'--gate' requires a value"):
+        _ = parse_args(argv)
+
+
 # --- equals-form cases ---
 
 
@@ -107,6 +114,24 @@ def test_show_output_equals_form() raises:
 def test_color_equals_form() raises:
     var argv: List[String] = ["--color=always"]
     assert_true(parse_args(argv).config.color == ColorWhen.ALWAYS)
+
+
+def test_gate_equals_form() raises:
+    var argv: List[String] = ["--gate=smoke"]
+    assert_equal(parse_args(argv).config.gates[0], "smoke")
+
+
+def test_gate_accumulates_and_preserves_spaces() raises:
+    var argv: List[String] = [
+        "--gate",
+        "tests/test_smoke_*.mojo",
+        "--gate",
+        "a b c",
+    ]
+    var r = parse_args(argv)
+    assert_equal(len(r.config.gates), 2)
+    assert_equal(r.config.gates[0], "tests/test_smoke_*.mojo")
+    assert_equal(r.config.gates[1], "a b c")
 
 
 # --- bad-value cases (validated values only) ---

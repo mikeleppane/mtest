@@ -84,6 +84,7 @@ def flag_specs() -> List[FlagSpec]:
         FlagSpec("--exclude", FlagId.EXCLUDE, 1, True, True, ""),
         FlagSpec("-I", FlagId.INCLUDE, 1, True, True, ""),
         FlagSpec("--build-arg", FlagId.BUILD_ARG, 1, True, True, ""),
+        FlagSpec("--gate", FlagId.GATE, 1, True, True, ""),
         FlagSpec("--precompile", FlagId.PRECOMPILE, 1, True, True, ""),
         FlagSpec("--mojo", FlagId.MOJO, 1, False, True, ""),
         FlagSpec("-x", FlagId.EXITFIRST, 0, False, True, ""),
@@ -121,9 +122,6 @@ def flag_specs() -> List[FlagSpec]:
             False,
             False,
             "retries and flaky handling",
-        ),
-        FlagSpec(
-            "--gate", FlagId.GATE, 1, True, False, "gate-first scheduling"
         ),
         FlagSpec(
             "--junit-xml",

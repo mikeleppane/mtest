@@ -80,6 +80,18 @@ def test_forbidden_extra_source_operand_after_double_dash() raises:
         _ = parse_args(argv)
 
 
+def test_forbidden_output_selection_in_include_value() raises:
+    var argv: List[String] = ["-I", "-o"]
+    with assert_raises(contains="forbidden build argument '-o'"):
+        _ = parse_args(argv)
+
+
+def test_forbidden_emit_equals_form_in_include_value() raises:
+    var argv: List[String] = ["-I", "--emit=llvm"]
+    with assert_raises(contains="emit-type selection"):
+        _ = parse_args(argv)
+
+
 def test_bundled_short_flags_rejected() raises:
     var argv: List[String] = ["-xq"]
     with assert_raises(contains="cannot be bundled"):

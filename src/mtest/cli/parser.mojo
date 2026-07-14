@@ -28,8 +28,9 @@ comptime MTEST_VERSION = "0.1.0-dev"
 """The single source of the version string; `main` reuses this exact value."""
 
 comptime SUPPORTED_SUMMARY = (
-    "paths, --exclude, -I, --build-arg, --precompile, --mojo, -x/--exitfirst,"
-    " --timeout, -s/--show-output, -q, -v, --color, --help, --version"
+    "paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo,"
+    " -x/--exitfirst, --timeout, -s/--show-output, -q, -v, --color, --help,"
+    " --version"
 )
 """A stable one-line list of what this build serves, quoted in refusals."""
 
@@ -214,6 +215,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
 
     var paths = List[String]()
     var excludes = List[String]()
+    var gates = List[String]()
     var precompiles = List[Precompile]()
     var build_args = List[String]()
     var include_paths = List[String]()
@@ -313,10 +315,13 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         if s.id == FlagId.EXCLUDE:
             excludes.append(value)
         elif s.id == FlagId.INCLUDE:
+            _check_build_arg(value)
             include_paths.append(value)
         elif s.id == FlagId.BUILD_ARG:
             _check_build_arg(value)
             build_args.append(value)
+        elif s.id == FlagId.GATE:
+            gates.append(value)
         elif s.id == FlagId.PRECOMPILE:
             precompiles.append(_parse_precompile(value))
         elif s.id == FlagId.MOJO:
@@ -341,7 +346,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var cfg = RunnerConfig(
         paths=paths^,
         excludes=excludes^,
-        gates=[],
+        gates=gates^,
         precompiles=precompiles^,
         build_args=build_args^,
         include_paths=include_paths^,
