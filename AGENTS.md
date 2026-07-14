@@ -36,6 +36,16 @@ Python appears only in build-time tooling under `scripts/`.
   independent of parallel completion, and a hermetic build are first-class.
 - **Toolchain flakiness is weather.** Plan for it (build-not-run, cache
   quarantine, retries for crash-class steps); do not apologize for it.
+- **Presentation is a feature.** The README is the front door, held to a
+  standing per-phase doctrine: a professional front page showing what works
+  TODAY; REAL examples, every command and its output executed against the built
+  binary before commit (the runs recorded in that phase's notes); a CLI section
+  current against `--help` exactly; an architecture section with a mermaid
+  layering diagram; and honest status — the current ceiling, the untested
+  platforms, the behaviors not yet built. No vaporware: nothing the build cannot
+  do appears as if it can. Until a runnable binary exists, "executed examples"
+  means the real developer commands (`pixi run ci` and friends), and the status
+  says plainly that the runner itself is not built yet.
 
 ## The layering plan — one direction only
 
