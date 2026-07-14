@@ -166,6 +166,23 @@ def _signal_name(signo: Int) -> String:
     return String("")
 
 
+def _errno_name(errno: Int) -> String:
+    """The strerror-style words for a common spawn errno. `""` outside the set.
+
+    Covers the errnos a failed `execvp`/`chdir` plausibly reports, so the caller
+    can name the cause and otherwise fall back to the bare number. Pure.
+    """
+    if errno == 2:
+        return String("no such file or directory")
+    if errno == 7:
+        return String("argument list too long")
+    if errno == 8:
+        return String("exec format error")
+    if errno == 13:
+        return String("permission denied")
+    return String("")
+
+
 def _outcome_detail(e: Event) -> String:
     """The per-outcome detail suffix the console renders from event data.
 
@@ -288,9 +305,33 @@ struct ConsoleReporter(Reporter):
             self._on_precompile_failed(e)
         elif k == EventKind.FILE_FINISHED:
             self._on_file_finished(e)
+        elif k == EventKind.INTERNAL_ERROR:
+            self._on_internal_error(e)
         elif k == EventKind.SESSION_FINISHED:
             self._on_session_finished(e)
         # FILE_STARTED carries nothing the console renders on its own.
+
+    def _on_internal_error(mut self, e: Event):
+        """Render a loud red-bold banner naming the step, program, and errno.
+
+        A spawn failure (nonzero errno) names the cause; errno 0 is a machinery
+        failure and carries no errno suffix.
+        """
+        var banner = String("INTERNAL-ERROR  ") + e.step + ": "
+        if e.errno == 0:
+            banner += "internal failure running '" + e.program + "'"
+        else:
+            banner += (
+                "could not execute '"
+                + e.program
+                + "' (errno "
+                + String(e.errno)
+            )
+            var name = _errno_name(e.errno)
+            if name.byte_length() > 0:
+                banner += " — " + name
+            banner += ")"
+        self._head += self._paint(_RED_BOLD, banner) + "\n"
 
     def _on_session_started(mut self, e: Event):
         """Render the header: version + toolchain, then root and file counts."""

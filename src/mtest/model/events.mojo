@@ -42,6 +42,7 @@ struct EventKind(Equatable, ImplicitlyCopyable, Movable):
     comptime FILE_STARTED = Self(3)
     comptime FILE_FINISHED = Self(4)
     comptime SESSION_FINISHED = Self(5)
+    comptime INTERNAL_ERROR = Self(6)
 
     def __eq__(self, other: Self) -> Bool:
         """Two kinds are equal iff their discriminants match. Pure."""
@@ -152,6 +153,13 @@ struct Event(Copyable, Movable):
     var exclusion_pattern: String
     """The glob that excluded the file, for an EXCLUDED line (empty otherwise)."""
 
+    # InternalError.
+    var program: String
+    """The executable a failed spawn tried to run (InternalError)."""
+    var errno: Int
+    """The spawn errno for an InternalError (0 when the cause is a machinery
+    raise rather than a spawn failure)."""
+
     # SessionFinished.
     var summary: Summary
     """The per-outcome tally, including excluded and not-run (SessionFinished)."""
@@ -186,6 +194,8 @@ struct Event(Copyable, Movable):
             exit_status=0,
             timeout_seconds=0,
             exclusion_pattern="",
+            program="",
+            errno=0,
             summary=Summary.zeros(),
             wall_time_seconds=0.0,
             exit_code=0,
@@ -271,6 +281,21 @@ struct Event(Copyable, Movable):
         e.exit_status = exit_status
         e.timeout_seconds = timeout_seconds
         e.exclusion_pattern = exclusion_pattern
+        return e^
+
+    @staticmethod
+    def internal_error(step: String, program: String, errno: Int) -> Event:
+        """A spawn or machinery failure that stopped a step from running.
+
+        `step` is `"build"`, `"run"`, or `"precompile"`; `program` is the
+        executable the runner tried to spawn; `errno` is the spawn errno, or 0
+        when the cause is a machinery raise rather than a spawn failure. Carries
+        the diagnostic as data; the reporter renders the banner.
+        """
+        var e = Event._blank(EventKind.INTERNAL_ERROR)
+        e.step = step
+        e.program = program
+        e.errno = errno
         return e^
 
     @staticmethod

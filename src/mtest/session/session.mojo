@@ -75,7 +75,8 @@ struct FileResult(Copyable, Movable):
     """
 
     var event: Event
-    """The `FileFinished` event to emit (only meaningful when `ran`)."""
+    """The event to emit: a `FileFinished` verdict when `ran`, an
+    `InternalError` diagnostic when `internal_error`."""
     var outcome: Outcome
     """The recorded outcome to tally (only meaningful when `ran`)."""
     var ran: Bool
@@ -91,9 +92,10 @@ struct FileResult(Copyable, Movable):
         return Self(event^, outcome, True, False, False)
 
     @staticmethod
-    def internal() -> Self:
-        """A spawn failure: no verdict, routes to exit 3."""
-        return Self(Event.file_started(""), Outcome.NOT_RUN, False, True, False)
+    def internal(var event: Event) -> Self:
+        """A spawn failure: no verdict, carries the diagnostic, routes to exit 3.
+        """
+        return Self(event^, Outcome.NOT_RUN, False, True, False)
 
     @staticmethod
     def interrupt() -> Self:
@@ -171,7 +173,11 @@ def _run_one(
         return FileResult.interrupt()
     var bterm = bres.termination
     if bterm.is_spawn_failed():
-        return FileResult.internal()
+        # Could not spawn the compiler at all: a machinery diagnostic, not a
+        # verdict. The errno rides so the console can name the cause.
+        return FileResult.internal(
+            Event.internal_error("build", config.mojo_path, bterm.value)
+        )
 
     var bsignal = build_verdict(bterm)
     if bsignal == Outcome.COMPILE_ERROR:
@@ -195,7 +201,10 @@ def _run_one(
     )
     var rterm = rres.termination
     if rterm.is_spawn_failed():
-        return FileResult.internal()
+        # Could not spawn the freshly built binary: a machinery diagnostic.
+        return FileResult.internal(
+            Event.internal_error("run", out_bin, rterm.value)
+        )
     # An in-flight interrupt returns as TimedOut; never record it as a TIMEOUT.
     if rterm.is_timed_out() and interrupt_requested():
         return FileResult.interrupt()
@@ -364,6 +373,9 @@ def run_session[
                 interrupted = True
                 break
             if pr.internal_error:
+                reporter.handle(
+                    Event.internal_error("precompile", config.mojo_path, 0)
+                )
                 internal_error = True
                 break
             if not pr.ok:
@@ -376,6 +388,9 @@ def run_session[
                 break
             includes.append(pr.out_dir)
         except:
+            reporter.handle(
+                Event.internal_error("precompile", config.mojo_path, 0)
+            )
             internal_error = True
             break
 
@@ -395,6 +410,7 @@ def run_session[
                     interrupted = True
                     break
                 if fr.internal_error:
+                    reporter.handle(fr.event)
                     internal_error = True
                     break
                 reporter.handle(fr.event)
@@ -404,6 +420,9 @@ def run_session[
                     gate_abort = True
                     break
             except:
+                reporter.handle(
+                    Event.internal_error("build", config.mojo_path, 0)
+                )
                 internal_error = True
                 break
 
@@ -424,6 +443,7 @@ def run_session[
                     interrupted = True
                     break
                 if fr.internal_error:
+                    reporter.handle(fr.event)
                     internal_error = True
                     break
                 reporter.handle(fr.event)
@@ -432,6 +452,9 @@ def run_session[
                 if config.exitfirst and fr.outcome.is_failing():
                     break
             except:
+                reporter.handle(
+                    Event.internal_error("build", config.mojo_path, 0)
+                )
                 internal_error = True
                 break
 

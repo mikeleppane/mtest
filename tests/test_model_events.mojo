@@ -89,6 +89,14 @@ def test_file_finished_payload_carries_render_inputs() raises:
     assert_equal(e.signal_number, 4)
 
 
+def test_internal_error_payload() raises:
+    var e = Event.internal_error("build", "/usr/bin/mojo", 2)
+    assert_true(e.kind == EventKind.INTERNAL_ERROR)
+    assert_equal(e.step, "build")
+    assert_equal(e.program, "/usr/bin/mojo")
+    assert_equal(e.errno, 2)
+
+
 def test_session_finished_payload() raises:
     var s = Summary.zeros()
     s.counts[Outcome.PASS.code] = 5
@@ -110,6 +118,7 @@ def test_event_kinds_are_distinct() raises:
         EventKind.FILE_STARTED,
         EventKind.FILE_FINISHED,
         EventKind.SESSION_FINISHED,
+        EventKind.INTERNAL_ERROR,
     ]
     for i in range(len(kinds)):
         for j in range(len(kinds)):

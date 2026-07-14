@@ -413,5 +413,40 @@ def test_precompile_failed_banner_verbatim() raises:
     assert_true("3 file(s) could not run" in out)
 
 
+def test_internal_error_banner_names_step_program_and_errno() raises:
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.internal_error("build", "/no/such/mojo", 2))
+    var out = c.output()
+    assert_true("INTERNAL-ERROR" in out)
+    assert_true("build:" in out)
+    assert_true("/no/such/mojo" in out)
+    assert_true("errno 2" in out)
+    # A recognized errno is named in words alongside the number.
+    assert_true("no such file or directory" in out)
+
+
+def test_internal_error_banner_omits_errno_for_machinery_failure() raises:
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.internal_error("precompile", "/usr/bin/mojo", 0))
+    var out = c.output()
+    assert_true("INTERNAL-ERROR" in out)
+    assert_true("precompile:" in out)
+    assert_true("/usr/bin/mojo" in out)
+    # errno 0 is a machinery failure: no errno suffix.
+    assert_false("errno" in out)
+
+
+def test_internal_error_banner_falls_back_to_bare_errno() raises:
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.internal_error("run", "build/bin/x", 99))
+    var out = c.output()
+    assert_true("errno 99" in out)
+    # An unrecognized errno carries no worded name and no dangling separator.
+    assert_false("—" in out)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

@@ -18,6 +18,7 @@ from session_fixtures import (
     SRC_COMPILE_ERROR,
     SRC_CRASH,
     SRC_HANG,
+    SRC_PASS,
     base_config,
     temp_root,
     write_file,
@@ -97,6 +98,41 @@ def test_deadline_overrun_is_timeout_not_fail() raises:
     assert_true(
         finished.outcome == Outcome.TIMEOUT, "a deadline overrun is TIMEOUT"
     )
+
+
+def test_spawn_failure_routes_to_exit_3_and_emits_diagnostic() raises:
+    # A nonexistent compiler cannot be spawned: the session must resolve exit 3,
+    # emit an INTERNAL_ERROR diagnostic naming the build step and the program,
+    # and record NO false verdict for the file (it stays NOT-RUN).
+    var root = temp_root()
+    write_file(root, "tests/test_ok.mojo", SRC_PASS)
+
+    var config = base_config()
+    config.mojo_path = "/no/such/mojo/compiler"
+
+    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var code = run_session(config, root, comp)
+
+    assert_equal(code, 3, "a spawn failure resolves to exit 3")
+    ref rec = comp.reporters[0]
+
+    var saw_internal = False
+    var saw_verdict = False
+    for i in range(rec.count()):
+        var e = rec.event_at(i)
+        if e.kind == EventKind.INTERNAL_ERROR:
+            saw_internal = True
+            assert_equal(e.step, "build")
+            assert_equal(e.program, "/no/such/mojo/compiler")
+        if e.kind == EventKind.FILE_FINISHED:
+            saw_verdict = True
+    assert_true(saw_internal, "no INTERNAL_ERROR diagnostic was emitted")
+    assert_true(not saw_verdict, "a spawn failure must record no verdict")
+
+    var last = rec.event_at(rec.count() - 1)
+    assert_true(last.kind == EventKind.SESSION_FINISHED)
+    assert_equal(last.exit_code, 3)
+    assert_equal(last.summary.count_of(Outcome.NOT_RUN), 1)
 
 
 def main() raises:

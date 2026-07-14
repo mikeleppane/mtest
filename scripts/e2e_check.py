@@ -719,6 +719,52 @@ def s_out_of_root(manifest: dict) -> str:
     return "out-of-root operand -> exit 4"
 
 
+def s_internal_error(manifest: dict) -> str:
+    """A spawn/machinery failure must surface a diagnostic, not a silent exit 3.
+
+    Point the runner at a nonexistent `--mojo`, so spawning `mojo build` fails
+    with ENOENT before any file can be built. Assert exit 3, an INTERNAL-ERROR
+    banner naming the build step, the missing program, and the errno; that NO
+    false PASS/verdict line appears for the file; and that the file is accounted
+    NOT-RUN in the summary."""
+    rel = "testdata/suite/test_passing.mojo"
+    missing = "/no/such/mojo/compiler"
+    run = run_mtest(["--mojo", missing, rel], timeout=SHORT_TIMEOUT)
+    expect_exit(run, 3)
+    summ = expect_accounting(run)
+
+    expect(
+        "INTERNAL-ERROR" in run.stdout,
+        f"no INTERNAL-ERROR banner on a spawn failure:\n{run.stdout}",
+    )
+    expect(
+        "build" in run.stdout,
+        f"internal-error banner did not name the build step:\n{run.stdout}",
+    )
+    expect(
+        missing in run.stdout,
+        f"internal-error banner did not name the missing program:\n{run.stdout}",
+    )
+    expect(
+        "errno" in run.stdout,
+        f"internal-error banner did not report an errno:\n{run.stdout}",
+    )
+    # No false verdict: the file must never be reported PASS (or any verdict).
+    expect(
+        run.verdict_line("PASS", rel) is None,
+        f"spawn failure produced a false PASS verdict for {rel}",
+    )
+    expect(
+        not verdict_paths_in_order(run),
+        f"spawn failure produced verdict lines: {verdict_paths_in_order(run)}",
+    )
+    expect(
+        summ.not_run >= 1,
+        f"spawn-failed file not accounted NOT-RUN (not_run={summ.not_run})",
+    )
+    return "exit 3; INTERNAL-ERROR banner names build/program/errno; file NOT-RUN"
+
+
 def s_interrupt(manifest: dict) -> str:
     """Spawn mtest against slow/ in its OWN process group, wait until it has
     clearly started (its header appears), let it enter the hang, then SIGINT the
@@ -829,6 +875,7 @@ def main() -> int:
     h.scenario("usage-refusals", s_usage_refusals)
     h.scenario("passthrough+forbidden", s_passthrough_and_forbidden)
     h.scenario("out-of-root", s_out_of_root)
+    h.scenario("internal-error", s_internal_error)
     h.scenario("interrupt", s_interrupt)
 
     passed = sum(1 for _n, ok, _d in h.results if ok)
