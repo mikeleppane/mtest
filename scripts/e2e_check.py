@@ -207,7 +207,7 @@ def run_mtest(
 def run_mtest_pty(
     args: list[str],
     *,
-    env_overrides: dict[str, str] | None = None,
+    env_overrides: dict[str, str | None] | None = None,
     timeout: float = SHORT_TIMEOUT,
 ) -> tuple[int, bytes]:
     """Spawn build/mtest with stdout+stderr attached to a real pty, in its own
@@ -224,7 +224,14 @@ def run_mtest_pty(
     argv = [MTEST, *args]
     env = dict(os.environ)
     if env_overrides:
-        env.update(env_overrides)
+        # A None value REMOVES the key from the child environment (a plain
+        # dict.update cannot clear an ambient key). This lets a scenario prove
+        # behavior with a variable explicitly absent, not merely overridden.
+        for key, value in env_overrides.items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
         argv,
@@ -675,7 +682,13 @@ def s_color(manifest: dict) -> str:
     """
     rel = "testdata/suite/test_failing.mojo"
 
-    tty_rc, tty_out = run_mtest_pty([rel], timeout=SHORT_TIMEOUT)
+    # Explicitly REMOVE NO_COLOR so the colors-expected case does not inherit an
+    # ambient NO_COLOR (e.g. under `NO_COLOR=1 pixi run ci`), which would silence
+    # AUTO color and fail this assertion spuriously. The NO_COLOR-silences case
+    # below still sets it.
+    tty_rc, tty_out = run_mtest_pty(
+        [rel], env_overrides={"NO_COLOR": None}, timeout=SHORT_TIMEOUT
+    )
     expect(tty_rc == 1, f"expected exit 1 under a pty, got {tty_rc}")
     expect(
         b"\x1b" in tty_out,
