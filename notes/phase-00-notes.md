@@ -175,6 +175,25 @@ byte-identical double generation.
 
 ## External review triage
 
-_Filled after the dual adversarial review (Claude Opus 4.8 xhigh + Codex
-GPT-5.6-sol xhigh). Each finding is recorded here as fixed or
-rejected-with-reason._
+The external dual-review gate ran into tooling friction this phase. The first
+attempt at both reviewers was orphaned when the session was interrupted
+mid-run, producing no findings. On the retry the Codex run was dropped at the
+maintainer's direction, and the maintainer directed proceeding to merge before
+the Opus 4.8 (xhigh) run completed. The merge therefore rests on the automated
+gate and the maintainer's own review rather than a completed external pass:
+
+- `pixi run ci` (fmt-check → build → transcripts-check → test) green on a clean
+  tree.
+- The flipped-byte proof (the gate goes red on a hand-edited transcript) and the
+  fresh-clone proof (`pixi run ci` green at a different absolute path, proving no
+  leaked absolute path).
+- A maintainer self-review of the highest-risk component, the transcript
+  generator/normalizer, with adversarial probes: a report-lookalike line printed
+  before the report anchor is preserved byte-exact; a report block after the
+  anchor is normalized; a FAIL-detail line is not over-normalized; the
+  stack-dump collapse fails loudly on an unrecognized frame; termination is
+  `exit <N>` / `signal <N>`, never `128+N`. No critical or high defect surfaced.
+
+Any findings from a later completed external review will be triaged when Phase 1
+opens, as follow-up rather than a Phase 0 blocker. The standing per-phase
+dual-adversarial-review doctrine remains in force for future phases.
