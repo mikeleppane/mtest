@@ -1,0 +1,100 @@
+{
+  "schema": "mtest-e2e-manifest/1",
+  "description": "Single source of truth for the known-outcome testdata tree. Each discovered test_*.mojo file maps to the verdict the real mtest binary produces for it and the exit-code class that verdict contributes (0 = the pass/skip class, 1 = the failing class). The end-to-end harness consumes this file directly and asserts both-way completeness: every discovered test file has a row here, and every row names a file that exists on disk. There is no second, hard-coded expectations table.",
+  "testdata_root": "testdata",
+  "suite_root": "testdata/suite",
+  "exit_class_meaning": {
+    "0": "PASS or SKIP — contributes exit 0 (the session is clean unless another file fails)",
+    "1": "FAIL, CRASH, TIMEOUT, or COMPILE-ERROR — contributes exit 1"
+  },
+  "tests": {
+    "testdata/suite/test_passing.mojo": {
+      "verdict": "PASS",
+      "exit_class": 0,
+      "in_default_suite": true,
+      "rationale": "Three passing tests; the file exits 0. The exit-0 baseline and the single-file pass case."
+    },
+    "testdata/suite/test_failing.mojo": {
+      "verdict": "FAIL",
+      "exit_class": 1,
+      "in_default_suite": true,
+      "rationale": "One assertion fails; the file compiles, runs, and exits nonzero. Reported FAIL, distinct from CRASH."
+    },
+    "testdata/suite/test_crashing.mojo": {
+      "verdict": "CRASH",
+      "exit_class": 1,
+      "in_default_suite": true,
+      "rationale": "A test calls abort(\"simulated hard crash\"); the process dies by signal 4 (SIGILL). A crash is not a failure and stays a separate outcome."
+    },
+    "testdata/suite/test_zero.mojo": {
+      "verdict": "PASS",
+      "exit_class": 0,
+      "in_default_suite": true,
+      "zero_test_ceiling": true,
+      "rationale": "Collects ZERO tests and exits 0, so the runner counts the file PASS. This is the documented ceiling: an empty single file is not an error, whereas a whole session that collects nothing anywhere is the separate exit-5 case."
+    },
+    "testdata/suite/test_noisy.mojo": {
+      "verdict": "PASS",
+      "exit_class": 0,
+      "in_default_suite": true,
+      "rationale": "Every test passes while the file floods stdout and stderr with report-shaped and timing-shaped lookalike lines; the noise must not change the PASS verdict."
+    },
+    "testdata/suite/test_compile_error.mojo": {
+      "verdict": "COMPILE-ERROR",
+      "exit_class": 1,
+      "in_default_suite": true,
+      "rationale": "Parses cleanly (mojo format succeeds) but names an undefined symbol, so mojo build fails at name resolution. A broken test file, reported as the file's fault, never as a runner bug."
+    },
+    "testdata/suite/nested/test_nested.mojo": {
+      "verdict": "PASS",
+      "exit_class": 0,
+      "in_default_suite": true,
+      "rationale": "A passing suite one directory down; proves the directory walk recurses."
+    },
+    "testdata/slow/test_hanging.mojo": {
+      "verdict": "TIMEOUT",
+      "exit_class": 1,
+      "in_default_suite": false,
+      "reached_only_by": ["--timeout", "interrupt"],
+      "rationale": "Sleeps forever. Reached ONLY under --timeout (killed and reported TIMEOUT) or the interrupt scenario. No default scenario walks slow/, so it can never hang the gate."
+    },
+    "testdata/slow/test_slow_pass_a.mojo": {
+      "verdict": "PASS",
+      "exit_class": 0,
+      "in_default_suite": false,
+      "rationale": "A passing sibling of the hanging file that sorts after it; in the interrupt scenario it stays unscheduled and appears in the NOT-RUN accounting."
+    },
+    "testdata/slow/test_slow_pass_b.mojo": {
+      "verdict": "PASS",
+      "exit_class": 0,
+      "in_default_suite": false,
+      "rationale": "A second passing sibling left NOT-RUN when the interrupt truncates the slow/ walk."
+    },
+    "testdata/excluded/test_excluded.mojo": {
+      "verdict": "PASS",
+      "exit_class": 0,
+      "in_default_suite": false,
+      "rationale": "A passing suite whose role is to be the target of --exclude. When a pattern covers it the runner prints a loud EXCLUDED line and never builds it; when actually run it passes."
+    },
+    "testdata/pkg/test_uses_pkg.mojo": {
+      "verdict": "PASS",
+      "exit_class": 0,
+      "in_default_suite": false,
+      "requires_precompile": "testdata/pkg/mathlib",
+      "rationale": "Imports from a package that must be precompiled first. PASS only under --precompile testdata/pkg/mathlib, which builds the package and auto-adds its output directory to the include path so the import resolves."
+    }
+  },
+  "non_discovered": {
+    "testdata/suite/helper.mojo": {
+      "rationale": "No test_ prefix. A directory walk selects only test_*.mojo, so this support module must never be collected or reported; the harness proves it never appears in a default run's verdict lines."
+    }
+  },
+  "support_files": {
+    "testdata/pkg/mathlib/__init__.mojo": {
+      "rationale": "The importable package precompiled by the --precompile success scenario."
+    },
+    "testdata/pkg_broken/badlib/__init__.mojo": {
+      "rationale": "A deliberately broken package: precompiling it fails at name resolution, driving the PRECOMPILE-ERROR banner with dependent test files listed as casualties and exit 1."
+    }
+  }
+}

@@ -254,13 +254,22 @@ Accumulated the hard way; append as later phases teach more.
   `external_call`). A feasibility spike proved, on this toolchain, separate
   byte-exact stdout/stderr capture (args with spaces and empty strings survive),
   concurrent non-deadlocking drain via `poll`, timeout with a terminate-then-kill
-  sequence, a process-**group** kill that reaches a grandchild, exit-vs-signal
-  discrimination, and cwd control — all via `fork`/`setpgid`/`dup2`/`execvp`
-  (async-signal-safe child path; argv built in the parent) and
-  `pipe`/`poll`/`read`/`waitpid`/`kill`. `/bin/sh -c` is not a substitute. Two
-  traps: re-declaring `write` via `external_call` collides with the stdlib's own
-  `write` decl (use `read`/String instead), and the child after `fork` may call
-  only async-signal-safe functions before `exec`.
+  sequence, exit-vs-signal discrimination, and cwd control — all via
+  `fork`/`setpgid`/`dup2`/`execvp` (async-signal-safe child path; argv built in
+  the parent) and `pipe`/`poll`/`read`/`waitpid`/`kill`. `/bin/sh -c` is not a
+  substitute. **EOF on both read pipes is NOT completion.** A supervised child
+  terminates only when `waitpid` reaps it — EOF just means no more output is
+  coming, and a child that closes its streams and then hangs must still be
+  killed by the deadline. The supervision loop therefore keeps enforcing the
+  deadline with `waitpid(..., WNOHANG)` in a poll loop and never issues a
+  blocking `waitpid` after EOF (that can hang the runner forever). Every kill —
+  the deadline kill and every cleanup kill — targets the process **group**
+  (`kill(-pgid, …)`, via `setpgid`), never the direct child alone: a grandchild
+  inherits the redirected pipe write end, so killing only the direct child
+  leaves the parent's read blocked forever. Two further traps: re-declaring
+  `write` via `external_call` collides with the stdlib's own `write` decl (use
+  `read`/String instead), and the child after `fork` may call only
+  async-signal-safe functions before `exec`.
 - **The module cache is redirectable via `MODULAR_CACHE_DIR`** (the cache lives
   at `.mojo_cache`; `--print-cache-location`/`--clear-cache` exist). A post-kill
   retry build points it at a per-attempt temp dir so a killed compile's corrupted
@@ -270,6 +279,106 @@ Accumulated the hard way; append as later phases teach more.
 - **`mojo package` does not exist in 1.0.0b2** — only `mojo precompile`, which
   produces the same `.mojopkg` (with a deprecation warning suggesting `.mojoc`;
   the name is kept so `-I build` resolves `from mtest import …`).
+- **`UnsafePointer[T, _]` helper-argument origins are immutable by default.** A
+  helper function whose parameter is written `UnsafePointer[T, _]` receives a
+  wildcard origin that cannot be written through — writing a field via that
+  pointer fails with a "cannot mutate through immutable origin"-class compile
+  error at the write site. Correct move: write struct fields inline at the call
+  site, where the pointer still carries its concrete, mutable `alloc` origin,
+  rather than threading it through a helper that widens the origin to a
+  wildcard.
+- **String ↔ C-string/bytes conversion recipes (pinned for this toolchain):**
+  String → C string is `s.as_c_string_slice().unsafe_ptr()`; bytes (a
+  `List[Byte]`/span) → String is
+  `String(StringSlice(unsafe_from_utf8=Span(list)))`. FFI code reuses these
+  rather than reinventing byte/string plumbing.
+- **Fanning one event to N heterogeneous reporters is a comptime variadic
+  type-parameter pack, not a runtime trait-object list** — 1.0.0b2 polymorphism
+  is static. The proven pattern: a `struct Composite[*Rs: Reporter]` stores
+  `var reporters: Tuple[*Self.Rs]` and dispatches with
+  `comptime for i in range(Self.N): self.reporters[i].handle(e)`, where
+  `comptime N = Self.Rs.__len__()`. Five traps: inside the struct the pack must
+  be written `Self.Rs`, never bare `Rs` (symptom: "unqualified access to struct
+  parameter 'Rs'"); the constructor must accept a pre-built `Tuple[*Self.Rs]`
+  and move it in (`self.reporters = reporters^`), because a `VariadicPack`
+  cannot be splatted directly into `Tuple`'s constructor (symptom: "cannot
+  implicitly convert 'Tuple[VariadicPack[...]]' to 'Tuple[*Rs.values]'") — build
+  the tuple at the call site instead, `Composite(Tuple(A(...), B(...)))`, and
+  let `Rs` be inferred; the iteration length must be the comptime
+  `Self.Rs.__len__()`, never a runtime `len(tuple)` (symptom: "cannot use a
+  dynamic value in 'for' iterator expression"); reading a stored reporter's
+  state back needs no `rebind`, because a comptime-known index recovers the
+  concrete element type; and the struct itself cannot be made to conform to a
+  `Copyable`-bounded trait, even when every `Rs` element does, because
+  `Tuple[*Self.Rs]` is not synthesizably `Copyable` (symptom: "cannot
+  synthesize copy constructor because field '...' has non-copyable type
+  'Tuple[*Rs.values]'") — use such a composite as the top-level type a consumer
+  is generic over, never nested inside another struct. Correct move: adding a
+  reporter means adding a tuple element at the call site — dispatch stays fully
+  static.
+- **`fn` is fully removed in 1.0.0b2** — the compiler rejects it outright
+  (`'fn' has been removed; use 'def' instead`), including as a function-VALUE
+  type: write `def(...) -> ...`, never `fn(...) -> ...`.
+- **There is no module-global `var`, and `std.ffi._Global` crashes the
+  compiler** (`ParamInf::inferForStruct`). For state a bare C signal handler
+  must reach, the working pattern is a fixed-address anonymous mapping:
+  `mmap(FIXED_ADDR, 4096, PROT_READ|WRITE, MAP_PRIVATE|MAP_ANONYMOUS|
+  MAP_FIXED_NOREPLACE)`. Anonymous pages are zero-filled, so a flag stored
+  there reads False before any handler ever fires — safe to read even when no
+  handler was installed. On `MAP_FAILED`, check `errno == EEXIST` (the page is
+  already mapped — the idempotent reuse path) versus any other errno (a real
+  failure: raise); reusing a fixed address that mmap actually left unmapped
+  SIGSEGVs on the next access, so the two cases must not be conflated.
+- **A Mojo `def` used as a C callback is not itself usable as a code
+  pointer.** The function value IS the code pointer, but `UnsafePointer(to=
+  handler)` yields a stack slot that *holds* it — passing that pointer to
+  `sigaction` segfaults. Deref once, `UnsafePointer(to=handler).bitcast[
+  UInt64]()[0]`, to recover the real text-segment entry address, then write
+  those 8 bytes into the sigaction buffer (glibc linux-64 layout: `sa_flags`
+  at byte offset 136, struct ≥152 bytes); the kernel then correctly invokes a
+  `def(Int32)` handler via the SysV single-int ABI.
+- **`UnsafePointer` is non-nullable by construction** — there is no null
+  default constructor, and `unsafe_from_address=0` hard-fails at compile time
+  (`UnsafePointer is non-nullable. To construct a null pointer, use
+  Optional[UnsafePointer] to model nullability.`). For a NULL argv terminator,
+  over-allocate the array by one slot and `memset_zero` the whole buffer
+  before filling only the real entries — the untouched trailing slot IS the
+  terminator. Build a pointer from a raw integer address with
+  `UnsafePointer[T, MutAnyOrigin](unsafe_from_address=addr)`. `.alloc`/
+  `.offset` instance methods don't exist; use the free `alloc[T](n)` from
+  `std.memory` and `p.bitcast[U]()[k]` for byte-offset access.
+- **A tuple RETURN-type annotation, `-> (Bool, Int)`, does not compile**
+  (`no matching function in initialization` against `Tuple`'s synthesized
+  constructors) — return a small `@fieldwise_init` struct for any multi-value
+  result instead.
+- **A closed-vocabulary struct (an Int-wrapping enum-like type with `comptime
+  NAME = Self(n)` constants) must conform to `ImplicitlyCopyable`**, or the
+  constants fail to materialize at runtime; these types hold no owned
+  resources, so the conformance costs nothing. A large OWNING struct (holding
+  `List`s/`String`s) instead stays `Copyable, Movable` only, so every copy is
+  a visible, deliberate `.copy()` — reading an owned field into a local, or
+  calling `.value()` on an `Optional` of one, is an implicit copy and is
+  REJECTED without an explicit `.copy()`.
+- **`exit()` is not `noreturn` to Mojo's flow analysis** — after a
+  `try/except` whose every branch only calls `exit`, the compiler still
+  treats a variable used later as possibly-uninitialized on the fall-through
+  path it thinks exists. Seed a sentinel value before the `try`, with a
+  comment explaining why, so a reader doesn't "clean up" the dead-looking
+  initializer.
+- **The filesystem stdlib (1.0.0b2) lives under `std.os`/`std.os.path`/
+  `std.tempfile`, not `std.shutil`** — `from std.os.path import exists, isdir,
+  isfile, islink, dirname, basename` (`isdir`/`isfile` FOLLOW symlinks;
+  `islink` detects them, so a no-follow directory walk must skip `islink`
+  entries before recursing into them), `from std.os import listdir, makedirs,
+  symlink, remove, rmdir` (`listdir` entries are UNSORTED and `List` has no
+  `.sort()` — sort with `from std.builtin.sort import sort`), `from
+  std.tempfile import mkdtemp`. There is no `rmtree`; delete recursively by
+  hand.
+- **`mojo` resolves only through the pixi environment's `PATH`** — a binary
+  that itself spawns `mojo` as a child process (as this runner does, to build
+  each test file) must run under `pixi run`, or the child's `mojo build`
+  fails to spawn. Never scrub the environment before such a spawn: passing it
+  straight through is what lets the pixi toolchain reach every grandchild.
 
 ## Skills index
 
