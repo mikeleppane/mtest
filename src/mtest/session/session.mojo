@@ -36,14 +36,28 @@ from mtest.session.verdict import build_verdict, run_verdict
 
 
 def _mangle(rel: String) -> String:
-    """The collision-free binary name for a root-relative file path.
+    """The INJECTIVE binary name for a root-relative file path.
 
-    Strips the `.mojo` suffix and replaces every `/` with `__`, so
-    `tests/sub/test_a.mojo` becomes `tests__sub__test_a`. Collision-free
-    because root-relative paths are unique. Pure.
+    Strips the `.mojo` suffix, then escapes every `_` as `_u` and every `/`
+    as `_s` before emitting the rest of the characters unchanged, so
+    `tests/sub/test_a.mojo` becomes `tests_ssub_stest_ua`. Injective because
+    both escapes start with `_`: a literal `_` in the input NEVER survives
+    un-escaped into the output, so no output byte sequence is ambiguous
+    between "an escaped separator" and "a literal underscore" — two distinct
+    root-relative paths can never mangle to the same name (contrast a naive
+    `/`->`__` replacement, which collides `a/b.mojo` with the literal file
+    `a__b.mojo`). Pure.
     """
     var noext = String(rel.removesuffix(".mojo"))
-    return String("__").join(noext.split("/"))
+    var out = String("")
+    for cp in noext.codepoint_slices():
+        if cp == "_":
+            out += "_u"
+        elif cp == "/":
+            out += "_s"
+        else:
+            out += String(cp)
+    return out
 
 
 def _join(argv: List[String]) -> String:

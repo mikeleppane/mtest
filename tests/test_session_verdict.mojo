@@ -57,6 +57,15 @@ def test_build_verdict_signal_is_compile_error() raises:
     )
 
 
+def test_build_verdict_timed_out_is_compile_error() raises:
+    # An interrupt-induced TimedOut during a build folds into the defensive
+    # COMPILE_ERROR fallback — never a NOT_RUN sentinel, never a test CRASH.
+    assert_true(
+        build_verdict(Termination.timed_out(Termination.SIGNALED, 15, True))
+        == Outcome.COMPILE_ERROR
+    )
+
+
 def test_build_verdict_spawn_failed_is_not_run_sentinel() raises:
     assert_true(build_verdict(Termination.spawn_failed(2)) == Outcome.NOT_RUN)
 
