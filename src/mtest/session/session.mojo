@@ -24,6 +24,7 @@ from std.time import perf_counter_ns
 from mtest.config import RunnerConfig, lossy_utf8
 from mtest.discover import discover
 from mtest.exec import (
+    ProcessResult,
     ProcessSpec,
     interrupt_requested,
     run_supervised,
@@ -122,6 +123,12 @@ struct PrecompileResult(Copyable, Movable):
     """Whether a spawn failure occurred (routes to internal-error exit 3)."""
     var interrupted: Bool
     """Whether an interrupt aborted the step (routes to exit 2)."""
+    var errno: Int
+    """The spawn errno on an internal error, so the diagnostic names the real
+    cause (e.g. ENOENT for a nonexistent compiler); 0 otherwise."""
+    var program: String
+    """The program the step tried to spawn on an internal error; empty otherwise.
+    """
 
 
 def _run_one(
@@ -162,10 +169,18 @@ def _run_one(
         build_argv.append(a)
 
     # Build with NO deadline, inside the invocation root. The argv is copied so
-    # the original survives to ride the FileFinished event as build_argv.
-    var bres = run_supervised(
-        ProcessSpec.command_in(build_argv.copy(), root, 0)
-    )
+    # the original survives to ride the FileFinished event as build_argv. A build
+    # machinery raise (a pipe/fork syscall failure) is a build-phase internal
+    # error naming the compiler — never mislabeled against another step.
+    var bres: ProcessResult
+    try:
+        bres = run_supervised(
+            ProcessSpec.command_in(build_argv.copy(), root, 0)
+        )
+    except:
+        return FileResult.internal(
+            Event.internal_error("build", config.mojo_path, 0)
+        )
     var bdur = Float64(bres.duration_ms) / 1000.0
 
     # An interrupt during the build group-kills it (a TimedOut bail-out).
@@ -193,12 +208,18 @@ def _run_one(
         )
         return FileResult.ran_with(ev^, Outcome.COMPILE_ERROR)
 
-    # Build OK: run the freshly built binary under the run deadline.
+    # Build OK: run the freshly built binary under the run deadline. A run-phase
+    # machinery raise attributes to the RUN step and names the built binary, so a
+    # run-side failure is never laundered into a build diagnostic.
     var run_argv = List[String]()
     run_argv.append(out_bin)
-    var rres = run_supervised(
-        ProcessSpec.command_in(run_argv^, root, config.timeout_secs * 1000)
-    )
+    var rres: ProcessResult
+    try:
+        rres = run_supervised(
+            ProcessSpec.command_in(run_argv^, root, config.timeout_secs * 1000)
+        )
+    except:
+        return FileResult.internal(Event.internal_error("run", out_bin, 0))
     var rterm = rres.termination
     if rterm.is_spawn_failed():
         # Could not spawn the freshly built binary: a machinery diagnostic.
@@ -284,17 +305,21 @@ def _run_precompile(
 
     var res = run_supervised(ProcessSpec.command_in(argv^, root, 0))
     if interrupt_requested():
-        return PrecompileResult("", "", False, False, True)
+        return PrecompileResult("", "", False, False, True, 0, "")
     var term = res.termination
     if term.is_spawn_failed():
-        return PrecompileResult("", "", False, True, False)
+        # Could not spawn the compiler at all: carry the real errno and program
+        # so the diagnostic names the cause, exactly as the build/run paths do.
+        return PrecompileResult(
+            "", "", False, True, False, term.value, config.mojo_path
+        )
     if term.is_exited() and term.value == 0:
         var d = dirname(out_path)
         if d == "":
             d = String(".")
-        return PrecompileResult(d^, "", True, False, False)
+        return PrecompileResult(d^, "", True, False, False, 0, "")
     return PrecompileResult(
-        "", lossy_utf8(res.stderr_bytes), False, False, False
+        "", lossy_utf8(res.stderr_bytes), False, False, False, 0, ""
     )
 
 
@@ -374,7 +399,7 @@ def run_session[
                 break
             if pr.internal_error:
                 reporter.handle(
-                    Event.internal_error("precompile", config.mojo_path, 0)
+                    Event.internal_error("precompile", pr.program, pr.errno)
                 )
                 internal_error = True
                 break

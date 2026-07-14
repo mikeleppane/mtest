@@ -788,7 +788,33 @@ def s_internal_error(manifest: dict) -> str:
         summ.not_run >= 1,
         f"spawn-failed file not accounted NOT-RUN (not_run={summ.not_run})",
     )
-    return "exit 3; INTERNAL-ERROR banner names build/program/errno; file NOT-RUN"
+
+    # A precompile spawn failure must name the real errno too, not a generic
+    # errno 0. Point --precompile at a step whose compiler cannot be spawned: the
+    # banner names the precompile step, the missing program, and ENOENT (errno 2)
+    # exactly as the build path does — the errno is threaded, not dropped.
+    pc = run_mtest(
+        ["--mojo", missing, rel, "--precompile", "testdata/pkg/mathlib"],
+        timeout=SHORT_TIMEOUT,
+    )
+    expect_exit(pc, 3)
+    expect(
+        "INTERNAL-ERROR" in pc.stdout,
+        f"no INTERNAL-ERROR banner on a precompile spawn failure:\n{pc.stdout}",
+    )
+    expect(
+        "precompile" in pc.stdout,
+        f"internal-error banner did not name the precompile step:\n{pc.stdout}",
+    )
+    expect(
+        "errno 2" in pc.stdout,
+        f"precompile spawn failure dropped the real errno (expected ENOENT):"
+        f"\n{pc.stdout}",
+    )
+    return (
+        "exit 3; build+precompile INTERNAL-ERROR banners name step/program/"
+        "errno; file NOT-RUN"
+    )
 
 
 def s_interrupt(manifest: dict) -> str:
