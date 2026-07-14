@@ -254,13 +254,22 @@ Accumulated the hard way; append as later phases teach more.
   `external_call`). A feasibility spike proved, on this toolchain, separate
   byte-exact stdout/stderr capture (args with spaces and empty strings survive),
   concurrent non-deadlocking drain via `poll`, timeout with a terminate-then-kill
-  sequence, a process-**group** kill that reaches a grandchild, exit-vs-signal
-  discrimination, and cwd control — all via `fork`/`setpgid`/`dup2`/`execvp`
-  (async-signal-safe child path; argv built in the parent) and
-  `pipe`/`poll`/`read`/`waitpid`/`kill`. `/bin/sh -c` is not a substitute. Two
-  traps: re-declaring `write` via `external_call` collides with the stdlib's own
-  `write` decl (use `read`/String instead), and the child after `fork` may call
-  only async-signal-safe functions before `exec`.
+  sequence, exit-vs-signal discrimination, and cwd control — all via
+  `fork`/`setpgid`/`dup2`/`execvp` (async-signal-safe child path; argv built in
+  the parent) and `pipe`/`poll`/`read`/`waitpid`/`kill`. `/bin/sh -c` is not a
+  substitute. **EOF on both read pipes is NOT completion.** A supervised child
+  terminates only when `waitpid` reaps it — EOF just means no more output is
+  coming, and a child that closes its streams and then hangs must still be
+  killed by the deadline. The supervision loop therefore keeps enforcing the
+  deadline with `waitpid(..., WNOHANG)` in a poll loop and never issues a
+  blocking `waitpid` after EOF (that can hang the runner forever). Every kill —
+  the deadline kill and every cleanup kill — targets the process **group**
+  (`kill(-pgid, …)`, via `setpgid`), never the direct child alone: a grandchild
+  inherits the redirected pipe write end, so killing only the direct child
+  leaves the parent's read blocked forever. Two further traps: re-declaring
+  `write` via `external_call` collides with the stdlib's own `write` decl (use
+  `read`/String instead), and the child after `fork` may call only
+  async-signal-safe functions before `exec`.
 - **The module cache is redirectable via `MODULAR_CACHE_DIR`** (the cache lives
   at `.mojo_cache`; `--print-cache-location`/`--clear-cache` exist). A post-kill
   retry build points it at a per-attempt temp dir so a killed compile's corrupted
@@ -270,6 +279,37 @@ Accumulated the hard way; append as later phases teach more.
 - **`mojo package` does not exist in 1.0.0b2** — only `mojo precompile`, which
   produces the same `.mojopkg` (with a deprecation warning suggesting `.mojoc`;
   the name is kept so `-I build` resolves `from mtest import …`).
+- **`UnsafePointer[T, _]` helper-argument origins are immutable by default.** A
+  helper function whose parameter is written `UnsafePointer[T, _]` receives a
+  wildcard origin that cannot be written through — writing a field via that
+  pointer fails with a "cannot mutate through immutable origin"-class compile
+  error at the write site. Correct move: write struct fields inline at the call
+  site, where the pointer still carries its concrete, mutable `alloc` origin,
+  rather than threading it through a helper that widens the origin to a
+  wildcard.
+- **String ↔ C-string/bytes conversion recipes (pinned for this toolchain):**
+  String → C string is `s.as_c_string_slice().unsafe_ptr()`; bytes (a
+  `List[Byte]`/span) → String is
+  `String(StringSlice(unsafe_from_utf8=Span(list)))`. FFI code reuses these
+  rather than reinventing byte/string plumbing.
+- **Fanning one event to N heterogeneous reporters is a comptime variadic
+  type-parameter pack, not a runtime trait-object list** — 1.0.0b2 polymorphism
+  is static. The proven pattern: a `struct Composite[*Rs: Reporter]` stores
+  `var reporters: Tuple[*Self.Rs]` and dispatches with
+  `comptime for i in range(Self.N): self.reporters[i].handle(e)`, where
+  `comptime N = Self.Rs.__len__()`. Four traps: inside the struct the pack must
+  be written `Self.Rs`, never bare `Rs` (symptom: "unqualified access to struct
+  parameter 'Rs'"); the constructor must accept a pre-built `Tuple[*Self.Rs]`
+  and move it in (`self.reporters = reporters^`), because a `VariadicPack`
+  cannot be splatted directly into `Tuple`'s constructor (symptom: "cannot
+  implicitly convert 'Tuple[VariadicPack[...]]' to 'Tuple[*Rs.values]'") — build
+  the tuple at the call site instead, `Composite(Tuple(A(...), B(...)))`, and
+  let `Rs` be inferred; the iteration length must be the comptime
+  `Self.Rs.__len__()`, never a runtime `len(tuple)` (symptom: "cannot use a
+  dynamic value in 'for' iterator expression"); and reading a stored reporter's
+  state back needs no `rebind`, because a comptime-known index recovers the
+  concrete element type. Correct move: adding a reporter means adding a tuple
+  element at the call site — dispatch stays fully static.
 
 ## Skills index
 
