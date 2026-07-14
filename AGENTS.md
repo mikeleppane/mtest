@@ -228,8 +228,11 @@ Accumulated the hard way; append as later phases teach more.
   arrives as the payload of the runtime's `Unhandled exception caught during
   execution:` line (observed on stdout). User `print`s stream immediately and
   precede it — so the report parser must anchor on the **last** `Running <N>
-  tests for` line, never the first match (a test can print a report-lookalike
-  line).
+  tests for` line **that is followed by a `Summary` line**, never the first
+  match. The Summary qualifier matters on a crash stream, where the report is
+  lost: a `Running`-lookalike a test prints before aborting has no Summary after
+  it, so it is not mistaken for the report and the lines a test printed are left
+  byte-exact.
 - **TestSuite exposes an in-code skip API** (`suite.skip[f]()`), used via the
   manual construction form (discover, skip, then `run()`). A natively-skipped
   test emits a normal `SKIP` report line — distinct from the selection-induced

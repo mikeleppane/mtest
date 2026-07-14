@@ -175,25 +175,47 @@ byte-identical double generation.
 
 ## External review triage
 
-The external dual-review gate ran into tooling friction this phase. The first
-attempt at both reviewers was orphaned when the session was interrupted
-mid-run, producing no findings. On the retry the Codex run was dropped at the
-maintainer's direction, and the maintainer directed proceeding to merge before
-the Opus 4.8 (xhigh) run completed. The merge therefore rests on the automated
-gate and the maintainer's own review rather than a completed external pass:
+The external dual-review gate hit tooling friction this phase. The first attempt
+at both reviewers was orphaned when the session was interrupted mid-run,
+producing no findings. On the retry the Codex run was dropped at the
+maintainer's direction, and the maintainer directed proceeding to the merge; the
+Opus 4.8 (xhigh) review then completed just after the merge and its findings were
+triaged as post-merge follow-ups on `main`. The merge itself rested on the
+automated gate plus a maintainer self-review; the automated basis was:
 
 - `pixi run ci` (fmt-check → build → transcripts-check → test) green on a clean
   tree.
 - The flipped-byte proof (the gate goes red on a hand-edited transcript) and the
   fresh-clone proof (`pixi run ci` green at a different absolute path, proving no
   leaked absolute path).
-- A maintainer self-review of the highest-risk component, the transcript
-  generator/normalizer, with adversarial probes: a report-lookalike line printed
-  before the report anchor is preserved byte-exact; a report block after the
-  anchor is normalized; a FAIL-detail line is not over-normalized; the
-  stack-dump collapse fails loudly on an unrecognized frame; termination is
-  `exit <N>` / `signal <N>`, never `128+N`. No critical or high defect surfaced.
+- A self-review of the generator/normalizer with adversarial probes: a
+  report-lookalike printed before the anchor is preserved byte-exact; the report
+  block after the anchor is normalized; a FAIL-detail line is not
+  over-normalized; the stack-dump collapse fails loudly on an unrecognized frame;
+  termination is `exit <N>` / `signal <N>`, never `128+N`.
 
-Any findings from a later completed external review will be triaged when Phase 1
-opens, as follow-up rather than a Phase 0 blocker. The standing per-phase
-dual-adversarial-review doctrine remains in force for future phases.
+**Opus 4.8 (xhigh) verdict:** structurally sound Phase 0, no CRITICAL/HIGH/MEDIUM
+defect; three low findings, all accepted and fixed on `main`:
+
+1. **Normalizer anchoring was unsound for a crash stream** (latent
+   over-normalization). Picking the last `Running` line as the report anchor is
+   correct only when a real report exists; on a crash the report is lost, so a
+   `Running`-lookalike a test prints before aborting could become the anchor and
+   its printed rows be rewritten to `[ T ]`. No committed fixture triggered it.
+   FIXED: the anchor is now the last `Running` line that is *followed by a
+   `Summary` line* — a real report always ends in a Summary, a lost/fake one does
+   not — in both `gen_transcripts.py` and the doctrine wording. Verified: goldens
+   unchanged, and a synthetic crash-after-fake-report stream is no longer
+   over-normalized.
+2. **The smoke test's reconciliation scan ran past `--- stderr ---`** to
+   end-of-file, so a report-grammar lookalike in captured stderr could have been
+   folded into the stdout tally (it reconciled today only because no
+   report-carrying scenario's stderr contains report grammar). FIXED: the scan is
+   bounded to the span between the stdout and stderr markers.
+3. **NIT — the contract's `collect` exit-code phrasing** could be read against
+   the frozen precedence (an all-files-fail-to-compile `collect` reading as 5
+   rather than 1). FIXED: reworded to "1 if any file failed to compile, else 5 if
+   nothing collectable, else 0," citing the precedence rule.
+
+The standing per-phase dual-adversarial-review doctrine remains in force; the
+Codex leg was not completed this phase.
