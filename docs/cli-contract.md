@@ -4,7 +4,9 @@
 `mtest`. It is the public API of the tool. Until the v1.0 release it may change;
 at v1.0 the surfaces marked **FROZEN** below are frozen and any later change to
 them requires a major version bump. The exit-code model is already frozen — it
-mirrors pytest's — and will not change.
+mirrors pytest's — and will not change. Everything above describes the full v1
+target; for what the *current build* actually implements today, see
+[§24, Availability status (this build)](#24-availability-status-this-build).
 
 `mtest` is an orchestrator layered on top of Mojo's standard-library
 `std.testing.TestSuite`. TestSuite owns discovery, per-test selection, and the
@@ -481,3 +483,79 @@ mtest --junit-xml report.xml --gh-annotations auto tests/
 # List node ids without running anything.
 mtest collect tests/
 ```
+
+---
+
+## 24. Availability status (this build)
+
+Everything above is the full frozen-intent v1 contract. This section is
+different in kind: it states what the *current build* actually implements,
+today, so a reader can tell shipped behavior from target behavior without the
+contract above changing at all. Nothing in this section alters any flag
+semantic, exit-code meaning, node-id grammar, or outcome vocabulary defined
+above — it only reports which of those surfaces are wired up yet.
+
+### 24.1 Flags and subcommands
+
+**Served** (parsed into real behavior): positional `PATHS`, `--exclude`, `-I`,
+`--build-arg` (and post-`--` passthrough), `--precompile`, `--mojo`,
+`-x`/`--exitfirst`, `--timeout`, `--gate`, `-s`/`--show-output`, `-q`/`-v`,
+`--color`, `-h`/`--help`, `--version`, and the `run`, `version`, and `help`
+subcommands.
+
+**Not yet available**: `-k`, `--maxfail`, `-n`/`--workers`,
+`--compile-timeout`, `--retries`, `--junit-xml`, `--gh-annotations`,
+`--collect-only`, and the `collect` subcommand. Each is recognized by the
+parser — it knows the spelling and its arity — but is **refused before any
+test runs**, with a usage error that names the flag, states that it is part
+of the v1 contract, names the capability that brings it (e.g. `-k` arrives
+with the report parser; `--collect-only` and `collect` arrive with test
+collection; `-n`/`--workers` arrive with parallel workers), and lists what
+this build does serve.
+
+**A transitional exit-4 subcase.** That refusal is a usage error and exits 4,
+but it is a distinct, *temporary* subcase of §9's exit code 4 — it is not one
+of the causes the frozen table enumerates (unknown flag, bad value,
+nonexistent path, unknown node id, forbidden build argument). It exists solely
+because this build has not yet wired up every v1 surface; a flag that this
+build does not serve is treated as a usage error rather than silently
+accepted or silently ignored. As each surface above lights up, its refusal
+disappears — once every flag and subcommand in the frozen contract is served,
+this subcase no longer applies and exit 4 reverts to exactly its frozen
+causes.
+
+### 24.2 Exit codes reachable in this build
+
+Semantics are unchanged from §9; this states which paths to each code exist
+today.
+
+- **0** — reachable: every run outcome is PASS or SKIP (exclusions allowed).
+- **1** — reachable for FAIL, CRASH, TIMEOUT, COMPILE-ERROR, and
+  PRECOMPILE-ERROR. COMPILE-TIMEOUT, MALFORMED-SUITE, and FLAKY are part of
+  the frozen outcome vocabulary but are **not emitted by this build** — they
+  arrive with later capabilities (compile-timeout enforcement, report
+  parsing, and retries, respectively).
+- **2** — reachable: an interrupt (SIGINT/SIGTERM) is implemented with
+  sequential-session semantics — a partial summary is printed, the files
+  that had not yet started are reported NOT-RUN, and the active child's
+  process group is cleaned up. The parallel-workers interrupt story arrives
+  with parallel workers.
+- **3** — reachable via a spawn failure (the runner could not spawn `mojo` or
+  a built binary). The protocol-drift cause of exit 3 (a report present but
+  off-grammar) needs the report parser and is **not reachable** in this
+  build.
+- **4** — reachable for every frozen cause in §9, plus the transitional
+  not-yet-available-flag refusal subcase in §24.1 above.
+- **5** — reachable via an empty walk and via the everything-excluded case.
+  The deselection cause (`-k` matched nothing) needs per-test selection and
+  is **not reachable** in this build, since `-k` itself is refused (§24.1).
+
+### 24.3 The zero-test ceiling
+
+This build does not yet parse the per-file report TestSuite emits, so a
+verdict is decided from the child process's termination status alone: a file
+that exits 0 without running a single test is indistinguishable from a file
+that exits 0 after running and passing its tests, and is reported **PASS**.
+Report parsing and count reconciliation close this hole in a later build;
+until then, treat a PASS as "the file's process exited cleanly," not yet as
+"every test in it ran and passed."
