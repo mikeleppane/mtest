@@ -29,6 +29,10 @@ comptime _GRACE_MS = 300
 """How long a group SIGTERM is given before escalating to SIGKILL."""
 comptime _BUFSIZE = 65536
 """Per-read drain buffer size."""
+comptime _MAX_POSTREAP_DRAINS = 4
+"""Cap on post-reap drain iterations, so a flooding grandchild cannot spin the
+sweep forever. One `_drain` already empties the whole pipe buffer, so the reaped
+child's buffered output is fully captured well under this cap."""
 
 comptime _SYS_write = 1
 comptime _WNOHANG = 1
@@ -135,10 +139,22 @@ def run_supervised(
     var epipe = alloc[Int32](2)
     var xpipe = alloc[Int32](2)
     if external_call["pipe", Int32](opipe) != 0:
+        # Nothing opened yet; free the build allocations before raising.
+        _free_build(owned^, argv, opipe, epipe, xpipe)
         raise Error("exec: pipe() for stdout failed")
     if external_call["pipe", Int32](epipe) != 0:
+        # The stdout pipe is open: close both ends, then free, before raising.
+        _ = external_call["close", Int32](opipe[0])
+        _ = external_call["close", Int32](opipe[1])
+        _free_build(owned^, argv, opipe, epipe, xpipe)
         raise Error("exec: pipe() for stderr failed")
     if external_call["pipe2", Int32](xpipe, Int32(_O_CLOEXEC)) != 0:
+        # Both data pipes are open: close all four ends, then free, before raise.
+        _ = external_call["close", Int32](opipe[0])
+        _ = external_call["close", Int32](opipe[1])
+        _ = external_call["close", Int32](epipe[0])
+        _ = external_call["close", Int32](epipe[1])
+        _free_build(owned^, argv, opipe, epipe, xpipe)
         raise Error("exec: pipe2() for errno channel failed")
     var o_r = opipe[0]
     var o_w = opipe[1]
@@ -150,6 +166,14 @@ def run_supervised(
     var start = _mono_ms()
     var pid = external_call["fork", Int32]()
     if pid < 0:
+        # All six pipe ends are open: close every one, then free, before raising.
+        _ = external_call["close", Int32](o_r)
+        _ = external_call["close", Int32](o_w)
+        _ = external_call["close", Int32](e_r)
+        _ = external_call["close", Int32](e_w)
+        _ = external_call["close", Int32](x_r)
+        _ = external_call["close", Int32](x_w)
+        _free_build(owned^, argv, opipe, epipe, xpipe)
         raise Error("exec: fork() failed")
 
     if pid == 0:
@@ -172,6 +196,14 @@ def run_supervised(
         external_call["_exit", NoneType](Int32(127))
 
     # PARENT.
+    # Also set the child's process group from the parent to close the group-kill
+    # startup race: if the deadline fires in the microseconds before the child
+    # runs its own setpgid(0,0), kill(-pid, SIGTERM) would hit a group that does
+    # not exist yet. Doing it here makes the group exist from the parent's view
+    # immediately. Ignore the return — a post-exec race yields EACCES/ESRCH
+    # harmlessly, and the child's setpgid(0,0) remains authoritative (the
+    # belt-and-suspenders POSIX idiom).
+    _ = external_call["setpgid", Int32](pid, Int32(0))
     _ = external_call["close", Int32](o_w)
     _ = external_call["close", Int32](e_w)
     _ = external_call["close", Int32](x_w)
@@ -258,7 +290,14 @@ def run_supervised(
 
     # Child reaped: drain whatever remains without blocking (a lingering
     # grandchild on a normal exit must not stall us — poll(0) just returns 0).
-    while o_open or e_open:
+    # One `_drain` reads until EAGAIN/EOF, so it sweeps the entire pipe buffer
+    # in a single pass; the reaped child's buffered output is captured in the
+    # first iteration (the quiet-grandchild and no-grandchild cases finish here).
+    # The iteration cap only bounds a grandchild writing CONTINUOUSLY: it keeps
+    # the pipe writable so every `_drain` returns False (EAGAIN, never EOF) and
+    # `progressed` stays True, which would otherwise spin this loop forever.
+    var drains = 0
+    while (o_open or e_open) and drains < _MAX_POSTREAP_DRAINS:
         var rc = external_call["poll", Int32](pfd, UInt64(2), Int32(0))
         if Int(rc) <= 0:
             break
@@ -275,6 +314,7 @@ def run_supervised(
             progressed = True
         if not progressed:
             break
+        drains += 1
 
     _ = external_call["close", Int32](o_r)
     _ = external_call["close", Int32](e_r)
@@ -335,6 +375,24 @@ def _pfd_revents(
     return pfd.bitcast[Int16]()[i * 4 + 3]
 
 
+def _free_build(
+    var owned: List[_CStr],
+    argv: UnsafePointer[_CStr, MutUntrackedOrigin],
+    opipe: UnsafePointer[Int32, MutUntrackedOrigin],
+    epipe: UnsafePointer[Int32, MutUntrackedOrigin],
+    xpipe: UnsafePointer[Int32, MutUntrackedOrigin],
+):
+    """Free the pre-fork build allocations: the argv/cstr copies and the three
+    pipe fd arrays. Used both on the machinery-failure raise paths (before ebuf/
+    status exist) and, via `_free_all`, on the success paths. Pure."""
+    for i in range(len(owned)):
+        owned[i].free()
+    argv.free()
+    opipe.free()
+    epipe.free()
+    xpipe.free()
+
+
 def _free_all(
     var owned: List[_CStr],
     argv: UnsafePointer[_CStr, MutUntrackedOrigin],
@@ -345,11 +403,6 @@ def _free_all(
     status: UnsafePointer[Int32, MutUntrackedOrigin],
 ):
     """Free every heap allocation made for one supervised run. Pure."""
-    for i in range(len(owned)):
-        owned[i].free()
-    argv.free()
-    opipe.free()
-    epipe.free()
-    xpipe.free()
+    _free_build(owned^, argv, opipe, epipe, xpipe)
     ebuf.free()
     status.free()

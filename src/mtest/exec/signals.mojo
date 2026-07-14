@@ -22,6 +22,9 @@ comptime _FLAG_ADDR = 0x100000000000
 comptime _SIGINT = 2
 comptime _SIGTERM = 15
 
+comptime _EEXIST = 17
+"""errno for MAP_FIXED_NOREPLACE hitting an already-mapped page (reuse path)."""
+
 # mmap: PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE.
 comptime _PROT_RW = 0x3
 comptime _MAP_FLAGS = 0x2 | 0x20 | 0x100000
@@ -42,12 +45,15 @@ def _ensure_flag_page() raises:
     """Map the flag page if it is not already mapped; leave the flag untouched.
 
     The mapping is anonymous, so a fresh page reads zero. Idempotent: a second
-    call finds the page present and returns. Raises only if a fixed mapping at
-    the chosen address is impossible.
+    call finds the page present (EEXIST) and returns. Raises only if a fixed
+    mapping at the chosen address is impossible.
 
     Raises:
-        Error: `exec: could not map interrupt flag page` if mmap places the page
-            at an unexpected address on this kernel.
+        Error: `exec: could not map interrupt flag page` if mmap fails for any
+            reason other than the page already existing, or places the page at
+            an unexpected address on this kernel. Failing loudly is mandatory:
+            leaving the fixed address unmapped would SIGSEGV a later flag store
+            or `interrupt_requested()` read.
     """
     var addr = external_call["mmap", UInt64](
         UInt64(_FLAG_ADDR),
@@ -61,8 +67,22 @@ def _ensure_flag_page() raises:
         # Freshly mapped and zero-filled.
         return
     if addr == UInt64(_MAP_FAILED):
-        # Already mapped by a prior call (EEXIST) — reuse it.
-        return
+        # mmap failed. ONLY EEXIST means the page is already mapped by a prior
+        # call — the idempotent reuse path. Any other errno (ENOMEM/EINVAL/
+        # EACCES, or MAP_FIXED_NOREPLACE unsupported on a pre-4.17 kernel) left
+        # the fixed address UNMAPPED, so reusing it would SIGSEGV: fail loudly.
+        var errno = Int(
+            external_call[
+                "__errno_location", UnsafePointer[Int32, MutUntrackedOrigin]
+            ]()[0]
+        )
+        if errno == _EEXIST:
+            return
+        raise Error(
+            "exec: could not map interrupt flag page (errno "
+            + String(errno)
+            + ")"
+        )
     # An unexpected placement: undo it and fail loudly.
     _ = external_call["munmap", Int32](addr, UInt64(4096))
     raise Error("exec: could not map interrupt flag page")
