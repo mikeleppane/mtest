@@ -187,7 +187,9 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `fixtures` | `fixtures/` — the committed TestSuite probe modules |
 | `transcripts` | `goldens/transcripts/` + `scripts/gen_transcripts.py` + `scripts/transcripts_check.sh` |
 | `spec` | `docs/cli-contract.md` |
-| `agents` | `AGENTS.md`, `notes/` |
+| `agents` | `AGENTS.md` |
+| `notes` | `notes/` |
+| `readme` | `README.md` |
 | `model` | `src/mtest/model` (outcomes, node ids, events, exit codes) |
 | `config` | `src/mtest/config` (RunnerConfig) |
 | `discover` | `src/mtest/discover` (file walking) |
@@ -198,8 +200,9 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `cli` | `src/mtest/cli` (arg parsing, main) |
 | `cache` | in-session build/collection reuse |
 | `test` | test infrastructure (`scripts/test_all.sh`, `scripts/build_pkg.sh`, shared helpers) |
+| `e2e` | end-to-end harness (`scripts/e2e_check.py`) and its `testdata/` manifest and scenarios |
 | `bench` | `benchmarks/` |
-| `docs` | README, docstrings, `docs/` |
+| `docs` | docstrings, `docs/` |
 | `build` | packaging |
 | `ci` | `.github/workflows/` |
 | `skills` | `.agents/skills/` |
