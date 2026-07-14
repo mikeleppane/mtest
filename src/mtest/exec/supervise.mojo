@@ -56,6 +56,15 @@ comptime _SIGKILL = 9
 comptime _SIG_DFL = 0
 comptime _EINTR = 4
 """errno for a syscall interrupted by a signal — retry, never terminal."""
+comptime _ETXTBSY = 26
+"""errno for "text file busy": a freshly built binary can transiently report it
+when exec'd right after it was written and closed — a real exec-after-build race,
+never a genuine machinery failure. The child retries exec briefly on it."""
+comptime _ETXTBSY_MAX_RETRIES = 30
+"""How many times the child re-tries a busy exec before giving up."""
+comptime _ETXTBSY_SLEEP_NS = 10_000_000
+"""Nanoseconds the child sleeps between busy-exec retries (10 ms); with the retry
+cap this bounds the total wait to ~300 ms, all inside the rare busy window."""
 
 
 def _errno() -> Int:
@@ -201,6 +210,16 @@ def run_supervised(
     var x_r = xpipe[0]
     var x_w = xpipe[1]
 
+    # The busy-exec retry timespec, built in the PARENT so the child touches no
+    # allocator: [0..1] is the req (tv_sec, tv_nsec), [2..3] is scratch for the
+    # nanosleep `rem` out-parameter. The child reads its own copy-on-write copy;
+    # the parent frees its copy right after the fork (separate address spaces).
+    var nap = alloc[Int64](4)
+    nap[0] = 0
+    nap[1] = _ETXTBSY_SLEEP_NS
+    nap[2] = 0
+    nap[3] = 0
+
     var start = _mono_ms()
     var pid = external_call["fork", Int32]()
     if pid < 0:
@@ -211,6 +230,7 @@ def run_supervised(
         _ = external_call["close", Int32](e_w)
         _ = external_call["close", Int32](x_r)
         _ = external_call["close", Int32](x_w)
+        nap.free()
         _free_build(owned^, argv, opipe, epipe, xpipe)
         raise Error("exec: fork() failed")
 
@@ -229,7 +249,24 @@ def run_supervised(
         _ = external_call["close", Int32](e_w)
         _ = external_call["close", Int32](x_r)
         _ = external_call["execvp", Int32](arg0, argv)
-        # Exec failed: report errno through the still-open errno pipe.
+        # Exec failed. A freshly built binary can transiently be ETXTBSY (text
+        # file busy) when exec'd right after it was written and closed. Sleep
+        # briefly and retry exec within a bounded window before reporting the
+        # failure. Async-signal-safe: only nanosleep/execvp here, and the sleep
+        # timespec was built by the parent (no allocation in the child). A
+        # successful retried execvp never returns, so this costs time only in the
+        # rare busy window — the common first-exec-succeeds path is untouched.
+        var eloc = external_call[
+            "__errno_location", UnsafePointer[Int32, MutUntrackedOrigin]
+        ]()
+        var tries = 0
+        while Int(eloc[0]) == _ETXTBSY and tries < _ETXTBSY_MAX_RETRIES:
+            _ = external_call["nanosleep", Int32](
+                nap.bitcast[UInt8](), (nap + 2).bitcast[UInt8]()
+            )
+            _ = external_call["execvp", Int32](arg0, argv)
+            tries += 1
+        # Still failing: report the final errno through the errno pipe.
         _child_fail_errno(x_w)
         external_call["_exit", NoneType](Int32(127))
 
@@ -245,6 +282,9 @@ def run_supervised(
     _ = external_call["close", Int32](o_w)
     _ = external_call["close", Int32](e_w)
     _ = external_call["close", Int32](x_w)
+    # The child holds its own copy-on-write copy of the retry timespec; the parent
+    # never reads it again, so free the parent's copy now.
+    nap.free()
 
     var ebuf = alloc[Int32](1)
     ebuf[0] = 0
