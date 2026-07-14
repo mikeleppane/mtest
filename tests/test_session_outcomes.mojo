@@ -9,6 +9,7 @@ TIMEOUT (never a FAIL). All three resolve to exit 1.
 """
 from std.testing import assert_equal, assert_true, TestSuite
 
+from mtest.config import shell_join
 from mtest.model import EventKind, Outcome
 from mtest.report import CompositeReporter, RecordingReporter
 from mtest.session import run_session
@@ -35,7 +36,7 @@ def test_signal_death_is_crash_not_fail() raises:
     var finished = rec.event_at(2)
     assert_true(finished.kind == EventKind.FILE_FINISHED)
     assert_true(finished.outcome == Outcome.CRASH, "signal death must be CRASH")
-    assert_true("signal" in finished.detail, finished.detail)
+    assert_true(finished.signal_number > 0, String(finished.signal_number))
 
 
 def test_compiler_rejection_is_compile_error_not_crash() raises:
@@ -52,8 +53,8 @@ def test_compiler_rejection_is_compile_error_not_crash() raises:
         finished.outcome == Outcome.COMPILE_ERROR,
         "a rejected build is COMPILE_ERROR, never a run CRASH",
     )
-    # The compiler's stderr rides on detail for the reproduce section.
-    assert_true(finished.detail.byte_length() > 0)
+    # The compiler's stderr rides as captured bytes for the compiler banner.
+    assert_true(len(finished.captured_stderr) > 0)
 
 
 def test_compile_error_build_command_is_shell_quoted() raises:
@@ -73,10 +74,11 @@ def test_compile_error_build_command_is_shell_quoted() raises:
     ref rec = comp.reporters[0]
     var finished = rec.event_at(2)
     assert_true(finished.outcome == Outcome.COMPILE_ERROR)
-    assert_true(
-        "'path with space'" in finished.build_command,
-        finished.build_command,
-    )
+    # The raw space-bearing arg rides in the argv; the reproduce line shell-joins
+    # it into a copy-paste-safe (quoted) command.
+    assert_true("path with space" in finished.build_argv)
+    var joined = shell_join(finished.build_argv)
+    assert_true("'path with space'" in joined, joined)
 
 
 def test_deadline_overrun_is_timeout_not_fail() raises:

@@ -11,10 +11,13 @@ composition.
 
 The payloads are data only. There is no formatting, I/O, or printing here: the
 console reporter renders everything from these fields, so the fields must carry
-everything it needs — the captured stdout/stderr are kept as owned raw buffers
-the reporter reads verbatim, never pre-rendered, and `detail` carries the
-per-outcome specifics (the signal for a crash, the exit code for a failure, the
-compiler output for a compile error) as plain data.
+everything it needs — the captured stdout/stderr are kept as owned raw byte
+buffers the reporter decodes verbatim, never pre-rendered; the build command
+rides as raw `build_argv` (the reporter shell-joins it); and the per-outcome
+specifics ride as the data they are — `signal_number` for a crash, `exit_status`
+for a failure, `timeout_seconds` for a timeout, `exclusion_pattern` for an
+exclusion. A second, machine reporter could recover every one of these without
+parsing English.
 
 Usage errors are intentionally outside this set: they happen before any session
 exists and are printed by the CLI, so there is no usage-error event.
@@ -110,8 +113,9 @@ struct Event(Copyable, Movable):
     # Warning.
     var warning_kind: String
     """A short tag for the warning class (e.g. a stale exclusion)."""
-    var message: String
-    """The human-readable warning text."""
+    var warning_pattern: String
+    """The offending pattern the warning concerns; the reporter composes the
+    sentence from the kind and this datum."""
 
     # PrecompileFailed.
     var step: String
@@ -128,16 +132,25 @@ struct Event(Copyable, Movable):
     """The file's outcome (FileFinished)."""
     var duration_seconds: Float64
     """Wall time the file's run took, in seconds (FileFinished)."""
-    var build_command: String
-    """The command used to build the file, for verbose output (FileFinished)."""
+    var build_argv: List[String]
+    """The build command as argv, for the reporter to shell-join (FileFinished).
+    """
     var build_duration_seconds: Float64
     """Wall time the build took, in seconds, for verbose output (FileFinished)."""
-    var captured_stdout: String
-    """The file run's raw captured stdout, read verbatim by the reporter."""
-    var captured_stderr: String
-    """The file run's raw captured stderr, read verbatim by the reporter."""
-    var detail: String
-    """Per-outcome specifics: signal for a crash, exit code for a failure, etc."""
+    var captured_stdout: List[UInt8]
+    """The file run's raw captured stdout bytes, decoded verbatim by the reporter.
+    """
+    var captured_stderr: List[UInt8]
+    """The file run's raw captured stderr bytes, decoded verbatim by the reporter;
+    for a COMPILE_ERROR this holds the build's stderr (the compiler banner)."""
+    var signal_number: Int
+    """The terminating signal for a CRASH (0 otherwise)."""
+    var exit_status: Int
+    """The child's exit code for a FAIL (0 otherwise)."""
+    var timeout_seconds: Int
+    """The configured deadline for a TIMEOUT, in seconds (0 otherwise)."""
+    var exclusion_pattern: String
+    """The glob that excluded the file, for an EXCLUDED line (empty otherwise)."""
 
     # SessionFinished.
     var summary: Summary
@@ -158,18 +171,21 @@ struct Event(Copyable, Movable):
             selected_count=0,
             excluded_count=0,
             warning_kind="",
-            message="",
+            warning_pattern="",
             step="",
             compiler_output="",
             casualty_count=0,
             path="",
             outcome=Outcome.NOT_RUN,
             duration_seconds=0.0,
-            build_command="",
+            build_argv=List[String](),
             build_duration_seconds=0.0,
-            captured_stdout="",
-            captured_stderr="",
-            detail="",
+            captured_stdout=List[UInt8](),
+            captured_stderr=List[UInt8](),
+            signal_number=0,
+            exit_status=0,
+            timeout_seconds=0,
+            exclusion_pattern="",
             summary=Summary.zeros(),
             wall_time_seconds=0.0,
             exit_code=0,
@@ -192,11 +208,15 @@ struct Event(Copyable, Movable):
         return e^
 
     @staticmethod
-    def warning(warning_kind: String, message: String) -> Event:
-        """A loud non-file notice, such as a stale-exclusion warning."""
+    def warning(warning_kind: String, warning_pattern: String) -> Event:
+        """A loud non-file notice, such as a stale-exclusion warning.
+
+        Carries the offending pattern as data; the reporter composes the
+        sentence from `warning_kind` and `warning_pattern`.
+        """
         var e = Event._blank(EventKind.WARNING)
         e.warning_kind = warning_kind
-        e.message = message
+        e.warning_pattern = warning_pattern
         return e^
 
     @staticmethod
@@ -223,23 +243,34 @@ struct Event(Copyable, Movable):
         path: String,
         outcome: Outcome,
         duration_seconds: Float64,
-        build_command: String,
+        var build_argv: List[String],
         build_duration_seconds: Float64,
-        captured_stdout: String,
-        captured_stderr: String,
-        detail: String,
+        var captured_stdout: List[UInt8],
+        var captured_stderr: List[UInt8],
+        signal_number: Int = 0,
+        exit_status: Int = 0,
+        timeout_seconds: Int = 0,
+        exclusion_pattern: String = "",
     ) -> Event:
-        """A file's run finished, carrying everything the reporter renders from.
+        """A file's run finished, carrying the data the reporter renders from.
+
+        The per-outcome specifics ride as data: `signal_number` for a CRASH,
+        `exit_status` for a FAIL, `timeout_seconds` for a TIMEOUT, and
+        `exclusion_pattern` for an EXCLUDED line. The build command rides as
+        `build_argv`, and the captured streams as raw bytes.
         """
         var e = Event._blank(EventKind.FILE_FINISHED)
         e.path = path
         e.outcome = outcome
         e.duration_seconds = duration_seconds
-        e.build_command = build_command
+        e.build_argv = build_argv^
         e.build_duration_seconds = build_duration_seconds
-        e.captured_stdout = captured_stdout
-        e.captured_stderr = captured_stderr
-        e.detail = detail
+        e.captured_stdout = captured_stdout^
+        e.captured_stderr = captured_stderr^
+        e.signal_number = signal_number
+        e.exit_status = exit_status
+        e.timeout_seconds = timeout_seconds
+        e.exclusion_pattern = exclusion_pattern
         return e^
 
     @staticmethod

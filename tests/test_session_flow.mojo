@@ -51,7 +51,7 @@ def test_flow_pass_fail_excluded_warning_exit1() raises:
     assert_true(rec.kind_at(1) == EventKind.FILE_FINISHED)
     assert_true(rec.outcome_at(1) == Outcome.EXCLUDED)
     assert_equal(rec.path_at(1), "tests/test_skipme.mojo")
-    assert_equal(rec.event_at(1).detail, "*skipme*")
+    assert_equal(rec.event_at(1).exclusion_pattern, "*skipme*")
 
     assert_true(rec.kind_at(2) == EventKind.WARNING)
     assert_equal(rec.event_at(2).warning_kind, "stale-exclusion")
@@ -68,7 +68,7 @@ def test_flow_pass_fail_excluded_warning_exit1() raises:
     assert_equal(rec.path_at(5), "tests/test_b_fail.mojo")
     assert_true(rec.kind_at(6) == EventKind.FILE_FINISHED)
     assert_true(rec.outcome_at(6) == Outcome.FAIL)
-    assert_equal(rec.event_at(6).detail, "exit 1")
+    assert_equal(rec.event_at(6).exit_status, 1)
 
     var last = rec.event_at(7)
     assert_true(last.kind == EventKind.SESSION_FINISHED)
@@ -78,9 +78,10 @@ def test_flow_pass_fail_excluded_warning_exit1() raises:
     assert_equal(last.summary.count_of(Outcome.EXCLUDED), 1)
     assert_equal(last.summary.count_of(Outcome.NOT_RUN), 0)
 
-    # The build command is faithful (the reproduce line).
-    assert_true("build" in rec.event_at(4).build_command)
-    assert_true("tests/test_a_pass.mojo" in rec.event_at(4).build_command)
+    # The build command is faithful (the reproduce line), carried as argv.
+    var argv = rec.event_at(4).build_argv.copy()
+    assert_true("build" in argv)
+    assert_true("tests/test_a_pass.mojo" in argv)
 
     # The N=2 seam: the second recorder observed the identical stream.
     assert_equal(comp.reporters[1].count(), 8)

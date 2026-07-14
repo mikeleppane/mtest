@@ -16,6 +16,21 @@ from mtest.model import EventKind, Summary, Event, Outcome
 from mtest.report import ConsoleReporter
 
 
+def _bytes(s: String) -> List[UInt8]:
+    """The raw UTF-8 bytes of `s` as an owned list, for captured-stream fields.
+    """
+    var out = List[UInt8]()
+    var sb = s.as_bytes()
+    for i in range(len(sb)):
+        out.append(sb[i])
+    return out^
+
+
+def _argv(path: String) -> List[String]:
+    """A representative `mojo build <path>` argv for the build-command field."""
+    return ["mojo", "build", path]
+
+
 def _console(
     color: ColorWhen = ColorWhen.NEVER,
     verbosity: Verbosity = Verbosity.NORMAL,
@@ -58,11 +73,11 @@ def _feed_mock_run(mut c: ConsoleReporter):
             "tests/slow/test_giant.mojo",
             Outcome.EXCLUDED,
             0.0,
-            "",
+            List[String](),
             0.0,
-            "",
-            "",
-            "--exclude tests/slow/*",
+            List[UInt8](),
+            List[UInt8](),
+            exclusion_pattern="--exclude tests/slow/*",
         )
     )
     c.handle(
@@ -70,11 +85,10 @@ def _feed_mock_run(mut c: ConsoleReporter):
             "tests/test_alpha.mojo",
             Outcome.PASS,
             0.41,
-            "mojo build tests/test_alpha.mojo",
+            _argv("tests/test_alpha.mojo"),
             1.0,
-            "",
-            "",
-            "",
+            List[UInt8](),
+            List[UInt8](),
         )
     )
     c.handle(
@@ -82,11 +96,11 @@ def _feed_mock_run(mut c: ConsoleReporter):
             "tests/test_beta.mojo",
             Outcome.FAIL,
             0.52,
-            "mojo build tests/test_beta.mojo",
+            _argv("tests/test_beta.mojo"),
             1.0,
-            "the suite report, verbatim\n",
-            "on stderr\n",
-            "exit 1",
+            _bytes("the suite report, verbatim\n"),
+            _bytes("on stderr\n"),
+            exit_status=1,
         )
     )
     c.handle(
@@ -94,11 +108,11 @@ def _feed_mock_run(mut c: ConsoleReporter):
             "tests/test_gamma.mojo",
             Outcome.CRASH,
             0.09,
-            "mojo build tests/test_gamma.mojo",
+            _argv("tests/test_gamma.mojo"),
             1.0,
-            "",
-            "",
-            "signal 4 — SIGILL, illegal instruction",
+            List[UInt8](),
+            List[UInt8](),
+            signal_number=4,
         )
     )
     c.handle(
@@ -106,11 +120,11 @@ def _feed_mock_run(mut c: ConsoleReporter):
             "tests/test_delta.mojo",
             Outcome.TIMEOUT,
             300.0,
-            "mojo build tests/test_delta.mojo",
+            _argv("tests/test_delta.mojo"),
             1.0,
-            "",
-            "",
-            "SIGTERM sent, exited in grace",
+            List[UInt8](),
+            List[UInt8](),
+            timeout_seconds=300,
         )
     )
     c.handle(
@@ -118,11 +132,12 @@ def _feed_mock_run(mut c: ConsoleReporter):
             "tests/test_typo.mojo",
             Outcome.COMPILE_ERROR,
             1.30,
-            "mojo build tests/test_typo.mojo",
+            _argv("tests/test_typo.mojo"),
             1.30,
-            "",
-            "test_typo.mojo:3:5: error: use of unknown declaration 'foo'\n",
-            "",
+            List[UInt8](),
+            _bytes(
+                "test_typo.mojo:3:5: error: use of unknown declaration 'foo'\n"
+            ),
         )
     )
     c.handle(Event.session_finished(_mock_summary(), 302.4, 1))
@@ -178,11 +193,10 @@ def test_not_run_has_no_per_file_line_only_a_count() raises:
             "tests/test_skipped.mojo",
             Outcome.NOT_RUN,
             0.0,
-            "",
+            List[String](),
             0.0,
-            "",
-            "",
-            "",
+            List[UInt8](),
+            List[UInt8](),
         )
     )
     var out = c.output()
@@ -197,11 +211,11 @@ def test_crash_names_signal_in_words() raises:
     assert_true("signal 4 — SIGILL, illegal instruction" in out)
 
 
-def test_timeout_notes_the_kill() raises:
+def test_timeout_notes_the_deadline() raises:
     var c = _console()
     _feed_mock_run(c)
     var out = c.output()
-    assert_true("SIGTERM sent, exited in grace" in out)
+    assert_true("timed out after 300s" in out)
 
 
 def test_framed_section_per_non_pass_under_failures() raises:
@@ -244,11 +258,11 @@ def test_truncation_marker_passes_through() raises:
             "tests/test_loud.mojo",
             Outcome.FAIL,
             0.1,
-            "mojo build tests/test_loud.mojo",
+            _argv("tests/test_loud.mojo"),
             1.0,
-            "first line\n[... output truncated at 4096 bytes ...]\n",
-            "",
-            "exit 1",
+            _bytes("first line\n[... output truncated at 4096 bytes ...]\n"),
+            List[UInt8](),
+            exit_status=1,
         )
     )
     var out = c.output()
@@ -270,11 +284,11 @@ def test_reproduce_line_includes_build_flags_shell_quoted() raises:
             "tests/path with space.mojo",
             Outcome.FAIL,
             0.1,
-            "mojo build 'tests/path with space.mojo'",
+            _argv("tests/path with space.mojo"),
             1.0,
-            "boom\n",
-            "",
-            "exit 1",
+            _bytes("boom\n"),
+            List[UInt8](),
+            exit_status=1,
         )
     )
     var out = c.output()
@@ -375,12 +389,11 @@ def test_show_output_all_frames_passing_files_too() raises:
 def test_warning_renders_loud() raises:
     var c = _console()
     c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
-    c.handle(
-        Event.warning("stale-exclusion", "pattern 'old_*' matched nothing")
-    )
+    c.handle(Event.warning("stale-exclusion", "old_*"))
     var out = c.output()
     assert_true("WARNING" in out)
-    assert_true("pattern 'old_*' matched nothing" in out)
+    # The console composes the sentence from the kind and the pattern datum.
+    assert_true("exclude pattern 'old_*' matched nothing" in out)
 
 
 def test_precompile_failed_banner_verbatim() raises:

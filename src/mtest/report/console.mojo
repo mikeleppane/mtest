@@ -11,7 +11,14 @@ passed at construction; those are not session facts. Color is redundant: the
 verdict tokens carry the meaning, and when color is off no escape code is
 emitted at all.
 """
-from mtest.config import ColorWhen, ShowOutput, Verbosity, shell_quote
+from mtest.config import (
+    ColorWhen,
+    ShowOutput,
+    Verbosity,
+    lossy_utf8,
+    shell_join,
+    shell_quote,
+)
 from mtest.model import Event, EventKind, Outcome, Summary
 
 from mtest.report.reporter import Reporter
@@ -123,6 +130,61 @@ def _ensure_trailing_newline(s: String) -> String:
     if s[byte=s.byte_length() - 1] == "\n":
         return s.copy()
     return s + "\n"
+
+
+def _signal_name(signo: Int) -> String:
+    """The `"SIGNAME, description"` words for a common Linux terminating signal.
+
+    Covers the signals a supervised child can plausibly die by. Returns `""`
+    for a signal number outside that set, so the caller can fall back to the
+    bare number. Pure.
+    """
+    if signo == 1:
+        return String("SIGHUP, hangup")
+    if signo == 2:
+        return String("SIGINT, interrupt")
+    if signo == 3:
+        return String("SIGQUIT, quit")
+    if signo == 4:
+        return String("SIGILL, illegal instruction")
+    if signo == 5:
+        return String("SIGTRAP, trace/breakpoint trap")
+    if signo == 6:
+        return String("SIGABRT, abort")
+    if signo == 7:
+        return String("SIGBUS, bus error")
+    if signo == 8:
+        return String("SIGFPE, floating-point exception")
+    if signo == 9:
+        return String("SIGKILL, killed")
+    if signo == 11:
+        return String("SIGSEGV, segmentation fault")
+    if signo == 13:
+        return String("SIGPIPE, broken pipe")
+    if signo == 15:
+        return String("SIGTERM, terminated")
+    return String("")
+
+
+def _outcome_detail(e: Event) -> String:
+    """The per-outcome detail suffix the console renders from event data.
+
+    `FAIL` carries the exit code (`"exit <n>"`), `CRASH` the terminating signal
+    named in words when recognized (`"signal 4 — SIGILL, illegal instruction"`,
+    else just `"signal <n>"`), `TIMEOUT` the configured deadline (`"timed out
+    after <n>s"`); every other outcome has no detail. Pure.
+    """
+    if e.outcome == Outcome.FAIL:
+        return String("exit ") + String(e.exit_status)
+    if e.outcome == Outcome.CRASH:
+        var base = String("signal ") + String(e.signal_number)
+        var name = _signal_name(e.signal_number)
+        if name.byte_length() > 0:
+            return base + " — " + name
+        return base
+    if e.outcome == Outcome.TIMEOUT:
+        return String("timed out after ") + String(e.timeout_seconds) + "s"
+    return String("")
 
 
 struct ConsoleReporter(Reporter):
@@ -248,8 +310,18 @@ struct ConsoleReporter(Reporter):
         )
 
     def _on_warning(mut self, e: Event):
-        """Render a loud, yellow warning line."""
-        var line = String("WARNING  ") + e.warning_kind + ": " + e.message
+        """Render a loud, yellow warning line, composing the sentence per kind.
+        """
+        var sentence: String
+        if e.warning_kind == "stale-exclusion":
+            sentence = (
+                String("exclude pattern '")
+                + e.warning_pattern
+                + "' matched nothing"
+            )
+        else:
+            sentence = e.warning_pattern.copy()
+        var line = String("WARNING  ") + e.warning_kind + ": " + sentence
         self._head += self._paint(_YELLOW, line) + "\n"
 
     def _on_precompile_failed(mut self, e: Event):
@@ -270,7 +342,7 @@ struct ConsoleReporter(Reporter):
         """Render an excluded line, a verdict line, and any framed section."""
         if e.outcome == Outcome.EXCLUDED:
             var line = _col("EXCLUDED", _TOKEN_W) + _col(e.path, _PATH_W)
-            line += "(" + e.detail + ")"
+            line += "(" + e.exclusion_pattern + ")"
             self._head += self._paint(_YELLOW, line) + "\n"
             return
         if e.outcome == Outcome.NOT_RUN:
@@ -285,15 +357,16 @@ struct ConsoleReporter(Reporter):
             var token = _verdict_token(e.outcome)
             var line = _col(token, _TOKEN_W) + _col(e.path, _PATH_W)
             line += _fmt_fixed(e.duration_seconds, 2) + "s"
+            var detail = _outcome_detail(e)
             if (
                 e.outcome == Outcome.CRASH or e.outcome == Outcome.TIMEOUT
-            ) and e.detail.byte_length() > 0:
-                line += "  (" + e.detail + ")"
+            ) and detail.byte_length() > 0:
+                line += "  (" + detail + ")"
             self._head += self._paint(_color_for(e.outcome), line) + "\n"
             if self.verbosity == Verbosity.VERBOSE:
                 self._head += (
                     String("    build: ")
-                    + e.build_command
+                    + shell_join(e.build_argv)
                     + "  (build "
                     + _fmt_fixed(e.build_duration_seconds, 2)
                     + "s)\n"
@@ -320,22 +393,20 @@ struct ConsoleReporter(Reporter):
                 + e.path
                 + " — mojo build said: ---\n"
             )
-            var compiler = e.captured_stderr
-            if compiler.byte_length() == 0:
-                compiler = e.detail
-            out += _ensure_trailing_newline(compiler)
-            out += "reproduce: " + e.build_command + "\n\n"
+            out += _ensure_trailing_newline(lossy_utf8(e.captured_stderr))
+            out += "reproduce: " + shell_join(e.build_argv) + "\n\n"
             return out
 
         var token = _verdict_token(e.outcome)
         var header = String("--- ") + token + " " + e.path
-        if e.detail.byte_length() > 0:
-            header += " (" + e.detail + ")"
+        var detail = _outcome_detail(e)
+        if detail.byte_length() > 0:
+            header += " (" + detail + ")"
         header += " — captured stdout ---\n"
         var out = header
-        out += _ensure_trailing_newline(e.captured_stdout)
+        out += _ensure_trailing_newline(lossy_utf8(e.captured_stdout))
         out += "--- captured stderr ---\n"
-        out += _ensure_trailing_newline(e.captured_stderr)
+        out += _ensure_trailing_newline(lossy_utf8(e.captured_stderr))
         var repro = String("reproduce: mtest ")
         if self.mtest_build_flags.byte_length() > 0:
             repro += self.mtest_build_flags + " "

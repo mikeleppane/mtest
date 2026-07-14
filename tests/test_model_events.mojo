@@ -43,10 +43,10 @@ def test_session_started_payload() raises:
 
 
 def test_warning_payload() raises:
-    var e = Event.warning("stale-exclusion", "pattern 'old_*' matched nothing")
+    var e = Event.warning("stale-exclusion", "old_*")
     assert_true(e.kind == EventKind.WARNING)
     assert_equal(e.warning_kind, "stale-exclusion")
-    assert_equal(e.message, "pattern 'old_*' matched nothing")
+    assert_equal(e.warning_pattern, "old_*")
 
 
 def test_precompile_failed_payload() raises:
@@ -66,25 +66,27 @@ def test_file_started_payload() raises:
 
 
 def test_file_finished_payload_carries_render_inputs() raises:
+    var argv: List[String] = ["mojo", "build", "tests/test_a.mojo"]
     var e = Event.file_finished(
         "tests/test_a.mojo",
         Outcome.CRASH,
         duration_seconds=0.5,
-        build_command="mojo build tests/test_a.mojo",
+        build_argv=argv^,
         build_duration_seconds=1.25,
-        captured_stdout="on stdout\n",
-        captured_stderr="on stderr\n",
-        detail="signal 4 (SIGILL)",
+        captured_stdout=[UInt8(120)],
+        captured_stderr=[UInt8(121)],
+        signal_number=4,
     )
     assert_true(e.kind == EventKind.FILE_FINISHED)
     assert_equal(e.path, "tests/test_a.mojo")
     assert_true(e.outcome == Outcome.CRASH)
     assert_equal(e.duration_seconds, 0.5)
-    assert_equal(e.build_command, "mojo build tests/test_a.mojo")
+    assert_true("tests/test_a.mojo" in e.build_argv)
     assert_equal(e.build_duration_seconds, 1.25)
-    assert_equal(e.captured_stdout, "on stdout\n")
-    assert_equal(e.captured_stderr, "on stderr\n")
-    assert_equal(e.detail, "signal 4 (SIGILL)")
+    assert_equal(len(e.captured_stdout), 1)
+    assert_equal(e.captured_stdout[0], UInt8(120))
+    assert_equal(e.captured_stderr[0], UInt8(121))
+    assert_equal(e.signal_number, 4)
 
 
 def test_session_finished_payload() raises:

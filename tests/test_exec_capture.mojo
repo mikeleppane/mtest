@@ -7,7 +7,8 @@ output past a lowered bound is truncated to head + marker + tail.
 """
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
 
-from mtest.exec import ProcessSpec, ProcessResult, run_supervised, lossy_utf8
+from mtest.config import lossy_utf8
+from mtest.exec import ProcessSpec, ProcessResult, run_supervised
 
 from exec_helpers import bytes_to_str, count_byte, repeat, target, py_spec
 

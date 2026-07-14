@@ -26,11 +26,10 @@ def test_records_kinds_in_order() raises:
             "tests/test_a.mojo",
             Outcome.PASS,
             0.4,
-            "mojo build tests/test_a.mojo",
+            ["mojo", "build", "tests/test_a.mojo"],
             1.0,
-            "",
-            "",
-            "",
+            List[UInt8](),
+            List[UInt8](),
         )
     )
     r.handle(Event.session_finished(Summary.zeros(), 2.0, 0))
@@ -45,16 +44,19 @@ def test_records_kinds_in_order() raises:
 
 def test_records_key_file_fields() raises:
     var r = RecordingReporter()
+    var stdout_bytes = List[UInt8]()
+    stdout_bytes.append(UInt8(ord("b")))
+    stdout_bytes.append(UInt8(ord("o")))
     r.handle(
         Event.file_finished(
             "tests/test_gamma.mojo",
             Outcome.CRASH,
             0.09,
-            "mojo build tests/test_gamma.mojo",
+            ["mojo", "build", "tests/test_gamma.mojo"],
             0.5,
-            "boom on stdout\n",
-            "boom on stderr\n",
-            "signal 4 (SIGILL)",
+            stdout_bytes^,
+            List[UInt8](),
+            signal_number=4,
         )
     )
     assert_equal(r.count(), 1)
@@ -62,19 +64,18 @@ def test_records_key_file_fields() raises:
     assert_true(r.outcome_at(0) == Outcome.CRASH)
     # The full event is recoverable for richer assertions.
     var e = r.event_at(0)
-    assert_equal(e.detail, "signal 4 (SIGILL)")
-    assert_equal(e.captured_stdout, "boom on stdout\n")
+    assert_equal(e.signal_number, 4)
+    assert_equal(len(e.captured_stdout), 2)
+    assert_equal(e.captured_stdout[0], UInt8(ord("b")))
 
 
 def test_records_warning_and_precompile_payloads() raises:
     var r = RecordingReporter()
-    r.handle(
-        Event.warning("stale-exclusion", "pattern 'old_*' matched nothing")
-    )
+    r.handle(Event.warning("stale-exclusion", "old_*"))
     r.handle(
         Event.precompile_failed("precompile src/mtest", "error: boom\n", 7)
     )
-    assert_equal(r.event_at(0).message, "pattern 'old_*' matched nothing")
+    assert_equal(r.event_at(0).warning_pattern, "old_*")
     assert_equal(r.event_at(1).step, "precompile src/mtest")
     assert_equal(r.event_at(1).casualty_count, 7)
 

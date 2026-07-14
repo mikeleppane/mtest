@@ -21,13 +21,11 @@ from std.os import makedirs
 from std.os.path import basename, dirname, exists
 from std.time import perf_counter_ns
 
-from mtest.config import RunnerConfig, shell_join
+from mtest.config import RunnerConfig, lossy_utf8
 from mtest.discover import discover
 from mtest.exec import (
     ProcessSpec,
-    Termination,
     interrupt_requested,
-    lossy_utf8,
     run_supervised,
 )
 from mtest.model import Event, Outcome, Summary, exit_code_for
@@ -58,63 +56,6 @@ def _mangle(rel: String) -> String:
         else:
             out += String(cp)
     return out
-
-
-def _signal_name(signo: Int) -> String:
-    """The `"SIGNAME, description"` words for a common Linux terminating signal.
-
-    Covers the signals a supervised child can plausibly die by. Returns `""`
-    for a signal number outside that set, so the caller can fall back to the
-    bare number. Pure.
-    """
-    if signo == 1:
-        return String("SIGHUP, hangup")
-    if signo == 2:
-        return String("SIGINT, interrupt")
-    if signo == 3:
-        return String("SIGQUIT, quit")
-    if signo == 4:
-        return String("SIGILL, illegal instruction")
-    if signo == 5:
-        return String("SIGTRAP, trace/breakpoint trap")
-    if signo == 6:
-        return String("SIGABRT, abort")
-    if signo == 7:
-        return String("SIGBUS, bus error")
-    if signo == 8:
-        return String("SIGFPE, floating-point exception")
-    if signo == 9:
-        return String("SIGKILL, killed")
-    if signo == 11:
-        return String("SIGSEGV, segmentation fault")
-    if signo == 13:
-        return String("SIGPIPE, broken pipe")
-    if signo == 15:
-        return String("SIGTERM, terminated")
-    return String("")
-
-
-def _detail_for(
-    outcome: Outcome, term: Termination, timeout_secs: Int
-) -> String:
-    """The per-outcome `detail` string the console renders: signal, exit, etc.
-
-    `FAIL` carries the exit code, `CRASH` the terminating signal named in
-    words when recognized (`"signal 4 — SIGILL, illegal instruction"`, else
-    just `"signal <n>"`), `TIMEOUT` the configured deadline; every other
-    outcome carries no detail. Pure.
-    """
-    if outcome == Outcome.FAIL:
-        return String("exit ") + String(term.value)
-    if outcome == Outcome.CRASH:
-        var base = String("signal ") + String(term.value)
-        var name = _signal_name(term.value)
-        if name.byte_length() > 0:
-            return base + " — " + name
-        return base
-    if outcome == Outcome.TIMEOUT:
-        return String("timed out after ") + String(timeout_secs) + "s"
-    return String("")
 
 
 def _ensure_dir(path: String) raises:
@@ -217,10 +158,12 @@ def _run_one(
         build_argv.append(p)
     for a in config.build_args:
         build_argv.append(a)
-    var build_cmd = shell_join(build_argv)
 
-    # Build with NO deadline, inside the invocation root.
-    var bres = run_supervised(ProcessSpec.command_in(build_argv^, root, 0))
+    # Build with NO deadline, inside the invocation root. The argv is copied so
+    # the original survives to ride the FileFinished event as build_argv.
+    var bres = run_supervised(
+        ProcessSpec.command_in(build_argv.copy(), root, 0)
+    )
     var bdur = Float64(bres.duration_ms) / 1000.0
 
     # An interrupt during the build group-kills it (a TimedOut bail-out).
@@ -232,9 +175,15 @@ def _run_one(
 
     var bsignal = build_verdict(bterm)
     if bsignal == Outcome.COMPILE_ERROR:
-        var detail = lossy_utf8(bres.stderr_bytes)
+        # The compiler's stderr rides as raw bytes for the console banner.
         var ev = Event.file_finished(
-            rel, Outcome.COMPILE_ERROR, 0.0, build_cmd, bdur, "", "", detail
+            rel,
+            Outcome.COMPILE_ERROR,
+            0.0,
+            build_argv.copy(),
+            bdur,
+            List[UInt8](),
+            bres.stderr_bytes.copy(),
         )
         return FileResult.ran_with(ev^, Outcome.COMPILE_ERROR)
 
@@ -253,16 +202,31 @@ def _run_one(
 
     var outcome = run_verdict(rterm)
     var rdur = Float64(rres.duration_ms) / 1000.0
-    var detail = _detail_for(outcome, rterm, config.timeout_secs)
+
+    # Carry the per-outcome specifics as data; the console formats them. The
+    # terminating signal (CRASH) and the exit code (FAIL) both live in
+    # rterm.value; the configured deadline drives the TIMEOUT phrasing.
+    var signal_number = 0
+    var exit_status = 0
+    var timeout_seconds = 0
+    if outcome == Outcome.CRASH:
+        signal_number = rterm.value
+    elif outcome == Outcome.FAIL:
+        exit_status = rterm.value
+    elif outcome == Outcome.TIMEOUT:
+        timeout_seconds = config.timeout_secs
+
     var ev = Event.file_finished(
         rel,
         outcome,
         rdur,
-        build_cmd,
+        build_argv.copy(),
         bdur,
-        lossy_utf8(rres.stdout_bytes),
-        lossy_utf8(rres.stderr_bytes),
-        detail,
+        rres.stdout_bytes.copy(),
+        rres.stderr_bytes.copy(),
+        signal_number=signal_number,
+        exit_status=exit_status,
+        timeout_seconds=timeout_seconds,
     )
     return FileResult.ran_with(ev^, outcome)
 
@@ -368,17 +332,19 @@ def run_session[
     for e in disc.excluded:
         reporter.handle(
             Event.file_finished(
-                e.path, Outcome.EXCLUDED, 0.0, "", 0.0, "", "", e.pattern
+                e.path,
+                Outcome.EXCLUDED,
+                0.0,
+                List[String](),
+                0.0,
+                List[UInt8](),
+                List[UInt8](),
+                exclusion_pattern=e.pattern,
             )
         )
         summary.counts[Outcome.EXCLUDED.code] += 1
     for pat in disc.stale_excludes:
-        reporter.handle(
-            Event.warning(
-                "stale-exclusion",
-                String("exclude pattern '") + pat + "' matched nothing",
-            )
-        )
+        reporter.handle(Event.warning("stale-exclusion", pat))
 
     var run_outcomes = List[Outcome]()
     var interrupted = False

@@ -20,18 +20,17 @@ def _one_of_every_kind() -> List[Event]:
     s.counts[Outcome.PASS.code] = 1
     return [
         Event.session_started("tests", "mojo 1.0.0b2", 1, 1),
-        Event.warning("stale-exclusion", "pattern 'old_*' matched nothing"),
+        Event.warning("stale-exclusion", "old_*"),
         Event.precompile_failed("precompile src/mtest", "error: boom\n", 3),
         Event.file_started("tests/test_alpha.mojo"),
         Event.file_finished(
             "tests/test_alpha.mojo",
             Outcome.PASS,
             0.41,
-            "mojo build tests/test_alpha.mojo",
+            ["mojo", "build", "tests/test_alpha.mojo"],
             1.0,
-            "",
-            "",
-            "",
+            List[UInt8](),
+            List[UInt8](),
         ),
         Event.session_finished(s^, 302.4, 0),
     ]

@@ -8,7 +8,7 @@ subsequent build, which the faithful build command records.
 """
 from std.testing import assert_equal, assert_true, TestSuite
 
-from mtest.config import Precompile
+from mtest.config import Precompile, shell_join
 from mtest.model import EventKind, Outcome
 from mtest.report import CompositeReporter, RecordingReporter
 from mtest.session import run_session
@@ -72,7 +72,8 @@ def test_successful_precompile_widens_include_path() raises:
     # The out directory (build) was added to the include set of the file build.
     var finished = rec.event_at(2)
     assert_true(finished.outcome == Outcome.PASS)
-    assert_true("-I build" in finished.build_command, finished.build_command)
+    var joined = shell_join(finished.build_argv)
+    assert_true("-I build" in joined, joined)
 
 
 def main() raises:

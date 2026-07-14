@@ -11,7 +11,7 @@ The public surface is re-exported here so callers write
 """
 from mtest.exec.spec import ProcessSpec
 from mtest.exec.termination import Termination
-from mtest.exec.result import ProcessResult, lossy_utf8
+from mtest.exec.result import ProcessResult
 from mtest.exec.supervise import run_supervised
 from mtest.exec.signals import (
     install_signal_handlers,
