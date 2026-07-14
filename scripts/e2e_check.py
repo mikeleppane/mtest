@@ -413,12 +413,15 @@ def s_default_suite(manifest: dict) -> str:
 
     # Every suite file shows its manifest verdict token on a line naming its path.
     crash_lines: dict[str, str] = {}
+    compile_error_files: list[str] = []
     for rel, row in suite.items():
         token = row["verdict"]
         line = run.verdict_line(token, rel)
         expect(line is not None, f"missing verdict line {token} for {rel}")
         if token == "CRASH":
             crash_lines[rel] = line
+        if token == "COMPILE-ERROR":
+            compile_error_files.append(rel)
 
     # Standing pin: the crashing fixture dies by SIGILL (signal 4). mtest
     # renders the terminating signal both as the bare number and named in words
@@ -435,6 +438,29 @@ def s_default_suite(manifest: dict) -> str:
             "SIGILL" in line,
             f"CRASH verdict line for {rel} lost its worded signal name: {line!r}",
         )
+
+    # Standing pin: the compile-error fixture provokes a NAME-RESOLUTION error,
+    # not merely some build failure. The manifest claims it names an undefined
+    # symbol; assert the rendered compiler banner actually references that
+    # identifier. A future edit that turned the fixture into a syntax error (or
+    # renamed the symbol) would leave the COMPILE-ERROR token green while quietly
+    # breaking the property the manifest documents — this catches that drift.
+    expect(
+        len(compile_error_files) == 1,
+        f"expected exactly one COMPILE-ERROR fixture, got {compile_error_files}",
+    )
+    cerr_rel = compile_error_files[0]
+    marker = f"--- COMPILE-ERROR {cerr_rel}"
+    expect(
+        marker in run.stdout,
+        f"no framed COMPILE-ERROR section for {cerr_rel}:\n{run.stdout}",
+    )
+    cerr_section = run.stdout[run.stdout.index(marker) :]
+    expect(
+        "this_symbol_is_never_defined_anywhere" in cerr_section,
+        f"COMPILE-ERROR banner for {cerr_rel} did not reference the undefined "
+        f"symbol the fixture names (name-resolution property):\n{cerr_section}",
+    )
 
     # The zero-test file is PASS (the documented ceiling).
     zero = [r for r, row in suite.items() if row.get("zero_test_ceiling")]
