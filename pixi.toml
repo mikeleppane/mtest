@@ -66,12 +66,25 @@ transcripts-check = "bash scripts/transcripts_check.sh"
 # (#6413). The repo eats the same build-then-execute rule the runner enforces.
 test = "bash scripts/test_all.sh"
 
+# End-to-end gate: build the runnable binary, then drive it against the committed
+# known-outcome tree under testdata/ (via testdata/manifest.json, the single
+# source of expectations) asserting exact exit codes and structural console
+# output. Depends on build-bin so build/mtest exists. Runs under `pixi run`, so
+# the spawned binary inherits the pixi env with `mojo` on PATH — the per-file
+# `mojo build` children need it. The harness stdlib-only Python; every subprocess
+# spawn is hard-timeout-guarded so a runner hang can never wedge CI.
+[tasks.e2e]
+cmd = "python scripts/e2e_check.py"
+depends-on = ["build-bin"]
+
 # The aggregate gate CI runs. Ordered fail-fast: formatting, then the package
-# compile gate, then the protocol-transcript diff, then the Mojo tests.
+# compile gate, then the protocol-transcript diff, then the Mojo tests, then the
+# end-to-end binary gate.
 [tasks.ci]
 depends-on = [
     "fmt-check",
     "build",
     "transcripts-check",
     "test",
+    "e2e",
 ]
