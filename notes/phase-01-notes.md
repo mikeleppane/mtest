@@ -110,20 +110,53 @@ every scenario, clean scenario-level failures instead of hangs, and
 reproduce/`NO_COLOR`/signal pins so the gate doesn't drift with the
 environment).
 
-Two findings were minor enough to carry forward rather than fix immediately:
-a forward-looking console gap — the DESELECTED outcome already has a verdict
+One finding was minor enough to carry forward rather than fix immediately: a
+forward-looking console gap — the DESELECTED outcome already has a verdict
 token but no summary count, which is inert today because nothing emits
 DESELECTED yet, but per-test selection will need to add that count or the
-run/outcome-count invariant desyncs the moment it lands — and a small
-shell-quote helper that's duplicated between the CLI and console layers,
-because the CLI layer can't depend on the report layer.
+run/outcome-count invariant desyncs the moment it lands. (A second minor
+finding — a shell-quote helper duplicated between the CLI and console layers —
+was later consolidated into one shared helper when the whole-branch review also
+caught the compile-error reproduce line rendering unquoted; both were fixed
+together.)
 
 ### External review triage
 
-*Stub — pending.* The dual adversarial external review for this phase has
-not run yet. The maintainer fills in this section with the review verdict
-and the triage of its findings once that review completes, following the
-same format as the previous phase's external-review section.
+The standing per-phase gate is a dual adversarial external review — an Opus 4.8
+pass and a Codex pass, both briefed to attack the work.
+
+The Opus 4.8 whole-branch pass completed with a merge-ready verdict: no critical
+and no important findings. It confirmed the deepest module — the process
+supervisor — correct on every invariant the product sells: an async-signal-safe
+child path with argv built in the parent, a race-free close-on-exec errno
+channel, EOF-independent reaping, a process-group kill, a structural status
+decode, and a latching timeout, each backed by a test that can actually fail. It
+confirmed verdict honesty through every layer (a build that dies by a signal is
+a compile error, an interrupt is never a timeout verdict, a spawn failure is
+never a test outcome), the exit-code matrix faithful across every reachable code
+including the interrupt path with its no-orphaned-group check, the event stream
+as the reporter's only input, one-directional layering with all FFI confined to
+the supervisor, and scope disciplined in both directions. It raised three minor
+findings, triaged:
+
+- The compile-error `reproduce:` line rendered unquoted while the run-failure
+  one was shell-quoted — **fixed**: a single shared shell-quote helper now
+  serves the parser, the console, and the session, so both reproduce lines are
+  copy-paste-safe.
+- The precompile-failure summary band carries no precompile-error tally —
+  **rejected with reason**: a precompile failure is session-level, not a file
+  verdict, and folding it into the run-outcome tally would break the invariant
+  that the run-outcome counts equal the non-excluded, non-not-run verdict lines
+  (there are zero verdict lines when every file is a casualty). The failure is
+  already reported loudly in its own banner with a casualty count.
+- `execvp` does a PATH search that may allocate — **no action, mitigated**: the
+  run step's `argv[0]` carries a slash so no PATH search happens, and the argv
+  is built in the parent; this is the standard pattern every subprocess library
+  uses. Recorded as a residual toolchain note.
+
+The Codex pass is still to run (it needs an external tool the maintainer drives);
+this section is completed with the Codex verdict and any further triage once that
+leg runs.
 
 ## A process hazard worth naming
 
