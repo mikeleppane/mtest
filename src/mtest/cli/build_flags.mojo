@@ -6,41 +6,10 @@ the parser for the flags that change how a file is built — `--mojo` (only when
 differs from the plain `mojo` default), `-I`, `--build-arg`, and `--precompile` —
 and it lives in `cli` because those spellings are the parser's own. Pure: it reads
 a `RunnerConfig` and returns a `String`, touching no environment and no I/O.
+Quoting is `mtest.config`'s shared `shell_join`, the same helper `report` and
+`session` use, so every reproduce line quotes uniformly.
 """
-from mtest.config import RunnerConfig
-
-# Characters that need no shell quoting in a reproduce token. Kept in step with
-# the console's own quoting set so the whole reproduce line quotes uniformly.
-comptime _SHELL_SAFE: StaticString = (
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-./=:,+@%"
-)
-
-
-def _shell_quote(s: String) -> String:
-    """Single-quote `s` for a shell if it holds any unsafe character. Pure.
-
-    An already-safe token passes through unchanged; otherwise it is wrapped in
-    single quotes with embedded quotes escaped, so the reproduce line is
-    copy-paste safe. An empty token becomes `''`.
-    """
-    if s.byte_length() == 0:
-        return "''"
-    var safe = True
-    for cp in s.codepoint_slices():
-        if String(cp) not in _SHELL_SAFE:
-            safe = False
-            break
-    if safe:
-        return s.copy()
-    var out = String("'")
-    for cp in s.codepoint_slices():
-        var c = String(cp)
-        if c == "'":
-            out += "'\\''"
-        else:
-            out += c
-    out += "'"
-    return out
+from mtest.config import RunnerConfig, shell_join
 
 
 def build_flags_string(config: RunnerConfig) -> String:
@@ -75,9 +44,4 @@ def build_flags_string(config: RunnerConfig) -> String:
         else:
             tokens.append(pc.src.copy())
 
-    var out = String("")
-    for i in range(len(tokens)):
-        if i > 0:
-            out += " "
-        out += _shell_quote(tokens[i])
-    return out
+    return shell_join(tokens)

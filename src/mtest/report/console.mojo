@@ -11,7 +11,7 @@ passed at construction; those are not session facts. Color is redundant: the
 verdict tokens carry the meaning, and when color is off no escape code is
 emitted at all.
 """
-from mtest.config import ColorWhen, Verbosity, ShowOutput
+from mtest.config import ColorWhen, ShowOutput, Verbosity, shell_quote
 from mtest.model import Event, EventKind, Outcome, Summary
 
 from mtest.report.reporter import Reporter
@@ -30,11 +30,6 @@ comptime _RESET: StaticString = "\x1b[0m"
 # back to a two-space gutter so columns never collide.
 comptime _TOKEN_W = 15
 comptime _PATH_W = 32
-
-# Characters that need no shell quoting in a reproduce line.
-comptime _SHELL_SAFE: StaticString = (
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-./=:,+@%"
-)
 
 
 def _verdict_token(outcome: Outcome) -> String:
@@ -118,33 +113,6 @@ def _fmt_fixed(x: Float64, decimals: Int) -> String:
         for _ in range(decimals - fs.byte_length()):
             out += "0"
         out += fs
-    return out
-
-
-def _shell_quote(s: String) -> String:
-    """Single-quote `s` for a shell if it holds any unsafe character. Never raises.
-
-    A path that is already shell-safe passes through unchanged; otherwise it is
-    wrapped in single quotes with embedded quotes escaped, so the reproduce line
-    is copy-paste safe.
-    """
-    if s.byte_length() == 0:
-        return "''"
-    var safe = True
-    for cp in s.codepoint_slices():
-        if String(cp) not in _SHELL_SAFE:
-            safe = False
-            break
-    if safe:
-        return s.copy()
-    var out = String("'")
-    for cp in s.codepoint_slices():
-        var c = String(cp)
-        if c == "'":
-            out += "'\\''"
-        else:
-            out += c
-    out += "'"
     return out
 
 
@@ -371,7 +339,7 @@ struct ConsoleReporter(Reporter):
         var repro = String("reproduce: mtest ")
         if self.mtest_build_flags.byte_length() > 0:
             repro += self.mtest_build_flags + " "
-        repro += _shell_quote(e.path)
+        repro += shell_quote(e.path)
         out += repro + "\n\n"
         return out
 

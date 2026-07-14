@@ -21,7 +21,7 @@ from std.os import makedirs
 from std.os.path import basename, dirname, exists
 from std.time import perf_counter_ns
 
-from mtest.config import RunnerConfig
+from mtest.config import RunnerConfig, shell_join
 from mtest.discover import discover
 from mtest.exec import (
     ProcessSpec,
@@ -58,15 +58,6 @@ def _mangle(rel: String) -> String:
         else:
             out += String(cp)
     return out
-
-
-def _join(argv: List[String]) -> String:
-    """Join an argv into a single space-separated string for the reproduce line.
-
-    Not shell-escaped — a faithful, human-readable echo of the exact argv the
-    session ran. Pure.
-    """
-    return String(" ").join(argv)
 
 
 def _signal_name(signo: Int) -> String:
@@ -226,7 +217,7 @@ def _run_one(
         build_argv.append(p)
     for a in config.build_args:
         build_argv.append(a)
-    var build_cmd = _join(build_argv)
+    var build_cmd = shell_join(build_argv)
 
     # Build with NO deadline, inside the invocation root.
     var bres = run_supervised(ProcessSpec.command_in(build_argv^, root, 0))

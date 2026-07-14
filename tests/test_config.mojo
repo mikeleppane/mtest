@@ -15,6 +15,8 @@ from mtest.config import (
     ShowOutput,
     Verbosity,
     resolve_mojo_path,
+    shell_join,
+    shell_quote,
 )
 
 
@@ -113,6 +115,31 @@ def test_resolve_mojo_path_env_only() raises:
 def test_resolve_mojo_path_neither_falls_back_to_mojo() raises:
     var got = resolve_mojo_path(Optional[String](None), Optional[String](None))
     assert_equal(got, "mojo")
+
+
+def test_shell_quote_empty_becomes_two_single_quotes() raises:
+    assert_equal(shell_quote(""), "''")
+
+
+def test_shell_quote_safe_token_passes_through_unchanged() raises:
+    assert_equal(shell_quote("tests/test_a.mojo"), "tests/test_a.mojo")
+
+
+def test_shell_quote_space_containing_token_is_single_quoted() raises:
+    assert_equal(shell_quote("my dir"), "'my dir'")
+
+
+def test_shell_quote_embedded_single_quote_is_escaped() raises:
+    assert_equal(shell_quote("it's"), "'it'\\''s'")
+
+
+def test_shell_join_empty_list_is_empty_string() raises:
+    assert_equal(shell_join(List[String]()), "")
+
+
+def test_shell_join_quotes_each_token_and_space_joins() raises:
+    var tokens: List[String] = ["mojo", "build", "-I", "my dir"]
+    assert_equal(shell_join(tokens), "mojo build -I 'my dir'")
 
 
 def main() raises:

@@ -56,6 +56,29 @@ def test_compiler_rejection_is_compile_error_not_crash() raises:
     assert_true(finished.detail.byte_length() > 0)
 
 
+def test_compile_error_build_command_is_shell_quoted() raises:
+    # A space-bearing build arg must survive into the COMPILE-ERROR
+    # reproduce line quoted, or a copy-pasted repro command silently
+    # splits into two argv tokens.
+    var root = temp_root()
+    write_file(root, "tests/test_cerr.mojo", SRC_COMPILE_ERROR)
+
+    var config = base_config()
+    config.build_args.append("path with space")
+
+    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var code = run_session(config, root, comp)
+
+    assert_equal(code, 1)
+    ref rec = comp.reporters[0]
+    var finished = rec.event_at(2)
+    assert_true(finished.outcome == Outcome.COMPILE_ERROR)
+    assert_true(
+        "'path with space'" in finished.build_command,
+        finished.build_command,
+    )
+
+
 def test_deadline_overrun_is_timeout_not_fail() raises:
     var root = temp_root()
     write_file(root, "tests/test_hang.mojo", SRC_HANG)
