@@ -29,6 +29,15 @@ comptime _GRACE_MS = 300
 """How long a group SIGTERM is given before escalating to SIGKILL."""
 comptime _BUFSIZE = 65536
 """Per-read drain buffer size."""
+comptime _MAX_DRAIN_CHUNKS = 16
+"""Cap on reads a single `_drain` call performs before yielding back to the
+caller. A grandchild flooding the pipe CONTINUOUSLY would otherwise make `_drain`
+loop forever (every `read` returns data, never EOF/EAGAIN), starving the
+deadline/interrupt/reap checks. Capping per-call reads makes `_drain` return
+"not EOF" after a bounded slice so the caller re-polls and re-checks the clock;
+`BoundedCapture` still keeps head+tail, so no capture is lost. 16 * 64 KiB drains
+a full kernel pipe buffer many times over, so the common single-pass case is
+unaffected."""
 comptime _MAX_POSTREAP_DRAINS = 4
 """Cap on post-reap drain iterations, so a flooding grandchild cannot spin the
 sweep forever. One `_drain` already empties the whole pipe buffer, so the reaped
@@ -388,14 +397,26 @@ def run_supervised(
                 e_open = False
                 _pfd_disable(pfd, 1)
 
-    # Child reaped: drain whatever remains without blocking (a lingering
-    # grandchild on a normal exit must not stall us — poll(0) just returns 0).
-    # One `_drain` reads until EAGAIN/EOF, so it sweeps the entire pipe buffer
-    # in a single pass; the reaped child's buffered output is captured in the
-    # first iteration (the quiet-grandchild and no-grandchild cases finish here).
-    # The iteration cap only bounds a grandchild writing CONTINUOUSLY: it keeps
-    # the pipe writable so every `_drain` returns False (EAGAIN, never EOF) and
-    # `progressed` stays True, which would otherwise spin this loop forever.
+    # Child reaped. Sweep the rest of its process group FIRST, before draining. A
+    # grandchild the child forked outlives the reaped leader and is a leaked
+    # resource we own via the group; the timeout/interrupt path already
+    # group-kills, but a NORMAL exit would otherwise leave it running — and a
+    # grandchild flooding the inherited stdout pipe would keep `read` returning
+    # data forever, so a drain-to-EOF BEFORE the kill would never terminate.
+    # Killing the group closes the grandchild's write ends, so the drain that
+    # follows is guaranteed to reach EOF. The leader's own output is already in
+    # the kernel pipe buffer (it wrote it before exiting) and SIGKILL does not
+    # discard buffered pipe bytes, so the post-kill drain still captures it. This
+    # is cleanup ONLY: the reported status stays the leader's real fate — the
+    # sweep never turns a normal exit into TimedOut. Done promptly, before any
+    # later fork, so the pgid cannot have been reused.
+    _ = external_call["kill", Int32](Int32(-Int(pid)), Int32(_SIGKILL))
+
+    # Now drain whatever remains without blocking. With the group killed every
+    # write end is closed, so each `_drain` reaches EOF in a bounded number of
+    # reads; the quiet-grandchild and no-grandchild cases finish in the first
+    # iteration. The iteration cap is defensive belt-and-suspenders: draining
+    # after the sweep always converges to EOF.
     var drains = 0
     while (o_open or e_open) and drains < _MAX_POSTREAP_DRAINS:
         var rc = external_call["poll", Int32](pfd, UInt64(2), Int32(0))
@@ -415,16 +436,6 @@ def run_supervised(
         if not progressed:
             break
         drains += 1
-
-    # Sweep the rest of the child's process group on EVERY exit path. A grandchild
-    # the test forked outlives the reaped leader and is a leaked resource we own
-    # via the group; the timeout/interrupt path already group-kills, but a NORMAL
-    # exit would otherwise leave it running. The leader's buffered output was
-    # drained just above, so an immediate group SIGKILL now needs no grace window
-    # and adds ~no latency. This is cleanup ONLY: the reported status stays the
-    # leader's real fate — the sweep never turns a normal exit into TimedOut. Done
-    # promptly, before any later fork, so the pgid cannot have been reused.
-    _ = external_call["kill", Int32](Int32(-Int(pid)), Int32(_SIGKILL))
 
     _ = external_call["close", Int32](o_r)
     _ = external_call["close", Int32](e_r)
@@ -453,12 +464,17 @@ def _drain(
     buf: UnsafePointer[UInt8, MutUntrackedOrigin],
     mut cap: BoundedCapture,
 ) -> Bool:
-    """Read all currently-available bytes from `fd` into `cap` (non-blocking).
+    """Read available bytes from `fd` into `cap` (non-blocking), bounded per call.
 
-    Returns True iff EOF was reached (read returned 0). A negative read means no
-    more data is available right now (EAGAIN). Mutates `cap`; does not raise.
+    Returns True iff EOF was reached (read returned 0). Returns False when either
+    no more data is available right now (EAGAIN, read < 0) OR the per-call read
+    cap is hit with data still flowing — both mean "not EOF, re-poll". Bounding
+    the reads keeps a continuously flooding fd from spinning this call forever, so
+    the caller always regains control to re-check the deadline and interrupt.
+    Mutates `cap`; does not raise.
     """
-    while True:
+    var chunks = 0
+    while chunks < _MAX_DRAIN_CHUNKS:
         var n = external_call["read", Int](fd, buf, Int(_BUFSIZE))
         if n == 0:
             return True
@@ -466,6 +482,9 @@ def _drain(
             return False
         for i in range(n):
             cap.push_byte(buf[i])
+        chunks += 1
+    # Cap reached with data still available: not EOF — let the caller re-poll.
+    return False
 
 
 def _pfd_set(pfd: UnsafePointer[UInt8, MutUntrackedOrigin], i: Int, fd: Int32):
