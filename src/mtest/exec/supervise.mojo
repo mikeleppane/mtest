@@ -352,13 +352,26 @@ def run_supervised(
     _ = external_call["close", Int32](x_r)
 
     if spawn_failed:
-        # A real spawn failure: the child already _exit(127)'d, so a blocking
-        # reap returns at once; report the errno the child sent.
+        # The child already _exit(127)'d, so a blocking reap returns at once.
         _ = external_call["waitpid", Int32](pid, status, Int32(0))
         _ = external_call["close", Int32](o_r)
         _ = external_call["close", Int32](e_r)
-        var errno = Int(ebuf[0])
         var dur = _mono_ms() - start
+        if timed_out:
+            # A deadline or an interrupt fired DURING the busy-exec retry window
+            # and group-killed us, yet the child then exhausted its retries and
+            # reported the exec errno. Our own kill won the race, so the run
+            # LATCHES to TimedOut regardless of that errno — exactly as the
+            # running-child latch site below does; final_* retains the reaped
+            # death. The session disambiguates a real timeout from an interrupt
+            # via the interrupt flag, so this one check restores BOTH precedences
+            # (the interrupt one is the load-bearing exit-2 guarantee).
+            var final = _decode(Int(status[0]))
+            var term = Termination.timed_out(final.kind, final.value, escalated)
+            _free_all(owned^, argv, opipe, epipe, xpipe, ebuf, status)
+            return ProcessResult(List[UInt8](), List[UInt8](), term, dur)
+        # No latch fired: a genuine spawn failure — report the child's errno.
+        var errno = Int(ebuf[0])
         _free_all(owned^, argv, opipe, epipe, xpipe, ebuf, status)
         return ProcessResult(
             List[UInt8](), List[UInt8](), Termination.spawn_failed(errno), dur
