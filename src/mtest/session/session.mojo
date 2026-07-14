@@ -69,18 +69,58 @@ def _join(argv: List[String]) -> String:
     return String(" ").join(argv)
 
 
+def _signal_name(signo: Int) -> String:
+    """The `"SIGNAME, description"` words for a common Linux terminating signal.
+
+    Covers the signals a supervised child can plausibly die by. Returns `""`
+    for a signal number outside that set, so the caller can fall back to the
+    bare number. Pure.
+    """
+    if signo == 1:
+        return String("SIGHUP, hangup")
+    if signo == 2:
+        return String("SIGINT, interrupt")
+    if signo == 3:
+        return String("SIGQUIT, quit")
+    if signo == 4:
+        return String("SIGILL, illegal instruction")
+    if signo == 5:
+        return String("SIGTRAP, trace/breakpoint trap")
+    if signo == 6:
+        return String("SIGABRT, abort")
+    if signo == 7:
+        return String("SIGBUS, bus error")
+    if signo == 8:
+        return String("SIGFPE, floating-point exception")
+    if signo == 9:
+        return String("SIGKILL, killed")
+    if signo == 11:
+        return String("SIGSEGV, segmentation fault")
+    if signo == 13:
+        return String("SIGPIPE, broken pipe")
+    if signo == 15:
+        return String("SIGTERM, terminated")
+    return String("")
+
+
 def _detail_for(
     outcome: Outcome, term: Termination, timeout_secs: Int
 ) -> String:
     """The per-outcome `detail` string the console renders: signal, exit, etc.
 
-    `FAIL` carries the exit code, `CRASH` the terminating signal, `TIMEOUT` the
-    configured deadline; every other outcome carries no detail. Pure.
+    `FAIL` carries the exit code, `CRASH` the terminating signal named in
+    words when recognized (`"signal 4 — SIGILL, illegal instruction"`, else
+    just `"signal <n>"`), `TIMEOUT` the configured deadline; every other
+    outcome carries no detail. Pure.
     """
     if outcome == Outcome.FAIL:
         return String("exit ") + String(term.value)
     if outcome == Outcome.CRASH:
-        return String("signal ") + String(term.value)
+        var base = String("signal ") + String(term.value)
+        var name = _signal_name(term.value)
+        if name.byte_length() > 0:
+            return base + " — " + name
+        return base
     if outcome == Outcome.TIMEOUT:
         return String("timed out after ") + String(timeout_secs) + "s"
     return String("")

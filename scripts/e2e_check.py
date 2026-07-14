@@ -421,14 +421,19 @@ def s_default_suite(manifest: dict) -> str:
             crash_lines[rel] = line
 
     # Standing pin: the crashing fixture dies by SIGILL (signal 4). mtest
-    # renders the terminating signal number as "signal <n>" (never the symbolic
-    # name), on the verdict line, so a regression that changes the death signal
-    # is caught here rather than only by a one-time manual cross-check.
+    # renders the terminating signal both as the bare number and named in words
+    # ("signal 4 — SIGILL, illegal instruction") on the verdict line, so a
+    # regression that changes the death signal OR drops the word-name is caught
+    # here rather than only by a one-time manual cross-check.
     expect(len(crash_lines) == 1, f"expected exactly one CRASH fixture, got {crash_lines}")
     for rel, line in crash_lines.items():
         expect(
             "signal 4" in line,
             f"CRASH verdict line for {rel} lost its signal-4 detail: {line!r}",
+        )
+        expect(
+            "SIGILL" in line,
+            f"CRASH verdict line for {rel} lost its worded signal name: {line!r}",
         )
 
     # The zero-test file is PASS (the documented ceiling).
