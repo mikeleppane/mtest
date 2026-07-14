@@ -376,8 +376,10 @@ per line, sorted **lexicographically**. The runner imposes its own order so the
 frozen output format never couples to TestSuite's discovery order (execution
 still uses discovery order internally). `collect` accepts the selection and
 build flags because it compiles files to enumerate them. A file that does not
-compile reports its error on stderr, listing continues, and the exit code is 1
-(or 5 if nothing was collectable, 0 otherwise).
+compile reports its error on stderr and listing continues; the exit code is **1
+if any file failed to compile**, else **5 if nothing was collectable**, else
+**0** — consistent with the §9 precedence, under which a compile failure (a
+failing outcome → 1) dominates "nothing collected" (→ 5).
 
 ---
 
