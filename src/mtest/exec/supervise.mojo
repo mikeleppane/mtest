@@ -41,8 +41,33 @@ comptime _O_CLOEXEC = 0x80000
 comptime _F_SETFL = 4
 comptime _O_NONBLOCK = 0x800
 comptime _CLOCK_MONOTONIC = 1
+comptime _SIGCHLD = 17
 comptime _SIGTERM = 15
 comptime _SIGKILL = 9
+comptime _SIG_DFL = 0
+comptime _EINTR = 4
+"""errno for a syscall interrupted by a signal — retry, never terminal."""
+
+
+def _errno() -> Int:
+    """The current thread's errno via the same libc location the child uses."""
+    return Int(
+        external_call[
+            "__errno_location", UnsafePointer[Int32, MutUntrackedOrigin]
+        ]()[0]
+    )
+
+
+def _reap_reapable():
+    """Force our own SIGCHLD disposition to SIG_DFL before spawning children.
+
+    A parent that inherited `SIG_IGN` for SIGCHLD would make our children
+    kernel auto-reaped: `waitpid` then fails with ECHILD and can never hand back
+    a status word, which would launder every child — real failures and crashes
+    included — into a false `Exited(0)`. Resetting to the default makes every
+    child spawned here waitable. Idempotent; the default is the normal state, so
+    this only ever undoes a hostile inherited disposition."""
+    _ = external_call["signal", Int](Int32(_SIGCHLD), Int(_SIG_DFL))
 
 
 def _mono_ms() -> Int:
@@ -114,6 +139,10 @@ def run_supervised(
 
     # Map the interrupt flag page so polling it in the loop is always safe.
     _ensure_flag_page()
+
+    # Guarantee our children are reapable regardless of the inherited SIGCHLD
+    # disposition, so `waitpid` below always yields a real status.
+    _reap_reapable()
 
     var head_cap = capture_bound_bytes // 2
     var tail_cap = capture_bound_bytes - head_cap
@@ -208,17 +237,74 @@ def run_supervised(
     _ = external_call["close", Int32](e_w)
     _ = external_call["close", Int32](x_w)
 
-    # The errno pipe resolves first: 4 bytes => spawn failed; EOF => exec ran.
     var ebuf = alloc[Int32](1)
     ebuf[0] = 0
-    var en = external_call["read", Int](x_r, ebuf.bitcast[UInt8](), Int(4))
-    _ = external_call["close", Int32](x_r)
-
     var status = alloc[Int32](1)
     status[0] = 0
 
-    if en == 4:
-        # Spawn failed: the child already _exit(127)'d; reap it and report errno.
+    # Shared deadline/interrupt state, carried from the pre-exec resolution below
+    # into the supervision loop: a stall in EITHER phase is governed by the same
+    # deadline, and a timed-out latch set here survives into the final verdict.
+    var killing = False
+    var escalated = False
+    var timed_out = False
+    var kill_time = 0
+
+    # Resolve spawn-failed vs exec-ran WITHOUT blocking. The errno pipe delivers
+    # 4 bytes on failure or a close-on-exec EOF when exec runs; a BLOCKING read
+    # here would hang forever if the child stalls between fork and exec, and with
+    # SA_RESTART on the handlers neither the deadline nor Ctrl-C could break it.
+    # So make it non-blocking and fold it into the deadline/interrupt loop:
+    # accumulate up to 4 errno bytes, or observe EOF, re-checking the deadline
+    # and the interrupt latch every slice. A stuck pre-exec child is group-killed
+    # on timeout/interrupt just like a stuck running one.
+    _ = external_call["fcntl", Int32](x_r, Int32(_F_SETFL), Int32(_O_NONBLOCK))
+    var xpfd = alloc[UInt8](8)
+    memset_zero(xpfd, 8)
+    _pfd_set(xpfd, 0, x_r)
+    var egot = 0
+    var spawn_failed = False
+    while True:
+        var now = _mono_ms()
+        if not killing:
+            if interrupt_requested() or (
+                spec.timeout_ms > 0 and (now - start) >= spec.timeout_ms
+            ):
+                _ = external_call["kill", Int32](
+                    Int32(-Int(pid)), Int32(_SIGTERM)
+                )
+                killing = True
+                timed_out = True
+                kill_time = now
+        else:
+            if not escalated and (now - kill_time) >= _GRACE_MS:
+                _ = external_call["kill", Int32](
+                    Int32(-Int(pid)), Int32(_SIGKILL)
+                )
+                escalated = True
+
+        var n = external_call["read", Int](
+            x_r, ebuf.bitcast[UInt8]() + egot, Int(4 - egot)
+        )
+        if n > 0:
+            # A 4-byte errno write is atomic (<= PIPE_BUF), so this normally
+            # completes in one read; accumulate defensively regardless.
+            egot += Int(n)
+            if egot >= 4:
+                spawn_failed = True
+                break
+            continue
+        if n == 0:
+            # Close-on-exec EOF: exec ran (or the child is already gone).
+            break
+        # EAGAIN: nothing resolved yet — wait a slice, bounding deadline lag.
+        _ = external_call["poll", Int32](xpfd, UInt64(1), Int32(_POLL_SLICE_MS))
+    xpfd.free()
+    _ = external_call["close", Int32](x_r)
+
+    if spawn_failed:
+        # A real spawn failure: the child already _exit(127)'d, so a blocking
+        # reap returns at once; report the errno the child sent.
         _ = external_call["waitpid", Int32](pid, status, Int32(0))
         _ = external_call["close", Int32](o_r)
         _ = external_call["close", Int32](e_r)
@@ -244,20 +330,34 @@ def run_supervised(
 
     var o_open = True
     var e_open = True
-    var killing = False
-    var escalated = False
-    var timed_out = False
-    var kill_time = 0
-    var raw = 0
 
     while True:
         var r = external_call["waitpid", Int32](pid, status, Int32(_WNOHANG))
         if Int(r) == Int(pid):
-            raw = Int(status[0])
+            # `status` now holds the reaped child's real status word.
             break
         if Int(r) < 0:
-            # No child to reap (already gone): stop enforcing.
-            break
+            # With SIGCHLD forced to SIG_DFL our child IS reapable, so this is
+            # not "already gone" — it is machinery failure. EINTR is retryable.
+            # Anything else (ECHILD or otherwise) means we can never learn the
+            # child's real fate, and decoding the still-zero status word would be
+            # a false Exited(0) PASS. Group-clean and report a spawn-failure
+            # sentinel instead: the session routes it to the internal-error exit
+            # (exit 3), which covers reap-side machinery failure too. A non-status
+            # must never become an Exited/Signaled outcome.
+            var errno = _errno()
+            if errno == _EINTR:
+                continue
+            _ = external_call["kill", Int32](Int32(-Int(pid)), Int32(_SIGKILL))
+            _ = external_call["close", Int32](o_r)
+            _ = external_call["close", Int32](e_r)
+            var dur = _mono_ms() - start
+            var oz = out_cap.finish()
+            var ez = err_cap.finish()
+            buf.free()
+            pfd.free()
+            _free_all(owned^, argv, opipe, epipe, xpipe, ebuf, status)
+            return ProcessResult(oz^, ez^, Termination.spawn_failed(errno), dur)
 
         var now = _mono_ms()
         if not killing:
@@ -316,10 +416,21 @@ def run_supervised(
             break
         drains += 1
 
+    # Sweep the rest of the child's process group on EVERY exit path. A grandchild
+    # the test forked outlives the reaped leader and is a leaked resource we own
+    # via the group; the timeout/interrupt path already group-kills, but a NORMAL
+    # exit would otherwise leave it running. The leader's buffered output was
+    # drained just above, so an immediate group SIGKILL now needs no grace window
+    # and adds ~no latency. This is cleanup ONLY: the reported status stays the
+    # leader's real fate — the sweep never turns a normal exit into TimedOut. Done
+    # promptly, before any later fork, so the pgid cannot have been reused.
+    _ = external_call["kill", Int32](Int32(-Int(pid)), Int32(_SIGKILL))
+
     _ = external_call["close", Int32](o_r)
     _ = external_call["close", Int32](e_r)
 
     var dur = _mono_ms() - start
+    var raw = Int(status[0])
     var term: Termination
     if timed_out:
         # The deadline/interrupt kill LATCHES: TimedOut regardless of how the
