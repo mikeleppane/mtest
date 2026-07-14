@@ -142,14 +142,25 @@ def normalize(raw: bytes, *, is_crash_stream: bool) -> str:
             lines = lines[:start] + ["<STACK-DUMP>"]
 
     # (1) Timing tokens -> [ T ], ANCHORED: only on report-grammar lines at or
-    # after the LAST `Running <N> tests for` line. A report-lookalike line that
-    # a test PRINTS (noisy fixture) appears before that anchor and stays
-    # byte-exact — this is why first-match scanning would be wrong.
-    anchors = [i for i, ln in enumerate(lines) if RUNNING_RE.match(ln)]
-    if anchors:
-        anchor = anchors[-1]
-        for i in range(anchor, len(lines)):
-            lines[i] = _normalize_timing(lines[i])
+    # after the `Running <N> tests for` line that OPENS the real report block.
+    # A real report always ends in a `Summary ` line, so the anchor is the last
+    # `Running` line that is followed by a `Summary ` line. This matters on a
+    # crash stream, where the report is LOST: a `Running`-lookalike a test prints
+    # before aborting has no `Summary` after it, so it never becomes the anchor
+    # and the lines a test printed stay byte-exact. Requiring the Summary is what
+    # keeps "anchor on the last Running line" from over-normalizing user output.
+    summary_idxs = [i for i, ln in enumerate(lines) if ln.startswith("Summary [ ")]
+    if summary_idxs:
+        last_summary = summary_idxs[-1]
+        running_before = [
+            i
+            for i, ln in enumerate(lines)
+            if RUNNING_RE.match(ln) and i < last_summary
+        ]
+        if running_before:
+            anchor = running_before[-1]
+            for i in range(anchor, len(lines)):
+                lines[i] = _normalize_timing(lines[i])
 
     result = "\n".join(lines)
     if had_trailing_nl:
