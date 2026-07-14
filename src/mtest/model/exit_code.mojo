@@ -1,11 +1,18 @@
 """The pure run-outcome to process exit-code function (Layer 0).
 
 The runner's exit code is its product: a code you cannot trust is worse than
-none. This module owns the mapping from the multiset of RUN outcomes — the
-outcomes of the files that actually ran, never the excluded or not-run ones — to
-the three codes that mapping alone decides: 1, 5, and 0. Codes 4 (pre-run usage
+none. This module owns the mapping from the multiset of RUN outcomes to the
+three codes that mapping alone decides: 1, 5, and 0. Codes 4 (pre-run usage
 error), 3 (internal error), and 2 (interrupt) are control-flow codes decided in
 the session and main, not here.
+
+The multiset callers pass is RUN outcomes at TEST granularity: one entry per
+test that actually ran (PASS/FAIL/SKIP/…), plus one file-level outcome for each
+file with no per-test attribution (CRASH, TIMEOUT, COMPILE_ERROR,
+MALFORMED_SUITE, PRECOMPILE_ERROR). DESELECTED, EXCLUDED, and NOT_RUN are NEVER
+in the multiset — a deselected, excluded, or not-run test did not run, so it
+cannot be a RUN outcome. An empty multiset (an empty final selection, or an
+empty collection) maps to 5.
 """
 from mtest.model.outcome import Outcome
 

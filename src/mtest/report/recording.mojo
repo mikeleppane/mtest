@@ -6,7 +6,7 @@ emitted — ordering, kinds, and payload fields — without parsing rendered tex
 It stores each event whole, so any field is recoverable later; the convenience
 accessors cover the fields tests reach for most.
 """
-from mtest.model import Event, EventKind, Outcome
+from mtest.model import Event, EventKind, Outcome, ParseDisposition, TestResult
 
 from mtest.report.reporter import Reporter
 
@@ -50,3 +50,24 @@ struct RecordingReporter(Reporter):
         """A copy of the i-th recorded event, for richer assertions. Never raises.
         """
         return self.events[i].copy()
+
+    def test_at(self, i: Int) -> TestResult:
+        """The `TestResult` of the i-th recorded event. Does not mutate or raise.
+        """
+        return self.events[i].test.copy()
+
+    def selected_test_total_at(self, i: Int) -> Int:
+        """The selected-test total of the i-th recorded event. Never raises."""
+        return self.events[i].selected_test_total
+
+    def deselected_test_total_at(self, i: Int) -> Int:
+        """The deselected-test total of the i-th recorded event. Never raises.
+        """
+        return self.events[i].deselected_test_total
+
+    def parse_disposition_at(self, i: Int) -> ParseDisposition:
+        """The FileFinished parse disposition of the i-th recorded event.
+
+        Does not mutate or raise.
+        """
+        return self.events[i].parse_disposition

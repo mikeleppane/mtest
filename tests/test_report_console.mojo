@@ -12,7 +12,7 @@ in.
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
 
 from mtest.config import ColorWhen, Verbosity, ShowOutput
-from mtest.model import EventKind, Summary, Event, Outcome
+from mtest.model import EventKind, Summary, Event, Outcome, NodeId, TestResult
 from mtest.report import ConsoleReporter
 
 
@@ -436,6 +436,20 @@ def test_internal_error_banner_omits_errno_for_machinery_failure() raises:
     assert_true("/usr/bin/mojo" in out)
     # errno 0 is a machinery failure: no errno suffix.
     assert_false("errno" in out)
+
+
+def test_test_reported_and_collection_known_render_nothing() raises:
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 5, 1))
+    var before = c.output()
+    var n = NodeId("tests/test_a.mojo", "test_foo")
+    c.handle(Event.test_reported(TestResult(n^, Outcome.FAIL)))
+    c.handle(
+        Event.collection_known(selected_test_total=5, deselected_test_total=1)
+    )
+    var after = c.output()
+    # Same precedent as FILE_STARTED: these kinds render nothing this commit.
+    assert_equal(after, before)
 
 
 def test_internal_error_banner_falls_back_to_bare_errno() raises:

@@ -7,7 +7,15 @@ through it and read the recorded kinds, paths, and outcomes back in order.
 """
 from std.testing import assert_equal, assert_true, TestSuite
 
-from mtest.model import EventKind, Summary, Event, Outcome
+from mtest.model import (
+    EventKind,
+    Summary,
+    Event,
+    Outcome,
+    NodeId,
+    TestResult,
+    ParseDisposition,
+)
 from mtest.report import RecordingReporter
 
 
@@ -78,6 +86,40 @@ def test_records_warning_and_precompile_payloads() raises:
     assert_equal(r.event_at(0).warning_pattern, "old_*")
     assert_equal(r.event_at(1).step, "precompile src/mtest")
     assert_equal(r.event_at(1).casualty_count, 7)
+
+
+def test_records_test_reported_and_collection_known() raises:
+    var r = RecordingReporter()
+    var n = NodeId("tests/test_a.mojo", "test_foo")
+    var tr = TestResult(n.copy(), Outcome.FAIL, "boom", "[ 0.01 ]")
+    r.handle(Event.test_reported(tr^))
+    r.handle(
+        Event.collection_known(selected_test_total=9, deselected_test_total=2)
+    )
+    assert_equal(r.count(), 2)
+    assert_true(r.kind_at(0) == EventKind.TEST_REPORTED)
+    assert_true(r.kind_at(1) == EventKind.COLLECTION_KNOWN)
+    assert_true(r.test_at(0).node == n)
+    assert_true(r.test_at(0).outcome == Outcome.FAIL)
+    assert_equal(r.selected_test_total_at(1), 9)
+    assert_equal(r.deselected_test_total_at(1), 2)
+
+
+def test_records_file_finished_parse_disposition() raises:
+    var r = RecordingReporter()
+    r.handle(
+        Event.file_finished(
+            "tests/test_a.mojo",
+            Outcome.FAIL,
+            0.1,
+            List[String](),
+            0.0,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.DRIFT,
+        )
+    )
+    assert_true(r.parse_disposition_at(0) == ParseDisposition.DRIFT)
 
 
 def main() raises:

@@ -309,7 +309,13 @@ struct ConsoleReporter(Reporter):
             self._on_internal_error(e)
         elif k == EventKind.SESSION_FINISHED:
             self._on_session_finished(e)
-        # FILE_STARTED carries nothing the console renders on its own.
+        elif k == EventKind.TEST_REPORTED:
+            pass
+        elif k == EventKind.COLLECTION_KNOWN:
+            pass
+        # FILE_STARTED, TEST_REPORTED, and COLLECTION_KNOWN carry nothing the
+        # console renders on its own yet: per-test storytelling and the
+        # collection line arrive later.
 
     def _on_internal_error(mut self, e: Event):
         """Render a loud red-bold banner naming the step, program, and errno.
