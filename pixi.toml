@@ -33,6 +33,15 @@ mojo-version = "mojo --version"
 # produces the same artifact.
 build = "bash scripts/build_pkg.sh"
 
+# Link the runnable binary at build/mtest from src/main.mojo. Depends on `build`
+# so the package is precompiled to build/mtest.mojopkg FIRST — `-I build`
+# resolves `from mtest... import` against that artifact (the same include the
+# test runner uses), so main compiles against a binary dependency, not the whole
+# source tree. This is the first artifact a human can actually run.
+build-bin = { cmd = "mojo build -I build src/main.mojo -o build/mtest", depends-on = [
+    "build",
+] }
+
 # Rewrite Mojo files in place — run locally before committing. Covers the runner
 # package, the probe fixtures, and the tests.
 fmt = "mojo format src fixtures tests"

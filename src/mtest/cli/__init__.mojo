@@ -11,9 +11,14 @@ serves it, and, for a not-yet-served flag, the milestone that brings it. The
 full v1 grammar is parsed now and the unserved flags are refused loudly, so
 later work flips an availability bit instead of teaching a new token.
 
+It also owns `build_flags_string` — the inverse of the parser for the
+build-affecting flags, rendering a `RunnerConfig` back into the shell-ready
+string the console echoes in a run-failure `reproduce:` line.
+
 The public surface is re-exported here so callers write
-`from mtest.cli import parse_args, ParseResult, ...`.
+`from mtest.cli import parse_args, ParseResult, build_flags_string, ...`.
 """
+from mtest.cli.build_flags import build_flags_string
 from mtest.cli.flag_spec import FlagId, FlagSpec, flag_specs
 from mtest.cli.parse_result import ParseResult
 from mtest.cli.parser import (

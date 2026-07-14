@@ -17,3 +17,4 @@ from mtest.exec.signals import (
     install_signal_handlers,
     interrupt_requested,
 )
+from mtest.exec.tty import stdout_isatty
