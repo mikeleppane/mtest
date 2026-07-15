@@ -2,9 +2,9 @@
 
 Collect mode is set by the `collect` subcommand OR the `--collect-only` flag, and
 the two are identical. Run-only flags served by this build (`-x`/`--exitfirst`,
-`--maxfail`, `--gate`, `-s`/`--show-output`) combined with collect are a usage
-error; `--timeout` is NOT refused — it bounds the collection probes. Operands
-(paths, node ids) and `-k` remain allowed.
+`--maxfail`, `--durations`, `--gate`, `-s`/`--show-output`) combined with collect
+are a usage error; `--timeout` is NOT refused — it bounds the collection probes.
+Operands (paths, node ids) and `-k` remain allowed.
 """
 from std.testing import assert_equal, assert_raises, assert_true, TestSuite
 
@@ -49,6 +49,15 @@ def test_maxfail_with_collect_is_usage_error() raises:
     with assert_raises(contains="--maxfail"):
         _ = parse_args(argv)
     var argv2: List[String] = ["collect", "--maxfail", "1"]
+    with assert_raises(contains="run-only"):
+        _ = parse_args(argv2)
+
+
+def test_durations_with_collect_is_usage_error() raises:
+    var argv: List[String] = ["collect", "--durations", "5"]
+    with assert_raises(contains="--durations"):
+        _ = parse_args(argv)
+    var argv2: List[String] = ["collect", "--durations", "5"]
     with assert_raises(contains="run-only"):
         _ = parse_args(argv2)
 

@@ -182,6 +182,16 @@ def test_timeout_zero_disables() raises:
     assert_equal(parse_args(argv).config.timeout_secs, 0)
 
 
+def test_durations_sets_count() raises:
+    var argv: List[String] = ["--durations", "5"]
+    assert_equal(parse_args(argv).config.durations, 5)
+
+
+def test_durations_defaults_to_zero() raises:
+    var argv = List[String]()
+    assert_equal(parse_args(argv).config.durations, 0)
+
+
 def test_dash_s_sets_show_output_all() raises:
     var argv: List[String] = ["-s"]
     assert_true(parse_args(argv).config.show_output == ShowOutput.ALL)

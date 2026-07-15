@@ -4,9 +4,9 @@ bad-value case.
 
 The available arity-1 spellings are enumerated, not sampled: `--exclude`, `-I`,
 `--build-arg`, `--precompile`, `--mojo`, `--timeout`, `--show-output`,
-`--color`, `--gate`, `--maxfail`. Each proves that omitting the value is a
-located usage error and that the `--flag=value` spelling lands the same value
-as `--flag value`.
+`--color`, `--gate`, `--maxfail`, `--durations`. Each proves that omitting the
+value is a located usage error and that the `--flag=value` spelling lands the
+same value as `--flag value`.
 """
 from std.testing import assert_equal, assert_raises, assert_true, TestSuite
 
@@ -77,6 +77,12 @@ def test_maxfail_missing_value() raises:
         _ = parse_args(argv)
 
 
+def test_durations_missing_value() raises:
+    var argv: List[String] = ["--durations"]
+    with assert_raises(contains="'--durations' requires a value"):
+        _ = parse_args(argv)
+
+
 # --- equals-form cases ---
 
 
@@ -132,6 +138,11 @@ def test_maxfail_equals_form() raises:
     assert_equal(parse_args(argv).config.maxfail, 2)
 
 
+def test_durations_equals_form() raises:
+    var argv: List[String] = ["--durations=5"]
+    assert_equal(parse_args(argv).config.durations, 5)
+
+
 def test_maxfail_space_form() raises:
     var argv: List[String] = ["--maxfail", "2"]
     assert_equal(parse_args(argv).config.maxfail, 2)
@@ -145,6 +156,21 @@ def test_maxfail_zero_means_no_limit() raises:
 def test_maxfail_defaults_to_zero() raises:
     var argv: List[String] = []
     assert_equal(parse_args(argv).config.maxfail, 0)
+
+
+def test_durations_space_form() raises:
+    var argv: List[String] = ["--durations", "5"]
+    assert_equal(parse_args(argv).config.durations, 5)
+
+
+def test_durations_zero_means_disabled() raises:
+    var argv: List[String] = ["--durations", "0"]
+    assert_equal(parse_args(argv).config.durations, 0)
+
+
+def test_durations_defaults_to_zero() raises:
+    var argv: List[String] = []
+    assert_equal(parse_args(argv).config.durations, 0)
 
 
 def test_gate_accumulates_and_preserves_spaces() raises:
@@ -183,6 +209,18 @@ def test_maxfail_rejects_non_integer() raises:
 
 def test_maxfail_rejects_negative() raises:
     var argv: List[String] = ["--maxfail", "-1"]
+    with assert_raises(contains="wants an integer"):
+        _ = parse_args(argv)
+
+
+def test_durations_rejects_non_integer() raises:
+    var argv: List[String] = ["--durations", "abc"]
+    with assert_raises(contains="wants an integer"):
+        _ = parse_args(argv)
+
+
+def test_durations_rejects_negative() raises:
+    var argv: List[String] = ["--durations", "-1"]
     with assert_raises(contains="wants an integer"):
         _ = parse_args(argv)
 

@@ -54,6 +54,8 @@ def frozen_inventory() -> List[InvRow]:
         InvRow("--version", 0, False, True),
         InvRow("-k", 1, False, True),
         InvRow("--maxfail", 1, False, True),
+        # `--durations N`: non-negative int; 0 disables.
+        InvRow("--durations", 1, False, True),
         # In the v1 contract but not served by this build.
         InvRow("-n", 1, False, False),
         InvRow("--workers", 1, False, False),
@@ -61,6 +63,13 @@ def frozen_inventory() -> List[InvRow]:
         InvRow("--retries", 1, False, False),
         InvRow("--junit-xml", 1, False, False),
         InvRow("--gh-annotations", 1, False, False),
+        # `--shard M/N`: 1<=M<=N (documented/inventoried, not enforced — it
+        # refuses before any value validation runs).
+        InvRow("--shard", 1, False, False),
+        # `--serial GLOB`: repeatable.
+        InvRow("--serial", 1, True, False),
+        # `--json PATH|-`.
+        InvRow("--json", 1, False, False),
         # Served by this build (collect mode).
         InvRow("--collect-only", 0, False, True),
     ]
@@ -158,6 +167,18 @@ def test_refuse_junit_xml() raises:
 
 def test_refuse_gh_annotations() raises:
     _assert_refused("--gh-annotations")
+
+
+def test_refuse_shard() raises:
+    _assert_refused("--shard")
+
+
+def test_refuse_serial() raises:
+    _assert_refused("--serial")
+
+
+def test_refuse_json() raises:
+    _assert_refused("--json")
 
 
 def test_collect_only_is_served_and_sets_collect_mode() raises:

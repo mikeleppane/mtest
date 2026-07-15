@@ -952,7 +952,10 @@ def s_usage_refusals(manifest: dict) -> str:
     remaining usage refusal this build enforces is a RUN-ONLY flag combined with
     collect mode: a listing is not a run, so every served run-only flag
     (--maxfail, -x/--exitfirst, --gate, -s/--show-output) is refused with exit 4,
-    while --timeout is NOT refused (it bounds the probes)."""
+    while --timeout is NOT refused (it bounds the probes). Separately,
+    --shard/--serial/--json are part of the v1 contract but not served by this
+    build, so each fires the standard availability refusal (exit 4, the flag
+    named on stderr) regardless of subcommand."""
     run = run_mtest(
         ["collect", "--maxfail", "1", "testdata/matrix"], timeout=SHORT_TIMEOUT
     )
@@ -1001,9 +1004,76 @@ def s_usage_refusals(manifest: dict) -> str:
         f"a usage error must print no listing to stdout, got:\n{show.stdout!r}",
     )
 
+    shard = run_mtest(["--shard", "1/4", "testdata/matrix"], timeout=SHORT_TIMEOUT)
+    expect_exit(shard, 4)
+    expect(
+        "--shard" in shard.stderr,
+        f"--shard did not name itself on stderr:\n{shard.stderr}",
+    )
+    expect(
+        "not available in this build" in shard.stderr,
+        f"--shard did not fire the availability refusal:\n{shard.stderr}",
+    )
+    expect(
+        shard.stdout == "",
+        f"a usage error must print no listing to stdout, got:\n{shard.stdout!r}",
+    )
+
+    serial = run_mtest(
+        ["--serial", "foo*", "testdata/matrix"], timeout=SHORT_TIMEOUT
+    )
+    expect_exit(serial, 4)
+    expect(
+        "--serial" in serial.stderr,
+        f"--serial did not name itself on stderr:\n{serial.stderr}",
+    )
+    expect(
+        "not available in this build" in serial.stderr,
+        f"--serial did not fire the availability refusal:\n{serial.stderr}",
+    )
+    expect(
+        serial.stdout == "",
+        f"a usage error must print no listing to stdout, got:\n{serial.stdout!r}",
+    )
+
+    json_path = run_mtest(
+        ["--json", "out.json", "testdata/matrix"], timeout=SHORT_TIMEOUT
+    )
+    expect_exit(json_path, 4)
+    expect(
+        "--json" in json_path.stderr,
+        f"--json did not name itself on stderr:\n{json_path.stderr}",
+    )
+    expect(
+        "not available in this build" in json_path.stderr,
+        f"--json did not fire the availability refusal:\n{json_path.stderr}",
+    )
+    expect(
+        json_path.stdout == "",
+        f"a usage error must print no listing to stdout, got:\n{json_path.stdout!r}",
+    )
+
+    json_stdout = run_mtest(
+        ["--json", "-", "testdata/matrix"], timeout=SHORT_TIMEOUT
+    )
+    expect_exit(json_stdout, 4)
+    expect(
+        "--json" in json_stdout.stderr,
+        f"--json - did not name itself on stderr:\n{json_stdout.stderr}",
+    )
+    expect(
+        "not available in this build" in json_stdout.stderr,
+        f"--json - did not fire the availability refusal:\n{json_stdout.stderr}",
+    )
+    expect(
+        json_stdout.stdout == "",
+        f"a usage error must print no listing to stdout, got:\n{json_stdout.stdout!r}",
+    )
+
     return (
         "run-only flags (--maxfail, --gate, -s) + collect -> exit 4 on "
-        "stderr, no listing"
+        "stderr, no listing; --shard/--serial/--json -> exit 4 availability "
+        "refusal"
     )
 
 
