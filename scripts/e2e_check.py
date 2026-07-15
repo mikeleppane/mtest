@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MTEST = os.path.join(REPO_ROOT, "build", "mtest")
 MANIFEST_PATH = os.path.join(REPO_ROOT, "testdata", "manifest.json")
+LOGGING_MOJO = os.path.join(REPO_ROOT, "scripts", "logging_mojo.py")
 
 # Generous per-spawn wall-clock ceilings. Cold `mojo build` is slow, so these are
 # roomy — their only job is to keep a hung runner from wedging CI, never to time
@@ -332,10 +333,11 @@ def expect_accounting(run: Run) -> Summary:
     """The file-count invariant that still holds now that pass/fail/skip count
     TESTS, not files: the summary and the header agree on the excluded FILE count.
 
-    (The old run-outcomes+not-run==selected file-count identity no longer holds —
-    passed/failed are per-test — and the cross-cutting test-count arithmetic is
-    asserted in a later task; here we keep the band parseable and the excluded
-    counts reconciled.)"""
+    (The old run-outcomes+not-run==selected file-count identity no longer holds
+    — passed/failed are per-test, and `s_default_suite` asserts that exact
+    test-count arithmetic separately; here we keep the band parseable and the
+    excluded counts reconciled for every scenario, not just the default suite.)
+    """
     summ = run.summary()
     _selected, hdr_excluded = run.header()
     expect(
@@ -520,23 +522,48 @@ def s_default_suite(manifest: dict) -> str:
         f"compile-error FILES: band {summ.compile_error} != manifest "
         f"{file_abnormals['compile_error']}",
     )
-    # pass/fail are per-TEST. The manifest carries per_test rows only for files
-    # that parse a report (crash/compile-error files and the report-less PASS
-    # fixtures have none), so failed is exact — only the failing test file
-    # contributes — while passed is a lower bound.
+    # pass/fail/skip are per-TEST. Every report-bearing file (PASS or FAIL —
+    # the verdict a parsed report can actually produce) must carry a per_test
+    # block, and no non-report-bearing file (CRASH/COMPILE-ERROR, which never
+    # reach the parser) may carry one; a manifest edit that adds a suite file
+    # without one, or leaves a stale block on an abnormal one, fails loudly
+    # here instead of silently under/over-counting the exact totals below.
+    report_bearing = {"PASS", "FAIL"}
+    for rel, row in suite.items():
+        has_per_test = "per_test" in row
+        if row["verdict"] in report_bearing:
+            expect(
+                has_per_test,
+                f"{rel} is report-bearing ({row['verdict']}) but the manifest "
+                f"has no per_test block for it",
+            )
+        else:
+            expect(
+                not has_per_test,
+                f"{rel} is not report-bearing ({row['verdict']}) but the "
+                f"manifest carries a per_test block for it",
+            )
+
+    want_passed = sum(
+        r["per_test"]["passed"] for r in suite.values() if "per_test" in r
+    )
     want_failed = sum(
         r["per_test"]["failed"] for r in suite.values() if "per_test" in r
     )
-    want_passed = sum(
-        r["per_test"]["passed"] for r in suite.values() if "per_test" in r
+    want_skipped = sum(
+        r["per_test"]["skipped"] for r in suite.values() if "per_test" in r
+    )
+    expect(
+        summ.passed == want_passed,
+        f"passed TESTS: band {summ.passed} != manifest per-test {want_passed}",
     )
     expect(
         summ.failed == want_failed,
         f"failed TESTS: band {summ.failed} != manifest per-test {want_failed}",
     )
     expect(
-        summ.passed >= want_passed,
-        f"passed TESTS: band {summ.passed} < manifest lower bound {want_passed}",
+        summ.skipped == want_skipped,
+        f"skipped TESTS: band {summ.skipped} != manifest per-test {want_skipped}",
     )
     expect(summ.excluded == 0 and summ.not_run == 0, "unexpected excluded/not-run")
 
@@ -1296,6 +1323,108 @@ def s_selection_chameleon(manifest: dict) -> str:
     return "chameleon: loud recollect-once then MALFORMED-SUITE, exit 1 (not 3)"
 
 
+def _mojo_log_path() -> str:
+    """A fresh path for MTEST_MOJO_LOG, absent until the logging wrapper writes
+    it — proves the wrapper (not some pre-existing file) produced the log."""
+    fd, path = tempfile.mkstemp(prefix="mtest_mojo_log_", suffix=".tsv")
+    os.close(fd)
+    os.remove(path)
+    return path
+
+
+def _mojo_log_lines(path: str) -> list[str]:
+    """The logging wrapper's recorded lines, or [] if it never wrote the file."""
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as fh:
+        return [ln.rstrip("\n") for ln in fh if ln.strip()]
+
+
+def _count_builds(lines: list[str], rel: str) -> int:
+    """How many `build\\t<rel>\\t...` entries the wrapper logged for `rel`."""
+    count = 0
+    for ln in lines:
+        fields = ln.split("\t")
+        if len(fields) >= 2 and fields[0] == "build" and fields[1] == rel:
+            count += 1
+    return count
+
+
+def s_single_build(manifest: dict) -> str:
+    """The BuildProducts registry shares ONE `mojo build` per file between the
+    selection probe and the run — proved with the committed logging `--mojo`
+    wrapper (scripts/logging_mojo.py) over a SINGLE selection-run invocation.
+    Two separate `mtest` invocations would legitimately rebuild; this scenario
+    never does that.
+
+    `-k one` over the whole testdata/matrix tree matches test_alpha_one AND
+    test_beta_one, so BOTH files are touched — a multi-file selection. Phase 1
+    (probe every run file) builds each file once; Phase 2 (run the selected
+    subset) reuses that same binary. The wrapper's log is the independent
+    witness: exactly one `mojo build <file>` line per file, not two."""
+    log_path = _mojo_log_path()
+    try:
+        run = run_mtest(
+            ["--mojo", LOGGING_MOJO, "-k", "one", "testdata/matrix"],
+            env_overrides={"MTEST_MOJO_LOG": log_path},
+        )
+        expect_exit(run, 0)
+        expect(
+            os.path.exists(log_path),
+            "the logging --mojo wrapper never wrote a log file",
+        )
+        lines = _mojo_log_lines(log_path)
+        for rel in (MATRIX_ALPHA, MATRIX_BETA):
+            n = _count_builds(lines, rel)
+            expect(
+                n == 1,
+                f"expected exactly 1 'mojo build {rel}' over one selection-run "
+                f"invocation (probe+run must share the build), got {n}: {lines}",
+            )
+        return (
+            f"one invocation selects across 2 files (-k one); each built "
+            f"exactly once ({len(lines)} mojo invocations logged total)"
+        )
+    finally:
+        if os.path.exists(log_path):
+            os.remove(log_path)
+
+
+def s_stale_recovery_two_builds(manifest: dict) -> str:
+    """The chameleon's stale-name recovery rebuilds the file EXACTLY TWICE: the
+    initial Phase-1 build, then the one recollect-once rebuild the recovery
+    flow triggers when the suite refuses under `--only` a name it just listed
+    under `--skip-all`. The run still ends MALFORMED-SUITE (exit-1 class),
+    never exit 3 — the recovery is a bounded retry, not a drift."""
+    log_path = _mojo_log_path()
+    try:
+        run = run_mtest(
+            ["--mojo", LOGGING_MOJO, CHAMELEON, "-k", "ghost"],
+            env_overrides={"MTEST_MOJO_LOG": log_path},
+            timeout=SHORT_TIMEOUT,
+        )
+        expect_exit(run, 1)
+        expect(
+            run.verdict_line("MALFORMED-SUITE", CHAMELEON) is not None,
+            "the chameleon was not reported MALFORMED-SUITE under the logging "
+            f"wrapper:\n{run.stdout}",
+        )
+        lines = _mojo_log_lines(log_path)
+        n = _count_builds(lines, CHAMELEON)
+        expect(
+            n == 2,
+            f"expected exactly 2 'mojo build {CHAMELEON}' entries (initial + "
+            f"one stale-name rebuild), got {n}: {lines}",
+        )
+        return (
+            "chameleon: 2 builds logged (initial + stale-name rebuild), "
+            "MALFORMED-SUITE exit 1 (not 3)"
+        )
+    finally:
+        if os.path.exists(log_path):
+            os.remove(log_path)
+
+
 def s_internal_error(manifest: dict) -> str:
     """A spawn/machinery failure must surface a diagnostic, not a silent exit 3.
 
@@ -1486,6 +1615,8 @@ def main() -> int:
     h.scenario("selection-unknown-test", s_selection_unknown_test)
     h.scenario("selection-empty", s_selection_empty)
     h.scenario("selection-chameleon", s_selection_chameleon)
+    h.scenario("single-build", s_single_build)
+    h.scenario("stale-recovery-two-builds", s_stale_recovery_two_builds)
     h.scenario("collect", s_collect)
     h.scenario("passthrough+forbidden", s_passthrough_and_forbidden)
     h.scenario("out-of-root", s_out_of_root)
