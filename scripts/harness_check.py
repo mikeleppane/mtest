@@ -371,6 +371,18 @@ def check_e2e_layout() -> None:
         raise AssertionError("obsolete testdata/ root still exists")
 
 
+def check_format_roots() -> None:
+    """Both formatting tasks cover every Mojo source family."""
+    pixi = (REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
+    expected = {
+        'fmt = "mojo format src tests e2e"',
+        'fmt-check = "mojo format src tests e2e && git diff --exit-code"',
+    }
+    missing = sorted(line for line in expected if line not in pixi)
+    if missing:
+        raise AssertionError(f"format task root coverage mismatch: missing={missing}")
+
+
 def main() -> int:
     try:
         check_recursive_direct_runner()
@@ -379,6 +391,7 @@ def main() -> int:
         check_transcript_comparator()
         check_protocol_asset_layout()
         check_e2e_layout()
+        check_format_roots()
     except (AssertionError, OSError, subprocess.SubprocessError) as exc:
         print(f"harness-check: FAIL: {exc}", file=sys.stderr)
         return 1

@@ -48,7 +48,7 @@ fmt = "mojo format src tests e2e"
 # CI gate: format, then fail if anything changed (never edits in CI). A format
 # that shifts a fixture's `At <path>:<line>:<col>` coordinates is an oracle-side
 # change — regenerate transcripts, do not fight the gate.
-fmt-check = "mojo format src tests && git diff --exit-code"
+fmt-check = "mojo format src tests e2e && git diff --exit-code"
 
 # Regenerate the protocol snapshots IN PLACE from the committed fixtures at the
 # pinned toolchain. Local use only (updating the committed snapshots); never run in
