@@ -52,8 +52,8 @@ def frozen_inventory() -> List[InvRow]:
         InvRow("-h", 0, False, True),
         InvRow("--help", 0, False, True),
         InvRow("--version", 0, False, True),
+        InvRow("-k", 1, False, True),
         # In the v1 contract but not served by this build.
-        InvRow("-k", 1, False, False),
         InvRow("--maxfail", 1, False, False),
         InvRow("-n", 1, False, False),
         InvRow("--workers", 1, False, False),
@@ -125,10 +125,6 @@ def _assert_refused(spelling: String) raises:
     var argv3: List[String] = [spelling]
     with assert_raises(contains=spelling):
         _ = parse_args(argv3)
-
-
-def test_refuse_k() raises:
-    _assert_refused("-k")
 
 
 def test_refuse_maxfail() raises:

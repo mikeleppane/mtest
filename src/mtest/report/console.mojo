@@ -482,14 +482,28 @@ struct ConsoleReporter(Reporter):
         body += _extra_count(s, Outcome.PRECOMPILE_ERROR, "precompile error")
         body += _extra_count(s, Outcome.FLAKY, "flaky")
 
-        var band = (
-            String("===== ")
-            + body
-            + " ("
+        # DESELECTED is a per-TEST count (from the authoritative test totals),
+        # not a per-file Summary tally, and is shown only when a selection
+        # actually deselected something so a plain run's band is unchanged.
+        var parenthetical = (
+            String("(")
             + String(s.count_of(Outcome.EXCLUDED))
             + " excluded, "
             + String(s.count_of(Outcome.NOT_RUN))
-            + " not run) in "
+            + " not run"
+        )
+        if e.test_counts.deselected > 0:
+            parenthetical += (
+                ", " + String(e.test_counts.deselected) + " deselected"
+            )
+        parenthetical += ")"
+
+        var band = (
+            String("===== ")
+            + body
+            + " "
+            + parenthetical
+            + " in "
             + _fmt_fixed(e.wall_time_seconds, 1)
             + "s ====="
         )

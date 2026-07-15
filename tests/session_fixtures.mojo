@@ -84,6 +84,49 @@ comptime SRC_ZERO = (
 )
 
 
+# --- Selection fixtures: distinct names for -k / --only, plus a chameleon. ----
+
+# Three passing tests with distinct names -> a probe lists all three; `-k add`
+# selects two, a node id selects one. Source order: add_one, add_two, sub_one.
+comptime SRC_MATRIX = (
+    "from std.testing import TestSuite, assert_true\n\n\n"
+    "def test_add_one() raises:\n    assert_true(True)\n\n\n"
+    "def test_add_two() raises:\n    assert_true(True)\n\n\n"
+    "def test_sub_one() raises:\n    assert_true(True)\n\n\n"
+    "def main() raises:\n"
+    "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
+)
+# A passing and a failing test; selecting the failing one runs it under --only
+# and reports FAIL while the passing one is deselected.
+comptime SRC_MATRIX_FAIL = (
+    "from std.testing import TestSuite, assert_true\n\n\n"
+    "def test_ok() raises:\n    assert_true(True)\n\n\n"
+    "def test_bad() raises:\n    assert_true(False)\n\n\n"
+    "def main() raises:\n"
+    "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
+)
+# The chameleon: under --skip-all it lists test_real AND test_ghost, but under
+# --only it registers only test_real, so `--only test_ghost` raises the stdlib's
+# `… test not found in suite:`. The sanctioned proof that user code can refuse a
+# name it just listed -> the loud recollect-once, then MALFORMED-SUITE.
+comptime SRC_CHAMELEON = (
+    "from std.sys import argv\n"
+    "from std.testing import TestSuite, assert_true\n\n\n"
+    "def test_real() raises:\n    assert_true(True)\n\n\n"
+    "def test_ghost() raises:\n    assert_true(True)\n\n\n"
+    "def main() raises:\n"
+    "    var has_only = False\n"
+    "    for a in argv():\n"
+    '        if a == "--only":\n'
+    "            has_only = True\n"
+    "    var s = TestSuite()\n"
+    "    s.test[test_real]()\n"
+    "    if not has_only:\n"
+    "        s.test[test_ghost]()\n"
+    "    s^.run()\n"
+)
+
+
 def temp_root() raises -> String:
     """Create and return a fresh, empty temp directory to use as a root."""
     return mkdtemp()

@@ -1,6 +1,6 @@
 {
   "schema": "mtest-e2e-manifest/2",
-  "description": "Single source of truth for the known-outcome testdata tree. Each discovered test_*.mojo file maps to the verdict the real mtest binary produces for it and the exit-code class that verdict contributes (0 = the pass/skip class, 1 = the failing class, 3 = the drift/internal-error tier). Schema /2 adds per-test expectations and the report parse `disposition` each file drives, now that the session PARSES each run's own report (the run-report-as-handshake) instead of trusting the exit status alone. The end-to-end harness consumes this file directly and asserts both-way completeness: every discovered test file has a row here, and every row names a file that exists on disk. There is no second, hard-coded expectations table.",
+  "description": "Single source of truth for the known-outcome testdata tree. Each discovered test_*.mojo file maps to the verdict the real mtest binary produces for it and the exit-code class that verdict contributes (0 = the pass/skip class, 1 = the failing class, 3 = the drift/internal-error tier). Schema /2 adds per-test expectations and the report parse `disposition` each file drives, now that the session PARSES each run's own report (the run-report-as-handshake) instead of trusting the exit status alone. Files reached only by SELECTION (testdata/matrix/, testdata/chameleon/) carry a `selection` block documenting the per-scenario selected/deselected split; DESELECTED is a summary count, never a listed row. The end-to-end harness consumes this file directly and asserts both-way completeness: every discovered test file has a row here, and every row names a file that exists on disk. There is no second, hard-coded expectations table.",
   "testdata_root": "testdata",
   "suite_root": "testdata/suite",
   "hostile_root": "testdata/hostile",
@@ -138,6 +138,38 @@
       "requires_precompile": "testdata/pkg/mathlib",
       "disposition": "PARSED",
       "rationale": "Imports from a package that must be precompiled first. PASS only under --precompile testdata/pkg/mathlib, which builds the package and auto-adds its output directory to the include path so the import resolves."
+    },
+    "testdata/matrix/test_alpha.mojo": {
+      "verdict": "PASS",
+      "exit_class": 0,
+      "in_default_suite": false,
+      "reached_only_by": ["selection"],
+      "disposition": "PARSED",
+      "per_test": { "passed": 3, "failed": 0, "skipped": 0, "deselected": 0 },
+      "selection": {
+        "-k two": { "passed": 1, "deselected": 2 },
+        "node-id test_alpha_one": { "passed": 1, "deselected": 2 },
+        "dir + node-id union": { "passed": 3, "deselected": 0 }
+      },
+      "rationale": "The selection-matrix file: three distinctly named passing tests probed with --skip-all, then run under --only. A whole run passes all three; `-k two` or a node id selects one and deselects the other two; the dir+node-id union keeps all three (the plain dir operand beats the node id). DESELECTED is a summary count, never a listed row. Reached only by the selection scenarios."
+    },
+    "testdata/matrix/test_beta.mojo": {
+      "verdict": "PASS",
+      "exit_class": 0,
+      "in_default_suite": false,
+      "reached_only_by": ["selection"],
+      "disposition": "PARSED",
+      "per_test": { "passed": 2, "failed": 0, "skipped": 0, "deselected": 0 },
+      "rationale": "The matrix sibling: two passing tests. Its role is the mixed-operand union — `mtest testdata/matrix testdata/matrix/test_alpha.mojo::test_alpha_one` keeps the whole tree (the plain dir operand beats the node id), so both files run whole and nothing is deselected."
+    },
+    "testdata/chameleon/test_chameleon.mojo": {
+      "verdict": "MALFORMED-SUITE",
+      "exit_class": 1,
+      "in_default_suite": false,
+      "reached_only_by": ["selection"],
+      "disposition": "NO_REPORT",
+      "per_test": { "passed": 0, "failed": 0, "skipped": 0, "deselected": 1 },
+      "rationale": "The chameleon: under --skip-all it lists test_real AND test_ghost (a qualifying two-test collection), but under --only it registers only test_real, so `--only test_ghost` raises the stdlib's `… test not found in suite:`. A subset selection drives the loud recollect-once, then a second identical refusal -> MALFORMED-SUITE (exit-1 class), NEVER exit 3. The sanctioned proof that user code can refuse a name it just listed."
     }
   },
   "non_discovered": {

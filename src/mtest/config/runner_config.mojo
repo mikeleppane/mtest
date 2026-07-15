@@ -57,6 +57,9 @@ struct RunnerConfig(Copyable, Movable):
     var exitfirst: Bool
     """Whether to stop the run after the first failing file (`-x`)."""
 
+    var keyword: String
+    """The `-k` keyword expression; empty means no keyword filter."""
+
     @staticmethod
     def default() -> RunnerConfig:
         """A config with every field at its contract default. Allocates.
@@ -78,4 +81,5 @@ struct RunnerConfig(Copyable, Movable):
             verbosity=Verbosity.NORMAL,
             color=ColorWhen.AUTO,
             exitfirst=False,
+            keyword="",
         )

@@ -12,7 +12,15 @@ in.
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
 
 from mtest.config import ColorWhen, Verbosity, ShowOutput
-from mtest.model import EventKind, Summary, Event, Outcome, NodeId, TestResult
+from mtest.model import (
+    EventKind,
+    Summary,
+    Event,
+    Outcome,
+    NodeId,
+    TestCounts,
+    TestResult,
+)
 from mtest.report import ConsoleReporter
 
 
@@ -317,6 +325,26 @@ def test_summary_count_arithmetic_matches_verdict_lines() raises:
     # Excluded and not-run ride the SAME band as SEPARATE counts.
     assert_true("(1 excluded, 2 not run)" in out)
     assert_true("in 302.4s" in out)
+
+
+def test_deselected_shows_in_band_only_when_nonzero() raises:
+    # No deselection: the band stays the plain (excluded, not run) shape.
+    var plain = _console()
+    plain.handle(Event.session_finished(_mock_summary(), 302.4, 1))
+    assert_false("deselected" in plain.output())
+
+    # With deselections, the band names them as a separate count.
+    var c = _console()
+    c.handle(
+        Event.session_finished(
+            _mock_summary(),
+            302.4,
+            0,
+            test_counts=TestCounts(passed=2, failed=0, skipped=0, deselected=3),
+        )
+    )
+    var out = c.output()
+    assert_true("(1 excluded, 2 not run, 3 deselected)" in out)
 
 
 def test_color_off_emits_no_escape_codes_but_keeps_tokens() raises:

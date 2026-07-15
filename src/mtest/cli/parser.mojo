@@ -29,7 +29,7 @@ comptime MTEST_VERSION = "0.1.0-dev"
 
 comptime SUPPORTED_SUMMARY = (
     "paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo,"
-    " -x/--exitfirst, --timeout, -s/--show-output, -q, -v, --color, --help,"
+    " -x/--exitfirst, --timeout, -s/--show-output, -q, -v, --color, -k, --help,"
     " --version"
 )
 """A stable one-line list of what this build serves, quoted in refusals."""
@@ -224,6 +224,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var show_output = ShowOutput.FAILURES
     var color = ColorWhen.AUTO
     var exitfirst = False
+    var keyword = String("")
     var saw_quiet = False
     var saw_verbose = False
 
@@ -332,6 +333,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             show_output = _parse_show_output(value)
         elif s.id == FlagId.COLOR:
             color = _parse_color(value)
+        elif s.id == FlagId.SELECT:
+            keyword = value
 
     if saw_quiet and saw_verbose:
         raise _err("'-q' and '-v' are mutually exclusive")
@@ -356,5 +359,6 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         verbosity=verbosity,
         color=color,
         exitfirst=exitfirst,
+        keyword=keyword^,
     )
     return ParseResult.run(cfg^)

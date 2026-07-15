@@ -18,11 +18,13 @@ error (spawn failure or machinery raise) is 3; a precompile failure is 1;
 otherwise the pure `exit_code_for` over the RUN outcomes decides 1 / 5 / 0.
 """
 from std.os import makedirs
-from std.os.path import basename, dirname, exists
+from std.os.path import basename, dirname, exists, isdir
 from std.time import perf_counter_ns
 
+from mtest.cache import BuildProduct, BuildRegistry
 from mtest.config import RunnerConfig, lossy_utf8
-from mtest.discover import discover
+from mtest.discover import discover, normalize_operand, normalize_root
+from mtest.discover.result import DiscoveryResult
 from mtest.exec import (
     ProcessResult,
     ProcessSpec,
@@ -40,9 +42,28 @@ from mtest.model import (
     TestResult,
     exit_code_for,
 )
+from mtest.protocol import (
+    ParsedReport,
+    ParsedRow,
+    ReportVerdict,
+    collection_disqualifier,
+    collection_names,
+    parse_report,
+)
 from mtest.report import CompositeReporter, Reporter
+from mtest.select import (
+    FileIntent,
+    NamedTarget,
+    OperandParse,
+    parse_operands,
+    select_from,
+    selection_active,
+)
 from mtest.session.classify import classify, resolve_report
 from mtest.session.verdict import build_verdict
+
+comptime _STALE_NAME_PHRASE = "test not found in suite:"
+"""The stdlib phrase when `--only` names a test the suite no longer offers."""
 
 
 def _mangle(rel: String) -> String:
@@ -383,6 +404,598 @@ def _run_one(
     )
 
 
+# --- The SELECTION pipeline: probe -> select -> run -> reconcile. -------------
+
+
+def _str_in(items: List[String], needle: String) -> Bool:
+    """Whether `needle` equals any element of `items`. Pure."""
+    for x in items:
+        if x == needle:
+            return True
+    return False
+
+
+def _same_set(a: List[String], b: List[String]) -> Bool:
+    """Whether `a` and `b` hold the same set of names (order-independent)."""
+    if len(a) != len(b):
+        return False
+    for x in a:
+        if not _str_in(b, x):
+            return False
+    return True
+
+
+def _intent_for(
+    rel: String, plan: OperandParse, nroot: String
+) raises -> FileIntent:
+    """The selection intent for a discovered file (Stage 1 -> per-file intent).
+
+    A file is WHOLE when no node id was given at all, or when a plain operand
+    (file or directory) covered it — the union rule: a plain operand always
+    beats a node id. Otherwise its intent is the union of the test names every
+    node-id operand attached to it.
+    """
+    if not plan.has_node_id:
+        return FileIntent.whole_file()
+    for p in plan.plain_operands:
+        var rp = normalize_operand(p, nroot)
+        if rp == "":
+            return FileIntent.whole_file()  # the root itself covers everything
+        var abs_p = nroot + "/" + rp
+        if isdir(abs_p):
+            if rel == rp or rel.startswith(rp + "/"):
+                return FileIntent.whole_file()
+        elif rel == rp:
+            return FileIntent.whole_file()
+    var names = List[String]()
+    for t in plan.named_targets:
+        var trp = normalize_operand(t.file_part, nroot)
+        if trp == rel and not _str_in(names, t.name):
+            names.append(String(t.name))
+    if len(names) > 0:
+        return FileIntent.named(names^)
+    return FileIntent.whole_file()
+
+
+@fieldwise_init
+struct _BuildOutcome(Copyable, Movable):
+    """The result of building one file into the registry for selection."""
+
+    var ok: Bool
+    """Whether the binary is ready (`binary`/`canonical` valid)."""
+    var binary: String
+    """The built binary path when `ok`."""
+    var canonical: String
+    """The canonical source path when `ok`."""
+    var build_argv: List[String]
+    """The build command, for a terminal file_finished's reproduce line."""
+    var bdur: Float64
+    """The build wall time in seconds."""
+    var terminal: Bool
+    """Whether a terminal `FileResult` was produced (compile error/internal)."""
+    var result: FileResult
+    """The terminal FileResult to replay when `terminal`."""
+
+
+def _blank_file_result() -> FileResult:
+    """A placeholder FileResult for the non-terminal `_BuildOutcome` path."""
+    return FileResult.interrupt()
+
+
+def _build_for_selection(
+    config: RunnerConfig,
+    root: String,
+    rel: String,
+    include_paths: List[String],
+    mut reg: BuildRegistry,
+) raises -> _BuildOutcome:
+    """Build `rel` into the registry (once), or produce a terminal FileResult.
+
+    A compile error records a compile-error entry and returns a terminal
+    COMPILE_ERROR FileResult; a spawn/machinery failure returns a terminal
+    internal-error FileResult; an interrupt returns a terminal interrupt. On
+    success the registry holds the fresh build and the binary/canonical ride
+    back for the probe and run to share.
+    """
+    _ensure_dir(root + "/build/bin")
+    var mangled = _mangle(rel)
+    var out_bin = String("build/bin/") + mangled
+    var build_argv = List[String]()
+    build_argv.append(config.mojo_path)
+    build_argv.append("build")
+    build_argv.append(rel)
+    build_argv.append("-o")
+    build_argv.append(out_bin)
+    for p in include_paths:
+        build_argv.append("-I")
+        build_argv.append(p)
+    for a in config.build_args:
+        build_argv.append(a)
+
+    var bres: ProcessResult
+    try:
+        bres = run_supervised(
+            ProcessSpec.command_in(build_argv.copy(), root, 0)
+        )
+    except:
+        return _BuildOutcome(
+            False,
+            "",
+            "",
+            List[String](),
+            0.0,
+            True,
+            FileResult.internal(
+                Event.internal_error("build", config.mojo_path, 0)
+            ),
+        )
+    var bdur = Float64(bres.duration_ms) / 1000.0
+    if interrupt_requested():
+        return _BuildOutcome(
+            False, "", "", List[String](), 0.0, True, FileResult.interrupt()
+        )
+    var bterm = bres.termination
+    if bterm.is_spawn_failed():
+        return _BuildOutcome(
+            False,
+            "",
+            "",
+            List[String](),
+            0.0,
+            True,
+            FileResult.internal(
+                Event.internal_error("build", config.mojo_path, bterm.value)
+            ),
+        )
+    var bsignal = build_verdict(bterm)
+    if bsignal == Outcome.COMPILE_ERROR:
+        reg.record_compile_error(rel, lossy_utf8(bres.stderr_bytes))
+        var ev = Event.file_finished(
+            rel,
+            Outcome.COMPILE_ERROR,
+            0.0,
+            build_argv.copy(),
+            bdur,
+            List[UInt8](),
+            bres.stderr_bytes.copy(),
+        )
+        return _BuildOutcome(
+            False,
+            "",
+            "",
+            build_argv^,
+            bdur,
+            True,
+            FileResult.ran_with(ev^, Outcome.COMPILE_ERROR),
+        )
+    var canonical = canonicalize(root + "/" + rel)
+    reg.record_build(BuildProduct.built(rel, out_bin, canonical))
+    return _BuildOutcome(
+        True, out_bin, canonical, build_argv^, bdur, False, _blank_file_result()
+    )
+
+
+@fieldwise_init
+struct _ProbeOutcome(Copyable, Movable):
+    """The result of probing one built file with `--skip-all`."""
+
+    var qualified: Bool
+    """Whether the probe read as a collection listing (universe is valid)."""
+    var universe: List[String]
+    """The collected test names, in discovery order (when qualified)."""
+    var terminal: Bool
+    """Whether a terminal FileResult was produced (crash/timeout/malformed/drift).
+    """
+    var result: FileResult
+    """The terminal FileResult to replay when `terminal`."""
+
+
+def _probe_terminal(
+    rel: String,
+    outcome: Outcome,
+    disposition: ParseDisposition,
+    warning_kind: String,
+    warning_detail: String,
+    build_argv: List[String],
+    bdur: Float64,
+    var stdout_bytes: List[UInt8],
+    var stderr_bytes: List[UInt8],
+    is_drift: Bool,
+    signal_number: Int = 0,
+    timeout_seconds: Int = 0,
+) -> FileResult:
+    """A file-level terminal FileResult for a probe that did not qualify."""
+    var pre = List[Event]()
+    if warning_kind != "":
+        pre.append(Event.warning(warning_kind, warning_detail))
+    var ev = Event.file_finished(
+        rel,
+        outcome,
+        0.0,
+        build_argv.copy(),
+        bdur,
+        stdout_bytes^,
+        stderr_bytes^,
+        signal_number=signal_number,
+        timeout_seconds=timeout_seconds,
+        parse_disposition=disposition,
+    )
+    var exits = List[Outcome]()
+    if not is_drift:
+        exits.append(outcome)
+    return FileResult.classified(
+        pre^, ev^, outcome, exits^, TestCounts.zeros(), is_drift
+    )
+
+
+def _probe_file(
+    config: RunnerConfig,
+    root: String,
+    rel: String,
+    binary: String,
+    canonical: String,
+    build_argv: List[String],
+    bdur: Float64,
+    mut reg: BuildRegistry,
+) raises -> _ProbeOutcome:
+    """Run the `--skip-all` probe and route its result.
+
+    Qualifying -> the universe is the collection listing (recorded in the
+    registry). A probe that CRASHes/TIMEs-out is that file's failing outcome; an
+    OFF_GRAMMAR probe is DRIFT (exit 3); an ABSENT/AMBIGUOUS/VALID-but-
+    disqualified probe is MALFORMED_SUITE (the module ran bodies or ignored
+    `--skip-all`).
+    """
+    var argv = List[String]()
+    argv.append(binary)
+    argv.append("--skip-all")
+    var pres = run_supervised(
+        ProcessSpec.command_in(argv^, root, config.timeout_secs * 1000)
+    )
+    var pterm = pres.termination
+    if pterm.is_signaled():
+        return _ProbeOutcome(
+            False,
+            List[String](),
+            True,
+            _probe_terminal(
+                rel,
+                Outcome.CRASH,
+                ParseDisposition.NO_REPORT,
+                "",
+                "",
+                build_argv,
+                bdur,
+                pres.stdout_bytes.copy(),
+                pres.stderr_bytes.copy(),
+                False,
+                signal_number=pterm.value,
+            ),
+        )
+    if pterm.is_timed_out():
+        return _ProbeOutcome(
+            False,
+            List[String](),
+            True,
+            _probe_terminal(
+                rel,
+                Outcome.TIMEOUT,
+                ParseDisposition.NO_REPORT,
+                "",
+                "",
+                build_argv,
+                bdur,
+                pres.stdout_bytes.copy(),
+                pres.stderr_bytes.copy(),
+                False,
+                timeout_seconds=config.timeout_secs,
+            ),
+        )
+
+    var report = parse_report(lossy_utf8(pres.stdout_bytes), canonical)
+    var disq = collection_disqualifier(report)
+    if disq == "":
+        var universe = collection_names(report)
+        var listing = List[String]()
+        for nm in universe:
+            listing.append(rel + "::" + nm)
+        reg.record_probe(rel, True, listing^)
+        return _ProbeOutcome(True, universe^, False, _blank_file_result())
+
+    if report.verdict == ReportVerdict.OFF_GRAMMAR:
+        return _ProbeOutcome(
+            False,
+            List[String](),
+            True,
+            _probe_terminal(
+                rel,
+                Outcome.NOT_RUN,
+                ParseDisposition.DRIFT,
+                "drift",
+                (
+                    "the --skip-all probe drifted off the pinned grammar ("
+                    + report.reason
+                    + "); check the toolchain pin and goldens/transcripts/"
+                ),
+                build_argv,
+                bdur,
+                pres.stdout_bytes.copy(),
+                pres.stderr_bytes.copy(),
+                True,
+            ),
+        )
+    return _ProbeOutcome(
+        False,
+        List[String](),
+        True,
+        _probe_terminal(
+            rel,
+            Outcome.MALFORMED_SUITE,
+            ParseDisposition.NO_REPORT,
+            "malformed-suite",
+            (
+                "the --skip-all probe did not read as a collection listing ("
+                + disq
+                + "); a conforming module lists its tests as all-SKIP under"
+                " --skip-all"
+            ),
+            build_argv,
+            bdur,
+            pres.stdout_bytes.copy(),
+            pres.stderr_bytes.copy(),
+            False,
+        ),
+    )
+
+
+@fieldwise_init
+struct _Collected(Copyable, Movable):
+    """One file after phase-1 build+probe+select: terminal, or runnable."""
+
+    var rel: String
+    var terminal: Bool
+    var terminal_result: FileResult
+    var universe: List[String]
+    var selected: List[String]
+    var deselected: List[String]
+    var intent: FileIntent
+    var binary: String
+    var canonical: String
+    var build_argv: List[String]
+    var bdur: Float64
+
+
+def _selected_view(
+    var rows: List[ParsedRow], selected: List[String]
+) -> ParsedReport:
+    """A synthetic VALID report of just the selected rows, tallies recomputed.
+
+    The child under `--only` reports every test (non-selected ones as SKIP); the
+    classifier must see only the SELECTED rows so the file verdict and exit-code
+    contribution reflect the selection, not the suppressed deselections.
+    """
+    var kept = List[ParsedRow]()
+    var p = 0
+    var f = 0
+    var s = 0
+    for r in rows:
+        if _str_in(selected, r.name):
+            if r.outcome == Outcome.PASS:
+                p += 1
+            elif r.outcome == Outcome.FAIL:
+                f += 1
+            elif r.outcome == Outcome.SKIP:
+                s += 1
+            kept.append(r.copy())
+    return ParsedReport.valid(kept^, len(kept), p, f, s, f > 0)
+
+
+def _reconcile_and_classify(
+    config: RunnerConfig,
+    rel: String,
+    term: ProcessResult,
+    universe: List[String],
+    selected: List[String],
+    deselected: List[String],
+    build_argv: List[String],
+    bdur: Float64,
+    canonical: String,
+) -> FileResult:
+    """Reconcile a completed selection run against the universe and classify.
+
+    A crash/timeout is that file's abnormal outcome. Otherwise the report must
+    be VALID and its row set must equal the universe; a non-selected row must be
+    SKIP (suppressed, counted DESELECTED) — a non-selected row that RAN, or any
+    membership instability, is MALFORMED_SUITE (exit-1 class, never drift). The
+    SELECTED rows drive the verdict via the pure classifier.
+    """
+    var rterm = term.termination
+    var rdur = Float64(term.duration_ms) / 1000.0
+
+    if rterm.is_signaled():
+        return _run_terminal_file(
+            rel,
+            Outcome.CRASH,
+            ParseDisposition.NO_REPORT,
+            "",
+            "",
+            build_argv,
+            bdur,
+            rdur,
+            term,
+            len(deselected),
+            signal_number=rterm.value,
+        )
+    if rterm.is_timed_out():
+        return _run_terminal_file(
+            rel,
+            Outcome.TIMEOUT,
+            ParseDisposition.NO_REPORT,
+            "",
+            "",
+            build_argv,
+            bdur,
+            rdur,
+            term,
+            len(deselected),
+            timeout_seconds=config.timeout_secs,
+        )
+
+    var trusted = resolve_report(
+        lossy_utf8(term.stdout_bytes), canonical, term.stdout_truncated
+    )
+    var report = trusted.report.copy()
+    if trusted.is_overflow or report.verdict != ReportVerdict.VALID:
+        return _run_terminal_file(
+            rel,
+            Outcome.MALFORMED_SUITE,
+            ParseDisposition.NO_REPORT,
+            "malformed-suite",
+            (
+                "the selection run spoke no honest report to reconcile against"
+                " the collected tests"
+            ),
+            build_argv,
+            bdur,
+            rdur,
+            term,
+            len(deselected),
+        )
+
+    # The row set must equal the universe: every collected test must appear.
+    var row_names = List[String]()
+    for r in report.rows:
+        row_names.append(r.name)
+    if not _same_set(row_names, universe):
+        return _run_terminal_file(
+            rel,
+            Outcome.MALFORMED_SUITE,
+            ParseDisposition.NO_REPORT,
+            "malformed-suite",
+            (
+                "the selection run's tests did not match the collected set (a"
+                " test appeared or vanished between collection and run)"
+            ),
+            build_argv,
+            bdur,
+            rdur,
+            term,
+            len(deselected),
+        )
+    # A non-selected row MUST be SKIP (the selection-induced skip we suppress).
+    for r in report.rows:
+        if not _str_in(selected, r.name) and r.outcome != Outcome.SKIP:
+            return _run_terminal_file(
+                rel,
+                Outcome.MALFORMED_SUITE,
+                ParseDisposition.NO_REPORT,
+                "malformed-suite",
+                (
+                    "a deselected test ran under --only instead of reporting a"
+                    " selection-induced SKIP: "
+                    + r.name
+                ),
+                build_argv,
+                bdur,
+                rdur,
+                term,
+                len(deselected),
+            )
+
+    var sel_view = _selected_view(report.rows.copy(), selected)
+    var cls = classify(rterm, sel_view^, False)
+
+    var pre = List[Event]()
+    for r in report.rows:
+        if _str_in(selected, r.name):
+            pre.append(
+                Event.test_reported(
+                    TestResult(
+                        NodeId(rel, r.name), r.outcome, r.detail, r.timing
+                    )
+                )
+            )
+    if cls.warning_kind != "":
+        pre.append(Event.warning(cls.warning_kind, cls.warning_detail))
+
+    var signal_number = 0
+    var exit_status = 0
+    if cls.file_outcome == Outcome.FAIL:
+        exit_status = rterm.value
+
+    var ev = Event.file_finished(
+        rel,
+        cls.file_outcome,
+        rdur,
+        build_argv.copy(),
+        bdur,
+        term.stdout_bytes.copy(),
+        term.stderr_bytes.copy(),
+        signal_number=signal_number,
+        exit_status=exit_status,
+        parse_disposition=cls.disposition,
+        passed_tests=cls.passed_tests,
+        failed_tests=cls.failed_tests,
+        skipped_tests=cls.skipped_tests,
+        deselected_tests=len(deselected),
+    )
+    return FileResult.classified(
+        pre^,
+        ev^,
+        cls.file_outcome,
+        cls.exit_outcomes.copy(),
+        TestCounts(
+            cls.passed_tests,
+            cls.failed_tests,
+            cls.skipped_tests,
+            len(deselected),
+        ),
+        cls.is_drift,
+    )
+
+
+def _run_terminal_file(
+    rel: String,
+    outcome: Outcome,
+    disposition: ParseDisposition,
+    warning_kind: String,
+    warning_detail: String,
+    build_argv: List[String],
+    bdur: Float64,
+    rdur: Float64,
+    term: ProcessResult,
+    deselected_count: Int,
+    signal_number: Int = 0,
+    timeout_seconds: Int = 0,
+) -> FileResult:
+    """A file-level terminal FileResult for a selection run (crash/malformed).
+    """
+    var pre = List[Event]()
+    if warning_kind != "":
+        pre.append(Event.warning(warning_kind, warning_detail))
+    var ev = Event.file_finished(
+        rel,
+        outcome,
+        rdur,
+        build_argv.copy(),
+        bdur,
+        term.stdout_bytes.copy(),
+        term.stderr_bytes.copy(),
+        signal_number=signal_number,
+        timeout_seconds=timeout_seconds,
+        parse_disposition=disposition,
+        deselected_tests=deselected_count,
+    )
+    return FileResult.classified(
+        pre^,
+        ev^,
+        outcome,
+        [outcome],
+        TestCounts(0, 0, 0, deselected_count),
+        False,
+    )
+
+
 def _run_precompile(
     config: RunnerConfig,
     root: String,
@@ -442,6 +1055,413 @@ def _run_precompile(
         return PrecompileResult(d^, "", True, False, False, 0, "")
     return PrecompileResult(
         "", lossy_utf8(res.stderr_bytes), False, False, False, 0, ""
+    )
+
+
+@fieldwise_init
+struct SelectionSummary(Copyable, Movable):
+    """What the selection sub-session folds back into `run_session`."""
+
+    var run_outcomes: List[Outcome]
+    """The exit-code multiset contribution of the run files."""
+    var test_totals: TestCounts
+    """The per-test totals (passed/failed/skipped/deselected) run-wide."""
+    var ran_files: Int
+    """How many run files produced a tallied verdict."""
+    var interrupted: Bool
+    """Whether an interrupt aborted the sub-session (exit 2)."""
+    var internal_error: Bool
+    """Whether a spawn/machinery failure occurred (exit 3)."""
+    var drift: Bool
+    """Whether a probe drifted off the pinned grammar (exit 3)."""
+
+
+def _prepend_events(var extra: List[Event], var fr: FileResult) -> FileResult:
+    """Prepend `extra` events (a loud recovery warning) to `fr.pre_events`."""
+    if len(extra) == 0:
+        return fr^
+    var merged = List[Event]()
+    for e in extra:
+        merged.append(e.copy())
+    for e in fr.pre_events:
+        merged.append(e.copy())
+    fr.pre_events = merged^
+    return fr^
+
+
+def _run_selected_with_recovery(
+    config: RunnerConfig,
+    root: String,
+    c: _Collected,
+    mut reg: BuildRegistry,
+    include_paths: List[String],
+) raises -> FileResult:
+    """Run one file's selected subset, with the stale-name recover-once flow.
+
+    Runs plain when the selection is the whole universe, else with `--only`. If
+    the run instead reports `… test not found in suite:` (a suite that refuses a
+    name it just listed), emit a LOUD warning, REBUILD (atomic registry
+    replace), RE-PROBE, RE-VALIDATE (a name now gone is an exit-4 unknown test),
+    and RE-RUN once. A SECOND stale-name error is MALFORMED_SUITE (exit-1 class),
+    never exit 3.
+    """
+    var binary = c.binary
+    var canonical = c.canonical
+    var build_argv = c.build_argv.copy()
+    var bdur = c.bdur
+    var universe = c.universe.copy()
+    var selected = c.selected.copy()
+    var deselected = c.deselected.copy()
+    var recovery_warnings = List[Event]()
+    var attempts = 0
+
+    while True:
+        var run_argv = List[String]()
+        run_argv.append(binary)
+        if not _same_set(selected, universe):
+            run_argv.append("--only")
+            for nm in selected:
+                run_argv.append(nm)
+        var rres: ProcessResult
+        try:
+            rres = run_supervised(
+                ProcessSpec.command_in(
+                    run_argv^, root, config.timeout_secs * 1000
+                )
+            )
+        except:
+            return FileResult.internal(Event.internal_error("run", binary, 0))
+        var rterm = rres.termination
+        if rterm.is_spawn_failed():
+            return FileResult.internal(
+                Event.internal_error("run", binary, rterm.value)
+            )
+        if rterm.is_timed_out() and interrupt_requested():
+            return FileResult.interrupt()
+
+        var stdout_text = lossy_utf8(rres.stdout_bytes)
+        var is_stale = (
+            rterm.is_exited()
+            and rterm.value == 1
+            and (_STALE_NAME_PHRASE in stdout_text)
+        )
+        if not is_stale:
+            var fr = _reconcile_and_classify(
+                config,
+                c.rel,
+                rres,
+                universe,
+                selected,
+                deselected,
+                build_argv,
+                bdur,
+                canonical,
+            )
+            return _prepend_events(recovery_warnings^, fr^)
+
+        if attempts >= 1:
+            # A second stale-name error after a fresh rebuild+recollect: the
+            # suite is a chameleon that keeps refusing names it just listed.
+            var rdur = Float64(rres.duration_ms) / 1000.0
+            var fr = _run_terminal_file(
+                c.rel,
+                Outcome.MALFORMED_SUITE,
+                ParseDisposition.NO_REPORT,
+                "malformed-suite",
+                (
+                    "the suite refused a selected test it had just listed, then"
+                    " refused again after a fresh rebuild + recollect (the"
+                    " '"
+                    + _STALE_NAME_PHRASE
+                    + "' chameleon); the module's --skip-all listing disagrees"
+                    " with the names it accepts under --only"
+                ),
+                build_argv,
+                bdur,
+                rdur,
+                rres,
+                len(deselected),
+            )
+            return _prepend_events(recovery_warnings^, fr^)
+
+        attempts += 1
+        recovery_warnings.append(
+            Event.warning(
+                "stale-name",
+                (
+                    "the suite for '"
+                    + c.rel
+                    + "' refused a test it listed under --skip-all ('"
+                    + _STALE_NAME_PHRASE
+                    + "'); rebuilding and recollecting once before retrying"
+                ),
+            )
+        )
+        # REBUILD (atomic registry replace), then RE-PROBE and RE-VALIDATE.
+        var bo: _BuildOutcome
+        try:
+            bo = _build_for_selection(config, root, c.rel, include_paths, reg)
+        except:
+            return FileResult.internal(
+                Event.internal_error("build", config.mojo_path, 0)
+            )
+        if bo.terminal:
+            return _prepend_events(recovery_warnings^, bo.result.copy())
+        binary = bo.binary
+        canonical = bo.canonical
+        build_argv = bo.build_argv.copy()
+        bdur = bo.bdur
+        var po: _ProbeOutcome
+        try:
+            po = _probe_file(
+                config, root, c.rel, binary, canonical, build_argv, bdur, reg
+            )
+        except:
+            return FileResult.internal(Event.internal_error("probe", binary, 0))
+        if po.terminal:
+            return _prepend_events(recovery_warnings^, po.result.copy())
+        universe = po.universe.copy()
+        var sr = select_from(universe, c.rel, c.intent, config.keyword)
+        selected = sr.selected.copy()
+        deselected = sr.deselected.copy()
+
+
+def _run_selection[
+    *Rs: Reporter
+](
+    config: RunnerConfig,
+    root: String,
+    disc: DiscoveryResult,
+    include_paths: List[String],
+    plan: OperandParse,
+    mut reporter: CompositeReporter[*Rs],
+    mut summary: Summary,
+) raises -> SelectionSummary:
+    """The SELECTION sub-session: probe every run file, then run the selection.
+
+    Phase 1 builds+probes+selects every run file (sharing each build through the
+    registry), so the run-wide selected/deselected totals are known and emitted
+    as `collection_known` BEFORE any test body runs. Phase 2 then runs each
+    file's selected subset, suppressing the deselected rows. An unknown test name
+    raises out to exit 4; a machinery failure resolves to exit 3.
+    """
+    var nroot = normalize_root(root)
+    var reg = BuildRegistry()
+    var collected = List[_Collected]()
+    var interrupted = False
+    var internal_error = False
+
+    # --exclude beats a node id: a node-id file that was excluded is dropped
+    # loudly rather than silently ignored.
+    for t in plan.named_targets:
+        var trp = normalize_operand(t.file_part, nroot)
+        for ex in disc.excluded:
+            if ex.path == trp:
+                reporter.handle(
+                    Event.warning(
+                        "excluded-node-id",
+                        (
+                            "node id '"
+                            + t.file_part
+                            + "::"
+                            + t.name
+                            + "' names a file excluded by '"
+                            + ex.pattern
+                            + "'; dropping it"
+                        ),
+                    )
+                )
+                break
+
+    # PHASE 1: build + probe + select every run file.
+    for ri in range(len(disc.run_files)):
+        if interrupt_requested():
+            interrupted = True
+            break
+        var rel = disc.run_files[ri]
+        var bo: _BuildOutcome
+        try:
+            bo = _build_for_selection(config, root, rel, include_paths, reg)
+        except:
+            reporter.handle(Event.internal_error("build", config.mojo_path, 0))
+            internal_error = True
+            break
+        if bo.terminal:
+            if bo.result.interrupted:
+                interrupted = True
+                break
+            if bo.result.internal_error:
+                reporter.handle(bo.result.event)
+                internal_error = True
+                break
+            # A compile-error terminal: replay it in phase 2 with the others.
+            collected.append(
+                _Collected(
+                    rel,
+                    True,
+                    bo.result.copy(),
+                    List[String](),
+                    List[String](),
+                    List[String](),
+                    FileIntent.whole_file(),
+                    "",
+                    "",
+                    bo.build_argv.copy(),
+                    bo.bdur,
+                )
+            )
+            continue
+
+        var po: _ProbeOutcome
+        try:
+            po = _probe_file(
+                config,
+                root,
+                rel,
+                bo.binary,
+                bo.canonical,
+                bo.build_argv,
+                bo.bdur,
+                reg,
+            )
+        except:
+            reporter.handle(Event.internal_error("probe", bo.binary, 0))
+            internal_error = True
+            break
+        if po.terminal:
+            collected.append(
+                _Collected(
+                    rel,
+                    True,
+                    po.result.copy(),
+                    List[String](),
+                    List[String](),
+                    List[String](),
+                    FileIntent.whole_file(),
+                    bo.binary,
+                    bo.canonical,
+                    bo.build_argv.copy(),
+                    bo.bdur,
+                )
+            )
+            continue
+
+        # Qualified: select from the universe (unknown test -> exit 4, propagated).
+        var intent = _intent_for(rel, plan, nroot)
+        var sr = select_from(po.universe, rel, intent, config.keyword)
+        collected.append(
+            _Collected(
+                rel,
+                False,
+                _blank_file_result(),
+                po.universe.copy(),
+                sr.selected.copy(),
+                sr.deselected.copy(),
+                intent^,
+                bo.binary,
+                bo.canonical,
+                bo.build_argv.copy(),
+                bo.bdur,
+            )
+        )
+
+    if interrupted or internal_error:
+        return SelectionSummary(
+            List[Outcome](),
+            TestCounts.zeros(),
+            0,
+            interrupted,
+            internal_error,
+            False,
+        )
+
+    # Collection is known: emit the run-wide totals before any body runs.
+    var sel_total = 0
+    var desel_total = 0
+    for c in collected:
+        if not c.terminal:
+            sel_total += len(c.selected)
+            desel_total += len(c.deselected)
+    reporter.handle(Event.collection_known(sel_total, desel_total))
+
+    # PHASE 2: run each file's selected subset (or replay its terminal result).
+    var run_outcomes = List[Outcome]()
+    var test_totals = TestCounts.zeros()
+    var ran_files = 0
+    var drift = False
+
+    for ci in range(len(collected)):
+        if interrupt_requested():
+            interrupted = True
+            break
+        ref c = collected[ci]
+        reporter.handle(Event.file_started(c.rel))
+
+        if c.terminal:
+            var fr = c.terminal_result.copy()
+            for pe in fr.pre_events:
+                reporter.handle(pe)
+            reporter.handle(fr.event)
+            test_totals.deselected += fr.test_counts.deselected
+            if fr.is_drift:
+                drift = True
+                continue
+            summary.counts[fr.outcome.code] += 1
+            run_outcomes.extend(fr.exit_outcomes.copy())
+            ran_files += 1
+            continue
+
+        if len(c.selected) == 0:
+            # Every test deselected: the file is NOT executed. Account the
+            # deselections; the file itself lands in the NOT-RUN accounting.
+            reporter.handle(
+                Event.file_finished(
+                    c.rel,
+                    Outcome.NOT_RUN,
+                    0.0,
+                    c.build_argv.copy(),
+                    c.bdur,
+                    List[UInt8](),
+                    List[UInt8](),
+                    deselected_tests=len(c.deselected),
+                )
+            )
+            test_totals.deselected += len(c.deselected)
+            continue
+
+        var fr = _run_selected_with_recovery(
+            config, root, c, reg, include_paths
+        )
+        if fr.interrupted:
+            interrupted = True
+            break
+        if fr.internal_error:
+            reporter.handle(fr.event)
+            internal_error = True
+            break
+        for pe in fr.pre_events:
+            reporter.handle(pe)
+        reporter.handle(fr.event)
+        test_totals.passed += fr.test_counts.passed
+        test_totals.failed += fr.test_counts.failed
+        test_totals.skipped += fr.test_counts.skipped
+        test_totals.deselected += fr.test_counts.deselected
+        if fr.is_drift:
+            drift = True
+            continue
+        summary.counts[fr.outcome.code] += 1
+        run_outcomes.extend(fr.exit_outcomes.copy())
+        ran_files += 1
+        if config.exitfirst and fr.outcome.is_failing():
+            break
+
+    return SelectionSummary(
+        run_outcomes^,
+        test_totals,
+        ran_files,
+        interrupted,
+        internal_error,
+        drift,
     )
 
 
@@ -592,8 +1612,31 @@ def run_session[
         interrupted or internal_error or precompile_failed or gate_abort
     )
 
-    # Run files, sorted; -x stops scheduling after the first failing file.
-    if proceed_runs:
+    # SELECTION is active when any operand is a node id or `-k` is present. The
+    # operand parse (a malformed node id -> exit 4) is computed on this pre-run
+    # path so it propagates like discovery's own usage errors.
+    var sel_active = selection_active(config.paths, config.keyword)
+
+    # Run files. Under selection, the run set is probed then run through the
+    # selection sub-session; otherwise the plain build-then-run loop applies.
+    if proceed_runs and sel_active:
+        var plan = parse_operands(config.paths)
+        var sel = _run_selection(
+            config, root, disc, includes, plan, reporter, summary
+        )
+        run_outcomes.extend(sel.run_outcomes.copy())
+        test_totals.passed += sel.test_totals.passed
+        test_totals.failed += sel.test_totals.failed
+        test_totals.skipped += sel.test_totals.skipped
+        test_totals.deselected += sel.test_totals.deselected
+        ran_files += sel.ran_files
+        if sel.interrupted:
+            interrupted = True
+        if sel.internal_error:
+            internal_error = True
+        if sel.drift:
+            drift = True
+    elif proceed_runs:
         for ri in range(len(disc.run_files)):
             if interrupt_requested():
                 interrupted = True

@@ -54,8 +54,9 @@ SHORT_TIMEOUT = 30.0
 
 SUMMARY_RE = re.compile(
     r"=====\s+(\d+) passed,\s+(\d+) failed,\s+(\d+) crashed,\s+"
-    r"(\d+) timed out,\s+(\d+) compile error\s+"
-    r"\((\d+) excluded,\s+(\d+) not run\)\s+in\s+([\d.]+)s\s+====="
+    r"(\d+) timed out,\s+(\d+) compile error[^(]*"
+    r"\((\d+) excluded,\s+(\d+) not run(?:,\s+(\d+) deselected)?\)"
+    r"\s+in\s+([\d.]+)s\s+====="
 )
 HEADER_RE = re.compile(r"root:\s+.*?selected:\s+(\d+) files\s+excluded:\s+(\d+)")
 
@@ -92,6 +93,7 @@ class Summary:
     excluded: int
     not_run: int
     seconds: float
+    deselected: int = 0
 
     @property
     def run_outcomes(self) -> int:
@@ -139,7 +141,8 @@ class Run:
             compile_error=int(g[4]),
             excluded=int(g[5]),
             not_run=int(g[6]),
-            seconds=float(g[7]),
+            deselected=int(g[7]) if g[7] is not None else 0,
+            seconds=float(g[8]),
         )
 
     def header(self) -> tuple[int, int]:
@@ -771,7 +774,6 @@ def s_usage_refusals(manifest: dict) -> str:
     cases = [
         (["collect", "testdata/suite/test_passing.mojo"], "collect"),
         (["testdata/suite/test_passing.mojo", "--maxfail", "1"], "maxfail"),
-        (["testdata/suite/test_passing.mojo", "-k", "foo"], "-k"),
     ]
     for args, needle in cases:
         run = run_mtest(args, timeout=SHORT_TIMEOUT)
@@ -781,7 +783,7 @@ def s_usage_refusals(manifest: dict) -> str:
             f"usage error for {args} did not name '{needle}' on stderr:\n{run.stderr}",
         )
         expect(run.stderr.strip() != "", f"usage error for {args} wrote nothing to stderr")
-    return "collect / --maxfail / -k each refused with exit 4 on stderr"
+    return "collect / --maxfail each refused with exit 4 on stderr (-k now served)"
 
 
 def s_passthrough_and_forbidden(manifest: dict) -> str:
@@ -810,6 +812,129 @@ def s_out_of_root(manifest: dict) -> str:
         f"out-of-root operand did not report escaping the root:\n{run.stderr}",
     )
     return "out-of-root operand -> exit 4"
+
+
+MATRIX_ALPHA = "testdata/matrix/test_alpha.mojo"
+MATRIX_BETA = "testdata/matrix/test_beta.mojo"
+CHAMELEON = "testdata/chameleon/test_chameleon.mojo"
+
+
+def s_selection_keyword(manifest: dict) -> str:
+    """`-k` narrows a file to a subset run under --only; the rest are DESELECTED.
+
+    `-k two` selects only test_alpha_two of the three; the file runs under
+    --only, PASSes, and the two unselected tests are counted DESELECTED (a
+    summary count, never a listed verdict row)."""
+    run = run_mtest([MATRIX_ALPHA, "-k", "two"])
+    expect_exit(run, 0)
+    summ = expect_accounting(run)
+    expect(
+        run.verdict_line("PASS", MATRIX_ALPHA) is not None,
+        "the -k subset selection did not PASS the file",
+    )
+    expect(
+        summ.deselected == 2,
+        f"expected 2 deselected under -k two, got {summ.deselected}",
+    )
+    return "-k selects a subset (--only), rest DESELECTED; exit 0"
+
+
+def s_selection_node_id(manifest: dict) -> str:
+    """A node-id operand selects exactly one test; the rest are DESELECTED."""
+    run = run_mtest([f"{MATRIX_ALPHA}::test_alpha_one"])
+    expect_exit(run, 0)
+    summ = expect_accounting(run)
+    expect(
+        run.verdict_line("PASS", MATRIX_ALPHA) is not None,
+        "the node-id selection did not PASS the file",
+    )
+    expect(
+        summ.deselected == 2,
+        f"expected 2 deselected for a single node id, got {summ.deselected}",
+    )
+    return "node-id operand selects one test; 2 DESELECTED; exit 0"
+
+
+def s_selection_union(manifest: dict) -> str:
+    """A dir operand UNIONs with a node id under it: the whole tree still runs.
+
+    `mtest testdata/matrix testdata/matrix/test_alpha.mojo::test_alpha_one`
+    covers test_alpha.mojo with BOTH a plain dir operand and a node id — the
+    plain operand wins (whole), so every test in both files runs and nothing is
+    deselected."""
+    run = run_mtest(["testdata/matrix", f"{MATRIX_ALPHA}::test_alpha_one"])
+    expect_exit(run, 0)
+    summ = expect_accounting(run)
+    expect(
+        run.verdict_line("PASS", MATRIX_ALPHA) is not None,
+        "union run did not PASS test_alpha.mojo",
+    )
+    expect(
+        run.verdict_line("PASS", MATRIX_BETA) is not None,
+        "union run did not PASS test_beta.mojo (the dir must keep it whole)",
+    )
+    expect(
+        summ.deselected == 0,
+        f"union kept everything, but {summ.deselected} were deselected",
+    )
+    return "dir + node-id union runs the whole tree; 0 DESELECTED; exit 0"
+
+
+def s_selection_malformed_node_id(manifest: dict) -> str:
+    """More than one `::` is a MALFORMED node id -> exit 4, never 'unknown test'.
+    """
+    run = run_mtest(
+        [f"{MATRIX_ALPHA}::test_alpha_one::extra"], timeout=SHORT_TIMEOUT
+    )
+    expect_exit(run, 4)
+    expect(
+        "malformed node id" in run.stderr,
+        f"malformed node id did not say so on stderr:\n{run.stderr}",
+    )
+    expect(
+        "unknown test" not in run.stderr,
+        f"a malformed node id must NOT be reported as 'unknown test':\n{run.stderr}",
+    )
+    return "malformed node id (>1 '::') -> exit 4, names it, never 'unknown test'"
+
+
+def s_selection_unknown_test(manifest: dict) -> str:
+    """A node id naming a test the file does not collect -> exit 4 'unknown test'.
+    """
+    run = run_mtest([f"{MATRIX_ALPHA}::test_does_not_exist"], timeout=SHORT_TIMEOUT)
+    expect_exit(run, 4)
+    expect(
+        "unknown test" in run.stderr,
+        f"an unknown test name did not report 'unknown test':\n{run.stderr}",
+    )
+    return "unknown test name (after the probe) -> exit 4"
+
+
+def s_selection_empty(manifest: dict) -> str:
+    """A `-k` that matches nothing deselects every test -> nothing runs -> exit 5.
+    """
+    run = run_mtest([MATRIX_ALPHA, "-k", "no_such_keyword_zzz"])
+    expect_exit(run, 5)
+    return "empty final selection (all deselected) -> exit 5"
+
+
+def s_selection_chameleon(manifest: dict) -> str:
+    """The chameleon: recollect-once then MALFORMED-SUITE (exit-1), never exit 3.
+
+    Selecting the ghost forces a --only run; the suite lists it under --skip-all
+    but refuses it under --only, so mtest warns loudly, rebuilds + recollects,
+    retries, sees the same refusal, and reports MALFORMED-SUITE."""
+    run = run_mtest([CHAMELEON, "-k", "ghost"], timeout=SHORT_TIMEOUT)
+    expect_exit(run, 1)
+    expect(
+        run.verdict_line("MALFORMED-SUITE", CHAMELEON) is not None,
+        f"the chameleon was not reported MALFORMED-SUITE:\n{run.stdout}",
+    )
+    expect(
+        "stale-name" in run.combined or "WARNING" in run.combined,
+        f"the recover-once flow did not warn loudly:\n{run.combined}",
+    )
+    return "chameleon: loud recollect-once then MALFORMED-SUITE, exit 1 (not 3)"
 
 
 def s_internal_error(manifest: dict) -> str:
@@ -993,6 +1118,13 @@ def main() -> int:
     h.scenario("show-output", s_show_output)
     h.scenario("color", s_color)
     h.scenario("usage-refusals", s_usage_refusals)
+    h.scenario("selection-keyword", s_selection_keyword)
+    h.scenario("selection-node-id", s_selection_node_id)
+    h.scenario("selection-union", s_selection_union)
+    h.scenario("selection-malformed-node-id", s_selection_malformed_node_id)
+    h.scenario("selection-unknown-test", s_selection_unknown_test)
+    h.scenario("selection-empty", s_selection_empty)
+    h.scenario("selection-chameleon", s_selection_chameleon)
     h.scenario("passthrough+forbidden", s_passthrough_and_forbidden)
     h.scenario("out-of-root", s_out_of_root)
     h.scenario("internal-error", s_internal_error)
