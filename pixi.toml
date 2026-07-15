@@ -115,3 +115,6 @@ depends-on = [
     "test",
     "e2e",
 ]
+
+[target.linux-64.dependencies]
+valgrind = "==3.27.1"
