@@ -31,7 +31,7 @@ def count_byte(b: List[UInt8], value: UInt8) -> Int:
 
 def target(name: String) -> String:
     """The repo-relative path of a committed exec helper target."""
-    return String("scripts/exec_targets/") + name
+    return String("tests/fixtures/exec/") + name
 
 
 def py_spec(var argv: List[String], timeout_ms: Int = 0) -> ProcessSpec:

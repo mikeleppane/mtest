@@ -701,7 +701,7 @@ when the toolchain itself changes (which shows up in every transcript header).
   is to remain the fastest-to-re-pin orchestrator on top of it, or to be absorbed
   gracefully.
 - **No runtime dependencies.** The runner is pure Mojo; Python appears only in
-  build-time tooling under `scripts/`.
+  build/test harnesses and test-only subprocess fixtures.
 
 ## Toolchain
 

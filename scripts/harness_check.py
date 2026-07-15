@@ -83,6 +83,21 @@ SUPPORT_MODULES = {
     "tmptree.mojo",
     "transcript_cases.mojo",
 }
+EXEC_FIXTURES = {
+    "README.md",
+    "argv_echoer.py",
+    "close_streams_then_hang.py",
+    "dual_flooder.py",
+    "etxtbsy_target.sh",
+    "exit_nonzero.py",
+    "flooding_grandchild.py",
+    "grandchild_exit0.py",
+    "grandchild_spawner.py",
+    "self_signaler.py",
+    "sigterm_grace_exit.py",
+    "sigterm_ignorer.py",
+    "sleeper.py",
+}
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -230,10 +245,25 @@ def check_suite_layout() -> None:
         )
 
 
+def check_exec_fixture_layout() -> None:
+    """Exec subprocess actors live with tests, not developer harnesses."""
+    fixture_dir = REPO_ROOT / "tests" / "fixtures" / "exec"
+    actual = {path.name for path in fixture_dir.iterdir()} if fixture_dir.exists() else set()
+    if actual != EXEC_FIXTURES:
+        raise AssertionError(
+            "exec fixture membership mismatch: "
+            f"missing={sorted(EXEC_FIXTURES - actual)}, "
+            f"extra={sorted(actual - EXEC_FIXTURES)}"
+        )
+    if (REPO_ROOT / "scripts" / "exec_targets").exists():
+        raise AssertionError("obsolete scripts/exec_targets directory still exists")
+
+
 def main() -> int:
     try:
         check_recursive_direct_runner()
         check_suite_layout()
+        check_exec_fixture_layout()
     except (AssertionError, OSError, subprocess.SubprocessError) as exc:
         print(f"harness-check: FAIL: {exc}", file=sys.stderr)
         return 1

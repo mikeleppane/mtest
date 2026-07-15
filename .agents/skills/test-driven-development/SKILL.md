@@ -162,8 +162,8 @@ directory proving recursion, and an excluded directory. A `MANIFEST` maps file �
 expected verdict → expected contribution to the exit code, with a rationale line
 each. A Python end-to-end harness under `scripts/` builds the runner once and
 asserts, per scenario, the **exact exit code** and the **structural** shape of the
-output. Python is fine there — `scripts/` is its containment zone; the runner
-itself stays pure Mojo.
+output. Python harness logic stays under `scripts/`; test-only subprocess actors
+may live under `tests/fixtures/exec/`. The runner itself stays pure Mojo.
 
 ### The tripwire and the self-verifying generator
 

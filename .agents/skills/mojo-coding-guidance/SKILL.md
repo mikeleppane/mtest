@@ -322,9 +322,9 @@ relies on.
   `model` → `config` → `discover`|`protocol`|`report` → `exec` → `session` →
   `cli`. Never import "up"; a cycle is a bug. Structure findings and refactor
   planning live in [improve-architecture](../improve-architecture/SKILL.md).
-- **`src/` is pure Mojo.** Python exists only under `scripts/` (the transcript
-  generator and check harness). A `from mtest import ...` under `src/` is a Mojo
-  import of *this* package.
+- **`src/` is pure Mojo.** Python exists only under `scripts/` (build/test
+  harnesses) and `tests/fixtures/exec/` (test-only subprocess actors). A
+  `from mtest import ...` under `src/` is a Mojo import of *this* package.
 - **Generated source is a golden that happens to be source.** Any file emitted by
   a generator carries a provenance header and is **never hand-edited** — fix the
   generator and regenerate, exactly like a transcript.
