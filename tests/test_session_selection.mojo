@@ -21,6 +21,7 @@ from mtest.session import run_session
 
 from session_fixtures import (
     SRC_CHAMELEON,
+    SRC_FAIL,
     SRC_MATRIX,
     SRC_MATRIX_FAIL,
     base_config,
@@ -174,6 +175,21 @@ def test_chameleon_recollects_once_then_malformed_suite() raises:
         ):
             saw_stale = True
     assert_true(saw_stale, "the recover-once flow must warn loudly")
+
+
+def test_malformed_node_id_raises_even_when_a_gate_fails() raises:
+    # The syntactic malformed-node-id check (pure over `config.paths`, needs no
+    # probe universe) must raise its exit-4 usage error even when a gate fails
+    # first — a failing gate must never mask it behind the gate's own exit 1.
+    var root = temp_root()
+    write_file(root, "tests/test_gate.mojo", SRC_FAIL)
+    var cfg = base_config()
+    cfg.gates.append("tests/test_gate.mojo")
+    cfg.paths.append("bad::node::id")
+
+    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    with assert_raises(contains="malformed node id"):
+        _ = run_session(cfg, root, comp)
 
 
 def main() raises:

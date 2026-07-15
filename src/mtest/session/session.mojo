@@ -1424,6 +1424,19 @@ def _run_selection[
             summary.counts[fr.outcome.code] += 1
             run_outcomes.extend(fr.exit_outcomes.copy())
             ran_files += 1
+            # Mirror the runnable branch's early-stop below (and the
+            # non-selection loop's): a TERMINAL file — compile error, probe
+            # crash, probe timeout, or malformed suite — must honor -x /
+            # --maxfail exactly like a runnable one, or the remaining files
+            # keep scheduling past a limit the non-selection path would have
+            # respected.
+            if config.exitfirst and fr.outcome.is_failing():
+                break
+            if (
+                config.maxfail > 0
+                and _failing_count(run_outcomes) >= config.maxfail
+            ):
+                break
             continue
 
         if len(c.selected) == 0:
@@ -1632,9 +1645,19 @@ def run_session[
         interrupted or internal_error or precompile_failed or gate_abort
     )
 
-    # SELECTION is active when any operand is a node id or `-k` is present. The
-    # operand parse (a malformed node id -> exit 4) is computed on this pre-run
-    # path so it propagates like discovery's own usage errors.
+    # SELECTION is active when any operand is a node id or `-k` is present.
+    # `parse_operands` below re-derives the same malformed-node-id shape check
+    # (`sep_count > 1`) that `discover`'s `_classify` already applies to EVERY
+    # operand in `config.paths` UNCONDITIONALLY at the very top of this
+    # function (discover.mojo's Stage 2) — before precompiles, gates, or any
+    # `proceed_runs`-gated step runs. So a malformed node id always raises its
+    # exit-4 usage error before a failing gate/precompile could ever be
+    # reached, and a failing gate/precompile can never mask it: discover's
+    # check dominates every time. `parse_operands` here exists to build the
+    # `OperandParse` selection intent (plain operands vs. named targets), not
+    # to gate malformed syntax a second time — see
+    # `test_malformed_node_id_raises_even_when_a_gate_fails` in
+    # tests/test_session_selection.mojo for the pinned regression.
     var sel_active = selection_active(config.paths, config.keyword)
 
     # Run files. Under selection, the run set is probed then run through the

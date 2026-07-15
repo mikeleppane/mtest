@@ -15,6 +15,7 @@ from mtest.report import CompositeReporter, RecordingReporter
 from mtest.session import run_session
 
 from session_fixtures import (
+    SRC_COMPILE_ERROR,
     SRC_CRASH,
     SRC_FAIL,
     SRC_FAIL_MULTI,
@@ -189,6 +190,39 @@ def test_maxfail_stops_scheduling_in_the_selection_path() raises:
     var last = rec.event_at(rec.count() - 1)
     assert_equal(last.summary.count_of(Outcome.FAIL), 1)
     assert_equal(last.summary.count_of(Outcome.NOT_RUN), 1)
+
+
+def test_maxfail_stops_scheduling_after_a_terminal_file_under_selection() raises:
+    # A TERMINAL file under SELECTION (here a compile error, resolved in
+    # phase 1 and replayed in phase 2) must honor --maxfail exactly like a
+    # runnable file: the phase-2 terminal branch has to stop scheduling before
+    # the NEXT file runs, the same as the non-selection loop and the runnable
+    # branch both already do. `-k pass` makes selection active without needing
+    # the compile-error file to probe at all.
+    var root = temp_root()
+    write_file(root, "tests/test_a_compile_error.mojo", SRC_COMPILE_ERROR)
+    write_file(root, "tests/test_b_pass.mojo", SRC_PASS)
+
+    var config = base_config()
+    config.keyword = "pass"
+    config.maxfail = 1
+
+    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var code = run_session(config, root, comp)
+
+    assert_equal(code, 1)
+    ref rec = comp.reporters[0]
+    var last = rec.event_at(rec.count() - 1)
+    assert_equal(last.summary.count_of(Outcome.COMPILE_ERROR), 1)
+    # test_b_pass must be NOT-RUN, exactly as the non-selection path would
+    # have skipped it past --maxfail — not started, not built into a verdict.
+    assert_equal(last.summary.count_of(Outcome.NOT_RUN), 1)
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.FILE_STARTED:
+            assert_true(
+                rec.path_at(i) != "tests/test_b_pass.mojo",
+                "test_b_pass.mojo must never be scheduled past --maxfail 1",
+            )
 
 
 def main() raises:
