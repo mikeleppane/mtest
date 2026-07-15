@@ -1,4 +1,4 @@
-"""Shared helpers for the `exec` tests (imported via `-I tests`, not a suite).
+"""Shared helpers for the `exec` tests (via `-I tests/support`, not a suite).
 
 Small conveniences the exec tests share: turning captured raw bytes into a
 `String` for readable assertions, counting bytes matching a value, and building

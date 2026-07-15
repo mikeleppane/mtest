@@ -9,7 +9,7 @@ into one honest verdict. On the default run path there is no separate probe: the
 run's own report IS the handshake.
 
 The policy is TOTAL over every child fate and is pinned, row by row, in
-`tests/test_session_classify.mojo`. In precedence order:
+`tests/unit/test_session_classify.mojo`. In precedence order:
 
 - `Signaled(_)`      -> CRASH   (the parser is UNCONSULTED — a crash is a crash).
 - `TimedOut`         -> TIMEOUT (latched; a valid report does not rescue it).

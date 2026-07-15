@@ -1824,7 +1824,7 @@ def run_session[
     # `OperandParse` selection intent (plain operands vs. named targets), not
     # to gate malformed syntax a second time — see
     # `test_malformed_node_id_raises_even_when_a_gate_fails` in
-    # tests/test_session_selection.mojo for the pinned regression.
+    # tests/integration/test_session_selection.mojo for the pinned regression.
     var sel_active = selection_active(config.paths, config.keyword)
 
     # Run files. Under selection, the run set is probed then run through the

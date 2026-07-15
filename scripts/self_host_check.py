@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """The `test` gate: mtest dogfoods its own suite, checked for completeness.
 
-Runs the real `build/mtest -I build tests/` binary (never `mojo run` — see
+Runs the real `build/mtest -I build -I tests/support tests/` binary (never
+`mojo run` — see
 scripts/test_all.sh for why) over this repo's own tests/ directory, streaming
 its output live and propagating its exit code: the suite must PASS *through
 mtest itself* for this gate to pass.
 
 That alone is not proof mtest saw every test file — a discovery bug could
 silently drop one and still exit 0. So this script also runs an
-MTEST-INDEPENDENT completeness check: it globs tests/test_*.mojo on disk
-itself, with nothing but the stdlib, and fails loudly if that count disagrees
-with the "selected: N files ... excluded: M files" count mtest's own header
-reported. Together, selected + excluded must equal every test_*.mojo file this
-script found on its own — proof mtest discovered (and accounted for) every
-file in its own suite, not just a subset that happened to pass.
+MTEST-INDEPENDENT completeness check: it recursively inventories the classified
+suite roots with nothing but the stdlib, and fails loudly unless mtest's result
+rows name that exact path set. The header count is checked independently too.
 
 Console layout is an informal surface (see scripts/e2e_check.py's HEADER_RE),
 so this parses the header line, not raw bytes.
@@ -47,23 +45,32 @@ TIMEOUT_SECONDS = 900.0
 HEADER_RE = re.compile(
     r"root:\s+.*?selected:\s+(?P<selected>\d+)\s+files\s+excluded:\s+(?P<excluded>\d+)"
 )
+PASS_ROW_RE = re.compile(
+    r"^PASS\s+(?P<path>tests/(?:unit|integration)/test_\S+\.mojo)\s",
+    re.MULTILINE,
+)
 
 
 def discovered_test_files() -> list[str]:
-    """Root-relative `tests/test_*.mojo` paths, found WITHOUT asking mtest.
+    """Classified root-relative suite paths, found WITHOUT asking mtest.
 
     Walks tests/ directly with the stdlib only, matching the same basename
-    pattern mtest's own discovery glob uses (`test_*.mojo`,
-    src/mtest/discover/walk.mojo) recursively -- so a future subdirectory
-    under tests/ stays covered. This function must never call mtest or read
-    its output; it is the independent half of the completeness check.
+    pattern mtest's own discovery uses. Every suite must be directly under
+    tests/unit or tests/integration; fixture/support/snapshot suites are a
+    structural error. This function never calls mtest or reads its output.
     """
     found: list[str] = []
     for dirpath, _dirs, files in os.walk(TESTS_DIR):
         for name in files:
             if name.startswith("test_") and name.endswith(".mojo"):
                 abs_path = os.path.join(dirpath, name)
-                found.append(os.path.relpath(abs_path, REPO_ROOT))
+                relative = os.path.relpath(abs_path, REPO_ROOT)
+                parent = os.path.dirname(relative)
+                if parent not in {"tests/unit", "tests/integration"}:
+                    raise RuntimeError(
+                        f"executable suite outside classified roots: {relative}"
+                    )
+                found.append(relative)
     return sorted(found)
 
 
@@ -83,7 +90,7 @@ def _kill_group(proc: subprocess.Popen) -> None:
 
 
 def run_mtest_over_own_suite() -> tuple[int, str]:
-    """Spawn `build/mtest -I build tests/`, streaming its combined output to
+    """Spawn mtest over tests/ with its support include, streaming output to
     this process's stdout live and also capturing it for the header parse.
 
     Runs in its own process group with the inherited environment, so `mojo`
@@ -104,7 +111,7 @@ def run_mtest_over_own_suite() -> tuple[int, str]:
         )
         return 1, ""
 
-    argv = [MTEST, "-I", "build", "tests/"]
+    argv = [MTEST, "-I", "build", "-I", "tests/support", "tests/"]
     proc = subprocess.Popen(
         argv,
         cwd=REPO_ROOT,
@@ -152,7 +159,11 @@ def run_mtest_over_own_suite() -> tuple[int, str]:
 def main() -> int:
     code, output = run_mtest_over_own_suite()
 
-    disk_files = discovered_test_files()
+    try:
+        disk_files = discovered_test_files()
+    except RuntimeError as exc:
+        print(f"FATAL: self_host_check: {exc}", file=sys.stderr)
+        return 1
     disk_count = len(disk_files)
 
     match = HEADER_RE.search(output)
@@ -167,6 +178,7 @@ def main() -> int:
     selected = int(match.group("selected"))
     excluded = int(match.group("excluded"))
     accounted_for = selected + excluded
+    reported_files = sorted(set(PASS_ROW_RE.findall(output)))
 
     ok = True
 
@@ -183,8 +195,16 @@ def main() -> int:
             f"FATAL: self_host_check: completeness mismatch -- mtest "
             f"reported selected={selected} + excluded={excluded} = "
             f"{accounted_for} test file(s), but an independent glob of "
-            f"tests/test_*.mojo (computed without mtest) found {disk_count}: "
+            f"the classified suite roots (computed without mtest) found {disk_count}: "
             f"{disk_files}",
+            file=sys.stderr,
+        )
+        ok = False
+    elif reported_files != disk_files:
+        print(
+            "FATAL: self_host_check: exact path membership mismatch -- "
+            f"mtest PASS rows named {reported_files}, but the independent "
+            f"classified inventory is {disk_files}",
             file=sys.stderr,
         )
         ok = False
@@ -203,8 +223,8 @@ def main() -> int:
 
     print(
         f"self_host_check: OK -- mtest selected {selected} file(s) of its "
-        f"own suite; an independent glob (computed without mtest) also found "
-        f"{disk_count}; mtest exited 0"
+        f"own suite; its exact PASS-row path set matches all {disk_count} "
+        f"independently inventoried classified suites; mtest exited 0"
     )
     return 0
 

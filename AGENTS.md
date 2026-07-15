@@ -125,16 +125,16 @@ pixi run fmt              # format in place (run locally before committing)
 pixi run build            # the package-compiles gate
 pixi run transcripts-check# regenerate to a temp dir and diff byte-for-byte
 pixi run test-direct      # the independent glob-driven twin: build+execute
-                           # each tests/test_*.mojo directly, no mtest involved
+                           # each unit/integration suite directly, no mtest involved
 pixi run test             # the self-hosted dogfood run: build/mtest over its
-                           # own tests/, plus a completeness check against an
-                           # independent glob of the same tree
+                           # own tests/, plus exact path-membership verification
+                           # against an independent classified inventory
 pixi run e2e              # build the binary, drive it against testdata/
                             # (manifest.json), assert exact exit codes/output
 ```
 
-`pixi run ci` chains `fmt-check -> build -> transcripts-check -> test-direct ->
-test -> e2e` fail-fast and is exactly what CI runs. `test-direct` and `test`
+`pixi run ci` chains `fmt-check -> harness-check -> build -> transcripts-check ->
+test-direct -> test -> e2e` fail-fast and is exactly what CI runs. `test-direct` and `test`
 both build-then-execute the binary directly — never `mojo run` anywhere in the
 gate, because it masks crash exit codes to 1.
 

@@ -8,7 +8,7 @@ it cannot bias the parser it feeds; the transcript smoke test does not import it
 either, so the transcript oracle stays independent of the parser under test.
 
 Not a test module (no `test_` prefix, so the runner never builds it as a suite);
-it is imported via `-I tests`.
+it is imported via `-I tests/support`.
 """
 
 comptime TX_DIR = "goldens/transcripts/"

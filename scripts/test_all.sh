@@ -57,9 +57,9 @@ bash scripts/build_pkg.sh
 
 # Tests build against the prebuilt package at -O0: correctness tests do not need
 # optimized codegen, and -O0 dodges the LLVM grind on TestSuite discovery glue.
-# `-I tests` puts shared non-test helper modules on the import path; the walk
-# only builds files matching test_*.mojo.
-INCLUDE=(--no-optimization -I build -I tests)
+# `-I tests/support` puts shared non-test helper modules on the import path; the
+# walk only builds files matching test_*.mojo.
+INCLUDE=(--no-optimization -I build -I tests/support)
 
 mkdir -p build/tests
 

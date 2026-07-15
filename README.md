@@ -534,58 +534,59 @@ exit-vs-signal discrimination).
 ## Self-hosting
 
 `mtest` runs its own test suite. `pixi run test` builds `build/mtest` and then
-runs `build/mtest -I build tests/` — the real binary, executing itself over
-its own 55 `tests/test_*.mojo` files, never `mojo run` — and
+runs `build/mtest -I build -I tests/support tests/` — the real binary,
+executing itself over its own 55 classified unit/integration suites, never
+`mojo run` — and
 `scripts/self_host_check.py` propagates that exit code *and* independently
-globs `tests/test_*.mojo` itself (without asking `mtest`) to confirm the file
-count agrees with what `mtest` reported selecting: proof the runner discovered
-every one of its own test files and silently skipped none. Executed for this
-report:
+inventories `tests/unit/` and `tests/integration/` (without asking `mtest`) to
+confirm the exact result-row path set agrees with disk: proof the runner
+discovered every one of its own test files and silently skipped none. Executed
+for this report:
 
 ```console
-$ pixi run bash -c 'build/mtest --durations 5 -q -I build tests/'
-===== 510 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 122.1s =====
+$ pixi run bash -c 'build/mtest --durations 5 -q -I build -I tests/support tests/'
+===== 522 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 133.1s =====
 
 slowest 5 files:
-  tests/test_session_maxfail.mojo  25.81s
-  tests/test_session_collect.mojo  15.47s
-  tests/test_session_selection.mojo  11.70s
-  tests/test_session_handshake.mojo  6.08s
-  tests/test_session_gates.mojo  5.45s
+  tests/integration/test_session_maxfail.mojo  27.39s
+  tests/integration/test_session_collect.mojo  17.54s
+  tests/integration/test_session_selection.mojo  17.08s
+  tests/integration/test_session_gates.mojo  7.21s
+  tests/integration/test_session_handshake.mojo  6.27s
 $ echo $?
 0
 ```
 
-`mtest collect -I build tests/` lists all 510 node ids the dogfood run above
+`mtest collect -I build -I tests/support tests/` lists all 522 node ids the dogfood run above
 selected (abbreviated here):
 
 ```console
-$ pixi run bash -c 'build/mtest collect -I build tests/'
-tests/test_cache_registry.mojo::test_atomic_replacement_no_stale_field_survives
-tests/test_cache_registry.mojo::test_compile_error_entry_short_circuits
-tests/test_cache_registry.mojo::test_keying_records_and_reads_back_exactly
-tests/test_cache_registry.mojo::test_once_built_check_then_record_yields_one_build
-tests/test_cache_registry.mojo::test_once_probed_check_then_record_yields_one_probe
-tests/test_cache_registry.mojo::test_probe_attaches_to_existing_entry
-tests/test_cache_registry.mojo::test_probe_before_build_raises
-tests/test_cli_arity.mojo::test_build_arg_equals_form
-... (500 more lines omitted; 510 node ids across 55 files) ...
-tests/test_transcripts_smoke.mojo::test_every_transcript_has_a_well_formed_envelope
-tests/test_transcripts_smoke.mojo::test_manifest_lists_every_scenario
-tests/test_transcripts_smoke.mojo::test_noisy_impostor_precedes_the_real_report
-tests/test_transcripts_smoke.mojo::test_report_counts_reconcile
-tests/test_transcripts_smoke.mojo::test_tripwire_crash_terminates_by_signal
-tests/test_transcripts_smoke.mojo::test_tripwire_only_unknown_error_phrase
+$ pixi run bash -c 'build/mtest collect -I build -I tests/support tests/'
+tests/integration/test_discover_pipeline.mojo::test_default_path_falls_back_to_root
+tests/integration/test_discover_pipeline.mojo::test_default_path_prefers_tests_dir
+tests/integration/test_discover_pipeline.mojo::test_empty_walk_is_not_an_error
+tests/integration/test_discover_pipeline.mojo::test_exclude_removes_and_records_and_flags_stale
+tests/integration/test_discover_pipeline.mojo::test_exclude_wins_over_gate
+tests/integration/test_discover_pipeline.mojo::test_explicit_file_operand_bypasses_pattern
+tests/integration/test_discover_pipeline.mojo::test_gate_overlap_is_promoted_to_gate_only
+tests/integration/test_discover_pipeline.mojo::test_malformed_node_id_operand_raises
+... (508 more lines omitted; 522 node ids across 55 files) ...
+tests/unit/test_session_verdict.mojo::test_build_verdict_timed_out_is_compile_error
+tests/unit/test_session_verdict.mojo::test_run_verdict_exit_nonzero_is_fail
+tests/unit/test_session_verdict.mojo::test_run_verdict_exit_zero_is_pass
+tests/unit/test_session_verdict.mojo::test_run_verdict_signal_is_crash
+tests/unit/test_session_verdict.mojo::test_run_verdict_spawn_failed_is_not_run_sentinel
+tests/unit/test_session_verdict.mojo::test_run_verdict_timed_out_is_timeout
 $ echo $?
 0
 ```
 
 This dogfood run is **an additional gate, not the only executor** of
-`tests/`. `pixi run ci` runs four independent checks in order, and `test`
+`tests/`. `pixi run ci` runs its independent checks in order, and `test`
 (the dogfood above) is only one of them:
 
 - **`test-direct`** — the mtest-**independent** twin: builds and executes
-  every `tests/test_*.mojo` file directly, one process per file, with no
+  every suite under `tests/unit/` and `tests/integration/` directly, one process per file, with no
   `mtest` involved at all. If `test-direct` and `test` (mtest running the same
   files on itself) ever disagree on outcome, that disagreement is a
   self-hosting bug in `mtest`, not noise — the two are meant to agree because
@@ -665,7 +666,7 @@ are pinned in [pixi.toml](pixi.toml).
 
 ```console
 $ pixi install                 # one-time, the only networked step
-$ pixi run ci                  # fmt-check → build → transcripts-check → test-direct → test → e2e
+$ pixi run ci                  # fmt-check → harness-check → build → transcripts-check → test-direct → test → e2e
 ```
 
 `pixi run ci` is the full gate. Individually:
@@ -674,10 +675,13 @@ $ pixi run ci                  # fmt-check → build → transcripts-check → t
 |------|--------------|
 | `pixi run build` | precompile `src/mtest` to `build/mtest.mojopkg` — the compile gate |
 | `pixi run build-bin` | link the runnable binary at `build/mtest` from `src/main.mojo` |
+| `pixi run harness-check` | fast self-tests for recursive suite enumeration and collision-free binary paths |
 | `pixi run transcripts` | regenerate the golden transcripts in place (local only) |
 | `pixi run transcripts-check` | regenerate to a temp dir and diff byte-for-byte — the protocol pin |
-| `pixi run test-direct` | the **independent** twin: build and execute every `tests/test_*.mojo` directly, one process per file, with no `mtest` involved |
-| `pixi run test` | the **dogfood** gate: `build/mtest -I build tests/` running mtest over its own suite, plus a completeness check independent of mtest's own count |
+| `pixi run test-unit` | directly build and execute the in-memory unit suites only |
+| `pixi run test-integration` | directly build and execute the filesystem/compiler/process integration suites only |
+| `pixi run test-direct` | the **independent** twin: build and execute every unit/integration suite directly, one process per file, with no `mtest` involved |
+| `pixi run test` | the **dogfood** gate: `build/mtest -I build -I tests/support tests/` running mtest over its own suite, plus exact path-membership verification independent of mtest |
 | `pixi run e2e` | build `build/mtest`, then drive it against `testdata/` and assert exact exit codes and console structure |
 
 See [Self-hosting](#self-hosting) for how `test` and `test-direct` relate.

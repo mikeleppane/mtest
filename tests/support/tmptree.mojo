@@ -1,7 +1,7 @@
 """Temp-directory tree helpers for the `discover` tests.
 
 Not a test module (no `test_` prefix, so the runner never builds it as a suite);
-it is imported via `-I tests`. Each helper builds or tears down a real on-disk
+it is imported via `-I tests/support`. Each helper builds or tears down a real on-disk
 tree so the walk can be exercised against actual directories, files, and
 symlinks, then cleaned up.
 """

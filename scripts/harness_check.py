@@ -18,6 +18,71 @@ import tempfile
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+UNIT_SUITES = {
+    "test_cache_registry.mojo",
+    "test_cli_arity.mojo",
+    "test_cli_arity0.mojo",
+    "test_cli_build_flags.mojo",
+    "test_cli_collect.mojo",
+    "test_cli_grammar.mojo",
+    "test_cli_inventory.mojo",
+    "test_cli_parse.mojo",
+    "test_config.mojo",
+    "test_discover_fnmatch.mojo",
+    "test_discover_normalize.mojo",
+    "test_model_events.mojo",
+    "test_model_exit_code.mojo",
+    "test_model_node_id.mojo",
+    "test_model_outcome.mojo",
+    "test_model_parse_disposition.mojo",
+    "test_model_test_counts.mojo",
+    "test_model_test_result.mojo",
+    "test_protocol_corruption.mojo",
+    "test_protocol_matrix.mojo",
+    "test_report_composite.mojo",
+    "test_report_console.mojo",
+    "test_report_recording.mojo",
+    "test_select_logic.mojo",
+    "test_select_operands.mojo",
+    "test_session_classify.mojo",
+    "test_session_detail.mojo",
+    "test_session_mangle.mojo",
+    "test_session_verdict.mojo",
+}
+INTEGRATION_SUITES = {
+    "test_discover_pipeline.mojo",
+    "test_discover_walk.mojo",
+    "test_exec_capture.mojo",
+    "test_exec_decode.mojo",
+    "test_exec_etxtbsy.mojo",
+    "test_exec_fdhygiene.mojo",
+    "test_exec_flood.mojo",
+    "test_exec_interrupt.mojo",
+    "test_exec_paths.mojo",
+    "test_exec_prestart.mojo",
+    "test_exec_reap.mojo",
+    "test_exec_sweep.mojo",
+    "test_exec_timeout.mojo",
+    "test_protocol_collection.mojo",
+    "test_protocol_report.mojo",
+    "test_session_collect.mojo",
+    "test_session_exit_codes.mojo",
+    "test_session_flow.mojo",
+    "test_session_gates.mojo",
+    "test_session_handshake.mojo",
+    "test_session_interrupt.mojo",
+    "test_session_maxfail.mojo",
+    "test_session_outcomes.mojo",
+    "test_session_precompile.mojo",
+    "test_session_selection.mojo",
+    "test_transcripts_smoke.mojo",
+}
+SUPPORT_MODULES = {
+    "exec_helpers.mojo",
+    "session_fixtures.mojo",
+    "tmptree.mojo",
+    "transcript_cases.mojo",
+}
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -121,9 +186,54 @@ out.chmod(out.stat().st_mode | stat.S_IXUSR)
             shutil.rmtree(disposable_outputs, ignore_errors=True)
 
 
+def check_suite_layout() -> None:
+    """Every executable suite and support module has its classified home."""
+    tests_dir = REPO_ROOT / "tests"
+    actual_unit = {path.name for path in (tests_dir / "unit").glob("test_*.mojo")}
+    actual_integration = {
+        path.name for path in (tests_dir / "integration").glob("test_*.mojo")
+    }
+    if actual_unit != UNIT_SUITES:
+        raise AssertionError(
+            "unit suite membership mismatch: "
+            f"missing={sorted(UNIT_SUITES - actual_unit)}, "
+            f"extra={sorted(actual_unit - UNIT_SUITES)}"
+        )
+    if actual_integration != INTEGRATION_SUITES:
+        raise AssertionError(
+            "integration suite membership mismatch: "
+            f"missing={sorted(INTEGRATION_SUITES - actual_integration)}, "
+            f"extra={sorted(actual_integration - INTEGRATION_SUITES)}"
+        )
+    all_suites = {
+        path.relative_to(tests_dir)
+        for path in tests_dir.rglob("test_*.mojo")
+        if path.is_file()
+    }
+    classified = {
+        *(Path("unit") / name for name in UNIT_SUITES),
+        *(Path("integration") / name for name in INTEGRATION_SUITES),
+    }
+    if all_suites != classified:
+        raise AssertionError(
+            "tests/ contains an executable suite outside unit/integration: "
+            f"{sorted(str(path) for path in all_suites - classified)}"
+        )
+    actual_support = {
+        path.name for path in (tests_dir / "support").glob("*.mojo")
+    }
+    if actual_support != SUPPORT_MODULES:
+        raise AssertionError(
+            "support module membership mismatch: "
+            f"missing={sorted(SUPPORT_MODULES - actual_support)}, "
+            f"extra={sorted(actual_support - SUPPORT_MODULES)}"
+        )
+
+
 def main() -> int:
     try:
         check_recursive_direct_runner()
+        check_suite_layout()
     except (AssertionError, OSError, subprocess.SubprocessError) as exc:
         print(f"harness-check: FAIL: {exc}", file=sys.stderr)
         return 1

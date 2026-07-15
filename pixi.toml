@@ -61,13 +61,15 @@ transcripts = "python scripts/gen_transcripts.py"
 transcripts-check = "bash scripts/transcripts_check.sh"
 
 # The INDEPENDENT glob-driven twin: builds the package first (fail-fast), then
-# BUILDS each tests/test_*.mojo and EXECUTES the binary directly, one process per
+# BUILDS each unit/integration test_*.mojo and EXECUTES the binary directly, one process per
 # file, with no mtest involved. `mojo run` never appears in the gate — it masks
 # crash exit codes to 1 and can JIT-crash in CI (#6413). The repo eats the same
 # build-then-execute rule the runner enforces. Kept in `ci` alongside `test` (the
 # dogfood run below) as an mtest-independent oracle: if the two ever disagree on
 # outcome, that disagreement is a self-hosting bug in mtest, not noise.
-test-direct = "bash scripts/test_all.sh"
+test-direct = "bash scripts/test_all.sh tests/unit tests/integration"
+test-unit = "bash scripts/test_all.sh tests/unit"
+test-integration = "bash scripts/test_all.sh tests/integration"
 
 # Fast self-tests for repository harness behavior. Uses disposable test inputs
 # and a fake compiler to prove recursive root selection and injective binary
@@ -75,11 +77,11 @@ test-direct = "bash scripts/test_all.sh"
 harness-check = "python scripts/harness_check.py"
 
 # DOGFOOD gate: run mtest over its OWN tests/ suite, executing the built binary
-# directly (`build/mtest -I build tests/` — never `mojo run`, for the same
+# directly (`build/mtest -I build -I tests/support tests/` — never `mojo run`, for the same
 # crash-exit-code reason as test-direct). Depends on build-bin so build/mtest and
 # the precompiled package both exist. `scripts/self_host_check.py` runs the
 # binary, propagates its exit code (the suite must PASS through mtest), and
-# checks COMPLETENESS independently of mtest: it globs tests/test_*.mojo itself
+# checks COMPLETENESS independently of mtest: it walks the classified suite roots
 # (without asking mtest) and fails if that count disagrees with the file count
 # mtest reported selecting — proof mtest discovered every test file and silently
 # skipped none. This is an ADDITIONAL gate beside test-direct, never a

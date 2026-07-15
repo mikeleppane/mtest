@@ -31,7 +31,7 @@ on.
 mtest's own tests are ordinary `def ... raises` functions discovered by
 `TestSuite` and run against the **precompiled package** (`build/mtest.mojopkg` —
 `mojo package` does not exist in `1.0.0b2`, only `mojo precompile`). Every test
-file ends with the same runner, exactly as `tests/test_transcripts_smoke.mojo`
+file ends with the same runner, exactly as `tests/integration/test_transcripts_smoke.mojo`
 does today:
 
 ```mojo
@@ -55,23 +55,24 @@ def main() raises:
 ```
 
 **Crucially, the repo eats the discipline the product sells.** The suite is run
-by `scripts/test_all.sh`, which for each `tests/test_*.mojo` **builds a binary
+by `scripts/test_all.sh`, which for each classified suite **builds a binary
 with `mojo build` and executes it directly** — never `mojo run`, which masks a
 crashing process's exit code to 1 and can JIT-crash in CI (#6413). Run the whole
 suite (the canonical green gate), or one file while iterating:
 
 ```bash
-pixi run test                                      # THE gate — build pkg, then build+execute every tests/test_*.mojo
-pixi run build && mojo build --no-optimization -I build -I tests \
-    tests/test_exec.mojo -o build/tests/test_exec && build/tests/test_exec   # one file
+pixi run test-direct                               # independent gate — build pkg, then build+execute every suite
+pixi run build && mojo build --no-optimization -I build -I tests/support \
+    tests/integration/test_exec_capture.mojo -o build/tests/integration/test_exec_capture && build/tests/integration/test_exec_capture
 ```
 
 `scripts/test_all.sh` builds the package first (fail-fast on a broken toolchain
-or a package that no longer compiles), then globs `tests/test_*.mojo` in sorted
-order — no hand-maintained list to drift. A stale `build/mtest.mojopkg` is the
+or a package that no longer compiles), then recursively inventories the requested
+classified roots in sorted order — no hand-maintained execution list to drift. A stale `build/mtest.mojopkg` is the
 classic "my change did nothing" trap: after any `src/` edit, rebuild before
 running a single test file by hand, or the test exercises stale code. One file
-per unit under test, named `tests/test_<thing>.mojo`.
+per unit under test, named `tests/unit/test_<thing>.mojo` or
+`tests/integration/test_<thing>.mojo` according to the boundary it crosses.
 
 **Keep test modules small.** Mojo `#6554` is a `TestSuite`-discovery compile
 stall that scales with a module's *function count*, not file size. A file that
@@ -298,4 +299,5 @@ float legitimately appears is a timing number under `bench` — those are
 - [ ] A refactor commit does not move a transcript or a tripwire's pinned value
 - [ ] Test module stays small (function count, not just file size) — split and
       add to `SLOW_6554` in `scripts/test_all.sh` if it starts stalling
-- [ ] `pixi run test` green; the new file follows `tests/test_<thing>.mojo`
+- [ ] `pixi run test-direct` and `pixi run test` green; the new file is in the
+      correct classified suite root

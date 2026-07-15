@@ -1,7 +1,7 @@
 """Tiny known-outcome Mojo fixtures for the session orchestration tests.
 
 Not a test module (no `test_` prefix), so the runner never builds it as a
-suite; it is imported via `-I tests`. Each helper writes a MINIMAL real Mojo
+suite; it is imported via `-I tests/support`. Each helper writes a MINIMAL real Mojo
 source into a temp tree so the session can genuinely build-and-execute it — the
 only faithful way to exercise the keystone — and returns configs wired to that
 tree. Keep every fixture as small as its outcome demands: build output lands
