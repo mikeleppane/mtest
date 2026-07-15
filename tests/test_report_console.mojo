@@ -2,12 +2,13 @@
 
 These feed a fixed event stream and assert the STRUCTURE of the rendered buffer,
 not its exact bytes: one verdict line per FileFinished in order, the fixed
-verdict-token vocabulary, a framed section per non-PASS under the default
-`failures`, a shell-quoted `reproduce:` line carrying build flags, the summary
-count arithmetic, no escape codes when color is off, signals named in words, and
-captured output rendered verbatim (truncation marker included). The console
-learns every printed fact from the events — only version and config are passed
-in.
+verdict-token vocabulary, per-TEST failure sections carrying a node id + verbatim
+detail + a copy-pasteable repro line, the once-per-file file-scope captured-output
+label, `-v` per-test rows, the NO-TESTS / MALFORMED-SUITE / DRIFT /
+capture-overflow tokens, the TEST-count summary band, no escape codes when color
+is off, signals named in words, and captured output rendered verbatim. The
+console learns every printed fact from the events — only version and config are
+passed in.
 """
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
 
@@ -18,6 +19,7 @@ from mtest.model import (
     Event,
     Outcome,
     NodeId,
+    ParseDisposition,
     TestCounts,
     TestResult,
 )
@@ -37,6 +39,11 @@ def _bytes(s: String) -> List[UInt8]:
 def _argv(path: String) -> List[String]:
     """A representative `mojo build <path>` argv for the build-command field."""
     return ["mojo", "build", path]
+
+
+def _count(haystack: String, needle: String) -> Int:
+    """How many non-overlapping times `needle` occurs in `haystack`."""
+    return len(haystack.split(needle)) - 1
 
 
 def _console(
@@ -73,8 +80,19 @@ def _mock_summary() -> Summary:
     return s^
 
 
+def _mock_test_counts() -> TestCounts:
+    """The per-TEST totals matching `_feed_mock_run`: 1 passed, 1 failed."""
+    return TestCounts(passed=1, failed=1, skipped=0, deselected=0)
+
+
 def _feed_mock_run(mut c: ConsoleReporter):
-    """Drive the reporter through the full console mock event stream."""
+    """Drive the reporter through the full console mock event stream.
+
+    The stream mirrors what the session emits: a FILE_STARTED before each file,
+    the retrospective per-test TEST_REPORTED rows for a parsed report, then the
+    FILE_FINISHED verdict. The passing file collects one passing test; the
+    failing file collects one failing test carrying assertion detail.
+    """
     c.handle(Event.session_started("tests", "mojo 1.0.0b2", 5, 1))
     c.handle(
         Event.file_finished(
@@ -88,6 +106,14 @@ def _feed_mock_run(mut c: ConsoleReporter):
             exclusion_pattern="--exclude tests/slow/*",
         )
     )
+    c.handle(Event.file_started("tests/test_alpha.mojo"))
+    c.handle(
+        Event.test_reported(
+            TestResult(
+                NodeId("tests/test_alpha.mojo", "test_alpha_one"), Outcome.PASS
+            )
+        )
+    )
     c.handle(
         Event.file_finished(
             "tests/test_alpha.mojo",
@@ -97,6 +123,19 @@ def _feed_mock_run(mut c: ConsoleReporter):
             1.0,
             List[UInt8](),
             List[UInt8](),
+            parse_disposition=ParseDisposition.PARSED,
+            passed_tests=1,
+        )
+    )
+    c.handle(Event.file_started("tests/test_beta.mojo"))
+    c.handle(
+        Event.test_reported(
+            TestResult(
+                NodeId("tests/test_beta.mojo", "test_beta_fails"),
+                Outcome.FAIL,
+                "      boom:\n        fake detail line",
+                "",
+            )
         )
     )
     c.handle(
@@ -109,8 +148,11 @@ def _feed_mock_run(mut c: ConsoleReporter):
             _bytes("the suite report, verbatim\n"),
             _bytes("on stderr\n"),
             exit_status=1,
+            parse_disposition=ParseDisposition.PARSED,
+            failed_tests=1,
         )
     )
+    c.handle(Event.file_started("tests/test_gamma.mojo"))
     c.handle(
         Event.file_finished(
             "tests/test_gamma.mojo",
@@ -123,6 +165,7 @@ def _feed_mock_run(mut c: ConsoleReporter):
             signal_number=4,
         )
     )
+    c.handle(Event.file_started("tests/test_delta.mojo"))
     c.handle(
         Event.file_finished(
             "tests/test_delta.mojo",
@@ -135,6 +178,7 @@ def _feed_mock_run(mut c: ConsoleReporter):
             timeout_seconds=300,
         )
     )
+    c.handle(Event.file_started("tests/test_typo.mojo"))
     c.handle(
         Event.file_finished(
             "tests/test_typo.mojo",
@@ -148,7 +192,11 @@ def _feed_mock_run(mut c: ConsoleReporter):
             ),
         )
     )
-    c.handle(Event.session_finished(_mock_summary(), 302.4, 1))
+    c.handle(
+        Event.session_finished(
+            _mock_summary(), 302.4, 1, test_counts=_mock_test_counts()
+        )
+    )
 
 
 def test_header_learns_facts_from_session_started() raises:
@@ -226,19 +274,149 @@ def test_timeout_notes_the_deadline() raises:
     assert_true("timed out after 300s" in out)
 
 
-def test_framed_section_per_non_pass_under_failures() raises:
+def test_failing_test_section_carries_node_id_and_repro() raises:
     var c = _console()
     _feed_mock_run(c)
     var out = c.output()
-    # FAIL, CRASH, TIMEOUT, COMPILE-ERROR each get a framed section; PASS does not.
-    assert_true(
-        "--- FAIL tests/test_beta.mojo (exit 1) — captured stdout ---" in out
+    # The failing test gets its OWN framed section headed by the node id.
+    assert_true("--- FAIL tests/test_beta.mojo::test_beta_fails ---" in out)
+    # The verbatim assertion detail rides through (dedented, see the dedicated
+    # transform test); a distinctive fragment survives.
+    assert_true("fake detail line" in out)
+    # A copy-pasteable per-test repro names the node id (path::test).
+    assert_true("reproduce: mtest tests/test_beta.mojo::test_beta_fails" in out)
+
+
+def test_detail_is_dedented_and_at_line_made_root_relative() raises:
+    # The two — and ONLY two — permitted detail transformations: strip the
+    # common leading indentation TestSuite bakes in, and render `At <abs>:...`
+    # lines root-relative by stripping the run root. Everything else is verbatim.
+    var c = _console()
+    c.handle(Event.session_started("/run/root", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_x.mojo"))
+    var detail = (
+        "        Unhandled exception\n"
+        "        At /run/root/tests/test_x.mojo:12:5: AssertionError: nope\n"
+        "          extra"
     )
-    assert_true(
-        "--- COMPILE-ERROR tests/test_typo.mojo — mojo build said: ---" in out
+    c.handle(
+        Event.test_reported(
+            TestResult(
+                NodeId("tests/test_x.mojo", "test_x"), Outcome.FAIL, detail, ""
+            )
+        )
     )
-    # The passing file is never framed.
-    assert_false("--- PASS tests/test_alpha.mojo" in out)
+    c.handle(
+        Event.file_finished(
+            "tests/test_x.mojo",
+            Outcome.FAIL,
+            0.1,
+            _argv("tests/test_x.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            exit_status=1,
+            parse_disposition=ParseDisposition.PARSED,
+            failed_tests=1,
+        )
+    )
+    var out = c.output()
+    # (a) Common indentation stripped: the first detail line stands at column 0,
+    # and the relative indent under it is preserved (uniform strip, not a crush).
+    assert_true("\nUnhandled exception\n" in out)
+    assert_true("\n  extra" in out)
+    # (b) The `At` line is root-relative; the baked absolute path is gone.
+    assert_true("At tests/test_x.mojo:12:5: AssertionError: nope" in out)
+    assert_false("/run/root/tests/test_x.mojo" in out)
+    # Nothing ELSE is rewritten: the message text is byte-verbatim.
+    assert_true("AssertionError: nope" in out)
+
+
+def test_at_line_root_strip_is_anchored_not_a_blanket_replace() raises:
+    # A SECOND occurrence of the run root — inside the assertion message, on
+    # the SAME line as the backtrace pointer — must survive verbatim. Only the
+    # ONE root prefix immediately after `At ` is stripped; this is not a
+    # blanket `.replace(root + "/", "")` over the whole line.
+    var c = _console()
+    c.handle(Event.session_started("/run/root", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_x.mojo"))
+    var detail = (
+        "        At /run/root/tests/x.mojo:12:5: AssertionError: expected"
+        " /run/root/golden.txt, got /tmp/actual.txt"
+    )
+    c.handle(
+        Event.test_reported(
+            TestResult(
+                NodeId("tests/test_x.mojo", "test_x"), Outcome.FAIL, detail, ""
+            )
+        )
+    )
+    c.handle(
+        Event.file_finished(
+            "tests/test_x.mojo",
+            Outcome.FAIL,
+            0.1,
+            _argv("tests/test_x.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            exit_status=1,
+            parse_disposition=ParseDisposition.PARSED,
+            failed_tests=1,
+        )
+    )
+    var out = c.output()
+    # The backtrace pointer itself is made root-relative.
+    assert_true("At tests/x.mojo:12:5:" in out)
+    # But the SECOND occurrence — inside the assertion message — is preserved
+    # verbatim, root prefix and all.
+    assert_true("/run/root/golden.txt" in out)
+
+
+def test_captured_output_shown_once_per_file_with_scope_label() raises:
+    # Two failing tests in ONE file: the captured output is framed ONCE, under a
+    # label that says it is file-scoped and TestSuite does not attribute it per
+    # test.
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_two.mojo"))
+    c.handle(
+        Event.test_reported(
+            TestResult(
+                NodeId("tests/test_two.mojo", "test_a"), Outcome.FAIL, "a", ""
+            )
+        )
+    )
+    c.handle(
+        Event.test_reported(
+            TestResult(
+                NodeId("tests/test_two.mojo", "test_b"), Outcome.FAIL, "b", ""
+            )
+        )
+    )
+    c.handle(
+        Event.file_finished(
+            "tests/test_two.mojo",
+            Outcome.FAIL,
+            0.2,
+            _argv("tests/test_two.mojo"),
+            1.0,
+            _bytes("shared stdout\n"),
+            _bytes("shared stderr\n"),
+            exit_status=1,
+            parse_disposition=ParseDisposition.PARSED,
+            failed_tests=2,
+        )
+    )
+    var out = c.output()
+    # Two per-test sections, ONE file-scoped capture block.
+    assert_true("--- FAIL tests/test_two.mojo::test_a ---" in out)
+    assert_true("--- FAIL tests/test_two.mojo::test_b ---" in out)
+    assert_true("does not attribute output to individual tests" in out)
+    assert_equal(_count(out, "file-scoped"), 1)
+    # The captured bytes still ride verbatim, once.
+    assert_equal(_count(out, "shared stdout"), 1)
+    assert_equal(_count(out, "shared stderr"), 1)
 
 
 def test_captured_output_is_verbatim() raises:
@@ -307,6 +485,42 @@ def test_reproduce_line_includes_build_flags_shell_quoted() raises:
     )
 
 
+def test_per_test_repro_quotes_a_space_bearing_node_id() raises:
+    # A per-test repro shell-quotes the WHOLE node id, so a space-bearing path
+    # survives copy-paste as one argument.
+    var c = _console(mtest_build_flags="-I lib")
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/path with space.mojo"))
+    c.handle(
+        Event.test_reported(
+            TestResult(
+                NodeId("tests/path with space.mojo", "test_boom"),
+                Outcome.FAIL,
+                "boom",
+                "",
+            )
+        )
+    )
+    c.handle(
+        Event.file_finished(
+            "tests/path with space.mojo",
+            Outcome.FAIL,
+            0.1,
+            _argv("tests/path with space.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            exit_status=1,
+            parse_disposition=ParseDisposition.PARSED,
+            failed_tests=1,
+        )
+    )
+    var out = c.output()
+    assert_true(
+        "reproduce: mtest -I lib 'tests/path with space.mojo::test_boom'" in out
+    )
+
+
 def test_compile_error_reproduce_is_the_build_command() raises:
     var c = _console()
     _feed_mock_run(c)
@@ -314,23 +528,164 @@ def test_compile_error_reproduce_is_the_build_command() raises:
     assert_true("reproduce: mojo build tests/test_typo.mojo" in out)
 
 
-def test_summary_count_arithmetic_matches_verdict_lines() raises:
+def test_no_tests_file_reads_no_tests_never_passed() raises:
+    # A VALID file that ran zero tests is NO-TESTS, not PASS — exit-0 class but it
+    # must never read as "passed".
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_zero.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_zero.mojo",
+            Outcome.PASS,
+            0.1,
+            _argv("tests/test_zero.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.PARSED,
+            passed_tests=0,
+            failed_tests=0,
+            skipped_tests=0,
+        )
+    )
+    var out = c.output()
+    assert_true("NO-TESTS" in out)
+    assert_true("tests/test_zero.mojo" in out)
+    # The verdict token is never PASS for a zero-test file.
+    assert_false("PASS" in out)
+
+
+def test_malformed_suite_renders_token_and_diagnostic() raises:
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_silent.mojo"))
+    c.handle(
+        Event.warning(
+            "malformed-suite",
+            (
+                "the --skip-all probe did not read as a collection listing"
+                " (no report)"
+            ),
+        )
+    )
+    c.handle(
+        Event.file_finished(
+            "tests/test_silent.mojo",
+            Outcome.MALFORMED_SUITE,
+            0.1,
+            _argv("tests/test_silent.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.NO_REPORT,
+        )
+    )
+    var out = c.output()
+    assert_true("MALFORMED-SUITE" in out)
+    # The console composes a helpful diagnostic naming the failure mode.
+    assert_true("no conforming report" in out)
+
+
+def test_drift_renders_loud_banner_naming_pin_and_goldens() raises:
+    var c = _console()
+    c.handle(Event.session_started("/root", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_liar.mojo"))
+    c.handle(
+        Event.warning(
+            "drift",
+            (
+                "the --skip-all probe drifted off the pinned grammar (extra"
+                " column); check the toolchain pin and goldens/transcripts/"
+            ),
+        )
+    )
+    c.handle(
+        Event.file_finished(
+            "tests/test_liar.mojo",
+            Outcome.NOT_RUN,
+            0.1,
+            _argv("tests/test_liar.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.DRIFT,
+        )
+    )
+    var out = c.output()
+    assert_true("DRIFT" in out)
+    # Names the pinned toolchain, the golden transcripts, and the offending line.
+    assert_true("mojo 1.0.0b2" in out)
+    assert_true("goldens/transcripts/" in out)
+    assert_true("extra column" in out)
+
+
+def test_capture_overflow_names_its_cause_distinct_from_fail() raises:
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_overflow.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_overflow.mojo",
+            Outcome.FAIL,
+            0.1,
+            _argv("tests/test_overflow.mojo"),
+            1.0,
+            _bytes("flood\n"),
+            List[UInt8](),
+            exit_status=1,
+            parse_disposition=ParseDisposition.CAPTURE_OVERFLOW,
+        )
+    )
+    var out = c.output()
+    assert_true("FAIL" in out)
+    # A line names the overflow cause, distinct from a plain assertion failure.
+    assert_true("capture-overflow" in out)
+
+
+def test_summary_band_counts_tests_and_files_separately() raises:
     var c = _console()
     _feed_mock_run(c)
     var out = c.output()
-    # The five run-outcome counts equal the five non-excluded/non-not-run lines.
-    assert_true(
-        "1 passed, 1 failed, 1 crashed, 1 timed out, 1 compile error" in out
-    )
+    # pass/fail/skip are per-TEST; the file-level abnormals are separate counts.
+    assert_true("1 passed, 1 failed, 0 skipped" in out)
+    assert_true("1 crashed" in out)
+    assert_true("1 timed out" in out)
+    assert_true("1 compile error" in out)
     # Excluded and not-run ride the SAME band as SEPARATE counts.
     assert_true("(1 excluded, 2 not run)" in out)
     assert_true("in 302.4s" in out)
 
 
+def test_summary_band_omits_zero_file_abnormals() raises:
+    # A clean run has no crash/timeout/compile-error files: those counts are
+    # dropped, while the per-test pass/fail/skip counts always show.
+    var c = _console()
+    var s = Summary.zeros()
+    s.counts[Outcome.PASS.code] = 2
+    c.handle(
+        Event.session_finished(
+            s^,
+            1.0,
+            0,
+            test_counts=TestCounts(passed=5, failed=0, skipped=1, deselected=0),
+        )
+    )
+    var out = c.output()
+    assert_true("5 passed, 0 failed, 1 skipped" in out)
+    assert_false("crashed" in out)
+    assert_false("timed out" in out)
+    assert_false("compile error" in out)
+
+
 def test_deselected_shows_in_band_only_when_nonzero() raises:
     # No deselection: the band stays the plain (excluded, not run) shape.
     var plain = _console()
-    plain.handle(Event.session_finished(_mock_summary(), 302.4, 1))
+    plain.handle(
+        Event.session_finished(
+            _mock_summary(), 302.4, 1, test_counts=_mock_test_counts()
+        )
+    )
     assert_false("deselected" in plain.output())
 
     # With deselections, the band names them as a separate count.
@@ -355,6 +710,43 @@ def test_color_off_emits_no_escape_codes_but_keeps_tokens() raises:
     # Color is never the sole carrier: the tokens still convey the meaning.
     assert_true("FAIL" in out)
     assert_true("CRASH" in out)
+
+
+def test_no_tests_and_drift_tokens_survive_color_off() raises:
+    # The distinctive tokens carry meaning without color.
+    var c = _console(color=ColorWhen.NEVER)
+    c.handle(Event.session_started("/root", "mojo 1.0.0b2", 2, 0))
+    c.handle(Event.file_started("tests/test_zero.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_zero.mojo",
+            Outcome.PASS,
+            0.1,
+            _argv("tests/test_zero.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.PARSED,
+        )
+    )
+    c.handle(Event.file_started("tests/test_liar.mojo"))
+    c.handle(Event.warning("drift", "off grammar; goldens/transcripts/"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_liar.mojo",
+            Outcome.NOT_RUN,
+            0.1,
+            _argv("tests/test_liar.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.DRIFT,
+        )
+    )
+    var out = c.output()
+    assert_false("\x1b" in out)
+    assert_true("NO-TESTS" in out)
+    assert_true("DRIFT" in out)
 
 
 def test_auto_color_off_when_not_tty() raises:
@@ -394,6 +786,54 @@ def test_verbose_adds_build_command_and_timings() raises:
     _feed_mock_run(c)
     var out = c.output()
     assert_true("build: mojo build tests/test_alpha.mojo" in out)
+
+
+def test_verbose_shows_per_test_rows() raises:
+    var c = _console(verbosity=Verbosity.VERBOSE)
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_mix.mojo"))
+    c.handle(
+        Event.test_reported(
+            TestResult(NodeId("tests/test_mix.mojo", "test_p"), Outcome.PASS)
+        )
+    )
+    c.handle(
+        Event.test_reported(
+            TestResult(NodeId("tests/test_mix.mojo", "test_s"), Outcome.SKIP)
+        )
+    )
+    c.handle(
+        Event.test_reported(
+            TestResult(
+                NodeId("tests/test_mix.mojo", "test_f"),
+                Outcome.FAIL,
+                "boom",
+                "",
+            )
+        )
+    )
+    c.handle(
+        Event.file_finished(
+            "tests/test_mix.mojo",
+            Outcome.FAIL,
+            0.2,
+            _argv("tests/test_mix.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            exit_status=1,
+            parse_disposition=ParseDisposition.PARSED,
+            passed_tests=1,
+            failed_tests=1,
+            skipped_tests=1,
+        )
+    )
+    var out = c.output()
+    # One row per test, each naming its node id and its outcome token.
+    assert_true("tests/test_mix.mojo::test_p" in out)
+    assert_true("tests/test_mix.mojo::test_s" in out)
+    assert_true("tests/test_mix.mojo::test_f" in out)
+    assert_true("SKIP" in out)
 
 
 def test_show_output_none_suppresses_sections() raises:
@@ -466,17 +906,15 @@ def test_internal_error_banner_omits_errno_for_machinery_failure() raises:
     assert_false("errno" in out)
 
 
-def test_test_reported_and_collection_known_render_nothing() raises:
+def test_collection_known_renders_nothing() raises:
     var c = _console()
     c.handle(Event.session_started("tests", "mojo 1.0.0b2", 5, 1))
     var before = c.output()
-    var n = NodeId("tests/test_a.mojo", "test_foo")
-    c.handle(Event.test_reported(TestResult(n^, Outcome.FAIL)))
     c.handle(
         Event.collection_known(selected_test_total=5, deselected_test_total=1)
     )
     var after = c.output()
-    # Same precedent as FILE_STARTED: these kinds render nothing this commit.
+    # Same precedent as before: the collection line arrives later, not here.
     assert_equal(after, before)
 
 

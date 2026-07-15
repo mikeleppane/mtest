@@ -5,7 +5,12 @@ stream into an owned `String` buffer, exposed via `output()`, so unit tests can
 assert the structure directly and `main` writes that buffer to stdout (flushing
 even on an interrupt/partial-summary path).
 
-Every fact it prints comes from an event — there is no side channel. Only the
+Every fact it prints comes from an event — there is no side channel. It tells the
+per-TEST failure story: a framed section for every FAILING test carrying its
+verbatim assertion detail and a copy-pasteable repro line, the captured output
+shown ONCE per file under an explicit file-scope label, `-v` per-test rows, the
+NO-TESTS / MALFORMED-SUITE / DRIFT / capture-overflow tokens, and a summary band
+that counts TESTS for pass/fail/skip and FILES for the abnormals. Only the
 version string (a build constant) and the color/verbosity/show-output config are
 passed at construction; those are not session facts. Color is redundant: the
 verdict tokens carry the meaning, and when color is off no escape code is
@@ -19,7 +24,15 @@ from mtest.config import (
     shell_join,
     shell_quote,
 )
-from mtest.model import Event, EventKind, Outcome, Summary
+from mtest.model import (
+    Event,
+    EventKind,
+    Outcome,
+    ParseDisposition,
+    Summary,
+    TestCounts,
+    TestResult,
+)
 
 from mtest.report.reporter import Reporter
 
@@ -204,13 +217,163 @@ def _outcome_detail(e: Event) -> String:
     return String("")
 
 
+def _is_no_tests(e: Event) -> Bool:
+    """Whether a FileFinished is a NO-TESTS pass: a VALID report that ran zero
+    tests.
+
+    A parsed report with zero passed/failed/skipped rows on a PASS file is a
+    NO-TESTS result — exit-0 class, but it must never read as "passed". Pure.
+    """
+    return (
+        e.outcome == Outcome.PASS
+        and e.parse_disposition == ParseDisposition.PARSED
+        and e.passed_tests == 0
+        and e.failed_tests == 0
+        and e.skipped_tests == 0
+    )
+
+
+def _disposition_note(e: Event) -> String:
+    """A verdict-line note naming a non-plain disposition, or `""`. Pure.
+
+    A CAPTURE_OVERFLOW FAIL and a MALFORMED_SUITE each get a distinct sentence
+    naming why no report can be trusted, so neither reads as a plain assertion
+    failure.
+    """
+    if e.parse_disposition == ParseDisposition.CAPTURE_OVERFLOW:
+        return String(
+            "    capture-overflow: the captured output exceeded the capture"
+            " bound, so no report block is trustworthy (not a plain assertion"
+            " failure)"
+        )
+    if e.outcome == Outcome.MALFORMED_SUITE:
+        if e.parse_disposition == ParseDisposition.AMBIGUOUS:
+            return String(
+                "    malformed-suite: the module produced an ambiguous report"
+                " (multiple or forged report blocks) — no per-test verdict can"
+                " be trusted"
+            )
+        return String(
+            "    malformed-suite: the module ran but spoke no conforming report"
+            " block — no per-test verdict can be trusted"
+        )
+    return String("")
+
+
+def _common_indent(lines: List[String]) -> Int:
+    """The count of leading spaces shared by every non-empty line, or 0. Pure.
+
+    Empty lines are ignored; a non-empty line with no leading space forces 0.
+    """
+    var m = -1
+    for ref ln in lines:
+        if ln.byte_length() == 0:
+            continue
+        var c = 0
+        for cp in ln.codepoint_slices():
+            if String(cp) == " ":
+                c += 1
+            else:
+                break
+        if c == 0:
+            return 0
+        if m < 0 or c < m:
+            m = c
+    if m < 0:
+        return 0
+    return m
+
+
+def _strip_at_root_prefix(ln: String, root: String) -> String:
+    """Anchored form of transform (2): if `ln`, after any leading spaces, IS a
+    backtrace pointer starting with `At <root>/`, strip only that one
+    `root + "/"` occurrence immediately after `At `. Every other byte on the
+    line — including any LATER occurrence of the root path, e.g. inside an
+    assertion message — rides through untouched. A line that merely contains
+    `"At "` somewhere without being anchored there is left alone. Pure.
+    """
+    if root.byte_length() == 0:
+        return ln
+    var lead = String("")
+    for cp in ln.codepoint_slices():
+        if String(cp) == " ":
+            lead += " "
+        else:
+            break
+    var marker = lead + "At " + root + "/"
+    if not ln.startswith(marker):
+        return ln
+    return lead + "At " + String(ln.removeprefix(marker))
+
+
+def _transform_detail(detail: String, root: String) -> String:
+    """A FAIL's verbatim detail with the TWO permitted transformations only.
+
+    (1) Strip the common leading-whitespace prefix TestSuite bakes into the
+    detail block — a UNIFORM dedent that keeps the relative shape. (2) On a
+    line that IS a backtrace pointer (`At <path>:<line>:<col>: ...`, optionally
+    indented), render the compiler-baked ABSOLUTE path root-relative by
+    stripping the single run-root prefix (`root + "/"`) that immediately
+    follows `At `. NOTHING else is rewritten — in particular a later
+    occurrence of the run root elsewhere on the same line (e.g. inside the
+    assertion message) is untouched — and every other byte rides through
+    verbatim. Allocates; never raises.
+    """
+    if detail.byte_length() == 0:
+        return String("")
+    var lines = List[String]()
+    for ln in detail.split("\n"):
+        lines.append(String(ln))
+    var indent = _common_indent(lines)
+    var prefix = String("")
+    for _ in range(indent):
+        prefix += " "
+    var out = String("")
+    for i in range(len(lines)):
+        var ln = lines[i].copy()
+        if indent > 0 and ln.byte_length() >= indent:
+            ln = String(ln.removeprefix(prefix))
+        ln = _strip_at_root_prefix(ln, root)
+        if i > 0:
+            out += "\n"
+        out += ln
+    return out^
+
+
+def _extra_count(s: Summary, outcome: Outcome, label: String) -> String:
+    """`, <n> <label>` for a nonzero outcome tally, else empty. Never raises."""
+    var n = s.count_of(outcome)
+    if n == 0:
+        return String("")
+    return String(", ") + String(n) + " " + label
+
+
+def _worst_color(s: Summary, tc: TestCounts) -> StaticString:
+    """The summary-band color: red-bold if any crash-class FILE ran, else red if
+    any failing TEST or FAIL file, else green. Never raises.
+    """
+    if (
+        s.count_of(Outcome.CRASH) > 0
+        or s.count_of(Outcome.TIMEOUT) > 0
+        or s.count_of(Outcome.COMPILE_ERROR) > 0
+        or s.count_of(Outcome.COMPILE_TIMEOUT) > 0
+        or s.count_of(Outcome.MALFORMED_SUITE) > 0
+        or s.count_of(Outcome.PRECOMPILE_ERROR) > 0
+    ):
+        return _RED_BOLD
+    if s.count_of(Outcome.FAIL) > 0 or tc.failed > 0:
+        return _RED
+    return _GREEN
+
+
 struct ConsoleReporter(Reporter):
     """Renders the event stream into an owned, inspectable console buffer.
 
     Accumulates three parts as events arrive — the streamed header/verdict
     block, the framed failure sections, and the final summary band — and joins
-    them in `output()`. Copyable and Movable so it composes into a
-    `CompositeReporter`.
+    them in `output()`. Per file it accumulates the retrospective TEST_REPORTED
+    results so `FILE_FINISHED` can render per-test failure sections. Copyable and
+    Movable so it composes into a `CompositeReporter`.
     """
 
     var version: String
@@ -229,6 +392,14 @@ struct ConsoleReporter(Reporter):
     """The framed failure/crash/compile sections, in file order."""
     var _summary: String
     """The final summary band."""
+    var _run_root: String
+    """The run root from SESSION_STARTED, for root-relativizing `At` lines."""
+    var _toolchain: String
+    """The resolved toolchain label, for naming the pin in a DRIFT banner."""
+    var _file_tests: List[TestResult]
+    """The current file's TEST_REPORTED results, reset on FILE_STARTED."""
+    var _last_warning_detail: String
+    """The most recent warning's detail, for folding into a DRIFT banner."""
 
     def __init__(
         out self,
@@ -269,6 +440,10 @@ struct ConsoleReporter(Reporter):
         self._head = String("")
         self._sections = String("")
         self._summary = String("")
+        self._run_root = String("")
+        self._toolchain = String("")
+        self._file_tests = List[TestResult]()
+        self._last_warning_detail = String("")
 
     def _paint(self, code: StaticString, text: String) -> String:
         """Wrap `text` in an ANSI color unless color is off or the code is empty.
@@ -303,6 +478,10 @@ struct ConsoleReporter(Reporter):
             self._on_warning(e)
         elif k == EventKind.PRECOMPILE_FAILED:
             self._on_precompile_failed(e)
+        elif k == EventKind.FILE_STARTED:
+            # A new file's per-test accumulation begins; drop any stale state.
+            self._file_tests = List[TestResult]()
+            self._last_warning_detail = String("")
         elif k == EventKind.FILE_FINISHED:
             self._on_file_finished(e)
         elif k == EventKind.INTERNAL_ERROR:
@@ -310,12 +489,17 @@ struct ConsoleReporter(Reporter):
         elif k == EventKind.SESSION_FINISHED:
             self._on_session_finished(e)
         elif k == EventKind.TEST_REPORTED:
-            pass
+            # Accumulate the retrospective per-test result; FILE_FINISHED renders
+            # the per-test story from it. Emits nothing on its own.
+            self._file_tests.append(e.test.copy())
         elif k == EventKind.COLLECTION_KNOWN:
+            # The collection line arrives in a later surface; nothing here yet.
             pass
-        # FILE_STARTED, TEST_REPORTED, and COLLECTION_KNOWN carry nothing the
-        # console renders on its own yet: per-test storytelling and the
-        # collection line arrive later.
+
+    def _reset_file(mut self):
+        """Clear the per-file accumulation after a file is fully rendered."""
+        self._file_tests = List[TestResult]()
+        self._last_warning_detail = String("")
 
     def _on_internal_error(mut self, e: Event):
         """Render a loud red-bold banner naming the step, program, and errno.
@@ -340,7 +524,13 @@ struct ConsoleReporter(Reporter):
         self._head += self._paint(_RED_BOLD, banner) + "\n"
 
     def _on_session_started(mut self, e: Event):
-        """Render the header: version + toolchain, then root and file counts."""
+        """Render the header: version + toolchain, then root and file counts.
+
+        Also latches the run root and toolchain (needed even under quiet, for
+        root-relativizing `At` lines and naming the pin in a DRIFT banner).
+        """
+        self._run_root = e.root.copy()
+        self._toolchain = e.toolchain.copy()
         if self.verbosity == Verbosity.QUIET:
             return
         self._head += (
@@ -358,6 +548,9 @@ struct ConsoleReporter(Reporter):
 
     def _on_warning(mut self, e: Event):
         """Render a loud, yellow warning line, composing the sentence per kind.
+
+        Latches the detail so a DRIFT file's banner can fold in the offending
+        line the session emitted just before its FileFinished.
         """
         var sentence: String
         if e.warning_kind == "stale-exclusion":
@@ -368,6 +561,7 @@ struct ConsoleReporter(Reporter):
             )
         else:
             sentence = e.warning_pattern.copy()
+        self._last_warning_detail = e.warning_pattern.copy()
         var line = String("WARNING  ") + e.warning_kind + ": " + sentence
         self._head += self._paint(_YELLOW, line) + "\n"
 
@@ -386,22 +580,36 @@ struct ConsoleReporter(Reporter):
         self._head += "\n"
 
     def _on_file_finished(mut self, e: Event):
-        """Render an excluded line, a verdict line, and any framed section."""
+        """Render an excluded line, a verdict line, per-test sections, or a banner.
+        """
         if e.outcome == Outcome.EXCLUDED:
             var line = _col("EXCLUDED", _TOKEN_W) + _col(e.path, _PATH_W)
             line += "(" + e.exclusion_pattern + ")"
             self._head += self._paint(_YELLOW, line) + "\n"
+            self._reset_file()
+            return
+        if e.parse_disposition == ParseDisposition.DRIFT:
+            # The sanctioned exit-3 path: an off-grammar report from the pinned
+            # toolchain. Its file outcome is NOT_RUN, so render the loud banner
+            # here before the generic not-run drop below.
+            self._render_drift(e)
+            self._reset_file()
             return
         if e.outcome == Outcome.NOT_RUN:
             # Not-run is a summary count only; no per-file line. Be robust and
             # simply drop a stray not-run FileFinished rather than crash.
+            self._reset_file()
             return
 
-        # In quiet mode only non-PASS verdict lines are shown.
+        var no_tests = _is_no_tests(e)
+        # In quiet mode only non-PASS verdict lines are shown (NO-TESTS is
+        # exit-0 class, so it is suppressed alongside PASS).
         if not (
             self.verbosity == Verbosity.QUIET and e.outcome == Outcome.PASS
         ):
-            var token = _verdict_token(e.outcome)
+            var token = String("NO-TESTS") if no_tests else _verdict_token(
+                e.outcome
+            )
             var line = _col(token, _TOKEN_W) + _col(e.path, _PATH_W)
             line += _fmt_fixed(e.duration_seconds, 2) + "s"
             var detail = _outcome_detail(e)
@@ -409,7 +617,11 @@ struct ConsoleReporter(Reporter):
                 e.outcome == Outcome.CRASH or e.outcome == Outcome.TIMEOUT
             ) and detail.byte_length() > 0:
                 line += "  (" + detail + ")"
-            self._head += self._paint(_color_for(e.outcome), line) + "\n"
+            var color = _YELLOW if no_tests else _color_for(e.outcome)
+            self._head += self._paint(color, line) + "\n"
+            var note = _disposition_note(e)
+            if note.byte_length() > 0:
+                self._head += self._paint(_YELLOW, note) + "\n"
             if self.verbosity == Verbosity.VERBOSE:
                 self._head += (
                     String("    build: ")
@@ -418,9 +630,38 @@ struct ConsoleReporter(Reporter):
                     + _fmt_fixed(e.build_duration_seconds, 2)
                     + "s)\n"
                 )
+                for ref t in self._file_tests:
+                    self._head += self._render_test_row(t)
 
         if self._should_show_section(e.outcome):
             self._sections += self._render_section(e)
+        self._reset_file()
+
+    def _render_test_row(self, t: TestResult) -> String:
+        """One `-v` per-test row: outcome token, node id, and raw timing."""
+        var out = String("    ") + _verdict_token(t.outcome) + " "
+        out += t.node.render()
+        if t.timing.byte_length() > 0:
+            out += "  [" + t.timing + "]"
+        return out + "\n"
+
+    def _render_drift(mut self, e: Event):
+        """A loud DRIFT banner: name the pin, the goldens, and the offending line.
+        """
+        var banner = (
+            String("DRIFT  ")
+            + e.path
+            + " — the pinned toolchain "
+            + self._toolchain
+            + " emitted an off-grammar report."
+        )
+        self._head += self._paint(_RED_BOLD, banner) + "\n"
+        if self._last_warning_detail.byte_length() > 0:
+            self._head += "    " + self._last_warning_detail + "\n"
+        self._head += (
+            "    Check both the toolchain pin and goldens/transcripts/, and"
+            " this file's own captured output.\n"
+        )
 
     def _should_show_section(self, outcome: Outcome) -> Bool:
         """Whether a framed section is shown for this outcome under the config.
@@ -431,8 +672,16 @@ struct ConsoleReporter(Reporter):
             return True
         return outcome.is_failing()
 
+    def _repro_line(self, target: String) -> String:
+        """A `reproduce: mtest [<flags>] <target>` line, shell-quoted. Pure."""
+        var repro = String("reproduce: mtest ")
+        if self.mtest_build_flags.byte_length() > 0:
+            repro += self.mtest_build_flags + " "
+        repro += shell_quote(target)
+        return repro
+
     def _render_section(self, e: Event) -> String:
-        """A framed section with the captured output verbatim and a reproduce line.
+        """The file's framed sections: per-test failures then the file-scope block.
         """
         if e.outcome == Outcome.COMPILE_ERROR:
             var out = (
@@ -444,47 +693,86 @@ struct ConsoleReporter(Reporter):
             out += "reproduce: " + shell_join(e.build_argv) + "\n\n"
             return out
 
-        var token = _verdict_token(e.outcome)
+        var out = String("")
+        var has_pertest = False
+        for ref t in self._file_tests:
+            if t.outcome == Outcome.FAIL:
+                has_pertest = True
+                out += self._render_test_failure(t)
+        out += self._render_file_scope(e, has_pertest)
+        return out
+
+    def _render_test_failure(self, t: TestResult) -> String:
+        """A framed per-test failure: node id header, verbatim detail, repro line.
+
+        The detail carries the two permitted transformations only (a uniform
+        dedent and a root-relative `At` line); the untransformed bytes remain in
+        the file-scope captured-output block below.
+        """
+        var node = t.node.render()
+        var out = String("--- FAIL ") + node + " ---\n"
+        var d = _transform_detail(t.detail, self._run_root)
+        if d.byte_length() > 0:
+            out += _ensure_trailing_newline(d)
+        out += self._repro_line(node) + "\n\n"
+        return out
+
+    def _render_file_scope(self, e: Event, has_pertest: Bool) -> String:
+        """The once-per-file captured-output block under an explicit scope label.
+
+        TestSuite does not attribute captured output per test, so the block is
+        labelled file-scoped and says so on screen. A file-level repro rides here
+        only when no per-test section already carried one.
+        """
+        var token = String("NO-TESTS") if _is_no_tests(e) else _verdict_token(
+            e.outcome
+        )
         var header = String("--- ") + token + " " + e.path
         var detail = _outcome_detail(e)
         if detail.byte_length() > 0:
             header += " (" + detail + ")"
-        header += " — captured stdout ---\n"
+        header += (
+            " — captured output (file-scoped; TestSuite does not attribute"
+            " output to individual tests) ---\n"
+        )
         var out = header
         out += _ensure_trailing_newline(lossy_utf8(e.captured_stdout))
         out += "--- captured stderr ---\n"
         out += _ensure_trailing_newline(lossy_utf8(e.captured_stderr))
-        var repro = String("reproduce: mtest ")
-        if self.mtest_build_flags.byte_length() > 0:
-            repro += self.mtest_build_flags + " "
-        repro += shell_quote(e.path)
-        out += repro + "\n\n"
+        if not has_pertest:
+            out += self._repro_line(e.path) + "\n"
+        out += "\n"
         return out
 
     def _on_session_finished(mut self, e: Event):
-        """Render the summary band, colored by the worst outcome present."""
+        """Render the summary band, colored by the worst outcome present.
+
+        Arithmetic: `passed`/`failed`/`skipped` are per-TEST totals (the tests
+        that actually ran); the file-level abnormals (crashed/timed-out/compile-
+        error/malformed-suite and their kin) are per-FILE counts appended only
+        when nonzero — they account for files that produced no per-test
+        attribution. `excluded`/`not run`/`deselected` are separate counts in the
+        parenthetical. So: passed+failed+skipped = tests run, and the file
+        abnormals + excluded + not-run cover every file with no test rows.
+        """
         var s = e.summary.copy()
+        var tc = e.test_counts
         var body = (
-            String(s.count_of(Outcome.PASS))
+            String(tc.passed)
             + " passed, "
-            + String(s.count_of(Outcome.FAIL))
+            + String(tc.failed)
             + " failed, "
-            + String(s.count_of(Outcome.CRASH))
-            + " crashed, "
-            + String(s.count_of(Outcome.TIMEOUT))
-            + " timed out, "
-            + String(s.count_of(Outcome.COMPILE_ERROR))
-            + " compile error"
+            + String(tc.skipped)
+            + " skipped"
         )
-        body += _extra_count(s, Outcome.SKIP, "skipped")
-        body += _extra_count(s, Outcome.COMPILE_TIMEOUT, "compile timeout")
+        body += _extra_count(s, Outcome.CRASH, "crashed")
+        body += _extra_count(s, Outcome.TIMEOUT, "timed out")
+        body += _extra_count(s, Outcome.COMPILE_ERROR, "compile error")
         body += _extra_count(s, Outcome.MALFORMED_SUITE, "malformed suite")
+        body += _extra_count(s, Outcome.COMPILE_TIMEOUT, "compile timeout")
         body += _extra_count(s, Outcome.PRECOMPILE_ERROR, "precompile error")
         body += _extra_count(s, Outcome.FLAKY, "flaky")
 
-        # DESELECTED is a per-TEST count (from the authoritative test totals),
-        # not a per-file Summary tally, and is shown only when a selection
-        # actually deselected something so a plain run's band is unchanged.
         var parenthetical = (
             String("(")
             + String(s.count_of(Outcome.EXCLUDED))
@@ -492,10 +780,8 @@ struct ConsoleReporter(Reporter):
             + String(s.count_of(Outcome.NOT_RUN))
             + " not run"
         )
-        if e.test_counts.deselected > 0:
-            parenthetical += (
-                ", " + String(e.test_counts.deselected) + " deselected"
-            )
+        if tc.deselected > 0:
+            parenthetical += ", " + String(tc.deselected) + " deselected"
         parenthetical += ")"
 
         var band = (
@@ -507,30 +793,4 @@ struct ConsoleReporter(Reporter):
             + _fmt_fixed(e.wall_time_seconds, 1)
             + "s ====="
         )
-        self._summary = "\n" + self._paint(_worst_color(s), band) + "\n"
-
-
-def _extra_count(s: Summary, outcome: Outcome, label: String) -> String:
-    """`, <n> <label>` for a nonzero outcome tally, else empty. Never raises."""
-    var n = s.count_of(outcome)
-    if n == 0:
-        return String("")
-    return String(", ") + String(n) + " " + label
-
-
-def _worst_color(s: Summary) -> StaticString:
-    """The summary-band color: red-bold if any crash-class outcome ran, else red
-    if any failure, else green. Never raises.
-    """
-    if (
-        s.count_of(Outcome.CRASH) > 0
-        or s.count_of(Outcome.TIMEOUT) > 0
-        or s.count_of(Outcome.COMPILE_ERROR) > 0
-        or s.count_of(Outcome.COMPILE_TIMEOUT) > 0
-        or s.count_of(Outcome.MALFORMED_SUITE) > 0
-        or s.count_of(Outcome.PRECOMPILE_ERROR) > 0
-    ):
-        return _RED_BOLD
-    if s.count_of(Outcome.FAIL) > 0:
-        return _RED
-    return _GREEN
+        self._summary = "\n" + self._paint(_worst_color(s, tc), band) + "\n"

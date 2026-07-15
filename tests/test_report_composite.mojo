@@ -9,7 +9,7 @@ their own independent state — the runtime proof the seam works at N=2.
 from std.testing import assert_equal, assert_true, TestSuite
 
 from mtest.config import ColorWhen, Verbosity, ShowOutput
-from mtest.model import EventKind, Summary, Event, Outcome
+from mtest.model import EventKind, Summary, Event, Outcome, TestCounts
 from mtest.report import RecordingReporter, ConsoleReporter, CompositeReporter
 
 
@@ -32,7 +32,12 @@ def _one_of_every_kind() -> List[Event]:
             List[UInt8](),
             List[UInt8](),
         ),
-        Event.session_finished(s^, 302.4, 0),
+        Event.session_finished(
+            s^,
+            302.4,
+            0,
+            test_counts=TestCounts(passed=1, failed=0, skipped=0, deselected=0),
+        ),
     ]
 
 

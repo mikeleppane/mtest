@@ -52,11 +52,21 @@ MANIFEST_PATH = os.path.join(REPO_ROOT, "testdata", "manifest.json")
 DEFAULT_TIMEOUT = 180.0
 SHORT_TIMEOUT = 30.0
 
+# The summary band counts TESTS for pass/fail/skip and FILES for the abnormals.
+# pass/fail/skip always appear; each file-level abnormal appears only when
+# nonzero, so every abnormal segment (and the trailing deselected count) is
+# optional. Named groups keep call sites robust to the optional segments.
 SUMMARY_RE = re.compile(
-    r"=====\s+(\d+) passed,\s+(\d+) failed,\s+(\d+) crashed,\s+"
-    r"(\d+) timed out,\s+(\d+) compile error[^(]*"
-    r"\((\d+) excluded,\s+(\d+) not run(?:,\s+(\d+) deselected)?\)"
-    r"\s+in\s+([\d.]+)s\s+====="
+    r"=====\s+(?P<passed>\d+) passed,\s+(?P<failed>\d+) failed,\s+"
+    r"(?P<skipped>\d+) skipped"
+    r"(?:,\s+(?P<crashed>\d+) crashed)?"
+    r"(?:,\s+(?P<timed_out>\d+) timed out)?"
+    r"(?:,\s+(?P<compile_error>\d+) compile error)?"
+    r"(?:,\s+(?P<malformed>\d+) malformed suite)?"
+    r"[^(]*"
+    r"\((?P<excluded>\d+) excluded,\s+(?P<not_run>\d+) not run"
+    r"(?:,\s+(?P<deselected>\d+) deselected)?\)"
+    r"\s+in\s+(?P<seconds>[\d.]+)s\s+====="
 )
 HEADER_RE = re.compile(r"root:\s+.*?selected:\s+(\d+) files\s+excluded:\s+(\d+)")
 
@@ -68,12 +78,14 @@ VERDICT_TO_BUCKET = {
     "COMPILE-ERROR": "compile_error",
 }
 
-# A run/failing-outcome verdict line starts at column 0 with one of these
-# tokens, then the root-relative path (never contains whitespace in this tree).
-# Used to check contract §17's determinism promise: the console summary is
-# ordered lexicographically by path, independent of finish order.
+# A per-file verdict line starts at column 0 with one of these tokens, then the
+# root-relative path (never contains whitespace in this tree). NO-TESTS is a
+# valid zero-test pass line and must be counted for the ordering check. Used to
+# check contract §17's determinism promise: the console summary is ordered
+# lexicographically by path, independent of finish order.
+VERDICT_LINE_TOKENS = list(VERDICT_TO_BUCKET) + ["NO-TESTS"]
 VERDICT_LINE_RE = re.compile(
-    r"^(?:" + "|".join(re.escape(t) for t in VERDICT_TO_BUCKET) + r")\s+(\S+)",
+    r"^(?:" + "|".join(re.escape(t) for t in VERDICT_LINE_TOKENS) + r")\s+(\S+)",
     re.MULTILINE,
 )
 
@@ -85,25 +97,20 @@ def verdict_paths_in_order(run: Run) -> list[str]:
 
 @dataclass
 class Summary:
+    # passed/failed/skipped are per-TEST totals; crashed/timed_out/compile_error/
+    # malformed are per-FILE abnormal counts (omitted from the band when zero, so
+    # they parse as 0 here). excluded/not_run/deselected are separate counts.
     passed: int
     failed: int
+    skipped: int
     crashed: int
     timed_out: int
     compile_error: int
+    malformed: int
     excluded: int
     not_run: int
     seconds: float
     deselected: int = 0
-
-    @property
-    def run_outcomes(self) -> int:
-        return (
-            self.passed
-            + self.failed
-            + self.crashed
-            + self.timed_out
-            + self.compile_error
-        )
 
 
 class ScenarioError(AssertionError):
@@ -132,17 +139,23 @@ class Run:
             raise ScenarioError(
                 f"no summary band in output for {self.argv}\n{self.combined}"
             )
-        g = m.groups()
+        g = m.groupdict()
+
+        def num(key: str) -> int:
+            return int(g[key]) if g.get(key) is not None else 0
+
         return Summary(
-            passed=int(g[0]),
-            failed=int(g[1]),
-            crashed=int(g[2]),
-            timed_out=int(g[3]),
-            compile_error=int(g[4]),
-            excluded=int(g[5]),
-            not_run=int(g[6]),
-            deselected=int(g[7]) if g[7] is not None else 0,
-            seconds=float(g[8]),
+            passed=num("passed"),
+            failed=num("failed"),
+            skipped=num("skipped"),
+            crashed=num("crashed"),
+            timed_out=num("timed_out"),
+            compile_error=num("compile_error"),
+            malformed=num("malformed"),
+            excluded=num("excluded"),
+            not_run=num("not_run"),
+            deselected=num("deselected"),
+            seconds=float(g["seconds"]),
         )
 
     def header(self) -> tuple[int, int]:
@@ -316,15 +329,15 @@ def expect_exit(run: Run, code: int) -> None:
 
 
 def expect_accounting(run: Run) -> Summary:
-    """The counting invariant that must hold on every run that reaches a summary:
-    run outcomes + not-run == header-selected, and the two excluded counts agree."""
+    """The file-count invariant that still holds now that pass/fail/skip count
+    TESTS, not files: the summary and the header agree on the excluded FILE count.
+
+    (The old run-outcomes+not-run==selected file-count identity no longer holds —
+    passed/failed are per-test — and the cross-cutting test-count arithmetic is
+    asserted in a later task; here we keep the band parseable and the excluded
+    counts reconciled.)"""
     summ = run.summary()
-    selected, hdr_excluded = run.header()
-    expect(
-        summ.run_outcomes + summ.not_run == selected,
-        f"accounting broken: run_outcomes({summ.run_outcomes}) + "
-        f"not_run({summ.not_run}) != selected({selected}) for {run.argv}",
-    )
+    _selected, hdr_excluded = run.header()
     expect(
         summ.excluded == hdr_excluded,
         f"excluded mismatch: summary {summ.excluded} vs header {hdr_excluded} "
@@ -425,7 +438,8 @@ def s_default_suite(manifest: dict) -> str:
     crash_lines: dict[str, str] = {}
     compile_error_files: list[str] = []
     for rel, row in suite.items():
-        token = row["verdict"]
+        # A zero-test file renders NO-TESTS, not the manifest's PASS verdict.
+        token = "NO-TESTS" if row.get("zero_tests") else row["verdict"]
         line = run.verdict_line(token, rel)
         expect(line is not None, f"missing verdict line {token} for {rel}")
         if token == "CRASH":
@@ -478,25 +492,52 @@ def s_default_suite(manifest: dict) -> str:
     zero = [r for r, row in suite.items() if row.get("zero_tests")]
     expect(len(zero) == 1, "expected exactly one zero-test file")
     expect(
-        run.verdict_line("PASS", zero[0]) is not None,
-        "zero-test file did not show a (NO-TESTS) PASS",
+        run.verdict_line("NO-TESTS", zero[0]) is not None,
+        "zero-test file did not show a NO-TESTS verdict (never a plain PASS)",
     )
     # helper.mojo (non-discovered) must never appear.
     for rel in manifest.get("non_discovered", {}):
         expect(rel not in run.stdout, f"non-discovered file {rel} appeared in output")
 
-    # Summary counts equal what the manifest predicts for the suite.
-    want = {"passed": 0, "failed": 0, "crashed": 0, "timed_out": 0, "compile_error": 0}
+    # Summary arithmetic under the TEST-count band: crashed/timed-out/compile-
+    # error are per-FILE abnormal counts (from the verdict buckets), while
+    # passed/failed count TESTS.
+    file_abnormals = {"crashed": 0, "timed_out": 0, "compile_error": 0}
     for row in suite.values():
-        want[VERDICT_TO_BUCKET[row["verdict"]]] += 1
-    got = {
-        "passed": summ.passed,
-        "failed": summ.failed,
-        "crashed": summ.crashed,
-        "timed_out": summ.timed_out,
-        "compile_error": summ.compile_error,
-    }
-    expect(got == want, f"suite summary counts {got} != manifest {want}")
+        bucket = VERDICT_TO_BUCKET[row["verdict"]]
+        if bucket in file_abnormals:
+            file_abnormals[bucket] += 1
+    expect(
+        summ.crashed == file_abnormals["crashed"],
+        f"crashed FILES: band {summ.crashed} != manifest {file_abnormals['crashed']}",
+    )
+    expect(
+        summ.timed_out == file_abnormals["timed_out"],
+        f"timed-out FILES: band {summ.timed_out} != manifest {file_abnormals['timed_out']}",
+    )
+    expect(
+        summ.compile_error == file_abnormals["compile_error"],
+        f"compile-error FILES: band {summ.compile_error} != manifest "
+        f"{file_abnormals['compile_error']}",
+    )
+    # pass/fail are per-TEST. The manifest carries per_test rows only for files
+    # that parse a report (crash/compile-error files and the report-less PASS
+    # fixtures have none), so failed is exact — only the failing test file
+    # contributes — while passed is a lower bound.
+    want_failed = sum(
+        r["per_test"]["failed"] for r in suite.values() if "per_test" in r
+    )
+    want_passed = sum(
+        r["per_test"]["passed"] for r in suite.values() if "per_test" in r
+    )
+    expect(
+        summ.failed == want_failed,
+        f"failed TESTS: band {summ.failed} != manifest per-test {want_failed}",
+    )
+    expect(
+        summ.passed >= want_passed,
+        f"passed TESTS: band {summ.passed} < manifest lower bound {want_passed}",
+    )
     expect(summ.excluded == 0 and summ.not_run == 0, "unexpected excluded/not-run")
 
     # Contract §17 (Determinism): the console summary is ordered lexicographically
@@ -1226,7 +1267,7 @@ def s_interrupt(manifest: dict) -> str:
     combined = out + "\n" + err
     m = SUMMARY_RE.search(combined)
     expect(m is not None, f"no partial summary after interrupt:\n{combined}")
-    not_run = int(m.group(7))
+    not_run = int(m.group("not_run"))
     expect(not_run >= 1, f"interrupt summary showed no NOT-RUN accounting (not_run={not_run})")
 
     # The process group must be gone — no orphaned children.
