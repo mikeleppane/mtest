@@ -16,6 +16,8 @@ import subprocess
 import sys
 import tempfile
 
+from transcript_compare import compare_directories
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 UNIT_SUITES = {
@@ -259,11 +261,51 @@ def check_exec_fixture_layout() -> None:
         raise AssertionError("obsolete scripts/exec_targets directory still exists")
 
 
+def check_transcript_comparator() -> None:
+    """The real snapshot comparator accepts only an explicit path relocation."""
+    with tempfile.TemporaryDirectory(prefix="mtest-transcript-compare-") as raw_tmp:
+        tmp = Path(raw_tmp)
+        before = tmp / "before"
+        after = tmp / "after"
+        before.mkdir()
+        after.mkdir()
+        old = b"<REPO>/fixtures/"
+        new = b"<REPO>/tests/fixtures/protocol/"
+        (before / "case.txt").write_bytes(b"source: " + old + b"passing.mojo\nPASS\n")
+        (before / "MANIFEST.txt").write_bytes(b"case.txt\n")
+        (after / "case.txt").write_bytes(b"source: " + new + b"passing.mojo\nPASS\n")
+        (after / "MANIFEST.txt").write_bytes(b"case.txt\n")
+
+        relocated = compare_directories(before, after, replacement=(old, new))
+        if not relocated.ok or relocated.changed_files != ("case.txt",):
+            raise AssertionError(
+                "snapshot comparator rejected a path-only relocation: "
+                f"{relocated.errors}"
+            )
+
+        (after / "case.txt").write_bytes(
+            b"source: " + new + b"passing.mojo\nFAIL\n"
+        )
+        mutated = compare_directories(before, after, replacement=(old, new))
+        if mutated.ok:
+            raise AssertionError("snapshot comparator accepted a non-path mutation")
+
+        (after / "case.txt").write_bytes((before / "case.txt").read_bytes())
+        exact = compare_directories(before, after)
+        if not exact.ok:
+            raise AssertionError(f"exact snapshot comparator rejected equality: {exact.errors}")
+        (after / "extra.txt").write_bytes(b"unexpected\n")
+        extra = compare_directories(before, after)
+        if extra.ok:
+            raise AssertionError("snapshot comparator accepted an extra file")
+
+
 def main() -> int:
     try:
         check_recursive_direct_runner()
         check_suite_layout()
         check_exec_fixture_layout()
+        check_transcript_comparator()
     except (AssertionError, OSError, subprocess.SubprocessError) as exc:
         print(f"harness-check: FAIL: {exc}", file=sys.stderr)
         return 1

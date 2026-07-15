@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 python scripts/gen_transcripts.py --out "$TMP" >/dev/null
 
-if ! diff -ru goldens/transcripts "$TMP"; then
+if ! python scripts/transcript_compare.py goldens/transcripts "$TMP"; then
     echo "" >&2
     echo "transcripts-check: committed transcripts differ from a fresh" >&2
     echo "  regeneration. A repo change must not move these bytes. If the" >&2
