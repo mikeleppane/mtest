@@ -163,13 +163,16 @@ def test_fd_summary_lookalike_valid() raises:
     assert_true(parse_report(_at_fd(N_SUMMARY), SP).verdict == V.VALID)
 
 
-def test_fd_header_lookalike_off_grammar() raises:
-    # An identical header inserted INSIDE a FAIL's detail. The anchor is the LAST
-    # matching header before the rule, so it takes the in-detail header; only the
-    # rows after it remain, fewer than the header declared -> OFF_GRAMMAR. This is
-    # near-impossible in real output (it needs an assertion message carrying the
-    # file's exact canonical path in header form) and is intentionally OFF_GRAMMAR.
-    assert_true(parse_report(_at_fd(N_HEADER), SP).verdict == V.OFF_GRAMMAR)
+def test_fd_header_lookalike_valid() raises:
+    # An identical header inserted INSIDE a FAIL's detail (a test asserting about
+    # the file's own canonical path could print it byte-for-byte). Anchoring
+    # blindly on the LAST matching header before the rule would hijack the anchor
+    # onto this in-detail header and underflow the declared count, misreading
+    # conforming CONTENT as toolchain drift (OFF_GRAMMAR -> exit 3). The anchor is
+    # chosen by reconciliation instead: the in-detail header's block does not
+    # reconcile, so the real header — whose block does — wins, and the planted
+    # line rides through as verbatim FAIL detail. VALID.
+    assert_true(parse_report(_at_fd(N_HEADER), SP).verdict == V.VALID)
 
 
 # ---- [RS] between the rule and the Summary ----

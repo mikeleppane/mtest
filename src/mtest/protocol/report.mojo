@@ -272,16 +272,22 @@ def _parse_summary(line: String) -> _SummaryParse:
     var p0 = String(parts[0])
     var p1 = String(parts[1])
     var p2 = String(parts[2])
-    if not p0.endswith(" passed"):
-        return miss
-    if not p1.endswith(" failed"):
-        return miss
-    if not p2.endswith(" skipped "):
-        return miss
     var pv = _parse_nonneg_int(String(p0.split(" ")[0]))
     var fv = _parse_nonneg_int(String(p1.split(" ")[0]))
     var sv = _parse_nonneg_int(String(p2.split(" ")[0]))
     if pv < 0 or fv < 0 or sv < 0:
+        return miss
+    # Each field must be EXACTLY `<canonical digits> <label>` — nothing between
+    # the count and the label. A suffix-only `endswith(" passed")` check would
+    # accept a forged `1 forged passed` (extra token) or a padded `01 passed`
+    # and let the whole report reconcile to a false GREEN; matching the exact
+    # rendered form rejects both. The `skipped` field carries the load-bearing
+    # trailing space the toolchain emits.
+    if p0 != String(pv) + " passed":
+        return miss
+    if p1 != String(fv) + " failed":
+        return miss
+    if p2 != String(sv) + " skipped ":
         return miss
     return _SummaryParse(True, total, pv, fv, sv)
 
@@ -343,84 +349,25 @@ def _parse_trailer(line: String) -> _TrailerParse:
     return _TrailerParse(False, "")
 
 
-def parse_report(stdout_text: String, source_path: String) -> ParsedReport:
-    """Classify one child's decoded stdout against `source_path`'s report grammar.
+def _parse_block(
+    lines: List[String],
+    anchor: Int,
+    declared: Int,
+    rule_i: Int,
+    summ: _SummaryParse,
+    summary_i: Int,
+    n: Int,
+    source_path: String,
+) -> ParsedReport:
+    """Parse and reconcile the block framed by `anchor` .. `rule_i`. Pure.
 
-    Pure and total: every input maps to exactly one `ParsedReport`, performs no
-    I/O, and never raises. See the module docstring for the grammar and the
-    full classification precedence.
-
-    Args:
-        stdout_text: The child's stdout, already lossy-decoded to a String by
-            the caller. Not mutated.
-        source_path: The canonical source path the header must byte-equal for a
-            block to be this file's report. Not mutated.
-
-    Returns:
-        The verdict plus, for VALID, the parsed rows and reconciled counts.
-        Allocates the rows list. Never raises.
+    Reads the rows strictly between the candidate header at `anchor` and the
+    terminal rule at `rule_i`, then reconciles them against the terminal
+    `summ`/trailer. Returns VALID iff that block fully reconciles (rows match the
+    declared count and the summary tallies, every name is valid and unique, and
+    the trailer agrees with the failure count); otherwise the specific
+    OFF_GRAMMAR/AMBIGUOUS verdict the break warrants. Never raises.
     """
-    var lines = _split_lines(stdout_text)
-    var n = len(lines)
-
-    # 1. Identity: collect every header whose path byte-equals source_path.
-    var header_idx = List[Int]()
-    var header_n = List[Int]()
-    for i in range(n):
-        var hn = _header_n(lines[i], source_path)
-        if hn >= 0:
-            header_idx.append(i)
-            header_n.append(hn)
-    if len(header_idx) == 0:
-        return ParsedReport.absent()
-
-    # 2. Terminal framing, scanned from the END.
-    var summary_i = -1
-    for i in range(n - 1, -1, -1):
-        if _parse_summary(lines[i]).ok:
-            summary_i = i
-            break
-    if summary_i < 0:
-        return ParsedReport.off_grammar(
-            "matching header without terminal framing"
-        )
-    if summary_i == 0 or lines[summary_i - 1] != "--------":
-        return ParsedReport.off_grammar("missing rule before summary")
-    var rule_i = summary_i - 1
-    var summ = _parse_summary(lines[summary_i])
-
-    # 3. Reject two or more complete matching-path blocks (a forgery).
-    var complete_blocks = 0
-    for k in range(len(header_idx)):
-        var start = header_idx[k]
-        var stop = n
-        if k + 1 < len(header_idx):
-            stop = header_idx[k + 1]
-        for j in range(start + 1, stop - 1):
-            if lines[j] == "--------" and _parse_summary(lines[j + 1]).ok:
-                complete_blocks += 1
-                break
-    if complete_blocks >= 2:
-        return ParsedReport.ambiguous("multiple complete report blocks")
-
-    # The anchor is the LAST matching header before the terminal rule; a test's
-    # own stdout precedes the buffered report, so an earlier matching header is
-    # user output to ignore. Anchoring on the last (not the first) means a
-    # header-lookalike a test PRINTS before its real report is skipped over and
-    # the genuine report reconciles. A genuine report has exactly one header, so
-    # the choice is invisible for well-formed input; it only decides which header
-    # a printed duplicate defers to.
-    var anchor = -1
-    var declared = 0
-    for k in range(len(header_idx)):
-        if header_idx[k] < rule_i:
-            anchor = header_idx[k]
-            declared = header_n[k]
-    if anchor < 0:
-        return ParsedReport.off_grammar(
-            "matching header without terminal framing"
-        )
-
     # 4. Rows region: strictly between the anchor header and the terminal rule.
     var rows = List[ParsedRow]()
     # Whether a detail line has been appended to the current (last) FAIL row.
@@ -491,3 +438,114 @@ def parse_report(stdout_text: String, source_path: String) -> ParsedReport:
     return ParsedReport.valid(
         rows^, declared, summ.passed, summ.failed, summ.skipped, has_trailer
     )
+
+
+def parse_report(stdout_text: String, source_path: String) -> ParsedReport:
+    """Classify one child's decoded stdout against `source_path`'s report grammar.
+
+    Pure and total: every input maps to exactly one `ParsedReport`, performs no
+    I/O, and never raises. See the module docstring for the grammar and the
+    full classification precedence.
+
+    Args:
+        stdout_text: The child's stdout, already lossy-decoded to a String by
+            the caller. Not mutated.
+        source_path: The canonical source path the header must byte-equal for a
+            block to be this file's report. Not mutated.
+
+    Returns:
+        The verdict plus, for VALID, the parsed rows and reconciled counts.
+        Allocates the rows list. Never raises.
+    """
+    var lines = _split_lines(stdout_text)
+    var n = len(lines)
+
+    # 1. Identity: collect every header whose path byte-equals source_path.
+    var header_idx = List[Int]()
+    var header_n = List[Int]()
+    for i in range(n):
+        var hn = _header_n(lines[i], source_path)
+        if hn >= 0:
+            header_idx.append(i)
+            header_n.append(hn)
+    if len(header_idx) == 0:
+        return ParsedReport.absent()
+
+    # 2. Terminal framing, scanned from the END.
+    var summary_i = -1
+    for i in range(n - 1, -1, -1):
+        if _parse_summary(lines[i]).ok:
+            summary_i = i
+            break
+    if summary_i < 0:
+        return ParsedReport.off_grammar(
+            "matching header without terminal framing"
+        )
+    if summary_i == 0 or lines[summary_i - 1] != "--------":
+        return ParsedReport.off_grammar("missing rule before summary")
+    var rule_i = summary_i - 1
+    var summ = _parse_summary(lines[summary_i])
+
+    # 3. Reject two or more complete matching-path blocks (a forgery).
+    var complete_blocks = 0
+    for k in range(len(header_idx)):
+        var start = header_idx[k]
+        var stop = n
+        if k + 1 < len(header_idx):
+            stop = header_idx[k + 1]
+        for j in range(start + 1, stop - 1):
+            if lines[j] == "--------" and _parse_summary(lines[j + 1]).ok:
+                complete_blocks += 1
+                break
+    if complete_blocks >= 2:
+        return ParsedReport.ambiguous("multiple complete report blocks")
+
+    # 4-7. The anchor is chosen by RECONCILIATION, not blindly the last header.
+    # A test's own stdout precedes the buffered report, so an earlier matching
+    # header is user output to ignore; the last header before the rule is the
+    # primary anchor and, for a genuine single-header report, the only candidate.
+    # But a conforming FAIL's detail can contain a line that byte-equals this
+    # file's OWN header (a test asserting about paths); blindly anchoring on the
+    # last header would hijack the anchor onto that detail line, underflow the
+    # declared count, and misread conforming CONTENT as toolchain drift (exit 3).
+    # So parse the primary block first; if it reconciles it is VALID, else fall
+    # back through the earlier candidates and take the last (scanning backward)
+    # whose block fully reconciles. If none reconciles, the primary verdict
+    # stands — a genuine off-grammar/ambiguous break, never a false VALID.
+    var cand_anchor = List[Int]()
+    var cand_declared = List[Int]()
+    for k in range(len(header_idx)):
+        if header_idx[k] < rule_i:
+            cand_anchor.append(header_idx[k])
+            cand_declared.append(header_n[k])
+    if len(cand_anchor) == 0:
+        return ParsedReport.off_grammar(
+            "matching header without terminal framing"
+        )
+    var last = len(cand_anchor) - 1
+    var primary = _parse_block(
+        lines,
+        cand_anchor[last],
+        cand_declared[last],
+        rule_i,
+        summ,
+        summary_i,
+        n,
+        source_path,
+    )
+    if primary.verdict == ReportVerdict.VALID:
+        return primary^
+    for c in range(last - 1, -1, -1):
+        var cand = _parse_block(
+            lines,
+            cand_anchor[c],
+            cand_declared[c],
+            rule_i,
+            summ,
+            summary_i,
+            n,
+            source_path,
+        )
+        if cand.verdict == ReportVerdict.VALID:
+            return cand^
+    return primary^

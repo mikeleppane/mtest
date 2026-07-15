@@ -423,5 +423,82 @@ def test_pre_report_header_lookalike_before_real_report_valid() raises:
     assert_equal(len(r.rows), 3)
 
 
+def test_forged_extra_token_in_passed_field_off_grammar() raises:
+    # A hand-forged Summary whose passed field carries an EXTRA token between the
+    # count and the label (`1 forged passed`). The field still ends in ` passed`
+    # and its first space-token still reads as 1, so a suffix-only check would
+    # accept it and the whole report would reconcile to a false GREEN. The summary
+    # grammar is exactly `<digits> passed`; the extra token violates it, so the
+    # line is no Summary at all, the report has a genuine header without terminal
+    # framing, and it is OFF_GRAMMAR — never VALID.
+    var text = (
+        "Running 1 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    PASS [ 0.001 ] test_ok\n"
+        "--------\n"
+        "Summary [ 0.001 ] 1 tests run: 1 forged passed , 0 failed , 0 skipped "
+    )
+    var r = parse_report(text, SP)
+    assert_true(r.verdict == ReportVerdict.OFF_GRAMMAR)
+    assert_true(r.verdict != ReportVerdict.VALID)
+
+
+def test_forged_extra_token_in_each_field_off_grammar() raises:
+    # An extra token planted in ALL THREE summary fields at once. Each count still
+    # reads as a valid non-negative integer that reconciles with the rows, so a
+    # suffix-only check would still land VALID; the exact `<digits> <label>` shape
+    # is what rejects it. OFF_GRAMMAR.
+    var text = (
+        "Running 1 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    PASS [ 0.001 ] test_ok\n"
+        "--------\n"
+        "Summary [ 0.001 ] 1 tests run: 1 forged passed , 0 bogus failed , 0"
+        " junk skipped "
+    )
+    var r = parse_report(text, SP)
+    assert_true(r.verdict == ReportVerdict.OFF_GRAMMAR)
+    assert_true(r.verdict != ReportVerdict.VALID)
+
+
+def test_forged_leading_zero_count_off_grammar() raises:
+    # A leading-zero count (`01 passed`) is off the pinned grammar: the toolchain
+    # never zero-pads. A first-token parse would normalize `01` to 1 and accept
+    # it; requiring the field to equal exactly `String(count) + " passed"` rejects
+    # the padded form. OFF_GRAMMAR, never a false PASS.
+    var text = (
+        "Running 1 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    PASS [ 0.001 ] test_ok\n"
+        "--------\n"
+        "Summary [ 0.001 ] 1 tests run: 01 passed , 0 failed , 0 skipped "
+    )
+    var r = parse_report(text, SP)
+    assert_true(r.verdict == ReportVerdict.OFF_GRAMMAR)
+    assert_true(r.verdict != ReportVerdict.VALID)
+
+
+def test_fail_detail_header_lookalike_reconciles_valid() raises:
+    # A conforming test (plausibly the runner's OWN suite) FAILs while asserting
+    # about paths, and its failure detail contains a flush-left line that byte-
+    # equals this file's own header, `Running 1 tests for <P> `. That line is a
+    # matching header sitting AFTER the real one, so anchoring blindly on the last
+    # header before the rule hijacks the anchor onto the detail line, the block
+    # underflows its declared count, and the report is misread as toolchain drift
+    # (OFF_GRAMMAR -> exit 3) purely from test CONTENT. Choosing the anchor by
+    # reconciliation finds the real header — whose block DOES reconcile — and the
+    # detail line rides through as verbatim FAIL detail. VALID, not OFF_GRAMMAR.
+    var text = (
+        "Running 1 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    FAIL [ 0.001 ] test_paths\n"
+        "Running 1 tests for /home/x/proj/tests/test_a.mojo \n"
+        "--------\n"
+        "Summary [ 0.001 ] 1 tests run: 0 passed , 1 failed , 0 skipped \n"
+        "Test suite' /home/x/proj/tests/test_a.mojo 'failed! "
+    )
+    var r = parse_report(text, SP)
+    assert_true(r.verdict == ReportVerdict.VALID)
+    assert_equal(len(r.rows), 1)
+    assert_true(r.rows[0].outcome == Outcome.FAIL)
+    assert_true("Running 1 tests for" in r.rows[0].detail)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
