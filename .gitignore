@@ -11,3 +11,4 @@ __pycache__/
 *.pyc
 # internal working plans and review outputs — never committed or published
 docs/plans/
+.superpowers

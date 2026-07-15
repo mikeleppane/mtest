@@ -57,13 +57,32 @@ struct RunnerConfig(Copyable, Movable):
     var exitfirst: Bool
     """Whether to stop the run after the first failing file (`-x`)."""
 
+    var keyword: String
+    """The `-k` keyword expression; empty means no keyword filter."""
+
+    var maxfail: Int
+    """`--maxfail N`: stop scheduling once N failing TESTS have accumulated;
+    `0` disables the limit (no cap)."""
+
+    var durations: Int
+    """`--durations N`: the number of slowest files to report; `0` disables
+    the report (no listing). The console reporter renders the file-level
+    slowest-files list after the summary band, from this field threaded at
+    construction."""
+
+    var collect: Bool
+    """Collect mode (`collect` subcommand / `--collect-only`): probe every
+    discovered file for its node ids and print the sorted listing, running no
+    test body. When True the session takes the collect path, not a run."""
+
     @staticmethod
     def default() -> RunnerConfig:
         """A config with every field at its contract default. Allocates.
 
         The defaults: every list empty, `mojo_path="mojo"`,
         `timeout_secs=300`, `show_output=FAILURES`, `verbosity=NORMAL`,
-        `color=AUTO`, `exitfirst=False`.
+        `color=AUTO`, `exitfirst=False`, `maxfail=0` (no limit),
+        `durations=0` (no report), `collect=False`.
         """
         return RunnerConfig(
             paths=[],
@@ -78,4 +97,8 @@ struct RunnerConfig(Copyable, Movable):
             verbosity=Verbosity.NORMAL,
             color=ColorWhen.AUTO,
             exitfirst=False,
+            keyword="",
+            maxfail=0,
+            durations=0,
+            collect=False,
         )

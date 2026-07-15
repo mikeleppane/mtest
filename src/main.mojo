@@ -30,7 +30,7 @@ from mtest.cli import (
 )
 from mtest.exec import install_signal_handlers, stdout_isatty
 from mtest.report import CompositeReporter, ConsoleReporter
-from mtest.session import run_session
+from mtest.session import CollectResult, run_collect, run_session
 
 
 def _argv_tail() -> List[String]:
@@ -91,6 +91,27 @@ def main():
         _eprintln("mtest: internal error: " + String(e))
         exit(3)
 
+    # Collect mode: probe every discovered file for its node ids and print the
+    # SORTED listing to STDOUT, byte-clean, running no test body. This print is
+    # the SECOND sanctioned exception to the event seam (usage errors are the
+    # first): the listing is a frozen machine-readable contract, so it is written
+    # OUTSIDE any reporter, STDOUT carries ONLY the listing, and every diagnostic
+    # goes to STDERR. A discover: usage error still routes to exit 4.
+    if config.collect:
+        var collected = CollectResult(List[String](), List[String](), 0)
+        try:
+            collected = run_collect(config, root)
+        except e:
+            _eprintln(String(e))
+            exit(4)
+        for line in collected.diagnostics:
+            _eprintln(line)
+        var listing = String("")
+        for nid in collected.listing:
+            listing += nid + "\n"
+        print(listing, end="", flush=True)
+        exit(collected.code)
+
     var build_flags = build_flags_string(config)
     var console = ConsoleReporter(
         MTEST_VERSION,
@@ -100,6 +121,7 @@ def main():
         config.verbosity,
         config.show_output,
         build_flags^,
+        config.durations,
     )
     var comp = CompositeReporter(Tuple(console^))
 

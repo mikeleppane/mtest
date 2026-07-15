@@ -22,7 +22,11 @@ parsing English.
 Usage errors are intentionally outside this set: they happen before any session
 exists and are printed by the CLI, so there is no usage-error event.
 """
+from mtest.model.node_id import NodeId
 from mtest.model.outcome import Outcome
+from mtest.model.parse_disposition import ParseDisposition
+from mtest.model.test_counts import TestCounts
+from mtest.model.test_result import TestResult
 
 
 @fieldwise_init
@@ -43,6 +47,8 @@ struct EventKind(Equatable, ImplicitlyCopyable, Movable):
     comptime FILE_FINISHED = Self(4)
     comptime SESSION_FINISHED = Self(5)
     comptime INTERNAL_ERROR = Self(6)
+    comptime TEST_REPORTED = Self(7)
+    comptime COLLECTION_KNOWN = Self(8)
 
     def __eq__(self, other: Self) -> Bool:
         """Two kinds are equal iff their discriminants match. Pure."""
@@ -152,6 +158,31 @@ struct Event(Copyable, Movable):
     """The configured deadline for a TIMEOUT, in seconds (0 otherwise)."""
     var exclusion_pattern: String
     """The glob that excluded the file, for an EXCLUDED line (empty otherwise)."""
+    var parse_disposition: ParseDisposition
+    """Why the report parse landed where it did (FileFinished)."""
+    var passed_tests: Int
+    """How many tests in this file passed, at test granularity (FileFinished).
+    """
+    var failed_tests: Int
+    """How many tests in this file failed, at test granularity (FileFinished).
+    """
+    var skipped_tests: Int
+    """How many tests in this file were skipped, at test granularity
+    (FileFinished)."""
+    var deselected_tests: Int
+    """How many tests in this file were deselected, at test granularity
+    (FileFinished)."""
+
+    # TestReported.
+    var test: TestResult
+    """The per-test result this event reports (TestReported)."""
+
+    # CollectionKnown.
+    var selected_test_total: Int
+    """How many tests, across the whole run, are selected (CollectionKnown)."""
+    var deselected_test_total: Int
+    """How many tests, across the whole run, are deselected (CollectionKnown).
+    """
 
     # InternalError.
     var program: String
@@ -167,6 +198,8 @@ struct Event(Copyable, Movable):
     """Total wall time of the whole session, in seconds (SessionFinished)."""
     var exit_code: Int
     """The process exit code the session resolved (SessionFinished)."""
+    var test_counts: TestCounts
+    """The authoritative per-test totals for the whole run (SessionFinished)."""
 
     @staticmethod
     def _blank(kind: EventKind) -> Event:
@@ -194,11 +227,20 @@ struct Event(Copyable, Movable):
             exit_status=0,
             timeout_seconds=0,
             exclusion_pattern="",
+            parse_disposition=ParseDisposition.NO_REPORT,
+            passed_tests=0,
+            failed_tests=0,
+            skipped_tests=0,
+            deselected_tests=0,
+            test=TestResult(NodeId("", ""), Outcome.NOT_RUN),
+            selected_test_total=0,
+            deselected_test_total=0,
             program="",
             errno=0,
             summary=Summary.zeros(),
             wall_time_seconds=0.0,
             exit_code=0,
+            test_counts=TestCounts.zeros(),
         )
 
     @staticmethod
@@ -261,13 +303,20 @@ struct Event(Copyable, Movable):
         exit_status: Int = 0,
         timeout_seconds: Int = 0,
         exclusion_pattern: String = "",
+        parse_disposition: ParseDisposition = ParseDisposition.NO_REPORT,
+        passed_tests: Int = 0,
+        failed_tests: Int = 0,
+        skipped_tests: Int = 0,
+        deselected_tests: Int = 0,
     ) -> Event:
         """A file's run finished, carrying the data the reporter renders from.
 
         The per-outcome specifics ride as data: `signal_number` for a CRASH,
         `exit_status` for a FAIL, `timeout_seconds` for a TIMEOUT, and
         `exclusion_pattern` for an EXCLUDED line. The build command rides as
-        `build_argv`, and the captured streams as raw bytes.
+        `build_argv`, and the captured streams as raw bytes. `parse_disposition`
+        and the four `*_tests` totals carry the test-granularity read of this
+        file's report; every one defaults so existing callers are unaffected.
         """
         var e = Event._blank(EventKind.FILE_FINISHED)
         e.path = path
@@ -281,6 +330,11 @@ struct Event(Copyable, Movable):
         e.exit_status = exit_status
         e.timeout_seconds = timeout_seconds
         e.exclusion_pattern = exclusion_pattern
+        e.parse_disposition = parse_disposition
+        e.passed_tests = passed_tests
+        e.failed_tests = failed_tests
+        e.skipped_tests = skipped_tests
+        e.deselected_tests = deselected_tests
         return e^
 
     @staticmethod
@@ -300,11 +354,42 @@ struct Event(Copyable, Movable):
 
     @staticmethod
     def session_finished(
-        var summary: Summary, wall_time_seconds: Float64, exit_code: Int
+        var summary: Summary,
+        wall_time_seconds: Float64,
+        exit_code: Int,
+        test_counts: TestCounts = TestCounts.zeros(),
     ) -> Event:
-        """The run ended: the full summary tally, wall time, and exit code."""
+        """The run ended: the full summary tally, wall time, and exit code.
+
+        `test_counts` carries the authoritative per-test totals; it defaults to
+        zeros so existing callers are unaffected.
+        """
         var e = Event._blank(EventKind.SESSION_FINISHED)
         e.summary = summary^
         e.wall_time_seconds = wall_time_seconds
         e.exit_code = exit_code
+        e.test_counts = test_counts
+        return e^
+
+    @staticmethod
+    def test_reported(var test: TestResult) -> Event:
+        """One test's result, reported retrospectively after its file exits.
+
+        Conceptually sits between `FileStarted` and `FileFinished` once a
+        child's report parses. `path` mirrors `test.node.path` so the existing
+        `path_at` accessors keep working without inspecting `test`.
+        """
+        var e = Event._blank(EventKind.TEST_REPORTED)
+        e.path = test.node.path
+        e.test = test^
+        return e^
+
+    @staticmethod
+    def collection_known(
+        selected_test_total: Int, deselected_test_total: Int
+    ) -> Event:
+        """The final selected/deselected test totals became known, run-wide."""
+        var e = Event._blank(EventKind.COLLECTION_KNOWN)
+        e.selected_test_total = selected_test_total
+        e.deselected_test_total = deselected_test_total
         return e^

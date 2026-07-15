@@ -38,6 +38,27 @@ def test_multiple_path_operands_in_order() raises:
     assert_equal(r.config.paths[1], "tests/b.mojo")
 
 
+def test_empty_argv_has_no_keyword_filter() raises:
+    var argv = List[String]()
+    var r = parse_args(argv)
+    assert_equal(r.config.keyword, "")
+
+
+def test_k_captures_the_keyword_expression() raises:
+    var argv: List[String] = ["tests/", "-k", "test_add"]
+    var r = parse_args(argv)
+    assert_true(r.is_run())
+    assert_equal(r.config.keyword, "test_add")
+    assert_equal(len(r.config.paths), 1)
+    assert_equal(r.config.paths[0], "tests/")
+
+
+def test_k_inline_equals_form() raises:
+    var argv: List[String] = ["-k=slow OR fast"]
+    var r = parse_args(argv)
+    assert_equal(r.config.keyword, "slow OR fast")
+
+
 def test_run_subcommand_is_consumed() raises:
     var argv: List[String] = ["run", "tests/"]
     var r = parse_args(argv)
@@ -159,6 +180,16 @@ def test_timeout_sets_seconds() raises:
 def test_timeout_zero_disables() raises:
     var argv: List[String] = ["--timeout", "0"]
     assert_equal(parse_args(argv).config.timeout_secs, 0)
+
+
+def test_durations_sets_count() raises:
+    var argv: List[String] = ["--durations", "5"]
+    assert_equal(parse_args(argv).config.durations, 5)
+
+
+def test_durations_defaults_to_zero() raises:
+    var argv = List[String]()
+    assert_equal(parse_args(argv).config.durations, 0)
 
 
 def test_dash_s_sets_show_output_all() raises:

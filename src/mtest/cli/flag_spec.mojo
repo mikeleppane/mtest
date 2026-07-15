@@ -43,6 +43,10 @@ struct FlagId:
     comptime JUNIT_XML = 20
     comptime GH_ANNOTATIONS = 21
     comptime COLLECT_ONLY = 22
+    comptime DURATIONS = 23
+    comptime SHARD = 24
+    comptime SERIAL = 25
+    comptime JSON = 26
 
 
 @fieldwise_init
@@ -98,14 +102,25 @@ def flag_specs() -> List[FlagSpec]:
         FlagSpec("-h", FlagId.HELP, 0, False, True, ""),
         FlagSpec("--help", FlagId.HELP, 0, False, True, ""),
         FlagSpec("--version", FlagId.VERSION, 0, False, True, ""),
+        FlagSpec("-k", FlagId.SELECT, 1, False, True, ""),
+        FlagSpec("--maxfail", FlagId.MAXFAIL, 1, False, True, ""),
+        FlagSpec("--durations", FlagId.DURATIONS, 1, False, True, ""),
         # Part of the v1 contract but not served by this build.
-        FlagSpec("-k", FlagId.SELECT, 1, False, False, "the report parser"),
-        FlagSpec(
-            "--maxfail", FlagId.MAXFAIL, 1, False, False, "per-test outcomes"
-        ),
         FlagSpec("-n", FlagId.WORKERS, 1, False, False, "parallel workers"),
         FlagSpec(
             "--workers", FlagId.WORKERS, 1, False, False, "parallel workers"
+        ),
+        FlagSpec("--shard", FlagId.SHARD, 1, False, False, "test sharding"),
+        FlagSpec(
+            "--serial",
+            FlagId.SERIAL,
+            1,
+            True,
+            False,
+            "serial execution pinning",
+        ),
+        FlagSpec(
+            "--json", FlagId.JSON, 1, False, False, "machine report artifacts"
         ),
         FlagSpec(
             "--compile-timeout",
@@ -139,12 +154,5 @@ def flag_specs() -> List[FlagSpec]:
             False,
             "CI annotations",
         ),
-        FlagSpec(
-            "--collect-only",
-            FlagId.COLLECT_ONLY,
-            0,
-            False,
-            False,
-            "test collection",
-        ),
+        FlagSpec("--collect-only", FlagId.COLLECT_ONLY, 0, False, True, ""),
     ]

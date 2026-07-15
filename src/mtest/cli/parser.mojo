@@ -29,8 +29,8 @@ comptime MTEST_VERSION = "0.1.0-dev"
 
 comptime SUPPORTED_SUMMARY = (
     "paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo,"
-    " -x/--exitfirst, --timeout, -s/--show-output, -q, -v, --color, --help,"
-    " --version"
+    " -x/--exitfirst, --timeout, -s/--show-output, -q, -v, --color, -k,"
+    " --maxfail, --durations, collect/--collect-only, --help, --version"
 )
 """A stable one-line list of what this build serves, quoted in refusals."""
 
@@ -74,15 +74,6 @@ def _refuse(spec: FlagSpec) -> Error:
     )
 
 
-def _refuse_collect() -> Error:
-    """The refusal for the `collect` subcommand, not served by this build."""
-    return Error(
-        "cli: the 'collect' subcommand is part of the mtest v1 contract but is"
-        + " not available in this build (it arrives with test collection);"
-        + " this build serves: run, version, help (see mtest --help)"
-    )
-
-
 # --- value validation ---
 
 
@@ -101,6 +92,20 @@ def _parse_timeout(value: String) raises -> Int:
     """Parse a `--timeout` value: a non-negative integer (`0` disables)."""
     if not _all_digits(value):
         raise _err("'--timeout' wants an integer >= 0, got '" + value + "'")
+    return atol(value)
+
+
+def _parse_maxfail(value: String) raises -> Int:
+    """Parse a `--maxfail` value: a non-negative integer (`0` disables)."""
+    if not _all_digits(value):
+        raise _err("'--maxfail' wants an integer >= 0, got '" + value + "'")
+    return atol(value)
+
+
+def _parse_durations(value: String) raises -> Int:
+    """Parse a `--durations` value: a non-negative integer (`0` disables)."""
+    if not _all_digits(value):
+        raise _err("'--durations' wants an integer >= 0, got '" + value + "'")
     return atol(value)
 
 
@@ -202,6 +207,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         `-q`/`-v` together, or a flag/subcommand this build does not yet serve.
     """
     var start = 0
+    var collect = False
     if len(argv) > 0:
         var head = argv[0]
         if head == "version":
@@ -209,7 +215,10 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         if head == "help":
             return ParseResult.show_help()
         if head == "collect":
-            raise _refuse_collect()
+            # The `collect` subcommand is exactly `--collect-only`: it turns on
+            # collect mode and consumes the head token like `run` does.
+            collect = True
+            start = 1
         if head == "run":
             start = 1
 
@@ -224,6 +233,12 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var show_output = ShowOutput.FAILURES
     var color = ColorWhen.AUTO
     var exitfirst = False
+    var keyword = String("")
+    var maxfail = 0
+    var saw_maxfail = False
+    var durations = 0
+    var saw_durations = False
+    var saw_show_output = False
     var saw_quiet = False
     var saw_verbose = False
 
@@ -294,10 +309,13 @@ def parse_args(argv: List[String]) raises -> ParseResult:
                 exitfirst = True
             elif s.id == FlagId.SHOW_ALL:
                 show_output = ShowOutput.ALL
+                saw_show_output = True
             elif s.id == FlagId.QUIET:
                 saw_quiet = True
             elif s.id == FlagId.VERBOSE:
                 saw_verbose = True
+            elif s.id == FlagId.COLLECT_ONLY:
+                collect = True
             i += 1
             continue
 
@@ -330,8 +348,48 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             timeout_secs = _parse_timeout(value)
         elif s.id == FlagId.SHOW_OUTPUT:
             show_output = _parse_show_output(value)
+            saw_show_output = True
         elif s.id == FlagId.COLOR:
             color = _parse_color(value)
+        elif s.id == FlagId.SELECT:
+            keyword = value
+        elif s.id == FlagId.MAXFAIL:
+            maxfail = _parse_maxfail(value)
+            saw_maxfail = True
+        elif s.id == FlagId.DURATIONS:
+            durations = _parse_durations(value)
+            saw_durations = True
+
+    # Collect mode is a listing, not a run: the run-only knobs that shape which
+    # tests execute or when to stop scheduling are meaningless against it and are
+    # refused loudly. `--timeout` is NOT refused — it bounds the collection
+    # probes exactly as it bounds a run (a hanging probe is a TIMEOUT).
+    if collect:
+        if exitfirst:
+            raise _err(
+                "'-x'/'--exitfirst' is a run-only flag and cannot be combined"
+                " with collect mode"
+            )
+        if saw_maxfail:
+            raise _err(
+                "'--maxfail' is a run-only flag and cannot be combined with"
+                " collect mode"
+            )
+        if len(gates) > 0:
+            raise _err(
+                "'--gate' is a run-only flag and cannot be combined with"
+                " collect mode"
+            )
+        if saw_show_output:
+            raise _err(
+                "'-s'/'--show-output' is a run-only flag and cannot be"
+                " combined with collect mode"
+            )
+        if saw_durations:
+            raise _err(
+                "'--durations' is a run-only flag and cannot be combined"
+                " with collect mode"
+            )
 
     if saw_quiet and saw_verbose:
         raise _err("'-q' and '-v' are mutually exclusive")
@@ -356,5 +414,9 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         verbosity=verbosity,
         color=color,
         exitfirst=exitfirst,
+        keyword=keyword^,
+        maxfail=maxfail,
+        durations=durations,
+        collect=collect,
     )
     return ParseResult.run(cfg^)

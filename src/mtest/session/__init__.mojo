@@ -10,5 +10,11 @@ pre-session usage errors are main's.
 The public surface is re-exported here so callers write
 `from mtest.session import run_session, run_verdict, build_verdict`.
 """
-from mtest.session.session import run_session
+from mtest.session.session import CollectResult, run_collect, run_session
 from mtest.session.verdict import run_verdict, build_verdict
+from mtest.session.classify import (
+    Classification,
+    TrustedReport,
+    classify,
+    resolve_report,
+)

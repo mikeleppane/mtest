@@ -74,6 +74,24 @@ def test_one_failing_dominates_any_number_of_passes() raises:
         assert_equal(exit_code_for([Outcome.SKIP, o]), 1)
 
 
+def test_lone_internal_state_is_pinned_not_failing() raises:
+    # DESELECTED, EXCLUDED, and NOT_RUN should never normally be passed in the
+    # multiset (deselected/excluded/not-run tests did not run) -- but the raw
+    # function behavior is pinned here so the contract is explicit: none of
+    # them is in the failing class, so a lone one yields 0, not 5 or 1.
+    assert_equal(exit_code_for([Outcome.DESELECTED]), 0)
+    assert_equal(exit_code_for([Outcome.EXCLUDED]), 0)
+    assert_equal(exit_code_for([Outcome.NOT_RUN]), 0)
+
+
+def test_all_skip_multiset_is_success() raises:
+    assert_equal(exit_code_for([Outcome.SKIP, Outcome.SKIP, Outcome.SKIP]), 0)
+
+
+def test_fail_among_passes_is_failure() raises:
+    assert_equal(exit_code_for([Outcome.PASS, Outcome.FAIL, Outcome.PASS]), 1)
+
+
 def test_multiple_failing_outcomes_still_one() raises:
     assert_equal(
         exit_code_for([Outcome.FAIL, Outcome.CRASH, Outcome.TIMEOUT]), 1

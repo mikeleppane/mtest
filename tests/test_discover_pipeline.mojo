@@ -126,13 +126,46 @@ def test_empty_walk_is_not_an_error() raises:
     remove_tree(root)
 
 
-def test_node_id_operand_raises() raises:
+def test_node_id_operand_resolves_to_its_file() raises:
     var root = temp_root()
     touch(root, "tests/test_a.mojo")
-    with assert_raises(contains="per-test selection"):
+    var result = discover(
+        _cfg(
+            ["tests/test_a.mojo::test_foo"],
+            List[String](),
+            List[String](),
+        ),
+        root,
+    )
+    # The node id implies its file; the run set carries that file once.
+    assert_equal(len(result.run_files), 1)
+    assert_equal(result.run_files[0], "tests/test_a.mojo")
+    remove_tree(root)
+
+
+def test_two_node_ids_same_file_dedup_to_one_file() raises:
+    var root = temp_root()
+    touch(root, "tests/test_a.mojo")
+    var result = discover(
+        _cfg(
+            ["tests/test_a.mojo::test_foo", "tests/test_a.mojo::test_bar"],
+            List[String](),
+            List[String](),
+        ),
+        root,
+    )
+    assert_equal(len(result.run_files), 1)
+    assert_equal(result.run_files[0], "tests/test_a.mojo")
+    remove_tree(root)
+
+
+def test_malformed_node_id_operand_raises() raises:
+    var root = temp_root()
+    touch(root, "tests/test_a.mojo")
+    with assert_raises(contains="malformed node id"):
         _ = discover(
             _cfg(
-                ["tests/test_a.mojo::test_foo"],
+                ["tests/test_a.mojo::test_foo::extra"],
                 List[String](),
                 List[String](),
             ),

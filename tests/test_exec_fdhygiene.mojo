@@ -47,7 +47,9 @@ def test_process_result_construct_and_drop() raises:
         var out = List[UInt8]()
         out.append(UInt8(65))
         var err = List[UInt8]()
-        var pr = ProcessResult(out^, err^, Termination.exited(0), 5)
+        var pr = ProcessResult(
+            out^, err^, False, False, Termination.exited(0), 5
+        )
         assert_equal(len(pr.stdout_bytes), 1)
 
 

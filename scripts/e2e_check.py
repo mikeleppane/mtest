@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MTEST = os.path.join(REPO_ROOT, "build", "mtest")
 MANIFEST_PATH = os.path.join(REPO_ROOT, "testdata", "manifest.json")
+LOGGING_MOJO = os.path.join(REPO_ROOT, "scripts", "logging_mojo.py")
 
 # Generous per-spawn wall-clock ceilings. Cold `mojo build` is slow, so these are
 # roomy — their only job is to keep a hung runner from wedging CI, never to time
@@ -52,10 +53,21 @@ MANIFEST_PATH = os.path.join(REPO_ROOT, "testdata", "manifest.json")
 DEFAULT_TIMEOUT = 180.0
 SHORT_TIMEOUT = 30.0
 
+# The summary band counts TESTS for pass/fail/skip and FILES for the abnormals.
+# pass/fail/skip always appear; each file-level abnormal appears only when
+# nonzero, so every abnormal segment (and the trailing deselected count) is
+# optional. Named groups keep call sites robust to the optional segments.
 SUMMARY_RE = re.compile(
-    r"=====\s+(\d+) passed,\s+(\d+) failed,\s+(\d+) crashed,\s+"
-    r"(\d+) timed out,\s+(\d+) compile error\s+"
-    r"\((\d+) excluded,\s+(\d+) not run\)\s+in\s+([\d.]+)s\s+====="
+    r"=====\s+(?P<passed>\d+) passed,\s+(?P<failed>\d+) failed,\s+"
+    r"(?P<skipped>\d+) skipped"
+    r"(?:,\s+(?P<crashed>\d+) crashed)?"
+    r"(?:,\s+(?P<timed_out>\d+) timed out)?"
+    r"(?:,\s+(?P<compile_error>\d+) compile error)?"
+    r"(?:,\s+(?P<malformed>\d+) malformed suite)?"
+    r"[^(]*"
+    r"\((?P<excluded>\d+) excluded,\s+(?P<not_run>\d+) not run"
+    r"(?:,\s+(?P<deselected>\d+) deselected)?\)"
+    r"\s+in\s+(?P<seconds>[\d.]+)s\s+====="
 )
 HEADER_RE = re.compile(r"root:\s+.*?selected:\s+(\d+) files\s+excluded:\s+(\d+)")
 
@@ -67,12 +79,14 @@ VERDICT_TO_BUCKET = {
     "COMPILE-ERROR": "compile_error",
 }
 
-# A run/failing-outcome verdict line starts at column 0 with one of these
-# tokens, then the root-relative path (never contains whitespace in this tree).
-# Used to check contract §17's determinism promise: the console summary is
-# ordered lexicographically by path, independent of finish order.
+# A per-file verdict line starts at column 0 with one of these tokens, then the
+# root-relative path (never contains whitespace in this tree). NO-TESTS is a
+# valid zero-test pass line and must be counted for the ordering check. Used to
+# check contract §17's determinism promise: the console summary is ordered
+# lexicographically by path, independent of finish order.
+VERDICT_LINE_TOKENS = list(VERDICT_TO_BUCKET) + ["NO-TESTS"]
 VERDICT_LINE_RE = re.compile(
-    r"^(?:" + "|".join(re.escape(t) for t in VERDICT_TO_BUCKET) + r")\s+(\S+)",
+    r"^(?:" + "|".join(re.escape(t) for t in VERDICT_LINE_TOKENS) + r")\s+(\S+)",
     re.MULTILINE,
 )
 
@@ -84,24 +98,20 @@ def verdict_paths_in_order(run: Run) -> list[str]:
 
 @dataclass
 class Summary:
+    # passed/failed/skipped are per-TEST totals; crashed/timed_out/compile_error/
+    # malformed are per-FILE abnormal counts (omitted from the band when zero, so
+    # they parse as 0 here). excluded/not_run/deselected are separate counts.
     passed: int
     failed: int
+    skipped: int
     crashed: int
     timed_out: int
     compile_error: int
+    malformed: int
     excluded: int
     not_run: int
     seconds: float
-
-    @property
-    def run_outcomes(self) -> int:
-        return (
-            self.passed
-            + self.failed
-            + self.crashed
-            + self.timed_out
-            + self.compile_error
-        )
+    deselected: int = 0
 
 
 class ScenarioError(AssertionError):
@@ -130,16 +140,23 @@ class Run:
             raise ScenarioError(
                 f"no summary band in output for {self.argv}\n{self.combined}"
             )
-        g = m.groups()
+        g = m.groupdict()
+
+        def num(key: str) -> int:
+            return int(g[key]) if g.get(key) is not None else 0
+
         return Summary(
-            passed=int(g[0]),
-            failed=int(g[1]),
-            crashed=int(g[2]),
-            timed_out=int(g[3]),
-            compile_error=int(g[4]),
-            excluded=int(g[5]),
-            not_run=int(g[6]),
-            seconds=float(g[7]),
+            passed=num("passed"),
+            failed=num("failed"),
+            skipped=num("skipped"),
+            crashed=num("crashed"),
+            timed_out=num("timed_out"),
+            compile_error=num("compile_error"),
+            malformed=num("malformed"),
+            excluded=num("excluded"),
+            not_run=num("not_run"),
+            deselected=num("deselected"),
+            seconds=float(g["seconds"]),
         )
 
     def header(self) -> tuple[int, int]:
@@ -313,15 +330,16 @@ def expect_exit(run: Run, code: int) -> None:
 
 
 def expect_accounting(run: Run) -> Summary:
-    """The counting invariant that must hold on every run that reaches a summary:
-    run outcomes + not-run == header-selected, and the two excluded counts agree."""
+    """The file-count invariant that still holds now that pass/fail/skip count
+    TESTS, not files: the summary and the header agree on the excluded FILE count.
+
+    (The old run-outcomes+not-run==selected file-count identity no longer holds
+    — passed/failed are per-test, and `s_default_suite` asserts that exact
+    test-count arithmetic separately; here we keep the band parseable and the
+    excluded counts reconciled for every scenario, not just the default suite.)
+    """
     summ = run.summary()
-    selected, hdr_excluded = run.header()
-    expect(
-        summ.run_outcomes + summ.not_run == selected,
-        f"accounting broken: run_outcomes({summ.run_outcomes}) + "
-        f"not_run({summ.not_run}) != selected({selected}) for {run.argv}",
-    )
+    _selected, hdr_excluded = run.header()
     expect(
         summ.excluded == hdr_excluded,
         f"excluded mismatch: summary {summ.excluded} vs header {hdr_excluded} "
@@ -422,7 +440,8 @@ def s_default_suite(manifest: dict) -> str:
     crash_lines: dict[str, str] = {}
     compile_error_files: list[str] = []
     for rel, row in suite.items():
-        token = row["verdict"]
+        # A zero-test file renders NO-TESTS, not the manifest's PASS verdict.
+        token = "NO-TESTS" if row.get("zero_tests") else row["verdict"]
         line = run.verdict_line(token, rel)
         expect(line is not None, f"missing verdict line {token} for {rel}")
         if token == "CRASH":
@@ -469,29 +488,83 @@ def s_default_suite(manifest: dict) -> str:
         f"symbol the fixture names (name-resolution property):\n{cerr_section}",
     )
 
-    # The zero-test file is PASS (the documented ceiling).
-    zero = [r for r, row in suite.items() if row.get("zero_test_ceiling")]
-    expect(len(zero) == 1, "expected exactly one zero-test-ceiling file")
+    # The zero-test file is a NO-TESTS pass: the zero-test ceiling is CLOSED, so
+    # this PASS comes from a parsed zero-test report, not from the exit status.
+    # As a member of the suite it still contributes to the exit-0 class.
+    zero = [r for r, row in suite.items() if row.get("zero_tests")]
+    expect(len(zero) == 1, "expected exactly one zero-test file")
     expect(
-        run.verdict_line("PASS", zero[0]) is not None,
-        "zero-test file did not show PASS",
+        run.verdict_line("NO-TESTS", zero[0]) is not None,
+        "zero-test file did not show a NO-TESTS verdict (never a plain PASS)",
     )
     # helper.mojo (non-discovered) must never appear.
     for rel in manifest.get("non_discovered", {}):
         expect(rel not in run.stdout, f"non-discovered file {rel} appeared in output")
 
-    # Summary counts equal what the manifest predicts for the suite.
-    want = {"passed": 0, "failed": 0, "crashed": 0, "timed_out": 0, "compile_error": 0}
+    # Summary arithmetic under the TEST-count band: crashed/timed-out/compile-
+    # error are per-FILE abnormal counts (from the verdict buckets), while
+    # passed/failed count TESTS.
+    file_abnormals = {"crashed": 0, "timed_out": 0, "compile_error": 0}
     for row in suite.values():
-        want[VERDICT_TO_BUCKET[row["verdict"]]] += 1
-    got = {
-        "passed": summ.passed,
-        "failed": summ.failed,
-        "crashed": summ.crashed,
-        "timed_out": summ.timed_out,
-        "compile_error": summ.compile_error,
-    }
-    expect(got == want, f"suite summary counts {got} != manifest {want}")
+        bucket = VERDICT_TO_BUCKET[row["verdict"]]
+        if bucket in file_abnormals:
+            file_abnormals[bucket] += 1
+    expect(
+        summ.crashed == file_abnormals["crashed"],
+        f"crashed FILES: band {summ.crashed} != manifest {file_abnormals['crashed']}",
+    )
+    expect(
+        summ.timed_out == file_abnormals["timed_out"],
+        f"timed-out FILES: band {summ.timed_out} != manifest {file_abnormals['timed_out']}",
+    )
+    expect(
+        summ.compile_error == file_abnormals["compile_error"],
+        f"compile-error FILES: band {summ.compile_error} != manifest "
+        f"{file_abnormals['compile_error']}",
+    )
+    # pass/fail/skip are per-TEST. Every report-bearing file (PASS or FAIL —
+    # the verdict a parsed report can actually produce) must carry a per_test
+    # block, and no non-report-bearing file (CRASH/COMPILE-ERROR, which never
+    # reach the parser) may carry one; a manifest edit that adds a suite file
+    # without one, or leaves a stale block on an abnormal one, fails loudly
+    # here instead of silently under/over-counting the exact totals below.
+    report_bearing = {"PASS", "FAIL"}
+    for rel, row in suite.items():
+        has_per_test = "per_test" in row
+        if row["verdict"] in report_bearing:
+            expect(
+                has_per_test,
+                f"{rel} is report-bearing ({row['verdict']}) but the manifest "
+                f"has no per_test block for it",
+            )
+        else:
+            expect(
+                not has_per_test,
+                f"{rel} is not report-bearing ({row['verdict']}) but the "
+                f"manifest carries a per_test block for it",
+            )
+
+    want_passed = sum(
+        r["per_test"]["passed"] for r in suite.values() if "per_test" in r
+    )
+    want_failed = sum(
+        r["per_test"]["failed"] for r in suite.values() if "per_test" in r
+    )
+    want_skipped = sum(
+        r["per_test"]["skipped"] for r in suite.values() if "per_test" in r
+    )
+    expect(
+        summ.passed == want_passed,
+        f"passed TESTS: band {summ.passed} != manifest per-test {want_passed}",
+    )
+    expect(
+        summ.failed == want_failed,
+        f"failed TESTS: band {summ.failed} != manifest per-test {want_failed}",
+    )
+    expect(
+        summ.skipped == want_skipped,
+        f"skipped TESTS: band {summ.skipped} != manifest per-test {want_skipped}",
+    )
     expect(summ.excluded == 0 and summ.not_run == 0, "unexpected excluded/not-run")
 
     # Contract §17 (Determinism): the console summary is ordered lexicographically
@@ -511,6 +584,58 @@ def s_default_suite(manifest: dict) -> str:
     )
 
 
+def s_hostile(manifest: dict) -> str:
+    """The hostile handshake set: each report-shaped adversary, run alone.
+
+    silent -> MALFORMED-SUITE (exit 1); forger (two blocks) -> MALFORMED-SUITE
+    (exit 1); liar (off-grammar report) -> DRIFT (exit 3); overflow (a ~13 MiB
+    flood) -> CAPTURE-OVERFLOW FAIL (exit 1). These files are NOT in the default
+    suite — the liar alone forces exit 3, which would swamp a whole-suite run —
+    so each is driven on its own here. The verdict tokens and exit codes come
+    straight from the manifest rows for testdata/hostile/*."""
+    hostile = {
+        rel: row
+        for rel, row in manifest["tests"].items()
+        if rel.startswith("testdata/hostile/")
+    }
+    expect(len(hostile) == 4, f"expected 4 hostile fixtures, got {len(hostile)}")
+
+    silent = "testdata/hostile/test_silent.mojo"
+    run = run_mtest([silent])
+    expect_exit(run, 1)
+    expect(
+        run.verdict_line("MALFORMED-SUITE", silent) is not None,
+        f"silent binary did not report MALFORMED-SUITE:\n{run.stdout}",
+    )
+
+    forger = "testdata/hostile/test_forger.mojo"
+    run = run_mtest([forger])
+    expect_exit(run, 1)
+    expect(
+        run.verdict_line("MALFORMED-SUITE", forger) is not None,
+        f"forger did not report MALFORMED-SUITE:\n{run.stdout}",
+    )
+
+    liar = "testdata/hostile/test_liar.mojo"
+    run = run_mtest([liar])
+    expect_exit(run, 3)
+    expect(
+        "drift" in run.combined.lower(),
+        f"liar did not surface a drift diagnostic (exit 3):\n{run.combined}",
+    )
+
+    # --show-output none keeps the ~8 MiB truncated capture out of the console;
+    # the FAIL verdict line prints regardless of the show-output setting.
+    overflow = "testdata/hostile/test_overflow.mojo"
+    run = run_mtest([overflow, "--show-output", "none"])
+    expect_exit(run, 1)
+    expect(
+        run.verdict_line("FAIL", overflow) is not None,
+        f"overflow flood did not report FAIL:\n{run.stdout}",
+    )
+    return "silent/forger MALFORMED-SUITE, liar DRIFT exit 3, overflow FAIL"
+
+
 def s_single_pass(manifest: dict) -> str:
     rel = "testdata/suite/test_passing.mojo"
     run = run_mtest([rel])
@@ -526,6 +651,24 @@ def s_exitfirst(manifest: dict) -> str:
     summ = expect_accounting(run)
     expect(summ.not_run >= 1, f"-x left nothing NOT-RUN (not_run={summ.not_run})")
     return f"-x stopped scheduling; {summ.not_run} NOT-RUN, accounting holds"
+
+
+def s_maxfail(manifest: dict) -> str:
+    """`--maxfail N` stops scheduling once N failing TESTS have accumulated.
+
+    testdata/maxfail/ sorts test_a_fail, test_b_fail, test_c_pass; each failing
+    file contributes exactly one failing test. `--maxfail 1` must stop right
+    after test_a_fail, leaving the other two NOT-RUN."""
+    run = run_mtest(["testdata/maxfail", "--maxfail", "1"])
+    expect_exit(run, 1)
+    summ = expect_accounting(run)
+    expect(summ.failed == 1, f"--maxfail 1 let {summ.failed} FAILs run, expected 1")
+    expect(summ.not_run == 2, f"--maxfail 1 left {summ.not_run} NOT-RUN, expected 2")
+    expect(
+        run.verdict_line("FAIL", "testdata/maxfail/test_a_fail.mojo") is not None,
+        "the file that tripped --maxfail did not report FAIL",
+    )
+    return f"--maxfail 1 stopped after 1 failing test; {summ.not_run} NOT-RUN, accounting holds"
 
 
 def s_exclude_and_stale(manifest: dict) -> str:
@@ -670,6 +813,74 @@ def s_show_output(manifest: dict) -> str:
     return "framing: none suppresses, failures frames FAIL, all frames PASS"
 
 
+# A slowest-files row: two leading spaces, the path, then a trailing "N.NNs".
+DURATIONS_ROW_RE = re.compile(r"^  (\S+)\s+([\d.]+)s\s*$")
+
+
+def s_durations(manifest: dict) -> str:
+    """`--durations N` renders a file-level slowest-files list, INFORMAL tier:
+    structure only (presence, size, order, `-q` survival) — never exact
+    timings."""
+    suite = _suite_tests(manifest)
+    files_run = sum(1 for row in suite.values() if row["verdict"] != "COMPILE-ERROR")
+    cerr_rel = next(
+        rel for rel, row in suite.items() if row["verdict"] == "COMPILE-ERROR"
+    )
+
+    # Absent without the flag.
+    absent = run_mtest(["testdata/suite"])
+    expect(
+        "slowest" not in absent.stdout,
+        "a slowest-files section appeared without --durations",
+    )
+
+    # Present with the flag; requesting far more rows than files ran, the
+    # header states the ACTUAL (capped) count, never the requested N.
+    requested = files_run + 50
+    run = run_mtest(["testdata/suite", "--durations", str(requested)])
+    m = re.search(r"slowest (\d+) files:\n((?:  .+\n)+)", run.stdout)
+    expect(
+        m is not None,
+        f"no slowest-files section with --durations {requested}:\n{run.stdout}",
+    )
+    shown = int(m.group(1))
+    rows = [ln for ln in m.group(2).splitlines() if ln.strip()]
+    expect(
+        shown == files_run,
+        f"header states {shown}, expected {files_run} (files that actually ran)",
+    )
+    expect(shown != requested, f"header echoed the requested N ({requested}) verbatim")
+    expect(len(rows) == shown, f"header says {shown} rows but {len(rows)} rendered")
+
+    parsed = []
+    for ln in rows:
+        rm = DURATIONS_ROW_RE.match(ln)
+        expect(rm is not None, f"slowest-files row is not 'path  N.NNs': {ln!r}")
+        parsed.append((rm.group(1), float(rm.group(2))))
+
+    # The COMPILE-ERROR file never reached the run step (duration 0.0) and
+    # must never appear among the rows, however many were requested.
+    expect(
+        all(path != cerr_rel for path, _dur in parsed),
+        f"COMPILE-ERROR file {cerr_rel} (never ran) appeared in the "
+        f"slowest-files list: {parsed}",
+    )
+
+    # Descending duration order (ties would break by path, not asserted here
+    # since real wall-clock durations are exceedingly unlikely to tie).
+    durs = [d for _p, d in parsed]
+    expect(
+        all(durs[i] >= durs[i + 1] for i in range(len(durs) - 1)),
+        f"slowest-files rows are not in descending duration order: {parsed}",
+    )
+
+    # Survives -q: an explicit --durations beats the -q verbosity default.
+    quiet = run_mtest(["testdata/suite", "--durations", "2", "-q"])
+    expect("slowest 2 files:" in quiet.stdout, "-q suppressed the --durations list")
+
+    return f"absent w/o flag; {shown} rows (capped from {requested}), descending, survives -q"
+
+
 def s_color(manifest: dict) -> str:
     """NO_COLOR must silence AUTO color even on a real tty; --color always is
     absolute and paints regardless of NO_COLOR or tty-ness.
@@ -713,21 +924,252 @@ def s_color(manifest: dict) -> str:
     return "AUTO+tty colors, NO_COLOR silences it, --color always is absolute"
 
 
+COLLECT_MATRIX_EXPECTED = [
+    "testdata/matrix/test_alpha.mojo::test_alpha_one",
+    "testdata/matrix/test_alpha.mojo::test_alpha_three",
+    "testdata/matrix/test_alpha.mojo::test_alpha_two",
+    "testdata/matrix/test_beta.mojo::test_beta_one",
+    "testdata/matrix/test_beta.mojo::test_beta_two",
+]
+COLLECT_DIR_EXPECTED = [
+    "testdata/collect/test_probe_ok.mojo::test_one",
+    "testdata/collect/test_probe_ok.mojo::test_two",
+]
+
+
+def s_collect(manifest: dict) -> str:
+    """`collect` / `--collect-only`: STDOUT is byte-clean and is ONLY the sorted
+    node-id listing; every diagnostic goes to STDERR; the total per-file policy
+    holds (qualifying listed; compile-error/crash/timeout/malformed -> stderr +
+    continue + exit-1; drift -> exit 3; nothing collectable -> exit 5).
+
+    STDOUT purity is asserted MECHANICALLY: stdout is split into lines and the
+    lines must be exactly the sorted expected node-id set — nothing else may ride
+    stdout, ever."""
+    # 1. Byte-purity on a clean tree: stdout is EXACTLY the sorted listing.
+    run = run_mtest(["collect", "testdata/matrix"])
+    expect_exit(run, 0)
+    node_ids = run.stdout.splitlines()
+    expect(
+        node_ids == sorted(node_ids),
+        f"collect listing is not lexicographically sorted: {node_ids}",
+    )
+    expect(
+        node_ids == COLLECT_MATRIX_EXPECTED,
+        f"collect listing {node_ids} != expected {COLLECT_MATRIX_EXPECTED}",
+    )
+    # STDOUT ends in exactly one newline per node id and carries nothing else.
+    expect(
+        run.stdout == "".join(n + "\n" for n in COLLECT_MATRIX_EXPECTED),
+        f"stdout is not the byte-clean listing:\n{run.stdout!r}",
+    )
+    expect(
+        run.stderr.strip() == "",
+        f"an all-qualifying collect must keep stderr empty:\n{run.stderr}",
+    )
+
+    # 2. `--collect-only` is byte-identical to the `collect` subcommand.
+    co = run_mtest(["--collect-only", "testdata/matrix"])
+    expect_exit(co, 0)
+    expect(
+        co.stdout == run.stdout,
+        "--collect-only stdout differs from the collect subcommand",
+    )
+
+    # 3. The per-file matrix: a crashing probe and a hanging probe (bounded by a
+    # short --timeout) each write a diagnostic to STDERR while the good file's
+    # node ids are still listed; exit-1 class. No diagnostic leaks onto STDOUT.
+    mtx = run_mtest(
+        ["collect", "testdata/collect", "--timeout", "2"], timeout=SHORT_TIMEOUT
+    )
+    expect_exit(mtx, 1)
+    mtx_ids = mtx.stdout.splitlines()
+    expect(
+        mtx_ids == COLLECT_DIR_EXPECTED,
+        f"the good file's node ids were not listed: {mtx_ids}",
+    )
+    expect(
+        "collect:" not in mtx.stdout,
+        f"a diagnostic leaked onto STDOUT:\n{mtx.stdout!r}",
+    )
+    expect(
+        "test_probe_crash.mojo" in mtx.stderr,
+        f"the crashing probe had no STDERR diagnostic:\n{mtx.stderr}",
+    )
+    expect(
+        "test_probe_hang.mojo" in mtx.stderr,
+        f"the hanging probe had no STDERR diagnostic:\n{mtx.stderr}",
+    )
+
+    # 4. An off-grammar probe is DRIFT (exit 3); STDOUT stays empty.
+    liar = run_mtest(
+        ["collect", "testdata/hostile/test_liar.mojo"], timeout=SHORT_TIMEOUT
+    )
+    expect_exit(liar, 3)
+    expect(liar.stdout == "", f"drift left bytes on STDOUT:\n{liar.stdout!r}")
+    expect(
+        "drift" in liar.stderr.lower(),
+        f"the off-grammar probe surfaced no drift diagnostic:\n{liar.stderr}",
+    )
+
+    # 5. A malformed suite (silent) is exit-1; STDOUT stays empty.
+    silent = run_mtest(
+        ["collect", "testdata/hostile/test_silent.mojo"], timeout=SHORT_TIMEOUT
+    )
+    expect_exit(silent, 1)
+    expect(silent.stdout == "", "a malformed probe left bytes on STDOUT")
+    expect(
+        "test_silent.mojo" in silent.stderr,
+        f"the malformed probe had no STDERR diagnostic:\n{silent.stderr}",
+    )
+
+    # 6. Nothing collectable -> exit 5; STDOUT empty.
+    tmp = tempfile.mkdtemp(
+        prefix=".e2e_collect_empty_", dir=os.path.join(REPO_ROOT, "testdata")
+    )
+    try:
+        rel = os.path.relpath(tmp, REPO_ROOT)
+        empt = run_mtest(["collect", rel], timeout=SHORT_TIMEOUT)
+        expect_exit(empt, 5)
+        expect(empt.stdout == "", "nothing-collectable left bytes on STDOUT")
+    finally:
+        os.rmdir(tmp)
+
+    return (
+        "byte-clean sorted listing; --collect-only == collect; "
+        "crash/hang/malformed -> stderr + continue (exit 1); drift exit 3; "
+        "empty exit 5"
+    )
+
+
 def s_usage_refusals(manifest: dict) -> str:
-    cases = [
-        (["collect", "testdata/suite/test_passing.mojo"], "collect"),
-        (["testdata/suite/test_passing.mojo", "--maxfail", "1"], "maxfail"),
-        (["testdata/suite/test_passing.mojo", "-k", "foo"], "-k"),
-    ]
-    for args, needle in cases:
-        run = run_mtest(args, timeout=SHORT_TIMEOUT)
-        expect_exit(run, 4)
-        expect(
-            needle in run.stderr,
-            f"usage error for {args} did not name '{needle}' on stderr:\n{run.stderr}",
-        )
-        expect(run.stderr.strip() != "", f"usage error for {args} wrote nothing to stderr")
-    return "collect / --maxfail / -k each refused with exit 4 on stderr"
+    """collect is now served, so the collect-subcommand refusal is gone. The
+    remaining usage refusal this build enforces is a RUN-ONLY flag combined with
+    collect mode: a listing is not a run, so every served run-only flag
+    (--maxfail, -x/--exitfirst, --gate, -s/--show-output) is refused with exit 4,
+    while --timeout is NOT refused (it bounds the probes). Separately,
+    --shard/--serial/--json are part of the v1 contract but not served by this
+    build, so each fires the standard availability refusal (exit 4, the flag
+    named on stderr) regardless of subcommand."""
+    run = run_mtest(
+        ["collect", "--maxfail", "1", "testdata/matrix"], timeout=SHORT_TIMEOUT
+    )
+    expect_exit(run, 4)
+    expect(
+        "--maxfail" in run.stderr,
+        f"collect+--maxfail did not name --maxfail on stderr:\n{run.stderr}",
+    )
+    expect(
+        "run-only" in run.stderr,
+        f"collect+--maxfail did not explain the run-only refusal:\n{run.stderr}",
+    )
+    expect(
+        run.stdout == "",
+        f"a usage error must print no listing to stdout, got:\n{run.stdout!r}",
+    )
+
+    gate = run_mtest(
+        ["collect", "--gate", "testdata/matrix/test_alpha.mojo", "testdata/matrix"],
+        timeout=SHORT_TIMEOUT,
+    )
+    expect_exit(gate, 4)
+    expect(
+        "--gate" in gate.stderr,
+        f"collect+--gate did not name --gate on stderr:\n{gate.stderr}",
+    )
+    expect(
+        "run-only" in gate.stderr,
+        f"collect+--gate did not explain the run-only refusal:\n{gate.stderr}",
+    )
+    expect(
+        gate.stdout == "",
+        f"a usage error must print no listing to stdout, got:\n{gate.stdout!r}",
+    )
+
+    show = run_mtest(
+        ["collect", "-s", "testdata/matrix"], timeout=SHORT_TIMEOUT
+    )
+    expect_exit(show, 4)
+    expect(
+        "run-only" in show.stderr,
+        f"collect+-s did not explain the run-only refusal:\n{show.stderr}",
+    )
+    expect(
+        show.stdout == "",
+        f"a usage error must print no listing to stdout, got:\n{show.stdout!r}",
+    )
+
+    shard = run_mtest(["--shard", "1/4", "testdata/matrix"], timeout=SHORT_TIMEOUT)
+    expect_exit(shard, 4)
+    expect(
+        "--shard" in shard.stderr,
+        f"--shard did not name itself on stderr:\n{shard.stderr}",
+    )
+    expect(
+        "not available in this build" in shard.stderr,
+        f"--shard did not fire the availability refusal:\n{shard.stderr}",
+    )
+    expect(
+        shard.stdout == "",
+        f"a usage error must print no listing to stdout, got:\n{shard.stdout!r}",
+    )
+
+    serial = run_mtest(
+        ["--serial", "foo*", "testdata/matrix"], timeout=SHORT_TIMEOUT
+    )
+    expect_exit(serial, 4)
+    expect(
+        "--serial" in serial.stderr,
+        f"--serial did not name itself on stderr:\n{serial.stderr}",
+    )
+    expect(
+        "not available in this build" in serial.stderr,
+        f"--serial did not fire the availability refusal:\n{serial.stderr}",
+    )
+    expect(
+        serial.stdout == "",
+        f"a usage error must print no listing to stdout, got:\n{serial.stdout!r}",
+    )
+
+    json_path = run_mtest(
+        ["--json", "out.json", "testdata/matrix"], timeout=SHORT_TIMEOUT
+    )
+    expect_exit(json_path, 4)
+    expect(
+        "--json" in json_path.stderr,
+        f"--json did not name itself on stderr:\n{json_path.stderr}",
+    )
+    expect(
+        "not available in this build" in json_path.stderr,
+        f"--json did not fire the availability refusal:\n{json_path.stderr}",
+    )
+    expect(
+        json_path.stdout == "",
+        f"a usage error must print no listing to stdout, got:\n{json_path.stdout!r}",
+    )
+
+    json_stdout = run_mtest(
+        ["--json", "-", "testdata/matrix"], timeout=SHORT_TIMEOUT
+    )
+    expect_exit(json_stdout, 4)
+    expect(
+        "--json" in json_stdout.stderr,
+        f"--json - did not name itself on stderr:\n{json_stdout.stderr}",
+    )
+    expect(
+        "not available in this build" in json_stdout.stderr,
+        f"--json - did not fire the availability refusal:\n{json_stdout.stderr}",
+    )
+    expect(
+        json_stdout.stdout == "",
+        f"a usage error must print no listing to stdout, got:\n{json_stdout.stdout!r}",
+    )
+
+    return (
+        "run-only flags (--maxfail, --gate, -s) + collect -> exit 4 on "
+        "stderr, no listing; --shard/--serial/--json -> exit 4 availability "
+        "refusal"
+    )
 
 
 def s_passthrough_and_forbidden(manifest: dict) -> str:
@@ -756,6 +1198,231 @@ def s_out_of_root(manifest: dict) -> str:
         f"out-of-root operand did not report escaping the root:\n{run.stderr}",
     )
     return "out-of-root operand -> exit 4"
+
+
+MATRIX_ALPHA = "testdata/matrix/test_alpha.mojo"
+MATRIX_BETA = "testdata/matrix/test_beta.mojo"
+CHAMELEON = "testdata/chameleon/test_chameleon.mojo"
+
+
+def s_selection_keyword(manifest: dict) -> str:
+    """`-k` narrows a file to a subset run under --only; the rest are DESELECTED.
+
+    `-k two` selects only test_alpha_two of the three; the file runs under
+    --only, PASSes, and the two unselected tests are counted DESELECTED (a
+    summary count, never a listed verdict row)."""
+    run = run_mtest([MATRIX_ALPHA, "-k", "two"])
+    expect_exit(run, 0)
+    summ = expect_accounting(run)
+    expect(
+        run.verdict_line("PASS", MATRIX_ALPHA) is not None,
+        "the -k subset selection did not PASS the file",
+    )
+    expect(
+        summ.deselected == 2,
+        f"expected 2 deselected under -k two, got {summ.deselected}",
+    )
+    return "-k selects a subset (--only), rest DESELECTED; exit 0"
+
+
+def s_selection_node_id(manifest: dict) -> str:
+    """A node-id operand selects exactly one test; the rest are DESELECTED."""
+    run = run_mtest([f"{MATRIX_ALPHA}::test_alpha_one"])
+    expect_exit(run, 0)
+    summ = expect_accounting(run)
+    expect(
+        run.verdict_line("PASS", MATRIX_ALPHA) is not None,
+        "the node-id selection did not PASS the file",
+    )
+    expect(
+        summ.deselected == 2,
+        f"expected 2 deselected for a single node id, got {summ.deselected}",
+    )
+    return "node-id operand selects one test; 2 DESELECTED; exit 0"
+
+
+def s_selection_union(manifest: dict) -> str:
+    """A dir operand UNIONs with a node id under it: the whole tree still runs.
+
+    `mtest testdata/matrix testdata/matrix/test_alpha.mojo::test_alpha_one`
+    covers test_alpha.mojo with BOTH a plain dir operand and a node id — the
+    plain operand wins (whole), so every test in both files runs and nothing is
+    deselected."""
+    run = run_mtest(["testdata/matrix", f"{MATRIX_ALPHA}::test_alpha_one"])
+    expect_exit(run, 0)
+    summ = expect_accounting(run)
+    expect(
+        run.verdict_line("PASS", MATRIX_ALPHA) is not None,
+        "union run did not PASS test_alpha.mojo",
+    )
+    expect(
+        run.verdict_line("PASS", MATRIX_BETA) is not None,
+        "union run did not PASS test_beta.mojo (the dir must keep it whole)",
+    )
+    expect(
+        summ.deselected == 0,
+        f"union kept everything, but {summ.deselected} were deselected",
+    )
+    return "dir + node-id union runs the whole tree; 0 DESELECTED; exit 0"
+
+
+def s_selection_malformed_node_id(manifest: dict) -> str:
+    """More than one `::` is a MALFORMED node id -> exit 4, never 'unknown test'.
+    """
+    run = run_mtest(
+        [f"{MATRIX_ALPHA}::test_alpha_one::extra"], timeout=SHORT_TIMEOUT
+    )
+    expect_exit(run, 4)
+    expect(
+        "malformed node id" in run.stderr,
+        f"malformed node id did not say so on stderr:\n{run.stderr}",
+    )
+    expect(
+        "unknown test" not in run.stderr,
+        f"a malformed node id must NOT be reported as 'unknown test':\n{run.stderr}",
+    )
+    return "malformed node id (>1 '::') -> exit 4, names it, never 'unknown test'"
+
+
+def s_selection_unknown_test(manifest: dict) -> str:
+    """A node id naming a test the file does not collect -> exit 4 'unknown test'.
+    """
+    run = run_mtest([f"{MATRIX_ALPHA}::test_does_not_exist"], timeout=SHORT_TIMEOUT)
+    expect_exit(run, 4)
+    expect(
+        "unknown test" in run.stderr,
+        f"an unknown test name did not report 'unknown test':\n{run.stderr}",
+    )
+    return "unknown test name (after the probe) -> exit 4"
+
+
+def s_selection_empty(manifest: dict) -> str:
+    """A `-k` that matches nothing deselects every test -> nothing runs -> exit 5.
+    """
+    run = run_mtest([MATRIX_ALPHA, "-k", "no_such_keyword_zzz"])
+    expect_exit(run, 5)
+    return "empty final selection (all deselected) -> exit 5"
+
+
+def s_selection_chameleon(manifest: dict) -> str:
+    """The chameleon: recollect-once then MALFORMED-SUITE (exit-1), never exit 3.
+
+    Selecting the ghost forces a --only run; the suite lists it under --skip-all
+    but refuses it under --only, so mtest warns loudly, rebuilds + recollects,
+    retries, sees the same refusal, and reports MALFORMED-SUITE."""
+    run = run_mtest([CHAMELEON, "-k", "ghost"], timeout=SHORT_TIMEOUT)
+    expect_exit(run, 1)
+    expect(
+        run.verdict_line("MALFORMED-SUITE", CHAMELEON) is not None,
+        f"the chameleon was not reported MALFORMED-SUITE:\n{run.stdout}",
+    )
+    expect(
+        "stale-name" in run.combined or "WARNING" in run.combined,
+        f"the recover-once flow did not warn loudly:\n{run.combined}",
+    )
+    return "chameleon: loud recollect-once then MALFORMED-SUITE, exit 1 (not 3)"
+
+
+def _mojo_log_path() -> str:
+    """A fresh path for MTEST_MOJO_LOG, absent until the logging wrapper writes
+    it — proves the wrapper (not some pre-existing file) produced the log."""
+    fd, path = tempfile.mkstemp(prefix="mtest_mojo_log_", suffix=".tsv")
+    os.close(fd)
+    os.remove(path)
+    return path
+
+
+def _mojo_log_lines(path: str) -> list[str]:
+    """The logging wrapper's recorded lines, or [] if it never wrote the file."""
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as fh:
+        return [ln.rstrip("\n") for ln in fh if ln.strip()]
+
+
+def _count_builds(lines: list[str], rel: str) -> int:
+    """How many `build\\t<rel>\\t...` entries the wrapper logged for `rel`."""
+    count = 0
+    for ln in lines:
+        fields = ln.split("\t")
+        if len(fields) >= 2 and fields[0] == "build" and fields[1] == rel:
+            count += 1
+    return count
+
+
+def s_single_build(manifest: dict) -> str:
+    """The BuildProducts registry shares ONE `mojo build` per file between the
+    selection probe and the run — proved with the committed logging `--mojo`
+    wrapper (scripts/logging_mojo.py) over a SINGLE selection-run invocation.
+    Two separate `mtest` invocations would legitimately rebuild; this scenario
+    never does that.
+
+    `-k one` over the whole testdata/matrix tree matches test_alpha_one AND
+    test_beta_one, so BOTH files are touched — a multi-file selection. Phase 1
+    (probe every run file) builds each file once; Phase 2 (run the selected
+    subset) reuses that same binary. The wrapper's log is the independent
+    witness: exactly one `mojo build <file>` line per file, not two."""
+    log_path = _mojo_log_path()
+    try:
+        run = run_mtest(
+            ["--mojo", LOGGING_MOJO, "-k", "one", "testdata/matrix"],
+            env_overrides={"MTEST_MOJO_LOG": log_path},
+        )
+        expect_exit(run, 0)
+        expect(
+            os.path.exists(log_path),
+            "the logging --mojo wrapper never wrote a log file",
+        )
+        lines = _mojo_log_lines(log_path)
+        for rel in (MATRIX_ALPHA, MATRIX_BETA):
+            n = _count_builds(lines, rel)
+            expect(
+                n == 1,
+                f"expected exactly 1 'mojo build {rel}' over one selection-run "
+                f"invocation (probe+run must share the build), got {n}: {lines}",
+            )
+        return (
+            f"one invocation selects across 2 files (-k one); each built "
+            f"exactly once ({len(lines)} mojo invocations logged total)"
+        )
+    finally:
+        if os.path.exists(log_path):
+            os.remove(log_path)
+
+
+def s_stale_recovery_two_builds(manifest: dict) -> str:
+    """The chameleon's stale-name recovery rebuilds the file EXACTLY TWICE: the
+    initial Phase-1 build, then the one recollect-once rebuild the recovery
+    flow triggers when the suite refuses under `--only` a name it just listed
+    under `--skip-all`. The run still ends MALFORMED-SUITE (exit-1 class),
+    never exit 3 — the recovery is a bounded retry, not a drift."""
+    log_path = _mojo_log_path()
+    try:
+        run = run_mtest(
+            ["--mojo", LOGGING_MOJO, CHAMELEON, "-k", "ghost"],
+            env_overrides={"MTEST_MOJO_LOG": log_path},
+            timeout=SHORT_TIMEOUT,
+        )
+        expect_exit(run, 1)
+        expect(
+            run.verdict_line("MALFORMED-SUITE", CHAMELEON) is not None,
+            "the chameleon was not reported MALFORMED-SUITE under the logging "
+            f"wrapper:\n{run.stdout}",
+        )
+        lines = _mojo_log_lines(log_path)
+        n = _count_builds(lines, CHAMELEON)
+        expect(
+            n == 2,
+            f"expected exactly 2 'mojo build {CHAMELEON}' entries (initial + "
+            f"one stale-name rebuild), got {n}: {lines}",
+        )
+        return (
+            "chameleon: 2 builds logged (initial + stale-name rebuild), "
+            "MALFORMED-SUITE exit 1 (not 3)"
+        )
+    finally:
+        if os.path.exists(log_path):
+            os.remove(log_path)
 
 
 def s_internal_error(manifest: dict) -> str:
@@ -867,7 +1534,7 @@ def s_interrupt(manifest: dict) -> str:
     combined = out + "\n" + err
     m = SUMMARY_RE.search(combined)
     expect(m is not None, f"no partial summary after interrupt:\n{combined}")
-    not_run = int(m.group(7))
+    not_run = int(m.group("not_run"))
     expect(not_run >= 1, f"interrupt summary showed no NOT-RUN accounting (not_run={not_run})")
 
     # The process group must be gone — no orphaned children.
@@ -926,8 +1593,10 @@ def main() -> int:
     print("=== mtest end-to-end gate ===", flush=True)
     h.scenario("manifest-completeness", s_manifest_completeness)
     h.scenario("default-suite", s_default_suite)
+    h.scenario("hostile", s_hostile)
     h.scenario("single-pass", s_single_pass)
     h.scenario("exitfirst", s_exitfirst)
+    h.scenario("maxfail", s_maxfail)
     h.scenario("exclude+stale", s_exclude_and_stale)
     h.scenario("all-excluded", s_all_excluded)
     h.scenario("empty-dir", s_empty_dir)
@@ -936,8 +1605,19 @@ def main() -> int:
     h.scenario("precompile", s_precompile)
     h.scenario("quiet-verbose", s_quiet_verbose)
     h.scenario("show-output", s_show_output)
+    h.scenario("durations", s_durations)
     h.scenario("color", s_color)
     h.scenario("usage-refusals", s_usage_refusals)
+    h.scenario("selection-keyword", s_selection_keyword)
+    h.scenario("selection-node-id", s_selection_node_id)
+    h.scenario("selection-union", s_selection_union)
+    h.scenario("selection-malformed-node-id", s_selection_malformed_node_id)
+    h.scenario("selection-unknown-test", s_selection_unknown_test)
+    h.scenario("selection-empty", s_selection_empty)
+    h.scenario("selection-chameleon", s_selection_chameleon)
+    h.scenario("single-build", s_single_build)
+    h.scenario("stale-recovery-two-builds", s_stale_recovery_two_builds)
+    h.scenario("collect", s_collect)
     h.scenario("passthrough+forbidden", s_passthrough_and_forbidden)
     h.scenario("out-of-root", s_out_of_root)
     h.scenario("internal-error", s_internal_error)

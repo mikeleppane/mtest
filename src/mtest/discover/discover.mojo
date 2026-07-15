@@ -26,6 +26,7 @@ from std.builtin.sort import sort
 from std.os.path import exists, isdir, isfile
 
 from mtest.config import RunnerConfig
+from mtest.model import split_node_token
 from mtest.discover.fnmatch import fnmatch
 from mtest.discover.normalize import normalize_operand, normalize_root
 from mtest.discover.result import DiscoveryResult, ExcludedEntry
@@ -57,35 +58,38 @@ def _dedup_preserve(items: List[String]) -> List[String]:
     return out^
 
 
-def _node_id_error(op: String) -> Error:
-    """The exit-4 refusal for a `::` node-id operand (not served this build)."""
+def _malformed_node_id_error(op: String) -> Error:
+    """The exit-4 usage error for an operand with more than one `::`."""
     return Error(
-        "discover: per-test selection ('"
+        "discover: malformed node id '"
         + op
-        + "') is not available in this build; node-id selection arrives with"
-        + " the report parser — pass a file or directory operand instead"
+        + "': a node id is PATH::TEST with a single '::' (see mtest --help)"
     )
 
 
 def _classify(op: String, nroot: String, mut into: List[String]) raises:
     """Resolve one operand into `into` (walked files, or one explicit file).
 
-    Raises a `discover:` usage error for a `::` node id, a nonexistent path, or
-    an operand escaping the root.
+    A node id (`PATH::TEST`) resolves to its FILE part — the node id implies its
+    file, and per-test name selection is applied later by the session. More than
+    one `::` is a MALFORMED node id (exit-4 usage error). Also raises for a
+    nonexistent path or an operand escaping the root.
     """
-    if op.find("::") != -1:
-        raise _node_id_error(op)
-    var rel = normalize_operand(op, nroot)  # raises on root escape
+    var split = split_node_token(op)
+    if split.sep_count > 1:
+        raise _malformed_node_id_error(op)
+    var file_op = op if split.sep_count == 0 else split.file_part
+    var rel = normalize_operand(file_op, nroot)  # raises on root escape
     var fpath = _abs_of(nroot, rel)
     if not exists(fpath):
-        raise Error("discover: no such path '" + op + "'")
+        raise Error("discover: no such path '" + file_op + "'")
     if isdir(fpath):
         for f in walk_dir(fpath, rel):
             into.append(f)
     elif isfile(fpath):
         into.append(rel)
     else:
-        raise Error("discover: no such path '" + op + "'")
+        raise Error("discover: no such path '" + file_op + "'")
 
 
 def _apply_excludes(

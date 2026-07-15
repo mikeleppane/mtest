@@ -52,16 +52,26 @@ def frozen_inventory() -> List[InvRow]:
         InvRow("-h", 0, False, True),
         InvRow("--help", 0, False, True),
         InvRow("--version", 0, False, True),
+        InvRow("-k", 1, False, True),
+        InvRow("--maxfail", 1, False, True),
+        # `--durations N`: non-negative int; 0 disables.
+        InvRow("--durations", 1, False, True),
         # In the v1 contract but not served by this build.
-        InvRow("-k", 1, False, False),
-        InvRow("--maxfail", 1, False, False),
         InvRow("-n", 1, False, False),
         InvRow("--workers", 1, False, False),
         InvRow("--compile-timeout", 1, False, False),
         InvRow("--retries", 1, False, False),
         InvRow("--junit-xml", 1, False, False),
         InvRow("--gh-annotations", 1, False, False),
-        InvRow("--collect-only", 0, False, False),
+        # `--shard M/N`: 1<=M<=N (documented/inventoried, not enforced — it
+        # refuses before any value validation runs).
+        InvRow("--shard", 1, False, False),
+        # `--serial GLOB`: repeatable.
+        InvRow("--serial", 1, True, False),
+        # `--json PATH|-`.
+        InvRow("--json", 1, False, False),
+        # Served by this build (collect mode).
+        InvRow("--collect-only", 0, False, True),
     ]
 
 
@@ -127,14 +137,6 @@ def _assert_refused(spelling: String) raises:
         _ = parse_args(argv3)
 
 
-def test_refuse_k() raises:
-    _assert_refused("-k")
-
-
-def test_refuse_maxfail() raises:
-    _assert_refused("--maxfail")
-
-
 def test_refuse_workers_short() raises:
     _assert_refused("-n")
 
@@ -167,22 +169,35 @@ def test_refuse_gh_annotations() raises:
     _assert_refused("--gh-annotations")
 
 
-def test_refuse_collect_only() raises:
-    _assert_refused("--collect-only")
+def test_refuse_shard() raises:
+    _assert_refused("--shard")
 
 
-def test_refuse_collect_subcommand() raises:
+def test_refuse_serial() raises:
+    _assert_refused("--serial")
+
+
+def test_refuse_json() raises:
+    _assert_refused("--json")
+
+
+def test_collect_only_is_served_and_sets_collect_mode() raises:
+    # `--collect-only` is now served: it parses cleanly and turns on collect
+    # mode rather than being refused as an unbuilt flag.
+    var argv: List[String] = ["--collect-only"]
+    var r = parse_args(argv)
+    assert_true(r.config.collect)
+
+
+def test_collect_subcommand_is_served() raises:
     var argv: List[String] = ["collect", "tests/"]
-    with assert_raises(contains="v1 contract"):
-        _ = parse_args(argv)
-    var argv2: List[String] = ["collect"]
-    with assert_raises(contains="collect"):
-        _ = parse_args(argv2)
+    var r = parse_args(argv)
+    assert_true(r.config.collect)
 
 
 def test_refuse_equals_form_still_names_flag() raises:
-    var argv: List[String] = ["--maxfail=3"]
-    with assert_raises(contains="--maxfail"):
+    var argv: List[String] = ["--workers=3"]
+    with assert_raises(contains="--workers"):
         _ = parse_args(argv)
 
 
