@@ -137,12 +137,5 @@ def flag_specs() -> List[FlagSpec]:
             False,
             "CI annotations",
         ),
-        FlagSpec(
-            "--collect-only",
-            FlagId.COLLECT_ONLY,
-            0,
-            False,
-            False,
-            "test collection",
-        ),
+        FlagSpec("--collect-only", FlagId.COLLECT_ONLY, 0, False, True, ""),
     ]

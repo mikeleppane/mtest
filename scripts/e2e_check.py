@@ -788,19 +788,182 @@ def s_color(manifest: dict) -> str:
     return "AUTO+tty colors, NO_COLOR silences it, --color always is absolute"
 
 
+COLLECT_MATRIX_EXPECTED = [
+    "testdata/matrix/test_alpha.mojo::test_alpha_one",
+    "testdata/matrix/test_alpha.mojo::test_alpha_three",
+    "testdata/matrix/test_alpha.mojo::test_alpha_two",
+    "testdata/matrix/test_beta.mojo::test_beta_one",
+    "testdata/matrix/test_beta.mojo::test_beta_two",
+]
+COLLECT_DIR_EXPECTED = [
+    "testdata/collect/test_probe_ok.mojo::test_one",
+    "testdata/collect/test_probe_ok.mojo::test_two",
+]
+
+
+def s_collect(manifest: dict) -> str:
+    """`collect` / `--collect-only`: STDOUT is byte-clean and is ONLY the sorted
+    node-id listing; every diagnostic goes to STDERR; the total per-file policy
+    holds (qualifying listed; compile-error/crash/timeout/malformed -> stderr +
+    continue + exit-1; drift -> exit 3; nothing collectable -> exit 5).
+
+    STDOUT purity is asserted MECHANICALLY: stdout is split into lines and the
+    lines must be exactly the sorted expected node-id set — nothing else may ride
+    stdout, ever."""
+    # 1. Byte-purity on a clean tree: stdout is EXACTLY the sorted listing.
+    run = run_mtest(["collect", "testdata/matrix"])
+    expect_exit(run, 0)
+    node_ids = run.stdout.splitlines()
+    expect(
+        node_ids == sorted(node_ids),
+        f"collect listing is not lexicographically sorted: {node_ids}",
+    )
+    expect(
+        node_ids == COLLECT_MATRIX_EXPECTED,
+        f"collect listing {node_ids} != expected {COLLECT_MATRIX_EXPECTED}",
+    )
+    # STDOUT ends in exactly one newline per node id and carries nothing else.
+    expect(
+        run.stdout == "".join(n + "\n" for n in COLLECT_MATRIX_EXPECTED),
+        f"stdout is not the byte-clean listing:\n{run.stdout!r}",
+    )
+    expect(
+        run.stderr.strip() == "",
+        f"an all-qualifying collect must keep stderr empty:\n{run.stderr}",
+    )
+
+    # 2. `--collect-only` is byte-identical to the `collect` subcommand.
+    co = run_mtest(["--collect-only", "testdata/matrix"])
+    expect_exit(co, 0)
+    expect(
+        co.stdout == run.stdout,
+        "--collect-only stdout differs from the collect subcommand",
+    )
+
+    # 3. The per-file matrix: a crashing probe and a hanging probe (bounded by a
+    # short --timeout) each write a diagnostic to STDERR while the good file's
+    # node ids are still listed; exit-1 class. No diagnostic leaks onto STDOUT.
+    mtx = run_mtest(
+        ["collect", "testdata/collect", "--timeout", "2"], timeout=SHORT_TIMEOUT
+    )
+    expect_exit(mtx, 1)
+    mtx_ids = mtx.stdout.splitlines()
+    expect(
+        mtx_ids == COLLECT_DIR_EXPECTED,
+        f"the good file's node ids were not listed: {mtx_ids}",
+    )
+    expect(
+        "collect:" not in mtx.stdout,
+        f"a diagnostic leaked onto STDOUT:\n{mtx.stdout!r}",
+    )
+    expect(
+        "test_probe_crash.mojo" in mtx.stderr,
+        f"the crashing probe had no STDERR diagnostic:\n{mtx.stderr}",
+    )
+    expect(
+        "test_probe_hang.mojo" in mtx.stderr,
+        f"the hanging probe had no STDERR diagnostic:\n{mtx.stderr}",
+    )
+
+    # 4. An off-grammar probe is DRIFT (exit 3); STDOUT stays empty.
+    liar = run_mtest(
+        ["collect", "testdata/hostile/test_liar.mojo"], timeout=SHORT_TIMEOUT
+    )
+    expect_exit(liar, 3)
+    expect(liar.stdout == "", f"drift left bytes on STDOUT:\n{liar.stdout!r}")
+    expect(
+        "drift" in liar.stderr.lower(),
+        f"the off-grammar probe surfaced no drift diagnostic:\n{liar.stderr}",
+    )
+
+    # 5. A malformed suite (silent) is exit-1; STDOUT stays empty.
+    silent = run_mtest(
+        ["collect", "testdata/hostile/test_silent.mojo"], timeout=SHORT_TIMEOUT
+    )
+    expect_exit(silent, 1)
+    expect(silent.stdout == "", "a malformed probe left bytes on STDOUT")
+    expect(
+        "test_silent.mojo" in silent.stderr,
+        f"the malformed probe had no STDERR diagnostic:\n{silent.stderr}",
+    )
+
+    # 6. Nothing collectable -> exit 5; STDOUT empty.
+    tmp = tempfile.mkdtemp(
+        prefix=".e2e_collect_empty_", dir=os.path.join(REPO_ROOT, "testdata")
+    )
+    try:
+        rel = os.path.relpath(tmp, REPO_ROOT)
+        empt = run_mtest(["collect", rel], timeout=SHORT_TIMEOUT)
+        expect_exit(empt, 5)
+        expect(empt.stdout == "", "nothing-collectable left bytes on STDOUT")
+    finally:
+        os.rmdir(tmp)
+
+    return (
+        "byte-clean sorted listing; --collect-only == collect; "
+        "crash/hang/malformed -> stderr + continue (exit 1); drift exit 3; "
+        "empty exit 5"
+    )
+
+
 def s_usage_refusals(manifest: dict) -> str:
-    cases = [
-        (["collect", "testdata/suite/test_passing.mojo"], "collect"),
-    ]
-    for args, needle in cases:
-        run = run_mtest(args, timeout=SHORT_TIMEOUT)
-        expect_exit(run, 4)
-        expect(
-            needle in run.stderr,
-            f"usage error for {args} did not name '{needle}' on stderr:\n{run.stderr}",
-        )
-        expect(run.stderr.strip() != "", f"usage error for {args} wrote nothing to stderr")
-    return "collect refused with exit 4 on stderr (-k, --maxfail now served)"
+    """collect is now served, so the collect-subcommand refusal is gone. The
+    remaining usage refusal this build enforces is a RUN-ONLY flag combined with
+    collect mode: a listing is not a run, so every served run-only flag
+    (--maxfail, -x/--exitfirst, --gate, -s/--show-output) is refused with exit 4,
+    while --timeout is NOT refused (it bounds the probes)."""
+    run = run_mtest(
+        ["collect", "--maxfail", "1", "testdata/matrix"], timeout=SHORT_TIMEOUT
+    )
+    expect_exit(run, 4)
+    expect(
+        "--maxfail" in run.stderr,
+        f"collect+--maxfail did not name --maxfail on stderr:\n{run.stderr}",
+    )
+    expect(
+        "run-only" in run.stderr,
+        f"collect+--maxfail did not explain the run-only refusal:\n{run.stderr}",
+    )
+    expect(
+        run.stdout == "",
+        f"a usage error must print no listing to stdout, got:\n{run.stdout!r}",
+    )
+
+    gate = run_mtest(
+        ["collect", "--gate", "testdata/matrix/test_alpha.mojo", "testdata/matrix"],
+        timeout=SHORT_TIMEOUT,
+    )
+    expect_exit(gate, 4)
+    expect(
+        "--gate" in gate.stderr,
+        f"collect+--gate did not name --gate on stderr:\n{gate.stderr}",
+    )
+    expect(
+        "run-only" in gate.stderr,
+        f"collect+--gate did not explain the run-only refusal:\n{gate.stderr}",
+    )
+    expect(
+        gate.stdout == "",
+        f"a usage error must print no listing to stdout, got:\n{gate.stdout!r}",
+    )
+
+    show = run_mtest(
+        ["collect", "-s", "testdata/matrix"], timeout=SHORT_TIMEOUT
+    )
+    expect_exit(show, 4)
+    expect(
+        "run-only" in show.stderr,
+        f"collect+-s did not explain the run-only refusal:\n{show.stderr}",
+    )
+    expect(
+        show.stdout == "",
+        f"a usage error must print no listing to stdout, got:\n{show.stdout!r}",
+    )
+
+    return (
+        "run-only flags (--maxfail, --gate, -s) + collect -> exit 4 on "
+        "stderr, no listing"
+    )
 
 
 def s_passthrough_and_forbidden(manifest: dict) -> str:
@@ -1143,6 +1306,7 @@ def main() -> int:
     h.scenario("selection-unknown-test", s_selection_unknown_test)
     h.scenario("selection-empty", s_selection_empty)
     h.scenario("selection-chameleon", s_selection_chameleon)
+    h.scenario("collect", s_collect)
     h.scenario("passthrough+forbidden", s_passthrough_and_forbidden)
     h.scenario("out-of-root", s_out_of_root)
     h.scenario("internal-error", s_internal_error)

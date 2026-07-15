@@ -17,6 +17,30 @@
     "CAPTURE_OVERFLOW": "output truncated with no valid report surviving in the tail"
   },
   "tests": {
+    "testdata/collect/test_probe_ok.mojo": {
+      "verdict": "PASS",
+      "exit_class": 0,
+      "in_default_suite": false,
+      "reached_only_by": ["collect"],
+      "disposition": "PARSED",
+      "rationale": "A clean two-test suite for the collect scenario. Under --skip-all the probe lists test_one and test_two, running no body, so `mtest collect` emits its two node ids. A whole run PASSes; reached only by the collect scenario."
+    },
+    "testdata/collect/test_probe_crash.mojo": {
+      "verdict": "CRASH",
+      "exit_class": 1,
+      "in_default_suite": false,
+      "reached_only_by": ["collect"],
+      "disposition": "NO_REPORT",
+      "rationale": "The crash is in main, not a test body, so --skip-all cannot skip past it: the collection probe dies by signal. `mtest collect` writes a crash diagnostic to STDERR and the listing continues for the other files. Reached only by the collect scenario."
+    },
+    "testdata/collect/test_probe_hang.mojo": {
+      "verdict": "TIMEOUT",
+      "exit_class": 1,
+      "in_default_suite": false,
+      "reached_only_by": ["collect"],
+      "disposition": "NO_REPORT",
+      "rationale": "The hang is in main, before any suite runs, so --skip-all cannot skip it: the collection probe never returns and is bounded by --timeout. `mtest collect` writes a timeout diagnostic to STDERR and the listing continues. Reached only by the collect scenario under a short --timeout, so it can never hang the gate."
+    },
     "testdata/suite/test_passing.mojo": {
       "verdict": "PASS",
       "exit_class": 0,

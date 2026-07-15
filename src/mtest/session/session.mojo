@@ -17,6 +17,7 @@ Exit-code control flow (precedence high to low): an interrupt is 2; an internal
 error (spawn failure or machinery raise) is 3; a precompile failure is 1;
 otherwise the pure `exit_code_for` over the RUN outcomes decides 1 / 5 / 0.
 """
+from std.builtin.sort import sort
 from std.os import makedirs
 from std.os.path import basename, dirname, exists, isdir
 from std.time import perf_counter_ns
@@ -1723,3 +1724,203 @@ def run_session[
         Event.session_finished(summary^, wall, code, test_counts=test_totals)
     )
     return code
+
+
+# --- The COLLECT path: probe every file for its node ids, print the listing. --
+
+
+@fieldwise_init
+struct CollectResult(Copyable, Movable):
+    """What `run_collect` hands back to `main` to print OUTSIDE the reporter seam.
+
+    `main` prints `listing` verbatim to STDOUT (one node id per line, byte-clean)
+    and every `diagnostics` line to STDERR, then exits `code`. Owns its lists;
+    copies are explicit.
+    """
+
+    var listing: List[String]
+    """The SORTED node-id listing for STDOUT — the ONLY thing STDOUT carries."""
+    var diagnostics: List[String]
+    """Per-file error / note lines for STDERR (never mixed into the listing)."""
+    var code: Int
+    """The resolved exit code: 2 interrupt, 3 drift/internal, 1 failing, 5
+    nothing collectable, else 0."""
+
+
+def _collect_phrase(fr: FileResult) -> String:
+    """A short stderr phrase for a probe that did not yield node ids."""
+    var o = fr.outcome
+    if o == Outcome.COMPILE_ERROR:
+        return "compile error (probe skipped)"
+    if o == Outcome.CRASH:
+        return "the --skip-all probe crashed"
+    if o == Outcome.TIMEOUT:
+        return "the --skip-all probe timed out"
+    if fr.is_drift:
+        return (
+            "the --skip-all probe drifted off the pinned grammar (drift,"
+            " exit 3)"
+        )
+    return "the --skip-all probe did not list its tests (malformed suite)"
+
+
+def run_collect(config: RunnerConfig, root: String) raises -> CollectResult:
+    """Probe every discovered run file for its node ids and build the listing.
+
+    Reuses the selection probe machinery (`_build_for_selection` + `_probe_file`,
+    sharing each build through a `BuildRegistry`) to learn each file's node ids
+    under `--skip-all`, running NO test body. A qualifying file contributes
+    `rel::name` for every collected name; a compile error / crash / timeout /
+    malformed suite writes a stderr diagnostic and the listing CONTINUES with the
+    other files (exit-1 class); an off-grammar probe is DRIFT (exit 3); a
+    spawn/machinery failure ABORTS the listing (exit 3). The listing is SORTED
+    lexicographically (the frozen order).
+
+    The caller (`main`) prints the result OUTSIDE the reporter seam — the SECOND
+    sanctioned exception to the event seam, after usage errors — so STDOUT stays
+    byte-clean (only the listing) while every diagnostic goes to STDERR. This
+    function prints nothing and drives no reporter.
+
+    Session exit code: 2 if interrupted; else 3 if any drift or internal failure;
+    else 1 if any file failed to collect; else 5 if nothing was collectable (no
+    node ids); else 0.
+
+    Raises:
+        Error: a `discover:` usage error only (main maps it to exit 4); every
+            build/probe failure is caught here and folded into the result.
+    """
+    var disc = discover(config, root)  # a discover: usage error propagates.
+    var reg = BuildRegistry()
+    var includes = config.include_paths.copy()
+    var node_ids = List[String]()
+    var diags = List[String]()
+    var any_failing = False
+    var drift = False
+    var internal = False
+    var interrupted = False
+
+    # `-k` is a run-time selection filter; collect prints the FULL discovered
+    # listing and ignores it with a note (deterministic and documented).
+    if config.keyword != "":
+        diags.append(
+            "collect: -k is ignored in collect mode; printing the full node-id"
+            " listing for the discovered files"
+        )
+
+    # Precompile steps first, widening the include set so a file importing a
+    # precompiled package can build for its probe. A failed or unspawnable step
+    # is a machinery-class abort (exit 3): collection cannot proceed honestly.
+    for pc in config.precompiles:
+        if interrupt_requested():
+            interrupted = True
+            break
+        try:
+            var pr = _run_precompile(config, root, pc.src, pc.out, includes)
+            if pr.interrupted:
+                interrupted = True
+                break
+            if pr.internal_error or not pr.ok:
+                diags.append(
+                    "collect: precompile step '"
+                    + pc.src
+                    + "' failed; aborting collection"
+                )
+                internal = True
+                break
+            includes.append(pr.out_dir)
+        except:
+            # `_run_precompile`'s own machinery (e.g. the output directory could
+            # not be created) raised rather than returning a result. Mirror
+            # `run_session`'s handling: an internal-abort diagnostic and exit 3,
+            # not a `discover:`-style usage error. Not independently unit-tested
+            # here — `run_session`'s sibling except (session.mojo ~1580) has no
+            # dedicated raise-path test either; both are machinery-only
+            # defensive code exercised only by the `pr.internal_error`
+            # return-value path in `test_session_precompile.mojo`.
+            diags.append(
+                "collect: precompile step '"
+                + pc.src
+                + "' failed; aborting collection"
+            )
+            internal = True
+            break
+
+    if not (interrupted or internal):
+        for ri in range(len(disc.run_files)):
+            if interrupt_requested():
+                interrupted = True
+                break
+            var rel = disc.run_files[ri]
+            var bo: _BuildOutcome
+            try:
+                bo = _build_for_selection(config, root, rel, includes, reg)
+            except:
+                diags.append(
+                    "collect: " + rel + ": internal build failure; aborting"
+                )
+                internal = True
+                break
+            if bo.terminal:
+                if bo.result.interrupted:
+                    interrupted = True
+                    break
+                if bo.result.internal_error:
+                    diags.append(
+                        "collect: " + rel + ": internal build failure; aborting"
+                    )
+                    internal = True
+                    break
+                # A compile-error terminal: a diagnostic; the listing continues.
+                diags.append(
+                    "collect: " + rel + ": " + _collect_phrase(bo.result)
+                )
+                any_failing = True
+                continue
+
+            var po: _ProbeOutcome
+            try:
+                po = _probe_file(
+                    config,
+                    root,
+                    rel,
+                    bo.binary,
+                    bo.canonical,
+                    bo.build_argv,
+                    bo.bdur,
+                    reg,
+                )
+            except:
+                diags.append(
+                    "collect: " + rel + ": internal probe failure; aborting"
+                )
+                internal = True
+                break
+            if po.qualified:
+                for nm in po.universe:
+                    node_ids.append(rel + "::" + nm)
+                continue
+
+            # A non-qualifying terminal probe: diagnostic, then classify. Drift
+            # forces exit 3 but the listing still continues; the rest are exit-1.
+            diags.append("collect: " + rel + ": " + _collect_phrase(po.result))
+            if po.result.is_drift:
+                drift = True
+            else:
+                any_failing = True
+
+    sort(node_ids)
+
+    var code: Int
+    if interrupted:
+        code = 2
+    elif internal:
+        code = 3
+    elif drift:
+        code = 3
+    elif any_failing:
+        code = 1
+    elif len(node_ids) == 0:
+        code = 5
+    else:
+        code = 0
+    return CollectResult(node_ids^, diags^, code)

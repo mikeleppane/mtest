@@ -64,13 +64,19 @@ struct RunnerConfig(Copyable, Movable):
     """`--maxfail N`: stop scheduling once N failing TESTS have accumulated;
     `0` disables the limit (no cap)."""
 
+    var collect: Bool
+    """Collect mode (`collect` subcommand / `--collect-only`): probe every
+    discovered file for its node ids and print the sorted listing, running no
+    test body. When True the session takes the collect path, not a run."""
+
     @staticmethod
     def default() -> RunnerConfig:
         """A config with every field at its contract default. Allocates.
 
         The defaults: every list empty, `mojo_path="mojo"`,
         `timeout_secs=300`, `show_output=FAILURES`, `verbosity=NORMAL`,
-        `color=AUTO`, `exitfirst=False`, `maxfail=0` (no limit).
+        `color=AUTO`, `exitfirst=False`, `maxfail=0` (no limit),
+        `collect=False`.
         """
         return RunnerConfig(
             paths=[],
@@ -87,4 +93,5 @@ struct RunnerConfig(Copyable, Movable):
             exitfirst=False,
             keyword="",
             maxfail=0,
+            collect=False,
         )

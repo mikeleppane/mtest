@@ -61,7 +61,8 @@ def frozen_inventory() -> List[InvRow]:
         InvRow("--retries", 1, False, False),
         InvRow("--junit-xml", 1, False, False),
         InvRow("--gh-annotations", 1, False, False),
-        InvRow("--collect-only", 0, False, False),
+        # Served by this build (collect mode).
+        InvRow("--collect-only", 0, False, True),
     ]
 
 
@@ -159,17 +160,18 @@ def test_refuse_gh_annotations() raises:
     _assert_refused("--gh-annotations")
 
 
-def test_refuse_collect_only() raises:
-    _assert_refused("--collect-only")
+def test_collect_only_is_served_and_sets_collect_mode() raises:
+    # `--collect-only` is now served: it parses cleanly and turns on collect
+    # mode rather than being refused as an unbuilt flag.
+    var argv: List[String] = ["--collect-only"]
+    var r = parse_args(argv)
+    assert_true(r.config.collect)
 
 
-def test_refuse_collect_subcommand() raises:
+def test_collect_subcommand_is_served() raises:
     var argv: List[String] = ["collect", "tests/"]
-    with assert_raises(contains="v1 contract"):
-        _ = parse_args(argv)
-    var argv2: List[String] = ["collect"]
-    with assert_raises(contains="collect"):
-        _ = parse_args(argv2)
+    var r = parse_args(argv)
+    assert_true(r.config.collect)
 
 
 def test_refuse_equals_form_still_names_flag() raises:
