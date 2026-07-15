@@ -425,6 +425,20 @@ def _same_set(a: List[String], b: List[String]) -> Bool:
     return True
 
 
+def _failing_count(outcomes: List[Outcome]) -> Int:
+    """The number of failing-class entries in a run-outcome multiset. Pure.
+
+    `outcomes` is already TEST-granular (per-test for a VALID report, one
+    file-level entry otherwise), so this is exactly the `--maxfail` counter:
+    each element counts once, with no re-derivation from file-level outcomes
+    and no double-counting."""
+    var n = 0
+    for o in outcomes:
+        if o.is_failing():
+            n += 1
+    return n
+
+
 def _intent_for(
     rel: String, plan: OperandParse, nroot: String
 ) raises -> FileIntent:
@@ -1454,6 +1468,11 @@ def _run_selection[
         ran_files += 1
         if config.exitfirst and fr.outcome.is_failing():
             break
+        if (
+            config.maxfail > 0
+            and _failing_count(run_outcomes) >= config.maxfail
+        ):
+            break
 
     return SelectionSummary(
         run_outcomes^,
@@ -1665,6 +1684,11 @@ def run_session[
                 ran_files += 1
                 if config.exitfirst and fr.outcome.is_failing():
                     break
+                if (
+                    config.maxfail > 0
+                    and _failing_count(run_outcomes) >= config.maxfail
+                ):
+                    break
             except:
                 reporter.handle(
                     Event.internal_error("build", config.mojo_path, 0)
@@ -1673,8 +1697,9 @@ def run_session[
                 break
 
     # Every selected file that did not produce a tallied verdict is NOT_RUN — a
-    # gate casualty, an -x/gate-abort/interrupt skip, a precompile casualty, or a
-    # drift file (which forces exit 3 and is accounted here, never tallied).
+    # gate casualty, an -x/--maxfail/gate-abort/interrupt skip, a precompile
+    # casualty, or a drift file (which forces exit 3 and is accounted here,
+    # never tallied).
     var not_run = selected - ran_files
     summary.counts[Outcome.NOT_RUN.code] += not_run
 

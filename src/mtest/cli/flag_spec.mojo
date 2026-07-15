@@ -99,10 +99,8 @@ def flag_specs() -> List[FlagSpec]:
         FlagSpec("--help", FlagId.HELP, 0, False, True, ""),
         FlagSpec("--version", FlagId.VERSION, 0, False, True, ""),
         FlagSpec("-k", FlagId.SELECT, 1, False, True, ""),
+        FlagSpec("--maxfail", FlagId.MAXFAIL, 1, False, True, ""),
         # Part of the v1 contract but not served by this build.
-        FlagSpec(
-            "--maxfail", FlagId.MAXFAIL, 1, False, False, "per-test outcomes"
-        ),
         FlagSpec("-n", FlagId.WORKERS, 1, False, False, "parallel workers"),
         FlagSpec(
             "--workers", FlagId.WORKERS, 1, False, False, "parallel workers"

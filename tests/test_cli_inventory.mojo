@@ -53,8 +53,8 @@ def frozen_inventory() -> List[InvRow]:
         InvRow("--help", 0, False, True),
         InvRow("--version", 0, False, True),
         InvRow("-k", 1, False, True),
+        InvRow("--maxfail", 1, False, True),
         # In the v1 contract but not served by this build.
-        InvRow("--maxfail", 1, False, False),
         InvRow("-n", 1, False, False),
         InvRow("--workers", 1, False, False),
         InvRow("--compile-timeout", 1, False, False),
@@ -127,10 +127,6 @@ def _assert_refused(spelling: String) raises:
         _ = parse_args(argv3)
 
 
-def test_refuse_maxfail() raises:
-    _assert_refused("--maxfail")
-
-
 def test_refuse_workers_short() raises:
     _assert_refused("-n")
 
@@ -177,8 +173,8 @@ def test_refuse_collect_subcommand() raises:
 
 
 def test_refuse_equals_form_still_names_flag() raises:
-    var argv: List[String] = ["--maxfail=3"]
-    with assert_raises(contains="--maxfail"):
+    var argv: List[String] = ["--workers=3"]
+    with assert_raises(contains="--workers"):
         _ = parse_args(argv)
 
 

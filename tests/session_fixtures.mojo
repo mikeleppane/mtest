@@ -38,6 +38,20 @@ comptime SRC_FAIL = (
     "def main() raises:\n"
     "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
 )
+# A real TestSuite with THREE failing tests -> a VALID report with three FAIL
+# rows -> the --maxfail overshoot fixture (one file contributes 3 to the
+# failing-test count in a single scheduling step).
+comptime SRC_FAIL_MULTI = (
+    "from std.testing import TestSuite, assert_true\n\n\n"
+    "def test_fail_one() raises:\n"
+    "    assert_true(False)\n\n\n"
+    "def test_fail_two() raises:\n"
+    "    assert_true(False)\n\n\n"
+    "def test_fail_three() raises:\n"
+    "    assert_true(False)\n\n\n"
+    "def main() raises:\n"
+    "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
+)
 # A binary that dies by SIGABRT -> CRASH (never a FAIL).
 comptime SRC_CRASH = (
     "from std.ffi import external_call\n\n\ndef main():\n    _ ="

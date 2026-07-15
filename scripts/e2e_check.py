@@ -585,6 +585,24 @@ def s_exitfirst(manifest: dict) -> str:
     return f"-x stopped scheduling; {summ.not_run} NOT-RUN, accounting holds"
 
 
+def s_maxfail(manifest: dict) -> str:
+    """`--maxfail N` stops scheduling once N failing TESTS have accumulated.
+
+    testdata/maxfail/ sorts test_a_fail, test_b_fail, test_c_pass; each failing
+    file contributes exactly one failing test. `--maxfail 1` must stop right
+    after test_a_fail, leaving the other two NOT-RUN."""
+    run = run_mtest(["testdata/maxfail", "--maxfail", "1"])
+    expect_exit(run, 1)
+    summ = expect_accounting(run)
+    expect(summ.failed == 1, f"--maxfail 1 let {summ.failed} FAILs run, expected 1")
+    expect(summ.not_run == 2, f"--maxfail 1 left {summ.not_run} NOT-RUN, expected 2")
+    expect(
+        run.verdict_line("FAIL", "testdata/maxfail/test_a_fail.mojo") is not None,
+        "the file that tripped --maxfail did not report FAIL",
+    )
+    return f"--maxfail 1 stopped after 1 failing test; {summ.not_run} NOT-RUN, accounting holds"
+
+
 def s_exclude_and_stale(manifest: dict) -> str:
     run = run_mtest(
         [
@@ -773,7 +791,6 @@ def s_color(manifest: dict) -> str:
 def s_usage_refusals(manifest: dict) -> str:
     cases = [
         (["collect", "testdata/suite/test_passing.mojo"], "collect"),
-        (["testdata/suite/test_passing.mojo", "--maxfail", "1"], "maxfail"),
     ]
     for args, needle in cases:
         run = run_mtest(args, timeout=SHORT_TIMEOUT)
@@ -783,7 +800,7 @@ def s_usage_refusals(manifest: dict) -> str:
             f"usage error for {args} did not name '{needle}' on stderr:\n{run.stderr}",
         )
         expect(run.stderr.strip() != "", f"usage error for {args} wrote nothing to stderr")
-    return "collect / --maxfail each refused with exit 4 on stderr (-k now served)"
+    return "collect refused with exit 4 on stderr (-k, --maxfail now served)"
 
 
 def s_passthrough_and_forbidden(manifest: dict) -> str:
@@ -1108,6 +1125,7 @@ def main() -> int:
     h.scenario("hostile", s_hostile)
     h.scenario("single-pass", s_single_pass)
     h.scenario("exitfirst", s_exitfirst)
+    h.scenario("maxfail", s_maxfail)
     h.scenario("exclude+stale", s_exclude_and_stale)
     h.scenario("all-excluded", s_all_excluded)
     h.scenario("empty-dir", s_empty_dir)

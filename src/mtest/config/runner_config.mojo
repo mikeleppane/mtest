@@ -60,13 +60,17 @@ struct RunnerConfig(Copyable, Movable):
     var keyword: String
     """The `-k` keyword expression; empty means no keyword filter."""
 
+    var maxfail: Int
+    """`--maxfail N`: stop scheduling once N failing TESTS have accumulated;
+    `0` disables the limit (no cap)."""
+
     @staticmethod
     def default() -> RunnerConfig:
         """A config with every field at its contract default. Allocates.
 
         The defaults: every list empty, `mojo_path="mojo"`,
         `timeout_secs=300`, `show_output=FAILURES`, `verbosity=NORMAL`,
-        `color=AUTO`, `exitfirst=False`.
+        `color=AUTO`, `exitfirst=False`, `maxfail=0` (no limit).
         """
         return RunnerConfig(
             paths=[],
@@ -82,4 +86,5 @@ struct RunnerConfig(Copyable, Movable):
             color=ColorWhen.AUTO,
             exitfirst=False,
             keyword="",
+            maxfail=0,
         )

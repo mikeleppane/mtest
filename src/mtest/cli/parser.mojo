@@ -29,8 +29,8 @@ comptime MTEST_VERSION = "0.1.0-dev"
 
 comptime SUPPORTED_SUMMARY = (
     "paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo,"
-    " -x/--exitfirst, --timeout, -s/--show-output, -q, -v, --color, -k, --help,"
-    " --version"
+    " -x/--exitfirst, --timeout, -s/--show-output, -q, -v, --color, -k,"
+    " --maxfail, --help, --version"
 )
 """A stable one-line list of what this build serves, quoted in refusals."""
 
@@ -101,6 +101,13 @@ def _parse_timeout(value: String) raises -> Int:
     """Parse a `--timeout` value: a non-negative integer (`0` disables)."""
     if not _all_digits(value):
         raise _err("'--timeout' wants an integer >= 0, got '" + value + "'")
+    return atol(value)
+
+
+def _parse_maxfail(value: String) raises -> Int:
+    """Parse a `--maxfail` value: a non-negative integer (`0` disables)."""
+    if not _all_digits(value):
+        raise _err("'--maxfail' wants an integer >= 0, got '" + value + "'")
     return atol(value)
 
 
@@ -225,6 +232,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var color = ColorWhen.AUTO
     var exitfirst = False
     var keyword = String("")
+    var maxfail = 0
     var saw_quiet = False
     var saw_verbose = False
 
@@ -335,6 +343,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             color = _parse_color(value)
         elif s.id == FlagId.SELECT:
             keyword = value
+        elif s.id == FlagId.MAXFAIL:
+            maxfail = _parse_maxfail(value)
 
     if saw_quiet and saw_verbose:
         raise _err("'-q' and '-v' are mutually exclusive")
@@ -360,5 +370,6 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         color=color,
         exitfirst=exitfirst,
         keyword=keyword^,
+        maxfail=maxfail,
     )
     return ParseResult.run(cfg^)

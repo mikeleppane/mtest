@@ -4,9 +4,9 @@ bad-value case.
 
 The available arity-1 spellings are enumerated, not sampled: `--exclude`, `-I`,
 `--build-arg`, `--precompile`, `--mojo`, `--timeout`, `--show-output`,
-`--color`, `--gate`. Each proves that omitting the value is a located usage
-error and that the `--flag=value` spelling lands the same value as `--flag
-value`.
+`--color`, `--gate`, `--maxfail`. Each proves that omitting the value is a
+located usage error and that the `--flag=value` spelling lands the same value
+as `--flag value`.
 """
 from std.testing import assert_equal, assert_raises, assert_true, TestSuite
 
@@ -71,6 +71,12 @@ def test_gate_missing_value() raises:
         _ = parse_args(argv)
 
 
+def test_maxfail_missing_value() raises:
+    var argv: List[String] = ["--maxfail"]
+    with assert_raises(contains="'--maxfail' requires a value"):
+        _ = parse_args(argv)
+
+
 # --- equals-form cases ---
 
 
@@ -121,6 +127,26 @@ def test_gate_equals_form() raises:
     assert_equal(parse_args(argv).config.gates[0], "smoke")
 
 
+def test_maxfail_equals_form() raises:
+    var argv: List[String] = ["--maxfail=2"]
+    assert_equal(parse_args(argv).config.maxfail, 2)
+
+
+def test_maxfail_space_form() raises:
+    var argv: List[String] = ["--maxfail", "2"]
+    assert_equal(parse_args(argv).config.maxfail, 2)
+
+
+def test_maxfail_zero_means_no_limit() raises:
+    var argv: List[String] = ["--maxfail", "0"]
+    assert_equal(parse_args(argv).config.maxfail, 0)
+
+
+def test_maxfail_defaults_to_zero() raises:
+    var argv: List[String] = []
+    assert_equal(parse_args(argv).config.maxfail, 0)
+
+
 def test_gate_accumulates_and_preserves_spaces() raises:
     var argv: List[String] = [
         "--gate",
@@ -145,6 +171,18 @@ def test_timeout_rejects_non_integer() raises:
 
 def test_timeout_rejects_negative() raises:
     var argv: List[String] = ["--timeout", "-5"]
+    with assert_raises(contains="wants an integer"):
+        _ = parse_args(argv)
+
+
+def test_maxfail_rejects_non_integer() raises:
+    var argv: List[String] = ["--maxfail", "abc"]
+    with assert_raises(contains="wants an integer"):
+        _ = parse_args(argv)
+
+
+def test_maxfail_rejects_negative() raises:
+    var argv: List[String] = ["--maxfail", "-1"]
     with assert_raises(contains="wants an integer"):
         _ = parse_args(argv)
 
