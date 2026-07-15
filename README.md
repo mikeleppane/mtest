@@ -101,11 +101,11 @@ $ pixi run build-bin
 ### A passing run
 
 ```console
-$ pixi run bash -c 'build/mtest testdata/suite/test_passing.mojo'
+$ pixi run bash -c 'build/mtest e2e/suite/test_passing.mojo'
 mtest 0.1.0-dev (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
-PASS           testdata/suite/test_passing.mojo  0.07s
+PASS           e2e/suite/test_passing.mojo  0.07s
 
 ===== 3 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 0.5s =====
 $ echo $?
@@ -118,58 +118,58 @@ individually (`3 passed`), not the one file that held them.
 ### A mixed run — FAIL, CRASH, COMPILE-ERROR, NO-TESTS, and PASS together
 
 ```console
-$ pixi run bash -c 'build/mtest testdata/suite'
+$ pixi run bash -c 'build/mtest e2e/suite'
 mtest 0.1.0-dev (mojo)
 root: /home/mikko/dev/mtest   selected: 7 files   excluded: 0
 
-PASS           testdata/suite/nested/test_nested.mojo  0.07s
-COMPILE-ERROR  testdata/suite/test_compile_error.mojo  0.00s
-CRASH          testdata/suite/test_crashing.mojo  1.12s  (signal 4 — SIGILL, illegal instruction)
-FAIL           testdata/suite/test_failing.mojo  0.08s
-PASS           testdata/suite/test_noisy.mojo  0.02s
-PASS           testdata/suite/test_passing.mojo  0.02s
-NO-TESTS       testdata/suite/test_zero.mojo   0.07s
+PASS           e2e/suite/nested/test_nested.mojo  0.07s
+COMPILE-ERROR  e2e/suite/test_compile_error.mojo  0.00s
+CRASH          e2e/suite/test_crashing.mojo  1.12s  (signal 4 — SIGILL, illegal instruction)
+FAIL           e2e/suite/test_failing.mojo  0.08s
+PASS           e2e/suite/test_noisy.mojo  0.02s
+PASS           e2e/suite/test_passing.mojo  0.02s
+NO-TESTS       e2e/suite/test_zero.mojo   0.07s
 
---- COMPILE-ERROR testdata/suite/test_compile_error.mojo — mojo build said: ---
-/home/mikko/dev/mtest/testdata/suite/test_compile_error.mojo:12:17: error: use of unknown declaration 'this_symbol_is_never_defined_anywhere'
+--- COMPILE-ERROR e2e/suite/test_compile_error.mojo — mojo build said: ---
+/home/mikko/dev/mtest/e2e/suite/test_compile_error.mojo:12:17: error: use of unknown declaration 'this_symbol_is_never_defined_anywhere'
     var value = this_symbol_is_never_defined_anywhere()
                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 mojo: error: failed to parse the provided Mojo source module
-reproduce: mojo build testdata/suite/test_compile_error.mojo -o build/bin/testdata_ssuite_stest_ucompile_uerror
+reproduce: mojo build e2e/suite/test_compile_error.mojo -o build/bin/e2e_ssuite_stest_ucompile_uerror
 
---- CRASH testdata/suite/test_crashing.mojo (signal 4 — SIGILL, illegal instruction) — captured output (file-scoped; TestSuite does not attribute output to individual tests) ---
-ABORT: /home/mikko/dev/mtest/testdata/suite/test_crashing.mojo:17:10: simulated hard crash
+--- CRASH e2e/suite/test_crashing.mojo (signal 4 — SIGILL, illegal instruction) — captured output (file-scoped; TestSuite does not attribute output to individual tests) ---
+ABORT: /home/mikko/dev/mtest/e2e/suite/test_crashing.mojo:17:10: simulated hard crash
 --- captured stderr ---
 #0 0x00007ef08659c33b (/home/mikko/dev/mtest/.pixi/envs/default/lib/libKGENCompilerRTShared.so+0x7233b)
 #1 0x00007ef0865994a6 (/home/mikko/dev/mtest/.pixi/envs/default/lib/libKGENCompilerRTShared.so+0x6f4a6)
 #2 0x00007ef08659d127 (/home/mikko/dev/mtest/.pixi/envs/default/lib/libKGENCompilerRTShared.so+0x73127)
 #3 0x00007ef086245330 (/lib/x86_64-linux-gnu/libc.so.6+0x45330)
 #4 0x0000604b8bdac3a8 test_crashing::test_aborts_process() test_crashing.mojo:0:0
-#5 0x0000604b8bdacef0 main (/home/mikko/dev/mtest/build/bin/testdata_ssuite_stest_ucrashing+0x1ef0)
+#5 0x0000604b8bdacef0 main (/home/mikko/dev/mtest/build/bin/e2e_ssuite_stest_ucrashing+0x1ef0)
 #6 0x00007ef08622a1ca __libc_start_call_main ./csu/../sysdeps/nptl/libc_start_call_main.h:74:3
 #7 0x00007ef08622a28b call_init ./csu/../csu/libc-start.c:128:20
 #8 0x00007ef08622a28b __libc_start_main ./csu/../csu/libc-start.c:347:5
-#9 0x0000604b8bdac1d5 _start (/home/mikko/dev/mtest/build/bin/testdata_ssuite_stest_ucrashing+0x11d5)
-reproduce: mtest testdata/suite/test_crashing.mojo
+#9 0x0000604b8bdac1d5 _start (/home/mikko/dev/mtest/build/bin/e2e_ssuite_stest_ucrashing+0x11d5)
+reproduce: mtest e2e/suite/test_crashing.mojo
 
---- FAIL testdata/suite/test_failing.mojo::test_second_fails ---
-At testdata/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:
+--- FAIL e2e/suite/test_failing.mojo::test_second_fails ---
+At e2e/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:
    left: 1
   right: 2
-reproduce: mtest testdata/suite/test_failing.mojo::test_second_fails
+reproduce: mtest e2e/suite/test_failing.mojo::test_second_fails
 
---- FAIL testdata/suite/test_failing.mojo (exit 1) — captured output (file-scoped; TestSuite does not attribute output to individual tests) ---
+--- FAIL e2e/suite/test_failing.mojo (exit 1) — captured output (file-scoped; TestSuite does not attribute output to individual tests) ---
 Unhandled exception caught during execution: 
-Running 3 tests for /home/mikko/dev/mtest/testdata/suite/test_failing.mojo 
+Running 3 tests for /home/mikko/dev/mtest/e2e/suite/test_failing.mojo
     PASS [ 0.001 ] test_first_passes
     FAIL [ 0.058 ] test_second_fails
-      At /home/mikko/dev/mtest/testdata/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:
+      At /home/mikko/dev/mtest/e2e/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:
          left: 1
         right: 2
     PASS [ 0.001 ] test_third_passes
 --------
 Summary [ 0.059 ] 3 tests run: 2 passed , 1 failed , 0 skipped 
-Test suite' /home/mikko/dev/mtest/testdata/suite/test_failing.mojo 'failed! 
+Test suite' /home/mikko/dev/mtest/e2e/suite/test_failing.mojo 'failed!
 
 --- captured stderr ---
 
@@ -220,17 +220,17 @@ $ echo $?
 ### `--exclude`
 
 ```console
-$ pixi run bash -c 'build/mtest testdata/suite --exclude "*_failing.mojo" --exclude "*_crashing.mojo" --exclude "*_compile_error.mojo"'
+$ pixi run bash -c 'build/mtest e2e/suite --exclude "*_failing.mojo" --exclude "*_crashing.mojo" --exclude "*_compile_error.mojo"'
 mtest 0.1.0-dev (mojo)
 root: /home/mikko/dev/mtest   selected: 4 files   excluded: 3
 
-EXCLUDED       testdata/suite/test_compile_error.mojo  (*_compile_error.mojo)
-EXCLUDED       testdata/suite/test_crashing.mojo  (*_crashing.mojo)
-EXCLUDED       testdata/suite/test_failing.mojo  (*_failing.mojo)
-PASS           testdata/suite/nested/test_nested.mojo  0.07s
-PASS           testdata/suite/test_noisy.mojo  0.02s
-PASS           testdata/suite/test_passing.mojo  0.02s
-NO-TESTS       testdata/suite/test_zero.mojo   0.02s
+EXCLUDED       e2e/suite/test_compile_error.mojo  (*_compile_error.mojo)
+EXCLUDED       e2e/suite/test_crashing.mojo  (*_crashing.mojo)
+EXCLUDED       e2e/suite/test_failing.mojo  (*_failing.mojo)
+PASS           e2e/suite/nested/test_nested.mojo  0.07s
+PASS           e2e/suite/test_noisy.mojo  0.02s
+PASS           e2e/suite/test_passing.mojo  0.02s
+NO-TESTS       e2e/suite/test_zero.mojo   0.02s
 
 ===== 7 passed, 0 failed, 0 skipped (3 excluded, 0 not run) in 1.8s =====
 $ echo $?
@@ -242,7 +242,7 @@ excluded file is never silently dropped.
 
 ### Selecting tests — `-k` and node ids
 
-`testdata/matrix/` holds two files with distinctly named tests, built for
+`e2e/matrix/` holds two files with distinctly named tests, built for
 exactly this: `test_alpha.mojo` (`test_alpha_one`, `test_alpha_two`,
 `test_alpha_three`) and `test_beta.mojo` (`test_beta_one`, `test_beta_two`).
 
@@ -250,12 +250,12 @@ exactly this: `test_alpha.mojo` (`test_alpha_one`, `test_alpha_two`,
 (`path::name`), so it matches on the file path too, not just the test name:
 
 ```console
-$ pixi run bash -c 'build/mtest -k one testdata/matrix'
+$ pixi run bash -c 'build/mtest -k one e2e/matrix'
 mtest 0.1.0-dev (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
 
-PASS           testdata/matrix/test_alpha.mojo 0.02s
-PASS           testdata/matrix/test_beta.mojo  0.03s
+PASS           e2e/matrix/test_alpha.mojo 0.02s
+PASS           e2e/matrix/test_beta.mojo  0.03s
 
 ===== 2 passed, 0 failed, 0 skipped (0 excluded, 0 not run, 3 deselected) in 0.9s =====
 $ echo $?
@@ -270,11 +270,11 @@ A node-id operand (`path::test`) selects exactly one test; every non-selected
 test in the file is deselected the same way:
 
 ```console
-$ pixi run bash -c 'build/mtest testdata/matrix/test_alpha.mojo::test_alpha_two'
+$ pixi run bash -c 'build/mtest e2e/matrix/test_alpha.mojo::test_alpha_two'
 mtest 0.1.0-dev (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
-PASS           testdata/matrix/test_alpha.mojo 0.03s
+PASS           e2e/matrix/test_alpha.mojo 0.03s
 
 ===== 1 passed, 0 failed, 0 skipped (0 excluded, 0 not run, 2 deselected) in 0.5s =====
 $ echo $?
@@ -285,11 +285,11 @@ If **every** test in a file is deselected, the file itself is never scheduled
 and is counted `not run` (distinct from the per-test `deselected` count):
 
 ```console
-$ pixi run bash -c 'build/mtest -k passing testdata/suite/test_passing.mojo testdata/suite/test_noisy.mojo testdata/suite/test_failing.mojo'
+$ pixi run bash -c 'build/mtest -k passing e2e/suite/test_passing.mojo e2e/suite/test_noisy.mojo e2e/suite/test_failing.mojo'
 mtest 0.1.0-dev (mojo)
 root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0
 
-PASS           testdata/suite/test_passing.mojo  0.02s
+PASS           e2e/suite/test_passing.mojo  0.02s
 
 ===== 3 passed, 0 failed, 0 skipped (0 excluded, 2 not run, 6 deselected) in 1.3s =====
 $ echo $?
@@ -305,28 +305,28 @@ has nothing to run and exits `5`.
 ### `--maxfail` — stop after N failing tests
 
 ```console
-$ pixi run bash -c 'build/mtest --maxfail 1 testdata/maxfail'
+$ pixi run bash -c 'build/mtest --maxfail 1 e2e/maxfail'
 mtest 0.1.0-dev (mojo)
 root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0
 
-FAIL           testdata/maxfail/test_a_fail.mojo  0.07s
+FAIL           e2e/maxfail/test_a_fail.mojo  0.07s
 
---- FAIL testdata/maxfail/test_a_fail.mojo::test_one_fails ---
-At testdata/maxfail/test_a_fail.mojo:10:17: AssertionError: `left == right` comparison failed:
+--- FAIL e2e/maxfail/test_a_fail.mojo::test_one_fails ---
+At e2e/maxfail/test_a_fail.mojo:10:17: AssertionError: `left == right` comparison failed:
    left: 1
   right: 2
-reproduce: mtest testdata/maxfail/test_a_fail.mojo::test_one_fails
+reproduce: mtest e2e/maxfail/test_a_fail.mojo::test_one_fails
 
---- FAIL testdata/maxfail/test_a_fail.mojo (exit 1) — captured output (file-scoped; TestSuite does not attribute output to individual tests) ---
+--- FAIL e2e/maxfail/test_a_fail.mojo (exit 1) — captured output (file-scoped; TestSuite does not attribute output to individual tests) ---
 Unhandled exception caught during execution: 
-Running 1 tests for /home/mikko/dev/mtest/testdata/maxfail/test_a_fail.mojo 
+Running 1 tests for /home/mikko/dev/mtest/e2e/maxfail/test_a_fail.mojo
     FAIL [ 0.029 ] test_one_fails
-      At /home/mikko/dev/mtest/testdata/maxfail/test_a_fail.mojo:10:17: AssertionError: `left == right` comparison failed:
+      At /home/mikko/dev/mtest/e2e/maxfail/test_a_fail.mojo:10:17: AssertionError: `left == right` comparison failed:
          left: 1
         right: 2
 --------
 Summary [ 0.029 ] 1 tests run: 0 passed , 1 failed , 0 skipped 
-Test suite' /home/mikko/dev/mtest/testdata/maxfail/test_a_fail.mojo 'failed! 
+Test suite' /home/mikko/dev/mtest/e2e/maxfail/test_a_fail.mojo 'failed!
 
 --- captured stderr ---
 
@@ -349,12 +349,12 @@ lists the resulting node ids sorted **lexicographically** — the runner's own
 frozen order, not source declaration order:
 
 ```console
-$ pixi run bash -c 'build/mtest collect testdata/matrix'
-testdata/matrix/test_alpha.mojo::test_alpha_one
-testdata/matrix/test_alpha.mojo::test_alpha_three
-testdata/matrix/test_alpha.mojo::test_alpha_two
-testdata/matrix/test_beta.mojo::test_beta_one
-testdata/matrix/test_beta.mojo::test_beta_two
+$ pixi run bash -c 'build/mtest collect e2e/matrix'
+e2e/matrix/test_alpha.mojo::test_alpha_one
+e2e/matrix/test_alpha.mojo::test_alpha_three
+e2e/matrix/test_alpha.mojo::test_alpha_two
+e2e/matrix/test_beta.mojo::test_beta_one
+e2e/matrix/test_beta.mojo::test_beta_two
 $ echo $?
 0
 ```
@@ -367,11 +367,11 @@ the `--skip-all` probe itself — writes a diagnostic to stderr and the listing
 **continues** for the rest:
 
 ```console
-$ pixi run bash -c 'build/mtest collect testdata/collect --timeout 2'
-collect: testdata/collect/test_probe_crash.mojo: the --skip-all probe crashed
-collect: testdata/collect/test_probe_hang.mojo: the --skip-all probe timed out
-testdata/collect/test_probe_ok.mojo::test_one
-testdata/collect/test_probe_ok.mojo::test_two
+$ pixi run bash -c 'build/mtest collect e2e/collect --timeout 2'
+collect: e2e/collect/test_probe_crash.mojo: the --skip-all probe crashed
+collect: e2e/collect/test_probe_hang.mojo: the --skip-all probe timed out
+e2e/collect/test_probe_ok.mojo::test_one
+e2e/collect/test_probe_ok.mojo::test_two
 $ echo $?
 1
 ```
@@ -384,18 +384,18 @@ run-only wall-clock (build time is not counted). The header always states the
 does not pad the list:
 
 ```console
-$ pixi run bash -c 'build/mtest --durations 10 testdata/matrix'
+$ pixi run bash -c 'build/mtest --durations 10 e2e/matrix'
 mtest 0.1.0-dev (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
 
-PASS           testdata/matrix/test_alpha.mojo 0.02s
-PASS           testdata/matrix/test_beta.mojo  0.07s
+PASS           e2e/matrix/test_alpha.mojo 0.02s
+PASS           e2e/matrix/test_beta.mojo  0.07s
 
 ===== 5 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 0.9s =====
 
 slowest 2 files:
-  testdata/matrix/test_beta.mojo  0.07s
-  testdata/matrix/test_alpha.mojo  0.02s
+  e2e/matrix/test_beta.mojo  0.07s
+  e2e/matrix/test_alpha.mojo  0.02s
 $ echo $?
 0
 ```
@@ -409,11 +409,11 @@ $ echo $?
 **process group** (not just the child) SIGINT/kill so nothing is orphaned,
 prints a partial summary with a NOT-RUN count for everything that never got a
 chance to run, and exits `2`. Run against a directory containing a file that
-sleeps forever (`testdata/slow/`, interrupted after it started but before it
+sleeps forever (`e2e/slow/`, interrupted after it started but before it
 finished):
 
 ```console
-$ pixi run bash -c 'build/mtest testdata/slow'
+$ pixi run bash -c 'build/mtest e2e/slow'
 # ^C sent to the process group ~1.5s after the header printed
 mtest 0.1.0-dev (mojo)
 root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0
@@ -477,7 +477,7 @@ quarantine), `--retries` (retries and flaky handling), `--junit-xml` and
 stream). For example:
 
 ```console
-$ pixi run bash -c 'build/mtest --shard 1/2 testdata/suite'
+$ pixi run bash -c 'build/mtest --shard 1/2 e2e/suite'
 cli: '--shard' is part of the mtest v1 contract but is not available in this build (it arrives with test sharding); this build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo, -x/--exitfirst, --timeout, -s/--show-output, -q, -v, --color, -k, --maxfail, --durations, collect/--collect-only, --help, --version (see mtest --help)
 $ echo $?
 4
@@ -593,8 +593,8 @@ This dogfood run is **an additional gate, not the only executor** of
   they run the identical built binaries.
 - **`test`** — the dogfood gate described above (`self_host_check.py`).
 - **`e2e`** — the binary end-to-end gate: builds `build/mtest`, then drives it
-  against the committed known-outcome tree under `testdata/` (via
-  `testdata/manifest.json`) and asserts exact exit codes and console
+  against the committed known-outcome tree under `e2e/` (via
+  `e2e/manifest.json`) and asserts exact exit codes and console
   structure. Every example in this README is a hand-run instance of what
   `e2e` checks automatically.
 - **`transcripts-check`** — the protocol pin: regenerates per-file protocol
@@ -616,7 +616,7 @@ open, and are stated honestly here rather than glossed over.
   `test_*` function was accidentally renamed — is no longer indistinguishable
   from a real pass. It is reported **NO-TESTS**, excluded from the `passed`
   count, and a session that collects nothing but NO-TESTS files exits `5`
-  ("nothing collected"), the same as an empty walk. `testdata/suite/test_zero.mojo`
+  ("nothing collected"), the same as an empty walk. `e2e/suite/test_zero.mojo`
   in the [mixed-run example above](#a-mixed-run--fail-crash-compile-error-no-tests-and-pass-together)
   demonstrates this.
 - **A crashed file's tests are unattributed.** When a file CRASHes, the
@@ -637,7 +637,7 @@ open, and are stated honestly here rather than glossed over.
   A file with two or more failing tests can therefore push the true failing
   count past `N` before the runner notices — the
   [`--maxfail` example above](#--maxfail--stop-after-n-failing-tests) stops at
-  exactly 1 only because each `testdata/maxfail/` fixture contains a single
+  exactly 1 only because each `e2e/maxfail/` fixture contains a single
   failing test.
 - **`--durations` is file-level only.** The slowest-files list ranks whole
   files by run-only wall-clock; the slowest individual *test* inside an
@@ -682,7 +682,7 @@ $ pixi run ci                  # fmt-check → harness-check → build → trans
 | `pixi run test-integration` | directly build and execute the filesystem/compiler/process integration suites only |
 | `pixi run test-direct` | the **independent** twin: build and execute every unit/integration suite directly, one process per file, with no `mtest` involved |
 | `pixi run test` | the **dogfood** gate: `build/mtest -I build -I tests/support tests/` running mtest over its own suite, plus exact path-membership verification independent of mtest |
-| `pixi run e2e` | build `build/mtest`, then drive it against `testdata/` and assert exact exit codes and console structure |
+| `pixi run e2e` | build `build/mtest`, then drive it against `e2e/` and assert exact exit codes and console structure |
 
 See [Self-hosting](#self-hosting) for how `test` and `test-direct` relate.
 

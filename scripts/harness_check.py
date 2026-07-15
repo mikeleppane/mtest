@@ -341,6 +341,36 @@ def check_protocol_asset_layout() -> None:
             raise AssertionError(f"obsolete protocol asset root still exists: {obsolete}")
 
 
+def check_e2e_layout() -> None:
+    """Known-outcome CLI inputs stay outside self-host discovery."""
+    e2e_root = REPO_ROOT / "e2e"
+    manifest_path = e2e_root / "manifest.json"
+    if not manifest_path.is_file():
+        raise AssertionError("e2e/manifest.json is missing")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("e2e_root") != "e2e":
+        raise AssertionError("e2e manifest does not declare e2e_root=e2e")
+    rows = set(manifest["tests"])
+    discovered = {
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in e2e_root.rglob("test_*.mojo")
+    }
+    if rows != discovered or len(rows) != 25:
+        raise AssertionError(
+            "e2e manifest/discovery mismatch: "
+            f"missing={sorted(discovered - rows)}, stale={sorted(rows - discovered)}"
+        )
+    referenced = {
+        *rows,
+        *manifest.get("non_discovered", {}).keys(),
+        *manifest.get("support_files", {}).keys(),
+    }
+    if any(not path.startswith("e2e/") for path in referenced):
+        raise AssertionError("e2e manifest retains a path outside e2e/")
+    if (REPO_ROOT / "testdata").exists():
+        raise AssertionError("obsolete testdata/ root still exists")
+
+
 def main() -> int:
     try:
         check_recursive_direct_runner()
@@ -348,6 +378,7 @@ def main() -> int:
         check_exec_fixture_layout()
         check_transcript_comparator()
         check_protocol_asset_layout()
+        check_e2e_layout()
     except (AssertionError, OSError, subprocess.SubprocessError) as exc:
         print(f"harness-check: FAIL: {exc}", file=sys.stderr)
         return 1

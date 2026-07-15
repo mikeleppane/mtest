@@ -1,7 +1,7 @@
 """Selection-matrix sibling: two more distinctly named tests.
 
-Its role is to sit alongside test_alpha.mojo under testdata/matrix so the
-mixed-operand union scenario (`mtest testdata/matrix testdata/matrix/
+Its role is to sit alongside test_alpha.mojo under e2e/matrix so the
+mixed-operand union scenario (`mtest e2e/matrix e2e/matrix/
 test_alpha.mojo::test_alpha_one`) proves the directory operand keeps the whole
 tree while the node id adds nothing (union -> everything runs).
 """

@@ -44,7 +44,7 @@ build-bin = { cmd = "mojo build -I build src/main.mojo -o build/mtest", depends-
 
 # Rewrite Mojo files in place — run locally before committing. Protocol fixtures
 # live beneath tests/, so this covers the runner, fixtures, and suites.
-fmt = "mojo format src tests"
+fmt = "mojo format src tests e2e"
 # CI gate: format, then fail if anything changed (never edits in CI). A format
 # that shifts a fixture's `At <path>:<line>:<col>` coordinates is an oracle-side
 # change — regenerate transcripts, do not fight the gate.
@@ -91,7 +91,7 @@ cmd = "python scripts/self_host_check.py"
 depends-on = ["build-bin"]
 
 # End-to-end gate: build the runnable binary, then drive it against the committed
-# known-outcome tree under testdata/ (via testdata/manifest.json, the single
+# known-outcome tree under e2e/ (via e2e/manifest.json, the single
 # source of expectations) asserting exact exit codes and structural console
 # output. Depends on build-bin so build/mtest exists. Runs under `pixi run`, so
 # the spawned binary inherits the pixi env with `mojo` on PATH — the per-file

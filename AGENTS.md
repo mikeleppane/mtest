@@ -131,7 +131,7 @@ pixi run test-direct      # the independent glob-driven twin: build+execute
 pixi run test             # the self-hosted dogfood run: build/mtest over its
                            # own tests/, plus exact path-membership verification
                            # against an independent classified inventory
-pixi run e2e              # build the binary, drive it against testdata/
+pixi run e2e              # build the binary, drive it against e2e/
                             # (manifest.json), assert exact exit codes/output
 ```
 
@@ -210,7 +210,7 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `cli` | `src/mtest/cli` (arg parsing, main) |
 | `cache` | in-session build/collection reuse |
 | `test` | test infrastructure (`scripts/test_all.sh`, `scripts/build_pkg.sh`, shared helpers) |
-| `e2e` | end-to-end harness (`scripts/e2e_check.py`) and its `testdata/` manifest and scenarios |
+| `e2e` | end-to-end harness (`scripts/e2e_check.py`) and its `e2e/` manifest and scenarios |
 | `bench` | `benchmarks/` |
 | `docs` | docstrings, `docs/` |
 | `build` | packaging |

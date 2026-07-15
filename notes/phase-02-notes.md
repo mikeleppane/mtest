@@ -106,7 +106,7 @@ corruption-resistance story:
 
 ## The hostile fixtures, run one at a time
 
-`testdata/hostile/` and `testdata/chameleon/` exist to make the doctrine
+`e2e/hostile/` and `e2e/chameleon/` exist to make the doctrine
 above concrete. Each one is a known-outcome fixture with a docstring
 predicting exactly what should happen, and each was run to confirm the
 prediction rather than just trusted from the source:
@@ -154,7 +154,7 @@ building twice. `scripts/logging_mojo.py` is a stdlib-only wrapper that logs
 every `mojo` invocation's subcommand and target before exec-ing the real
 `mojo` with an identical argv, so stdout, stderr, and the exit code are
 untouched. Run one selection invocation through it —
-`mtest --mojo <wrapper> -k one testdata/matrix`, which matches
+`mtest --mojo <wrapper> -k one e2e/matrix`, which matches
 `test_alpha_one` in one file and `test_beta_one` in another — and the
 wrapper's log shows exactly one `mojo build` per file, not two. The probe
 phase (learn each file's node ids under `--skip-all`) and the run phase
