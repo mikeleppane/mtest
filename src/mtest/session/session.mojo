@@ -1,21 +1,30 @@
-"""Sequential orchestration: discover -> build -> execute -> verdict -> exit (L4).
+"""Sequential orchestration: discover -> build -> execute -> classify -> exit (L4).
 
 `run_session` is the integration keystone. It runs the discovered files in a
 fixed order — precompile steps, then gates, then run files — building each to a
-binary and executing it under the `exec` supervisor, mapping every termination
-to an honest `Outcome` through the pure `verdict` functions, emitting the closed
-`Event` set to the composed reporter, and resolving the process exit code. It is
-sequential by contract: no parallelism, no retries, no report parsing.
+binary and executing it under the `exec` supervisor. It owns the RUN-report
+handshake and the verdict policy: it decodes each child's captured stdout,
+resolves WHICH report a truncated capture may trust (`resolve_report`), runs the
+TOTAL per-test classifier (`classify`), reconciles a `--only` selection run
+against its `--skip-all` collection universe, and maps every termination to an
+honest `Outcome` — emitting the closed `Event` set to the composed reporter and
+resolving the process exit code. It is sequential by contract: no parallelism;
+the ONLY retry is the bounded stale-name recover-once during selection.
 
 The session emits events and NOTHING else. The reporter formats; pre-session CLI
 usage errors are main's. The ONE thing that propagates out of `run_session` is a
-`discover:` usage error (main maps it to exit 4); every other failure — an
-`exec:` machinery raise or a spawn failure — is caught here and resolved to the
-internal-error exit code 3.
+`discover:` usage error (main maps it to exit 4) — plus an unknown selected test
+name (also exit 4); every other failure — an `exec:` machinery raise or a spawn
+failure — is caught here and resolved to the internal-error exit code 3.
 
 Exit-code control flow (precedence high to low): an interrupt is 2; an internal
-error (spawn failure or machinery raise) is 3; a precompile failure is 1;
-otherwise the pure `exit_code_for` over the RUN outcomes decides 1 / 5 / 0.
+error (spawn failure or machinery raise) is 3; a report that drifted off the
+pinned grammar is 3 (the same tier); a precompile failure is 1; otherwise the
+pure `exit_code_for` over the RUN outcomes decides 1 / 5 / 0. The selection,
+probe, and gate paths honor the same classification and exit-code semantics as
+the default run path — they route non-VALID reports through the same
+`resolve_report`/`classify` machinery so a forged or off-grammar report never
+resolves differently under selection than it would by default.
 """
 from std.builtin.sort import sort
 from std.os import makedirs
@@ -49,7 +58,6 @@ from mtest.protocol import (
     ReportVerdict,
     collection_disqualifier,
     collection_names,
-    parse_report,
 )
 from mtest.report import CompositeReporter, Reporter
 from mtest.select import (
@@ -60,11 +68,21 @@ from mtest.select import (
     select_from,
     selection_active,
 )
-from mtest.session.classify import classify, resolve_report
+from mtest.session.classify import Classification, classify, resolve_report
 from mtest.session.verdict import build_verdict
 
 comptime _STALE_NAME_PHRASE = "test not found in suite:"
 """The stdlib phrase when `--only` names a test the suite no longer offers."""
+
+comptime _UNHANDLED_PREFIX = "Unhandled exception caught during execution:"
+"""The runtime framing that carries a stale-name refusal as its payload.
+
+A stale-name refusal aborts the suite BEFORE any report is printed, so the
+stdlib emits the phrase as the payload of this line — e.g. `Unhandled exception
+caught during execution: explicitly allowed test not found in suite: test_x`.
+Anchoring the stale-name detection on this framing keeps a test that merely
+PRINTS the phrase in its own output (or in an assertion detail) from tripping a
+wasted rebuild+reprobe."""
 
 
 def _mangle(rel: String) -> String:
@@ -426,6 +444,23 @@ def _same_set(a: List[String], b: List[String]) -> Bool:
     return True
 
 
+def _has_stale_name_diagnostic(text: String) -> Bool:
+    """Whether `text` carries the stdlib's ANCHORED stale-name refusal. Pure.
+
+    A stale-name refusal aborts the suite before any report is printed, so the
+    stdlib emits the phrase as the payload of an `Unhandled exception caught
+    during execution:` line. Anchoring on that framing — a line that BOTH opens
+    with the runtime prefix AND carries the `test not found in suite:` phrase —
+    keeps a test that merely PRINTS the phrase in its own output (or in an
+    assertion detail on some other line) from being mistaken for a refusal.
+    """
+    for line in text.split("\n"):
+        var l = String(line)
+        if l.startswith(_UNHANDLED_PREFIX) and (_STALE_NAME_PHRASE in l):
+            return True
+    return False
+
+
 def _failing_count(outcomes: List[Outcome]) -> Int:
     """The number of failing-class entries in a run-outcome multiset. Pure.
 
@@ -599,10 +634,14 @@ struct _ProbeOutcome(Copyable, Movable):
     var universe: List[String]
     """The collected test names, in discovery order (when qualified)."""
     var terminal: Bool
-    """Whether a terminal FileResult was produced (crash/timeout/malformed/drift).
-    """
+    """Whether a terminal FileResult was produced (crash/timeout/malformed/drift/
+    overflow/spawn-failure/interrupt)."""
     var result: FileResult
     """The terminal FileResult to replay when `terminal`."""
+    var internal_error: Bool
+    """Whether the probe could not spawn the binary (routes to exit 3)."""
+    var interrupted: Bool
+    """Whether an interrupt aborted the probe (routes to exit 2)."""
 
 
 def _probe_terminal(
@@ -655,9 +694,19 @@ def _probe_file(
 ) raises -> _ProbeOutcome:
     """Run the `--skip-all` probe and route its result.
 
+    Termination handling is TOTAL, mirroring `_run_one`'s run-phase policy so a
+    probe never resolves differently than the default path would: a SpawnFailed
+    probe is an internal error (exit 3); an interrupt-induced timeout is an
+    interrupt (exit 2); a signaled probe is that file's CRASH; a plain timeout is
+    a TIMEOUT. On a clean exit the captured stdout is decoded and resolved under
+    the SAME truncation policy the run path uses (`resolve_report`): only a
+    report wholly retained in the tail is trusted, so a forged report in a
+    truncated head is refused as capture-overflow (a failing outcome, never a
+    qualifying listing, never exit 0).
+
     Qualifying -> the universe is the collection listing (recorded in the
-    registry). A probe that CRASHes/TIMEs-out is that file's failing outcome; an
-    OFF_GRAMMAR probe is DRIFT (exit 3); an ABSENT/AMBIGUOUS/VALID-but-
+    registry). An OFF_GRAMMAR probe is DRIFT (exit 3); a capture-overflow probe
+    is CAPTURE_OVERFLOW (exit-1 class); an ABSENT/AMBIGUOUS/VALID-but-
     disqualified probe is MALFORMED_SUITE (the module ran bodies or ignored
     `--skip-all`).
     """
@@ -668,6 +717,25 @@ def _probe_file(
         ProcessSpec.command_in(argv^, root, config.timeout_secs * 1000)
     )
     var pterm = pres.termination
+    if pterm.is_spawn_failed():
+        # Could not spawn the freshly built binary: a machinery diagnostic, not
+        # a verdict — routed to the internal-error exit code, exactly as the run
+        # path's spawn-failure handling does.
+        return _ProbeOutcome(
+            False,
+            List[String](),
+            True,
+            FileResult.internal(
+                Event.internal_error("probe", binary, pterm.value)
+            ),
+            True,
+            False,
+        )
+    # An in-flight interrupt returns as TimedOut; never record it as a TIMEOUT.
+    if pterm.is_timed_out() and interrupt_requested():
+        return _ProbeOutcome(
+            False, List[String](), True, FileResult.interrupt(), False, True
+        )
     if pterm.is_signaled():
         return _ProbeOutcome(
             False,
@@ -686,6 +754,8 @@ def _probe_file(
                 False,
                 signal_number=pterm.value,
             ),
+            False,
+            False,
         )
     if pterm.is_timed_out():
         return _ProbeOutcome(
@@ -705,9 +775,44 @@ def _probe_file(
                 False,
                 timeout_seconds=config.timeout_secs,
             ),
+            False,
+            False,
         )
 
-    var report = parse_report(lossy_utf8(pres.stdout_bytes), canonical)
+    # Clean exit: resolve WHICH report to trust under capture overflow before
+    # consulting it. A truncated capture that kept no valid block in its tail is
+    # refused as overflow — a forged all-SKIP report in the retained head must
+    # never qualify as a collection listing.
+    var trusted = resolve_report(
+        lossy_utf8(pres.stdout_bytes), canonical, pres.stdout_truncated
+    )
+    if trusted.is_overflow:
+        return _ProbeOutcome(
+            False,
+            List[String](),
+            True,
+            _probe_terminal(
+                rel,
+                Outcome.FAIL,
+                ParseDisposition.CAPTURE_OVERFLOW,
+                "capture-overflow",
+                (
+                    "the --skip-all probe's stdout overflowed the capture bound"
+                    " and no complete report survived in the retained tail"
+                    " (look for the '[mtest: output truncated' marker); reduce"
+                    " the probe's output or raise the capture bound"
+                ),
+                build_argv,
+                bdur,
+                pres.stdout_bytes.copy(),
+                pres.stderr_bytes.copy(),
+                False,
+            ),
+            False,
+            False,
+        )
+
+    var report = trusted.report.copy()
     var disq = collection_disqualifier(report)
     if disq == "":
         var universe = collection_names(report)
@@ -715,7 +820,9 @@ def _probe_file(
         for nm in universe:
             listing.append(rel + "::" + nm)
         reg.record_probe(rel, True, listing^)
-        return _ProbeOutcome(True, universe^, False, _blank_file_result())
+        return _ProbeOutcome(
+            True, universe^, False, _blank_file_result(), False, False
+        )
 
     if report.verdict == ReportVerdict.OFF_GRAMMAR:
         return _ProbeOutcome(
@@ -738,6 +845,8 @@ def _probe_file(
                 pres.stderr_bytes.copy(),
                 True,
             ),
+            False,
+            False,
         )
     return _ProbeOutcome(
         False,
@@ -760,6 +869,8 @@ def _probe_file(
             pres.stderr_bytes.copy(),
             False,
         ),
+        False,
+        False,
     )
 
 
@@ -859,24 +970,19 @@ def _reconcile_and_classify(
     var trusted = resolve_report(
         lossy_utf8(term.stdout_bytes), canonical, term.stdout_truncated
     )
-    var report = trusted.report.copy()
-    if trusted.is_overflow or report.verdict != ReportVerdict.VALID:
-        return _run_terminal_file(
-            rel,
-            Outcome.MALFORMED_SUITE,
-            ParseDisposition.NO_REPORT,
-            "malformed-suite",
-            (
-                "the selection run spoke no honest report to reconcile against"
-                " the collected tests"
-            ),
-            build_argv,
-            bdur,
-            rdur,
-            term,
-            len(deselected),
+    if trusted.is_overflow or trusted.report.verdict != ReportVerdict.VALID:
+        # No VALID report to reconcile. Route it through the SAME total
+        # classifier the default path uses so selection preserves every
+        # distinction: capture-overflow -> CAPTURE_OVERFLOW (exit-1 class),
+        # OFF_GRAMMAR -> DRIFT (exit 3), ABSENT/AMBIGUOUS -> MALFORMED_SUITE.
+        # Only a VALID report whose membership fails to reconcile (below) is the
+        # selection-specific MALFORMED_SUITE.
+        var cls = classify(rterm, trusted.report, trusted.is_overflow)
+        return _classified_terminal(
+            rel, cls, build_argv, bdur, rdur, term, len(deselected)
         )
 
+    var report = trusted.report.copy()
     # The row set must equal the universe: every collected test must appear.
     var row_names = List[String]()
     for r in report.rows:
@@ -1008,6 +1114,47 @@ def _run_terminal_file(
         [outcome],
         TestCounts(0, 0, 0, deselected_count),
         False,
+    )
+
+
+def _classified_terminal(
+    rel: String,
+    cls: Classification,
+    build_argv: List[String],
+    bdur: Float64,
+    rdur: Float64,
+    term: ProcessResult,
+    deselected_count: Int,
+) -> FileResult:
+    """A file-level terminal FileResult from a `Classification` (no per-test rows).
+
+    Bridges a selection run whose report was NOT a reconcilable VALID one — a
+    capture overflow, an off-grammar drift, or an absent/ambiguous report — from
+    the pure `classify` result to a `FileResult`, so the selection path emits the
+    same outcome, disposition, warning, exit-code contribution, and drift flag
+    the default run path would for the identical report.
+    """
+    var pre = List[Event]()
+    if cls.warning_kind != "":
+        pre.append(Event.warning(cls.warning_kind, cls.warning_detail))
+    var ev = Event.file_finished(
+        rel,
+        cls.file_outcome,
+        rdur,
+        build_argv.copy(),
+        bdur,
+        term.stdout_bytes.copy(),
+        term.stderr_bytes.copy(),
+        parse_disposition=cls.disposition,
+        deselected_tests=deselected_count,
+    )
+    return FileResult.classified(
+        pre^,
+        ev^,
+        cls.file_outcome,
+        cls.exit_outcomes.copy(),
+        TestCounts(0, 0, 0, deselected_count),
+        cls.is_drift,
     )
 
 
@@ -1154,11 +1301,21 @@ def _run_selected_with_recovery(
         if rterm.is_timed_out() and interrupt_requested():
             return FileResult.interrupt()
 
+        # Stale-name detection PARSES the report first: a VALID report — even a
+        # FAIL — is a genuine per-test result, never a stale-name refusal. Only
+        # when the run produced NO valid report AND the stdlib's anchored refusal
+        # diagnostic appears is this a stale name (which a bare substring in a
+        # test's own output must never forge).
         var stdout_text = lossy_utf8(rres.stdout_bytes)
+        var run_trusted = resolve_report(
+            stdout_text, canonical, rres.stdout_truncated
+        )
+        var no_valid_report = run_trusted.report.verdict != ReportVerdict.VALID
         var is_stale = (
             rterm.is_exited()
             and rterm.value == 1
-            and (_STALE_NAME_PHRASE in stdout_text)
+            and no_valid_report
+            and _has_stale_name_diagnostic(stdout_text)
         )
         if not is_stale:
             var fr = _reconcile_and_classify(
@@ -1341,6 +1498,13 @@ def _run_selection[
             )
         except:
             reporter.handle(Event.internal_error("probe", bo.binary, 0))
+            internal_error = True
+            break
+        if po.interrupted:
+            interrupted = True
+            break
+        if po.internal_error:
+            reporter.handle(po.result.event)
             internal_error = True
             break
         if po.terminal:
@@ -1623,11 +1787,14 @@ def run_session[
                 test_totals.failed += fr.test_counts.failed
                 test_totals.skipped += fr.test_counts.skipped
                 if fr.is_drift:
-                    # A drifting report forces exit 3 and contributes nothing to
-                    # the run outcomes; it is accounted NOT_RUN like an internal
-                    # error, but the run continues.
+                    # A drifting gate is at least as serious as a failing one: a
+                    # gate exists to stop the run early, so a gate that drifts
+                    # aborts scheduling the same way, fanning the remaining files
+                    # out to NOT_RUN. Drift keeps exit-3 precedence over the
+                    # exit-1 a failing gate would resolve to.
                     drift = True
-                    continue
+                    gate_abort = True
+                    break
                 summary.counts[fr.outcome.code] += 1
                 run_outcomes.extend(fr.exit_outcomes.copy())
                 ran_files += 1
@@ -1913,6 +2080,15 @@ def run_collect(config: RunnerConfig, root: String) raises -> CollectResult:
                     reg,
                 )
             except:
+                diags.append(
+                    "collect: " + rel + ": internal probe failure; aborting"
+                )
+                internal = True
+                break
+            if po.interrupted:
+                interrupted = True
+                break
+            if po.internal_error:
                 diags.append(
                     "collect: " + rel + ": internal probe failure; aborting"
                 )

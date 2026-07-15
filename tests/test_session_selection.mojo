@@ -15,15 +15,18 @@ from std.testing import (
     TestSuite,
 )
 
-from mtest.model import Event, EventKind, Outcome
+from mtest.model import Event, EventKind, Outcome, ParseDisposition
 from mtest.report import CompositeReporter, RecordingReporter
 from mtest.session import run_session
 
 from session_fixtures import (
     SRC_CHAMELEON,
     SRC_FAIL,
+    SRC_FAIL_PHRASE,
     SRC_MATRIX,
     SRC_MATRIX_FAIL,
+    SRC_ONLY_FLOOD,
+    SRC_ONLY_LIAR,
     base_config,
     temp_root,
     write_file,
@@ -175,6 +178,97 @@ def test_chameleon_recollects_once_then_malformed_suite() raises:
         ):
             saw_stale = True
     assert_true(saw_stale, "the recover-once flow must warn loudly")
+
+
+def test_selected_off_grammar_run_is_drift_exit_3() raises:
+    # The probe (--skip-all) is a clean two-test collection, but the selected
+    # --only RUN emits an off-grammar trailing Summary. Selection must preserve
+    # the same distinction the default path does: an OFF_GRAMMAR run is DRIFT
+    # (exit 3), NOT collapsed to MALFORMED_SUITE (exit 1).
+    var root = temp_root()
+    write_file(root, "tests/test_ol.mojo", SRC_ONLY_LIAR)
+    var cfg = base_config()
+    cfg.paths.append("tests/test_ol.mojo::test_one")
+
+    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var code = run_session(cfg, root, comp)
+
+    assert_equal(code, 3, "a selected off-grammar run is DRIFT, exit 3")
+    ref rec = comp.reporters[0]
+    var finished = _finished(rec)
+    assert_true(
+        finished.parse_disposition == ParseDisposition.DRIFT,
+        "an off-grammar selected run is DRIFT, not malformed-suite",
+    )
+    var saw_drift = False
+    for i in range(rec.count()):
+        if (
+            rec.kind_at(i) == EventKind.WARNING
+            and rec.event_at(i).warning_kind == "drift"
+        ):
+            saw_drift = True
+    assert_true(saw_drift, "a drifting selected run must warn loudly")
+
+
+def test_selected_overflow_run_is_capture_overflow_exit_1() raises:
+    # The probe is clean, but the selected --only RUN overflows the capture
+    # bound. Selection must classify it as CAPTURE_OVERFLOW with the actionable
+    # overflow hint (exit-1 class), not a generic MALFORMED_SUITE.
+    var root = temp_root()
+    write_file(root, "tests/test_of.mojo", SRC_ONLY_FLOOD)
+    var cfg = base_config()
+    cfg.timeout_secs = 30
+    cfg.paths.append("tests/test_of.mojo::test_one")
+
+    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var code = run_session(cfg, root, comp)
+
+    assert_equal(code, 1, "a selected overflow run is exit-1 class")
+    ref rec = comp.reporters[0]
+    var finished = _finished(rec)
+    assert_true(
+        finished.parse_disposition == ParseDisposition.CAPTURE_OVERFLOW,
+        "an overflowing selected run is CAPTURE_OVERFLOW",
+    )
+    var saw_overflow = False
+    for i in range(rec.count()):
+        if (
+            rec.kind_at(i) == EventKind.WARNING
+            and rec.event_at(i).warning_kind == "capture-overflow"
+        ):
+            saw_overflow = True
+    assert_true(saw_overflow, "an overflowing run must warn with the hint")
+
+
+def test_valid_fail_printing_stale_phrase_is_not_stale_name() raises:
+    # A genuinely FAILING selected test that also prints the stale-name phrase in
+    # its own body produces a VALID FAIL report. The anchored stale-name check
+    # must treat it as a normal per-test FAIL (identity preserved), NEVER trip
+    # the recover-once/MALFORMED_SUITE path off a bare substring.
+    var root = temp_root()
+    write_file(root, "tests/test_fp.mojo", SRC_FAIL_PHRASE)
+    var cfg = base_config()
+    cfg.paths.append("tests/test_fp.mojo::test_prints_phrase_and_fails")
+
+    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var code = run_session(cfg, root, comp)
+
+    assert_equal(code, 1, "a genuine FAIL resolves to exit 1")
+    ref rec = comp.reporters[0]
+    var finished = _finished(rec)
+    assert_true(
+        finished.outcome == Outcome.FAIL,
+        "a valid FAIL report is a per-test FAIL, not stale-name recovery",
+    )
+    assert_equal(finished.failed_tests, 1)
+    var saw_stale = False
+    for i in range(rec.count()):
+        if (
+            rec.kind_at(i) == EventKind.WARNING
+            and rec.event_at(i).warning_kind == "stale-name"
+        ):
+            saw_stale = True
+    assert_false(saw_stale, "a valid FAIL must not trip stale-name recovery")
 
 
 def test_malformed_node_id_raises_even_when_a_gate_fails() raises:

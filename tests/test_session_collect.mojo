@@ -16,6 +16,7 @@ from mtest.session import run_collect
 from session_fixtures import (
     SRC_COMPILE_ERROR,
     SRC_CRASH,
+    SRC_FLOOD_PROBE,
     SRC_HANG,
     SRC_LIAR,
     SRC_MATRIX,
@@ -127,6 +128,46 @@ def test_off_grammar_probe_is_drift_exit_3() raises:
 
     assert_equal(res.code, 3, "an off-grammar probe is DRIFT, exit 3")
     assert_true(_any_contains(res.diagnostics, "tests/test_liar.mojo"))
+
+
+def test_truncated_probe_refuses_forged_head_report_exit_1() raises:
+    # The probe output carries a complete exact-path all-SKIP report in the
+    # retained HEAD, then floods past the capture bound so the genuine report is
+    # lost to truncation. The probe must apply the run path's truncation policy
+    # (only a report wholly in the TAIL is trusted): the forged head report is
+    # refused, no node ids are listed, and the file is a failing outcome — never
+    # exit 0 with forged ids.
+    var root = temp_root()
+    write_file(root, "tests/test_flood.mojo", SRC_FLOOD_PROBE)
+    var cfg = base_config()
+    cfg.collect = True
+    cfg.timeout_secs = 30
+    cfg.paths.append("tests")
+
+    var res = run_collect(cfg, root)
+
+    assert_equal(res.code, 1, "a truncated probe is a failing outcome, not 0")
+    assert_equal(
+        len(res.listing), 0, "no forged node ids survive truncation refusal"
+    )
+    assert_true(_any_contains(res.diagnostics, "tests/test_flood.mojo"))
+
+
+def test_probe_spawn_failure_is_internal_exit_3() raises:
+    # A fake compiler (`/bin/true`) exits 0 without producing the binary, so the
+    # build "succeeds" but the probe cannot spawn the (nonexistent) binary: a
+    # SpawnFailed termination. That is an internal machinery failure (exit 3),
+    # NOT a malformed suite (exit 1).
+    var root = temp_root()
+    write_file(root, "tests/test_x.mojo", SRC_PASS)
+    var cfg = base_config()
+    cfg.collect = True
+    cfg.mojo_path = "/bin/true"
+    cfg.paths.append("tests")
+
+    var res = run_collect(cfg, root)
+
+    assert_equal(res.code, 3, "a probe spawn failure is internal, exit 3")
 
 
 def test_keyword_is_ignored_with_note_and_full_listing() raises:

@@ -141,6 +141,68 @@ comptime SRC_CHAMELEON = (
 )
 
 
+# A real one-test suite that, under --skip-all, prints a complete exact-path
+# all-SKIP report (in the retained HEAD) and THEN floods stdout far past the
+# capture bound, so the genuine report is lost to truncation and only junk
+# survives in the tail. The probe must REFUSE the forged head report under
+# truncation (capture-overflow), never list `test_real`, never exit 0.
+comptime SRC_FLOOD_PROBE = (
+    "from std.testing import TestSuite, assert_true\n\n\ndef test_real()"
+    " raises:\n    assert_true(True)\n\n\ndef main() raises:\n   "
+    " TestSuite.discover_tests[__functions_in_module()]().run()\n    var unit ="
+    " String(\n       "
+    ' "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"\n   '
+    ' )\n    var chunk = String("")\n    for i in range(1024):\n        chunk'
+    " += unit\n    for i in range(200):\n        print(chunk)\n"
+)
+# Clean under --skip-all (a qualifying two-test collection), but under --only it
+# runs the suite and THEN hand-forges a trailing Summary the grammar rejects ->
+# the selected RUN is OFF_GRAMMAR -> DRIFT (exit 3), matching the default path.
+comptime SRC_ONLY_LIAR = (
+    "from std.sys import argv\n"
+    "from std.testing import TestSuite, assert_true\n\n\n"
+    "def test_one() raises:\n    assert_true(True)\n\n\n"
+    "def test_two() raises:\n    assert_true(True)\n\n\n"
+    "def main() raises:\n"
+    "    var has_only = False\n"
+    "    for a in argv():\n"
+    '        if a == "--only":\n'
+    "            has_only = True\n"
+    "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
+    "    if has_only:\n"
+    '        print("Summary [ 0.00s ] 1 tests run: 1 passed , 0 failed ,'
+    ' 0 skipped ")\n'
+)
+# Clean under --skip-all, but under --only it runs the suite and THEN floods
+# stdout past the capture bound -> the selected RUN is capture-overflow ->
+# CAPTURE_OVERFLOW (exit-1 class), matching the default path.
+comptime SRC_ONLY_FLOOD = (
+    "from std.sys import argv\nfrom std.testing import TestSuite,"
+    " assert_true\n\n\ndef test_one() raises:\n    assert_true(True)\n\n\ndef"
+    " test_two() raises:\n    assert_true(True)\n\n\ndef main() raises:\n   "
+    ' var has_only = False\n    for a in argv():\n        if a == "--only":\n  '
+    "          has_only = True\n   "
+    " TestSuite.discover_tests[__functions_in_module()]().run()\n    if"
+    " has_only:\n        var unit = String(\n           "
+    ' "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"\n     '
+    '   )\n        var chunk = String("")\n        for i in range(1024):\n     '
+    "       chunk += unit\n        for i in range(200):\n           "
+    " print(chunk)\n"
+)
+# A genuinely FAILING test that also PRINTS the stale-name phrase in its own
+# body. The run produces a VALID FAIL report AND the phrase appears in stdout;
+# an anchored stale-name check must treat this as a normal per-test FAIL, never
+# as a stale-name refusal (which would discard the failing test's identity).
+comptime SRC_FAIL_PHRASE = (
+    "from std.testing import TestSuite, assert_true\n\n\n"
+    "def test_prints_phrase_and_fails() raises:\n"
+    '    print("test not found in suite: not really")\n'
+    "    assert_true(False)\n\n\n"
+    "def main() raises:\n"
+    "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
+)
+
+
 def temp_root() raises -> String:
     """Create and return a fresh, empty temp directory to use as a root."""
     return mkdtemp()
