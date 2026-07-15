@@ -123,7 +123,9 @@ def test_off_grammar_is_drift_exit3() raises:
     assert_true(c.is_drift, "off-grammar must route to drift (exit 3)")
     assert_equal(len(c.exit_outcomes), 0)  # contributes NOTHING to the multiset
     assert_true("missing rule before summary" in c.warning_detail)
-    assert_true("goldens/transcripts/" in c.warning_detail, c.warning_detail)
+    assert_true(
+        "tests/snapshots/protocol/" in c.warning_detail, c.warning_detail
+    )
 
 
 # ---- VALID: the clean cases --------------------------------------------------

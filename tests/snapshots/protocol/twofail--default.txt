@@ -3,17 +3,17 @@ cmd: <BIN>
 termination: exit 1
 --- stdout ---
 Unhandled exception caught during execution: 
-Running 2 tests for <REPO>/fixtures/twofail.mojo 
+Running 2 tests for <REPO>/tests/fixtures/protocol/twofail.mojo 
     FAIL [ T ] test_first_fails
-      At <REPO>/fixtures/twofail.mojo:10:17: AssertionError: `left == right` comparison failed:
+      At <REPO>/tests/fixtures/protocol/twofail.mojo:10:17: AssertionError: `left == right` comparison failed:
          left: 10
         right: 11
     FAIL [ T ] test_second_fails
-      At <REPO>/fixtures/twofail.mojo:14:17: AssertionError: `left == right` comparison failed:
+      At <REPO>/tests/fixtures/protocol/twofail.mojo:14:17: AssertionError: `left == right` comparison failed:
          left: 20
         right: 21
 --------
 Summary [ T ] 2 tests run: 0 passed , 2 failed , 0 skipped 
-Test suite' <REPO>/fixtures/twofail.mojo 'failed! 
+Test suite' <REPO>/tests/fixtures/protocol/twofail.mojo 'failed! 
 
 --- stderr ---

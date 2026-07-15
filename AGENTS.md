@@ -84,12 +84,12 @@ triple-quoted, and mandatory on public entities.
 
 ## The transcript lifecycle — doctrine
 
-The committed golden transcripts under `goldens/transcripts/` pin TestSuite's
+The committed protocol snapshots under `tests/snapshots/protocol/` pin TestSuite's
 actual per-file protocol at the pinned toolchain. `scripts/gen_transcripts.py`
 is the only thing that writes them.
 
 - **A red `transcripts-check` after a repo change indicts THE CHANGE, not the
-  goldens.** Regenerating (`pixi run transcripts`) is legitimate **only** when
+  snapshots.** Regenerating (`pixi run transcripts`) is legitimate **only** when
   the oracle side visibly changed: a mojo pin bump (which appears in every
   transcript header) or a deliberate fixture/matrix edit. "The new output looks
   close enough" is never evidence.
@@ -194,8 +194,8 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | ----- | ---- |
 | `scaffold` | repo skeleton, license/readme/gitignore/gitattributes |
 | `pixi` | `pixi.toml`, `pixi.lock`, tasks, the environment |
-| `fixtures` | `fixtures/` — the committed TestSuite probe modules |
-| `transcripts` | `goldens/transcripts/` + `scripts/gen_transcripts.py` + `scripts/transcripts_check.sh` |
+| `fixtures` | `tests/fixtures/` — protocol probes and subprocess actors |
+| `transcripts` | `tests/snapshots/protocol/` + generator/check scripts |
 | `spec` | `docs/cli-contract.md` |
 | `agents` | `AGENTS.md` |
 | `notes` | `notes/` |
@@ -452,7 +452,7 @@ Accumulated the hard way; append as later phases teach more.
 
 - `.agents/skills/git-conventions` — commit/branch/PR conventions for this repo.
 - `.agents/skills/mojo-coding-guidance` — per-edit Mojo coding contract.
-- `.agents/skills/test-driven-development` — the transcript-golden lifecycle and
+- `.agents/skills/test-driven-development` — the protocol-snapshot lifecycle and
   parser-testing discipline.
 - `.agents/skills/code-review-and-quality` — pre-merge review axes and the
   standing dual-adversarial-review protocol.

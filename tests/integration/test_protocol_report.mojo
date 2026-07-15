@@ -1,10 +1,10 @@
-"""Golden-driven tests for `parse_report` (Layer 2): the four report verdicts.
+"""Snapshot-driven tests for `parse_report` (Layer 2): report verdicts.
 
-Every report-bearing golden under `goldens/transcripts/` is the oracle here: the
+Every report-bearing snapshot under `tests/snapshots/protocol/` is the oracle: the
 frozen bytes `std.testing.TestSuite` emits at the pinned toolchain. Each test
-drives `parse_report` over a golden's stdout region (via `transcript_cases`) and
+drives `parse_report` over a snapshot's stdout region (via `transcript_cases`) and
 pins the verdict, the parsed rows, the counts, and — for the FAIL cases — the
-verbatim detail. A crash or a usage-error golden carries no report block, so it
+verbatim detail. A crash or usage-error snapshot carries no report block, so it
 must classify ABSENT, never a partial VALID.
 """
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
@@ -13,7 +13,7 @@ from mtest.model import Outcome
 from mtest.protocol import ParsedReport, ReportVerdict, parse_report
 
 from transcript_cases import (
-    read_golden,
+    read_snapshot,
     read_manifest,
     stdout_region,
     source_path_for,
@@ -21,11 +21,13 @@ from transcript_cases import (
 
 
 def _parse(name: String) raises -> ParsedReport:
-    return parse_report(stdout_region(read_golden(name)), source_path_for(name))
+    return parse_report(
+        stdout_region(read_snapshot(name)), source_path_for(name)
+    )
 
 
 def _expected_valid() -> List[String]:
-    """Goldens that carry one well-formed report for their source path."""
+    """Snapshots that carry one well-formed report for their source path."""
     return [
         "passing--default.txt",
         "passing--skip-all.txt",
@@ -45,7 +47,7 @@ def _expected_valid() -> List[String]:
 
 
 def _expected_absent() -> List[String]:
-    """Goldens that carry no matching-path report (crash or usage error)."""
+    """Snapshots with no matching-path report (crash or usage error)."""
     return [
         "crashing--default.txt",
         "passing--only-unknown.txt",
@@ -65,9 +67,9 @@ def _contains(names: List[String], target: String) -> Bool:
 
 
 def test_manifest_enumerates_every_scenario_verdict() raises:
-    # Enumerate via MANIFEST.txt, not a hard-coded list: every golden is either
+    # Enumerate via MANIFEST.txt, not a hard-coded list: every snapshot is either
     # asserted VALID-with-expectations or ASSERTED ABSENT, and the two buckets
-    # partition the manifest exactly, so a newly added golden cannot silently
+    # partition the manifest exactly, so a newly added snapshot cannot silently
     # escape parser coverage.
     var manifest = read_manifest()
     var valid = _expected_valid()
@@ -86,7 +88,7 @@ def test_manifest_enumerates_every_scenario_verdict() raises:
         assert_true(in_valid or in_absent)
         assert_false(in_valid and in_absent)
 
-    # No expectation names a golden absent from the manifest.
+    # No expectation names a snapshot absent from the manifest.
     for name in valid:
         assert_true(_contains(manifest, String(name)))
     for name in absent:
@@ -129,7 +131,7 @@ def test_empty_reports_declare_zero_rows() raises:
         assert_false(r.has_trailer)
 
 
-def test_skipped_goldens_are_valid_with_skip_rows() raises:
+def test_skipped_snapshots_are_valid_with_skip_rows() raises:
     for name in [
         "skipped--default.txt",
         "skipped--skip-all.txt",
@@ -154,7 +156,10 @@ def test_mixed_default_valid_with_fail_detail() raises:
     assert_true(r.rows[1].outcome == Outcome.FAIL)
     assert_true(r.rows[2].outcome == Outcome.PASS)
     assert_equal(r.rows[1].name, "test_second_fails")
-    assert_true("At <REPO>/fixtures/mixed.mojo:14:17:" in r.rows[1].detail)
+    assert_true(
+        "At <REPO>/tests/fixtures/protocol/mixed.mojo:14:17:"
+        in r.rows[1].detail
+    )
     assert_true("left: 1" in r.rows[1].detail)
     assert_true("right: 2" in r.rows[1].detail)
     assert_equal(r.summary_passed, 2)
@@ -193,9 +198,9 @@ def test_twofail_detail_is_verbatim() raises:
     assert_equal(
         r.rows[0].detail,
         (
-            "      At <REPO>/fixtures/twofail.mojo:10:17: AssertionError:"
-            " `left == right` comparison failed:\n         left: 10\n     "
-            "   right: 11"
+            "      At <REPO>/tests/fixtures/protocol/twofail.mojo:10:17:"
+            " AssertionError: `left == right` comparison failed:\n        "
+            " left: 10\n        right: 11"
         ),
     )
     assert_equal(r.summary_failed, 2)
@@ -225,7 +230,10 @@ def test_noisy_impostor_row_is_ignored() raises:
     assert_equal(r.rows[0].name, "test_prints_and_passes")
     assert_equal(r.rows[1].name, "test_prints_then_fails")
     assert_true(r.rows[1].outcome == Outcome.FAIL)
-    assert_true("At <REPO>/fixtures/noisy.mojo:32:17:" in r.rows[1].detail)
+    assert_true(
+        "At <REPO>/tests/fixtures/protocol/noisy.mojo:32:17:"
+        in r.rows[1].detail
+    )
     assert_equal(r.rows[2].name, "test_prints_timing_lookalike")
     assert_equal(r.summary_passed, 2)
     assert_equal(r.summary_failed, 1)
@@ -255,7 +263,7 @@ def test_crashing_has_no_report_absent() raises:
     assert_equal(r.declared_count, 0)
 
 
-def test_usage_error_goldens_are_absent() raises:
+def test_usage_error_snapshots_are_absent() raises:
     # These carry only an `Unhandled exception ...` phrase, no report block —
     # a session concern, not the parser's; the parser sees no matching header.
     for name in [

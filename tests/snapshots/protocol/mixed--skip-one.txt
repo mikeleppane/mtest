@@ -3,7 +3,7 @@ cmd: <BIN> --skip test_second_fails
 termination: exit 0
 --- stdout ---
 
-Running 3 tests for <REPO>/fixtures/mixed.mojo 
+Running 3 tests for <REPO>/tests/fixtures/protocol/mixed.mojo 
     PASS [ T ] test_first_passes
     SKIP [ T ] test_second_fails
     PASS [ T ] test_third_passes

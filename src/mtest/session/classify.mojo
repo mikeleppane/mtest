@@ -263,8 +263,8 @@ def classify(
             (
                 "the report drifted off the pinned toolchain's grammar ("
                 + report.reason
-                + "); check the toolchain pin and goldens/transcripts/ against"
-                " the file's own output"
+                + "); check the toolchain pin and tests/snapshots/protocol/"
+                " against the file's own output"
             ),
         )
 

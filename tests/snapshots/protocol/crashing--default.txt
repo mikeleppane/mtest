@@ -2,6 +2,6 @@
 cmd: <BIN>
 termination: signal 4
 --- stdout ---
-ABORT: <REPO>/fixtures/crashing.mojo:17:10: simulated hard crash
+ABORT: <REPO>/tests/fixtures/protocol/crashing.mojo:17:10: simulated hard crash
 --- stderr ---
 <STACK-DUMP>

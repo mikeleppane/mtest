@@ -71,7 +71,7 @@ one. The current vocabulary:
 | `scaffold` | repo skeleton, top-level layout, editor/tooling config |
 | `pixi` | `pixi.toml`, tasks, the pinned toolchain, environment |
 | `fixtures` | the probe `.mojo` files the transcripts are generated from |
-| `transcripts` | the golden transcripts and their normalizer/matrix |
+| `transcripts` | protocol snapshots and their normalizer/matrix |
 | `spec` | the CLI contract and other frozen-intent spec docs |
 | `agents` | AGENTS.md itself |
 | `model` | Layer 0: outcomes, node ids, events, exit-code precedence |
@@ -105,7 +105,7 @@ truly trivial changes.
 
 ## Transcript provenance in commit messages — repo-specific
 
-The committed goldens under `goldens/transcripts/` (and the `fixtures/` they are
+The committed snapshots under `tests/snapshots/protocol/` (and the protocol fixtures they are
 generated from) are mechanically produced and frozen. A commit that
 **regenerates** any transcript must name the *oracle-side reason* in the body —
 a Mojo pin bump, a deliberate fixture edit, a scenario-matrix change — because
@@ -167,7 +167,7 @@ the transcript format, and the frozen CLI contract are **Ask-first** boundaries
 5. Choose the right **type** and **scope** (read AGENTS.md if unsure).
 6. Write a specific **subject** and a **why** body.
 7. Handle **breaking changes** (`!` + footer) and **transcript provenance**
-   (name the oracle-side reason when regenerating goldens).
+   (name the oracle-side reason when regenerating snapshots).
 8. **Confirm no AI/assistant attribution** snuck in.
 
 ## Change summaries

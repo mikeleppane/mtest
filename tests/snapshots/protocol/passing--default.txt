@@ -3,7 +3,7 @@ cmd: <BIN>
 termination: exit 0
 --- stdout ---
 
-Running 3 tests for <REPO>/fixtures/passing.mojo 
+Running 3 tests for <REPO>/tests/fixtures/protocol/passing.mojo 
     PASS [ T ] test_zeta_passes
     PASS [ T ] test_alpha_passes
     PASS [ T ] test_mid_passes

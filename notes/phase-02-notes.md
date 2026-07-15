@@ -39,7 +39,7 @@ asking to build on a premise nobody re-verified.
 
 ## The R5 native-skip findings
 
-Three facts about TestSuite's native skip API, pinned by new golden
+Three facts about TestSuite's native skip API, pinned by new protocol snapshot
 transcripts (`skipped--skip-all.txt`, `skipped--only-native.txt`) rather than
 assumed:
 
@@ -48,7 +48,7 @@ assumed:
 2. A natively-skipped test that is explicitly **selected** by name under
    `--only` still reports `SKIP`. Selecting it does not force it to run.
 3. And the one that actually matters: `--only <native-skip-test>` output is
-   **byte-identical** to `--skip-all` output. Diffing the two golden
+   **byte-identical** to `--skip-all` output. Diffing the two snapshot
    transcripts shows the only difference is the `cmd:` line in the header —
    every report byte after it matches, down to `SKIP [ T ] test_runs_normally`
    showing up in *both* transcripts even though the `--only` run never named

@@ -11,11 +11,11 @@ count, the per-test rows, and the `Summary` tallies against each other. A parser
 that "successfully" reads garbage must fail here.
 
 Transcripts are enumerated via MANIFEST.txt, never a directory listing, so a
-golden that is present on disk but missing from the manifest cannot hide.
+snapshot that is present on disk but missing from the manifest cannot hide.
 """
 from std.testing import assert_equal, assert_true, TestSuite
 
-comptime TX_DIR = "goldens/transcripts/"
+comptime TX_DIR = "tests/snapshots/protocol/"
 
 
 def _read(path: String) raises -> String:
@@ -171,17 +171,17 @@ def test_noisy_impostor_precedes_the_real_report() raises:
 
 
 def test_tripwire_crash_terminates_by_signal() raises:
-    # Pins goldens/transcripts/crashing--default.txt: the crash dies by SIGNAL,
+    # Pins the crashing-default snapshot: the crash dies by SIGNAL,
     # exactly as committed, and the ABORT line survives normalization on stdout.
     var text = _read(TX_DIR + "crashing--default.txt")
     var lines = _lines(text)
     assert_equal(String(lines[2].removeprefix("termination: ")), "signal 4")
-    assert_true("ABORT: <REPO>/fixtures/crashing.mojo" in text)
+    assert_true("ABORT: <REPO>/tests/fixtures/protocol/crashing.mojo" in text)
     assert_true("<STACK-DUMP>" in text)
 
 
 def test_tripwire_only_unknown_error_phrase() raises:
-    # Pins goldens/transcripts/passing--only-unknown.txt: the stale-name error.
+    # Pins the passing-only-unknown snapshot's stale-name error.
     var text = _read(TX_DIR + "passing--only-unknown.txt")
     assert_true("explicitly allowed test not found in suite" in text)
 

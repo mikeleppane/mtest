@@ -1,7 +1,7 @@
 """The exhaustive corruption matrix for `parse_report` (Layer 2).
 
 One base VALID report (numeric timings, an absolute path — live runtime shape,
-not a normalized golden) is corrupted by inserting ONE noise line at EVERY parser
+not a normalized snapshot) is corrupted by inserting ONE noise line at EVERY parser
 state and the classification is pinned per cell. The insertion points are the
 states a forger could aim at: [H] after the header before the first row, [P]
 right after a PASS/SKIP row, [Fd] inside a FAIL row's detail, [RS] between the

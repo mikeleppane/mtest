@@ -3,8 +3,8 @@
 `collection_disqualifier`/`collection_names` decide whether a `--skip-all`
 probe's parsed report reads as a collection listing (VALID, all rows SKIP, no
 reported failures, no failure trailer) and extract the listed names. Each test
-drives real golden bytes via `transcript_cases`, or a hand-built literal for a
-synthesized disqualifier the committed goldens don't carry — mirroring the
+drives real snapshot bytes via `transcript_cases`, or a hand-built literal for a
+synthesized disqualifier the committed snapshots don't carry — mirroring the
 literal-report style already used in `test_protocol_corruption.mojo`.
 """
 from std.testing import assert_equal, assert_true, TestSuite
@@ -17,13 +17,15 @@ from mtest.protocol import (
     collection_names,
 )
 
-from transcript_cases import read_golden, stdout_region, source_path_for
+from transcript_cases import read_snapshot, stdout_region, source_path_for
 
 comptime SP = "/home/x/proj/tests/test_a.mojo"
 
 
 def _parse(name: String) raises -> ParsedReport:
-    return parse_report(stdout_region(read_golden(name)), source_path_for(name))
+    return parse_report(
+        stdout_region(read_snapshot(name)), source_path_for(name)
+    )
 
 
 def test_passing_skip_all_qualifies_with_source_order_names() raises:

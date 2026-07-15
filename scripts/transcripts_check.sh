@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # CI gate: regenerate every transcript into a temp dir and diff against what is
-# committed under goldens/transcripts/ — byte-identical or red. This is strictly
+# committed under tests/snapshots/protocol/ — byte-identical or red. This is strictly
 # stronger than a hash check (it shows WHICH bytes moved) and is the protocol
 # pin: the generator stamps the resolved mojo version and os/arch into every
 # header, so a toolchain re-pin diffs loudly and the diff IS the protocol
@@ -10,7 +10,7 @@
 # network is touched.
 #
 # TRANSCRIPT LIFECYCLE: a red diff after a repo change indicts THE CHANGE, not
-# the goldens. Regenerating (pixi run transcripts) is legitimate ONLY when the
+# the snapshots. Regenerating (pixi run transcripts) is legitimate ONLY when the
 # oracle side visibly changed — a mojo pin bump (visible in every header) or a
 # deliberate fixture/matrix edit. Never hand-edit a transcript. When it goes red,
 # suspect in order: (1) generator nondeterminism (ordering, environment leakage,
@@ -27,9 +27,9 @@ trap 'rm -rf "$TMP"' EXIT
 
 python scripts/gen_transcripts.py --out "$TMP" >/dev/null
 
-if ! python scripts/transcript_compare.py goldens/transcripts "$TMP"; then
+if ! python scripts/transcript_compare.py tests/snapshots/protocol "$TMP"; then
     echo "" >&2
-    echo "transcripts-check: committed transcripts differ from a fresh" >&2
+    echo "transcripts-check: committed snapshots differ from a fresh" >&2
     echo "  regeneration. A repo change must not move these bytes. If the" >&2
     echo "  TOOLCHAIN genuinely changed (check the mojo version in the header)," >&2
     echo "  run 'pixi run transcripts' and commit the result with that reason." >&2

@@ -597,11 +597,11 @@ This dogfood run is **an additional gate, not the only executor** of
   `testdata/manifest.json`) and asserts exact exit codes and console
   structure. Every example in this README is a hand-run instance of what
   `e2e` checks automatically.
-- **`transcripts-check`** — the protocol pin: regenerates the golden per-file
+- **`transcripts-check`** — the protocol pin: regenerates per-file protocol
   `TestSuite` report transcripts from committed fixtures at the pinned Mojo
-  toolchain and diffs them byte-for-byte against `goldens/transcripts/`. This
+  toolchain and diffs them byte-for-byte against `tests/snapshots/protocol/`. This
   is the oracle the `protocol` layer is parsed against; a red diff here after
-  a repository change indicts the change, not the goldens.
+  a repository change indicts the change, not the snapshots.
 
 ## Status
 
@@ -676,7 +676,7 @@ $ pixi run ci                  # fmt-check → harness-check → build → trans
 | `pixi run build` | precompile `src/mtest` to `build/mtest.mojopkg` — the compile gate |
 | `pixi run build-bin` | link the runnable binary at `build/mtest` from `src/main.mojo` |
 | `pixi run harness-check` | fast self-tests for recursive suite enumeration and collision-free binary paths |
-| `pixi run transcripts` | regenerate the golden transcripts in place (local only) |
+| `pixi run transcripts` | regenerate protocol snapshots in place (local only) |
 | `pixi run transcripts-check` | regenerate to a temp dir and diff byte-for-byte — the protocol pin |
 | `pixi run test-unit` | directly build and execute the in-memory unit suites only |
 | `pixi run test-integration` | directly build and execute the filesystem/compiler/process integration suites only |
@@ -686,9 +686,9 @@ $ pixi run ci                  # fmt-check → harness-check → build → trans
 
 See [Self-hosting](#self-hosting) for how `test` and `test-direct` relate.
 
-The golden transcripts are the project's contract with the toolchain: a red
+The protocol snapshots are the project's contract with the toolchain: a red
 `transcripts-check` after a repository change indicts the change, not the
-goldens. They are regenerated only by the generator, never by hand, and only
+snapshots. They are regenerated only by the generator, never by hand, and only
 when the toolchain itself changes (which shows up in every transcript header).
 
 ## Non-goals

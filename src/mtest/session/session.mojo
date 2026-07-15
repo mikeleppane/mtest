@@ -837,7 +837,7 @@ def _probe_file(
                 (
                     "the --skip-all probe drifted off the pinned grammar ("
                     + report.reason
-                    + "); check the toolchain pin and goldens/transcripts/"
+                    + "); check the toolchain pin and tests/snapshots/protocol/"
                 ),
                 build_argv,
                 bdur,

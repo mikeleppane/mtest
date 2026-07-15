@@ -3,7 +3,7 @@ cmd: <BIN> --skip-all
 termination: exit 0
 --- stdout ---
 
-Running 0 tests for <REPO>/fixtures/empty.mojo 
+Running 0 tests for <REPO>/tests/fixtures/protocol/empty.mojo 
 --------
 Summary [ T ] 0 tests run: 0 passed , 0 failed , 0 skipped 
 

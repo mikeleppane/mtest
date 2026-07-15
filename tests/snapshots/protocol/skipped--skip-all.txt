@@ -3,7 +3,7 @@ cmd: <BIN> --skip-all
 termination: exit 0
 --- stdout ---
 
-Running 2 tests for <REPO>/fixtures/skipped.mojo 
+Running 2 tests for <REPO>/tests/fixtures/protocol/skipped.mojo 
     SKIP [ T ] test_runs_normally
     SKIP [ T ] test_natively_skipped
 --------

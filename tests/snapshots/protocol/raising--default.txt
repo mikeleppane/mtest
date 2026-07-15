@@ -3,12 +3,12 @@ cmd: <BIN>
 termination: exit 1
 --- stdout ---
 Unhandled exception caught during execution: 
-Running 1 tests for <REPO>/fixtures/raising.mojo 
+Running 1 tests for <REPO>/tests/fixtures/protocol/raising.mojo 
     FAIL [ T ] test_raises_plain_error
       boom:
         fake detail line
 --------
 Summary [ T ] 1 tests run: 0 passed , 1 failed , 0 skipped 
-Test suite' <REPO>/fixtures/raising.mojo 'failed! 
+Test suite' <REPO>/tests/fixtures/protocol/raising.mojo 'failed! 
 
 --- stderr ---

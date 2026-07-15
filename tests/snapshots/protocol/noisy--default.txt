@@ -6,16 +6,16 @@ termination: exit 1
 just a plain user line
 about to fail, on stdout
 user mentions [ 0.001 ] mid-sentenceUnhandled exception caught during execution: 
-Running 3 tests for <REPO>/fixtures/noisy.mojo 
+Running 3 tests for <REPO>/tests/fixtures/protocol/noisy.mojo 
     PASS [ T ] test_prints_and_passes
     FAIL [ T ] test_prints_then_fails
-      At <REPO>/fixtures/noisy.mojo:32:17: AssertionError: `left == right` comparison failed:
+      At <REPO>/tests/fixtures/protocol/noisy.mojo:32:17: AssertionError: `left == right` comparison failed:
          left: 1
         right: 2
     PASS [ T ] test_prints_timing_lookalike
 --------
 Summary [ T ] 3 tests run: 2 passed , 1 failed , 0 skipped 
-Test suite' <REPO>/fixtures/noisy.mojo 'failed! 
+Test suite' <REPO>/tests/fixtures/protocol/noisy.mojo 'failed! 
 
 --- stderr ---
 noisy test writing to stderr

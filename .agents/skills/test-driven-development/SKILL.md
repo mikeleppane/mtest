@@ -6,7 +6,7 @@ description: Test-driven development for the mtest repo — a pytest-like test r
 # Test-Driven Development (mtest)
 
 Write the failing test before the code. For a bug, reproduce it with a test — or
-a golden transcript — *before* fixing it. Tests are proof; "looks right" is not
+a protocol snapshot — *before* fixing it. Tests are proof; "looks right" is not
 done. This is a test runner, not a numerics project: there is essentially no
 float math anywhere in `src/`. A supervised process exits with an exact integer
 code or dies by an exact signal; a report declares an exact count of tests; a
@@ -95,7 +95,7 @@ kind of test:
 | `model` — outcomes, events, exit-code precedence | the precedence function over every outcome multiset | pure logic — enumerate the domain |
 | `config` — RunnerConfig | defaults, flag → field mapping | pure logic |
 | `discover` — walk, pattern, excludes | a temp tree of `test_*.mojo` + decoys | a hand-built directory |
-| `protocol` — report/collect parsing | the committed golden transcripts | `goldens/transcripts/` |
+| `protocol` — report/collect parsing | committed protocol snapshots | `tests/snapshots/protocol/` |
 | `report` — reporters | rendered output for a fixed event stream | structural assertions |
 | `exec` — the POSIX process adapter | supervision of real system binaries | `/bin/echo`, `/bin/false`, `/bin/sleep` |
 | `session` — orchestration | verdict + exit code end to end | the known-outcome tree (below) |
@@ -114,8 +114,8 @@ as it is banned in the product — supervise a real binary, not `/bin/sh -c`.
 
 ### Golden-transcript tests — freeze the toolchain's protocol, byte for byte
 
-The transcripts under `goldens/transcripts/` are this repo's golden tests at
-project scale: committed probe `fixtures/`, run at the pinned Mojo toolchain,
+The transcripts under `tests/snapshots/protocol/` are this repo's snapshots at
+project scale: committed probes under `tests/fixtures/protocol/`, run at the pinned Mojo toolchain,
 their normalized output frozen and diffed byte-for-byte by `pixi run
 transcripts-check`. **The toolchain IS the oracle** — a transcript pins exactly
 what `std.testing.TestSuite` emits at the pinned version, which is what lets the
@@ -254,7 +254,7 @@ float legitimately appears is a timing number under `bench` — those are
   in review, not a style choice; sampling is how a wrong precedence table or a
   missed flag ships.
 - Keep tests independent: no shared mutable state between tests, and no test
-  writes under `goldens/`, `fixtures/`, or a committed known-outcome tree — those
+  writes under `tests/snapshots/`, `tests/fixtures/`, or a known-outcome tree — those
   are frozen inputs, not scratch space. A test that needs a directory builds it in
   a temp dir and cleans up.
 

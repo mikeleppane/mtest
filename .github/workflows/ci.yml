@@ -40,7 +40,7 @@ jobs:
       #   harness-check     — exercise recursive suite enumeration and output mapping
       #   build             — precompile src/mtest (the package-compiles gate)
       #   transcripts-check — regenerate every transcript to a temp dir and diff
-      #                       byte-for-byte against the committed goldens (also a
+      #                       byte-for-byte against committed protocol snapshots (also a
       #                       toolchain-drift detector via the pinned header)
       #   test-direct       — build each classified suite and EXECUTE the binary
       #                       directly (never `mojo run`, which masks crash codes)

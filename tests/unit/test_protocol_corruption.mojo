@@ -1,6 +1,6 @@
 """Synthesized-input tests for `parse_report` (Layer 2): raw form and forgeries.
 
-The goldens are normalized (timing token `T`, path token `<REPO>/...`); these
+The snapshots are normalized (timing token `T`, path token `<REPO>/...`); these
 tests instead build report strings the way a LIVE child prints them — numeric
 timings and absolute canonical paths — to prove the parser reads real runtime
 output, and pin the exact-path identity rule (a same-suffix impostor path does

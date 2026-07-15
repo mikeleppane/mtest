@@ -100,6 +100,16 @@ EXEC_FIXTURES = {
     "sigterm_ignorer.py",
     "sleeper.py",
 }
+PROTOCOL_FIXTURES = {
+    "crashing.mojo",
+    "empty.mojo",
+    "mixed.mojo",
+    "noisy.mojo",
+    "passing.mojo",
+    "raising.mojo",
+    "skipped.mojo",
+    "twofail.mojo",
+}
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -300,12 +310,44 @@ def check_transcript_comparator() -> None:
             raise AssertionError("snapshot comparator accepted an extra file")
 
 
+def check_protocol_asset_layout() -> None:
+    """Protocol generator inputs and outputs occupy their documented homes."""
+    fixtures = REPO_ROOT / "tests" / "fixtures" / "protocol"
+    actual_fixtures = (
+        {path.name for path in fixtures.iterdir()} if fixtures.exists() else set()
+    )
+    if actual_fixtures != PROTOCOL_FIXTURES:
+        raise AssertionError(
+            "protocol fixture membership mismatch: "
+            f"missing={sorted(PROTOCOL_FIXTURES - actual_fixtures)}, "
+            f"extra={sorted(actual_fixtures - PROTOCOL_FIXTURES)}"
+        )
+
+    snapshots = REPO_ROOT / "tests" / "snapshots" / "protocol"
+    manifest = snapshots / "MANIFEST.txt"
+    if not manifest.is_file():
+        raise AssertionError("protocol snapshot MANIFEST.txt is missing")
+    listed = tuple(manifest.read_text(encoding="utf-8").splitlines())
+    actual_snapshots = tuple(
+        sorted(path.name for path in snapshots.glob("*.txt") if path != manifest)
+    )
+    if listed != actual_snapshots or len(listed) != 21:
+        raise AssertionError(
+            "protocol snapshot manifest/membership mismatch: "
+            f"listed={list(listed)}, actual={list(actual_snapshots)}"
+        )
+    for obsolete in (REPO_ROOT / "fixtures", REPO_ROOT / "goldens"):
+        if obsolete.exists():
+            raise AssertionError(f"obsolete protocol asset root still exists: {obsolete}")
+
+
 def main() -> int:
     try:
         check_recursive_direct_runner()
         check_suite_layout()
         check_exec_fixture_layout()
         check_transcript_comparator()
+        check_protocol_asset_layout()
     except (AssertionError, OSError, subprocess.SubprocessError) as exc:
         print(f"harness-check: FAIL: {exc}", file=sys.stderr)
         return 1

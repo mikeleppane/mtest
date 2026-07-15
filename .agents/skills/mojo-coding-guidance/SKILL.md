@@ -16,7 +16,7 @@ code is right or it is a lie, and a crash is not a failure.
 **Where this applies today.** `src/mtest/` is an intentionally empty, compiling
 package — there is no `model`/`exec`/`protocol`/`session` code yet to hold this
 bar (AGENTS.md). Concretely this skill governs the Mojo that *does* exist now
-(the probe `fixtures/`, the tests under `tests/`, `src/mtest/__init__.mojo`'s
+(the protocol probes under `tests/fixtures/`, the suites, `src/mtest/__init__.mojo`'s
 docstring) and is the contract each later module must meet the day it lands —
 read it before writing `exec` just as much as before touching today's fixtures.
 
@@ -156,7 +156,7 @@ grammar. The parser must never miscount a test's stdout as protocol.
   number of per-test result rows, and the summary tallies must all agree
   (`declared == rows == passed + failed + skipped`). A mismatch is a
   MALFORMED-SUITE signal, not something to paper over by trusting one source.
-- **The report grammar is the toolchain's, not ours.** The golden transcripts pin
+- **The report grammar is the toolchain's, not ours.** Protocol snapshots pin
   exactly what TestSuite emits at the pinned Mojo version; the parser is written
   against those frozen bytes, not against a remembered format. When the transcript
   changes, the parser follows the transcript.

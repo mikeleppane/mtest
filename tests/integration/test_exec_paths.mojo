@@ -19,9 +19,9 @@ from tmptree import temp_root, touch, link_dir, remove_tree
 
 
 def test_existing_file_is_absolute_and_canonical() raises:
-    var p = canonicalize("fixtures/passing.mojo")
+    var p = canonicalize("tests/fixtures/protocol/passing.mojo")
     assert_true(p.startswith("/"), p)
-    assert_true(p.endswith("/fixtures/passing.mojo"), p)
+    assert_true(p.endswith("/tests/fixtures/protocol/passing.mojo"), p)
     assert_false("/./" in p, p)
     assert_false("/../" in p, p)
 

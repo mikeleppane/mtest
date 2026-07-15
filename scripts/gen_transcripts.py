@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the golden protocol transcripts by running the committed fixtures.
+"""Generate protocol snapshots by running the committed fixtures.
 
 The toolchain IS the oracle. For every scenario in the matrix below this script
 builds the fixture, runs the binary with the scenario's arguments, captures
@@ -19,7 +19,7 @@ and (3) collapsing a crash stack dump to <STACK-DUMP>. Everything else is
 captured verbatim.
 
 Usage:
-    python scripts/gen_transcripts.py              # write into goldens/transcripts/
+    python scripts/gen_transcripts.py              # write into tests/snapshots/protocol/
     python scripts/gen_transcripts.py --out DIR    # write into DIR (check harness)
 """
 from __future__ import annotations
@@ -34,7 +34,7 @@ import tempfile
 
 NORMALIZER_VERSION = "v1"
 REPO_ROOT = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
-FIXTURES_DIR = os.path.join(REPO_ROOT, "fixtures")
+FIXTURES_DIR = os.path.join(REPO_ROOT, "tests", "fixtures", "protocol")
 
 # --- The scenario matrix -----------------------------------------------------
 # (scenario_id, fixture, argv). The transcript filename is
@@ -123,7 +123,7 @@ def normalize(raw: bytes, *, is_crash_stream: bool) -> str:
     # (3) Stack collapse — crash stderr only. Collapse the maximal trailing block
     # starting at the first `Stack dump` header (or a frame line) to a single
     # <STACK-DUMP>, HEADER INCLUDED: the header text varies with llvm-symbolizer
-    # presence in PATH and must never reach a golden. Every line after the header
+    # presence in PATH and must never reach a snapshot. Every line after the header
     # must match a frame pattern, or generation fails so the rule is extended
     # deliberately, never silently.
     if is_crash_stream:
@@ -265,7 +265,7 @@ def verify_scenario(fixture, scenario, out_norm, err_norm, returncode, transcrip
                 f"{returncode}"
             )
         # The ABORT line (on stdout) must survive the normalizer.
-        if "ABORT: <REPO>/fixtures/" not in out_norm:
+        if "ABORT: <REPO>/tests/fixtures/protocol/" not in out_norm:
             raise GenError(
                 f"{fixture}--{scenario}: ABORT line did not survive normalization"
             )
@@ -373,7 +373,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--out",
-        default=os.path.join(REPO_ROOT, "goldens", "transcripts"),
+        default=os.path.join(REPO_ROOT, "tests", "snapshots", "protocol"),
         help="output directory for transcripts + MANIFEST",
     )
     args = ap.parse_args()

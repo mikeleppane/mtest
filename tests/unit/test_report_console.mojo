@@ -589,7 +589,7 @@ def test_malformed_suite_renders_token_and_diagnostic() raises:
     assert_true("no conforming report" in out)
 
 
-def test_drift_renders_loud_banner_naming_pin_and_goldens() raises:
+def test_drift_renders_loud_banner_naming_pin_and_snapshots() raises:
     var c = _console()
     c.handle(Event.session_started("/root", "mojo 1.0.0b2", 1, 0))
     c.handle(Event.file_started("tests/test_liar.mojo"))
@@ -598,7 +598,8 @@ def test_drift_renders_loud_banner_naming_pin_and_goldens() raises:
             "drift",
             (
                 "the --skip-all probe drifted off the pinned grammar (extra"
-                " column); check the toolchain pin and goldens/transcripts/"
+                " column); check the toolchain pin and"
+                " tests/snapshots/protocol/"
             ),
         )
     )
@@ -616,9 +617,9 @@ def test_drift_renders_loud_banner_naming_pin_and_goldens() raises:
     )
     var out = c.output()
     assert_true("DRIFT" in out)
-    # Names the pinned toolchain, the golden transcripts, and the offending line.
+    # Names the pinned toolchain, protocol snapshots, and the offending line.
     assert_true("mojo 1.0.0b2" in out)
-    assert_true("goldens/transcripts/" in out)
+    assert_true("tests/snapshots/protocol/" in out)
     assert_true("extra column" in out)
 
 
@@ -732,7 +733,7 @@ def test_no_tests_and_drift_tokens_survive_color_off() raises:
         )
     )
     c.handle(Event.file_started("tests/test_liar.mojo"))
-    c.handle(Event.warning("drift", "off grammar; goldens/transcripts/"))
+    c.handle(Event.warning("drift", "off grammar; tests/snapshots/protocol/"))
     c.handle(
         Event.file_finished(
             "tests/test_liar.mojo",

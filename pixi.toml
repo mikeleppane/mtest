@@ -5,12 +5,12 @@ description = "A pytest-like test runner for Mojo that orchestrates the stdlib's
 channels = ["https://conda.modular.com/max/", "conda-forge"]
 # Linux is the gate platform; macOS is a v1 target and shares the same POSIX
 # process surface the runner depends on. Bumping the platform set is an
-# Ask-first decision — the transcript goldens are stamped with os/arch and a
+# Ask-first decision — the protocol snapshots are stamped with os/arch and a
 # regeneration on a foreign platform diffs loudly by design.
 platforms = ["linux-64", "osx-arm64"]
 
 [dependencies]
-# The toolchain IS the oracle: the golden transcripts pin TestSuite's behavior
+# The toolchain IS the oracle: the protocol snapshots pin TestSuite's behavior
 # at exactly this Mojo version, and the version appears in every transcript
 # header. Bumping mojo is an Ask-first decision (CI must match local; a bump can
 # silently change valid syntax AND the pinned protocol — regenerate transcripts
@@ -42,20 +42,20 @@ build-bin = { cmd = "mojo build -I build src/main.mojo -o build/mtest", depends-
     "build",
 ] }
 
-# Rewrite Mojo files in place — run locally before committing. Covers the runner
-# package, the probe fixtures, and the tests.
-fmt = "mojo format src fixtures tests"
+# Rewrite Mojo files in place — run locally before committing. Protocol fixtures
+# live beneath tests/, so this covers the runner, fixtures, and suites.
+fmt = "mojo format src tests"
 # CI gate: format, then fail if anything changed (never edits in CI). A format
 # that shifts a fixture's `At <path>:<line>:<col>` coordinates is an oracle-side
 # change — regenerate transcripts, do not fight the gate.
-fmt-check = "mojo format src fixtures tests && git diff --exit-code"
+fmt-check = "mojo format src tests && git diff --exit-code"
 
-# Regenerate the golden transcripts IN PLACE from the committed fixtures at the
-# pinned toolchain. Local use only (updating the committed goldens); never run in
+# Regenerate the protocol snapshots IN PLACE from the committed fixtures at the
+# pinned toolchain. Local use only (updating the committed snapshots); never run in
 # CI. The generator self-verifies (hard asserts) before writing.
 transcripts = "python scripts/gen_transcripts.py"
 # CI gate: regenerate every transcript into a temp dir and diff byte-for-byte
-# against goldens/transcripts/ (MANIFEST included) — byte-identical or red. This
+# against tests/snapshots/protocol/ (MANIFEST included) — byte-identical or red. This
 # is the protocol pin: a red diff after a repo change indicts THE CHANGE; a red
 # diff after a mojo re-pin is the protocol changelog. Hermetic.
 transcripts-check = "bash scripts/transcripts_check.sh"
