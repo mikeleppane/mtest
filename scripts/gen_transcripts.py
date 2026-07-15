@@ -61,6 +61,8 @@ MATRIX = [
     ("skip-all-args", "passing", ["--skip-all", "--only", "x"]),
     # Conditional: only because 1.0.0b2's TestSuite exposes an in-code skip API.
     ("default", "skipped", []),
+    ("skip-all", "skipped", ["--skip-all"]),
+    ("only-native", "skipped", ["--only", "test_natively_skipped"]),
 ]
 
 # Scenarios whose fixture aborts the process — their stderr carries a stack dump.
@@ -275,6 +277,36 @@ def verify_scenario(fixture, scenario, out_norm, err_norm, returncode, transcrip
         if names != expected:
             raise GenError(
                 f"skip-all listing {names} != fixture test names {expected}"
+            )
+
+    # native-skip skip-all collection: BOTH names are listed as SKIP, in source
+    # (discovery) order — pins that a natively skipped test is not omitted or
+    # reordered by --skip-all.
+    if scenario == "skip-all" and fixture == "skipped":
+        names = [n for (r, n) in _report_result_lines(out_norm) if r == "SKIP"]
+        expected = ["test_runs_normally", "test_natively_skipped"]
+        if names != expected:
+            raise GenError(
+                f"skip-all listing {names} != fixture test names {expected}"
+            )
+
+    # native-skip survives explicit selection: --only the natively-skipped test
+    # still reports it as SKIP, not PASS — the native skip is not overridden by
+    # being explicitly named. The OTHER (unselected) test also reports SKIP —
+    # that is the ordinary selection-induced SKIP --only already gives every
+    # unselected test (see e.g. skipped--only-native's sibling behavior in
+    # mixed--skip-one.txt) — so both rows are SKIP, for two different reasons,
+    # and a bare row list cannot distinguish them; that ambiguity is exactly
+    # what downstream reconciliation must resolve.
+    if scenario == "only-native" and fixture == "skipped":
+        rows = _report_result_lines(out_norm)
+        expected_rows = [
+            ("SKIP", "test_runs_normally"),
+            ("SKIP", "test_natively_skipped"),
+        ]
+        if rows != expected_rows:
+            raise GenError(
+                f"only-native rows {rows} != expected {expected_rows}"
             )
 
     # noisy: the report-lookalike and timing-lookalike user lines must survive

@@ -16,4 +16,6 @@ passing--skip-all.txt
 passing--skip-unknown.txt
 raising--default.txt
 skipped--default.txt
+skipped--only-native.txt
+skipped--skip-all.txt
 twofail--default.txt
