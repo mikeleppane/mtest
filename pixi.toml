@@ -69,6 +69,11 @@ transcripts-check = "bash scripts/transcripts_check.sh"
 # outcome, that disagreement is a self-hosting bug in mtest, not noise.
 test-direct = "bash scripts/test_all.sh"
 
+# Fast self-tests for repository harness behavior. Uses disposable test inputs
+# and a fake compiler to prove recursive root selection and injective binary
+# paths without rebuilding the full Mojo suite.
+harness-check = "python scripts/harness_check.py"
+
 # DOGFOOD gate: run mtest over its OWN tests/ suite, executing the built binary
 # directly (`build/mtest -I build tests/` — never `mojo run`, for the same
 # crash-exit-code reason as test-direct). Depends on build-bin so build/mtest and
@@ -101,6 +106,7 @@ depends-on = ["build-bin"]
 [tasks.ci]
 depends-on = [
     "fmt-check",
+    "harness-check",
     "build",
     "transcripts-check",
     "test-direct",
