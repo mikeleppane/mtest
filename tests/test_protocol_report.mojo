@@ -73,6 +73,12 @@ def test_manifest_enumerates_every_scenario_verdict() raises:
     var valid = _expected_valid()
     var absent = _expected_absent()
 
+    # Airtight partition length: a duplicate WITHIN one bucket (e.g. the same
+    # name listed twice in `_expected_valid`) would still satisfy the
+    # per-name completeness loop below while silently dropping coverage of
+    # some other manifest entry — this catches it directly.
+    assert_equal(len(valid) + len(absent), len(manifest))
+
     # Completeness: each manifest name is classified by exactly one bucket.
     for name in manifest:
         var in_valid = _contains(valid, String(name))

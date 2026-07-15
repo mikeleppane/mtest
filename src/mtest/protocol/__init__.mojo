@@ -15,3 +15,4 @@ from mtest.protocol.report import (
     ReportVerdict,
     parse_report,
 )
+from mtest.protocol.collection import collection_disqualifier, collection_names
