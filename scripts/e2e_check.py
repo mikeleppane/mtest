@@ -469,12 +469,14 @@ def s_default_suite(manifest: dict) -> str:
         f"symbol the fixture names (name-resolution property):\n{cerr_section}",
     )
 
-    # The zero-test file is PASS (the documented ceiling).
-    zero = [r for r, row in suite.items() if row.get("zero_test_ceiling")]
-    expect(len(zero) == 1, "expected exactly one zero-test-ceiling file")
+    # The zero-test file is a NO-TESTS pass: the zero-test ceiling is CLOSED, so
+    # this PASS comes from a parsed zero-test report, not from the exit status.
+    # As a member of the suite it still contributes to the exit-0 class.
+    zero = [r for r, row in suite.items() if row.get("zero_tests")]
+    expect(len(zero) == 1, "expected exactly one zero-test file")
     expect(
         run.verdict_line("PASS", zero[0]) is not None,
-        "zero-test file did not show PASS",
+        "zero-test file did not show a (NO-TESTS) PASS",
     )
     # helper.mojo (non-discovered) must never appear.
     for rel in manifest.get("non_discovered", {}):
@@ -509,6 +511,58 @@ def s_default_suite(manifest: dict) -> str:
         f"exit 1; {summ.passed} passed / {summ.failed} failed / {summ.crashed} "
         f"crashed / {summ.compile_error} compile-error, arithmetic holds"
     )
+
+
+def s_hostile(manifest: dict) -> str:
+    """The hostile handshake set: each report-shaped adversary, run alone.
+
+    silent -> MALFORMED-SUITE (exit 1); forger (two blocks) -> MALFORMED-SUITE
+    (exit 1); liar (off-grammar report) -> DRIFT (exit 3); overflow (a ~13 MiB
+    flood) -> CAPTURE-OVERFLOW FAIL (exit 1). These files are NOT in the default
+    suite — the liar alone forces exit 3, which would swamp a whole-suite run —
+    so each is driven on its own here. The verdict tokens and exit codes come
+    straight from the manifest rows for testdata/hostile/*."""
+    hostile = {
+        rel: row
+        for rel, row in manifest["tests"].items()
+        if rel.startswith("testdata/hostile/")
+    }
+    expect(len(hostile) == 4, f"expected 4 hostile fixtures, got {len(hostile)}")
+
+    silent = "testdata/hostile/test_silent.mojo"
+    run = run_mtest([silent])
+    expect_exit(run, 1)
+    expect(
+        run.verdict_line("MALFORMED-SUITE", silent) is not None,
+        f"silent binary did not report MALFORMED-SUITE:\n{run.stdout}",
+    )
+
+    forger = "testdata/hostile/test_forger.mojo"
+    run = run_mtest([forger])
+    expect_exit(run, 1)
+    expect(
+        run.verdict_line("MALFORMED-SUITE", forger) is not None,
+        f"forger did not report MALFORMED-SUITE:\n{run.stdout}",
+    )
+
+    liar = "testdata/hostile/test_liar.mojo"
+    run = run_mtest([liar])
+    expect_exit(run, 3)
+    expect(
+        "drift" in run.combined.lower(),
+        f"liar did not surface a drift diagnostic (exit 3):\n{run.combined}",
+    )
+
+    # --show-output none keeps the ~8 MiB truncated capture out of the console;
+    # the FAIL verdict line prints regardless of the show-output setting.
+    overflow = "testdata/hostile/test_overflow.mojo"
+    run = run_mtest([overflow, "--show-output", "none"])
+    expect_exit(run, 1)
+    expect(
+        run.verdict_line("FAIL", overflow) is not None,
+        f"overflow flood did not report FAIL:\n{run.stdout}",
+    )
+    return "silent/forger MALFORMED-SUITE, liar DRIFT exit 3, overflow FAIL"
 
 
 def s_single_pass(manifest: dict) -> str:
@@ -926,6 +980,7 @@ def main() -> int:
     print("=== mtest end-to-end gate ===", flush=True)
     h.scenario("manifest-completeness", s_manifest_completeness)
     h.scenario("default-suite", s_default_suite)
+    h.scenario("hostile", s_hostile)
     h.scenario("single-pass", s_single_pass)
     h.scenario("exitfirst", s_exitfirst)
     h.scenario("exclude+stale", s_exclude_and_stale)

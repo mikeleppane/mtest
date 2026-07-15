@@ -66,11 +66,12 @@ def test_successful_precompile_widens_include_path() raises:
 
     assert_equal(code, 0, "a clean precompile plus a passing file is exit 0")
     ref rec = comp.reporters[0]
-    # start + file pair + finish = 4 (no PrecompileFailed event on success).
-    assert_equal(rec.count(), 4)
+    # start + file triple (started, test_reported, finished) + finish = 5 (no
+    # PrecompileFailed event on success).
+    assert_equal(rec.count(), 5)
     assert_true(rec.kind_at(1) == EventKind.FILE_STARTED)
     # The out directory (build) was added to the include set of the file build.
-    var finished = rec.event_at(2)
+    var finished = rec.event_at(3)
     assert_true(finished.outcome == Outcome.PASS)
     var joined = shell_join(finished.build_argv)
     assert_true("-I build" in joined, joined)

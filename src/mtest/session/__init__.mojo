@@ -12,3 +12,9 @@ The public surface is re-exported here so callers write
 """
 from mtest.session.session import run_session
 from mtest.session.verdict import run_verdict, build_verdict
+from mtest.session.classify import (
+    Classification,
+    TrustedReport,
+    classify,
+    resolve_report,
+)

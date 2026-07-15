@@ -26,12 +26,23 @@ from mtest.discover import discover
 from mtest.exec import (
     ProcessResult,
     ProcessSpec,
+    canonicalize,
     interrupt_requested,
     run_supervised,
 )
-from mtest.model import Event, Outcome, Summary, exit_code_for
+from mtest.model import (
+    Event,
+    NodeId,
+    Outcome,
+    ParseDisposition,
+    Summary,
+    TestCounts,
+    TestResult,
+    exit_code_for,
+)
 from mtest.report import CompositeReporter, Reporter
-from mtest.session.verdict import build_verdict, run_verdict
+from mtest.session.classify import classify, resolve_report
+from mtest.session.verdict import build_verdict
 
 
 def _mangle(rel: String) -> String:
@@ -69,39 +80,110 @@ def _ensure_dir(path: String) raises:
 struct FileResult(Copyable, Movable):
     """The outcome of building-and-running one file, plus the control signals.
 
-    `ran` marks a genuine recorded verdict whose `event` the session emits and
-    whose `outcome` it tallies. `internal_error` and `interrupted` are mutually
-    exclusive short-circuits: the session ignores `event`/`outcome` and resolves
-    the exit code (3 or 2) directly. Owns its `event`; copies are explicit.
+    A completed file emits its `pre_events` (retrospective per-test rows and any
+    loud warning) in order, then its `event` (the `FileFinished` verdict). When
+    NOT a drift, the session tallies the file-level `outcome` once in the summary
+    and appends `exit_outcomes` (the per-test/file-level multiset contribution)
+    to the run outcomes; a drift file (`is_drift`) emits its events but forces
+    exit 3 and contributes nothing. `internal_error` and `interrupted` are
+    mutually exclusive short-circuits: the session emits `event` (for internal
+    error) and resolves the exit code (3 or 2) directly. `test_counts` is the
+    per-test tally to accumulate. Owns its lists/event; copies are explicit.
     """
 
+    var pre_events: List[Event]
+    """Events to emit before `event`: per-test `TestReported` rows, then a loud
+    `Warning` when the classification demands one (empty otherwise)."""
     var event: Event
     """The event to emit: a `FileFinished` verdict when `ran`, an
     `InternalError` diagnostic when `internal_error`."""
     var outcome: Outcome
-    """The recorded outcome to tally (only meaningful when `ran`)."""
+    """The file-level outcome to tally once (only meaningful when `ran`)."""
+    var exit_outcomes: List[Outcome]
+    """The exit-code multiset contribution (per-test for VALID, else file-level;
+    empty for a drift file)."""
+    var test_counts: TestCounts
+    """The per-test passed/failed/skipped tally to accumulate run-wide."""
     var ran: Bool
     """Whether the file produced a real verdict to emit and tally."""
     var internal_error: Bool
     """Whether a spawn failure occurred (routes to internal-error exit 3)."""
     var interrupted: Bool
     """Whether an interrupt aborted this file (routes to exit 2)."""
+    var is_drift: Bool
+    """Whether the report drifted off the pinned grammar (forces exit 3)."""
 
     @staticmethod
     def ran_with(var event: Event, outcome: Outcome) -> Self:
-        """A completed file carrying its emit event and tally outcome."""
-        return Self(event^, outcome, True, False, False)
+        """A completed file whose sole multiset entry is its file-level outcome.
+
+        Used by the build COMPILE_ERROR path, which has no per-test report.
+        """
+        return Self(
+            List[Event](),
+            event^,
+            outcome,
+            [outcome],
+            TestCounts.zeros(),
+            True,
+            False,
+            False,
+            False,
+        )
+
+    @staticmethod
+    def classified(
+        var pre_events: List[Event],
+        var event: Event,
+        outcome: Outcome,
+        var exit_outcomes: List[Outcome],
+        test_counts: TestCounts,
+        is_drift: Bool,
+    ) -> Self:
+        """A completed run carrying its per-test events and multiset contribution.
+        """
+        return Self(
+            pre_events^,
+            event^,
+            outcome,
+            exit_outcomes^,
+            test_counts,
+            True,
+            False,
+            False,
+            is_drift,
+        )
 
     @staticmethod
     def internal(var event: Event) -> Self:
         """A spawn failure: no verdict, carries the diagnostic, routes to exit 3.
         """
-        return Self(event^, Outcome.NOT_RUN, False, True, False)
+        return Self(
+            List[Event](),
+            event^,
+            Outcome.NOT_RUN,
+            List[Outcome](),
+            TestCounts.zeros(),
+            False,
+            True,
+            False,
+            False,
+        )
 
     @staticmethod
     def interrupt() -> Self:
         """An interrupt aborted this file: no verdict, routes to exit 2."""
-        return Self(Event.file_started(""), Outcome.NOT_RUN, False, False, True)
+        return Self(
+            List[Event](),
+            Event.file_started(""),
+            Outcome.NOT_RUN,
+            List[Outcome](),
+            TestCounts.zeros(),
+            False,
+            False,
+            True,
+            False,
+        )
 
 
 @fieldwise_init
@@ -143,9 +225,11 @@ def _run_one(
     one file. The build runs with NO deadline (a stalled compile is a documented
     ceiling); the run runs under `config.timeout_secs`. Build termination maps
     through `build_verdict` (a compiler that dies by a signal is a
-    `COMPILE_ERROR`, never a crash); the run maps through `run_verdict`. A spawn
-    failure at either step is an internal error; an in-flight interrupt (a
-    `TimedOut` with the interrupt flag set) aborts without recording a `TIMEOUT`.
+    `COMPILE_ERROR`, never a crash); the run maps through `resolve_report`
+    (which decides which report a truncated capture may trust) and then
+    `classify` (the TOTAL per-test policy). A spawn failure at either step is
+    an internal error; an in-flight interrupt (a `TimedOut` with the interrupt
+    flag set) aborts without recording a `TIMEOUT`.
 
     Raises:
         Error: only if the `exec` machinery itself fails (a `pipe`/`fork`
@@ -230,8 +314,35 @@ def _run_one(
     if rterm.is_timed_out() and interrupt_requested():
         return FileResult.interrupt()
 
-    var outcome = run_verdict(rterm)
     var rdur = Float64(rres.duration_ms) / 1000.0
+
+    # The run's own report IS the handshake. Decode the captured stdout, resolve
+    # WHICH report to trust under capture overflow (a truncated capture keeps a
+    # verdict only if a complete block survived wholly in the tail), then run the
+    # TOTAL classifier against the canonical path the child baked into its report.
+    var source_path = canonicalize(root + "/" + rel)
+    var stdout_text = lossy_utf8(rres.stdout_bytes)
+    var trusted = resolve_report(
+        stdout_text, source_path, rres.stdout_truncated
+    )
+    var cls = classify(rterm, trusted.report, trusted.is_overflow)
+
+    # Retrospective per-test events for a VALID report, in row order, between the
+    # already-emitted file_started and the file_finished below.
+    var pre = List[Event]()
+    if cls.disposition == ParseDisposition.PARSED:
+        for r in trusted.report.rows:
+            pre.append(
+                Event.test_reported(
+                    TestResult(
+                        NodeId(rel, r.name), r.outcome, r.detail, r.timing
+                    )
+                )
+            )
+    # A loud warning (drift, malformed suite, overflow, exit-status mismatch)
+    # rides just before the file_finished so the reporter can associate it.
+    if cls.warning_kind != "":
+        pre.append(Event.warning(cls.warning_kind, cls.warning_detail))
 
     # Carry the per-outcome specifics as data; the console formats them. The
     # terminating signal (CRASH) and the exit code (FAIL) both live in
@@ -239,16 +350,16 @@ def _run_one(
     var signal_number = 0
     var exit_status = 0
     var timeout_seconds = 0
-    if outcome == Outcome.CRASH:
+    if cls.file_outcome == Outcome.CRASH:
         signal_number = rterm.value
-    elif outcome == Outcome.FAIL:
+    elif cls.file_outcome == Outcome.FAIL:
         exit_status = rterm.value
-    elif outcome == Outcome.TIMEOUT:
+    elif cls.file_outcome == Outcome.TIMEOUT:
         timeout_seconds = config.timeout_secs
 
     var ev = Event.file_finished(
         rel,
-        outcome,
+        cls.file_outcome,
         rdur,
         build_argv.copy(),
         bdur,
@@ -257,8 +368,19 @@ def _run_one(
         signal_number=signal_number,
         exit_status=exit_status,
         timeout_seconds=timeout_seconds,
+        parse_disposition=cls.disposition,
+        passed_tests=cls.passed_tests,
+        failed_tests=cls.failed_tests,
+        skipped_tests=cls.skipped_tests,
     )
-    return FileResult.ran_with(ev^, outcome)
+    return FileResult.classified(
+        pre^,
+        ev^,
+        cls.file_outcome,
+        cls.exit_outcomes.copy(),
+        TestCounts(cls.passed_tests, cls.failed_tests, cls.skipped_tests, 0),
+        cls.is_drift,
+    )
 
 
 def _run_precompile(
@@ -381,9 +503,12 @@ def run_session[
         reporter.handle(Event.warning("stale-exclusion", pat))
 
     var run_outcomes = List[Outcome]()
+    var test_totals = TestCounts.zeros()
+    var ran_files = 0
     var interrupted = False
     var internal_error = False
     var precompile_failed = False
+    var drift = False
 
     # Precompile steps, in listed order. Each success widens the include set.
     var includes = config.include_paths.copy()
@@ -438,9 +563,21 @@ def run_session[
                     reporter.handle(fr.event)
                     internal_error = True
                     break
+                for pe in fr.pre_events:
+                    reporter.handle(pe)
                 reporter.handle(fr.event)
+                test_totals.passed += fr.test_counts.passed
+                test_totals.failed += fr.test_counts.failed
+                test_totals.skipped += fr.test_counts.skipped
+                if fr.is_drift:
+                    # A drifting report forces exit 3 and contributes nothing to
+                    # the run outcomes; it is accounted NOT_RUN like an internal
+                    # error, but the run continues.
+                    drift = True
+                    continue
                 summary.counts[fr.outcome.code] += 1
-                run_outcomes.append(fr.outcome)
+                run_outcomes.extend(fr.exit_outcomes.copy())
+                ran_files += 1
                 if fr.outcome.is_failing():
                     gate_abort = True
                     break
@@ -471,9 +608,18 @@ def run_session[
                     reporter.handle(fr.event)
                     internal_error = True
                     break
+                for pe in fr.pre_events:
+                    reporter.handle(pe)
                 reporter.handle(fr.event)
+                test_totals.passed += fr.test_counts.passed
+                test_totals.failed += fr.test_counts.failed
+                test_totals.skipped += fr.test_counts.skipped
+                if fr.is_drift:
+                    drift = True
+                    continue
                 summary.counts[fr.outcome.code] += 1
-                run_outcomes.append(fr.outcome)
+                run_outcomes.extend(fr.exit_outcomes.copy())
+                ran_files += 1
                 if config.exitfirst and fr.outcome.is_failing():
                     break
             except:
@@ -483,15 +629,21 @@ def run_session[
                 internal_error = True
                 break
 
-    # Every selected file that did not produce a verdict is NOT_RUN — a gate
-    # casualty, an -x/gate-abort/interrupt skip, or a precompile casualty.
-    var not_run = selected - len(run_outcomes)
+    # Every selected file that did not produce a tallied verdict is NOT_RUN — a
+    # gate casualty, an -x/gate-abort/interrupt skip, a precompile casualty, or a
+    # drift file (which forces exit 3 and is accounted here, never tallied).
+    var not_run = selected - ran_files
     summary.counts[Outcome.NOT_RUN.code] += not_run
 
+    # Exit-code precedence (high to low): interrupt (2), internal error (3) and
+    # drift (3, the same tier), precompile failure (1), else the pure
+    # `exit_code_for` over the run outcomes at TEST granularity (1/5/0).
     var code: Int
     if interrupted:
         code = 2
     elif internal_error:
+        code = 3
+    elif drift:
         code = 3
     elif precompile_failed:
         code = 1
@@ -499,5 +651,7 @@ def run_session[
         code = exit_code_for(run_outcomes)
 
     var wall = Float64(perf_counter_ns() - started_ns) / 1.0e9
-    reporter.handle(Event.session_finished(summary^, wall, code))
+    reporter.handle(
+        Event.session_finished(summary^, wall, code, test_counts=test_totals)
+    )
     return code

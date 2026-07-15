@@ -64,11 +64,13 @@ def test_exitfirst_stops_and_fans_out_not_run() raises:
 
     assert_equal(code, 1)
     ref rec = comp.reporters[0]
-    # start + first-file pair + finish = 4; the second file is never started.
-    assert_equal(rec.count(), 4)
-    assert_true(rec.outcome_at(2) == Outcome.FAIL)
-    assert_equal(rec.path_at(2), "tests/test_a_fail.mojo")
-    var last = rec.event_at(3)
+    # start + first-file triple (started, test_reported, finished) + finish = 5;
+    # the second file is never started.
+    assert_equal(rec.count(), 5)
+    assert_true(rec.kind_at(3) == EventKind.FILE_FINISHED)
+    assert_true(rec.outcome_at(3) == Outcome.FAIL)
+    assert_equal(rec.path_at(3), "tests/test_a_fail.mojo")
+    var last = rec.event_at(4)
     assert_equal(last.summary.count_of(Outcome.FAIL), 1)
     assert_equal(last.summary.count_of(Outcome.NOT_RUN), 1)
 
