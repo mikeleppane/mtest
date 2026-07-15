@@ -56,10 +56,10 @@ single **invocation root**. In v1 the root is the **current working directory**.
 - Parsing stops at a bare `--`. Everything after it is forwarded verbatim as
   build arguments (equivalent to repeated `--build-arg`), subject to the
   forbidden-argument rule (§8.4).
-- A repeatable flag (`--exclude`, `--gate`, `--build-arg`, `-I`, `--precompile`)
-  may appear multiple times; each occurrence is one value. Values containing
-  spaces are preserved exactly (the runner never re-splits a flag value on
-  spaces).
+- A repeatable flag (`--exclude`, `--gate`, `--build-arg`, `-I`, `--precompile`,
+  `--serial`) may appear multiple times; each occurrence is one value. Values
+  containing spaces are preserved exactly (the runner never re-splits a flag
+  value on spaces).
 - An unknown flag, a missing required value, or a malformed value is a usage
   error (exit 4), detected before any test runs.
 
@@ -78,17 +78,25 @@ single **invocation root**. In v1 the root is the **current working directory**.
 | `--mojo PATH` | ✓ | ✓ |
 | `-x`, `--maxfail N` | ✓ | — |
 | `-n, --workers N` | ✓ | ✓ |
+| `--shard M/N` | ✓ | ✓ |
+| `--serial GLOB` | ✓ | — |
 | `--timeout`, `--compile-timeout` | ✓ | ✓ (compile only) |
 | `--retries N` | ✓ | — |
 | `--gate PATH` | ✓ | — |
 | `-s`, `--show-output MODE` | ✓ | — |
+| `--durations N` | ✓ | — |
 | `--junit-xml PATH`, `--gh-annotations` | ✓ | — |
+| `--json PATH\|-` | ✓ | — |
 | `-q`, `-v`, `--color WHEN` | ✓ | ✓ |
 | `--collect-only` | ✓ (→ behaves as `collect`) | n/a |
 
 `collect` compiles files to enumerate their tests, so it honors the build and
 selection flags; it does not schedule test execution, so run-time flags
-(`--timeout` for a run, `-x`, `--retries`, reporters) do not apply.
+(`-x`, `--maxfail`, `--retries`, `--durations`, `--serial`, reporters) do not
+apply. `--timeout` is the one exception: unlike the other run-only flags above,
+it is applicable in `collect` mode too, because it also bounds each file's
+`--skip-all` collection probe (§5, §6) — a probe is a real process spawn with
+the same hang risk as a run.
 
 ---
 
@@ -111,7 +119,10 @@ named twice, or via both its file and its node id) are de-duplicated; a test
 runs at most once.
 
 A nonexistent path, or a node id naming a file that exists but a test that does
-not, is a usage error (exit 4).
+not, is a usage error (exit 4). That check happens **after** the file's
+`--skip-all` collection probe (§6) reports its universe of test names: an
+unknown node id is an exit-4 error raised post-probe, before any test body
+runs.
 
 **`-k STR`** is a case-insensitive substring filter over node ids. At most one
 `-k` is accepted in v1 (boolean expressions are reserved). A `-k` that matches
@@ -133,6 +144,13 @@ def main() raises:
 Any behavioral equivalent is acceptable: it must honor `--skip-all`, `--only`,
 and `--skip` as arguments and emit TestSuite's standard report. The runner
 relies on that protocol, not on the exact source.
+
+Under `--skip-all`, a conforming module executes **no test bodies** at all — it
+reports every test as SKIP without running any of them. The runner relies on
+that guarantee to use `--skip-all` as a **collection probe** (§5, §16): a
+module whose report under `--skip-all` shows anything other than an all-SKIP
+listing fails to qualify as a probe, which is the basis for classifying it as
+MALFORMED-SUITE below.
 
 - A file that **fails to compile** yields COMPILE-ERROR (or COMPILE-TIMEOUT if
   the build exceeds `--compile-timeout`).
@@ -273,7 +291,8 @@ reruns are secondary diagnostic evidence only.
 - `-x`, `--exitfirst` — stop *scheduling* new files after the first failing
   file. Files already in flight finish.
 - `--maxfail N` — stop after N failing **tests**. A file-level error outcome
-  (crash, timeout, compile error, malformed suite) counts as one.
+  (crash, timeout, compile error, malformed suite) counts as one. `N=0` means
+  no limit — the same 0-disables convention as `--timeout` and `--durations`.
 - `--gate PATH` (repeatable) — gate files run **first**, and a gate failure
   aborts the whole session immediately, regardless of `-x`. This is the
   smoke-test-first pattern: don't spend the pool if the smoke test is red.
@@ -333,6 +352,18 @@ Child stdout and stderr are captured separately and byte-exactly.
 wins over it. The console summary is ordered deterministically (§17), not by
 completion order. Console text layout and color are **informal** and may change.
 
+**Slowest files — `--durations N`** (`N` a non-negative integer). After the
+summary band, print the `N` slowest **files** by run-only wall-clock (the process time for the run step
+alone; build time is not counted). The header states the *actual* number of
+rows printed — `min(N, files that ran)` — never the raw requested `N`. This
+list is **informal** (§20), like the rest of the console reporter, and is
+explicitly **not** part of the §17 determinism guarantee: its content tracks
+real elapsed time, which varies run to run, even though the sort itself
+(duration descending, path ascending on ties) is deterministic for a given set
+of durations. An explicit `--durations` survives `-q` — it prints even in
+quiet mode. `N=0` (the default) disables the list. `--durations` is a
+**run-only** flag; combining it with `collect` is a usage error (§4).
+
 ### 15.2 JUnit XML — `--junit-xml PATH`
 
 Written atomically (temp file, then rename). Mapping over the outcome
@@ -369,6 +400,18 @@ vocabulary, total:
   length-bounded. User-controlled paths, names, and assertion text are never
   interpolated raw into a workflow command.
 
+### 15.4 Machine event stream — `--json PATH|-` (not yet served)
+
+`--json` is part of the frozen v1 contract but **not yet served**: the parser
+recognizes the spelling and its arity, but this build refuses it before any
+test runs (§24). Its intended shape is a newline-delimited stream of the
+runner's own typed events — the same events the console and JUnit reporters
+already consume internally — written to `PATH`, or to stdout when the value
+is `-`. `--json` is a **run-only** flag in v1 (§4). This gives CI systems and
+other tooling a stable machine artifact for the full event timeline without
+depending on the informal console text (§15.1) or on a separate plugin
+mechanism.
+
 ---
 
 ## 16. `collect`
@@ -377,11 +420,27 @@ vocabulary, total:
 per line, sorted **lexicographically**. The runner imposes its own order so the
 frozen output format never couples to TestSuite's discovery order (execution
 still uses discovery order internally). `collect` accepts the selection and
-build flags because it compiles files to enumerate them. A file that does not
-compile reports its error on stderr and listing continues; the exit code is **1
-if any file failed to compile**, else **5 if nothing was collectable**, else
-**0** — consistent with the §9 precedence, under which a compile failure (a
-failing outcome → 1) dominates "nothing collected" (→ 5).
+build flags because it compiles files to enumerate them.
+
+Per file, the build-then-probe (§5, §6) resolves one of four ways:
+
+- A **qualifying** probe (an all-SKIP report, §6) contributes its node ids to
+  the listing.
+- A **compile error, a crash, a timeout, or MALFORMED-SUITE** (§6) writes a
+  diagnostic to stderr and the listing **continues** with the remaining files
+  — MALFORMED-SUITE during `collect` is in the same **exit-1 class** as it is
+  during a run.
+- A **protocol-drift** probe (a report present but off-grammar, §6) is an
+  internal error and forces **exit 3**; the listing still diagnoses the
+  remaining files to stderr, but the session cannot exit anything but 3.
+- An internal/machinery failure (e.g. an unspawnable build) **aborts** the
+  listing outright at **exit 3**.
+
+The session exit code is **3** if any drift or internal failure occurred, else
+**1** if any file failed to collect (compile error, crash, timeout, or
+MALFORMED-SUITE), else **5** if nothing was collectable, else **0** —
+consistent with the §9 precedence, under which an internal error (→ 3)
+dominates a failing outcome (→ 1), which dominates "nothing collected" (→ 5).
 
 ---
 
@@ -406,6 +465,20 @@ single file's **build**; exceeding it yields COMPILE-TIMEOUT with a hint to spli
 the module or exclude it. Timeout kills are signal-first (a terminate signal,
 then a grace period, then a hard kill) and reach the whole process tree, not just
 the direct child.
+
+**`--shard M/N` (not yet served).** Splits the discovered file set into `N`
+disjoint shards and runs only shard `M`'s files, for spreading one suite
+across parallel CI jobs. `1 <= M <= N`. It applies to both `run` and `collect`
+(§4) — sharding what gets collected, not only what gets run. It is part of
+the frozen v1 contract, recognized by the parser (arity 1), but refused
+before any test runs (§24).
+
+**`--serial GLOB` (not yet served, repeatable).** Pins every file matching
+`GLOB` to run outside the parallel pool, one at a time, for suites with a
+shared resource (a port, a device) that cannot tolerate concurrent access.
+Each occurrence adds one glob pattern; `--serial` is a **run-only** flag (§4).
+It is part of the frozen v1 contract, recognized by the parser, but refused
+before any test runs (§24).
 
 ---
 
@@ -433,16 +506,23 @@ the direct child.
 
 ## 21. Reserved (documented as reserved, not in v1)
 
+The following are out of scope for v1 and reserved for a later major version
+(vNext); each is either unrecognized by the parser, or recognized-but-refused
+as noted:
+
 `--root`; `--lf`/`--ff` (last/failed-first); boolean `-k` expressions; a config
-file (TOML subset or argfile); `--pattern`; `--durations` (blocked on an upstream
-timing bug); a `--json` event stream; markers / `xfail`; `--asan`; `--shuffle`
-(file-order randomization to surface order dependencies); `--fail-on-flaky`;
-watch mode; a plugin mechanism; and a **persistent** build/collection cache
-(`--cache-dir`/`--no-cache`). Within one session the runner builds each file once
-and reuses it (`collect` and `run` share the binary), but nothing persists across
-invocations in v1: a trustworthy-verdict tool does not ship "fast but possibly
-stale", and a correct cache key (transitive source closure, environment inputs,
-target triple, schema version, concurrent-writer safety) is its own deliverable.
+file (TOML subset or argfile); `--pattern`; a **per-test** granularity for
+`--durations` (the slowest individual *tests*, not just files — blocked on the
+same upstream per-test timing gap that blocks per-test attribution elsewhere;
+the file-level `--durations N` is itself served now, §15.1); markers /
+`xfail`; `--asan`; `--shuffle` (file-order randomization to surface order
+dependencies); `--fail-on-flaky`; watch mode; and a **persistent**
+build/collection cache (`--cache-dir`/`--no-cache`). Within one session the runner builds each file
+once and reuses it (`collect` and `run` share the binary), but nothing
+persists across invocations in v1: a trustworthy-verdict tool does not ship
+"fast but possibly stale", and a correct cache key (transitive source closure,
+environment inputs, target triple, schema version, concurrent-writer safety)
+is its own deliverable.
 
 ---
 
@@ -497,21 +577,23 @@ above — it only reports which of those surfaces are wired up yet.
 
 ### 24.1 Flags and subcommands
 
-**Served** (parsed into real behavior): positional `PATHS`, `--exclude`, `-I`,
-`--build-arg` (and post-`--` passthrough), `--precompile`, `--mojo`,
-`-x`/`--exitfirst`, `--timeout`, `--gate`, `-s`/`--show-output`, `-q`/`-v`,
-`--color`, `-h`/`--help`, `--version`, and the `run`, `version`, and `help`
-subcommands.
+**Served** (parsed into real behavior): positional `PATHS`, `-k`, `--exclude`,
+`-I`, `--build-arg` (and post-`--` passthrough), `--precompile`, `--mojo`,
+`-x`/`--exitfirst`, `--maxfail`, `--timeout`, `--gate`, `-s`/`--show-output`,
+`--durations`, `-q`/`-v`, `--color`, `-h`/`--help`, `--version`, and the `run`,
+`collect`, `version`, and `help` subcommands (`--collect-only` too, as an
+alias that behaves as `collect`).
 
-**Not yet available**: `-k`, `--maxfail`, `-n`/`--workers`,
-`--compile-timeout`, `--retries`, `--junit-xml`, `--gh-annotations`,
-`--collect-only`, and the `collect` subcommand. Each is recognized by the
-parser — it knows the spelling and its arity — but is **refused before any
-test runs**, with a usage error that names the flag, states that it is part
-of the v1 contract, names the capability that brings it (e.g. `-k` arrives
-with the report parser; `--collect-only` and `collect` arrive with test
-collection; `-n`/`--workers` arrive with parallel workers), and lists what
-this build does serve.
+**Still refused**: `-n`/`--workers`, `--compile-timeout`, `--retries`,
+`--junit-xml`, `--gh-annotations`, `--shard`, `--serial`, `--json`. Each is
+recognized by the parser — it knows the spelling and its arity — but is
+**refused before any test runs**, with a usage error that names the flag,
+states that it is part of the v1 contract, names the capability that brings it
+(e.g. `-n`/`--workers` arrive with parallel workers; `--compile-timeout` and
+`--retries` arrive with the module-cache quarantine and retry/flaky handling;
+`--junit-xml`, `--gh-annotations`, and `--json` arrive with machine report
+artifacts and CI annotations; `--shard` arrives with test sharding; `--serial`
+arrives with serial execution pinning), and lists what this build does serve.
 
 **A transitional exit-4 subcase.** That refusal is a usage error and exits 4,
 but it is a distinct, *temporary* subcase of §9's exit code 4 — it is not one
@@ -530,32 +612,19 @@ Semantics are unchanged from §9; this states which paths to each code exist
 today.
 
 - **0** — reachable: every run outcome is PASS or SKIP (exclusions allowed).
-- **1** — reachable for FAIL, CRASH, TIMEOUT, COMPILE-ERROR, and
-  PRECOMPILE-ERROR. COMPILE-TIMEOUT, MALFORMED-SUITE, and FLAKY are part of
-  the frozen outcome vocabulary but are **not emitted by this build** — they
-  arrive with later capabilities (compile-timeout enforcement, report
-  parsing, and retries, respectively).
+- **1** — reachable for FAIL, CRASH, TIMEOUT, COMPILE-ERROR, MALFORMED-SUITE,
+  and PRECOMPILE-ERROR. COMPILE-TIMEOUT and FLAKY are part of the frozen
+  outcome vocabulary but are **not emitted by this build** — they arrive with
+  compile-timeout enforcement and retries, respectively.
 - **2** — reachable: an interrupt (SIGINT/SIGTERM) is implemented with
   sequential-session semantics — a partial summary is printed, the files
   that had not yet started are reported NOT-RUN, and the active child's
   process group is cleaned up. The parallel-workers interrupt story arrives
   with parallel workers.
 - **3** — reachable via a spawn failure (the runner could not spawn `mojo` or
-  a built binary). The protocol-drift cause of exit 3 (a report present but
-  off-grammar) needs the report parser and is **not reachable** in this
-  build.
+  a built binary) and via protocol drift (a report present but off-grammar,
+  §6), in both `run` and `collect`.
 - **4** — reachable for every frozen cause in §9, plus the transitional
   not-yet-available-flag refusal subcase in §24.1 above.
-- **5** — reachable via an empty walk and via the everything-excluded case.
-  The deselection cause (`-k` matched nothing) needs per-test selection and
-  is **not reachable** in this build, since `-k` itself is refused (§24.1).
-
-### 24.3 The zero-test ceiling
-
-This build does not yet parse the per-file report TestSuite emits, so a
-verdict is decided from the child process's termination status alone: a file
-that exits 0 without running a single test is indistinguishable from a file
-that exits 0 after running and passing its tests, and is reported **PASS**.
-Report parsing and count reconciliation close this hole in a later build;
-until then, treat a PASS as "the file's process exited cleanly," not yet as
-"every test in it ran and passed."
+- **5** — reachable via an empty walk, via the everything-excluded case, and
+  via deselection (`-k` matched nothing, §9).
