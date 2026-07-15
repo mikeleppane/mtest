@@ -29,6 +29,28 @@ def read_golden(name: String) raises -> String:
     return open(TX_DIR + name, "r").read()
 
 
+def read_manifest() raises -> List[String]:
+    """The transcript file names listed in `goldens/transcripts/MANIFEST.txt`.
+
+    One name per line, stripped, empty lines skipped — the same enumeration the
+    transcript smoke test uses, so a golden present on disk but missing from the
+    manifest cannot escape coverage. Reimplemented here (not imported from the
+    smoke test) to keep the oracle independent.
+
+    Returns:
+        The manifest's file names in order. Allocates.
+
+    Raises:
+        Error: If the manifest cannot be opened or read.
+    """
+    var names = List[String]()
+    for line in read_golden("MANIFEST.txt").split("\n"):
+        var s = String(String(line).strip())
+        if s.byte_length() > 0:
+            names.append(s)
+    return names^
+
+
 def stdout_region(golden_text: String) -> String:
     """The captured-stdout section of a golden, rejoined with newlines.
 

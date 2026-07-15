@@ -188,5 +188,240 @@ def test_summary_lookalike_in_detail_stays_valid() raises:
     assert_true("trailing detail after the lookalike" in r.rows[0].detail)
 
 
+def test_rule_deleted_is_off_grammar() raises:
+    # With the 8-dash rule removed the Summary follows a row directly; the line
+    # before the Summary is not the rule.
+    var text = (
+        "Running 1 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    PASS [ 0.001 ] test_one\n"
+        "Summary [ 0.001 ] 1 tests run: 1 passed , 0 failed , 0 skipped "
+    )
+    assert_true(parse_report(text, SP).verdict == ReportVerdict.OFF_GRAMMAR)
+
+
+def test_summary_tally_does_not_sum_off_grammar() raises:
+    # passed + failed + skipped must equal the declared total; here 2+1+1 != 3.
+    var text = (
+        "Running 3 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    PASS [ 0.001 ] test_one\n"
+        "    PASS [ 0.001 ] test_two\n"
+        "    PASS [ 0.001 ] test_three\n"
+        "--------\n"
+        "Summary [ 0.001 ] 3 tests run: 2 passed , 1 failed , 1 skipped "
+    )
+    assert_true(parse_report(text, SP).verdict == ReportVerdict.OFF_GRAMMAR)
+
+
+def test_row_tallies_disagree_with_summary_off_grammar() raises:
+    # The Summary is self-consistent (1+1+1 == 3) but the three PASS rows do not
+    # match its passed/failed/skipped split — broken arithmetic.
+    var text = (
+        "Running 3 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    PASS [ 0.001 ] test_one\n"
+        "    PASS [ 0.001 ] test_two\n"
+        "    PASS [ 0.001 ] test_three\n"
+        "--------\n"
+        "Summary [ 0.001 ] 3 tests run: 1 passed , 1 failed , 1 skipped "
+    )
+    assert_true(parse_report(text, SP).verdict == ReportVerdict.OFF_GRAMMAR)
+
+
+def test_malformed_row_names_off_grammar() raises:
+    # An empty, a whitespace-containing, and a `::`-bearing row name are each a
+    # malformed name the toolchain never emits.
+    for bad in [
+        "    PASS [ 0.001 ] ",
+        "    PASS [ 0.001 ] a b",
+        "    PASS [ 0.001 ] a::b",
+    ]:
+        var text = (
+            "Running 1 tests for /home/x/proj/tests/test_a.mojo \n"
+            + String(bad)
+            + "\n--------\n"
+            "Summary [ 0.001 ] 1 tests run: 1 passed , 0 failed , 0 skipped "
+        )
+        assert_true(parse_report(text, SP).verdict == ReportVerdict.OFF_GRAMMAR)
+
+
+def test_trailer_absent_with_failures_off_grammar() raises:
+    # A failing run must carry the `Test suite' ... 'failed!` trailer; its
+    # absence with failed > 0 is an inconsistency.
+    var text = (
+        "Running 1 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    FAIL [ 0.001 ] test_one\n"
+        "      boom\n"
+        "--------\n"
+        "Summary [ 0.001 ] 1 tests run: 0 passed , 1 failed , 0 skipped "
+    )
+    assert_true(parse_report(text, SP).verdict == ReportVerdict.OFF_GRAMMAR)
+
+
+def test_trailer_names_different_path_off_grammar() raises:
+    # The trailer must name source_path byte-for-byte; a foreign path is drift.
+    var text = (
+        "Running 1 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    FAIL [ 0.001 ] test_one\n"
+        "      boom\n"
+        "--------\n"
+        "Summary [ 0.001 ] 1 tests run: 0 passed , 1 failed , 0 skipped \n"
+        "Test suite' /other/tests/test_a.mojo 'failed! "
+    )
+    assert_true(parse_report(text, SP).verdict == ReportVerdict.OFF_GRAMMAR)
+
+
+def test_truncation_marker_before_report_stays_valid() raises:
+    # A truncation marker in the tail BEFORE a complete report is pre-report
+    # junk; refusing overflow is the session's job, not the parser's.
+    var text = (
+        "[mtest: output truncated — 999 bytes omitted, limit 12 bytes]\n"
+        "Running 1 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    PASS [ 0.001 ] test_one\n"
+        "--------\n"
+        "Summary [ 0.001 ] 1 tests run: 1 passed , 0 failed , 0 skipped "
+    )
+    assert_true(parse_report(text, SP).verdict == ReportVerdict.VALID)
+
+
+def test_truncation_severed_framing_off_grammar() raises:
+    # Truncation cut the report off after the header: a matching header with no
+    # rule and no Summary.
+    var text = (
+        "Running 2 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    PASS [ 0.001 ] test_one"
+    )
+    assert_true(parse_report(text, SP).verdict == ReportVerdict.OFF_GRAMMAR)
+
+
+def test_truncation_severed_header_is_absent() raises:
+    # Truncation cut the header itself; the partial `Running` never matches.
+    var text = "Running 2 tes"
+    assert_true(parse_report(text, SP).verdict == ReportVerdict.ABSENT)
+
+
+def test_replacement_char_in_detail_stays_valid() raises:
+    # A U+FFFD from a lossy decode inside FAIL detail is absorbed verbatim.
+    var text = (
+        "Running 1 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    FAIL [ 0.001 ] test_one\n"
+        "      boom � here\n"
+        "--------\n"
+        "Summary [ 0.001 ] 1 tests run: 0 passed , 1 failed , 0 skipped \n"
+        "Test suite' /home/x/proj/tests/test_a.mojo 'failed! "
+    )
+    var r = parse_report(text, SP)
+    assert_true(r.verdict == ReportVerdict.VALID)
+    assert_true("�" in r.rows[0].detail)
+
+
+def test_replacement_char_in_path_breaks_identity_absent() raises:
+    # A U+FFFD in the header path means it no longer byte-equals source_path, so
+    # the exact-identity rule finds no matching header -> ABSENT.
+    var text = (
+        "Running 1 tests for /home/x/proj/tests/test_�.mojo \n"
+        "    PASS [ 0.001 ] test_one\n"
+        "--------\n"
+        "Summary [ 0.001 ] 1 tests run: 1 passed , 0 failed , 0 skipped "
+    )
+    assert_true(parse_report(text, SP).verdict == ReportVerdict.ABSENT)
+
+
+def test_stderr_content_is_invisible_to_the_parser() raises:
+    # `parse_report` takes only stdout. A report-lookalike that lived on stderr
+    # is never concatenated in, so the genuine stdout report parses VALID alone.
+    var stdout_text = (
+        "Running 1 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    PASS [ 0.001 ] test_one\n"
+        "--------\n"
+        "Summary [ 0.001 ] 1 tests run: 1 passed , 0 failed , 0 skipped "
+    )
+    # A forged second report that only ever existed on stderr — deliberately NOT
+    # passed to parse_report, documenting that the parser scans stdout only.
+    var stderr_text = (
+        "Running 9 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    PASS [ 0.001 ] forged\n"
+        "--------\n"
+        "Summary [ 0.001 ] 9 tests run: 9 passed , 0 failed , 0 skipped "
+    )
+    _ = stderr_text
+    assert_true(parse_report(stdout_text, SP).verdict == ReportVerdict.VALID)
+
+
+def test_fail_detail_preserves_leading_empty_line() raises:
+    # A FAIL whose detail BEGINS with an empty line must keep that line verbatim:
+    # `["", "      boom"]` is two lines, so the join is "\n      boom", not the
+    # lone "      boom" that dropping the empty leader would yield.
+    var text = (
+        "Running 1 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    FAIL [ 0.001 ] test_one\n"
+        "\n"
+        "      boom\n"
+        "--------\n"
+        "Summary [ 0.001 ] 1 tests run: 0 passed , 1 failed , 0 skipped \n"
+        "Test suite' /home/x/proj/tests/test_a.mojo 'failed! "
+    )
+    var r = parse_report(text, SP)
+    assert_true(r.verdict == ReportVerdict.VALID)
+    assert_equal(len(r.rows), 1)
+    assert_true(r.rows[0].outcome == Outcome.FAIL)
+    assert_equal(r.rows[0].detail, "\n      boom")
+
+
+def test_fail_detail_interior_empty_line_round_trips() raises:
+    # Interior empty lines already survive; pin `["a", "", "b"]` -> "a\n\nb".
+    var text = (
+        "Running 1 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    FAIL [ 0.001 ] test_one\n"
+        "a\n"
+        "\n"
+        "b\n"
+        "--------\n"
+        "Summary [ 0.001 ] 1 tests run: 0 passed , 1 failed , 0 skipped \n"
+        "Test suite' /home/x/proj/tests/test_a.mojo 'failed! "
+    )
+    var r = parse_report(text, SP)
+    assert_true(r.verdict == ReportVerdict.VALID)
+    assert_equal(r.rows[0].detail, "a\n\nb")
+
+
+def test_fail_detail_single_empty_line_is_empty_string() raises:
+    # A FAIL whose ONLY detail line is empty is the same bytes as no detail:
+    # `[""]` -> "". Still a FAIL row, counted, with empty detail.
+    var text = (
+        "Running 1 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    FAIL [ 0.001 ] test_one\n"
+        "\n"
+        "--------\n"
+        "Summary [ 0.001 ] 1 tests run: 0 passed , 1 failed , 0 skipped \n"
+        "Test suite' /home/x/proj/tests/test_a.mojo 'failed! "
+    )
+    var r = parse_report(text, SP)
+    assert_true(r.verdict == ReportVerdict.VALID)
+    assert_equal(len(r.rows), 1)
+    assert_true(r.rows[0].outcome == Outcome.FAIL)
+    assert_equal(r.rows[0].detail, "")
+
+
+def test_pre_report_header_lookalike_before_real_report_valid() raises:
+    # The realistic case: a test's own stdout is streamed BEFORE the toolchain's
+    # buffered report, so a header-lookalike the test PRINTS (here with a DIFFERENT
+    # count) precedes the real block. The anchor must be the LAST matching header
+    # before the rule — the earlier printed header is user output to ignore — so
+    # the genuine report is found and reconciles. Anchor-on-first would misread the
+    # printed header as the anchor and land OFF_GRAMMAR, wrongly blaming the
+    # toolchain.
+    var text = (
+        "Running 1 tests for /home/x/proj/tests/test_a.mojo \n"
+        "Running 3 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    PASS [ 0.001 ] test_one\n"
+        "    PASS [ 0.001 ] test_two\n"
+        "    PASS [ 0.001 ] test_three\n"
+        "--------\n"
+        "Summary [ T ] 3 tests run: 3 passed , 0 failed , 0 skipped "
+    )
+    var r = parse_report(text, SP)
+    assert_true(r.verdict == ReportVerdict.VALID)
+    assert_equal(len(r.rows), 3)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

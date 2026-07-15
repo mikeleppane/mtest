@@ -25,6 +25,17 @@ declared, a duplicate name) is AMBIGUOUS. Identity is EXACT byte-equality on the
 header path, never a suffix — a same-suffix-different-root impostor simply fails
 to match and the report reads ABSENT.
 
+Summary-grammar junk appended AFTER a complete report is read as terminal by the
+end-scan (which takes the LAST Summary), so the preceding line is no longer the
+rule and the report classifies OFF_GRAMMAR ("missing rule before summary"), not
+AMBIGUOUS. This is intentional: both are non-VALID, and no forgery reaches VALID.
+
+The header anchor obeys the same buffered-report-after-user-output reality: the
+rows region is measured from the LAST matching header before the terminal rule,
+never the first. A test's own stdout is streamed BEFORE the toolchain's buffered
+report block, so a header-lookalike a test PRINTS appears earlier and is user
+output to ignore; the real report's header is the last one preceding the rule.
+
 Precedence (the checks fire in this order; the first to fire decides):
   1. No header whose path byte-equals `source_path`            -> ABSENT
   2. Header present but no terminal Summary                    -> OFF_GRAMMAR
@@ -392,7 +403,13 @@ def parse_report(stdout_text: String, source_path: String) -> ParsedReport:
     if complete_blocks >= 2:
         return ParsedReport.ambiguous("multiple complete report blocks")
 
-    # The anchor is the last matching header before the terminal rule.
+    # The anchor is the LAST matching header before the terminal rule; a test's
+    # own stdout precedes the buffered report, so an earlier matching header is
+    # user output to ignore. Anchoring on the last (not the first) means a
+    # header-lookalike a test PRINTS before its real report is skipped over and
+    # the genuine report reconciles. A genuine report has exactly one header, so
+    # the choice is invisible for well-formed input; it only decides which header
+    # a printed duplicate defers to.
     var anchor = -1
     var declared = 0
     for k in range(len(header_idx)):
@@ -406,6 +423,10 @@ def parse_report(stdout_text: String, source_path: String) -> ParsedReport:
 
     # 4. Rows region: strictly between the anchor header and the terminal rule.
     var rows = List[ParsedRow]()
+    # Whether a detail line has been appended to the current (last) FAIL row.
+    # Tracked explicitly rather than inferred from `detail` emptiness, so a FAIL
+    # whose detail BEGINS with an empty line keeps that line verbatim.
+    var detail_started = False
     for i in range(anchor + 1, rule_i):
         var line = String(lines[i])
         var rp = _parse_row(line)
@@ -416,16 +437,17 @@ def parse_report(stdout_text: String, source_path: String) -> ParsedReport:
                 if r.name == rp.name:
                     return ParsedReport.ambiguous("duplicate row name")
             rows.append(ParsedRow(rp.name, rp.outcome, "", rp.timing))
+            detail_started = False
         else:
             # A non-row line is FAIL detail; it must follow a FAIL row.
             var li = len(rows) - 1
             if li < 0 or rows[li].outcome != Outcome.FAIL:
                 return ParsedReport.off_grammar("noise in structural position")
-            var existing = rows[li].detail
-            if existing.byte_length() == 0:
+            if not detail_started:
                 rows[li].detail = line
+                detail_started = True
             else:
-                rows[li].detail = existing + "\n" + line
+                rows[li].detail = rows[li].detail + "\n" + line
 
     # 5. Reconcile the three independent counts.
     var rows_count = len(rows)

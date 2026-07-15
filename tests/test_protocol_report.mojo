@@ -12,11 +12,85 @@ from std.testing import assert_equal, assert_true, assert_false, TestSuite
 from mtest.model import Outcome
 from mtest.protocol import ParsedReport, ReportVerdict, parse_report
 
-from transcript_cases import read_golden, stdout_region, source_path_for
+from transcript_cases import (
+    read_golden,
+    read_manifest,
+    stdout_region,
+    source_path_for,
+)
 
 
 def _parse(name: String) raises -> ParsedReport:
     return parse_report(stdout_region(read_golden(name)), source_path_for(name))
+
+
+def _expected_valid() -> List[String]:
+    """Goldens that carry one well-formed report for their source path."""
+    return [
+        "passing--default.txt",
+        "passing--skip-all.txt",
+        "passing--only-many.txt",
+        "empty--default.txt",
+        "empty--skip-all.txt",
+        "skipped--default.txt",
+        "skipped--skip-all.txt",
+        "skipped--only-native.txt",
+        "mixed--default.txt",
+        "mixed--skip-one.txt",
+        "mixed--only-selected-fail.txt",
+        "twofail--default.txt",
+        "raising--default.txt",
+        "noisy--default.txt",
+    ]
+
+
+def _expected_absent() -> List[String]:
+    """Goldens that carry no matching-path report (crash or usage error)."""
+    return [
+        "crashing--default.txt",
+        "passing--only-unknown.txt",
+        "passing--flag-unknown.txt",
+        "passing--no-compose.txt",
+        "passing--only-noargs.txt",
+        "passing--skip-all-args.txt",
+        "passing--skip-unknown.txt",
+    ]
+
+
+def _contains(names: List[String], target: String) -> Bool:
+    for n in names:
+        if n == target:
+            return True
+    return False
+
+
+def test_manifest_enumerates_every_scenario_verdict() raises:
+    # Enumerate via MANIFEST.txt, not a hard-coded list: every golden is either
+    # asserted VALID-with-expectations or ASSERTED ABSENT, and the two buckets
+    # partition the manifest exactly, so a newly added golden cannot silently
+    # escape parser coverage.
+    var manifest = read_manifest()
+    var valid = _expected_valid()
+    var absent = _expected_absent()
+
+    # Completeness: each manifest name is classified by exactly one bucket.
+    for name in manifest:
+        var in_valid = _contains(valid, String(name))
+        var in_absent = _contains(absent, String(name))
+        assert_true(in_valid or in_absent)
+        assert_false(in_valid and in_absent)
+
+    # No expectation names a golden absent from the manifest.
+    for name in valid:
+        assert_true(_contains(manifest, String(name)))
+    for name in absent:
+        assert_true(_contains(manifest, String(name)))
+
+    # Drive the parser over every enumerated scenario and pin its verdict.
+    for name in valid:
+        assert_true(_parse(String(name)).verdict == ReportVerdict.VALID)
+    for name in absent:
+        assert_true(_parse(String(name)).verdict == ReportVerdict.ABSENT)
 
 
 def test_passing_default_three_pass_rows() raises:
