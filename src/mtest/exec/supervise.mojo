@@ -369,12 +369,19 @@ def run_supervised(
             var final = _decode(Int(status[0]))
             var term = Termination.timed_out(final.kind, final.value, escalated)
             _free_all(owned^, argv, opipe, epipe, xpipe, ebuf, status)
-            return ProcessResult(List[UInt8](), List[UInt8](), term, dur)
+            return ProcessResult(
+                List[UInt8](), List[UInt8](), False, False, term, dur
+            )
         # No latch fired: a genuine spawn failure — report the child's errno.
         var errno = Int(ebuf[0])
         _free_all(owned^, argv, opipe, epipe, xpipe, ebuf, status)
         return ProcessResult(
-            List[UInt8](), List[UInt8](), Termination.spawn_failed(errno), dur
+            List[UInt8](),
+            List[UInt8](),
+            False,
+            False,
+            Termination.spawn_failed(errno),
+            dur,
         )
 
     # Exec succeeded: supervise the running child.
@@ -419,7 +426,14 @@ def run_supervised(
             buf.free()
             pfd.free()
             _free_all(owned^, argv, opipe, epipe, xpipe, ebuf, status)
-            return ProcessResult(oz^, ez^, Termination.spawn_failed(errno), dur)
+            return ProcessResult(
+                oz^,
+                ez^,
+                out_cap.was_truncated(),
+                err_cap.was_truncated(),
+                Termination.spawn_failed(errno),
+                dur,
+            )
 
         var now = _mono_ms()
         if not killing:
@@ -509,7 +523,14 @@ def run_supervised(
     buf.free()
     pfd.free()
     _free_all(owned^, argv, opipe, epipe, xpipe, ebuf, status)
-    return ProcessResult(out_bytes^, err_bytes^, term, dur)
+    return ProcessResult(
+        out_bytes^,
+        err_bytes^,
+        out_cap.was_truncated(),
+        err_cap.was_truncated(),
+        term,
+        dur,
+    )
 
 
 def _drain(

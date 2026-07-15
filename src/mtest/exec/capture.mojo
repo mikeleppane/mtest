@@ -63,6 +63,15 @@ struct BoundedCapture(Movable):
             self.tail_start = (self.tail_start + 1) % self.tail_cap
         self.tail_count += 1
 
+    def was_truncated(self) -> Bool:
+        """True iff more bytes were pushed than the head+tail bound could keep.
+
+        Equivalent to whether `finish()` splices the omission marker: over the
+        bound the middle was dropped. Pure — reads `total` against the caps and
+        changes no state.
+        """
+        return self.total > self.head_cap + self.tail_cap
+
     def _tail_in_order(self) -> List[UInt8]:
         """The retained tail bytes, oldest first. Allocates; does not raise."""
         var out = List[UInt8]()
