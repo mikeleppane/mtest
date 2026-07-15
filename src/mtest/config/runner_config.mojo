@@ -66,8 +66,9 @@ struct RunnerConfig(Copyable, Movable):
 
     var durations: Int
     """`--durations N`: the number of slowest files to report; `0` disables
-    the report (no listing). Parsing/validation/plumbing only in this build —
-    the slowest-files list itself is not yet rendered."""
+    the report (no listing). The console reporter renders the file-level
+    slowest-files list after the summary band, from this field threaded at
+    construction."""
 
     var collect: Bool
     """Collect mode (`collect` subcommand / `--collect-only`): probe every

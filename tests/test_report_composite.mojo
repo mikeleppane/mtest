@@ -81,6 +81,7 @@ def test_heterogeneous_composite_fans_to_recorder_and_console() raises:
                 verbosity=Verbosity.NORMAL,
                 show_output=ShowOutput.FAILURES,
                 mtest_build_flags="",
+                durations=0,
             ),
         )
     )

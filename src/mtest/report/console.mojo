@@ -348,6 +348,67 @@ def _extra_count(s: Summary, outcome: Outcome, label: String) -> String:
     return String(", ") + String(n) + " " + label
 
 
+@fieldwise_init
+struct _FileDuration(Copyable, Movable):
+    """One RUN file's root-relative path and its RUN-ONLY wall-clock duration.
+
+    Accumulated from `FileFinished` events that reached the run step
+    (`duration_seconds > 0.0`) so the slowest-files list can be sorted after
+    the fact without re-touching the event stream.
+    """
+
+    var path: String
+    """The file's root-relative path, as carried by the event."""
+    var duration_seconds: Float64
+    """The file's spawn-to-reap wall time, in seconds."""
+
+
+def _path_less(a: String, b: String) -> Bool:
+    """Byte-wise lexicographic `a < b`. Pure.
+
+    Paths are UTF-8; comparing bytes gives the same order as comparing
+    codepoints, so this is a correct, dependency-free path tiebreak.
+    """
+    var ab = a.as_bytes()
+    var bb = b.as_bytes()
+    var an = len(ab)
+    var bn = len(bb)
+    var n = an if an < bn else bn
+    for i in range(n):
+        if ab[i] != bb[i]:
+            return ab[i] < bb[i]
+    return an < bn
+
+
+def _slower(a: _FileDuration, b: _FileDuration) -> Bool:
+    """Whether `a` sorts before `b`: longer duration first, path breaks ties.
+
+    Pure.
+    """
+    if a.duration_seconds != b.duration_seconds:
+        return a.duration_seconds > b.duration_seconds
+    return _path_less(a.path, b.path)
+
+
+def _sort_slowest(mut files: List[_FileDuration]):
+    """In-place selection sort of `files` by `_slower`. Never raises.
+
+    File counts are small (one run's worth of files), so an O(n^2) selection
+    sort keeps this dependency-free and trivially deterministic; it is not on
+    any hot path.
+    """
+    var n = len(files)
+    for i in range(n):
+        var best = i
+        for j in range(i + 1, n):
+            if _slower(files[j], files[best]):
+                best = j
+        if best != i:
+            var tmp = files[i].copy()
+            files[i] = files[best].copy()
+            files[best] = tmp^
+
+
 def _worst_color(s: Summary, tc: TestCounts) -> StaticString:
     """The summary-band color: red-bold if any crash-class FILE ran, else red if
     any failing TEST or FAIL file, else green. Never raises.
@@ -386,12 +447,22 @@ struct ConsoleReporter(Reporter):
     """Which files' captured output to frame: failures, all, or none."""
     var mtest_build_flags: String
     """Shell-ready build-affecting flags to echo in a run-failure reproduce line."""
+    var durations: Int
+    """`--durations N`: how many slowest-running FILES to list after the
+    summary band; `0` (or the flag absent) renders nothing extra. Independent
+    of `verbosity` — an explicit `--durations` survives `-q`."""
     var _head: String
     """The streamed header, warnings, banners, and verdict/excluded lines."""
     var _sections: String
     """The framed failure/crash/compile sections, in file order."""
     var _summary: String
-    """The final summary band."""
+    """The final summary band, plus the slowest-files list (when `durations`
+    is set) appended after it."""
+    var _file_durations: List[_FileDuration]
+    """Per-file RUN-ONLY wall-clock durations accumulated from `FileFinished`,
+    for the slowest-files list. Only files that reached the run step
+    (`duration_seconds > 0.0`) are recorded; a COMPILE_ERROR/EXCLUDED/NOT_RUN
+    file carries `0.0` and is never added."""
     var _run_root: String
     """The run root from SESSION_STARTED, for root-relativizing `At` lines."""
     var _toolchain: String
@@ -410,6 +481,7 @@ struct ConsoleReporter(Reporter):
         verbosity: Verbosity,
         show_output: ShowOutput,
         var mtest_build_flags: String,
+        durations: Int,
     ):
         """Construct a reporter and resolve color once.
 
@@ -426,6 +498,8 @@ struct ConsoleReporter(Reporter):
             show_output: Which files' captured output to frame.
             mtest_build_flags: Shell-ready build-affecting flags for reproduce
                 lines (empty when none are in effect).
+            durations: `--durations N` from config; `0` disables the
+                slowest-files list.
         """
         self.version = version^
         if color == ColorWhen.ALWAYS:
@@ -437,6 +511,7 @@ struct ConsoleReporter(Reporter):
         self.verbosity = verbosity
         self.show_output = show_output
         self.mtest_build_flags = mtest_build_flags^
+        self.durations = durations
         self._head = String("")
         self._sections = String("")
         self._summary = String("")
@@ -444,6 +519,7 @@ struct ConsoleReporter(Reporter):
         self._toolchain = String("")
         self._file_tests = List[TestResult]()
         self._last_warning_detail = String("")
+        self._file_durations = List[_FileDuration]()
 
     def _paint(self, code: StaticString, text: String) -> String:
         """Wrap `text` in an ANSI color unless color is off or the code is empty.
@@ -582,6 +658,15 @@ struct ConsoleReporter(Reporter):
     def _on_file_finished(mut self, e: Event):
         """Render an excluded line, a verdict line, per-test sections, or a banner.
         """
+        if e.duration_seconds > 0.0:
+            # RUN-ONLY signal: a file that never reached the run step (an
+            # EXCLUDED, COMPILE_ERROR-before-run, or NOT_RUN file) carries
+            # `0.0` here and is never counted for the slowest-files list. A
+            # TIMEOUT/interrupted file DID run and is recorded at its
+            # observed value. Independent of every branch below.
+            self._file_durations.append(
+                _FileDuration(e.path.copy(), e.duration_seconds)
+            )
         if e.outcome == Outcome.EXCLUDED:
             var line = _col("EXCLUDED", _TOKEN_W) + _col(e.path, _PATH_W)
             line += "(" + e.exclusion_pattern + ")"
@@ -794,3 +879,35 @@ struct ConsoleReporter(Reporter):
             + "s ====="
         )
         self._summary = "\n" + self._paint(_worst_color(s, tc), band) + "\n"
+        self._summary += self._render_slowest_files()
+
+    def _render_slowest_files(self) -> String:
+        """The after-band slowest-FILES list, or `""` when it has nothing to say.
+
+        Presence-only: `""` when `durations` is `0`/absent, or when no file
+        reached the run step. Otherwise sorts the accumulated RUN-ONLY
+        durations descending, breaking ties by root-relative path ascending,
+        and renders at most `min(durations, files_run)` rows under a header
+        that states the ACTUAL row count shown — never the requested `N` when
+        fewer files ran. This is file-level: the header says "files" and no
+        per-test timing is shown or implied. Renders regardless of
+        `verbosity` (an explicit `--durations` survives `-q`). Never raises.
+        """
+        if self.durations <= 0:
+            return String("")
+        var files = self._file_durations.copy()
+        _sort_slowest(files)
+        var total = len(files)
+        var n_rows = self.durations if self.durations < total else total
+        if n_rows == 0:
+            return String("")
+        var out = String("\nslowest ") + String(n_rows) + " files:\n"
+        for i in range(n_rows):
+            out += (
+                "  "
+                + files[i].path
+                + "  "
+                + _fmt_fixed(files[i].duration_seconds, 2)
+                + "s\n"
+            )
+        return out^

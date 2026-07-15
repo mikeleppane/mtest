@@ -786,6 +786,74 @@ def s_show_output(manifest: dict) -> str:
     return "framing: none suppresses, failures frames FAIL, all frames PASS"
 
 
+# A slowest-files row: two leading spaces, the path, then a trailing "N.NNs".
+DURATIONS_ROW_RE = re.compile(r"^  (\S+)\s+([\d.]+)s\s*$")
+
+
+def s_durations(manifest: dict) -> str:
+    """`--durations N` renders a file-level slowest-files list, INFORMAL tier:
+    structure only (presence, size, order, `-q` survival) — never exact
+    timings."""
+    suite = _suite_tests(manifest)
+    files_run = sum(1 for row in suite.values() if row["verdict"] != "COMPILE-ERROR")
+    cerr_rel = next(
+        rel for rel, row in suite.items() if row["verdict"] == "COMPILE-ERROR"
+    )
+
+    # Absent without the flag.
+    absent = run_mtest(["testdata/suite"])
+    expect(
+        "slowest" not in absent.stdout,
+        "a slowest-files section appeared without --durations",
+    )
+
+    # Present with the flag; requesting far more rows than files ran, the
+    # header states the ACTUAL (capped) count, never the requested N.
+    requested = files_run + 50
+    run = run_mtest(["testdata/suite", "--durations", str(requested)])
+    m = re.search(r"slowest (\d+) files:\n((?:  .+\n)+)", run.stdout)
+    expect(
+        m is not None,
+        f"no slowest-files section with --durations {requested}:\n{run.stdout}",
+    )
+    shown = int(m.group(1))
+    rows = [ln for ln in m.group(2).splitlines() if ln.strip()]
+    expect(
+        shown == files_run,
+        f"header states {shown}, expected {files_run} (files that actually ran)",
+    )
+    expect(shown != requested, f"header echoed the requested N ({requested}) verbatim")
+    expect(len(rows) == shown, f"header says {shown} rows but {len(rows)} rendered")
+
+    parsed = []
+    for ln in rows:
+        rm = DURATIONS_ROW_RE.match(ln)
+        expect(rm is not None, f"slowest-files row is not 'path  N.NNs': {ln!r}")
+        parsed.append((rm.group(1), float(rm.group(2))))
+
+    # The COMPILE-ERROR file never reached the run step (duration 0.0) and
+    # must never appear among the rows, however many were requested.
+    expect(
+        all(path != cerr_rel for path, _dur in parsed),
+        f"COMPILE-ERROR file {cerr_rel} (never ran) appeared in the "
+        f"slowest-files list: {parsed}",
+    )
+
+    # Descending duration order (ties would break by path, not asserted here
+    # since real wall-clock durations are exceedingly unlikely to tie).
+    durs = [d for _p, d in parsed]
+    expect(
+        all(durs[i] >= durs[i + 1] for i in range(len(durs) - 1)),
+        f"slowest-files rows are not in descending duration order: {parsed}",
+    )
+
+    # Survives -q: an explicit --durations beats the -q verbosity default.
+    quiet = run_mtest(["testdata/suite", "--durations", "2", "-q"])
+    expect("slowest 2 files:" in quiet.stdout, "-q suppressed the --durations list")
+
+    return f"absent w/o flag; {shown} rows (capped from {requested}), descending, survives -q"
+
+
 def s_color(manifest: dict) -> str:
     """NO_COLOR must silence AUTO color even on a real tty; --color always is
     absolute and paints regardless of NO_COLOR or tty-ness.
@@ -1408,6 +1476,7 @@ def main() -> int:
     h.scenario("precompile", s_precompile)
     h.scenario("quiet-verbose", s_quiet_verbose)
     h.scenario("show-output", s_show_output)
+    h.scenario("durations", s_durations)
     h.scenario("color", s_color)
     h.scenario("usage-refusals", s_usage_refusals)
     h.scenario("selection-keyword", s_selection_keyword)

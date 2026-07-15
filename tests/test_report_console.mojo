@@ -53,6 +53,7 @@ def _console(
     is_tty: Bool = False,
     no_color: Bool = False,
     mtest_build_flags: String = "",
+    durations: Int = 0,
 ) -> ConsoleReporter:
     """A console reporter with the mock's version and the given config."""
     return ConsoleReporter(
@@ -63,6 +64,7 @@ def _console(
         verbosity=verbosity,
         show_output=show_output,
         mtest_build_flags=mtest_build_flags,
+        durations=durations,
     )
 
 
@@ -926,6 +928,219 @@ def test_internal_error_banner_falls_back_to_bare_errno() raises:
     assert_true("errno 99" in out)
     # An unrecognized errno carries no worded name and no dangling separator.
     assert_false("—" in out)
+
+
+def test_durations_zero_renders_no_slowest_files_list() raises:
+    # `durations=0` is the flag-absent default: the report is presence-only.
+    var c = _console(durations=0)
+    _feed_mock_run(c)
+    var out = c.output()
+    assert_false("slowest" in out)
+
+
+def test_durations_header_states_count_descending_order_and_excludes_zero_duration() raises:
+    # Three files ran with distinct durations; one COMPILE_ERROR file never
+    # reached the run step and carries 0.0 — it must never appear in the
+    # slowest list even though `durations=3` would otherwise have room.
+    # QUIET verbosity so a PASS file contributes no head verdict line, making
+    # each PASS path's ONLY occurrence in `out` the slowest-list row — this
+    # also doubles as the "-q survival" proof.
+    var c = _console(durations=3, verbosity=Verbosity.QUIET)
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 4, 0))
+    c.handle(Event.file_started("tests/test_a.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_a.mojo",
+            Outcome.PASS,
+            0.30,
+            _argv("tests/test_a.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.PARSED,
+            passed_tests=1,
+        )
+    )
+    c.handle(Event.file_started("tests/test_b.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_b.mojo",
+            Outcome.PASS,
+            0.10,
+            _argv("tests/test_b.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.PARSED,
+            passed_tests=1,
+        )
+    )
+    c.handle(Event.file_started("tests/test_c.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_c.mojo",
+            Outcome.PASS,
+            0.50,
+            _argv("tests/test_c.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.PARSED,
+            passed_tests=1,
+        )
+    )
+    c.handle(Event.file_started("tests/test_typo.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_typo.mojo",
+            Outcome.COMPILE_ERROR,
+            0.0,
+            _argv("tests/test_typo.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+        )
+    )
+    c.handle(
+        Event.session_finished(
+            Summary.zeros(), 1.0, 1, test_counts=TestCounts.zeros()
+        )
+    )
+    var out = c.output()
+    # Header states the ACTUAL count shown, and says "files" (no per-test
+    # timing implied).
+    assert_true("slowest 3 files:" in out)
+    # Descending order: 0.50 (c) > 0.30 (a) > 0.10 (b).
+    var i_c = out.find("tests/test_c.mojo")
+    var i_a = out.find("tests/test_a.mojo")
+    var i_b = out.find("tests/test_b.mojo")
+    assert_true(i_c >= 0)
+    assert_true(i_a >= 0)
+    assert_true(i_b >= 0)
+    assert_true(i_c < i_a)
+    assert_true(i_a < i_b)
+    # Exactly 3 slowest-list rows: the zero-duration COMPILE_ERROR file never
+    # reached the run step and is excluded, even though it did produce a
+    # verdict line (QUIET only suppresses PASS lines).
+    assert_equal(_count(out, "\n  tests/test_"), 3)
+    assert_true("COMPILE-ERROR" in out)
+    assert_true("tests/test_typo.mojo" in out)
+
+
+def test_durations_row_count_is_capped_by_files_run_not_requested_n() raises:
+    # `durations=10` but only 2 files ran: the header states 2 (the min), not
+    # the requested 10, and exactly 2 rows render.
+    var c = _console(durations=10)
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 2, 0))
+    c.handle(Event.file_started("tests/test_a.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_a.mojo",
+            Outcome.PASS,
+            0.30,
+            _argv("tests/test_a.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.PARSED,
+            passed_tests=1,
+        )
+    )
+    c.handle(Event.file_started("tests/test_b.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_b.mojo",
+            Outcome.PASS,
+            0.10,
+            _argv("tests/test_b.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.PARSED,
+            passed_tests=1,
+        )
+    )
+    c.handle(
+        Event.session_finished(
+            Summary.zeros(), 1.0, 0, test_counts=TestCounts.zeros()
+        )
+    )
+    var out = c.output()
+    assert_true("slowest 2 files:" in out)
+    assert_false("slowest 10 files:" in out)
+    assert_equal(_count(out, "\n  tests/test_"), 2)
+
+
+def test_durations_ties_break_by_path_ascending() raises:
+    # Two files with the SAME duration, fed in reverse-alphabetical order:
+    # the ascending-path tiebreak must still put "a" before "z".
+    var c = _console(durations=2, verbosity=Verbosity.QUIET)
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 2, 0))
+    c.handle(Event.file_started("tests/test_z.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_z.mojo",
+            Outcome.PASS,
+            0.20,
+            _argv("tests/test_z.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.PARSED,
+            passed_tests=1,
+        )
+    )
+    c.handle(Event.file_started("tests/test_a.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_a.mojo",
+            Outcome.PASS,
+            0.20,
+            _argv("tests/test_a.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.PARSED,
+            passed_tests=1,
+        )
+    )
+    c.handle(
+        Event.session_finished(
+            Summary.zeros(), 1.0, 0, test_counts=TestCounts.zeros()
+        )
+    )
+    var out = c.output()
+    var i_a = out.find("tests/test_a.mojo")
+    var i_z = out.find("tests/test_z.mojo")
+    assert_true(i_a >= 0)
+    assert_true(i_z >= 0)
+    assert_true(i_a < i_z)
+
+
+def test_durations_zero_files_run_renders_nothing() raises:
+    # `durations > 0` but every FileFinished carries 0.0 (nothing ran):
+    # presence-only means no slowest-files section at all.
+    var c = _console(durations=5)
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 1))
+    c.handle(
+        Event.file_finished(
+            "tests/test_x.mojo",
+            Outcome.EXCLUDED,
+            0.0,
+            List[String](),
+            0.0,
+            List[UInt8](),
+            List[UInt8](),
+            exclusion_pattern="--exclude tests/*",
+        )
+    )
+    c.handle(
+        Event.session_finished(
+            Summary.zeros(), 1.0, 0, test_counts=TestCounts.zeros()
+        )
+    )
+    var out = c.output()
+    assert_false("slowest" in out)
 
 
 def main() raises:

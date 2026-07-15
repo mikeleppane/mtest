@@ -121,6 +121,7 @@ def main():
         config.verbosity,
         config.show_output,
         build_flags^,
+        config.durations,
     )
     var comp = CompositeReporter(Tuple(console^))
 
