@@ -21,6 +21,10 @@ mojo = "==1.0.0b2,<2"
 # itself is pure Mojo with ZERO runtime dependencies; there is no
 # [pypi-dependencies] section on purpose.
 python = "3.12.*"
+# The POSIX adapter is a build-time C object linked into Mojo executables. Pin
+# one compiler on both supported targets so its ABI and sanitizer behavior are
+# reproducible; the linked object adds no runtime library dependency.
+clang = "==18.1.8"
 
 [tasks]
 # Print the pinned Mojo version — first CI step, fails fast on a broken toolchain
