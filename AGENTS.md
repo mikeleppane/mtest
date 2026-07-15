@@ -124,11 +124,19 @@ The floor before any change is done — all green, in this order:
 pixi run fmt              # format in place (run locally before committing)
 pixi run build            # the package-compiles gate
 pixi run transcripts-check# regenerate to a temp dir and diff byte-for-byte
-pixi run test             # build each test and execute the binary directly
+pixi run test-direct      # the independent glob-driven twin: build+execute
+                           # each tests/test_*.mojo directly, no mtest involved
+pixi run test             # the self-hosted dogfood run: build/mtest over its
+                           # own tests/, plus a completeness check against an
+                           # independent glob of the same tree
+pixi run e2e              # build the binary, drive it against testdata/
+                            # (manifest.json), assert exact exit codes/output
 ```
 
-`pixi run ci` chains `fmt-check -> build -> transcripts-check -> test`
-fail-fast and is exactly what CI runs. Never use `mojo run` in the gate.
+`pixi run ci` chains `fmt-check -> build -> transcripts-check -> test-direct ->
+test -> e2e` fail-fast and is exactly what CI runs. `test-direct` and `test`
+both build-then-execute the binary directly — never `mojo run` anywhere in the
+gate, because it masks crash exit codes to 1.
 
 ## Pin policy and Ask-first boundaries
 
@@ -382,6 +390,61 @@ Accumulated the hard way; append as later phases teach more.
   each test file) must run under `pixi run`, or the child's `mojo build`
   fails to spawn. Never scrub the environment before such a spawn: passing it
   straight through is what lets the pixi toolchain reach every grandchild.
+- **A parsed report is trusted only via triple count reconciliation, never
+  because it "looks" well-formed.** The header's declared count, the actual
+  row count, and the Summary line's own total must all agree, AND the row-level
+  PASS/FAIL/SKIP tally must equal the Summary's PASS/FAIL/SKIP tally. Trap:
+  accepting a report because its rows and its Summary line are each
+  individually well-shaped. Correct move: the triple reconciliation is the
+  forgery backstop — it is what stands between a hand-forged or off-grammar
+  report and a false PASS. The same discipline extends to block count: two or
+  more complete, individually well-formed report blocks for the same path are
+  never resolved "last wins" — a suite that runs `TestSuite...run()` twice
+  produces two well-formed blocks, and picking one would silently launder a
+  forged extra block, so multiple complete blocks classify AMBIGUOUS instead.
+- **`--only <name>` selecting a natively-skipped test is byte-identical to
+  `--skip-all`.** Under `--only`, every non-selected test reports as a
+  selection-induced SKIP row, and a natively-skipped SELECTED test also
+  reports SKIP — the stdlib does not distinguish the two in the report bytes;
+  only the `cmd:` line in the header differs between the two transcripts. Trap:
+  treating every SKIP row in a selection run the same way. Correct move:
+  reconcile against the names mtest itself selected, not the report alone — a
+  SKIP on a SELECTED name is a native skip (report it as SKIP); a SKIP on a
+  NON-selected name is a deselection (suppress the row, count it DESELECTED
+  instead); a non-selected row that is NOT SKIP is MALFORMED-SUITE (a
+  deselected test ran when it should have been suppressed).
+- **A truncated capture never yields PASS unless the whole report survived in
+  the retained tail.** Trap: parsing the full truncated stdout as one string
+  and trusting whatever report block turns up in it — the retained head can
+  hold a stale or partial block from before the omission marker. Correct
+  move: on a truncated capture (the exec layer's `stdout_truncated` flag),
+  re-parse only the text AFTER the LAST truncation-marker line, and accept the
+  result only if it parses fully VALID there; otherwise the report was lost to
+  truncation and the file is a capture-overflow FAIL — never a drift, never a
+  PASS.
+- **Reconciliation, suppression, and stale-name/membership disagreements are
+  user-class failures (MALFORMED-SUITE, exit 1), never exit 3.** Exit 3
+  (drift) is reserved for a genuine off-grammar report from the pinned
+  toolchain, decided by the parser's own grammar precedence — not for a
+  selection run that disagrees with itself. Trap: routing a suppression or
+  membership disagreement (a deselected test that ran, a row set that doesn't
+  match the collected universe, a suite that refuses a name it just listed) to
+  exit 3 and blaming the toolchain. Correct move: when both a toolchain-drift
+  explanation and a file-behaving-badly explanation are open, blame the file —
+  MALFORMED-SUITE, exit 1, not drift.
+- **More Mojo-syntax gotchas from this toolchain:** `String` conforms to
+  `ImplicitlyCopyable` in 1.0.0b2, so the "owning struct stays `Copyable,
+  Movable` only, with an explicit `.copy()`" house convention above is a
+  deliberate code-review discipline this repo chooses, not something the
+  compiler forces on `String` fields — do not treat an implicit `String` copy
+  as a compile error to design around. `Int(String)` RAISES on non-digit
+  input, so a `def` that must stay pure and non-raising (a report parser, for
+  instance) cannot call it — hand-roll digit-by-digit parsing instead (walk
+  codepoints, reject anything outside `0`-`9`, accumulate manually, and return
+  a sentinel such as `-1` for "not a number"). `std.os.path.realpath` exists
+  and resolves symlinks, so canonicalizing a path to the exact string `mojo
+  build` bakes into its report lines needs no libc FFI — `from std.os.path
+  import realpath` is enough.
 
 ## Skills index
 
