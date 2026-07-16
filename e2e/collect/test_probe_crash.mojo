@@ -9,4 +9,6 @@ from std.ffi import external_call
 
 
 def main():
-    _ = external_call["abort", Int32]()
+    # SAFETY: libc abort has the exact `void abort(void)` ABI and accepts no
+    # pointer. This hostile fixture deliberately terminates here by SIGABRT.
+    external_call["abort", NoneType]()

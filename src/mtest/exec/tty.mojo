@@ -19,4 +19,6 @@ def stdout_isatty() -> Bool:
     Returns:
         `True` iff fd 1 is a terminal.
     """
+    # SAFETY: libc isatty has the exact `int isatty(int)` ABI, fd 1 is a valid
+    # scalar input even when closed, and the call accepts/retains no pointer.
     return external_call["isatty", Int32](Int32(1)) == 1

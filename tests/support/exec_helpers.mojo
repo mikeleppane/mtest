@@ -4,12 +4,13 @@ Small conveniences the exec tests share: turning captured raw bytes into a
 `String` for readable assertions, counting bytes matching a value, and building
 the `["python3", <script>, ...]` argv for a committed helper target.
 """
+from mtest.config import lossy_utf8
 from mtest.exec import ProcessSpec
 
 
 def bytes_to_str(b: List[UInt8]) -> String:
     """Render captured bytes as a `String` for assertions (valid UTF-8 here)."""
-    return String(StringSlice(unsafe_from_utf8=Span(b)))
+    return lossy_utf8(b)
 
 
 def repeat(s: String, n: Int) -> String:
