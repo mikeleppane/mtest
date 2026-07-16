@@ -447,7 +447,7 @@ Flags this build serves:
 | Flag | Meaning |
 |------|---------|
 | `PATHS...` | files, directories (walked recursively for `test_*.mojo`), an explicit file path, or a node id (`path::test`, selects one test) |
-| `-k STR` | case-insensitive substring filter over node ids; at most one `-k` in this build; a `-k` that empties the whole session exits `5` |
+| `-k STR` | case-insensitive substring filter over node ids; single-valued (a repeated `-k` takes the last occurrence in this build — see [contract §24.3](docs/cli-contract.md#243-selection-and-parsing-deviations-in-this-build)); ignored under `collect` today; a `-k` that empties the whole session exits `5` |
 | `--exclude GLOB` | (repeatable) drop matching files from the run; always reported with a loud `EXCLUDED` line |
 | `-I PATH` | (repeatable) an include path forwarded to every `mojo build` |
 | `--build-arg ARG` / `-- ARGS...` | (repeatable / pass-through) forward one argument to `mojo build`; `-o`, `--emit`, and extra source operands are refused (exit 4) |
