@@ -1,13 +1,12 @@
-# Fixtures and golden transcripts are byte-exact. Git must never normalize line
+# Protocol fixtures and snapshots are byte-exact. Git must never normalize line
 # endings, strip trailing whitespace, or run text diffs/merges on these paths.
 # The transcripts pin TestSuite's real output, whose report lines DELIBERATELY
 # carry trailing spaces, and whose exact bytes are regenerated and diffed
 # byte-for-byte by the CI gate — a "helpful" CRLF->LF rewrite or whitespace
-# strip would silently invalidate every golden. The `**` recursive form is
-# required: a bare `fixtures/ -text` directory pattern does NOT apply to the
-# files inside it.
-fixtures/**       -text
-goldens/**        -text
+# strip would silently invalidate every snapshot. The `**` recursive form is
+# required: a bare directory pattern does not apply to the files inside it.
+tests/fixtures/**  -text
+tests/snapshots/** -text
 
 # The pixi lock is machine-generated; treat it as binary so a stale local diff
 # never triggers a 3-way merge, and keep GitHub from counting it as source.

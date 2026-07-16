@@ -37,12 +37,40 @@ jobs:
 
       # The aggregate gate, fail-fast in order:
       #   fmt-check         — mojo format then `git diff --exit-code` (never edits in CI)
+      #   harness-check     — exercise recursive suite enumeration and output mapping
+      #   safety-check      — reject undocumented unsafe Mojo operations
+      #   native-check      — verify native ABI/layout/symbol isolation and lifecycle
       #   build             — precompile src/mtest (the package-compiles gate)
       #   transcripts-check — regenerate every transcript to a temp dir and diff
-      #                       byte-for-byte against the committed goldens (also a
+      #                       byte-for-byte against committed protocol snapshots (also a
       #                       toolchain-drift detector via the pinned header)
-      #   test              — build each tests/test_*.mojo and EXECUTE the binary
+      #   test-direct       — build each classified suite and EXECUTE the binary
       #                       directly (never `mojo run`, which masks crash codes)
+      #   test              — dogfood mtest over the same exact path inventory
       # No network is touched here.
-      - name: CI gate (fmt-check -> build -> transcripts-check -> test)
+      - name: CI gate
         run: pixi run ci
+
+  macos-build:
+    name: macOS arm64 build + link
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          locked: true
+          cache: true
+
+      - name: Mojo version
+        run: pixi run mojo-version
+
+      - name: Precompile package
+        run: pixi run build
+
+      - name: Link executable
+        run: pixi run build-bin
+
+      - name: Smoke-test executable
+        run: ./build/mtest --help

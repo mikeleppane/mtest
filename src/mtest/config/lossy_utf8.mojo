@@ -92,6 +92,10 @@ def lossy_utf8(bytes: List[UInt8]) -> String:
         var slice = List[UInt8]()
         for k in range(seq_len):
             slice.append(bytes[i + k])
+        # SAFETY: the branch-specific leading-byte bounds plus the tightened
+        # first continuation and every remaining 0x80..0xBF continuation prove
+        # this 2..4-byte slice is one RFC 3629 scalar (no overlong, surrogate, or
+        # >U+10FFFF value). `slice` remains live until String copies the Span.
         out += String(StringSlice(unsafe_from_utf8=Span(slice)))
         i += seq_len
     return out^

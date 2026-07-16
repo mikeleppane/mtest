@@ -731,8 +731,7 @@ struct ConsoleReporter(Reporter):
         return out + "\n"
 
     def _render_drift(mut self, e: Event):
-        """A loud DRIFT banner: name the pin, the goldens, and the offending line.
-        """
+        """A loud DRIFT banner naming the pin, snapshots, and offending line."""
         var banner = (
             String("DRIFT  ")
             + e.path
@@ -744,7 +743,7 @@ struct ConsoleReporter(Reporter):
         if self._last_warning_detail.byte_length() > 0:
             self._head += "    " + self._last_warning_detail + "\n"
         self._head += (
-            "    Check both the toolchain pin and goldens/transcripts/, and"
+            "    Check the toolchain pin and tests/snapshots/protocol/, and"
             " this file's own captured output.\n"
         )
 

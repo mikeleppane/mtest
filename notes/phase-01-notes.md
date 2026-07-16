@@ -44,7 +44,7 @@ the session disambiguates a real timeout from a user interrupt via the
 latching flag rather than the termination shape alone.
 
 Reproduced independently by hand (not just via the automated gate): launching
-`mtest testdata/slow` in its own session, waiting for the run to actually
+`mtest e2e/slow` in its own session, waiting for the run to actually
 start, sending `SIGINT` to the whole process group, and then checking for
 survivors. Exit code was 2, the summary read `0 passed, 0 failed, 0 crashed,
 0 timed out, 0 compile error (0 excluded, 3 not run)`, and a follow-up
@@ -56,7 +56,7 @@ A file that builds and exits 0 without running any tests is reported PASS in
 this build. That's not a hidden gap — there is no per-test report parsing
 yet, so the runner has no way to know a file collected zero `test_*`
 functions versus running some and passing all of them. The committed
-`testdata/suite/test_zero.mojo` fixture (a suite with no test functions at
+`e2e/suite/test_zero.mojo` fixture (a suite with no test functions at
 all) makes this concrete: both its manifest row and its end-to-end assertion
 pin PASS as the correct-for-this-build outcome, and it's stated plainly in
 the README's status section rather than glossed over. Closing this hole is
@@ -176,11 +176,11 @@ against the committed test fixtures.
 A single passing file:
 
 ```console
-$ build/mtest testdata/suite/test_passing.mojo
+$ build/mtest e2e/suite/test_passing.mojo
 mtest 0.1.0-dev (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
-PASS           testdata/suite/test_passing.mojo  0.02s
+PASS           e2e/suite/test_passing.mojo  0.02s
 
 ===== 1 passed, 0 failed, 0 crashed, 0 timed out, 0 compile error (0 excluded, 0 not run) in 0.4s =====
 ```
@@ -191,47 +191,47 @@ A mixed directory — pass, compile error, crash, and a real assertion
 failure, all in one run:
 
 ```console
-$ build/mtest testdata/suite
+$ build/mtest e2e/suite
 mtest 0.1.0-dev (mojo)
 root: /home/mikko/dev/mtest   selected: 7 files   excluded: 0
 
-PASS           testdata/suite/nested/test_nested.mojo  0.07s
-COMPILE-ERROR  testdata/suite/test_compile_error.mojo  0.00s
-CRASH          testdata/suite/test_crashing.mojo  1.18s  (signal 4 — SIGILL, illegal instruction)
-FAIL           testdata/suite/test_failing.mojo  0.03s
-PASS           testdata/suite/test_noisy.mojo  0.02s
-PASS           testdata/suite/test_passing.mojo  0.02s
-PASS           testdata/suite/test_zero.mojo   0.07s
+PASS           e2e/suite/nested/test_nested.mojo  0.07s
+COMPILE-ERROR  e2e/suite/test_compile_error.mojo  0.00s
+CRASH          e2e/suite/test_crashing.mojo  1.18s  (signal 4 — SIGILL, illegal instruction)
+FAIL           e2e/suite/test_failing.mojo  0.03s
+PASS           e2e/suite/test_noisy.mojo  0.02s
+PASS           e2e/suite/test_passing.mojo  0.02s
+PASS           e2e/suite/test_zero.mojo   0.07s
 
---- COMPILE-ERROR testdata/suite/test_compile_error.mojo — mojo build said: ---
-/home/mikko/dev/mtest/testdata/suite/test_compile_error.mojo:12:17: error: use of unknown declaration 'this_symbol_is_never_defined_anywhere'
+--- COMPILE-ERROR e2e/suite/test_compile_error.mojo — mojo build said: ---
+/home/mikko/dev/mtest/e2e/suite/test_compile_error.mojo:12:17: error: use of unknown declaration 'this_symbol_is_never_defined_anywhere'
     var value = this_symbol_is_never_defined_anywhere()
                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 mojo: error: failed to parse the provided Mojo source module
-reproduce: mojo build testdata/suite/test_compile_error.mojo -o build/bin/testdata_ssuite_stest_ucompile_uerror
+reproduce: mojo build e2e/suite/test_compile_error.mojo -o build/bin/e2e_ssuite_stest_ucompile_uerror
 
---- CRASH testdata/suite/test_crashing.mojo (signal 4 — SIGILL, illegal instruction) — captured stdout ---
-ABORT: /home/mikko/dev/mtest/testdata/suite/test_crashing.mojo:17:10: simulated hard crash
+--- CRASH e2e/suite/test_crashing.mojo (signal 4 — SIGILL, illegal instruction) — captured stdout ---
+ABORT: /home/mikko/dev/mtest/e2e/suite/test_crashing.mojo:17:10: simulated hard crash
 --- captured stderr ---
 #0 0x... (/home/mikko/dev/mtest/.pixi/envs/default/lib/libKGENCompilerRTShared.so+0x...)
     ... (stack dump, elided here — full frames in the README) ...
-reproduce: mtest testdata/suite/test_crashing.mojo
+reproduce: mtest e2e/suite/test_crashing.mojo
 
---- FAIL testdata/suite/test_failing.mojo (exit 1) — captured stdout ---
+--- FAIL e2e/suite/test_failing.mojo (exit 1) — captured stdout ---
 Unhandled exception caught during execution:
-Running 3 tests for /home/mikko/dev/mtest/testdata/suite/test_failing.mojo
+Running 3 tests for /home/mikko/dev/mtest/e2e/suite/test_failing.mojo
     PASS [ 0.001 ] test_first_passes
     FAIL [ 0.043 ] test_second_fails
-      At /home/mikko/dev/mtest/testdata/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:
+      At /home/mikko/dev/mtest/e2e/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:
          left: 1
         right: 2
     PASS [ 0.001 ] test_third_passes
 --------
 Summary [ 0.043 ] 3 tests run: 2 passed , 1 failed , 0 skipped
-Test suite' /home/mikko/dev/mtest/testdata/suite/test_failing.mojo 'failed!
+Test suite' /home/mikko/dev/mtest/e2e/suite/test_failing.mojo 'failed!
 
 --- captured stderr ---
-reproduce: mtest testdata/suite/test_failing.mojo
+reproduce: mtest e2e/suite/test_failing.mojo
 
 
 ===== 4 passed, 1 failed, 1 crashed, 0 timed out, 1 compile error (0 excluded, 0 not run) in 3.9s =====

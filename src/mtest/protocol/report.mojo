@@ -6,8 +6,8 @@ PURE: it imports only `model`, performs no I/O, holds no FFI, decides no policy,
 and never raises. The session (a higher layer) owns the decode and turns the
 verdict into policy; this module only reads bytes.
 
-The grammar is exactly what the pinned toolchain emits, frozen in the golden
-transcripts under `goldens/transcripts/`. Trailing spaces are load-bearing. A
+The grammar is exactly what the pinned toolchain emits, frozen in protocol
+snapshots under `tests/snapshots/protocol/`. Trailing spaces are load-bearing. A
 report block for a file whose canonical path is `P`:
 
     Running <N> tests for <P>                (header, trailing space, P byte-exact)

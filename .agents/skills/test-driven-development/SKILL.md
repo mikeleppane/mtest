@@ -6,7 +6,7 @@ description: Test-driven development for the mtest repo — a pytest-like test r
 # Test-Driven Development (mtest)
 
 Write the failing test before the code. For a bug, reproduce it with a test — or
-a golden transcript — *before* fixing it. Tests are proof; "looks right" is not
+a protocol snapshot — *before* fixing it. Tests are proof; "looks right" is not
 done. This is a test runner, not a numerics project: there is essentially no
 float math anywhere in `src/`. A supervised process exits with an exact integer
 code or dies by an exact signal; a report declares an exact count of tests; a
@@ -31,7 +31,7 @@ on.
 mtest's own tests are ordinary `def ... raises` functions discovered by
 `TestSuite` and run against the **precompiled package** (`build/mtest.mojopkg` —
 `mojo package` does not exist in `1.0.0b2`, only `mojo precompile`). Every test
-file ends with the same runner, exactly as `tests/test_transcripts_smoke.mojo`
+file ends with the same runner, exactly as `tests/integration/test_transcripts_smoke.mojo`
 does today:
 
 ```mojo
@@ -55,23 +55,24 @@ def main() raises:
 ```
 
 **Crucially, the repo eats the discipline the product sells.** The suite is run
-by `scripts/test_all.sh`, which for each `tests/test_*.mojo` **builds a binary
+by `scripts/test_all.sh`, which for each classified suite **builds a binary
 with `mojo build` and executes it directly** — never `mojo run`, which masks a
 crashing process's exit code to 1 and can JIT-crash in CI (#6413). Run the whole
 suite (the canonical green gate), or one file while iterating:
 
 ```bash
-pixi run test                                      # THE gate — build pkg, then build+execute every tests/test_*.mojo
-pixi run build && mojo build --no-optimization -I build -I tests \
-    tests/test_exec.mojo -o build/tests/test_exec && build/tests/test_exec   # one file
+pixi run test-direct                               # independent gate — build pkg, then build+execute every suite
+pixi run build && mojo build --no-optimization -I build -I tests/support \
+    tests/integration/test_exec_capture.mojo -o build/tests/integration/test_exec_capture && build/tests/integration/test_exec_capture
 ```
 
 `scripts/test_all.sh` builds the package first (fail-fast on a broken toolchain
-or a package that no longer compiles), then globs `tests/test_*.mojo` in sorted
-order — no hand-maintained list to drift. A stale `build/mtest.mojopkg` is the
+or a package that no longer compiles), then recursively inventories the requested
+classified roots in sorted order — no hand-maintained execution list to drift. A stale `build/mtest.mojopkg` is the
 classic "my change did nothing" trap: after any `src/` edit, rebuild before
 running a single test file by hand, or the test exercises stale code. One file
-per unit under test, named `tests/test_<thing>.mojo`.
+per unit under test, named `tests/unit/test_<thing>.mojo` or
+`tests/integration/test_<thing>.mojo` according to the boundary it crosses.
 
 **Keep test modules small.** Mojo `#6554` is a `TestSuite`-discovery compile
 stall that scales with a module's *function count*, not file size. A file that
@@ -94,7 +95,7 @@ kind of test:
 | `model` — outcomes, events, exit-code precedence | the precedence function over every outcome multiset | pure logic — enumerate the domain |
 | `config` — RunnerConfig | defaults, flag → field mapping | pure logic |
 | `discover` — walk, pattern, excludes | a temp tree of `test_*.mojo` + decoys | a hand-built directory |
-| `protocol` — report/collect parsing | the committed golden transcripts | `goldens/transcripts/` |
+| `protocol` — report/collect parsing | committed protocol snapshots | `tests/snapshots/protocol/` |
 | `report` — reporters | rendered output for a fixed event stream | structural assertions |
 | `exec` — the POSIX process adapter | supervision of real system binaries | `/bin/echo`, `/bin/false`, `/bin/sleep` |
 | `session` — orchestration | verdict + exit code end to end | the known-outcome tree (below) |
@@ -113,8 +114,8 @@ as it is banned in the product — supervise a real binary, not `/bin/sh -c`.
 
 ### Golden-transcript tests — freeze the toolchain's protocol, byte for byte
 
-The transcripts under `goldens/transcripts/` are this repo's golden tests at
-project scale: committed probe `fixtures/`, run at the pinned Mojo toolchain,
+The transcripts under `tests/snapshots/protocol/` are this repo's snapshots at
+project scale: committed probes under `tests/fixtures/protocol/`, run at the pinned Mojo toolchain,
 their normalized output frozen and diffed byte-for-byte by `pixi run
 transcripts-check`. **The toolchain IS the oracle** — a transcript pins exactly
 what `std.testing.TestSuite` emits at the pinned version, which is what lets the
@@ -161,8 +162,8 @@ directory proving recursion, and an excluded directory. A `MANIFEST` maps file �
 expected verdict → expected contribution to the exit code, with a rationale line
 each. A Python end-to-end harness under `scripts/` builds the runner once and
 asserts, per scenario, the **exact exit code** and the **structural** shape of the
-output. Python is fine there — `scripts/` is its containment zone; the runner
-itself stays pure Mojo.
+output. Python harness logic stays under `scripts/`; test-only subprocess actors
+may live under `tests/fixtures/exec/`. The runner itself stays pure Mojo.
 
 ### The tripwire and the self-verifying generator
 
@@ -253,7 +254,7 @@ float legitimately appears is a timing number under `bench` — those are
   in review, not a style choice; sampling is how a wrong precedence table or a
   missed flag ships.
 - Keep tests independent: no shared mutable state between tests, and no test
-  writes under `goldens/`, `fixtures/`, or a committed known-outcome tree — those
+  writes under `tests/snapshots/`, `tests/fixtures/`, or a known-outcome tree — those
   are frozen inputs, not scratch space. A test that needs a directory builds it in
   a temp dir and cleans up.
 
@@ -298,4 +299,5 @@ float legitimately appears is a timing number under `bench` — those are
 - [ ] A refactor commit does not move a transcript or a tripwire's pinned value
 - [ ] Test module stays small (function count, not just file size) — split and
       add to `SLOW_6554` in `scripts/test_all.sh` if it starts stalling
-- [ ] `pixi run test` green; the new file follows `tests/test_<thing>.mojo`
+- [ ] `pixi run test-direct` and `pixi run test` green; the new file is in the
+      correct classified suite root

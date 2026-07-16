@@ -16,7 +16,7 @@ code is right or it is a lie, and a crash is not a failure.
 **Where this applies today.** `src/mtest/` is an intentionally empty, compiling
 package — there is no `model`/`exec`/`protocol`/`session` code yet to hold this
 bar (AGENTS.md). Concretely this skill governs the Mojo that *does* exist now
-(the probe `fixtures/`, the tests under `tests/`, `src/mtest/__init__.mojo`'s
+(the protocol probes under `tests/fixtures/`, the suites, `src/mtest/__init__.mojo`'s
 docstring) and is the contract each later module must meet the day it lands —
 read it before writing `exec` just as much as before touching today's fixtures.
 
@@ -139,6 +139,30 @@ that keep it correct:
   POSIX surface. Any `#ifdef`-shaped divergence is hidden behind the module's
   narrow interface — `session` never sees an fd or a syscall.
 
+### `SAFETY:` arguments are part of every unsafe operation
+
+Immediately precede every raw allocation/free, `UnsafePointer` construction,
+unsafe string/pointer conversion, pointer bitcast, memory initialization, or FFI
+call with `# SAFETY:`. One comment may cover a mechanically contiguous unsafe
+block, but never unrelated intervening statements. State the actual proof rather
+than paraphrasing the operation:
+
+- where the pointer came from and who owns/frees it;
+- why it stays live and does not escape the callee's borrow;
+- the exact initialized byte/element bounds used by every read or write;
+- alignment, layout, bit-pattern, and gated platform assumptions;
+- the foreign signature and pointer-retention contract;
+- signal-context or post-fork async-safety constraints; and
+- cleanup behavior on every partial-success and error path.
+
+Prefer a safe stdlib operation when one exists. During the hardening migration,
+run `pixi run safety-check` explicitly to inventory unresolved sites and review
+its non-gating pointer arithmetic/typed-dereference hints. Do not add a clause
+until the operation's invariants are actually true. The task joins `ci` only
+after the complete inventory is resolved; from then on every Mojo edit must keep
+it green. The checker proves only that a nearby argument exists; review proves
+that the argument is true and complete.
+
 ---
 
 ## Protocol parsing — anchor on the last report header, trust nothing a test prints
@@ -156,7 +180,7 @@ grammar. The parser must never miscount a test's stdout as protocol.
   number of per-test result rows, and the summary tallies must all agree
   (`declared == rows == passed + failed + skipped`). A mismatch is a
   MALFORMED-SUITE signal, not something to paper over by trusting one source.
-- **The report grammar is the toolchain's, not ours.** The golden transcripts pin
+- **The report grammar is the toolchain's, not ours.** Protocol snapshots pin
   exactly what TestSuite emits at the pinned Mojo version; the parser is written
   against those frozen bytes, not against a remembered format. When the transcript
   changes, the parser follows the transcript.
@@ -322,9 +346,9 @@ relies on.
   `model` → `config` → `discover`|`protocol`|`report` → `exec` → `session` →
   `cli`. Never import "up"; a cycle is a bug. Structure findings and refactor
   planning live in [improve-architecture](../improve-architecture/SKILL.md).
-- **`src/` is pure Mojo.** Python exists only under `scripts/` (the transcript
-  generator and check harness). A `from mtest import ...` under `src/` is a Mojo
-  import of *this* package.
+- **`src/` is pure Mojo.** Python exists only under `scripts/` (build/test
+  harnesses) and `tests/fixtures/exec/` (test-only subprocess actors). A
+  `from mtest import ...` under `src/` is a Mojo import of *this* package.
 - **Generated source is a golden that happens to be source.** Any file emitted by
   a generator carries a provenance header and is **never hand-edited** — fix the
   generator and regenerate, exactly like a transcript.

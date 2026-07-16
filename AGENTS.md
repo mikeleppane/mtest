@@ -18,8 +18,11 @@ them for CI.
 
 Non-goals: it is **not** an assertion library (assertions come from
 `std.testing`), **not** a property-testing framework, and **not** a replacement
-for TestSuite. It has **zero runtime dependencies** — the runner is pure Mojo;
-Python appears only in build-time tooling under `scripts/`.
+for TestSuite. It has **zero runtime dependencies**: product logic under `src/`
+is pure Mojo, while the exec-private POSIX adapter under `native/` is compiled
+and statically linked at build time against the platform C library. Python
+appears only in build-time tooling under `scripts/` and test-only subprocess
+actors under `tests/fixtures/exec/`.
 
 ## Product principles
 
@@ -72,22 +75,50 @@ proven the first time it exists.
 
 ## Mojo, not Python
 
-`src/` is **pure Mojo**. Python lives only under `scripts/` (the transcript
-generator and check harness) and is never a runtime dependency. Follow the
+`src/` is **pure Mojo**. The approved native boundary is confined to `native/`:
+a private C17 POSIX adapter that supplies header-derived signal/process ABI,
+compiled to an object and statically linked into Mojo consumers. It may not
+contain product policy, reporting, parsing, or orchestration. Python lives only
+under `scripts/` (build/test harnesses) and `tests/fixtures/exec/` (test-only
+subprocess actors), and is never a runtime dependency. Follow the
 global `mojo-syntax` skill for all syntax — training data is stale, and this
 toolchain has removed or renamed much of what a model will reach for by default
 (`def` not `fn`, `comptime` not `alias`/`@parameter`, `var` not `let`,
 `std.`-prefixed imports, `s[byte=i]` not `s[i]`). Docstrings are Google-style,
 triple-quoted, and mandatory on public entities.
 
+## Unsafe Mojo requires a local proof
+
+Every operation that bypasses Mojo's lifetime, initialization, bounds, type, or
+ABI checks has an adjacent `# SAFETY:` comment. Put the comment immediately
+before the smallest operation or contiguous unsafe block it justifies; do not
+use a distant function-level assurance. The argument is concrete and
+falsifiable, addressing every applicable invariant:
+
+- pointer provenance and ownership, including who frees an allocation;
+- lifetime and non-escape across every borrow or syscall;
+- byte/element bounds and complete initialization before reads;
+- alignment, layout, valid bit patterns, and platform assumptions;
+- the exact foreign ABI and whether the callee retains a pointer;
+- signal-handler or post-fork restrictions and concurrency assumptions; and
+- cleanup on success, error, timeout, and partial-initialization paths.
+
+Prefer deleting an unsafe operation when a safe stdlib operation exists. During
+the hardening migration, run `pixi run safety-check` explicitly to inventory
+unresolved sites; do not add a clause until the operation's invariants are true.
+The task joins `ci` only after the complete inventory is resolved. The checker
+enforces local comment presence and prints separate pointer-arithmetic and
+typed-dereference review hints; human review still proves adequacy. A green
+checker is not proof that unsafe code is sound.
+
 ## The transcript lifecycle — doctrine
 
-The committed golden transcripts under `goldens/transcripts/` pin TestSuite's
+The committed protocol snapshots under `tests/snapshots/protocol/` pin TestSuite's
 actual per-file protocol at the pinned toolchain. `scripts/gen_transcripts.py`
 is the only thing that writes them.
 
 - **A red `transcripts-check` after a repo change indicts THE CHANGE, not the
-  goldens.** Regenerating (`pixi run transcripts`) is legitimate **only** when
+  snapshots.** Regenerating (`pixi run transcripts`) is legitimate **only** when
   the oracle side visibly changed: a mojo pin bump (which appears in every
   transcript header) or a deliberate fixture/matrix edit. "The new output looks
   close enough" is never evidence.
@@ -125,16 +156,16 @@ pixi run fmt              # format in place (run locally before committing)
 pixi run build            # the package-compiles gate
 pixi run transcripts-check# regenerate to a temp dir and diff byte-for-byte
 pixi run test-direct      # the independent glob-driven twin: build+execute
-                           # each tests/test_*.mojo directly, no mtest involved
+                           # each unit/integration suite directly, no mtest involved
 pixi run test             # the self-hosted dogfood run: build/mtest over its
-                           # own tests/, plus a completeness check against an
-                           # independent glob of the same tree
-pixi run e2e              # build the binary, drive it against testdata/
+                           # own tests/, plus exact path-membership verification
+                           # against an independent classified inventory
+pixi run e2e              # build the binary, drive it against e2e/
                             # (manifest.json), assert exact exit codes/output
 ```
 
-`pixi run ci` chains `fmt-check -> build -> transcripts-check -> test-direct ->
-test -> e2e` fail-fast and is exactly what CI runs. `test-direct` and `test`
+`pixi run ci` chains `fmt-check -> harness-check -> build -> transcripts-check ->
+test-direct -> test -> e2e` fail-fast and is exactly what CI runs. `test-direct` and `test`
 both build-then-execute the binary directly — never `mojo run` anywhere in the
 gate, because it masks crash exit codes to 1.
 
@@ -192,8 +223,8 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | ----- | ---- |
 | `scaffold` | repo skeleton, license/readme/gitignore/gitattributes |
 | `pixi` | `pixi.toml`, `pixi.lock`, tasks, the environment |
-| `fixtures` | `fixtures/` — the committed TestSuite probe modules |
-| `transcripts` | `goldens/transcripts/` + `scripts/gen_transcripts.py` + `scripts/transcripts_check.sh` |
+| `fixtures` | `tests/fixtures/` — protocol probes and subprocess actors |
+| `transcripts` | `tests/snapshots/protocol/` + generator/check scripts |
 | `spec` | `docs/cli-contract.md` |
 | `agents` | `AGENTS.md` |
 | `notes` | `notes/` |
@@ -208,7 +239,7 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `cli` | `src/mtest/cli` (arg parsing, main) |
 | `cache` | in-session build/collection reuse |
 | `test` | test infrastructure (`scripts/test_all.sh`, `scripts/build_pkg.sh`, shared helpers) |
-| `e2e` | end-to-end harness (`scripts/e2e_check.py`) and its `testdata/` manifest and scenarios |
+| `e2e` | end-to-end harness (`scripts/e2e_check.py`) and its `e2e/` manifest and scenarios |
 | `bench` | `benchmarks/` |
 | `docs` | docstrings, `docs/` |
 | `build` | packaging |
@@ -450,7 +481,7 @@ Accumulated the hard way; append as later phases teach more.
 
 - `.agents/skills/git-conventions` — commit/branch/PR conventions for this repo.
 - `.agents/skills/mojo-coding-guidance` — per-edit Mojo coding contract.
-- `.agents/skills/test-driven-development` — the transcript-golden lifecycle and
+- `.agents/skills/test-driven-development` — the protocol-snapshot lifecycle and
   parser-testing discipline.
 - `.agents/skills/code-review-and-quality` — pre-merge review axes and the
   standing dual-adversarial-review protocol.

@@ -39,7 +39,7 @@ asking to build on a premise nobody re-verified.
 
 ## The R5 native-skip findings
 
-Three facts about TestSuite's native skip API, pinned by new golden
+Three facts about TestSuite's native skip API, pinned by new protocol snapshot
 transcripts (`skipped--skip-all.txt`, `skipped--only-native.txt`) rather than
 assumed:
 
@@ -48,7 +48,7 @@ assumed:
 2. A natively-skipped test that is explicitly **selected** by name under
    `--only` still reports `SKIP`. Selecting it does not force it to run.
 3. And the one that actually matters: `--only <native-skip-test>` output is
-   **byte-identical** to `--skip-all` output. Diffing the two golden
+   **byte-identical** to `--skip-all` output. Diffing the two snapshot
    transcripts shows the only difference is the `cmd:` line in the header —
    every report byte after it matches, down to `SKIP [ T ] test_runs_normally`
    showing up in *both* transcripts even though the `--only` run never named
@@ -106,7 +106,7 @@ corruption-resistance story:
 
 ## The hostile fixtures, run one at a time
 
-`testdata/hostile/` and `testdata/chameleon/` exist to make the doctrine
+`e2e/hostile/` and `e2e/chameleon/` exist to make the doctrine
 above concrete. Each one is a known-outcome fixture with a docstring
 predicting exactly what should happen, and each was run to confirm the
 prediction rather than just trusted from the source:
@@ -154,7 +154,7 @@ building twice. `scripts/logging_mojo.py` is a stdlib-only wrapper that logs
 every `mojo` invocation's subcommand and target before exec-ing the real
 `mojo` with an identical argv, so stdout, stderr, and the exit code are
 untouched. Run one selection invocation through it —
-`mtest --mojo <wrapper> -k one testdata/matrix`, which matches
+`mtest --mojo <wrapper> -k one e2e/matrix`, which matches
 `test_alpha_one` in one file and `test_beta_one` in another — and the
 wrapper's log shows exactly one `mojo build` per file, not two. The probe
 phase (learn each file's node ids under `--skip-all`) and the run phase

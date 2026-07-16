@@ -5,12 +5,12 @@ description = "A pytest-like test runner for Mojo that orchestrates the stdlib's
 channels = ["https://conda.modular.com/max/", "conda-forge"]
 # Linux is the gate platform; macOS is a v1 target and shares the same POSIX
 # process surface the runner depends on. Bumping the platform set is an
-# Ask-first decision — the transcript goldens are stamped with os/arch and a
+# Ask-first decision — the protocol snapshots are stamped with os/arch and a
 # regeneration on a foreign platform diffs loudly by design.
 platforms = ["linux-64", "osx-arm64"]
 
 [dependencies]
-# The toolchain IS the oracle: the golden transcripts pin TestSuite's behavior
+# The toolchain IS the oracle: the protocol snapshots pin TestSuite's behavior
 # at exactly this Mojo version, and the version appears in every transcript
 # header. Bumping mojo is an Ask-first decision (CI must match local; a bump can
 # silently change valid syntax AND the pinned protocol — regenerate transcripts
@@ -21,6 +21,10 @@ mojo = "==1.0.0b2,<2"
 # itself is pure Mojo with ZERO runtime dependencies; there is no
 # [pypi-dependencies] section on purpose.
 python = "3.12.*"
+# The POSIX adapter is a build-time C object linked into Mojo executables. Pin
+# one compiler on both supported targets so its ABI and sanitizer behavior are
+# reproducible; the linked object adds no runtime library dependency.
+clang = "==18.1.8"
 
 [tasks]
 # Print the pinned Mojo version — first CI step, fails fast on a broken toolchain
@@ -33,48 +37,83 @@ mojo-version = "mojo --version"
 # produces the same artifact.
 build = "bash scripts/build_pkg.sh"
 
+# Compile the exec-private C adapter to the one production object linked into
+# every Mojo executable that can instantiate mtest.exec. The ABI checker proves
+# the test-only fault/sanitizer controls are absent from this artifact.
+build-native = "python scripts/build_native.py"
+
 # Link the runnable binary at build/mtest from src/main.mojo. Depends on `build`
 # so the package is precompiled to build/mtest.mojopkg FIRST — `-I build`
 # resolves `from mtest... import` against that artifact (the same include the
 # test runner uses), so main compiles against a binary dependency, not the whole
 # source tree. This is the first artifact a human can actually run.
-build-bin = { cmd = "mojo build -I build src/main.mojo -o build/mtest", depends-on = [
+build-bin = { cmd = "mojo build -I build src/main.mojo -o build/mtest -Xlinker build/native/mtest_exec_native.o", depends-on = [
     "build",
+    "build-native",
 ] }
 
-# Rewrite Mojo files in place — run locally before committing. Covers the runner
-# package, the probe fixtures, and the tests.
-fmt = "mojo format src fixtures tests"
+# Rewrite Mojo files in place — run locally before committing. Protocol fixtures
+# live beneath tests/, so this covers the runner, fixtures, and suites.
+fmt = "mojo format src tests e2e"
 # CI gate: format, then fail if anything changed (never edits in CI). A format
 # that shifts a fixture's `At <path>:<line>:<col>` coordinates is an oracle-side
 # change — regenerate transcripts, do not fight the gate.
-fmt-check = "mojo format src fixtures tests && git diff --exit-code"
+fmt-check = "mojo format src tests e2e && git diff --exit-code"
 
-# Regenerate the golden transcripts IN PLACE from the committed fixtures at the
-# pinned toolchain. Local use only (updating the committed goldens); never run in
+# Stdlib-only unsafe-operation inventory. Mutation tests pin every syntax family
+# and string/comment exclusion; the complete product/test inventory must remain
+# locally documented before the ordinary CI gate can proceed.
+safety-check = "python scripts/safety_check_test.py && python scripts/safety_check.py"
+
+# Strict C17 ABI/layout/symbol verification plus native lifecycle tests for the
+# private exec adapter. This remains separate from the Mojo suite so the test
+# object can expose deterministic fault and sanitizer controls that production
+# linkage proves absent.
+native-check = "python scripts/native_check.py"
+
+# Source-build the native adapter and a risk-weighted exec subset with matching
+# AddressSanitizer instrumentation. Live OOB/UAF/leak controls prove that both
+# the compiler instrumentation and fail-closed harness remain effective.
+asan-check = "python scripts/asan_check.py"
+
+# Source-build every exec integration suite with debug information and run it
+# under the locked Linux-only Memcheck. Undefined-value, invalid-access, leak,
+# and fd controls run first; reviewed runtime-reachable allocations are matched
+# exactly and project/native frames are forbidden from that baseline.
+valgrind-check = "python scripts/valgrind_check.py"
+
+# Regenerate the protocol snapshots IN PLACE from the committed fixtures at the
+# pinned toolchain. Local use only (updating the committed snapshots); never run in
 # CI. The generator self-verifies (hard asserts) before writing.
 transcripts = "python scripts/gen_transcripts.py"
 # CI gate: regenerate every transcript into a temp dir and diff byte-for-byte
-# against goldens/transcripts/ (MANIFEST included) — byte-identical or red. This
+# against tests/snapshots/protocol/ (MANIFEST included) — byte-identical or red. This
 # is the protocol pin: a red diff after a repo change indicts THE CHANGE; a red
 # diff after a mojo re-pin is the protocol changelog. Hermetic.
 transcripts-check = "bash scripts/transcripts_check.sh"
 
 # The INDEPENDENT glob-driven twin: builds the package first (fail-fast), then
-# BUILDS each tests/test_*.mojo and EXECUTES the binary directly, one process per
+# BUILDS each unit/integration test_*.mojo and EXECUTES the binary directly, one process per
 # file, with no mtest involved. `mojo run` never appears in the gate — it masks
 # crash exit codes to 1 and can JIT-crash in CI (#6413). The repo eats the same
 # build-then-execute rule the runner enforces. Kept in `ci` alongside `test` (the
 # dogfood run below) as an mtest-independent oracle: if the two ever disagree on
 # outcome, that disagreement is a self-hosting bug in mtest, not noise.
-test-direct = "bash scripts/test_all.sh"
+test-direct = "bash scripts/test_all.sh tests/unit tests/integration"
+test-unit = "bash scripts/test_all.sh tests/unit"
+test-integration = "bash scripts/test_all.sh tests/integration"
+
+# Fast self-tests for repository harness behavior. Uses disposable test inputs
+# and a fake compiler to prove recursive root selection and injective binary
+# paths without rebuilding the full Mojo suite.
+harness-check = "python scripts/harness_check.py"
 
 # DOGFOOD gate: run mtest over its OWN tests/ suite, executing the built binary
-# directly (`build/mtest -I build tests/` — never `mojo run`, for the same
+# directly (`build/mtest -I build -I tests/support tests/` — never `mojo run`, for the same
 # crash-exit-code reason as test-direct). Depends on build-bin so build/mtest and
 # the precompiled package both exist. `scripts/self_host_check.py` runs the
 # binary, propagates its exit code (the suite must PASS through mtest), and
-# checks COMPLETENESS independently of mtest: it globs tests/test_*.mojo itself
+# checks COMPLETENESS independently of mtest: it walks the classified suite roots
 # (without asking mtest) and fails if that count disagrees with the file count
 # mtest reported selecting — proof mtest discovered every test file and silently
 # skipped none. This is an ADDITIONAL gate beside test-direct, never a
@@ -84,7 +123,7 @@ cmd = "python scripts/self_host_check.py"
 depends-on = ["build-bin"]
 
 # End-to-end gate: build the runnable binary, then drive it against the committed
-# known-outcome tree under testdata/ (via testdata/manifest.json, the single
+# known-outcome tree under e2e/ (via e2e/manifest.json, the single
 # source of expectations) asserting exact exit codes and structural console
 # output. Depends on build-bin so build/mtest exists. Runs under `pixi run`, so
 # the spawned binary inherits the pixi env with `mojo` on PATH — the per-file
@@ -101,9 +140,15 @@ depends-on = ["build-bin"]
 [tasks.ci]
 depends-on = [
     "fmt-check",
+    "harness-check",
+    "safety-check",
+    "native-check",
     "build",
     "transcripts-check",
     "test-direct",
     "test",
     "e2e",
 ]
+
+[target.linux-64.dependencies]
+valgrind = "==3.27.1"

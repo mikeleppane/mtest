@@ -15,7 +15,7 @@ from mtest.exec.result import ProcessResult
 from mtest.exec.paths import canonicalize
 from mtest.exec.supervise import run_supervised
 from mtest.exec.signals import (
-    install_signal_handlers,
+    ExecRuntime,
     interrupt_requested,
 )
 from mtest.exec.tty import stdout_isatty

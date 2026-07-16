@@ -58,14 +58,14 @@ replace the two-model gate, they prepare for it.
    red gate is finding #1 — stop and report it, and name *which* stage went red (a
    byte diff in `transcripts-check` and a test failure indict different things —
    see axes 2 and 1). *Exception:* for a **docs-only diff** (Markdown,
-   docstrings, comments — nothing under `src/`, `tests/`, `scripts/`, `fixtures/`,
-   `goldens/`), a `fmt-check` and a read are enough.
+   docstrings, comments — nothing under `src/`, `tests/`, or `scripts/`), a
+   `fmt-check` and a read are enough.
 2. **Read the diff with its commit messages.** Does each commit do one thing with
    an honest scope and a *why* body? Does a `refactor` commit actually preserve
    behavior (transcripts untouched, no test weakened)? Does a `perf` commit cite
    its before/after numbers?
-3. **Check the frozen zones.** Did the change touch committed goldens
-   (`goldens/transcripts/`), the probe `fixtures/`, a pin (Mojo, the platform
+3. **Check the frozen zones.** Did the change touch protocol snapshots
+   (`tests/snapshots/protocol/`), protocol fixtures, a pin (Mojo, the platform
    set), the transcript on-disk format, or the frozen CLI contract? Those are
    Ask-first boundaries (AGENTS.md) — if crossed, was it raised *before* the
    commit? **Any regenerated transcript must name the oracle-side reason in the
@@ -94,7 +94,7 @@ Walk the diff once per axis. The triage prompts are starting points, not a scrip
 ### 2. Transcript fidelity & provenance (this repo's signature axis)
 
 - **Is every committed transcript traceable to a fixture, a scenario, and a
-  pinned toolchain?** Each golden's header names `gen_transcripts.py`, the
+  pinned toolchain?** Each snapshot header names `gen_transcripts.py`, the
   resolved mojo version + commit, the os/arch, the normalizer version, the fixture,
   and the scenario. A transcript that cannot be traced to a fixture + a matrix row
   + a pinned version does not get committed — full stop. A header that claims a
@@ -119,7 +119,7 @@ Walk the diff once per axis. The triage prompts are starting points, not a scrip
   crash-dies-by-signal, impostor-survives-byte-exact, count reconciliation, and
   byte-identical double generation — not for a sample, not as a warning. A
   disagreement belongs at generation time, not as a baffling Mojo failure later.
-- **No absolute path in any golden.** The compiler bakes absolute source paths;
+- **No absolute path in any snapshot.** The compiler bakes absolute source paths;
   the normalizer rewrites the repo root to `<REPO>`. An absolute path, a
   `llvm-symbolizer` line, or a raw `Stack dump` header surviving into a committed
   transcript is a **Critical** provenance break.
@@ -234,7 +234,7 @@ Group findings by severity; each carries `file:line` and a quoted snippet.
 
 | Severity | Meaning |
 |---|---|
-| **Critical** | crash laundered into a fail, `mojo run` in an exit-code path, hand-edited transcript, absolute path in a golden, Python under `src/`, allocation in the child before exec, red gate merged, `transcripts-check` weakened to a hash |
+| **Critical** | crash laundered into a fail, `mojo run` in an exit-code path, hand-edited transcript, absolute path in a snapshot, Python under `src/`, allocation in the child before exec, red gate merged, `transcripts-check` weakened to a hash |
 | **High** | 128+N termination, deadline kill collapsed into a crash, wrong exit-code precedence, un-anchored parse, over- or under-normalized transcript, missing group-kill or pipe drain, up-graph import, FFI outside `exec`, obsolete syntax that will break |
 | **Medium** | missing test for new behavior, vague/unlocated error message, unpinned magic constant, missing provenance comment, unmeasured perf claim |
 | **Low** | naming, a redundant copy, a docstring gap |

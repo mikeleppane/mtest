@@ -2,20 +2,20 @@
 """End-to-end gate for mtest.
 
 Runs the real `build/mtest` binary against the committed known-outcome tree under
-testdata/ and asserts, for a table of scenarios, the EXACT exit code and the
+e2e/ and asserts, for a table of scenarios, the EXACT exit code and the
 STRUCTURE of the console output (verdict tokens, root-relative paths, summary
 count arithmetic, framing presence/absence, error messages). Console layout is an
 informal surface, so nothing here is byte-golden: it asserts tokens and counts,
 never exact bytes.
 
-Expectations come from testdata/manifest.json — the single source of truth. This
+Expectations come from e2e/manifest.json — the single source of truth. This
 script consumes it directly and checks completeness both ways: every discovered
 test_*.mojo file has a manifest row, and every manifest row names a file that
 exists. There is no parallel hard-coded expectations table.
 
 Safety: every subprocess spawn has a hard wall-clock timeout and runs in its own
 process group, so a runner bug can never hang the gate. The only fixture that
-never returns (testdata/slow/test_hanging.mojo) is reached solely by the
+never returns (e2e/slow/test_hanging.mojo) is reached solely by the
 --timeout scenario (which mtest bounds) and the interrupt scenario (which sends
 SIGINT under a kill-guard).
 
@@ -44,7 +44,8 @@ from dataclasses import dataclass, field
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MTEST = os.path.join(REPO_ROOT, "build", "mtest")
-MANIFEST_PATH = os.path.join(REPO_ROOT, "testdata", "manifest.json")
+E2E_ROOT = os.path.join(REPO_ROOT, "e2e")
+MANIFEST_PATH = os.path.join(E2E_ROOT, "manifest.json")
 LOGGING_MOJO = os.path.join(REPO_ROOT, "scripts", "logging_mojo.py")
 
 # Generous per-spawn wall-clock ceilings. Cold `mojo build` is slow, so these are
@@ -357,7 +358,7 @@ def load_manifest() -> dict:
 
 
 def discovered_test_files() -> set[str]:
-    root = os.path.join(REPO_ROOT, "testdata")
+    root = E2E_ROOT
     found: set[str] = set()
     for dirpath, _dirs, files in os.walk(root):
         for name in files:
@@ -430,7 +431,7 @@ def _suite_tests(manifest: dict) -> dict:
 
 def s_default_suite(manifest: dict) -> str:
     suite = _suite_tests(manifest)
-    run = run_mtest(["testdata/suite"])
+    run = run_mtest(["e2e/suite"])
     # Any exit_class-1 member means the session exits 1.
     any_failing = any(row["exit_class"] == 1 for row in suite.values())
     expect_exit(run, 1 if any_failing else 0)
@@ -592,15 +593,15 @@ def s_hostile(manifest: dict) -> str:
     flood) -> CAPTURE-OVERFLOW FAIL (exit 1). These files are NOT in the default
     suite — the liar alone forces exit 3, which would swamp a whole-suite run —
     so each is driven on its own here. The verdict tokens and exit codes come
-    straight from the manifest rows for testdata/hostile/*."""
+    straight from the manifest rows for e2e/hostile/*."""
     hostile = {
         rel: row
         for rel, row in manifest["tests"].items()
-        if rel.startswith("testdata/hostile/")
+        if rel.startswith("e2e/hostile/")
     }
     expect(len(hostile) == 4, f"expected 4 hostile fixtures, got {len(hostile)}")
 
-    silent = "testdata/hostile/test_silent.mojo"
+    silent = "e2e/hostile/test_silent.mojo"
     run = run_mtest([silent])
     expect_exit(run, 1)
     expect(
@@ -608,7 +609,7 @@ def s_hostile(manifest: dict) -> str:
         f"silent binary did not report MALFORMED-SUITE:\n{run.stdout}",
     )
 
-    forger = "testdata/hostile/test_forger.mojo"
+    forger = "e2e/hostile/test_forger.mojo"
     run = run_mtest([forger])
     expect_exit(run, 1)
     expect(
@@ -616,7 +617,7 @@ def s_hostile(manifest: dict) -> str:
         f"forger did not report MALFORMED-SUITE:\n{run.stdout}",
     )
 
-    liar = "testdata/hostile/test_liar.mojo"
+    liar = "e2e/hostile/test_liar.mojo"
     run = run_mtest([liar])
     expect_exit(run, 3)
     expect(
@@ -626,7 +627,7 @@ def s_hostile(manifest: dict) -> str:
 
     # --show-output none keeps the ~8 MiB truncated capture out of the console;
     # the FAIL verdict line prints regardless of the show-output setting.
-    overflow = "testdata/hostile/test_overflow.mojo"
+    overflow = "e2e/hostile/test_overflow.mojo"
     run = run_mtest([overflow, "--show-output", "none"])
     expect_exit(run, 1)
     expect(
@@ -637,7 +638,7 @@ def s_hostile(manifest: dict) -> str:
 
 
 def s_single_pass(manifest: dict) -> str:
-    rel = "testdata/suite/test_passing.mojo"
+    rel = "e2e/suite/test_passing.mojo"
     run = run_mtest([rel])
     expect_exit(run, 0)
     expect(run.verdict_line("PASS", rel) is not None, "no PASS verdict line")
@@ -646,7 +647,7 @@ def s_single_pass(manifest: dict) -> str:
 
 
 def s_exitfirst(manifest: dict) -> str:
-    run = run_mtest(["testdata/suite", "-x"])
+    run = run_mtest(["e2e/suite", "-x"])
     expect_exit(run, 1)
     summ = expect_accounting(run)
     expect(summ.not_run >= 1, f"-x left nothing NOT-RUN (not_run={summ.not_run})")
@@ -656,16 +657,16 @@ def s_exitfirst(manifest: dict) -> str:
 def s_maxfail(manifest: dict) -> str:
     """`--maxfail N` stops scheduling once N failing TESTS have accumulated.
 
-    testdata/maxfail/ sorts test_a_fail, test_b_fail, test_c_pass; each failing
+    e2e/maxfail/ sorts test_a_fail, test_b_fail, test_c_pass; each failing
     file contributes exactly one failing test. `--maxfail 1` must stop right
     after test_a_fail, leaving the other two NOT-RUN."""
-    run = run_mtest(["testdata/maxfail", "--maxfail", "1"])
+    run = run_mtest(["e2e/maxfail", "--maxfail", "1"])
     expect_exit(run, 1)
     summ = expect_accounting(run)
     expect(summ.failed == 1, f"--maxfail 1 let {summ.failed} FAILs run, expected 1")
     expect(summ.not_run == 2, f"--maxfail 1 left {summ.not_run} NOT-RUN, expected 2")
     expect(
-        run.verdict_line("FAIL", "testdata/maxfail/test_a_fail.mojo") is not None,
+        run.verdict_line("FAIL", "e2e/maxfail/test_a_fail.mojo") is not None,
         "the file that tripped --maxfail did not report FAIL",
     )
     return f"--maxfail 1 stopped after 1 failing test; {summ.not_run} NOT-RUN, accounting holds"
@@ -674,18 +675,18 @@ def s_maxfail(manifest: dict) -> str:
 def s_exclude_and_stale(manifest: dict) -> str:
     run = run_mtest(
         [
-            "testdata/excluded",
-            "testdata/suite/test_passing.mojo",
+            "e2e/excluded",
+            "e2e/suite/test_passing.mojo",
             "--exclude",
-            "testdata/excluded/test_excluded.mojo",
+            "e2e/excluded/test_excluded.mojo",
             "--exclude",
-            "testdata/stale_no_such_*.mojo",
+            "e2e/stale_no_such_*.mojo",
         ]
     )
     expect_exit(run, 0)
     summ = expect_accounting(run)
     expect(
-        run.verdict_line("EXCLUDED", "testdata/excluded/test_excluded.mojo") is not None,
+        run.verdict_line("EXCLUDED", "e2e/excluded/test_excluded.mojo") is not None,
         "no loud EXCLUDED line",
     )
     expect(
@@ -698,11 +699,11 @@ def s_exclude_and_stale(manifest: dict) -> str:
 
 def s_all_excluded(manifest: dict) -> str:
     run = run_mtest(
-        ["testdata/excluded", "--exclude", "testdata/excluded/test_excluded.mojo"]
+        ["e2e/excluded", "--exclude", "e2e/excluded/test_excluded.mojo"]
     )
     expect_exit(run, 5)
     expect(
-        run.verdict_line("EXCLUDED", "testdata/excluded/test_excluded.mojo") is not None,
+        run.verdict_line("EXCLUDED", "e2e/excluded/test_excluded.mojo") is not None,
         "no EXCLUDED line",
     )
     return "everything excluded -> exit 5"
@@ -710,7 +711,7 @@ def s_all_excluded(manifest: dict) -> str:
 
 def s_empty_dir(manifest: dict) -> str:
     # Must live inside the invocation root (an out-of-root operand is exit 4).
-    tmp = tempfile.mkdtemp(prefix=".e2e_empty_", dir=os.path.join(REPO_ROOT, "testdata"))
+    tmp = tempfile.mkdtemp(prefix=".e2e_empty_", dir=E2E_ROOT)
     try:
         rel = os.path.relpath(tmp, REPO_ROOT)
         run = run_mtest([rel])
@@ -722,7 +723,7 @@ def s_empty_dir(manifest: dict) -> str:
 
 def s_failing_gate(manifest: dict) -> str:
     run = run_mtest(
-        ["testdata/suite", "--gate", "testdata/suite/test_failing.mojo"]
+        ["e2e/suite", "--gate", "e2e/suite/test_failing.mojo"]
     )
     expect_exit(run, 1)
     summ = expect_accounting(run)
@@ -733,13 +734,13 @@ def s_failing_gate(manifest: dict) -> str:
 
 def s_timeout(manifest: dict) -> str:
     run = run_mtest(
-        ["testdata/slow/test_hanging.mojo", "--timeout", "1"], timeout=SHORT_TIMEOUT
+        ["e2e/slow/test_hanging.mojo", "--timeout", "1"], timeout=SHORT_TIMEOUT
     )
     expect_exit(run, 1)
     summ = expect_accounting(run)
     expect(summ.timed_out == 1, f"expected 1 timed out, got {summ.timed_out}")
     expect(
-        run.verdict_line("TIMEOUT", "testdata/slow/test_hanging.mojo") is not None,
+        run.verdict_line("TIMEOUT", "e2e/slow/test_hanging.mojo") is not None,
         "no TIMEOUT verdict line",
     )
     expect(run.wall < 10.0, f"mtest took {run.wall:.1f}s to honor --timeout 1")
@@ -747,9 +748,9 @@ def s_timeout(manifest: dict) -> str:
 
 
 def s_precompile(manifest: dict) -> str:
-    rel = "testdata/pkg/test_uses_pkg.mojo"
+    rel = "e2e/pkg/test_uses_pkg.mojo"
     # Success: package precompiled, auto -I resolves the import -> PASS.
-    ok = run_mtest([rel, "--precompile", "testdata/pkg/mathlib"])
+    ok = run_mtest([rel, "--precompile", "e2e/pkg/mathlib"])
     expect_exit(ok, 0)
     expect(ok.verdict_line("PASS", rel) is not None, "precompiled import did not PASS")
     expect(
@@ -757,7 +758,7 @@ def s_precompile(manifest: dict) -> str:
         "auto -I failed: importing test hit a COMPILE-ERROR",
     )
     # Failure: broken package -> PRECOMPILE banner, casualties, exit 1.
-    bad = run_mtest([rel, "--precompile", "testdata/pkg_broken/badlib"])
+    bad = run_mtest([rel, "--precompile", "e2e/pkg_broken/badlib"])
     expect_exit(bad, 1)
     expect(
         "PRECOMPILE" in bad.combined,
@@ -773,7 +774,7 @@ def s_precompile(manifest: dict) -> str:
 
 
 def s_quiet_verbose(manifest: dict) -> str:
-    rel = "testdata/suite/test_passing.mojo"
+    rel = "e2e/suite/test_passing.mojo"
     quiet = run_mtest([rel, "-q"])
     expect_exit(quiet, 0)
     expect(
@@ -790,8 +791,8 @@ def s_quiet_verbose(manifest: dict) -> str:
 
 
 def s_show_output(manifest: dict) -> str:
-    fail = "testdata/suite/test_failing.mojo"
-    pass_ = "testdata/suite/test_passing.mojo"
+    fail = "e2e/suite/test_failing.mojo"
+    pass_ = "e2e/suite/test_passing.mojo"
     none = run_mtest([fail, "--show-output", "none"])
     expect_exit(none, 1)
     expect("--- FAIL" not in none.stdout, "--show-output none still framed the FAIL")
@@ -828,7 +829,7 @@ def s_durations(manifest: dict) -> str:
     )
 
     # Absent without the flag.
-    absent = run_mtest(["testdata/suite"])
+    absent = run_mtest(["e2e/suite"])
     expect(
         "slowest" not in absent.stdout,
         "a slowest-files section appeared without --durations",
@@ -837,7 +838,7 @@ def s_durations(manifest: dict) -> str:
     # Present with the flag; requesting far more rows than files ran, the
     # header states the ACTUAL (capped) count, never the requested N.
     requested = files_run + 50
-    run = run_mtest(["testdata/suite", "--durations", str(requested)])
+    run = run_mtest(["e2e/suite", "--durations", str(requested)])
     m = re.search(r"slowest (\d+) files:\n((?:  .+\n)+)", run.stdout)
     expect(
         m is not None,
@@ -875,7 +876,7 @@ def s_durations(manifest: dict) -> str:
     )
 
     # Survives -q: an explicit --durations beats the -q verbosity default.
-    quiet = run_mtest(["testdata/suite", "--durations", "2", "-q"])
+    quiet = run_mtest(["e2e/suite", "--durations", "2", "-q"])
     expect("slowest 2 files:" in quiet.stdout, "-q suppressed the --durations list")
 
     return f"absent w/o flag; {shown} rows (capped from {requested}), descending, survives -q"
@@ -891,7 +892,7 @@ def s_color(manifest: dict) -> str:
     attaches a real pty so the AUTO+tty case is actually colored first, then
     proves NO_COLOR turns it off.
     """
-    rel = "testdata/suite/test_failing.mojo"
+    rel = "e2e/suite/test_failing.mojo"
 
     # Explicitly REMOVE NO_COLOR so the colors-expected case does not inherit an
     # ambient NO_COLOR (e.g. under `NO_COLOR=1 pixi run ci`), which would silence
@@ -925,15 +926,15 @@ def s_color(manifest: dict) -> str:
 
 
 COLLECT_MATRIX_EXPECTED = [
-    "testdata/matrix/test_alpha.mojo::test_alpha_one",
-    "testdata/matrix/test_alpha.mojo::test_alpha_three",
-    "testdata/matrix/test_alpha.mojo::test_alpha_two",
-    "testdata/matrix/test_beta.mojo::test_beta_one",
-    "testdata/matrix/test_beta.mojo::test_beta_two",
+    "e2e/matrix/test_alpha.mojo::test_alpha_one",
+    "e2e/matrix/test_alpha.mojo::test_alpha_three",
+    "e2e/matrix/test_alpha.mojo::test_alpha_two",
+    "e2e/matrix/test_beta.mojo::test_beta_one",
+    "e2e/matrix/test_beta.mojo::test_beta_two",
 ]
 COLLECT_DIR_EXPECTED = [
-    "testdata/collect/test_probe_ok.mojo::test_one",
-    "testdata/collect/test_probe_ok.mojo::test_two",
+    "e2e/collect/test_probe_ok.mojo::test_one",
+    "e2e/collect/test_probe_ok.mojo::test_two",
 ]
 
 
@@ -947,7 +948,7 @@ def s_collect(manifest: dict) -> str:
     lines must be exactly the sorted expected node-id set — nothing else may ride
     stdout, ever."""
     # 1. Byte-purity on a clean tree: stdout is EXACTLY the sorted listing.
-    run = run_mtest(["collect", "testdata/matrix"])
+    run = run_mtest(["collect", "e2e/matrix"])
     expect_exit(run, 0)
     node_ids = run.stdout.splitlines()
     expect(
@@ -969,7 +970,7 @@ def s_collect(manifest: dict) -> str:
     )
 
     # 2. `--collect-only` is byte-identical to the `collect` subcommand.
-    co = run_mtest(["--collect-only", "testdata/matrix"])
+    co = run_mtest(["--collect-only", "e2e/matrix"])
     expect_exit(co, 0)
     expect(
         co.stdout == run.stdout,
@@ -980,7 +981,7 @@ def s_collect(manifest: dict) -> str:
     # short --timeout) each write a diagnostic to STDERR while the good file's
     # node ids are still listed; exit-1 class. No diagnostic leaks onto STDOUT.
     mtx = run_mtest(
-        ["collect", "testdata/collect", "--timeout", "2"], timeout=SHORT_TIMEOUT
+        ["collect", "e2e/collect", "--timeout", "2"], timeout=SHORT_TIMEOUT
     )
     expect_exit(mtx, 1)
     mtx_ids = mtx.stdout.splitlines()
@@ -1003,7 +1004,7 @@ def s_collect(manifest: dict) -> str:
 
     # 4. An off-grammar probe is DRIFT (exit 3); STDOUT stays empty.
     liar = run_mtest(
-        ["collect", "testdata/hostile/test_liar.mojo"], timeout=SHORT_TIMEOUT
+        ["collect", "e2e/hostile/test_liar.mojo"], timeout=SHORT_TIMEOUT
     )
     expect_exit(liar, 3)
     expect(liar.stdout == "", f"drift left bytes on STDOUT:\n{liar.stdout!r}")
@@ -1014,7 +1015,7 @@ def s_collect(manifest: dict) -> str:
 
     # 5. A malformed suite (silent) is exit-1; STDOUT stays empty.
     silent = run_mtest(
-        ["collect", "testdata/hostile/test_silent.mojo"], timeout=SHORT_TIMEOUT
+        ["collect", "e2e/hostile/test_silent.mojo"], timeout=SHORT_TIMEOUT
     )
     expect_exit(silent, 1)
     expect(silent.stdout == "", "a malformed probe left bytes on STDOUT")
@@ -1025,7 +1026,7 @@ def s_collect(manifest: dict) -> str:
 
     # 6. Nothing collectable -> exit 5; STDOUT empty.
     tmp = tempfile.mkdtemp(
-        prefix=".e2e_collect_empty_", dir=os.path.join(REPO_ROOT, "testdata")
+        prefix=".e2e_collect_empty_", dir=E2E_ROOT
     )
     try:
         rel = os.path.relpath(tmp, REPO_ROOT)
@@ -1052,7 +1053,7 @@ def s_usage_refusals(manifest: dict) -> str:
     build, so each fires the standard availability refusal (exit 4, the flag
     named on stderr) regardless of subcommand."""
     run = run_mtest(
-        ["collect", "--maxfail", "1", "testdata/matrix"], timeout=SHORT_TIMEOUT
+        ["collect", "--maxfail", "1", "e2e/matrix"], timeout=SHORT_TIMEOUT
     )
     expect_exit(run, 4)
     expect(
@@ -1069,7 +1070,7 @@ def s_usage_refusals(manifest: dict) -> str:
     )
 
     gate = run_mtest(
-        ["collect", "--gate", "testdata/matrix/test_alpha.mojo", "testdata/matrix"],
+        ["collect", "--gate", "e2e/matrix/test_alpha.mojo", "e2e/matrix"],
         timeout=SHORT_TIMEOUT,
     )
     expect_exit(gate, 4)
@@ -1087,7 +1088,7 @@ def s_usage_refusals(manifest: dict) -> str:
     )
 
     show = run_mtest(
-        ["collect", "-s", "testdata/matrix"], timeout=SHORT_TIMEOUT
+        ["collect", "-s", "e2e/matrix"], timeout=SHORT_TIMEOUT
     )
     expect_exit(show, 4)
     expect(
@@ -1099,7 +1100,7 @@ def s_usage_refusals(manifest: dict) -> str:
         f"a usage error must print no listing to stdout, got:\n{show.stdout!r}",
     )
 
-    shard = run_mtest(["--shard", "1/4", "testdata/matrix"], timeout=SHORT_TIMEOUT)
+    shard = run_mtest(["--shard", "1/4", "e2e/matrix"], timeout=SHORT_TIMEOUT)
     expect_exit(shard, 4)
     expect(
         "--shard" in shard.stderr,
@@ -1115,7 +1116,7 @@ def s_usage_refusals(manifest: dict) -> str:
     )
 
     serial = run_mtest(
-        ["--serial", "foo*", "testdata/matrix"], timeout=SHORT_TIMEOUT
+        ["--serial", "foo*", "e2e/matrix"], timeout=SHORT_TIMEOUT
     )
     expect_exit(serial, 4)
     expect(
@@ -1132,7 +1133,7 @@ def s_usage_refusals(manifest: dict) -> str:
     )
 
     json_path = run_mtest(
-        ["--json", "out.json", "testdata/matrix"], timeout=SHORT_TIMEOUT
+        ["--json", "out.json", "e2e/matrix"], timeout=SHORT_TIMEOUT
     )
     expect_exit(json_path, 4)
     expect(
@@ -1149,7 +1150,7 @@ def s_usage_refusals(manifest: dict) -> str:
     )
 
     json_stdout = run_mtest(
-        ["--json", "-", "testdata/matrix"], timeout=SHORT_TIMEOUT
+        ["--json", "-", "e2e/matrix"], timeout=SHORT_TIMEOUT
     )
     expect_exit(json_stdout, 4)
     expect(
@@ -1173,7 +1174,7 @@ def s_usage_refusals(manifest: dict) -> str:
 
 
 def s_passthrough_and_forbidden(manifest: dict) -> str:
-    rel = "testdata/suite/test_passing.mojo"
+    rel = "e2e/suite/test_passing.mojo"
     good = run_mtest([rel, "--", "--no-optimization"])
     expect_exit(good, 0)
     expect(good.verdict_line("PASS", rel) is not None, "forwarded build arg broke the run")
@@ -1200,9 +1201,9 @@ def s_out_of_root(manifest: dict) -> str:
     return "out-of-root operand -> exit 4"
 
 
-MATRIX_ALPHA = "testdata/matrix/test_alpha.mojo"
-MATRIX_BETA = "testdata/matrix/test_beta.mojo"
-CHAMELEON = "testdata/chameleon/test_chameleon.mojo"
+MATRIX_ALPHA = "e2e/matrix/test_alpha.mojo"
+MATRIX_BETA = "e2e/matrix/test_beta.mojo"
+CHAMELEON = "e2e/chameleon/test_chameleon.mojo"
 
 
 def s_selection_keyword(manifest: dict) -> str:
@@ -1244,11 +1245,11 @@ def s_selection_node_id(manifest: dict) -> str:
 def s_selection_union(manifest: dict) -> str:
     """A dir operand UNIONs with a node id under it: the whole tree still runs.
 
-    `mtest testdata/matrix testdata/matrix/test_alpha.mojo::test_alpha_one`
+    `mtest e2e/matrix e2e/matrix/test_alpha.mojo::test_alpha_one`
     covers test_alpha.mojo with BOTH a plain dir operand and a node id — the
     plain operand wins (whole), so every test in both files runs and nothing is
     deselected."""
-    run = run_mtest(["testdata/matrix", f"{MATRIX_ALPHA}::test_alpha_one"])
+    run = run_mtest(["e2e/matrix", f"{MATRIX_ALPHA}::test_alpha_one"])
     expect_exit(run, 0)
     summ = expect_accounting(run)
     expect(
@@ -1357,7 +1358,7 @@ def s_single_build(manifest: dict) -> str:
     Two separate `mtest` invocations would legitimately rebuild; this scenario
     never does that.
 
-    `-k one` over the whole testdata/matrix tree matches test_alpha_one AND
+    `-k one` over the whole e2e/matrix tree matches test_alpha_one AND
     test_beta_one, so BOTH files are touched — a multi-file selection. Phase 1
     (probe every run file) builds each file once; Phase 2 (run the selected
     subset) reuses that same binary. The wrapper's log is the independent
@@ -1365,7 +1366,7 @@ def s_single_build(manifest: dict) -> str:
     log_path = _mojo_log_path()
     try:
         run = run_mtest(
-            ["--mojo", LOGGING_MOJO, "-k", "one", "testdata/matrix"],
+            ["--mojo", LOGGING_MOJO, "-k", "one", "e2e/matrix"],
             env_overrides={"MTEST_MOJO_LOG": log_path},
         )
         expect_exit(run, 0)
@@ -1433,7 +1434,7 @@ def s_internal_error(manifest: dict) -> str:
     banner naming the build step, the missing program, and the errno; that NO
     false PASS/verdict line appears for the file; and that the file is accounted
     NOT-RUN in the summary."""
-    rel = "testdata/suite/test_passing.mojo"
+    rel = "e2e/suite/test_passing.mojo"
     missing = "/no/such/mojo/compiler"
     run = run_mtest(["--mojo", missing, rel], timeout=SHORT_TIMEOUT)
     expect_exit(run, 3)
@@ -1474,7 +1475,7 @@ def s_internal_error(manifest: dict) -> str:
     # banner names the precompile step, the missing program, and ENOENT (errno 2)
     # exactly as the build path does — the errno is threaded, not dropped.
     pc = run_mtest(
-        ["--mojo", missing, rel, "--precompile", "testdata/pkg/mathlib"],
+        ["--mojo", missing, rel, "--precompile", "e2e/pkg/mathlib"],
         timeout=SHORT_TIMEOUT,
     )
     expect_exit(pc, 3)
@@ -1502,7 +1503,7 @@ def s_interrupt(manifest: dict) -> str:
     clearly started (its header appears), let it enter the hang, then SIGINT the
     group. Assert exit 2, a partial summary with NOT-RUN accounting, and that the
     process group is gone (no orphan). Hard-guarded so it can never hang CI."""
-    argv = [MTEST, "testdata/slow"]
+    argv = [MTEST, "e2e/slow"]
     proc = subprocess.Popen(
         argv,
         cwd=REPO_ROOT,

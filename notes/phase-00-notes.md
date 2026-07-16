@@ -2,7 +2,7 @@
 
 Phase 0 stands the project up without writing any runner logic. What it delivers
 is the harness and the spec: committed TestSuite probe fixtures, normalized
-golden transcripts that pin TestSuite's real per-file protocol at the pinned
+protocol snapshots that pin TestSuite's real per-file protocol at the pinned
 toolchain, a regenerate-and-diff CI gate, a Mojo smoke test that parses those
 transcripts and reconciles their counts, the committed v1 CLI contract, and —
 the one precondition the whole product stands on — the verdict of a subprocess
@@ -29,8 +29,9 @@ that is the correct state for this phase, not a placeholder to fill.
   keep prism's silent scalar-concatenation footgun for every flag it did not
   pre-consume, and it trades the zero-dependency stance for the easy 80%. Revisit
   only if prism ships native post-`--` pass-through.
-- **The oracle harness:** committed `fixtures/` + normalized transcripts under
-  `goldens/transcripts/` + `MANIFEST.txt` + a regenerate-and-diff gate. Every
+- **The oracle harness:** committed `tests/fixtures/protocol/` + normalized
+  transcripts under `tests/snapshots/protocol/` + `MANIFEST.txt` + a
+  regenerate-and-diff gate. Every
   transcript header carries the resolved mojo version and commit, the os/arch,
   and the normalizer version, so a regeneration on a different toolchain or a
   foreign platform diffs loudly at the header by design.
@@ -123,7 +124,7 @@ route on this toolchain.
 - **A malformed `test_` function** (e.g. one taking an argument) is neither a
   compile error nor a silent exclusion: it raises a discovery-time runtime error
   (`test function '<name>' has nonconforming signature`). Recorded here rather
-  than made a golden, to keep the matrix at exactly the enumerated scenarios.
+  than made a snapshot, to keep the matrix at exactly the enumerated scenarios.
 - **The report colorizes only on a TTY.** Captured through a pipe it is plain
   text; the transcripts and the eventual parser see plain text.
 
@@ -142,7 +143,7 @@ byte-identical double generation.
 
 ## Proofs
 
-- **The gate bites (flipped byte).** Editing `goldens/transcripts/
+- **The gate bites (flipped byte).** Editing `tests/snapshots/protocol/
   crashing--default.txt` to read `termination: signal 5` turned
   `transcripts-check` red with a precise diff (`-termination: signal 5` /
   `+termination: signal 4`); `git checkout` of the file restored green. Hand-edits
@@ -204,7 +205,7 @@ defect; three low findings, all accepted and fixed on `main`:
    its printed rows be rewritten to `[ T ]`. No committed fixture triggered it.
    FIXED: the anchor is now the last `Running` line that is *followed by a
    `Summary` line* — a real report always ends in a Summary, a lost/fake one does
-   not — in both `gen_transcripts.py` and the doctrine wording. Verified: goldens
+   not — in both `gen_transcripts.py` and the doctrine wording. Verified: snapshots
    unchanged, and a synthetic crash-after-fake-report stream is no longer
    over-normalized.
 2. **The smoke test's reconciliation scan ran past `--- stderr ---`** to

@@ -36,6 +36,7 @@ from mtest.config import RunnerConfig, lossy_utf8
 from mtest.discover import discover, normalize_operand, normalize_root
 from mtest.discover.result import DiscoveryResult
 from mtest.exec import (
+    ExecRuntime,
     ProcessResult,
     ProcessSpec,
     canonicalize,
@@ -254,6 +255,7 @@ struct PrecompileResult(Copyable, Movable):
 
 
 def _run_one(
+    mut runtime: ExecRuntime,
     config: RunnerConfig,
     root: String,
     rel: String,
@@ -299,7 +301,7 @@ def _run_one(
     var bres: ProcessResult
     try:
         bres = run_supervised(
-            ProcessSpec.command_in(build_argv.copy(), root, 0)
+            runtime, ProcessSpec.command_in(build_argv.copy(), root, 0)
         )
     except:
         return FileResult.internal(
@@ -340,7 +342,8 @@ def _run_one(
     var rres: ProcessResult
     try:
         rres = run_supervised(
-            ProcessSpec.command_in(run_argv^, root, config.timeout_secs * 1000)
+            runtime,
+            ProcessSpec.command_in(run_argv^, root, config.timeout_secs * 1000),
         )
     except:
         return FileResult.internal(Event.internal_error("run", out_bin, 0))
@@ -533,6 +536,7 @@ def _blank_file_result() -> FileResult:
 
 
 def _build_for_selection(
+    mut runtime: ExecRuntime,
     config: RunnerConfig,
     root: String,
     rel: String,
@@ -565,7 +569,7 @@ def _build_for_selection(
     var bres: ProcessResult
     try:
         bres = run_supervised(
-            ProcessSpec.command_in(build_argv.copy(), root, 0)
+            runtime, ProcessSpec.command_in(build_argv.copy(), root, 0)
         )
     except:
         return _BuildOutcome(
@@ -683,6 +687,7 @@ def _probe_terminal(
 
 
 def _probe_file(
+    mut runtime: ExecRuntime,
     config: RunnerConfig,
     root: String,
     rel: String,
@@ -714,7 +719,7 @@ def _probe_file(
     argv.append(binary)
     argv.append("--skip-all")
     var pres = run_supervised(
-        ProcessSpec.command_in(argv^, root, config.timeout_secs * 1000)
+        runtime, ProcessSpec.command_in(argv^, root, config.timeout_secs * 1000)
     )
     var pterm = pres.termination
     if pterm.is_spawn_failed():
@@ -837,7 +842,7 @@ def _probe_file(
                 (
                     "the --skip-all probe drifted off the pinned grammar ("
                     + report.reason
-                    + "); check the toolchain pin and goldens/transcripts/"
+                    + "); check the toolchain pin and tests/snapshots/protocol/"
                 ),
                 build_argv,
                 bdur,
@@ -1159,6 +1164,7 @@ def _classified_terminal(
 
 
 def _run_precompile(
+    mut runtime: ExecRuntime,
     config: RunnerConfig,
     root: String,
     src: String,
@@ -1200,7 +1206,7 @@ def _run_precompile(
     for a in config.build_args:
         argv.append(a)
 
-    var res = run_supervised(ProcessSpec.command_in(argv^, root, 0))
+    var res = run_supervised(runtime, ProcessSpec.command_in(argv^, root, 0))
     if interrupt_requested():
         return PrecompileResult("", "", False, False, True, 0, "")
     var term = res.termination
@@ -1252,6 +1258,7 @@ def _prepend_events(var extra: List[Event], var fr: FileResult) -> FileResult:
 
 
 def _run_selected_with_recovery(
+    mut runtime: ExecRuntime,
     config: RunnerConfig,
     root: String,
     c: _Collected,
@@ -1287,9 +1294,10 @@ def _run_selected_with_recovery(
         var rres: ProcessResult
         try:
             rres = run_supervised(
+                runtime,
                 ProcessSpec.command_in(
                     run_argv^, root, config.timeout_secs * 1000
-                )
+                ),
             )
         except:
             return FileResult.internal(Event.internal_error("run", binary, 0))
@@ -1372,7 +1380,9 @@ def _run_selected_with_recovery(
         # REBUILD (atomic registry replace), then RE-PROBE and RE-VALIDATE.
         var bo: _BuildOutcome
         try:
-            bo = _build_for_selection(config, root, c.rel, include_paths, reg)
+            bo = _build_for_selection(
+                runtime, config, root, c.rel, include_paths, reg
+            )
         except:
             return FileResult.internal(
                 Event.internal_error("build", config.mojo_path, 0)
@@ -1386,7 +1396,15 @@ def _run_selected_with_recovery(
         var po: _ProbeOutcome
         try:
             po = _probe_file(
-                config, root, c.rel, binary, canonical, build_argv, bdur, reg
+                runtime,
+                config,
+                root,
+                c.rel,
+                binary,
+                canonical,
+                build_argv,
+                bdur,
+                reg,
             )
         except:
             return FileResult.internal(Event.internal_error("probe", binary, 0))
@@ -1401,6 +1419,7 @@ def _run_selected_with_recovery(
 def _run_selection[
     *Rs: Reporter
 ](
+    mut runtime: ExecRuntime,
     config: RunnerConfig,
     root: String,
     disc: DiscoveryResult,
@@ -1453,7 +1472,9 @@ def _run_selection[
         var rel = disc.run_files[ri]
         var bo: _BuildOutcome
         try:
-            bo = _build_for_selection(config, root, rel, include_paths, reg)
+            bo = _build_for_selection(
+                runtime, config, root, rel, include_paths, reg
+            )
         except:
             reporter.handle(Event.internal_error("build", config.mojo_path, 0))
             internal_error = True
@@ -1487,6 +1508,7 @@ def _run_selection[
         var po: _ProbeOutcome
         try:
             po = _probe_file(
+                runtime,
                 config,
                 root,
                 rel,
@@ -1622,7 +1644,7 @@ def _run_selection[
             continue
 
         var fr = _run_selected_with_recovery(
-            config, root, c, reg, include_paths
+            runtime, config, root, c, reg, include_paths
         )
         if fr.interrupted:
             interrupted = True
@@ -1665,7 +1687,10 @@ def _run_selection[
 def run_session[
     *Rs: Reporter
 ](
-    config: RunnerConfig, root: String, mut reporter: CompositeReporter[*Rs]
+    mut runtime: ExecRuntime,
+    config: RunnerConfig,
+    root: String,
+    mut reporter: CompositeReporter[*Rs],
 ) raises -> Int:
     """Orchestrate a whole run and return the resolved process exit code.
 
@@ -1676,6 +1701,7 @@ def run_session[
     session emits events only; it prints nothing.
 
     Args:
+        runtime: Exclusive owner of process-global exec and signal state.
         config: Every knob the run reads.
         root: The invocation root; built binaries and paths are relative to it.
         reporter: The composed reporters the session fans every event to.
@@ -1735,7 +1761,9 @@ def run_session[
             interrupted = True
             break
         try:
-            var pr = _run_precompile(config, root, pc.src, pc.out, includes)
+            var pr = _run_precompile(
+                runtime, config, root, pc.src, pc.out, includes
+            )
             if pr.interrupted:
                 interrupted = True
                 break
@@ -1772,7 +1800,9 @@ def run_session[
                 break
             reporter.handle(Event.file_started(disc.gate_files[gi]))
             try:
-                var fr = _run_one(config, root, disc.gate_files[gi], includes)
+                var fr = _run_one(
+                    runtime, config, root, disc.gate_files[gi], includes
+                )
                 if fr.interrupted:
                     interrupted = True
                     break
@@ -1824,7 +1854,7 @@ def run_session[
     # `OperandParse` selection intent (plain operands vs. named targets), not
     # to gate malformed syntax a second time — see
     # `test_malformed_node_id_raises_even_when_a_gate_fails` in
-    # tests/test_session_selection.mojo for the pinned regression.
+    # tests/integration/test_session_selection.mojo for the pinned regression.
     var sel_active = selection_active(config.paths, config.keyword)
 
     # Run files. Under selection, the run set is probed then run through the
@@ -1832,7 +1862,7 @@ def run_session[
     if proceed_runs and sel_active:
         var plan = parse_operands(config.paths)
         var sel = _run_selection(
-            config, root, disc, includes, plan, reporter, summary
+            runtime, config, root, disc, includes, plan, reporter, summary
         )
         run_outcomes.extend(sel.run_outcomes.copy())
         test_totals.passed += sel.test_totals.passed
@@ -1853,7 +1883,9 @@ def run_session[
                 break
             reporter.handle(Event.file_started(disc.run_files[ri]))
             try:
-                var fr = _run_one(config, root, disc.run_files[ri], includes)
+                var fr = _run_one(
+                    runtime, config, root, disc.run_files[ri], includes
+                )
                 if fr.interrupted:
                     interrupted = True
                     break
@@ -1916,6 +1948,32 @@ def run_session[
     return code
 
 
+def run_session[
+    *Rs: Reporter
+](
+    config: RunnerConfig, root: String, mut reporter: CompositeReporter[*Rs]
+) raises -> Int:
+    """Run a session with a locally owned runtime for direct library callers.
+
+    The CLI uses the overload that accepts its already-open runtime so runtime
+    construction failures map to internal exit 3 before session error handling.
+    This convenience overload preserves the session test/library surface while
+    still passing exclusive mutable ownership to every supervised child.
+    """
+    var runtime = ExecRuntime()
+    try:
+        var code = run_session(runtime, config, root, reporter)
+        runtime.close()
+        return code
+    except error:
+        var primary = String(error)
+        try:
+            runtime.close()
+        except cleanup_error:
+            raise Error(primary + "; " + String(cleanup_error))
+        raise Error(primary)
+
+
 # --- The COLLECT path: probe every file for its node ids, print the listing. --
 
 
@@ -1954,7 +2012,9 @@ def _collect_phrase(fr: FileResult) -> String:
     return "the --skip-all probe did not list its tests (malformed suite)"
 
 
-def run_collect(config: RunnerConfig, root: String) raises -> CollectResult:
+def run_collect(
+    mut runtime: ExecRuntime, config: RunnerConfig, root: String
+) raises -> CollectResult:
     """Probe every discovered run file for its node ids and build the listing.
 
     Reuses the selection probe machinery (`_build_for_selection` + `_probe_file`,
@@ -2005,7 +2065,9 @@ def run_collect(config: RunnerConfig, root: String) raises -> CollectResult:
             interrupted = True
             break
         try:
-            var pr = _run_precompile(config, root, pc.src, pc.out, includes)
+            var pr = _run_precompile(
+                runtime, config, root, pc.src, pc.out, includes
+            )
             if pr.interrupted:
                 interrupted = True
                 break
@@ -2043,7 +2105,9 @@ def run_collect(config: RunnerConfig, root: String) raises -> CollectResult:
             var rel = disc.run_files[ri]
             var bo: _BuildOutcome
             try:
-                bo = _build_for_selection(config, root, rel, includes, reg)
+                bo = _build_for_selection(
+                    runtime, config, root, rel, includes, reg
+                )
             except:
                 diags.append(
                     "collect: " + rel + ": internal build failure; aborting"
@@ -2070,6 +2134,7 @@ def run_collect(config: RunnerConfig, root: String) raises -> CollectResult:
             var po: _ProbeOutcome
             try:
                 po = _probe_file(
+                    runtime,
                     config,
                     root,
                     rel,
@@ -2123,3 +2188,19 @@ def run_collect(config: RunnerConfig, root: String) raises -> CollectResult:
     else:
         code = 0
     return CollectResult(node_ids^, diags^, code)
+
+
+def run_collect(config: RunnerConfig, root: String) raises -> CollectResult:
+    """Collect with a locally owned runtime for direct library callers."""
+    var runtime = ExecRuntime()
+    try:
+        var result = run_collect(runtime, config, root)
+        runtime.close()
+        return result^
+    except error:
+        var primary = String(error)
+        try:
+            runtime.close()
+        except cleanup_error:
+            raise Error(primary + "; " + String(cleanup_error))
+        raise Error(primary)
