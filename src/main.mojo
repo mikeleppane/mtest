@@ -4,7 +4,7 @@
 the terminal, and calls `exit`. It parses argv, prints help or the version to
 stdout and exits 0, prints a usage error to stderr and exits 4 (the one stated
 exception to the event seam — a pre-session usage error has no reporter to route
-through), resolves the console's color inputs, installs the interrupt handlers,
+through), resolves the console's color inputs, constructs the exec runtime,
 wraps a `ConsoleReporter` in a one-element `CompositeReporter` (the type the
 session drives), runs the session, flushes the console's rendered buffer to
 stdout, and exits with the session's resolved code.
@@ -28,7 +28,7 @@ from mtest.cli import (
     parse_args,
     version_text,
 )
-from mtest.exec import install_signal_handlers, stdout_isatty
+from mtest.exec import ExecRuntime, stdout_isatty
 from mtest.report import CompositeReporter, ConsoleReporter
 from mtest.session import CollectResult, run_collect, run_session
 
@@ -56,6 +56,16 @@ def _eprintln(text: String):
     print(text, file=FileDescriptor(2), flush=True)
 
 
+def _close_runtime(mut runtime: ExecRuntime) -> Bool:
+    """Explicitly restore exec state; report and return False on failure."""
+    try:
+        runtime.close()
+        return True
+    except e:
+        _eprintln("mtest: internal error: " + String(e))
+        return False
+
+
 def main():
     """Parse argv, run the session, and exit with the resolved code."""
     # The sentinel is never read: every except path below exits the process,
@@ -80,16 +90,24 @@ def main():
     # A configured run.
     var config = result.config.copy()
 
-    # Install the interrupt handlers and resolve the invocation root. A failure
-    # of either is a pre-session internal error (mapping the flag page or reading
-    # the cwd) — the honest code is 3, the same the session gives its own.
-    var root = String("")
+    # Resolve the invocation root, then transactionally take exclusive ownership
+    # of process-global signal/exec state. Either failure is a pre-session
+    # internal error; the honest code is 3.
+    var root: String
     try:
-        install_signal_handlers()
         root = String(cwd())
     except e:
         _eprintln("mtest: internal error: " + String(e))
         exit(3)
+        return
+
+    var runtime: ExecRuntime
+    try:
+        runtime = ExecRuntime()
+    except e:
+        _eprintln("mtest: internal error: " + String(e))
+        exit(3)
+        return
 
     # Collect mode: probe every discovered file for its node ids and print the
     # SORTED listing to STDOUT, byte-clean, running no test body. This print is
@@ -102,6 +120,8 @@ def main():
         try:
             collected = run_collect(config, root)
         except e:
+            if not _close_runtime(runtime):
+                exit(3)
             _eprintln(String(e))
             exit(4)
         for line in collected.diagnostics:
@@ -110,6 +130,8 @@ def main():
         for nid in collected.listing:
             listing += nid + "\n"
         print(listing, end="", flush=True)
+        if not _close_runtime(runtime):
+            exit(3)
         exit(collected.code)
 
     var build_flags = build_flags_string(config)
@@ -131,10 +153,14 @@ def main():
     except e:
         # The only raise the session propagates is a discover: usage error;
         # like a cli usage error it exits 4 to stderr.
+        if not _close_runtime(runtime):
+            exit(3)
         _eprintln(String(e))
         exit(4)
 
     # Flush the console's fully rendered buffer verbatim (it already ends in a
     # newline), even on an interrupt or partial-summary path.
     print(comp.reporters[0].output(), end="", flush=True)
+    if not _close_runtime(runtime):
+        exit(3)
     exit(code)

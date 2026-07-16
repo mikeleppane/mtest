@@ -15,7 +15,7 @@ from std.memory import UnsafePointer, memset_zero, alloc
 
 from mtest.exec.capture import BoundedCapture
 from mtest.exec.result import ProcessResult
-from mtest.exec.signals import interrupt_requested, _ensure_flag_page
+from mtest.exec.signals import interrupt_requested
 from mtest.exec.spec import ProcessSpec
 from mtest.exec.termination import Termination
 
@@ -154,9 +154,6 @@ def run_supervised(
     """
     if len(spec.argv) == 0:
         raise Error("exec: run_supervised got an empty argv")
-
-    # Map the interrupt flag page so polling it in the loop is always safe.
-    _ensure_flag_page()
 
     # Guarantee our children are reapable regardless of the inherited SIGCHLD
     # disposition, so `waitpid` below always yields a real status.

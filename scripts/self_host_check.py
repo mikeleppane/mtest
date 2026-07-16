@@ -32,6 +32,9 @@ import time
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MTEST = os.path.join(REPO_ROOT, "build", "mtest")
+NATIVE_OBJECT = os.path.join(
+    REPO_ROOT, "build", "native", "mtest_exec_native_test.o"
+)
 TESTS_DIR = os.path.join(REPO_ROOT, "tests")
 
 # The full 55-file suite runs several minutes serially (some files spawn their
@@ -111,7 +114,16 @@ def run_mtest_over_own_suite() -> tuple[int, str]:
         )
         return 1, ""
 
-    argv = [MTEST, "-I", "build", "-I", "tests/support", "tests/"]
+    argv = [
+        MTEST,
+        "-I",
+        "build",
+        "-I",
+        "tests/support",
+        "--build-arg=-Xlinker",
+        f"--build-arg={NATIVE_OBJECT}",
+        "tests/",
+    ]
     proc = subprocess.Popen(
         argv,
         cwd=REPO_ROOT,

@@ -37,13 +37,19 @@ mojo-version = "mojo --version"
 # produces the same artifact.
 build = "bash scripts/build_pkg.sh"
 
+# Compile the exec-private C adapter to the one production object linked into
+# every Mojo executable that can instantiate mtest.exec. The ABI checker proves
+# the test-only fault/sanitizer controls are absent from this artifact.
+build-native = "python scripts/build_native.py"
+
 # Link the runnable binary at build/mtest from src/main.mojo. Depends on `build`
 # so the package is precompiled to build/mtest.mojopkg FIRST — `-I build`
 # resolves `from mtest... import` against that artifact (the same include the
 # test runner uses), so main compiles against a binary dependency, not the whole
 # source tree. This is the first artifact a human can actually run.
-build-bin = { cmd = "mojo build -I build src/main.mojo -o build/mtest", depends-on = [
+build-bin = { cmd = "mojo build -I build src/main.mojo -o build/mtest -Xlinker build/native/mtest_exec_native.o", depends-on = [
     "build",
+    "build-native",
 ] }
 
 # Rewrite Mojo files in place — run locally before committing. Protocol fixtures
@@ -58,6 +64,12 @@ fmt-check = "mojo format src tests e2e && git diff --exit-code"
 # every syntax family and string/comment exclusion. This task intentionally
 # remains outside `ci` until every reported operation is fixed and documented.
 safety-check = "python scripts/safety_check_test.py && python scripts/safety_check.py"
+
+# Strict C17 ABI/layout/symbol verification plus native lifecycle tests for the
+# private exec adapter. This remains separate from the Mojo suite so the test
+# object can expose deterministic fault and sanitizer controls that production
+# linkage proves absent.
+native-check = "python scripts/native_check.py"
 
 # Regenerate the protocol snapshots IN PLACE from the committed fixtures at the
 # pinned toolchain. Local use only (updating the committed snapshots); never run in
@@ -118,6 +130,7 @@ depends-on = ["build-bin"]
 depends-on = [
     "fmt-check",
     "harness-check",
+    "native-check",
     "build",
     "transcripts-check",
     "test-direct",

@@ -54,12 +54,18 @@ done
 
 # Build the package first — the compile gate for src/mtest.
 bash scripts/build_pkg.sh
+python scripts/build_native.py
 
 # Tests build against the prebuilt package at -O0: correctness tests do not need
 # optimized codegen, and -O0 dodges the LLVM grind on TestSuite discovery glue.
 # `-I tests/support` puts shared non-test helper modules on the import path; the
 # walk only builds files matching test_*.mojo.
-INCLUDE=(--no-optimization -I build -I tests/support)
+INCLUDE=(
+    --no-optimization
+    -I build
+    -I tests/support
+    -Xlinker build/native/mtest_exec_native_test.o
+)
 
 mkdir -p build/tests
 

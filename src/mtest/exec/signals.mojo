@@ -1,158 +1,149 @@
-"""The interrupt primitive: SIGINT/SIGTERM handlers over a latching flag (L3).
+"""Exclusive process-global interrupt/runtime ownership (Layer 3).
 
-`install_signal_handlers` installs async-signal-safe SIGINT and SIGTERM handlers
-via `sigaction`; each handler does nothing but set a process-wide flag.
-`interrupt_requested` reads that flag, and the supervision loop polls it so an
-interrupt group-kills the active child promptly instead of waiting out the
-deadline. Once set the flag LATCHES — an interrupt is not forgotten.
+`ExecRuntime` is the non-copyable token that owns mtest's saved SIGINT and
+SIGTERM dispositions. The native adapter uses the platform's own headers and a
+`volatile sig_atomic_t` latch; Mojo never lays out `struct sigaction`, invents a
+callback pointer, maps a fixed address, or reads libc's private errno storage.
 
-The flag needs storage a bare C handler can reach, and this toolchain has no
-module-global `var` (and its `_Global` helper miscompiles), so the flag lives in
-a one-page anonymous mapping at a fixed, compile-time address. Anonymous pages
-are zero-filled, so the flag reads False until a handler fires — which makes
-reading it safe even when no handlers were installed. All of this is confined
-here; callers see only the two functions.
+Construction is transactional and rejects a second active runtime. `close()` is
+explicit and fallible so restoration failure can never be reported as success.
+The destructor is only a last-resort retry for exceptional unwinding; callers
+must use `close()` on every ordinary path.
 """
 from std.ffi import external_call
-from std.memory import UnsafePointer, memset_zero, alloc
-
-comptime _FLAG_ADDR = 0x100000000000
-"""A fixed high address for the one-page interrupt-flag mapping."""
-
-comptime _SIGINT = 2
-comptime _SIGTERM = 15
-
-comptime _EEXIST = 17
-"""errno for MAP_FIXED_NOREPLACE hitting an already-mapped page (reuse path)."""
-
-# mmap: PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE.
-comptime _PROT_RW = 0x3
-comptime _MAP_FLAGS = 0x2 | 0x20 | 0x100000
-comptime _MAP_FAILED = 0xFFFFFFFFFFFFFFFF
-
-# sigaction: a fixed struct buffer (>= the 152-byte glibc layout) whose first 8
-# bytes hold the handler code pointer; glibc fills the restorer itself.
-comptime _SA_SIZE = 160
-comptime _SA_RESTART = 0x10000000
+from std.memory import alloc, memset_zero
 
 
-def _flag_ptr() -> UnsafePointer[Int32, MutAnyOrigin]:
-    """A pointer to the interrupt flag cell. Pure."""
-    return UnsafePointer[Int32, MutAnyOrigin](unsafe_from_address=_FLAG_ADDR)
+comptime _ERROR_BYTES = 32
+"""Size of ABI-v1 `struct mtest_exec_error` (alignment 8)."""
 
 
-def _ensure_flag_page() raises:
-    """Map the flag page if it is not already mapped; leave the flag untouched.
-
-    The mapping is anonymous, so a fresh page reads zero. Idempotent: a second
-    call finds the page present (EEXIST) and returns. Raises only if a fixed
-    mapping at the chosen address is impossible.
-
-    Raises:
-        Error: `exec: could not map interrupt flag page` if mmap fails for any
-            reason other than the page already existing, or places the page at
-            an unexpected address on this kernel. Failing loudly is mandatory:
-            leaving the fixed address unmapped would SIGSEGV a later flag store
-            or `interrupt_requested()` read.
-    """
-    var addr = external_call["mmap", UInt64](
-        UInt64(_FLAG_ADDR),
-        UInt64(4096),
-        Int32(_PROT_RW),
-        Int32(_MAP_FLAGS),
-        Int32(-1),
-        Int64(0),
+def _runtime_error(prefix: String, operation: Int, error_number: Int) -> Error:
+    """Build one named native-runtime machinery error. Allocates."""
+    return Error(
+        prefix
+        + " (operation "
+        + String(operation)
+        + ", errno "
+        + String(error_number)
+        + ")"
     )
-    if addr == UInt64(_FLAG_ADDR):
-        # Freshly mapped and zero-filled.
-        return
-    if addr == UInt64(_MAP_FAILED):
-        # mmap failed. ONLY EEXIST means the page is already mapped by a prior
-        # call — the idempotent reuse path. Any other errno (ENOMEM/EINVAL/
-        # EACCES, or MAP_FIXED_NOREPLACE unsupported on a pre-4.17 kernel) left
-        # the fixed address UNMAPPED, so reusing it would SIGSEGV: fail loudly.
-        var errno = Int(
-            external_call[
-                "__errno_location", UnsafePointer[Int32, MutUntrackedOrigin]
-            ]()[0]
-        )
-        if errno == _EEXIST:
-            return
-        raise Error(
-            "exec: could not map interrupt flag page (errno "
-            + String(errno)
-            + ")"
-        )
-    # An unexpected placement: undo it and fail loudly.
-    _ = external_call["munmap", Int32](addr, UInt64(4096))
-    raise Error("exec: could not map interrupt flag page")
 
 
-def _on_interrupt(signo: Int32):
-    """The installed handler: set the latching flag and return. Async-safe."""
-    _flag_ptr()[0] = 1
+struct ExecRuntime(Movable):
+    """Exclusive ownership of mtest's process-global exec/signal state.
 
-
-def _install_one(
-    signo: Int32,
-    act: UnsafePointer[UInt8, MutUntrackedOrigin],
-    old: UnsafePointer[UInt8, MutUntrackedOrigin],
-):
-    """Install `_on_interrupt` for `signo` via the prepared sigaction buffer."""
-    # The function value is itself the code pointer; taking its address yields a
-    # stack slot holding it, so read that slot to get the real entry address.
-    act.bitcast[UInt64]()[0] = UnsafePointer(to=_on_interrupt).bitcast[
-        UInt64
-    ]()[0]
-    _ = external_call["sigaction", Int32](signo, act, old)
-
-
-def install_signal_handlers() raises:
-    """Install SIGINT and SIGTERM handlers that set the latching interrupt flag.
-
-    Maps the flag page if needed, then installs an async-signal-safe handler for
-    both signals via `sigaction`. Safe to call once at startup; the handlers only
-    set the flag, so they do no work that is unsafe in signal context.
-
-    Raises:
-        Error: `exec: could not map interrupt flag page` if the flag page cannot
-            be mapped.
+    Construct once around a session or direct supervision group, pass it by
+    mutable borrow to child operations, and call `close()` explicitly. A second
+    simultaneously active instance raises `EBUSY` through the native error
+    record. Sequential construct/use/close cycles are supported.
     """
-    _ensure_flag_page()
-    var act = alloc[UInt8](_SA_SIZE)
-    memset_zero(act, _SA_SIZE)
-    var old = alloc[UInt8](_SA_SIZE)
-    memset_zero(old, _SA_SIZE)
-    # sa_flags lives at byte offset 136 on the glibc linux-64 layout (136/4=34).
-    act.bitcast[Int32]()[34] = Int32(_SA_RESTART)
-    _install_one(Int32(_SIGINT), act, old)
-    _install_one(Int32(_SIGTERM), act, old)
-    act.free()
-    old.free()
+
+    var active: Bool
+    """Whether this token still owns the native runtime."""
+
+    def __init__(out self) raises:
+        """Transactionally install native interrupt handlers and take ownership.
+
+        Raises:
+            Error: A named `exec: runtime open failed` machinery error containing
+                the adapter operation and errno.
+        """
+        self.active = False
+        # SAFETY: `alloc[UInt64](4)` owns 32 bytes aligned to 8, exactly ABI-v1's
+        # error record. Zeroing initializes every byte before C may write it;
+        # `mtest_exec_runtime_open` does not retain the pointer.
+        var error = alloc[UInt64](4)
+        memset_zero(error.bitcast[UInt8](), _ERROR_BYTES)
+        var result = external_call["mtest_exec_runtime_open", Int32](
+            error.bitcast[UInt8]()
+        )
+        if result != 0:
+            # SAFETY: the adapter initialized the complete aligned error record
+            # before returning. ABI-v1 fixes operation at byte 0 and errno at 4.
+            var operation = Int(error.bitcast[UInt32]()[0])
+            var error_number = Int(error.bitcast[Int32]()[1])
+            # SAFETY: `error` is still the unique allocation owner and C did not
+            # retain it; this frees it exactly once before the raising path.
+            error.free()
+            raise _runtime_error(
+                "exec: runtime open failed", operation, error_number
+            )
+        # SAFETY: `error` remains uniquely owned and non-escaping after the
+        # successful non-retaining ABI call; free it exactly once.
+        error.free()
+        self.active = True
+
+    def close(mut self) raises:
+        """Restore saved dispositions and release runtime ownership explicitly.
+
+        Idempotent after success. On restoration failure the token remains
+        active so the caller can report the error and retry; a new child/runtime
+        remains rejected by the native state machine.
+
+        Raises:
+            Error: A named `exec: runtime close failed` machinery error containing
+                the first restoration operation and errno.
+        """
+        if not self.active:
+            return
+        # SAFETY: this is the same complete, aligned, uniquely-owned ABI-v1 error
+        # record used by construction. The close call writes but never retains it.
+        var error = alloc[UInt64](4)
+        memset_zero(error.bitcast[UInt8](), _ERROR_BYTES)
+        var result = external_call["mtest_exec_runtime_close", Int32](
+            error.bitcast[UInt8]()
+        )
+        if result != 0:
+            # SAFETY: C initialized the record before returning; ABI-v1 fixes
+            # operation and errno at the first two 32-bit slots.
+            var operation = Int(error.bitcast[UInt32]()[0])
+            var error_number = Int(error.bitcast[Int32]()[1])
+            # SAFETY: the non-retained allocation still has one owner; free once
+            # while leaving `self.active` true for an explicit retry.
+            error.free()
+            raise _runtime_error(
+                "exec: runtime close failed", operation, error_number
+            )
+        # SAFETY: successful close did not retain the uniquely-owned record.
+        error.free()
+        self.active = False
+
+    def __del__(deinit self):
+        """Best-effort last-resort restoration; explicit `close()` is required.
+        """
+        if not self.active:
+            return
+        # SAFETY: destructor fallback owns this aligned 32-byte record, fully
+        # initializes it, passes it to a non-retaining ABI call, then frees it.
+        # Failure cannot be raised from a destructor; explicit close is the only
+        # success-reporting path and is enforced by callers/tests.
+        var error = alloc[UInt64](4)
+        memset_zero(error.bitcast[UInt8](), _ERROR_BYTES)
+        _ = external_call["mtest_exec_runtime_close", Int32](
+            error.bitcast[UInt8]()
+        )
+        error.free()
 
 
 def interrupt_requested() -> Bool:
-    """Whether an interrupt (SIGINT/SIGTERM) has been requested since startup.
+    """Whether SIGINT or SIGTERM has latched since runtime construction."""
+    # SAFETY: the ABI takes no pointers and returns exactly 0 or 1. The native
+    # handler communicates only through its `volatile sig_atomic_t` cell.
+    return external_call["mtest_exec_interrupt_requested", Int32]() != 0
 
-    Reads the latching flag; ensures the flag page exists first so it is safe to
-    call even when no handlers were installed (in which case it reads False).
-    Does not mutate; does not raise in practice (the page map is idempotent).
+
+def _reset_interrupt():
+    """Clear the native interrupt latch. Test-only; absent from production ABI.
     """
-    try:
-        _ensure_flag_page()
-    except:
-        return False
-    return _flag_ptr()[0] != 0
-
-
-def _reset_interrupt() raises:
-    """Clear the latched interrupt flag. For tests and re-arming; not public."""
-    _ensure_flag_page()
-    _flag_ptr()[0] = 0
+    # SAFETY: direct-test binaries link the isolated testing adapter object; the
+    # function takes no pointer, retains nothing, and only clears sig_atomic_t.
+    external_call["mtest_exec_test_reset_interrupt", NoneType]()
 
 
 def _raise_self(signo: Int):
-    """Send signal `signo` to our own process. For the self-signal test; internal.
-    """
+    """Deliver `signo` to this process for interrupt integration tests."""
+    # SAFETY: `getpid` has no arguments and returns the current pid; `kill` takes
+    # that live pid plus the test's valid signal number and retains no pointer.
     var pid = external_call["getpid", Int32]()
     _ = external_call["kill", Int32](pid, Int32(signo))

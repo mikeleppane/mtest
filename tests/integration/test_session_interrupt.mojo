@@ -8,7 +8,7 @@ so this test installs handlers, self-signals, asserts, and resets the flag.
 """
 from std.testing import assert_equal, assert_true, TestSuite
 
-from mtest.exec import install_signal_handlers, interrupt_requested
+from mtest.exec import ExecRuntime, interrupt_requested
 from mtest.exec.signals import _raise_self, _reset_interrupt
 from mtest.model import EventKind, Outcome
 from mtest.report import CompositeReporter, RecordingReporter
@@ -26,7 +26,7 @@ def test_interrupt_before_files_is_exit_2_all_not_run() raises:
 
     # Install the handlers, then self-signal so the flag is already set when the
     # session reaches its first pre-file interrupt check.
-    install_signal_handlers()
+    var runtime = ExecRuntime()
     _reset_interrupt()
     _raise_self(_SIGINT)
     assert_true(interrupt_requested(), "flag must be set before the session")
@@ -34,6 +34,7 @@ def test_interrupt_before_files_is_exit_2_all_not_run() raises:
     var comp = CompositeReporter(Tuple(RecordingReporter()))
     var code = run_session(base_config(), root, comp)
     _reset_interrupt()
+    runtime.close()
 
     assert_equal(code, 2, "an interrupt resolves to exit 2, never a TIMEOUT")
     ref rec = comp.reporters[0]

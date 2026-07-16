@@ -18,9 +18,11 @@ them for CI.
 
 Non-goals: it is **not** an assertion library (assertions come from
 `std.testing`), **not** a property-testing framework, and **not** a replacement
-for TestSuite. It has **zero runtime dependencies** — the runner is pure Mojo;
-Python appears only in build-time tooling under `scripts/` and test-only
-subprocess actors under `tests/fixtures/exec/`.
+for TestSuite. It has **zero runtime dependencies**: product logic under `src/`
+is pure Mojo, while the exec-private POSIX adapter under `native/` is compiled
+and statically linked at build time against the platform C library. Python
+appears only in build-time tooling under `scripts/` and test-only subprocess
+actors under `tests/fixtures/exec/`.
 
 ## Product principles
 
@@ -73,9 +75,12 @@ proven the first time it exists.
 
 ## Mojo, not Python
 
-`src/` is **pure Mojo**. Python lives only under `scripts/` (build/test harnesses)
-and `tests/fixtures/exec/` (test-only subprocess actors), and is never a runtime
-dependency. Follow the
+`src/` is **pure Mojo**. The approved native boundary is confined to `native/`:
+a private C17 POSIX adapter that supplies header-derived signal/process ABI,
+compiled to an object and statically linked into Mojo consumers. It may not
+contain product policy, reporting, parsing, or orchestration. Python lives only
+under `scripts/` (build/test harnesses) and `tests/fixtures/exec/` (test-only
+subprocess actors), and is never a runtime dependency. Follow the
 global `mojo-syntax` skill for all syntax — training data is stale, and this
 toolchain has removed or renamed much of what a model will reach for by default
 (`def` not `fn`, `comptime` not `alias`/`@parameter`, `var` not `let`,

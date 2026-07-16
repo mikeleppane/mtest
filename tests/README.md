@@ -9,6 +9,10 @@ generated protocol evidence in separate homes:
 - `integration/` contains tests that cross one of those boundaries: filesystem
   discovery, real compiler invocations, subprocess control, or multi-layer
   session behavior.
+- `native/` contains C17 ABI, ownership, signal-transaction, sanitizer-control,
+  and deterministic fault tests for the exec-private POSIX adapter. These are
+  built by the pinned Clang and are deliberately outside Mojo TestSuite
+  discovery; `pixi run native-check` runs their normal gate.
 - `support/` contains Mojo helper modules imported by executable suites. Files
   here are not test suites and must not be discovered as `test_*.mojo`.
 - `fixtures/exec/` contains subprocess actors used to exercise the exec layer.
@@ -28,6 +32,7 @@ Run the classified suites directly with:
 $ pixi run test-unit
 $ pixi run test-integration
 $ pixi run test-direct
+$ pixi run native-check
 ```
 
 `test-direct` is the aggregate independent executor. `pixi run test` is the

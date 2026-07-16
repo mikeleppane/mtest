@@ -19,7 +19,7 @@ from std.testing import assert_true, TestSuite
 from mtest.exec import (
     ProcessSpec,
     run_supervised,
-    install_signal_handlers,
+    ExecRuntime,
 )
 from mtest.exec.signals import _reset_interrupt
 
@@ -56,7 +56,7 @@ def test_deadline_beats_stuck_etxtbsy_exec_latches_timed_out() raises:
     # not kill it outright: it keeps retrying the busy exec and would otherwise
     # exhaust its retries and report SpawnFailed. The deadline latch must win, so
     # the verdict is TimedOut, not SpawnFailed.
-    install_signal_handlers()
+    var runtime = ExecRuntime()
     _reset_interrupt()
     var t = target("etxtbsy_target.sh")
     var fd = _open_wronly(t)
@@ -68,6 +68,7 @@ def test_deadline_beats_stuck_etxtbsy_exec_latches_timed_out() raises:
     assert_true(r.termination.is_timed_out(), String(r.termination))
     # Bounded by the retry window, not left to run unsupervised.
     assert_true(r.duration_ms < 2000, String(r.duration_ms))
+    runtime.close()
 
 
 def _schedule_self_sigint() -> Int32:
@@ -102,7 +103,7 @@ def test_interrupt_beats_stuck_etxtbsy_exec_latches_timed_out() raises:
     # never a SpawnFailed machinery error. No deadline: the interrupt alone drives
     # the kill. A helper delivers the SIGINT mid-run so the child, surviving the
     # caught group SIGTERM, still reaches the errno path under the latch.
-    install_signal_handlers()
+    var runtime = ExecRuntime()
     _reset_interrupt()
     var t = target("etxtbsy_target.sh")
     var fd = _open_wronly(t)
@@ -118,6 +119,7 @@ def test_interrupt_beats_stuck_etxtbsy_exec_latches_timed_out() raises:
     _ = external_call["waitpid", Int32](helper, st, Int32(0))
     st.free()
     _reset_interrupt()
+    runtime.close()
     assert_true(r.termination.is_timed_out(), String(r.termination))
 
 

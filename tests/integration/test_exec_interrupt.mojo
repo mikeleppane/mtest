@@ -13,7 +13,7 @@ from std.testing import assert_true, assert_false, TestSuite
 from mtest.exec import (
     ProcessSpec,
     run_supervised,
-    install_signal_handlers,
+    ExecRuntime,
     interrupt_requested,
 )
 from mtest.exec.signals import _reset_interrupt, _raise_self
@@ -24,17 +24,18 @@ comptime _SIGINT = 2
 
 
 def test_sigaction_self_signal_flips_flag() raises:
-    install_signal_handlers()
+    var runtime = ExecRuntime()
     _reset_interrupt()
     assert_false(interrupt_requested(), "flag should start clear")
     _raise_self(_SIGINT)
     # The async-signal-safe handler set the latching flag; we observe it.
     assert_true(interrupt_requested(), "SIGINT handler did not set the flag")
     _reset_interrupt()
+    runtime.close()
 
 
 def test_run_supervised_bails_out_promptly_on_interrupt() raises:
-    install_signal_handlers()
+    var runtime = ExecRuntime()
     _reset_interrupt()
     _raise_self(_SIGINT)
     assert_true(interrupt_requested())
@@ -45,6 +46,7 @@ def test_run_supervised_bails_out_promptly_on_interrupt() raises:
     assert_true(r.termination.is_timed_out(), String(r.termination))
     assert_true(r.duration_ms < 5000, String(r.duration_ms))
     _reset_interrupt()
+    runtime.close()
 
 
 def main() raises:
