@@ -118,7 +118,7 @@ def main():
     if config.collect:
         var collected = CollectResult(List[String](), List[String](), 0)
         try:
-            collected = run_collect(config, root)
+            collected = run_collect(runtime, config, root)
         except e:
             if not _close_runtime(runtime):
                 exit(3)
@@ -149,7 +149,7 @@ def main():
 
     var code = 0
     try:
-        code = run_session(config, root, comp)
+        code = run_session(runtime, config, root, comp)
     except e:
         # The only raise the session propagates is a discover: usage error;
         # like a cli usage error it exits 4 to stderr.

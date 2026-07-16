@@ -19,17 +19,19 @@ are pinned by the decode tests, which still pass after the refactor.
 """
 from std.testing import assert_true, TestSuite
 
-from mtest.exec import run_supervised
+from mtest.exec import ExecRuntime, run_supervised
 
 from exec_helpers import target, py_spec
 
 
 def test_deadline_governs_the_run_not_a_blocking_preread() raises:
+    var runtime = ExecRuntime()
     var argv = List[String]()
     argv.append(target("sleeper.py"))
     # Exec resolves at once (EOF), then the child hangs 300s; a short deadline
     # must end it via the loop, so the duration tracks the deadline, not 300s.
-    var r = run_supervised(py_spec(argv^, 200))
+    var r = run_supervised(runtime, py_spec(argv^, 200))
+    runtime.close()
     assert_true(r.termination.is_timed_out(), String(r.termination))
     assert_true(r.duration_ms < 5000, String(r.duration_ms))
 

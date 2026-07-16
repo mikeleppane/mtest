@@ -1,4 +1,4 @@
-"""fd hygiene for `exec`: repeated spawns must not leak file descriptors.
+"""FD hygiene for `exec`: repeated spawns must not leak file descriptors.
 
 The runner spawns one child per file in one long-lived process, so a single
 leaked pipe end per spawn accumulates without bound. This runs many supervised
@@ -9,7 +9,7 @@ cleanly.
 from std.os import listdir
 from std.testing import assert_true, assert_equal, TestSuite
 
-from mtest.exec import ProcessSpec, ProcessResult, run_supervised
+from mtest.exec import ExecRuntime, ProcessSpec, ProcessResult, run_supervised
 from mtest.exec.termination import Termination
 
 
@@ -22,18 +22,20 @@ def _open_fd_count() raises -> Int:
 
 
 def test_repeated_spawns_do_not_leak_fds() raises:
+    var runtime = ExecRuntime()
     # Warm up once so any one-time mappings (the interrupt flag page) exist.
     var warm = List[String]()
     warm.append("/bin/true")
-    _ = run_supervised(ProcessSpec.command(warm^))
+    _ = run_supervised(runtime, ProcessSpec.command(warm^))
 
     var before = _open_fd_count()
     for _ in range(100):
         var argv = List[String]()
         argv.append("/bin/true")
-        var r = run_supervised(ProcessSpec.command(argv^))
+        var r = run_supervised(runtime, ProcessSpec.command(argv^))
         assert_true(r.termination.is_exited(), String(r.termination))
     var after = _open_fd_count()
+    runtime.close()
     # No growth: every pipe end opened per spawn is closed on every path.
     assert_true(
         after <= before,

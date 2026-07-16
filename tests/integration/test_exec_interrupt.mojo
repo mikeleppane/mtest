@@ -42,7 +42,7 @@ def test_run_supervised_bails_out_promptly_on_interrupt() raises:
     # No deadline at all, but the pending interrupt must group-kill and return.
     var argv = List[String]()
     argv.append(target("sleeper.py"))
-    var r = run_supervised(py_spec(argv^, 0))
+    var r = run_supervised(runtime, py_spec(argv^, 0))
     assert_true(r.termination.is_timed_out(), String(r.termination))
     assert_true(r.duration_ms < 5000, String(r.duration_ms))
     _reset_interrupt()

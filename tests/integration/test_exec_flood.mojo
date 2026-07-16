@@ -17,19 +17,21 @@ spin does not merely fail these — it hangs, which is the intended loud signal.
 """
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
 
-from mtest.exec import run_supervised
+from mtest.exec import ExecRuntime, run_supervised
 
 from exec_helpers import target, py_spec
 
 
 def test_flooding_grandchild_post_reap_returns_promptly() raises:
+    var runtime = ExecRuntime()
     # NO timeout: the leader exits 0 immediately and is reaped. The grandchild
     # floods stdout forever. Before the group-sweep-first fix this hangs in the
     # post-reap drain; after it, the sweep closes the write end and the drain ends.
     var argv = List[String]()
     argv.append(target("flooding_grandchild.py"))
     argv.append("exit0")
-    var r = run_supervised(py_spec(argv^, 0))
+    var r = run_supervised(runtime, py_spec(argv^, 0))
+    runtime.close()
     # Cleanup only: the reported status is the leader's real clean exit.
     assert_true(r.termination.is_exited(), String(r.termination))
     assert_equal(r.termination.value, 0)
@@ -39,13 +41,15 @@ def test_flooding_grandchild_post_reap_returns_promptly() raises:
 
 
 def test_flooding_grandchild_in_run_times_out_promptly() raises:
+    var runtime = ExecRuntime()
     # Short timeout: the leader stays alive while the grandchild floods. A drain
     # that read to EOF (or unbounded) would starve the deadline check forever;
     # the bounded per-slice drain returns so the deadline fires and we time out.
     var argv = List[String]()
     argv.append(target("flooding_grandchild.py"))
     argv.append("alive")
-    var r = run_supervised(py_spec(argv^, 200))
+    var r = run_supervised(runtime, py_spec(argv^, 200))
+    runtime.close()
     assert_true(r.termination.is_timed_out(), String(r.termination))
     # Hard wall-clock bound: a spinning in-run drain would never reach here.
     assert_true(r.duration_ms < 5000, String(r.duration_ms))

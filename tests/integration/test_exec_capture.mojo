@@ -8,7 +8,7 @@ output past a lowered bound is truncated to head + marker + tail.
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
 
 from mtest.config import lossy_utf8
-from mtest.exec import ProcessSpec, ProcessResult, run_supervised
+from mtest.exec import ExecRuntime, ProcessSpec, ProcessResult, run_supervised
 from mtest.exec.capture import BoundedCapture
 
 from exec_helpers import bytes_to_str, count_byte, repeat, target, py_spec
@@ -46,13 +46,15 @@ def test_capture_over_bound_truncated_marker() raises:
 
 
 def test_byte_exact_separate_capture() raises:
+    var runtime = ExecRuntime()
     var argv = List[String]()
     argv.append(target("argv_echoer.py"))
     argv.append("hello world")
     argv.append("trailing ")  # trailing space must survive
     argv.append("")  # empty argv entry must survive
     argv.append("x")
-    var r = run_supervised(py_spec(argv^))
+    var r = run_supervised(runtime, py_spec(argv^))
+    runtime.close()
     assert_true(r.termination.is_exited(), String(r.termination))
     assert_equal(
         bytes_to_str(r.stdout_bytes),
@@ -66,9 +68,11 @@ def test_byte_exact_separate_capture() raises:
 
 
 def test_dual_stream_drain_no_deadlock() raises:
+    var runtime = ExecRuntime()
     var argv = List[String]()
     argv.append(target("dual_flooder.py"))
-    var r = run_supervised(py_spec(argv^))
+    var r = run_supervised(runtime, py_spec(argv^))
+    runtime.close()
     assert_true(r.termination.is_exited(), String(r.termination))
     assert_equal(r.termination.value, 0)
     # 256 KiB per stream, each a single distinct byte value: separate + exact.
@@ -79,6 +83,7 @@ def test_dual_stream_drain_no_deadlock() raises:
 
 
 def test_capture_bound_truncates_head_tail_marker() raises:
+    var runtime = ExecRuntime()
     # 100 'a', 300 'b', 100 'c' with a 200-byte bound (100 head + 100 tail).
     var code = String(
         'import sys; sys.stdout.write("a"*100 + "b"*300 + "c"*100)'
@@ -87,7 +92,10 @@ def test_capture_bound_truncates_head_tail_marker() raises:
     argv.append("python3")
     argv.append("-c")
     argv.append(code)
-    var r = run_supervised(ProcessSpec.command(argv^), capture_bound_bytes=200)
+    var r = run_supervised(
+        runtime, ProcessSpec.command(argv^), capture_bound_bytes=200
+    )
+    runtime.close()
     var s = bytes_to_str(r.stdout_bytes)
     # Head survives, tail survives, middle dropped, marker present.
     assert_true(s.startswith(repeat("a", 100)), s)
@@ -100,12 +108,16 @@ def test_capture_bound_truncates_head_tail_marker() raises:
 
 
 def test_under_bound_is_byte_exact() raises:
+    var runtime = ExecRuntime()
     var code = String('import sys; sys.stdout.write("x"*150)')
     var argv = List[String]()
     argv.append("python3")
     argv.append("-c")
     argv.append(code)
-    var r = run_supervised(ProcessSpec.command(argv^), capture_bound_bytes=200)
+    var r = run_supervised(
+        runtime, ProcessSpec.command(argv^), capture_bound_bytes=200
+    )
+    runtime.close()
     assert_equal(len(r.stdout_bytes), 150)
     assert_equal(count_byte(r.stdout_bytes, UInt8(ord("x"))), 150)
     assert_false("truncated" in bytes_to_str(r.stdout_bytes))

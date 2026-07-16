@@ -1,9 +1,9 @@
 """Exclusive process-global interrupt/runtime ownership (Layer 3).
 
-`ExecRuntime` is the non-copyable token that owns mtest's saved SIGINT and
-SIGTERM dispositions. The native adapter uses the platform's own headers and a
-`volatile sig_atomic_t` latch; Mojo never lays out `struct sigaction`, invents a
-callback pointer, maps a fixed address, or reads libc's private errno storage.
+`ExecRuntime` is the non-copyable token that owns mtest's saved SIGINT, SIGTERM,
+and SIGCHLD dispositions. The native adapter uses the platform's own headers and
+a `volatile sig_atomic_t` latch; Mojo never lays out `struct sigaction`, invents
+a callback pointer, maps a fixed address, or reads libc's private errno storage.
 
 Construction is transactional and rejects a second active runtime. `close()` is
 explicit and fallible so restoration failure can never be reported as success.

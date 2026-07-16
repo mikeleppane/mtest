@@ -70,10 +70,13 @@ static struct mtest_exec_process mtest_process;
 static uint64_t mtest_next_handle = 1;
 static struct sigaction mtest_old_int;
 static struct sigaction mtest_old_term;
+static struct sigaction mtest_old_chld;
 static int mtest_old_int_saved;
 static int mtest_old_term_saved;
+static int mtest_old_chld_saved;
 static int mtest_int_installed;
 static int mtest_term_installed;
+static int mtest_chld_installed;
 
 #if MTEST_EXEC_TESTING
 struct mtest_fault_state {
@@ -564,6 +567,7 @@ uint32_t mtest_exec_native_abi_version(void) {
 int32_t mtest_exec_runtime_open(struct mtest_exec_error *error) {
     int expected = MTEST_RUNTIME_CLOSED;
     struct sigaction action;
+    struct sigaction child_action;
     int saved_errno;
     int rollback_errno = 0;
 
@@ -577,7 +581,10 @@ int32_t mtest_exec_runtime_open(struct mtest_exec_error *error) {
     memset(&action, 0, sizeof(action));
     action.sa_handler = mtest_on_interrupt;
     action.sa_flags = SA_RESTART;
-    if (sigemptyset(&action.sa_mask) != 0) {
+    memset(&child_action, 0, sizeof(child_action));
+    child_action.sa_handler = SIG_DFL;
+    if (sigemptyset(&action.sa_mask) != 0 ||
+        sigemptyset(&child_action.sa_mask) != 0) {
         saved_errno = errno;
         atomic_store(&mtest_runtime_state, MTEST_RUNTIME_CLOSED);
         mtest_set_error(error, MTEST_EXEC_OP_NONE, saved_errno, 0, 0);
@@ -606,12 +613,22 @@ int32_t mtest_exec_runtime_open(struct mtest_exec_error *error) {
         return -1;
     }
     mtest_old_term_saved = 1;
+    if (sigaction(SIGCHLD, NULL, &mtest_old_chld) != 0) {
+        saved_errno = errno;
+        mtest_old_int_saved = 0;
+        mtest_old_term_saved = 0;
+        atomic_store(&mtest_runtime_state, MTEST_RUNTIME_CLOSED);
+        mtest_set_error(error, MTEST_EXEC_OP_NONE, saved_errno, 0, SIGCHLD);
+        return -1;
+    }
+    mtest_old_chld_saved = 1;
     if (mtest_checked_sigaction(
             MTEST_EXEC_OP_SIGACTION_INSTALL_INT, SIGINT, &action, NULL
         ) != 0) {
         saved_errno = errno;
         mtest_old_int_saved = 0;
         mtest_old_term_saved = 0;
+        mtest_old_chld_saved = 0;
         atomic_store(&mtest_runtime_state, MTEST_RUNTIME_CLOSED);
         mtest_set_error(
             error, MTEST_EXEC_OP_SIGACTION_INSTALL_INT, saved_errno, 0, SIGINT
@@ -636,6 +653,7 @@ int32_t mtest_exec_runtime_open(struct mtest_exec_error *error) {
         if (rollback_errno == 0) {
             mtest_old_int_saved = 0;
             mtest_old_term_saved = 0;
+            mtest_old_chld_saved = 0;
             atomic_store(&mtest_runtime_state, MTEST_RUNTIME_CLOSED);
         } else {
             atomic_store(
@@ -657,6 +675,50 @@ int32_t mtest_exec_runtime_open(struct mtest_exec_error *error) {
         return -1;
     }
     mtest_term_installed = 1;
+    if (sigaction(SIGCHLD, &child_action, NULL) != 0) {
+        saved_errno = errno;
+        uint32_t rollback_operation = MTEST_EXEC_OP_NONE;
+        if (mtest_checked_sigaction(
+                MTEST_EXEC_OP_SIGACTION_RESTORE_TERM,
+                SIGTERM,
+                &mtest_old_term,
+                NULL
+            ) != 0) {
+            rollback_operation = MTEST_EXEC_OP_SIGACTION_RESTORE_TERM;
+            rollback_errno = errno;
+        } else {
+            mtest_term_installed = 0;
+        }
+        if (mtest_checked_sigaction(
+                MTEST_EXEC_OP_SIGACTION_RESTORE_INT,
+                SIGINT,
+                &mtest_old_int,
+                NULL
+            ) != 0) {
+            if (rollback_errno == 0) {
+                rollback_operation = MTEST_EXEC_OP_SIGACTION_RESTORE_INT;
+                rollback_errno = errno;
+            }
+        } else {
+            mtest_int_installed = 0;
+        }
+        if (rollback_errno == 0) {
+            mtest_old_int_saved = 0;
+            mtest_old_term_saved = 0;
+            mtest_old_chld_saved = 0;
+            atomic_store(&mtest_runtime_state, MTEST_RUNTIME_CLOSED);
+        } else {
+            atomic_store(&mtest_runtime_state, MTEST_RUNTIME_RESTORE_REQUIRED);
+        }
+        mtest_set_error(error, MTEST_EXEC_OP_NONE, saved_errno, 0, SIGCHLD);
+        if (rollback_errno != 0) {
+            mtest_set_cleanup_error(
+                error, rollback_operation, rollback_errno
+            );
+        }
+        return -1;
+    }
+    mtest_chld_installed = 1;
     mtest_interrupt_flag = 0;
     atomic_store(&mtest_runtime_state, MTEST_RUNTIME_OPEN);
     return 0;
@@ -665,6 +727,7 @@ int32_t mtest_exec_runtime_open(struct mtest_exec_error *error) {
 int32_t mtest_exec_runtime_close(struct mtest_exec_error *error) {
     uint32_t first_operation = MTEST_EXEC_OP_NONE;
     int first_errno = 0;
+    int had_failure = 0;
     int expected = MTEST_RUNTIME_OPEN;
 
     mtest_clear_error(error);
@@ -692,14 +755,25 @@ int32_t mtest_exec_runtime_close(struct mtest_exec_error *error) {
         return -1;
     }
 restore_handlers:
+    if (mtest_chld_installed &&
+        sigaction(SIGCHLD, &mtest_old_chld, NULL) != 0) {
+        first_errno = errno;
+        had_failure = 1;
+    } else {
+        mtest_chld_installed = 0;
+        mtest_old_chld_saved = 0;
+    }
     if (mtest_term_installed && mtest_checked_sigaction(
             MTEST_EXEC_OP_SIGACTION_RESTORE_TERM,
             SIGTERM,
             &mtest_old_term,
             NULL
         ) != 0) {
-        first_operation = MTEST_EXEC_OP_SIGACTION_RESTORE_TERM;
-        first_errno = errno;
+        if (!had_failure) {
+            first_operation = MTEST_EXEC_OP_SIGACTION_RESTORE_TERM;
+            first_errno = errno;
+        }
+        had_failure = 1;
     } else {
         mtest_term_installed = 0;
         mtest_old_term_saved = 0;
@@ -710,15 +784,16 @@ restore_handlers:
             &mtest_old_int,
             NULL
         ) != 0) {
-        if (first_operation == MTEST_EXEC_OP_NONE) {
+        if (!had_failure) {
             first_operation = MTEST_EXEC_OP_SIGACTION_RESTORE_INT;
             first_errno = errno;
         }
+        had_failure = 1;
     } else {
         mtest_int_installed = 0;
         mtest_old_int_saved = 0;
     }
-    if (first_operation != MTEST_EXEC_OP_NONE) {
+    if (had_failure) {
         atomic_store(
             &mtest_runtime_state, MTEST_RUNTIME_RESTORE_REQUIRED
         );
@@ -1424,6 +1499,13 @@ int32_t mtest_exec_process_group(
             error, operation, errno, 0, -((int64_t)process->process_group)
         );
         return -1;
+    }
+    if (action == MTEST_EXEC_GROUP_KILL) {
+        /* A successful pre-reap SIGKILL reaches every member still in the
+           owned process group. The deliberately waitable leader may keep the
+           numeric group observable until waitpid; retained pipe writers are
+           bounded and classified separately by the Mojo supervisor. */
+        process->group_swept = 1;
     }
     result->state = MTEST_EXEC_GROUP_PRESENT;
     return 0;

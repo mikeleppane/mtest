@@ -32,7 +32,7 @@ def test_interrupt_before_files_is_exit_2_all_not_run() raises:
     assert_true(interrupt_requested(), "flag must be set before the session")
 
     var comp = CompositeReporter(Tuple(RecordingReporter()))
-    var code = run_session(base_config(), root, comp)
+    var code = run_session(runtime, base_config(), root, comp)
     _reset_interrupt()
     runtime.close()
 

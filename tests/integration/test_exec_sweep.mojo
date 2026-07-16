@@ -12,12 +12,13 @@ from std.os import remove
 from std.os.path import exists
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
 
-from mtest.exec import ProcessSpec, run_supervised
+from mtest.exec import ExecRuntime, ProcessSpec, run_supervised
 
 from exec_helpers import target, py_spec
 
 
 def test_group_sweep_reaches_grandchild_on_normal_exit() raises:
+    var runtime = ExecRuntime()
     var sentinel = String("build/tests/sweep_sentinel.txt")
     if exists(sentinel):
         remove(sentinel)
@@ -25,7 +26,7 @@ def test_group_sweep_reaches_grandchild_on_normal_exit() raises:
     argv.append(target("grandchild_exit0.py"))
     argv.append(sentinel)
     # NO timeout: the direct child exits 0 at once and is reaped normally.
-    var r = run_supervised(py_spec(argv^, 0))
+    var r = run_supervised(runtime, py_spec(argv^, 0))
     # Cleanup only: the reported status is the leader's real clean exit.
     assert_true(r.termination.is_exited(), String(r.termination))
     assert_equal(r.termination.value, 0)
@@ -36,7 +37,8 @@ def test_group_sweep_reaches_grandchild_on_normal_exit() raises:
     wait.append("python3")
     wait.append("-c")
     wait.append("import time; time.sleep(3)")
-    _ = run_supervised(ProcessSpec.command(wait^))
+    _ = run_supervised(runtime, ProcessSpec.command(wait^))
+    runtime.close()
     assert_false(exists(sentinel), "grandchild survived the normal-exit sweep")
 
 
