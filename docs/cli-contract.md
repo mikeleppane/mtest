@@ -628,3 +628,32 @@ today.
   not-yet-available-flag refusal subcase in §24.1 above.
 - **5** — reachable via an empty walk, via the everything-excluded case, and
   via deselection (`-k` matched nothing, §9).
+
+### 24.3 Selection and parsing deviations in this build
+
+Two surfaces behave more permissively today than the frozen contract above
+describes. Both are stated here so shipped behavior can be told from target
+behavior; neither changes a flag semantic, exit code, or the node-id grammar,
+and both converge to the contract as the runner matures.
+
+- **`collect` does not narrow by per-test selection yet.** §4 lists `-k` as
+  applicable to `collect`, and §16 says `collect` honors the selection flags.
+  This build does not yet apply per-test selection to the `collect` listing: a
+  `-k` under `collect` prints a loud `-k is ignored in collect mode` notice and
+  lists every node id in the discovered files, and a `PATH::TEST` node-id operand
+  contributes its whole **file** to the listing rather than the single test.
+  `collect` still honors path/directory operands, `--exclude`, `--precompile`,
+  `-I`, and the other build flags — only the per-test narrowing is deferred. A
+  `run` **does** honor `-k` and node-id narrowing; this deviation is
+  `collect`-only. (Narrowing `collect` by `-k` — the `pytest --collect-only -k`
+  workflow — arrives with the same selection plumbing.)
+- **A repeated single-valued flag takes the last occurrence.** §3 enumerates the
+  repeatable flags (`--exclude`, `--gate`, `--build-arg`, `-I`, `--precompile`,
+  `--serial`); every other flag is single-valued. The frozen intent is
+  at-most-one — e.g. §5 says "at most one `-k` is accepted in v1". This build
+  does not yet reject a repeated single-valued flag (`-k`, `--maxfail`,
+  `--timeout`, `--color`, `--show-output`, `--durations`, `--mojo`): it silently
+  uses the **last** occurrence (so `-k a -k b` filters by `b`, not `a or b`).
+  Until the at-most-one check is enforced (a usage error, exit 4), do not rely on
+  repeating these flags. The mutually-exclusive `-q`/`-v` pair is already
+  rejected as a usage error; the single-valued-flag check follows the same shape.

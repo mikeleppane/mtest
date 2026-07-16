@@ -67,23 +67,44 @@ def _malformed_node_id_error(op: String) -> Error:
     )
 
 
+def _node_id_names_directory_error(op: String, dir_part: String) -> Error:
+    """The exit-4 usage error for a node id whose path resolves to a directory.
+
+    A node id is FILE::TEST — it selects one test in one file. If its path is a
+    directory, silently walking it would drop the `::TEST` selector and run the
+    whole tree, so it is refused as malformed rather than degraded to a walk.
+    """
+    return Error(
+        "discover: malformed node id '"
+        + op
+        + "': '"
+        + dir_part
+        + "' is a directory, but a node id is FILE::TEST (see mtest --help)"
+    )
+
+
 def _classify(op: String, nroot: String, mut into: List[String]) raises:
     """Resolve one operand into `into` (walked files, or one explicit file).
 
     A node id (`PATH::TEST`) resolves to its FILE part — the node id implies its
     file, and per-test name selection is applied later by the session. More than
-    one `::` is a MALFORMED node id (exit-4 usage error). Also raises for a
-    nonexistent path or an operand escaping the root.
+    one `::`, or a node id whose PATH is a directory, is a MALFORMED node id
+    (exit-4 usage error) — a directory node id must not silently drop its
+    `::TEST` selector and walk the tree. Also raises for a nonexistent path or an
+    operand escaping the root.
     """
     var split = split_node_token(op)
     if split.sep_count > 1:
         raise _malformed_node_id_error(op)
-    var file_op = op if split.sep_count == 0 else split.file_part
+    var is_node_id = split.sep_count == 1
+    var file_op = op if not is_node_id else split.file_part
     var rel = normalize_operand(file_op, nroot)  # raises on root escape
     var fpath = _abs_of(nroot, rel)
     if not exists(fpath):
         raise Error("discover: no such path '" + file_op + "'")
     if isdir(fpath):
+        if is_node_id:
+            raise _node_id_names_directory_error(op, file_op)
         for f in walk_dir(fpath, rel):
             into.append(f)
     elif isfile(fpath):

@@ -1755,7 +1755,12 @@ def run_session[
 
     # Precompile steps, in listed order. Each success widens the include set.
     var includes = config.include_paths.copy()
-    var casualties = selected
+    # Every selected file (gates first, then the run set) depends on the
+    # precompiled packages, so a precompile failure makes all of them casualties
+    # — named individually in the banner (§8.3), not merely counted.
+    var casualty_files = disc.gate_files.copy()
+    for f in disc.run_files:
+        casualty_files.append(String(f))
     for pc in config.precompiles:
         if interrupt_requested():
             interrupted = True
@@ -1777,7 +1782,10 @@ def run_session[
                 precompile_failed = True
                 reporter.handle(
                     Event.precompile_failed(
-                        pc.src, pr.compiler_output, casualties
+                        pc.src,
+                        pr.compiler_output,
+                        len(casualty_files),
+                        casualties=casualty_files,
                     )
                 )
                 break

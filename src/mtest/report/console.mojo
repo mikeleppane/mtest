@@ -643,15 +643,21 @@ struct ConsoleReporter(Reporter):
 
     def _on_precompile_failed(mut self, e: Event):
         """Render the precompile-failure banner with the compiler output verbatim.
+
+        Uses the frozen outcome-vocabulary label (PRECOMPILE-ERROR) and, per
+        §8.3, names each dependent test file as a casualty — not merely a count —
+        so a reader can see exactly which files were denied a run.
         """
         var banner = (
-            String("PRECOMPILE-FAILED  ")
+            String("PRECOMPILE-ERROR  ")
             + e.step
             + "  ("
             + String(e.casualty_count)
             + " file(s) could not run)"
         )
         self._head += self._paint(_RED_BOLD, banner) + "\n"
+        for c in e.casualties:
+            self._head += "  " + c + "\n"
         self._head += _ensure_trailing_newline(e.compiler_output)
         self._head += "\n"
 

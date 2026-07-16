@@ -174,6 +174,21 @@ def test_malformed_node_id_operand_raises() raises:
     remove_tree(root)
 
 
+def test_node_id_naming_a_directory_raises() raises:
+    # A node id's path must be a FILE. Pointing it at a directory must not
+    # silently drop the ::TEST selector and walk the whole tree — it is an
+    # exit-4 malformed node id, the same class as the other node-id shape errors.
+    var root = temp_root()
+    touch(root, "tests/test_a.mojo")
+    touch(root, "tests/test_b.mojo")
+    with assert_raises(contains="malformed node id"):
+        _ = discover(
+            _cfg(["tests::test_a"], List[String](), List[String]()),
+            root,
+        )
+    remove_tree(root)
+
+
 def test_nonexistent_operand_raises() raises:
     var root = temp_root()
     with assert_raises(contains="discover: no such path 'nope/test_x.mojo'"):
