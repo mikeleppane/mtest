@@ -60,9 +60,9 @@ fmt = "mojo format src tests e2e"
 # change — regenerate transcripts, do not fight the gate.
 fmt-check = "mojo format src tests e2e && git diff --exit-code"
 
-# Standalone stdlib-only inventory during safety hardening. Mutation tests pin
-# every syntax family and string/comment exclusion. This task intentionally
-# remains outside `ci` until every reported operation is fixed and documented.
+# Stdlib-only unsafe-operation inventory. Mutation tests pin every syntax family
+# and string/comment exclusion; the complete product/test inventory must remain
+# locally documented before the ordinary CI gate can proceed.
 safety-check = "python scripts/safety_check_test.py && python scripts/safety_check.py"
 
 # Strict C17 ABI/layout/symbol verification plus native lifecycle tests for the
@@ -70,6 +70,17 @@ safety-check = "python scripts/safety_check_test.py && python scripts/safety_che
 # object can expose deterministic fault and sanitizer controls that production
 # linkage proves absent.
 native-check = "python scripts/native_check.py"
+
+# Source-build the native adapter and a risk-weighted exec subset with matching
+# AddressSanitizer instrumentation. Live OOB/UAF/leak controls prove that both
+# the compiler instrumentation and fail-closed harness remain effective.
+asan-check = "python scripts/asan_check.py"
+
+# Source-build every exec integration suite with debug information and run it
+# under the locked Linux-only Memcheck. Undefined-value, invalid-access, leak,
+# and fd controls run first; reviewed runtime-reachable allocations are matched
+# exactly and project/native frames are forbidden from that baseline.
+valgrind-check = "python scripts/valgrind_check.py"
 
 # Regenerate the protocol snapshots IN PLACE from the committed fixtures at the
 # pinned toolchain. Local use only (updating the committed snapshots); never run in
@@ -130,6 +141,7 @@ depends-on = ["build-bin"]
 depends-on = [
     "fmt-check",
     "harness-check",
+    "safety-check",
     "native-check",
     "build",
     "transcripts-check",

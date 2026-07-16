@@ -38,6 +38,7 @@ jobs:
       # The aggregate gate, fail-fast in order:
       #   fmt-check         — mojo format then `git diff --exit-code` (never edits in CI)
       #   harness-check     — exercise recursive suite enumeration and output mapping
+      #   safety-check      — reject undocumented unsafe Mojo operations
       #   native-check      — verify native ABI/layout/symbol isolation and lifecycle
       #   build             — precompile src/mtest (the package-compiles gate)
       #   transcripts-check — regenerate every transcript to a temp dir and diff

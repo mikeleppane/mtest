@@ -32,9 +32,21 @@ Run the classified suites directly with:
 $ pixi run test-unit
 $ pixi run test-integration
 $ pixi run test-direct
+$ pixi run safety-check
 $ pixi run native-check
+$ pixi run asan-check
+$ pixi run valgrind-check
 ```
 
 `test-direct` is the aggregate independent executor. `pixi run test` is the
 separate self-hosted check that drives `build/mtest` over the same unit and
 integration suites, while `pixi run e2e` exercises the external CLI corpus.
+
+`asan-check` source-builds the adapter and the highest-risk exec suites with
+matching ASan/LSan instrumentation. It first proves that heap overflow,
+use-after-free, and leak controls are detected. `valgrind-check` is Linux-only
+and substantially slower: it source-builds every `test_exec_*` suite, exercises
+Memcheck's invalid-access, undefined-value, leak, and descriptor controls, and
+rejects any project/native allocation in the reviewed Mojo-runtime reachable
+baseline. These dynamic checks complement the normal behavioral gate; neither
+is a claim that all memory or process-lifecycle behavior is proved safe.
