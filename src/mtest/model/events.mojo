@@ -131,6 +131,8 @@ struct Event(Copyable, Movable):
     """The raw captured compiler output for the failed step."""
     var casualty_count: Int
     """How many files could not run because the step failed."""
+    var casualties: List[String]
+    """The dependent test files that could not run (empty if only a count is known)."""
 
     # FileStarted / FileFinished.
     var path: String
@@ -216,6 +218,7 @@ struct Event(Copyable, Movable):
             step="",
             compiler_output="",
             casualty_count=0,
+            casualties=List[String](),
             path="",
             outcome=Outcome.NOT_RUN,
             duration_seconds=0.0,
@@ -273,14 +276,22 @@ struct Event(Copyable, Movable):
 
     @staticmethod
     def precompile_failed(
-        step: String, compiler_output: String, casualty_count: Int
+        step: String,
+        compiler_output: String,
+        casualty_count: Int,
+        casualties: List[String] = List[String](),
     ) -> Event:
         """A session-level build step failed, before any file identity exists.
+
+        `casualties` names the dependent test files that could not run; when it
+        is non-empty its length is authoritative for the count (§8.3 asks the
+        banner to list them, not merely count them).
         """
         var e = Event._blank(EventKind.PRECOMPILE_FAILED)
         e.step = step
         e.compiler_output = compiler_output
-        e.casualty_count = casualty_count
+        e.casualties = casualties.copy()
+        e.casualty_count = len(casualties) if casualties else casualty_count
         return e^
 
     @staticmethod

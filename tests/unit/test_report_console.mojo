@@ -874,14 +874,24 @@ def test_precompile_failed_banner_verbatim() raises:
         Event.precompile_failed(
             "precompile src/mtest",
             "error: undefined symbol 'bar'\n",
-            3,
+            0,
+            casualties=[
+                String("tests/test_a.mojo"),
+                String("tests/test_b.mojo"),
+                String("tests/nested/test_c.mojo"),
+            ],
         )
     )
     var out = c.output()
-    assert_true("PRECOMPILE-FAILED" in out)
+    # The banner uses the frozen outcome-vocabulary label, not an ad-hoc one.
+    assert_true("PRECOMPILE-ERROR" in out)
     assert_true("precompile src/mtest" in out)
     assert_true("error: undefined symbol 'bar'" in out)
     assert_true("3 file(s) could not run" in out)
+    # §8.3: every dependent test file is named as a casualty, not merely counted.
+    assert_true("tests/test_a.mojo" in out)
+    assert_true("tests/test_b.mojo" in out)
+    assert_true("tests/nested/test_c.mojo" in out)
 
 
 def test_internal_error_banner_names_step_program_and_errno() raises:
