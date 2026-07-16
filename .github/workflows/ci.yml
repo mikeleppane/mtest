@@ -48,3 +48,27 @@ jobs:
       # No network is touched here.
       - name: CI gate
         run: pixi run ci
+
+  macos-build:
+    name: macOS arm64 build + link
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          locked: true
+          cache: true
+
+      - name: Mojo version
+        run: pixi run mojo-version
+
+      - name: Precompile package
+        run: pixi run build
+
+      - name: Link executable
+        run: pixi run build-bin
+
+      - name: Smoke-test executable
+        run: ./build/mtest --help
