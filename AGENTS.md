@@ -82,6 +82,30 @@ toolchain has removed or renamed much of what a model will reach for by default
 `std.`-prefixed imports, `s[byte=i]` not `s[i]`). Docstrings are Google-style,
 triple-quoted, and mandatory on public entities.
 
+## Unsafe Mojo requires a local proof
+
+Every operation that bypasses Mojo's lifetime, initialization, bounds, type, or
+ABI checks has an adjacent `# SAFETY:` comment. Put the comment immediately
+before the smallest operation or contiguous unsafe block it justifies; do not
+use a distant function-level assurance. The argument is concrete and
+falsifiable, addressing every applicable invariant:
+
+- pointer provenance and ownership, including who frees an allocation;
+- lifetime and non-escape across every borrow or syscall;
+- byte/element bounds and complete initialization before reads;
+- alignment, layout, valid bit patterns, and platform assumptions;
+- the exact foreign ABI and whether the callee retains a pointer;
+- signal-handler or post-fork restrictions and concurrency assumptions; and
+- cleanup on success, error, timeout, and partial-initialization paths.
+
+Prefer deleting an unsafe operation when a safe stdlib operation exists. During
+the hardening migration, run `pixi run safety-check` explicitly to inventory
+unresolved sites; do not add a clause until the operation's invariants are true.
+The task joins `ci` only after the complete inventory is resolved. The checker
+enforces local comment presence and prints separate pointer-arithmetic and
+typed-dereference review hints; human review still proves adequacy. A green
+checker is not proof that unsafe code is sound.
+
 ## The transcript lifecycle — doctrine
 
 The committed protocol snapshots under `tests/snapshots/protocol/` pin TestSuite's

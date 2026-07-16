@@ -139,6 +139,30 @@ that keep it correct:
   POSIX surface. Any `#ifdef`-shaped divergence is hidden behind the module's
   narrow interface — `session` never sees an fd or a syscall.
 
+### `SAFETY:` arguments are part of every unsafe operation
+
+Immediately precede every raw allocation/free, `UnsafePointer` construction,
+unsafe string/pointer conversion, pointer bitcast, memory initialization, or FFI
+call with `# SAFETY:`. One comment may cover a mechanically contiguous unsafe
+block, but never unrelated intervening statements. State the actual proof rather
+than paraphrasing the operation:
+
+- where the pointer came from and who owns/frees it;
+- why it stays live and does not escape the callee's borrow;
+- the exact initialized byte/element bounds used by every read or write;
+- alignment, layout, bit-pattern, and gated platform assumptions;
+- the foreign signature and pointer-retention contract;
+- signal-context or post-fork async-safety constraints; and
+- cleanup behavior on every partial-success and error path.
+
+Prefer a safe stdlib operation when one exists. During the hardening migration,
+run `pixi run safety-check` explicitly to inventory unresolved sites and review
+its non-gating pointer arithmetic/typed-dereference hints. Do not add a clause
+until the operation's invariants are actually true. The task joins `ci` only
+after the complete inventory is resolved; from then on every Mojo edit must keep
+it green. The checker proves only that a nearby argument exists; review proves
+that the argument is true and complete.
+
 ---
 
 ## Protocol parsing — anchor on the last report header, trust nothing a test prints
