@@ -106,6 +106,7 @@ def flag_specs() -> List[FlagSpec]:
         FlagSpec("--maxfail", FlagId.MAXFAIL, 1, False, True, ""),
         FlagSpec("--durations", FlagId.DURATIONS, 1, False, True, ""),
         FlagSpec("--shard", FlagId.SHARD, 1, False, True, ""),
+        FlagSpec("--retries", FlagId.RETRIES, 1, False, True, ""),
         # Part of the v1 contract but not served by this build.
         FlagSpec("-n", FlagId.WORKERS, 1, False, False, "parallel workers"),
         FlagSpec(
@@ -129,14 +130,6 @@ def flag_specs() -> List[FlagSpec]:
             False,
             False,
             "the module-cache quarantine",
-        ),
-        FlagSpec(
-            "--retries",
-            FlagId.RETRIES,
-            1,
-            False,
-            False,
-            "retries and flaky handling",
         ),
         FlagSpec(
             "--junit-xml",

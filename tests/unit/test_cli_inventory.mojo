@@ -59,11 +59,12 @@ def frozen_inventory() -> List[InvRow]:
         InvRow("--durations", 1, False, True),
         # `--shard [hash:|slice:]M/N`: 1<=M<=N, last-wins.
         InvRow("--shard", 1, False, True),
+        # `--retries N`: non-negative int; 0 disables.
+        InvRow("--retries", 1, False, True),
         # In the v1 contract but not served by this build.
         InvRow("-n", 1, False, False),
         InvRow("--workers", 1, False, False),
         InvRow("--compile-timeout", 1, False, False),
-        InvRow("--retries", 1, False, False),
         InvRow("--junit-xml", 1, False, False),
         InvRow("--gh-annotations", 1, False, False),
         # `--serial GLOB`: repeatable.
@@ -149,8 +150,29 @@ def test_refuse_compile_timeout() raises:
     _assert_refused("--compile-timeout")
 
 
-def test_refuse_retries() raises:
-    _assert_refused("--retries")
+def test_retries_is_served_and_parses() raises:
+    # `--retries` is now served: a non-negative int parses cleanly.
+    var argv: List[String] = ["--retries", "3"]
+    var r = parse_args(argv)
+    assert_equal(r.config.retries, 3)
+
+
+def test_retries_zero_disables() raises:
+    var argv: List[String] = ["--retries", "0"]
+    var r = parse_args(argv)
+    assert_equal(r.config.retries, 0)
+
+
+def test_retries_default_is_zero() raises:
+    var argv: List[String] = ["tests/"]
+    var r = parse_args(argv)
+    assert_equal(r.config.retries, 0)
+
+
+def test_retries_bad_value_is_usage_error() raises:
+    var argv: List[String] = ["--retries", "-1"]
+    with assert_raises(contains="integer >= 0"):
+        _ = parse_args(argv)
 
 
 def test_gate_is_served_and_accumulates() raises:

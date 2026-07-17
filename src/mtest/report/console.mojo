@@ -179,6 +179,32 @@ def _signal_name(signo: Int) -> String:
     return String("")
 
 
+def _term_phrase(
+    kind: Int, value: Int, final_kind: Int, final_value: Int, escalated: Bool
+) -> String:
+    """A short human phrase for an attempt's decomposed termination. Pure.
+
+    The `AttemptFinished` event carries the termination as plain integers (the
+    exec-layer `Termination` kinds: 0 EXITED, 1 SIGNALED, 2 TIMED_OUT, 3
+    SPAWN_FAILED) so this layer imports nothing above it. A signal is named in
+    words when recognized; a deadline notes any SIGKILL escalation; a nonzero
+    EXITED is a compiler ICE that exited under its own control.
+    """
+    if kind == 1:
+        var name = _signal_name(value)
+        if name != "":
+            return String("signal ") + String(value) + " — " + name
+        return String("signal ") + String(value)
+    if kind == 2:
+        var s = String("timed out")
+        if escalated:
+            s += ", escalated to SIGKILL"
+        return s
+    if kind == 3:
+        return String("spawn failed (errno ") + String(value) + ")"
+    return String("exit ") + String(value)
+
+
 def _errno_name(errno: Int) -> String:
     """The strerror-style words for a common spawn errno. `""` outside the set.
 
@@ -571,6 +597,8 @@ struct ConsoleReporter(Reporter):
         elif k == EventKind.COLLECTION_KNOWN:
             # The collection line arrives in a later surface; nothing here yet.
             pass
+        elif k == EventKind.ATTEMPT_FINISHED:
+            self._on_attempt_finished(e)
 
     def _reset_file(mut self):
         """Clear the per-file accumulation after a file is fully rendered."""
@@ -639,6 +667,41 @@ struct ConsoleReporter(Reporter):
             sentence = e.warning_pattern.copy()
         self._last_warning_detail = e.warning_pattern.copy()
         var line = String("WARNING  ") + e.warning_kind + ": " + sentence
+        self._head += self._paint(_YELLOW, line) + "\n"
+
+    def _on_attempt_finished(mut self, e: Event):
+        """Render a loud "TRY" line for one non-final crash-class retry attempt.
+
+        Reads the attempt's identity from the plain decomposed fields the event
+        carries (never re-parsing bytes): which attempt of how many, the step and
+        classification, and a short phrase for the termination. The excerpt
+        markers say loudly when the captured streams were clamped.
+        """
+        var phrase = _term_phrase(
+            e.term_kind,
+            e.term_value,
+            e.term_final_kind,
+            e.term_final_value,
+            e.escalated,
+        )
+        var line = _col("TRY", _TOKEN_W) + _col(e.path, _PATH_W)
+        line += (
+            String("attempt ")
+            + String(e.attempt_index)
+            + "/"
+            + String(e.attempts_planned)
+            + "  "
+            + e.step
+            + " "
+            + e.classification
+            + "  ("
+            + phrase
+            + ")  "
+            + _fmt_fixed(e.duration_seconds, 2)
+            + "s"
+        )
+        if e.stdout_truncated or e.stderr_truncated:
+            line += "  [excerpt]"
         self._head += self._paint(_YELLOW, line) + "\n"
 
     def _on_precompile_failed(mut self, e: Event):

@@ -157,6 +157,14 @@
       "disposition": "PARSED",
       "rationale": "A passing suite whose role is to be the target of --exclude. When a pattern covers it the runner prints a loud EXCLUDED line and never builds it; when actually run it passes."
     },
+    "e2e/flaky/test_flaky.mojo": {
+      "verdict": "CRASH",
+      "exit_class": 1,
+      "in_default_suite": false,
+      "reached_only_by": ["retries"],
+      "disposition": "NO_REPORT",
+      "rationale": "The retry fixture: keyed by a per-file marker under build/e2e-scratch/ (owned/reset by the harness), it CRASHES by SIGSEGV on its first run (no marker) then PASSES on a re-run (marker present). The listed verdict is the fresh-marker first-run state: with an empty scratch and --retries 0 it dies by signal and mtest reports CRASH (exit 1). The retries scenario resets the marker and runs it twice: --retries 1 -> FLAKY (exit 0, a TRY line for the crashed first attempt), --retries 0 -> CRASH (exit 1). Reached only by the retries scenario; never in the default suite."
+    },
     "e2e/maxfail/test_a_fail.mojo": {
       "verdict": "FAIL",
       "exit_class": 1,

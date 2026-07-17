@@ -672,6 +672,76 @@ def s_maxfail(manifest: dict) -> str:
     return f"--maxfail 1 stopped after 1 failing test; {summ.not_run} NOT-RUN, accounting holds"
 
 
+def s_retries_flaky(manifest: dict) -> str:
+    """`--retries` re-runs a crash-class failure; a late pass is FLAKY.
+
+    The flaky fixture crashes by SIGSEGV on its first run (dropping a marker) and
+    passes on a re-run (marker present). The harness OWNS the scratch dir and
+    resets the marker before each run so ordering is deterministic:
+      * --retries 1 -> the crashed first attempt shows a TRY line, the file is
+        reported FLAKY, and the process exits 0;
+      * --retries 0 -> the first crash stands as CRASH and the process exits 1.
+    Structure is asserted (a TRY line and a FLAKY token are present), never the
+    exact console bytes."""
+    rel = "e2e/flaky/test_flaky.mojo"
+    scratch = os.path.join(REPO_ROOT, "build", "e2e-scratch")
+    marker = os.path.join(scratch, "flaky_marker")
+
+    def reset() -> None:
+        os.makedirs(scratch, exist_ok=True)
+        if os.path.exists(marker):
+            os.remove(marker)
+
+    try:
+        # --retries 1: crash then pass -> FLAKY, exit 0, with a TRY line.
+        reset()
+        run1 = run_mtest([rel, "--retries", "1"], timeout=SHORT_TIMEOUT)
+        expect_exit(run1, 0)
+        expect(
+            run1.verdict_line("TRY", rel) is not None,
+            f"--retries 1 showed no TRY line for the crashed first attempt:\n"
+            f"{run1.stdout}",
+        )
+        expect(
+            run1.verdict_line("FLAKY", rel) is not None,
+            f"--retries 1 did not report the file FLAKY:\n{run1.stdout}",
+        )
+        expect_accounting(run1)
+
+        # --retries 0: the first crash stands -> CRASH, exit 1.
+        reset()
+        run0 = run_mtest([rel, "--retries", "0"], timeout=SHORT_TIMEOUT)
+        expect_exit(run0, 1)
+        expect(
+            run0.verdict_line("CRASH", rel) is not None,
+            f"--retries 0 did not report the file CRASH:\n{run0.stdout}",
+        )
+
+        # SELECTION variant: retries must NOT be inert under -k/node-id. The same
+        # crash-then-pass via a keyword selection is FLAKY with a TRY line.
+        reset()
+        runk = run_mtest(
+            ["e2e/flaky", "-k", "flaky", "--retries", "1"],
+            timeout=SHORT_TIMEOUT,
+        )
+        expect_exit(runk, 0)
+        expect(
+            runk.verdict_line("TRY", rel) is not None,
+            f"-k selection + --retries 1 showed no TRY line:\n{runk.stdout}",
+        )
+        expect(
+            runk.verdict_line("FLAKY", rel) is not None,
+            f"-k selection + --retries 1 did not report FLAKY:\n{runk.stdout}",
+        )
+    finally:
+        if os.path.exists(marker):
+            os.remove(marker)
+    return (
+        "retries: default --retries 1 -> TRY + FLAKY (exit 0); --retries 0 ->"
+        " CRASH (exit 1); -k selection --retries 1 -> TRY + FLAKY (exit 0)"
+    )
+
+
 def s_exclude_and_stale(manifest: dict) -> str:
     run = run_mtest(
         [
@@ -1049,9 +1119,9 @@ def s_usage_refusals(manifest: dict) -> str:
     collect mode: a listing is not a run, so every served run-only flag
     (--maxfail, -x/--exitfirst, --gate, -s/--show-output) is refused with exit 4,
     while --timeout is NOT refused (it bounds the probes). Separately,
-    --shard/--serial/--json are part of the v1 contract but not served by this
-    build, so each fires the standard availability refusal (exit 4, the flag
-    named on stderr) regardless of subcommand."""
+    --serial/--json are part of the v1 contract but not served by this build, so
+    each fires the standard availability refusal (exit 4, the flag named on
+    stderr) regardless of subcommand."""
     run = run_mtest(
         ["collect", "--maxfail", "1", "e2e/matrix"], timeout=SHORT_TIMEOUT
     )
@@ -1098,21 +1168,6 @@ def s_usage_refusals(manifest: dict) -> str:
     expect(
         show.stdout == "",
         f"a usage error must print no listing to stdout, got:\n{show.stdout!r}",
-    )
-
-    shard = run_mtest(["--shard", "1/4", "e2e/matrix"], timeout=SHORT_TIMEOUT)
-    expect_exit(shard, 4)
-    expect(
-        "--shard" in shard.stderr,
-        f"--shard did not name itself on stderr:\n{shard.stderr}",
-    )
-    expect(
-        "not available in this build" in shard.stderr,
-        f"--shard did not fire the availability refusal:\n{shard.stderr}",
-    )
-    expect(
-        shard.stdout == "",
-        f"a usage error must print no listing to stdout, got:\n{shard.stdout!r}",
     )
 
     serial = run_mtest(
@@ -1168,8 +1223,7 @@ def s_usage_refusals(manifest: dict) -> str:
 
     return (
         "run-only flags (--maxfail, --gate, -s) + collect -> exit 4 on "
-        "stderr, no listing; --shard/--serial/--json -> exit 4 availability "
-        "refusal"
+        "stderr, no listing; --serial/--json -> exit 4 availability refusal"
     )
 
 
@@ -1598,6 +1652,7 @@ def main() -> int:
     h.scenario("single-pass", s_single_pass)
     h.scenario("exitfirst", s_exitfirst)
     h.scenario("maxfail", s_maxfail)
+    h.scenario("retries-flaky", s_retries_flaky)
     h.scenario("exclude+stale", s_exclude_and_stale)
     h.scenario("all-excluded", s_all_excluded)
     h.scenario("empty-dir", s_empty_dir)

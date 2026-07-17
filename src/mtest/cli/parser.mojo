@@ -31,8 +31,8 @@ comptime MTEST_VERSION = "0.1.0-dev"
 comptime SUPPORTED_SUMMARY = (
     "paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo,"
     " -x/--exitfirst, --timeout, -s/--show-output, -q, -v, --color, -k,"
-    " --maxfail, --durations, --shard, collect/--collect-only, --help,"
-    " --version"
+    " --maxfail, --durations, --shard, --retries, collect/--collect-only,"
+    " --help, --version"
 )
 """A stable one-line list of what this build serves, quoted in refusals."""
 
@@ -108,6 +108,13 @@ def _parse_durations(value: String) raises -> Int:
     """Parse a `--durations` value: a non-negative integer (`0` disables)."""
     if not _all_digits(value):
         raise _err("'--durations' wants an integer >= 0, got '" + value + "'")
+    return atol(value)
+
+
+def _parse_retries(value: String) raises -> Int:
+    """Parse a `--retries` value: a non-negative integer (`0` disables)."""
+    if not _all_digits(value):
+        raise _err("'--retries' wants an integer >= 0, got '" + value + "'")
     return atol(value)
 
 
@@ -283,6 +290,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var shard_mode = ShardMode.HASH
     var shard_m = 0
     var shard_n = 0
+    var retries = 0
     var saw_show_output = False
     var saw_quiet = False
     var saw_verbose = False
@@ -409,6 +417,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             shard_mode = parsed[0]
             shard_m = parsed[1]
             shard_n = parsed[2]
+        elif s.id == FlagId.RETRIES:
+            retries = _parse_retries(value)
 
     # Collect mode is a listing, not a run: the run-only knobs that shape which
     # tests execute or when to stop scheduling are meaningless against it and are
@@ -471,5 +481,6 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         shard_mode=shard_mode,
         shard_m=shard_m,
         shard_n=shard_n,
+        retries=retries,
     )
     return ParseResult.run(cfg^)

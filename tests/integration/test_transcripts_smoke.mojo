@@ -68,8 +68,8 @@ def _first_int(field: String) raises -> Int:
 def test_manifest_lists_every_scenario() raises:
     var names = _manifest()
     # 18 protocol scenarios plus the native-skip scenarios (default, skip-all,
-    # only-native).
-    assert_equal(len(names), 21)
+    # only-native), plus the pinned real-segfault shape (segfault--default).
+    assert_equal(len(names), 22)
     var have_crash = False
     var have_only_unknown = False
     for n in names:

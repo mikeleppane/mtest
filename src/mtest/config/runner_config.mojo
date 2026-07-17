@@ -88,6 +88,12 @@ struct RunnerConfig(Copyable, Movable):
     the whole discovered run set runs. When `> 0` the session keeps only the run
     files this shard owns; gate files are never sharded."""
 
+    var retries: Int
+    """`--retries N`: how many times to RE-RUN a crash-class failure (a real
+    crash or a deadline kill) before accepting it; `0` (the default) disables
+    retries. A file runs up to `retries + 1` attempts; a late pass after a
+    crash-class attempt is FLAKY. Deterministic failures are never retried."""
+
     @staticmethod
     def default() -> RunnerConfig:
         """A config with every field at its contract default. Allocates.
@@ -95,8 +101,9 @@ struct RunnerConfig(Copyable, Movable):
         The defaults: every list empty, `mojo_path="mojo"`,
         `timeout_secs=300`, `show_output=FAILURES`, `verbosity=NORMAL`,
         `color=AUTO`, `exitfirst=False`, `maxfail=0` (no limit),
-        `durations=0` (no report), `collect=False`, and UNSHARDED
-        (`shard_mode=HASH`, `shard_m=0`, `shard_n=0`).
+        `durations=0` (no report), `collect=False`, UNSHARDED
+        (`shard_mode=HASH`, `shard_m=0`, `shard_n=0`), and `retries=0` (no
+        retries).
         """
         return RunnerConfig(
             paths=[],
@@ -118,4 +125,5 @@ struct RunnerConfig(Copyable, Movable):
             shard_mode=ShardMode.HASH,
             shard_m=0,
             shard_n=0,
+            retries=0,
         )
