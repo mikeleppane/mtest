@@ -24,6 +24,7 @@ from mtest.model import (
     TestResult,
 )
 from mtest.report import ConsoleReporter
+from mtest.report.console import _precompile_ending_phrase
 
 
 def _bytes(s: String) -> List[UInt8]:
@@ -992,6 +993,92 @@ def test_precompile_failed_banner_verbatim() raises:
     assert_true("tests/test_a.mojo" in out)
     assert_true("tests/test_b.mojo" in out)
     assert_true("tests/nested/test_c.mojo" in out)
+
+
+def test_precompile_ending_phrase_names_each_ending_in_words() raises:
+    # The PURE phrase builder behind the banner's "how it ended" clause. The
+    # decomposed termination kinds are the exec-layer discriminants: 0 EXITED,
+    # 1 SIGNALED, 2 TIMED_OUT, 3 SPAWN_FAILED.
+    assert_equal(
+        _precompile_ending_phrase(2, 0, False, 600), "timed out after 600s"
+    )
+    assert_equal(
+        _precompile_ending_phrase(2, 0, True, 600),
+        "timed out after 600s, escalated to SIGKILL",
+    )
+    assert_equal(
+        _precompile_ending_phrase(1, 11, False, 0),
+        "died by signal 11 (SIGSEGV, segmentation fault)",
+    )
+    # A signal outside the named set still reads as words, minus the name.
+    assert_equal(
+        _precompile_ending_phrase(1, 62, False, 0), "died by signal 62"
+    )
+    assert_equal(_precompile_ending_phrase(0, 1, False, 0), "exited 1")
+    assert_equal(
+        _precompile_ending_phrase(3, 2, False, 0),
+        "could not be spawned (errno 2)",
+    )
+
+
+def test_precompile_failed_banner_names_a_timeout_ending() raises:
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(
+        Event.precompile_failed(
+            "mathlib",
+            "mojo: note: lowering @foo\n",
+            0,
+            casualties=[String("tests/test_a.mojo")],
+            ending_known=True,
+            term_kind=2,
+            term_value=0,
+            escalated=False,
+            timeout_seconds=600,
+            attempts_used=1,
+        )
+    )
+    var out = c.output()
+    assert_true("PRECOMPILE-ERROR" in out)
+    # A step WE killed at the deadline names the deadline, in words.
+    assert_true("timed out after 600s" in out)
+    assert_true("1 file(s) could not run" in out)
+    # The compiler's own output still rides verbatim, and the casualty is named.
+    assert_true("mojo: note: lowering @foo" in out)
+    assert_true("tests/test_a.mojo" in out)
+
+
+def test_precompile_failed_banner_names_a_signal_ending() raises:
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(
+        Event.precompile_failed(
+            "mathlib",
+            "Stack dump:\n",
+            0,
+            casualties=[String("tests/test_a.mojo")],
+            ending_known=True,
+            term_kind=1,
+            term_value=11,
+            attempts_used=2,
+        )
+    )
+    var out = c.output()
+    assert_true("died by signal 11 (SIGSEGV, segmentation fault)" in out)
+    # A step that burned its retry budget says so.
+    assert_true("2 attempts" in out)
+
+
+def test_precompile_failed_banner_without_an_ending_is_unchanged() raises:
+    # An event that carries no ending identity must not invent one (an unset
+    # termination would otherwise read as the lie "exited 0").
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.precompile_failed("mathlib", "error: boom\n", 2))
+    var out = c.output()
+    assert_true("2 file(s) could not run" in out)
+    assert_false("exited 0" in out)
+    assert_false("timed out" in out)
 
 
 def test_internal_error_banner_names_step_program_and_errno() raises:

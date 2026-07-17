@@ -5,13 +5,23 @@ Stands in for the real `mojo` binary the same way `scripts/logging_mojo.py`
 does: `mtest --mojo scripts/fake_slow_mojo.py ...` routes every child mtest
 spawns through this script first. It splits by subcommand:
 
-* `build` — writes one progress line to stderr (so the COMPILE-TIMEOUT banner has
-  real compiler output to render verbatim), then sleeps far longer than any
-  deadline the scenario sets. It NEVER finishes on its own; mtest's
-  `--compile-timeout` is the only thing that ends it.
-* anything else (`precompile`, `--version`, ...) — EXECS the real `mojo` found on
-  PATH with the untouched argv, exactly like `logging_mojo.py`, so this wrapper
-  stays a transparent stand-in outside the one path it exists to slow down.
+* `build` and `precompile` — TRUNCATE the `-o` output path (see below), write one
+  progress line to stderr (so the COMPILE-TIMEOUT / PRECOMPILE-ERROR banner has
+  real compiler output to render verbatim), then sleep far longer than any
+  deadline the scenario sets. They NEVER finish on their own; mtest's
+  `--compile-timeout` is the only thing that ends them. Both compile subcommands
+  are bounded by that one deadline, so both are slowed here.
+* anything else (`--version`, ...) — EXECS the real `mojo` found on PATH with the
+  untouched argv, exactly like `logging_mojo.py`, so this wrapper stays a
+  transparent stand-in outside the paths it exists to slow down.
+
+Clobbering `-o` before sleeping is what makes the precompile promotion scenario
+DISCRIMINATING rather than decorative. A real `mojo precompile` writes (and, on
+failure, deletes) its output path, so a shim that merely ignored `-o` would leave
+a pre-existing OUT intact even under eager promotion — the promotion assertions
+would pass whether or not mtest built to a temp first. Destroying whatever sits at
+`-o` reproduces the damage the real compiler does, so the sentinel survives ONLY
+because mtest pointed the compiler at a temp path.
 
 SIGTERM is handled and exits PROMPTLY — well inside mtest's 5-second compile
 grace. That is deliberate on both counts: it keeps the e2e fast (no waiting out
@@ -50,11 +60,27 @@ def _on_sigterm(_signum: int, _frame: object) -> None:
     os._exit(SIGTERM_EXIT)
 
 
-def _slow_build() -> int:
+def _clobber_output(args: list[str]) -> None:
+    """Truncate the `-o` path, the way a real compile does before it finishes."""
+    if "-o" not in args:
+        return
+    out = args[args.index("-o") + 1]
+    parent = os.path.dirname(out)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(out, "wb") as handle:
+        handle.write(b"fake_slow_mojo.py: PARTIAL OUTPUT, NEVER COMPLETED\n")
+
+
+def _slow_compile(subcommand: str, args: list[str]) -> int:
     signal.signal(signal.SIGTERM, _on_sigterm)
+    # Destroy whatever is at `-o` BEFORE sleeping: a real compiler owns that path
+    # from the moment it starts, and mtest's promotion contract is what keeps a
+    # good OUT out of its reach.
+    _clobber_output(args)
     # Emit BEFORE sleeping and flush: the bytes must already be in mtest's
     # capture pipe when the deadline fires, so the banner can show them.
-    sys.stderr.write("fake_slow_mojo.py: lowering module (this will not finish)\n")
+    sys.stderr.write(f"fake_slow_mojo.py: {subcommand}: lowering module (this will not finish)\n")
     sys.stderr.flush()
     time.sleep(SLEEP_SECONDS)
     # Only reachable if nothing ever killed us — i.e. the deadline did not fire.
@@ -64,8 +90,8 @@ def _slow_build() -> int:
 
 def main() -> int:
     args = sys.argv[1:]
-    if len(args) > 0 and args[0] == "build":
-        return _slow_build()
+    if len(args) > 0 and args[0] in ("build", "precompile"):
+        return _slow_compile(args[0], args)
 
     real_mojo = shutil.which("mojo")
     if real_mojo is None:

@@ -142,6 +142,13 @@ struct Event(Copyable, Movable):
     """How many files could not run because the step failed."""
     var casualties: List[String]
     """The dependent test files that could not run (empty if only a count is known)."""
+    var ending_known: Bool
+    """Whether the step's final termination identity rides with this event.
+
+    A PrecompileFailed carries HOW the step's last attempt ended in the shared
+    `term_kind`/`term_value`/`escalated`/`timeout_seconds`/`attempts_used` fields.
+    This flag says those fields were populated, so a reporter never renders an
+    unset termination as the lie "exited 0"."""
 
     # FileStarted / FileFinished.
     var path: String
@@ -288,6 +295,7 @@ struct Event(Copyable, Movable):
             compiler_output="",
             casualty_count=0,
             casualties=List[String](),
+            ending_known=False,
             path="",
             outcome=Outcome.NOT_RUN,
             duration_seconds=0.0,
@@ -377,18 +385,39 @@ struct Event(Copyable, Movable):
         compiler_output: String,
         casualty_count: Int,
         casualties: List[String] = List[String](),
+        ending_known: Bool = False,
+        term_kind: Int = 0,
+        term_value: Int = 0,
+        escalated: Bool = False,
+        timeout_seconds: Int = 0,
+        attempts_used: Int = 1,
     ) -> Event:
         """A session-level build step failed, before any file identity exists.
 
         `casualties` names the dependent test files that could not run; when it
         is non-empty its length is authoritative for the count (§8.3 asks the
         banner to list them, not merely count them).
+
+        The step's FINAL ending rides as typed data so the banner can name it in
+        words rather than leave a reader guessing: `term_kind`/`term_value` are
+        the decomposed exec-layer termination (0 EXITED, 1 SIGNALED, 2 TIMED_OUT,
+        3 SPAWN_FAILED) with `escalated` for a SIGKILL escalation,
+        `timeout_seconds` the deadline WE enforced on a TIMED_OUT step, and
+        `attempts_used` how many attempts the retry budget spent. A caller that
+        knows none of this leaves `ending_known` False and the reporter says
+        nothing about the ending rather than inventing one.
         """
         var e = Event._blank(EventKind.PRECOMPILE_FAILED)
         e.step = step
         e.compiler_output = compiler_output
         e.casualties = casualties.copy()
         e.casualty_count = len(casualties) if casualties else casualty_count
+        e.ending_known = ending_known
+        e.term_kind = term_kind
+        e.term_value = term_value
+        e.escalated = escalated
+        e.timeout_seconds = timeout_seconds
+        e.attempts_used = attempts_used
         return e^
 
     @staticmethod

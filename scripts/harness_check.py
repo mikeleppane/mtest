@@ -51,6 +51,7 @@ UNIT_SUITES = {
     "test_session_classify.mojo",
     "test_session_detail.mojo",
     "test_session_mangle.mojo",
+    "test_session_precompile_paths.mojo",
     "test_session_retry_class.mojo",
     "test_session_shard.mojo",
     "test_session_verdict.mojo",

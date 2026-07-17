@@ -50,6 +50,7 @@ from mtest.exec import (
     Termination,
     canonicalize,
     interrupt_requested,
+    rename_path,
     run_supervised,
 )
 from mtest.model import (
@@ -268,7 +269,12 @@ struct PrecompileResult(Copyable, Movable):
 
     On success `ok` is set and `out_dir` is the include directory added to every
     subsequent build. On failure `compiler_output` holds the captured compiler
-    output. `internal_error` and `interrupted` short-circuit as in `FileResult`.
+    output and the `term_*`/`timeout_seconds` fields carry HOW the final attempt
+    ended, so the banner can name the ending in words. `internal_error` and
+    `interrupted` short-circuit as in `FileResult`. `events` are the session-level
+    events the step produced along the way (a `TRY` per retried attempt, the
+    compile-kill residual warnings, and a success-after-retry warning); the caller
+    emits them in order before acting on the outcome.
     """
 
     var out_dir: String
@@ -287,6 +293,108 @@ struct PrecompileResult(Copyable, Movable):
     var program: String
     """The program the step tried to spawn on an internal error; empty otherwise.
     """
+    var events: List[Event]
+    """The step's attempt events and warnings, in emission order."""
+    var term: Termination
+    """The final attempt's raw termination (meaningful on a failed step)."""
+    var timeout_seconds: Int
+    """The compile deadline WE enforced, for a step killed at it; 0 otherwise."""
+    var attempts_used: Int
+    """How many attempts the step spent (1 when it ran once with no retry)."""
+    var ending_known: Bool
+    """Whether `term` is the real ending of a compiler that ran and failed.
+
+    False when the step failed for a reason the COMPILER never expressed — a
+    failed promotion, where the compiler exited 0 and only the rename lost. The
+    banner must then say nothing about an ending rather than report `term`'s
+    Exited(0) as the nonsense "exited 0" on a step that failed."""
+
+    @staticmethod
+    def _blank() -> Self:
+        """A result with every field at its neutral value. Allocates."""
+        return Self(
+            "",
+            "",
+            False,
+            False,
+            False,
+            0,
+            "",
+            List[Event](),
+            Termination.exited(0),
+            0,
+            1,
+            False,
+        )
+
+    @staticmethod
+    def interrupt(var events: List[Event]) -> Self:
+        """An interrupt aborted the step: routes the session to exit 2."""
+        var r = Self._blank()
+        r.interrupted = True
+        r.events = events^
+        return r^
+
+    @staticmethod
+    def internal(errno: Int, program: String, var events: List[Event]) -> Self:
+        """The compiler could not be spawned: routes the session to exit 3."""
+        var r = Self._blank()
+        r.internal_error = True
+        r.errno = errno
+        r.program = program
+        r.events = events^
+        return r^
+
+    @staticmethod
+    def success(
+        out_dir: String, var events: List[Event], attempts_used: Int
+    ) -> Self:
+        """The step built and PROMOTED its package; `out_dir` widens -I."""
+        var r = Self._blank()
+        r.ok = True
+        r.out_dir = out_dir
+        r.events = events^
+        r.attempts_used = attempts_used
+        return r^
+
+    @staticmethod
+    def failure(
+        compiler_output: String,
+        var events: List[Event],
+        term: Termination,
+        timeout_seconds: Int,
+        attempts_used: Int,
+    ) -> Self:
+        """The step's final attempt failed: PRECOMPILE-ERROR, exit 1.
+
+        `term` is how the COMPILER ended, so the banner names that ending.
+        """
+        var r = Self._blank()
+        r.compiler_output = compiler_output
+        r.events = events^
+        r.term = term
+        r.timeout_seconds = timeout_seconds
+        r.attempts_used = attempts_used
+        r.ending_known = True
+        return r^
+
+    @staticmethod
+    def promotion_failure(
+        compiler_output: String, var events: List[Event], attempts_used: Int
+    ) -> Self:
+        """The compiler SUCCEEDED but its package could not be promoted onto OUT.
+
+        Still a PRECOMPILE-ERROR at exit 1 — no package was published — but the
+        step has NO compiler ending to name: this attempt exited 0. Leaving
+        `ending_known` False keeps the banner from reporting "exited 0" on a
+        failed step and sends the reader to `compiler_output`, which explains
+        that the rename is what lost and that OUT was left untouched.
+        """
+        var r = Self._blank()
+        r.compiler_output = compiler_output
+        r.events = events^
+        r.attempts_used = attempts_used
+        return r^
 
 
 @fieldwise_init
@@ -617,6 +725,55 @@ def _rmtree(path: String) raises:
     rmdir(path)
 
 
+def _discard_path(path: String):
+    """Best-effort delete of one disposable build artifact. Never raises.
+
+    Used for a failed precompile attempt's temp package: it is litter, and
+    failing the session over litter would be worse than the litter.
+    """
+    try:
+        _rmtree(path)
+    except:
+        pass
+
+
+def _precompile_temp_path(
+    out_path: String, src: String, attempt_index: Int
+) -> String:
+    """The TEMP path attempt `attempt_index` of precompile step `src` builds into.
+
+    A hidden per-step, per-attempt `.tmp` directory beside OUT, holding the
+    package under OUT's own basename. Derived from OUT so the promotion is a
+    rename within one FILESYSTEM (an atomic replace, never a copy), and distinct
+    per attempt so a retry can never inherit a killed attempt's half-written
+    bytes.
+
+    Keyed on the MANGLED source as well as the attempt — symmetrically with the
+    per-attempt quarantine dir — so two steps, two concurrent mtest runs over one
+    root, or a stale dir left by a SIGKILLed run cannot collide on one temp
+    directory and unlink it under another compiler's feet. (OUT is safe either
+    way: a lost temp fails its own step's promotion, it never publishes.)
+
+    The directory is what hides an unpromoted attempt from the `-I <dir>` scan of
+    the OUT directory: the temp CANNOT simply be `<out>.tmp`, because the pinned
+    toolchain rejects a package output path that does not end in
+    `.mojopkg`/`.mojoc` (`mojo precompile -o x.tmp` is a hard error, not a
+    warning). Keeping the required extension and moving the file out of the
+    scanned directory buys the same guarantee the suffix would have. Pure.
+    """
+    var d = dirname(out_path)
+    var tmp_dir = (
+        ".mtest-precompile-"
+        + _mangle(src)
+        + ".attempt-"
+        + String(attempt_index)
+        + ".tmp"
+    )
+    if d != "":
+        tmp_dir = d + "/" + tmp_dir
+    return tmp_dir + "/" + String(basename(out_path))
+
+
 def _cleanup_quarantine(root: String, dirs: List[String]):
     """Best-effort delete of every per-attempt quarantine cache dir.
 
@@ -636,12 +793,16 @@ def _make_attempt_finished(
     att: _AttemptResult,
     attempt_index: Int,
     attempts_planned: Int,
+    step_override: String = "",
 ) -> Event:
     """The `AttemptFinished` event for ONE non-final crash-class attempt.
 
     The failed step's raw `Termination` is decomposed into the event's plain
     identity fields, and the captured streams are CLAMPED to a bounded head+tail
     excerpt (the final attempt keeps the full capture in the FileFinished).
+    `step_override` names the step when it is not the file path's own build/run —
+    the session-level `"precompile"` step reuses this whole seam, so a precompile
+    TRY line carries the same identity as a build one.
     """
     var step: String
     var term: Termination
@@ -663,6 +824,8 @@ def _make_attempt_finished(
         dur = att.rdur
         out_bytes = att.run_stdout.copy()
         err_bytes = att.run_stderr.copy()
+    if step_override != "":
+        step = step_override.copy()
     var co = clamp_stream(out_bytes, _ATTEMPT_STREAM_HEAD, _ATTEMPT_STREAM_TAIL)
     var ce = clamp_stream(err_bytes, _ATTEMPT_STREAM_HEAD, _ATTEMPT_STREAM_TAIL)
     return Event.attempt_finished(
@@ -1712,13 +1875,29 @@ def _run_precompile(
     out_name: Optional[String],
     include_paths: List[String],
 ) raises -> PrecompileResult:
-    """Precompile one source into a package, with NO deadline, inside `root`.
+    """Precompile one source into a package — bounded, retried, promoted ATOMICALLY.
 
-    Builds `mojo precompile <src> -o <out>` (out defaults to
+    Builds `mojo precompile <src> -o <temp>` (OUT defaults to
     `build/<name>.mojopkg`, `name` the `.mojo`-stripped basename of `src`),
-    forwarding the include paths and build args. On success returns the OUT
-    directory to add to the include set; on failure returns the captured
-    compiler output. A spawn failure is an internal error.
+    forwarding the include paths and build args. Every ATTEMPT writes a temp path
+    derived from OUT (`_precompile_temp_path`) and is RENAMED onto OUT only after
+    it exits 0, so a killed, crashed, or rejected attempt never touches OUT: a
+    good package from an earlier run survives a failed step byte-for-byte, and no
+    dependent ever builds against a half-written package. Failed temps are deleted
+    best-effort; a cleanup failure never fails the session.
+
+    The step is bounded by `--compile-timeout` with the compile-specific grace —
+    the same treatment the per-file builds get — and gets the same crash-class
+    `--retries` budget: up to `config.retries + 1` attempts, retried ONLY when
+    `retry_classify("precompile", ...)` calls the failure crash-class, each retry
+    on a FRESH temp path and quarantined against a fresh per-attempt module cache
+    (with the loud residual warning). At `--retries 0` exactly one attempt runs
+    and behavior is unchanged apart from the invisible temp-then-rename.
+
+    Precompile attempts are SESSION-level: their `AttemptFinished` events name the
+    `src` spelling and carry `step="precompile"`; there is no FLAKY verdict and no
+    file counter — a success after a crash-class attempt emits a loud warning
+    instead.
 
     Raises:
         Error: only if the `exec` machinery itself fails or the OUT directory
@@ -1731,40 +1910,204 @@ def _run_precompile(
     else:
         out_path = String("build/") + name + ".mojopkg"
 
+    # The temp lives beside OUT, so its parent must exist before the first
+    # attempt writes it (and the rename stays within one directory).
     var parent = dirname(out_path)
     if parent != "":
         _ensure_dir(root + "/" + parent)
 
-    var argv = List[String]()
-    argv.append(config.mojo_path)
-    argv.append("precompile")
-    argv.append(src)
-    argv.append("-o")
-    argv.append(out_path)
-    for p in include_paths:
-        argv.append("-I")
-        argv.append(p)
-    for a in config.build_args:
-        argv.append(a)
+    var attempts_planned = config.retries + 1
+    var events = List[Event]()
+    var quarantine_dirs = List[String]()
+    var quarantine_dir = String("")
+    var had_retry = False
+    var attempt_index = 1
 
-    var res = run_supervised(runtime, ProcessSpec.command_in(argv^, root, 0))
-    if interrupt_requested():
-        return PrecompileResult("", "", False, False, True, 0, "")
-    var term = res.termination
-    if term.is_spawn_failed():
-        # Could not spawn the compiler at all: carry the real errno and program
-        # so the diagnostic names the cause, exactly as the build/run paths do.
-        return PrecompileResult(
-            "", "", False, True, False, term.value, config.mojo_path
+    while True:
+        var tmp_path = _precompile_temp_path(out_path, src, attempt_index)
+        var tmp_dir = dirname(tmp_path)
+        _ensure_dir(root + "/" + tmp_dir)
+        var argv = List[String]()
+        argv.append(config.mojo_path)
+        argv.append("precompile")
+        argv.append(src)
+        argv.append("-o")
+        argv.append(tmp_path)
+        for p in include_paths:
+            argv.append("-I")
+            argv.append(p)
+        for a in config.build_args:
+            argv.append(a)
+
+        # NARROW quarantine: only a post-compile-kill retry redirects the module
+        # cache, exactly as the file build path does. The session is
+        # single-threaded, so mutating our own environment around the spawn is
+        # safe; it is restored immediately after.
+        var quarantined = quarantine_dir != ""
+        var prev_cache = getenv("MODULAR_CACHE_DIR", "")
+        var had_prev = prev_cache != ""
+        if quarantined:
+            _ = setenv("MODULAR_CACHE_DIR", quarantine_dir, True)
+
+        var res: ProcessResult
+        try:
+            res = run_supervised(
+                runtime,
+                ProcessSpec.command_in(
+                    argv.copy(),
+                    root,
+                    config.compile_timeout_secs * 1000,
+                    _COMPILE_GRACE_MS,
+                ),
+            )
+        except e:
+            if quarantined:
+                _restore_cache_env(had_prev, prev_cache)
+            _discard_path(root + "/" + tmp_dir)
+            _cleanup_quarantine(root, quarantine_dirs)
+            raise e^
+        if quarantined:
+            _restore_cache_env(had_prev, prev_cache)
+
+        var dur = Float64(res.duration_ms) / 1000.0
+        # An interrupt during the step group-kills it (a TimedOut bail-out). It
+        # is answered BEFORE the termination is read, so an interrupt is never
+        # mistaken for a deadline — whatever the supervisor had to do to stop it.
+        if interrupt_requested():
+            _discard_path(root + "/" + tmp_dir)
+            _cleanup_quarantine(root, quarantine_dirs)
+            return PrecompileResult.interrupt(events^)
+
+        var term = res.termination
+        if term.is_spawn_failed():
+            # Could not spawn the compiler at all: carry the real errno and
+            # program so the diagnostic names the cause, exactly as the
+            # build/run paths do.
+            _discard_path(root + "/" + tmp_dir)
+            _cleanup_quarantine(root, quarantine_dirs)
+            return PrecompileResult.internal(
+                term.value, config.mojo_path, events^
+            )
+
+        if term.is_exited() and term.value == 0:
+            # PROMOTE: the package is real, so publish it indivisibly. A rename
+            # that fails leaves OUT untouched — the step is honestly a failure,
+            # never a half-published package.
+            try:
+                rename_path(root + "/" + tmp_path, root + "/" + out_path)
+            except:
+                # The COMPILER exited 0; only the rename lost (e.g. OUT is a
+                # directory, or its parent is read-only). There is no compiler
+                # ending to name, so this result carries none.
+                _discard_path(root + "/" + tmp_dir)
+                _cleanup_quarantine(root, quarantine_dirs)
+                return PrecompileResult.promotion_failure(
+                    String(
+                        "mtest: the precompile of '"
+                        + src
+                        + "' succeeded, but its package could not be promoted"
+                        " from '"
+                    )
+                    + tmp_path
+                    + "' to '"
+                    + out_path
+                    + "'. The compiler is not at fault: check that OUT is a"
+                    " writable file path (a directory or a read-only parent at"
+                    " OUT will fail here). OUT was left untouched.\n",
+                    events^,
+                    attempt_index,
+                )
+            if had_retry:
+                # No FLAKY verdict exists for a session-level step, so the
+                # warning IS the signal that this package was not built cleanly
+                # the first time.
+                events.append(
+                    Event.warning(
+                        "precompile-succeeded-after-retry",
+                        (
+                            "the precompile step '"
+                            + src
+                            + "' succeeded only on attempt "
+                            + String(attempt_index)
+                            + " of "
+                            + String(attempts_planned)
+                            + "; its earlier attempt(s) were killed or crashed,"
+                            " so treat this package as suspect"
+                        ),
+                    )
+                )
+            # The promoted package left the temp directory empty; take it away
+            # too, so a successful step leaves the OUT tree exactly as an
+            # unpromoted run would have.
+            _discard_path(root + "/" + tmp_dir)
+            _cleanup_quarantine(root, quarantine_dirs)
+            var d = dirname(out_path)
+            if d == "":
+                d = String(".")
+            return PrecompileResult.success(d, events^, attempt_index)
+
+        # The attempt failed. Classify it for retry eligibility under the BUILD
+        # rules (`interrupted` is False: an interrupt was short-circuited above,
+        # so a TimedOut reaching here is a genuine deadline).
+        var rc = retry_classify("precompile", term, False, res.stderr_bytes)
+        var more_attempts = attempt_index < attempts_planned
+        if rc.retry_eligible and more_attempts:
+            had_retry = True
+            var att = _AttemptResult._build_failed(
+                argv.copy(), term, res.stderr_bytes.copy(), dur, tmp_path
+            )
+            events.append(
+                _make_attempt_finished(
+                    src,
+                    rc,
+                    att,
+                    attempt_index,
+                    attempts_planned,
+                    step_override="precompile",
+                )
+            )
+            # A compile kill: the shared module cache MAY be suspect. Warn
+            # loudly and run the NEXT attempt quarantined against a fresh
+            # per-attempt cache, into a fresh temp path.
+            events.append(
+                Event.warning(
+                    "compile-kill-residual",
+                    (
+                        "the precompile of '"
+                        + src
+                        + "' was killed ("
+                        + rc.label
+                        + "); the shared module cache may be suspect, so the"
+                        " rebuild ran quarantined against a fresh per-attempt"
+                        " cache (the shared cache was neither used nor deleted)"
+                    ),
+                )
+            )
+            _discard_path(root + "/" + tmp_dir)
+            quarantine_dir = (
+                String("build/quarantine/precompile-")
+                + _mangle(src)
+                + "/attempt-"
+                + String(attempt_index + 1)
+            )
+            _ensure_dir(root + "/" + quarantine_dir)
+            quarantine_dirs.append(quarantine_dir)
+            attempt_index += 1
+            continue
+
+        # Final attempt: the step is a PRECOMPILE-ERROR. OUT was never written.
+        _discard_path(root + "/" + tmp_dir)
+        _cleanup_quarantine(root, quarantine_dirs)
+        var timeout_seconds = 0
+        if term.is_timed_out():
+            timeout_seconds = config.compile_timeout_secs
+        return PrecompileResult.failure(
+            lossy_utf8(res.stderr_bytes),
+            events^,
+            term,
+            timeout_seconds,
+            attempt_index,
         )
-    if term.is_exited() and term.value == 0:
-        var d = dirname(out_path)
-        if d == "":
-            d = String(".")
-        return PrecompileResult(d^, "", True, False, False, 0, "")
-    return PrecompileResult(
-        "", lossy_utf8(res.stderr_bytes), False, False, False, 0, ""
-    )
 
 
 @fieldwise_init
@@ -2371,6 +2714,12 @@ def run_session[
             var pr = _run_precompile(
                 runtime, config, root, pc.src, pc.out, includes
             )
+            # The step's own attempt record first, in order: each retried
+            # attempt's TRY line, its residual warning, and a success-after-retry
+            # warning — the session-level signal that stands in for the FLAKY
+            # verdict a file would get.
+            for ev in pr.events:
+                reporter.handle(ev)
             if pr.interrupted:
                 interrupted = True
                 break
@@ -2388,6 +2737,12 @@ def run_session[
                         pr.compiler_output,
                         len(casualty_files),
                         casualties=casualty_files,
+                        ending_known=pr.ending_known,
+                        term_kind=pr.term.kind,
+                        term_value=pr.term.value,
+                        escalated=pr.term.escalated,
+                        timeout_seconds=pr.timeout_seconds,
+                        attempts_used=pr.attempts_used,
                     )
                 )
                 break

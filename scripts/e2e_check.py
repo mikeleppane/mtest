@@ -35,6 +35,7 @@ import os
 import pty
 import re
 import select
+import shutil
 import signal
 import subprocess
 import sys
@@ -48,6 +49,7 @@ E2E_ROOT = os.path.join(REPO_ROOT, "e2e")
 MANIFEST_PATH = os.path.join(E2E_ROOT, "manifest.json")
 LOGGING_MOJO = os.path.join(REPO_ROOT, "scripts", "logging_mojo.py")
 FAKE_SLOW_MOJO = os.path.join(REPO_ROOT, "scripts", "fake_slow_mojo.py")
+FAKE_CRASH_MOJO = os.path.join(REPO_ROOT, "scripts", "fake_crash_mojo.py")
 
 # Generous per-spawn wall-clock ceilings. Cold `mojo build` is slow, so these are
 # roomy — their only job is to keep a hung runner from wedging CI, never to time
@@ -919,6 +921,186 @@ def s_precompile(manifest: dict) -> str:
     return "precompile PASS (auto -I) + broken precompile banner/casualty exit 1"
 
 
+def s_precompile_timeout(manifest: dict) -> str:
+    """`--compile-timeout` bounds a `--precompile` step too; a blown deadline is
+    a PRECOMPILE-ERROR that NAMES the timeout.
+
+    Uses the slow-compiler stand-in (scripts/fake_slow_mojo.py), which sleeps
+    forever on `precompile` and honors SIGTERM promptly. The package is fine; only
+    the compiler is slow — so this separates "we killed it at our deadline" from
+    "the compiler rejected the code", which read identically at exit 1 unless the
+    banner says which one happened.
+
+    Structure is asserted, never the exact console bytes."""
+    rel = "e2e/pkg/test_uses_pkg.mojo"
+    run = run_mtest(
+        [
+            "--mojo",
+            FAKE_SLOW_MOJO,
+            rel,
+            "--precompile",
+            "e2e/pkg/mathlib",
+            "--compile-timeout",
+            "1",
+        ],
+        timeout=SHORT_TIMEOUT,
+    )
+    expect_exit(run, 1)
+    expect(
+        "PRECOMPILE-ERROR" in run.combined,
+        f"a timed-out precompile did not report PRECOMPILE-ERROR:\n{run.stdout}",
+    )
+    # The ending, in words: the deadline WE enforced — never a bare exit code.
+    expect(
+        "timed out after 1s" in run.combined,
+        f"the PRECOMPILE-ERROR banner never named the timeout:\n{run.stdout}",
+    )
+    # The compiler's own output rides verbatim, and the dependents are named.
+    expect(
+        "lowering module" in run.combined,
+        f"the PRECOMPILE-ERROR banner dropped the compiler output:\n{run.stdout}",
+    )
+    expect(
+        rel in run.combined and "could not run" in run.combined,
+        f"the timed-out precompile listed no casualties:\n{run.stdout}",
+    )
+    expect(run.wall < 20.0, f"mtest took {run.wall:.1f}s to honor --compile-timeout 1")
+    return "precompile --compile-timeout 1 -> PRECOMPILE-ERROR naming the timeout + casualties (exit 1)"
+
+
+def s_precompile_crash_retry(manifest: dict) -> str:
+    """A crash-class precompile is retried under `--retries`, then reported.
+
+    Uses the crashing-compiler stand-in (scripts/fake_crash_mojo.py), which dies
+    by SIGSEGV on `precompile`. A signal death is crash-class, so:
+
+      * --retries 0 -> one attempt, PRECOMPILE-ERROR naming the signal, exit 1;
+      * --retries 1 -> a TRY line for the first attempt plus the residual warning
+        (the retry ran quarantined against a fresh module cache), then the retry
+        crashes too and the step is still PRECOMPILE-ERROR at exit 1.
+    """
+    rel = "e2e/pkg/test_uses_pkg.mojo"
+    base = ["--mojo", FAKE_CRASH_MOJO, rel, "--precompile", "e2e/pkg/mathlib"]
+
+    run = run_mtest([*base, "--retries", "0"], timeout=SHORT_TIMEOUT)
+    expect_exit(run, 1)
+    expect(
+        "PRECOMPILE-ERROR" in run.combined,
+        f"a crashed precompile did not report PRECOMPILE-ERROR:\n{run.stdout}",
+    )
+    # The ending, in words: the signal that killed the compiler, named.
+    expect(
+        "died by signal 11 (SIGSEGV, segmentation fault)" in run.combined,
+        f"the PRECOMPILE-ERROR banner never named the signal:\n{run.stdout}",
+    )
+    # At --retries 0 exactly one attempt runs: no TRY line, no retry warning.
+    expect(
+        "TRY" not in run.stdout,
+        f"--retries 0 retried a precompile step:\n{run.stdout}",
+    )
+
+    runr = run_mtest([*base, "--retries", "1"], timeout=SHORT_TIMEOUT)
+    expect_exit(runr, 1)
+    expect(
+        runr.verdict_line("TRY", "e2e/pkg/mathlib") is not None,
+        f"--retries 1 showed no TRY line for the crashed precompile:\n{runr.stdout}",
+    )
+    expect(
+        "precompile" in runr.stdout and "compile-crash" in runr.stdout,
+        f"the precompile TRY line lost its step/classification:\n{runr.stdout}",
+    )
+    expect(
+        "compile-kill-residual" in runr.stdout,
+        f"a killed precompile fired no cache-residual warning:\n{runr.stdout}",
+    )
+    expect(
+        "quarantin" in runr.stdout,
+        f"the retried precompile never mentioned the cache quarantine:\n{runr.stdout}",
+    )
+    expect(
+        "PRECOMPILE-ERROR" in runr.combined and "2 attempts" in runr.combined,
+        f"a retry-exhausted precompile did not report both attempts:\n{runr.stdout}",
+    )
+    return (
+        "precompile crash: --retries 0 -> PRECOMPILE-ERROR naming signal 11 (exit 1);"
+        " --retries 1 -> TRY + residual warning + quarantined retry -> PRECOMPILE-ERROR"
+    )
+
+
+def s_precompile_promotion(manifest: dict) -> str:
+    """THE promotion guarantee: a failed precompile never touches OUT.
+
+    An attempt builds to a temp path and is renamed onto OUT only after it exits
+    0. So a step that is killed at the deadline, or dies by a signal, must leave a
+    good package from an earlier run BYTE-IDENTICAL — and leave no temp litter in
+    the OUT directory either. Both killed endings are checked against the same
+    sentinel: this is the deliverable the whole change exists for.
+
+    This scenario is DISCRIMINATING, not decorative: both shims TRUNCATE their
+    `-o` path before sleeping/crashing, the way a real `mojo precompile` owns (and
+    on failure deletes) its output. Point mtest at eager promotion — build to OUT
+    directly — and every assertion below fails, because the shim then destroys the
+    sentinel exactly as the real compiler would. The sentinel survives ONLY
+    because mtest never let the compiler near OUT."""
+    rel = "e2e/pkg/test_uses_pkg.mojo"
+    out_dir = os.path.join(REPO_ROOT, "build", "e2e-promotion")
+    out_rel = "build/e2e-promotion/mathlib.mojopkg"
+    out_path = os.path.join(REPO_ROOT, out_rel)
+    sentinel = b"SENTINEL-PACKAGE-BYTES\n"
+
+    def _litter() -> list[str]:
+        return sorted(
+            name for name in os.listdir(out_dir) if name.endswith(".tmp")
+        )
+
+    try:
+        for label, mojo_shim, extra in (
+            ("killed at the deadline", FAKE_SLOW_MOJO, ["--compile-timeout", "1"]),
+            ("crashed by a signal", FAKE_CRASH_MOJO, []),
+        ):
+            os.makedirs(out_dir, exist_ok=True)
+            with open(out_path, "wb") as fh:
+                fh.write(sentinel)
+            run = run_mtest(
+                [
+                    "--mojo",
+                    mojo_shim,
+                    rel,
+                    "--precompile",
+                    f"e2e/pkg/mathlib:{out_rel}",
+                    *extra,
+                ],
+                timeout=SHORT_TIMEOUT,
+            )
+            expect_exit(run, 1)
+            expect(
+                "PRECOMPILE-ERROR" in run.combined,
+                f"the precompile {label} did not fail the step:\n{run.stdout}",
+            )
+            expect(
+                os.path.isfile(out_path),
+                f"a precompile {label} DESTROYED the good OUT package "
+                f"({out_rel} no longer exists)",
+            )
+            with open(out_path, "rb") as fh:
+                after = fh.read()
+            expect(
+                after == sentinel,
+                f"a precompile {label} DAMAGED the good OUT package: "
+                f"{after!r} != {sentinel!r}",
+            )
+            expect(
+                _litter() == [],
+                f"a precompile {label} left temp litter in OUT: {_litter()}",
+            )
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
+    return (
+        "promotion: a precompile killed at the deadline and one killed by SIGSEGV"
+        " both left the pre-existing OUT byte-identical, with no .tmp litter"
+    )
+
+
 def s_quiet_verbose(manifest: dict) -> str:
     rel = "e2e/suite/test_passing.mojo"
     quiet = run_mtest([rel, "-q"])
@@ -1736,6 +1918,9 @@ def main() -> int:
     h.scenario("failing-gate", s_failing_gate)
     h.scenario("timeout", s_timeout)
     h.scenario("precompile", s_precompile)
+    h.scenario("precompile-timeout", s_precompile_timeout)
+    h.scenario("precompile-crash-retry", s_precompile_crash_retry)
+    h.scenario("precompile-promotion", s_precompile_promotion)
     h.scenario("quiet-verbose", s_quiet_verbose)
     h.scenario("show-output", s_show_output)
     h.scenario("durations", s_durations)

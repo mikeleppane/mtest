@@ -205,6 +205,34 @@ def _term_phrase(
     return String("exit ") + String(value)
 
 
+def _precompile_ending_phrase(
+    term_kind: Int, term_value: Int, escalated: Bool, timeout_seconds: Int
+) -> String:
+    """How a precompile step's FINAL attempt ended, in words. Pure.
+
+    A step that never produced its package is exit 1 either way, so the ONE thing
+    the banner owes a reader is which ending it was: a deadline WE enforced, a
+    compiler that died by a signal, a compiler that rejected the code, or a
+    compiler we could not even spawn. Reads the decomposed exec-layer termination
+    kinds (0 EXITED, 1 SIGNALED, 2 TIMED_OUT, 3 SPAWN_FAILED) the event carries,
+    so this layer imports nothing above it.
+    """
+    if term_kind == 1:
+        var name = _signal_name(term_value)
+        var base = String("died by signal ") + String(term_value)
+        if name != "":
+            return base + " (" + name + ")"
+        return base
+    if term_kind == 2:
+        var s = String("timed out after ") + String(timeout_seconds) + "s"
+        if escalated:
+            s += ", escalated to SIGKILL"
+        return s
+    if term_kind == 3:
+        return String("could not be spawned (errno ") + String(term_value) + ")"
+    return String("exited ") + String(term_value)
+
+
 def _errno_name(errno: Int) -> String:
     """The strerror-style words for a common spawn errno. `""` outside the set.
 
@@ -711,12 +739,28 @@ struct ConsoleReporter(Reporter):
 
         Uses the frozen outcome-vocabulary label (PRECOMPILE-ERROR) and, per
         §8.3, names each dependent test file as a casualty — not merely a count —
-        so a reader can see exactly which files were denied a run.
+        so a reader can see exactly which files were denied a run. When the event
+        carries the step's final termination it is named IN WORDS: a step killed
+        at the compile deadline reads as a timeout, never as the compiler
+        rejecting the code, and a step that burned its retry budget says how many
+        attempts it spent. Rendered from typed fields only; the compiler's own
+        output rides verbatim below.
         """
+        var detail = String("")
+        if e.ending_known:
+            detail += (
+                _precompile_ending_phrase(
+                    e.term_kind, e.term_value, e.escalated, e.timeout_seconds
+                )
+                + "; "
+            )
+            if e.attempts_used > 1:
+                detail += String(e.attempts_used) + " attempts; "
         var banner = (
             String("PRECOMPILE-ERROR  ")
             + e.step
             + "  ("
+            + detail
             + String(e.casualty_count)
             + " file(s) could not run)"
         )
