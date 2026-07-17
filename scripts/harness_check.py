@@ -362,7 +362,7 @@ def check_e2e_layout() -> None:
         path.relative_to(REPO_ROOT).as_posix()
         for path in e2e_root.rglob("test_*.mojo")
     }
-    if rows != discovered or len(rows) != 28:
+    if rows != discovered or len(rows) != 29:
         raise AssertionError(
             "e2e manifest/discovery mismatch: "
             f"missing={sorted(discovered - rows)}, stale={sorted(rows - discovered)}"

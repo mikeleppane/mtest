@@ -917,12 +917,18 @@ def _finalize_attempt(
     var signal_number = 0
     var exit_status = 0
     var timeout_seconds = 0
+    # The run Termination's latched SIGKILL escalation rides the verdict, so a
+    # `--timeout N` with no retries (hence no TRY line) can still say whether the
+    # child stopped on the polite SIGTERM or had to be killed. Only a TIMEOUT
+    # latches it; every other outcome leaves it False rather than guessing.
+    var escalated = False
     if cls.file_outcome == Outcome.CRASH:
         signal_number = att.rterm.value
     elif cls.file_outcome == Outcome.FAIL:
         exit_status = att.rterm.value
     elif cls.file_outcome == Outcome.TIMEOUT:
         timeout_seconds = config.timeout_secs
+        escalated = att.rterm.escalated
 
     # A late pass after a crash-class attempt is FLAKY (not PASS): the file
     # tallies under FLAKY, but its per-test exit multiset stays the passing
@@ -948,6 +954,7 @@ def _finalize_attempt(
         skipped_tests=cls.skipped_tests,
         attempts_used=attempts_used,
         flaky=flaky,
+        escalated=escalated,
     )
     var fr = FileResult.classified(
         pre^,
@@ -1349,8 +1356,14 @@ def _probe_terminal(
     is_drift: Bool,
     signal_number: Int = 0,
     timeout_seconds: Int = 0,
+    escalated: Bool = False,
 ) -> FileResult:
-    """A file-level terminal FileResult for a probe that did not qualify."""
+    """A file-level terminal FileResult for a probe that did not qualify.
+
+    `escalated` is the probe `Termination`'s latched SIGKILL escalation, passed
+    by the timeout caller so a probe killed at the deadline reads like every
+    other TIMEOUT verdict.
+    """
     var pre = List[Event]()
     if warning_kind != "":
         pre.append(Event.warning(warning_kind, warning_detail))
@@ -1365,6 +1378,7 @@ def _probe_terminal(
         signal_number=signal_number,
         timeout_seconds=timeout_seconds,
         parse_disposition=disposition,
+        escalated=escalated,
     )
     var exits = List[Outcome]()
     if not is_drift:
@@ -1467,6 +1481,7 @@ def _probe_file(
                 pres.stderr_bytes.copy(),
                 False,
                 timeout_seconds=config.timeout_secs,
+                escalated=pterm.escalated,
             ),
             False,
             False,
@@ -1667,6 +1682,7 @@ def _reconcile_and_classify(
             len(deselected),
             timeout_seconds=config.timeout_secs,
             attempts_used=attempts_used,
+            escalated=rterm.escalated,
         )
 
     var trusted = resolve_report(
@@ -1811,8 +1827,13 @@ def _run_terminal_file(
     signal_number: Int = 0,
     timeout_seconds: Int = 0,
     attempts_used: Int = 1,
+    escalated: Bool = False,
 ) -> FileResult:
     """A file-level terminal FileResult for a selection run (crash/malformed).
+
+    `escalated` is the run `Termination`'s latched SIGKILL escalation, passed by
+    the timeout caller so a selection run's TIMEOUT verdict tells the same story
+    the default path's does.
     """
     var pre = List[Event]()
     if warning_kind != "":
@@ -1830,6 +1851,7 @@ def _run_terminal_file(
         parse_disposition=disposition,
         deselected_tests=deselected_count,
         attempts_used=attempts_used,
+        escalated=escalated,
     )
     return FileResult.classified(
         pre^,

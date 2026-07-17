@@ -178,6 +178,39 @@ def test_file_finished_carries_resilience_fields_when_given() raises:
     assert_true(e.slow)
 
 
+def test_file_finished_defaults_escalated_to_false() raises:
+    # A file whose run needed no kill at all must never carry an escalation: the
+    # default is the honest "we did not have to escalate".
+    var e = Event.file_finished(
+        "tests/test_a.mojo",
+        Outcome.PASS,
+        duration_seconds=0.1,
+        build_argv=List[String](),
+        build_duration_seconds=0.0,
+        captured_stdout=List[UInt8](),
+        captured_stderr=List[UInt8](),
+    )
+    assert_false(e.escalated)
+
+
+def test_file_finished_carries_the_latched_escalation_when_given() raises:
+    # The FINAL verdict of a timed-out file needs the same latched escalation the
+    # TRY lines already carry, so a run WITHOUT retries can still say whether the
+    # child went down on the polite SIGTERM or had to be SIGKILLed.
+    var e = Event.file_finished(
+        "tests/test_a.mojo",
+        Outcome.TIMEOUT,
+        duration_seconds=1.3,
+        build_argv=List[String](),
+        build_duration_seconds=0.0,
+        captured_stdout=List[UInt8](),
+        captured_stderr=List[UInt8](),
+        timeout_seconds=1,
+        escalated=True,
+    )
+    assert_true(e.escalated)
+
+
 def test_attempt_finished_payload_carries_full_record() raises:
     var argv: List[String] = ["mojo", "run", "tests/test_a.mojo"]
     var e = Event.attempt_finished(

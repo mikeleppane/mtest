@@ -150,6 +150,14 @@
       "disposition": "PARSED",
       "rationale": "A second passing sibling left NOT-RUN when the interrupt truncates the slow/ walk."
     },
+    "e2e/stubborn/test_stubborn.mojo": {
+      "verdict": "TIMEOUT",
+      "exit_class": 1,
+      "in_default_suite": false,
+      "reached_only_by": ["timeout-escalation"],
+      "disposition": "NO_REPORT",
+      "rationale": "Disarms SIGTERM (SIG_IGN) and then sleeps forever, so the supervisor's polite SIGTERM cannot end it and the kill protocol MUST escalate to SIGKILL after the 300ms run-step grace. The escalation is latched on the Termination and surfaces on the retry TRY line. Reached ONLY by the timeout-escalation scenario (--timeout 1 --retries 1), which mtest bounds; it lives in its OWN directory so no scenario that walks slow/ (notably interrupt) can reach a child that refuses the polite signal."
+    },
     "e2e/excluded/test_excluded.mojo": {
       "verdict": "PASS",
       "exit_class": 0,

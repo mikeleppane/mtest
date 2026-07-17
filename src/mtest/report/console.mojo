@@ -260,6 +260,15 @@ def _outcome_detail(e: Event) -> String:
     deadline (`"timed out after <n>s"` — the run deadline and the compile
     deadline read the same because both name the deadline WE enforced); every
     other outcome has no detail. Pure.
+
+    A deadline that had to be escalated says so, in `_term_phrase`'s words so the
+    verdict line and the TRY lines agree. This is the ONLY place the escalation
+    reaches a reader when no retry ran (a TRY line exists only for a non-final
+    attempt), which is the common `--timeout N` case. The clause is driven by the
+    event's latched `escalated`, so it appears only where the session populates
+    it from a run `Termination` — the compile steps do not yet pass their
+    `bterm.escalated`, and until they do a COMPILE_TIMEOUT simply renders the
+    bare deadline rather than claiming an escalation nobody recorded.
     """
     if e.outcome == Outcome.FAIL:
         return String("exit ") + String(e.exit_status)
@@ -270,7 +279,10 @@ def _outcome_detail(e: Event) -> String:
             return base + " — " + name
         return base
     if e.outcome == Outcome.TIMEOUT or e.outcome == Outcome.COMPILE_TIMEOUT:
-        return String("timed out after ") + String(e.timeout_seconds) + "s"
+        var s = String("timed out after ") + String(e.timeout_seconds) + "s"
+        if e.escalated:
+            s += ", escalated to SIGKILL"
+        return s
     return String("")
 
 
@@ -971,6 +983,15 @@ struct ConsoleReporter(Reporter):
         did a retry actually run, rebuilding against a fresh quarantined module
         cache. At `--retries 0` exactly one attempt was scheduled and the banner
         promises nothing about a rebuild that never happened.
+
+        That sentence says how many attempts ran and NOTHING about how each one
+        ended, because `attempts_used` is a count and no typed field records the
+        per-attempt endings. A first attempt killed by a compiler ICE (crash-
+        class, so the retry rebuilds against a quarantined cache) followed by a
+        second that blew the deadline is also `attempts_used == 2` on a
+        COMPILE-TIMEOUT file — so any claim that the deadline fired every time
+        would be unearned. The verdict line and the sentence above it already say
+        the one ending that IS known: the final attempt's.
         """
         var secs = String(e.timeout_seconds)
         var out = (
@@ -994,7 +1015,7 @@ struct ConsoleReporter(Reporter):
                 "the compile was retried against a fresh quarantined module"
                 " cache ("
                 + String(e.attempts_used)
-                + " attempts) and exceeded the deadline every time\n"
+                + " attempts)\n"
             )
         out += self._compile_timeout_repro(e) + "\n\n"
         return out

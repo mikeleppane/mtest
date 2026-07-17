@@ -25,7 +25,7 @@ from mtest.model import (
     TestResult,
 )
 from mtest.report import ConsoleReporter
-from mtest.report.console import _precompile_ending_phrase
+from mtest.report.console import _precompile_ending_phrase, _term_phrase
 
 
 def _bytes(s: String) -> List[UInt8]:
@@ -276,6 +276,48 @@ def test_timeout_notes_the_deadline() raises:
     _feed_mock_run(c)
     var out = c.output()
     assert_true("timed out after 300s" in out)
+
+
+def _feed_timeout(mut c: ConsoleReporter, escalated: Bool):
+    """One TIMEOUT FileFinished whose run did (or did not) need a SIGKILL."""
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_hangs.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_hangs.mojo",
+            Outcome.TIMEOUT,
+            1.31,
+            _argv("tests/test_hangs.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            timeout_seconds=1,
+            escalated=escalated,
+        )
+    )
+
+
+def test_timeout_verdict_reports_the_sigkill_escalation() raises:
+    # The COMMON case is `--timeout N` with NO retries: there is no TRY line, so
+    # the verdict line is the only place the escalation can be told. A child that
+    # ignored SIGTERM and had to be SIGKILLed is a materially different story
+    # from one that stopped politely, and the reader is owed it.
+    var c = _console()
+    _feed_timeout(c, escalated=True)
+    var out = c.output()
+    assert_true("timed out after 1s" in out)
+    assert_true("escalated to SIGKILL" in out)
+
+
+def test_timeout_verdict_claims_no_escalation_that_never_happened() raises:
+    # The mirror image: a child that went down on the polite SIGTERM must NOT be
+    # narrated as having been SIGKILLed.
+    var c = _console()
+    _feed_timeout(c, escalated=False)
+    var out = c.output()
+    assert_true("timed out after 1s" in out)
+    assert_false("escalated" in out)
+    assert_false("SIGKILL" in out)
 
 
 def test_failing_test_section_carries_node_id_and_repro() raises:
@@ -615,11 +657,28 @@ def test_compile_timeout_promises_no_quarantine_when_no_retry_ran() raises:
 
 
 def test_compile_timeout_names_the_quarantine_when_a_retry_ran() raises:
-    # attempts_used > 1: a quarantined rebuild really did run and time out too.
+    # attempts_used > 1: a quarantined rebuild really did run. A retried build
+    # failure is always quarantined (a run-crash retry does not rebuild), so the
+    # rebuild itself is the one thing the count DOES license the banner to say.
     var c = _console()
     _feed_compile_timeout(c, attempts_used=2)
     var out = c.output()
     assert_true("quarantined" in out)
+    assert_true("2 attempts" in out)
+
+
+def test_compile_timeout_never_claims_every_attempt_hit_the_deadline() raises:
+    # `attempts_used` counts attempts; it does NOT record how each one ENDED.
+    # A first attempt killed by a compiler ICE (crash-class -> quarantined
+    # rebuild) followed by a second that blew the deadline is ALSO
+    # `attempts_used == 2` with a COMPILE-TIMEOUT verdict — so a banner that
+    # says the deadline fired every time would be asserting what no typed field
+    # supports. It may say how many attempts ran, and no more.
+    var c = _console()
+    _feed_compile_timeout(c, attempts_used=2)
+    var out = c.output()
+    assert_false("every time" in out)
+    assert_false("every attempt" in out)
     assert_true("2 attempts" in out)
 
 
@@ -1096,6 +1155,60 @@ def test_precompile_failed_banner_verbatim() raises:
     assert_true("tests/test_a.mojo" in out)
     assert_true("tests/test_b.mojo" in out)
     assert_true("tests/nested/test_c.mojo" in out)
+
+
+def test_term_phrase_names_a_signal_in_words_and_falls_back_to_the_number() raises:
+    # The PURE phrase builder behind the TRY lines. The decomposed termination
+    # kinds are the exec-layer discriminants: 0 EXITED, 1 SIGNALED, 2 TIMED_OUT,
+    # 3 SPAWN_FAILED.
+    assert_equal(
+        _term_phrase(1, 11, 0, 0, False),
+        "signal 11 — SIGSEGV, segmentation fault",
+    )
+    # A signal OUTSIDE the named set must still read as the bare number — never
+    # an empty phrase and never a neighbour's name.
+    assert_equal(_term_phrase(1, 31, 0, 0, False), "signal 31")
+    assert_equal(_term_phrase(1, 62, 0, 0, False), "signal 62")
+
+
+def test_term_phrase_notes_the_sigkill_escalation_of_a_deadline() raises:
+    # A deadline the child survived until SIGKILL says so; a child that went
+    # down on the polite SIGTERM must not claim an escalation that never ran.
+    assert_equal(_term_phrase(2, 0, 1, 15, False), "timed out")
+    assert_equal(
+        _term_phrase(2, 0, 1, 9, True), "timed out, escalated to SIGKILL"
+    )
+
+
+def test_crash_narrative_reads_a_segfault_with_no_stdout_and_no_abort() raises:
+    # The OBSERVED segfault shape (tests/snapshots/protocol/): termination is
+    # signal 11, stdout is EMPTY, there is NO `ABORT:` line anywhere, and stderr
+    # carries only the runtime's stack dump. The narrative must be built from the
+    # typed `signal_number` alone: it may never assume an ABORT line (that is the
+    # SIGABRT fixture's shape) or that stdout said anything at all.
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_segfault.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_segfault.mojo",
+            Outcome.CRASH,
+            0.2,
+            _argv("tests/test_segfault.mojo"),
+            1.0,
+            List[UInt8](),
+            _bytes("<STACK-DUMP>\n"),
+            signal_number=11,
+        )
+    )
+    var out = c.output()
+    assert_true("CRASH" in out)
+    assert_true("signal 11 — SIGSEGV, segmentation fault" in out)
+    # No ABORT line existed, so none may be printed or implied.
+    assert_false("ABORT" in out)
+    # The empty stdout is rendered as nothing, and the stderr rides verbatim.
+    assert_true("--- captured stderr ---" in out)
+    assert_true("<STACK-DUMP>" in out)
 
 
 def test_precompile_ending_phrase_names_each_ending_in_words() raises:

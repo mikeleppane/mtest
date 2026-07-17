@@ -448,6 +448,7 @@ struct Event(Copyable, Movable):
         attempts_used: Int = 1,
         flaky: Bool = False,
         slow: Bool = False,
+        escalated: Bool = False,
     ) -> Event:
         """A file's run finished, carrying the data the reporter renders from.
 
@@ -457,8 +458,11 @@ struct Event(Copyable, Movable):
         `build_argv`, and the captured streams as raw bytes. `parse_disposition`
         and the four `*_tests` totals carry the test-granularity read of this
         file's report. `attempts_used`/`flaky`/`slow` carry the resilience
-        summary of the run. Every one defaults so existing callers are
-        unaffected.
+        summary of the run. `escalated` is the run `Termination`'s latched
+        SIGKILL escalation, so a TIMEOUT verdict can say whether the child went
+        down on the polite SIGTERM or had to be killed — the same fact a TRY
+        line reads, but available with no retry in play. Every one defaults so
+        existing callers are unaffected.
         """
         var e = Event._blank(EventKind.FILE_FINISHED)
         e.path = path
@@ -480,6 +484,7 @@ struct Event(Copyable, Movable):
         e.attempts_used = attempts_used
         e.flaky = flaky
         e.slow = slow
+        e.escalated = escalated
         return e^
 
     @staticmethod

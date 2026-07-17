@@ -1093,18 +1093,107 @@ def s_failing_gate(manifest: dict) -> str:
 
 
 def s_timeout(manifest: dict) -> str:
-    run = run_mtest(
-        ["e2e/slow/test_hanging.mojo", "--timeout", "1"], timeout=SHORT_TIMEOUT
-    )
+    """The POLITE half of the escalation pair (the stubborn half is
+    timeout-escalation). This fixture sleeps without disarming SIGTERM, so the
+    supervisor's polite signal ends it inside the grace and NO SIGKILL is ever
+    sent. The verdict must therefore name the deadline and say nothing about an
+    escalation: this is the assertion that makes the escalation clause a
+    CONDITIONAL fact rather than a constant, so a clause appended unconditionally
+    fails HERE while the stubborn scenario stays green.
+    """
+    rel = "e2e/slow/test_hanging.mojo"
+    run = run_mtest([rel, "--timeout", "1"], timeout=SHORT_TIMEOUT)
     expect_exit(run, 1)
     summ = expect_accounting(run)
     expect(summ.timed_out == 1, f"expected 1 timed out, got {summ.timed_out}")
+    verdict = run.verdict_line("TIMEOUT", rel)
+    expect(verdict is not None, "no TIMEOUT verdict line")
     expect(
-        run.verdict_line("TIMEOUT", "e2e/slow/test_hanging.mojo") is not None,
-        "no TIMEOUT verdict line",
+        "timed out after 1s" in verdict,
+        f"the TIMEOUT verdict did not name the deadline:\n{verdict}",
+    )
+    expect(
+        "escalated" not in verdict and "SIGKILL" not in verdict,
+        f"a child that died on the polite SIGTERM was narrated as having been"
+        f" escalated to SIGKILL — the escalation clause is not conditional on the"
+        f" latched Termination:\n{verdict}",
     )
     expect(run.wall < 10.0, f"mtest took {run.wall:.1f}s to honor --timeout 1")
-    return f"TIMEOUT verdict, exit 1, returned in {run.wall:.1f}s"
+    return (
+        f"TIMEOUT verdict names the deadline and claims NO escalation (polite"
+        f" SIGTERM sufficed), exit 1, returned in {run.wall:.1f}s"
+    )
+
+
+def s_timeout_escalation(manifest: dict) -> str:
+    """A child that IGNORES SIGTERM forces the supervisor's full kill protocol:
+    SIGTERM -> 300ms run-step grace -> SIGKILL. The escalation is latched on the
+    Termination, and BOTH places that can narrate it must:
+
+      * --retries 0 -> no attempt is non-final, so there is no TRY line and the
+        TIMEOUT VERDICT line is the only place the reader can learn the child had
+        to be killed. This is the common case (`mtest --timeout N`).
+      * --retries 1 -> attempt 1 is a crash-class run-timeout, so it also gets a
+        TRY line, and the two must agree.
+
+    Structure only — the wording is an informal surface, so this asserts the
+    lines, the escalation clause, and the final TIMEOUT verdict, never exact
+    bytes. Only SIGKILL can end this fixture; if the escalation ever regressed,
+    the child would survive its deadline and the harness guard (not these
+    assertions) would fire.
+    """
+    rel = "e2e/stubborn/test_stubborn.mojo"
+
+    # --retries 0: the verdict line alone carries the story.
+    run0 = run_mtest([rel, "--timeout", "1", "--retries", "0"], timeout=SHORT_TIMEOUT)
+    expect_exit(run0, 1)
+    summ0 = expect_accounting(run0)
+    expect(summ0.timed_out == 1, f"expected 1 timed out, got {summ0.timed_out}")
+    expect(
+        "TRY" not in run0.stdout,
+        f"--retries 0 scheduled only one attempt but showed a TRY line:\n{run0.stdout}",
+    )
+    verdict0 = run0.verdict_line("TIMEOUT", rel)
+    expect(verdict0 is not None, f"no TIMEOUT verdict line:\n{run0.stdout}")
+    expect(
+        "escalated to SIGKILL" in verdict0,
+        f"a SIGTERM-ignoring child's TIMEOUT verdict did not report the SIGKILL"
+        f" escalation, so nothing in the run did:\n{verdict0}",
+    )
+    expect(
+        "timed out after 1s" in verdict0,
+        f"the TIMEOUT verdict did not name the deadline:\n{verdict0}",
+    )
+
+    # --retries 1: the TRY line tells the same story, and so does the verdict.
+    run = run_mtest([rel, "--timeout", "1", "--retries", "1"], timeout=SHORT_TIMEOUT)
+    expect_exit(run, 1)
+    summ = expect_accounting(run)
+    expect(summ.timed_out == 1, f"expected 1 timed out, got {summ.timed_out}")
+    try_line = run.verdict_line("TRY", rel)
+    expect(
+        try_line is not None,
+        f"the timed-out first attempt showed no TRY line:\n{run.stdout}",
+    )
+    expect(
+        "escalated to SIGKILL" in try_line,
+        f"a SIGTERM-ignoring child's TRY line did not report the SIGKILL"
+        f" escalation:\n{try_line}",
+    )
+    expect(
+        "timed out" in try_line,
+        f"the TRY line did not name the deadline as the cause:\n{try_line}",
+    )
+    verdict = run.verdict_line("TIMEOUT", rel)
+    expect(verdict is not None, f"no final TIMEOUT verdict line:\n{run.stdout}")
+    expect(
+        "escalated to SIGKILL" in verdict,
+        f"the TRY line reported the escalation but the final verdict did not:\n{verdict}",
+    )
+    return (
+        "SIGTERM ignored -> --retries 0: TIMEOUT verdict itself reports the SIGKILL"
+        f" escalation (no TRY line); --retries 1: TRY + verdict agree; exit 1, {run.wall:.1f}s"
+    )
 
 
 def s_precompile(manifest: dict) -> str:
@@ -2134,6 +2223,7 @@ def main() -> int:
     h.scenario("empty-dir", s_empty_dir)
     h.scenario("failing-gate", s_failing_gate)
     h.scenario("timeout", s_timeout)
+    h.scenario("timeout-escalation", s_timeout_escalation)
     h.scenario("precompile", s_precompile)
     h.scenario("precompile-timeout", s_precompile_timeout)
     h.scenario("precompile-crash-retry", s_precompile_crash_retry)
