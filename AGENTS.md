@@ -508,6 +508,75 @@ Accumulated the hard way; append as later phases teach more.
   individual registry fields in place across a rebuild, which can leave a
   stale canonical source or listing paired with a fresh binary. Correct move:
   always replace the whole product, never patch a field.
+- **A killed `mojo build` never corrupts its module cache — a kill probe
+  found strict temp-then-rename atomicity.** Nine trials (SIGTERM-to-the-group
+  and SIGKILL, each at an early/mid/late point) against a shared cache
+  produced zero half-written entries: every cache entry was either absent
+  (recomputed cold) or fully valid (reused, and reused fast) after a kill.
+  Correct move: treat the per-attempt quarantine dir as defense-in-depth for
+  the residual risk one machine and one beta toolchain can't rule out — not
+  as a fix for corruption that was actually observed, because none was.
+- **The post-kill cache quarantine works by mutating the PARENT's
+  environment right before spawn, not through the exec spec.** The native
+  adapter snapshots the live `environ` at spawn time, so quarantining a
+  killed compile means setting `MODULAR_CACHE_DIR` in mtest's own process
+  and restoring/unsetting it immediately after — no native ABI change
+  needed. Trap: this is safe ONLY because the session is single-threaded
+  today; a future concurrent pool must route per-child env through
+  `ProcessSpec.env_extra` (reserved, still unread) instead of mutating the
+  one shared parent env, or two children spawning in the same window will
+  race each other's cache directory.
+- **A `pixi run`-less invocation of the e2e Python driver looks like a real
+  regression, not a setup error.** `python scripts/e2e_check.py` run outside
+  the pixi env fails many scenarios with a real `INTERNAL-ERROR` banner —
+  `could not execute 'mojo' (errno 2) — no such file or directory` — because
+  the driver's own PATH lacks `mojo`, and that PATH is what the `build/mtest`
+  it spawns inherits down to the `mojo build` grandchild. Symptom: a wall of
+  failures that reads exactly like a RED regression sweep. Correct move:
+  before debugging content, check the INTERNAL-ERROR banner's errno line —
+  errno 2 on `mojo` means "wrong environment," not "broken code."
+- **`fmt-check` is `mojo format src tests e2e && git diff --exit-code`, and
+  it is the first gate `pixi run ci` runs.** It reds on ANY uncommitted
+  diff, including unrelated work-in-progress or a foreign untracked file
+  that got staged — a full `ci` run dies at gate one for reasons unrelated
+  to the change under test. Correct move: commit or stash before running
+  `ci`; to check a dirty tree instead, run the other gates individually plus
+  a scoped `git diff --exit-code -- src tests e2e`. And always capture a
+  gate's REAL exit as its own statement (`cmd; echo "x=$?"`) — a trailing
+  pipe/echo silently reports 0 even when the gate itself failed.
+- **The harness gates enforce explicit membership, not just presence.**
+  `scripts/harness_check.py` pins exact suite/fixture sets (`UNIT_SUITES`,
+  `INTEGRATION_SUITES`, `PROTOCOL_FIXTURES`) and exact counts (22 protocol
+  snapshots, 29 e2e fixtures); a new `tests/unit/*.mojo`,
+  `tests/integration/*.mojo`, snapshot, or `e2e/**/test_*.mojo` that isn't
+  registered reds `harness-check` with a "membership mismatch," even though
+  the suite itself runs green. Correct move: register a new suite/fixture in
+  the SAME commit that adds it.
+- **Never run two builds against the shared `build/` tree at once.** A
+  `pixi run ci` racing a concurrent `pixi run build`/`build-bin` corrupted
+  `build/mtest.mojopkg` mid-write, producing a dogfood compile error (the
+  compiler's own "invalid Mojo precompiled file … invalid magic bytes") that
+  vanished on a clean re-run and looked exactly like a real regression.
+  Serialize any build-producing command against the ci/dogfood/e2e run —
+  builds now run one at a time, full stop.
+- **The crash-class retry classifier never retries a deterministic
+  failure.** `retry_classify` (`src/mtest/session/retry_class.mojo`) retries
+  ONLY a signal death, a deadline kill, or a compiler crash (by signal, or by
+  a pinned ICE stderr signature on a nonzero exit) — a process that `Exited`
+  under its own control, at ANY code including 0, is deterministic and is
+  NEVER retried. Trap: "the step failed, so retry it" — no; the termination
+  kind and, for a nonzero compile exit, the stderr signature are what
+  decide, and the signature list is assumption-pinned, not exhaustively
+  observed.
+- **A regression guard must be shown to fail when its property is broken,
+  not just shown to pass.** This phase shipped a promotion test that passed
+  against the exact bug it claimed to catch — its stand-in compiler never
+  wrote the output path it was supposed to protect — and an escalation
+  "proof" that was only ever an observed transcript (run the fixture,
+  eyeball the right words). Correct move: mutation-prove it — break the
+  property (a stand-in that skips the write, a fixture that takes the other
+  branch), watch the test go RED, then revert — before calling anything a
+  pin. "I ran it and it looked right" is an observation, not a guard.
 
 ## Skills index
 
