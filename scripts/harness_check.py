@@ -38,6 +38,7 @@ UNIT_SUITES = {
     "test_model_node_id.mojo",
     "test_model_outcome.mojo",
     "test_model_parse_disposition.mojo",
+    "test_model_slow.mojo",
     "test_model_test_counts.mojo",
     "test_model_test_result.mojo",
     "test_protocol_corruption.mojo",

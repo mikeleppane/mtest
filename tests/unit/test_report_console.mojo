@@ -320,6 +320,86 @@ def test_timeout_verdict_claims_no_escalation_that_never_happened() raises:
     assert_false("SIGKILL" in out)
 
 
+def _feed_slow(
+    mut c: ConsoleReporter,
+    outcome: Outcome,
+    slow: Bool,
+    duration_seconds: Float64,
+    build_duration_seconds: Float64,
+):
+    """One terminal FileFinished with the given outcome/slow/durations."""
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_crawl.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_crawl.mojo",
+            outcome,
+            duration_seconds,
+            _argv("tests/test_crawl.mojo"),
+            build_duration_seconds,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.PARSED,
+            passed_tests=1 if outcome == Outcome.PASS else 0,
+            failed_tests=1 if outcome == Outcome.FAIL else 0,
+            slow=slow,
+        )
+    )
+
+
+def test_slow_file_carries_the_slow_token_on_the_verdict_line() raises:
+    var c = _console()
+    _feed_slow(c, Outcome.PASS, True, 61.0, 1.0)
+    var out = c.output()
+    assert_true("SLOW" in out)
+
+
+def test_slow_file_still_reports_its_real_verdict() raises:
+    # SLOW rides alongside the verdict; it never replaces or perturbs it. A
+    # slow FAIL is still reported FAIL, with its real duration.
+    var c = _console()
+    _feed_slow(c, Outcome.FAIL, True, 61.0, 1.0)
+    var out = c.output()
+    assert_true("FAIL" in out)
+    assert_true("SLOW" in out)
+    assert_true("61.00s" in out)
+
+
+def test_non_slow_file_has_no_slow_token() raises:
+    # The honesty property: `slow=False` must never render SLOW, even for a
+    # file whose duration happens to be printed elsewhere on the line.
+    var c = _console()
+    _feed_slow(c, Outcome.PASS, False, 1.5, 1.0)
+    var out = c.output()
+    assert_false("SLOW" in out)
+
+
+def test_verbose_slow_build_names_the_build_step() raises:
+    var c = _console(verbosity=Verbosity.VERBOSE)
+    _feed_slow(c, Outcome.PASS, True, 1.2, 65.0)
+    var out = c.output()
+    assert_true("SLOW" in out)
+    assert_true("build" in out)
+    assert_true("65.00s" in out)
+
+
+def test_verbose_slow_run_names_the_run_step() raises:
+    var c = _console(verbosity=Verbosity.VERBOSE)
+    _feed_slow(c, Outcome.PASS, True, 90.0, 1.0)
+    var out = c.output()
+    assert_true("SLOW" in out)
+    assert_true("run" in out)
+    assert_true("90.00s" in out)
+
+
+def test_verbose_non_slow_file_has_no_slow_step_note() raises:
+    var c = _console(verbosity=Verbosity.VERBOSE)
+    _feed_slow(c, Outcome.PASS, False, 1.2, 1.0)
+    var out = c.output()
+    assert_false("SLOW" in out)
+    assert_false("slow:" in out)
+
+
 def test_failing_test_section_carries_node_id_and_repro() raises:
     var c = _console()
     _feed_mock_run(c)

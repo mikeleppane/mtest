@@ -21,3 +21,4 @@ from mtest.model.exit_code import (
     EXIT_FAILURE,
     EXIT_NOTHING_RAN,
 )
+from mtest.model.slow import SLOW_THRESHOLD_SECONDS, is_slow, slow_step_label

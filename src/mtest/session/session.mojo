@@ -63,6 +63,7 @@ from mtest.model import (
     TestCounts,
     TestResult,
     exit_code_for,
+    is_slow,
 )
 from mtest.protocol import (
     ParsedReport,
@@ -896,6 +897,7 @@ def _finalize_attempt(
             att.build_stderr.copy(),
             timeout_seconds=bto,
             attempts_used=attempts_used,
+            slow=is_slow(att.bdur, 0.0),
         )
         return FileResult.ran_with(ev^, bout)
 
@@ -955,6 +957,7 @@ def _finalize_attempt(
         attempts_used=attempts_used,
         flaky=flaky,
         escalated=escalated,
+        slow=is_slow(att.bdur, att.rdur),
     )
     var fr = FileResult.classified(
         pre^,
@@ -1307,6 +1310,7 @@ def _build_for_selection(
             List[UInt8](),
             bres.stderr_bytes.copy(),
             timeout_seconds=bto,
+            slow=is_slow(bdur, 0.0),
         )
         return _BuildOutcome(
             False,
@@ -1379,6 +1383,7 @@ def _probe_terminal(
         timeout_seconds=timeout_seconds,
         parse_disposition=disposition,
         escalated=escalated,
+        slow=is_slow(bdur, 0.0),
     )
     var exits = List[Outcome]()
     if not is_drift:
@@ -1797,6 +1802,7 @@ def _reconcile_and_classify(
         deselected_tests=len(deselected),
         attempts_used=attempts_used,
         flaky=flaky,
+        slow=is_slow(bdur, rdur),
     )
     return FileResult.classified(
         pre^,
@@ -1852,6 +1858,7 @@ def _run_terminal_file(
         deselected_tests=deselected_count,
         attempts_used=attempts_used,
         escalated=escalated,
+        slow=is_slow(bdur, rdur),
     )
     return FileResult.classified(
         pre^,
@@ -1895,6 +1902,7 @@ def _classified_terminal(
         parse_disposition=cls.disposition,
         deselected_tests=deselected_count,
         attempts_used=attempts_used,
+        slow=is_slow(bdur, rdur),
     )
     return FileResult.classified(
         pre^,
@@ -2607,6 +2615,7 @@ def _run_selection[
                     List[UInt8](),
                     List[UInt8](),
                     deselected_tests=len(c.deselected),
+                    slow=is_slow(c.bdur, 0.0),
                 )
             )
             test_totals.deselected += len(c.deselected)

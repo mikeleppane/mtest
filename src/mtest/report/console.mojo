@@ -33,6 +33,7 @@ from mtest.model import (
     Summary,
     TestCounts,
     TestResult,
+    slow_step_label,
 )
 
 from mtest.report.reporter import Reporter
@@ -327,6 +328,30 @@ def _disposition_note(e: Event) -> String:
             " block — no per-test verdict can be trusted"
         )
     return String("")
+
+
+def _slow_note(e: Event) -> String:
+    """The `-v` clause naming which step(s) were SLOW and their duration(s).
+
+    `slow_step_label` decides WHICH of the two typed duration fields crossed
+    the threshold; the durations rendered here are always those same fields
+    (never invented), so this can never claim a step's time that the event
+    does not itself carry. Called only when `e.slow` is True.
+    """
+    var label = slow_step_label(e.build_duration_seconds, e.duration_seconds)
+    if label == "build":
+        return "build " + _fmt_fixed(e.build_duration_seconds, 2) + "s"
+    if label == "run":
+        return "run " + _fmt_fixed(e.duration_seconds, 2) + "s"
+    if label == "build and run":
+        return (
+            "build "
+            + _fmt_fixed(e.build_duration_seconds, 2)
+            + "s, run "
+            + _fmt_fixed(e.duration_seconds, 2)
+            + "s"
+        )
+    return ""
 
 
 def _common_indent(lines: List[String]) -> Int:
@@ -895,6 +920,12 @@ struct ConsoleReporter(Reporter):
                 or e.outcome == Outcome.COMPILE_TIMEOUT
             ) and detail.byte_length() > 0:
                 line += "  (" + detail + ")"
+            if e.slow:
+                # An INFORMAL-tier annotation, never an outcome: it rides
+                # alongside whatever verdict token this line already carries
+                # and never replaces it — a SLOW file still reports its real
+                # verdict, counts, and exit code.
+                line += "  SLOW"
             var color = _YELLOW if no_tests else _color_for(e.outcome)
             self._head += self._paint(color, line) + "\n"
             var note = _disposition_note(e)
@@ -908,6 +939,8 @@ struct ConsoleReporter(Reporter):
                     + _fmt_fixed(e.build_duration_seconds, 2)
                     + "s)\n"
                 )
+                if e.slow:
+                    self._head += String("    slow: ") + _slow_note(e) + "\n"
                 for ref t in self._file_tests:
                     self._head += self._render_test_row(t)
 
