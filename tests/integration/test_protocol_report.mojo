@@ -50,6 +50,7 @@ def _expected_absent() -> List[String]:
     """Snapshots with no matching-path report (crash or usage error)."""
     return [
         "crashing--default.txt",
+        "segfault--default.txt",
         "passing--only-unknown.txt",
         "passing--flag-unknown.txt",
         "passing--no-compose.txt",

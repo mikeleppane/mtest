@@ -18,3 +18,19 @@ from mtest.session.classify import (
     classify,
     resolve_report,
 )
+from mtest.session.clamp import ClampedStream, clamp_stream
+from mtest.session.shard import fnv1a64, partition, shard_owns
+from mtest.session.retry_class import (
+    RetryClass,
+    has_crash_signature,
+    retry_classify,
+)
+from mtest.session.attribution import (
+    ATTRIBUTION_FILE_BUDGET_SECONDS,
+    ATTRIBUTION_SESSION_BUDGET_SECONDS,
+    ISOLATION_RUN_CAP,
+    ISOLATION_TIMEOUT_CAP_SECS,
+    AttributionStep,
+    attribution_step,
+    isolation_timeout_secs,
+)

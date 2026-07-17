@@ -19,5 +19,6 @@ from mtest.config.mojo_path import resolve_mojo_path
 from mtest.config.precompile import Precompile
 from mtest.config.runner_config import RunnerConfig
 from mtest.config.shell_quote import shell_join, shell_quote
+from mtest.config.shard_mode import ShardMode
 from mtest.config.show_output import ShowOutput
 from mtest.config.verbosity import Verbosity

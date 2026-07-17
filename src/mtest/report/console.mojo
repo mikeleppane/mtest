@@ -25,6 +25,7 @@ from mtest.config import (
     shell_quote,
 )
 from mtest.model import (
+    AttributionDisposition,
     Event,
     EventKind,
     Outcome,
@@ -32,6 +33,7 @@ from mtest.model import (
     Summary,
     TestCounts,
     TestResult,
+    slow_step_label,
 )
 
 from mtest.report.reporter import Reporter
@@ -179,6 +181,60 @@ def _signal_name(signo: Int) -> String:
     return String("")
 
 
+def _term_phrase(
+    kind: Int, value: Int, final_kind: Int, final_value: Int, escalated: Bool
+) -> String:
+    """A short human phrase for an attempt's decomposed termination. Pure.
+
+    The `AttemptFinished` event carries the termination as plain integers (the
+    exec-layer `Termination` kinds: 0 EXITED, 1 SIGNALED, 2 TIMED_OUT, 3
+    SPAWN_FAILED) so this layer imports nothing above it. A signal is named in
+    words when recognized; a deadline notes any SIGKILL escalation; a nonzero
+    EXITED is a compiler ICE that exited under its own control.
+    """
+    if kind == 1:
+        var name = _signal_name(value)
+        if name != "":
+            return String("signal ") + String(value) + " — " + name
+        return String("signal ") + String(value)
+    if kind == 2:
+        var s = String("timed out")
+        if escalated:
+            s += ", escalated to SIGKILL"
+        return s
+    if kind == 3:
+        return String("spawn failed (errno ") + String(value) + ")"
+    return String("exit ") + String(value)
+
+
+def _precompile_ending_phrase(
+    term_kind: Int, term_value: Int, escalated: Bool, timeout_seconds: Int
+) -> String:
+    """How a precompile step's FINAL attempt ended, in words. Pure.
+
+    A step that never produced its package is exit 1 either way, so the ONE thing
+    the banner owes a reader is which ending it was: a deadline WE enforced, a
+    compiler that died by a signal, a compiler that rejected the code, or a
+    compiler we could not even spawn. Reads the decomposed exec-layer termination
+    kinds (0 EXITED, 1 SIGNALED, 2 TIMED_OUT, 3 SPAWN_FAILED) the event carries,
+    so this layer imports nothing above it.
+    """
+    if term_kind == 1:
+        var name = _signal_name(term_value)
+        var base = String("died by signal ") + String(term_value)
+        if name != "":
+            return base + " (" + name + ")"
+        return base
+    if term_kind == 2:
+        var s = String("timed out after ") + String(timeout_seconds) + "s"
+        if escalated:
+            s += ", escalated to SIGKILL"
+        return s
+    if term_kind == 3:
+        return String("could not be spawned (errno ") + String(term_value) + ")"
+    return String("exited ") + String(term_value)
+
+
 def _errno_name(errno: Int) -> String:
     """The strerror-style words for a common spawn errno. `""` outside the set.
 
@@ -201,8 +257,19 @@ def _outcome_detail(e: Event) -> String:
 
     `FAIL` carries the exit code (`"exit <n>"`), `CRASH` the terminating signal
     named in words when recognized (`"signal 4 — SIGILL, illegal instruction"`,
-    else just `"signal <n>"`), `TIMEOUT` the configured deadline (`"timed out
-    after <n>s"`); every other outcome has no detail. Pure.
+    else just `"signal <n>"`), `TIMEOUT` and `COMPILE_TIMEOUT` the configured
+    deadline (`"timed out after <n>s"` — the run deadline and the compile
+    deadline read the same because both name the deadline WE enforced); every
+    other outcome has no detail. Pure.
+
+    A deadline that had to be escalated says so, in `_term_phrase`'s words so the
+    verdict line and the TRY lines agree. This is the ONLY place the escalation
+    reaches a reader when no retry ran (a TRY line exists only for a non-final
+    attempt), which is the common `--timeout N` case. The clause is driven by the
+    event's latched `escalated`, so it appears only where the session populates
+    it from a run `Termination` — the compile steps do not yet pass their
+    `bterm.escalated`, and until they do a COMPILE_TIMEOUT simply renders the
+    bare deadline rather than claiming an escalation nobody recorded.
     """
     if e.outcome == Outcome.FAIL:
         return String("exit ") + String(e.exit_status)
@@ -212,8 +279,11 @@ def _outcome_detail(e: Event) -> String:
         if name.byte_length() > 0:
             return base + " — " + name
         return base
-    if e.outcome == Outcome.TIMEOUT:
-        return String("timed out after ") + String(e.timeout_seconds) + "s"
+    if e.outcome == Outcome.TIMEOUT or e.outcome == Outcome.COMPILE_TIMEOUT:
+        var s = String("timed out after ") + String(e.timeout_seconds) + "s"
+        if e.escalated:
+            s += ", escalated to SIGKILL"
+        return s
     return String("")
 
 
@@ -258,6 +328,30 @@ def _disposition_note(e: Event) -> String:
             " block — no per-test verdict can be trusted"
         )
     return String("")
+
+
+def _slow_note(e: Event) -> String:
+    """The `-v` clause naming which step(s) were SLOW and their duration(s).
+
+    `slow_step_label` decides WHICH of the two typed duration fields crossed
+    the threshold; the durations rendered here are always those same fields
+    (never invented), so this can never claim a step's time that the event
+    does not itself carry. Called only when `e.slow` is True.
+    """
+    var label = slow_step_label(e.build_duration_seconds, e.duration_seconds)
+    if label == "build":
+        return "build " + _fmt_fixed(e.build_duration_seconds, 2) + "s"
+    if label == "run":
+        return "run " + _fmt_fixed(e.duration_seconds, 2) + "s"
+    if label == "build and run":
+        return (
+            "build "
+            + _fmt_fixed(e.build_duration_seconds, 2)
+            + "s, run "
+            + _fmt_fixed(e.duration_seconds, 2)
+            + "s"
+        )
+    return ""
 
 
 def _common_indent(lines: List[String]) -> Int:
@@ -571,6 +665,10 @@ struct ConsoleReporter(Reporter):
         elif k == EventKind.COLLECTION_KNOWN:
             # The collection line arrives in a later surface; nothing here yet.
             pass
+        elif k == EventKind.ATTEMPT_FINISHED:
+            self._on_attempt_finished(e)
+        elif k == EventKind.CRASH_ATTRIBUTION:
+            self._on_crash_attribution(e)
 
     def _reset_file(mut self):
         """Clear the per-file accumulation after a file is fully rendered."""
@@ -641,17 +739,129 @@ struct ConsoleReporter(Reporter):
         var line = String("WARNING  ") + e.warning_kind + ": " + sentence
         self._head += self._paint(_YELLOW, line) + "\n"
 
+    def _on_attempt_finished(mut self, e: Event):
+        """Render a loud "TRY" line for one non-final crash-class retry attempt.
+
+        Reads the attempt's identity from the plain decomposed fields the event
+        carries (never re-parsing bytes): which attempt of how many, the step and
+        classification, and a short phrase for the termination. The excerpt
+        markers say loudly when the captured streams were clamped.
+        """
+        var phrase = _term_phrase(
+            e.term_kind,
+            e.term_value,
+            e.term_final_kind,
+            e.term_final_value,
+            e.escalated,
+        )
+        var line = _col("TRY", _TOKEN_W) + _col(e.path, _PATH_W)
+        line += (
+            String("attempt ")
+            + String(e.attempt_index)
+            + "/"
+            + String(e.attempts_planned)
+            + "  "
+            + e.step
+            + " "
+            + e.classification
+            + "  ("
+            + phrase
+            + ")  "
+            + _fmt_fixed(e.duration_seconds, 2)
+            + "s"
+        )
+        if e.stdout_truncated or e.stderr_truncated:
+            line += "  [excerpt]"
+        self._head += self._paint(_YELLOW, line) + "\n"
+
+    def _on_crash_attribution(mut self, e: Event):
+        """Render ONE crashed file's bounded-isolation attribution result.
+
+        Composed from the event's typed fields only — the disposition, the
+        culprit, the rerun count, and the elapsed time — never from a sentence
+        the session pre-rendered.
+
+        Attribution is SECONDARY evidence: the file's CRASH verdict was already
+        rendered above and is not restated here as a verdict. So every
+        non-ATTRIBUTED disposition says BOTH that the verdict is unchanged and
+        that the culprit is UNATTRIBUTED — a reader must never be able to read a
+        stopped search as a soft accusation. The token is `ATTRIBUTION`, which
+        deliberately prefixes NO verdict token in the vocabulary: a line-oriented
+        reader scanning for `CRASH` must never match this diagnostic.
+        """
+        var d = e.attribution_disposition
+        var label: String
+        var detail: String
+        if d == AttributionDisposition.ATTRIBUTED:
+            label = String("ATTRIBUTED")
+            detail = String("culprit: ") + e.culprit_test
+        elif d == AttributionDisposition.NO_REPRODUCTION:
+            label = String("NO-REPRODUCTION")
+            detail = String(
+                "the crash did not reproduce with each test run alone; the"
+                " CRASH verdict stands and the culprit is UNATTRIBUTED"
+            )
+        elif d == AttributionDisposition.PROBE_FAILED:
+            label = String("PROBE-FAILED")
+            detail = String(
+                "the file's test list could not be recovered, so no test could"
+                " be isolated; the CRASH verdict stands and the culprit is"
+                " UNATTRIBUTED"
+            )
+        elif d == AttributionDisposition.RUN_CAP:
+            label = String("RUN-CAP")
+            detail = String(
+                "the 32-run cap stopped the search before every test had run"
+                " alone; the CRASH verdict stands and the culprit is"
+                " UNATTRIBUTED"
+            )
+        else:
+            label = String("TIME-BUDGET")
+            detail = String(
+                "the time budget stopped the search before every test had run"
+                " alone; the CRASH verdict stands and the culprit is"
+                " UNATTRIBUTED"
+            )
+        var line = _col("ATTRIBUTION", _TOKEN_W) + _col(e.path, _PATH_W)
+        line += (
+            label
+            + "  "
+            + detail
+            + "  ("
+            + String(e.isolation_reruns)
+            + " isolation rerun(s), "
+            + _fmt_fixed(e.attribution_seconds, 2)
+            + "s)"
+        )
+        self._head += self._paint(_YELLOW, line) + "\n"
+
     def _on_precompile_failed(mut self, e: Event):
         """Render the precompile-failure banner with the compiler output verbatim.
 
         Uses the frozen outcome-vocabulary label (PRECOMPILE-ERROR) and, per
         §8.3, names each dependent test file as a casualty — not merely a count —
-        so a reader can see exactly which files were denied a run.
+        so a reader can see exactly which files were denied a run. When the event
+        carries the step's final termination it is named IN WORDS: a step killed
+        at the compile deadline reads as a timeout, never as the compiler
+        rejecting the code, and a step that burned its retry budget says how many
+        attempts it spent. Rendered from typed fields only; the compiler's own
+        output rides verbatim below.
         """
+        var detail = String("")
+        if e.ending_known:
+            detail += (
+                _precompile_ending_phrase(
+                    e.term_kind, e.term_value, e.escalated, e.timeout_seconds
+                )
+                + "; "
+            )
+            if e.attempts_used > 1:
+                detail += String(e.attempts_used) + " attempts; "
         var banner = (
             String("PRECOMPILE-ERROR  ")
             + e.step
             + "  ("
+            + detail
             + String(e.casualty_count)
             + " file(s) could not run)"
         )
@@ -705,9 +915,17 @@ struct ConsoleReporter(Reporter):
             line += _fmt_fixed(e.duration_seconds, 2) + "s"
             var detail = _outcome_detail(e)
             if (
-                e.outcome == Outcome.CRASH or e.outcome == Outcome.TIMEOUT
+                e.outcome == Outcome.CRASH
+                or e.outcome == Outcome.TIMEOUT
+                or e.outcome == Outcome.COMPILE_TIMEOUT
             ) and detail.byte_length() > 0:
                 line += "  (" + detail + ")"
+            if e.slow:
+                # An INFORMAL-tier annotation, never an outcome: it rides
+                # alongside whatever verdict token this line already carries
+                # and never replaces it — a SLOW file still reports its real
+                # verdict, counts, and exit code.
+                line += "  SLOW"
             var color = _YELLOW if no_tests else _color_for(e.outcome)
             self._head += self._paint(color, line) + "\n"
             var note = _disposition_note(e)
@@ -721,6 +939,8 @@ struct ConsoleReporter(Reporter):
                     + _fmt_fixed(e.build_duration_seconds, 2)
                     + "s)\n"
                 )
+                if e.slow:
+                    self._head += String("    slow: ") + _slow_note(e) + "\n"
                 for ref t in self._file_tests:
                     self._head += self._render_test_row(t)
 
@@ -770,9 +990,75 @@ struct ConsoleReporter(Reporter):
         repro += shell_quote(target)
         return repro
 
+    def _compile_timeout_repro(self, e: Event) -> String:
+        """A `reproduce:` line naming the deadline that fired. Pure.
+
+        The COMPILE-ERROR banner reproduces with the raw `mojo build` argv, but
+        that argv would hang forever — the whole point is that this build does
+        not finish. So a COMPILE-TIMEOUT reproduces through mtest, carrying the
+        `--compile-timeout` that fired so the reader reruns the same experiment
+        rather than a different one.
+        """
+        var repro = String("reproduce: mtest ")
+        if self.mtest_build_flags.byte_length() > 0:
+            repro += self.mtest_build_flags + " "
+        repro += "--compile-timeout " + String(e.timeout_seconds) + " "
+        repro += shell_quote(e.path)
+        return repro
+
+    def _render_compile_timeout(self, e: Event) -> String:
+        """The framed COMPILE-TIMEOUT banner, rendered from typed fields only.
+
+        Names the deadline, shows whatever the compiler managed to say verbatim,
+        then carries the one actionable hint (split or exclude) and a repro line.
+
+        The quarantine sentence is CONDITIONAL on `attempts_used > 1`: only then
+        did a retry actually run, rebuilding against a fresh quarantined module
+        cache. At `--retries 0` exactly one attempt was scheduled and the banner
+        promises nothing about a rebuild that never happened.
+
+        That sentence says how many attempts ran and NOTHING about how each one
+        ended, because `attempts_used` is a count and no typed field records the
+        per-attempt endings. A first attempt killed by a compiler ICE (crash-
+        class, so the retry rebuilds against a quarantined cache) followed by a
+        second that blew the deadline is also `attempts_used == 2` on a
+        COMPILE-TIMEOUT file — so any claim that the deadline fired every time
+        would be unearned. The verdict line and the sentence above it already say
+        the one ending that IS known: the final attempt's.
+        """
+        var secs = String(e.timeout_seconds)
+        var out = (
+            String("--- COMPILE-TIMEOUT ")
+            + e.path
+            + " (timed out after "
+            + secs
+            + "s) — mtest killed the build at the compile timeout; the"
+            + " compiler said: ---\n"
+        )
+        out += _ensure_trailing_newline(lossy_utf8(e.captured_stderr))
+        out += (
+            "the build exceeded the "
+            + secs
+            + "s compile timeout — split the module into smaller files or"
+            " exclude it (raise the deadline with --compile-timeout N, or"
+            " --compile-timeout 0 to remove it)\n"
+        )
+        if e.attempts_used > 1:
+            out += (
+                "the compile was retried against a fresh quarantined module"
+                " cache ("
+                + String(e.attempts_used)
+                + " attempts)\n"
+            )
+        out += self._compile_timeout_repro(e) + "\n\n"
+        return out
+
     def _render_section(self, e: Event) -> String:
         """The file's framed sections: per-test failures then the file-scope block.
         """
+        if e.outcome == Outcome.COMPILE_TIMEOUT:
+            return self._render_compile_timeout(e)
+
         if e.outcome == Outcome.COMPILE_ERROR:
             var out = (
                 String("--- COMPILE-ERROR ")

@@ -14,6 +14,7 @@ from std.testing import assert_equal, assert_true, assert_false, TestSuite
 
 from mtest.config import ColorWhen, Verbosity, ShowOutput
 from mtest.model import (
+    AttributionDisposition,
     EventKind,
     Summary,
     Event,
@@ -24,6 +25,7 @@ from mtest.model import (
     TestResult,
 )
 from mtest.report import ConsoleReporter
+from mtest.report.console import _precompile_ending_phrase, _term_phrase
 
 
 def _bytes(s: String) -> List[UInt8]:
@@ -274,6 +276,128 @@ def test_timeout_notes_the_deadline() raises:
     _feed_mock_run(c)
     var out = c.output()
     assert_true("timed out after 300s" in out)
+
+
+def _feed_timeout(mut c: ConsoleReporter, escalated: Bool):
+    """One TIMEOUT FileFinished whose run did (or did not) need a SIGKILL."""
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_hangs.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_hangs.mojo",
+            Outcome.TIMEOUT,
+            1.31,
+            _argv("tests/test_hangs.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            timeout_seconds=1,
+            escalated=escalated,
+        )
+    )
+
+
+def test_timeout_verdict_reports_the_sigkill_escalation() raises:
+    # The COMMON case is `--timeout N` with NO retries: there is no TRY line, so
+    # the verdict line is the only place the escalation can be told. A child that
+    # ignored SIGTERM and had to be SIGKILLed is a materially different story
+    # from one that stopped politely, and the reader is owed it.
+    var c = _console()
+    _feed_timeout(c, escalated=True)
+    var out = c.output()
+    assert_true("timed out after 1s" in out)
+    assert_true("escalated to SIGKILL" in out)
+
+
+def test_timeout_verdict_claims_no_escalation_that_never_happened() raises:
+    # The mirror image: a child that went down on the polite SIGTERM must NOT be
+    # narrated as having been SIGKILLed.
+    var c = _console()
+    _feed_timeout(c, escalated=False)
+    var out = c.output()
+    assert_true("timed out after 1s" in out)
+    assert_false("escalated" in out)
+    assert_false("SIGKILL" in out)
+
+
+def _feed_slow(
+    mut c: ConsoleReporter,
+    outcome: Outcome,
+    slow: Bool,
+    duration_seconds: Float64,
+    build_duration_seconds: Float64,
+):
+    """One terminal FileFinished with the given outcome/slow/durations."""
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_crawl.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_crawl.mojo",
+            outcome,
+            duration_seconds,
+            _argv("tests/test_crawl.mojo"),
+            build_duration_seconds,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.PARSED,
+            passed_tests=1 if outcome == Outcome.PASS else 0,
+            failed_tests=1 if outcome == Outcome.FAIL else 0,
+            slow=slow,
+        )
+    )
+
+
+def test_slow_file_carries_the_slow_token_on_the_verdict_line() raises:
+    var c = _console()
+    _feed_slow(c, Outcome.PASS, True, 61.0, 1.0)
+    var out = c.output()
+    assert_true("SLOW" in out)
+
+
+def test_slow_file_still_reports_its_real_verdict() raises:
+    # SLOW rides alongside the verdict; it never replaces or perturbs it. A
+    # slow FAIL is still reported FAIL, with its real duration.
+    var c = _console()
+    _feed_slow(c, Outcome.FAIL, True, 61.0, 1.0)
+    var out = c.output()
+    assert_true("FAIL" in out)
+    assert_true("SLOW" in out)
+    assert_true("61.00s" in out)
+
+
+def test_non_slow_file_has_no_slow_token() raises:
+    # The honesty property: `slow=False` must never render SLOW, even for a
+    # file whose duration happens to be printed elsewhere on the line.
+    var c = _console()
+    _feed_slow(c, Outcome.PASS, False, 1.5, 1.0)
+    var out = c.output()
+    assert_false("SLOW" in out)
+
+
+def test_verbose_slow_build_names_the_build_step() raises:
+    var c = _console(verbosity=Verbosity.VERBOSE)
+    _feed_slow(c, Outcome.PASS, True, 1.2, 65.0)
+    var out = c.output()
+    assert_true("SLOW" in out)
+    assert_true("build" in out)
+    assert_true("65.00s" in out)
+
+
+def test_verbose_slow_run_names_the_run_step() raises:
+    var c = _console(verbosity=Verbosity.VERBOSE)
+    _feed_slow(c, Outcome.PASS, True, 90.0, 1.0)
+    var out = c.output()
+    assert_true("SLOW" in out)
+    assert_true("run" in out)
+    assert_true("90.00s" in out)
+
+
+def test_verbose_non_slow_file_has_no_slow_step_note() raises:
+    var c = _console(verbosity=Verbosity.VERBOSE)
+    _feed_slow(c, Outcome.PASS, False, 1.2, 1.0)
+    var out = c.output()
+    assert_false("SLOW" in out)
+    assert_false("slow:" in out)
 
 
 def test_failing_test_section_carries_node_id_and_repro() raises:
@@ -528,6 +652,123 @@ def test_compile_error_reproduce_is_the_build_command() raises:
     _feed_mock_run(c)
     var out = c.output()
     assert_true("reproduce: mojo build tests/test_typo.mojo" in out)
+
+
+# --- COMPILE-TIMEOUT: the banner is rendered from the typed event fields only ---
+
+
+def _feed_compile_timeout(
+    mut c: ConsoleReporter,
+    attempts_used: Int = 1,
+    stderr_text: String = "mojo: warning: still lowering module\n",
+):
+    """One COMPILE_TIMEOUT FileFinished for the fixed slow-build fixture."""
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_slow.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_slow.mojo",
+            Outcome.COMPILE_TIMEOUT,
+            0.0,
+            _argv("tests/test_slow.mojo"),
+            1.0,
+            List[UInt8](),
+            _bytes(stderr_text),
+            timeout_seconds=1,
+            attempts_used=attempts_used,
+        )
+    )
+
+
+def test_compile_timeout_verdict_token_and_deadline() raises:
+    var c = _console()
+    _feed_compile_timeout(c)
+    var out = c.output()
+    # The verdict line carries the token and names the deadline that fired.
+    assert_true("COMPILE-TIMEOUT" in out)
+    assert_true("tests/test_slow.mojo" in out)
+    assert_true("timed out after 1s" in out)
+
+
+def test_compile_timeout_banner_shows_compiler_stderr_verbatim() raises:
+    var c = _console()
+    _feed_compile_timeout(c, stderr_text="mojo: note: lowering @foo\n")
+    var out = c.output()
+    assert_true("mojo: note: lowering @foo" in out)
+
+
+def test_compile_timeout_banner_carries_the_split_or_exclude_hint() raises:
+    var c = _console()
+    _feed_compile_timeout(c)
+    var out = c.output()
+    assert_true("exceeded the 1s compile timeout" in out)
+    assert_true("split" in out)
+    assert_true("exclude" in out)
+
+
+def test_compile_timeout_reproduce_names_the_deadline() raises:
+    var c = _console()
+    _feed_compile_timeout(c)
+    var out = c.output()
+    assert_true(
+        "reproduce: mtest --compile-timeout 1 tests/test_slow.mojo" in out
+    )
+
+
+def test_compile_timeout_reproduce_keeps_the_build_flags() raises:
+    var c = _console(mtest_build_flags="--mojo /opt/mojo -I lib")
+    _feed_compile_timeout(c)
+    var out = c.output()
+    assert_true(
+        "reproduce: mtest --mojo /opt/mojo -I lib --compile-timeout 1"
+        " tests/test_slow.mojo"
+        in out
+    )
+
+
+def test_compile_timeout_promises_no_quarantine_when_no_retry_ran() raises:
+    # At `--retries 0` exactly ONE attempt was scheduled: the banner must not
+    # claim a quarantined rebuild that never happened.
+    var c = _console()
+    _feed_compile_timeout(c, attempts_used=1)
+    var out = c.output()
+    assert_false("quarantin" in out)
+    assert_false("retried" in out)
+
+
+def test_compile_timeout_names_the_quarantine_when_a_retry_ran() raises:
+    # attempts_used > 1: a quarantined rebuild really did run. A retried build
+    # failure is always quarantined (a run-crash retry does not rebuild), so the
+    # rebuild itself is the one thing the count DOES license the banner to say.
+    var c = _console()
+    _feed_compile_timeout(c, attempts_used=2)
+    var out = c.output()
+    assert_true("quarantined" in out)
+    assert_true("2 attempts" in out)
+
+
+def test_compile_timeout_never_claims_every_attempt_hit_the_deadline() raises:
+    # `attempts_used` counts attempts; it does NOT record how each one ENDED.
+    # A first attempt killed by a compiler ICE (crash-class -> quarantined
+    # rebuild) followed by a second that blew the deadline is ALSO
+    # `attempts_used == 2` with a COMPILE-TIMEOUT verdict — so a banner that
+    # says the deadline fired every time would be asserting what no typed field
+    # supports. It may say how many attempts ran, and no more.
+    var c = _console()
+    _feed_compile_timeout(c, attempts_used=2)
+    var out = c.output()
+    assert_false("every time" in out)
+    assert_false("every attempt" in out)
+    assert_true("2 attempts" in out)
+
+
+def test_compile_timeout_banner_is_not_the_compile_error_banner() raises:
+    # A build WE killed must never be framed as the compiler rejecting the code.
+    var c = _console()
+    _feed_compile_timeout(c)
+    var out = c.output()
+    assert_false("COMPILE-ERROR" in out)
+    assert_false("mojo build said" in out)
 
 
 def test_no_tests_file_reads_no_tests_never_passed() raises:
@@ -867,6 +1108,108 @@ def test_warning_renders_loud() raises:
     assert_true("exclude pattern 'old_*' matched nothing" in out)
 
 
+def _attribution(
+    disposition: AttributionDisposition,
+    culprit: String = "",
+    reruns: Int = 0,
+    seconds: Float64 = 0.0,
+) -> String:
+    """The rendered buffer for ONE crash-attribution event on a crashed file.
+
+    The FileFinished rides first so every assertion below reads the attribution
+    line in the place a real run puts it: after the file's CRASH verdict, which
+    the attribution never touches.
+    """
+    try:
+        var c = _console()
+        c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+        c.handle(Event.file_started("tests/test_boom.mojo"))
+        c.handle(
+            Event.file_finished(
+                "tests/test_boom.mojo",
+                Outcome.CRASH,
+                0.3,
+                _argv("tests/test_boom.mojo"),
+                1.0,
+                List[UInt8](),
+                List[UInt8](),
+                signal_number=11,
+            )
+        )
+        c.handle(
+            Event.crash_attribution(
+                "tests/test_boom.mojo", disposition, culprit, reruns, seconds
+            )
+        )
+        return c.output()
+    except:
+        return String("")
+
+
+def test_attribution_attributed_names_the_culprit_reruns_and_elapsed() raises:
+    var out = _attribution(
+        AttributionDisposition.ATTRIBUTED, "test_segfaults", 4, 2.5
+    )
+    assert_true("ATTRIBUTION" in out)
+    assert_true("tests/test_boom.mojo" in out)
+    assert_true("test_segfaults" in out)
+    assert_true("4 isolation rerun" in out)
+    assert_true("2.50s" in out)
+    # The verdict it annotates is untouched and still rendered above it.
+    assert_true("CRASH" in out)
+    # An ATTRIBUTED line is the ONE disposition that is not an admission of
+    # ignorance, so it must not claim the culprit is unknown.
+    assert_false("UNATTRIBUTED" in out)
+
+
+def test_attribution_no_reproduction_leaves_the_culprit_unattributed() raises:
+    var out = _attribution(AttributionDisposition.NO_REPRODUCTION, "", 3, 1.25)
+    assert_true("ATTRIBUTION" in out)
+    assert_true("NO-REPRODUCTION" in out)
+    assert_true("did not reproduce" in out)
+    # Never a guess: the verdict stands and the culprit is named as unknown.
+    assert_true("UNATTRIBUTED" in out)
+    assert_true("CRASH verdict stands" in out)
+
+
+def test_attribution_probe_failed_says_the_listing_was_unrecoverable() raises:
+    var out = _attribution(AttributionDisposition.PROBE_FAILED, "", 0, 0.5)
+    assert_true("PROBE-FAILED" in out)
+    assert_true("test list" in out)
+    assert_true("UNATTRIBUTED" in out)
+    assert_true("CRASH verdict stands" in out)
+
+
+def test_attribution_run_cap_says_the_cap_stopped_the_search() raises:
+    var out = _attribution(AttributionDisposition.RUN_CAP, "", 32, 9.0)
+    assert_true("RUN-CAP" in out)
+    assert_true("32-run cap" in out)
+    assert_true("UNATTRIBUTED" in out)
+    assert_true("CRASH verdict stands" in out)
+
+
+def test_attribution_time_budget_says_the_clock_stopped_the_search() raises:
+    var out = _attribution(AttributionDisposition.TIME_BUDGET, "", 7, 120.0)
+    assert_true("TIME-BUDGET" in out)
+    assert_true("time budget" in out)
+    assert_true("UNATTRIBUTED" in out)
+    assert_true("CRASH verdict stands" in out)
+
+
+def test_attribution_never_starts_a_line_with_an_existing_verdict_token() raises:
+    # The attribution cluster shares the console with the verdict lines; a token
+    # that PREFIXED an existing one (e.g. "CRASH-ATTRIBUTION") would make a
+    # line-oriented reader mistake a diagnostic for a second CRASH verdict.
+    var out = _attribution(
+        AttributionDisposition.ATTRIBUTED, "test_segfaults", 2, 0.1
+    )
+    var crash_starts = 0
+    for line in out.split("\n"):
+        if String(line).startswith("CRASH"):
+            crash_starts += 1
+    assert_equal(crash_starts, 1)
+
+
 def test_precompile_failed_banner_verbatim() raises:
     var c = _console()
     c.handle(Event.session_started("tests", "mojo 1.0.0b2", 3, 0))
@@ -892,6 +1235,146 @@ def test_precompile_failed_banner_verbatim() raises:
     assert_true("tests/test_a.mojo" in out)
     assert_true("tests/test_b.mojo" in out)
     assert_true("tests/nested/test_c.mojo" in out)
+
+
+def test_term_phrase_names_a_signal_in_words_and_falls_back_to_the_number() raises:
+    # The PURE phrase builder behind the TRY lines. The decomposed termination
+    # kinds are the exec-layer discriminants: 0 EXITED, 1 SIGNALED, 2 TIMED_OUT,
+    # 3 SPAWN_FAILED.
+    assert_equal(
+        _term_phrase(1, 11, 0, 0, False),
+        "signal 11 — SIGSEGV, segmentation fault",
+    )
+    # A signal OUTSIDE the named set must still read as the bare number — never
+    # an empty phrase and never a neighbour's name.
+    assert_equal(_term_phrase(1, 31, 0, 0, False), "signal 31")
+    assert_equal(_term_phrase(1, 62, 0, 0, False), "signal 62")
+
+
+def test_term_phrase_notes_the_sigkill_escalation_of_a_deadline() raises:
+    # A deadline the child survived until SIGKILL says so; a child that went
+    # down on the polite SIGTERM must not claim an escalation that never ran.
+    assert_equal(_term_phrase(2, 0, 1, 15, False), "timed out")
+    assert_equal(
+        _term_phrase(2, 0, 1, 9, True), "timed out, escalated to SIGKILL"
+    )
+
+
+def test_crash_narrative_reads_a_segfault_with_no_stdout_and_no_abort() raises:
+    # The OBSERVED segfault shape (tests/snapshots/protocol/): termination is
+    # signal 11, stdout is EMPTY, there is NO `ABORT:` line anywhere, and stderr
+    # carries only the runtime's stack dump. The narrative must be built from the
+    # typed `signal_number` alone: it may never assume an ABORT line (that is the
+    # SIGABRT fixture's shape) or that stdout said anything at all.
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_segfault.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_segfault.mojo",
+            Outcome.CRASH,
+            0.2,
+            _argv("tests/test_segfault.mojo"),
+            1.0,
+            List[UInt8](),
+            _bytes("<STACK-DUMP>\n"),
+            signal_number=11,
+        )
+    )
+    var out = c.output()
+    assert_true("CRASH" in out)
+    assert_true("signal 11 — SIGSEGV, segmentation fault" in out)
+    # No ABORT line existed, so none may be printed or implied.
+    assert_false("ABORT" in out)
+    # The empty stdout is rendered as nothing, and the stderr rides verbatim.
+    assert_true("--- captured stderr ---" in out)
+    assert_true("<STACK-DUMP>" in out)
+
+
+def test_precompile_ending_phrase_names_each_ending_in_words() raises:
+    # The PURE phrase builder behind the banner's "how it ended" clause. The
+    # decomposed termination kinds are the exec-layer discriminants: 0 EXITED,
+    # 1 SIGNALED, 2 TIMED_OUT, 3 SPAWN_FAILED.
+    assert_equal(
+        _precompile_ending_phrase(2, 0, False, 600), "timed out after 600s"
+    )
+    assert_equal(
+        _precompile_ending_phrase(2, 0, True, 600),
+        "timed out after 600s, escalated to SIGKILL",
+    )
+    assert_equal(
+        _precompile_ending_phrase(1, 11, False, 0),
+        "died by signal 11 (SIGSEGV, segmentation fault)",
+    )
+    # A signal outside the named set still reads as words, minus the name.
+    assert_equal(
+        _precompile_ending_phrase(1, 62, False, 0), "died by signal 62"
+    )
+    assert_equal(_precompile_ending_phrase(0, 1, False, 0), "exited 1")
+    assert_equal(
+        _precompile_ending_phrase(3, 2, False, 0),
+        "could not be spawned (errno 2)",
+    )
+
+
+def test_precompile_failed_banner_names_a_timeout_ending() raises:
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(
+        Event.precompile_failed(
+            "mathlib",
+            "mojo: note: lowering @foo\n",
+            0,
+            casualties=[String("tests/test_a.mojo")],
+            ending_known=True,
+            term_kind=2,
+            term_value=0,
+            escalated=False,
+            timeout_seconds=600,
+            attempts_used=1,
+        )
+    )
+    var out = c.output()
+    assert_true("PRECOMPILE-ERROR" in out)
+    # A step WE killed at the deadline names the deadline, in words.
+    assert_true("timed out after 600s" in out)
+    assert_true("1 file(s) could not run" in out)
+    # The compiler's own output still rides verbatim, and the casualty is named.
+    assert_true("mojo: note: lowering @foo" in out)
+    assert_true("tests/test_a.mojo" in out)
+
+
+def test_precompile_failed_banner_names_a_signal_ending() raises:
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(
+        Event.precompile_failed(
+            "mathlib",
+            "Stack dump:\n",
+            0,
+            casualties=[String("tests/test_a.mojo")],
+            ending_known=True,
+            term_kind=1,
+            term_value=11,
+            attempts_used=2,
+        )
+    )
+    var out = c.output()
+    assert_true("died by signal 11 (SIGSEGV, segmentation fault)" in out)
+    # A step that burned its retry budget says so.
+    assert_true("2 attempts" in out)
+
+
+def test_precompile_failed_banner_without_an_ending_is_unchanged() raises:
+    # An event that carries no ending identity must not invent one (an unset
+    # termination would otherwise read as the lie "exited 0").
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.precompile_failed("mathlib", "error: boom\n", 2))
+    var out = c.output()
+    assert_true("2 file(s) could not run" in out)
+    assert_false("exited 0" in out)
+    assert_false("timed out" in out)
 
 
 def test_internal_error_banner_names_step_program_and_errno() raises:

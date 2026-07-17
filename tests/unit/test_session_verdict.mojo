@@ -57,12 +57,24 @@ def test_build_verdict_signal_is_compile_error() raises:
     )
 
 
-def test_build_verdict_timed_out_is_compile_error() raises:
-    # An interrupt-induced TimedOut during a build folds into the defensive
-    # COMPILE_ERROR fallback — never a NOT_RUN sentinel, never a test CRASH.
+def test_build_verdict_timed_out_is_compile_timeout() raises:
+    # A build we killed at `--compile-timeout` is its OWN outcome: the compiler
+    # never got to say anything about the code, so calling it a COMPILE_ERROR
+    # would blame the source for our deadline. Never a NOT_RUN sentinel, never a
+    # test CRASH. (An interrupt-induced TimedOut never reaches here — the caller
+    # short-circuits an interrupt before consulting the verdict.)
     assert_true(
         build_verdict(Termination.timed_out(Termination.SIGNALED, 15, True))
-        == Outcome.COMPILE_ERROR
+        == Outcome.COMPILE_TIMEOUT
+    )
+
+
+def test_build_verdict_timed_out_escalated_is_also_compile_timeout() raises:
+    # A compiler that ignored SIGTERM and needed the SIGKILL escalation is still
+    # our deadline kill, not a compile error.
+    assert_true(
+        build_verdict(Termination.timed_out(Termination.SIGNALED, 9, True))
+        == Outcome.COMPILE_TIMEOUT
     )
 
 

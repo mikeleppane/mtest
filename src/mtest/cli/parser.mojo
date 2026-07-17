@@ -19,6 +19,7 @@ from mtest.config import (
     ColorWhen,
     Precompile,
     RunnerConfig,
+    ShardMode,
     ShowOutput,
     Verbosity,
     resolve_mojo_path,
@@ -29,8 +30,9 @@ comptime MTEST_VERSION = "0.1.0-dev"
 
 comptime SUPPORTED_SUMMARY = (
     "paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo,"
-    " -x/--exitfirst, --timeout, -s/--show-output, -q, -v, --color, -k,"
-    " --maxfail, --durations, collect/--collect-only, --help, --version"
+    " -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v,"
+    " --color, -k, --maxfail, --durations, --shard, --retries,"
+    " collect/--collect-only, --help, --version"
 )
 """A stable one-line list of what this build serves, quoted in refusals."""
 
@@ -109,6 +111,23 @@ def _parse_durations(value: String) raises -> Int:
     return atol(value)
 
 
+def _parse_retries(value: String) raises -> Int:
+    """Parse a `--retries` value: a non-negative integer (`0` disables)."""
+    if not _all_digits(value):
+        raise _err("'--retries' wants an integer >= 0, got '" + value + "'")
+    return atol(value)
+
+
+def _parse_compile_timeout(value: String) raises -> Int:
+    """Parse a `--compile-timeout` value: a non-negative integer (`0` disables).
+    """
+    if not _all_digits(value):
+        raise _err(
+            "'--compile-timeout' wants an integer >= 0, got '" + value + "'"
+        )
+    return atol(value)
+
+
 def _parse_show_output(value: String) raises -> ShowOutput:
     """Parse a `--show-output` mode: `failures`, `all`, or `none`."""
     if value == "failures":
@@ -146,6 +165,46 @@ def _parse_precompile(value: String) raises -> Precompile:
     if src.byte_length() == 0 or out.byte_length() == 0:
         raise _err("'--precompile' wants SRC[:OUT], got '" + value + "'")
     return Precompile(src=src, out=Optional[String](out))
+
+
+def _parse_shard(value: String) raises -> Tuple[ShardMode, Int, Int]:
+    """Parse a `--shard [hash:|slice:]M/N` value into (mode, M, N).
+
+    Peels an optional `hash:`/`slice:` mode prefix (split on the FIRST `:`;
+    default `hash`), then splits the remainder on `/` into two positive integers
+    and enforces `1 <= M <= N`. Any deviation raises the standard usage error.
+    """
+    var mode = ShardMode.HASH
+    var rest = value
+    if value.find(":") != -1:
+        var parts = value.split(":", 1)
+        var prefix = String(parts[0])
+        rest = String(parts[1])
+        if prefix == "hash":
+            mode = ShardMode.HASH
+        elif prefix == "slice":
+            mode = ShardMode.SLICE
+        else:
+            raise _err_shard(value)
+    if rest.find("/") == -1:
+        raise _err_shard(value)
+    var mn = rest.split("/", 1)
+    var ms = String(mn[0])
+    var ns = String(mn[1])
+    if not _all_digits(ms) or not _all_digits(ns):
+        raise _err_shard(value)
+    var m = atol(ms)
+    var n = atol(ns)
+    if n < 1 or m < 1 or m > n:
+        raise _err_shard(value)
+    return (mode, m, n)
+
+
+def _err_shard(value: String) -> Error:
+    """The standard `--shard` usage error naming the offending value."""
+    return _err(
+        "'--shard' wants [hash:|slice:]M/N with 1<=M<=N, got '" + value + "'"
+    )
 
 
 def _check_build_arg(tok: String) raises:
@@ -230,6 +289,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var include_paths = List[String]()
     var mojo_flag = Optional[String](None)
     var timeout_secs = 300
+    var compile_timeout_secs = 600
     var show_output = ShowOutput.FAILURES
     var color = ColorWhen.AUTO
     var exitfirst = False
@@ -238,6 +298,10 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var saw_maxfail = False
     var durations = 0
     var saw_durations = False
+    var shard_mode = ShardMode.HASH
+    var shard_m = 0
+    var shard_n = 0
+    var retries = 0
     var saw_show_output = False
     var saw_quiet = False
     var saw_verbose = False
@@ -346,6 +410,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             mojo_flag = value
         elif s.id == FlagId.TIMEOUT:
             timeout_secs = _parse_timeout(value)
+        elif s.id == FlagId.COMPILE_TIMEOUT:
+            compile_timeout_secs = _parse_compile_timeout(value)
         elif s.id == FlagId.SHOW_OUTPUT:
             show_output = _parse_show_output(value)
             saw_show_output = True
@@ -359,6 +425,13 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         elif s.id == FlagId.DURATIONS:
             durations = _parse_durations(value)
             saw_durations = True
+        elif s.id == FlagId.SHARD:
+            var parsed = _parse_shard(value)
+            shard_mode = parsed[0]
+            shard_m = parsed[1]
+            shard_n = parsed[2]
+        elif s.id == FlagId.RETRIES:
+            retries = _parse_retries(value)
 
     # Collect mode is a listing, not a run: the run-only knobs that shape which
     # tests execute or when to stop scheduling are meaningless against it and are
@@ -418,5 +491,10 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         maxfail=maxfail,
         durations=durations,
         collect=collect,
+        shard_mode=shard_mode,
+        shard_m=shard_m,
+        shard_n=shard_n,
+        retries=retries,
+        compile_timeout_secs=compile_timeout_secs,
     )
     return ParseResult.run(cfg^)

@@ -45,6 +45,7 @@ MATRIX = [
     ("default", "mixed", []),
     ("default", "empty", []),
     ("default", "crashing", []),
+    ("default", "segfault", []),
     ("default", "noisy", []),
     ("default", "twofail", []),
     ("default", "raising", []),
@@ -65,8 +66,11 @@ MATRIX = [
     ("only-native", "skipped", ["--only", "test_natively_skipped"]),
 ]
 
-# Scenarios whose fixture aborts the process — their stderr carries a stack dump.
-CRASH_FIXTURES = {"crashing"}
+# Scenarios whose fixture crashes the process — their stderr carries a stack
+# dump. `crashing` aborts (SIGILL + an ABORT line); `segfault` faults on an
+# invalid load (SIGSEGV, no ABORT line). Both die by signal; the stderr of each
+# is treated as a crash stream and collapsed to <STACK-DUMP>.
+CRASH_FIXTURES = {"crashing", "segfault"}
 
 # --- Normalization patterns --------------------------------------------------
 RUNNING_RE = re.compile(r"^Running \d+ tests for ")
@@ -264,8 +268,25 @@ def verify_scenario(fixture, scenario, out_norm, err_norm, returncode, transcrip
                 f"{fixture}--{scenario}: expected death by signal, got exit "
                 f"{returncode}"
             )
-        # The ABORT line (on stdout) must survive the normalizer.
-        if "ABORT: <REPO>/tests/fixtures/protocol/" not in out_norm:
+        # An ABORT line is NOT universal to crashes: a controlled abort() emits
+        # one, a raw segfault emits none. So the pin is two-part.
+        # (a) If ANY ABORT line appears on stdout it must be well-formed —
+        # normalized to the <REPO>-rewritten fixture-path shape, never leaking
+        # an absolute path. This holds for every crash fixture.
+        for ln in out_norm.split("\n"):
+            if ln.startswith("ABORT:") and not ln.startswith(
+                "ABORT: <REPO>/tests/fixtures/protocol/"
+            ):
+                raise GenError(
+                    f"{fixture}--{scenario}: ABORT line present but not "
+                    f"normalized to the <REPO> fixture-path shape: {ln!r}"
+                )
+        # (b) A fixture that aborts() MUST still emit its ABORT line — without it
+        # the crash pin has nothing to anchor on. Scoped to `crashing`, the only
+        # fixture that aborts; a segfault fixture is exempt by design.
+        if fixture == "crashing" and (
+            "ABORT: <REPO>/tests/fixtures/protocol/" not in out_norm
+        ):
             raise GenError(
                 f"{fixture}--{scenario}: ABORT line did not survive normalization"
             )

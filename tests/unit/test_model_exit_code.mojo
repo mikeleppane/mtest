@@ -84,6 +84,17 @@ def test_lone_internal_state_is_pinned_not_failing() raises:
     assert_equal(exit_code_for([Outcome.NOT_RUN]), 0)
 
 
+def test_flaky_never_contributes_to_failing_exit() raises:
+    # A FLAKY outcome is a pass that only succeeded on a retry: it must never
+    # push the exit code to 1. A multiset of FLAKY among PASS and SKIP yields 0,
+    # and a lone FLAKY yields 0 -- the flaky-is-non-failing guarantee, explicit.
+    assert_equal(exit_code_for([Outcome.FLAKY]), 0)
+    assert_equal(exit_code_for([Outcome.PASS, Outcome.FLAKY, Outcome.SKIP]), 0)
+    assert_equal(exit_code_for([Outcome.FLAKY, Outcome.FLAKY, Outcome.PASS]), 0)
+    # A real failure still dominates, even beside a flaky pass.
+    assert_equal(exit_code_for([Outcome.FLAKY, Outcome.FAIL]), 1)
+
+
 def test_all_skip_multiset_is_success() raises:
     assert_equal(exit_code_for([Outcome.SKIP, Outcome.SKIP, Outcome.SKIP]), 0)
 

@@ -16,6 +16,7 @@ from mtest.model import (
     NodeId,
     TestResult,
     ParseDisposition,
+    AttributionDisposition,
     TestCounts,
 )
 
@@ -49,6 +50,22 @@ def test_session_started_payload() raises:
     assert_equal(e.toolchain, "/usr/bin/mojo (1.0.0b2)")
     assert_equal(e.selected_count, 7)
     assert_equal(e.excluded_count, 2)
+    # Shard fields default so existing callers are unaffected (unsharded run).
+    assert_equal(e.shard_label, "")
+    assert_equal(e.sharded_out_count, 0)
+
+
+def test_session_started_carries_shard_fields_when_given() raises:
+    var e = Event.session_started(
+        "tests",
+        "mojo 1.0.0b2",
+        selected_count=3,
+        excluded_count=0,
+        shard_label="2/5",
+        sharded_out_count=9,
+    )
+    assert_equal(e.shard_label, "2/5")
+    assert_equal(e.sharded_out_count, 9)
 
 
 def test_warning_payload() raises:
@@ -126,6 +143,151 @@ def test_file_finished_carries_test_granularity_fields_when_given() raises:
     assert_equal(e.deselected_tests, 4)
 
 
+def test_file_finished_defaults_new_resilience_fields() raises:
+    # attempts_used/flaky/slow default so existing callers are unaffected: a
+    # file that ran once, was not flaky, and was not slow.
+    var e = Event.file_finished(
+        "tests/test_a.mojo",
+        Outcome.PASS,
+        duration_seconds=0.1,
+        build_argv=List[String](),
+        build_duration_seconds=0.0,
+        captured_stdout=List[UInt8](),
+        captured_stderr=List[UInt8](),
+    )
+    assert_equal(e.attempts_used, 1)
+    assert_false(e.flaky)
+    assert_false(e.slow)
+
+
+def test_file_finished_carries_resilience_fields_when_given() raises:
+    var e = Event.file_finished(
+        "tests/test_a.mojo",
+        Outcome.FLAKY,
+        duration_seconds=0.1,
+        build_argv=List[String](),
+        build_duration_seconds=0.0,
+        captured_stdout=List[UInt8](),
+        captured_stderr=List[UInt8](),
+        attempts_used=3,
+        flaky=True,
+        slow=True,
+    )
+    assert_equal(e.attempts_used, 3)
+    assert_true(e.flaky)
+    assert_true(e.slow)
+
+
+def test_file_finished_defaults_escalated_to_false() raises:
+    # A file whose run needed no kill at all must never carry an escalation: the
+    # default is the honest "we did not have to escalate".
+    var e = Event.file_finished(
+        "tests/test_a.mojo",
+        Outcome.PASS,
+        duration_seconds=0.1,
+        build_argv=List[String](),
+        build_duration_seconds=0.0,
+        captured_stdout=List[UInt8](),
+        captured_stderr=List[UInt8](),
+    )
+    assert_false(e.escalated)
+
+
+def test_file_finished_carries_the_latched_escalation_when_given() raises:
+    # The FINAL verdict of a timed-out file needs the same latched escalation the
+    # TRY lines already carry, so a run WITHOUT retries can still say whether the
+    # child went down on the polite SIGTERM or had to be SIGKILLed.
+    var e = Event.file_finished(
+        "tests/test_a.mojo",
+        Outcome.TIMEOUT,
+        duration_seconds=1.3,
+        build_argv=List[String](),
+        build_duration_seconds=0.0,
+        captured_stdout=List[UInt8](),
+        captured_stderr=List[UInt8](),
+        timeout_seconds=1,
+        escalated=True,
+    )
+    assert_true(e.escalated)
+
+
+def test_attempt_finished_payload_carries_full_record() raises:
+    var argv: List[String] = ["mojo", "run", "tests/test_a.mojo"]
+    var e = Event.attempt_finished(
+        "tests/test_a.mojo",
+        "run",
+        attempt_index=1,
+        attempts_planned=3,
+        term_kind=2,
+        term_value=11,
+        term_final_kind=2,
+        term_final_value=9,
+        escalated=True,
+        retry_eligible=True,
+        classification="signal",
+        duration_seconds=0.42,
+        captured_stdout=[UInt8(120)],
+        captured_stderr=[UInt8(121)],
+        stdout_truncated=True,
+        stderr_truncated=False,
+        attempt_argv=argv^,
+    )
+    assert_true(e.kind == EventKind.ATTEMPT_FINISHED)
+    assert_equal(e.path, "tests/test_a.mojo")
+    assert_equal(e.step, "run")
+    assert_equal(e.attempt_index, 1)
+    assert_equal(e.attempts_planned, 3)
+    assert_equal(e.term_kind, 2)
+    assert_equal(e.term_value, 11)
+    assert_equal(e.term_final_kind, 2)
+    assert_equal(e.term_final_value, 9)
+    assert_true(e.escalated)
+    assert_true(e.retry_eligible)
+    assert_equal(e.classification, "signal")
+    assert_equal(e.duration_seconds, 0.42)
+    assert_equal(len(e.captured_stdout), 1)
+    assert_equal(e.captured_stdout[0], UInt8(120))
+    assert_equal(e.captured_stderr[0], UInt8(121))
+    assert_true(e.stdout_truncated)
+    assert_false(e.stderr_truncated)
+    assert_true("tests/test_a.mojo" in e.attempt_argv)
+
+
+def test_crash_attribution_payload() raises:
+    var e = Event.crash_attribution(
+        "tests/test_a.mojo",
+        AttributionDisposition.ATTRIBUTED,
+        culprit_test="test_boom",
+        isolation_reruns=4,
+        attribution_seconds=1.5,
+    )
+    assert_true(e.kind == EventKind.CRASH_ATTRIBUTION)
+    assert_equal(e.path, "tests/test_a.mojo")
+    assert_true(e.attribution_disposition == AttributionDisposition.ATTRIBUTED)
+    assert_equal(e.culprit_test, "test_boom")
+    assert_equal(e.isolation_reruns, 4)
+    assert_equal(e.attribution_seconds, 1.5)
+
+
+def test_attribution_disposition_constants_distinct_and_count() raises:
+    var values = [
+        AttributionDisposition.ATTRIBUTED,
+        AttributionDisposition.NO_REPRODUCTION,
+        AttributionDisposition.PROBE_FAILED,
+        AttributionDisposition.RUN_CAP,
+        AttributionDisposition.TIME_BUDGET,
+    ]
+    assert_equal(AttributionDisposition.COUNT, 5)
+    assert_equal(len(values), AttributionDisposition.COUNT)
+    for i in range(len(values)):
+        for j in range(len(values)):
+            if i == j:
+                assert_true(values[i] == values[j])
+            else:
+                assert_true(values[i] != values[j])
+                assert_false(values[i] == values[j])
+
+
 def test_internal_error_payload() raises:
     var e = Event.internal_error("build", "/usr/bin/mojo", 2)
     assert_true(e.kind == EventKind.INTERNAL_ERROR)
@@ -145,6 +307,8 @@ def test_session_finished_payload() raises:
     assert_equal(e.summary.count_of(Outcome.EXCLUDED), 2)
     assert_equal(e.wall_time_seconds, 3.5)
     assert_equal(e.exit_code, 1)
+    # flaky_files defaults to zero when the caller does not pass it.
+    assert_equal(e.flaky_files, 0)
     # test_counts defaults to zeros when the caller does not pass it.
     assert_equal(e.test_counts.passed, 0)
     assert_equal(e.test_counts.failed, 0)
@@ -162,6 +326,14 @@ def test_session_finished_carries_test_counts_when_given() raises:
     assert_equal(e.test_counts.failed, 2)
     assert_equal(e.test_counts.skipped, 1)
     assert_equal(e.test_counts.deselected, 3)
+
+
+def test_session_finished_carries_flaky_files_when_given() raises:
+    var s = Summary.zeros()
+    var e = Event.session_finished(
+        s^, wall_time_seconds=1.0, exit_code=0, flaky_files=2
+    )
+    assert_equal(e.flaky_files, 2)
 
 
 def test_test_reported_payload() raises:
@@ -215,6 +387,8 @@ def test_event_kinds_are_distinct() raises:
         EventKind.INTERNAL_ERROR,
         EventKind.TEST_REPORTED,
         EventKind.COLLECTION_KNOWN,
+        EventKind.ATTEMPT_FINISHED,
+        EventKind.CRASH_ATTRIBUTION,
     ]
     for i in range(len(kinds)):
         for j in range(len(kinds)):

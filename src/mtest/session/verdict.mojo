@@ -15,8 +15,8 @@ branches on but never emits as a file's outcome:
   checks `is_spawn_failed()` first and treats it as an internal error (exit 3),
   so this value is only a total-function placeholder, never recorded.
 - `build_verdict` returns `PASS` for a clean build ("proceed to the run step")
-  and `NOT_RUN` for a `SpawnFailed` build (internal error, exit 3); the only
-  real reported outcome it yields is `COMPILE_ERROR`.
+  and `NOT_RUN` for a `SpawnFailed` build (internal error, exit 3); the real
+  reported outcomes it yields are `COMPILE_ERROR` and `COMPILE_TIMEOUT`.
 """
 from mtest.exec import Termination
 from mtest.model import Outcome
@@ -53,24 +53,35 @@ def build_verdict(t: Termination) -> Outcome:
     """Map a BUILD termination to a build signal (pure, total).
 
     - `Exited(0)` -> `PASS` sentinel: the build succeeded, proceed to the run.
+    - `TimedOut` -> `COMPILE_TIMEOUT`: WE killed the build at
+      `--compile-timeout`. The compiler never reached a verdict on the code, so
+      reporting a COMPILE_ERROR would blame the source for our own deadline.
     - `Exited(nonzero)` or `Signaled(_)` -> `COMPILE_ERROR` (a compiler that
       dies by a signal is a BUILD failure, never a test crash).
     - `SpawnFailed` -> `NOT_RUN` sentinel: could not spawn the compiler; the
       caller checks `is_spawn_failed()` first and treats it as an internal
       error (exit 3).
 
+    An INTERRUPT also surfaces as `TimedOut`; the caller short-circuits an
+    interrupt before consulting this function, so a `TimedOut` reaching here is
+    always a genuine compile deadline.
+
     Args:
         t: How the supervised build ended. Not mutated.
 
     Returns:
-        `PASS` to proceed, `COMPILE_ERROR` on a failed build, or the `NOT_RUN`
-        spawn sentinel. Does not raise.
+        `PASS` to proceed, `COMPILE_TIMEOUT` for a deadline kill,
+        `COMPILE_ERROR` on any other failed build, or the `NOT_RUN` spawn
+        sentinel. Does not raise.
     """
     if t.is_exited() and t.value == 0:
         return Outcome.PASS
     if t.is_spawn_failed():
         # Could not spawn the compiler; a sentinel the caller routes to exit 3.
         return Outcome.NOT_RUN
-    # Exited(nonzero), Signaled(_), or (interrupt-induced) TimedOut: a build
-    # failure. A compiler that dies by a signal is a COMPILE_ERROR, not a crash.
+    if t.is_timed_out():
+        # Our own compile deadline killed it (an interrupt never reaches here).
+        return Outcome.COMPILE_TIMEOUT
+    # Exited(nonzero) or Signaled(_): a build failure. A compiler that dies by a
+    # signal is a COMPILE_ERROR, not a crash.
     return Outcome.COMPILE_ERROR

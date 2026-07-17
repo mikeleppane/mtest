@@ -27,8 +27,17 @@ the default run path — they route non-VALID reports through the same
 resolves differently under selection than it would by default.
 """
 from std.builtin.sort import sort
-from std.os import makedirs
-from std.os.path import basename, dirname, exists, isdir
+from std.ffi import external_call
+from std.os import (
+    getenv,
+    listdir,
+    makedirs,
+    remove,
+    rmdir,
+    setenv,
+    unsetenv,
+)
+from std.os.path import basename, dirname, exists, isdir, islink, join
 from std.time import perf_counter_ns
 
 from mtest.cache import BuildProduct, BuildRegistry
@@ -39,11 +48,14 @@ from mtest.exec import (
     ExecRuntime,
     ProcessResult,
     ProcessSpec,
+    Termination,
     canonicalize,
     interrupt_requested,
+    rename_path,
     run_supervised,
 )
 from mtest.model import (
+    AttributionDisposition,
     Event,
     NodeId,
     Outcome,
@@ -52,6 +64,7 @@ from mtest.model import (
     TestCounts,
     TestResult,
     exit_code_for,
+    is_slow,
 )
 from mtest.protocol import (
     ParsedReport,
@@ -69,8 +82,35 @@ from mtest.select import (
     select_from,
     selection_active,
 )
-from mtest.session.classify import Classification, classify, resolve_report
+from mtest.session.attribution import attribution_step, isolation_timeout_secs
+from mtest.session.classify import (
+    Classification,
+    TrustedReport,
+    classify,
+    resolve_report,
+)
+from mtest.session.clamp import clamp_stream
+from mtest.session.retry_class import RetryClass, retry_classify
+from mtest.session.shard import partition
 from mtest.session.verdict import build_verdict
+
+comptime _ATTEMPT_STREAM_HEAD = 65536
+"""Head bytes of each stream retained in a NON-final attempt's excerpt (64 KiB).
+"""
+comptime _ATTEMPT_STREAM_TAIL = 65536
+"""Tail bytes of each stream retained in a NON-final attempt's excerpt (64 KiB).
+"""
+
+comptime _COMPILE_GRACE_MS = 5000
+"""SIGTERM->SIGKILL grace for a BUILD killed at `--compile-timeout` (5 s).
+
+Deliberately far wider than the run path's 300 ms. A compiler is killed at its
+own convenience, not ours: it may be mid-write to the shared module cache, and
+SIGKILLing it 300 ms in is the most plausible way to leave that cache torn. Five
+seconds lets it unwind and flush; a compiler still alive after that has ignored
+SIGTERM and earns the SIGKILL — which is precisely when the NARROW cache
+quarantine on the retry rebuild is worth its keep.
+"""
 
 comptime _STALE_NAME_PHRASE = "test not found in suite:"
 """The stdlib phrase when `--only` names a test the suite no longer offers."""
@@ -153,6 +193,13 @@ struct FileResult(Copyable, Movable):
     """Whether an interrupt aborted this file (routes to exit 2)."""
     var is_drift: Bool
     """Whether the report drifted off the pinned grammar (forces exit 3)."""
+    var binary_path: String
+    """The binary this file's run ACTUALLY executed, or empty when none ran.
+
+    Carried so the crash-attribution post-pass can rerun THAT binary rather than
+    reconstruct a name for it: a crash-class BUILD retry rebuilds to
+    `build/bin/<mangled>.attempt-N` and runs that, so the mangled name is not
+    always the thing that crashed. Diagnostics only — no verdict reads it."""
 
     @staticmethod
     def ran_with(var event: Event, outcome: Outcome) -> Self:
@@ -170,6 +217,7 @@ struct FileResult(Copyable, Movable):
             False,
             False,
             False,
+            "",
         )
 
     @staticmethod
@@ -193,6 +241,7 @@ struct FileResult(Copyable, Movable):
             False,
             False,
             is_drift,
+            "",
         )
 
     @staticmethod
@@ -209,6 +258,7 @@ struct FileResult(Copyable, Movable):
             True,
             False,
             False,
+            "",
         )
 
     @staticmethod
@@ -224,6 +274,7 @@ struct FileResult(Copyable, Movable):
             False,
             True,
             False,
+            "",
         )
 
 
@@ -233,7 +284,12 @@ struct PrecompileResult(Copyable, Movable):
 
     On success `ok` is set and `out_dir` is the include directory added to every
     subsequent build. On failure `compiler_output` holds the captured compiler
-    output. `internal_error` and `interrupted` short-circuit as in `FileResult`.
+    output and the `term_*`/`timeout_seconds` fields carry HOW the final attempt
+    ended, so the banner can name the ending in words. `internal_error` and
+    `interrupted` short-circuit as in `FileResult`. `events` are the session-level
+    events the step produced along the way (a `TRY` per retried attempt, the
+    compile-kill residual warnings, and a success-after-retry warning); the caller
+    emits them in order before acting on the outcome.
     """
 
     var out_dir: String
@@ -252,91 +308,376 @@ struct PrecompileResult(Copyable, Movable):
     var program: String
     """The program the step tried to spawn on an internal error; empty otherwise.
     """
+    var events: List[Event]
+    """The step's attempt events and warnings, in emission order."""
+    var term: Termination
+    """The final attempt's raw termination (meaningful on a failed step)."""
+    var timeout_seconds: Int
+    """The compile deadline WE enforced, for a step killed at it; 0 otherwise."""
+    var attempts_used: Int
+    """How many attempts the step spent (1 when it ran once with no retry)."""
+    var ending_known: Bool
+    """Whether `term` is the real ending of a compiler that ran and failed.
+
+    False when the step failed for a reason the COMPILER never expressed — a
+    failed promotion, where the compiler exited 0 and only the rename lost. The
+    banner must then say nothing about an ending rather than report `term`'s
+    Exited(0) as the nonsense "exited 0" on a step that failed."""
+
+    @staticmethod
+    def _blank() -> Self:
+        """A result with every field at its neutral value. Allocates."""
+        return Self(
+            "",
+            "",
+            False,
+            False,
+            False,
+            0,
+            "",
+            List[Event](),
+            Termination.exited(0),
+            0,
+            1,
+            False,
+        )
+
+    @staticmethod
+    def interrupt(var events: List[Event]) -> Self:
+        """An interrupt aborted the step: routes the session to exit 2."""
+        var r = Self._blank()
+        r.interrupted = True
+        r.events = events^
+        return r^
+
+    @staticmethod
+    def internal(errno: Int, program: String, var events: List[Event]) -> Self:
+        """The compiler could not be spawned: routes the session to exit 3."""
+        var r = Self._blank()
+        r.internal_error = True
+        r.errno = errno
+        r.program = program
+        r.events = events^
+        return r^
+
+    @staticmethod
+    def success(
+        out_dir: String, var events: List[Event], attempts_used: Int
+    ) -> Self:
+        """The step built and PROMOTED its package; `out_dir` widens -I."""
+        var r = Self._blank()
+        r.ok = True
+        r.out_dir = out_dir
+        r.events = events^
+        r.attempts_used = attempts_used
+        return r^
+
+    @staticmethod
+    def failure(
+        compiler_output: String,
+        var events: List[Event],
+        term: Termination,
+        timeout_seconds: Int,
+        attempts_used: Int,
+    ) -> Self:
+        """The step's final attempt failed: PRECOMPILE-ERROR, exit 1.
+
+        `term` is how the COMPILER ended, so the banner names that ending.
+        """
+        var r = Self._blank()
+        r.compiler_output = compiler_output
+        r.events = events^
+        r.term = term
+        r.timeout_seconds = timeout_seconds
+        r.attempts_used = attempts_used
+        r.ending_known = True
+        return r^
+
+    @staticmethod
+    def promotion_failure(
+        compiler_output: String, var events: List[Event], attempts_used: Int
+    ) -> Self:
+        """The compiler SUCCEEDED but its package could not be promoted onto OUT.
+
+        Still a PRECOMPILE-ERROR at exit 1 — no package was published — but the
+        step has NO compiler ending to name: this attempt exited 0. Leaving
+        `ending_known` False keeps the banner from reporting "exited 0" on a
+        failed step and sends the reader to `compiler_output`, which explains
+        that the rename is what lost and that OUT was left untouched.
+        """
+        var r = Self._blank()
+        r.compiler_output = compiler_output
+        r.events = events^
+        r.attempts_used = attempts_used
+        return r^
 
 
-def _run_one(
+@fieldwise_init
+struct _AttemptResult(Copyable, Movable):
+    """The raw result of ONE build->run->classify attempt for a file.
+
+    Returned by `_single_attempt` so the attempt loop can BOTH build the file's
+    terminal `FileResult` (via `_finalize_attempt`) AND decide a retry (via
+    `retry_classify` over the failed step's raw `Termination`). `control` is `1`
+    for an internal error (routes to exit 3), `2` for an interrupt (exit 2), or
+    `0` for a completed attempt. A completed attempt is a compile terminal when
+    `build_failed` (the build died and no run happened) or otherwise a run that
+    classified into `cls`. Owns its buffers; copies are explicit.
+    """
+
+    var control: Int
+    """`0` completed, `1` internal error, `2` interrupt."""
+    var internal_event: Event
+    """The InternalError diagnostic when `control == 1`."""
+    var build_failed: Bool
+    """Whether the build failed terminally (a compile step; no run happened)."""
+    var build_argv: List[String]
+    """The build command that produced (or tried to produce) the binary."""
+    var bterm: Termination
+    """The build's raw termination (for `retry_classify` on the build path)."""
+    var build_stderr: List[UInt8]
+    """The build's captured stderr (the compiler banner / ICE signature)."""
+    var bdur: Float64
+    """The build wall time in seconds."""
+    var out_bin: String
+    """The binary path this attempt built/ran."""
+    var rterm: Termination
+    """The run's raw termination (valid when a run happened)."""
+    var run_stdout: List[UInt8]
+    """The run's full captured stdout (final attempt keeps it; retries clamp it).
+    """
+    var run_stderr: List[UInt8]
+    """The run's full captured stderr."""
+    var rdur: Float64
+    """The run wall time in seconds."""
+    var trusted: TrustedReport
+    """The resolved report the run's stdout was trusted to carry."""
+    var cls: Classification
+    """The TOTAL per-test classification of the run."""
+
+    @staticmethod
+    def _internal(var e: Event) -> Self:
+        """An internal-error attempt: routes the file to exit 3."""
+        return Self(
+            1,
+            e^,
+            False,
+            List[String](),
+            Termination.exited(0),
+            List[UInt8](),
+            0.0,
+            "",
+            Termination.exited(0),
+            List[UInt8](),
+            List[UInt8](),
+            0.0,
+            TrustedReport(ParsedReport.absent(), False),
+            _blank_classification(),
+        )
+
+    @staticmethod
+    def _interrupt() -> Self:
+        """An interrupt aborted the attempt: routes the file to exit 2."""
+        return Self(
+            2,
+            Event.file_started(""),
+            False,
+            List[String](),
+            Termination.exited(0),
+            List[UInt8](),
+            0.0,
+            "",
+            Termination.exited(0),
+            List[UInt8](),
+            List[UInt8](),
+            0.0,
+            TrustedReport(ParsedReport.absent(), False),
+            _blank_classification(),
+        )
+
+    @staticmethod
+    def _build_failed(
+        var build_argv: List[String],
+        bterm: Termination,
+        var build_stderr: List[UInt8],
+        bdur: Float64,
+        out_bin: String,
+    ) -> Self:
+        """A terminal compile failure: no run happened; raw bterm/stderr ride.
+        """
+        return Self(
+            0,
+            Event.file_started(""),
+            True,
+            build_argv^,
+            bterm,
+            build_stderr^,
+            bdur,
+            out_bin,
+            Termination.exited(0),
+            List[UInt8](),
+            List[UInt8](),
+            0.0,
+            TrustedReport(ParsedReport.absent(), False),
+            _blank_classification(),
+        )
+
+    @staticmethod
+    def _selection_run(
+        binary: String,
+        rterm: Termination,
+        var run_stdout: List[UInt8],
+        var run_stderr: List[UInt8],
+        rdur: Float64,
+    ) -> Self:
+        """A RAN result for a selection run, so `_make_attempt_finished` can
+        emit its TRY line. The selection path already built the binary in phase
+        1, so the build fields are placeholders; only the run fields matter.
+        """
+        return Self(
+            0,
+            Event.file_started(""),
+            False,
+            List[String](),
+            Termination.exited(0),
+            List[UInt8](),
+            0.0,
+            binary,
+            rterm,
+            run_stdout^,
+            run_stderr^,
+            rdur,
+            TrustedReport(ParsedReport.absent(), False),
+            _blank_classification(),
+        )
+
+
+def _blank_classification() -> Classification:
+    """A placeholder classification for a non-ran attempt result. Pure."""
+    return Classification(
+        Outcome.NOT_RUN,
+        ParseDisposition.NO_REPORT,
+        0,
+        0,
+        0,
+        List[Outcome](),
+        False,
+        "",
+        "",
+    )
+
+
+def _restore_cache_env(had_prev: Bool, prev_cache: String) raises:
+    """Restore `MODULAR_CACHE_DIR` to its pre-quarantine value (or unset it)."""
+    if had_prev:
+        _ = setenv("MODULAR_CACHE_DIR", prev_cache, True)
+    else:
+        _ = unsetenv("MODULAR_CACHE_DIR")
+
+
+def _single_attempt(
     mut runtime: ExecRuntime,
     config: RunnerConfig,
     root: String,
     rel: String,
     include_paths: List[String],
-) raises -> FileResult:
-    """Build `rel` to a binary and, if it built, execute it under supervision.
+    out_bin: String,
+    do_build: Bool,
+    quarantine_dir: String,
+    prior_build_argv: List[String],
+    prior_bterm: Termination,
+    prior_build_stderr: List[UInt8],
+    prior_bdur: Float64,
+) raises -> _AttemptResult:
+    """Run ONE build->run->classify attempt for `rel`, returning raw facts.
 
-    Composes the `exec` supervisor into the session's build-then-run step for
-    one file. The build runs with NO deadline (a stalled compile is a documented
-    ceiling); the run runs under `config.timeout_secs`. Build termination maps
-    through `build_verdict` (a compiler that dies by a signal is a
-    `COMPILE_ERROR`, never a crash); the run maps through `resolve_report`
-    (which decides which report a truncated capture may trust) and then
-    `classify` (the TOTAL per-test policy). A spawn failure at either step is
-    an internal error; an in-flight interrupt (a `TimedOut` with the interrupt
-    flag set) aborts without recording a `TIMEOUT`.
+    The single-attempt keystone the retry loop wraps. When `do_build` it builds
+    `rel` into `out_bin` (with NO deadline); otherwise it REUSES the prior
+    successful build's facts and only re-runs `out_bin` (a run-side retry never
+    rebuilds). A NARROW cache quarantine applies ONLY when `quarantine_dir` is
+    non-empty (a post-compile-kill rebuild): `MODULAR_CACHE_DIR` is pointed at
+    that fresh dir around the build spawn and RESTORED immediately after — the
+    session is single-threaded, so mutating mtest's own environment is safe, and
+    the shared cache is never used for a post-kill rebuild. The build/run
+    termination, spawn-failure, and in-flight-interrupt short-circuits match the
+    non-retry path exactly, so an unset `--retries` is byte-for-byte unchanged.
 
     Raises:
-        Error: only if the `exec` machinery itself fails (a `pipe`/`fork`
-            syscall) or a directory cannot be made — the caller catches these
-            and resolves exit 3.
+        Error: only if the `exec` machinery itself fails or a directory cannot
+            be made — the caller catches these and resolves exit 3.
     """
-    _ensure_dir(root + "/build/bin")
+    var build_argv = prior_build_argv.copy()
+    var bterm = prior_bterm
+    var build_stderr = prior_build_stderr.copy()
+    var bdur = prior_bdur
 
-    var mangled = _mangle(rel)
-    var out_bin = String("build/bin/") + mangled
-    var build_argv = List[String]()
-    build_argv.append(config.mojo_path)
-    build_argv.append("build")
-    build_argv.append(rel)
-    build_argv.append("-o")
-    build_argv.append(out_bin)
-    for p in include_paths:
-        build_argv.append("-I")
-        build_argv.append(p)
-    for a in config.build_args:
-        build_argv.append(a)
+    if do_build:
+        build_argv = List[String]()
+        build_argv.append(config.mojo_path)
+        build_argv.append("build")
+        build_argv.append(rel)
+        build_argv.append("-o")
+        build_argv.append(out_bin)
+        for p in include_paths:
+            build_argv.append("-I")
+            build_argv.append(p)
+        for a in config.build_args:
+            build_argv.append(a)
 
-    # Build with NO deadline, inside the invocation root. The argv is copied so
-    # the original survives to ride the FileFinished event as build_argv. A build
-    # machinery raise (a pipe/fork syscall failure) is a build-phase internal
-    # error naming the compiler — never mislabeled against another step.
-    var bres: ProcessResult
-    try:
-        bres = run_supervised(
-            runtime, ProcessSpec.command_in(build_argv.copy(), root, 0)
-        )
-    except:
-        return FileResult.internal(
-            Event.internal_error("build", config.mojo_path, 0)
-        )
-    var bdur = Float64(bres.duration_ms) / 1000.0
+        # NARROW quarantine: only a post-compile-kill rebuild redirects the
+        # module cache. The spike observed NO cache corruption from a killed
+        # compile (the cache commits atomically), so this is defense-in-depth.
+        var quarantined = quarantine_dir != ""
+        var prev_cache = getenv("MODULAR_CACHE_DIR", "")
+        var had_prev = prev_cache != ""
+        if quarantined:
+            _ = setenv("MODULAR_CACHE_DIR", quarantine_dir, True)
 
-    # An interrupt during the build group-kills it (a TimedOut bail-out).
-    if interrupt_requested():
-        return FileResult.interrupt()
-    var bterm = bres.termination
-    if bterm.is_spawn_failed():
-        # Could not spawn the compiler at all: a machinery diagnostic, not a
-        # verdict. The errno rides so the console can name the cause.
-        return FileResult.internal(
-            Event.internal_error("build", config.mojo_path, bterm.value)
-        )
+        # Build under `--compile-timeout` (0 disables), inside the invocation
+        # root, with the COMPILE-specific grace. A build machinery raise is a
+        # build-phase internal error naming the compiler.
+        var bres: ProcessResult
+        try:
+            bres = run_supervised(
+                runtime,
+                ProcessSpec.command_in(
+                    build_argv.copy(),
+                    root,
+                    config.compile_timeout_secs * 1000,
+                    _COMPILE_GRACE_MS,
+                ),
+            )
+        except:
+            if quarantined:
+                _restore_cache_env(had_prev, prev_cache)
+            return _AttemptResult._internal(
+                Event.internal_error("build", config.mojo_path, 0)
+            )
+        if quarantined:
+            _restore_cache_env(had_prev, prev_cache)
 
-    var bsignal = build_verdict(bterm)
-    if bsignal == Outcome.COMPILE_ERROR:
-        # The compiler's stderr rides as raw bytes for the console banner.
-        var ev = Event.file_finished(
-            rel,
-            Outcome.COMPILE_ERROR,
-            0.0,
-            build_argv.copy(),
-            bdur,
-            List[UInt8](),
-            bres.stderr_bytes.copy(),
-        )
-        return FileResult.ran_with(ev^, Outcome.COMPILE_ERROR)
+        bdur = Float64(bres.duration_ms) / 1000.0
+        # An interrupt during the build group-kills it (a TimedOut bail-out).
+        if interrupt_requested():
+            return _AttemptResult._interrupt()
+        bterm = bres.termination
+        if bterm.is_spawn_failed():
+            # Could not spawn the compiler at all: a machinery diagnostic.
+            return _AttemptResult._internal(
+                Event.internal_error("build", config.mojo_path, bterm.value)
+            )
+        build_stderr = bres.stderr_bytes.copy()
+        if build_verdict(bterm).is_failing():
+            # A compile failure (a COMPILE_ERROR, or a COMPILE_TIMEOUT when our
+            # deadline killed it): no run happens. The raw bterm + stderr ride so
+            # the caller can BOTH finalize the build verdict AND classify a retry
+            # (a signaled/timed-out/ICE compiler is crash-class).
+            return _AttemptResult._build_failed(
+                build_argv^, bterm, build_stderr^, bdur, out_bin
+            )
 
-    # Build OK: run the freshly built binary under the run deadline. A run-phase
-    # machinery raise attributes to the RUN step and names the built binary, so a
-    # run-side failure is never laundered into a build diagnostic.
+    # Build OK (or reused from a prior successful build): run the binary. A
+    # run-phase machinery raise attributes to the RUN step and names the binary.
     var run_argv = List[String]()
     run_argv.append(out_bin)
     var rres: ProcessResult
@@ -346,23 +687,21 @@ def _run_one(
             ProcessSpec.command_in(run_argv^, root, config.timeout_secs * 1000),
         )
     except:
-        return FileResult.internal(Event.internal_error("run", out_bin, 0))
+        return _AttemptResult._internal(Event.internal_error("run", out_bin, 0))
     var rterm = rres.termination
     if rterm.is_spawn_failed():
-        # Could not spawn the freshly built binary: a machinery diagnostic.
-        return FileResult.internal(
+        return _AttemptResult._internal(
             Event.internal_error("run", out_bin, rterm.value)
         )
     # An in-flight interrupt returns as TimedOut; never record it as a TIMEOUT.
     if rterm.is_timed_out() and interrupt_requested():
-        return FileResult.interrupt()
+        return _AttemptResult._interrupt()
 
     var rdur = Float64(rres.duration_ms) / 1000.0
 
     # The run's own report IS the handshake. Decode the captured stdout, resolve
-    # WHICH report to trust under capture overflow (a truncated capture keeps a
-    # verdict only if a complete block survived wholly in the tail), then run the
-    # TOTAL classifier against the canonical path the child baked into its report.
+    # WHICH report to trust under capture overflow, then run the TOTAL classifier
+    # against the canonical path the child baked into its report.
     var source_path = canonicalize(root + "/" + rel)
     var stdout_text = lossy_utf8(rres.stdout_bytes)
     var trusted = resolve_report(
@@ -370,11 +709,274 @@ def _run_one(
     )
     var cls = classify(rterm, trusted.report, trusted.is_overflow)
 
-    # Retrospective per-test events for a VALID report, in row order, between the
-    # already-emitted file_started and the file_finished below.
+    return _AttemptResult(
+        0,
+        Event.file_started(""),
+        False,
+        build_argv^,
+        bterm,
+        build_stderr^,
+        bdur,
+        out_bin,
+        rterm,
+        rres.stdout_bytes.copy(),
+        rres.stderr_bytes.copy(),
+        rdur,
+        trusted^,
+        cls^,
+    )
+
+
+def _rmtree(path: String) raises:
+    """Recursively remove `path` and everything under it; a no-op if absent.
+
+    A symlink child is UNLINKED, never traversed (CWE-59): recursing into a
+    symlink-to-directory would delete the TARGET's contents, so a symlink planted
+    at a predictable temp/quarantine path under `build/` could let a failed
+    compile's cleanup reach outside the build tree. `islink` is checked BEFORE
+    `isdir` because `isdir` follows the link and would report a symlink-to-dir as
+    a directory. Only REAL directories are recursed into.
+    """
+    if not exists(path):
+        return
+    for name in listdir(path):
+        var child = join(path, name)
+        if islink(child):
+            remove(child)
+        elif isdir(child):
+            _rmtree(child)
+        else:
+            remove(child)
+    rmdir(path)
+
+
+def _discard_path(path: String):
+    """Best-effort delete of one disposable build artifact. Never raises.
+
+    Used for a failed precompile attempt's temp package: it is litter, and
+    failing the session over litter would be worse than the litter.
+    """
+    try:
+        _rmtree(path)
+    except:
+        pass
+
+
+def _invocation_nonce() -> String:
+    """A per-invocation token isolating this process's temp/quarantine dirs.
+
+    Two mtest PROCESSES over one checkout (plausible now that `--shard` invites
+    `mtest --shard 1/2` and `mtest --shard 2/2` in one tree) must never collide
+    on a temp path one's compiler is writing or a quarantine cache one's cleanup
+    would delete. The process id is stable within a run and distinct across
+    concurrent runs, so it keys each invocation's disposable dirs apart. Never
+    raises.
+    """
+    # SAFETY: `getpid` takes no arguments and returns this process's id as an
+    # Int32; there is nothing to misuse and the call cannot fail.
+    var pid = external_call["getpid", Int32]()
+    return String(Int(pid))
+
+
+def _quarantine_dir(
+    prefix: String, mangled: String, attempt_index: Int, nonce: String
+) -> String:
+    """The per-attempt, per-INVOCATION quarantine cache dir under `build/`.
+
+    A crash-class compile retry rebuilds against this fresh cache dir instead of
+    the shared module cache. Keyed on the invocation `nonce` as well as the
+    mangled source and attempt so a concurrent mtest process's `_cleanup_quarantine`
+    can never delete THIS invocation's live cache mid-rebuild. `prefix` is `""`
+    for a per-file build retry and `"precompile-"` for a precompile step. Pure.
+    """
+    return (
+        "build/quarantine/"
+        + prefix
+        + mangled
+        + "/inv-"
+        + nonce
+        + "/attempt-"
+        + String(attempt_index)
+    )
+
+
+def _retry_out_bin(
+    mangled: String, attempt_index: Int, nonce: String
+) -> String:
+    """The output binary path a crash-class BUILD retry rebuilds into.
+
+    Distinct per attempt (a retry must not inherit a killed attempt's bytes) and
+    per INVOCATION (two concurrent mtest processes must not write the same
+    `.attempt-N` file under each other's compiler). Pure.
+    """
+    return (
+        "build/bin/"
+        + mangled
+        + ".inv-"
+        + nonce
+        + ".attempt-"
+        + String(attempt_index)
+    )
+
+
+def _precompile_temp_path(
+    out_path: String, src: String, attempt_index: Int, nonce: String
+) -> String:
+    """The TEMP path attempt `attempt_index` of precompile step `src` builds into.
+
+    A hidden per-step, per-attempt `.tmp` directory beside OUT, holding the
+    package under OUT's own basename. Derived from OUT so the promotion is a
+    rename within one FILESYSTEM (an atomic replace, never a copy), and distinct
+    per attempt so a retry can never inherit a killed attempt's half-written
+    bytes.
+
+    Keyed on the MANGLED source AND the per-invocation `nonce` as well as the
+    attempt — symmetrically with the per-attempt quarantine dir — so two steps,
+    two concurrent mtest PROCESSES over one root, or a stale dir left by a
+    SIGKILLed run cannot collide on one temp directory and unlink it under
+    another compiler's feet. (OUT is safe either way: a lost temp fails its own
+    step's promotion, it never publishes.)
+
+    The directory is what hides an unpromoted attempt from the `-I <dir>` scan of
+    the OUT directory: the temp CANNOT simply be `<out>.tmp`, because the pinned
+    toolchain rejects a package output path that does not end in
+    `.mojopkg`/`.mojoc` (`mojo precompile -o x.tmp` is a hard error, not a
+    warning). Keeping the required extension and moving the file out of the
+    scanned directory buys the same guarantee the suffix would have. Pure.
+    """
+    var d = dirname(out_path)
+    var tmp_dir = (
+        ".mtest-precompile-"
+        + _mangle(src)
+        + ".inv-"
+        + nonce
+        + ".attempt-"
+        + String(attempt_index)
+        + ".tmp"
+    )
+    if d != "":
+        tmp_dir = d + "/" + tmp_dir
+    return tmp_dir + "/" + String(basename(out_path))
+
+
+def _cleanup_quarantine(root: String, dirs: List[String]):
+    """Best-effort delete of every per-attempt quarantine cache dir.
+
+    A cleanup failure NEVER fails the session (the dirs live under `build/`,
+    which is disposable); the shared module cache is never touched.
+    """
+    for d in dirs:
+        try:
+            _rmtree(root + "/" + d)
+        except:
+            pass
+
+
+def _make_attempt_finished(
+    rel: String,
+    rc: RetryClass,
+    att: _AttemptResult,
+    attempt_index: Int,
+    attempts_planned: Int,
+    step_override: String = "",
+) -> Event:
+    """The `AttemptFinished` event for ONE non-final crash-class attempt.
+
+    The failed step's raw `Termination` is decomposed into the event's plain
+    identity fields, and the captured streams are CLAMPED to a bounded head+tail
+    excerpt (the final attempt keeps the full capture in the FileFinished).
+    `step_override` names the step when it is not the file path's own build/run —
+    the session-level `"precompile"` step reuses this whole seam, so a precompile
+    TRY line carries the same identity as a build one.
+    """
+    var step: String
+    var term: Termination
+    var argv: List[String]
+    var dur: Float64
+    var out_bytes: List[UInt8]
+    var err_bytes: List[UInt8]
+    if att.build_failed:
+        step = String("build")
+        term = att.bterm
+        argv = att.build_argv.copy()
+        dur = att.bdur
+        out_bytes = List[UInt8]()
+        err_bytes = att.build_stderr.copy()
+    else:
+        step = String("run")
+        term = att.rterm
+        argv = [att.out_bin]
+        dur = att.rdur
+        out_bytes = att.run_stdout.copy()
+        err_bytes = att.run_stderr.copy()
+    if step_override != "":
+        step = step_override.copy()
+    var co = clamp_stream(out_bytes, _ATTEMPT_STREAM_HEAD, _ATTEMPT_STREAM_TAIL)
+    var ce = clamp_stream(err_bytes, _ATTEMPT_STREAM_HEAD, _ATTEMPT_STREAM_TAIL)
+    return Event.attempt_finished(
+        rel,
+        step,
+        attempt_index,
+        attempts_planned,
+        term.kind,
+        term.value,
+        term.final_kind,
+        term.final_value,
+        term.escalated,
+        True,
+        rc.label,
+        dur,
+        co.bytes.copy(),
+        ce.bytes.copy(),
+        co.truncated,
+        ce.truncated,
+        argv^,
+    )
+
+
+def _finalize_attempt(
+    config: RunnerConfig,
+    rel: String,
+    var att: _AttemptResult,
+    attempts_used: Int,
+    flaky: Bool,
+) -> FileResult:
+    """Build the file's terminal `FileResult` from its LAST attempt.
+
+    Mirrors the non-retry verdict construction exactly, then threads
+    `attempts_used` and — for a late pass after a crash-class attempt — the
+    FLAKY outcome/flag. At `attempts_used == 1, flaky == False` the result is
+    byte-for-byte the pre-retry behavior.
+    """
+    if att.build_failed:
+        # COMPILE_ERROR (the compiler rejected the code) or COMPILE_TIMEOUT (we
+        # killed it at the deadline) — the raw build termination decides, so a
+        # deadline kill is never mislabelled as the source's fault. The
+        # compiler's stderr rides as raw bytes for the console banner; the
+        # deadline rides so the banner can name it.
+        var bout = build_verdict(att.bterm)
+        var bto = 0
+        if bout == Outcome.COMPILE_TIMEOUT:
+            bto = config.compile_timeout_secs
+        var ev = Event.file_finished(
+            rel,
+            bout,
+            0.0,
+            att.build_argv.copy(),
+            att.bdur,
+            List[UInt8](),
+            att.build_stderr.copy(),
+            timeout_seconds=bto,
+            attempts_used=attempts_used,
+            slow=is_slow(att.bdur, 0.0),
+        )
+        return FileResult.ran_with(ev^, bout)
+
+    var cls = att.cls.copy()
+    # Retrospective per-test events for a VALID report, in row order.
     var pre = List[Event]()
     if cls.disposition == ParseDisposition.PARSED:
-        for r in trusted.report.rows:
+        for r in att.trusted.report.rows:
             pre.append(
                 Event.test_reported(
                     TestResult(
@@ -382,32 +984,40 @@ def _run_one(
                     )
                 )
             )
-    # A loud warning (drift, malformed suite, overflow, exit-status mismatch)
-    # rides just before the file_finished so the reporter can associate it.
     if cls.warning_kind != "":
         pre.append(Event.warning(cls.warning_kind, cls.warning_detail))
 
-    # Carry the per-outcome specifics as data; the console formats them. The
-    # terminating signal (CRASH) and the exit code (FAIL) both live in
-    # rterm.value; the configured deadline drives the TIMEOUT phrasing.
     var signal_number = 0
     var exit_status = 0
     var timeout_seconds = 0
+    # The run Termination's latched SIGKILL escalation rides the verdict, so a
+    # `--timeout N` with no retries (hence no TRY line) can still say whether the
+    # child stopped on the polite SIGTERM or had to be killed. Only a TIMEOUT
+    # latches it; every other outcome leaves it False rather than guessing.
+    var escalated = False
     if cls.file_outcome == Outcome.CRASH:
-        signal_number = rterm.value
+        signal_number = att.rterm.value
     elif cls.file_outcome == Outcome.FAIL:
-        exit_status = rterm.value
+        exit_status = att.rterm.value
     elif cls.file_outcome == Outcome.TIMEOUT:
         timeout_seconds = config.timeout_secs
+        escalated = att.rterm.escalated
+
+    # A late pass after a crash-class attempt is FLAKY (not PASS): the file
+    # tallies under FLAKY, but its per-test exit multiset stays the passing
+    # (non-failing) one, so a flaky pass counts 0 toward --maxfail and exit 0.
+    var file_out = cls.file_outcome
+    if flaky:
+        file_out = Outcome.FLAKY
 
     var ev = Event.file_finished(
         rel,
-        cls.file_outcome,
-        rdur,
-        build_argv.copy(),
-        bdur,
-        rres.stdout_bytes.copy(),
-        rres.stderr_bytes.copy(),
+        file_out,
+        att.rdur,
+        att.build_argv.copy(),
+        att.bdur,
+        att.run_stdout.copy(),
+        att.run_stderr.copy(),
         signal_number=signal_number,
         exit_status=exit_status,
         timeout_seconds=timeout_seconds,
@@ -415,15 +1025,213 @@ def _run_one(
         passed_tests=cls.passed_tests,
         failed_tests=cls.failed_tests,
         skipped_tests=cls.skipped_tests,
+        attempts_used=attempts_used,
+        flaky=flaky,
+        escalated=escalated,
+        slow=is_slow(att.bdur, att.rdur),
     )
-    return FileResult.classified(
+    var fr = FileResult.classified(
         pre^,
         ev^,
-        cls.file_outcome,
+        file_out,
         cls.exit_outcomes.copy(),
         TestCounts(cls.passed_tests, cls.failed_tests, cls.skipped_tests, 0),
         cls.is_drift,
     )
+    # The binary this attempt actually RAN — which a BUILD retry moves to a
+    # `.attempt-N` path. Crash attribution reruns this, never a reconstruction.
+    fr.binary_path = att.out_bin
+    return fr^
+
+
+def _finalize_exit_code(code: Int, interrupt_pending: Bool) -> Int:
+    """Let a late interrupt DOMINATE the already-resolved exit code.
+
+    The exit `code` is computed BEFORE the crash-attribution post-pass, from the
+    run-phase interrupt flag. An interrupt that ARRIVES during that pass (a
+    Ctrl-C mid-attribution) must still resolve to exit 2 — interrupt dominates,
+    consistent with the post-pass's own contract that exit 2 never waits on
+    diagnostics. An already-2 code is unchanged; every other code yields to a
+    pending interrupt. Pure.
+    """
+    if interrupt_pending and code != 2:
+        return 2
+    return code
+
+
+def _compile_crash_residual(
+    noun: String, name: String, rc: RetryClass, term: Termination
+) -> String:
+    """The residual-risk warning when a crash-class COMPILE failure is retried.
+
+    Crash-class covers TWO shapes, and the sentence must be true for both: a
+    compiler WE killed (a SIGTERM/SIGKILL at the compile deadline) and one that
+    CRASHED on its own (died by a signal, or exited nonzero carrying an ICE
+    signature). Saying "was killed" for a self-exited ICE would contradict the
+    typed termination, so the cause phrase is read off `term`. The cache-suspect
+    tail is identical for both — the shared module cache may be torn either way,
+    which is why the rebuild ran quarantined. Pure.
+    """
+    var cause: String
+    if term.is_timed_out():
+        cause = "was killed at the compile deadline"
+    elif term.is_signaled():
+        cause = "crashed (died by signal)"
+    else:
+        cause = (
+            "crashed on its own (exited nonzero with a compiler-crash"
+            " signature)"
+        )
+    return (
+        "the "
+        + noun
+        + " of '"
+        + name
+        + "' "
+        + cause
+        + " ("
+        + rc.label
+        + "); the shared module cache may be suspect, so the rebuild ran"
+        " quarantined against a fresh per-attempt cache (the shared cache was"
+        " neither used nor deleted)"
+    )
+
+
+def _flaky_eligible(file_outcome: Outcome) -> Bool:
+    """Whether a post-retry FINAL attempt counts as a genuine flaky-eligible pass.
+
+    A file is FLAKY only when a retry followed a crash-class failure and the
+    FINAL attempt is a genuine PASS. On the plain run path the classifier can
+    Exit with an OFF-GRAMMAR report, which classifies to `NOT_RUN` + drift — NOT
+    failing, but NOT a pass either. Keying on `== PASS` (never `not is_failing()`)
+    keeps a crash-then-drift file at its real drift verdict (exit 3) instead of
+    laundering it into a green FLAKY pass, while a crash-then-clean-pass still
+    qualifies. Pure.
+    """
+    return file_outcome == Outcome.PASS
+
+
+def _run_one(
+    mut runtime: ExecRuntime,
+    config: RunnerConfig,
+    root: String,
+    rel: String,
+    include_paths: List[String],
+) raises -> FileResult:
+    """Build `rel`, execute it, and RETRY a crash-class failure up to the budget.
+
+    Runs up to `config.retries + 1` attempts through `_single_attempt`. An
+    attempt that PASSES, or fails DETERMINISTICALLY (a real FAIL, a compile
+    error, a flooded capture), is final. A crash-class failure with attempts
+    remaining is reported immediately as an `AttemptFinished` and retried: a
+    crash-class BUILD failure REBUILDS quarantined against a fresh cache (with a
+    loud residual-risk warning); a crash-class RUN failure RE-RUNS the same
+    binary. If the final attempt passes after any retry the file is FLAKY. An
+    interrupt is never retried (short-circuited before the retry decision), and
+    an unset `--retries` runs exactly one attempt with the pre-retry behavior.
+
+    Raises:
+        Error: only if the `exec` machinery itself fails (a `pipe`/`fork`
+            syscall) or a directory cannot be made — the caller catches these
+            and resolves exit 3.
+    """
+    _ensure_dir(root + "/build/bin")
+    var mangled = _mangle(rel)
+    var nonce = _invocation_nonce()
+    var attempts_planned = config.retries + 1
+
+    # AttemptFinished (+ any compile-kill warning) for each NON-final attempt,
+    # in order; prepended to the final FileResult so the reporter renders each
+    # the moment its attempt completed, before the file's verdict.
+    var attempt_events = List[Event]()
+    var quarantine_dirs = List[String]()
+    var had_retry = False
+
+    var do_build = True
+    var quarantine_dir = String("")
+    var out_bin = String("build/bin/") + mangled
+    var prior_build_argv = List[String]()
+    var prior_bterm = Termination.exited(0)
+    var prior_build_stderr = List[UInt8]()
+    var prior_bdur = 0.0
+
+    var attempt_index = 1
+    while True:
+        var att = _single_attempt(
+            runtime,
+            config,
+            root,
+            rel,
+            include_paths,
+            out_bin,
+            do_build,
+            quarantine_dir,
+            prior_build_argv,
+            prior_bterm,
+            prior_build_stderr,
+            prior_bdur,
+        )
+        if att.control == 1:
+            _cleanup_quarantine(root, quarantine_dirs)
+            return FileResult.internal(att.internal_event.copy())
+        if att.control == 2:
+            _cleanup_quarantine(root, quarantine_dirs)
+            return FileResult.interrupt()
+
+        # Classify the completed attempt's failed step for retry eligibility. An
+        # interrupt was already short-circuited above, so `interrupted` is False
+        # here — honoring the DEFENSIVE NOTE never to pass interrupted=True
+        # without a TimedOut (a TimedOut reaching here is a genuine deadline).
+        var rc: RetryClass
+        var attempt_passed = False
+        if att.build_failed:
+            rc = retry_classify("build", att.bterm, False, att.build_stderr)
+        else:
+            rc = retry_classify("run", att.rterm, False, att.run_stderr)
+            attempt_passed = _flaky_eligible(att.cls.file_outcome)
+
+        var more_attempts = attempt_index < attempts_planned
+        if rc.retry_eligible and more_attempts:
+            had_retry = True
+            attempt_events.append(
+                _make_attempt_finished(
+                    rel, rc, att, attempt_index, attempts_planned
+                )
+            )
+            if att.build_failed:
+                # A compile kill: the shared module cache MAY be suspect. Warn
+                # loudly and run the NEXT rebuild quarantined against a fresh
+                # per-attempt cache with a fresh output path.
+                attempt_events.append(
+                    Event.warning(
+                        "compile-kill-residual",
+                        _compile_crash_residual("compile", rel, rc, att.bterm),
+                    )
+                )
+                do_build = True
+                out_bin = _retry_out_bin(mangled, attempt_index + 1, nonce)
+                quarantine_dir = _quarantine_dir(
+                    "", mangled, attempt_index + 1, nonce
+                )
+                _ensure_dir(root + "/" + quarantine_dir)
+                quarantine_dirs.append(quarantine_dir)
+            else:
+                # A run crash: RE-RUN the same already-built binary (no rebuild,
+                # no quarantine). Carry the prior build facts forward.
+                do_build = False
+                quarantine_dir = String("")
+                prior_build_argv = att.build_argv.copy()
+                prior_bterm = att.bterm
+                prior_build_stderr = att.build_stderr.copy()
+                prior_bdur = att.bdur
+            attempt_index += 1
+            continue
+
+        # Final attempt: passed, failed deterministically, or budget exhausted.
+        var flaky = had_retry and attempt_passed
+        var fr = _finalize_attempt(config, rel, att^, attempt_index, flaky)
+        _cleanup_quarantine(root, quarantine_dirs)
+        return _prepend_events(attempt_events^, fr^)
 
 
 # --- The SELECTION pipeline: probe -> select -> run -> reconcile. -------------
@@ -435,6 +1243,26 @@ def _str_in(items: List[String], needle: String) -> Bool:
         if x == needle:
             return True
     return False
+
+
+def _select_names(names: List[String], selected: List[String]) -> List[String]:
+    """The isolation candidates for attribution: `names` restricted to `selected`.
+
+    Crash attribution reruns a crashed file's tests one at a time to name the
+    culprit. Under `-k`/`--only` the file's FULL test universe was probed, but
+    only the SELECTED subset actually ran in the user's session — isolating a
+    DESELECTED test (which never ran) could name a culprit out of code the user
+    never invoked. An empty `selected` means "no selection active" (the plain run
+    path), so every name is a candidate. Otherwise keep only selected names, in
+    the given SOURCE order. Pure.
+    """
+    if len(selected) == 0:
+        return names.copy()
+    var kept = List[String]()
+    for n in names:
+        if _str_in(selected, n):
+            kept.append(n)
+    return kept^
 
 
 def _same_set(a: List[String], b: List[String]) -> Bool:
@@ -569,7 +1397,13 @@ def _build_for_selection(
     var bres: ProcessResult
     try:
         bres = run_supervised(
-            runtime, ProcessSpec.command_in(build_argv.copy(), root, 0)
+            runtime,
+            ProcessSpec.command_in(
+                build_argv.copy(),
+                root,
+                config.compile_timeout_secs * 1000,
+                _COMPILE_GRACE_MS,
+            ),
         )
     except:
         return _BuildOutcome(
@@ -602,16 +1436,23 @@ def _build_for_selection(
             ),
         )
     var bsignal = build_verdict(bterm)
-    if bsignal == Outcome.COMPILE_ERROR:
+    if bsignal.is_failing():
+        # COMPILE_ERROR, or COMPILE_TIMEOUT when `--compile-timeout` killed the
+        # build. Either way the file is terminal here and never probed or run.
+        var bto = 0
+        if bsignal == Outcome.COMPILE_TIMEOUT:
+            bto = config.compile_timeout_secs
         reg.record_compile_error(rel, lossy_utf8(bres.stderr_bytes))
         var ev = Event.file_finished(
             rel,
-            Outcome.COMPILE_ERROR,
+            bsignal,
             0.0,
             build_argv.copy(),
             bdur,
             List[UInt8](),
             bres.stderr_bytes.copy(),
+            timeout_seconds=bto,
+            slow=is_slow(bdur, 0.0),
         )
         return _BuildOutcome(
             False,
@@ -620,7 +1461,7 @@ def _build_for_selection(
             build_argv^,
             bdur,
             True,
-            FileResult.ran_with(ev^, Outcome.COMPILE_ERROR),
+            FileResult.ran_with(ev^, bsignal),
         )
     var canonical = canonicalize(root + "/" + rel)
     reg.record_build(BuildProduct.built(rel, out_bin, canonical))
@@ -661,8 +1502,14 @@ def _probe_terminal(
     is_drift: Bool,
     signal_number: Int = 0,
     timeout_seconds: Int = 0,
+    escalated: Bool = False,
 ) -> FileResult:
-    """A file-level terminal FileResult for a probe that did not qualify."""
+    """A file-level terminal FileResult for a probe that did not qualify.
+
+    `escalated` is the probe `Termination`'s latched SIGKILL escalation, passed
+    by the timeout caller so a probe killed at the deadline reads like every
+    other TIMEOUT verdict.
+    """
     var pre = List[Event]()
     if warning_kind != "":
         pre.append(Event.warning(warning_kind, warning_detail))
@@ -677,6 +1524,8 @@ def _probe_terminal(
         signal_number=signal_number,
         timeout_seconds=timeout_seconds,
         parse_disposition=disposition,
+        escalated=escalated,
+        slow=is_slow(bdur, 0.0),
     )
     var exits = List[Outcome]()
     if not is_drift:
@@ -779,6 +1628,7 @@ def _probe_file(
                 pres.stderr_bytes.copy(),
                 False,
                 timeout_seconds=config.timeout_secs,
+                escalated=pterm.escalated,
             ),
             False,
             False,
@@ -931,6 +1781,8 @@ def _reconcile_and_classify(
     build_argv: List[String],
     bdur: Float64,
     canonical: String,
+    attempts_used: Int = 1,
+    flaky_if_pass: Bool = False,
 ) -> FileResult:
     """Reconcile a completed selection run against the universe and classify.
 
@@ -939,6 +1791,11 @@ def _reconcile_and_classify(
     SKIP (suppressed, counted DESELECTED) — a non-selected row that RAN, or any
     membership instability, is MALFORMED_SUITE (exit-1 class, never drift). The
     SELECTED rows drive the verdict via the pure classifier.
+
+    `attempts_used` rides every FileFinished so the reporter can show a retried
+    selection run's attempt count; `flaky_if_pass` (set when an earlier attempt
+    was crash-class) promotes a VALID pass to FLAKY. Both default so a single
+    attempt is byte-for-byte unchanged.
     """
     var rterm = term.termination
     var rdur = Float64(term.duration_ms) / 1000.0
@@ -956,6 +1813,7 @@ def _reconcile_and_classify(
             term,
             len(deselected),
             signal_number=rterm.value,
+            attempts_used=attempts_used,
         )
     if rterm.is_timed_out():
         return _run_terminal_file(
@@ -970,6 +1828,8 @@ def _reconcile_and_classify(
             term,
             len(deselected),
             timeout_seconds=config.timeout_secs,
+            attempts_used=attempts_used,
+            escalated=rterm.escalated,
         )
 
     var trusted = resolve_report(
@@ -984,7 +1844,14 @@ def _reconcile_and_classify(
         # selection-specific MALFORMED_SUITE.
         var cls = classify(rterm, trusted.report, trusted.is_overflow)
         return _classified_terminal(
-            rel, cls, build_argv, bdur, rdur, term, len(deselected)
+            rel,
+            cls,
+            build_argv,
+            bdur,
+            rdur,
+            term,
+            len(deselected),
+            attempts_used=attempts_used,
         )
 
     var report = trusted.report.copy()
@@ -1007,6 +1874,7 @@ def _reconcile_and_classify(
             rdur,
             term,
             len(deselected),
+            attempts_used=attempts_used,
         )
     # A non-selected row MUST be SKIP (the selection-induced skip we suppress).
     for r in report.rows:
@@ -1026,6 +1894,7 @@ def _reconcile_and_classify(
                 rdur,
                 term,
                 len(deselected),
+                attempts_used=attempts_used,
             )
 
     var sel_view = _selected_view(report.rows.copy(), selected)
@@ -1049,9 +1918,18 @@ def _reconcile_and_classify(
     if cls.file_outcome == Outcome.FAIL:
         exit_status = rterm.value
 
+    # A late pass after a crash-class retry is FLAKY (not PASS): promote the
+    # outcome while keeping the passing per-test exit multiset, so a flaky
+    # selection pass counts 0 toward --maxfail and exit 0. A crash-then-FAIL
+    # stays FAIL (still failing), never flaky.
+    var file_out = cls.file_outcome
+    var flaky = flaky_if_pass and not cls.file_outcome.is_failing()
+    if flaky:
+        file_out = Outcome.FLAKY
+
     var ev = Event.file_finished(
         rel,
-        cls.file_outcome,
+        file_out,
         rdur,
         build_argv.copy(),
         bdur,
@@ -1064,11 +1942,14 @@ def _reconcile_and_classify(
         failed_tests=cls.failed_tests,
         skipped_tests=cls.skipped_tests,
         deselected_tests=len(deselected),
+        attempts_used=attempts_used,
+        flaky=flaky,
+        slow=is_slow(bdur, rdur),
     )
     return FileResult.classified(
         pre^,
         ev^,
-        cls.file_outcome,
+        file_out,
         cls.exit_outcomes.copy(),
         TestCounts(
             cls.passed_tests,
@@ -1093,8 +1974,14 @@ def _run_terminal_file(
     deselected_count: Int,
     signal_number: Int = 0,
     timeout_seconds: Int = 0,
+    attempts_used: Int = 1,
+    escalated: Bool = False,
 ) -> FileResult:
     """A file-level terminal FileResult for a selection run (crash/malformed).
+
+    `escalated` is the run `Termination`'s latched SIGKILL escalation, passed by
+    the timeout caller so a selection run's TIMEOUT verdict tells the same story
+    the default path's does.
     """
     var pre = List[Event]()
     if warning_kind != "":
@@ -1111,6 +1998,9 @@ def _run_terminal_file(
         timeout_seconds=timeout_seconds,
         parse_disposition=disposition,
         deselected_tests=deselected_count,
+        attempts_used=attempts_used,
+        escalated=escalated,
+        slow=is_slow(bdur, rdur),
     )
     return FileResult.classified(
         pre^,
@@ -1130,6 +2020,7 @@ def _classified_terminal(
     rdur: Float64,
     term: ProcessResult,
     deselected_count: Int,
+    attempts_used: Int = 1,
 ) -> FileResult:
     """A file-level terminal FileResult from a `Classification` (no per-test rows).
 
@@ -1152,6 +2043,8 @@ def _classified_terminal(
         term.stderr_bytes.copy(),
         parse_disposition=cls.disposition,
         deselected_tests=deselected_count,
+        attempts_used=attempts_used,
+        slow=is_slow(bdur, rdur),
     )
     return FileResult.classified(
         pre^,
@@ -1171,13 +2064,29 @@ def _run_precompile(
     out_name: Optional[String],
     include_paths: List[String],
 ) raises -> PrecompileResult:
-    """Precompile one source into a package, with NO deadline, inside `root`.
+    """Precompile one source into a package — bounded, retried, promoted ATOMICALLY.
 
-    Builds `mojo precompile <src> -o <out>` (out defaults to
+    Builds `mojo precompile <src> -o <temp>` (OUT defaults to
     `build/<name>.mojopkg`, `name` the `.mojo`-stripped basename of `src`),
-    forwarding the include paths and build args. On success returns the OUT
-    directory to add to the include set; on failure returns the captured
-    compiler output. A spawn failure is an internal error.
+    forwarding the include paths and build args. Every ATTEMPT writes a temp path
+    derived from OUT (`_precompile_temp_path`) and is RENAMED onto OUT only after
+    it exits 0, so a killed, crashed, or rejected attempt never touches OUT: a
+    good package from an earlier run survives a failed step byte-for-byte, and no
+    dependent ever builds against a half-written package. Failed temps are deleted
+    best-effort; a cleanup failure never fails the session.
+
+    The step is bounded by `--compile-timeout` with the compile-specific grace —
+    the same treatment the per-file builds get — and gets the same crash-class
+    `--retries` budget: up to `config.retries + 1` attempts, retried ONLY when
+    `retry_classify("precompile", ...)` calls the failure crash-class, each retry
+    on a FRESH temp path and quarantined against a fresh per-attempt module cache
+    (with the loud residual warning). At `--retries 0` exactly one attempt runs
+    and behavior is unchanged apart from the invisible temp-then-rename.
+
+    Precompile attempts are SESSION-level: their `AttemptFinished` events name the
+    `src` spelling and carry `step="precompile"`; there is no FLAKY verdict and no
+    file counter — a success after a crash-class attempt emits a loud warning
+    instead.
 
     Raises:
         Error: only if the `exec` machinery itself fails or the OUT directory
@@ -1190,40 +2099,196 @@ def _run_precompile(
     else:
         out_path = String("build/") + name + ".mojopkg"
 
+    # The temp lives beside OUT, so its parent must exist before the first
+    # attempt writes it (and the rename stays within one directory).
     var parent = dirname(out_path)
     if parent != "":
         _ensure_dir(root + "/" + parent)
 
-    var argv = List[String]()
-    argv.append(config.mojo_path)
-    argv.append("precompile")
-    argv.append(src)
-    argv.append("-o")
-    argv.append(out_path)
-    for p in include_paths:
-        argv.append("-I")
-        argv.append(p)
-    for a in config.build_args:
-        argv.append(a)
+    var nonce = _invocation_nonce()
+    var attempts_planned = config.retries + 1
+    var events = List[Event]()
+    var quarantine_dirs = List[String]()
+    var quarantine_dir = String("")
+    var had_retry = False
+    var attempt_index = 1
 
-    var res = run_supervised(runtime, ProcessSpec.command_in(argv^, root, 0))
-    if interrupt_requested():
-        return PrecompileResult("", "", False, False, True, 0, "")
-    var term = res.termination
-    if term.is_spawn_failed():
-        # Could not spawn the compiler at all: carry the real errno and program
-        # so the diagnostic names the cause, exactly as the build/run paths do.
-        return PrecompileResult(
-            "", "", False, True, False, term.value, config.mojo_path
+    while True:
+        var tmp_path = _precompile_temp_path(
+            out_path, src, attempt_index, nonce
         )
-    if term.is_exited() and term.value == 0:
-        var d = dirname(out_path)
-        if d == "":
-            d = String(".")
-        return PrecompileResult(d^, "", True, False, False, 0, "")
-    return PrecompileResult(
-        "", lossy_utf8(res.stderr_bytes), False, False, False, 0, ""
-    )
+        var tmp_dir = dirname(tmp_path)
+        _ensure_dir(root + "/" + tmp_dir)
+        var argv = List[String]()
+        argv.append(config.mojo_path)
+        argv.append("precompile")
+        argv.append(src)
+        argv.append("-o")
+        argv.append(tmp_path)
+        for p in include_paths:
+            argv.append("-I")
+            argv.append(p)
+        for a in config.build_args:
+            argv.append(a)
+
+        # NARROW quarantine: only a post-compile-kill retry redirects the module
+        # cache, exactly as the file build path does. The session is
+        # single-threaded, so mutating our own environment around the spawn is
+        # safe; it is restored immediately after.
+        var quarantined = quarantine_dir != ""
+        var prev_cache = getenv("MODULAR_CACHE_DIR", "")
+        var had_prev = prev_cache != ""
+        if quarantined:
+            _ = setenv("MODULAR_CACHE_DIR", quarantine_dir, True)
+
+        var res: ProcessResult
+        try:
+            res = run_supervised(
+                runtime,
+                ProcessSpec.command_in(
+                    argv.copy(),
+                    root,
+                    config.compile_timeout_secs * 1000,
+                    _COMPILE_GRACE_MS,
+                ),
+            )
+        except e:
+            if quarantined:
+                _restore_cache_env(had_prev, prev_cache)
+            _discard_path(root + "/" + tmp_dir)
+            _cleanup_quarantine(root, quarantine_dirs)
+            raise e^
+        if quarantined:
+            _restore_cache_env(had_prev, prev_cache)
+
+        var dur = Float64(res.duration_ms) / 1000.0
+        # An interrupt during the step group-kills it (a TimedOut bail-out). It
+        # is answered BEFORE the termination is read, so an interrupt is never
+        # mistaken for a deadline — whatever the supervisor had to do to stop it.
+        if interrupt_requested():
+            _discard_path(root + "/" + tmp_dir)
+            _cleanup_quarantine(root, quarantine_dirs)
+            return PrecompileResult.interrupt(events^)
+
+        var term = res.termination
+        if term.is_spawn_failed():
+            # Could not spawn the compiler at all: carry the real errno and
+            # program so the diagnostic names the cause, exactly as the
+            # build/run paths do.
+            _discard_path(root + "/" + tmp_dir)
+            _cleanup_quarantine(root, quarantine_dirs)
+            return PrecompileResult.internal(
+                term.value, config.mojo_path, events^
+            )
+
+        if term.is_exited() and term.value == 0:
+            # PROMOTE: the package is real, so publish it indivisibly. A rename
+            # that fails leaves OUT untouched — the step is honestly a failure,
+            # never a half-published package.
+            try:
+                rename_path(root + "/" + tmp_path, root + "/" + out_path)
+            except:
+                # The COMPILER exited 0; only the rename lost (e.g. OUT is a
+                # directory, or its parent is read-only). There is no compiler
+                # ending to name, so this result carries none.
+                _discard_path(root + "/" + tmp_dir)
+                _cleanup_quarantine(root, quarantine_dirs)
+                return PrecompileResult.promotion_failure(
+                    String(
+                        "mtest: the precompile of '"
+                        + src
+                        + "' succeeded, but its package could not be promoted"
+                        " from '"
+                    )
+                    + tmp_path
+                    + "' to '"
+                    + out_path
+                    + "'. The compiler is not at fault: check that OUT is a"
+                    " writable file path (a directory or a read-only parent at"
+                    " OUT will fail here). OUT was left untouched.\n",
+                    events^,
+                    attempt_index,
+                )
+            if had_retry:
+                # No FLAKY verdict exists for a session-level step, so the
+                # warning IS the signal that this package was not built cleanly
+                # the first time.
+                events.append(
+                    Event.warning(
+                        "precompile-succeeded-after-retry",
+                        (
+                            "the precompile step '"
+                            + src
+                            + "' succeeded only on attempt "
+                            + String(attempt_index)
+                            + " of "
+                            + String(attempts_planned)
+                            + "; its earlier attempt(s) were killed or crashed,"
+                            " so treat this package as suspect"
+                        ),
+                    )
+                )
+            # The promoted package left the temp directory empty; take it away
+            # too, so a successful step leaves the OUT tree exactly as an
+            # unpromoted run would have.
+            _discard_path(root + "/" + tmp_dir)
+            _cleanup_quarantine(root, quarantine_dirs)
+            var d = dirname(out_path)
+            if d == "":
+                d = String(".")
+            return PrecompileResult.success(d, events^, attempt_index)
+
+        # The attempt failed. Classify it for retry eligibility under the BUILD
+        # rules (`interrupted` is False: an interrupt was short-circuited above,
+        # so a TimedOut reaching here is a genuine deadline).
+        var rc = retry_classify("precompile", term, False, res.stderr_bytes)
+        var more_attempts = attempt_index < attempts_planned
+        if rc.retry_eligible and more_attempts:
+            had_retry = True
+            var att = _AttemptResult._build_failed(
+                argv.copy(), term, res.stderr_bytes.copy(), dur, tmp_path
+            )
+            events.append(
+                _make_attempt_finished(
+                    src,
+                    rc,
+                    att,
+                    attempt_index,
+                    attempts_planned,
+                    step_override="precompile",
+                )
+            )
+            # A compile kill: the shared module cache MAY be suspect. Warn
+            # loudly and run the NEXT attempt quarantined against a fresh
+            # per-attempt cache, into a fresh temp path.
+            events.append(
+                Event.warning(
+                    "compile-kill-residual",
+                    _compile_crash_residual("precompile", src, rc, term),
+                )
+            )
+            _discard_path(root + "/" + tmp_dir)
+            quarantine_dir = _quarantine_dir(
+                "precompile-", _mangle(src), attempt_index + 1, nonce
+            )
+            _ensure_dir(root + "/" + quarantine_dir)
+            quarantine_dirs.append(quarantine_dir)
+            attempt_index += 1
+            continue
+
+        # Final attempt: the step is a PRECOMPILE-ERROR. OUT was never written.
+        _discard_path(root + "/" + tmp_dir)
+        _cleanup_quarantine(root, quarantine_dirs)
+        var timeout_seconds = 0
+        if term.is_timed_out():
+            timeout_seconds = config.compile_timeout_secs
+        return PrecompileResult.failure(
+            lossy_utf8(res.stderr_bytes),
+            events^,
+            term,
+            timeout_seconds,
+            attempt_index,
+        )
 
 
 @fieldwise_init
@@ -1242,6 +2307,10 @@ struct SelectionSummary(Copyable, Movable):
     """Whether a spawn/machinery failure occurred (exit 3)."""
     var drift: Bool
     """Whether a probe drifted off the pinned grammar (exit 3)."""
+    var crash_files: List[_CrashFile]
+    """The run files that ended CRASH, in discovery order, for the bounded
+    crash-attribution post-pass. Diagnostics only: this list feeds no count, no
+    outcome multiset, and no exit code."""
 
 
 def _prepend_events(var extra: List[Event], var fr: FileResult) -> FileResult:
@@ -1265,14 +2334,24 @@ def _run_selected_with_recovery(
     mut reg: BuildRegistry,
     include_paths: List[String],
 ) raises -> FileResult:
-    """Run one file's selected subset, with the stale-name recover-once flow.
+    """Run one file's selected subset, with recover-once AND crash-class retries.
 
-    Runs plain when the selection is the whole universe, else with `--only`. If
-    the run instead reports `… test not found in suite:` (a suite that refuses a
-    name it just listed), emit a LOUD warning, REBUILD (atomic registry
-    replace), RE-PROBE, RE-VALIDATE (a name now gone is an exit-4 unknown test),
-    and RE-RUN once. A SECOND stale-name error is MALFORMED_SUITE (exit-1 class),
-    never exit 3.
+    Runs plain when the selection is the whole universe, else with `--only`. Two
+    ORTHOGONAL recovery mechanisms compose here, each with its own budget:
+
+    - Stale-name recover-once: if the run reports `… test not found in suite:` (a
+      suite refusing a name it just listed), emit a LOUD warning, REBUILD (atomic
+      registry replace), RE-PROBE, RE-VALIDATE, and RE-RUN once; a SECOND
+      stale-name error is MALFORMED_SUITE (exit-1 class), never exit 3.
+    - Crash-class retries (`--retries N`): a run that dies by signal or a
+      deadline (never an interrupt, short-circuited first) is re-run — the SAME
+      already-built binary, no rebuild — up to `retries` extra times, each
+      non-final attempt reported immediately as a TRY line; a late pass is FLAKY.
+
+    A stale-name refusal is an `Exited(1)` diagnostic, so it is never crash-class
+    — the two mechanisms never contend for the same failure. Their events
+    interleave in one chronological `pre_stream` prepended to the file's verdict.
+    At `--retries 0` this is byte-for-byte the pre-retry recover-once behavior.
     """
     var binary = c.binary
     var canonical = c.canonical
@@ -1281,8 +2360,11 @@ def _run_selected_with_recovery(
     var universe = c.universe.copy()
     var selected = c.selected.copy()
     var deselected = c.deselected.copy()
-    var recovery_warnings = List[Event]()
+    var pre_stream = List[Event]()
     var attempts = 0
+    var attempts_planned = config.retries + 1
+    var crash_attempt = 1
+    var had_crash_retry = False
 
     while True:
         var run_argv = List[String]()
@@ -1326,6 +2408,28 @@ def _run_selected_with_recovery(
             and _has_stale_name_diagnostic(stdout_text)
         )
         if not is_stale:
+            # A crash-class run (signal / deadline; an interrupt was
+            # short-circuited above, so `interrupted` is False) is re-run when
+            # attempts remain. Deterministic outcomes (a FAIL, malformed suite,
+            # capture overflow, drift) classify NOT eligible and finalize now.
+            var rc = retry_classify("run", rterm, False, rres.stderr_bytes)
+            if rc.retry_eligible and crash_attempt < attempts_planned:
+                had_crash_retry = True
+                var rdur = Float64(rres.duration_ms) / 1000.0
+                var att = _AttemptResult._selection_run(
+                    binary,
+                    rterm,
+                    rres.stdout_bytes.copy(),
+                    rres.stderr_bytes.copy(),
+                    rdur,
+                )
+                pre_stream.append(
+                    _make_attempt_finished(
+                        c.rel, rc, att, crash_attempt, attempts_planned
+                    )
+                )
+                crash_attempt += 1
+                continue
             var fr = _reconcile_and_classify(
                 config,
                 c.rel,
@@ -1336,8 +2440,10 @@ def _run_selected_with_recovery(
                 build_argv,
                 bdur,
                 canonical,
+                attempts_used=crash_attempt,
+                flaky_if_pass=had_crash_retry,
             )
-            return _prepend_events(recovery_warnings^, fr^)
+            return _prepend_events(pre_stream^, fr^)
 
         if attempts >= 1:
             # A second stale-name error after a fresh rebuild+recollect: the
@@ -1361,11 +2467,12 @@ def _run_selected_with_recovery(
                 rdur,
                 rres,
                 len(deselected),
+                attempts_used=crash_attempt,
             )
-            return _prepend_events(recovery_warnings^, fr^)
+            return _prepend_events(pre_stream^, fr^)
 
         attempts += 1
-        recovery_warnings.append(
+        pre_stream.append(
             Event.warning(
                 "stale-name",
                 (
@@ -1388,7 +2495,7 @@ def _run_selected_with_recovery(
                 Event.internal_error("build", config.mojo_path, 0)
             )
         if bo.terminal:
-            return _prepend_events(recovery_warnings^, bo.result.copy())
+            return _prepend_events(pre_stream^, bo.result.copy())
         binary = bo.binary
         canonical = bo.canonical
         build_argv = bo.build_argv.copy()
@@ -1409,7 +2516,7 @@ def _run_selected_with_recovery(
         except:
             return FileResult.internal(Event.internal_error("probe", binary, 0))
         if po.terminal:
-            return _prepend_events(recovery_warnings^, po.result.copy())
+            return _prepend_events(pre_stream^, po.result.copy())
         universe = po.universe.copy()
         var sr = select_from(universe, c.rel, c.intent, config.keyword)
         selected = sr.selected.copy()
@@ -1427,6 +2534,7 @@ def _run_selection[
     plan: OperandParse,
     mut reporter: CompositeReporter[*Rs],
     mut summary: Summary,
+    mut reg: BuildRegistry,
 ) raises -> SelectionSummary:
     """The SELECTION sub-session: probe every run file, then run the selection.
 
@@ -1437,7 +2545,6 @@ def _run_selection[
     raises out to exit 4; a machinery failure resolves to exit 3.
     """
     var nroot = normalize_root(root)
-    var reg = BuildRegistry()
     var collected = List[_Collected]()
     var interrupted = False
     var internal_error = False
@@ -1574,6 +2681,7 @@ def _run_selection[
             interrupted,
             internal_error,
             False,
+            List[_CrashFile](),
         )
 
     # Collection is known: emit the run-wide totals before any body runs.
@@ -1590,6 +2698,7 @@ def _run_selection[
     var test_totals = TestCounts.zeros()
     var ran_files = 0
     var drift = False
+    var crash_files = List[_CrashFile]()
 
     for ci in range(len(collected)):
         if interrupt_requested():
@@ -1610,6 +2719,10 @@ def _run_selection[
             summary.counts[fr.outcome.code] += 1
             run_outcomes.extend(fr.exit_outcomes.copy())
             ran_files += 1
+            if fr.outcome == Outcome.CRASH:
+                crash_files.append(
+                    _CrashFile(c.rel, c.binary, c.selected.copy())
+                )
             # Mirror the runnable branch's early-stop below (and the
             # non-selection loop's): a TERMINAL file — compile error, probe
             # crash, probe timeout, or malformed suite — must honor -x /
@@ -1638,6 +2751,7 @@ def _run_selection[
                     List[UInt8](),
                     List[UInt8](),
                     deselected_tests=len(c.deselected),
+                    slow=is_slow(c.bdur, 0.0),
                 )
             )
             test_totals.deselected += len(c.deselected)
@@ -1666,6 +2780,8 @@ def _run_selection[
         summary.counts[fr.outcome.code] += 1
         run_outcomes.extend(fr.exit_outcomes.copy())
         ran_files += 1
+        if fr.outcome == Outcome.CRASH:
+            crash_files.append(_CrashFile(c.rel, c.binary, c.selected.copy()))
         if config.exitfirst and fr.outcome.is_failing():
             break
         if (
@@ -1681,7 +2797,380 @@ def _run_selection[
         interrupted,
         internal_error,
         drift,
+        crash_files^,
     )
+
+
+# --- The CRASH-ATTRIBUTION post-pass: bounded isolation reruns. ---------------
+#
+# A CRASH verdict is honest but unhelpful: the process died, but the verdict
+# cannot say WHICH test killed it. This post-pass re-runs a crashed file's tests
+# one at a time and names the first that dies by signal.
+#
+# It is SECONDARY EVIDENCE and NEVER a verdict input. Everything below emits
+# `CrashAttribution` events and the one loud announcement, and touches NOTHING
+# else: not `summary.counts`, not `run_outcomes`, not the exit code, not the
+# file's `FileFinished`. That is the whole doctrine — a crashed file's verdict
+# and the process exit code are identical whether attribution names a culprit,
+# fails to reproduce the crash, or never runs at all. UNATTRIBUTED stands
+# whenever isolation does not reproduce; the pass never guesses.
+
+
+@fieldwise_init
+struct _CrashFile(Copyable, Movable):
+    """One CRASH file queued for attribution: its path and the binary that ran.
+
+    The binary is carried, never reconstructed from `rel`: a crash-class BUILD
+    retry rebuilds to `build/bin/<mangled>.attempt-N` and RUNS that, so only the
+    run itself knows what actually crashed.
+    """
+
+    var rel: String
+    """The root-relative path of the crashed file."""
+    var binary: String
+    """The binary its crashed run executed."""
+    var selected: List[String]
+    """The test names actually SELECTED in this run (empty = no selection, all
+    names). Attribution isolates only these, never a deselected test that never
+    ran under the user's `-k`/`--only`."""
+
+
+def _secs_since(started_ns: UInt) -> Float64:
+    """Wall seconds elapsed since a `perf_counter_ns` reading. Never raises."""
+    return Float64(perf_counter_ns() - started_ns) / 1.0e9
+
+
+@fieldwise_init
+struct _AttributionListing(Copyable, Movable):
+    """The binary and the source-order test names to isolate for one file."""
+
+    var ok: Bool
+    """Whether a qualifying listing and a runnable binary were both recovered."""
+    var binary: String
+    """The root-relative built binary to re-run under `--only`."""
+    var names: List[String]
+    """The file's test names in SOURCE order (the listing's order; never sorted).
+    """
+
+
+def _attribution_probe(
+    mut runtime: ExecRuntime,
+    config: RunnerConfig,
+    root: String,
+    rel: String,
+    binary: String,
+) raises -> _AttributionListing:
+    """Re-probe `binary` with `--skip-all` for its test-name universe.
+
+    The FALLBACK when the registry holds no qualifying listing for `rel` — the
+    plain (non-selection) run loop never probes, so a crashed file from it
+    arrives here unlisted.
+
+    Deliberately NOT `_probe_file`: that function exists to give a file a
+    VERDICT, and attribution must never produce one. It builds a terminal
+    `FileResult`/`FileFinished` for a non-qualifying probe and records into the
+    registry, both of which would be wrong here — the file's verdict is already
+    settled. This probe also runs under the ISOLATION deadline rather than
+    `--timeout`, so a `--timeout 0` run cannot hang the pass. Anything short of a
+    clean exit carrying a qualifying listing simply yields `ok = False`, which
+    the caller renders as PROBE_FAILED.
+
+    Raises:
+        Error: only if the `exec` machinery itself fails; the caller catches it.
+    """
+    var argv = List[String]()
+    argv.append(binary)
+    argv.append("--skip-all")
+    var pres = run_supervised(
+        runtime,
+        ProcessSpec.command_in(
+            argv^, root, isolation_timeout_secs(config.timeout_secs) * 1000
+        ),
+    )
+    var term = pres.termination
+    if not term.is_exited():
+        # Signaled, timed out, or unspawnable: no listing to be had.
+        return _AttributionListing(False, binary, List[String]())
+    var canonical = canonicalize(root + "/" + rel)
+    var trusted = resolve_report(
+        lossy_utf8(pres.stdout_bytes), canonical, pres.stdout_truncated
+    )
+    if trusted.is_overflow:
+        return _AttributionListing(False, binary, List[String]())
+    if collection_disqualifier(trusted.report) != "":
+        return _AttributionListing(False, binary, List[String]())
+    return _AttributionListing(
+        True, binary, collection_names(trusted.report.copy())
+    )
+
+
+def _attribution_listing(
+    mut runtime: ExecRuntime,
+    config: RunnerConfig,
+    root: String,
+    rel: String,
+    binary: String,
+    reg: BuildRegistry,
+) raises -> _AttributionListing:
+    """The qualifying listing for `rel`: the registry's, else a fresh probe.
+
+    PREFERS the registry: the selection/collect paths already probed every file
+    with `--skip-all` and recorded the qualifying node-id listing, so re-probing
+    would spawn a process to learn what is already known. The registry's listing
+    is stored as `rel::name` node ids; the names are recovered by stripping that
+    prefix, preserving SOURCE order.
+
+    `binary` is the path the file's crashed run ACTUALLY executed, carried here
+    from that run rather than reconstructed. Reconstructing `build/bin/<mangled>`
+    would be wrong: a crash-class BUILD retry rebuilds to
+    `build/bin/<mangled>.attempt-N` and then RUNS that binary, so a file whose
+    rebuilt binary crashes at runtime earns its CRASH verdict on a path the
+    mangled name does not name. Attribution would then probe a binary that either
+    does not exist (a useless PROBE_FAILED) or — far worse — is a STALE leftover
+    from an earlier run, and could name a culprit out of code that never ran: a
+    MISLEADING attribution. The pass reruns the binary that crashed, and nothing
+    else.
+
+    The registry's listing is trusted only when its entry describes the SAME
+    binary that crashed — a listing read off a different build is not this
+    crash's test universe.
+
+    The plain run loop keeps no registry entry, so its crashed files fall back to
+    a fresh probe. A missing binary or a non-qualifying probe yields
+    `ok = False` -> PROBE_FAILED.
+
+    Raises:
+        Error: only if the `exec` machinery itself fails; the caller catches it.
+    """
+    if binary == "" or not exists(root + "/" + binary):
+        return _AttributionListing(False, binary, List[String]())
+    if reg.has(rel):
+        var bp = reg.get(rel)
+        if bp.probed and bp.qualified and bp.binary_path == binary:
+            var prefix = rel + "::"
+            var names = List[String]()
+            for node_id in bp.listing:
+                names.append(String(node_id.removeprefix(prefix)))
+            return _AttributionListing(True, binary, names^)
+    return _attribution_probe(runtime, config, root, rel, binary)
+
+
+def _attribute_one[
+    *Rs: Reporter
+](
+    mut runtime: ExecRuntime,
+    config: RunnerConfig,
+    root: String,
+    rel: String,
+    binary: String,
+    selected: List[String],
+    reg: BuildRegistry,
+    pass_started_ns: UInt,
+    mut reporter: CompositeReporter[*Rs],
+) raises -> Bool:
+    """Attribute ONE crashed file, emitting exactly one `CrashAttribution`.
+
+    Runs each of the file's tests alone (`--only <name>`) in SOURCE order and
+    stops at the FIRST rerun that dies by signal — that test is the culprit
+    (ATTRIBUTED). Under a `-k`/`--only` selection, only the SELECTED names are
+    isolated (`selected` non-empty restricts the candidates), so attribution can
+    never name a DESELECTED test that never ran in the user's run. Every other
+    stop renders its own typed disposition:
+    NO_REPRODUCTION when every test ran alone without crashing, RUN_CAP or
+    TIME_BUDGET when a bound cut the search short, PROBE_FAILED when the listing
+    could not be recovered or a rerun could not be spawned.
+
+    Isolation reruns are NEVER retried: `--retries` re-runs a crash-class failure
+    to decide a VERDICT, and this pass decides no verdict — a crash here is the
+    ANSWER it is looking for, and re-running it would only spend the budget.
+
+    Returns:
+        False iff an interrupt ABANDONED the pass (the caller stops immediately
+        and emits nothing further); True otherwise, including for every
+        disposition — a stopped search is a normal, fully-reported outcome.
+
+    Raises:
+        Error: never in practice — every `exec` failure is caught and rendered as
+            PROBE_FAILED, because attribution must not be able to fail a session.
+    """
+    var file_started_ns = perf_counter_ns()
+
+    # The SESSION budget is checked HERE, before the listing — not only inside
+    # the rerun loop below. Recovering a listing can itself cost a probe of up to
+    # the isolation deadline (the plain run loop records no registry entry, so
+    # EVERY one of its crashed files pays that probe). A pass that has already
+    # spent its budget must not buy one more probe per remaining file merely to
+    # earn the right to say TIME_BUDGET: with many crashed files under
+    # `--timeout 0` that is 60 s of diagnostics apiece, behind an exit code
+    # resolved long before. The file still gets its typed line; it just does not
+    # get a process.
+    var pre = attribution_step(1, 0, 0.0, _secs_since(pass_started_ns))
+    if pre.should_stop:
+        reporter.handle(
+            Event.crash_attribution(rel, pre.disposition, "", 0, 0.0)
+        )
+        return True
+
+    var listing: _AttributionListing
+    try:
+        listing = _attribution_listing(runtime, config, root, rel, binary, reg)
+    except:
+        listing = _AttributionListing(False, "", List[String]())
+    if interrupt_requested():
+        return False
+    if not listing.ok:
+        reporter.handle(
+            Event.crash_attribution(
+                rel,
+                AttributionDisposition.PROBE_FAILED,
+                "",
+                0,
+                _secs_since(file_started_ns),
+            )
+        )
+        return True
+
+    # Restrict to the names the user actually selected: a deselected test never
+    # ran in this session, so isolating it could name a culprit out of code the
+    # run never invoked. An empty selection (the plain run path) keeps them all.
+    var names = _select_names(listing.names, selected)
+
+    var timeout_ms = isolation_timeout_secs(config.timeout_secs) * 1000
+    var runs = 0
+    var index = 0
+    while True:
+        if interrupt_requested():
+            return False
+        var step = attribution_step(
+            len(names) - index,
+            runs,
+            _secs_since(file_started_ns),
+            _secs_since(pass_started_ns),
+        )
+        if step.should_stop:
+            reporter.handle(
+                Event.crash_attribution(
+                    rel,
+                    step.disposition,
+                    "",
+                    runs,
+                    _secs_since(file_started_ns),
+                )
+            )
+            return True
+
+        var name = names[index]
+        index += 1
+        var argv = List[String]()
+        argv.append(listing.binary)
+        argv.append("--only")
+        argv.append(name)
+        var res: ProcessResult
+        try:
+            res = run_supervised(
+                runtime, ProcessSpec.command_in(argv^, root, timeout_ms)
+            )
+        except:
+            # The machinery failed mid-pass. A verdict already stands, so this
+            # is a diagnostic that gave up, never a session failure.
+            reporter.handle(
+                Event.crash_attribution(
+                    rel,
+                    AttributionDisposition.PROBE_FAILED,
+                    "",
+                    runs,
+                    _secs_since(file_started_ns),
+                )
+            )
+            return True
+        var term = res.termination
+        if term.is_spawn_failed():
+            reporter.handle(
+                Event.crash_attribution(
+                    rel,
+                    AttributionDisposition.PROBE_FAILED,
+                    "",
+                    runs,
+                    _secs_since(file_started_ns),
+                )
+            )
+            return True
+        # Counted only now: a spawn that never produced a process is not a rerun,
+        # and reporting one would overstate what the pass actually tried.
+        runs += 1
+        if term.is_timed_out() and interrupt_requested():
+            return False
+        if term.is_signaled():
+            # The culprit: this test, run entirely alone, killed the process.
+            reporter.handle(
+                Event.crash_attribution(
+                    rel,
+                    AttributionDisposition.ATTRIBUTED,
+                    name,
+                    runs,
+                    _secs_since(file_started_ns),
+                )
+            )
+            return True
+        # Anything else — a pass, a failing assertion, a deadline — is NOT the
+        # crash this pass is hunting. Say nothing about it and move on: only a
+        # reproduced crash may name a culprit.
+
+
+def _run_crash_attribution[
+    *Rs: Reporter
+](
+    mut runtime: ExecRuntime,
+    config: RunnerConfig,
+    root: String,
+    crash_files: List[_CrashFile],
+    reg: BuildRegistry,
+    mut reporter: CompositeReporter[*Rs],
+) raises:
+    """The bounded crash-attribution post-pass over every CRASH file.
+
+    Runs once, after every file has its verdict and before the summary band, in
+    DISCOVERY order. The runner is sequential at this capacity, so "after the
+    pool drains" is simply "after the run loop".
+
+    LOUD before it starts: a watcher of a long run sees the announcement before
+    any extra process is spawned, so the reruns are never mysterious. Each file
+    then renders exactly one typed line. When the session budget is gone the
+    remaining files still get their line (TIME_BUDGET) rather than vanishing —
+    the pass accounts for every crashed file it was asked about.
+
+    SKIPPED entirely under interrupt, and abandoned the moment one arrives
+    mid-pass: exit 2 must not wait on diagnostics.
+    """
+    if len(crash_files) == 0 or interrupt_requested():
+        return
+    reporter.handle(
+        Event.warning(
+            "crash-attribution-start",
+            (
+                "re-running the crashed file(s) one test at a time to name the"
+                " culprit ("
+                + String(len(crash_files))
+                + " file(s); bounded and best-effort). This is SECONDARY"
+                " diagnostics: the CRASH verdict already stands and nothing"
+                " found here can change it or the exit code"
+            ),
+        )
+    )
+    var pass_started_ns = perf_counter_ns()
+    for cf in crash_files:
+        if not _attribute_one(
+            runtime,
+            config,
+            root,
+            cf.rel,
+            cf.binary,
+            cf.selected.copy(),
+            reg,
+            pass_started_ns,
+            reporter,
+        ):
+            return
 
 
 def run_session[
@@ -1719,10 +3208,33 @@ def run_session[
     # Discovery. A discover: usage error propagates to main (exit 4).
     var disc = discover(config, root)
 
+    # Sharding partitions the discovered RUN files (never the gates): keep only
+    # the subset this shard owns so every downstream count, casualty, run loop,
+    # and the exit-code multiset see exactly this shard's work.
+    var shard_label = String("")
+    var sharded_out_count = 0
+    if config.shard_n > 0:
+        var before = len(disc.run_files)
+        disc.run_files = partition(
+            disc.run_files.copy(),
+            config.shard_mode,
+            config.shard_m,
+            config.shard_n,
+        )
+        sharded_out_count = before - len(disc.run_files)
+        shard_label = String(config.shard_m) + "/" + String(config.shard_n)
+
     var selected = len(disc.gate_files) + len(disc.run_files)
     var excluded = len(disc.excluded)
     reporter.handle(
-        Event.session_started(root, config.mojo_path, selected, excluded)
+        Event.session_started(
+            root,
+            config.mojo_path,
+            selected,
+            excluded,
+            shard_label=shard_label,
+            sharded_out_count=sharded_out_count,
+        )
     )
 
     var summary = Summary.zeros()
@@ -1752,6 +3264,14 @@ def run_session[
     var internal_error = False
     var precompile_failed = False
     var drift = False
+    # The registry the selection/collect probe machinery records builds and
+    # qualifying listings into. The plain run loop keeps no entry here — it never
+    # probes — so the attribution post-pass falls back to a fresh probe for its
+    # files. Diagnostics read it; nothing else does.
+    var reg = BuildRegistry()
+    # The CRASH files, in discovery order, for the bounded attribution post-pass.
+    # Collected as verdicts land; feeds no count, no multiset, no exit code.
+    var crash_files = List[_CrashFile]()
 
     # Precompile steps, in listed order. Each success widens the include set.
     var includes = config.include_paths.copy()
@@ -1769,6 +3289,12 @@ def run_session[
             var pr = _run_precompile(
                 runtime, config, root, pc.src, pc.out, includes
             )
+            # The step's own attempt record first, in order: each retried
+            # attempt's TRY line, its residual warning, and a success-after-retry
+            # warning — the session-level signal that stands in for the FLAKY
+            # verdict a file would get.
+            for ev in pr.events:
+                reporter.handle(ev)
             if pr.interrupted:
                 interrupted = True
                 break
@@ -1786,6 +3312,12 @@ def run_session[
                         pr.compiler_output,
                         len(casualty_files),
                         casualties=casualty_files,
+                        ending_known=pr.ending_known,
+                        term_kind=pr.term.kind,
+                        term_value=pr.term.value,
+                        escalated=pr.term.escalated,
+                        timeout_seconds=pr.timeout_seconds,
+                        attempts_used=pr.attempts_used,
                     )
                 )
                 break
@@ -1870,7 +3402,7 @@ def run_session[
     if proceed_runs and sel_active:
         var plan = parse_operands(config.paths)
         var sel = _run_selection(
-            runtime, config, root, disc, includes, plan, reporter, summary
+            runtime, config, root, disc, includes, plan, reporter, summary, reg
         )
         run_outcomes.extend(sel.run_outcomes.copy())
         test_totals.passed += sel.test_totals.passed
@@ -1884,6 +3416,7 @@ def run_session[
             internal_error = True
         if sel.drift:
             drift = True
+        crash_files.extend(sel.crash_files.copy())
     elif proceed_runs:
         for ri in range(len(disc.run_files)):
             if interrupt_requested():
@@ -1913,6 +3446,14 @@ def run_session[
                 summary.counts[fr.outcome.code] += 1
                 run_outcomes.extend(fr.exit_outcomes.copy())
                 ran_files += 1
+                if fr.outcome == Outcome.CRASH:
+                    # The plain run path runs no selection, so every test name is
+                    # an attribution candidate: an empty selected set.
+                    crash_files.append(
+                        _CrashFile(
+                            disc.run_files[ri], fr.binary_path, List[String]()
+                        )
+                    )
                 if config.exitfirst and fr.outcome.is_failing():
                     break
                 if (
@@ -1949,9 +3490,39 @@ def run_session[
     else:
         code = exit_code_for(run_outcomes)
 
+    # The bounded crash-attribution post-pass. It runs HERE — after every file
+    # has its verdict, after the summary is tallied, and after `code` is already
+    # resolved above — precisely so it CANNOT influence any of them: the only
+    # thing left for it to do is emit `CrashAttribution` events. A crashed file's
+    # verdict and this process's exit code are byte-identical whether the pass
+    # names a culprit, fails to reproduce the crash, or is skipped entirely. It
+    # is skipped under an interrupt: exit 2 must not wait on diagnostics. A raise
+    # out of it would be a machinery failure AFTER the run is decided, so it is
+    # caught and dropped rather than allowed to rewrite a settled exit code.
+    if not interrupted:
+        try:
+            _run_crash_attribution(
+                runtime, config, root, crash_files, reg, reporter
+            )
+        except:
+            pass
+
+    # An interrupt delivered DURING the attribution pass (Ctrl-C mid-diagnostics)
+    # must dominate the already-resolved code: exit 2 never waits on diagnostics.
+    code = _finalize_exit_code(code, interrupt_requested())
+
     var wall = Float64(perf_counter_ns() - started_ns) / 1.0e9
+    # A file that passed only after a crash-class retry tallied under FLAKY; that
+    # run-wide count rides the SessionFinished summary line.
+    var flaky_files = summary.count_of(Outcome.FLAKY)
     reporter.handle(
-        Event.session_finished(summary^, wall, code, test_counts=test_totals)
+        Event.session_finished(
+            summary^,
+            wall,
+            code,
+            test_counts=test_totals,
+            flaky_files=flaky_files,
+        )
     )
     return code
 
@@ -2048,6 +3619,17 @@ def run_collect(
             build/probe failure is caught here and folded into the result.
     """
     var disc = discover(config, root)  # a discover: usage error propagates.
+
+    # Collect honors the same shard partition as a run: the listing is exactly
+    # this shard's node ids. Gate files are never sharded (collect has none).
+    if config.shard_n > 0:
+        disc.run_files = partition(
+            disc.run_files.copy(),
+            config.shard_mode,
+            config.shard_m,
+            config.shard_n,
+        )
+
     var reg = BuildRegistry()
     var includes = config.include_paths.copy()
     var node_ids = List[String]()

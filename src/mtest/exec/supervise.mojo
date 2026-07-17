@@ -13,7 +13,7 @@ from std.memory import UnsafePointer, alloc, memset_zero
 from mtest.exec.capture import BoundedCapture
 from mtest.exec.result import ProcessResult
 from mtest.exec.signals import ExecRuntime, interrupt_requested
-from mtest.exec.spec import ProcessSpec
+from mtest.exec.spec import DEFAULT_GRACE_MS, ProcessSpec
 from mtest.exec.termination import Termination
 
 comptime _BytePtr = UnsafePointer[UInt8, MutUntrackedOrigin]
@@ -23,8 +23,14 @@ comptime _DEFAULT_CAP_BYTES = 8 * 1024 * 1024
 """Default per-stream capture bound: 8 MiB (head + tail)."""
 comptime _POLL_SLICE_MS = 50
 """Maximum normal poll latency for deadline and interrupt checks."""
-comptime _GRACE_MS = 300
-"""Grace between process-group SIGTERM and SIGKILL."""
+comptime _GRACE_MS = DEFAULT_GRACE_MS
+"""Fallback grace between process-group SIGTERM and SIGKILL.
+
+The deadline/interrupt escalation reads `spec.grace_ms` (which defaults to this
+same value), so a caller can widen the grace for a child that needs longer to
+die cleanly. This constant remains the grace for the machinery-error abort path,
+where there is no spec in hand and nothing is mid-flight worth waiting on.
+"""
 comptime _POST_LEADER_MS = 300
 """Bound for group sweep and nonblocking drain after leader observation."""
 comptime _POST_LEADER_SLICE_MS = 10
@@ -454,7 +460,7 @@ def _supervise_open_process(
                     killing = True
                     timed_out = True
                     kill_time = now
-            elif not escalated and now - kill_time >= _GRACE_MS:
+            elif not escalated and now - kill_time >= spec.grace_ms:
                 _ = _group(handle, _GROUP_KILL, native)
                 escalated = True
 

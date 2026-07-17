@@ -32,11 +32,13 @@ UNIT_SUITES = {
     "test_config.mojo",
     "test_discover_fnmatch.mojo",
     "test_discover_normalize.mojo",
+    "test_exec_spec.mojo",
     "test_model_events.mojo",
     "test_model_exit_code.mojo",
     "test_model_node_id.mojo",
     "test_model_outcome.mojo",
     "test_model_parse_disposition.mojo",
+    "test_model_slow.mojo",
     "test_model_test_counts.mojo",
     "test_model_test_result.mojo",
     "test_protocol_corruption.mojo",
@@ -46,9 +48,15 @@ UNIT_SUITES = {
     "test_report_recording.mojo",
     "test_select_logic.mojo",
     "test_select_operands.mojo",
+    "test_session_attribution.mojo",
+    "test_session_clamp.mojo",
     "test_session_classify.mojo",
     "test_session_detail.mojo",
     "test_session_mangle.mojo",
+    "test_session_precompile_paths.mojo",
+    "test_session_resilience.mojo",
+    "test_session_retry_class.mojo",
+    "test_session_shard.mojo",
     "test_session_verdict.mojo",
 }
 INTEGRATION_SUITES = {
@@ -76,6 +84,7 @@ INTEGRATION_SUITES = {
     "test_session_maxfail.mojo",
     "test_session_outcomes.mojo",
     "test_session_precompile.mojo",
+    "test_session_rmtree.mojo",
     "test_session_selection.mojo",
     "test_transcripts_smoke.mojo",
 }
@@ -107,6 +116,7 @@ PROTOCOL_FIXTURES = {
     "noisy.mojo",
     "passing.mojo",
     "raising.mojo",
+    "segfault.mojo",
     "skipped.mojo",
     "twofail.mojo",
 }
@@ -331,7 +341,7 @@ def check_protocol_asset_layout() -> None:
     actual_snapshots = tuple(
         sorted(path.name for path in snapshots.glob("*.txt") if path != manifest)
     )
-    if listed != actual_snapshots or len(listed) != 21:
+    if listed != actual_snapshots or len(listed) != 22:
         raise AssertionError(
             "protocol snapshot manifest/membership mismatch: "
             f"listed={list(listed)}, actual={list(actual_snapshots)}"
@@ -355,7 +365,7 @@ def check_e2e_layout() -> None:
         path.relative_to(REPO_ROOT).as_posix()
         for path in e2e_root.rglob("test_*.mojo")
     }
-    if rows != discovered or len(rows) != 25:
+    if rows != discovered or len(rows) != 29:
         raise AssertionError(
             "e2e manifest/discovery mismatch: "
             f"missing={sorted(discovered - rows)}, stale={sorted(rows - discovered)}"

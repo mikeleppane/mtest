@@ -1,6 +1,6 @@
 ---
 name: improve-architecture
-description: Explore the mtest codebase, surface architectural friction, and propose module-deepening refactors as actionable plan documents under docs/plans/. Use when asked to review architecture, "make this cleaner", "reduce coupling", "this file is doing too much", or to evaluate whether a module pulls its weight. Tuned to this repo's one-directional layering (model → config → discover|protocol|report → exec → session → cli), the principle that exec is the deepest module, its pure-Mojo src/ rule, and the reality that src/mtest/ is still an empty package — right now the modules worth this scrutiny are the harness scripts under scripts/. Produces a durable refactor plan, not edits — execution is a separate, approved step.
+description: Explore the mtest codebase, surface architectural friction, and propose module-deepening refactors as actionable plan documents under docs/plans/. Use when asked to review architecture, "make this cleaner", "reduce coupling", "this file is doing too much", "is this abstraction worth it", or to evaluate whether a module pulls its weight. Tuned to this repo's one-directional layering (model → config → discover|protocol|report → exec → session → cli), the principle that exec is the deepest module, its pure-Mojo src/ rule, and the conviction that architecture survives years of phases by having fewer parts, not more extension points. Covers the built-out layers under src/mtest/ and the harness scripts under scripts/. Produces a durable refactor plan, not edits — execution is a separate, approved step.
 ---
 
 # Improve Architecture (mtest)
@@ -22,6 +22,14 @@ complex as implementation — and this repo's higher-stakes variant: a **leaked
 seam**, where callers see internals that a later phase must be free to replace or
 that expose an fd, a syscall, or a raw termination code.
 
+The inverse failure is just as real and this skill hunts it with the same
+energy: **needless structure** — a seam nothing varies behind, a layer that only
+forwards, an interface with one implementation and no doctrine naming it. Depth
+is the ratio of implementation hidden to interface exposed, so every construct
+that hides nothing makes the system *shallower* in aggregate. The architecture
+that withstands years of change is the one with the fewest parts, each earning
+its keep — not the one with the most extension points.
+
 Project rules live in [AGENTS.md](../../../AGENTS.md) and override this skill.
 For the per-edit coding contract, cite
 [mojo-coding-guidance](../mojo-coding-guidance/SKILL.md); this skill is about
@@ -39,28 +47,26 @@ friction clearly warrants one) — say which you're doing before you do it.
 
 ## Where the codebase actually is right now
 
-Today, `src/mtest/` is one file: `__init__.mojo` with a module docstring — a
-compiling, intentionally empty package. Most of the layering and seam guidance
-below describes the *target* shape for the phases that build out the runner.
-Applying it to `src/` today means judging a codebase that isn't there yet —
-don't manufacture findings against modules that don't exist.
+The layers have landed: `src/mtest/` holds `model`, `config`, `discover`,
+`protocol`, `report`, `exec`, `session`, and `cli`, plus the `cache` and
+`select` packages, with the suites under `tests/` exercising them at their
+boundaries. The layering and seam guidance below is judged against **real
+imports now** — start every pass by grepping them, not by trusting the diagram.
 
-What *is* fair game today is the harness under `scripts/`. `gen_transcripts.py`
-is the transcript generator and normalizer that `transcripts_check.sh` drives,
-and it is the harness's own deep module: `normalize(raw, *, is_crash_stream) ->
-text` is one call that hides the anchored timing-token rewrite (only on
-report-grammar lines at or after the LAST `Running <N> tests for`), the
-repo-root → `<REPO>` rewrite, the stack-dump collapse, and the framing guard —
-none of which leaks to `generate()`. Above it, `generate()` hides
-build-fixture → run-scenario → normalize → self-verify → dedup behind a single
-`() -> dict[name, transcript]`, and `verify_scenario()` concentrates every
-structural hard-assert in one place. That is already a small interface over a
-substantial implementation. Treat a change that spreads normalization logic into
-`render`, or that reaches around `normalize` to scrub a byte ad hoc, or that
-inlines a self-verify check somewhere other than `verify_scenario`, exactly like
-a layering violation in `src/` — same discipline, different layer names. Once
-modules land under `src/mtest/`, this skill's center of gravity moves there;
-until then, `scripts/` is where an architecture pass earns its keep.
+The harness under `scripts/` remains fair game with the same discipline.
+`gen_transcripts.py` is the transcript generator and normalizer that
+`transcripts_check.sh` drives, and it is the harness's own deep module:
+`normalize(raw, *, is_crash_stream) -> text` is one call that hides the
+anchored timing-token rewrite (only on report-grammar lines at or after the
+LAST `Running <N> tests for`), the repo-root → `<REPO>` rewrite, the stack-dump
+collapse, and the framing guard — none of which leaks to `generate()`. Above
+it, `generate()` hides build-fixture → run-scenario → normalize → self-verify →
+dedup behind a single `() -> dict[name, transcript]`, and `verify_scenario()`
+concentrates every structural hard-assert in one place. Treat a change that
+spreads normalization logic into `render`, or that reaches around `normalize`
+to scrub a byte ad hoc, or that inlines a self-verify check somewhere other
+than `verify_scenario`, exactly like a layering violation in `src/` — same
+discipline, different layer names.
 
 ---
 
@@ -138,17 +144,26 @@ Walk the tree and the imports. Common findings, roughly by value:
 4. **A shallow module.** A wrapper whose interface is as wide as its body — e.g. a
    "runner" struct that forwards `discover` + `build` + `run` + `parse` and
    exposes all four. Either deepen it (hide the pipeline) or inline it.
-5. **A leaky public surface.** `__init__.mojo` re-exporting internal helpers, or
+5. **An abstraction that never varies.** A trait with one conforming
+   implementation and no AGENTS.md-named seam, a `make_*` factory returning its
+   only concrete type, a facade re-exporting another module's surface, a config
+   struct wrapping one value. These are speculative structure — added for a
+   future that will arrive with different cases — and the fix is usually
+   **deletion or inlining**, the one refactor that makes the system deeper by
+   removing interface. (The `Reporter` trait is the counter-example: doctrine
+   named that seam before the second reporter existed, and three reporters now
+   flow through it.)
+6. **A leaky public surface.** `__init__.mojo` re-exporting internal helpers, or
    callers importing past the package (`from mtest.exec import _drain_pipe`)
    because the clean name isn't exported. Fix the surface, not the callers.
-6. **Duplicated parsing/fixture logic across tests.** Several test files each
+7. **Duplicated parsing/fixture logic across tests.** Several test files each
    re-implementing the transcript walker or the temp-tree builder — extract a
    shared helper the suite owns (under `tests/`, on the `-I tests` path), don't
    let the next copy land.
-7. **A struct exposing raw fields** that callers mutate directly, so an invariant
+8. **A struct exposing raw fields** that callers mutate directly, so an invariant
    (a `ProcessResult` whose termination and captured streams must stay
    consistent) can't be enforced. Deepen behind methods.
-8. **Flat pile with no boundary.** Many files in one package with no re-exported
+9. **Flat pile with no boundary.** Many files in one package with no re-exported
    surface — navigational friction; the fix is a package split + `__init__.mojo`,
    not a rewrite.
 
@@ -156,14 +171,20 @@ Walk the tree and the imports. Common findings, roughly by value:
 
 ## What "deeper" looks like here
 
-- **Today's example is already in the harness.** `normalize(raw, *,
+- **The harness shows the shape.** `normalize(raw, *,
   is_crash_stream)` (`scripts/gen_transcripts.py`) is deep: one call hides the
   anchored rewrite, the repo-root scrub, the stack collapse, and the framing
   guard, and nothing about the anchor arithmetic leaks to `render`.
-- **`exec` will earn the same shape.** `run_supervised(spec) -> ProcessResult`
-  hides fork/pipes/poll/kill entirely — the deepest interface-to-implementation
-  ratio in the repo, and exactly the boundary the `exec` unit tests exercise by
-  supervising system binaries.
+- **`exec` has that shape in the tree.** `run_supervised(spec) -> ProcessResult`
+  (`src/mtest/exec/supervise.mojo`) hides fork/pipes/poll/kill entirely — the
+  deepest interface-to-implementation ratio in the repo, and exactly the
+  boundary the `exec` tests exercise by supervising system binaries.
+- **Deeper is often smaller.** Deepening usually means *removing* surface — an
+  internal un-exported, a pass-through inlined, two calls collapsed into one —
+  not adding a layer. A new layer that forwards is width wearing depth's
+  clothes: it adds a name and a jump while hiding nothing. Before proposing any
+  new interface, ask what breaks if the construct is deleted instead;
+  "nothing" means delete.
 - **Test at the boundary.** If testing a module forces you to construct its
   internals (an fd, a half-built pipe), the boundary is in the wrong place. A deep
   module is tested through its public functions on small inputs (see
@@ -175,10 +196,13 @@ Walk the tree and the imports. Common findings, roughly by value:
   `ProcessResult` (every termination maps to exactly one outcome, never raises) is
   deeper than one that raises — the caller needs no error path.
 
-### The deep modules to come
+### The deep modules and the shapes they must keep
 
-Frame deepening opportunities in `src/mtest/` around the layers the plan already
-names — each should end up a simple interface over a substantial implementation:
+The layers under `src/mtest/` are built; judge each against the shape it was
+planned to keep — a simple interface over a substantial implementation. (The
+signatures below are the intended shapes; hold the real exported names to the
+same ratio, and treat surface *growth* on these modules as friction to explain,
+not progress to applaud:)
 
 - **`exec`** — `run_supervised(spec) -> ProcessResult` over fork/exec, pipes,
   poll, the group-kill protocol, and fd cleanup. The syscalls stay internal.
@@ -195,12 +219,12 @@ names — each should end up a simple interface over a substantial implementatio
 
 ## The exploration → plan flow
 
-1. **Map before judging.** While `src/mtest/` is still just `__init__.mojo`, map
-   `scripts/` instead: read `gen_transcripts.py` and confirm normalization lives
-   in `normalize`, self-verification in `verify_scenario`, and orchestration in
-   `generate` — nothing reaching around those seams. Once modules land under
-   `src/mtest/`, list them, read each `__init__.mojo`, and sketch the actual
-   import graph (grep the import lines); compare it to the intended layering above.
+1. **Map before judging.** List the packages under `src/mtest/`, read each
+   `__init__.mojo`, and sketch the actual import graph (grep the `from mtest.`
+   import lines); compare it to the intended layering above. For the harness,
+   read `gen_transcripts.py` and confirm normalization lives in `normalize`,
+   self-verification in `verify_scenario`, and orchestration in `generate` —
+   nothing reaching around those seams.
 2. **Collect friction**, not fixes yet. Note each smell with a `file:line` and
    one sentence on why it costs the reader, the tests, or a later phase.
 3. **Cluster into refactors.** Group related smells into a handful of named
@@ -235,7 +259,15 @@ never "per the plan".
 - **No premature abstraction.** Two similar reporters are cheaper to read than one
   clever generic — the one-engine-vs-many call belongs to the phase that has all
   the reporters on the table, not to a cleanup. Extract a shared helper on the
-  *third* occurrence, not the second.
+  *third* occurrence, not the second. The per-construct version of this rule is
+  the rent test in [mojo-coding-guidance](../mojo-coding-guidance/SKILL.md):
+  a trait needs a second implementation or an AGENTS.md-named seam, a helper
+  needs a hidden decision or a second caller, a struct needs an invariant to
+  enforce.
+- **Deletion is the best refactor.** A pass that removes an interface, inlines a
+  wrapper, or drops a dead seam has *succeeded*, and a plan whose migration is
+  mostly deletions is the most trustworthy kind. Finding nothing to build is
+  not a failed pass; building something unneeded is.
 - **No feature work dressed up as architecture.** Parallelism, crash isolation,
   the cache, and the JUnit/GH reporters are their own phases with their own tests
   and plans. The architecture pass *protects seams*; it does not add a worker

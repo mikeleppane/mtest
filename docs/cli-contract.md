@@ -208,9 +208,20 @@ automatically added to `-I` so dependent test files resolve `from <name> import
 …`. In v1 precompiled packages are **always rebuilt** (no caching across
 invocations — the step is cheap and a wrong cache key is worse than a rebuild).
 
-If a precompile step fails, the session ends in **PRECOMPILE-ERROR**: there is no
-test identity to attach it to, so the runner prints one banner, lists every test
-file that depended on it as a casualty, and exits 1.
+Each attempt builds to a temp path beside OUT and is renamed onto OUT **only
+after it exits 0**, so a killed, crashed, or rejected attempt never touches OUT:
+a good package from an earlier run survives a failed step byte-for-byte, and no
+dependent ever builds against a half-written package. The step is bounded by
+`--compile-timeout` (§18) and gets the same crash-class `--retries` budget as a
+file build (§13): up to N extra attempts on a signal, a compile-timeout, or a
+compiler-crash signature, each on a fresh temp and a quarantined module cache. A
+precompile that only succeeds after a retry is not a FLAKY verdict — there is no
+test identity to carry one — but a loud success-after-retry warning.
+
+If a precompile step's attempts are all exhausted, the session ends in
+**PRECOMPILE-ERROR**: there is no test identity to attach it to, so the runner
+prints one banner naming the ending, lists every test file that depended on it
+as a casualty, and exits 1.
 
 ### 8.4 Forbidden build arguments
 
@@ -219,6 +230,12 @@ would take that control away are rejected as usage errors (exit 4): output
 selection (`-o`), emit-type selection (`--emit`), and any **extra source
 operand** (a positional path handed to `mojo build`). This applies to
 `--build-arg`, to `-I` misuse, and to post-`--` arguments alike.
+
+This build does not manage a build thread budget — there is no worker pool yet
+(§24), so a build spends whatever `mojo build` chooses by default. A build
+thread-count argument (`-j`, `--num-threads`) is therefore **not** a forbidden
+argument today; it is forwarded like any other `--build-arg`. Ownership of the
+build's parallelism arrives with the worker pool.
 
 ---
 
@@ -240,6 +257,11 @@ Otherwise: an interrupt dominates (→ 2); else an internal error (→ 3); else 
 failing outcome (→ 1); else nothing collected (→ 5); else 0. A user interrupt
 outranks an internal error because the run was truncated on purpose and its
 result is no longer authoritative.
+
+A `--shard` (§18) that owns no run files reaches exit 5 by the same
+nothing-collected rule — but only when nothing else ran: a shard whose gates ran
+(gates are never sharded) exits by its gate results, so exit 5 means *neither* a
+gate *nor* a shard-owned file ran.
 
 ---
 
@@ -271,6 +293,9 @@ interrupted sessions honest, even though they are not per-test "outcomes":
   line, never listed individually.
 - **EXCLUDED** — removed by `--exclude`. Reported loudly on the console (never
   silent).
+- **SHARDED-OUT** — a run file assigned to a different `--shard` (§18). Counted
+  in the session header (how many files this shard did not own), never listed
+  individually — the other shards run them, so naming each here would be noise.
 - **NOT-RUN** — never scheduled because `-x`, `--maxfail`, or an interrupt
   truncated the session. Shown in the summary so a truncated run can never
   masquerade as a complete one.
@@ -284,6 +309,18 @@ unattributed**. The runner never blames every test and never manufactures
 certainty. The file-level CRASH outcome is always authoritative; isolation
 reruns are secondary diagnostic evidence only.
 
+The attribution pass runs **after** the main session and is strictly bounded, so
+a pathological crasher can never hang the run: at most **32 isolation reruns per
+file**, each with a deadline of `min(--timeout, 60)` seconds, under a **120 s
+per-file** and **600 s per-session** wall-clock budget (checked before each
+rerun). Every crashed file ends with a typed stop reason — **attributed** (a
+single culprit reproduced), **no-reproduction** (isolation stayed green),
+**probe-failed** (an isolation rerun could not even be built or spawned),
+**run-cap** (the 32-rerun ceiling), or **time-budget** (a wall-clock budget) —
+and the file-level CRASH stands regardless. Isolation reruns are never subject to
+`--retries`, and the whole pass is **skipped under interrupt** (a truncated run's
+attribution is not worth the delay).
+
 ---
 
 ## 11. Stopping early
@@ -293,6 +330,9 @@ reruns are secondary diagnostic evidence only.
 - `--maxfail N` — stop after N failing **tests**. A file-level error outcome
   (crash, timeout, compile error, malformed suite) counts as one. `N=0` means
   no limit — the same 0-disables convention as `--timeout` and `--durations`.
+  Only a **final** failing outcome counts: a test that crashed on an earlier
+  attempt but passed on retry is FLAKY (§13), a pass, and contributes **0** to
+  the `--maxfail` tally.
 - `--gate PATH` (repeatable) — gate files run **first**, and a gate failure
   aborts the whole session immediately, regardless of `-x`. This is the
   smoke-test-first pattern: don't spend the pool if the smoke test is red.
@@ -319,17 +359,31 @@ reruns are secondary diagnostic evidence only.
 ## 13. Retries and flakiness
 
 `--retries N` (default 0) retries **crash-class steps only**. N is the number of
-*additional* attempts (N+1 total).
+*additional* attempts (N+1 total), and the loop resumes from the step that
+failed — a run that crashes is re-run against the already-built binary, not
+rebuilt.
 
-- **Crash-class** = termination by signal, a timeout, or compiler output
-  matching a crash signature. A nonzero exit with ordinary diagnostics is
-  deterministic and is **never** retried; neither is a failing assertion.
-- Retries apply uniformly to precompile, build, and run steps. Each retry uses a
-  fresh output path and a quarantined module cache (a killed compile can corrupt
-  the shared cache).
+- **Crash-class**, on the **run** step, is termination by signal or a deadline
+  kill (a `--timeout` expiry). On a **build** or **precompile** step it is
+  termination by signal, a `--compile-timeout` expiry, **or** a nonzero exit
+  whose stderr carries a compiler-crash signature (an ICE banner or stack dump).
+  Everything else is deterministic and is **never** retried: any run that exited
+  under its own control (a failing assertion, a `worse-of` disagreement, a
+  capture-overflow FAIL), an ordinary compile error (a nonzero exit with no
+  crash signature), a spawn failure, and an interrupt.
+- Each attempt uses a fresh output path; after a **compile** kill the rebuild
+  runs against a quarantined per-attempt module cache, since a killed compile
+  can corrupt the shared one. Each attempt is bounded by the same `--timeout` /
+  `--compile-timeout` budget as the first.
 - Every attempt's diagnostics are retained in the report. The **last** attempt's
   outcome is authoritative. A test that passes only after a retry is reported
-  **FLAKY** and, by default, passes CI (`--fail-on-flaky` is reserved).
+  **FLAKY** and, being a pass, exits 0 and by default passes CI
+  (`--fail-on-flaky` is reserved).
+
+Retries apply to precompile, build, and run steps. In this build the full
+build-and-run retry is wired on the default (non-selection) run path; crash-class
+**run** retries also apply under selection (`-k` or a node id), but build-side
+retries under selection are not yet wired (§24.3).
 
 ---
 
@@ -351,6 +405,21 @@ Child stdout and stderr are captured separately and byte-exactly.
 `--color WHEN` is `auto|always|never`; `NO_COLOR` is respected, and the flag
 wins over it. The console summary is ordered deterministically (§17), not by
 completion order. Console text layout and color are **informal** and may change.
+
+There is **no live progress counter** in this build (a running `k/n` line, which
+arrives with the worker pool); a file's result prints when the file finishes, and
+the summary band, the slowest-files list, and the failure detail (per-attempt
+`TRY` lines from `--retries`, verdict blocks) all print at completion. The
+deterministic surfaces (§17) — the summary band and the sort *order* of any list
+— never depend on completion order.
+
+**The `SLOW` annotation.** A build or run step whose wall time reaches **60 s**
+is flagged `SLOW`. It is an **informal** annotation, never an outcome: it does
+not appear in the outcome vocabulary (§10.1), never changes a verdict or the
+exit code, and is not part of the §17 determinism guarantee. Under `-v` the note
+names *which* step (build or run) crossed the threshold and its duration, so a
+comptime-stalled compile is visible at 60 s rather than only at the 600 s
+compile deadline.
 
 **Slowest files — `--durations N`** (`N` a non-negative integer). After the
 summary band, print the `N` slowest **files** by run-only wall-clock (the process time for the run step
@@ -457,28 +526,49 @@ never changes *what* is reported, only how fast.
 
 `-n, --workers N|auto` sets the worker count. `auto` sizing is runner-chosen and
 may tune across minor versions. Because `mojo build` is itself multi-threaded,
-`auto` is conservative (stacked cold compiles starve each other).
+`auto` is conservative (stacked cold compiles starve each other). The worker
+pool is a later concurrency milestone: **`-n`/`--workers` is not served in this
+build** (§24), which runs files sequentially.
 
 `--timeout SECS` (default 300, `0` disables) bounds a single file's **run**;
-exceeding it yields TIMEOUT. `--compile-timeout SECS` (default 600) bounds a
-single file's **build**; exceeding it yields COMPILE-TIMEOUT with a hint to split
-the module or exclude it. Timeout kills are signal-first (a terminate signal,
-then a grace period, then a hard kill) and reach the whole process tree, not just
-the direct child.
+exceeding it yields TIMEOUT. `--compile-timeout SECS` (default 600, `0`
+disables) bounds a single file's **build**; exceeding it yields COMPILE-TIMEOUT
+with a hint to split the module or exclude it. It kills after the same
+signal-first sequence with a compile-specific grace (~5s longer than a run kill,
+since a compiler unwinds more slowly). Timeout kills are signal-first (a
+terminate signal, then a grace period, then a hard kill) and reach the whole
+process tree, not just the direct child.
 
-**`--shard M/N` (not yet served).** Splits the discovered file set into `N`
-disjoint shards and runs only shard `M`'s files, for spreading one suite
-across parallel CI jobs. `1 <= M <= N`. It applies to both `run` and `collect`
-(§4) — sharding what gets collected, not only what gets run. It is part of
-the frozen v1 contract, recognized by the parser (arity 1), but refused
-before any test runs (§24).
+**`--shard [hash:|slice:]M/N`.** Splits the discovered RUN-file set into `N`
+disjoint shards and runs only shard `M`'s files, for spreading one suite across
+parallel CI jobs. `1 <= M <= N`; a malformed value is a usage error (exit 4).
+The partition is applied to the **post-exclusion** run-file universe **before
+any build**, so a sharded-out file is never compiled. Two modes:
+
+- **`hash:` (the default).** A file is owned by shard `M` iff
+  `fnv1a64(path) % N == M-1`, where `fnv1a64` is canonical FNV-1a 64-bit (frozen
+  offset basis `0xcbf29ce484222325`, prime `0x100000001b3`) over the **lexical
+  root-relative** NodeId path exactly as discovery produced it — never a
+  realpath. Assignment depends only on the path bytes, so it is stable across
+  machines and independent of discovery order.
+- **`slice:`.** The eligible files, already sorted lexicographically, are dealt
+  round-robin: the file at sorted index `i` is owned iff `i % N == M-1`.
+
+Sharding applies to both `run` and `collect` (§4) — sharding what gets
+collected, not only what gets run. **Gates are never sharded**: every gate file
+runs on every shard, so the smoke-test-first guarantee holds per job. Node-id
+operands are validated against the owning shard only — a node id naming a file
+this shard does not own is not this shard's to reject. Sharded-out files are
+**counted, not listed** (§10.2), and a shard that owns no run files falls under
+the empty-collection exit code (§9).
 
 **`--serial GLOB` (not yet served, repeatable).** Pins every file matching
 `GLOB` to run outside the parallel pool, one at a time, for suites with a
 shared resource (a port, a device) that cannot tolerate concurrent access.
 Each occurrence adds one glob pattern; `--serial` is a **run-only** flag (§4).
 It is part of the frozen v1 contract, recognized by the parser, but refused
-before any test runs (§24).
+before any test runs (§24) — it ships with the worker pool, since serial
+pinning is only meaningful once tests would otherwise run in parallel.
 
 ---
 
@@ -579,21 +669,20 @@ above — it only reports which of those surfaces are wired up yet.
 
 **Served** (parsed into real behavior): positional `PATHS`, `-k`, `--exclude`,
 `-I`, `--build-arg` (and post-`--` passthrough), `--precompile`, `--mojo`,
-`-x`/`--exitfirst`, `--maxfail`, `--timeout`, `--gate`, `-s`/`--show-output`,
-`--durations`, `-q`/`-v`, `--color`, `-h`/`--help`, `--version`, and the `run`,
-`collect`, `version`, and `help` subcommands (`--collect-only` too, as an
-alias that behaves as `collect`).
+`-x`/`--exitfirst`, `--maxfail`, `--timeout`, `--compile-timeout`, `--retries`,
+`--shard`, `--gate`, `-s`/`--show-output`, `--durations`, `-q`/`-v`, `--color`,
+`-h`/`--help`, `--version`, and the `run`, `collect`, `version`, and `help`
+subcommands (`--collect-only` too, as an alias that behaves as `collect`).
+`--shard` applies under both `run` and `collect`.
 
-**Still refused**: `-n`/`--workers`, `--compile-timeout`, `--retries`,
-`--junit-xml`, `--gh-annotations`, `--shard`, `--serial`, `--json`. Each is
-recognized by the parser — it knows the spelling and its arity — but is
-**refused before any test runs**, with a usage error that names the flag,
-states that it is part of the v1 contract, names the capability that brings it
-(e.g. `-n`/`--workers` arrive with parallel workers; `--compile-timeout` and
-`--retries` arrive with the module-cache quarantine and retry/flaky handling;
+**Still refused**: `-n`/`--workers`, `--junit-xml`, `--gh-annotations`,
+`--serial`, `--json`. Each is recognized by the parser — it knows the spelling
+and its arity — but is **refused before any test runs**, with a usage error
+that names the flag, states that it is part of the v1 contract, names the
+capability that brings it (`-n`/`--workers` arrive with parallel workers;
 `--junit-xml`, `--gh-annotations`, and `--json` arrive with machine report
-artifacts and CI annotations; `--shard` arrives with test sharding; `--serial`
-arrives with serial execution pinning), and lists what this build does serve.
+artifacts and CI annotations; `--serial` arrives with serial execution
+pinning), and lists what this build does serve.
 
 **A transitional exit-4 subcase.** That refusal is a usage error and exits 4,
 but it is a distinct, *temporary* subcase of §9's exit code 4 — it is not one
@@ -612,10 +701,10 @@ Semantics are unchanged from §9; this states which paths to each code exist
 today.
 
 - **0** — reachable: every run outcome is PASS or SKIP (exclusions allowed).
-- **1** — reachable for FAIL, CRASH, TIMEOUT, COMPILE-ERROR, MALFORMED-SUITE,
-  and PRECOMPILE-ERROR. COMPILE-TIMEOUT and FLAKY are part of the frozen
-  outcome vocabulary but are **not emitted by this build** — they arrive with
-  compile-timeout enforcement and retries, respectively.
+- **1** — reachable for FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT,
+  MALFORMED-SUITE, and PRECOMPILE-ERROR. FLAKY (a pass produced only after a
+  crash-class retry) is also emitted now, and, being a pass, does **not** raise
+  the exit code — a FLAKY-only session exits 0.
 - **2** — reachable: an interrupt (SIGINT/SIGTERM) is implemented with
   sequential-session semantics — a partial summary is printed, the files
   that had not yet started are reported NOT-RUN, and the active child's
@@ -631,10 +720,10 @@ today.
 
 ### 24.3 Selection and parsing deviations in this build
 
-Two surfaces behave more permissively today than the frozen contract above
-describes. Both are stated here so shipped behavior can be told from target
-behavior; neither changes a flag semantic, exit code, or the node-id grammar,
-and both converge to the contract as the runner matures.
+A few surfaces behave more permissively, or cover less ground, today than the
+frozen contract above describes. Each is stated here so shipped behavior can be
+told from target behavior; none changes a flag semantic, exit code, or the
+node-id grammar, and all converge to the contract as the runner matures.
 
 - **`collect` does not narrow by per-test selection yet.** §4 lists `-k` as
   applicable to `collect`, and §16 says `collect` honors the selection flags.
@@ -657,3 +746,11 @@ and both converge to the contract as the runner matures.
   Until the at-most-one check is enforced (a usage error, exit 4), do not rely on
   repeating these flags. The mutually-exclusive `-q`/`-v` pair is already
   rejected as a usage error; the single-valued-flag check follows the same shape.
+- **`--retries` does not rebuild under selection yet.** On the default
+  (non-selection) run path, `--retries` (§13) retries the full step chain — a
+  crash-class **build** or **precompile** kill is rebuilt, and a crash-class
+  **run** is re-run. Under selection (`-k` or a node id), only crash-class
+  **run** retries are wired: a run that dies by signal or a deadline is re-run
+  against the already-built binary, but a build-side crash-class failure is not
+  retried on the selection path. The classification and FLAKY reporting are
+  otherwise identical; only the build-side retry under selection is deferred.

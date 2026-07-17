@@ -14,6 +14,7 @@ in this build.
 from std.testing import assert_equal, assert_raises, assert_true, TestSuite
 
 from mtest.cli import flag_specs, parse_args
+from mtest.config import ShardMode
 
 
 @fieldwise_init
@@ -56,16 +57,17 @@ def frozen_inventory() -> List[InvRow]:
         InvRow("--maxfail", 1, False, True),
         # `--durations N`: non-negative int; 0 disables.
         InvRow("--durations", 1, False, True),
+        # `--shard [hash:|slice:]M/N`: 1<=M<=N, last-wins.
+        InvRow("--shard", 1, False, True),
+        # `--retries N`: non-negative int; 0 disables.
+        InvRow("--retries", 1, False, True),
+        # `--compile-timeout SECS`: non-negative int; 0 disables.
+        InvRow("--compile-timeout", 1, False, True),
         # In the v1 contract but not served by this build.
         InvRow("-n", 1, False, False),
         InvRow("--workers", 1, False, False),
-        InvRow("--compile-timeout", 1, False, False),
-        InvRow("--retries", 1, False, False),
         InvRow("--junit-xml", 1, False, False),
         InvRow("--gh-annotations", 1, False, False),
-        # `--shard M/N`: 1<=M<=N (documented/inventoried, not enforced — it
-        # refuses before any value validation runs).
-        InvRow("--shard", 1, False, False),
         # `--serial GLOB`: repeatable.
         InvRow("--serial", 1, True, False),
         # `--json PATH|-`.
@@ -145,12 +147,78 @@ def test_refuse_workers_long() raises:
     _assert_refused("--workers")
 
 
-def test_refuse_compile_timeout() raises:
-    _assert_refused("--compile-timeout")
+def test_compile_timeout_is_served_and_parses() raises:
+    # `--compile-timeout` is now served: a non-negative int parses cleanly.
+    var argv: List[String] = ["--compile-timeout", "90"]
+    var r = parse_args(argv)
+    assert_equal(r.config.compile_timeout_secs, 90)
 
 
-def test_refuse_retries() raises:
-    _assert_refused("--retries")
+def test_compile_timeout_zero_disables() raises:
+    var argv: List[String] = ["--compile-timeout", "0"]
+    var r = parse_args(argv)
+    assert_equal(r.config.compile_timeout_secs, 0)
+
+
+def test_compile_timeout_default_is_600() raises:
+    var argv: List[String] = ["tests/"]
+    var r = parse_args(argv)
+    assert_equal(r.config.compile_timeout_secs, 600)
+
+
+def test_compile_timeout_last_wins() raises:
+    # Not repeatable: a second `--compile-timeout` overwrites the first.
+    var argv: List[String] = [
+        "--compile-timeout",
+        "5",
+        "--compile-timeout",
+        "7",
+    ]
+    var r = parse_args(argv)
+    assert_equal(r.config.compile_timeout_secs, 7)
+
+
+def test_compile_timeout_inline_value_parses() raises:
+    var argv: List[String] = ["--compile-timeout=12"]
+    var r = parse_args(argv)
+    assert_equal(r.config.compile_timeout_secs, 12)
+
+
+def test_compile_timeout_bad_value_is_usage_error() raises:
+    var argv: List[String] = ["--compile-timeout", "-1"]
+    with assert_raises(contains="integer >= 0"):
+        _ = parse_args(argv)
+
+
+def test_compile_timeout_non_numeric_names_the_flag() raises:
+    var argv: List[String] = ["--compile-timeout", "soon"]
+    with assert_raises(contains="'--compile-timeout'"):
+        _ = parse_args(argv)
+
+
+def test_retries_is_served_and_parses() raises:
+    # `--retries` is now served: a non-negative int parses cleanly.
+    var argv: List[String] = ["--retries", "3"]
+    var r = parse_args(argv)
+    assert_equal(r.config.retries, 3)
+
+
+def test_retries_zero_disables() raises:
+    var argv: List[String] = ["--retries", "0"]
+    var r = parse_args(argv)
+    assert_equal(r.config.retries, 0)
+
+
+def test_retries_default_is_zero() raises:
+    var argv: List[String] = ["tests/"]
+    var r = parse_args(argv)
+    assert_equal(r.config.retries, 0)
+
+
+def test_retries_bad_value_is_usage_error() raises:
+    var argv: List[String] = ["--retries", "-1"]
+    with assert_raises(contains="integer >= 0"):
+        _ = parse_args(argv)
 
 
 def test_gate_is_served_and_accumulates() raises:
@@ -169,8 +237,35 @@ def test_refuse_gh_annotations() raises:
     _assert_refused("--gh-annotations")
 
 
-def test_refuse_shard() raises:
-    _assert_refused("--shard")
+def test_shard_is_served_hash_default() raises:
+    # `--shard` is now served: a bare `M/N` parses cleanly, hash by default.
+    var argv: List[String] = ["--shard", "2/5"]
+    var r = parse_args(argv)
+    assert_true(r.config.shard_mode == ShardMode.HASH)
+    assert_equal(r.config.shard_m, 2)
+    assert_equal(r.config.shard_n, 5)
+
+
+def test_shard_is_served_slice_prefix() raises:
+    var argv: List[String] = ["--shard", "slice:3/4"]
+    var r = parse_args(argv)
+    assert_true(r.config.shard_mode == ShardMode.SLICE)
+    assert_equal(r.config.shard_m, 3)
+    assert_equal(r.config.shard_n, 4)
+
+
+def test_shard_last_wins() raises:
+    # Not repeatable: a second `--shard` overwrites the first (like --timeout).
+    var argv: List[String] = ["--shard", "1/9", "--shard", "hash:2/3"]
+    var r = parse_args(argv)
+    assert_equal(r.config.shard_m, 2)
+    assert_equal(r.config.shard_n, 3)
+
+
+def test_shard_bad_value_is_usage_error() raises:
+    var argv: List[String] = ["--shard", "6/5"]
+    with assert_raises(contains="1<=M<=N"):
+        _ = parse_args(argv)
 
 
 def test_refuse_serial() raises:
