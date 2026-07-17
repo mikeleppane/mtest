@@ -4,14 +4,18 @@ A pytest-like test runner for [Mojo](https://www.modular.com/mojo) that
 orchestrates the standard library's per-file `TestSuite` — it never replaces it.
 
 > [!NOTE]
-> **Status: walking skeleton, now with a per-test spine.** `build/mtest` is a
+> **Status: walking skeleton, now with a resilience layer.** `build/mtest` is a
 > real binary — it discovers files, builds each one, executes it directly,
 > parses each file's `TestSuite` report, and reports a truthful exit code at
 > per-test granularity: `-k`, node-id selection, `--maxfail`, `mtest collect`,
-> and `--durations` are all live today. What's still missing: a crash never
-> attributes to one test inside its file, captured output is file-scoped (not
-> per test), and the whole runner is exercised on Linux only so far. See
-> [Status](#status) for exactly what that means before you rely on it.
+> `--durations`, `--retries` (with a FLAKY verdict), `--compile-timeout`, and
+> `--shard` are all live today. What's still missing: **concurrency** — there
+> is no worker pool yet, `-n`/`--workers` and `--serial` are refused, and the
+> runner is single-child and sequential; a crash's isolation-rerun attribution
+> is bounded and diagnostic-only, never a verdict; captured output is
+> file-scoped (not per test); and the whole runner is exercised on Linux only
+> so far. See [Status](#status) for exactly what that means before you rely on
+> it.
 
 ## Why
 
@@ -41,10 +45,14 @@ aggregating tests across files, and reporting them the way CI expects.
   JUnit XML mapping is still to come.
 - **Loud over silent.** Every excluded file is reported with an `EXCLUDED`
   line today; a skipped, deselected, or truncated run must never look like a
-  run that passed everything. Retry and timeout reporting extend this as those
-  capabilities land.
+  run that passed everything. Retry and compile-timeout reporting extend this
+  now: every crash-class attempt gets its own `TRY` line, a killed compile's
+  cache-quarantine posture is announced with a `WARNING`, and a bounded crash
+  attribution pass is announced before it runs and never lets a stopped search
+  read as a soft accusation.
 - **CI is the customer.** Deterministic, path-sorted console output and a
-  hermetic, zero-runtime-dependency build are in place now. Machine-readable
+  hermetic, zero-runtime-dependency build are in place now, and `--shard` lets
+  one suite spread across a CI matrix deterministically. Machine-readable
   reports (JUnit XML, GitHub annotations) and parallel workers are the next
   milestones toward that goal — see [Status](#status).
 
@@ -65,12 +73,56 @@ aggregating tests across files, and reporting them the way CI expects.
   running a single test body).
 - **A real outcome model**, now at both file and test granularity: PASS, FAIL,
   CRASH (death by signal, kept distinct from FAIL), TIMEOUT, COMPILE-ERROR,
-  and NO-TESTS (a file that builds and exits cleanly but reports zero tests —
-  the former "zero-test ceiling" is closed; see [Status](#status)), each with
-  a framed detail section (captured output, or the compiler's own error) and a
-  one-line reproduce command.
+  COMPILE-TIMEOUT, and NO-TESTS (a file that builds and exits cleanly but
+  reports zero tests — the former "zero-test ceiling" is closed; see
+  [Status](#status)), each with a framed detail section (captured output, or
+  the compiler's own error) and a one-line reproduce command. A signal or
+  timeout is named **in words** (`signal 11 — SIGSEGV, segmentation fault`,
+  `timed out after 1s`), and a kill that had to escalate past a polite
+  terminate says so (`escalated to SIGKILL`) in the same line the `TRY`
+  attempt log uses, so the two never disagree.
+- **`--retries N`**, crash-class only. A run that dies by signal or hits its
+  deadline — or a build/precompile that is killed or dies with a compiler-ICE
+  signature in its stderr — gets up to `N` extra attempts; a failing
+  assertion, an ordinary compile error, or anything else deterministic is
+  never retried. A file that fails once and then passes is reported **FLAKY**
+  (a pass — exit 0), never silently as a plain PASS. Every attempt gets its
+  own `TRY` line naming why it failed; the last attempt is authoritative. On
+  the default (non-selection) run path the full build-and-run chain retries;
+  under `-k`/a node id, only crash-class **run** retries are wired today (a
+  build-side crash-class failure under selection is not yet retried) — see
+  [Status](#status).
+- **`--compile-timeout SECS`**, bounding a single file's *build* (default
+  `600`, `0` disables) the same way `--timeout` bounds its run: exceeding it
+  yields **COMPILE-TIMEOUT** with a split-or-exclude hint, killed with a
+  compile-specific grace (~5s longer than a run kill) so a compiler flushing
+  its module cache gets the chance to exit cleanly on the terminate signal
+  before it is force-killed. A killed compile's retry rebuild runs against a
+  fresh, quarantined per-attempt module cache, announced with a loud
+  `WARNING` — defense-in-depth; see [Status](#status) for what a cache probe
+  actually found.
+- **`--shard [hash:|slice:]M/N`**, for spreading one suite across a CI matrix:
+  splits the discovered file set into `N` disjoint shards before any build and
+  runs (or `collect`s) only shard `M`'s files. `hash:` (the default) assigns
+  by a stable FNV-1a hash of the file's path, so assignment never depends on
+  discovery order or machine; `slice:` deals sorted files round-robin. Gates
+  are never sharded — every gate runs on every shard.
+- **Bounded crash attribution.** When a file CRASHes, a secondary,
+  strictly-bounded pass (at most 32 isolation reruns per file, under a
+  120s-per-file/600s-per-session wall-clock budget) re-runs its tests one at a
+  time to try to name a culprit. It **never** changes the file's CRASH verdict
+  or the exit code — it is diagnostic evidence only, printed on its own
+  `ATTRIBUTION` line: `ATTRIBUTED` when one test reproduces the crash alone,
+  or a stated reason (`NO-REPRODUCTION`, `PROBE-FAILED`, `RUN-CAP`,
+  `TIME-BUDGET`) when it doesn't — the culprit then stands honestly
+  **UNATTRIBUTED**, never guessed.
 - **`--durations N`**, the N slowest *files* by run-only wall-clock, printed
   after the summary band (survives `-q`).
+- **The `SLOW` annotation.** A build or run step whose wall time reaches a
+  fixed **60s** threshold (no flag) is flagged `SLOW` on its verdict line —
+  an informal note, never an outcome; it never changes a verdict, a count, or
+  the exit code. Under `-v` it names which step (build, run, or both) crossed
+  the threshold.
 - **Precompiled package dependencies** via `--precompile`, a per-file
   `--timeout`, gate files that must pass first (`--gate`), stop-after-first-
   failure (`-x`/`--exitfirst`), quiet/verbose console modes (`-q`/`-v`,
@@ -81,12 +133,11 @@ aggregating tests across files, and reporting them the way CI expects.
 - **A deterministic console summary** and a documented, honest set of
   remaining limits — see [Status](#status).
 
-What is **not** built yet: parallel workers (`-n`/`--workers`), test sharding
-(`--shard`) and serial pinning (`--serial`), retries/flaky handling
-(`--retries`), `--compile-timeout` enforcement, the machine event stream
-(`--json`), and machine reporters (`--junit-xml`, `--gh-annotations`). Each is
-recognized by the parser and refused before any test runs — see
-[CLI reference](#cli-reference).
+What is **not** built yet: **concurrency** — parallel workers (`-n`/
+`--workers`) and serial pinning (`--serial`, meaningless without a pool) —
+plus the machine event stream (`--json`) and machine reporters (`--junit-xml`,
+`--gh-annotations`). Each is recognized by the parser and refused before any
+test runs — see [CLI reference](#cli-reference).
 
 ## Examples
 
@@ -428,6 +479,232 @@ All 3 files are reported NOT-RUN because the interrupt landed before any of
 them finished; a `ps` check after exit shows no orphaned `mojo`/`mtest`
 processes left behind.
 
+### `--retries` and FLAKY
+
+`e2e/flaky/test_flaky.mojo` is built for exactly this: it CRASHes (a real
+SIGSEGV) on its first run, then PASSES on a re-run, keyed by a marker file
+under `build/e2e-scratch/` that must be reset between runs for deterministic
+ordering (the way `scripts/e2e_check.py`'s `retries-flaky` scenario does):
+
+```console
+$ rm -f build/e2e-scratch/flaky_marker
+$ pixi run bash -c 'build/mtest e2e/flaky/test_flaky.mojo --retries 1'
+mtest 0.1.0-dev (mojo)
+root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
+
+TRY            e2e/flaky/test_flaky.mojo       attempt 1/2  run signal  (signal 11 — SIGSEGV, segmentation fault)  1.13s
+FLAKY          e2e/flaky/test_flaky.mojo       0.02s
+
+===== 1 passed, 0 failed, 0 skipped, 1 flaky (0 excluded, 0 not run) in 1.6s =====
+$ echo $?
+0
+```
+
+The `TRY` line names the crashed first attempt; the file is reported **FLAKY**
+(a pass, not a plain PASS) once the retry succeeds, and the process exits `0`
+— a flaky pass is not, by itself, a CI failure. With `--retries 0` (the
+default) there is no second attempt, so the same crash stands as the file's
+final, only outcome:
+
+```console
+$ rm -f build/e2e-scratch/flaky_marker
+$ pixi run bash -c 'build/mtest e2e/flaky/test_flaky.mojo --retries 0'
+mtest 0.1.0-dev (mojo)
+root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
+
+CRASH          e2e/flaky/test_flaky.mojo       1.12s  (signal 11 — SIGSEGV, segmentation fault)
+WARNING  crash-attribution-start: re-running the crashed file(s) one test at a time to name the culprit (1 file(s); bounded and best-effort). This is SECONDARY diagnostics: the CRASH verdict already stands and nothing found here can change it or the exit code
+ATTRIBUTION    e2e/flaky/test_flaky.mojo       NO-REPRODUCTION  the crash did not reproduce with each test run alone; the CRASH verdict stands and the culprit is UNATTRIBUTED  (1 isolation rerun(s), 0.06s)
+
+--- CRASH e2e/flaky/test_flaky.mojo (signal 11 — SIGSEGV, segmentation fault) — captured output (file-scoped; TestSuite does not attribute output to individual tests) ---
+--- captured stderr ---
+[...stack trace omitted...]
+reproduce: mtest e2e/flaky/test_flaky.mojo
+
+===== 0 passed, 0 failed, 0 skipped, 1 crashed (0 excluded, 0 not run) in 1.6s =====
+$ echo $?
+1
+```
+
+That run also shows the crash-attribution pass **unprompted** — every CRASH
+triggers it. Here it can't reproduce the crash in isolation (this fixture's
+crash is keyed by a marker file, not by test order, so running it alone a
+second time just passes), so the culprit stays honestly **UNATTRIBUTED**; the
+CRASH verdict and exit code are unchanged either way. `--retries` under
+selection (`-k` or a node id) retries this same crash-class **run** failure
+identically — only a build-side crash-class failure is not yet retried under
+selection (see [Status](#status)).
+
+### Crash attribution — naming, or honestly failing to name, a culprit
+
+`e2e/attribution/` holds the honesty pair the attribution pass is built
+around: one file whose crash is deterministic (always the same test) and one
+whose crash only happens when its tests run together. Both still report
+CRASH, at the same exit code — attribution is diagnostic evidence layered on
+top, never a second verdict:
+
+```console
+$ pixi run bash -c 'build/mtest e2e/attribution/test_deterministic_crasher.mojo'
+mtest 0.1.0-dev (mojo)
+root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
+
+CRASH          e2e/attribution/test_deterministic_crasher.mojo  1.12s  (signal 4 — SIGILL, illegal instruction)
+WARNING  crash-attribution-start: re-running the crashed file(s) one test at a time to name the culprit (1 file(s); bounded and best-effort). This is SECONDARY diagnostics: the CRASH verdict already stands and nothing found here can change it or the exit code
+ATTRIBUTION    e2e/attribution/test_deterministic_crasher.mojo  ATTRIBUTED  culprit: test_boom  (2 isolation rerun(s), 1.18s)
+
+[...captured output omitted...]
+
+===== 0 passed, 0 failed, 0 skipped, 1 crashed (0 excluded, 0 not run) in 2.7s =====
+$ echo $?
+1
+```
+
+```console
+$ pixi run bash -c 'build/mtest e2e/attribution/test_order_dependent_crasher.mojo'
+mtest 0.1.0-dev (mojo)
+root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
+
+CRASH          e2e/attribution/test_order_dependent_crasher.mojo  1.18s  (signal 11 — SIGSEGV, segmentation fault)
+WARNING  crash-attribution-start: re-running the crashed file(s) one test at a time to name the culprit (1 file(s); bounded and best-effort). This is SECONDARY diagnostics: the CRASH verdict already stands and nothing found here can change it or the exit code
+ATTRIBUTION    e2e/attribution/test_order_dependent_crasher.mojo  NO-REPRODUCTION  the crash did not reproduce with each test run alone; the CRASH verdict stands and the culprit is UNATTRIBUTED  (2 isolation rerun(s), 0.08s)
+
+[...captured output omitted...]
+
+===== 0 passed, 0 failed, 0 skipped, 1 crashed (0 excluded, 0 not run) in 1.7s =====
+$ echo $?
+1
+```
+
+Both runs exit `1` with an identical CRASH shape; only the `ATTRIBUTION` line
+differs. The pass is strictly bounded (at most 32 isolation reruns per file,
+under per-file and per-session wall-clock budgets) so a pathological crasher
+can never hang a run — when the budget or the run cap is exhausted first, the
+line says so (`RUN-CAP`, `TIME-BUDGET`) instead of guessing.
+
+### Compile timeout
+
+`--compile-timeout SECS` bounds a file's *build* the same way `--timeout`
+bounds its run. The committed `scripts/fake_slow_mojo.py` — a `--mojo`
+stand-in that sleeps forever on `build` but honors the terminate signal
+promptly — makes this fast and deterministic to demonstrate without waiting
+out a real stalled compile:
+
+```console
+$ pixi run bash -c 'build/mtest --mojo scripts/fake_slow_mojo.py e2e/suite/test_passing.mojo --compile-timeout 1'
+mtest 0.1.0-dev (scripts/fake_slow_mojo.py)
+root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
+
+COMPILE-TIMEOUT  e2e/suite/test_passing.mojo     0.00s  (timed out after 1s)
+
+--- COMPILE-TIMEOUT e2e/suite/test_passing.mojo (timed out after 1s) — mtest killed the build at the compile timeout; the compiler said: ---
+fake_slow_mojo.py: build: lowering module (this will not finish)
+fake_slow_mojo.py: SIGTERM received; exiting
+the build exceeded the 1s compile timeout — split the module into smaller files or exclude it (raise the deadline with --compile-timeout N, or --compile-timeout 0 to remove it)
+reproduce: mtest --mojo scripts/fake_slow_mojo.py --compile-timeout 1 e2e/suite/test_passing.mojo
+
+===== 0 passed, 0 failed, 0 skipped, 1 compile timeout (0 excluded, 0 not run) in 1.0s =====
+$ echo $?
+1
+```
+
+`test_passing.mojo` is a perfectly valid file here — only slow to compile
+under this stand-in — which is exactly what separates COMPILE-TIMEOUT from
+COMPILE-ERROR. Combined with `--retries`, a killed compile's rebuild runs
+against a fresh, quarantined module cache, announced with a loud `WARNING`:
+
+```console
+$ pixi run bash -c 'build/mtest --mojo scripts/fake_slow_mojo.py e2e/suite/test_passing.mojo --compile-timeout 1 --retries 1'
+mtest 0.1.0-dev (scripts/fake_slow_mojo.py)
+root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
+
+TRY            e2e/suite/test_passing.mojo     attempt 1/2  build compile-timeout  (timed out)  1.02s
+WARNING  compile-kill-residual: the compile of 'e2e/suite/test_passing.mojo' was killed (compile-timeout); the shared module cache may be suspect, so the rebuild ran quarantined against a fresh per-attempt cache (the shared cache was neither used nor deleted)
+COMPILE-TIMEOUT  e2e/suite/test_passing.mojo     0.00s  (timed out after 1s)
+
+[...captured output omitted...]
+
+===== 0 passed, 0 failed, 0 skipped, 1 compile timeout (0 excluded, 0 not run) in 2.1s =====
+$ echo $?
+1
+```
+
+The stand-in never finishes compiling, so both attempts time out and the file
+is still COMPILE-TIMEOUT at exit `1` — the quarantine warning fires
+regardless of whether the retry eventually succeeds.
+
+### A timeout narrative — signals in words, SIGKILL escalation
+
+`e2e/stubborn/test_stubborn.mojo` ignores the terminate signal, forcing the
+supervisor's full kill protocol (terminate, a grace period, then `SIGKILL`).
+The verdict line is the only place a `--retries 0` reader learns the child had
+to be force-killed, so it says so in words, not a bare exit status:
+
+```console
+$ pixi run bash -c 'build/mtest e2e/stubborn/test_stubborn.mojo --timeout 1 --retries 0'
+mtest 0.1.0-dev (mojo)
+root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
+
+TIMEOUT        e2e/stubborn/test_stubborn.mojo 1.31s  (timed out after 1s, escalated to SIGKILL)
+
+--- TIMEOUT e2e/stubborn/test_stubborn.mojo (timed out after 1s, escalated to SIGKILL) — captured output (file-scoped; TestSuite does not attribute output to individual tests) ---
+--- captured stderr ---
+reproduce: mtest e2e/stubborn/test_stubborn.mojo
+
+===== 0 passed, 0 failed, 0 skipped, 1 timed out (0 excluded, 0 not run) in 1.7s =====
+$ echo $?
+1
+```
+
+Every crash and timeout is narrated this way — `signal N — NAME, meaning` for
+a death by signal, `timed out after Ns` for a deadline, and `, escalated to
+SIGKILL` appended whenever a polite terminate had to be followed by a hard
+kill — in both the verdict line and any `TRY` line for a non-final attempt, so
+the two always agree.
+
+### Sharding a CI matrix
+
+`--shard [hash:|slice:]M/N` splits the discovered file set into `N` disjoint
+shards before any build, for spreading one suite across parallel CI jobs.
+`hash:` (the default) assigns each file by a stable hash of its path, so
+assignment never depends on machine or discovery order — the recommended mode
+for a real CI matrix. `mtest collect` makes the partition easy to see: the
+union of every shard's listing is exactly the unsharded listing, and no node
+id appears twice.
+
+```console
+$ pixi run bash -c 'build/mtest collect e2e/suite --shard 1/3'
+collect: e2e/suite/test_compile_error.mojo: compile error (probe skipped)
+e2e/suite/test_crashing.mojo::test_aborts_process
+e2e/suite/test_crashing.mojo::test_after_crash_passes
+e2e/suite/test_crashing.mojo::test_before_crash_passes
+e2e/suite/test_failing.mojo::test_first_passes
+e2e/suite/test_failing.mojo::test_second_fails
+e2e/suite/test_failing.mojo::test_third_passes
+e2e/suite/test_noisy.mojo::test_prints_report_lookalike_and_passes
+e2e/suite/test_noisy.mojo::test_prints_timing_lookalike_and_passes
+e2e/suite/test_noisy.mojo::test_prints_to_stderr_and_passes
+$ echo $?
+1
+$ pixi run bash -c 'build/mtest collect e2e/suite --shard 2/3'
+e2e/suite/nested/test_nested.mojo::test_nested_passes
+$ echo $?
+0
+$ pixi run bash -c 'build/mtest collect e2e/suite --shard 3/3'
+e2e/suite/test_passing.mojo::test_one_passes
+e2e/suite/test_passing.mojo::test_three_passes
+e2e/suite/test_passing.mojo::test_two_passes
+$ echo $?
+0
+```
+
+(`test_zero.mojo` contributes no node ids to any shard because it's NO-TESTS,
+not because sharding dropped it.) `--shard` and `collect` compose: a
+sharded-out file is never even probed, so `test_compile_error.mojo`'s
+probe-skipped diagnostic appears only on the one shard that owns it — the
+same shard, every time, because `hash:` assignment is a pure function of the
+path. `--shard` applies to `run` the same way, partitioning which files get
+built and executed rather than which node ids get listed.
+
 ## CLI reference
 
 This section is generated against `build/mtest --help` — it is not allowed to
@@ -439,7 +716,7 @@ mtest — a pytest-like test runner for Mojo
 
 usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]
 
-This build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo, -x/--exitfirst, --timeout, -s/--show-output, -q, -v, --color, -k, --maxfail, --durations, collect/--collect-only, --help, --version
+This build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo, -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v, --color, -k, --maxfail, --durations, --shard, --retries, collect/--collect-only, --help, --version
 ```
 
 Flags this build serves:
@@ -456,12 +733,15 @@ Flags this build serves:
 | `--mojo PATH` | override the `mojo` toolchain resolved from `PATH` (or `MTEST_MOJO`) |
 | `-x`, `--exitfirst` | stop scheduling new files after the first failing file |
 | `--maxfail N` | stop scheduling once `N` tests have failed (`N=0`, the default, means no limit); the check lands between files, not mid-file |
-| `--timeout SECS` | bound a single file's run; exceeding it yields TIMEOUT |
+| `--timeout SECS` | bound a single file's run (default `300`, `0` disables); exceeding it yields TIMEOUT |
+| `--compile-timeout SECS` | bound a single file's build (default `600`, `0` disables); exceeding it yields COMPILE-TIMEOUT, killed with a compile-specific grace |
+| `--retries N` | crash-class-only retries, `N` extra attempts (default `0`); a late pass is reported FLAKY; under selection (`-k`/node id), only crash-class run retries are wired — see [Status](#status) |
 | `-s`, `--show-output MODE` | `failures` (default), `all`, or `none` — which outcomes show captured output |
 | `--durations N` | print the `N` slowest files by run-only wall-clock after the summary (`N=0`, the default, disables it); survives `-q` |
 | `-q` | quiet: omit PASS lines |
-| `-v` | verbose: add the build command and per-step timing |
+| `-v` | verbose: add the build command, per-step timing, and the `SLOW`-step label |
 | `--color WHEN` | `auto` (default), `always`, or `never`; `NO_COLOR` also disables color |
+| `--shard [hash:\|slice:]M/N` | run (or `collect`) only shard `M` of `N`, `1<=M<=N`; `hash:` (default, stable FNV-1a over the path) or `slice:` (sorted round-robin); a malformed value is a usage error |
 | `collect [PATHS] [flags]`, `--collect-only` | list node ids, sorted lexicographically, instead of running anything |
 | `-h`, `--help` | print this usage text and exit 0 |
 | `--version` | print the version and exit 0 |
@@ -470,15 +750,14 @@ Flags this build serves:
 spelling and arity) but **refused before any test runs**, with a usage error
 naming the flag and the capability that brings it, per the contract's
 [availability status](docs/cli-contract.md#24-availability-status-this-build):
-`-n`/`--workers` (parallel workers), `--compile-timeout` (the module-cache
-quarantine), `--retries` (retries and flaky handling), `--junit-xml` and
-`--gh-annotations` (machine report artifacts), `--shard` (test sharding),
-`--serial` (serial execution pinning), and `--json` (the machine event
-stream). For example:
+`-n`/`--workers` (parallel workers), `--serial` (serial execution pinning,
+meaningless without a worker pool), `--junit-xml` and `--gh-annotations`
+(machine report artifacts), and `--json` (the machine event stream). For
+example:
 
 ```console
-$ pixi run bash -c 'build/mtest --shard 1/2 e2e/suite'
-cli: '--shard' is part of the mtest v1 contract but is not available in this build (it arrives with test sharding); this build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo, -x/--exitfirst, --timeout, -s/--show-output, -q, -v, --color, -k, --maxfail, --durations, collect/--collect-only, --help, --version (see mtest --help)
+$ pixi run bash -c 'build/mtest -n 2 e2e/suite'
+cli: '-n' is part of the mtest v1 contract but is not available in this build (it arrives with parallel workers); this build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo, -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v, --color, -k, --maxfail, --durations, --shard, --retries, collect/--collect-only, --help, --version (see mtest --help)
 $ echo $?
 4
 ```
@@ -530,6 +809,23 @@ subprocess-supervision feasibility study confirmed the whole pipeline is
 buildable from Mojo on the pinned toolchain via POSIX FFI (separate byte-exact
 capture, a terminate-then-kill timeout targeting the whole process group,
 exit-vs-signal discrimination).
+
+**The resilience machinery lives inside `session`, not as a new layer.** A
+pure, total crash-class classifier (`retry_class`) decides, from a step's
+`Termination` and its stderr alone, whether a failure is eligible for
+`--retries` — a signal or a deadline kill always is; an ordinary compile error
+or a failing assertion never is. The attempt loop that consumes that decision
+resumes from the failed step (a crashed run re-runs the already-built binary;
+a killed build rebuilds, quarantined) rather than restarting the whole file.
+`--shard`'s partition (`shard`) is a pure function of a file's path, applied
+by `session` before any build so a sharded-out file is never even probed. The
+crash-attribution pass is a bounded post-pass that runs after the main
+session finishes, in the same single child the rest of the runner uses — it
+re-runs a crashed file's tests one at a time, sequentially, never in
+parallel, and is skipped outright under interrupt. None of this introduces a
+worker pool or any concurrency: every build, run, retry attempt, and
+attribution rerun still goes through the same one-child-at-a-time supervisor
+the walking skeleton always had.
 
 ## Self-hosting
 
@@ -619,13 +915,61 @@ open, and are stated honestly here rather than glossed over.
   ("nothing collected"), the same as an empty walk. `e2e/suite/test_zero.mojo`
   in the [mixed-run example above](#a-mixed-run--fail-crash-compile-error-no-tests-and-pass-together)
   demonstrates this.
-- **A crashed file's tests are unattributed.** When a file CRASHes, the
-  outcome is reported at the **file** level only — `TestSuite`'s report never
-  reaches a conclusion when the process dies mid-run, so the runner cannot
-  attribute the crash to one of the file's individual tests. The CRASH block
-  in the [mixed-run example](#a-mixed-run--fail-crash-compile-error-no-tests-and-pass-together)
-  shows no per-test breakdown for `test_crashing.mojo`'s three tests, unlike
-  the FAIL block right below it, which names the one test that failed.
+- **No concurrency in this build.** There is no worker pool: `-n`/`--workers`
+  and `--serial` are both refused before any test runs (see
+  [CLI reference](#cli-reference)) — that is a later milestone. Every build,
+  run, retry attempt, and crash-attribution rerun goes through the same
+  single-child, sequential supervisor, one file at a time, in the order
+  discovery produced. Nothing in this README should be read as implying a
+  worker pool, parallel builds, or a live `k/n` progress counter exist today.
+- **A crashed file's verdict is never attributed, but a bounded post-pass may
+  name a culprit.** `TestSuite`'s report never reaches a conclusion when the
+  process dies mid-run, so the CRASH outcome is reported at the **file**
+  level and that file-level verdict is always authoritative — it is never
+  changed by anything below. After the main session finishes, a strictly
+  bounded, sequential post-pass (at most 32 isolation reruns per crashed
+  file, under a 120s-per-file and 600s-per-session wall-clock budget) re-runs
+  the file's tests one at a time to try to name a culprit, on its own
+  `ATTRIBUTION` line. When the crash reproduces with one test alone, that
+  test is named `ATTRIBUTED`; when it doesn't reproduce — an order-dependent
+  crash can pass every test run alone — or the run cap or a wall-clock budget
+  stops the search first, the culprit stands honestly **UNATTRIBUTED**, never
+  guessed. The [crash-attribution examples above](#crash-attribution--naming-or-honestly-failing-to-name-a-culprit)
+  show both outcomes for real. The pass is skipped entirely under interrupt.
+- **The compiler-crash signature list is assumption-pinned.** `--retries`
+  treats a compile-side nonzero exit as crash-class only when its stderr
+  carries a recognized crash signature (the LLVM/Mojo "PLEASE submit a bug
+  report" banner, a `Stack dump` header, or one of two stack-frame shapes).
+  Those markers were **ported from the transcript normalizer's patterns, not
+  validated against a real Mojo internal compiler error** — no ICE was
+  reproduced on this toolchain during the resilience work that added them. If
+  a real ICE later prints a different banner, it will not be recognized as
+  crash-class until the marker list is extended.
+- **Retries under selection cover less ground than the default path.**
+  `--retries` retries the full build-and-run chain on the default
+  (non-selection) run path. Under `-k` or a node-id operand, only
+  crash-class **run** retries are wired — a run that dies by signal or hits
+  its deadline is re-run against the already-built binary — but a
+  build-side crash-class failure (a killed compile, or a compile that dies
+  with a crash signature) is **not** retried when a selection flag is in
+  play. The classification and FLAKY reporting are otherwise identical; see
+  [contract §24.3](docs/cli-contract.md#243-selection-and-parsing-deviations-in-this-build).
+- **The `SLOW` annotation is a fixed, unconfigurable 60s threshold** — there
+  is no flag to change it. It is purely informal: it never changes a
+  verdict, a count, or the exit code, and it is not part of any determinism
+  guarantee.
+- **Cache-quarantine is defense-in-depth, not a proven fix for an observed
+  problem.** A compile killed by `--compile-timeout` (or by a compile-class
+  retry) has its rebuild run against a fresh, per-attempt module cache
+  rather than the shared one, announced with a loud `WARNING` naming the
+  residual risk. This exists because a killed compiler *could*, in
+  principle, leave a damaged shared cache entry that then surfaces as a
+  misleading failure in some unrelated, innocent file. A dedicated probe
+  during this work killed real compiles mid-flight and found the module
+  cache commits atomically — **no corruption was observed**. The
+  per-attempt quarantine is kept anyway as defense-in-depth against a
+  failure mode the probe did not manage to trigger, not as a fix for one it
+  did.
 - **Captured output is file-scoped, not per-test.** Every captured-output
   block is explicitly labeled "captured output (file-scoped; TestSuite does
   not attribute output to individual tests)" — `TestSuite` does not segment a
@@ -653,11 +997,10 @@ open, and are stated honestly here rather than glossed over.
   in-flight child's process group, prints the partial summary with NOT-RUN
   accounting, and exits `2`. See the
   [example above](#interrupt-behavior).
-- **Not built yet**: parallel workers, test sharding (`--shard`) and serial
-  pinning (`--serial`), retries/flaky handling, `--compile-timeout`
-  enforcement, the machine event stream (`--json`), JUnit XML, and GitHub
-  annotations. Each is refused explicitly (exit 4) rather than silently
-  accepted — see [CLI reference](#cli-reference).
+- **Not built yet**: parallel workers (`-n`/`--workers`) and serial pinning
+  (`--serial`, meaningless without a pool), the machine event stream
+  (`--json`), JUnit XML, and GitHub annotations. Each is refused explicitly
+  (exit 4) rather than silently accepted — see [CLI reference](#cli-reference).
 
 ## Developing
 
