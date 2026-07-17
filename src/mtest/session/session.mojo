@@ -70,6 +70,7 @@ from mtest.select import (
     selection_active,
 )
 from mtest.session.classify import Classification, classify, resolve_report
+from mtest.session.shard import partition
 from mtest.session.verdict import build_verdict
 
 comptime _STALE_NAME_PHRASE = "test not found in suite:"
@@ -1719,10 +1720,33 @@ def run_session[
     # Discovery. A discover: usage error propagates to main (exit 4).
     var disc = discover(config, root)
 
+    # Sharding partitions the discovered RUN files (never the gates): keep only
+    # the subset this shard owns so every downstream count, casualty, run loop,
+    # and the exit-code multiset see exactly this shard's work.
+    var shard_label = String("")
+    var sharded_out_count = 0
+    if config.shard_n > 0:
+        var before = len(disc.run_files)
+        disc.run_files = partition(
+            disc.run_files.copy(),
+            config.shard_mode,
+            config.shard_m,
+            config.shard_n,
+        )
+        sharded_out_count = before - len(disc.run_files)
+        shard_label = String(config.shard_m) + "/" + String(config.shard_n)
+
     var selected = len(disc.gate_files) + len(disc.run_files)
     var excluded = len(disc.excluded)
     reporter.handle(
-        Event.session_started(root, config.mojo_path, selected, excluded)
+        Event.session_started(
+            root,
+            config.mojo_path,
+            selected,
+            excluded,
+            shard_label=shard_label,
+            sharded_out_count=sharded_out_count,
+        )
     )
 
     var summary = Summary.zeros()
@@ -2048,6 +2072,17 @@ def run_collect(
             build/probe failure is caught here and folded into the result.
     """
     var disc = discover(config, root)  # a discover: usage error propagates.
+
+    # Collect honors the same shard partition as a run: the listing is exactly
+    # this shard's node ids. Gate files are never sharded (collect has none).
+    if config.shard_n > 0:
+        disc.run_files = partition(
+            disc.run_files.copy(),
+            config.shard_mode,
+            config.shard_m,
+            config.shard_n,
+        )
+
     var reg = BuildRegistry()
     var includes = config.include_paths.copy()
     var node_ids = List[String]()

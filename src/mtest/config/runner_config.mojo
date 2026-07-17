@@ -8,6 +8,7 @@ that rule is discover's, not config's, to apply.
 """
 from mtest.config.color_when import ColorWhen
 from mtest.config.precompile import Precompile
+from mtest.config.shard_mode import ShardMode
 from mtest.config.show_output import ShowOutput
 from mtest.config.verbosity import Verbosity
 
@@ -75,6 +76,18 @@ struct RunnerConfig(Copyable, Movable):
     discovered file for its node ids and print the sorted listing, running no
     test body. When True the session takes the collect path, not a run."""
 
+    var shard_mode: ShardMode
+    """`--shard` partitioning mode: hash (default) or slice. Only consulted when
+    `shard_n > 0`."""
+
+    var shard_m: Int
+    """`--shard M/N`: this shard's 1-based index. `0` when unsharded."""
+
+    var shard_n: Int
+    """`--shard M/N`: the total shard count. `0` (the default) means UNSHARDED —
+    the whole discovered run set runs. When `> 0` the session keeps only the run
+    files this shard owns; gate files are never sharded."""
+
     @staticmethod
     def default() -> RunnerConfig:
         """A config with every field at its contract default. Allocates.
@@ -82,7 +95,8 @@ struct RunnerConfig(Copyable, Movable):
         The defaults: every list empty, `mojo_path="mojo"`,
         `timeout_secs=300`, `show_output=FAILURES`, `verbosity=NORMAL`,
         `color=AUTO`, `exitfirst=False`, `maxfail=0` (no limit),
-        `durations=0` (no report), `collect=False`.
+        `durations=0` (no report), `collect=False`, and UNSHARDED
+        (`shard_mode=HASH`, `shard_m=0`, `shard_n=0`).
         """
         return RunnerConfig(
             paths=[],
@@ -101,4 +115,7 @@ struct RunnerConfig(Copyable, Movable):
             maxfail=0,
             durations=0,
             collect=False,
+            shard_mode=ShardMode.HASH,
+            shard_m=0,
+            shard_n=0,
         )

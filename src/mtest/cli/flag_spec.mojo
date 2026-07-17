@@ -105,12 +105,12 @@ def flag_specs() -> List[FlagSpec]:
         FlagSpec("-k", FlagId.SELECT, 1, False, True, ""),
         FlagSpec("--maxfail", FlagId.MAXFAIL, 1, False, True, ""),
         FlagSpec("--durations", FlagId.DURATIONS, 1, False, True, ""),
+        FlagSpec("--shard", FlagId.SHARD, 1, False, True, ""),
         # Part of the v1 contract but not served by this build.
         FlagSpec("-n", FlagId.WORKERS, 1, False, False, "parallel workers"),
         FlagSpec(
             "--workers", FlagId.WORKERS, 1, False, False, "parallel workers"
         ),
-        FlagSpec("--shard", FlagId.SHARD, 1, False, False, "test sharding"),
         FlagSpec(
             "--serial",
             FlagId.SERIAL,

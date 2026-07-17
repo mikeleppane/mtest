@@ -18,3 +18,4 @@ from mtest.session.classify import (
     classify,
     resolve_report,
 )
+from mtest.session.shard import fnv1a64, partition, shard_owns
