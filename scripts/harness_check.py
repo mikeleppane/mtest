@@ -32,6 +32,7 @@ UNIT_SUITES = {
     "test_config.mojo",
     "test_discover_fnmatch.mojo",
     "test_discover_normalize.mojo",
+    "test_exec_spec.mojo",
     "test_model_events.mojo",
     "test_model_exit_code.mojo",
     "test_model_node_id.mojo",
@@ -46,9 +47,12 @@ UNIT_SUITES = {
     "test_report_recording.mojo",
     "test_select_logic.mojo",
     "test_select_operands.mojo",
+    "test_session_clamp.mojo",
     "test_session_classify.mojo",
     "test_session_detail.mojo",
     "test_session_mangle.mojo",
+    "test_session_retry_class.mojo",
+    "test_session_shard.mojo",
     "test_session_verdict.mojo",
 }
 INTEGRATION_SUITES = {
@@ -107,6 +111,7 @@ PROTOCOL_FIXTURES = {
     "noisy.mojo",
     "passing.mojo",
     "raising.mojo",
+    "segfault.mojo",
     "skipped.mojo",
     "twofail.mojo",
 }
@@ -331,7 +336,7 @@ def check_protocol_asset_layout() -> None:
     actual_snapshots = tuple(
         sorted(path.name for path in snapshots.glob("*.txt") if path != manifest)
     )
-    if listed != actual_snapshots or len(listed) != 21:
+    if listed != actual_snapshots or len(listed) != 22:
         raise AssertionError(
             "protocol snapshot manifest/membership mismatch: "
             f"listed={list(listed)}, actual={list(actual_snapshots)}"
@@ -355,7 +360,7 @@ def check_e2e_layout() -> None:
         path.relative_to(REPO_ROOT).as_posix()
         for path in e2e_root.rglob("test_*.mojo")
     }
-    if rows != discovered or len(rows) != 25:
+    if rows != discovered or len(rows) != 26:
         raise AssertionError(
             "e2e manifest/discovery mismatch: "
             f"missing={sorted(discovered - rows)}, stale={sorted(rows - discovered)}"

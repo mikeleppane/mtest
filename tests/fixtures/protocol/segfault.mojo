@@ -16,6 +16,10 @@ def test_before_segfault_passes() raises:
 
 
 def test_segfaults() raises:
+    # SAFETY: this deliberately constructs an UnsafePointer at a known-invalid
+    # low address so the load below raises a genuine SIGSEGV, the exact crash
+    # this fixture exists to pin (no buffered report, no ABORT: line, process
+    # dies by signal). It never runs outside this crash-probe fixture.
     var p = UnsafePointer[Int, MutUntrackedOrigin](unsafe_from_address=8)
     print(p[])
 

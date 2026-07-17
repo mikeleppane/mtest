@@ -32,6 +32,10 @@ def test_flaky_passes_on_retry() raises:
         # closes before the fault), then die by a raw SIGSEGV.
         with open(_MARKER, "w") as f:
             f.write("crashed once\n")
+        # SAFETY: this deliberately constructs an UnsafePointer at a known-invalid
+        # address so the load below raises a genuine SIGSEGV, the exact crash this
+        # fixture exists to produce for the retry e2e scenario. It never runs
+        # outside this test fixture.
         var p = UnsafePointer[Int, MutUntrackedOrigin](unsafe_from_address=8)
         print(p[])
 
