@@ -19,3 +19,8 @@ from mtest.session.classify import (
     resolve_report,
 )
 from mtest.session.shard import fnv1a64, partition, shard_owns
+from mtest.session.retry_class import (
+    RetryClass,
+    has_crash_signature,
+    retry_classify,
+)
