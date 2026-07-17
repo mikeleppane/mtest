@@ -22,6 +22,7 @@ parsing English.
 Usage errors are intentionally outside this set: they happen before any session
 exists and are printed by the CLI, so there is no usage-error event.
 """
+from mtest.model.attribution import AttributionDisposition
 from mtest.model.node_id import NodeId
 from mtest.model.outcome import Outcome
 from mtest.model.parse_disposition import ParseDisposition
@@ -49,6 +50,8 @@ struct EventKind(Equatable, ImplicitlyCopyable, Movable):
     comptime INTERNAL_ERROR = Self(6)
     comptime TEST_REPORTED = Self(7)
     comptime COLLECTION_KNOWN = Self(8)
+    comptime ATTEMPT_FINISHED = Self(9)
+    comptime CRASH_ATTRIBUTION = Self(10)
 
     def __eq__(self, other: Self) -> Bool:
         """Two kinds are equal iff their discriminants match. Pure."""
@@ -116,6 +119,12 @@ struct Event(Copyable, Movable):
     """How many discovered files were selected to run."""
     var excluded_count: Int
     """How many discovered files were excluded."""
+    var shard_label: String
+    """The shard identity for a sharded run (e.g. "2/5"), empty when unsharded
+    (SessionStarted)."""
+    var sharded_out_count: Int
+    """How many selected files this shard handed off to other shards
+    (SessionStarted)."""
 
     # Warning.
     var warning_kind: String
@@ -174,6 +183,62 @@ struct Event(Copyable, Movable):
     var deselected_tests: Int
     """How many tests in this file were deselected, at test granularity
     (FileFinished)."""
+    var attempts_used: Int
+    """How many attempts the file's run took to reach its outcome; 1 when it
+    ran once with no retry (FileFinished)."""
+    var flaky: Bool
+    """Whether the file passed only after one or more failing attempts
+    (FileFinished)."""
+    var slow: Bool
+    """Whether the file's wall time crossed the slow threshold (FileFinished)."""
+
+    # AttemptFinished. `path` names the file, `step` names the attempted step
+    # ("build" | "run" | "precompile"), `duration_seconds` the attempt's wall
+    # time, and `captured_stdout`/`captured_stderr` the bounded excerpts (the
+    # caller bounds them before constructing the event).
+    var attempt_index: Int
+    """Which attempt this was, 1-based (the k-th of the planned attempts)."""
+    var attempts_planned: Int
+    """How many attempts were planned in total (the retry budget, N+1)."""
+    var term_kind: Int
+    """The termination kind as a plain discriminant (the attempt's raw
+    termination identity, decomposed from an exec.Termination)."""
+    var term_value: Int
+    """The termination value paired with `term_kind` (e.g. the signal number or
+    exit status of this attempt)."""
+    var term_final_kind: Int
+    """The latched final termination kind after any escalation."""
+    var term_final_value: Int
+    """The termination value paired with `term_final_kind`."""
+    var escalated: Bool
+    """Whether the runner escalated the signal (e.g. SIGTERM then SIGKILL); a
+    TRY line reads "SIGTERM sent, escalated to SIGKILL" from these fields."""
+    var retry_eligible: Bool
+    """Whether the classifier judged this attempt retry-eligible/crash-class."""
+    var classification: String
+    """A short classification label for the attempt (e.g. "signal",
+    "compile-timeout", "compile-crash")."""
+    var stdout_truncated: Bool
+    """Whether the captured stdout excerpt was truncated by the caller's bound,
+    so the reporter can print a loud "excerpt" marker (AttemptFinished)."""
+    var stderr_truncated: Bool
+    """Whether the captured stderr excerpt was truncated by the caller's bound
+    (AttemptFinished)."""
+    var attempt_argv: List[String]
+    """The argv this attempt ran, for the reproduce/diagnostic line
+    (AttemptFinished)."""
+
+    # CrashAttribution. `path` names the crashing file.
+    var attribution_disposition: AttributionDisposition
+    """Why the bounded crash-isolation pass stopped (CrashAttribution)."""
+    var culprit_test: String
+    """The attributed culprit test name, empty when none was attributed
+    (CrashAttribution)."""
+    var isolation_reruns: Int
+    """How many isolation reruns the attribution pass performed
+    (CrashAttribution)."""
+    var attribution_seconds: Float64
+    """The wall time the attribution pass took, in seconds (CrashAttribution)."""
 
     # TestReported.
     var test: TestResult
@@ -202,6 +267,8 @@ struct Event(Copyable, Movable):
     """The process exit code the session resolved (SessionFinished)."""
     var test_counts: TestCounts
     """The authoritative per-test totals for the whole run (SessionFinished)."""
+    var flaky_files: Int
+    """How many files passed only after a retry, run-wide (SessionFinished)."""
 
     @staticmethod
     def _blank(kind: EventKind) -> Event:
@@ -213,6 +280,8 @@ struct Event(Copyable, Movable):
             toolchain="",
             selected_count=0,
             excluded_count=0,
+            shard_label="",
+            sharded_out_count=0,
             warning_kind="",
             warning_pattern="",
             step="",
@@ -235,6 +304,25 @@ struct Event(Copyable, Movable):
             failed_tests=0,
             skipped_tests=0,
             deselected_tests=0,
+            attempts_used=1,
+            flaky=False,
+            slow=False,
+            attempt_index=0,
+            attempts_planned=0,
+            term_kind=0,
+            term_value=0,
+            term_final_kind=0,
+            term_final_value=0,
+            escalated=False,
+            retry_eligible=False,
+            classification="",
+            stdout_truncated=False,
+            stderr_truncated=False,
+            attempt_argv=List[String](),
+            attribution_disposition=AttributionDisposition.NO_REPRODUCTION,
+            culprit_test="",
+            isolation_reruns=0,
+            attribution_seconds=0.0,
             test=TestResult(NodeId("", ""), Outcome.NOT_RUN),
             selected_test_total=0,
             deselected_test_total=0,
@@ -244,6 +332,7 @@ struct Event(Copyable, Movable):
             wall_time_seconds=0.0,
             exit_code=0,
             test_counts=TestCounts.zeros(),
+            flaky_files=0,
         )
 
     @staticmethod
@@ -252,14 +341,22 @@ struct Event(Copyable, Movable):
         toolchain: String,
         selected_count: Int,
         excluded_count: Int,
+        shard_label: String = "",
+        sharded_out_count: Int = 0,
     ) -> Event:
         """The run began: root, resolved toolchain, and selected/excluded counts.
+
+        `shard_label` names the shard identity for a sharded run (e.g. "2/5")
+        and `sharded_out_count` how many selected files were handed to other
+        shards; both default so existing callers are unaffected.
         """
         var e = Event._blank(EventKind.SESSION_STARTED)
         e.root = root
         e.toolchain = toolchain
         e.selected_count = selected_count
         e.excluded_count = excluded_count
+        e.shard_label = shard_label
+        e.sharded_out_count = sharded_out_count
         return e^
 
     @staticmethod
@@ -319,6 +416,9 @@ struct Event(Copyable, Movable):
         failed_tests: Int = 0,
         skipped_tests: Int = 0,
         deselected_tests: Int = 0,
+        attempts_used: Int = 1,
+        flaky: Bool = False,
+        slow: Bool = False,
     ) -> Event:
         """A file's run finished, carrying the data the reporter renders from.
 
@@ -327,7 +427,9 @@ struct Event(Copyable, Movable):
         `exclusion_pattern` for an EXCLUDED line. The build command rides as
         `build_argv`, and the captured streams as raw bytes. `parse_disposition`
         and the four `*_tests` totals carry the test-granularity read of this
-        file's report; every one defaults so existing callers are unaffected.
+        file's report. `attempts_used`/`flaky`/`slow` carry the resilience
+        summary of the run. Every one defaults so existing callers are
+        unaffected.
         """
         var e = Event._blank(EventKind.FILE_FINISHED)
         e.path = path
@@ -346,6 +448,9 @@ struct Event(Copyable, Movable):
         e.failed_tests = failed_tests
         e.skipped_tests = skipped_tests
         e.deselected_tests = deselected_tests
+        e.attempts_used = attempts_used
+        e.flaky = flaky
+        e.slow = slow
         return e^
 
     @staticmethod
@@ -369,17 +474,20 @@ struct Event(Copyable, Movable):
         wall_time_seconds: Float64,
         exit_code: Int,
         test_counts: TestCounts = TestCounts.zeros(),
+        flaky_files: Int = 0,
     ) -> Event:
         """The run ended: the full summary tally, wall time, and exit code.
 
-        `test_counts` carries the authoritative per-test totals; it defaults to
-        zeros so existing callers are unaffected.
+        `test_counts` carries the authoritative per-test totals and
+        `flaky_files` how many files passed only after a retry; both default so
+        existing callers are unaffected.
         """
         var e = Event._blank(EventKind.SESSION_FINISHED)
         e.summary = summary^
         e.wall_time_seconds = wall_time_seconds
         e.exit_code = exit_code
         e.test_counts = test_counts
+        e.flaky_files = flaky_files
         return e^
 
     @staticmethod
@@ -403,4 +511,80 @@ struct Event(Copyable, Movable):
         var e = Event._blank(EventKind.COLLECTION_KNOWN)
         e.selected_test_total = selected_test_total
         e.deselected_test_total = deselected_test_total
+        return e^
+
+    @staticmethod
+    def attempt_finished(
+        path: String,
+        step: String,
+        attempt_index: Int,
+        attempts_planned: Int,
+        term_kind: Int,
+        term_value: Int,
+        term_final_kind: Int,
+        term_final_value: Int,
+        escalated: Bool,
+        retry_eligible: Bool,
+        classification: String,
+        duration_seconds: Float64,
+        var captured_stdout: List[UInt8],
+        var captured_stderr: List[UInt8],
+        stdout_truncated: Bool,
+        stderr_truncated: Bool,
+        var attempt_argv: List[String],
+    ) -> Event:
+        """One non-final retry attempt's full record, for a "TRY" block.
+
+        Carries everything a reporter needs to render the attempt now AND to
+        serialize it later without re-parsing bytes: `path` associates it with a
+        file and `step` is the attempted step ("build" | "run" | "precompile").
+        The termination identity rides as plain fields — `term_kind`/`term_value`
+        with the latched `term_final_kind`/`term_final_value` and `escalated` —
+        decomposed from an exec.Termination so this layer imports nothing above
+        it. `retry_eligible` and `classification` carry the classifier verdict,
+        `duration_seconds` the attempt's wall time, and the captured streams the
+        bounded excerpts with their `*_truncated` markers (the caller bounds the
+        bytes before constructing the event). `attempt_argv` is the argv for the
+        reproduce line.
+        """
+        var e = Event._blank(EventKind.ATTEMPT_FINISHED)
+        e.path = path
+        e.step = step
+        e.attempt_index = attempt_index
+        e.attempts_planned = attempts_planned
+        e.term_kind = term_kind
+        e.term_value = term_value
+        e.term_final_kind = term_final_kind
+        e.term_final_value = term_final_value
+        e.escalated = escalated
+        e.retry_eligible = retry_eligible
+        e.classification = classification
+        e.duration_seconds = duration_seconds
+        e.captured_stdout = captured_stdout^
+        e.captured_stderr = captured_stderr^
+        e.stdout_truncated = stdout_truncated
+        e.stderr_truncated = stderr_truncated
+        e.attempt_argv = attempt_argv^
+        return e^
+
+    @staticmethod
+    def crash_attribution(
+        path: String,
+        disposition: AttributionDisposition,
+        culprit_test: String,
+        isolation_reruns: Int,
+        attribution_seconds: Float64,
+    ) -> Event:
+        """One crash file's bounded-isolation attribution result.
+
+        `path` is the crashing file, `disposition` why the pass stopped,
+        `culprit_test` the attributed test (empty when none), `isolation_reruns`
+        how many reruns it took, and `attribution_seconds` the pass's wall time.
+        """
+        var e = Event._blank(EventKind.CRASH_ATTRIBUTION)
+        e.path = path
+        e.attribution_disposition = disposition
+        e.culprit_test = culprit_test
+        e.isolation_reruns = isolation_reruns
+        e.attribution_seconds = attribution_seconds
         return e^

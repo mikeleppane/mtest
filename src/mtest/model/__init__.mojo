@@ -12,6 +12,7 @@ from mtest.model.outcome import Outcome
 from mtest.model.node_id import NodeId, NodeIdSplit, split_node_token
 from mtest.model.test_result import TestResult
 from mtest.model.parse_disposition import ParseDisposition
+from mtest.model.attribution import AttributionDisposition
 from mtest.model.test_counts import TestCounts
 from mtest.model.events import EventKind, Summary, Event
 from mtest.model.exit_code import (
