@@ -443,10 +443,13 @@ class Runner:
 def build_matrix() -> list[Check]:
     I = ["-I", "build"]  # noqa: E741
     refused = [("--workers", "4", "parallel workers"), ("-n", "4", "parallel workers"),
-               ("--compile-timeout", "60", "module-cache"), ("--retries", "2", "retries"),
                ("--junit-xml", "r.xml", "machine report"), ("--gh-annotations", "auto", "annotations"),
-               ("--shard", "1/2", "sharding"), ("--serial", "*.mojo", "serial"),
-               ("--json", "-", "machine")]
+               ("--serial", "*.mojo", "serial"), ("--json", "-", "machine")]
+    # Newly served (§24.1): --retries, --compile-timeout, and --shard are wired
+    # up — the parser accepts them and they run, so they must NOT exit 4 with the
+    # not-available refusal. Assert the flip so the validator stops asserting a
+    # falsehood, without duplicating the e2e's behavior coverage.
+    served = [("--retries", "2"), ("--compile-timeout", "600")]
     checks = [
         # Version identity (§19) — discriminating, not a bare "mtest".
         Check("help: version prints the version", "§19", ["version"], 0, out_has=["mtest 0.1.0"]),
@@ -533,6 +536,13 @@ def build_matrix() -> list[Check]:
     for flag, val, _cap in refused:
         checks.append(Check(f"refused: {flag} -> 4 names flag + v1 contract", "§24.1",
                             I + [flag, val, "tests"], 4, any_has=["v1 contract", flag]))
+    # Served resilience flags (§24.1): accepted on the clean suite -> 0, never the
+    # not-available refusal.
+    for flag, val in served:
+        checks.append(Check(f"served: {flag} accepted (not exit 4)", "§13,§18,§24.1",
+                            I + [flag, val, "tests"], 0, any_absent=["v1 contract"]))
+    checks.append(Check("served: collect --shard partitions (not exit 4)", "§18,§24.1",
+                        ["collect"] + I + ["--shard", "1/2", "tests"], 0, any_absent=["v1 contract"]))
     return checks
 
 
