@@ -96,6 +96,17 @@ comptime _ATTEMPT_STREAM_TAIL = 65536
 """Tail bytes of each stream retained in a NON-final attempt's excerpt (64 KiB).
 """
 
+comptime _COMPILE_GRACE_MS = 5000
+"""SIGTERM->SIGKILL grace for a BUILD killed at `--compile-timeout` (5 s).
+
+Deliberately far wider than the run path's 300 ms. A compiler is killed at its
+own convenience, not ours: it may be mid-write to the shared module cache, and
+SIGKILLing it 300 ms in is the most plausible way to leave that cache torn. Five
+seconds lets it unwind and flush; a compiler still alive after that has ignored
+SIGTERM and earns the SIGKILL — which is precisely when the NARROW cache
+quarantine on the retry rebuild is worth its keep.
+"""
+
 comptime _STALE_NAME_PHRASE = "test not found in suite:"
 """The stdlib phrase when `--only` names a test the suite no longer offers."""
 
@@ -499,12 +510,19 @@ def _single_attempt(
         if quarantined:
             _ = setenv("MODULAR_CACHE_DIR", quarantine_dir, True)
 
-        # Build with NO deadline, inside the invocation root. A build machinery
-        # raise is a build-phase internal error naming the compiler.
+        # Build under `--compile-timeout` (0 disables), inside the invocation
+        # root, with the COMPILE-specific grace. A build machinery raise is a
+        # build-phase internal error naming the compiler.
         var bres: ProcessResult
         try:
             bres = run_supervised(
-                runtime, ProcessSpec.command_in(build_argv.copy(), root, 0)
+                runtime,
+                ProcessSpec.command_in(
+                    build_argv.copy(),
+                    root,
+                    config.compile_timeout_secs * 1000,
+                    _COMPILE_GRACE_MS,
+                ),
             )
         except:
             if quarantined:
@@ -526,10 +544,11 @@ def _single_attempt(
                 Event.internal_error("build", config.mojo_path, bterm.value)
             )
         build_stderr = bres.stderr_bytes.copy()
-        if build_verdict(bterm) == Outcome.COMPILE_ERROR:
-            # A compile failure: no run happens. The raw bterm + stderr ride so
-            # the caller can BOTH finalize a COMPILE_ERROR verdict AND classify
-            # a retry (a signaled/timed-out/ICE compiler is crash-class).
+        if build_verdict(bterm).is_failing():
+            # A compile failure (a COMPILE_ERROR, or a COMPILE_TIMEOUT when our
+            # deadline killed it): no run happens. The raw bterm + stderr ride so
+            # the caller can BOTH finalize the build verdict AND classify a retry
+            # (a signaled/timed-out/ICE compiler is crash-class).
             return _AttemptResult._build_failed(
                 build_argv^, bterm, build_stderr^, bdur, out_bin
             )
@@ -682,18 +701,27 @@ def _finalize_attempt(
     byte-for-byte the pre-retry behavior.
     """
     if att.build_failed:
-        # The compiler's stderr rides as raw bytes for the console banner.
+        # COMPILE_ERROR (the compiler rejected the code) or COMPILE_TIMEOUT (we
+        # killed it at the deadline) — the raw build termination decides, so a
+        # deadline kill is never mislabelled as the source's fault. The
+        # compiler's stderr rides as raw bytes for the console banner; the
+        # deadline rides so the banner can name it.
+        var bout = build_verdict(att.bterm)
+        var bto = 0
+        if bout == Outcome.COMPILE_TIMEOUT:
+            bto = config.compile_timeout_secs
         var ev = Event.file_finished(
             rel,
-            Outcome.COMPILE_ERROR,
+            bout,
             0.0,
             att.build_argv.copy(),
             att.bdur,
             List[UInt8](),
             att.build_stderr.copy(),
+            timeout_seconds=bto,
             attempts_used=attempts_used,
         )
-        return FileResult.ran_with(ev^, Outcome.COMPILE_ERROR)
+        return FileResult.ran_with(ev^, bout)
 
     var cls = att.cls.copy()
     # Retrospective per-test events for a VALID report, in row order.
@@ -1037,7 +1065,13 @@ def _build_for_selection(
     var bres: ProcessResult
     try:
         bres = run_supervised(
-            runtime, ProcessSpec.command_in(build_argv.copy(), root, 0)
+            runtime,
+            ProcessSpec.command_in(
+                build_argv.copy(),
+                root,
+                config.compile_timeout_secs * 1000,
+                _COMPILE_GRACE_MS,
+            ),
         )
     except:
         return _BuildOutcome(
@@ -1070,16 +1104,22 @@ def _build_for_selection(
             ),
         )
     var bsignal = build_verdict(bterm)
-    if bsignal == Outcome.COMPILE_ERROR:
+    if bsignal.is_failing():
+        # COMPILE_ERROR, or COMPILE_TIMEOUT when `--compile-timeout` killed the
+        # build. Either way the file is terminal here and never probed or run.
+        var bto = 0
+        if bsignal == Outcome.COMPILE_TIMEOUT:
+            bto = config.compile_timeout_secs
         reg.record_compile_error(rel, lossy_utf8(bres.stderr_bytes))
         var ev = Event.file_finished(
             rel,
-            Outcome.COMPILE_ERROR,
+            bsignal,
             0.0,
             build_argv.copy(),
             bdur,
             List[UInt8](),
             bres.stderr_bytes.copy(),
+            timeout_seconds=bto,
         )
         return _BuildOutcome(
             False,
@@ -1088,7 +1128,7 @@ def _build_for_selection(
             build_argv^,
             bdur,
             True,
-            FileResult.ran_with(ev^, Outcome.COMPILE_ERROR),
+            FileResult.ran_with(ev^, bsignal),
         )
     var canonical = canonicalize(root + "/" + rel)
     reg.record_build(BuildProduct.built(rel, out_bin, canonical))

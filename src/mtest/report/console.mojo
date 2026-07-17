@@ -227,8 +227,10 @@ def _outcome_detail(e: Event) -> String:
 
     `FAIL` carries the exit code (`"exit <n>"`), `CRASH` the terminating signal
     named in words when recognized (`"signal 4 — SIGILL, illegal instruction"`,
-    else just `"signal <n>"`), `TIMEOUT` the configured deadline (`"timed out
-    after <n>s"`); every other outcome has no detail. Pure.
+    else just `"signal <n>"`), `TIMEOUT` and `COMPILE_TIMEOUT` the configured
+    deadline (`"timed out after <n>s"` — the run deadline and the compile
+    deadline read the same because both name the deadline WE enforced); every
+    other outcome has no detail. Pure.
     """
     if e.outcome == Outcome.FAIL:
         return String("exit ") + String(e.exit_status)
@@ -238,7 +240,7 @@ def _outcome_detail(e: Event) -> String:
         if name.byte_length() > 0:
             return base + " — " + name
         return base
-    if e.outcome == Outcome.TIMEOUT:
+    if e.outcome == Outcome.TIMEOUT or e.outcome == Outcome.COMPILE_TIMEOUT:
         return String("timed out after ") + String(e.timeout_seconds) + "s"
     return String("")
 
@@ -768,7 +770,9 @@ struct ConsoleReporter(Reporter):
             line += _fmt_fixed(e.duration_seconds, 2) + "s"
             var detail = _outcome_detail(e)
             if (
-                e.outcome == Outcome.CRASH or e.outcome == Outcome.TIMEOUT
+                e.outcome == Outcome.CRASH
+                or e.outcome == Outcome.TIMEOUT
+                or e.outcome == Outcome.COMPILE_TIMEOUT
             ) and detail.byte_length() > 0:
                 line += "  (" + detail + ")"
             var color = _YELLOW if no_tests else _color_for(e.outcome)
@@ -833,9 +837,66 @@ struct ConsoleReporter(Reporter):
         repro += shell_quote(target)
         return repro
 
+    def _compile_timeout_repro(self, e: Event) -> String:
+        """A `reproduce:` line naming the deadline that fired. Pure.
+
+        The COMPILE-ERROR banner reproduces with the raw `mojo build` argv, but
+        that argv would hang forever — the whole point is that this build does
+        not finish. So a COMPILE-TIMEOUT reproduces through mtest, carrying the
+        `--compile-timeout` that fired so the reader reruns the same experiment
+        rather than a different one.
+        """
+        var repro = String("reproduce: mtest ")
+        if self.mtest_build_flags.byte_length() > 0:
+            repro += self.mtest_build_flags + " "
+        repro += "--compile-timeout " + String(e.timeout_seconds) + " "
+        repro += shell_quote(e.path)
+        return repro
+
+    def _render_compile_timeout(self, e: Event) -> String:
+        """The framed COMPILE-TIMEOUT banner, rendered from typed fields only.
+
+        Names the deadline, shows whatever the compiler managed to say verbatim,
+        then carries the one actionable hint (split or exclude) and a repro line.
+
+        The quarantine sentence is CONDITIONAL on `attempts_used > 1`: only then
+        did a retry actually run, rebuilding against a fresh quarantined module
+        cache. At `--retries 0` exactly one attempt was scheduled and the banner
+        promises nothing about a rebuild that never happened.
+        """
+        var secs = String(e.timeout_seconds)
+        var out = (
+            String("--- COMPILE-TIMEOUT ")
+            + e.path
+            + " (timed out after "
+            + secs
+            + "s) — mtest killed the build at the compile timeout; the"
+            + " compiler said: ---\n"
+        )
+        out += _ensure_trailing_newline(lossy_utf8(e.captured_stderr))
+        out += (
+            "the build exceeded the "
+            + secs
+            + "s compile timeout — split the module into smaller files or"
+            " exclude it (raise the deadline with --compile-timeout N, or"
+            " --compile-timeout 0 to remove it)\n"
+        )
+        if e.attempts_used > 1:
+            out += (
+                "the compile was retried against a fresh quarantined module"
+                " cache ("
+                + String(e.attempts_used)
+                + " attempts) and exceeded the deadline every time\n"
+            )
+        out += self._compile_timeout_repro(e) + "\n\n"
+        return out
+
     def _render_section(self, e: Event) -> String:
         """The file's framed sections: per-test failures then the file-scope block.
         """
+        if e.outcome == Outcome.COMPILE_TIMEOUT:
+            return self._render_compile_timeout(e)
+
         if e.outcome == Outcome.COMPILE_ERROR:
             var out = (
                 String("--- COMPILE-ERROR ")

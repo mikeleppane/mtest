@@ -107,6 +107,9 @@ def flag_specs() -> List[FlagSpec]:
         FlagSpec("--durations", FlagId.DURATIONS, 1, False, True, ""),
         FlagSpec("--shard", FlagId.SHARD, 1, False, True, ""),
         FlagSpec("--retries", FlagId.RETRIES, 1, False, True, ""),
+        FlagSpec(
+            "--compile-timeout", FlagId.COMPILE_TIMEOUT, 1, False, True, ""
+        ),
         # Part of the v1 contract but not served by this build.
         FlagSpec("-n", FlagId.WORKERS, 1, False, False, "parallel workers"),
         FlagSpec(
@@ -122,14 +125,6 @@ def flag_specs() -> List[FlagSpec]:
         ),
         FlagSpec(
             "--json", FlagId.JSON, 1, False, False, "machine report artifacts"
-        ),
-        FlagSpec(
-            "--compile-timeout",
-            FlagId.COMPILE_TIMEOUT,
-            1,
-            False,
-            False,
-            "the module-cache quarantine",
         ),
         FlagSpec(
             "--junit-xml",

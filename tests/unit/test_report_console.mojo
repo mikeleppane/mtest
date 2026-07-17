@@ -530,6 +530,106 @@ def test_compile_error_reproduce_is_the_build_command() raises:
     assert_true("reproduce: mojo build tests/test_typo.mojo" in out)
 
 
+# --- COMPILE-TIMEOUT: the banner is rendered from the typed event fields only ---
+
+
+def _feed_compile_timeout(
+    mut c: ConsoleReporter,
+    attempts_used: Int = 1,
+    stderr_text: String = "mojo: warning: still lowering module\n",
+):
+    """One COMPILE_TIMEOUT FileFinished for the fixed slow-build fixture."""
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_slow.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_slow.mojo",
+            Outcome.COMPILE_TIMEOUT,
+            0.0,
+            _argv("tests/test_slow.mojo"),
+            1.0,
+            List[UInt8](),
+            _bytes(stderr_text),
+            timeout_seconds=1,
+            attempts_used=attempts_used,
+        )
+    )
+
+
+def test_compile_timeout_verdict_token_and_deadline() raises:
+    var c = _console()
+    _feed_compile_timeout(c)
+    var out = c.output()
+    # The verdict line carries the token and names the deadline that fired.
+    assert_true("COMPILE-TIMEOUT" in out)
+    assert_true("tests/test_slow.mojo" in out)
+    assert_true("timed out after 1s" in out)
+
+
+def test_compile_timeout_banner_shows_compiler_stderr_verbatim() raises:
+    var c = _console()
+    _feed_compile_timeout(c, stderr_text="mojo: note: lowering @foo\n")
+    var out = c.output()
+    assert_true("mojo: note: lowering @foo" in out)
+
+
+def test_compile_timeout_banner_carries_the_split_or_exclude_hint() raises:
+    var c = _console()
+    _feed_compile_timeout(c)
+    var out = c.output()
+    assert_true("exceeded the 1s compile timeout" in out)
+    assert_true("split" in out)
+    assert_true("exclude" in out)
+
+
+def test_compile_timeout_reproduce_names_the_deadline() raises:
+    var c = _console()
+    _feed_compile_timeout(c)
+    var out = c.output()
+    assert_true(
+        "reproduce: mtest --compile-timeout 1 tests/test_slow.mojo" in out
+    )
+
+
+def test_compile_timeout_reproduce_keeps_the_build_flags() raises:
+    var c = _console(mtest_build_flags="--mojo /opt/mojo -I lib")
+    _feed_compile_timeout(c)
+    var out = c.output()
+    assert_true(
+        "reproduce: mtest --mojo /opt/mojo -I lib --compile-timeout 1"
+        " tests/test_slow.mojo"
+        in out
+    )
+
+
+def test_compile_timeout_promises_no_quarantine_when_no_retry_ran() raises:
+    # At `--retries 0` exactly ONE attempt was scheduled: the banner must not
+    # claim a quarantined rebuild that never happened.
+    var c = _console()
+    _feed_compile_timeout(c, attempts_used=1)
+    var out = c.output()
+    assert_false("quarantin" in out)
+    assert_false("retried" in out)
+
+
+def test_compile_timeout_names_the_quarantine_when_a_retry_ran() raises:
+    # attempts_used > 1: a quarantined rebuild really did run and time out too.
+    var c = _console()
+    _feed_compile_timeout(c, attempts_used=2)
+    var out = c.output()
+    assert_true("quarantined" in out)
+    assert_true("2 attempts" in out)
+
+
+def test_compile_timeout_banner_is_not_the_compile_error_banner() raises:
+    # A build WE killed must never be framed as the compiler rejecting the code.
+    var c = _console()
+    _feed_compile_timeout(c)
+    var out = c.output()
+    assert_false("COMPILE-ERROR" in out)
+    assert_false("mojo build said" in out)
+
+
 def test_no_tests_file_reads_no_tests_never_passed() raises:
     # A VALID file that ran zero tests is NO-TESTS, not PASS — exit-0 class but it
     # must never read as "passed".

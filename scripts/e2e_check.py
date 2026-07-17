@@ -47,6 +47,7 @@ MTEST = os.path.join(REPO_ROOT, "build", "mtest")
 E2E_ROOT = os.path.join(REPO_ROOT, "e2e")
 MANIFEST_PATH = os.path.join(E2E_ROOT, "manifest.json")
 LOGGING_MOJO = os.path.join(REPO_ROOT, "scripts", "logging_mojo.py")
+FAKE_SLOW_MOJO = os.path.join(REPO_ROOT, "scripts", "fake_slow_mojo.py")
 
 # Generous per-spawn wall-clock ceilings. Cold `mojo build` is slow, so these are
 # roomy — their only job is to keep a hung runner from wedging CI, never to time
@@ -739,6 +740,81 @@ def s_retries_flaky(manifest: dict) -> str:
     return (
         "retries: default --retries 1 -> TRY + FLAKY (exit 0); --retries 0 ->"
         " CRASH (exit 1); -k selection --retries 1 -> TRY + FLAKY (exit 0)"
+    )
+
+
+def s_compile_timeout(manifest: dict) -> str:
+    """`--compile-timeout` bounds the BUILD; a blown deadline is COMPILE-TIMEOUT.
+
+    Uses the committed slow-compiler `--mojo` stand-in
+    (scripts/fake_slow_mojo.py), which sleeps forever on `build` but honors
+    SIGTERM promptly — so this exercises the GRACEFUL half of the supervised kill
+    protocol against a normal, perfectly valid fixture. The file is only slow to
+    compile, never broken: that is exactly what separates COMPILE-TIMEOUT from
+    COMPILE-ERROR.
+
+      * --compile-timeout 1 -> COMPILE-TIMEOUT, the split-or-exclude hint, exit 1;
+      * --compile-timeout 1 --retries 1 -> the first timed-out compile shows a TRY
+        line and the compile-kill-residual warning (the rebuild ran quarantined
+        against a fresh module cache), then the retry times out too and the file
+        is still COMPILE-TIMEOUT at exit 1.
+
+    Structure is asserted, never the exact console bytes."""
+    rel = "e2e/suite/test_passing.mojo"
+
+    # --compile-timeout 1: one bounded build, killed at the deadline.
+    run = run_mtest(
+        ["--mojo", FAKE_SLOW_MOJO, rel, "--compile-timeout", "1"],
+        timeout=SHORT_TIMEOUT,
+    )
+    expect_exit(run, 1)
+    expect(
+        run.verdict_line("COMPILE-TIMEOUT", rel) is not None,
+        f"--compile-timeout 1 did not report COMPILE-TIMEOUT:\n{run.stdout}",
+    )
+    expect(
+        "compile timeout" in run.stdout and "split" in run.stdout,
+        f"the COMPILE-TIMEOUT banner carried no split-or-exclude hint:\n{run.stdout}",
+    )
+    expect(
+        "--compile-timeout 1" in run.stdout,
+        f"the COMPILE-TIMEOUT banner's repro line never named the deadline:\n"
+        f"{run.stdout}",
+    )
+    expect(
+        run.verdict_line("COMPILE-ERROR", rel) is None,
+        f"a build WE killed was reported as a COMPILE-ERROR:\n{run.stdout}",
+    )
+    expect_accounting(run)
+
+    # --retries 1: a compile-timeout is crash-class, so it retries + quarantines.
+    runr = run_mtest(
+        ["--mojo", FAKE_SLOW_MOJO, rel, "--compile-timeout", "1", "--retries", "1"],
+        timeout=SHORT_TIMEOUT,
+    )
+    expect_exit(runr, 1)
+    expect(
+        runr.verdict_line("TRY", rel) is not None,
+        f"--retries 1 showed no TRY line for the timed-out first compile:\n"
+        f"{runr.stdout}",
+    )
+    expect(
+        "compile-kill-residual" in runr.stdout,
+        f"a killed compile fired no cache-residual warning:\n{runr.stdout}",
+    )
+    expect(
+        "quarantin" in runr.stdout,
+        f"the retried compile never mentioned the cache quarantine:\n{runr.stdout}",
+    )
+    expect(
+        runr.verdict_line("COMPILE-TIMEOUT", rel) is not None,
+        f"a retry-exhausted compile timeout is still COMPILE-TIMEOUT:\n{runr.stdout}",
+    )
+    expect_accounting(runr)
+
+    return (
+        "compile-timeout: --compile-timeout 1 -> COMPILE-TIMEOUT + hint (exit 1);"
+        " --retries 1 -> TRY + quarantined rebuild + COMPILE-TIMEOUT (exit 1)"
     )
 
 
@@ -1653,6 +1729,7 @@ def main() -> int:
     h.scenario("exitfirst", s_exitfirst)
     h.scenario("maxfail", s_maxfail)
     h.scenario("retries-flaky", s_retries_flaky)
+    h.scenario("compile-timeout", s_compile_timeout)
     h.scenario("exclude+stale", s_exclude_and_stale)
     h.scenario("all-excluded", s_all_excluded)
     h.scenario("empty-dir", s_empty_dir)

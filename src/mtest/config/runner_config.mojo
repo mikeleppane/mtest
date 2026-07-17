@@ -94,6 +94,12 @@ struct RunnerConfig(Copyable, Movable):
     retries. A file runs up to `retries + 1` attempts; a late pass after a
     crash-class attempt is FLAKY. Deterministic failures are never retried."""
 
+    var compile_timeout_secs: Int
+    """`--compile-timeout SECS`: per-file BUILD timeout in seconds; `0` disables
+    it. A build that exceeds it is killed under the supervised protocol (with a
+    compile-specific grace) and reported COMPILE_TIMEOUT — a crash-class failure
+    `--retries` will retry against a quarantined module cache."""
+
     @staticmethod
     def default() -> RunnerConfig:
         """A config with every field at its contract default. Allocates.
@@ -102,8 +108,8 @@ struct RunnerConfig(Copyable, Movable):
         `timeout_secs=300`, `show_output=FAILURES`, `verbosity=NORMAL`,
         `color=AUTO`, `exitfirst=False`, `maxfail=0` (no limit),
         `durations=0` (no report), `collect=False`, UNSHARDED
-        (`shard_mode=HASH`, `shard_m=0`, `shard_n=0`), and `retries=0` (no
-        retries).
+        (`shard_mode=HASH`, `shard_m=0`, `shard_n=0`), `retries=0` (no
+        retries), and `compile_timeout_secs=600`.
         """
         return RunnerConfig(
             paths=[],
@@ -126,4 +132,5 @@ struct RunnerConfig(Copyable, Movable):
             shard_m=0,
             shard_n=0,
             retries=0,
+            compile_timeout_secs=600,
         )

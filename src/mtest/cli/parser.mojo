@@ -30,9 +30,9 @@ comptime MTEST_VERSION = "0.1.0-dev"
 
 comptime SUPPORTED_SUMMARY = (
     "paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo,"
-    " -x/--exitfirst, --timeout, -s/--show-output, -q, -v, --color, -k,"
-    " --maxfail, --durations, --shard, --retries, collect/--collect-only,"
-    " --help, --version"
+    " -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v,"
+    " --color, -k, --maxfail, --durations, --shard, --retries,"
+    " collect/--collect-only, --help, --version"
 )
 """A stable one-line list of what this build serves, quoted in refusals."""
 
@@ -115,6 +115,16 @@ def _parse_retries(value: String) raises -> Int:
     """Parse a `--retries` value: a non-negative integer (`0` disables)."""
     if not _all_digits(value):
         raise _err("'--retries' wants an integer >= 0, got '" + value + "'")
+    return atol(value)
+
+
+def _parse_compile_timeout(value: String) raises -> Int:
+    """Parse a `--compile-timeout` value: a non-negative integer (`0` disables).
+    """
+    if not _all_digits(value):
+        raise _err(
+            "'--compile-timeout' wants an integer >= 0, got '" + value + "'"
+        )
     return atol(value)
 
 
@@ -279,6 +289,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var include_paths = List[String]()
     var mojo_flag = Optional[String](None)
     var timeout_secs = 300
+    var compile_timeout_secs = 600
     var show_output = ShowOutput.FAILURES
     var color = ColorWhen.AUTO
     var exitfirst = False
@@ -399,6 +410,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             mojo_flag = value
         elif s.id == FlagId.TIMEOUT:
             timeout_secs = _parse_timeout(value)
+        elif s.id == FlagId.COMPILE_TIMEOUT:
+            compile_timeout_secs = _parse_compile_timeout(value)
         elif s.id == FlagId.SHOW_OUTPUT:
             show_output = _parse_show_output(value)
             saw_show_output = True
@@ -482,5 +495,6 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         shard_m=shard_m,
         shard_n=shard_n,
         retries=retries,
+        compile_timeout_secs=compile_timeout_secs,
     )
     return ParseResult.run(cfg^)
