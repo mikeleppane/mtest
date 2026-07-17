@@ -165,6 +165,22 @@
       "disposition": "NO_REPORT",
       "rationale": "The retry fixture: keyed by a per-file marker under build/e2e-scratch/ (owned/reset by the harness), it CRASHES by SIGSEGV on its first run (no marker) then PASSES on a re-run (marker present). The listed verdict is the fresh-marker first-run state: with an empty scratch and --retries 0 it dies by signal and mtest reports CRASH (exit 1). The retries scenario resets the marker and runs it twice: --retries 1 -> FLAKY (exit 0, a TRY line for the crashed first attempt), --retries 0 -> CRASH (exit 1). Reached only by the retries scenario; never in the default suite."
     },
+    "e2e/attribution/test_deterministic_crasher.mojo": {
+      "verdict": "CRASH",
+      "exit_class": 1,
+      "in_default_suite": false,
+      "reached_only_by": ["crash-attribution"],
+      "disposition": "NO_REPORT",
+      "rationale": "The ATTRIBUTED half of the crash-attribution honesty pair. test_boom aborts unconditionally (SIGILL), so the file CRASHes and the bounded isolation post-pass reproduces the crash with test_boom run alone and names it as the culprit. The two passing siblings give attribution something to exclude. The listed verdict is the whole-file one: CRASH, exit 1 — the SAME verdict the file gets whether or not attribution names anything, which is the doctrine this pair exists to pin."
+    },
+    "e2e/attribution/test_order_dependent_crasher.mojo": {
+      "verdict": "CRASH",
+      "exit_class": 1,
+      "in_default_suite": false,
+      "reached_only_by": ["crash-attribution"],
+      "disposition": "NO_REPORT",
+      "rationale": "The NO-REPRODUCTION half of the crash-attribution honesty pair. It crashes (SIGSEGV) only when its tests run TOGETHER: the first corrupts an in-process environment variable the second trips over. Each test run ALONE under --only passes, so isolation cannot reproduce the crash and the pass reports NO_REPRODUCTION — the culprit stays UNATTRIBUTED and is never guessed. Its verdict and summary band are IDENTICAL to the deterministic sibling's (CRASH, exit 1, 1 crashed): attribution success changes no verdict."
+    },
     "e2e/maxfail/test_a_fail.mojo": {
       "verdict": "FAIL",
       "exit_class": 1,

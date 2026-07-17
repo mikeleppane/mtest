@@ -47,6 +47,7 @@ UNIT_SUITES = {
     "test_report_recording.mojo",
     "test_select_logic.mojo",
     "test_select_operands.mojo",
+    "test_session_attribution.mojo",
     "test_session_clamp.mojo",
     "test_session_classify.mojo",
     "test_session_detail.mojo",
@@ -361,7 +362,7 @@ def check_e2e_layout() -> None:
         path.relative_to(REPO_ROOT).as_posix()
         for path in e2e_root.rglob("test_*.mojo")
     }
-    if rows != discovered or len(rows) != 26:
+    if rows != discovered or len(rows) != 28:
         raise AssertionError(
             "e2e manifest/discovery mismatch: "
             f"missing={sorted(discovered - rows)}, stale={sorted(rows - discovered)}"

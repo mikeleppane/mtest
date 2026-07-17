@@ -54,6 +54,7 @@ from mtest.exec import (
     run_supervised,
 )
 from mtest.model import (
+    AttributionDisposition,
     Event,
     NodeId,
     Outcome,
@@ -79,6 +80,7 @@ from mtest.select import (
     select_from,
     selection_active,
 )
+from mtest.session.attribution import attribution_step, isolation_timeout_secs
 from mtest.session.classify import (
     Classification,
     TrustedReport,
@@ -189,6 +191,13 @@ struct FileResult(Copyable, Movable):
     """Whether an interrupt aborted this file (routes to exit 2)."""
     var is_drift: Bool
     """Whether the report drifted off the pinned grammar (forces exit 3)."""
+    var binary_path: String
+    """The binary this file's run ACTUALLY executed, or empty when none ran.
+
+    Carried so the crash-attribution post-pass can rerun THAT binary rather than
+    reconstruct a name for it: a crash-class BUILD retry rebuilds to
+    `build/bin/<mangled>.attempt-N` and runs that, so the mangled name is not
+    always the thing that crashed. Diagnostics only — no verdict reads it."""
 
     @staticmethod
     def ran_with(var event: Event, outcome: Outcome) -> Self:
@@ -206,6 +215,7 @@ struct FileResult(Copyable, Movable):
             False,
             False,
             False,
+            "",
         )
 
     @staticmethod
@@ -229,6 +239,7 @@ struct FileResult(Copyable, Movable):
             False,
             False,
             is_drift,
+            "",
         )
 
     @staticmethod
@@ -245,6 +256,7 @@ struct FileResult(Copyable, Movable):
             True,
             False,
             False,
+            "",
         )
 
     @staticmethod
@@ -260,6 +272,7 @@ struct FileResult(Copyable, Movable):
             False,
             True,
             False,
+            "",
         )
 
 
@@ -936,7 +949,7 @@ def _finalize_attempt(
         attempts_used=attempts_used,
         flaky=flaky,
     )
-    return FileResult.classified(
+    var fr = FileResult.classified(
         pre^,
         ev^,
         file_out,
@@ -944,6 +957,10 @@ def _finalize_attempt(
         TestCounts(cls.passed_tests, cls.failed_tests, cls.skipped_tests, 0),
         cls.is_drift,
     )
+    # The binary this attempt actually RAN — which a BUILD retry moves to a
+    # `.attempt-N` path. Crash attribution reruns this, never a reconstruction.
+    fr.binary_path = att.out_bin
+    return fr^
 
 
 def _run_one(
@@ -2126,6 +2143,10 @@ struct SelectionSummary(Copyable, Movable):
     """Whether a spawn/machinery failure occurred (exit 3)."""
     var drift: Bool
     """Whether a probe drifted off the pinned grammar (exit 3)."""
+    var crash_files: List[_CrashFile]
+    """The run files that ended CRASH, in discovery order, for the bounded
+    crash-attribution post-pass. Diagnostics only: this list feeds no count, no
+    outcome multiset, and no exit code."""
 
 
 def _prepend_events(var extra: List[Event], var fr: FileResult) -> FileResult:
@@ -2349,6 +2370,7 @@ def _run_selection[
     plan: OperandParse,
     mut reporter: CompositeReporter[*Rs],
     mut summary: Summary,
+    mut reg: BuildRegistry,
 ) raises -> SelectionSummary:
     """The SELECTION sub-session: probe every run file, then run the selection.
 
@@ -2359,7 +2381,6 @@ def _run_selection[
     raises out to exit 4; a machinery failure resolves to exit 3.
     """
     var nroot = normalize_root(root)
-    var reg = BuildRegistry()
     var collected = List[_Collected]()
     var interrupted = False
     var internal_error = False
@@ -2496,6 +2517,7 @@ def _run_selection[
             interrupted,
             internal_error,
             False,
+            List[_CrashFile](),
         )
 
     # Collection is known: emit the run-wide totals before any body runs.
@@ -2512,6 +2534,7 @@ def _run_selection[
     var test_totals = TestCounts.zeros()
     var ran_files = 0
     var drift = False
+    var crash_files = List[_CrashFile]()
 
     for ci in range(len(collected)):
         if interrupt_requested():
@@ -2532,6 +2555,8 @@ def _run_selection[
             summary.counts[fr.outcome.code] += 1
             run_outcomes.extend(fr.exit_outcomes.copy())
             ran_files += 1
+            if fr.outcome == Outcome.CRASH:
+                crash_files.append(_CrashFile(c.rel, c.binary))
             # Mirror the runnable branch's early-stop below (and the
             # non-selection loop's): a TERMINAL file — compile error, probe
             # crash, probe timeout, or malformed suite — must honor -x /
@@ -2588,6 +2613,8 @@ def _run_selection[
         summary.counts[fr.outcome.code] += 1
         run_outcomes.extend(fr.exit_outcomes.copy())
         ran_files += 1
+        if fr.outcome == Outcome.CRASH:
+            crash_files.append(_CrashFile(c.rel, c.binary))
         if config.exitfirst and fr.outcome.is_failing():
             break
         if (
@@ -2603,7 +2630,366 @@ def _run_selection[
         interrupted,
         internal_error,
         drift,
+        crash_files^,
     )
+
+
+# --- The CRASH-ATTRIBUTION post-pass: bounded isolation reruns. ---------------
+#
+# A CRASH verdict is honest but unhelpful: the process died, but the verdict
+# cannot say WHICH test killed it. This post-pass re-runs a crashed file's tests
+# one at a time and names the first that dies by signal.
+#
+# It is SECONDARY EVIDENCE and NEVER a verdict input. Everything below emits
+# `CrashAttribution` events and the one loud announcement, and touches NOTHING
+# else: not `summary.counts`, not `run_outcomes`, not the exit code, not the
+# file's `FileFinished`. That is the whole doctrine — a crashed file's verdict
+# and the process exit code are identical whether attribution names a culprit,
+# fails to reproduce the crash, or never runs at all. UNATTRIBUTED stands
+# whenever isolation does not reproduce; the pass never guesses.
+
+
+@fieldwise_init
+struct _CrashFile(Copyable, Movable):
+    """One CRASH file queued for attribution: its path and the binary that ran.
+
+    The binary is carried, never reconstructed from `rel`: a crash-class BUILD
+    retry rebuilds to `build/bin/<mangled>.attempt-N` and RUNS that, so only the
+    run itself knows what actually crashed.
+    """
+
+    var rel: String
+    """The root-relative path of the crashed file."""
+    var binary: String
+    """The binary its crashed run executed."""
+
+
+def _secs_since(started_ns: UInt) -> Float64:
+    """Wall seconds elapsed since a `perf_counter_ns` reading. Never raises."""
+    return Float64(perf_counter_ns() - started_ns) / 1.0e9
+
+
+@fieldwise_init
+struct _AttributionListing(Copyable, Movable):
+    """The binary and the source-order test names to isolate for one file."""
+
+    var ok: Bool
+    """Whether a qualifying listing and a runnable binary were both recovered."""
+    var binary: String
+    """The root-relative built binary to re-run under `--only`."""
+    var names: List[String]
+    """The file's test names in SOURCE order (the listing's order; never sorted).
+    """
+
+
+def _attribution_probe(
+    mut runtime: ExecRuntime,
+    config: RunnerConfig,
+    root: String,
+    rel: String,
+    binary: String,
+) raises -> _AttributionListing:
+    """Re-probe `binary` with `--skip-all` for its test-name universe.
+
+    The FALLBACK when the registry holds no qualifying listing for `rel` — the
+    plain (non-selection) run loop never probes, so a crashed file from it
+    arrives here unlisted.
+
+    Deliberately NOT `_probe_file`: that function exists to give a file a
+    VERDICT, and attribution must never produce one. It builds a terminal
+    `FileResult`/`FileFinished` for a non-qualifying probe and records into the
+    registry, both of which would be wrong here — the file's verdict is already
+    settled. This probe also runs under the ISOLATION deadline rather than
+    `--timeout`, so a `--timeout 0` run cannot hang the pass. Anything short of a
+    clean exit carrying a qualifying listing simply yields `ok = False`, which
+    the caller renders as PROBE_FAILED.
+
+    Raises:
+        Error: only if the `exec` machinery itself fails; the caller catches it.
+    """
+    var argv = List[String]()
+    argv.append(binary)
+    argv.append("--skip-all")
+    var pres = run_supervised(
+        runtime,
+        ProcessSpec.command_in(
+            argv^, root, isolation_timeout_secs(config.timeout_secs) * 1000
+        ),
+    )
+    var term = pres.termination
+    if not term.is_exited():
+        # Signaled, timed out, or unspawnable: no listing to be had.
+        return _AttributionListing(False, binary, List[String]())
+    var canonical = canonicalize(root + "/" + rel)
+    var trusted = resolve_report(
+        lossy_utf8(pres.stdout_bytes), canonical, pres.stdout_truncated
+    )
+    if trusted.is_overflow:
+        return _AttributionListing(False, binary, List[String]())
+    if collection_disqualifier(trusted.report) != "":
+        return _AttributionListing(False, binary, List[String]())
+    return _AttributionListing(
+        True, binary, collection_names(trusted.report.copy())
+    )
+
+
+def _attribution_listing(
+    mut runtime: ExecRuntime,
+    config: RunnerConfig,
+    root: String,
+    rel: String,
+    binary: String,
+    reg: BuildRegistry,
+) raises -> _AttributionListing:
+    """The qualifying listing for `rel`: the registry's, else a fresh probe.
+
+    PREFERS the registry: the selection/collect paths already probed every file
+    with `--skip-all` and recorded the qualifying node-id listing, so re-probing
+    would spawn a process to learn what is already known. The registry's listing
+    is stored as `rel::name` node ids; the names are recovered by stripping that
+    prefix, preserving SOURCE order.
+
+    `binary` is the path the file's crashed run ACTUALLY executed, carried here
+    from that run rather than reconstructed. Reconstructing `build/bin/<mangled>`
+    would be wrong: a crash-class BUILD retry rebuilds to
+    `build/bin/<mangled>.attempt-N` and then RUNS that binary, so a file whose
+    rebuilt binary crashes at runtime earns its CRASH verdict on a path the
+    mangled name does not name. Attribution would then probe a binary that either
+    does not exist (a useless PROBE_FAILED) or — far worse — is a STALE leftover
+    from an earlier run, and could name a culprit out of code that never ran: a
+    MISLEADING attribution. The pass reruns the binary that crashed, and nothing
+    else.
+
+    The registry's listing is trusted only when its entry describes the SAME
+    binary that crashed — a listing read off a different build is not this
+    crash's test universe.
+
+    The plain run loop keeps no registry entry, so its crashed files fall back to
+    a fresh probe. A missing binary or a non-qualifying probe yields
+    `ok = False` -> PROBE_FAILED.
+
+    Raises:
+        Error: only if the `exec` machinery itself fails; the caller catches it.
+    """
+    if binary == "" or not exists(root + "/" + binary):
+        return _AttributionListing(False, binary, List[String]())
+    if reg.has(rel):
+        var bp = reg.get(rel)
+        if bp.probed and bp.qualified and bp.binary_path == binary:
+            var prefix = rel + "::"
+            var names = List[String]()
+            for node_id in bp.listing:
+                names.append(String(node_id.removeprefix(prefix)))
+            return _AttributionListing(True, binary, names^)
+    return _attribution_probe(runtime, config, root, rel, binary)
+
+
+def _attribute_one[
+    *Rs: Reporter
+](
+    mut runtime: ExecRuntime,
+    config: RunnerConfig,
+    root: String,
+    rel: String,
+    binary: String,
+    reg: BuildRegistry,
+    pass_started_ns: UInt,
+    mut reporter: CompositeReporter[*Rs],
+) raises -> Bool:
+    """Attribute ONE crashed file, emitting exactly one `CrashAttribution`.
+
+    Runs each of the file's tests alone (`--only <name>`) in SOURCE order and
+    stops at the FIRST rerun that dies by signal — that test is the culprit
+    (ATTRIBUTED). Every other stop renders its own typed disposition:
+    NO_REPRODUCTION when every test ran alone without crashing, RUN_CAP or
+    TIME_BUDGET when a bound cut the search short, PROBE_FAILED when the listing
+    could not be recovered or a rerun could not be spawned.
+
+    Isolation reruns are NEVER retried: `--retries` re-runs a crash-class failure
+    to decide a VERDICT, and this pass decides no verdict — a crash here is the
+    ANSWER it is looking for, and re-running it would only spend the budget.
+
+    Returns:
+        False iff an interrupt ABANDONED the pass (the caller stops immediately
+        and emits nothing further); True otherwise, including for every
+        disposition — a stopped search is a normal, fully-reported outcome.
+
+    Raises:
+        Error: never in practice — every `exec` failure is caught and rendered as
+            PROBE_FAILED, because attribution must not be able to fail a session.
+    """
+    var file_started_ns = perf_counter_ns()
+
+    # The SESSION budget is checked HERE, before the listing — not only inside
+    # the rerun loop below. Recovering a listing can itself cost a probe of up to
+    # the isolation deadline (the plain run loop records no registry entry, so
+    # EVERY one of its crashed files pays that probe). A pass that has already
+    # spent its budget must not buy one more probe per remaining file merely to
+    # earn the right to say TIME_BUDGET: with many crashed files under
+    # `--timeout 0` that is 60 s of diagnostics apiece, behind an exit code
+    # resolved long before. The file still gets its typed line; it just does not
+    # get a process.
+    var pre = attribution_step(1, 0, 0.0, _secs_since(pass_started_ns))
+    if pre.should_stop:
+        reporter.handle(
+            Event.crash_attribution(rel, pre.disposition, "", 0, 0.0)
+        )
+        return True
+
+    var listing: _AttributionListing
+    try:
+        listing = _attribution_listing(runtime, config, root, rel, binary, reg)
+    except:
+        listing = _AttributionListing(False, "", List[String]())
+    if interrupt_requested():
+        return False
+    if not listing.ok:
+        reporter.handle(
+            Event.crash_attribution(
+                rel,
+                AttributionDisposition.PROBE_FAILED,
+                "",
+                0,
+                _secs_since(file_started_ns),
+            )
+        )
+        return True
+
+    var timeout_ms = isolation_timeout_secs(config.timeout_secs) * 1000
+    var runs = 0
+    var index = 0
+    while True:
+        if interrupt_requested():
+            return False
+        var step = attribution_step(
+            len(listing.names) - index,
+            runs,
+            _secs_since(file_started_ns),
+            _secs_since(pass_started_ns),
+        )
+        if step.should_stop:
+            reporter.handle(
+                Event.crash_attribution(
+                    rel,
+                    step.disposition,
+                    "",
+                    runs,
+                    _secs_since(file_started_ns),
+                )
+            )
+            return True
+
+        var name = listing.names[index]
+        index += 1
+        var argv = List[String]()
+        argv.append(listing.binary)
+        argv.append("--only")
+        argv.append(name)
+        var res: ProcessResult
+        try:
+            res = run_supervised(
+                runtime, ProcessSpec.command_in(argv^, root, timeout_ms)
+            )
+        except:
+            # The machinery failed mid-pass. A verdict already stands, so this
+            # is a diagnostic that gave up, never a session failure.
+            reporter.handle(
+                Event.crash_attribution(
+                    rel,
+                    AttributionDisposition.PROBE_FAILED,
+                    "",
+                    runs,
+                    _secs_since(file_started_ns),
+                )
+            )
+            return True
+        var term = res.termination
+        if term.is_spawn_failed():
+            reporter.handle(
+                Event.crash_attribution(
+                    rel,
+                    AttributionDisposition.PROBE_FAILED,
+                    "",
+                    runs,
+                    _secs_since(file_started_ns),
+                )
+            )
+            return True
+        # Counted only now: a spawn that never produced a process is not a rerun,
+        # and reporting one would overstate what the pass actually tried.
+        runs += 1
+        if term.is_timed_out() and interrupt_requested():
+            return False
+        if term.is_signaled():
+            # The culprit: this test, run entirely alone, killed the process.
+            reporter.handle(
+                Event.crash_attribution(
+                    rel,
+                    AttributionDisposition.ATTRIBUTED,
+                    name,
+                    runs,
+                    _secs_since(file_started_ns),
+                )
+            )
+            return True
+        # Anything else — a pass, a failing assertion, a deadline — is NOT the
+        # crash this pass is hunting. Say nothing about it and move on: only a
+        # reproduced crash may name a culprit.
+
+
+def _run_crash_attribution[
+    *Rs: Reporter
+](
+    mut runtime: ExecRuntime,
+    config: RunnerConfig,
+    root: String,
+    crash_files: List[_CrashFile],
+    reg: BuildRegistry,
+    mut reporter: CompositeReporter[*Rs],
+) raises:
+    """The bounded crash-attribution post-pass over every CRASH file.
+
+    Runs once, after every file has its verdict and before the summary band, in
+    DISCOVERY order. The runner is sequential at this capacity, so "after the
+    pool drains" is simply "after the run loop".
+
+    LOUD before it starts: a watcher of a long run sees the announcement before
+    any extra process is spawned, so the reruns are never mysterious. Each file
+    then renders exactly one typed line. When the session budget is gone the
+    remaining files still get their line (TIME_BUDGET) rather than vanishing —
+    the pass accounts for every crashed file it was asked about.
+
+    SKIPPED entirely under interrupt, and abandoned the moment one arrives
+    mid-pass: exit 2 must not wait on diagnostics.
+    """
+    if len(crash_files) == 0 or interrupt_requested():
+        return
+    reporter.handle(
+        Event.warning(
+            "crash-attribution-start",
+            (
+                "re-running the crashed file(s) one test at a time to name the"
+                " culprit ("
+                + String(len(crash_files))
+                + " file(s); bounded and best-effort). This is SECONDARY"
+                " diagnostics: the CRASH verdict already stands and nothing"
+                " found here can change it or the exit code"
+            ),
+        )
+    )
+    var pass_started_ns = perf_counter_ns()
+    for cf in crash_files:
+        if not _attribute_one(
+            runtime,
+            config,
+            root,
+            cf.rel,
+            cf.binary,
+            reg,
+            pass_started_ns,
+            reporter,
+        ):
+            return
 
 
 def run_session[
@@ -2697,6 +3083,14 @@ def run_session[
     var internal_error = False
     var precompile_failed = False
     var drift = False
+    # The registry the selection/collect probe machinery records builds and
+    # qualifying listings into. The plain run loop keeps no entry here — it never
+    # probes — so the attribution post-pass falls back to a fresh probe for its
+    # files. Diagnostics read it; nothing else does.
+    var reg = BuildRegistry()
+    # The CRASH files, in discovery order, for the bounded attribution post-pass.
+    # Collected as verdicts land; feeds no count, no multiset, no exit code.
+    var crash_files = List[_CrashFile]()
 
     # Precompile steps, in listed order. Each success widens the include set.
     var includes = config.include_paths.copy()
@@ -2827,7 +3221,7 @@ def run_session[
     if proceed_runs and sel_active:
         var plan = parse_operands(config.paths)
         var sel = _run_selection(
-            runtime, config, root, disc, includes, plan, reporter, summary
+            runtime, config, root, disc, includes, plan, reporter, summary, reg
         )
         run_outcomes.extend(sel.run_outcomes.copy())
         test_totals.passed += sel.test_totals.passed
@@ -2841,6 +3235,7 @@ def run_session[
             internal_error = True
         if sel.drift:
             drift = True
+        crash_files.extend(sel.crash_files.copy())
     elif proceed_runs:
         for ri in range(len(disc.run_files)):
             if interrupt_requested():
@@ -2870,6 +3265,10 @@ def run_session[
                 summary.counts[fr.outcome.code] += 1
                 run_outcomes.extend(fr.exit_outcomes.copy())
                 ran_files += 1
+                if fr.outcome == Outcome.CRASH:
+                    crash_files.append(
+                        _CrashFile(disc.run_files[ri], fr.binary_path)
+                    )
                 if config.exitfirst and fr.outcome.is_failing():
                     break
                 if (
@@ -2905,6 +3304,23 @@ def run_session[
         code = 1
     else:
         code = exit_code_for(run_outcomes)
+
+    # The bounded crash-attribution post-pass. It runs HERE — after every file
+    # has its verdict, after the summary is tallied, and after `code` is already
+    # resolved above — precisely so it CANNOT influence any of them: the only
+    # thing left for it to do is emit `CrashAttribution` events. A crashed file's
+    # verdict and this process's exit code are byte-identical whether the pass
+    # names a culprit, fails to reproduce the crash, or is skipped entirely. It
+    # is skipped under an interrupt: exit 2 must not wait on diagnostics. A raise
+    # out of it would be a machinery failure AFTER the run is decided, so it is
+    # caught and dropped rather than allowed to rewrite a settled exit code.
+    if not interrupted:
+        try:
+            _run_crash_attribution(
+                runtime, config, root, crash_files, reg, reporter
+            )
+        except:
+            pass
 
     var wall = Float64(perf_counter_ns() - started_ns) / 1.0e9
     # A file that passed only after a crash-class retry tallied under FLAKY; that

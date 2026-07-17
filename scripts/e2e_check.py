@@ -50,6 +50,7 @@ MANIFEST_PATH = os.path.join(E2E_ROOT, "manifest.json")
 LOGGING_MOJO = os.path.join(REPO_ROOT, "scripts", "logging_mojo.py")
 FAKE_SLOW_MOJO = os.path.join(REPO_ROOT, "scripts", "fake_slow_mojo.py")
 FAKE_CRASH_MOJO = os.path.join(REPO_ROOT, "scripts", "fake_crash_mojo.py")
+FAKE_RETRY_CRASH_MOJO = os.path.join(REPO_ROOT, "scripts", "fake_retry_crash_mojo.py")
 
 # Generous per-spawn wall-clock ceilings. Cold `mojo build` is slow, so these are
 # roomy — their only job is to keep a hung runner from wedging CI, never to time
@@ -742,6 +743,217 @@ def s_retries_flaky(manifest: dict) -> str:
     return (
         "retries: default --retries 1 -> TRY + FLAKY (exit 0); --retries 0 ->"
         " CRASH (exit 1); -k selection --retries 1 -> TRY + FLAKY (exit 0)"
+    )
+
+
+def s_crash_attribution(manifest: dict) -> str:
+    """A CRASH file gets a bounded isolation post-pass that NEVER moves the verdict.
+
+    The honesty pair, and the doctrine's core claim asserted directly:
+
+      * the DETERMINISTIC crasher — one test always dies — is ATTRIBUTED: the
+        pass names test_boom as the culprit;
+      * the ORDER-DEPENDENT crasher — crashes only with its tests run together —
+        is NO-REPRODUCTION: each test passes alone, so the culprit stays
+        UNATTRIBUTED and is never guessed.
+
+    Both files must produce the IDENTICAL verdict and exit code: attribution is
+    secondary evidence, so a run where it succeeds and a run where it fails must
+    be indistinguishable in everything a verdict is made of. That equality —
+    exit 1, a CRASH verdict line, and a byte-equal summary accounting tuple — is
+    asserted between the two runs, not merely against the manifest. Structure
+    only; never console bytes."""
+    attributed_rel = "e2e/attribution/test_deterministic_crasher.mojo"
+    unattributed_rel = "e2e/attribution/test_order_dependent_crasher.mojo"
+
+    def verdict_facts(rel: str) -> tuple:
+        run = run_mtest([rel], timeout=SHORT_TIMEOUT)
+        # THE claim: the CRASH verdict and the exit code stand on their own.
+        expect_exit(run, 1)
+        crash_line = run.verdict_line("CRASH", rel)
+        expect(
+            crash_line is not None,
+            f"{rel} did not report the file CRASH:\n{run.stdout}",
+        )
+        summ = expect_accounting(run)
+        expect(
+            summ.crashed == 1,
+            f"{rel}: band counted {summ.crashed} crashed files, expected 1",
+        )
+        # The pass announces itself before spawning anything, so a watcher of a
+        # long run is never left wondering where the extra processes came from.
+        expect(
+            "crash-attribution-start" in run.combined,
+            f"{rel}: the attribution pass never announced itself:\n{run.stdout}",
+        )
+        line = run.verdict_line("ATTRIBUTION", rel)
+        expect(
+            line is not None,
+            f"{rel}: no ATTRIBUTION line for a crashed file:\n{run.stdout}",
+        )
+        facts = (
+            summ.passed,
+            summ.failed,
+            summ.skipped,
+            summ.crashed,
+            summ.excluded,
+            summ.not_run,
+        )
+        return run.returncode, facts, line
+
+    attributed_rc, attributed_facts, attributed_line = verdict_facts(attributed_rel)
+    unattributed_rc, unattributed_facts, unattributed_line = verdict_facts(
+        unattributed_rel
+    )
+
+    # The deterministic crasher's culprit is NAMED.
+    expect(
+        "ATTRIBUTED" in attributed_line and "test_boom" in attributed_line,
+        f"the deterministic crasher's culprit was not attributed to test_boom: "
+        f"{attributed_line!r}",
+    )
+    expect(
+        "UNATTRIBUTED" not in attributed_line,
+        f"an ATTRIBUTED line still called the culprit unknown: {attributed_line!r}",
+    )
+
+    # The order-dependent crasher's culprit is NOT guessed.
+    expect(
+        "NO-REPRODUCTION" in unattributed_line,
+        f"the order-dependent crasher did not report NO-REPRODUCTION: "
+        f"{unattributed_line!r}",
+    )
+    expect(
+        "UNATTRIBUTED" in unattributed_line,
+        f"a failed isolation search did not say the culprit is UNATTRIBUTED: "
+        f"{unattributed_line!r}",
+    )
+    for name in ("test_corrupts_shared_state", "test_trips_over_shared_state"):
+        expect(
+            name not in unattributed_line,
+            f"a NO-REPRODUCTION line named {name} — attribution GUESSED a "
+            f"culprit it never reproduced: {unattributed_line!r}",
+        )
+
+    # THE DOCTRINE: attribution success and attribution failure leave the
+    # verdict and the exit code indistinguishable.
+    expect(
+        attributed_rc == unattributed_rc == 1,
+        f"attribution changed the exit code: attributed={attributed_rc}, "
+        f"unattributed={unattributed_rc} (both must be 1)",
+    )
+    expect(
+        attributed_facts == unattributed_facts,
+        f"attribution changed the summary accounting: attributed="
+        f"{attributed_facts} != unattributed={unattributed_facts}",
+    )
+    # The REGISTRY-listing branch. A bare path operand is not a selection, so
+    # both runs above took the plain loop and the fallback probe; the branch that
+    # reads the already-recorded `rel::name` listing (and strips that prefix)
+    # would never execute. A strip bug there is INVISIBLE by construction: the
+    # malformed names would feed `--only`, every rerun would exit nonzero but
+    # UNSIGNALED, and the pass would report a falsely honest NO-REPRODUCTION on a
+    # file whose culprit is plainly nameable. `-k boom` forces the selection path,
+    # so the listing comes from the registry — and the culprit must still be named.
+    keyword = run_mtest(
+        [attributed_rel, "-k", "boom"], timeout=SHORT_TIMEOUT
+    )
+    expect_exit(keyword, 1)
+    expect(
+        keyword.verdict_line("CRASH", attributed_rel) is not None,
+        f"-k boom did not report the file CRASH:\n{keyword.stdout}",
+    )
+    keyword_line = keyword.verdict_line("ATTRIBUTION", attributed_rel)
+    expect(
+        keyword_line is not None,
+        f"-k boom produced no ATTRIBUTION line:\n{keyword.stdout}",
+    )
+    expect(
+        "ATTRIBUTED" in keyword_line and "test_boom" in keyword_line,
+        f"the registry-recorded listing did not name the culprit (a node-id "
+        f"prefix-strip bug would surface exactly here): {keyword_line!r}",
+    )
+
+    return (
+        "attribution: deterministic -> ATTRIBUTED (test_boom); order-dependent "
+        "-> NO-REPRODUCTION (UNATTRIBUTED); both exit 1 with identical CRASH "
+        f"accounting {attributed_facts}; -k selection -> ATTRIBUTED off the "
+        "registry listing"
+    )
+
+
+def s_attribution_reruns_the_binary_that_crashed(manifest: dict) -> str:
+    """Attribution reruns the binary that ACTUALLY crashed, not a reconstructed name.
+
+    The one path where the pass could point at the WRONG thing. A crash-class
+    BUILD failure is retried, and the retry rebuilds to a FRESH
+    `build/bin/<mangled>.attempt-2` and then RUNS that binary — so a file whose
+    rebuilt binary crashes at runtime has a CRASH verdict earned by a path the
+    mangled name does not name. A runner that reconstructed `build/bin/<mangled>`
+    would probe either a nonexistent file or a STALE binary from an earlier run,
+    and a stale binary can yield a culprit out of code that never ran: a
+    misleading ATTRIBUTED.
+
+    The shim (scripts/fake_retry_crash_mojo.py) makes that divergence real: its
+    first `build` truncates `-o` and hangs until `--compile-timeout` kills it
+    (crash-class -> retried), and its second writes a working binary at the
+    retry's fresh `.attempt-2` path. So `build/bin/<mangled>` exists but is
+    non-runnable, and only `.attempt-2` can answer a probe. ATTRIBUTED naming
+    test_boom is therefore reachable ONLY by rerunning the binary that ran."""
+    rel = "e2e/attribution/test_deterministic_crasher.mojo"
+    scratch = os.path.join(REPO_ROOT, "build", "e2e-scratch")
+    marker = os.path.join(scratch, "retry_crash_build_marker")
+
+    def reset() -> None:
+        os.makedirs(scratch, exist_ok=True)
+        if os.path.exists(marker):
+            os.remove(marker)
+
+    try:
+        reset()
+        run = run_mtest(
+            [
+                "--mojo",
+                FAKE_RETRY_CRASH_MOJO,
+                rel,
+                "--compile-timeout",
+                "1",
+                "--retries",
+                "1",
+            ],
+            timeout=SHORT_TIMEOUT,
+        )
+        # The first build was killed and retried, and the rebuilt binary crashed:
+        # the verdict is CRASH, exit 1 — attribution changes neither.
+        expect_exit(run, 1)
+        expect(
+            run.verdict_line("TRY", rel) is not None,
+            f"the killed first build showed no TRY line:\n{run.stdout}",
+        )
+        expect(
+            run.verdict_line("CRASH", rel) is not None,
+            f"the rebuilt binary's runtime crash was not reported CRASH:\n"
+            f"{run.stdout}",
+        )
+        line = run.verdict_line("ATTRIBUTION", rel)
+        expect(
+            line is not None,
+            f"no ATTRIBUTION line for the retried-build crash:\n{run.stdout}",
+        )
+        # THE claim: only the `.attempt-2` binary can name this culprit.
+        expect(
+            "ATTRIBUTED" in line and "test_boom" in line,
+            f"attribution did not rerun the binary that crashed — a "
+            f"reconstructed build/bin/<mangled> would land exactly here "
+            f"(PROBE-FAILED, or a culprit named out of a stale binary): "
+            f"{line!r}",
+        )
+    finally:
+        if os.path.exists(marker):
+            os.remove(marker)
+    return (
+        "build-retry crash: verdict CRASH exit 1 (unchanged), and attribution "
+        "named test_boom off the .attempt-2 binary that actually ran"
     )
 
 
@@ -1911,6 +2123,11 @@ def main() -> int:
     h.scenario("exitfirst", s_exitfirst)
     h.scenario("maxfail", s_maxfail)
     h.scenario("retries-flaky", s_retries_flaky)
+    h.scenario("crash-attribution", s_crash_attribution)
+    h.scenario(
+        "attribution-reruns-crashed-binary",
+        s_attribution_reruns_the_binary_that_crashed,
+    )
     h.scenario("compile-timeout", s_compile_timeout)
     h.scenario("exclude+stale", s_exclude_and_stale)
     h.scenario("all-excluded", s_all_excluded)

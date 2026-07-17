@@ -14,6 +14,7 @@ from std.testing import assert_equal, assert_true, assert_false, TestSuite
 
 from mtest.config import ColorWhen, Verbosity, ShowOutput
 from mtest.model import (
+    AttributionDisposition,
     EventKind,
     Summary,
     Event,
@@ -966,6 +967,108 @@ def test_warning_renders_loud() raises:
     assert_true("WARNING" in out)
     # The console composes the sentence from the kind and the pattern datum.
     assert_true("exclude pattern 'old_*' matched nothing" in out)
+
+
+def _attribution(
+    disposition: AttributionDisposition,
+    culprit: String = "",
+    reruns: Int = 0,
+    seconds: Float64 = 0.0,
+) -> String:
+    """The rendered buffer for ONE crash-attribution event on a crashed file.
+
+    The FileFinished rides first so every assertion below reads the attribution
+    line in the place a real run puts it: after the file's CRASH verdict, which
+    the attribution never touches.
+    """
+    try:
+        var c = _console()
+        c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+        c.handle(Event.file_started("tests/test_boom.mojo"))
+        c.handle(
+            Event.file_finished(
+                "tests/test_boom.mojo",
+                Outcome.CRASH,
+                0.3,
+                _argv("tests/test_boom.mojo"),
+                1.0,
+                List[UInt8](),
+                List[UInt8](),
+                signal_number=11,
+            )
+        )
+        c.handle(
+            Event.crash_attribution(
+                "tests/test_boom.mojo", disposition, culprit, reruns, seconds
+            )
+        )
+        return c.output()
+    except:
+        return String("")
+
+
+def test_attribution_attributed_names_the_culprit_reruns_and_elapsed() raises:
+    var out = _attribution(
+        AttributionDisposition.ATTRIBUTED, "test_segfaults", 4, 2.5
+    )
+    assert_true("ATTRIBUTION" in out)
+    assert_true("tests/test_boom.mojo" in out)
+    assert_true("test_segfaults" in out)
+    assert_true("4 isolation rerun" in out)
+    assert_true("2.50s" in out)
+    # The verdict it annotates is untouched and still rendered above it.
+    assert_true("CRASH" in out)
+    # An ATTRIBUTED line is the ONE disposition that is not an admission of
+    # ignorance, so it must not claim the culprit is unknown.
+    assert_false("UNATTRIBUTED" in out)
+
+
+def test_attribution_no_reproduction_leaves_the_culprit_unattributed() raises:
+    var out = _attribution(AttributionDisposition.NO_REPRODUCTION, "", 3, 1.25)
+    assert_true("ATTRIBUTION" in out)
+    assert_true("NO-REPRODUCTION" in out)
+    assert_true("did not reproduce" in out)
+    # Never a guess: the verdict stands and the culprit is named as unknown.
+    assert_true("UNATTRIBUTED" in out)
+    assert_true("CRASH verdict stands" in out)
+
+
+def test_attribution_probe_failed_says_the_listing_was_unrecoverable() raises:
+    var out = _attribution(AttributionDisposition.PROBE_FAILED, "", 0, 0.5)
+    assert_true("PROBE-FAILED" in out)
+    assert_true("test list" in out)
+    assert_true("UNATTRIBUTED" in out)
+    assert_true("CRASH verdict stands" in out)
+
+
+def test_attribution_run_cap_says_the_cap_stopped_the_search() raises:
+    var out = _attribution(AttributionDisposition.RUN_CAP, "", 32, 9.0)
+    assert_true("RUN-CAP" in out)
+    assert_true("32-run cap" in out)
+    assert_true("UNATTRIBUTED" in out)
+    assert_true("CRASH verdict stands" in out)
+
+
+def test_attribution_time_budget_says_the_clock_stopped_the_search() raises:
+    var out = _attribution(AttributionDisposition.TIME_BUDGET, "", 7, 120.0)
+    assert_true("TIME-BUDGET" in out)
+    assert_true("time budget" in out)
+    assert_true("UNATTRIBUTED" in out)
+    assert_true("CRASH verdict stands" in out)
+
+
+def test_attribution_never_starts_a_line_with_an_existing_verdict_token() raises:
+    # The attribution cluster shares the console with the verdict lines; a token
+    # that PREFIXED an existing one (e.g. "CRASH-ATTRIBUTION") would make a
+    # line-oriented reader mistake a diagnostic for a second CRASH verdict.
+    var out = _attribution(
+        AttributionDisposition.ATTRIBUTED, "test_segfaults", 2, 0.1
+    )
+    var crash_starts = 0
+    for line in out.split("\n"):
+        if String(line).startswith("CRASH"):
+            crash_starts += 1
+    assert_equal(crash_starts, 1)
 
 
 def test_precompile_failed_banner_verbatim() raises:

@@ -25,6 +25,7 @@ from mtest.config import (
     shell_quote,
 )
 from mtest.model import (
+    AttributionDisposition,
     Event,
     EventKind,
     Outcome,
@@ -629,6 +630,8 @@ struct ConsoleReporter(Reporter):
             pass
         elif k == EventKind.ATTEMPT_FINISHED:
             self._on_attempt_finished(e)
+        elif k == EventKind.CRASH_ATTRIBUTION:
+            self._on_crash_attribution(e)
 
     def _reset_file(mut self):
         """Clear the per-file accumulation after a file is fully rendered."""
@@ -732,6 +735,67 @@ struct ConsoleReporter(Reporter):
         )
         if e.stdout_truncated or e.stderr_truncated:
             line += "  [excerpt]"
+        self._head += self._paint(_YELLOW, line) + "\n"
+
+    def _on_crash_attribution(mut self, e: Event):
+        """Render ONE crashed file's bounded-isolation attribution result.
+
+        Composed from the event's typed fields only — the disposition, the
+        culprit, the rerun count, and the elapsed time — never from a sentence
+        the session pre-rendered.
+
+        Attribution is SECONDARY evidence: the file's CRASH verdict was already
+        rendered above and is not restated here as a verdict. So every
+        non-ATTRIBUTED disposition says BOTH that the verdict is unchanged and
+        that the culprit is UNATTRIBUTED — a reader must never be able to read a
+        stopped search as a soft accusation. The token is `ATTRIBUTION`, which
+        deliberately prefixes NO verdict token in the vocabulary: a line-oriented
+        reader scanning for `CRASH` must never match this diagnostic.
+        """
+        var d = e.attribution_disposition
+        var label: String
+        var detail: String
+        if d == AttributionDisposition.ATTRIBUTED:
+            label = String("ATTRIBUTED")
+            detail = String("culprit: ") + e.culprit_test
+        elif d == AttributionDisposition.NO_REPRODUCTION:
+            label = String("NO-REPRODUCTION")
+            detail = String(
+                "the crash did not reproduce with each test run alone; the"
+                " CRASH verdict stands and the culprit is UNATTRIBUTED"
+            )
+        elif d == AttributionDisposition.PROBE_FAILED:
+            label = String("PROBE-FAILED")
+            detail = String(
+                "the file's test list could not be recovered, so no test could"
+                " be isolated; the CRASH verdict stands and the culprit is"
+                " UNATTRIBUTED"
+            )
+        elif d == AttributionDisposition.RUN_CAP:
+            label = String("RUN-CAP")
+            detail = String(
+                "the 32-run cap stopped the search before every test had run"
+                " alone; the CRASH verdict stands and the culprit is"
+                " UNATTRIBUTED"
+            )
+        else:
+            label = String("TIME-BUDGET")
+            detail = String(
+                "the time budget stopped the search before every test had run"
+                " alone; the CRASH verdict stands and the culprit is"
+                " UNATTRIBUTED"
+            )
+        var line = _col("ATTRIBUTION", _TOKEN_W) + _col(e.path, _PATH_W)
+        line += (
+            label
+            + "  "
+            + detail
+            + "  ("
+            + String(e.isolation_reruns)
+            + " isolation rerun(s), "
+            + _fmt_fixed(e.attribution_seconds, 2)
+            + "s)"
+        )
         self._head += self._paint(_YELLOW, line) + "\n"
 
     def _on_precompile_failed(mut self, e: Event):
