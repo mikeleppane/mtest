@@ -54,6 +54,7 @@ UNIT_SUITES = {
     "test_session_detail.mojo",
     "test_session_mangle.mojo",
     "test_session_precompile_paths.mojo",
+    "test_session_resilience.mojo",
     "test_session_retry_class.mojo",
     "test_session_shard.mojo",
     "test_session_verdict.mojo",
@@ -83,6 +84,7 @@ INTEGRATION_SUITES = {
     "test_session_maxfail.mojo",
     "test_session_outcomes.mojo",
     "test_session_precompile.mojo",
+    "test_session_rmtree.mojo",
     "test_session_selection.mojo",
     "test_transcripts_smoke.mojo",
 }

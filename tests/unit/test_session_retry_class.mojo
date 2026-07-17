@@ -248,6 +248,40 @@ def test_sig_frame_among_other_lines() raises:
 # ---- has_crash_signature: negative cases --------------------------------------
 
 
+def test_sig_bug_report_midline_echo_is_not_crash() raises:
+    # An ordinary DETERMINISTIC compile error whose stderr merely ECHOES the
+    # phrase mid-line (a quoted assert message, quoted user source) must NOT
+    # forge the ICE banner: only a real banner LINE is crash-class. Retrying a
+    # deterministic failure would violate the core invariant.
+    assert_false(
+        has_crash_signature(
+            _bytes(
+                "error: assertion failed: submit a bug report if it recurs\n"
+            )
+        )
+    )
+    assert_false(
+        has_crash_signature(
+            _bytes(
+                'note:  raise Error("please submit a bug report upstream")\n'
+            )
+        )
+    )
+
+
+def test_sig_bug_report_banner_line_after_noise_is_crash() raises:
+    # The genuine LLVM/Mojo ICE banner LINE still trips it, even preceded by
+    # other output.
+    assert_true(
+        has_crash_signature(
+            _bytes(
+                "mojo: internal error\nPLEASE submit a bug report to"
+                " https://example/ and include the backtrace\n"
+            )
+        )
+    )
+
+
 def test_sig_ordinary_compile_error() raises:
     assert_false(
         has_crash_signature(

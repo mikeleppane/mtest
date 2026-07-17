@@ -43,6 +43,14 @@ the INTENT of the transcript normalizer's crash patterns (`scripts/
 gen_transcripts.py`): the LLVM/Mojo "PLEASE submit a bug report" banner, a
 `Stack dump` header line, and the two stack-frame shapes. If a real ICE later
 prints a different banner, extend the list here and re-pin the tests.
+
+The banner match is anchored at a LINE START (`PLEASE submit a bug report`)
+rather than an unanchored substring, so a deterministic compile error that
+merely echoes the phrase mid-line (a quoted assert message or quoted user
+source) is no longer misread as an ICE and wrongly retried. RESIDUAL: a
+deterministic compiler that emits a line whose own start byte-matches the exact
+banner shape could still trip it — a narrow, assumption-pinned corner accepted
+until a real ICE is captured on this toolchain.
 """
 from mtest.config import lossy_utf8
 from mtest.exec import Termination
@@ -221,8 +229,10 @@ def has_crash_signature(stderr: List[UInt8]) -> Bool:
     A conservative, total, non-raising scan for the ASSUMPTION-PINNED markers
     (see the module docstring). Matches ANY of:
 
-    - the substring `submit a bug report` (case-insensitive) — the LLVM/Mojo ICE
-      banner conventionally opens `PLEASE submit a bug report ...`,
+    - a LINE that starts (leading whitespace tolerated, case-insensitive) with
+      `please submit a bug report` — the LLVM/Mojo ICE banner line opens
+      `PLEASE submit a bug report to <url>`. Anchored at the line start so a
+      deterministic error echoing the phrase mid-line cannot forge it,
     - a line beginning `Stack dump`,
     - a stack-frame line in either shape the runtime emits (see
       `_is_symbolless_frame` / `_is_symbolized_frame`).
@@ -234,11 +244,15 @@ def has_crash_signature(stderr: List[UInt8]) -> Bool:
         True iff a crash marker is present. Does not raise.
     """
     var text = lossy_utf8(stderr)
-    # The banner can appear mid-line; scan the whole (lowercased) stream for it.
-    if "submit a bug report" in text.lower():
-        return True
     for line in text.split("\n"):
         var l = String(line)
+        # The LLVM/Mojo ICE banner LINE opens `PLEASE submit a bug report to
+        # <url>`. Anchor on that canonical shape at the LINE START (leading
+        # whitespace tolerated) so a deterministic compile error whose stderr
+        # merely ECHOES `submit a bug report` mid-line — a quoted assert message
+        # or quoted user source — cannot forge the signature and get retried.
+        if l.lower().lstrip().startswith("please submit a bug report"):
+            return True
         if l.startswith("Stack dump"):
             return True
         var lb = l.as_bytes()

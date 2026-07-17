@@ -27,6 +27,7 @@ the default run path — they route non-VALID reports through the same
 resolves differently under selection than it would by default.
 """
 from std.builtin.sort import sort
+from std.ffi import external_call
 from std.os import (
     getenv,
     listdir,
@@ -36,7 +37,7 @@ from std.os import (
     setenv,
     unsetenv,
 )
-from std.os.path import basename, dirname, exists, isdir, join
+from std.os.path import basename, dirname, exists, isdir, islink, join
 from std.time import perf_counter_ns
 
 from mtest.cache import BuildProduct, BuildRegistry
@@ -727,12 +728,22 @@ def _single_attempt(
 
 
 def _rmtree(path: String) raises:
-    """Recursively remove `path` and everything under it; a no-op if absent."""
+    """Recursively remove `path` and everything under it; a no-op if absent.
+
+    A symlink child is UNLINKED, never traversed (CWE-59): recursing into a
+    symlink-to-directory would delete the TARGET's contents, so a symlink planted
+    at a predictable temp/quarantine path under `build/` could let a failed
+    compile's cleanup reach outside the build tree. `islink` is checked BEFORE
+    `isdir` because `isdir` follows the link and would report a symlink-to-dir as
+    a directory. Only REAL directories are recursed into.
+    """
     if not exists(path):
         return
     for name in listdir(path):
         var child = join(path, name)
-        if isdir(child):
+        if islink(child):
+            remove(child)
+        elif isdir(child):
             _rmtree(child)
         else:
             remove(child)
@@ -751,8 +762,65 @@ def _discard_path(path: String):
         pass
 
 
+def _invocation_nonce() -> String:
+    """A per-invocation token isolating this process's temp/quarantine dirs.
+
+    Two mtest PROCESSES over one checkout (plausible now that `--shard` invites
+    `mtest --shard 1/2` and `mtest --shard 2/2` in one tree) must never collide
+    on a temp path one's compiler is writing or a quarantine cache one's cleanup
+    would delete. The process id is stable within a run and distinct across
+    concurrent runs, so it keys each invocation's disposable dirs apart. Never
+    raises.
+    """
+    # SAFETY: `getpid` takes no arguments and returns this process's id as an
+    # Int32; there is nothing to misuse and the call cannot fail.
+    var pid = external_call["getpid", Int32]()
+    return String(Int(pid))
+
+
+def _quarantine_dir(
+    prefix: String, mangled: String, attempt_index: Int, nonce: String
+) -> String:
+    """The per-attempt, per-INVOCATION quarantine cache dir under `build/`.
+
+    A crash-class compile retry rebuilds against this fresh cache dir instead of
+    the shared module cache. Keyed on the invocation `nonce` as well as the
+    mangled source and attempt so a concurrent mtest process's `_cleanup_quarantine`
+    can never delete THIS invocation's live cache mid-rebuild. `prefix` is `""`
+    for a per-file build retry and `"precompile-"` for a precompile step. Pure.
+    """
+    return (
+        "build/quarantine/"
+        + prefix
+        + mangled
+        + "/inv-"
+        + nonce
+        + "/attempt-"
+        + String(attempt_index)
+    )
+
+
+def _retry_out_bin(
+    mangled: String, attempt_index: Int, nonce: String
+) -> String:
+    """The output binary path a crash-class BUILD retry rebuilds into.
+
+    Distinct per attempt (a retry must not inherit a killed attempt's bytes) and
+    per INVOCATION (two concurrent mtest processes must not write the same
+    `.attempt-N` file under each other's compiler). Pure.
+    """
+    return (
+        "build/bin/"
+        + mangled
+        + ".inv-"
+        + nonce
+        + ".attempt-"
+        + String(attempt_index)
+    )
+
+
 def _precompile_temp_path(
-    out_path: String, src: String, attempt_index: Int
+    out_path: String, src: String, attempt_index: Int, nonce: String
 ) -> String:
     """The TEMP path attempt `attempt_index` of precompile step `src` builds into.
 
@@ -762,11 +830,12 @@ def _precompile_temp_path(
     per attempt so a retry can never inherit a killed attempt's half-written
     bytes.
 
-    Keyed on the MANGLED source as well as the attempt — symmetrically with the
-    per-attempt quarantine dir — so two steps, two concurrent mtest runs over one
-    root, or a stale dir left by a SIGKILLed run cannot collide on one temp
-    directory and unlink it under another compiler's feet. (OUT is safe either
-    way: a lost temp fails its own step's promotion, it never publishes.)
+    Keyed on the MANGLED source AND the per-invocation `nonce` as well as the
+    attempt — symmetrically with the per-attempt quarantine dir — so two steps,
+    two concurrent mtest PROCESSES over one root, or a stale dir left by a
+    SIGKILLed run cannot collide on one temp directory and unlink it under
+    another compiler's feet. (OUT is safe either way: a lost temp fails its own
+    step's promotion, it never publishes.)
 
     The directory is what hides an unpromoted attempt from the `-I <dir>` scan of
     the OUT directory: the temp CANNOT simply be `<out>.tmp`, because the pinned
@@ -779,6 +848,8 @@ def _precompile_temp_path(
     var tmp_dir = (
         ".mtest-precompile-"
         + _mangle(src)
+        + ".inv-"
+        + nonce
         + ".attempt-"
         + String(attempt_index)
         + ".tmp"
@@ -973,6 +1044,73 @@ def _finalize_attempt(
     return fr^
 
 
+def _finalize_exit_code(code: Int, interrupt_pending: Bool) -> Int:
+    """Let a late interrupt DOMINATE the already-resolved exit code.
+
+    The exit `code` is computed BEFORE the crash-attribution post-pass, from the
+    run-phase interrupt flag. An interrupt that ARRIVES during that pass (a
+    Ctrl-C mid-attribution) must still resolve to exit 2 — interrupt dominates,
+    consistent with the post-pass's own contract that exit 2 never waits on
+    diagnostics. An already-2 code is unchanged; every other code yields to a
+    pending interrupt. Pure.
+    """
+    if interrupt_pending and code != 2:
+        return 2
+    return code
+
+
+def _compile_crash_residual(
+    noun: String, name: String, rc: RetryClass, term: Termination
+) -> String:
+    """The residual-risk warning when a crash-class COMPILE failure is retried.
+
+    Crash-class covers TWO shapes, and the sentence must be true for both: a
+    compiler WE killed (a SIGTERM/SIGKILL at the compile deadline) and one that
+    CRASHED on its own (died by a signal, or exited nonzero carrying an ICE
+    signature). Saying "was killed" for a self-exited ICE would contradict the
+    typed termination, so the cause phrase is read off `term`. The cache-suspect
+    tail is identical for both — the shared module cache may be torn either way,
+    which is why the rebuild ran quarantined. Pure.
+    """
+    var cause: String
+    if term.is_timed_out():
+        cause = "was killed at the compile deadline"
+    elif term.is_signaled():
+        cause = "crashed (died by signal)"
+    else:
+        cause = (
+            "crashed on its own (exited nonzero with a compiler-crash"
+            " signature)"
+        )
+    return (
+        "the "
+        + noun
+        + " of '"
+        + name
+        + "' "
+        + cause
+        + " ("
+        + rc.label
+        + "); the shared module cache may be suspect, so the rebuild ran"
+        " quarantined against a fresh per-attempt cache (the shared cache was"
+        " neither used nor deleted)"
+    )
+
+
+def _flaky_eligible(file_outcome: Outcome) -> Bool:
+    """Whether a post-retry FINAL attempt counts as a genuine flaky-eligible pass.
+
+    A file is FLAKY only when a retry followed a crash-class failure and the
+    FINAL attempt is a genuine PASS. On the plain run path the classifier can
+    Exit with an OFF-GRAMMAR report, which classifies to `NOT_RUN` + drift — NOT
+    failing, but NOT a pass either. Keying on `== PASS` (never `not is_failing()`)
+    keeps a crash-then-drift file at its real drift verdict (exit 3) instead of
+    laundering it into a green FLAKY pass, while a crash-then-clean-pass still
+    qualifies. Pure.
+    """
+    return file_outcome == Outcome.PASS
+
+
 def _run_one(
     mut runtime: ExecRuntime,
     config: RunnerConfig,
@@ -999,6 +1137,7 @@ def _run_one(
     """
     _ensure_dir(root + "/build/bin")
     var mangled = _mangle(rel)
+    var nonce = _invocation_nonce()
     var attempts_planned = config.retries + 1
 
     # AttemptFinished (+ any compile-kill warning) for each NON-final attempt,
@@ -1049,7 +1188,7 @@ def _run_one(
             rc = retry_classify("build", att.bterm, False, att.build_stderr)
         else:
             rc = retry_classify("run", att.rterm, False, att.run_stderr)
-            attempt_passed = not att.cls.file_outcome.is_failing()
+            attempt_passed = _flaky_eligible(att.cls.file_outcome)
 
         var more_attempts = attempt_index < attempts_planned
         if rc.retry_eligible and more_attempts:
@@ -1066,30 +1205,13 @@ def _run_one(
                 attempt_events.append(
                     Event.warning(
                         "compile-kill-residual",
-                        (
-                            "the compile of '"
-                            + rel
-                            + "' was killed ("
-                            + rc.label
-                            + "); the shared module cache may be suspect, so"
-                            " the rebuild ran quarantined against a fresh"
-                            " per-attempt cache (the shared cache was neither"
-                            " used nor deleted)"
-                        ),
+                        _compile_crash_residual("compile", rel, rc, att.bterm),
                     )
                 )
                 do_build = True
-                out_bin = (
-                    String("build/bin/")
-                    + mangled
-                    + ".attempt-"
-                    + String(attempt_index + 1)
-                )
-                quarantine_dir = (
-                    String("build/quarantine/")
-                    + mangled
-                    + "/attempt-"
-                    + String(attempt_index + 1)
+                out_bin = _retry_out_bin(mangled, attempt_index + 1, nonce)
+                quarantine_dir = _quarantine_dir(
+                    "", mangled, attempt_index + 1, nonce
                 )
                 _ensure_dir(root + "/" + quarantine_dir)
                 quarantine_dirs.append(quarantine_dir)
@@ -1121,6 +1243,26 @@ def _str_in(items: List[String], needle: String) -> Bool:
         if x == needle:
             return True
     return False
+
+
+def _select_names(names: List[String], selected: List[String]) -> List[String]:
+    """The isolation candidates for attribution: `names` restricted to `selected`.
+
+    Crash attribution reruns a crashed file's tests one at a time to name the
+    culprit. Under `-k`/`--only` the file's FULL test universe was probed, but
+    only the SELECTED subset actually ran in the user's session — isolating a
+    DESELECTED test (which never ran) could name a culprit out of code the user
+    never invoked. An empty `selected` means "no selection active" (the plain run
+    path), so every name is a candidate. Otherwise keep only selected names, in
+    the given SOURCE order. Pure.
+    """
+    if len(selected) == 0:
+        return names.copy()
+    var kept = List[String]()
+    for n in names:
+        if _str_in(selected, n):
+            kept.append(n)
+    return kept^
 
 
 def _same_set(a: List[String], b: List[String]) -> Bool:
@@ -1963,6 +2105,7 @@ def _run_precompile(
     if parent != "":
         _ensure_dir(root + "/" + parent)
 
+    var nonce = _invocation_nonce()
     var attempts_planned = config.retries + 1
     var events = List[Event]()
     var quarantine_dirs = List[String]()
@@ -1971,7 +2114,9 @@ def _run_precompile(
     var attempt_index = 1
 
     while True:
-        var tmp_path = _precompile_temp_path(out_path, src, attempt_index)
+        var tmp_path = _precompile_temp_path(
+            out_path, src, attempt_index, nonce
+        )
         var tmp_dir = dirname(tmp_path)
         _ensure_dir(root + "/" + tmp_dir)
         var argv = List[String]()
@@ -2119,23 +2264,12 @@ def _run_precompile(
             events.append(
                 Event.warning(
                     "compile-kill-residual",
-                    (
-                        "the precompile of '"
-                        + src
-                        + "' was killed ("
-                        + rc.label
-                        + "); the shared module cache may be suspect, so the"
-                        " rebuild ran quarantined against a fresh per-attempt"
-                        " cache (the shared cache was neither used nor deleted)"
-                    ),
+                    _compile_crash_residual("precompile", src, rc, term),
                 )
             )
             _discard_path(root + "/" + tmp_dir)
-            quarantine_dir = (
-                String("build/quarantine/precompile-")
-                + _mangle(src)
-                + "/attempt-"
-                + String(attempt_index + 1)
+            quarantine_dir = _quarantine_dir(
+                "precompile-", _mangle(src), attempt_index + 1, nonce
             )
             _ensure_dir(root + "/" + quarantine_dir)
             quarantine_dirs.append(quarantine_dir)
@@ -2586,7 +2720,9 @@ def _run_selection[
             run_outcomes.extend(fr.exit_outcomes.copy())
             ran_files += 1
             if fr.outcome == Outcome.CRASH:
-                crash_files.append(_CrashFile(c.rel, c.binary))
+                crash_files.append(
+                    _CrashFile(c.rel, c.binary, c.selected.copy())
+                )
             # Mirror the runnable branch's early-stop below (and the
             # non-selection loop's): a TERMINAL file — compile error, probe
             # crash, probe timeout, or malformed suite — must honor -x /
@@ -2645,7 +2781,7 @@ def _run_selection[
         run_outcomes.extend(fr.exit_outcomes.copy())
         ran_files += 1
         if fr.outcome == Outcome.CRASH:
-            crash_files.append(_CrashFile(c.rel, c.binary))
+            crash_files.append(_CrashFile(c.rel, c.binary, c.selected.copy()))
         if config.exitfirst and fr.outcome.is_failing():
             break
         if (
@@ -2693,6 +2829,10 @@ struct _CrashFile(Copyable, Movable):
     """The root-relative path of the crashed file."""
     var binary: String
     """The binary its crashed run executed."""
+    var selected: List[String]
+    """The test names actually SELECTED in this run (empty = no selection, all
+    names). Attribution isolates only these, never a deselected test that never
+    ran under the user's `-k`/`--only`."""
 
 
 def _secs_since(started_ns: UInt) -> Float64:
@@ -2823,6 +2963,7 @@ def _attribute_one[
     root: String,
     rel: String,
     binary: String,
+    selected: List[String],
     reg: BuildRegistry,
     pass_started_ns: UInt,
     mut reporter: CompositeReporter[*Rs],
@@ -2831,7 +2972,10 @@ def _attribute_one[
 
     Runs each of the file's tests alone (`--only <name>`) in SOURCE order and
     stops at the FIRST rerun that dies by signal — that test is the culprit
-    (ATTRIBUTED). Every other stop renders its own typed disposition:
+    (ATTRIBUTED). Under a `-k`/`--only` selection, only the SELECTED names are
+    isolated (`selected` non-empty restricts the candidates), so attribution can
+    never name a DESELECTED test that never ran in the user's run. Every other
+    stop renders its own typed disposition:
     NO_REPRODUCTION when every test ran alone without crashing, RUN_CAP or
     TIME_BUDGET when a bound cut the search short, PROBE_FAILED when the listing
     could not be recovered or a rerun could not be spawned.
@@ -2886,6 +3030,11 @@ def _attribute_one[
         )
         return True
 
+    # Restrict to the names the user actually selected: a deselected test never
+    # ran in this session, so isolating it could name a culprit out of code the
+    # run never invoked. An empty selection (the plain run path) keeps them all.
+    var names = _select_names(listing.names, selected)
+
     var timeout_ms = isolation_timeout_secs(config.timeout_secs) * 1000
     var runs = 0
     var index = 0
@@ -2893,7 +3042,7 @@ def _attribute_one[
         if interrupt_requested():
             return False
         var step = attribution_step(
-            len(listing.names) - index,
+            len(names) - index,
             runs,
             _secs_since(file_started_ns),
             _secs_since(pass_started_ns),
@@ -2910,7 +3059,7 @@ def _attribute_one[
             )
             return True
 
-        var name = listing.names[index]
+        var name = names[index]
         index += 1
         var argv = List[String]()
         argv.append(listing.binary)
@@ -3016,6 +3165,7 @@ def _run_crash_attribution[
             root,
             cf.rel,
             cf.binary,
+            cf.selected.copy(),
             reg,
             pass_started_ns,
             reporter,
@@ -3297,8 +3447,12 @@ def run_session[
                 run_outcomes.extend(fr.exit_outcomes.copy())
                 ran_files += 1
                 if fr.outcome == Outcome.CRASH:
+                    # The plain run path runs no selection, so every test name is
+                    # an attribution candidate: an empty selected set.
                     crash_files.append(
-                        _CrashFile(disc.run_files[ri], fr.binary_path)
+                        _CrashFile(
+                            disc.run_files[ri], fr.binary_path, List[String]()
+                        )
                     )
                 if config.exitfirst and fr.outcome.is_failing():
                     break
@@ -3352,6 +3506,10 @@ def run_session[
             )
         except:
             pass
+
+    # An interrupt delivered DURING the attribution pass (Ctrl-C mid-diagnostics)
+    # must dominate the already-resolved code: exit 2 never waits on diagnostics.
+    code = _finalize_exit_code(code, interrupt_requested())
 
     var wall = Float64(perf_counter_ns() - started_ns) / 1.0e9
     # A file that passed only after a crash-class retry tallied under FLAKY; that
