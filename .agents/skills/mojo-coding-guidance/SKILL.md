@@ -1,6 +1,6 @@
 ---
 name: mojo-coding-guidance
-description: Mojo implementation and review guidance for the mtest repo — how to write clear, correct, tested, allocation-conscious Mojo for a pytest-like test runner that supervises the stdlib's TestSuite as subprocesses. Use every time you write, modify, refactor, or review Mojo in this codebase — process supervision, protocol parsing, exit-code fidelity, named errors, docstrings, and module boundaries all matter here. Apply on every Mojo edit, not only when the user asks for "clean code". Defers to the global mojo-syntax skill for language syntax and to AGENTS.md for project rules.
+description: Mojo implementation and review guidance for the mtest repo — how to write clear, correct, tested, allocation-conscious Mojo for a pytest-like test runner that supervises the stdlib's TestSuite as subprocesses. Use every time you write, modify, refactor, or review Mojo in this codebase — process supervision, protocol parsing, exit-code fidelity, named errors, docstrings, simplicity, and module boundaries all matter here. Apply on every Mojo edit, not only when the user asks for "clean code" or to remove over-engineering. Defers to the global mojo-syntax skill for language syntax and to AGENTS.md for project rules.
 ---
 
 # Mojo Coding Guidance (mtest)
@@ -13,12 +13,12 @@ orchestrates the stdlib's per-file `std.testing.TestSuite` — it discovers
 aggregates, and reports for CI. Correctness here is not "close enough": an exit
 code is right or it is a lie, and a crash is not a failure.
 
-**Where this applies today.** `src/mtest/` is an intentionally empty, compiling
-package — there is no `model`/`exec`/`protocol`/`session` code yet to hold this
-bar (AGENTS.md). Concretely this skill governs the Mojo that *does* exist now
-(the protocol probes under `tests/fixtures/`, the suites, `src/mtest/__init__.mojo`'s
-docstring) and is the contract each later module must meet the day it lands —
-read it before writing `exec` just as much as before touching today's fixtures.
+**Where this applies today.** The runner is substantially built: `src/mtest/`
+holds the layered packages (`model`, `config`, `discover`, `protocol`, `report`,
+`exec`, `session`, `cli`, plus `cache` and `select`), and the suites and
+fixtures under `tests/` exercise them at their boundaries. This skill governs
+every Mojo edit in all of them — the code that exists now and each module still
+to come.
 
 ## Sources of truth (read these first)
 
@@ -245,6 +245,60 @@ steps.
 
 ---
 
+## Simplicity — every construct must pay rent
+
+This code must still read plainly years and many phases from now, and complexity
+compounds: the unit of cost is the **name** — every new trait, struct, helper,
+or parameter is one more thing the next reader must find, open, and hold while
+following the code. So the default shape for new behavior is the smallest one:
+**a branch before a helper, a function before a struct, a struct before a
+trait, a constructor before a factory** — move to the bigger shape only when
+the smaller one demonstrably no longer holds the logic.
+
+The rent test — add a construct only when you can name what it buys *today*:
+
+- A **trait** exists when a second conforming implementation exists — or when
+  AGENTS.md names the seam (the `Reporter` trait predated the second reporter
+  because the plugin seam is doctrine, and it was proven by the first console
+  reporter flowing through it). A single-impl trait with no named seam is
+  indirection, not abstraction.
+- A **helper function** earns its name by hiding a real decision or invariant,
+  or by a second caller. A one-expression wrapper with one call site is a
+  detour, not a unit.
+- A **struct** earns existence by enforcing an invariant between its fields or
+  owning a resource with a lifecycle. A one-field bundle that exists to ride a
+  constructor call does not.
+- A **parameter, field, or config knob** needs a caller that passes a second
+  distinct value today. A "reserved" field needs the phase that fills it named
+  in AGENTS.md — otherwise it is a guess wearing a type.
+- A **factory or builder** exists when construction genuinely has variants or
+  steps. A `make_x()` that returns the one concrete `X()` is ceremony.
+
+When a later phase arrives with real variation, add the seam *then* — that
+phase has all the cases on the table; a seam guessed today rarely fits them and
+still has to be reworked, now with callers attached.
+
+**Deleting is a first-class edit.** Dead code, an unused re-export, a parameter
+nobody passes differently, a helper down to one trivial caller: remove them in
+the commit that notices them (or its own `refactor` commit). Git remembers;
+"keeping it for reference" keeps only the reading cost.
+
+| Rationalization | Reality |
+|---|---|
+| "We'll need the abstraction next quarter" | Next quarter's phase knows its real cases; today's guess constrains it. The seam added with the second case fits both. |
+| "An interface makes it more testable" | This repo tests at module boundaries with real subprocesses and the `RecordingReporter` double. A mock-only seam adds surface, not coverage. |
+| "The helper name documents the step" | A well-named local or one comment documents it without a jump. |
+| "It's only a small wrapper" | Cost is per-name, not per-line — three small wrappers turn `attempt < budget` into a three-file read. |
+| "Extracting now avoids churn later" | Later churn is one honest `refactor` commit made with the real cases in hand — cheaper than carrying the wrong shape until then. |
+
+Red flags — stop and inline or delete instead: a trait with one implementation
+and no AGENTS.md-named seam; `make_*` returning its only concrete type; a
+`*Config` struct with one field; a helper whose body is one expression with one
+caller; a parameter every caller passes identically; "for future use" in a
+docstring.
+
+---
+
 ## Naming
 
 Clear over clever. Types `UpperCamelCase` (`ProcessResult`, `RunnerConfig`);
@@ -403,5 +457,6 @@ recur in FFI/subprocess/parser code:
 - [ ] fds and buffers released in `__del__`; no fd growth across repeated spawns
 - [ ] All comparisons exact — no tolerance on exit codes or counts
 - [ ] Imports point down the layering; `src/` pure Mojo; all FFI confined to `exec`
+- [ ] Every new construct passes the rent test — no single-impl trait without an AGENTS.md-named seam, no single-caller pass-through helper, no one-field config struct, no factory with one product, no knob nobody varies
 - [ ] Syntax matches `mojo-syntax` (no `fn`/`let`/`alias`/`@parameter`/`inout`/`owned`)
 - [ ] New behavior has a test that would fail without it

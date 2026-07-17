@@ -1,6 +1,6 @@
 ---
 name: code-review-and-quality
-description: Multi-axis code review for the mtest repo before merge — your own code, another agent's, or a phase branch. Adds transcript-fidelity/provenance, exit-code-honesty, and syntax-drift checks on top of the standard correctness / readability / architecture review, plus the standing dual-adversarial external-review gate. Use whenever you are about to merge, or when asked "is this ready?", "review this", "check this", "look this over". Reviewing AI-generated Mojo is a stronger trigger, not a weaker one — obsolete syntax, a crash silently collapsed into a failure, and over-normalized transcripts are the dominant failure modes.
+description: Multi-axis code review for the mtest repo before merge — your own code, another agent's, or a phase branch. Adds transcript-fidelity/provenance, exit-code-honesty, syntax-drift, and unnecessary-complexity checks on top of the standard correctness / readability / architecture review, plus the standing dual-adversarial external-review gate. Use whenever you are about to merge, or when asked "is this ready?", "review this", "check this", "look this over". Reviewing AI-generated Mojo is a stronger trigger, not a weaker one — obsolete syntax, a crash silently collapsed into a failure, and over-normalized transcripts are the dominant failure modes.
 ---
 
 # Code Review & Quality (mtest)
@@ -213,6 +213,30 @@ Walk the diff once per axis. The triage prompts are starting points, not a scrip
   `fixtures`)? Does `__init__.mojo` re-export the intended surface and hold no
   top-level code?
 
+### 7. Simplicity & necessity
+
+Judge the diff by what it adds to the read, not only by what it gets right. A
+construct that is correct, documented, and *unnecessary* is still a finding with
+its own severity — not a nit. The production rule is the rent test in
+[mojo-coding-guidance](../mojo-coding-guidance/SKILL.md); cite it.
+
+- **Does every new construct pay rent today?** A trait with one conforming
+  implementation and no AGENTS.md-named seam; a `make_*` factory returning its
+  only concrete type; a `*Config` struct bundling one field; a helper whose body
+  is one expression with one caller; a parameter every call site passes the same
+  value. Each is a **Medium** finding; a whole speculative layer of them
+  ("pluggable X" with nothing plugged) is **High**.
+- **What breaks if this construct is inlined or deleted?** Ask it of each new
+  name in the diff. "Nothing" is the finding. Would a branch do where a helper
+  was added, a function where a struct was added?
+- **Anything dead on arrival?** An unused re-export, a "reserved" field with no
+  AGENTS.md-named phase, code kept "for reference", a second way to do what an
+  existing function already does.
+- **Does an "extensible/pluggable/future-proof" claim match the diff?** It needs
+  a second implementation or an AGENTS.md-named seam; otherwise the claim
+  misleads the next reader and the commit message overstates its type and scope
+  (cite [git-conventions](../git-conventions/SKILL.md)).
+
 ---
 
 ## Reviewing AI-generated code
@@ -223,8 +247,11 @@ into exit 1; decode `waitpid` as 128+N; scan a report from the first `Running`
 line instead of the last (miscounting a printed impostor); over-normalize a
 transcript to make a diff green; allocate in the child between fork and exec; kill
 only the child and deadlock on a grandchild; add tests that mirror the
-implementation instead of the oracle; and write commit messages with an AI
-trailer this repo forbids. Check each explicitly — polish is not correctness.
+implementation instead of the oracle; wrap one comparison in a trait + factory +
+config struct "for extensibility" (axis 7 — generated code over-abstracts by
+default, and the ceremony arrives fully documented, which makes it look
+deliberate); and write commit messages with an AI trailer this repo forbids.
+Check each explicitly — polish is not correctness.
 
 ---
 
@@ -235,8 +262,8 @@ Group findings by severity; each carries `file:line` and a quoted snippet.
 | Severity | Meaning |
 |---|---|
 | **Critical** | crash laundered into a fail, `mojo run` in an exit-code path, hand-edited transcript, absolute path in a snapshot, Python under `src/`, allocation in the child before exec, red gate merged, `transcripts-check` weakened to a hash |
-| **High** | 128+N termination, deadline kill collapsed into a crash, wrong exit-code precedence, un-anchored parse, over- or under-normalized transcript, missing group-kill or pipe drain, up-graph import, FFI outside `exec`, obsolete syntax that will break |
-| **Medium** | missing test for new behavior, vague/unlocated error message, unpinned magic constant, missing provenance comment, unmeasured perf claim |
+| **High** | 128+N termination, deadline kill collapsed into a crash, wrong exit-code precedence, un-anchored parse, over- or under-normalized transcript, missing group-kill or pipe drain, up-graph import, FFI outside `exec`, obsolete syntax that will break, a speculative plug-in layer with nothing plugged |
+| **Medium** | missing test for new behavior, vague/unlocated error message, unpinned magic constant, missing provenance comment, unmeasured perf claim, an unnecessary construct (single-impl trait with no named seam, factory with one product, one-field config struct, single-caller pass-through helper), dead or duplicate code |
 | **Low** | naming, a redundant copy, a docstring gap |
 | **Nit** | subjective; label it as such |
 
