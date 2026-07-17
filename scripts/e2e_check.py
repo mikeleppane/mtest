@@ -30,6 +30,7 @@ Usage:  pixi run e2e        (builds the binary first, then runs this)
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import pty
@@ -431,6 +432,86 @@ def _suite_tests(manifest: dict) -> dict:
         for rel, row in manifest["tests"].items()
         if row.get("in_default_suite")
     }
+
+
+# Every kill/timeout/crash class this build serves, mapped to the registered
+# scenario that drives it end-to-end. `s_resilience_matrix` checks this table
+# BOTH WAYS against SCENARIOS, the way `s_manifest_completeness` checks the
+# manifest against the tree — so a class whose scenario is silently dropped, and
+# a new resilience scenario nobody classified, both go RED.
+#
+# Two rows share `precompile-crash-retry`: the classifier gives the build and
+# precompile steps the SAME rules, and the precompile step is where a compiler's
+# death BY SIGNAL is driven. No scenario kills a `build` step with a signal —
+# that rule is exercised one step over, not directly.
+RESILIENCE_MATRIX = {
+    "run crash: abort/SIGILL": "default-suite",
+    "run crash: SIGSEGV": "retries-flaky",
+    "run timeout: polite exit inside the grace": "timeout",
+    "run timeout: SIGKILL escalation past the grace": "timeout-escalation",
+    "compile timeout: the build step": "compile-timeout",
+    "compile timeout: the precompile step": "precompile-timeout",
+    "compiler crash: death by SIGNAL": "precompile-crash-retry",
+    "compiler crash: crash SIGNATURE + nonzero exit": "compile-crash-signature",
+    "compiler crash: a retried build's binary is the one attributed": (
+        "attribution-reruns-crashed-binary"
+    ),
+    "precompile crash": "precompile-crash-retry",
+    "promotion: a killed compile never touches OUT": "precompile-promotion",
+}
+
+# A scenario that reaches for one of the kill/timeout/crash `--mojo` stand-ins is
+# a resilience scenario by construction, and must therefore be named by the
+# matrix above. Matched against each scenario's SOURCE, so the reverse check
+# needs no second hand-maintained list to drift out of step.
+RESILIENCE_SHIM_MARKERS = ("FAKE_CRASH_MOJO", "FAKE_SLOW_MOJO", "FAKE_RETRY_CRASH_MOJO")
+
+
+def s_resilience_matrix(manifest: dict) -> str:
+    """The matrix as a WHOLE: every kill/timeout/crash class has a live scenario.
+
+    The individual scenarios prove their own behavior; this one pins the SET, so
+    a future change that quietly drops a class from the gate is caught by the
+    gate. Checked both ways, mirroring `s_manifest_completeness`:
+
+      * every class in RESILIENCE_MATRIX names a REGISTERED scenario (delete or
+        rename `s_compile_timeout` and this goes red, instead of the compile
+        timeout simply ceasing to be tested);
+      * every registered scenario that drives a crash/slow compiler stand-in is
+        named by the matrix (add a resilience scenario and you must say which
+        class it serves).
+
+    This asserts COVERAGE, never behavior — it runs no mtest of its own.
+    """
+    registered = {name for name, _fn in SCENARIOS}
+    classified = set(RESILIENCE_MATRIX.values())
+
+    dangling = sorted(
+        f"{cls!r} -> {scen!r}"
+        for cls, scen in RESILIENCE_MATRIX.items()
+        if scen not in registered
+    )
+    expect(
+        not dangling,
+        "the resilience matrix names scenarios that are not registered — a "
+        f"kill/timeout/crash class lost its end-to-end proof: {dangling}",
+    )
+
+    unclassified = sorted(
+        name
+        for name, fn in SCENARIOS
+        if name not in classified
+        and any(marker in inspect.getsource(fn) for marker in RESILIENCE_SHIM_MARKERS)
+    )
+    expect(
+        not unclassified,
+        "these scenarios drive a crash/slow compiler stand-in but no resilience "
+        f"class claims them — add a RESILIENCE_MATRIX row: {unclassified}",
+    )
+    return (
+        f"{len(RESILIENCE_MATRIX)} kill/timeout/crash classes, each covered by a "
+        f"registered scenario; no unclassified resilience scenario"
+    )
 
 
 def s_default_suite(manifest: dict) -> str:
@@ -1029,6 +1110,86 @@ def s_compile_timeout(manifest: dict) -> str:
     return (
         "compile-timeout: --compile-timeout 1 -> COMPILE-TIMEOUT + hint (exit 1);"
         " --retries 1 -> TRY + quarantined rebuild + COMPILE-TIMEOUT (exit 1)"
+    )
+
+
+def s_compile_crash_signature(manifest: dict) -> str:
+    """The stderr CRASH SIGNATURE — not the nonzero exit — decides a build retry.
+
+    A compiler can crash and still exit under its own control: an ICE that prints
+    the LLVM banner and returns nonzero looks, to the supervisor, exactly like a
+    rejected program. Only the stderr tells them apart, so `retry_classify` scans
+    it (`has_crash_signature`). This scenario is the DISCRIMINATING PAIR that
+    proves the scan actually gates the decision:
+
+      * (a) WITH the banner  -> crash-class: a TRY line, the compile-kill-residual
+        warning, the quarantined rebuild — then the retry crashes the same way and
+        the file lands on its deterministic COMPILE-ERROR;
+      * (b) WITHOUT the banner -> deterministic: NO TRY line, NO residual warning,
+        one attempt only, straight to COMPILE-ERROR.
+
+    Both halves run the SAME shim with the SAME argv and the SAME `--retries 1`,
+    and the shim exits nonzero (never by a signal) in both. The ONLY difference is
+    the stderr text. A single (a)-style scenario would pass even if the runner
+    retried EVERY nonzero build — i.e. even if the signature list did nothing; (b)
+    is what makes that impossible. Delete the `has_crash_signature(...)` condition
+    from `retry_classify` (or force it true) and (b) fails on the TRY line.
+
+    Structure is asserted, never the exact console bytes."""
+    rel = "e2e/suite/test_passing.mojo"
+    argv = ["--mojo", FAKE_CRASH_MOJO, rel, "--retries", "1"]
+
+    # (a) nonzero exit WITH the ICE banner -> crash-class -> retried.
+    sig = run_mtest(
+        argv, timeout=SHORT_TIMEOUT, env_overrides={"MTEST_FAKE_BUILD_CRASH": "signature"}
+    )
+    expect_exit(sig, 1)
+    expect(
+        sig.verdict_line("TRY", rel) is not None,
+        f"a nonzero build with a crash banner was NOT retried (no TRY line) — the "
+        f"crash-signature scan is not reaching the retry decision:\n{sig.stdout}",
+    )
+    expect(
+        "compile-crash" in sig.stdout,
+        f"the retried build's TRY line did not classify it compile-crash:\n{sig.stdout}",
+    )
+    expect(
+        "compile-kill-residual" in sig.stdout and "quarantin" in sig.stdout,
+        f"a crash-class build fired no quarantined-rebuild warning:\n{sig.stdout}",
+    )
+    expect(
+        sig.verdict_line("COMPILE-ERROR", rel) is not None,
+        f"the retry-exhausted crash-class build did not land on COMPILE-ERROR:\n"
+        f"{sig.stdout}",
+    )
+    expect_accounting(sig)
+
+    # (b) the SAME shim, the SAME nonzero exit, ordinary stderr -> deterministic.
+    plain = run_mtest(
+        argv, timeout=SHORT_TIMEOUT, env_overrides={"MTEST_FAKE_BUILD_CRASH": "plain"}
+    )
+    expect_exit(plain, 1)
+    expect(
+        plain.verdict_line("TRY", rel) is None,
+        f"an ordinary compile error was RETRIED — `--retries` must never re-run a "
+        f"deterministic build failure, and only the stderr text differs from the "
+        f"crash-class run:\n{plain.stdout}",
+    )
+    expect(
+        "compile-kill-residual" not in plain.stdout,
+        f"a deterministic compile error fired the cache-residual warning:\n"
+        f"{plain.stdout}",
+    )
+    expect(
+        plain.verdict_line("COMPILE-ERROR", rel) is not None,
+        f"an ordinary compile error did not report COMPILE-ERROR:\n{plain.stdout}",
+    )
+    expect_accounting(plain)
+
+    return (
+        "compile-crash signature: nonzero exit + ICE banner -> TRY + quarantined"
+        " retry -> COMPILE-ERROR; the SAME nonzero exit with ordinary stderr ->"
+        " no TRY, no warning, COMPILE-ERROR (only the stderr text differs)"
     )
 
 
@@ -2193,6 +2354,55 @@ def _bootstrap_build_bin() -> int | None:
     return None
 
 
+# The scenario table, in run order. The single source of truth for what the gate
+# runs: `main` dispatches over it and `s_resilience_matrix` checks the kill/
+# timeout/crash coverage table against it, so a scenario can never be classified
+# by the matrix yet quietly left unregistered (or vice versa).
+SCENARIOS = [
+    ("manifest-completeness", s_manifest_completeness),
+    ("resilience-matrix", s_resilience_matrix),
+    ("default-suite", s_default_suite),
+    ("hostile", s_hostile),
+    ("single-pass", s_single_pass),
+    ("exitfirst", s_exitfirst),
+    ("maxfail", s_maxfail),
+    ("retries-flaky", s_retries_flaky),
+    ("crash-attribution", s_crash_attribution),
+    ("attribution-reruns-crashed-binary", s_attribution_reruns_the_binary_that_crashed),
+    ("compile-timeout", s_compile_timeout),
+    ("compile-crash-signature", s_compile_crash_signature),
+    ("exclude+stale", s_exclude_and_stale),
+    ("all-excluded", s_all_excluded),
+    ("empty-dir", s_empty_dir),
+    ("failing-gate", s_failing_gate),
+    ("timeout", s_timeout),
+    ("timeout-escalation", s_timeout_escalation),
+    ("precompile", s_precompile),
+    ("precompile-timeout", s_precompile_timeout),
+    ("precompile-crash-retry", s_precompile_crash_retry),
+    ("precompile-promotion", s_precompile_promotion),
+    ("quiet-verbose", s_quiet_verbose),
+    ("show-output", s_show_output),
+    ("durations", s_durations),
+    ("color", s_color),
+    ("usage-refusals", s_usage_refusals),
+    ("selection-keyword", s_selection_keyword),
+    ("selection-node-id", s_selection_node_id),
+    ("selection-union", s_selection_union),
+    ("selection-malformed-node-id", s_selection_malformed_node_id),
+    ("selection-unknown-test", s_selection_unknown_test),
+    ("selection-empty", s_selection_empty),
+    ("selection-chameleon", s_selection_chameleon),
+    ("single-build", s_single_build),
+    ("stale-recovery-two-builds", s_stale_recovery_two_builds),
+    ("collect", s_collect),
+    ("passthrough+forbidden", s_passthrough_and_forbidden),
+    ("out-of-root", s_out_of_root),
+    ("internal-error", s_internal_error),
+    ("interrupt", s_interrupt),
+]
+
+
 def main() -> int:
     if not os.path.exists(MTEST):
         # The e2e pixi task depends on build-bin, but support a bare invocation.
@@ -2205,48 +2415,8 @@ def main() -> int:
     h = Harness(manifest)
 
     print("=== mtest end-to-end gate ===", flush=True)
-    h.scenario("manifest-completeness", s_manifest_completeness)
-    h.scenario("default-suite", s_default_suite)
-    h.scenario("hostile", s_hostile)
-    h.scenario("single-pass", s_single_pass)
-    h.scenario("exitfirst", s_exitfirst)
-    h.scenario("maxfail", s_maxfail)
-    h.scenario("retries-flaky", s_retries_flaky)
-    h.scenario("crash-attribution", s_crash_attribution)
-    h.scenario(
-        "attribution-reruns-crashed-binary",
-        s_attribution_reruns_the_binary_that_crashed,
-    )
-    h.scenario("compile-timeout", s_compile_timeout)
-    h.scenario("exclude+stale", s_exclude_and_stale)
-    h.scenario("all-excluded", s_all_excluded)
-    h.scenario("empty-dir", s_empty_dir)
-    h.scenario("failing-gate", s_failing_gate)
-    h.scenario("timeout", s_timeout)
-    h.scenario("timeout-escalation", s_timeout_escalation)
-    h.scenario("precompile", s_precompile)
-    h.scenario("precompile-timeout", s_precompile_timeout)
-    h.scenario("precompile-crash-retry", s_precompile_crash_retry)
-    h.scenario("precompile-promotion", s_precompile_promotion)
-    h.scenario("quiet-verbose", s_quiet_verbose)
-    h.scenario("show-output", s_show_output)
-    h.scenario("durations", s_durations)
-    h.scenario("color", s_color)
-    h.scenario("usage-refusals", s_usage_refusals)
-    h.scenario("selection-keyword", s_selection_keyword)
-    h.scenario("selection-node-id", s_selection_node_id)
-    h.scenario("selection-union", s_selection_union)
-    h.scenario("selection-malformed-node-id", s_selection_malformed_node_id)
-    h.scenario("selection-unknown-test", s_selection_unknown_test)
-    h.scenario("selection-empty", s_selection_empty)
-    h.scenario("selection-chameleon", s_selection_chameleon)
-    h.scenario("single-build", s_single_build)
-    h.scenario("stale-recovery-two-builds", s_stale_recovery_two_builds)
-    h.scenario("collect", s_collect)
-    h.scenario("passthrough+forbidden", s_passthrough_and_forbidden)
-    h.scenario("out-of-root", s_out_of_root)
-    h.scenario("internal-error", s_internal_error)
-    h.scenario("interrupt", s_interrupt)
+    for name, fn in SCENARIOS:
+        h.scenario(name, fn)
 
     passed = sum(1 for _n, ok, _d in h.results if ok)
     total = len(h.results)
