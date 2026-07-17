@@ -15,6 +15,7 @@ passing--skip-all-args.txt
 passing--skip-all.txt
 passing--skip-unknown.txt
 raising--default.txt
+segfault--default.txt
 skipped--default.txt
 skipped--only-native.txt
 skipped--skip-all.txt
