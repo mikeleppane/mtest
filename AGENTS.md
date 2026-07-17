@@ -311,7 +311,9 @@ Accumulated the hard way; append as later phases teach more.
   leaves the parent's read blocked forever. Two further traps: re-declaring
   `write` via `external_call` collides with the stdlib's own `write` decl (use
   `read`/String instead), and the child after `fork` may call only
-  async-signal-safe functions before `exec`.
+  async-signal-safe functions before `exec`. This spike's machinery now ships
+  as the native C adapter (`native/mtest_exec_native.c`, the `mtest_exec_*`
+  ABI) rather than Mojo-side FFI — see the two Lessons below.
 - **The module cache is redirectable via `MODULAR_CACHE_DIR`** (the cache lives
   at `.mojo_cache`; `--print-cache-location`/`--clear-cache` exist). A post-kill
   retry build points it at a per-attempt temp dir so a killed compile's corrupted
@@ -476,6 +478,36 @@ Accumulated the hard way; append as later phases teach more.
   and resolves symlinks, so canonicalizing a path to the exact string `mojo
   build` bakes into its report lines needs no libc FFI — `from std.os.path
   import realpath` is enough.
+- **Exec supervision runs exactly one child at a time (native ABI v1).** The
+  native adapter (`native/mtest_exec_native.c`) keeps a single static process
+  slot and a lock-free state machine; `mtest_exec_process_open` does an atomic
+  `OPEN -> CHILD_ACTIVE` compare-exchange and fails with `EBUSY` if a child is
+  already active ("ABI v1 rejects a second runtime or active child"). Trap:
+  designing anything that supervises two children concurrently through this
+  adapter. Symptom: `process_open` fails with `EBUSY`. Correct move:
+  capacity-1 supervision is the current contract; genuine multi-child
+  concurrency requires extending the native ABI to a versioned multi-child
+  adapter (a deliberate, gated change to `native/` and its
+  ABI-version/native-check/asan/valgrind gates), never a Mojo-side workaround.
+- **Signal handling and the supervision syscalls live in the native C
+  adapter, not Mojo FFI.** The Mojo `exec` layer (`src/mtest/exec/signals.mojo`)
+  calls the `mtest_exec_*` ABI and no longer lays out `struct sigaction`, maps
+  a fixed address, invents a handler pointer, or reads libc's private errno
+  storage. The interrupt latch is a native `volatile sig_atomic_t`, surfaced
+  to Mojo as `interrupt_requested() -> Bool` — a plain boolean, no delivery
+  count. Correct move: add new supervision/signal capability by extending the
+  native adapter and its tests/gates, never by reintroducing Mojo-side
+  syscalls or a fixed mmap page. (The EOF-on-pipes-is-not-completion and
+  always-kill-the-process-GROUP traps from the FFI spike above still hold;
+  they are now enforced inside the adapter.)
+- **BuildProducts registry replacement is atomic (whole-slot).**
+  `record_build` swaps the entire registry slot in one assignment
+  (`self._items[pos.value()] = product.copy()`), so no stale field
+  (`canonical_source`, probe `listing`, `probed`/`qualified`) survives a
+  rebuild — this is the stale-name-recovery contract. Trap: mutating
+  individual registry fields in place across a rebuild, which can leave a
+  stale canonical source or listing paired with a fresh binary. Correct move:
+  always replace the whole product, never patch a field.
 
 ## Skills index
 
