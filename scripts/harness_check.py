@@ -44,6 +44,7 @@ UNIT_SUITES = {
     "test_model_test_result.mojo",
     "test_protocol_corruption.mojo",
     "test_protocol_matrix.mojo",
+    "test_report_annotations.mojo",
     "test_report_composite.mojo",
     "test_report_console.mojo",
     "test_report_escape.mojo",

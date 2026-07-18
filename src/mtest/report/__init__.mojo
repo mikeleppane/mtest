@@ -32,6 +32,10 @@ The surface:
 - `junit_reporter` — the stateful shell (`JunitReporter`, its `JunitStatus`):
   accumulates the typed event state, spools one `<testsuite>` fragment per
   finished file, and assembles the full document from the spool.
+- `annotations` — the pure GitHub Actions annotations renderer
+  (`render_annotations`): a run's events to node-id-sorted, capped, escaped
+  `::error`/`::warning`/`::notice` workflow-command lines. Not yet wired to a
+  flag or composed into the reporter set — a later task owns that.
 
 The public surface is re-exported here so callers write
 `from mtest.report import Reporter, CompositeReporter, ConsoleReporter, ...`.
@@ -79,3 +83,4 @@ from mtest.report.junit_reporter import (
     JunitStatus,
     open_junit_artifact,
 )
+from mtest.report.annotations import render_annotations
