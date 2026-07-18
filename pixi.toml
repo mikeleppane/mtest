@@ -25,6 +25,10 @@ python = "3.12.*"
 # one compiler on both supported targets so its ABI and sanitizer behavior are
 # reproducible; the linked object adds no runtime library dependency.
 clang = "==18.1.8"
+# The JUnit report gate needs a schema validator. xmllint (from libxml2) checks
+# the vendored junit-10.xsd against the shipped artifact directly; pinned so the
+# gate's accept/reject verdict cannot drift with an unpinned system copy.
+libxml2 = "==2.15.3"
 
 [tasks]
 # Print the pinned Mojo version — first CI step, fails fast on a broken toolchain
@@ -93,6 +97,13 @@ asan-check = "python scripts/asan_check.py"
 # no such exception, and the Valgrind job itself is not described as hermetic.
 valgrind-check = "python scripts/valgrind_check_test.py && python scripts/valgrind_check.py"
 
+# Gate the JUnit report tooling ahead of the renderer that will use it: recorded
+# unit tests first prove the checker actually rejects a broken artifact, then
+# the checker runs xmllint against the vendored junit-10.xsd plus the
+# arithmetic/structural invariants the schema cannot express over the
+# committed byte-faithful mock.
+junit-check = "python scripts/junit_check_test.py && python scripts/junit_check.py"
+
 # Regenerate the protocol snapshots IN PLACE from the committed fixtures at the
 # pinned toolchain. Local use only (updating the committed snapshots); never run in
 # CI. The generator self-verifies (hard asserts) before writing.
@@ -155,6 +166,7 @@ depends-on = [
     "safety-check",
     "postfork-check",
     "native-check",
+    "junit-check",
     "build",
     "transcripts-check",
     "test-direct",
