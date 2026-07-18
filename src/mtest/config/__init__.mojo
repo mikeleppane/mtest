@@ -13,6 +13,10 @@ environment or file reads, no printing.
 The public surface is re-exported here so callers write
 `from mtest.config import RunnerConfig, resolve_mojo_path, shell_quote, ...`.
 """
+from mtest.config.annotations_mode import (
+    AnnotationsMode,
+    annotations_resolved_on,
+)
 from mtest.config.color_when import ColorWhen
 from mtest.config.lossy_utf8 import lossy_utf8
 from mtest.config.mojo_path import resolve_mojo_path

@@ -249,7 +249,7 @@ Mirrors pytest, and is **FROZEN**:
 | 1 | at least one selected outcome is FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, or PRECOMPILE-ERROR |
 | 2 | interrupted (SIGINT/SIGTERM); a partial summary is printed |
 | 3 | internal `mtest` error — including protocol drift (a report present but off-grammar), and an environment/I-O failure such as a runtime report-destination open/write failure (a `--json` destination that cannot be opened at session start, or whose stream write later fails — a fatal abort; or a `--junit-xml` target that cannot be created at session start, or whose report cannot be finalized and renamed onto PATH) |
-| 4 | CLI usage error (unknown flag, bad value, nonexistent path, unknown node id, forbidden build argument, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory) — detected **before any test runs** |
+| 4 | CLI usage error (unknown flag, bad value, nonexistent path, unknown node id, forbidden build argument, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, or the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout) — detected **before any test runs** |
 | 5 | no tests collected (empty walk, `-k` matched nothing, everything excluded) |
 
 **Precedence** when outcomes mix. A usage error aborts before the run with 4.
@@ -509,15 +509,78 @@ events, never from a parse of the console text.
 
 ### 15.3 GitHub annotations — `--gh-annotations MODE`
 
-`auto|on|off`; `auto` is on iff `GITHUB_ACTIONS=true`.
+`--gh-annotations` is **served**: it emits GitHub Actions annotation
+workflow-command lines to **stdout**, in a deterministic tail after the console
+summary band. `MODE` is `off|on|auto`; **`auto` (the default) is on iff
+`GITHUB_ACTIONS=true`**, `on` always renders, `off` never does. The tail renders
+only when resolved-on.
 
-- FAIL → `::error file=<f>,line=<l>::<node id>: <first assertion line>` (location
-  taken from the `At <path>:<line>:<col>:` detail).
-- Crash-class → `::error file=<f>::…`.
-- Plus one summary `::notice`.
-- Every payload escapes `%`, CR, and LF as `%25`, `%0D`, `%0A`, and is
-  length-bounded. User-controlled paths, names, and assertion text are never
-  interpolated raw into a workflow command.
+**The frozen annotation shapes**, one clear entry per kind:
+
+- **Per-test FAIL** → `::error file=<f>,line=<l>::<node id>: <first assertion
+  line>`. `line=` is present **only** when that first line itself carries a
+  recognizable `At <path>:<line>:<col>:` backtrace pointer (the same shape the
+  console renders root-relative); a detail with no such pointer (e.g. a bare
+  `raise`) omits `line=` rather than guess one — **location honesty**: `line`
+  appears only where the assertion detail carried it, and `file=` paths assume
+  the invocation root is the repo root.
+- **Crash-class / file-level** (CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT,
+  MALFORMED-SUITE) → `::error file=<f>::<f>: <outcome in words>`. Never carries
+  `line=` (there is no per-test location for a whole-file abnormal outcome). A
+  plain per-test FAIL file is covered entirely by its per-test rows above.
+- **FLAKY** → `::warning file=<f>::<f>: flaky — passed on attempt K of N`.
+- **Precompile failure** → one `::error::<step>: …` with **no** `file=` property:
+  the failure belongs to the STEP, not any one file; the casualty files appear as
+  JUnit rows, not per-file annotations, so an annotation flood never burns the
+  error cap on a derivative fact.
+- **The summary notice** → exactly **one** `::notice::<band text>` per run, never
+  subject to the caps.
+
+**Level mapping**: failing → `::error`; FLAKY → `::warning`; the single run
+summary → `::notice`.
+
+**The tail is PER-KIND GROUPED**, each block node-id-sorted: the whole
+node-id-sorted `::error` block, then the whole node-id-sorted `::warning` block,
+then the single `::notice`. This is **not** a global node-id interleave across
+error and warning lines — the per-kind caps and the cap-minus-one aggregate line
+make per-kind grouping the deterministic, unambiguous form.
+
+**Bounds**. Each payload is escaped via the message escaper (`%`→`%25`,
+CR→`%0D`, LF→`%0A`) and each `file=` value via the property escaper (adds
+`:`→`%3A`, `,`→`%2C`); user-controlled paths, names, and assertion text are never
+interpolated raw into a workflow command, and an escaped-away CR/LF means a
+would-be forged second command line can never form. Each message is bounded to
+**4096 escaped bytes** (measured after escaping), with a truncation marker when
+cut. The **per-run per-STEP caps are 10 errors and 10 warnings** (a workflow STEP
+is capped at 10 error and 10 warning annotations; the "50" some readers conflate
+is the Checks **API**'s own per-request limit, a REST surface mtest never calls);
+past the cap the first `cap - 1` sorted rows render individually and one
+**aggregate** line (`… and N more …`) replaces the rest, so a block never exceeds
+its cap.
+
+**Stop-commands FENCING of echoed child output.** Whenever `GITHUB_ACTIONS=true`
+— independent of `MODE`, even `off` — every echoed region of captured **child**
+output the console renders (captured stdout/stderr under `--show-output`, failure
+and precompile excerpt regions) is wrapped in `::stop-commands::<token>` …
+`::<token>::` fencing, so a child's own `::error`-shaped bytes cannot forge a
+workflow command. The token is **high-entropy** (≥128-bit random, from
+`/dev/urandom`), **per-run-unique**, minted **after** the producing child has
+exited, never exposed to any child (not in its env or argv), and **regenerated**
+until the complete resume delimiter `::<token>::` is absent from the region being
+fenced. Restoration runs through an **always-runs epilogue**: a final resume
+delimiter is emitted before mtest's own annotation lines, so no error or
+partial-write path can leave workflow commands disabled or a fence unterminated.
+
+A **PRECOMPILE-ERROR** annotates with **no** `file=` (the failure belongs to the
+step; its casualties appear as JUnit rows, not per-file annotations).
+
+**The `--json -` interplay.** `--json -` makes stdout the byte-pure event stream,
+which the annotation tail cannot share. Beside `--json -`, annotations must be
+**explicitly `off`** — the only combination that runs. Both an explicit
+`--gh-annotations on` and the **default `auto`** are usage errors (exit 4, §9),
+detected at parse time, and the message names both fixes (drop `--json -`, or set
+`--gh-annotations off`). `--json PATH` does not own stdout, so annotations may
+ride alongside it.
 
 ### 15.4 Machine event stream — `--json PATH|-`
 
@@ -765,16 +828,16 @@ above — it only reports which of those surfaces are wired up yet.
 `-h`/`--help`, `--version`, and the `run`, `collect`, `version`, and `help`
 subcommands (`--collect-only` too, as an alias that behaves as `collect`).
 `--shard` applies under both `run` and `collect`. `--json` (the machine event
-stream, §15.4) and `--junit-xml` (the JUnit report, §15.2) are served too — see
-§24.2 for how they are now reached.
+stream, §15.4), `--junit-xml` (the JUnit report, §15.2), and `--gh-annotations`
+(the CI annotation tail, §15.3) are served too — see §24.2 for how they are now
+reached.
 
-**Still refused**: `-n`/`--workers`, `--gh-annotations`, `--serial`. Each is
-recognized by the parser — it knows the spelling and its arity — but is
-**refused before any test runs**, with a usage error that names the flag, states
-that it is part of the v1 contract, names the capability that brings it
-(`-n`/`--workers` arrive with parallel workers; `--gh-annotations` arrives with
-CI annotations; `--serial` arrives with serial execution pinning), and lists what
-this build does serve.
+**Still refused**: `-n`/`--workers`, `--serial`. Each is recognized by the
+parser — it knows the spelling and its arity — but is **refused before any test
+runs**, with a usage error that names the flag, states that it is part of the v1
+contract, names the capability that brings it (`-n`/`--workers` arrive with
+parallel workers; `--serial` arrives with serial execution pinning), and lists
+what this build does serve.
 
 **A transitional exit-4 subcase.** That refusal is a usage error and exits 4,
 but it is a distinct, *temporary* subcase of §9's exit code 4 — it is not one
@@ -829,6 +892,15 @@ creation failure). Unlike the stream, a spool failure never aborts mid-run; it
 surfaces at finalization, where the report is assembled and renamed atomically
 onto PATH (exit 3 on a finalization failure, with the prior report never
 truncated). The §9 causes are cited here, never restated.
+
+**`--gh-annotations` reachability.** `--gh-annotations off|on|auto` is served
+(§15.3): it is parsed into a self-gating annotations reporter composed beside the
+console, the stream, and the JUnit report. `auto` (the default) resolves on iff
+`GITHUB_ACTIONS=true`; the tail renders to stdout after the console band only when
+resolved-on. Beside `--json -` it must be explicitly `off` — the default `auto`
+and an explicit `on` are usage errors (exit 4) detected at parse time (§9). The
+stop-commands fencing of echoed child output is active whenever
+`GITHUB_ACTIONS=true`, independent of the mode.
 - **5** — reachable via an empty walk, via the everything-excluded case, and
   via deselection (`-k` matched nothing, §9).
 

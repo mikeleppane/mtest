@@ -6,6 +6,7 @@ one from argv; the session layer (a later module) only reads it. An empty
 `paths` list means "use discovery's own default root", not "nothing to do" —
 that rule is discover's, not config's, to apply.
 """
+from mtest.config.annotations_mode import AnnotationsMode
 from mtest.config.color_when import ColorWhen
 from mtest.config.precompile import Precompile
 from mtest.config.shard_mode import ShardMode
@@ -108,6 +109,13 @@ struct RunnerConfig(Copyable, Movable):
     parser validates it syntactically (a non-empty value with an existing parent
     directory); a runtime open failure is resolved by the session."""
 
+    var gh_annotations: AnnotationsMode
+    """`--gh-annotations off|on|auto`: whether to emit GitHub Actions annotation
+    workflow-command lines in the deterministic stdout tail. `auto` (the default)
+    is on iff `GITHUB_ACTIONS=true`; `on` always renders; `off` never does. The
+    stop-commands FENCING of echoed child output is a separate console-path
+    concern keyed on `GITHUB_ACTIONS`, active regardless of this mode."""
+
     var junit_dest: String
     """`--junit-xml PATH`: the JUnit XML report destination. Empty means the flag
     was absent (no report). Any other value is a filesystem PATH the assembled
@@ -127,7 +135,8 @@ struct RunnerConfig(Copyable, Movable):
         `color=AUTO`, `exitfirst=False`, `maxfail=0` (no limit),
         `durations=0` (no report), `collect=False`, UNSHARDED
         (`shard_mode=HASH`, `shard_m=0`, `shard_n=0`), `retries=0` (no
-        retries), `compile_timeout_secs=600`, `json_dest=""` (no stream), and
+        retries), `compile_timeout_secs=600`, `json_dest=""` (no stream),
+        `gh_annotations=AUTO` (on iff `GITHUB_ACTIONS=true`), and
         `junit_dest=""` (no JUnit report).
         """
         return RunnerConfig(
@@ -153,5 +162,6 @@ struct RunnerConfig(Copyable, Movable):
             retries=0,
             compile_timeout_secs=600,
             json_dest="",
+            gh_annotations=AnnotationsMode.AUTO,
             junit_dest="",
         )

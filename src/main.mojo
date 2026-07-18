@@ -33,7 +33,9 @@ from mtest.cli import (
     version_text,
 )
 from mtest.exec import ExecRuntime, stderr_isatty, stdout_isatty
+from mtest.config import annotations_resolved_on
 from mtest.report import (
+    AnnotationsReporter,
     CompositeReporter,
     ConsoleReporter,
     JsonStreamReporter,
@@ -41,8 +43,14 @@ from mtest.report import (
     close_json_fd,
     open_json_fd,
     open_junit_artifact,
+    resume_delimiter,
 )
-from mtest.session import CollectResult, run_collect, run_session
+from mtest.session import (
+    CollectResult,
+    annotation_lines,
+    run_collect,
+    run_session,
+)
 
 
 def _argv_tail() -> List[String]:
@@ -187,6 +195,16 @@ def main():
         json_active = True
         json_owns_fd = True
 
+    # The GitHub Actions probe drives BOTH the `auto` annotation resolution and
+    # the console's stop-commands FENCING of echoed child output. Fencing is
+    # active whenever `GITHUB_ACTIONS=true`, independent of the annotation mode
+    # (even `off`): any child-produced `::error` in echoed output would otherwise
+    # forge a workflow command. The annotation TAIL renders only when resolved-on.
+    var gh_actions = getenv("GITHUB_ACTIONS", "") == "true"
+    var annotations_on = annotations_resolved_on(
+        config.gh_annotations, gh_actions
+    )
+
     var console_is_tty = stderr_isatty() if console_fd == 2 else stdout_isatty()
     var build_flags = build_flags_string(config)
     var console = ConsoleReporter(
@@ -198,6 +216,7 @@ def main():
         config.show_output,
         build_flags^,
         config.durations,
+        gh_actions,
     )
     # Resolve the JUnit report destination. Unlike `--json`, the destination is
     # NEVER opened for live truncation: a unique temp file is created in the
@@ -229,18 +248,20 @@ def main():
 
     # A fixed composition ORDER: index 0 the console, index 1 the machine stream
     # (inert when `--json` is absent), index 2 the JUnit report (inert when
-    # `--junit-xml` is absent). The session polls index 1's stream latch and
-    # finalizes index 2's report by those fixed positions — `run_session[1, 2]`
-    # below names them.
+    # `--junit-xml` is absent), index 3 the annotations reporter (inert when
+    # resolved off). The session polls index 1's stream latch, finalizes index 2's
+    # report, and reaches index 3 for its tail by those fixed positions —
+    # `run_session[1, 2, 3]` below names them.
     var stream = JsonStreamReporter(json_fd, MTEST_VERSION, json_active)
     var junit = JunitReporter(
         junit_spool, junit_active, junit_target, junit_temp
     )
-    var comp = CompositeReporter(Tuple(console^, stream^, junit^))
+    var annotations = AnnotationsReporter(annotations_on)
+    var comp = CompositeReporter(Tuple(console^, stream^, junit^, annotations^))
 
     var code = 0
     try:
-        code = run_session[1, 2](runtime, config, root, comp)
+        code = run_session[1, 2, 3](runtime, config, root, comp)
     except e:
         # The only raise the session propagates is a discover: usage error;
         # like a cli usage error it exits 4 to stderr.
@@ -261,6 +282,29 @@ def main():
         file=FileDescriptor(console_fd),
         flush=True,
     )
+
+    # The ALWAYS-RUNS restoration epilogue, then the annotation tail — both to the
+    # console's resolved descriptor, right after the summary band. When the
+    # console fenced any captured-output region under Actions, emit one final
+    # resume delimiter FIRST so workflow commands are guaranteed re-enabled before
+    # mtest's OWN `::error`/`::warning`/`::notice` lines — no error or partial path
+    # can leave commands disabled. The tail itself renders only when annotations
+    # resolved on (never beside `--json -`, refused at parse time). `annotation_lines`
+    # reaches the concrete reporter at the fixed composite index 3.
+    var fence_token = comp.reporters[0].fence_token()
+    if gh_actions and fence_token != "":
+        print(
+            resume_delimiter(fence_token),
+            file=FileDescriptor(console_fd),
+            flush=True,
+        )
+    if annotations_on:
+        var tail = annotation_lines[3](comp)
+        var rendered = String("")
+        for line in tail:
+            rendered += line + "\n"
+        print(rendered, end="", file=FileDescriptor(console_fd), flush=True)
+
     if json_owns_fd:
         close_json_fd(json_fd)
     if not _close_runtime(runtime):

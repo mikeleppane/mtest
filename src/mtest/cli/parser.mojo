@@ -17,6 +17,7 @@ from std.os.path import dirname, isdir
 from mtest.cli.flag_spec import FlagId, FlagSpec, flag_specs
 from mtest.cli.parse_result import ParseResult
 from mtest.config import (
+    AnnotationsMode,
     ColorWhen,
     Precompile,
     RunnerConfig,
@@ -33,7 +34,7 @@ comptime SUPPORTED_SUMMARY = (
     "paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo,"
     " -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v,"
     " --color, -k, --maxfail, --durations, --shard, --retries, --json,"
-    " --junit-xml, collect/--collect-only, --help, --version"
+    " --junit-xml, --gh-annotations, collect/--collect-only, --help, --version"
 )
 """A stable one-line list of what this build serves, quoted in refusals."""
 
@@ -189,6 +190,19 @@ def _validate_junit_dest(value: String) raises -> String:
             + "'"
         )
     return value
+
+
+def _parse_annotations(value: String) raises -> AnnotationsMode:
+    """Parse a `--gh-annotations` mode: `off`, `on`, or `auto`."""
+    if value == "off":
+        return AnnotationsMode.OFF
+    if value == "on":
+        return AnnotationsMode.ON
+    if value == "auto":
+        return AnnotationsMode.AUTO
+    raise _err(
+        "'--gh-annotations' wants one of off|on|auto, got '" + value + "'"
+    )
 
 
 def _parse_color(value: String) raises -> ColorWhen:
@@ -354,6 +368,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var retries = 0
     var json_dest = String("")
     var junit_dest = String("")
+    var gh_annotations = AnnotationsMode.AUTO
     var saw_show_output = False
     var saw_quiet = False
     var saw_verbose = False
@@ -488,6 +503,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             json_dest = _validate_json_dest(value)
         elif s.id == FlagId.JUNIT_XML:
             junit_dest = _validate_junit_dest(value)
+        elif s.id == FlagId.GH_ANNOTATIONS:
+            gh_annotations = _parse_annotations(value)
 
     # Collect mode is a listing, not a run: the run-only knobs that shape which
     # tests execute or when to stop scheduling are meaningless against it and are
@@ -528,6 +545,18 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     elif saw_verbose:
         verbosity = Verbosity.VERBOSE
 
+    # `--json -` owns stdout for the byte-pure event stream, so nothing else may
+    # write there. The annotation tail renders to stdout too, so the ONLY way the
+    # two combine is with annotations EXPLICITLY off. The default `auto` and an
+    # explicit `on` are BOTH usage errors here, detected at parse time; the
+    # message names both fixes so a reader can resolve it either way.
+    if json_dest == "-" and gh_annotations != AnnotationsMode.OFF:
+        raise _err(
+            "'--json -' streams machine output to stdout, which the"
+            " '--gh-annotations' tail cannot share; drop '--json -' (use"
+            " '--json PATH'), or set '--gh-annotations off'"
+        )
+
     var mojo_path = resolve_mojo_path(mojo_flag, _env_mojo())
 
     var cfg = RunnerConfig(
@@ -553,6 +582,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         retries=retries,
         compile_timeout_secs=compile_timeout_secs,
         json_dest=json_dest^,
+        gh_annotations=gh_annotations,
         junit_dest=junit_dest^,
     )
     return ParseResult.run(cfg^)

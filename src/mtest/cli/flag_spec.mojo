@@ -125,13 +125,6 @@ def flag_specs() -> List[FlagSpec]:
         ),
         FlagSpec("--json", FlagId.JSON, 1, False, True, ""),
         FlagSpec("--junit-xml", FlagId.JUNIT_XML, 1, False, True, ""),
-        FlagSpec(
-            "--gh-annotations",
-            FlagId.GH_ANNOTATIONS,
-            1,
-            False,
-            False,
-            "CI annotations",
-        ),
+        FlagSpec("--gh-annotations", FlagId.GH_ANNOTATIONS, 1, False, True, ""),
         FlagSpec("--collect-only", FlagId.COLLECT_ONLY, 0, False, True, ""),
     ]

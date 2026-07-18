@@ -20,6 +20,7 @@ from mtest.model.test_counts import TestCounts
 from mtest.model.test_result import TestResult
 from mtest.model.events import Summary
 from mtest.report.annotations import render_annotations
+from mtest.report.annotations_reporter import AnnotationsReporter
 
 
 def _fail(path: String, name: String, detail: String) -> Event:
@@ -298,6 +299,67 @@ def test_no_session_finished_yields_no_notice() raises:
     var events = List[Event]()
     var out = render_annotations(events)
     assert_equal(len(out), 0)
+
+
+# --- The stateful AnnotationsReporter shell ---------------------------------
+
+
+def _mixed_stream() -> List[Event]:
+    """One error row (file z), one flaky warning (file a), and a notice."""
+    var events = List[Event]()
+    events.append(Event.file_started("tests/test_zzz.mojo"))
+    events.append(_fail("tests/test_zzz.mojo", "test_boom", "boom"))
+    events.append(_file_finished("tests/test_zzz.mojo", Outcome.FAIL))
+    events.append(Event.file_started("tests/test_aaa.mojo"))
+    events.append(_attempt("tests/test_aaa.mojo", 2))
+    events.append(
+        _file_finished(
+            "tests/test_aaa.mojo", Outcome.FLAKY, attempts_used=2, flaky=True
+        )
+    )
+    events.append(_session_finished(1, 1, 0, 0, 0, 3.0))
+    return events^
+
+
+def _feed(mut rep: AnnotationsReporter, events: List[Event]):
+    for e in events:
+        rep.handle(e)
+
+
+def test_active_reporter_matches_the_pure_renderer() raises:
+    var events = _mixed_stream()
+    var rep = AnnotationsReporter(active=True)
+    _feed(rep, events)
+    var got = rep.render()
+    var want = render_annotations(events)
+    assert_equal(len(got), len(want), "reporter and renderer disagree on count")
+    for i in range(len(want)):
+        assert_equal(got[i], want[i], "reporter line differs from renderer")
+
+
+def test_inactive_reporter_renders_nothing() raises:
+    var events = _mixed_stream()
+    var rep = AnnotationsReporter.inert()
+    _feed(rep, events)
+    assert_equal(len(rep.render()), 0)
+
+
+def test_reporter_tail_is_per_kind_grouped_not_globally_interleaved() raises:
+    # The error is on node id "tests/test_zzz.mojo::test_boom"; the warning is on
+    # file "tests/test_aaa.mojo". A GLOBAL node-id interleave would put the "a"
+    # warning before the "z" error; per-kind grouping keeps the WHOLE ::error
+    # block first, then the WHOLE ::warning block, then the single ::notice.
+    var rep = AnnotationsReporter(active=True)
+    _feed(rep, _mixed_stream())
+    var lines = rep.render()
+    assert_equal(len(lines), 3, "expected one error, one warning, one notice")
+    assert_true(lines[0].startswith("::error "), "error block is not first")
+    assert_true(
+        lines[1].startswith("::warning "), "warning block is not second"
+    )
+    assert_true(lines[2].startswith("::notice::"), "notice is not last")
+    assert_true("test_zzz" in lines[0])
+    assert_true("test_aaa" in lines[1])
 
 
 # --- Precompile: one `::error` with NO `file=` property ---------------------

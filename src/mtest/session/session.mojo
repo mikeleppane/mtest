@@ -74,6 +74,7 @@ from mtest.protocol import (
     collection_names,
 )
 from mtest.report import (
+    AnnotationsReporter,
     CompositeReporter,
     JsonStreamReporter,
     JunitFinalizeResult,
@@ -3342,8 +3343,36 @@ def _junit_finalize[
         return JunitFinalizeResult(False, "")
 
 
+def annotation_lines[
+    ann_index: Int, *Rs: Reporter
+](ref reporter: CompositeReporter[*Rs]) -> List[String]:
+    """The rendered annotation tail from the concrete `AnnotationsReporter`.
+
+    Reaches the reporter at the comptime `ann_index` DIRECTLY (a
+    `Pointer[AnnotationsReporter, …]` bound to the element — the same
+    compile-time type assertion as `_stream_failed`/`_junit_finalize`: a wrong
+    index fails to COMPILE rather than reinterpret the wrong type) and returns
+    its `render()`. `main` calls this AFTER `run_session` returns — the whole
+    event stream, `SessionFinished` included, has been accumulated — and writes
+    the lines to stdout in the deterministic tail after the console summary band.
+    An inert reporter (annotations resolved off) renders an empty list;
+    `ann_index < 0` (none composed) elides the whole call. Never raises.
+    """
+    comptime if ann_index >= 0:
+        ref element = reporter.reporters[ann_index]
+        var probe: Pointer[AnnotationsReporter, origin_of(element)] = Pointer(
+            to=element
+        )
+        return probe[].render()
+    else:
+        return List[String]()
+
+
 def run_session[
-    stream_index: Int = -1, junit_index: Int = -1, *Rs: Reporter
+    stream_index: Int = -1,
+    junit_index: Int = -1,
+    ann_index: Int = -1,
+    *Rs: Reporter,
 ](
     mut runtime: ExecRuntime,
     config: RunnerConfig,
@@ -3385,6 +3414,13 @@ def run_session[
             `-1` (the default) when none is composed. When non-negative the
             session synthesizes `[not-run]` rows and finalizes the report at
             Phase 1; when `-1` both are comptime no-ops.
+        ann_index: The fixed tuple position of the composed `AnnotationsReporter`,
+            or `-1` (the default) when none is composed. The annotations reporter
+            is PASSIVE — it accumulates the event stream through the ordinary
+            composite fan-out and needs no scheduling-boundary poll or terminal
+            synthesis — so the session performs no `ann_index`-keyed work; `main`
+            renders its tail via `annotation_lines[ann_index]` after this returns.
+            Named here so the composition is `run_session[stream, junit, ann]`.
         Rs: The reporter pack composed into `reporter`, inferred from the
             argument.
 
@@ -3777,7 +3813,10 @@ def run_session[
 
 
 def run_session[
-    stream_index: Int = -1, junit_index: Int = -1, *Rs: Reporter
+    stream_index: Int = -1,
+    junit_index: Int = -1,
+    ann_index: Int = -1,
+    *Rs: Reporter,
 ](
     config: RunnerConfig, root: String, mut reporter: CompositeReporter[*Rs]
 ) raises -> Int:
@@ -3787,13 +3826,13 @@ def run_session[
     open failures map to internal exit 3 before session error handling.
     This convenience overload preserves the session test/library surface while
     still passing exclusive mutable ownership to every supervised child.
-    `stream_index`/`junit_index` forward to the primary overload (see it for the
-    meaning).
+    `stream_index`/`junit_index`/`ann_index` forward to the primary overload (see
+    it for the meaning).
     """
     var runtime = ExecRuntime()
     try:
         runtime.open()
-        var code = run_session[stream_index, junit_index](
+        var code = run_session[stream_index, junit_index, ann_index](
             runtime, config, root, reporter
         )
         runtime.close()

@@ -6,18 +6,40 @@ file asserts two things exhaustively: every field of a freshly-built config
 sits at its contract default, and `resolve_mojo_path` implements the
 flag > MTEST_MOJO env > "mojo" precedence for all four presence combinations.
 """
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.config import (
+    AnnotationsMode,
     ColorWhen,
     Precompile,
     RunnerConfig,
     ShowOutput,
     Verbosity,
+    annotations_resolved_on,
     resolve_mojo_path,
     shell_join,
     shell_quote,
 )
+
+
+def test_default_gh_annotations_is_auto() raises:
+    var c = RunnerConfig.default()
+    assert_true(c.gh_annotations == AnnotationsMode.AUTO)
+
+
+def test_annotations_off_never_renders() raises:
+    assert_false(annotations_resolved_on(AnnotationsMode.OFF, True))
+    assert_false(annotations_resolved_on(AnnotationsMode.OFF, False))
+
+
+def test_annotations_on_always_renders() raises:
+    assert_true(annotations_resolved_on(AnnotationsMode.ON, True))
+    assert_true(annotations_resolved_on(AnnotationsMode.ON, False))
+
+
+def test_annotations_auto_follows_github_actions() raises:
+    assert_true(annotations_resolved_on(AnnotationsMode.AUTO, True))
+    assert_false(annotations_resolved_on(AnnotationsMode.AUTO, False))
 
 
 def test_default_paths_is_empty() raises:

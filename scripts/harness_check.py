@@ -84,6 +84,7 @@ INTEGRATION_SUITES = {
     "test_exec_timeout.mojo",
     "test_protocol_collection.mojo",
     "test_protocol_report.mojo",
+    "test_session_annotations.mojo",
     "test_session_collect.mojo",
     "test_session_exit_codes.mojo",
     "test_session_flow.mojo",
@@ -377,7 +378,7 @@ def check_e2e_layout() -> None:
         path.relative_to(REPO_ROOT).as_posix()
         for path in e2e_root.rglob("test_*.mojo")
     }
-    if rows != discovered or len(rows) != 29:
+    if rows != discovered or len(rows) != 31:
         raise AssertionError(
             "e2e manifest/discovery mismatch: "
             f"missing={sorted(discovered - rows)}, stale={sorted(rows - discovered)}"

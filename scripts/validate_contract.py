@@ -443,13 +443,12 @@ class Runner:
 def build_matrix() -> list[Check]:
     I = ["-I", "build"]  # noqa: E741
     refused = [("--workers", "4", "parallel workers"), ("-n", "4", "parallel workers"),
-               ("--gh-annotations", "auto", "annotations"),
                ("--serial", "*.mojo", "serial")]
     # Newly served (§24.1): --retries, --compile-timeout, and --shard are wired
     # up — the parser accepts them and they run, so they must NOT exit 4 with the
     # not-available refusal. Assert the flip so the validator stops asserting a
     # falsehood, without duplicating the e2e's behavior coverage.
-    served = [("--retries", "2"), ("--compile-timeout", "600"), ("--json", "out.ndjson"), ("--junit-xml", "r.xml")]
+    served = [("--retries", "2"), ("--compile-timeout", "600"), ("--json", "out.ndjson"), ("--junit-xml", "r.xml"), ("--gh-annotations", "auto")]
     checks = [
         # Version identity (§19) — discriminating, not a bare "mtest".
         Check("help: version prints the version", "§19", ["version"], 0, out_has=["mtest 0.1.0"]),

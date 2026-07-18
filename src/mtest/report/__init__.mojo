@@ -34,8 +34,10 @@ The surface:
   finished file, and assembles the full document from the spool.
 - `annotations` — the pure GitHub Actions annotations renderer
   (`render_annotations`): a run's events to node-id-sorted, capped, escaped
-  `::error`/`::warning`/`::notice` workflow-command lines. Not yet wired to a
-  flag or composed into the reporter set — a later task owns that.
+  `::error`/`::warning`/`::notice` workflow-command lines.
+- `annotations_reporter` — the stateful shell (`AnnotationsReporter`): a
+  self-gating `Reporter` that accumulates the event stream and renders the
+  deterministic annotation tail on demand for `main` to print to stdout.
 
 The public surface is re-exported here so callers write
 `from mtest.report import Reporter, CompositeReporter, ConsoleReporter, ...`.
@@ -84,3 +86,4 @@ from mtest.report.junit_reporter import (
     open_junit_artifact,
 )
 from mtest.report.annotations import render_annotations
+from mtest.report.annotations_reporter import AnnotationsReporter
