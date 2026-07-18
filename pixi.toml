@@ -104,6 +104,17 @@ valgrind-check = "python scripts/valgrind_check_test.py && python scripts/valgri
 # committed byte-faithful mock.
 junit-check = "python scripts/junit_check_test.py && python scripts/junit_check.py"
 
+# Gate mtest's OWN rendered JUnit document through the same junit-10 oracle:
+# build and run scripts/junit_emit.mojo (which drives the real JunitReporter
+# over every sentinel-matrix cell), then run the schema + arithmetic checker over
+# the emitted document and confirm a tampered copy is rejected. Depends on the
+# precompiled package so the emitter can import mtest.report. This validates the
+# shipped renderer's bytes, complementing junit-check's mock and the Mojo unit
+# tests that pin the renderer structure directly.
+junit-render-check = { cmd = "python scripts/junit_render_check.py", depends-on = [
+    "build",
+] }
+
 # Regenerate the protocol snapshots IN PLACE from the committed fixtures at the
 # pinned toolchain. Local use only (updating the committed snapshots); never run in
 # CI. The generator self-verifies (hard asserts) before writing.
@@ -168,6 +179,7 @@ depends-on = [
     "native-check",
     "junit-check",
     "build",
+    "junit-render-check",
     "transcripts-check",
     "test-direct",
     "test",

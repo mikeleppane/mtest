@@ -26,6 +26,12 @@ The surface:
   (`JsonStreamReporter`, its `StreamStatus`, and the `open_json_fd`/
   `close_json_fd` descriptor helpers): writes each event line to a resolved
   destination and latches a write failure.
+- `junit` — the pure JUnit XML renderer (typed suite state to `<testsuite>`
+  fragments and a node-id-sorted `<testsuites>` document), validated by the
+  vendored junit-10 schema + arithmetic oracle.
+- `junit_reporter` — the stateful shell (`JunitReporter`, its `JunitStatus`):
+  accumulates the typed event state, spools one `<testsuite>` fragment per
+  finished file, and assembles the full document from the spool.
 
 The public surface is re-exported here so callers write
 `from mtest.report import Reporter, CompositeReporter, ConsoleReporter, ...`.
@@ -53,3 +59,17 @@ from mtest.report.json_stream_reporter import (
     close_json_fd,
     open_json_fd,
 )
+from mtest.report.junit import (
+    JunitCase,
+    JunitPrimary,
+    JunitRerun,
+    JunitSuite,
+    RenderedSuite,
+    assemble,
+    bounded_text_from_bytes,
+    dotted_classname,
+    format_seconds,
+    node_sort_key,
+    render_suite,
+)
+from mtest.report.junit_reporter import JunitReporter, JunitStatus
