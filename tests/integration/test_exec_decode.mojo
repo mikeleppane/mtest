@@ -16,6 +16,7 @@ from exec_helpers import target, py_spec
 
 def test_clean_nonzero_exit_is_exited() raises:
     var runtime = ExecRuntime()
+    runtime.open()
     var argv = List[String]()
     argv.append("/bin/false")
     var r = run_supervised(runtime, ProcessSpec.command(argv^))
@@ -26,6 +27,7 @@ def test_clean_nonzero_exit_is_exited() raises:
 
 def test_true_exits_zero() raises:
     var runtime = ExecRuntime()
+    runtime.open()
     var argv = List[String]()
     argv.append("/bin/true")
     var r = run_supervised(runtime, ProcessSpec.command(argv^))
@@ -36,6 +38,7 @@ def test_true_exits_zero() raises:
 
 def test_signal_death_is_signaled_not_exit() raises:
     var runtime = ExecRuntime()
+    runtime.open()
     var argv = List[String]()
     argv.append(target("self_signaler.py"))
     var r = run_supervised(runtime, py_spec(argv^))
@@ -48,6 +51,7 @@ def test_signal_death_is_signaled_not_exit() raises:
 
 def test_nonexistent_binary_is_spawn_failed() raises:
     var runtime = ExecRuntime()
+    runtime.open()
     var argv = List[String]()
     argv.append("/nonexistent/mtest_no_such_binary")
     var r = run_supervised(runtime, ProcessSpec.command(argv^))
@@ -58,6 +62,7 @@ def test_nonexistent_binary_is_spawn_failed() raises:
 
 def test_genuine_exit_127_is_exited_not_spawn_failed() raises:
     var runtime = ExecRuntime()
+    runtime.open()
     var argv = List[String]()
     argv.append("python3")
     argv.append("-c")

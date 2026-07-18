@@ -5,10 +5,12 @@ and SIGCHLD dispositions. The native adapter uses the platform's own headers and
 a `volatile sig_atomic_t` latch; Mojo never lays out `struct sigaction`, invents
 a callback pointer, maps a fixed address, or reads libc's private errno storage.
 
-Construction is transactional and rejects a second active runtime. `close()` is
-explicit and fallible so restoration failure can never be reported as success.
-The destructor is only a last-resort retry for exceptional unwinding; callers
-must use `close()` on every ordinary path.
+An inactive token is materialized before `open()` transactionally installs the
+handlers and rejects a second active runtime. This keeps a live owner available
+when native installation and rollback both fail. `close()` is explicit and
+fallible so restoration failure can never be reported as success. The destructor
+is only a last-resort retry for exceptional unwinding; callers must use `close()`
+on every ordinary path.
 """
 from std.ffi import external_call
 from std.memory import alloc, memset_zero
@@ -18,9 +20,15 @@ comptime _ERROR_BYTES = 32
 """Size of ABI-v1 `struct mtest_exec_error` (alignment 8)."""
 
 
-def _runtime_error(prefix: String, operation: Int, error_number: Int) -> Error:
+def _runtime_error(
+    prefix: String,
+    operation: Int,
+    error_number: Int,
+    cleanup_operation: Int,
+    cleanup_error: Int,
+) -> Error:
     """Build one named native-runtime machinery error. Allocates."""
-    return Error(
+    var message = (
         prefix
         + " (operation "
         + String(operation)
@@ -28,28 +36,46 @@ def _runtime_error(prefix: String, operation: Int, error_number: Int) -> Error:
         + String(error_number)
         + ")"
     )
+    if cleanup_operation != 0:
+        message += (
+            "; cleanup operation "
+            + String(cleanup_operation)
+            + " failed with errno "
+            + String(cleanup_error)
+        )
+    return Error(message^)
 
 
 struct ExecRuntime(Movable):
     """Exclusive ownership of mtest's process-global exec/signal state.
 
-    Construct once around a session or direct supervision group, pass it by
-    mutable borrow to child operations, and call `close()` explicitly. A second
-    simultaneously active instance raises `EBUSY` through the native error
-    record. Sequential construct/use/close cycles are supported.
+    Materialize once around a session or direct supervision group, call `open()`,
+    pass it by mutable borrow to child operations, and call `close()` explicitly.
+    A second simultaneously active instance raises `EBUSY` through the native
+    error record. Sequential open/use/close cycles are supported.
     """
 
     var active: Bool
     """Whether this token still owns the native runtime."""
 
-    def __init__(out self) raises:
-        """Transactionally install native interrupt handlers and take ownership.
+    def __init__(out self):
+        """Materialize an inactive token before any fallible native operation.
+        """
+        self.active = False
+
+    def open(mut self) raises:
+        """Install native interrupt handlers and take transactional ownership.
+
+        On an install failure whose rollback also fails, this token remains
+        active and owns the native restoration-required state. The caller can
+        inspect the raised primary-plus-cleanup error and explicitly retry
+        `close()` on the same live value. Temporarily allocates one 32-byte ABI
+        error record and frees it before returning or raising.
 
         Raises:
             Error: A named `exec: runtime open failed` machinery error containing
-                the adapter operation and errno.
+                the adapter operation and errno plus any rollback failure.
         """
-        self.active = False
         # SAFETY: `alloc[UInt64](4)` owns 32 bytes aligned to 8, exactly ABI-v1's
         # error record. Zeroing initializes every byte before C may write it;
         # `mtest_exec_runtime_open` does not retain the pointer.
@@ -60,14 +86,25 @@ struct ExecRuntime(Movable):
         )
         if result != 0:
             # SAFETY: the adapter initialized the complete aligned error record
-            # before returning. ABI-v1 fixes operation at byte 0 and errno at 4.
+            # before returning. ABI-v1 fixes primary operation/errno at 0/4 and
+            # cleanup operation/errno at 8/12; a nonzero cleanup operation on
+            # runtime-open means native state is RESTORE_REQUIRED and this live
+            # token must own the explicit restoration retry.
             var operation = Int(error.bitcast[UInt32]()[0])
             var error_number = Int(error.bitcast[Int32]()[1])
+            var cleanup_operation = Int(error.bitcast[UInt32]()[2])
+            var cleanup_error = Int(error.bitcast[Int32]()[3])
+            if cleanup_operation != 0:
+                self.active = True
             # SAFETY: `error` is still the unique allocation owner and C did not
             # retain it; this frees it exactly once before the raising path.
             error.free()
             raise _runtime_error(
-                "exec: runtime open failed", operation, error_number
+                "exec: runtime open failed",
+                operation,
+                error_number,
+                cleanup_operation,
+                cleanup_error,
             )
         # SAFETY: `error` remains uniquely owned and non-escaping after the
         # successful non-retaining ABI call; free it exactly once.
@@ -75,11 +112,13 @@ struct ExecRuntime(Movable):
         self.active = True
 
     def close(mut self) raises:
-        """Restore saved dispositions and release runtime ownership explicitly.
+        """Repair any retained child, then restore dispositions and ownership.
 
-        Idempotent after success. On restoration failure the token remains
-        active so the caller can report the error and retry; a new child/runtime
-        remains rejected by the native state machine.
+        Idempotent after success. If machinery cleanup retained a child handle,
+        close retries its group sweep and reap before restoring signals. On a
+        cleanup or restoration failure the token remains active so the caller can
+        report the error and retry; a new child/runtime remains rejected by the
+        native state machine.
 
         Raises:
             Error: A named `exec: runtime close failed` machinery error containing
@@ -96,14 +135,20 @@ struct ExecRuntime(Movable):
         )
         if result != 0:
             # SAFETY: C initialized the record before returning; ABI-v1 fixes
-            # operation and errno at the first two 32-bit slots.
+            # primary and cleanup values at the first four 32-bit slots.
             var operation = Int(error.bitcast[UInt32]()[0])
             var error_number = Int(error.bitcast[Int32]()[1])
+            var cleanup_operation = Int(error.bitcast[UInt32]()[2])
+            var cleanup_error = Int(error.bitcast[Int32]()[3])
             # SAFETY: the non-retained allocation still has one owner; free once
             # while leaving `self.active` true for an explicit retry.
             error.free()
             raise _runtime_error(
-                "exec: runtime close failed", operation, error_number
+                "exec: runtime close failed",
+                operation,
+                error_number,
+                cleanup_operation,
+                cleanup_error,
             )
         # SAFETY: successful close did not retain the uniquely-owned record.
         error.free()
@@ -127,7 +172,7 @@ struct ExecRuntime(Movable):
 
 
 def interrupt_requested() -> Bool:
-    """Whether SIGINT or SIGTERM has latched since runtime construction."""
+    """Whether SIGINT or SIGTERM has latched since the latest runtime open."""
     # SAFETY: the ABI takes no pointers and returns exactly 0 or 1. The native
     # handler communicates only through its `volatile sig_atomic_t` cell.
     return external_call["mtest_exec_interrupt_requested", Int32]() != 0

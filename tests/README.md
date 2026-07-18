@@ -12,7 +12,9 @@ generated protocol evidence in separate homes:
 - `native/` contains C17 ABI, ownership, signal-transaction, sanitizer-control,
   and deterministic fault tests for the exec-private POSIX adapter. These are
   built by the pinned Clang and are deliberately outside Mojo TestSuite
-  discovery; `pixi run native-check` runs their normal gate.
+  discovery. `pixi run postfork-check` mutation-tests and repeats the complete
+  production/testing post-fork call-graph audit; `pixi run native-check`
+  depends on that audit before running the ABI and lifecycle gate.
 - `support/` contains Mojo helper modules imported by executable suites. Files
   here are not test suites and must not be discovered as `test_*.mojo`.
 - `fixtures/exec/` contains subprocess actors used to exercise the exec layer.
@@ -33,6 +35,7 @@ $ pixi run test-unit
 $ pixi run test-integration
 $ pixi run test-direct
 $ pixi run safety-check
+$ pixi run postfork-check
 $ pixi run native-check
 $ pixi run asan-check
 $ pixi run valgrind-check

@@ -10,7 +10,7 @@ read as a failure and our own deadline kill is never read as a crash:
   what actually happened (a clean grace exit, a SIGTERM death, or a SIGKILL
   escalation) and `escalated` records whether SIGKILL was needed.
 - `SpawnFailed(errno)` — the child could not be exec'd at all (the errno from a
-  failed `execvp`/`chdir`, reported through the close-on-exec errno pipe).
+  failed `execve`/`chdir`, reported through the close-on-exec errno pipe).
 
 This is one tagged struct rather than four types so it is a plain, copyable data
 value that a caller matches on; it owns nothing and never raises.

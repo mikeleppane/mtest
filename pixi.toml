@@ -65,11 +65,19 @@ fmt-check = "mojo format src tests e2e && git diff --exit-code"
 # locally documented before the ordinary CI gate can proceed.
 safety-check = "python scripts/safety_check_test.py && python scripts/safety_check.py"
 
+# Recurring Clang call-graph audit for the complete post-fork child region.
+# Mutation tests prove forbidden direct, wrapped, and indirect calls fail closed;
+# both production and testing preprocessing variants must match the exact
+# platform allowlist.
+postfork-check = "python scripts/postfork_check_test.py && python scripts/postfork_check.py"
+
 # Strict C17 ABI/layout/symbol verification plus native lifecycle tests for the
-# private exec adapter. This remains separate from the Mojo suite so the test
-# object can expose deterministic fault and sanitizer controls that production
-# linkage proves absent.
-native-check = "python scripts/native_check.py"
+# private exec adapter. The standalone post-fork audit is a prerequisite. This
+# remains separate from the Mojo suite so the test object can expose deterministic
+# fault and sanitizer controls that production linkage proves absent.
+native-check = { cmd = "python scripts/native_check.py", depends-on = [
+    "postfork-check",
+] }
 
 # Source-build the native adapter and a risk-weighted exec subset with matching
 # AddressSanitizer instrumentation. Live OOB/UAF/leak controls prove that both
@@ -77,10 +85,13 @@ native-check = "python scripts/native_check.py"
 asan-check = "python scripts/asan_check.py"
 
 # Source-build every exec integration suite with debug information and run it
-# under the locked Linux-only Memcheck. Undefined-value, invalid-access, leak,
-# and fd controls run first; reviewed runtime-reachable allocations are matched
-# exactly and project/native frames are forbidden from that baseline.
-valgrind-check = "python scripts/valgrind_check.py"
+# under the locked Linux-only Memcheck binary. Undefined-value, invalid-access,
+# leak, and fd controls run first; reviewed runtime-reachable allocations are
+# matched exactly and project/native frames are forbidden from that baseline.
+# The scheduled/manual workflow has a narrow approved apt exception for the exact
+# debug-symbol version matching the runner's preinstalled glibc; ordinary CI has
+# no such exception, and the Valgrind job itself is not described as hermetic.
+valgrind-check = "python scripts/valgrind_check_test.py && python scripts/valgrind_check.py"
 
 # Regenerate the protocol snapshots IN PLACE from the committed fixtures at the
 # pinned toolchain. Local use only (updating the committed snapshots); never run in
@@ -142,6 +153,7 @@ depends-on = [
     "fmt-check",
     "harness-check",
     "safety-check",
+    "postfork-check",
     "native-check",
     "build",
     "transcripts-check",

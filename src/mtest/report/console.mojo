@@ -238,7 +238,7 @@ def _precompile_ending_phrase(
 def _errno_name(errno: Int) -> String:
     """The strerror-style words for a common spawn errno. `""` outside the set.
 
-    Covers the errnos a failed `execvp`/`chdir` plausibly reports, so the caller
+    Covers the errnos a failed `execve`/`chdir` plausibly reports, so the caller
     can name the cause and otherwise fall back to the bare number. Pure.
     """
     if errno == 2:

@@ -536,8 +536,11 @@ disables) bounds a single file's **build**; exceeding it yields COMPILE-TIMEOUT
 with a hint to split the module or exclude it. It kills after the same
 signal-first sequence with a compile-specific grace (~5s longer than a run kill,
 since a compiler unwinds more slowly). Timeout kills are signal-first (a
-terminate signal, then a grace period, then a hard kill) and reach the whole
-process tree, not just the direct child.
+terminate signal, then a grace period, then a hard kill) and reach the owned
+process group, not just the direct child. A descendant that deliberately leaves
+that group (for example, with `setsid()`) cannot be killed by the group sweep;
+if it retains a capture pipe past the bounded cleanup deadline, the run is
+reported as an internal cleanup error, never as a pass.
 
 **`--shard [hash:|slice:]M/N`.** Splits the discovered RUN-file set into `N`
 disjoint shards and runs only shard `M`'s files, for spreading one suite across
@@ -618,11 +621,13 @@ is its own deliverable.
 
 ## 22. Platforms
 
-Linux and macOS are the v1 targets. The automated gate runs on Linux; macOS
-support rests on the same POSIX process surface and gains its own gate in a later
-release. Platform divergence in crash reporting is absorbed by the structured
-termination model (a terminating signal is recorded as a signal, never as a
-shell-encoded `128+N`).
+Linux and macOS are the v1 targets. Linux carries the native lifecycle,
+process-supervision, and dynamic memory-analysis gates. macOS arm64 carries a
+native post-fork call-graph audit plus package build, executable link, and
+`--help` smoke coverage; runtime supervision remains unverified there. Platform
+divergence in crash reporting is absorbed by the structured termination model
+(a terminating signal is recorded as a signal, never as a shell-encoded
+`128+N`).
 
 ---
 

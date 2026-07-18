@@ -3535,12 +3535,13 @@ def run_session[
     """Run a session with a locally owned runtime for direct library callers.
 
     The CLI uses the overload that accepts its already-open runtime so runtime
-    construction failures map to internal exit 3 before session error handling.
+    open failures map to internal exit 3 before session error handling.
     This convenience overload preserves the session test/library surface while
     still passing exclusive mutable ownership to every supervised child.
     """
     var runtime = ExecRuntime()
     try:
+        runtime.open()
         var code = run_session(runtime, config, root, reporter)
         runtime.close()
         return code
@@ -3784,6 +3785,7 @@ def run_collect(config: RunnerConfig, root: String) raises -> CollectResult:
     """Collect with a locally owned runtime for direct library callers."""
     var runtime = ExecRuntime()
     try:
+        runtime.open()
         var result = run_collect(runtime, config, root)
         runtime.close()
         return result^

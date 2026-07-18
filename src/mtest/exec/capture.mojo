@@ -15,8 +15,8 @@ struct BoundedCapture(Movable):
     """A memory-bounded byte sink keeping the head and tail of a stream.
 
     Bytes flow through `push`; `finish` materializes the retained bytes. Owns two
-    backing lists (the head buffer and a tail ring); construction and `finish`
-    allocate. Never raises.
+    backing lists (the head buffer and a tail ring). Construction validates the
+    capacities before creating those lists and can raise; `finish` allocates.
     """
 
     var head: List[UInt8]
@@ -35,8 +35,29 @@ struct BoundedCapture(Movable):
     var total: Int
     """How many bytes have been pushed in total."""
 
-    def __init__(out self, head_cap: Int, tail_cap: Int):
-        """A capture with the given head and tail capacities. Allocates."""
+    def __init__(out self, head_cap: Int, tail_cap: Int) raises:
+        """Initialize a capture after validating both capacities.
+
+        Creates the two initially empty backing lists only after validation;
+        they grow later as bytes are pushed.
+
+        Args:
+            head_cap: Nonnegative number of leading bytes to retain.
+            tail_cap: Positive number of trailing bytes to retain.
+
+        Raises:
+            Error: If `head_cap` is negative or `tail_cap` is nonpositive,
+                naming the offending capacity and value.
+        """
+        if head_cap < 0:
+            raise Error(
+                "exec: head capacity must be nonnegative, got "
+                + String(head_cap)
+            )
+        if tail_cap <= 0:
+            raise Error(
+                "exec: tail capacity must be positive, got " + String(tail_cap)
+            )
         self.head = List[UInt8]()
         self.tail = List[UInt8]()
         self.head_cap = head_cap

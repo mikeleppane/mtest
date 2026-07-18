@@ -10,8 +10,18 @@ extern "C" {
 #endif
 MTEST_EXEC_EXPORT void mtest_exec_test_fault_reset(void);
 MTEST_EXEC_EXPORT int32_t mtest_exec_test_fault_configure(uint32_t operation, uint32_t occurrence, int32_t error_number, int64_t result_value);
+MTEST_EXEC_EXPORT int32_t mtest_exec_test_fault_configure_secondary(
+    uint32_t operation,
+    uint32_t occurrence,
+    int32_t error_number,
+    int64_t result_value
+);
 MTEST_EXEC_EXPORT uint32_t mtest_exec_test_fault_seen(uint32_t operation);
 MTEST_EXEC_EXPORT void mtest_exec_test_reset_interrupt(void);
+MTEST_EXEC_EXPORT int32_t mtest_exec_test_deliver_interrupt_after(
+    uint32_t operation,
+    int32_t signal_number
+);
 MTEST_EXEC_EXPORT void mtest_exec_test_asan_oob(void);
 MTEST_EXEC_EXPORT void mtest_exec_test_asan_uaf(void);
 MTEST_EXEC_EXPORT void mtest_exec_test_asan_leak(void);

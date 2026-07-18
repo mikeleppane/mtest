@@ -23,6 +23,7 @@ def _open_fd_count() raises -> Int:
 
 def test_repeated_spawns_do_not_leak_fds() raises:
     var runtime = ExecRuntime()
+    runtime.open()
     # Warm up once so any one-time mappings (the interrupt flag page) exist.
     var warm = List[String]()
     warm.append("/bin/true")

@@ -99,6 +99,7 @@ EXEC_FIXTURES = {
     "argv_echoer.py",
     "close_streams_then_hang.py",
     "dual_flooder.py",
+    "escaped_pipe_holder.py",
     "etxtbsy_target.sh",
     "exit_nonzero.py",
     "flooding_grandchild.py",

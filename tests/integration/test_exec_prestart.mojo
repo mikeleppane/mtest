@@ -26,6 +26,7 @@ from exec_helpers import target, py_spec
 
 def test_deadline_governs_the_run_not_a_blocking_preread() raises:
     var runtime = ExecRuntime()
+    runtime.open()
     var argv = List[String]()
     argv.append(target("sleeper.py"))
     # Exec resolves at once (EOF), then the child hangs 300s; a short deadline

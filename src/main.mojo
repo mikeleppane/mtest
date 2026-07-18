@@ -101,11 +101,23 @@ def main():
         exit(3)
         return
 
-    var runtime: ExecRuntime
+    var runtime = ExecRuntime()
     try:
-        runtime = ExecRuntime()
+        runtime.open()
     except e:
-        _eprintln("mtest: internal error: " + String(e))
+        var primary = String(e)
+        try:
+            runtime.close()
+        except cleanup_error:
+            _eprintln(
+                "mtest: internal error: "
+                + primary
+                + "; "
+                + String(cleanup_error)
+            )
+            exit(3)
+            return
+        _eprintln("mtest: internal error: " + primary)
         exit(3)
         return
 

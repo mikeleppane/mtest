@@ -34,6 +34,7 @@ def test_nonzero_exit_not_laundered_under_ignored_sigchld() raises:
     # makes every child un-waitable and every result a false Exited(0).
     _inherit_sigchld_ignored()
     var runtime = ExecRuntime()
+    runtime.open()
     var argv = List[String]()
     argv.append(target("exit_nonzero.py"))
     var r = run_supervised(runtime, py_spec(argv^))

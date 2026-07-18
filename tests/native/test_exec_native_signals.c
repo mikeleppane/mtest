@@ -54,7 +54,18 @@ int main(void) {
     }
 
     mtest_exec_test_fault_reset();
+    if (mtest_exec_test_deliver_interrupt_after(
+            MTEST_EXEC_OP_SIGACTION_INSTALL_INT, SIGINT
+        ) != 0 ||
+        mtest_exec_runtime_open(&error) != 0 ||
+        mtest_exec_interrupt_requested() != 1 ||
+        mtest_exec_runtime_close(&error) != 0) {
+        fprintf(stderr, "interrupt delivered during open was not latched\n");
+        return 1;
+    }
+
     if (mtest_exec_runtime_open(&error) != 0 ||
+        mtest_exec_interrupt_requested() != 0 ||
         mtest_exec_runtime_close(&error) != 0 ||
         !matches_custom(SIGINT) || !matches_custom(SIGTERM) ||
         !matches_custom(SIGCHLD)) {

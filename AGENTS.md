@@ -142,10 +142,15 @@ phase notes.
 
 ## Hermetic by construction
 
-CI touches the network exactly once: the locked `pixi install`. Everything after
-is offline — the fixtures and the transcript generator are committed, and the
-generator rebuilds the fixtures with the locked toolchain. A change that needs
-the network in the gate is wrong.
+Ordinary CI touches the network exactly once: the locked `pixi install`.
+Everything after is offline — the fixtures and the transcript generator are
+committed, and the generator rebuilds the fixtures with the locked toolchain. A
+change that needs the network in the ordinary gate is wrong. One narrow
+exception is approved only for the scheduled/manual Valgrind job: after Pixi,
+it may update apt metadata and install exactly the `libc6-dbg` version matching
+the runner's already-installed `libc6`. The job logs apt provenance and fails if
+that exact package is unavailable, if libc changes, or if the versions differ.
+The exception does not apply to ordinary CI or any other package/network step.
 
 ## Toolchain and the quality floor
 
@@ -153,6 +158,10 @@ The floor before any change is done — all green, in this order:
 
 ```text
 pixi run fmt              # format in place (run locally before committing)
+pixi run harness-check    # validate exact harness membership and invariants
+pixi run safety-check     # inventory every unsafe Mojo operation and local proof
+pixi run postfork-check   # audit production/testing post-fork call graphs
+pixi run native-check     # verify native ABI/layout/exports and lifecycle
 pixi run build            # the package-compiles gate
 pixi run transcripts-check# regenerate to a temp dir and diff byte-for-byte
 pixi run test-direct      # the independent glob-driven twin: build+execute
@@ -164,10 +173,12 @@ pixi run e2e              # build the binary, drive it against e2e/
                             # (manifest.json), assert exact exit codes/output
 ```
 
-`pixi run ci` chains `fmt-check -> harness-check -> build -> transcripts-check ->
-test-direct -> test -> e2e` fail-fast and is exactly what CI runs. `test-direct` and `test`
-both build-then-execute the binary directly — never `mojo run` anywhere in the
-gate, because it masks crash exit codes to 1.
+`pixi run ci` chains `fmt-check -> harness-check -> safety-check -> postfork-check -> native-check -> build -> transcripts-check -> test-direct -> test -> e2e`
+fail-fast and is exactly what ordinary CI runs. `native-check`
+also depends on `postfork-check`, so invoking the native gate alone cannot omit
+the recurring child call-graph audit. `test-direct` and `test` both
+build-then-execute the binary directly — never `mojo run` anywhere in the gate,
+because it masks crash exit codes to 1.
 
 ## Pin policy and Ask-first boundaries
 

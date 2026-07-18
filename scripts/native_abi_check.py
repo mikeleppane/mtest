@@ -39,8 +39,10 @@ TEST_ONLY_SYMBOLS = {
     "mtest_exec_test_asan_oob",
     "mtest_exec_test_asan_uaf",
     "mtest_exec_test_fault_configure",
+    "mtest_exec_test_fault_configure_secondary",
     "mtest_exec_test_fault_reset",
     "mtest_exec_test_fault_seen",
+    "mtest_exec_test_deliver_interrupt_after",
     "mtest_exec_test_memcheck_fd_leak",
     "mtest_exec_test_memcheck_invalid",
     "mtest_exec_test_memcheck_undefined",
@@ -159,7 +161,7 @@ def main() -> int:
             f"  extra={sorted(testing_got - expected_testing)}",
         )
 
-    print("native-abi-check: OK -- ABI v1 layouts and 15/25 symbols exact")
+    print("native-abi-check: OK -- ABI v1 layouts and 15/27 symbols exact")
     return 0
 
 

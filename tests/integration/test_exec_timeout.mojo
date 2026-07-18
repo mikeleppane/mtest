@@ -21,6 +21,7 @@ from exec_helpers import target, py_spec
 
 def test_clean_grace_exit_latches_to_timed_out() raises:
     var runtime = ExecRuntime()
+    runtime.open()
     var argv = List[String]()
     argv.append(target("sigterm_grace_exit.py"))
     var r = run_supervised(runtime, py_spec(argv^, 200))
@@ -34,6 +35,7 @@ def test_clean_grace_exit_latches_to_timed_out() raises:
 
 def test_sigterm_death_latches_to_timed_out() raises:
     var runtime = ExecRuntime()
+    runtime.open()
     var argv = List[String]()
     argv.append(target("sleeper.py"))
     var r = run_supervised(runtime, py_spec(argv^, 200))
@@ -46,6 +48,7 @@ def test_sigterm_death_latches_to_timed_out() raises:
 
 def test_sigterm_ignorer_escalates_to_sigkill() raises:
     var runtime = ExecRuntime()
+    runtime.open()
     var argv = List[String]()
     argv.append(target("sigterm_ignorer.py"))
     var r = run_supervised(runtime, py_spec(argv^, 200))
@@ -58,6 +61,7 @@ def test_sigterm_ignorer_escalates_to_sigkill() raises:
 
 def test_close_streams_then_hang_killed_by_deadline() raises:
     var runtime = ExecRuntime()
+    runtime.open()
     # Both pipes hit EOF immediately, but the child sleeps on: the deadline, not
     # EOF, must end it. A blocking-wait-after-EOF bug would hang here forever.
     var argv = List[String]()
@@ -71,6 +75,7 @@ def test_close_streams_then_hang_killed_by_deadline() raises:
 
 def test_group_kill_reaches_grandchild() raises:
     var runtime = ExecRuntime()
+    runtime.open()
     var sentinel = String("build/tests/grandchild_sentinel.txt")
     if exists(sentinel):
         remove(sentinel)

@@ -457,11 +457,13 @@ $ echo $?
 ### Interrupt behavior
 
 `Ctrl-C` (SIGINT) stops scheduling new files, sends the in-flight child's
-**process group** (not just the child) SIGINT/kill so nothing is orphaned,
-prints a partial summary with a NOT-RUN count for everything that never got a
-chance to run, and exits `2`. Run against a directory containing a file that
-sleeps forever (`e2e/slow/`, interrupted after it started but before it
-finished):
+**owned process group** (not just the child) SIGINT/kill, prints a partial
+summary with a NOT-RUN count for everything that never got a chance to run, and
+exits `2`. A descendant that deliberately leaves that group cannot be killed by
+the group sweep; a retained capture pipe then becomes a bounded, loud internal
+cleanup error rather than a false pass. Run against a directory containing a
+file that sleeps forever (`e2e/slow/`, interrupted after it started but before
+it finished):
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/slow'
@@ -988,11 +990,12 @@ open, and are stated honestly here rather than glossed over.
   otherwise-fast file is invisible to it. A per-test granularity is reserved
   (`docs/cli-contract.md` §21), blocked on the same upstream per-test-timing
   gap that blocks per-test attribution above.
-- **macOS is untested.** Linux is the only platform the automated gate runs
-  on. macOS shares the same POSIX process-supervision surface
-  (`fork`/`execvp`/`waitpid`/process groups) the runner depends on, so it is a
-  stated v1 target, but nothing has exercised it yet — treat it as unverified
-  until it has its own gate.
+- **macOS arm64 has build/link smoke coverage, not runtime coverage.** The
+  `macos-15` job audits both native post-fork call graphs with the pinned Clang,
+  precompiles the package, links the executable, and runs `--help`. Native
+  lifecycle tests, Mojo process-supervision suites, and ASan/Valgrind dynamic
+  analysis remain Linux-only, so successful macOS runtime supervision is still
+  unverified.
 - **Interrupt behavior is implemented**, not aspirational: Ctrl-C cleans up the
   in-flight child's process group, prints the partial summary with NOT-RUN
   accounting, and exits `2`. See the
@@ -1008,8 +1011,8 @@ Requires [pixi](https://pixi.sh). The toolchain (Mojo `1.0.0b2`) and all tasks
 are pinned in [pixi.toml](pixi.toml).
 
 ```console
-$ pixi install                 # one-time, the only networked step
-$ pixi run ci                  # fmt-check → harness-check → build → transcripts-check → test-direct → test → e2e
+$ pixi install                 # local setup; ordinary CI's only networked step
+$ pixi run ci                  # fmt-check -> harness-check -> safety-check -> postfork-check -> native-check -> build -> transcripts-check -> test-direct -> test -> e2e
 ```
 
 `pixi run ci` is the full gate. Individually:
@@ -1019,6 +1022,9 @@ $ pixi run ci                  # fmt-check → harness-check → build → trans
 | `pixi run build` | precompile `src/mtest` to `build/mtest.mojopkg` — the compile gate |
 | `pixi run build-bin` | link the runnable binary at `build/mtest` from `src/main.mojo` |
 | `pixi run harness-check` | fast self-tests for recursive suite enumeration and collision-free binary paths |
+| `pixi run safety-check` | mutation-test and run the unsafe-Mojo inventory; enforces adjacent `# SAFETY:` proofs, but does not establish that those proofs are true |
+| `pixi run postfork-check` | mutation-test the Clang AST auditor, traverse the complete production/testing child call graphs, and require the exact reviewed platform-call set; proves allowlist conformance, not syscall correctness |
+| `pixi run native-check` | run `postfork-check`, strict C17 ABI/layout/export checks, and native lifecycle/fault tests; does not replace dynamic analysis |
 | `pixi run transcripts` | regenerate protocol snapshots in place (local only) |
 | `pixi run transcripts-check` | regenerate to a temp dir and diff byte-for-byte — the protocol pin |
 | `pixi run test-unit` | directly build and execute the in-memory unit suites only |
@@ -1026,6 +1032,16 @@ $ pixi run ci                  # fmt-check → harness-check → build → trans
 | `pixi run test-direct` | the **independent** twin: build and execute every unit/integration suite directly, one process per file, with no `mtest` involved |
 | `pixi run test` | the **dogfood** gate: `build/mtest -I build -I tests/support tests/` running mtest over its own suite, plus exact path-membership verification independent of mtest |
 | `pixi run e2e` | build `build/mtest`, then drive it against `e2e/` and assert exact exit codes and console structure |
+| `pixi run asan-check` | on Linux, prove live OOB/UAF/leak controls are detected and source-build the highest-risk exec suites with ASan/LSan; this is risk-weighted coverage, not a whole-program proof |
+| `pixi run valgrind-check` | on Linux, prove Memcheck controls and source-build the exec/native coverage under the pinned Valgrind binary; it does not prove all paths leak- or corruption-free |
+
+The scheduled Valgrind workflow also needs matching glibc debug symbols. It
+has a narrow approved apt exception after the locked Pixi install, scoped only
+to scheduled/manual Memcheck: it captures the runner's preinstalled `libc6`
+version, logs apt provenance, requests exactly `libc6-dbg=<that-version>`, and
+fails if the package is unavailable, libc changes, or the versions differ.
+Ordinary CI remains locked-Pixi-only after setup; this exception is not a claim
+that the Valgrind job itself is hermetic.
 
 See [Self-hosting](#self-hosting) for how `test` and `test-direct` relate.
 

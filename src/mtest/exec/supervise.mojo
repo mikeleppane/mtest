@@ -410,9 +410,13 @@ def _process_close(handle: UInt64, mut native: _NativeBuffers) raises:
 
 def _abort_process(handle: UInt64, mut native: _NativeBuffers) -> String:
     """Best-effort explicit cleanup after a machinery error; never raises."""
-    # SAFETY: the live token identifies the sole active process; the adapter
-    # closes channels, terminates the group, reaps the leader, and consumes the
-    # handle only on success. Error is complete, aligned, and non-retained.
+    # SAFETY: the live token identifies the sole active process. The adapter
+    # consumes it whenever channel close, group sweep, and leader reap complete,
+    # including a return that preserves an earlier cleanup diagnostic; otherwise
+    # it retains the unreaped leader (live or waitable) and native-static handle.
+    # The still-active ExecRuntime token remains its sole cross-ABI owner, and
+    # runtime.close() retries that exact handle before restoring signal state.
+    # Error is complete, aligned, and non-retained.
     var status = external_call["mtest_exec_process_abort", Int32](
         handle, UInt32(_GRACE_MS), native.error.bitcast[UInt8]()
     )
@@ -443,13 +447,6 @@ def _supervise_open_process(
     var kill_time = 0
 
     while not leader_waitable or setup_outcome == _SETUP_WAITING:
-        if _observe(handle, native) == _LEADER_WAITABLE:
-            leader_waitable = True
-
-        setup_outcome = _setup_drain(handle, native)
-        if leader_waitable and setup_outcome != _SETUP_WAITING:
-            break
-
         var now = _monotonic_ms(native)
         if not leader_waitable:
             if not killing:
@@ -464,7 +461,19 @@ def _supervise_open_process(
                 _ = _group(handle, _GROUP_KILL, native)
                 escalated = True
 
-        var readiness = _poll(handle, _POLL_SLICE_MS, native)
+        if _observe(handle, native) == _LEADER_WAITABLE:
+            leader_waitable = True
+
+        setup_outcome = _setup_drain(handle, native)
+        if leader_waitable and setup_outcome != _SETUP_WAITING:
+            break
+
+        var poll_timeout_ms = _POLL_SLICE_MS
+        if not killing and spec.timeout_ms > 0:
+            var remaining_ms = spec.timeout_ms - (now - start_ms)
+            if remaining_ms < poll_timeout_ms:
+                poll_timeout_ms = remaining_ms
+        var readiness = _poll(handle, poll_timeout_ms, native)
         if stdout_open and (readiness & _READY_STDOUT) != 0:
             if _drain_channel(handle, _CHANNEL_STDOUT, out_capture, native):
                 stdout_open = False

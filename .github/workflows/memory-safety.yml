@@ -58,6 +58,20 @@ jobs:
           locked: true
           cache: true
 
+      - name: Install glibc debug symbols
+        run: |
+          # Approved second network phase, scoped to scheduled/manual Memcheck.
+          libc_version="$(dpkg-query -W -f='${Version}' libc6)"
+          echo "preinstalled libc6 $libc_version"
+          sudo apt-get update
+          apt-cache policy libc6-dbg
+          sudo apt-get install --yes --no-install-recommends "libc6-dbg=$libc_version"
+          installed_libc_version="$(dpkg-query -W -f='${Version}' libc6)"
+          debug_version="$(dpkg-query -W -f='${Version}' libc6-dbg)"
+          test "$installed_libc_version" = "$libc_version"
+          test "$debug_version" = "$libc_version"
+          echo "libc6/libc6-dbg $libc_version"
+
       - name: Tool provenance
         run: |
           pixi run mojo-version

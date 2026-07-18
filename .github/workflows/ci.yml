@@ -17,7 +17,7 @@ permissions:
 jobs:
   ci:
     name: fmt + transcripts + tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -39,6 +39,7 @@ jobs:
       #   fmt-check         — mojo format then `git diff --exit-code` (never edits in CI)
       #   harness-check     — exercise recursive suite enumeration and output mapping
       #   safety-check      — reject undocumented unsafe Mojo operations
+      #   postfork-check    — audit the production/testing post-fork call graphs
       #   native-check      — verify native ABI/layout/symbol isolation and lifecycle
       #   build             — precompile src/mtest (the package-compiles gate)
       #   transcripts-check — regenerate every transcript to a temp dir and diff
@@ -47,6 +48,7 @@ jobs:
       #   test-direct       — build each classified suite and EXECUTE the binary
       #                       directly (never `mojo run`, which masks crash codes)
       #   test              — dogfood mtest over the same exact path inventory
+      #   e2e               — assert exact CLI exit codes and console structure
       # No network is touched here.
       - name: CI gate
         run: pixi run ci
@@ -65,6 +67,9 @@ jobs:
 
       - name: Mojo version
         run: pixi run mojo-version
+
+      - name: Audit post-fork call graph
+        run: pixi run postfork-check
 
       - name: Precompile package
         run: pixi run build

@@ -24,6 +24,7 @@ from exec_helpers import target, py_spec
 
 def test_flooding_grandchild_post_reap_returns_promptly() raises:
     var runtime = ExecRuntime()
+    runtime.open()
     # NO timeout: the leader exits 0 immediately and is reaped. The grandchild
     # floods stdout forever. Before the group-sweep-first fix this hangs in the
     # post-reap drain; after it, the sweep closes the write end and the drain ends.
@@ -42,6 +43,7 @@ def test_flooding_grandchild_post_reap_returns_promptly() raises:
 
 def test_flooding_grandchild_in_run_times_out_promptly() raises:
     var runtime = ExecRuntime()
+    runtime.open()
     # Short timeout: the leader stays alive while the grandchild floods. A drain
     # that read to EOF (or unbounded) would starve the deadline check forever;
     # the bounded per-slice drain returns so the deadline fires and we time out.

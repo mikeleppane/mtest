@@ -240,7 +240,7 @@ class Check:
 
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
-CRITICAL = {"interrupt: SIGINT frees the process tree"}  # skip-sensitive under --strict
+CRITICAL = {"interrupt: SIGINT frees the owned process group"}  # skip-sensitive under --strict
 
 
 class Runner:
@@ -366,8 +366,8 @@ class Runner:
     # -- interrupt: signal ONLY mtest so the child's survival tests mtest's own
     #    process-group teardown (§18/§24.2), not a signal the child caught directly.
     def check_interrupt(self, strict: bool):
-        ref = "§9/§24.2 SIGINT -> exit 2, partial summary, whole child tree freed"
-        name = "interrupt: SIGINT frees the process tree"
+        ref = "§9/§24.2 SIGINT -> exit 2, partial summary, owned child group freed"
+        name = "interrupt: SIGINT frees the owned process group"
         (self.root / "irq").mkdir(exist_ok=True)
         (self.root / "irq" / "test_1hang.mojo").write_text(
             "from std.time import sleep\nfrom std.testing import TestSuite\n\n\n"
@@ -594,7 +594,7 @@ def main() -> int:
             runner.check_color()
         if wanted("precompile: success path resolves import (auto -I)"):
             runner.check_precompile_success()
-        if not args.no_interrupt and wanted("interrupt: SIGINT frees the process tree"):
+        if not args.no_interrupt and wanted("interrupt: SIGINT frees the owned process group"):
             runner.check_interrupt(args.strict)
 
         n_pass = sum(1 for s, *_ in runner.results if s == PASS)

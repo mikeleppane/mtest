@@ -44,6 +44,8 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 
+import main_open_check
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MTEST = os.path.join(REPO_ROOT, "build", "mtest")
 E2E_ROOT = os.path.join(REPO_ROOT, "e2e")
@@ -2272,6 +2274,14 @@ def s_internal_error(manifest: dict) -> str:
     )
 
 
+def s_runtime_open_failure(manifest: dict) -> str:
+    """The real CLI main must report and explicitly repair failed signal open."""
+    try:
+        return main_open_check.check_main_open_failure()
+    except main_open_check.MainOpenCheckError as error:
+        raise ScenarioError(str(error)) from error
+
+
 def s_interrupt(manifest: dict) -> str:
     """Spawn mtest against slow/ in its OWN process group, wait until it has
     clearly started (its header appears), let it enter the hang, then SIGINT the
@@ -2399,6 +2409,7 @@ SCENARIOS = [
     ("passthrough+forbidden", s_passthrough_and_forbidden),
     ("out-of-root", s_out_of_root),
     ("internal-error", s_internal_error),
+    ("runtime-open-failure", s_runtime_open_failure),
     ("interrupt", s_interrupt),
 ]
 

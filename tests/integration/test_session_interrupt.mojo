@@ -27,6 +27,7 @@ def test_interrupt_before_files_is_exit_2_all_not_run() raises:
     # Install the handlers, then self-signal so the flag is already set when the
     # session reaches its first pre-file interrupt check.
     var runtime = ExecRuntime()
+    runtime.open()
     _reset_interrupt()
     _raise_self(_SIGINT)
     assert_true(interrupt_requested(), "flag must be set before the session")

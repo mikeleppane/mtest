@@ -24,7 +24,7 @@
 extern char **environ;
 
 #define MTEST_ETXTBSY_RETRIES 5u
-#define MTEST_ETXTBSY_DELAY_NS 50000000L
+#define MTEST_ETXTBSY_DELAY_MS 50
 #define MTEST_ABORT_SLICE_NS 10000000L
 
 _Static_assert(sizeof(sig_atomic_t) <= sizeof(int32_t), "sig_atomic_t width");
@@ -85,9 +85,14 @@ struct mtest_fault_state {
     uint32_t seen;
     int32_t error_number;
     int64_t result_value;
+    uint32_t secondary_occurrence;
+    int32_t secondary_error_number;
+    int64_t secondary_result_value;
 };
 
 static struct mtest_fault_state mtest_faults[MTEST_EXEC_OP_WAITPID + 1];
+static uint32_t mtest_interrupt_delivery_operation;
+static int mtest_interrupt_delivery_signal;
 
 static int mtest_fail_if_requested(uint32_t operation) {
     if (operation == MTEST_EXEC_OP_NONE || operation > MTEST_EXEC_OP_WAITPID) {
@@ -98,11 +103,15 @@ static int mtest_fail_if_requested(uint32_t operation) {
         return 0;
     }
     fault->seen += 1;
-    if (fault->seen != fault->occurrence) {
-        return 0;
+    if (fault->seen == fault->occurrence) {
+        errno = fault->error_number;
+        return 1;
     }
-    errno = fault->error_number;
-    return 1;
+    if (fault->seen == fault->secondary_occurrence) {
+        errno = fault->secondary_error_number;
+        return 1;
+    }
+    return 0;
 }
 
 static int64_t mtest_fault_result(uint32_t operation) {
@@ -112,12 +121,18 @@ static int64_t mtest_fault_result(uint32_t operation) {
             fault->seen == fault->occurrence) {
             return fault->result_value;
         }
+        if (fault->operation == operation &&
+            fault->seen == fault->secondary_occurrence) {
+            return fault->secondary_result_value;
+        }
     }
     return 0;
 }
 
 void mtest_exec_test_fault_reset(void) {
     memset(mtest_faults, 0, sizeof(mtest_faults));
+    mtest_interrupt_delivery_operation = MTEST_EXEC_OP_NONE;
+    mtest_interrupt_delivery_signal = 0;
 }
 
 int32_t mtest_exec_test_fault_configure(
@@ -131,7 +146,14 @@ int32_t mtest_exec_test_fault_configure(
         return -1;
     }
     if (operation == MTEST_EXEC_OP_CHILD_SETUP_WRITE) {
-        if (error_number == 0 && (result_value < 1 || result_value > 7)) {
+        if (error_number == 0 &&
+            (result_value < 1 ||
+             result_value >= (int64_t)sizeof(
+                 ((struct mtest_exec_setup_state *)0)->raw
+             ))) {
+            return -1;
+        }
+        if (error_number > 0 && result_value != 0) {
             return -1;
         }
     } else if (result_value != 0 || error_number == 0) {
@@ -143,6 +165,43 @@ int32_t mtest_exec_test_fault_configure(
     fault->seen = 0;
     fault->error_number = error_number;
     fault->result_value = result_value;
+    fault->secondary_occurrence = 0;
+    fault->secondary_error_number = 0;
+    fault->secondary_result_value = 0;
+    return 0;
+}
+
+int32_t mtest_exec_test_fault_configure_secondary(
+    uint32_t operation,
+    uint32_t occurrence,
+    int32_t error_number,
+    int64_t result_value
+) {
+    if (operation == MTEST_EXEC_OP_NONE || operation > MTEST_EXEC_OP_WAITPID ||
+        occurrence == 0 || error_number < 0 || result_value < 0) {
+        return -1;
+    }
+    struct mtest_fault_state *fault = &mtest_faults[operation];
+    if (fault->operation != operation || occurrence <= fault->occurrence) {
+        return -1;
+    }
+    if (operation == MTEST_EXEC_OP_CHILD_SETUP_WRITE) {
+        if (error_number == 0 &&
+            (result_value < 1 ||
+             result_value >= (int64_t)sizeof(
+                 ((struct mtest_exec_setup_state *)0)->raw
+             ))) {
+            return -1;
+        }
+        if (error_number > 0 && result_value != 0) {
+            return -1;
+        }
+    } else if (result_value != 0 || error_number == 0) {
+        return -1;
+    }
+    fault->secondary_occurrence = occurrence;
+    fault->secondary_error_number = error_number;
+    fault->secondary_result_value = result_value;
     return 0;
 }
 
@@ -156,6 +215,21 @@ uint32_t mtest_exec_test_fault_seen(uint32_t operation) {
 
 void mtest_exec_test_reset_interrupt(void) {
     mtest_interrupt_flag = 0;
+}
+
+int32_t mtest_exec_test_deliver_interrupt_after(
+    uint32_t operation,
+    int32_t signal_number
+) {
+    if ((operation != MTEST_EXEC_OP_SIGACTION_INSTALL_INT ||
+         signal_number != SIGINT) &&
+        (operation != MTEST_EXEC_OP_SIGACTION_INSTALL_TERM ||
+         signal_number != SIGTERM)) {
+        return -1;
+    }
+    mtest_interrupt_delivery_operation = operation;
+    mtest_interrupt_delivery_signal = signal_number;
+    return 0;
 }
 #else
 static int mtest_fail_if_requested(uint32_t operation) {
@@ -220,7 +294,20 @@ static int mtest_checked_sigaction(
     if (mtest_fail_if_requested(operation)) {
         return -1;
     }
-    return sigaction(signal_number, action, old_action);
+    int result = sigaction(signal_number, action, old_action);
+#if MTEST_EXEC_TESTING
+    if (result == 0 && operation == mtest_interrupt_delivery_operation) {
+        int delivered_signal = mtest_interrupt_delivery_signal;
+        mtest_interrupt_delivery_operation = MTEST_EXEC_OP_NONE;
+        mtest_interrupt_delivery_signal = 0;
+        /* SAFETY: this test-only seam runs in ordinary single-threaded test
+           code after sigaction returned successfully. `raise` synchronously
+           invokes the newly installed handler, which only assigns the
+           process-global volatile sig_atomic_t latch and retains no state. */
+        (void)raise(delivered_signal);
+    }
+#endif
+    return result;
 }
 
 static int mtest_close_raw(int fd) {
@@ -237,10 +324,19 @@ static int mtest_close_raw(int fd) {
     return result;
 }
 
+static int mtest_close_owned(int *fd) {
+    /* SAFETY: the caller exclusively owns the descriptor slot. Clear it before
+       entering close because Linux consumes the descriptor even when close
+       reports a late error; no cleanup path may retry a reusable integer. On
+       Darwin, mtest_close_raw resolves EINTR before returning. */
+    int closing = *fd;
+    *fd = -1;
+    return mtest_close_raw(closing);
+}
+
 static void mtest_close_quietly(int *fd) {
     if (*fd >= 0) {
-        (void)mtest_close_raw(*fd);
-        *fd = -1;
+        (void)mtest_close_owned(fd);
     }
 }
 
@@ -303,7 +399,16 @@ static void mtest_free_plan(struct mtest_exec_plan *plan) {
         }
     }
     free(plan->shell_argv);
-    mtest_free_vector(plan->candidates);
+    if (plan->candidates != NULL) {
+        /* SAFETY: the calloc-zeroed array has `candidate_count + 1` slots and
+           every non-NULL counted slot is a distinct plan-owned allocation.
+           Freeing the full counted range handles partial construction without
+           treating an interior NULL as the ownership boundary. */
+        for (size_t index = 0; index < plan->candidate_count; ++index) {
+            free(plan->candidates[index]);
+        }
+    }
+    free(plan->candidates);
     mtest_free_vector(plan->environment);
     mtest_free_vector(plan->argv);
     free(plan->cwd);
@@ -476,8 +581,12 @@ static int mtest_build_candidates(struct mtest_exec_plan *plan) {
         free(owned_default);
         return -1;
     }
+    int candidate_error = 0;
     if (mtest_has_slash(plan->argv[0])) {
         plan->candidates[0] = mtest_join_candidate("", 0, plan->argv[0]);
+        if (plan->candidates[0] == NULL) {
+            candidate_error = errno;
+        }
     } else {
         const char *component = path;
         for (size_t index = 0; index < plan->candidate_count; ++index) {
@@ -488,14 +597,20 @@ static int mtest_build_candidates(struct mtest_exec_plan *plan) {
             plan->candidates[index] = mtest_join_candidate(
                 component, length, plan->argv[0]
             );
+            if (plan->candidates[index] == NULL && candidate_error == 0) {
+                candidate_error = errno;
+            }
             component = separator == NULL ? component + length : separator + 1;
         }
     }
     free(owned_default);
     for (size_t index = 0; index < plan->candidate_count; ++index) {
         if (plan->candidates[index] == NULL) {
+            errno = candidate_error;
             return -1;
         }
+    }
+    for (size_t index = 0; index < plan->candidate_count; ++index) {
         plan->shell_argv[index] = mtest_allocate(
             MTEST_EXEC_OP_PLAN_ALLOC,
             (plan->argc + 2) * sizeof(char *)
@@ -578,6 +693,10 @@ int32_t mtest_exec_runtime_open(struct mtest_exec_error *error) {
         mtest_set_error(error, MTEST_EXEC_OP_NONE, EBUSY, 0, 0);
         return -1;
     }
+    /* SAFETY: the successful atomic transition gives this thread exclusive
+       process-global runtime ownership. Clear before installing either mtest
+       handler, so no handler-written interrupt can be erased during open. */
+    mtest_interrupt_flag = 0;
     memset(&action, 0, sizeof(action));
     action.sa_handler = mtest_on_interrupt;
     action.sa_flags = SA_RESTART;
@@ -719,7 +838,6 @@ int32_t mtest_exec_runtime_open(struct mtest_exec_error *error) {
         return -1;
     }
     mtest_chld_installed = 1;
-    mtest_interrupt_flag = 0;
     atomic_store(&mtest_runtime_state, MTEST_RUNTIME_OPEN);
     return 0;
 }
@@ -731,9 +849,26 @@ int32_t mtest_exec_runtime_close(struct mtest_exec_error *error) {
     int expected = MTEST_RUNTIME_OPEN;
 
     mtest_clear_error(error);
+retry_runtime_ownership:
+    expected = MTEST_RUNTIME_OPEN;
     if (!atomic_compare_exchange_strong(
             &mtest_runtime_state, &expected, MTEST_RUNTIME_OPENING
         )) {
+        if (expected == MTEST_RUNTIME_CHILD_ACTIVE) {
+            /* SAFETY: CHILD_ACTIVE means the static process record still owns
+               the sole live handle. Runtime close is the cross-ABI retry token:
+               abort either consumes that record, or leaves it pinned for this
+               same ExecRuntime owner to retry on a later close. */
+            uint64_t handle = mtest_process.handle;
+            if (handle == 0) {
+                mtest_set_error(error, MTEST_EXEC_OP_NONE, EBUSY, 1u, 0);
+                return -1;
+            }
+            if (mtest_exec_process_abort(handle, 0, error) != 0) {
+                return -1;
+            }
+            goto retry_runtime_ownership;
+        }
         if (expected == MTEST_RUNTIME_RESTORE_REQUIRED) {
             expected = MTEST_RUNTIME_RESTORE_REQUIRED;
             if (atomic_compare_exchange_strong(
@@ -848,6 +983,37 @@ static int mtest_set_fd_flag(
     return fcntl(fd, set_command, current | flag);
 }
 
+static int mtest_relocate_standard_fd(int *fd) {
+    if (*fd > STDERR_FILENO) {
+        return 0;
+    }
+    if (mtest_fail_if_requested(MTEST_EXEC_OP_FD_CLOEXEC)) {
+        return -1;
+    }
+    /* SAFETY: `pipe` returned this live, uniquely owned endpoint. The duplicate
+       is constrained above the standard descriptors and owns the same pipe end
+       with FD_CLOEXEC already set. Ownership moves to it only after the source
+       closes; if that close reports an error, the original slot is already
+       consumed, the duplicate is closed, and no cleanup retries either numeric
+       descriptor. */
+    int relocated = fcntl(
+        *fd, F_DUPFD_CLOEXEC, STDERR_FILENO + 1
+    );
+    if (relocated < 0) {
+        return -1;
+    }
+    int original = *fd;
+    *fd = -1;
+    if (mtest_close_raw(original) != 0) {
+        int saved_errno = errno;
+        (void)mtest_close_raw(relocated);
+        errno = saved_errno;
+        return -1;
+    }
+    *fd = relocated;
+    return 0;
+}
+
 static int mtest_prepare_pipe(
     int pipe_fds[2],
     uint32_t pipe_operation,
@@ -856,6 +1022,18 @@ static int mtest_prepare_pipe(
     if (mtest_fail_if_requested(pipe_operation) || pipe(pipe_fds) != 0) {
         mtest_set_error(error, pipe_operation, errno, 0, 0);
         return -1;
+    }
+    for (size_t index = 0; index < 2; ++index) {
+        int subject = pipe_fds[index];
+        if (mtest_relocate_standard_fd(&pipe_fds[index]) != 0) {
+            int saved_errno = errno;
+            mtest_close_quietly(&pipe_fds[0]);
+            mtest_close_quietly(&pipe_fds[1]);
+            mtest_set_error(
+                error, MTEST_EXEC_OP_FD_CLOEXEC, saved_errno, 0, subject
+            );
+            return -1;
+        }
     }
     if (mtest_set_fd_flag(
             pipe_fds[0], F_GETFD, FD_CLOEXEC, MTEST_EXEC_OP_FD_CLOEXEC
@@ -949,7 +1127,7 @@ static void mtest_child_exec(
 ) {
     /* SAFETY: this is the complete post-fork child region. Every pointer and
        argv slot was fully constructed in the parent and survives in the child's
-       copy-on-write image. Only setpgid, chdir, dup2, close, execve, nanosleep,
+       copy-on-write image. Only setpgid, chdir, dup2, close, execve, poll,
        write, and _exit are called; none retains a pointer after failed exec. */
     if (mtest_fail_if_requested(MTEST_EXEC_OP_CHILD_SETPGID) ||
         setpgid(0, 0) != 0) {
@@ -985,7 +1163,6 @@ static void mtest_child_exec(
 
     int last_errno = ENOENT;
     int saw_eacces = 0;
-    const struct timespec retry_delay = {0, MTEST_ETXTBSY_DELAY_NS};
     for (size_t index = 0; index < plan->candidate_count; ++index) {
         uint32_t retries = 0;
         for (;;) {
@@ -996,13 +1173,19 @@ static void mtest_child_exec(
             if (last_errno != ETXTBSY || retries >= MTEST_ETXTBSY_RETRIES) {
                 break;
             }
-            if (mtest_fail_if_requested(MTEST_EXEC_OP_CHILD_NANOSLEEP)) {
-                mtest_child_report(
-                    setup_write, MTEST_EXEC_STAGE_EXECVE, errno
-                );
-            }
-            struct timespec remaining = retry_delay;
-            while (nanosleep(&remaining, &remaining) != 0) {
+            for (;;) {
+                if (mtest_fail_if_requested(MTEST_EXEC_OP_CHILD_POLL)) {
+                    mtest_child_report(
+                        setup_write, MTEST_EXEC_STAGE_EXECVE, errno
+                    );
+                }
+                /* SAFETY: POSIX requires poll to be async-signal-safe. With
+                   nfds zero, the null descriptor pointer is never accessed;
+                   the integer timeout bounds the ETXTBSY backoff and poll
+                   retains no pointer or state after returning. */
+                if (poll(NULL, 0, MTEST_ETXTBSY_DELAY_MS) >= 0) {
+                    break;
+                }
                 if (errno != EINTR) {
                     mtest_child_report(
                         setup_write, MTEST_EXEC_STAGE_EXECVE, errno
@@ -1056,6 +1239,25 @@ static void mtest_cleanup_pipes(int stdout_pipe[2], int stderr_pipe[2], int setu
     mtest_close_quietly(&stderr_pipe[1]);
     mtest_close_quietly(&setup_pipe[0]);
     mtest_close_quietly(&setup_pipe[1]);
+}
+
+static int mtest_waitpid_exact(pid_t leader, int *raw_status) {
+    pid_t reaped;
+    if (mtest_fail_if_requested(MTEST_EXEC_OP_WAITPID)) {
+        reaped = -1;
+    } else {
+        reaped = waitpid(leader, raw_status, 0);
+    }
+    while (reaped < 0 && errno == EINTR) {
+        reaped = waitpid(leader, raw_status, 0);
+    }
+    if (reaped == leader) {
+        return 0;
+    }
+    if (reaped >= 0) {
+        errno = EIO;
+    }
+    return -1;
 }
 
 int32_t mtest_exec_process_open(
@@ -1142,13 +1344,26 @@ int32_t mtest_exec_process_open(
         if (saved_errno != EACCES && saved_errno != ESRCH) {
             (void)kill(-leader, SIGKILL);
             (void)kill(leader, SIGKILL);
-            (void)waitpid(leader, NULL, 0);
+            int wait_result = mtest_waitpid_exact(leader, NULL);
+            int wait_errno = errno;
             mtest_cleanup_pipes(stdout_pipe, stderr_pipe, setup_pipe);
             mtest_free_plan(plan);
-            atomic_store(&mtest_runtime_state, MTEST_RUNTIME_OPEN);
             mtest_set_error(
                 error, MTEST_EXEC_OP_PARENT_SETPGID, saved_errno, 0, leader
             );
+            if (wait_result != 0 && wait_errno != ECHILD) {
+                mtest_set_cleanup_error(
+                    error, MTEST_EXEC_OP_WAITPID, wait_errno
+                );
+                /* Fail closed because exact-child reaping is unproven and no
+                   handle was published for a later abort. Returning the
+                   runtime to OPEN here would hide an owned zombie and permit
+                   overlapping child ownership. Real waitpid for our exact,
+                   SIGKILLed child can only succeed, report ECHILD, or retry
+                   EINTR; the test seam reaches this terminal invariant. */
+                return -1;
+            }
+            atomic_store(&mtest_runtime_state, MTEST_RUNTIME_OPEN);
             return -1;
         }
     }
@@ -1311,11 +1526,13 @@ int32_t mtest_exec_process_read(
         return 0;
     }
     if (count == 0) {
-        if (mtest_close_raw(*fd) != 0) {
-            mtest_set_error(error, MTEST_EXEC_OP_CLOSE_CHANNEL, errno, 0, *fd);
+        int closing = *fd;
+        if (mtest_close_owned(fd) != 0) {
+            mtest_set_error(
+                error, MTEST_EXEC_OP_CLOSE_CHANNEL, errno, 0, closing
+            );
             return -1;
         }
-        *fd = -1;
         result->state = MTEST_EXEC_READ_EOF;
         return 0;
     }
@@ -1409,13 +1626,12 @@ int32_t mtest_exec_process_setup_drain(
             return -1;
         }
         int closed_fd = process->setup_fd;
-        if (mtest_close_raw(process->setup_fd) != 0) {
+        if (mtest_close_owned(&process->setup_fd) != 0) {
             mtest_set_error(
                 error, MTEST_EXEC_OP_CLOSE_CHANNEL, errno, 0, closed_fd
             );
             return -1;
         }
-        process->setup_fd = -1;
         if (state->length == 0) {
             state->outcome = MTEST_EXEC_SETUP_EXEC_SUCCEEDED;
             return 0;
@@ -1448,12 +1664,12 @@ int32_t mtest_exec_process_channel_close(
         return 0;
     }
     int closing = *fd;
-    if (mtest_fail_if_requested(MTEST_EXEC_OP_CLOSE_CHANNEL) ||
-        mtest_close_raw(*fd) != 0) {
+    int close_result = mtest_close_owned(fd);
+    if (close_result != 0 ||
+        mtest_fail_if_requested(MTEST_EXEC_OP_CLOSE_CHANNEL)) {
         mtest_set_error(error, MTEST_EXEC_OP_CLOSE_CHANNEL, errno, 0, closing);
         return -1;
     }
-    *fd = -1;
     return 0;
 }
 
@@ -1465,6 +1681,39 @@ static uint32_t mtest_group_operation(uint32_t action) {
         return MTEST_EXEC_OP_GROUP_TERM;
     }
     return MTEST_EXEC_OP_GROUP_KILL;
+}
+
+static int mtest_process_group_checked(
+    struct mtest_exec_process *process,
+    uint32_t action,
+    struct mtest_exec_group_result *result,
+    struct mtest_exec_error *error
+) {
+    int signal_number = action == MTEST_EXEC_GROUP_PROBE
+        ? 0
+        : (action == MTEST_EXEC_GROUP_TERM ? SIGTERM : SIGKILL);
+    uint32_t operation = mtest_group_operation(action);
+    if (mtest_fail_if_requested(operation) ||
+        kill(-process->process_group, signal_number) != 0) {
+        if (errno == ESRCH) {
+            result->state = MTEST_EXEC_GROUP_GONE;
+            process->group_swept = 1;
+            return 0;
+        }
+        mtest_set_error(
+            error, operation, errno, 0, -((int64_t)process->process_group)
+        );
+        return -1;
+    }
+    if (action == MTEST_EXEC_GROUP_KILL) {
+        /* A successful pre-reap SIGKILL reaches every member still in the
+           owned process group. The unreaped leader, live or waitable, keeps the
+           numeric group identity pinned until waitpid; retained pipe writers
+           are bounded and classified separately by the Mojo supervisor. */
+        process->group_swept = 1;
+    }
+    result->state = MTEST_EXEC_GROUP_PRESENT;
+    return 0;
 }
 
 int32_t mtest_exec_process_group(
@@ -1484,31 +1733,12 @@ int32_t mtest_exec_process_group(
         mtest_set_error(error, mtest_group_operation(action), errno, 0, 0);
         return -1;
     }
-    int signal_number = action == MTEST_EXEC_GROUP_PROBE
-        ? 0
-        : (action == MTEST_EXEC_GROUP_TERM ? SIGTERM : SIGKILL);
     uint32_t operation = mtest_group_operation(action);
-    if (mtest_fail_if_requested(operation) ||
-        kill(-process->process_group, signal_number) != 0) {
-        if (errno == ESRCH) {
-            result->state = MTEST_EXEC_GROUP_GONE;
-            process->group_swept = 1;
-            return 0;
-        }
-        mtest_set_error(
-            error, operation, errno, 0, -((int64_t)process->process_group)
-        );
+    if (process->reaped) {
+        mtest_set_error(error, operation, EINVAL, 0, 0);
         return -1;
     }
-    if (action == MTEST_EXEC_GROUP_KILL) {
-        /* A successful pre-reap SIGKILL reaches every member still in the
-           owned process group. The deliberately waitable leader may keep the
-           numeric group observable until waitpid; retained pipe writers are
-           bounded and classified separately by the Mojo supervisor. */
-        process->group_swept = 1;
-    }
-    result->state = MTEST_EXEC_GROUP_PRESENT;
-    return 0;
+    return mtest_process_group_checked(process, action, result, error);
 }
 
 int32_t mtest_exec_process_observe(
@@ -1659,83 +1889,119 @@ int32_t mtest_exec_process_abort(
     mtest_close_quietly(&process->stderr_fd);
     mtest_close_quietly(&process->setup_fd);
 
-    if (!process->reaped) {
-        if (kill(-process->process_group, SIGTERM) != 0 && errno != ESRCH) {
-            mtest_set_cleanup_error(error, MTEST_EXEC_OP_GROUP_TERM, errno);
+    if (process->reaped) {
+        if (!process->group_swept) {
+            mtest_set_error(
+                error, MTEST_EXEC_OP_NONE, EBUSY, 0, process->leader
+            );
+            return -1;
         }
-        int64_t start_ms = 0;
-        int64_t now_ms = 0;
-        struct timespec delay = {0, MTEST_ABORT_SLICE_NS};
-        if (mtest_exec_monotonic_ms(&start_ms, error) != 0) {
-            start_ms = 0;
+        mtest_free_process(process);
+        return 0;
+    }
+
+    struct mtest_exec_group_result group_result;
+    struct mtest_exec_error group_error;
+    memset(&group_result, 0, sizeof(group_result));
+    mtest_clear_error(&group_error);
+    if (mtest_process_group_checked(
+            process, MTEST_EXEC_GROUP_TERM, &group_result, &group_error
+        ) != 0) {
+        mtest_set_cleanup_error(
+            error, group_error.operation, group_error.error_number
+        );
+    }
+    int64_t start_ms = 0;
+    int64_t now_ms = 0;
+    struct timespec delay = {0, MTEST_ABORT_SLICE_NS};
+    struct mtest_exec_error clock_error;
+    mtest_clear_error(&clock_error);
+    if (mtest_exec_monotonic_ms(&start_ms, &clock_error) != 0) {
+        start_ms = 0;
+        mtest_set_error(
+            error,
+            clock_error.operation,
+            clock_error.error_number,
+            clock_error.detail,
+            clock_error.subject
+        );
+    }
+    while (!process->observed && start_ms != 0) {
+        struct mtest_exec_observe_result observation;
+        struct mtest_exec_error observe_error;
+        if (mtest_exec_process_observe(
+                handle, &observation, &observe_error
+            ) != 0) {
+            mtest_set_cleanup_error(
+                error, observe_error.operation, observe_error.error_number
+            );
+            break;
         }
-        while (!process->observed && start_ms != 0) {
-            struct mtest_exec_observe_result observation;
-            struct mtest_exec_error observe_error;
-            if (mtest_exec_process_observe(
-                    handle, &observation, &observe_error
-                ) != 0) {
-                mtest_set_cleanup_error(
-                    error, observe_error.operation, observe_error.error_number
-                );
-                break;
-            }
-            if (observation.state == MTEST_EXEC_LEADER_WAITABLE) {
-                break;
-            }
-            if (mtest_exec_monotonic_ms(&now_ms, &observe_error) != 0) {
-                mtest_set_cleanup_error(
-                    error, observe_error.operation, observe_error.error_number
-                );
-                break;
-            }
-            if (now_ms - start_ms >= (int64_t)grace_ms) {
-                break;
-            }
-            (void)nanosleep(&delay, NULL);
+        if (observation.state == MTEST_EXEC_LEADER_WAITABLE) {
+            break;
         }
-        if (!process->observed) {
-            if (kill(-process->process_group, SIGKILL) != 0 && errno != ESRCH) {
-                mtest_set_cleanup_error(error, MTEST_EXEC_OP_GROUP_KILL, errno);
-            }
-            if (kill(process->leader, SIGKILL) != 0 && errno != ESRCH) {
-                mtest_set_cleanup_error(error, MTEST_EXEC_OP_GROUP_KILL, errno);
-            }
-            siginfo_t information;
-            memset(&information, 0, sizeof(information));
-            int status;
-            do {
-                status = waitid(
-                    P_PID,
-                    (id_t)process->leader,
-                    &information,
-                    WEXITED | WNOWAIT
-                );
-            } while (status != 0 && errno == EINTR);
-            if (status == 0) {
-                process->observed = 1;
-            } else {
-                mtest_set_cleanup_error(error, MTEST_EXEC_OP_WAITID, errno);
-            }
+        if (mtest_exec_monotonic_ms(&now_ms, &observe_error) != 0) {
+            mtest_set_cleanup_error(
+                error, observe_error.operation, observe_error.error_number
+            );
+            break;
         }
-        if (process->observed && !process->reaped) {
-            int raw_status;
-            pid_t reaped;
-            do {
-                reaped = waitpid(process->leader, &raw_status, 0);
-            } while (reaped < 0 && errno == EINTR);
-            if (reaped == process->leader) {
-                process->reaped = 1;
-            } else {
-                mtest_set_cleanup_error(error, MTEST_EXEC_OP_WAITPID, errno);
-            }
+        if (now_ms - start_ms >= (int64_t)grace_ms) {
+            break;
+        }
+        (void)nanosleep(&delay, NULL);
+    }
+    if (!process->group_swept) {
+        memset(&group_result, 0, sizeof(group_result));
+        mtest_clear_error(&group_error);
+        if (mtest_process_group_checked(
+                process, MTEST_EXEC_GROUP_KILL, &group_result, &group_error
+            ) != 0) {
+            mtest_set_cleanup_error(
+                error, group_error.operation, group_error.error_number
+            );
+            /* Preserve the unreaped leader, whether live or waitable, as a
+               PID/PGID identity pin. A later abort can retry the group sweep
+               safely; reaping here would make the numeric group identity
+               reusable while descendants may live. */
+            return -1;
         }
     }
-    if (kill(-process->process_group, SIGKILL) != 0 && errno != ESRCH) {
-        mtest_set_cleanup_error(error, MTEST_EXEC_OP_GROUP_KILL, errno);
+    if (!process->observed) {
+        if (kill(process->leader, SIGKILL) != 0 && errno != ESRCH) {
+            mtest_set_cleanup_error(error, MTEST_EXEC_OP_GROUP_KILL, errno);
+            /* Without a proven group member or direct-leader termination,
+               blocking wait below could hang indefinitely. */
+            return -1;
+        }
+        siginfo_t information;
+        memset(&information, 0, sizeof(information));
+        int status;
+        do {
+            status = waitid(
+                P_PID,
+                (id_t)process->leader,
+                &information,
+                WEXITED | WNOWAIT
+            );
+        } while (status != 0 && errno == EINTR);
+        if (status == 0) {
+            process->observed = 1;
+        } else {
+            mtest_set_cleanup_error(error, MTEST_EXEC_OP_WAITID, errno);
+        }
     }
-    if (kill(-process->process_group, 0) != 0 && errno == ESRCH) {
-        process->group_swept = 1;
+    if (process->observed) {
+        int raw_status;
+        pid_t reaped;
+        do {
+            reaped = waitpid(process->leader, &raw_status, 0);
+        } while (reaped < 0 && errno == EINTR);
+        if (reaped == process->leader) {
+            process->reaped = 1;
+        } else {
+            mtest_set_cleanup_error(error, MTEST_EXEC_OP_WAITPID, errno);
+        }
     }
     if (!process->reaped || !process->group_swept) {
         if (error != NULL && error->operation == MTEST_EXEC_OP_NONE) {
@@ -1745,10 +2011,12 @@ int32_t mtest_exec_process_abort(
     }
     int had_error = error->operation != MTEST_EXEC_OP_NONE ||
         error->cleanup_operation != MTEST_EXEC_OP_NONE;
+    /* Reap + group sweep + the eager channel closes above prove that native
+       ownership is complete even when an earlier diagnostic must be returned. */
+    mtest_free_process(process);
     if (had_error) {
         return -1;
     }
-    mtest_free_process(process);
     return 0;
 }
 

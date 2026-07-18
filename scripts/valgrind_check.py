@@ -159,7 +159,17 @@ def valgrind(
     selected_flags = list(flags)
     if quiet_child:
         selected_flags.append("--child-silent-after-fork=yes")
-    return run(["valgrind", *selected_flags, *command], env=env)
+    result = run(["valgrind", *selected_flags, *command], env=env)
+    startup_failure = re.search(
+        r"(?m)^valgrind:\s+Fatal error at startup:", result.stdout
+    )
+    if startup_failure is not None:
+        (OUT / "startup-failure.log").write_text(result.stdout)
+        require(
+            False,
+            f"Valgrind failed to start for {' '.join(command)}:\n{result.stdout}",
+        )
+    return result
 
 
 def check_controls(env: dict[str, str]) -> None:

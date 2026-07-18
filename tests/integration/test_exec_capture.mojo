@@ -5,7 +5,13 @@ streams stay separate and byte-exact under the bound (trailing spaces and empty
 argv entries survive), a large dual-stream flood drains without deadlock, and
 output past a lowered bound is truncated to head + marker + tail.
 """
-from std.testing import assert_equal, assert_true, assert_false, TestSuite
+from std.testing import (
+    assert_equal,
+    assert_true,
+    assert_false,
+    assert_raises,
+    TestSuite,
+)
 
 from mtest.config import lossy_utf8
 from mtest.exec import ExecRuntime, ProcessSpec, ProcessResult, run_supervised
@@ -17,6 +23,37 @@ from exec_helpers import bytes_to_str, count_byte, repeat, target, py_spec
 def _push_n(mut cap: BoundedCapture, b: UInt8, n: Int):
     for _ in range(n):
         cap.push_byte(b)
+
+
+def test_capture_rejects_zero_tail_capacity() raises:
+    with assert_raises(contains="exec: tail capacity must be positive, got 0"):
+        _ = BoundedCapture(1, 0)
+
+
+def test_capture_rejects_negative_head_capacity() raises:
+    with assert_raises(
+        contains="exec: head capacity must be nonnegative, got -1"
+    ):
+        _ = BoundedCapture(-1, 1)
+
+
+def test_capture_rejects_negative_tail_capacity() raises:
+    with assert_raises(contains="exec: tail capacity must be positive, got -1"):
+        _ = BoundedCapture(1, -1)
+
+
+def test_capture_zero_head_keeps_one_byte_tail() raises:
+    var cap = BoundedCapture(0, 1)
+    cap.push_byte(UInt8(ord("x")))
+    assert_false(cap.was_truncated())
+    assert_equal(bytes_to_str(cap.finish()), "x")
+
+    cap.push_byte(UInt8(ord("y")))
+    assert_true(cap.was_truncated())
+    assert_equal(
+        bytes_to_str(cap.finish()),
+        "\n[mtest: output truncated — 1 bytes omitted, limit 1 bytes]\ny",
+    )
 
 
 def test_capture_below_bound_not_truncated_byte_exact() raises:
@@ -34,7 +71,7 @@ def test_capture_at_bound_not_truncated() raises:
     var cap = BoundedCapture(100, 100)
     _push_n(cap, UInt8(ord("y")), 200)
     assert_false(cap.was_truncated())
-    assert_equal(len(cap.finish()), 200)
+    assert_equal(bytes_to_str(cap.finish()), repeat("y", 200))
 
 
 def test_capture_over_bound_truncated_marker() raises:
@@ -42,11 +79,17 @@ def test_capture_over_bound_truncated_marker() raises:
     var cap = BoundedCapture(100, 100)
     _push_n(cap, UInt8(ord("z")), 201)
     assert_true(cap.was_truncated())
-    assert_true("[mtest: output truncated" in bytes_to_str(cap.finish()))
+    assert_equal(
+        bytes_to_str(cap.finish()),
+        repeat("z", 100)
+        + "\n[mtest: output truncated — 1 bytes omitted, limit 200 bytes]\n"
+        + repeat("z", 100),
+    )
 
 
 def test_byte_exact_separate_capture() raises:
     var runtime = ExecRuntime()
+    runtime.open()
     var argv = List[String]()
     argv.append(target("argv_echoer.py"))
     argv.append("hello world")
@@ -69,6 +112,7 @@ def test_byte_exact_separate_capture() raises:
 
 def test_dual_stream_drain_no_deadlock() raises:
     var runtime = ExecRuntime()
+    runtime.open()
     var argv = List[String]()
     argv.append(target("dual_flooder.py"))
     var r = run_supervised(runtime, py_spec(argv^))
@@ -84,6 +128,7 @@ def test_dual_stream_drain_no_deadlock() raises:
 
 def test_capture_bound_truncates_head_tail_marker() raises:
     var runtime = ExecRuntime()
+    runtime.open()
     # 100 'a', 300 'b', 100 'c' with a 200-byte bound (100 head + 100 tail).
     var code = String(
         'import sys; sys.stdout.write("a"*100 + "b"*300 + "c"*100)'
@@ -109,6 +154,7 @@ def test_capture_bound_truncates_head_tail_marker() raises:
 
 def test_under_bound_is_byte_exact() raises:
     var runtime = ExecRuntime()
+    runtime.open()
     var code = String('import sys; sys.stdout.write("x"*150)')
     var argv = List[String]()
     argv.append("python3")
