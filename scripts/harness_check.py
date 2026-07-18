@@ -33,6 +33,7 @@ UNIT_SUITES = {
     "test_discover_fnmatch.mojo",
     "test_discover_normalize.mojo",
     "test_exec_spec.mojo",
+    "test_exec_tty.mojo",
     "test_model_events.mojo",
     "test_model_exit_code.mojo",
     "test_model_node_id.mojo",
