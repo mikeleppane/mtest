@@ -454,6 +454,13 @@ struct _AttemptResult(Copyable, Movable):
     """The resolved report the run's stdout was trusted to carry."""
     var cls: Classification
     """The TOTAL per-test classification of the run."""
+    var run_stdout_truncated: Bool
+    """Whether the run's captured stdout overflowed the capture bound (the
+    run-phase `ProcessResult`'s own flag, carried through to the file's
+    `FileFinished`; False when no run happened)."""
+    var run_stderr_truncated: Bool
+    """Whether the run's captured stderr overflowed the capture bound (as
+    `run_stdout_truncated`, but for stderr)."""
 
     @staticmethod
     def _internal(var e: Event) -> Self:
@@ -473,6 +480,8 @@ struct _AttemptResult(Copyable, Movable):
             0.0,
             TrustedReport(ParsedReport.absent(), False),
             _blank_classification(),
+            False,
+            False,
         )
 
     @staticmethod
@@ -493,6 +502,8 @@ struct _AttemptResult(Copyable, Movable):
             0.0,
             TrustedReport(ParsedReport.absent(), False),
             _blank_classification(),
+            False,
+            False,
         )
 
     @staticmethod
@@ -520,6 +531,8 @@ struct _AttemptResult(Copyable, Movable):
             0.0,
             TrustedReport(ParsedReport.absent(), False),
             _blank_classification(),
+            False,
+            False,
         )
 
     @staticmethod
@@ -529,6 +542,8 @@ struct _AttemptResult(Copyable, Movable):
         var run_stdout: List[UInt8],
         var run_stderr: List[UInt8],
         rdur: Float64,
+        run_stdout_truncated: Bool = False,
+        run_stderr_truncated: Bool = False,
     ) -> Self:
         """A RAN result for a selection run, so `_make_attempt_finished` can
         emit its TRY line. The selection path already built the binary in phase
@@ -549,6 +564,8 @@ struct _AttemptResult(Copyable, Movable):
             rdur,
             TrustedReport(ParsedReport.absent(), False),
             _blank_classification(),
+            run_stdout_truncated,
+            run_stderr_truncated,
         )
 
 
@@ -724,6 +741,8 @@ def _single_attempt(
         rdur,
         trusted^,
         cls^,
+        rres.stdout_truncated,
+        rres.stderr_truncated,
     )
 
 
@@ -1029,6 +1048,8 @@ def _finalize_attempt(
         flaky=flaky,
         escalated=escalated,
         slow=is_slow(att.bdur, att.rdur),
+        stdout_truncated=att.run_stdout_truncated,
+        stderr_truncated=att.run_stderr_truncated,
     )
     var fr = FileResult.classified(
         pre^,
@@ -1503,12 +1524,17 @@ def _probe_terminal(
     signal_number: Int = 0,
     timeout_seconds: Int = 0,
     escalated: Bool = False,
+    stdout_truncated: Bool = False,
+    stderr_truncated: Bool = False,
 ) -> FileResult:
     """A file-level terminal FileResult for a probe that did not qualify.
 
     `escalated` is the probe `Termination`'s latched SIGKILL escalation, passed
     by the timeout caller so a probe killed at the deadline reads like every
-    other TIMEOUT verdict.
+    other TIMEOUT verdict. `stdout_truncated`/`stderr_truncated` are the
+    probe's own `ProcessResult` truncation booleans — the probe genuinely
+    executes the file's binary, so a truncated probe capture is real
+    truncation of that file's run.
     """
     var pre = List[Event]()
     if warning_kind != "":
@@ -1526,6 +1552,8 @@ def _probe_terminal(
         parse_disposition=disposition,
         escalated=escalated,
         slow=is_slow(bdur, 0.0),
+        stdout_truncated=stdout_truncated,
+        stderr_truncated=stderr_truncated,
     )
     var exits = List[Outcome]()
     if not is_drift:
@@ -1607,6 +1635,8 @@ def _probe_file(
                 pres.stderr_bytes.copy(),
                 False,
                 signal_number=pterm.value,
+                stdout_truncated=pres.stdout_truncated,
+                stderr_truncated=pres.stderr_truncated,
             ),
             False,
             False,
@@ -1629,6 +1659,8 @@ def _probe_file(
                 False,
                 timeout_seconds=config.timeout_secs,
                 escalated=pterm.escalated,
+                stdout_truncated=pres.stdout_truncated,
+                stderr_truncated=pres.stderr_truncated,
             ),
             False,
             False,
@@ -1662,6 +1694,8 @@ def _probe_file(
                 pres.stdout_bytes.copy(),
                 pres.stderr_bytes.copy(),
                 False,
+                stdout_truncated=pres.stdout_truncated,
+                stderr_truncated=pres.stderr_truncated,
             ),
             False,
             False,
@@ -1699,6 +1733,8 @@ def _probe_file(
                 pres.stdout_bytes.copy(),
                 pres.stderr_bytes.copy(),
                 True,
+                stdout_truncated=pres.stdout_truncated,
+                stderr_truncated=pres.stderr_truncated,
             ),
             False,
             False,
@@ -1723,6 +1759,8 @@ def _probe_file(
             pres.stdout_bytes.copy(),
             pres.stderr_bytes.copy(),
             False,
+            stdout_truncated=pres.stdout_truncated,
+            stderr_truncated=pres.stderr_truncated,
         ),
         False,
         False,
@@ -1945,6 +1983,8 @@ def _reconcile_and_classify(
         attempts_used=attempts_used,
         flaky=flaky,
         slow=is_slow(bdur, rdur),
+        stdout_truncated=term.stdout_truncated,
+        stderr_truncated=term.stderr_truncated,
     )
     return FileResult.classified(
         pre^,
@@ -2001,6 +2041,8 @@ def _run_terminal_file(
         attempts_used=attempts_used,
         escalated=escalated,
         slow=is_slow(bdur, rdur),
+        stdout_truncated=term.stdout_truncated,
+        stderr_truncated=term.stderr_truncated,
     )
     return FileResult.classified(
         pre^,
@@ -2045,6 +2087,8 @@ def _classified_terminal(
         deselected_tests=deselected_count,
         attempts_used=attempts_used,
         slow=is_slow(bdur, rdur),
+        stdout_truncated=term.stdout_truncated,
+        stderr_truncated=term.stderr_truncated,
     )
     return FileResult.classified(
         pre^,
@@ -2422,6 +2466,8 @@ def _run_selected_with_recovery(
                     rres.stdout_bytes.copy(),
                     rres.stderr_bytes.copy(),
                     rdur,
+                    rres.stdout_truncated,
+                    rres.stderr_truncated,
                 )
                 pre_stream.append(
                     _make_attempt_finished(

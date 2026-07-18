@@ -238,6 +238,10 @@ def test_selected_overflow_run_is_capture_overflow_exit_1() raises:
         ):
             saw_overflow = True
     assert_true(saw_overflow, "an overflowing run must warn with the hint")
+    assert_true(
+        finished.stdout_truncated,
+        "the selected run's own overflow must mark stdout_truncated",
+    )
 
 
 def test_valid_fail_printing_stale_phrase_is_not_stale_name() raises:

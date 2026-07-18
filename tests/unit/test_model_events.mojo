@@ -211,6 +211,40 @@ def test_file_finished_carries_the_latched_escalation_when_given() raises:
     assert_true(e.escalated)
 
 
+def test_file_finished_defaults_truncation_flags_to_false() raises:
+    # A file whose captured streams fit under the capture bound must never
+    # carry a phantom truncation: the default is the honest "nothing was cut".
+    var e = Event.file_finished(
+        "tests/test_a.mojo",
+        Outcome.PASS,
+        duration_seconds=0.1,
+        build_argv=List[String](),
+        build_duration_seconds=0.0,
+        captured_stdout=List[UInt8](),
+        captured_stderr=List[UInt8](),
+    )
+    assert_false(e.stdout_truncated)
+    assert_false(e.stderr_truncated)
+
+
+def test_file_finished_carries_truncation_flags_when_given() raises:
+    # The session propagates the file-scope process result's own per-stream
+    # truncation booleans onto the verdict, independently per stream.
+    var e = Event.file_finished(
+        "tests/test_a.mojo",
+        Outcome.FAIL,
+        duration_seconds=0.1,
+        build_argv=List[String](),
+        build_duration_seconds=0.0,
+        captured_stdout=List[UInt8](),
+        captured_stderr=List[UInt8](),
+        stdout_truncated=True,
+        stderr_truncated=False,
+    )
+    assert_true(e.stdout_truncated)
+    assert_false(e.stderr_truncated)
+
+
 def test_attempt_finished_payload_carries_full_record() raises:
     var argv: List[String] = ["mojo", "run", "tests/test_a.mojo"]
     var e = Event.attempt_finished(

@@ -8,16 +8,18 @@ that consumes it.
 """
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
-from mtest.exec import Termination
-from mtest.model import Outcome
+from mtest.exec import ProcessResult, Termination
+from mtest.model import Outcome, ParseDisposition
 from mtest.session.retry_class import RetryClass
 from mtest.session.session import (
     _compile_crash_residual,
     _finalize_exit_code,
     _flaky_eligible,
     _invocation_nonce,
+    _probe_terminal,
     _quarantine_dir,
     _retry_out_bin,
+    _run_terminal_file,
     _select_names,
 )
 
@@ -181,6 +183,66 @@ def test_retry_out_bin_distinct_per_attempt() raises:
     var a = _retry_out_bin("m", 2, "9")
     var b = _retry_out_bin("m", 3, "9")
     assert_false(a == b, "two attempts shared a retry binary")
+
+
+# ---- FileFinished carries the file-scope process result's own truncation ------
+
+
+def test_run_terminal_file_propagates_truncation_from_process_result() raises:
+    # A selection-run CRASH/TIMEOUT/malformed terminal is built straight from
+    # the run's own ProcessResult; its truncation booleans must ride the
+    # verdict per-stream, not collapse to a shared or defaulted flag.
+    var term = ProcessResult(
+        List[UInt8](),
+        List[UInt8](),
+        True,
+        False,
+        Termination.signaled(11),
+        5,
+    )
+    var fr = _run_terminal_file(
+        "tests/test_x.mojo",
+        Outcome.CRASH,
+        ParseDisposition.NO_REPORT,
+        "",
+        "",
+        List[String](),
+        0.0,
+        0.0,
+        term,
+        0,
+        signal_number=11,
+    )
+    assert_true(fr.event.stdout_truncated, "stdout truncation must propagate")
+    assert_false(
+        fr.event.stderr_truncated, "an untruncated stream must stay False"
+    )
+
+
+def test_probe_terminal_propagates_truncation_from_probe_result() raises:
+    # The --skip-all probe genuinely executes the file's binary, so a
+    # truncated probe capture is real truncation of that file's run and must
+    # ride the terminal FileFinished the probe produces on a crash/timeout/
+    # malformed/overflow probe.
+    var fr = _probe_terminal(
+        "tests/test_x.mojo",
+        Outcome.CRASH,
+        ParseDisposition.NO_REPORT,
+        "",
+        "",
+        List[String](),
+        0.0,
+        List[UInt8](),
+        List[UInt8](),
+        False,
+        signal_number=11,
+        stdout_truncated=False,
+        stderr_truncated=True,
+    )
+    assert_false(
+        fr.event.stdout_truncated, "an untruncated stream must stay False"
+    )
+    assert_true(fr.event.stderr_truncated, "stderr truncation must propagate")
 
 
 def main() raises:

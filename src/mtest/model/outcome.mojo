@@ -5,18 +5,19 @@ them count as a failure. It is the base of the layering: it imports nothing
 internal, and every layer above imports its vocabulary from here.
 
 The full v1 vocabulary is defined now so future work only starts emitting the
-values it adds, never redefines the set. The runner currently emits only a
-subset (PASS, FAIL, CRASH, TIMEOUT, COMPILE_ERROR, PRECOMPILE_ERROR, plus the
-internal EXCLUDED and NOT_RUN); the remaining values exist here but are not
-produced yet.
+values it adds, never redefines the set. The runner currently emits PASS, FAIL,
+CRASH, TIMEOUT, COMPILE_ERROR, COMPILE_TIMEOUT, MALFORMED_SUITE,
+PRECOMPILE_ERROR, and FLAKY, plus the internal EXCLUDED and NOT_RUN; the
+remaining values exist here but are not produced yet.
 
 The values split into three groups:
 
 - Reported per-test/per-file outcomes: PASS, FAIL, SKIP, CRASH, TIMEOUT,
   COMPILE_ERROR, COMPILE_TIMEOUT, MALFORMED_SUITE, and the session-level
   PRECOMPILE_ERROR. FLAKY is the annotation on a pass that only succeeded on a
-  retry; it is part of the vocabulary but is not emitted yet and this module
-  builds no retry machinery for it.
+  retry; the session emits it on a late pass after a crash-class attempt, but
+  this module itself builds no retry machinery — that lives in the session
+  layer above.
 - Internal states that are not per-test outcomes: DESELECTED, EXCLUDED, NOT_RUN.
 
 The failing class (contributes to process exit 1) is exactly FAIL, CRASH,
