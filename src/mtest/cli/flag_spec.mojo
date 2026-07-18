@@ -124,14 +124,7 @@ def flag_specs() -> List[FlagSpec]:
             "serial execution pinning",
         ),
         FlagSpec("--json", FlagId.JSON, 1, False, True, ""),
-        FlagSpec(
-            "--junit-xml",
-            FlagId.JUNIT_XML,
-            1,
-            False,
-            False,
-            "machine report artifacts",
-        ),
+        FlagSpec("--junit-xml", FlagId.JUNIT_XML, 1, False, True, ""),
         FlagSpec(
             "--gh-annotations",
             FlagId.GH_ANNOTATIONS,

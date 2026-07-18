@@ -66,12 +66,13 @@ def frozen_inventory() -> List[InvRow]:
         # In the v1 contract but not served by this build.
         InvRow("-n", 1, False, False),
         InvRow("--workers", 1, False, False),
-        InvRow("--junit-xml", 1, False, False),
         InvRow("--gh-annotations", 1, False, False),
         # `--serial GLOB`: repeatable.
         InvRow("--serial", 1, True, False),
         # `--json PATH|-`: now served.
         InvRow("--json", 1, False, True),
+        # `--junit-xml PATH`: now served.
+        InvRow("--junit-xml", 1, False, True),
         # Served by this build (collect mode).
         InvRow("--collect-only", 0, False, True),
     ]
@@ -229,8 +230,46 @@ def test_gate_is_served_and_accumulates() raises:
     assert_equal(r.config.gates[1], "y")
 
 
-def test_refuse_junit_xml() raises:
-    _assert_refused("--junit-xml")
+def test_junit_xml_path_is_served_when_parent_exists() raises:
+    # `--junit-xml` is now served: a PATH whose parent directory exists parses
+    # cleanly into the config rather than being refused.
+    var argv: List[String] = ["--junit-xml", "tests/report.xml"]
+    var r = parse_args(argv)
+    assert_equal(r.config.junit_dest, "tests/report.xml")
+
+
+def test_junit_xml_bare_filename_is_served() raises:
+    # A bare filename (no directory part) targets the current directory.
+    var argv: List[String] = ["--junit-xml", "report.xml"]
+    var r = parse_args(argv)
+    assert_equal(r.config.junit_dest, "report.xml")
+
+
+def test_junit_xml_default_is_absent() raises:
+    var argv: List[String] = ["tests/"]
+    var r = parse_args(argv)
+    assert_equal(r.config.junit_dest, "")
+
+
+def test_junit_xml_empty_value_is_usage_error() raises:
+    var argv: List[String] = ["--junit-xml", ""]
+    with assert_raises(contains="--junit-xml"):
+        _ = parse_args(argv)
+
+
+def test_junit_xml_nonexistent_parent_is_usage_error() raises:
+    var argv: List[String] = ["--junit-xml", "/no/such/dir/report.xml"]
+    with assert_raises(contains="--junit-xml"):
+        _ = parse_args(argv)
+
+
+def test_junit_xml_has_no_stdout_dash_form() raises:
+    # Unlike `--json -`, a bare `-` is NOT a stdout stream for `--junit-xml`
+    # (the document is renamed atomically, never streamed): `-` is a normal
+    # positional PATH operand and the flag itself is absent.
+    var argv: List[String] = ["--junit-xml", "report.xml", "-"]
+    var r = parse_args(argv)
+    assert_equal(r.config.junit_dest, "report.xml")
 
 
 def test_refuse_gh_annotations() raises:

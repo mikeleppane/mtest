@@ -33,7 +33,7 @@ comptime SUPPORTED_SUMMARY = (
     "paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo,"
     " -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v,"
     " --color, -k, --maxfail, --durations, --shard, --retries, --json,"
-    " collect/--collect-only, --help, --version"
+    " --junit-xml, collect/--collect-only, --help, --version"
 )
 """A stable one-line list of what this build serves, quoted in refusals."""
 
@@ -162,6 +162,29 @@ def _validate_json_dest(value: String) raises -> String:
     if parent != "" and not isdir(parent):
         raise _err(
             "'--json' destination parent directory does not exist: '"
+            + parent
+            + "'"
+        )
+    return value
+
+
+def _validate_junit_dest(value: String) raises -> String:
+    """Syntactically validate a `--junit-xml` destination; return it unchanged.
+
+    A `--junit-xml` value is always a filesystem PATH (no `-` stdout form — a
+    JUnit document is assembled and renamed atomically, never streamed live): it
+    must be non-empty and its parent directory (when it names one) must already
+    exist. This is the PARSE-time, pre-run check — an empty value or a
+    nonexistent parent is a usage error (exit 4) BEFORE any build or run; a
+    runtime creation failure (permissions, the target dir removed after this
+    check) is the session's to detect and is a different exit code.
+    """
+    if value.byte_length() == 0:
+        raise _err("'--junit-xml' wants a destination PATH, got an empty value")
+    var parent = String(dirname(value))
+    if parent != "" and not isdir(parent):
+        raise _err(
+            "'--junit-xml' destination parent directory does not exist: '"
             + parent
             + "'"
         )
@@ -330,6 +353,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var shard_n = 0
     var retries = 0
     var json_dest = String("")
+    var junit_dest = String("")
     var saw_show_output = False
     var saw_quiet = False
     var saw_verbose = False
@@ -462,6 +486,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             retries = _parse_retries(value)
         elif s.id == FlagId.JSON:
             json_dest = _validate_json_dest(value)
+        elif s.id == FlagId.JUNIT_XML:
+            junit_dest = _validate_junit_dest(value)
 
     # Collect mode is a listing, not a run: the run-only knobs that shape which
     # tests execute or when to stop scheduling are meaningless against it and are
@@ -527,5 +553,6 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         retries=retries,
         compile_timeout_secs=compile_timeout_secs,
         json_dest=json_dest^,
+        junit_dest=junit_dest^,
     )
     return ParseResult.run(cfg^)

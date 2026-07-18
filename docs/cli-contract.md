@@ -248,8 +248,8 @@ Mirrors pytest, and is **FROZEN**:
 | 0 | the session ran; every selected test's outcome is PASS or SKIP (exclusions allowed) |
 | 1 | at least one selected outcome is FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, or PRECOMPILE-ERROR |
 | 2 | interrupted (SIGINT/SIGTERM); a partial summary is printed |
-| 3 | internal `mtest` error — including protocol drift (a report present but off-grammar), and an environment/I-O failure such as a runtime report-destination open/write failure (a `--json` destination that cannot be opened at session start, or whose stream write later fails — a fatal abort) |
-| 4 | CLI usage error (unknown flag, bad value, nonexistent path, unknown node id, forbidden build argument, a syntactically invalid `--json` report destination — an empty value or a nonexistent parent directory) — detected **before any test runs** |
+| 3 | internal `mtest` error — including protocol drift (a report present but off-grammar), and an environment/I-O failure such as a runtime report-destination open/write failure (a `--json` destination that cannot be opened at session start, or whose stream write later fails — a fatal abort; or a `--junit-xml` target that cannot be created at session start, or whose report cannot be finalized and renamed onto PATH) |
+| 4 | CLI usage error (unknown flag, bad value, nonexistent path, unknown node id, forbidden build argument, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory) — detected **before any test runs** |
 | 5 | no tests collected (empty walk, `-k` matched nothing, everything excluded) |
 
 **Precedence** when outcomes mix. A usage error aborts before the run with 4.
@@ -394,6 +394,9 @@ Child stdout and stderr are captured separately and byte-exactly.
 - `--show-output MODE`: `failures` (default) shows captured output for FAIL and
   crash-class outcomes; `all` shows it for every test; `none` suppresses it.
 - `-s` is an alias for `--show-output all`.
+- `--show-output` governs the **console's** display of captured output only; the
+  machine reporters (`--junit-xml`, §15.2; `--json`, §15.4) carry capture per
+  their own bounded, always-on rules, unaffected by this flag.
 
 ---
 
@@ -442,27 +445,67 @@ quiet mode. `N=0` (the default) disables the list. `--durations` is a
 
 ### 15.2 JUnit XML — `--junit-xml PATH`
 
-Written atomically (temp file, then rename). Mapping over the outcome
-vocabulary, total:
+`--junit-xml` is **served**: it writes a JUnit XML report — the settled
+junit-10 dialect (`scripts/schemas/junit-10.xsd`), the same the committed
+`scripts/junit_check.py` oracle blesses — assembled from the runner's own typed
+events, never from a parse of the console text.
 
-| Outcome | XML |
-|---------|-----|
-| PASS | `<testcase>` (no child) |
-| FAIL | `<testcase>` with `<failure>` |
-| SKIP | `<testcase>` with `<skipped/>` |
-| CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, PRECOMPILE-ERROR | `<testcase>` with `<error type="...">` |
-| FLAKY | passing `<testcase>` with the retry count in `<system-out>` |
+- **Document shape.** One `<testsuites>` root carrying `name`, `tests`,
+  `failures`, and `errors` — and **not** `skipped` (junit-10 defines no root
+  `skipped`; the root skipped total is an arithmetic fact recomputed from the
+  child suites). One `<testsuite>` **per file**, carrying all four aggregate
+  counts (including `skipped`). Each `<testcase>` carries `name` and `classname`
+  (the file's dotted stem) and, optionally, ONE primary outcome child
+  (`failure`/`error`/`skipped`) plus any number of ordered rerun/flaky children.
+- **Outcome mapping**, total over the vocabulary:
 
-- File-level outcomes (which have no single test identity) attach to one
-  synthesized testcase, `<testcase name="<file>::[build]">`, inside that file's
-  `<testsuite>`.
-- All text is XML-escaped; invalid XML control characters are stripped. Captured
-  output attaches as `<system-out>`/`<system-err>` on failing testcases, bounded
-  in size with truncation marked.
-- Ordering is **deterministic**: testcases are sorted by node id, independent of
-  parallel completion order. Suite-level `time` is the runner's own wall-clock
-  per file; per-testcase `time` is **omitted** while upstream per-test timings
-  are untrustworthy (honesty over decoration).
+  | Outcome | XML |
+  |---------|-----|
+  | PASS | `<testcase>` (no child) |
+  | FAIL | `<testcase>` with `<failure>` (the verbatim assertion detail) |
+  | SKIP | `<testcase>` with `<skipped/>` |
+  | CRASH | `<testcase>`/sentinel with `<error>` |
+  | TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, PRECOMPILE-ERROR | sentinel `<testcase>` with `<error type="...">` |
+
+- **Sentinels.** A file-level outcome (no single test identity) attaches to one
+  synthesized sentinel testcase inside that file's suite: `[build]` for a
+  non-retried file-level failure, or `[attempts]` for a retried one. The two are
+  **mutually exclusive** — a suite carries at most ONE outcome-carrying
+  sentinel, or none when per-test rows already carry the verdict. A precompile
+  failure emits its own `mtest::precompile` suite with a `[precompile]` error,
+  plus one `[not-run]` suite per NAMED casualty; a bare casualty count with no
+  names invents no rows. A file that was selected but never ran — a precompile
+  casualty, or an interrupt/`--maxfail`/gate-abort skip — appears as a
+  synthesized `[not-run]` skipped testcase, so the report is total over the
+  selected set.
+- **Retries and flakiness** ride Surefire chronology in the `[attempts]` row: a
+  flaky pass carries one `<flakyFailure>` per earlier failed attempt (in attempt
+  order); a rerun-exhausted failure carries the FIRST failed attempt as the
+  primary and every later attempt (the final included) as a `<rerunFailure>`/
+  `<rerunError>`. Every rerun/flaky child carries the schema-required `type`.
+- **Capture.** Captured child output attaches once per suite as
+  `<system-out>`/`<system-err>`, bounded (64 KiB head + 64 KiB tail, elision
+  marked) and always-on — independent of `--show-output`, which governs only the
+  console (§14). All text is XML-escaped through the one shared path; a sentinel
+  `name` (`[build]`, `[attempts]`, `[not-run]`) is emitted verbatim.
+- **Time.** Suite-level `time` is the runner's own wall clock per file, formatted
+  as fixed-three-decimal seconds (JUnit's own policy, distinct from the JSON
+  stream's integer microseconds). Per-testcase `time` and suite `timestamp` are
+  **omitted** (schema-optional) while upstream per-test timings are untrustworthy
+  (honesty over decoration).
+- **Ordering is deterministic**: testcases are sorted by node id, and suites by
+  their key, independent of completion order. A testcase whose `name` already
+  contains `::` is its own node id (used verbatim); a bracket sentinel is keyed
+  as `<file>::[sentinel]` but never renamed.
+- **Artifact lifecycle.** A unique temp file is created in the TARGET directory
+  at session start — proving it writable BEFORE any build or run — and the
+  assembled document is written there and renamed **atomically** onto PATH only
+  after a verified complete write. Unlike the live `--json` stream, the prior
+  report at PATH is **NEVER truncated**: on any failure the target is left
+  exactly as it was. A syntactically bad destination (an empty value or a
+  nonexistent parent directory) is a pre-run usage error (exit 4, §9); a runtime
+  creation or finalization failure (an unwritable or vanished target) is an
+  internal error (exit 3, §9). Report destinations are not root-constrained.
 
 ### 15.3 GitHub annotations — `--gh-annotations MODE`
 
@@ -722,16 +765,16 @@ above — it only reports which of those surfaces are wired up yet.
 `-h`/`--help`, `--version`, and the `run`, `collect`, `version`, and `help`
 subcommands (`--collect-only` too, as an alias that behaves as `collect`).
 `--shard` applies under both `run` and `collect`. `--json` (the machine event
-stream, §15.4) is served too — see §24.2 for how it is now reached.
+stream, §15.4) and `--junit-xml` (the JUnit report, §15.2) are served too — see
+§24.2 for how they are now reached.
 
-**Still refused**: `-n`/`--workers`, `--junit-xml`, `--gh-annotations`,
-`--serial`. Each is recognized by the parser — it knows the spelling
-and its arity — but is **refused before any test runs**, with a usage error
-that names the flag, states that it is part of the v1 contract, names the
-capability that brings it (`-n`/`--workers` arrive with parallel workers;
-`--junit-xml` and `--gh-annotations` arrive with machine report
-artifacts and CI annotations; `--serial` arrives with serial execution
-pinning), and lists what this build does serve.
+**Still refused**: `-n`/`--workers`, `--gh-annotations`, `--serial`. Each is
+recognized by the parser — it knows the spelling and its arity — but is
+**refused before any test runs**, with a usage error that names the flag, states
+that it is part of the v1 contract, names the capability that brings it
+(`-n`/`--workers` arrive with parallel workers; `--gh-annotations` arrives with
+CI annotations; `--serial` arrives with serial execution pinning), and lists what
+this build does serve.
 
 **A transitional exit-4 subcase.** That refusal is a usage error and exits 4,
 but it is a distinct, *temporary* subcase of §9's exit code 4 — it is not one
@@ -776,6 +819,16 @@ validated syntactically at parse time (exit 4 on an empty value or a nonexistent
 parent directory) and opened at session start (exit 3 on a runtime open failure);
 a stream write that fails mid-run is a fatal abort to exit 3. The §9 causes are
 cited here, never restated.
+
+**`--junit-xml` reachability.** `--junit-xml PATH` is served (§15.2): it is
+parsed into a JUnit report reporter composed beside the console and the stream.
+Its destination is validated syntactically at parse time (exit 4 on an empty
+value or a nonexistent parent directory) and a unique temp is created in the
+target directory at session start to prove it writable (exit 3 on a runtime
+creation failure). Unlike the stream, a spool failure never aborts mid-run; it
+surfaces at finalization, where the report is assembled and renamed atomically
+onto PATH (exit 3 on a finalization failure, with the prior report never
+truncated). The §9 causes are cited here, never restated.
 - **5** — reachable via an empty walk, via the everything-excluded case, and
   via deselection (`-k` matched nothing, §9).
 

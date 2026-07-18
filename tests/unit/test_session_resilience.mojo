@@ -13,7 +13,6 @@ from mtest.model import Outcome, ParseDisposition
 from mtest.session.retry_class import RetryClass
 from mtest.session.session import (
     _compile_crash_residual,
-    _finalize_exit_code,
     _flaky_eligible,
     _invocation_nonce,
     _probe_terminal,
@@ -48,30 +47,12 @@ def test_flaky_eligible_rejects_real_failures() raises:
     assert_false(_flaky_eligible(Outcome.MALFORMED_SUITE))
 
 
-# ---- Fix 5: a late interrupt DOMINATES the resolved exit code ------------------
-
-
-def test_finalize_exit_code_interrupt_dominates_crash_exit() raises:
-    # A run that CRASHED resolves code 1 before attribution; an interrupt that
-    # arrives DURING the pass must still exit 2, not the laundered 1.
-    assert_equal(_finalize_exit_code(1, True), 2)
-
-
-def test_finalize_exit_code_interrupt_dominates_any_nonzero() raises:
-    assert_equal(_finalize_exit_code(5, True), 2)
-    assert_equal(_finalize_exit_code(0, True), 2)
-    assert_equal(_finalize_exit_code(3, True), 2)
-
-
-def test_finalize_exit_code_no_interrupt_is_untouched() raises:
-    assert_equal(_finalize_exit_code(1, False), 1)
-    assert_equal(_finalize_exit_code(0, False), 0)
-    assert_equal(_finalize_exit_code(5, False), 5)
-
-
-def test_finalize_exit_code_already_two_is_stable() raises:
-    assert_equal(_finalize_exit_code(2, True), 2)
-    assert_equal(_finalize_exit_code(2, False), 2)
+# ---- Fix 5: the late-interrupt DOMINANCE now lives in the terminal protocol ----
+#
+# The interrupt-linearization that a late (mid-attribution) interrupt dominates
+# the resolved exit code is fixed at the two-phase terminal protocol's Phase-1
+# entry and resolved by `_resolve_terminal_code`; its dedicated pins live in
+# `test_session_terminal.mojo`.
 
 
 # ---- Fix 7: the residual warning does not claim "killed" for a self-exited ICE -

@@ -72,4 +72,10 @@ from mtest.report.junit import (
     node_sort_key,
     render_suite,
 )
-from mtest.report.junit_reporter import JunitReporter, JunitStatus
+from mtest.report.junit_reporter import (
+    JunitArtifact,
+    JunitFinalizeResult,
+    JunitReporter,
+    JunitStatus,
+    open_junit_artifact,
+)

@@ -22,6 +22,7 @@ from std.io import FileDescriptor
 from std.os import getenv
 from std.pathlib import cwd
 from std.sys import argv, exit
+from std.tempfile import mkdtemp
 
 from mtest.cli import (
     MTEST_VERSION,
@@ -36,8 +37,10 @@ from mtest.report import (
     CompositeReporter,
     ConsoleReporter,
     JsonStreamReporter,
+    JunitReporter,
     close_json_fd,
     open_json_fd,
+    open_junit_artifact,
 )
 from mtest.session import CollectResult, run_collect, run_session
 
@@ -196,15 +199,48 @@ def main():
         build_flags^,
         config.durations,
     )
-    # A fixed composition ORDER: index 0 is the console, index 1 the machine
-    # stream (inert when `--json` is absent). The session polls index 1's latch
-    # by that fixed position — `run_session[1]` below names it.
+    # Resolve the JUnit report destination. Unlike `--json`, the destination is
+    # NEVER opened for live truncation: a unique temp file is created in the
+    # TARGET directory now — proving it writable BEFORE any build or run — and the
+    # assembled document is atomically renamed onto PATH at session finalization,
+    # so a prior report survives every failure. A runtime creation failure here
+    # (an unwritable or vanished target directory) is a pre-run internal error:
+    # exit 3, mirroring `--json`'s runtime open failure. Report destinations are
+    # not root-constrained.
+    var junit_active = config.junit_dest != ""
+    var junit_spool = String("")
+    var junit_temp = String("")
+    var junit_target = String("")
+    if junit_active:
+        try:
+            var spool = mkdtemp()
+            var artifact = open_junit_artifact(spool, config.junit_dest)
+            junit_spool = artifact.spool_dir
+            junit_temp = artifact.temp_path
+            junit_target = artifact.target_path
+        except junit_error:
+            if json_owns_fd:
+                close_json_fd(json_fd)
+            if not _close_runtime(runtime):
+                exit(3)
+            _eprintln("mtest: internal error: " + String(junit_error))
+            exit(3)
+            return
+
+    # A fixed composition ORDER: index 0 the console, index 1 the machine stream
+    # (inert when `--json` is absent), index 2 the JUnit report (inert when
+    # `--junit-xml` is absent). The session polls index 1's stream latch and
+    # finalizes index 2's report by those fixed positions — `run_session[1, 2]`
+    # below names them.
     var stream = JsonStreamReporter(json_fd, MTEST_VERSION, json_active)
-    var comp = CompositeReporter(Tuple(console^, stream^))
+    var junit = JunitReporter(
+        junit_spool, junit_active, junit_target, junit_temp
+    )
+    var comp = CompositeReporter(Tuple(console^, stream^, junit^))
 
     var code = 0
     try:
-        code = run_session[1](runtime, config, root, comp)
+        code = run_session[1, 2](runtime, config, root, comp)
     except e:
         # The only raise the session propagates is a discover: usage error;
         # like a cli usage error it exits 4 to stderr.

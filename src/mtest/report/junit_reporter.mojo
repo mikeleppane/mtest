@@ -32,6 +32,10 @@ step is the fragment file write, which is wrapped and latched (like the JSON
 stream reporter), after which the reporter goes silent. An INERT reporter (the
 no-`--junit-xml` shape) owns no spool directory and does nothing.
 """
+from std.ffi import external_call
+from std.os import remove
+from std.os.path import basename, dirname
+
 from mtest.model.events import Event, EventKind
 from mtest.model.outcome import Outcome
 from mtest.model.test_result import TestResult
@@ -53,6 +57,130 @@ comptime _TERM_EXITED = 0
 comptime _TERM_SIGNALED = 1
 comptime _TERM_TIMED_OUT = 2
 comptime _TERM_SPAWN_FAILED = 3
+
+
+def _junit_nonce() -> String:
+    """A per-process token isolating this run's JUnit spool and temp paths.
+
+    Two mtest PROCESSES writing the same `--junit-xml PATH` (plausible under
+    `--shard`) must never collide on a temp path one's finalize is renaming or a
+    spool dir one's cleanup would delete. The process id is stable within a run
+    and distinct across concurrent runs, so it keys each invocation's disposable
+    paths apart. Never raises.
+    """
+    # SAFETY: `getpid` takes no arguments and returns this process's id as an
+    # Int32; there is nothing to misuse and the call cannot fail.
+    var pid = external_call["getpid", Int32]()
+    return String(Int(pid))
+
+
+def _cstring(value: String) -> List[UInt8]:
+    """An owned NUL-terminated byte copy of `value`, for one libc call."""
+    var out = List[UInt8]()
+    for b in value.as_bytes():
+        out.append(b)
+    out.append(0)
+    return out^
+
+
+def _rename(src: String, dst: String) raises:
+    """Atomically rename `src` onto `dst`, replacing `dst` if it exists.
+
+    The report layer performs its own libc calls (as `json_stream_reporter` does
+    for `write`/`open`/`close`) rather than reaching up into `exec`, so the
+    reporter stays self-contained. Both paths share a filesystem (the caller
+    derives `src` from `dst`'s directory), so `rename(2)` is indivisible: on
+    success `dst` names what `src` named; on failure NEITHER path is modified —
+    the whole reason the JUnit artifact is renamed and not written in place.
+
+    Raises:
+        Error: if `rename(2)` failed (the target is a directory, straddles
+            filesystems, or its directory became unwritable).
+    """
+    var s = _cstring(src)
+    var d = _cstring(dst)
+    # SAFETY: libc rename has the exact `int rename(const char*, const char*)`
+    # ABI. Both arguments are complete NUL-terminated byte copies this function
+    # uniquely owns; the borrowed pointers stay valid for the whole synchronous
+    # call (both lists are used again below), and rename retains neither pointer
+    # and writes through neither. The result is a plain scalar status.
+    var rc = external_call["rename", Int32](s.unsafe_ptr(), d.unsafe_ptr())
+    _ = s^
+    _ = d^
+    if rc != 0:
+        raise Error(
+            "report: junit rename failed: '" + src + "' -> '" + dst + "'"
+        )
+
+
+@fieldwise_init
+struct JunitArtifact(Copyable, Movable):
+    """The resolved `--junit-xml` destination handles, proven writable at start.
+
+    `spool_dir` is a fresh session temp directory for the per-suite fragments;
+    `temp_path` is the unique temp FILE created in the TARGET directory (its
+    creation PROVES that directory writable now), the assembled document is
+    written to it at finalization, and it is renamed atomically onto
+    `target_path`. Owns its Strings; never raises.
+    """
+
+    var spool_dir: String
+    """The session temp directory the per-suite fragments are spooled into."""
+    var temp_path: String
+    """The unique temp file in the target dir; the final document lands here."""
+    var target_path: String
+    """The `--junit-xml` PATH the temp is atomically renamed onto."""
+
+
+def open_junit_artifact(
+    spool_dir: String, path: String
+) raises -> JunitArtifact:
+    """Resolve the JUnit destination and PROVE the target directory writable.
+
+    Creates a unique temp FILE in the TARGET directory (dirname(`path`)) at
+    session start — its creation proves the directory writable NOW, before any
+    build or run, so a doomed report destination fails fast rather than after a
+    whole run. The prior report at `path` is NEVER touched here (or anywhere
+    before the final atomic rename). Raises on a creation failure — the caller
+    resolves that to the pre-run internal-error exit code.
+
+    Args:
+        spool_dir: The already-created session temp directory for fragments.
+        path: The `--junit-xml` destination PATH.
+
+    Raises:
+        Error: if the unique temp file cannot be created (the target directory
+            is unwritable or missing).
+    """
+    var target_dir = String(dirname(path))
+    var temp_name = (
+        "." + String(basename(path)) + ".mtest-" + _junit_nonce() + ".tmp"
+    )
+    var temp_path: String
+    if target_dir != "":
+        temp_path = target_dir + "/" + temp_name
+    else:
+        temp_path = temp_name
+    # Prove writability by creating (truncating) the unique temp file now.
+    with open(temp_path, "w") as f:
+        f.write("")
+    return JunitArtifact(spool_dir, temp_path, path)
+
+
+@fieldwise_init
+struct JunitFinalizeResult(Copyable, Movable):
+    """The outcome of finalizing the JUnit artifact: a failure flag + diagnostic.
+
+    `failed` is True when the report could not be published (a latched spool, a
+    failed assemble, temp write, or atomic rename); `detail` is the loud
+    diagnostic the session surfaces. An inert or clean finalize is `failed=False`
+    with an empty `detail`.
+    """
+
+    var failed: Bool
+    """Whether finalization could not publish the report."""
+    var detail: String
+    """The loud diagnostic when `failed`; empty when clean."""
 
 
 @fieldwise_init
@@ -277,8 +405,20 @@ struct JunitReporter(Reporter):
     """
     var _context: String
     """What was being spooled when the latch tripped ("" while clean)."""
+    var _target_path: String
+    """The `--junit-xml` PATH the assembled document is renamed onto ("" when
+    inert or under a test driver that never finalizes)."""
+    var _temp_path: String
+    """The unique temp file the assembled document is written to before the
+    atomic rename onto `_target_path` ("" when inert)."""
 
-    def __init__(out self, spool_dir: String, active: Bool):
+    def __init__(
+        out self,
+        spool_dir: String,
+        active: Bool,
+        target_path: String = "",
+        temp_path: String = "",
+    ):
         """Construct a reporter that spools fragments into `spool_dir`.
 
         Args:
@@ -286,6 +426,11 @@ struct JunitReporter(Reporter):
                 per-suite fragments are written to.
             active: Whether to spool; `False` yields an inert reporter that owns
                 no directory and does nothing.
+            target_path: The `--junit-xml` PATH the finalized document is
+                atomically renamed onto; empty leaves `finalize` a no-op (a test
+                driver that only drives `assemble` never sets it).
+            temp_path: The unique temp file the document is written to before the
+                rename; empty leaves `finalize` a no-op.
         """
         self._active = active
         self._spool_dir = spool_dir
@@ -294,11 +439,94 @@ struct JunitReporter(Reporter):
         self._accums = List[_FileAccum]()
         self._failed = False
         self._context = String("")
+        self._target_path = target_path
+        self._temp_path = temp_path
 
     @staticmethod
     def inert() -> Self:
         """The no-`--junit-xml` reporter: owns no directory, does nothing."""
         return Self("", False)
+
+    def note_not_run(mut self, selected_paths: List[String]):
+        """Synthesize a `[not-run]` suite for each selected file never spooled.
+
+        Called by the session at the terminal protocol's Phase 1 (outside the
+        `Reporter` trait) so an interrupted, gate-aborted, or `--maxfail`-capped
+        run STILL carries a `[not-run]` skipped row for every selected file that
+        never produced a verdict. A file whose real verdict already spooled a
+        suite — a ran file, a deselected file, or a precompile casualty — is
+        already in the index and is skipped here, so no suite is ever doubled.
+        Total; never raises (the spool write is caught and latched like `handle`).
+        """
+        if not self._active or self._failed:
+            return
+        for i in range(len(selected_paths)):
+            if self._failed:
+                return
+            var path = selected_paths[i]
+            if self._has_suite(path):
+                continue
+            var cases = List[JunitCase]()
+            cases.append(
+                JunitCase(
+                    "[not-run]",
+                    dotted_classname(path),
+                    True,
+                    JunitPrimary("skipped", "not run", "", ""),
+                    List[JunitRerun](),
+                )
+            )
+            var suite = JunitSuite(path, 0.0, cases^, "", "")
+            self._spool(render_suite(suite), "not-run suite " + path)
+
+    def _has_suite(self, suite_key: String) -> Bool:
+        """Whether a suite with `suite_key` has already been spooled."""
+        for i in range(len(self._index)):
+            if self._index[i].suite_key == suite_key:
+                return True
+        return False
+
+    def finalize(mut self) -> JunitFinalizeResult:
+        """Publish the JUnit artifact: assemble -> temp write -> atomic rename.
+
+        Called by the SESSION on the concrete reporter (outside the `Reporter`
+        trait) at the terminal protocol's Phase 1. NON-RAISING: every failure is
+        caught and returned as a loud diagnostic the session collects.
+
+        The deliberate asymmetry vs the JSON stream: a spool-write failure does
+        NOT abort the run mid-flight (unlike a latched stream, a fatal abort) —
+        it rode silently to here and surfaces NOW as a finalization failure. On a
+        clean spool the fragments are assembled in node-id order, written to the
+        unique temp (a verified complete write), and renamed atomically onto the
+        target. The prior report at the target is never truncated: on ANY failure
+        the target is left exactly as it was and the temp is cleaned up.
+        """
+        if not self._active or self._target_path == "":
+            return JunitFinalizeResult(False, "")
+        if self._failed:
+            return JunitFinalizeResult(
+                True,
+                "junit spool failed while writing " + self._context,
+            )
+        try:
+            var doc = self.assemble("mtest")
+            with open(self._temp_path, "w") as f:
+                f.write(doc)
+            _rename(self._temp_path, self._target_path)
+        except e:
+            self._discard_temp()
+            return JunitFinalizeResult(
+                True, "junit report could not be written: " + String(e)
+            )
+        return JunitFinalizeResult(False, "")
+
+    def _discard_temp(mut self):
+        """Best-effort remove of the leftover temp file after a failed publish.
+        """
+        try:
+            remove(self._temp_path)
+        except:
+            pass
 
     def handle(mut self, e: Event):
         """Consume one event, spooling a suite as each file/precompile finishes.

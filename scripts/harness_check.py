@@ -50,6 +50,7 @@ UNIT_SUITES = {
     "test_report_json_reporter.mojo",
     "test_report_json_stream.mojo",
     "test_report_junit.mojo",
+    "test_report_junit_finalize.mojo",
     "test_report_junit_reporter.mojo",
     "test_report_recording.mojo",
     "test_select_logic.mojo",
@@ -63,6 +64,7 @@ UNIT_SUITES = {
     "test_session_resilience.mojo",
     "test_session_retry_class.mojo",
     "test_session_shard.mojo",
+    "test_session_terminal.mojo",
     "test_session_verdict.mojo",
 }
 INTEGRATION_SUITES = {
@@ -88,6 +90,7 @@ INTEGRATION_SUITES = {
     "test_session_handshake.mojo",
     "test_session_interrupt.mojo",
     "test_session_json_stream.mojo",
+    "test_session_junit.mojo",
     "test_session_maxfail.mojo",
     "test_session_outcomes.mojo",
     "test_session_precompile.mojo",

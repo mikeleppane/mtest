@@ -108,6 +108,16 @@ struct RunnerConfig(Copyable, Movable):
     parser validates it syntactically (a non-empty value with an existing parent
     directory); a runtime open failure is resolved by the session."""
 
+    var junit_dest: String
+    """`--junit-xml PATH`: the JUnit XML report destination. Empty means the flag
+    was absent (no report). Any other value is a filesystem PATH the assembled
+    `<testsuites>` document is written to. Unlike `--json`, the destination is
+    NEVER truncated live: the report is assembled at finalization, written to a
+    unique temp beside the target, and renamed atomically onto PATH only after a
+    verified complete write, so a prior report survives every failure. The parser
+    validates it syntactically (a non-empty value with an existing parent
+    directory); a runtime creation failure is resolved by the session."""
+
     @staticmethod
     def default() -> RunnerConfig:
         """A config with every field at its contract default. Allocates.
@@ -117,7 +127,8 @@ struct RunnerConfig(Copyable, Movable):
         `color=AUTO`, `exitfirst=False`, `maxfail=0` (no limit),
         `durations=0` (no report), `collect=False`, UNSHARDED
         (`shard_mode=HASH`, `shard_m=0`, `shard_n=0`), `retries=0` (no
-        retries), `compile_timeout_secs=600`, and `json_dest=""` (no stream).
+        retries), `compile_timeout_secs=600`, `json_dest=""` (no stream), and
+        `junit_dest=""` (no JUnit report).
         """
         return RunnerConfig(
             paths=[],
@@ -142,4 +153,5 @@ struct RunnerConfig(Copyable, Movable):
             retries=0,
             compile_timeout_secs=600,
             json_dest="",
+            junit_dest="",
         )
