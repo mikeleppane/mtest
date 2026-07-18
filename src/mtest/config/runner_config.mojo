@@ -100,6 +100,14 @@ struct RunnerConfig(Copyable, Movable):
     compile-specific grace) and reported COMPILE_TIMEOUT — a crash-class failure
     `--retries` will retry against a quarantined module cache."""
 
+    var json_dest: String
+    """`--json PATH|-`: the machine event-stream destination. Empty means the
+    flag was absent (no stream). `"-"` streams to stdout (byte-pure), relocating
+    the console to stderr. Any other value is a filesystem PATH the stream is
+    written to live, overwriting a pre-existing file at session start. The
+    parser validates it syntactically (a non-empty value with an existing parent
+    directory); a runtime open failure is resolved by the session."""
+
     @staticmethod
     def default() -> RunnerConfig:
         """A config with every field at its contract default. Allocates.
@@ -109,7 +117,7 @@ struct RunnerConfig(Copyable, Movable):
         `color=AUTO`, `exitfirst=False`, `maxfail=0` (no limit),
         `durations=0` (no report), `collect=False`, UNSHARDED
         (`shard_mode=HASH`, `shard_m=0`, `shard_n=0`), `retries=0` (no
-        retries), and `compile_timeout_secs=600`.
+        retries), `compile_timeout_secs=600`, and `json_dest=""` (no stream).
         """
         return RunnerConfig(
             paths=[],
@@ -133,4 +141,5 @@ struct RunnerConfig(Copyable, Movable):
             shard_n=0,
             retries=0,
             compile_timeout_secs=600,
+            json_dest="",
         )

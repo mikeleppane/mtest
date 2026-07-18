@@ -12,6 +12,7 @@ prints help/version to stdout with exit 0 and prints a usage error to stderr wit
 exit 4.
 """
 from std.os import getenv
+from std.os.path import dirname, isdir
 
 from mtest.cli.flag_spec import FlagId, FlagSpec, flag_specs
 from mtest.cli.parse_result import ParseResult
@@ -31,7 +32,7 @@ comptime MTEST_VERSION = "0.1.0-dev"
 comptime SUPPORTED_SUMMARY = (
     "paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo,"
     " -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v,"
-    " --color, -k, --maxfail, --durations, --shard, --retries,"
+    " --color, -k, --maxfail, --durations, --shard, --retries, --json,"
     " collect/--collect-only, --help, --version"
 )
 """A stable one-line list of what this build serves, quoted in refusals."""
@@ -139,6 +140,32 @@ def _parse_show_output(value: String) raises -> ShowOutput:
     raise _err(
         "'--show-output' wants one of failures|all|none, got '" + value + "'"
     )
+
+
+def _validate_json_dest(value: String) raises -> String:
+    """Syntactically validate a `--json` destination; return it unchanged.
+
+    `-` is the stdout stream and always valid. Any other value is a filesystem
+    PATH: it must be non-empty and its parent directory (when it names one) must
+    already exist. This is the PARSE-time, pre-run check — an empty value or a
+    nonexistent parent is a usage error (exit 4) BEFORE any build or run; a
+    runtime open failure (permissions, descriptor exhaustion) is the session's
+    to detect and is a different exit code.
+    """
+    if value == "-":
+        return value
+    if value.byte_length() == 0:
+        raise _err(
+            "'--json' wants a destination PATH or '-', got an empty value"
+        )
+    var parent = String(dirname(value))
+    if parent != "" and not isdir(parent):
+        raise _err(
+            "'--json' destination parent directory does not exist: '"
+            + parent
+            + "'"
+        )
+    return value
 
 
 def _parse_color(value: String) raises -> ColorWhen:
@@ -302,6 +329,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var shard_m = 0
     var shard_n = 0
     var retries = 0
+    var json_dest = String("")
     var saw_show_output = False
     var saw_quiet = False
     var saw_verbose = False
@@ -432,6 +460,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             shard_n = parsed[2]
         elif s.id == FlagId.RETRIES:
             retries = _parse_retries(value)
+        elif s.id == FlagId.JSON:
+            json_dest = _validate_json_dest(value)
 
     # Collect mode is a listing, not a run: the run-only knobs that shape which
     # tests execute or when to stop scheduling are meaningless against it and are
@@ -496,5 +526,6 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         shard_n=shard_n,
         retries=retries,
         compile_timeout_secs=compile_timeout_secs,
+        json_dest=json_dest^,
     )
     return ParseResult.run(cfg^)

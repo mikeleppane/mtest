@@ -71,12 +71,21 @@ static uint64_t mtest_next_handle = 1;
 static struct sigaction mtest_old_int;
 static struct sigaction mtest_old_term;
 static struct sigaction mtest_old_chld;
+static struct sigaction mtest_old_pipe;
 static int mtest_old_int_saved;
 static int mtest_old_term_saved;
 static int mtest_old_chld_saved;
+static int mtest_old_pipe_saved;
 static int mtest_int_installed;
 static int mtest_term_installed;
 static int mtest_chld_installed;
+/* SIGPIPE is ignored for the runtime's lifetime (the SECOND deliberate exec
+   carve-out, after the tty probe): a broken destination pipe -- a `--json -`
+   consumer that closed early, e.g. `mtest --json - | head` -- must return EPIPE
+   to the reporter's write so it can latch a fatal abort, never kill mtest with
+   the default SIGPIPE disposition (death at 141). The previous disposition is
+   saved here and restored on close, symmetrically with SIGINT/SIGTERM. */
+static int mtest_pipe_installed;
 
 #if MTEST_EXEC_TESTING
 struct mtest_fault_state {
@@ -838,8 +847,87 @@ int32_t mtest_exec_runtime_open(struct mtest_exec_error *error) {
         return -1;
     }
     mtest_chld_installed = 1;
+    /* Ignore SIGPIPE for the runtime's lifetime, saving the old disposition to
+       restore on close (mirroring SIGINT/SIGTERM). A plain sigaction like
+       SIGCHLD: this carve-out installs a disposition, not a fault-injectable
+       mtest handler, so it needs no operation code. Realistically infallible
+       for a valid signal, but a failure rolls the whole transaction back. */
+    if (sigaction(SIGPIPE, NULL, &mtest_old_pipe) != 0) {
+        saved_errno = errno;
+        goto sigpipe_rollback;
+    }
+    mtest_old_pipe_saved = 1;
+    {
+        struct sigaction pipe_action;
+        memset(&pipe_action, 0, sizeof(pipe_action));
+        pipe_action.sa_handler = SIG_IGN;
+        if (sigemptyset(&pipe_action.sa_mask) != 0 ||
+            sigaction(SIGPIPE, &pipe_action, NULL) != 0) {
+            saved_errno = errno;
+            mtest_old_pipe_saved = 0;
+            goto sigpipe_rollback;
+        }
+    }
+    mtest_pipe_installed = 1;
     atomic_store(&mtest_runtime_state, MTEST_RUNTIME_OPEN);
     return 0;
+
+sigpipe_rollback:
+    /* SIGPIPE setup failed with nothing SIGPIPE-side installed. Best-effort
+       restore SIGCHLD, then SIGTERM, then SIGINT -- the reverse of the install
+       order -- before failing closed, exactly as the SIGCHLD-install failure
+       path does. A rollback that itself fails leaves RESTORE_REQUIRED for the
+       owner's later close to retry. */
+    if (sigaction(SIGCHLD, &mtest_old_chld, NULL) != 0) {
+        if (rollback_errno == 0) {
+            rollback_errno = errno;
+        }
+    } else {
+        mtest_chld_installed = 0;
+    }
+    {
+        uint32_t rollback_operation = MTEST_EXEC_OP_NONE;
+        if (mtest_checked_sigaction(
+                MTEST_EXEC_OP_SIGACTION_RESTORE_TERM,
+                SIGTERM,
+                &mtest_old_term,
+                NULL
+            ) != 0) {
+            if (rollback_errno == 0) {
+                rollback_operation = MTEST_EXEC_OP_SIGACTION_RESTORE_TERM;
+                rollback_errno = errno;
+            }
+        } else {
+            mtest_term_installed = 0;
+        }
+        if (mtest_checked_sigaction(
+                MTEST_EXEC_OP_SIGACTION_RESTORE_INT,
+                SIGINT,
+                &mtest_old_int,
+                NULL
+            ) != 0) {
+            if (rollback_errno == 0) {
+                rollback_operation = MTEST_EXEC_OP_SIGACTION_RESTORE_INT;
+                rollback_errno = errno;
+            }
+        } else {
+            mtest_int_installed = 0;
+        }
+        if (rollback_errno == 0) {
+            mtest_old_int_saved = 0;
+            mtest_old_term_saved = 0;
+            mtest_old_chld_saved = 0;
+            mtest_old_pipe_saved = 0;
+            atomic_store(&mtest_runtime_state, MTEST_RUNTIME_CLOSED);
+        } else {
+            atomic_store(&mtest_runtime_state, MTEST_RUNTIME_RESTORE_REQUIRED);
+        }
+        mtest_set_error(error, MTEST_EXEC_OP_NONE, saved_errno, 0, SIGPIPE);
+        if (rollback_errno != 0) {
+            mtest_set_cleanup_error(error, rollback_operation, rollback_errno);
+        }
+        return -1;
+    }
 }
 
 int32_t mtest_exec_runtime_close(struct mtest_exec_error *error) {
@@ -890,9 +978,21 @@ retry_runtime_ownership:
         return -1;
     }
 restore_handlers:
+    /* Restore the SIGPIPE disposition first (a plain sigaction like SIGCHLD;
+       the restore order among the independent signals does not matter). */
+    if (mtest_pipe_installed &&
+        sigaction(SIGPIPE, &mtest_old_pipe, NULL) != 0) {
+        first_errno = errno;
+        had_failure = 1;
+    } else {
+        mtest_pipe_installed = 0;
+        mtest_old_pipe_saved = 0;
+    }
     if (mtest_chld_installed &&
         sigaction(SIGCHLD, &mtest_old_chld, NULL) != 0) {
-        first_errno = errno;
+        if (!had_failure) {
+            first_errno = errno;
+        }
         had_failure = 1;
     } else {
         mtest_chld_installed = 0;

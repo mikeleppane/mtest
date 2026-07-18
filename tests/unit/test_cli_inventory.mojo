@@ -70,8 +70,8 @@ def frozen_inventory() -> List[InvRow]:
         InvRow("--gh-annotations", 1, False, False),
         # `--serial GLOB`: repeatable.
         InvRow("--serial", 1, True, False),
-        # `--json PATH|-`.
-        InvRow("--json", 1, False, False),
+        # `--json PATH|-`: now served.
+        InvRow("--json", 1, False, True),
         # Served by this build (collect mode).
         InvRow("--collect-only", 0, False, True),
     ]
@@ -272,8 +272,43 @@ def test_refuse_serial() raises:
     _assert_refused("--serial")
 
 
-def test_refuse_json() raises:
-    _assert_refused("--json")
+def test_json_dash_is_served_and_sets_stdout_destination() raises:
+    # `--json -` is now served: the stream destination is stdout (`-`).
+    var argv: List[String] = ["--json", "-"]
+    var r = parse_args(argv)
+    assert_equal(r.config.json_dest, "-")
+
+
+def test_json_path_is_served_when_parent_exists() raises:
+    # A PATH whose parent directory exists parses cleanly.
+    var argv: List[String] = ["--json", "tests/out.ndjson"]
+    var r = parse_args(argv)
+    assert_equal(r.config.json_dest, "tests/out.ndjson")
+
+
+def test_json_bare_filename_is_served() raises:
+    # A bare filename (no directory part) targets the current directory.
+    var argv: List[String] = ["--json", "out.ndjson"]
+    var r = parse_args(argv)
+    assert_equal(r.config.json_dest, "out.ndjson")
+
+
+def test_json_default_is_absent() raises:
+    var argv: List[String] = ["tests/"]
+    var r = parse_args(argv)
+    assert_equal(r.config.json_dest, "")
+
+
+def test_json_empty_value_is_usage_error() raises:
+    var argv: List[String] = ["--json", ""]
+    with assert_raises(contains="--json"):
+        _ = parse_args(argv)
+
+
+def test_json_nonexistent_parent_is_usage_error() raises:
+    var argv: List[String] = ["--json", "/no/such/dir/out.ndjson"]
+    with assert_raises(contains="--json"):
+        _ = parse_args(argv)
 
 
 def test_collect_only_is_served_and_sets_collect_mode() raises:

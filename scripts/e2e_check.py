@@ -43,7 +43,9 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
+import json_stream_check
 import main_open_check
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1841,9 +1843,10 @@ def s_usage_refusals(manifest: dict) -> str:
     collect mode: a listing is not a run, so every served run-only flag
     (--maxfail, -x/--exitfirst, --gate, -s/--show-output) is refused with exit 4,
     while --timeout is NOT refused (it bounds the probes). Separately,
-    --serial/--json are part of the v1 contract but not served by this build, so
-    each fires the standard availability refusal (exit 4, the flag named on
-    stderr) regardless of subcommand."""
+    --serial is part of the v1 contract but not served by this build, so it
+    fires the standard availability refusal (exit 4, the flag named on
+    stderr) regardless of subcommand. (--json is now SERVED — its destination
+    taxonomy is proven by s_json_destination_taxonomy, not here.)"""
     run = run_mtest(
         ["collect", "--maxfail", "1", "e2e/matrix"], timeout=SHORT_TIMEOUT
     )
@@ -1909,43 +1912,9 @@ def s_usage_refusals(manifest: dict) -> str:
         f"a usage error must print no listing to stdout, got:\n{serial.stdout!r}",
     )
 
-    json_path = run_mtest(
-        ["--json", "out.json", "e2e/matrix"], timeout=SHORT_TIMEOUT
-    )
-    expect_exit(json_path, 4)
-    expect(
-        "--json" in json_path.stderr,
-        f"--json did not name itself on stderr:\n{json_path.stderr}",
-    )
-    expect(
-        "not available in this build" in json_path.stderr,
-        f"--json did not fire the availability refusal:\n{json_path.stderr}",
-    )
-    expect(
-        json_path.stdout == "",
-        f"a usage error must print no listing to stdout, got:\n{json_path.stdout!r}",
-    )
-
-    json_stdout = run_mtest(
-        ["--json", "-", "e2e/matrix"], timeout=SHORT_TIMEOUT
-    )
-    expect_exit(json_stdout, 4)
-    expect(
-        "--json" in json_stdout.stderr,
-        f"--json - did not name itself on stderr:\n{json_stdout.stderr}",
-    )
-    expect(
-        "not available in this build" in json_stdout.stderr,
-        f"--json - did not fire the availability refusal:\n{json_stdout.stderr}",
-    )
-    expect(
-        json_stdout.stdout == "",
-        f"a usage error must print no listing to stdout, got:\n{json_stdout.stdout!r}",
-    )
-
     return (
         "run-only flags (--maxfail, --gate, -s) + collect -> exit 4 on "
-        "stderr, no listing; --serial/--json -> exit 4 availability refusal"
+        "stderr, no listing; --serial -> exit 4 availability refusal"
     )
 
 
@@ -2364,6 +2333,273 @@ def _bootstrap_build_bin() -> int | None:
     return None
 
 
+def _looks_like_stream_line(line: str) -> bool:
+    """Whether a line is an NDJSON event record (starts a JSON object)."""
+    return line.startswith('{"event":')
+
+
+def s_json_forward_compat(manifest: dict) -> str:
+    """The strict consumer is the ORACLE, and it honors the ignore-unknowns
+    obligation: a forward-compat fixture with unknown fields AND an unknown event
+    kind is ACCEPTED, a torn tail is classified as truncation (not corruption),
+    and a corrupt committed line / duplicate key / non-finite token is REJECTED.
+    Runs the consumer's own fixture self-test so the versioning contract is gated.
+    """
+    rc = json_stream_check.main(["json_stream_check.py"])
+    expect(rc == 0, "the strict-consumer fixture self-test failed")
+    # Independently reconfirm the ignore-unknowns acceptance here.
+    fc = (json_stream_check.FIXTURE_DIR / "forward_compat.ndjson").read_text()
+    report = json_stream_check.parse_stream(fc)
+    expect(report.version == 1, "forward-compat header version was not 1")
+    expect(report.terminal is not None, "forward-compat terminal was dropped")
+    expect(
+        any(r.get("event") == "quantum_flux" for r in report.records),
+        "the unknown event kind was not accepted by the strict consumer",
+    )
+    return "strict consumer accepts unknown fields+kinds; rejects corruption"
+
+
+def s_json_purity(manifest: dict) -> str:
+    """`--json -` makes stdout the BYTE-PURE event stream and relocates the whole
+    console to stderr. Every stdout byte is a stream line the strict consumer
+    accepts (header first, exactly one terminal, exit_code == the real exit); the
+    human summary band lives on stderr, and NOT one stream line leaks to stderr
+    nor one console byte to stdout."""
+    run = run_mtest(["e2e/suite", "--json", "-"])
+    # stdout is the stream: strictly consumable, header + single terminal.
+    report = json_stream_check.parse_stream(run.stdout)
+    expect(report.version == 1, "stream header version was not 1 on stdout")
+    expect(report.terminal is not None, "stream carried no terminal record")
+    expect(
+        report.exit_code == run.returncode,
+        f"terminal exit_code {report.exit_code} != process exit {run.returncode}",
+    )
+    expect(not report.torn_tail, "a completed run's stream must not be torn")
+    # PURITY: stdout carries ONLY stream lines (no human summary band).
+    expect(
+        SUMMARY_RE.search(run.stdout) is None,
+        "the human summary band leaked onto the byte-pure stream (stdout)",
+    )
+    # The console relocated WHOLE to stderr: the summary band is there.
+    expect(
+        SUMMARY_RE.search(run.stderr) is not None,
+        f"the console summary band is not on stderr under --json -:\n{run.stderr}",
+    )
+    # No stream line leaked to stderr.
+    stray = [ln for ln in run.stderr.splitlines() if _looks_like_stream_line(ln)]
+    expect(not stray, f"stream lines leaked onto stderr (console fd): {stray[:2]}")
+    return f"stdout byte-pure ({report.line_count if hasattr(report,'line_count') else len(report.records)} records); console on stderr; exit {run.returncode}"
+
+
+def s_json_color_on_relocated_stderr(manifest: dict) -> str:
+    """`--color auto` decides against the console's RESOLVED destination. Under
+    `--json -` with stdout PIPED (never a tty) and stderr on a real PTY, the
+    console lives on stderr, so color renders on STDERR (the tty-probe's
+    PTY-positive oracle) while the byte-pure stream on stdout stays free of ANSI.
+    """
+    if not os.path.exists(MTEST):
+        raise ScenarioError(f"binary not found at {MTEST}; run `pixi run build-bin`")
+    argv = [MTEST, "e2e/suite/test_failing.mojo", "--json", "-", "--color", "auto"]
+    stdout_r, stdout_w = os.pipe()
+    master_fd, slave_fd = pty.openpty()
+    env = dict(os.environ)
+    env.pop("NO_COLOR", None)  # AUTO must be free to colorize a tty
+    proc = subprocess.Popen(
+        argv,
+        cwd=REPO_ROOT,
+        stdout=stdout_w,
+        stderr=slave_fd,
+        env=env,
+        start_new_session=True,
+    )
+    os.close(stdout_w)
+    os.close(slave_fd)
+    stream_bytes = bytearray()
+    console_bytes = bytearray()
+    deadline = time.monotonic() + SHORT_TIMEOUT
+    open_fds = {stdout_r, master_fd}
+    try:
+        while open_fds:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _kill_group(proc)
+                raise ScenarioError("color-pty scenario timed out")
+            ready, _, _ = select.select(list(open_fds), [], [], remaining)
+            for fd in ready:
+                try:
+                    chunk = os.read(fd, 4096)
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    open_fds.discard(fd)
+                    continue
+                (stream_bytes if fd == stdout_r else console_bytes).extend(chunk)
+    finally:
+        os.close(stdout_r)
+        os.close(master_fd)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _kill_group(proc)
+            proc.wait(timeout=5)
+    esc = b"\x1b["
+    expect(
+        esc in console_bytes,
+        "no ANSI color on the relocated stderr console under --color auto + a "
+        "stderr PTY (the stderr tty-probe positive case regressed)",
+    )
+    expect(
+        esc not in stream_bytes,
+        "ANSI color leaked onto the byte-pure --json - stream (stdout)",
+    )
+    # The stream is still strictly consumable (decoded lenient of the final tail).
+    report = json_stream_check.parse_stream(
+        stream_bytes.decode("utf-8", "replace")
+    )
+    expect(report.version == 1, "the stream header regressed under the color case")
+    return "color renders on the relocated stderr; stream on stdout stays ANSI-free"
+
+
+def s_json_destination_taxonomy(manifest: dict) -> str:
+    """The destination taxonomy split. A SYNTACTIC badness is a parse-time usage
+    error (exit 4) BEFORE any build: an empty value, and a nonexistent parent
+    directory. A RUNTIME open failure (the path is an existing directory, so
+    open fails EISDIR at session start) is a pre-run internal error (exit 3)."""
+    empty = run_mtest(["e2e/suite", "--json", ""])
+    expect_exit(empty, 4)
+    expect(
+        "--json" in empty.stderr,
+        f"empty --json value did not name the flag:\n{empty.stderr}",
+    )
+    bad_parent = run_mtest(["e2e/suite", "--json", "/no/such/dir/out.ndjson"])
+    expect_exit(bad_parent, 4)
+    # Exit 4 is decided BEFORE any build: no verdict/summary band was produced.
+    expect(
+        SUMMARY_RE.search(bad_parent.stdout + bad_parent.stderr) is None,
+        "a syntactic --json usage error ran the session instead of failing pre-run",
+    )
+    # Runtime open failure: an existing directory as the destination -> EISDIR.
+    runtime = run_mtest(["e2e/suite/test_passing.mojo", "--json", "e2e"])
+    expect_exit(runtime, 3)
+    expect(
+        "internal error" in runtime.stderr.lower(),
+        f"a runtime --json open failure was not an internal error:\n{runtime.stderr}",
+    )
+    return "empty->4, bad-parent->4 (pre-build), existing-dir open->3 (session-start)"
+
+
+def s_json_truncation_interrupt(manifest: dict) -> str:
+    """Truncation trio (1/3): an INTERRUPTED run ends the stream WITH its terminal
+    record and exit_code 2. The session fires SessionFinished on interrupt; the
+    file destination is alive, so the terminal record is committed."""
+    stream_path = os.path.join(tempfile.mkdtemp(), "interrupt.ndjson")
+    argv = [MTEST, "e2e/slow", "--json", stream_path]
+    proc = subprocess.Popen(
+        argv, cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, start_new_session=True,
+    )
+    pgid = os.getpgid(proc.pid)
+    try:
+        time.sleep(8.0)
+        expect(proc.poll() is None, "mtest exited before it could be interrupted")
+        os.killpg(pgid, signal.SIGINT)
+        try:
+            proc.communicate(timeout=60.0)
+        except subprocess.TimeoutExpired:
+            _kill_group(proc)
+            proc.communicate()
+            raise ScenarioError("mtest did not exit within the guard after SIGINT")
+    finally:
+        if proc.poll() is None:
+            _kill_group(proc)
+    expect(proc.returncode == 2, f"expected exit 2 on interrupt, got {proc.returncode}")
+    text = Path(stream_path).read_text()
+    report = json_stream_check.parse_stream(text)
+    expect(report.terminal is not None, "interrupted stream carried no terminal record")
+    expect(
+        report.exit_code == 2,
+        f"interrupted terminal exit_code was {report.exit_code}, want 2",
+    )
+    return "interrupt: stream ends WITH terminal record, exit_code 2"
+
+
+def s_json_truncation_sigkill(manifest: dict) -> str:
+    """Truncation trio (2/3): a SIGKILLed mtest leaves COMPLETE lines and at most
+    one torn tail — never corruption — and NO terminal record. The absence of the
+    terminal is the truncation signal."""
+    stream_path = os.path.join(tempfile.mkdtemp(), "sigkill.ndjson")
+    argv = [MTEST, "e2e/slow", "--json", stream_path]
+    proc = subprocess.Popen(
+        argv, cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, start_new_session=True,
+    )
+    pgid = os.getpgid(proc.pid)
+    try:
+        time.sleep(8.0)
+        expect(proc.poll() is None, "mtest exited before it could be killed")
+        os.killpg(pgid, signal.SIGKILL)
+        proc.communicate(timeout=30.0)
+    finally:
+        if proc.poll() is None:
+            _kill_group(proc)
+    text = Path(stream_path).read_text()
+    # parse_stream RAISES on corruption; a clean parse proves complete lines +
+    # at most one torn tail.
+    report = json_stream_check.parse_stream(text)
+    expect(
+        report.terminal is None,
+        "a SIGKILLed run produced a terminal record — it could not have finalized",
+    )
+    return "sigkill: complete lines + at most one torn tail; no terminal record"
+
+
+def s_json_truncation_dead_pipe(manifest: dict) -> str:
+    """Truncation trio (3/3): `mtest --json - | head` — a consumer that closes the
+    pipe early. SIGPIPE is ignored, so the reporter's write returns EPIPE and
+    latches a FATAL ABORT: mtest neither dies at 141 nor runs to completion — it
+    exits 3, with no orphaned children. What the reader DID get is complete lines
+    plus at most one torn tail."""
+    if not os.path.exists(MTEST):
+        raise ScenarioError(f"binary not found at {MTEST}; run `pixi run build-bin`")
+    argv = [MTEST, "e2e/suite", "--json", "-"]
+    proc = subprocess.Popen(
+        argv, cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    pgid = os.getpgid(proc.pid)
+    got = bytearray()
+    try:
+        # Read a little (the header block), then close the read end — a `head`.
+        assert proc.stdout is not None
+        got.extend(proc.stdout.read(64))
+        proc.stdout.close()
+        try:
+            proc.wait(timeout=DEFAULT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            _kill_group(proc)
+            proc.wait()
+            raise ScenarioError("mtest did not exit after its stream pipe closed")
+    finally:
+        if proc.poll() is None:
+            _kill_group(proc)
+    expect(
+        proc.returncode == 3,
+        f"a dead --json - pipe must be a fatal abort exit 3, got "
+        f"{proc.returncode} (141 would mean SIGPIPE was NOT ignored)",
+    )
+    # What the reader received parses as complete lines + at most one torn tail.
+    json_stream_check.parse_stream(got.decode("utf-8", "replace"), require_header=False)
+    # No orphaned process group.
+    time.sleep(0.5)
+    orphan = True
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        orphan = False
+    expect(not orphan, f"process group {pgid} still alive after fatal abort (orphan)")
+    return "dead pipe: fatal abort exit 3 (not 141), no orphan, clean partial stream"
+
+
 # The scenario table, in run order. The single source of truth for what the gate
 # runs: `main` dispatches over it and `s_resilience_matrix` checks the kill/
 # timeout/crash coverage table against it, so a scenario can never be classified
@@ -2411,6 +2647,13 @@ SCENARIOS = [
     ("internal-error", s_internal_error),
     ("runtime-open-failure", s_runtime_open_failure),
     ("interrupt", s_interrupt),
+    ("json-forward-compat", s_json_forward_compat),
+    ("json-purity", s_json_purity),
+    ("json-color-relocated-stderr", s_json_color_on_relocated_stderr),
+    ("json-destination-taxonomy", s_json_destination_taxonomy),
+    ("json-truncation-interrupt", s_json_truncation_interrupt),
+    ("json-truncation-sigkill", s_json_truncation_sigkill),
+    ("json-truncation-dead-pipe", s_json_truncation_dead_pipe),
 ]
 
 

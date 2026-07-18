@@ -73,7 +73,7 @@ from mtest.protocol import (
     collection_disqualifier,
     collection_names,
 )
-from mtest.report import CompositeReporter, Reporter
+from mtest.report import CompositeReporter, JsonStreamReporter, Reporter
 from mtest.select import (
     FileIntent,
     NamedTarget,
@@ -3219,8 +3219,33 @@ def _run_crash_attribution[
             return
 
 
+def _stream_failed[
+    stream_index: Int, *Rs: Reporter
+](ref reporter: CompositeReporter[*Rs]) -> Bool:
+    """Whether the stream reporter at `stream_index` has latched a write failure.
+
+    The composition order is FIXED by the caller (`main` builds the reporter
+    tuple as `(console, json_stream)`), so `stream_index` names WHICH tuple
+    element is the concrete `JsonStreamReporter`. A comptime-known index recovers
+    that element by reference; a `rebind` through a pointer reads its concrete
+    `status()` — the call goes through the CONCRETE tuple element, never through
+    the trait pack, so `CompositeReporter`, the `Reporter` trait, and `handle`
+    stay untouched. `stream_index < 0` means no stream reporter is composed (the
+    session's own test drivers, which pass a bare recording composite): the
+    comptime branch is elided, so those composites need no `status()` at all.
+    """
+    comptime if stream_index >= 0:
+        ref element = reporter.reporters[stream_index]
+        var probe = rebind[Pointer[JsonStreamReporter, origin_of(element)]](
+            Pointer(to=element)
+        )
+        return probe[].status().failed
+    else:
+        return False
+
+
 def run_session[
-    *Rs: Reporter
+    stream_index: Int = -1, *Rs: Reporter
 ](
     mut runtime: ExecRuntime,
     config: RunnerConfig,
@@ -3242,8 +3267,18 @@ def run_session[
         reporter: The composed reporters the session fans every event to.
 
     Returns:
-        The resolved exit code: 2 on interrupt, 3 on an internal error, 1 on a
+        The resolved exit code: 2 on interrupt, 3 on an internal error or a
+        latched machine-stream failure (a dead `--json` destination), 1 on a
         precompile failure, else `exit_code_for` over the run outcomes (1/5/0).
+
+    Parameters:
+        stream_index: The fixed tuple position of the composed
+            `JsonStreamReporter`, or `-1` (the default) when no stream reporter
+            is composed. When non-negative the session polls that reporter's
+            latch at each scheduling boundary and treats a write failure as a
+            fatal abort; when `-1` the poll is a comptime no-op.
+        Rs: The reporter pack composed into `reporter`, inferred from the
+            argument.
 
     Raises:
         Error: a `discover:` usage error only; every other failure is caught and
@@ -3310,6 +3345,12 @@ def run_session[
     var internal_error = False
     var precompile_failed = False
     var drift = False
+    # A latched machine-stream write failure (a dead `--json -` pipe, a full or
+    # unwritable destination) is a FATAL ABORT: the run's product is no longer
+    # deliverable, so the session stops scheduling and resolves exit 3. It is
+    # polled at each scheduling boundary (like `interrupt_requested`); the poll
+    # is a comptime no-op when no stream reporter is composed.
+    var stream_dead = _stream_failed[stream_index](reporter)
     # The registry the selection/collect probe machinery records builds and
     # qualifying listings into. The plain run loop keeps no entry here — it never
     # probes — so the attribution post-pass falls back to a fresh probe for its
@@ -3330,6 +3371,9 @@ def run_session[
     for pc in config.precompiles:
         if interrupt_requested():
             interrupted = True
+            break
+        if _stream_failed[stream_index](reporter):
+            stream_dead = True
             break
         try:
             var pr = _run_precompile(
@@ -3376,13 +3420,18 @@ def run_session[
             break
 
     var gate_abort = False
-    var proceed = not (interrupted or internal_error or precompile_failed)
+    var proceed = not (
+        interrupted or internal_error or precompile_failed or stream_dead
+    )
 
     # Gates first: a failing gate aborts the whole session immediately.
     if proceed:
         for gi in range(len(disc.gate_files)):
             if interrupt_requested():
                 interrupted = True
+                break
+            if _stream_failed[stream_index](reporter):
+                stream_dead = True
                 break
             reporter.handle(Event.file_started(disc.gate_files[gi]))
             try:
@@ -3425,7 +3474,11 @@ def run_session[
                 break
 
     var proceed_runs = not (
-        interrupted or internal_error or precompile_failed or gate_abort
+        interrupted
+        or internal_error
+        or precompile_failed
+        or gate_abort
+        or stream_dead
     )
 
     # SELECTION is active when any operand is a node id or `-k` is present.
@@ -3467,6 +3520,9 @@ def run_session[
         for ri in range(len(disc.run_files)):
             if interrupt_requested():
                 interrupted = True
+                break
+            if _stream_failed[stream_index](reporter):
+                stream_dead = True
                 break
             reporter.handle(Event.file_started(disc.run_files[ri]))
             try:
@@ -3521,13 +3577,25 @@ def run_session[
     var not_run = selected - ran_files
     summary.counts[Outcome.NOT_RUN.code] += not_run
 
-    # Exit-code precedence (high to low): interrupt (2), internal error (3) and
-    # drift (3, the same tier), precompile failure (1), else the pure
-    # `exit_code_for` over the run outcomes at TEST granularity (1/5/0).
+    # A stream failure that latched during the run loop (not caught at a
+    # scheduling boundary because it tripped on the final file's own events) is
+    # picked up here so a dead pipe on the last file still resolves to the fatal
+    # exit 3 rather than the run's own code.
+    if _stream_failed[stream_index](reporter):
+        stream_dead = True
+
+    # Exit-code precedence (high to low): interrupt (2), then the exit-3 tier —
+    # an internal error, a latched machine-stream failure (a dead `--json`
+    # destination is a fatal abort), and protocol drift — then a precompile
+    # failure (1), else the pure `exit_code_for` over the run outcomes at TEST
+    # granularity (1/5/0). A stream death outranks a mere failing run: the run's
+    # product could not be delivered, so its 1/5/0 verdict is not authoritative.
     var code: Int
     if interrupted:
         code = 2
     elif internal_error:
+        code = 3
+    elif stream_dead:
         code = 3
     elif drift:
         code = 3
@@ -3545,7 +3613,9 @@ def run_session[
     # is skipped under an interrupt: exit 2 must not wait on diagnostics. A raise
     # out of it would be a machinery failure AFTER the run is decided, so it is
     # caught and dropped rather than allowed to rewrite a settled exit code.
-    if not interrupted:
+    # Skipped under a stream death for the same reason as under interrupt: a
+    # fatal abort must not spend time on diagnostics whose consumer is gone.
+    if not interrupted and not stream_dead:
         try:
             _run_crash_attribution(
                 runtime, config, root, crash_files, reg, reporter
@@ -3574,7 +3644,7 @@ def run_session[
 
 
 def run_session[
-    *Rs: Reporter
+    stream_index: Int = -1, *Rs: Reporter
 ](
     config: RunnerConfig, root: String, mut reporter: CompositeReporter[*Rs]
 ) raises -> Int:
@@ -3584,11 +3654,12 @@ def run_session[
     open failures map to internal exit 3 before session error handling.
     This convenience overload preserves the session test/library surface while
     still passing exclusive mutable ownership to every supervised child.
+    `stream_index` forwards to the primary overload (see it for the meaning).
     """
     var runtime = ExecRuntime()
     try:
         runtime.open()
-        var code = run_session(runtime, config, root, reporter)
+        var code = run_session[stream_index](runtime, config, root, reporter)
         runtime.close()
         return code
     except error:

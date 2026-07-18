@@ -248,8 +248,8 @@ Mirrors pytest, and is **FROZEN**:
 | 0 | the session ran; every selected test's outcome is PASS or SKIP (exclusions allowed) |
 | 1 | at least one selected outcome is FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, or PRECOMPILE-ERROR |
 | 2 | interrupted (SIGINT/SIGTERM); a partial summary is printed |
-| 3 | internal `mtest` error — including protocol drift (a report present but off-grammar) |
-| 4 | CLI usage error (unknown flag, bad value, nonexistent path, unknown node id, forbidden build argument) — detected **before any test runs** |
+| 3 | internal `mtest` error — including protocol drift (a report present but off-grammar), and an environment/I-O failure such as a runtime report-destination open/write failure (a `--json` destination that cannot be opened at session start, or whose stream write later fails — a fatal abort) |
+| 4 | CLI usage error (unknown flag, bad value, nonexistent path, unknown node id, forbidden build argument, a syntactically invalid `--json` report destination — an empty value or a nonexistent parent directory) — detected **before any test runs** |
 | 5 | no tests collected (empty walk, `-k` matched nothing, everything excluded) |
 
 **Precedence** when outcomes mix. A usage error aborts before the run with 4.
@@ -406,6 +406,13 @@ Child stdout and stderr are captured separately and byte-exactly.
 wins over it. The console summary is ordered deterministically (§17), not by
 completion order. Console text layout and color are **informal** and may change.
 
+**Console destination.** The console writes to **stdout** by default, and to
+**stderr** when `--json -` owns stdout for the byte-pure event stream (§15.4) —
+one resolved destination through which every console byte flows, so a `--json -`
+run's stdout carries only stream lines. `--color auto` decides against that
+**resolved** destination: stdout's terminal-ness normally, stderr's when the
+console is relocated there.
+
 There is **no live progress counter** in this build (a running `k/n` line, which
 arrives with the worker pool); a file's result prints when the file finishes, and
 the summary band, the slowest-files list, and the failure detail (per-attempt
@@ -469,17 +476,53 @@ vocabulary, total:
   length-bounded. User-controlled paths, names, and assertion text are never
   interpolated raw into a workflow command.
 
-### 15.4 Machine event stream — `--json PATH|-` (not yet served)
+### 15.4 Machine event stream — `--json PATH|-`
 
-`--json` is part of the frozen v1 contract but **not yet served**: the parser
-recognizes the spelling and its arity, but this build refuses it before any
-test runs (§24). Its intended shape is a newline-delimited stream of the
-runner's own typed events — the same events the console and JUnit reporters
-already consume internally — written to `PATH`, or to stdout when the value
-is `-`. `--json` is a **run-only** flag in v1 (§4). This gives CI systems and
-other tooling a stable machine artifact for the full event timeline without
-depending on the informal console text (§15.1) or on a separate plugin
-mechanism.
+`--json` is **served**: it writes a newline-delimited stream of the runner's own
+typed events — the same events the console reporter consumes — to `PATH`, or to
+stdout when the value is `-`. `docs/json-stream.md` is the **normative** spec;
+this section summarizes it.
+
+- **Framing and header.** NDJSON: one complete JSON object per `\n`-terminated
+  line, valid escaped UTF-8, no floats (`Infinity`/`-Infinity`/`NaN` never
+  appear). Line 1 is the frozen header `{"event":"stream","version":1,
+  "generator":"mtest <version>"}`.
+- **Events.** The stream mirrors every session event the console reporter sees,
+  with the `progress` kind **excluded** (there is no live progress in this build,
+  §15.1). Each record mirrors the model's payload 1:1 under its own field names.
+- **`*_us` durations.** The sole naming exception: every `*_seconds` duration is
+  emitted as an integer-microsecond `*_us` field, so the stream carries no
+  floating-point value.
+- **Ordering.** An informal timeline with frozen split invariants: per session,
+  header → `session_started` → precompile records → per-file events →
+  `crash_attribution` → `session_finished` last; per file, contiguous
+  `test_reported` rows and monotonic `attempt_finished` records precede that
+  file's `file_finished`.
+- **Terminal.** Exactly one `session_finished` is dispatched in every scenario
+  (normal, interrupt, fatal abort), carrying the final `exit_code`. The stream
+  therefore carries zero-or-one terminal record: its **absence** (or a torn final
+  fragment) is the truncation signal.
+- **Determinism.** Two runs of the same inputs are equal under a closed
+  projection (outcomes, per-test sets, counts, dispositions, flags, casualty
+  lists, totals, exit code); the byte-payload fields with their omission metadata
+  and every measured `*_us` duration are excluded from that comparison.
+- **Writes and SIGPIPE.** Each line is drained through a `write_all` loop, so a
+  cut stream leaves complete lines plus at most one torn final fragment. SIGPIPE
+  is ignored for the run; a latched stream-write failure (a `--json -` consumer
+  that closed early, a full or unwritable destination) is a **fatal abort** to
+  exit 3, never death at 141.
+- **Destinations.** `-` makes stdout the byte-pure stream (the console relocates
+  to stderr, §15.1). A `PATH` is written live and a pre-existing file is
+  **overwritten** at session start (a live stream cannot rename atomically, so
+  this differs from JUnit's atomic write, §15.2); report destinations are not
+  root-constrained. A syntactically bad destination is a pre-run usage error
+  (exit 4, §9); a runtime open failure is a pre-run internal error (exit 3, §9).
+- **Versioning.** Version 1 freezes the framing, header, event names, field
+  meanings, and vocabularies. Growth is additive (new fields and kinds);
+  consumers **must ignore** unknown fields and kinds. A removal or
+  meaning-change bumps the header version; the version lives only on the header.
+
+`--json` is a **run-only** flag in v1 (§4).
 
 ---
 
@@ -678,14 +721,15 @@ above — it only reports which of those surfaces are wired up yet.
 `--shard`, `--gate`, `-s`/`--show-output`, `--durations`, `-q`/`-v`, `--color`,
 `-h`/`--help`, `--version`, and the `run`, `collect`, `version`, and `help`
 subcommands (`--collect-only` too, as an alias that behaves as `collect`).
-`--shard` applies under both `run` and `collect`.
+`--shard` applies under both `run` and `collect`. `--json` (the machine event
+stream, §15.4) is served too — see §24.2 for how it is now reached.
 
 **Still refused**: `-n`/`--workers`, `--junit-xml`, `--gh-annotations`,
-`--serial`, `--json`. Each is recognized by the parser — it knows the spelling
+`--serial`. Each is recognized by the parser — it knows the spelling
 and its arity — but is **refused before any test runs**, with a usage error
 that names the flag, states that it is part of the v1 contract, names the
 capability that brings it (`-n`/`--workers` arrive with parallel workers;
-`--junit-xml`, `--gh-annotations`, and `--json` arrive with machine report
+`--junit-xml` and `--gh-annotations` arrive with machine report
 artifacts and CI annotations; `--serial` arrives with serial execution
 pinning), and lists what this build does serve.
 
@@ -716,10 +760,22 @@ today.
   process group is cleaned up. The parallel-workers interrupt story arrives
   with parallel workers.
 - **3** — reachable via a spawn failure (the runner could not spawn `mojo` or
-  a built binary) and via protocol drift (a report present but off-grammar,
-  §6), in both `run` and `collect`.
-- **4** — reachable for every frozen cause in §9, plus the transitional
-  not-yet-available-flag refusal subcase in §24.1 above.
+  a built binary), via protocol drift (a report present but off-grammar,
+  §6) in both `run` and `collect`, and via a runtime `--json`
+  report-destination failure (§9): the destination could not be opened at
+  session start, or a stream write later failed (a dead `--json -` pipe, a full
+  or unwritable file) and the run was fatally aborted.
+- **4** — reachable for every frozen cause in §9 — now including a syntactically
+  invalid `--json` destination (an empty value or a nonexistent parent
+  directory), detected pre-run — plus the transitional not-yet-available-flag
+  refusal subcase in §24.1 above.
+
+**`--json` reachability.** `--json PATH|-` is served (§15.4): it is parsed into a
+live event-stream reporter composed beside the console. Its destination is
+validated syntactically at parse time (exit 4 on an empty value or a nonexistent
+parent directory) and opened at session start (exit 3 on a runtime open failure);
+a stream write that fails mid-run is a fatal abort to exit 3. The §9 causes are
+cited here, never restated.
 - **5** — reachable via an empty walk, via the everything-excluded case, and
   via deselection (`-k` matched nothing, §9).
 

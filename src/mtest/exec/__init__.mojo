@@ -18,5 +18,5 @@ from mtest.exec.signals import (
     ExecRuntime,
     interrupt_requested,
 )
-from mtest.exec.tty import stdout_isatty
+from mtest.exec.tty import stderr_isatty, stdout_isatty
 from mtest.exec.fs import rename_path

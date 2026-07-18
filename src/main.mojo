@@ -4,10 +4,13 @@
 the terminal, and calls `exit`. It parses argv, prints help or the version to
 stdout and exits 0, prints a usage error to stderr and exits 4 (the one stated
 exception to the event seam — a pre-session usage error has no reporter to route
-through), resolves the console's color inputs, constructs the exec runtime,
-wraps a `ConsoleReporter` in a one-element `CompositeReporter` (the type the
-session drives), runs the session, flushes the console's rendered buffer to
-stdout, and exits with the session's resolved code.
+through), resolves the console's color inputs, constructs the exec runtime, resolves the
+machine-stream destination (`--json`) and, with it, the console's own
+destination, composes a `ConsoleReporter` and a `JsonStreamReporter` into a
+fixed-order `CompositeReporter` (the type the session drives), runs the session,
+flushes the console's rendered buffer to its resolved descriptor (stdout, or
+stderr under `--json -` so stdout carries only the byte-pure stream), and exits
+with the session's resolved code.
 
 It stays THIN: every decision it makes is delegated. The parser resolves the
 config (including the mojo path); the console resolves color from the inputs main
@@ -28,8 +31,14 @@ from mtest.cli import (
     parse_args,
     version_text,
 )
-from mtest.exec import ExecRuntime, stdout_isatty
-from mtest.report import CompositeReporter, ConsoleReporter
+from mtest.exec import ExecRuntime, stderr_isatty, stdout_isatty
+from mtest.report import (
+    CompositeReporter,
+    ConsoleReporter,
+    JsonStreamReporter,
+    close_json_fd,
+    open_json_fd,
+)
 from mtest.session import CollectResult, run_collect, run_session
 
 
@@ -146,33 +155,78 @@ def main():
             exit(3)
         exit(collected.code)
 
+    # Resolve the machine-stream destination and, with it, the console's own
+    # destination. Under `--json -` the stream OWNS stdout (byte-pure), so the
+    # whole console relocates to stderr; `--json PATH` streams to the file and
+    # leaves the console on stdout. `--color auto` then decides against the
+    # console's RESOLVED descriptor — stderr's TTY-ness when relocated, stdout's
+    # otherwise — because color is a property of where the human text lands.
+    var console_fd = 1
+    var json_fd = -1
+    var json_active = False
+    var json_owns_fd = False
+    if config.json_dest == "-":
+        json_fd = 1
+        json_active = True
+        console_fd = 2
+    elif config.json_dest != "":
+        # Open the destination at session start. A runtime open failure
+        # (permissions, a missing parent that slipped past parse-time
+        # validation, descriptor exhaustion) is a pre-run internal error: exit 3.
+        try:
+            json_fd = open_json_fd(config.json_dest)
+        except open_error:
+            if not _close_runtime(runtime):
+                exit(3)
+            _eprintln("mtest: internal error: " + String(open_error))
+            exit(3)
+            return
+        json_active = True
+        json_owns_fd = True
+
+    var console_is_tty = stderr_isatty() if console_fd == 2 else stdout_isatty()
     var build_flags = build_flags_string(config)
     var console = ConsoleReporter(
         MTEST_VERSION,
         config.color,
-        stdout_isatty(),
+        console_is_tty,
         _no_color_set(),
         config.verbosity,
         config.show_output,
         build_flags^,
         config.durations,
     )
-    var comp = CompositeReporter(Tuple(console^))
+    # A fixed composition ORDER: index 0 is the console, index 1 the machine
+    # stream (inert when `--json` is absent). The session polls index 1's latch
+    # by that fixed position — `run_session[1]` below names it.
+    var stream = JsonStreamReporter(json_fd, MTEST_VERSION, json_active)
+    var comp = CompositeReporter(Tuple(console^, stream^))
 
     var code = 0
     try:
-        code = run_session(runtime, config, root, comp)
+        code = run_session[1](runtime, config, root, comp)
     except e:
         # The only raise the session propagates is a discover: usage error;
         # like a cli usage error it exits 4 to stderr.
+        if json_owns_fd:
+            close_json_fd(json_fd)
         if not _close_runtime(runtime):
             exit(3)
         _eprintln(String(e))
         exit(4)
 
     # Flush the console's fully rendered buffer verbatim (it already ends in a
-    # newline), even on an interrupt or partial-summary path.
-    print(comp.reporters[0].output(), end="", flush=True)
+    # newline) to its RESOLVED destination — stdout normally, stderr under
+    # `--json -` so stdout carries only the byte-pure stream. Even on an
+    # interrupt or partial-summary path.
+    print(
+        comp.reporters[0].output(),
+        end="",
+        file=FileDescriptor(console_fd),
+        flush=True,
+    )
+    if json_owns_fd:
+        close_json_fd(json_fd)
     if not _close_runtime(runtime):
         exit(3)
     exit(code)
