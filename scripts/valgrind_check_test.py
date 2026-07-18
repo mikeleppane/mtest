@@ -13,6 +13,14 @@ import valgrind_check
 
 
 class ValgrindCheckTests(unittest.TestCase):
+    def test_prepare_test_scratch_creates_missing_parent_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            scratch = Path(raw_tmp) / "build" / "tests"
+            with patch.object(valgrind_check, "TEST_SCRATCH", scratch):
+                valgrind_check.prepare_test_scratch()
+
+            self.assertTrue(scratch.is_dir())
+
     def test_startup_failure_reports_valgrind_diagnostic(self) -> None:
         result = subprocess.CompletedProcess(
             args=["valgrind"],

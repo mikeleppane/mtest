@@ -15,6 +15,7 @@ import native_abi_check
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "build" / "safety" / "valgrind"
+TEST_SCRATCH = ROOT / "build" / "tests"
 NATIVE_SOURCE = ROOT / "native" / "mtest_exec_native.c"
 NATIVE_OBJECT = OUT / "mtest_exec_native_test.o"
 CONTROL_SOURCE = ROOT / "tests" / "native" / "native_controls.c"
@@ -93,6 +94,11 @@ def clean_environment() -> dict[str, str]:
     env["HOME"] = str(home)
     require(not (ROOT / ".valgrindrc").exists(), "repository .valgrindrc is forbidden")
     return env
+
+
+def prepare_test_scratch() -> None:
+    """Create the scratch tree required by source-built integration suites."""
+    TEST_SCRATCH.mkdir(parents=True, exist_ok=True)
 
 
 def test_count(source: Path) -> int:
@@ -367,6 +373,7 @@ def main() -> int:
     if OUT.exists():
         shutil.rmtree(OUT)
     OUT.mkdir(parents=True)
+    prepare_test_scratch()
     env = clean_environment()
     version = run(["valgrind", "--version"], env=env)
     require(version.returncode == 0, f"cannot execute locked Valgrind:\n{version.stdout}")
