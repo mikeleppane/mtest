@@ -46,6 +46,7 @@ UNIT_SUITES = {
     "test_report_composite.mojo",
     "test_report_console.mojo",
     "test_report_escape.mojo",
+    "test_report_json_stream.mojo",
     "test_report_recording.mojo",
     "test_select_logic.mojo",
     "test_select_operands.mojo",

@@ -20,6 +20,8 @@ The surface:
   text/attribute escaping, GitHub-annotation message/property escaping, and
   the collision-proof stop-commands fencing helper) shared by the machine
   reporters this layer is growing.
+- `json_stream` — the pure NDJSON event serializer (`stream_header` and
+  `serialize_event`): one `Event` to one machine line, plus the stream header.
 
 The public surface is re-exported here so callers write
 `from mtest.report import Reporter, CompositeReporter, ConsoleReporter, ...`.
@@ -40,3 +42,4 @@ from mtest.report.escape import (
     xml_escape_attribute,
     xml_escape_text,
 )
+from mtest.report.json_stream import serialize_event, stream_header
