@@ -16,6 +16,10 @@ The surface:
   version string and the color/verbosity/output config are passed at
   construction (build constants, not session facts).
 - `RecordingReporter` — a stateful test double that records the event stream.
+- `escape` — pure machine-text escaping primitives (JSON string escaping, XML
+  text/attribute escaping, GitHub-annotation message/property escaping, and
+  the collision-proof stop-commands fencing helper) shared by the machine
+  reporters this layer is growing.
 
 The public surface is re-exported here so callers write
 `from mtest.report import Reporter, CompositeReporter, ConsoleReporter, ...`.
@@ -24,3 +28,15 @@ from mtest.report.reporter import Reporter
 from mtest.report.composite import CompositeReporter
 from mtest.report.console import ConsoleReporter
 from mtest.report.recording import RecordingReporter
+from mtest.report.escape import (
+    contains_resume_delimiter,
+    fence_region,
+    gh_escape_message,
+    gh_escape_property,
+    json_escape_string,
+    resume_delimiter,
+    select_collision_free_token,
+    stop_commands_opener,
+    xml_escape_attribute,
+    xml_escape_text,
+)
