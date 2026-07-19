@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -16,6 +17,17 @@ from process_watchdog import TIMEOUT_EXIT_CODE, run_command
 
 PYTHON = sys.executable
 WATCHDOG = Path(__file__).with_name("process_watchdog.py")
+
+
+def _wait_for_paths(paths: tuple[Path, ...], timeout_seconds: float = 3.0) -> None:
+    """Wait until every subprocess marker exists or fail with the missing set."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if all(path.exists() for path in paths):
+            return
+        time.sleep(0.01)
+    missing = [str(path) for path in paths if not path.exists()]
+    raise AssertionError(f"subprocess markers were not created: {missing}")
 
 
 def _run(
@@ -306,6 +318,104 @@ def test_timeout_terminates_the_whole_process_group() -> None:
             raise AssertionError("timeout let the descendant finish after cleanup")
 
 
+def _assert_cancellation_reaches_process_group(signum: int) -> None:
+    """A caller cancellation reaches the leader and its inherited group."""
+    with tempfile.TemporaryDirectory(prefix="mtest-watchdog-") as raw_tmp:
+        tmp = Path(raw_tmp)
+        leader_ready = tmp / "leader-ready"
+        descendant_ready = tmp / "descendant-ready"
+        leader_signal = tmp / "leader-signal"
+        descendant_signal = tmp / "descendant-signal"
+        leader_pid = tmp / "leader-pid"
+        deadline_sentinel = tmp / "deadline-sentinel"
+        deadline_sentinel.touch()
+        actor = tmp / "signal_actor.py"
+        actor.write_text(
+            "\n".join(
+                [
+                    "from pathlib import Path",
+                    "import os",
+                    "import signal",
+                    "import subprocess",
+                    "import sys",
+                    "import time",
+                    "role, ready, received, child_ready, child_received = sys.argv[1:6]",
+                    "signum = int(sys.argv[6])",
+                    "def handle(actual, _frame):",
+                    "    Path(received).write_text(str(actual))",
+                    "    raise SystemExit(0)",
+                    "signal.signal(signum, handle)",
+                    "if role == 'leader':",
+                    "    Path(sys.argv[7]).write_text(str(os.getpid()))",
+                    "    subprocess.Popen([sys.executable, __file__, 'descendant', child_ready, child_received, '', '', str(signum)])",
+                    "Path(ready).write_text('ready')",
+                    "time.sleep(60)",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        watchdog = subprocess.Popen(
+            [
+                PYTHON,
+                str(WATCHDOG),
+                "--source",
+                "tests/unit/test_watchdog.mojo",
+                "--step",
+                "run",
+                "--deadline-sentinel",
+                str(deadline_sentinel),
+                "--",
+                PYTHON,
+                str(actor),
+                "leader",
+                str(leader_ready),
+                str(leader_signal),
+                str(descendant_ready),
+                str(descendant_signal),
+                str(signum),
+                str(leader_pid),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            _wait_for_paths((leader_ready, descendant_ready, leader_pid))
+            os.kill(watchdog.pid, signum)
+            status = watchdog.wait(timeout=8.0)
+            if status != -signum:
+                raise AssertionError(
+                    f"expected watchdog signal {-signum}, got {status}"
+                )
+            _wait_for_paths((leader_signal, descendant_signal))
+            for received in (leader_signal, descendant_signal):
+                actual = received.read_text(encoding="utf-8")
+                if actual != str(signum):
+                    raise AssertionError(
+                        f"process-group member received {actual}, expected {signum}"
+                    )
+            if not deadline_sentinel.exists():
+                raise AssertionError("cancellation removed the deadline sentinel")
+        finally:
+            if watchdog.poll() is None:
+                watchdog.kill()
+                watchdog.wait()
+            if leader_pid.exists():
+                try:
+                    os.killpg(int(leader_pid.read_text(encoding="utf-8")), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+
+def test_sigterm_is_forwarded_to_the_process_group() -> None:
+    """SIGTERM cancellation is preserved and forwarded to every child."""
+    _assert_cancellation_reaches_process_group(signal.SIGTERM)
+
+
+def test_sigint_is_forwarded_to_the_process_group() -> None:
+    """SIGINT cancellation is preserved and forwarded to every child."""
+    _assert_cancellation_reaches_process_group(signal.SIGINT)
+
+
 def main() -> int:
     """Run every watchdog invariant without an external test framework."""
     for test in (
@@ -320,6 +430,8 @@ def main() -> int:
         test_spawn_failure_is_not_a_timeout,
         test_broken_timeout_diagnostic_leaves_the_deadline_sentinel,
         test_timeout_terminates_the_whole_process_group,
+        test_sigterm_is_forwarded_to_the_process_group,
+        test_sigint_is_forwarded_to_the_process_group,
     ):
         test()
     print("process-watchdog: OK")

@@ -17,6 +17,14 @@ from pathlib import Path
 DEFAULT_TIMEOUT_SECONDS = 300.0
 TERMINATION_GRACE_SECONDS = 5.0
 TIMEOUT_EXIT_CODE = 124
+_FORWARDED_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+
+
+class _WatchdogCancellation(BaseException):
+    """Carry one caller cancellation out of the blocking child wait."""
+
+    def __init__(self, signum: int) -> None:
+        self.signum = signum
 
 
 def _terminate_process_group(process: subprocess.Popen[object]) -> None:
@@ -31,6 +39,36 @@ def _terminate_process_group(process: subprocess.Popen[object]) -> None:
     # group. Keep the full grace period, then sweep that group even if the
     # leader has already exited and been reaped.
     time.sleep(TERMINATION_GRACE_SECONDS)
+
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+
+
+def _forward_signal_and_cleanup(
+    process: subprocess.Popen[object], signum: int
+) -> None:
+    """Forward caller cancellation, then force-reap the complete child group."""
+    try:
+        os.killpg(process.pid, signum)
+    except ProcessLookupError:
+        process.wait()
+        return
+
+    deadline = time.monotonic() + TERMINATION_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        # Reap the leader as soon as it exits. Descendants can keep the process
+        # group alive after that point, so group existence remains the cleanup
+        # condition rather than leader status alone.
+        process.poll()
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            process.wait()
+            return
+        time.sleep(0.01)
 
     try:
         os.killpg(process.pid, signal.SIGKILL)
@@ -99,16 +137,53 @@ def run_command(
     _validate_timeout_seconds(timeout_seconds)
     _validate_deadline_sentinel(deadline_sentinel)
 
-    process = subprocess.Popen(command, start_new_session=True)
+    process: subprocess.Popen[object] | None = None
+    pending_signum: int | None = None
+    previous_handlers: dict[int, signal.Handlers] = {}
+    managed_signals = set(_FORWARDED_SIGNALS)
+    previous_mask: set[signal.Signals] | None = None
+
+    def request_cancellation(signum: int, _frame: object) -> None:
+        """Record a spawn-race signal or leave the blocking wait immediately."""
+        nonlocal pending_signum
+        if process is None:
+            if pending_signum is None:
+                pending_signum = signum
+            return
+        raise _WatchdogCancellation(signum)
+
     try:
-        status = process.wait(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        _terminate_process_group(process)
-        _notify_timeout(source, step, timeout_seconds)
-        return TIMEOUT_EXIT_CODE
-    if deadline_sentinel is not None:
-        deadline_sentinel.unlink()
-    return status
+        for signum in _FORWARDED_SIGNALS:
+            previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, request_cancellation)
+        try:
+            process = subprocess.Popen(command, start_new_session=True)
+            if pending_signum is not None:
+                raise _WatchdogCancellation(pending_signum)
+            try:
+                status = process.wait(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                _terminate_process_group(process)
+                _notify_timeout(source, step, timeout_seconds)
+                return TIMEOUT_EXIT_CODE
+            if deadline_sentinel is not None:
+                deadline_sentinel.unlink()
+            return status
+        except _WatchdogCancellation as cancellation:
+            # A Python handler only raises the private control-flow exception.
+            # Block further cancellations while normal code forwards the first
+            # signal, sweeps lingering descendants, and reaps the group leader.
+            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, managed_signals)
+            _forward_signal_and_cleanup(process, cancellation.signum)
+            return -cancellation.signum
+    finally:
+        if previous_mask is None:
+            previous_mask = signal.pthread_sigmask(
+                signal.SIG_BLOCK, managed_signals
+            )
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
