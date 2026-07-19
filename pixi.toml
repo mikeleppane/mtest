@@ -172,6 +172,10 @@ test-direct = "bash scripts/test_all.sh tests/unit tests/integration"
 test-unit = "bash scripts/test_all.sh tests/unit"
 test-integration = "bash scripts/test_all.sh tests/integration"
 
+# Focused stdlib-only proof that the direct-suite watchdog preserves normal
+# statuses and cleans up a timed-out process group.
+process-watchdog-check = "python scripts/process_watchdog_test.py"
+
 # Fast self-tests for repository harness behavior. Uses disposable test inputs
 # and a fake compiler to prove recursive root selection and injective binary
 # paths without rebuilding the full Mojo suite.

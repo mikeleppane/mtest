@@ -236,6 +236,229 @@ out.chmod(out.stat().st_mode | stat.S_IXUSR)
             shutil.rmtree(disposable_outputs, ignore_errors=True)
 
 
+def check_process_watchdog() -> None:
+    """The direct-suite watchdog keeps ordinary exits and bounds hangs."""
+    result = subprocess.run(
+        [sys.executable, "scripts/process_watchdog_test.py"],
+        cwd=REPO_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            f"process watchdog self-test exited {result.returncode}:\n{result.stdout}"
+        )
+    if "process-watchdog: OK" not in result.stdout:
+        raise AssertionError(
+            "process watchdog self-test missed its completion sentinel:\n"
+            f"{result.stdout}"
+        )
+
+
+def _run_direct_runner_failure(
+    mode: str, step: str
+) -> tuple[subprocess.CompletedProcess[str], list[str], str, str, bool]:
+    """Run one disposable direct-suite failure at its build or run boundary."""
+    if mode not in {"ordinary", "timeout", "spawn"}:
+        raise AssertionError(f"unknown direct-runner failure mode: {mode}")
+    if step not in {"build", "run"}:
+        raise AssertionError(f"unknown direct-runner failure step: {step}")
+    tests_dir = REPO_ROOT / "tests"
+    with tempfile.TemporaryDirectory(
+        prefix=".harness-check-", dir=tests_dir
+    ) as raw_tmp:
+        tmp = Path(raw_tmp)
+        root = tmp / f"direct-{mode}-{step}"
+        root.mkdir()
+        failing = root / "test_a_failure.mojo"
+        following = root / "test_z_following.mojo"
+        failing.write_text("# direct-runner failure fixture\n", encoding="utf-8")
+        following.write_text("# direct-runner continuation fixture\n", encoding="utf-8")
+        disposable_outputs = REPO_ROOT / "build" / "tests" / tmp.name
+
+        tools_dir = tmp / "tools"
+        tools_dir.mkdir()
+        log_path = tmp / "mojo-build-log"
+        _write_executable(
+            tools_dir / "python",
+            f"#!/bin/sh\nexec {sys.executable} \"$@\"\n",
+        )
+        fake_mojo = tools_dir / "mojo"
+        _write_executable(
+            fake_mojo,
+            """#!/usr/bin/env python3
+import os
+from pathlib import Path
+import stat
+import sys
+import time
+
+args = sys.argv[1:]
+mode = os.environ["MTEST_DIRECT_FAILURE_MODE"]
+step = os.environ["MTEST_DIRECT_FAILURE_STEP"]
+if args[0] == "precompile":
+    if mode == "spawn" and step == "build":
+        Path(sys.argv[0]).unlink()
+    raise SystemExit(0)
+if args[0] != "build":
+    raise SystemExit(f"unexpected fake mojo command: {args}")
+source = next(arg for arg in args if arg.endswith(".mojo"))
+with open(os.environ["MTEST_FAKE_MOJO_LOG"], "a", encoding="utf-8") as log:
+    log.write(source + "\\n")
+if source.endswith("test_a_failure.mojo") and step == "build":
+    if mode == "ordinary":
+        raise SystemExit(124)
+    if mode == "timeout":
+        time.sleep(60)
+out = Path(args[args.index("-o") + 1])
+out.parent.mkdir(parents=True, exist_ok=True)
+if source.endswith("test_a_failure.mojo") and step == "run" and mode == "ordinary":
+    program = "#!/usr/bin/env bash\\nexit 124\\n"
+elif source.endswith("test_a_failure.mojo") and step == "run" and mode == "timeout":
+    program = "#!/usr/bin/env bash\\nsleep 60\\n"
+elif source.endswith("test_a_failure.mojo") and step == "run" and mode == "spawn":
+    program = "#!/definitely-missing-mtest-interpreter\\n"
+else:
+    program = "#!/usr/bin/env bash\\nprintf '%s\\n' " + repr("RAN:" + source) + "\\n"
+out.write_text(program, encoding="utf-8")
+out.chmod(out.stat().st_mode | stat.S_IXUSR)
+""",
+        )
+        env = os.environ.copy()
+        env["PATH"] = f"{tools_dir}{os.pathsep}{env['PATH']}"
+        env["MTEST_DIRECT_FAILURE_MODE"] = mode
+        env["MTEST_DIRECT_FAILURE_STEP"] = step
+        env["MTEST_FAKE_MOJO_LOG"] = str(log_path)
+        if mode == "timeout":
+            env["MTEST_TEST_ALL_TIMEOUT_SECONDS"] = "0.1"
+        if mode == "spawn" and step == "build":
+            # `precompile` removes the fake `mojo`; retain only system tools so
+            # the suite build cannot fall through to Pixi's real compiler.
+            cc = shutil.which("clang")
+            nm = shutil.which("nm")
+            if cc is None or nm is None:
+                raise AssertionError("harness lacks compiler tools for spawn probe")
+            env["PATH"] = f"{tools_dir}{os.pathsep}/usr/bin{os.pathsep}/bin"
+            env["CC"] = cc
+            env["NM"] = nm
+        relative_root = os.path.relpath(root, REPO_ROOT)
+        try:
+            result = subprocess.run(
+                ["bash", "scripts/test_all.sh", relative_root],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=15 if mode == "timeout" else 30,
+                check=False,
+            )
+            built = (
+                log_path.read_text(encoding="utf-8").splitlines()
+                if log_path.exists()
+                else []
+            )
+            deadline_sentinel = disposable_outputs / root.name / f"test_a_failure.{step}-deadline"
+            return (
+                result,
+                built,
+                str(failing.relative_to(REPO_ROOT)),
+                str(following.relative_to(REPO_ROOT)),
+                deadline_sentinel.exists(),
+            )
+        finally:
+            shutil.rmtree(disposable_outputs, ignore_errors=True)
+
+
+def check_direct_runner_exit_124_is_not_a_timeout() -> None:
+    """An ordinary build or run exit 124 fails but continues to later suites."""
+    for step in ("build", "run"):
+        result, built, failing, following, sentinel_exists = _run_direct_runner_failure(
+            "ordinary", step
+        )
+        if result.returncode != 1:
+            raise AssertionError(
+                "ordinary exit 124 did not remain a normal suite failure: "
+                f"step={step}, status={result.returncode}\n{result.stdout}"
+            )
+        if f"FAILED: {failing} ({step} exit 124)" not in result.stdout:
+            raise AssertionError(
+                "ordinary exit 124 lost its truthful failure diagnostic:\n"
+                f"{result.stdout}"
+            )
+        if f"RAN:{following}" not in result.stdout:
+            raise AssertionError(
+                "ordinary exit 124 stopped the direct runner before later suites:\n"
+                f"{result.stdout}"
+            )
+        if f"timed-out {step}" in result.stdout or sentinel_exists:
+            raise AssertionError(
+                "ordinary exit 124 was treated as a timeout:\n"
+                f"{result.stdout}"
+            )
+        if built != [failing, following]:
+            raise AssertionError(
+                f"ordinary {step} exit 124 did not build both suites: {built}"
+            )
+
+
+def check_direct_runner_timeout_stops_before_following_suite() -> None:
+    """A real build or run timeout exits 124 before a later suite starts."""
+    for step in ("build", "run"):
+        result, built, failing, following, sentinel_exists = _run_direct_runner_failure(
+            "timeout", step
+        )
+        if result.returncode != 124:
+            raise AssertionError(
+                "direct-runner timeout did not preserve exit 124: "
+                f"step={step}, status={result.returncode}\n{result.stdout}"
+            )
+        if f"timed-out {step}" not in result.stdout:
+            raise AssertionError(
+                "direct-runner timeout omitted its stopping diagnostic:\n"
+                f"{result.stdout}"
+            )
+        if built != [failing] or f"RAN:{following}" in result.stdout:
+            raise AssertionError(
+                f"direct-runner {step} timeout reached a later suite:\n{result.stdout}"
+            )
+        if not sentinel_exists:
+            raise AssertionError(f"real {step} timeout removed its deadline sentinel")
+
+
+def check_direct_runner_spawn_failure_is_not_a_timeout() -> None:
+    """A failed build or run start stops as internal error, never a timeout."""
+    for step in ("build", "run"):
+        result, built, failing, following, sentinel_exists = _run_direct_runner_failure(
+            "spawn", step
+        )
+        if result.returncode != 70:
+            raise AssertionError(
+                "direct-runner spawn failure did not preserve internal exit 70: "
+                f"step={step}, status={result.returncode}\n{result.stdout}"
+            )
+        if f"timed-out {step}" in result.stdout:
+            raise AssertionError(
+                "direct-runner spawn failure claimed timeout:\n"
+                f"{result.stdout}"
+            )
+        if "watchdog/internal failure" not in result.stdout:
+            raise AssertionError(
+                "direct-runner spawn failure missed its distinct diagnostic:\n"
+                f"{result.stdout}"
+            )
+        expected_built = [] if step == "build" else [failing]
+        if built != expected_built or f"RAN:{following}" in result.stdout:
+            raise AssertionError(
+                f"direct-runner {step} spawn failure reached a later suite:\n{result.stdout}"
+            )
+        if not sentinel_exists:
+            raise AssertionError(f"spawn failure removed its {step} deadline sentinel")
+
+
 def check_suite_layout() -> None:
     """Every executable suite and support module has its classified home."""
     tests_dir = REPO_ROOT / "tests"
@@ -408,7 +631,11 @@ def check_format_roots() -> None:
 
 def main() -> int:
     try:
+        check_process_watchdog()
         check_recursive_direct_runner()
+        check_direct_runner_exit_124_is_not_a_timeout()
+        check_direct_runner_timeout_stops_before_following_suite()
+        check_direct_runner_spawn_failure_is_not_a_timeout()
         check_suite_layout()
         check_exec_fixture_layout()
         check_transcript_comparator()

@@ -71,6 +71,13 @@ mkdir -p build/tests
 
 failed=0
 count=0
+watchdog_timeout_args=()
+# Test-only harness probes may lower this without changing the production
+# ceiling. Ordinary invocations always omit it and retain the hard 300-second
+# watchdog default.
+if [[ -n "${MTEST_TEST_ALL_TIMEOUT_SECONDS:-}" ]]; then
+    watchdog_timeout_args=(--timeout-seconds "$MTEST_TEST_ALL_TIMEOUT_SECONDS")
+fi
 # Python is already a locked build-time tool. It gives both GNU/Linux and macOS
 # the same bytewise ordering and NUL-delimited path handling; the set removes a
 # duplicate if a caller supplies overlapping roots.
@@ -78,15 +85,56 @@ while IFS= read -r -d '' test_file; do
     relative="${test_file#tests/}"
     bin="build/tests/${relative%.mojo}"
     mkdir -p "$(dirname "$bin")"
+    build_deadline_sentinel="${bin}.build-deadline"
+    run_deadline_sentinel="${bin}.run-deadline"
     echo "==> building $test_file -> $bin"
-    mojo build "${INCLUDE[@]}" "$test_file" -o "$bin"
-    echo "==> running $bin"
+    rm -f "$build_deadline_sentinel"
+    : > "$build_deadline_sentinel"
     set +e
-    "$bin"
+    python scripts/process_watchdog.py \
+        --source "$test_file" \
+        --step build \
+        --deadline-sentinel "$build_deadline_sentinel" \
+        "${watchdog_timeout_args[@]}" \
+        -- mojo build "${INCLUDE[@]}" "$test_file" -o "$bin"
     status=$?
     set -e
+    if [[ -e "$build_deadline_sentinel" ]]; then
+        if [[ "$status" -eq 124 ]]; then
+            echo "FATAL: test_all: stopping after timed-out build for $test_file" >&2
+            exit 124
+        fi
+        echo "FATAL: test_all: watchdog/internal failure during build for $test_file (exit $status); deadline sentinel remains" >&2
+        exit 70
+    fi
     if [[ "$status" -ne 0 ]]; then
-        echo "FAILED: $test_file (exit $status)" >&2
+        echo "FAILED: $test_file (build exit $status)" >&2
+        failed=1
+        count=$((count + 1))
+        continue
+    fi
+    echo "==> running $bin"
+    rm -f "$run_deadline_sentinel"
+    : > "$run_deadline_sentinel"
+    set +e
+    python scripts/process_watchdog.py \
+        --source "$test_file" \
+        --step run \
+        --deadline-sentinel "$run_deadline_sentinel" \
+        "${watchdog_timeout_args[@]}" \
+        -- "$bin"
+    status=$?
+    set -e
+    if [[ -e "$run_deadline_sentinel" ]]; then
+        if [[ "$status" -eq 124 ]]; then
+            echo "FATAL: test_all: stopping after timed-out run for $test_file" >&2
+            exit 124
+        fi
+        echo "FATAL: test_all: watchdog/internal failure during run for $test_file (exit $status); deadline sentinel remains" >&2
+        exit 70
+    fi
+    if [[ "$status" -ne 0 ]]; then
+        echo "FAILED: $test_file (run exit $status)" >&2
         failed=1
     fi
     count=$((count + 1))
