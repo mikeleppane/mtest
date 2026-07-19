@@ -99,6 +99,8 @@ static int mtest_chld_installed;
 static int mtest_pipe_installed;
 
 #if MTEST_EXEC_TESTING
+#define MTEST_TEST_MONOTONIC_WAIT_MAX_MS 10000u
+
 struct mtest_fault_state {
     uint32_t operation;
     uint32_t occurrence;
@@ -116,6 +118,10 @@ static int mtest_interrupt_delivery_signal;
 static uint32_t mtest_group_signal_eperm_operation;
 static uint32_t mtest_group_signal_eperm_forced_failures;
 static uint32_t mtest_group_signal_eperm_seen;
+static uint32_t mtest_monotonic_wait_occurrence;
+static uint32_t mtest_monotonic_wait_seen;
+static uint32_t mtest_monotonic_wait_max_ms;
+static uint32_t mtest_monotonic_wait_fired;
 
 int32_t mtest_exec_test_constant(uint32_t constant_id) {
     switch (constant_id) {
@@ -172,6 +178,10 @@ void mtest_exec_test_fault_reset(void) {
     mtest_group_signal_eperm_operation = MTEST_EXEC_OP_NONE;
     mtest_group_signal_eperm_forced_failures = 0;
     mtest_group_signal_eperm_seen = 0;
+    mtest_monotonic_wait_occurrence = 0;
+    mtest_monotonic_wait_seen = 0;
+    mtest_monotonic_wait_max_ms = 0;
+    mtest_monotonic_wait_fired = 0;
 }
 
 int32_t mtest_exec_test_fault_configure(
@@ -271,6 +281,62 @@ uint32_t mtest_exec_test_group_signal_eperm_seen(uint32_t operation) {
     return operation == mtest_group_signal_eperm_operation
         ? mtest_group_signal_eperm_seen
         : 0;
+}
+
+int32_t mtest_exec_test_monotonic_wait_configure(
+    uint32_t occurrence,
+    uint32_t max_wait_ms
+) {
+    if (occurrence == 0 || max_wait_ms == 0 ||
+        max_wait_ms > MTEST_TEST_MONOTONIC_WAIT_MAX_MS) {
+        return -1;
+    }
+    mtest_monotonic_wait_occurrence = occurrence;
+    mtest_monotonic_wait_seen = 0;
+    mtest_monotonic_wait_max_ms = max_wait_ms;
+    mtest_monotonic_wait_fired = 0;
+    return 0;
+}
+
+uint32_t mtest_exec_test_monotonic_wait_fired(void) {
+    return mtest_monotonic_wait_fired;
+}
+
+static void mtest_wait_before_monotonic_if_requested(void) {
+    if (mtest_monotonic_wait_occurrence == 0) {
+        return;
+    }
+    mtest_monotonic_wait_seen += 1;
+    if (mtest_monotonic_wait_seen != mtest_monotonic_wait_occurrence ||
+        mtest_process.handle == 0 || mtest_process.leader <= 0) {
+        return;
+    }
+    const struct timespec delay = {0, 1000000L};
+    for (uint32_t attempt = 0;
+         attempt <= mtest_monotonic_wait_max_ms;
+         ++attempt) {
+        siginfo_t information;
+        memset(&information, 0, sizeof(information));
+        int wait_status;
+        do {
+            wait_status = waitid(
+                P_PID,
+                (id_t)mtest_process.leader,
+                &information,
+                WEXITED | WNOHANG | WNOWAIT
+            );
+        } while (wait_status != 0 && errno == EINTR);
+        if (wait_status != 0) {
+            return;
+        }
+        if (information.si_pid == mtest_process.leader) {
+            mtest_monotonic_wait_fired = 1;
+            return;
+        }
+        if (attempt < mtest_monotonic_wait_max_ms) {
+            (void)nanosleep(&delay, NULL);
+        }
+    }
 }
 
 void mtest_exec_test_reset_interrupt(void) {
@@ -1104,6 +1170,9 @@ int32_t mtest_exec_monotonic_ms(
         mtest_set_error(error, MTEST_EXEC_OP_CLOCK_MONOTONIC, EINVAL, 0, 0);
         return -1;
     }
+#if MTEST_EXEC_TESTING
+    mtest_wait_before_monotonic_if_requested();
+#endif
     if (mtest_fail_if_requested(MTEST_EXEC_OP_CLOCK_MONOTONIC) ||
         clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
         mtest_set_error(error, MTEST_EXEC_OP_CLOCK_MONOTONIC, errno, 0, 0);
@@ -1937,6 +2006,10 @@ static int mtest_process_group_checked(
 #if defined(__APPLE__) || MTEST_EXEC_TESTING
     uint32_t eperm_retries = 0;
 #endif
+    /* In testing builds, named fault occurrence accounting advances once per
+       loop visit, including visits caused by the transient-EPERM seam. An
+       occurrence-N named group fault may therefore fire during such a retry;
+       production builds have no fault table or transient test seam. */
     for (;;) {
         int fault_injected = mtest_fail_if_requested(operation);
         int group_status = fault_injected

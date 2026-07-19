@@ -26,6 +26,11 @@ MTEST_EXEC_EXPORT int32_t mtest_exec_test_group_signal_eperm_configure(
 MTEST_EXEC_EXPORT uint32_t mtest_exec_test_group_signal_eperm_seen(
     uint32_t operation
 );
+MTEST_EXEC_EXPORT int32_t mtest_exec_test_monotonic_wait_configure(
+    uint32_t occurrence,
+    uint32_t max_wait_ms
+);
+MTEST_EXEC_EXPORT uint32_t mtest_exec_test_monotonic_wait_fired(void);
 MTEST_EXEC_EXPORT void mtest_exec_test_reset_interrupt(void);
 MTEST_EXEC_EXPORT int32_t mtest_exec_test_deliver_interrupt_after(
     uint32_t operation,

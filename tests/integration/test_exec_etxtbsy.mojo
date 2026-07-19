@@ -1,14 +1,18 @@
 """Text-file-busy latch precedence for the `exec` supervisor.
 
-When a deadline or an interrupt fires while the child is still retrying a
-text-file-busy (ETXTBSY) exec, the run must report TimedOut — our own kill won
-the race — never a SpawnFailed machinery error. The testing adapter injects
-ETXTBSY at the first child execve call, placing the child in the real bounded
-retry delay without relying on an ambient filesystem race, then injects EIO at
-the second call so SpawnFailed genuinely competes with the timeout latch.
-Because the child inherits our SIGTERM handler, it survives the group SIGTERM
-long enough to reach the errno-reporting path — the exact race in which the
-latch must still win.
+When a deadline or an interrupt fires around a text-file-busy (ETXTBSY) exec,
+the run must report TimedOut — our own kill won the race — never a SpawnFailed
+machinery error. The testing adapter injects ETXTBSY at the first child execve
+call, placing the child in the real bounded retry delay without relying on an
+ambient filesystem race, then injects EIO at the second call so SpawnFailed
+genuinely competes with the timeout latch.
+
+The deadline case delays the supervisor's first post-open clock read until both
+the deadline and child exit are in the past. It therefore pins the loop ordering:
+the timeout latch must be set before an observation of the already-waitable child
+can end the loop. The interrupt case instead delivers SIGINT during the retry;
+the child inherits our SIGTERM handler and survives long enough to reach the
+errno-reporting path under the already-set latch.
 
 Kept in its own module because it installs signal handlers and drives the process
 wide interrupt latch, which it resets so no state leaks into the other suites.
@@ -31,6 +35,8 @@ comptime _CONSTANT_EIO = 4
 comptime _CONSTANT_ETXTBSY = 5
 comptime _OP_CHILD_EXECVE = 24
 comptime _DELAY_MS = 10
+comptime _CLOCK_WAIT_OCCURRENCE = 2
+comptime _CLOCK_WAIT_MAX_MS = 1000
 """Milliseconds the SIGINT helper polls (10 ms) so the interrupt latch flips a
 short way INTO the busy-exec retry window — late enough that the group SIGTERM's
 grace escalation does not preempt the child before it reaches the errno path
@@ -69,6 +75,21 @@ def _inject_etxtbsy_then_exec_error() raises:
     assert_true(status == 0, "could not configure terminal child execve fault")
 
 
+def _wait_before_first_post_open_clock_read() raises:
+    """Let both the 20 ms deadline and child exit precede loop observation."""
+    # The first monotonic call captures run_supervised's start time. The second
+    # is the first loop-top deadline reading after process_open. At that exact
+    # call the test adapter waits, without consuming the child, until the one
+    # 50 ms ETXTBSY backoff reaches its terminal EIO and the child is waitable.
+    # That exit necessarily also follows the 20 ms deadline.
+    # SAFETY: this test-only ABI accepts two bounded scalar values, retains no
+    # pointer, and changes only testing-adapter clock-wait state.
+    var status = external_call[
+        "mtest_exec_test_monotonic_wait_configure", Int32
+    ](UInt32(_CLOCK_WAIT_OCCURRENCE), UInt32(_CLOCK_WAIT_MAX_MS))
+    assert_true(status == 0, "could not configure monotonic clock wait")
+
+
 def _reap_helper(helper: Int32) raises:
     """Reap one exact test helper without consuming a supervised child."""
     # SAFETY: `st` owns one zero-initialized aligned Int32. waitpid writes at
@@ -91,13 +112,20 @@ def test_deadline_beats_stuck_etxtbsy_exec_latches_timed_out() raises:
     runtime.open()
     _reset_interrupt()
     _inject_etxtbsy_then_exec_error()
+    _wait_before_first_post_open_clock_read()
     var t = target("etxtbsy_target.sh")
     var argv = List[String]()
     argv.append(t)
     var r = run_supervised(runtime, ProcessSpec.command(argv^, 20))
-    # SAFETY: this test-only scalar ABI clears only native fault-table state;
-    # it accepts no pointer, retains nothing, and the runtime has no live child.
+    # SAFETY: this test-only scalar ABI reports whether the configured delay
+    # fired. It accepts no pointer and neither mutates nor retains Mojo state.
+    var wait_fired = external_call[
+        "mtest_exec_test_monotonic_wait_fired", UInt32
+    ]()
+    # SAFETY: this test-only scalar ABI clears native test-control state; it
+    # accepts no pointer, retains nothing, and the runtime has no live child.
     external_call["mtest_exec_test_fault_reset", NoneType]()
+    assert_true(wait_fired == 1, "first post-open clock wait did not fire")
     assert_true(r.termination.is_timed_out(), String(r.termination))
     assert_true(r.termination.final_is_exited(), String(r.termination))
     # The target exits 0, so a nonzero final exit proves the injected terminal
@@ -169,8 +197,8 @@ def test_interrupt_beats_stuck_etxtbsy_exec_latches_timed_out() raises:
     # nor the interrupt state can leak into the rest of the suite.
     _reap_helper(helper)
     _reset_interrupt()
-    # SAFETY: this test-only scalar ABI clears only native fault-table state;
-    # it accepts no pointer, retains nothing, and the runtime has no live child.
+    # SAFETY: this test-only scalar ABI clears native test-control state; it
+    # accepts no pointer, retains nothing, and the runtime has no live child.
     external_call["mtest_exec_test_fault_reset", NoneType]()
     runtime.close()
     assert_true(r.termination.is_timed_out(), String(r.termination))
