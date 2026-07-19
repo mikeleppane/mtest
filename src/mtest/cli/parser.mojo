@@ -366,9 +366,13 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var shard_m = 0
     var shard_n = 0
     var retries = 0
+    var saw_retries = False
     var json_dest = String("")
+    var saw_json = False
     var junit_dest = String("")
+    var saw_junit = False
     var gh_annotations = AnnotationsMode.AUTO
+    var saw_annotations = False
     var saw_show_output = False
     var saw_quiet = False
     var saw_verbose = False
@@ -499,12 +503,16 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             shard_n = parsed[2]
         elif s.id == FlagId.RETRIES:
             retries = _parse_retries(value)
+            saw_retries = True
         elif s.id == FlagId.JSON:
             json_dest = _validate_json_dest(value)
+            saw_json = True
         elif s.id == FlagId.JUNIT_XML:
             junit_dest = _validate_junit_dest(value)
+            saw_junit = True
         elif s.id == FlagId.GH_ANNOTATIONS:
             gh_annotations = _parse_annotations(value)
+            saw_annotations = True
 
     # Collect mode is a listing, not a run: the run-only knobs that shape which
     # tests execute or when to stop scheduling are meaningless against it and are
@@ -534,6 +542,26 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         if saw_durations:
             raise _err(
                 "'--durations' is a run-only flag and cannot be combined"
+                " with collect mode"
+            )
+        if saw_retries:
+            raise _err(
+                "'--retries' is a run-only flag and cannot be combined with"
+                " collect mode"
+            )
+        if saw_json:
+            raise _err(
+                "'--json' is a run-only flag and cannot be combined with"
+                " collect mode"
+            )
+        if saw_junit:
+            raise _err(
+                "'--junit-xml' is a run-only flag and cannot be combined with"
+                " collect mode"
+            )
+        if saw_annotations:
+            raise _err(
+                "'--gh-annotations' is a run-only flag and cannot be combined"
                 " with collect mode"
             )
 

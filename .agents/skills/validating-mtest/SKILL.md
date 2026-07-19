@@ -123,7 +123,7 @@ Every row below is a check in `validate_contract.py` unless marked *(manual)*.
 | selection | node id runs exactly one, **poison sibling never runs**; `-k` exact count + case-insensitive; empties → 5; unknown test → 4; **dir node-id → 4** | 5,10.1 |
 | exclusion | pattern **truly removes** a would-crash file (exit stays 0); stale warns; exclude-all → 5 | 12 |
 | early stop | `-x` / `--maxfail` leave the **poison sibling NOT-RUN** (exact not-run count); failing `--gate` aborts (exact not-run) | 11 |
-| collect flags | run-only flags (`--durations`/`--maxfail`) → 4; streams split + listing continues; §24.3 deviations (`-k` ignored w/ notice; node-id lists whole file) | 4,16,24.3 |
+| collect flags | run-only flags (`-x`/`--maxfail`/`--durations`/`--gate`/`-s`/`--retries`/`--json`/`--junit-xml`/`--gh-annotations`, the last three even `off`) → 4; streams split + listing continues; §24.3 deviations (`-k` ignored w/ notice; node-id lists whole file) | 4,16,24.3 |
 | build args | `-o`/`--emit`/extra-source → 4 **and the test never ran** (pre-run detection) | 8.4,9 |
 | exit 3 | bad `--mojo` (spawn fail) → 3; **off-grammar report (drift) → 3**, never a verdict | 6,16,24.2 |
 | refused v1 flags | **all 9 spellings** → 4, each naming the flag + "v1 contract" | 24.1 |
