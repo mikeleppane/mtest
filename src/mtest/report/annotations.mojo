@@ -540,18 +540,99 @@ def _render_capped(
 # --- Public entry point -------------------------------------------------------
 
 
+struct AnnotationAccumulator(Copyable, Movable):
+    """Online accumulation of the annotation ROWS a run produces.
+
+    The reporter feeds every event through `observe` as it arrives and keeps
+    ONLY the lightweight `_AnnotationRow`s the capped renderer needs — a per-test
+    FAIL row, a file-level crash row, a flaky warning, a precompile error — plus
+    the terminal notice. It NEVER retains the multi-megabyte
+    `captured_stdout`/`captured_stderr` a `FileFinished`/`AttemptFinished` event
+    carries, which the renderer does not read anyway. Retention is therefore
+    O(failures x bounded detail), not O(files x capture bytes), so a CI-scale run
+    of hundreds of large-capture failures cannot exhaust memory before its ten
+    rendered rows are emitted. The only cross-event fact carried is a FLAKY row's
+    `attempts_planned`, reconciled from the most recent `AttemptFinished` for the
+    SAME file since its last `FileStarted`.
+    """
+
+    var _error_rows: List[_AnnotationRow]
+    var _warning_rows: List[_AnnotationRow]
+    var _has_notice: Bool
+    var _notice_message: String
+    var _pending_attempts_planned: Int
+
+    def __init__(out self):
+        """An empty accumulator."""
+        self._error_rows = List[_AnnotationRow]()
+        self._warning_rows = List[_AnnotationRow]()
+        self._has_notice = False
+        self._notice_message = String("")
+        self._pending_attempts_planned = -1
+
+    def observe(mut self, e: Event):
+        """Extract this event's annotation row(s), then drop the event.
+
+        Total over the event set; never raises. The event's raw captured bytes
+        are read by no row helper and are not retained past this call.
+        """
+        if e.kind == EventKind.FILE_STARTED:
+            self._pending_attempts_planned = -1
+        elif e.kind == EventKind.ATTEMPT_FINISHED:
+            self._pending_attempts_planned = e.attempts_planned
+        elif e.kind == EventKind.TEST_REPORTED:
+            if e.test.outcome == Outcome.FAIL:
+                self._error_rows.append(_test_fail_row(e.test))
+        elif e.kind == EventKind.FILE_FINISHED:
+            if _is_file_level_crash_class(e.outcome):
+                self._error_rows.append(_file_level_row(e))
+            if e.flaky:
+                var planned = (
+                    self._pending_attempts_planned if self._pending_attempts_planned
+                    > 0 else e.attempts_used
+                )
+                self._warning_rows.append(
+                    _flaky_row(e.path, e.attempts_used, planned)
+                )
+            self._pending_attempts_planned = -1
+        elif e.kind == EventKind.PRECOMPILE_FAILED:
+            self._error_rows.append(_precompile_row(e))
+        elif e.kind == EventKind.SESSION_FINISHED:
+            self._has_notice = True
+            self._notice_message = _notice_message(e)
+
+    def render(self) -> List[String]:
+        """The node-id-sorted, capped `::error` lines, then the sorted, capped
+        `::warning` lines, then the single `::notice` line when a
+        `SessionFinished` was seen. Never raises."""
+        var out = _render_capped(self._error_rows.copy(), False, _MAX_ERRORS)
+        var warning_lines = _render_capped(
+            self._warning_rows.copy(), True, _MAX_WARNINGS
+        )
+        for i in range(len(warning_lines)):
+            out.append(warning_lines[i])
+        if self._has_notice:
+            out.append("::notice::" + _escaped_message(self._notice_message))
+        return out^
+
+    def retained_message_bytes(self) -> Int:
+        """Total bytes held in accumulated rows + notice. An observability hook:
+        it is O(annotation output) and independent of the raw capture bytes the
+        events carried, which is the property the retention bound guarantees."""
+        var total = self._notice_message.byte_length()
+        for r in self._error_rows:
+            total += r.message.byte_length() + r.file.byte_length()
+        for r in self._warning_rows:
+            total += r.message.byte_length() + r.file.byte_length()
+        return total
+
+
 def render_annotations(events: List[Event]) -> List[String]:
     """The complete, ordered GitHub Actions annotation lines for one run.
 
-    Pure: `List[Event] -> List[String]`, no I/O, no sink, never raises. Walks
-    `events` once, in emission order, building the per-shape rows above (the
-    only cross-event fact this needs is a FLAKY row's `attempts_planned`,
-    reconciled from the most recent `AttemptFinished` for the SAME file since
-    its last `FileStarted` — never a console-text parse or an invented session
-    side channel). Returns the node-id-sorted, capped `::error` lines, then
-    the node-id-sorted, capped `::warning` lines, then the single `::notice`
-    line when a `SessionFinished` was seen (never capped, never more than
-    one).
+    Pure: `List[Event] -> List[String]`, no I/O, no sink, never raises. Feeds
+    the whole stream through an `AnnotationAccumulator` in emission order and
+    renders it — the batch equivalent of the reporter's online path.
 
     Args:
         events: The run's event stream, in emission order. Not mutated.
@@ -559,42 +640,7 @@ def render_annotations(events: List[Event]) -> List[String]:
     Returns:
         The ordered workflow-command lines, ready to print one per line.
     """
-    var error_rows = List[_AnnotationRow]()
-    var warning_rows = List[_AnnotationRow]()
-    var has_notice = False
-    var notice_message = String("")
-    var pending_attempts_planned = -1
-
+    var acc = AnnotationAccumulator()
     for e in events:
-        if e.kind == EventKind.FILE_STARTED:
-            pending_attempts_planned = -1
-        elif e.kind == EventKind.ATTEMPT_FINISHED:
-            pending_attempts_planned = e.attempts_planned
-        elif e.kind == EventKind.TEST_REPORTED:
-            if e.test.outcome == Outcome.FAIL:
-                error_rows.append(_test_fail_row(e.test))
-        elif e.kind == EventKind.FILE_FINISHED:
-            if _is_file_level_crash_class(e.outcome):
-                error_rows.append(_file_level_row(e))
-            if e.flaky:
-                var planned = (
-                    pending_attempts_planned if pending_attempts_planned
-                    > 0 else e.attempts_used
-                )
-                warning_rows.append(
-                    _flaky_row(e.path, e.attempts_used, planned)
-                )
-            pending_attempts_planned = -1
-        elif e.kind == EventKind.PRECOMPILE_FAILED:
-            error_rows.append(_precompile_row(e))
-        elif e.kind == EventKind.SESSION_FINISHED:
-            has_notice = True
-            notice_message = _notice_message(e)
-
-    var out = _render_capped(error_rows^, False, _MAX_ERRORS)
-    var warning_lines = _render_capped(warning_rows^, True, _MAX_WARNINGS)
-    for i in range(len(warning_lines)):
-        out.append(warning_lines[i])
-    if has_notice:
-        out.append("::notice::" + _escaped_message(notice_message))
-    return out^
+        acc.observe(e)
+    return acc.render()

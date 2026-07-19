@@ -561,5 +561,48 @@ def test_forged_error_command_inside_message_is_neutralized() raises:
     )
 
 
+def _reporter_retention(files: Int, capture_len: Int) raises -> Int:
+    # Build the capture once and reuse it by (fast) copy per file, so the test
+    # is not dominated by byte-by-byte list construction.
+    var cap = List[UInt8]()
+    for _ in range(capture_len):
+        cap.append(UInt8(120))  # 'x'
+    var rep = AnnotationsReporter(True)
+    for i in range(files):
+        rep.handle(
+            Event.file_finished(
+                "tests/test_" + String(i) + ".mojo",
+                Outcome.CRASH,
+                0.1,
+                List[String](),
+                0.0,
+                cap.copy(),
+                cap.copy(),
+                signal_number=11,
+            )
+        )
+    rep.handle(Event.session_finished(Summary.zeros(), 0.0, 0))
+    return rep.retained_message_bytes()
+
+
+def test_reporter_retention_is_independent_of_capture_size() raises:
+    # The reporter keeps only the lightweight annotation rows, never the raw
+    # captured output the renderer does not read. So its retained footprint over
+    # the same run is IDENTICAL whether each FileFinished carried 64 bytes or a
+    # hundred kilobytes of captures per stream — retention is O(rows), not
+    # O(captures). (The pre-fix reporter retained e.copy() including both
+    # captures, so its footprint scaled with the fed bytes.)
+    var files = 12
+    var tiny = _reporter_retention(files, 64)
+    var huge = _reporter_retention(files, 100_000)
+    assert_equal(tiny, huge)
+    # And it stays small in absolute terms: ~one bounded row per file, far under
+    # even a single stream's capture, let alone the megabytes fed in the huge case.
+    assert_true(
+        huge < 100_000,
+        "retention must be O(annotation output): " + String(huge),
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
