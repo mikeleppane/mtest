@@ -115,7 +115,7 @@ postfork-check = "python scripts/postfork_check_test.py && python scripts/postfo
 # private exec adapter. The standalone post-fork audit is a prerequisite. This
 # remains separate from the Mojo suite so the test object can expose deterministic
 # fault and sanitizer controls that production linkage proves absent.
-native-check = { cmd = "python scripts/native_check.py", depends-on = [
+native-check = { cmd = "python scripts/native_check_test.py && python scripts/native_check.py", depends-on = [
     "postfork-check",
 ] }
 
