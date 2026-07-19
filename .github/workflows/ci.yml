@@ -53,6 +53,32 @@ jobs:
       - name: CI gate
         run: pixi run ci
 
+  package:
+    name: linux-64 packaged-artifact gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          locked: true
+          cache: true
+
+      - name: Mojo version
+        run: pixi run mojo-version
+
+      # The packaged-artifact consumption gate: build the recipe into a LOCAL
+      # conda channel, install it into a fresh scratch env FROM THAT LOCAL
+      # CHANNEL, loader-clean probe the installed binary, run mtest's own
+      # suite through the installed binary, then a tarball fallback-format
+      # smoke-run. Nothing uploads, publishes, or authenticates anywhere.
+      # linux-64 only (the maintainer's ruling) — standalone from `pixi run
+      # ci`, not wired into the job above; macOS packaging stays a documented
+      # ceiling this phase, so the macos-build lane below is untouched.
+      - name: Package check
+        run: pixi run package-check
+
   macos-build:
     name: macOS arm64 build + link
     runs-on: macos-15
