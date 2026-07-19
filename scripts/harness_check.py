@@ -134,6 +134,9 @@ PROTOCOL_FIXTURES = {
     "skipped.mojo",
     "twofail.mojo",
 }
+E2E_NATIVE_FIXTURES = {
+    "e2e_json_terminal_write_fault.c",
+}
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -518,6 +521,18 @@ def check_exec_fixture_layout() -> None:
         raise AssertionError("obsolete scripts/exec_targets directory still exists")
 
 
+def check_e2e_native_fixture_layout() -> None:
+    """The E2E-only native fault sources have exact harness membership."""
+    fixture_dir = REPO_ROOT / "tests" / "native"
+    actual = {path.name for path in fixture_dir.glob("e2e_*")}
+    if actual != E2E_NATIVE_FIXTURES:
+        raise AssertionError(
+            "e2e native fixture membership mismatch: "
+            f"missing={sorted(E2E_NATIVE_FIXTURES - actual)}, "
+            f"extra={sorted(actual - E2E_NATIVE_FIXTURES)}"
+        )
+
+
 def check_transcript_comparator() -> None:
     """The real snapshot comparator accepts only an explicit path relocation."""
     with tempfile.TemporaryDirectory(prefix="mtest-transcript-compare-") as raw_tmp:
@@ -639,6 +654,7 @@ def main() -> int:
         check_direct_runner_spawn_failure_is_not_a_timeout()
         check_suite_layout()
         check_exec_fixture_layout()
+        check_e2e_native_fixture_layout()
         check_transcript_comparator()
         check_protocol_asset_layout()
         check_e2e_layout()

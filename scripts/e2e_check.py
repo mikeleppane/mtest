@@ -30,7 +30,6 @@ Usage:  pixi run e2e        (builds the binary first, then runs this)
 
 from __future__ import annotations
 
-import fcntl
 import inspect
 import json
 import os
@@ -45,6 +44,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import annotations_check
 import json_stream_check
@@ -60,6 +60,9 @@ LOGGING_MOJO = os.path.join(REPO_ROOT, "scripts", "logging_mojo.py")
 FAKE_SLOW_MOJO = os.path.join(REPO_ROOT, "scripts", "fake_slow_mojo.py")
 FAKE_CRASH_MOJO = os.path.join(REPO_ROOT, "scripts", "fake_crash_mojo.py")
 FAKE_RETRY_CRASH_MOJO = os.path.join(REPO_ROOT, "scripts", "fake_retry_crash_mojo.py")
+JSON_TERMINAL_WRITE_FAULT = os.path.join(
+    REPO_ROOT, "tests", "native", "e2e_json_terminal_write_fault.c"
+)
 
 # Generous per-spawn wall-clock ceilings. Cold `mojo build` is slow, so these are
 # roomy — their only job is to keep a hung runner from wedging CI, never to time
@@ -2612,135 +2615,140 @@ def s_json_truncation_dead_pipe(manifest: dict) -> str:
     return "dead pipe: fatal abort exit 3 (not 141), no orphan, clean partial stream"
 
 
-def _race_close_after_line(fd: int, marker: str, deadline: float) -> bool | None:
-    """Read `fd` and close it the INSTANT a committed line containing `marker`
-    is the last thing received, before anything after it has arrived.
-
-    Returns True when the close landed exactly there (the race was WON — the
-    producer's next write, if any, races against a fully closed read end),
-    False when `marker` appeared but more bytes (a further committed line, or
-    even a trailing partial one) had already arrived by the time this noticed
-    (the race was LOST — that later write, if any, already had a live reader
-    and cannot be blamed on this close), or None on EOF/timeout before
-    `marker` was ever seen.
-
-    A blocking `select()` wakeup is too slow for this: the producer's next
-    write can land before the scheduler even resumes the waiting reader. The
-    descriptor is put in NONBLOCKING mode and polled in a tight loop instead,
-    so the read reacts to newly arrived bytes as fast as this process can spin
-    — the only mechanism that reliably closes ahead of a producer's very next
-    write rather than after it.
-    """
-    fl = fcntl.fcntl(fd, fcntl.F_GETFL)
-    fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
-    buf = bytearray()
-    while time.monotonic() < deadline:
-        try:
-            chunk = os.read(fd, 65536)
-        except BlockingIOError:
-            continue
-        except OSError:
-            return None
-        if not chunk:
-            return None
-        buf += chunk
-        text = buf.decode("utf-8", "replace")
-        ends_clean = text.endswith("\n")
-        committed = text.split("\n")[:-1]
-        if not committed:
-            continue
-        if marker in committed[-1]:
-            if ends_clean:
-                os.close(fd)
-                return True
-            # The marker line is committed but a further, still-partial line
-            # has already started arriving — too late.
-            os.close(fd)
-            return False
-        if any(marker in line for line in committed):
-            os.close(fd)
-            return False
-    return None
+def _build_json_terminal_write_fault(directory: str) -> str:
+    """Build the test-only terminal-record write interposer in `directory`."""
+    compiler = os.environ.get("CC", "clang")
+    if sys.platform == "darwin":
+        library = os.path.join(directory, "libmtest_json_terminal_fault.dylib")
+        platform_flags = ["-dynamiclib"]
+        link_libraries: list[str] = []
+    else:
+        library = os.path.join(directory, "libmtest_json_terminal_fault.so")
+        platform_flags = ["-shared", "-fPIC"]
+        link_libraries = ["-ldl"]
+    argv = [
+        compiler,
+        "-std=c17",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-Wpedantic",
+        *platform_flags,
+        JSON_TERMINAL_WRITE_FAULT,
+        "-o",
+        library,
+        *link_libraries,
+    ]
+    proc = subprocess.Popen(
+        argv,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        output, _ = proc.communicate(timeout=SHORT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        output, _ = proc.communicate()
+        raise ScenarioError(
+            "the JSON terminal-write fault interposer did not compile within "
+            f"{SHORT_TIMEOUT}s:\n{output}"
+        )
+    expect(
+        proc.returncode == 0,
+        f"could not compile the JSON terminal-write fault interposer "
+        f"({proc.returncode}):\n{output}",
+    )
+    return library
 
 
 def s_json_terminal_write_failure(manifest: dict) -> str:
-    """The terminal record's OWN write can fail too — after the exit code was
-    already resolved. `session_finished` is dispatched AFTER Phase 1 resolves
-    `code`, and that dispatch is itself a stream write: a consumer that reads
-    through the last `file_finished` line and closes its read end right then
-    (before the writer reaches the terminal line) makes that write EPIPE,
-    exactly as a `--json -` consumer that stops reading the instant it has
-    everything it needs, or a file destination that hits ENOSPC precisely on
-    the terminal line. The fixture run here is a clean all-pass file — a
-    plain exit 0 for anyone who never saw the pipe close — so a process that
-    still exits 0 on a provably torn stream is a false success.
+    """A deterministic terminal-record write failure escalates clean 0 to 3.
 
-    A tiny run fits the 64 KiB pipe buffer whole, so closing only AFTER the
-    terminal record has already rendered would never reproduce the race (the
-    write already succeeded against a still-open, merely unread, pipe) — the
-    reader must close while the LAST thing it has seen is `file_finished`,
-    with nothing after it yet. `_race_close_after_line` is timing-sensitive by
-    nature (it is racing an internal write this process cannot observe
-    directly), so a handful of fresh attempts are given: losing the race just
-    means the run completed normally (exit 0, a healthy complete stream) and
-    proves nothing either way, so that attempt is discarded and retried
-    fresh, never counted as a scenario failure by itself."""
+    A test-only dynamic-library interposer rejects only the real CLI's write
+    containing the exact `session_finished` event marker. Every earlier write
+    reaches a normal file destination, so the stream proves a clean PASS through
+    `file_finished`, then loses only its terminal record. The process exit is the
+    out-of-band truth for that final delivery failure.
+    """
     if not os.path.exists(MTEST):
         raise ScenarioError(f"binary not found at {MTEST}; run `pixi run build-bin`")
     rel = "e2e/suite/test_passing.mojo"
-    argv = [MTEST, rel, "--json", "-", "--gh-annotations", "off"]
-
-    attempts = 8
-    for attempt in range(attempts):
+    with tempfile.TemporaryDirectory(prefix="mtest-json-terminal-fault-") as tmp:
+        stream_path = os.path.join(tmp, "stream.ndjson")
+        library = _build_json_terminal_write_fault(tmp)
+        argv = [MTEST, rel, "--json", stream_path, "--gh-annotations", "off"]
+        env = dict(os.environ)
+        env["GITHUB_ACTIONS"] = ""
+        if sys.platform == "darwin":
+            loader_variable = "DYLD_INSERT_LIBRARIES"
+        else:
+            loader_variable = "LD_PRELOAD"
+        inherited_preloads = env.get(loader_variable, "")
+        env[loader_variable] = library + (
+            os.pathsep + inherited_preloads if inherited_preloads else ""
+        )
         proc = subprocess.Popen(
-            argv, cwd=REPO_ROOT, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, start_new_session=True,
+            argv,
+            cwd=REPO_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+            env=env,
         )
         pgid = os.getpgid(proc.pid)
-        fd = proc.stdout.fileno()
-        won = _race_close_after_line(
-            fd, '"event":"file_finished"', time.monotonic() + SHORT_TIMEOUT
-        )
         try:
-            proc.wait(timeout=DEFAULT_TIMEOUT)
+            stdout, stderr = proc.communicate(timeout=DEFAULT_TIMEOUT)
         except subprocess.TimeoutExpired:
             _kill_group(proc)
-            proc.wait()
+            stdout, stderr = proc.communicate()
             raise ScenarioError(
-                f"mtest did not exit after its stream pipe closed (attempt "
-                f"{attempt})"
+                "mtest did not exit after the injected terminal-record write "
+                f"failure:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
             )
         finally:
             if proc.poll() is None:
                 _kill_group(proc)
-        if won:
-            expect(
-                proc.returncode == 3,
-                f"a terminal-write EPIPE after a clean all-pass run must "
-                f"escalate to exit 3 (the pre-dispatch code was 0), got "
-                f"{proc.returncode} — the exit code silently escaped the "
-                f"torn stream",
-            )
-            time.sleep(0.5)
-            orphan = True
-            try:
-                os.killpg(pgid, 0)
-            except ProcessLookupError:
-                orphan = False
-            expect(
-                not orphan,
-                f"process group {pgid} still alive after fatal abort (orphan)",
-            )
-            return (
-                f"terminal-record EPIPE after a clean run escalates 0 -> "
-                f"exit 3 (attempt {attempt + 1}/{attempts}), no orphan"
-            )
-        # The race was lost (or never reproduced) this attempt: a fresh
-        # process, tried again, up to the attempt ceiling.
-    raise ScenarioError(
-        f"never won the close-before-terminal-write race in {attempts} "
-        f"attempts — the reproduction is not landing on this machine"
-    )
+        expect(
+            proc.returncode == 3,
+            f"a terminal-record write failure after a clean all-pass run must "
+            f"escalate 0 -> 3, got {proc.returncode}\n"
+            f"--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+        )
+        text = Path(stream_path).read_text(encoding="utf-8")
+        report = json_stream_check.parse_stream(text)
+        expect(report.terminal is None, "the rejected terminal record reached the stream")
+        file_finishes = [
+            record
+            for record in report.records
+            if record.get("event") == "file_finished"
+        ]
+        expect(
+            len(file_finishes) == 1,
+            f"expected one committed pre-terminal file_finished record, got "
+            f"{len(file_finishes)}",
+        )
+        expect(
+            file_finishes[0].get("path") == rel
+            and file_finishes[0].get("outcome") == "pass",
+            f"pre-terminal file result was not the clean PASS: {file_finishes[0]}",
+        )
+        expect(not report.torn_tail, "the deterministic failure left a torn JSON tail")
+        time.sleep(0.5)
+        orphan = True
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            orphan = False
+        expect(
+            not orphan,
+            f"process group {pgid} still alive after terminal-write abort (orphan)",
+        )
+        return "terminal write fault: clean PASS escalates 0 -> 3, no orphan"
 
 
 def s_junit_scratch_cleanup(manifest: dict) -> str:
@@ -2842,25 +2850,108 @@ def s_junit_schema_gate(manifest: dict) -> str:
 def s_junit_determinism(manifest: dict) -> str:
     """Two repeated SEQUENTIAL `--junit-xml` runs of the same suite are equal
     under the JUnit CANONICAL form (`time` and embedded text masked; structure,
-    identity, classification, and counts kept). The suite includes a crash whose
-    ASLR addresses live in the masked error text, so raw byte equality would NOT
-    hold — the masking is load-bearing."""
-    tmp = tempfile.mkdtemp()
-    first = os.path.join(tmp, "run1.xml")
-    second = os.path.join(tmp, "run2.xml")
-    run_mtest(["e2e/suite", "--junit-xml", first])
-    run_mtest(["e2e/suite", "--junit-xml", second])
-    # A crash file is present, so the raw (unmasked-text) bytes must DIFFER — the
-    # discriminating proof that determinism holds only under the canonical mask.
-    raw1 = Path(first).read_text()
-    raw2 = Path(second).read_text()
-    expect(
-        raw1 != raw2,
-        "raw junit bytes were already equal — the crash-address discriminator "
-        "is missing, so canonical equality would prove nothing",
-    )
-    junit_canonicalize.assert_equal_runs(Path(first), Path(second))
-    return "two sequential runs are byte-equal under the canonical mask (raw bytes differ)"
+    identity, classification, and counts kept). Derived copies prove each mask is
+    load-bearing without relying on incidental differences between real runs:
+    changing a masked `time` or diagnostic body preserves canonical equality,
+    while changing an unmasked classification attribute does not."""
+    with tempfile.TemporaryDirectory(prefix="mtest-junit-determinism-") as tmp:
+        first = Path(tmp) / "run1.xml"
+        second = Path(tmp) / "run2.xml"
+        time_mutation = Path(tmp) / "time.xml"
+        text_mutation = Path(tmp) / "diagnostic.xml"
+        classification_mutation = Path(tmp) / "classification.xml"
+
+        first_run = run_mtest(["e2e/suite", "--junit-xml", str(first)])
+        second_run = run_mtest(["e2e/suite", "--junit-xml", str(second)])
+        expect_exit(first_run, 1)
+        expect_exit(second_run, 1)
+        junit_canonicalize.assert_equal_runs(first, second)
+
+        raw = first.read_text(encoding="utf-8")
+        canonical = junit_canonicalize.canonical_bytes(raw)
+
+        time_root = ET.fromstring(raw)
+        time_element = next(
+            (element for element in time_root.iter() if "time" in element.attrib),
+            None,
+        )
+        expect(time_element is not None, "the real JUnit report has no time attribute")
+        time_element.set("time", "98765.432")
+        ET.ElementTree(time_root).write(
+            time_mutation, encoding="utf-8", xml_declaration=True
+        )
+        time_raw = time_mutation.read_text(encoding="utf-8")
+        expect(time_raw != raw, "the time mutation did not change the raw report")
+        expect(
+            junit_canonicalize.canonical_bytes(time_raw) == canonical,
+            "a masked time mutation changed the canonical JUnit form",
+        )
+
+        text_root = ET.fromstring(raw)
+        masked_tags = {
+            "system-out",
+            "system-err",
+            "failure",
+            "error",
+            "stackTrace",
+            "flakyFailure",
+            "flakyError",
+            "rerunFailure",
+            "rerunError",
+        }
+        text_element = next(
+            (
+                element
+                for element in text_root.iter()
+                if element.tag in masked_tags and element.text is not None
+            ),
+            None,
+        )
+        expect(text_element is not None, "the real JUnit report has no diagnostic text")
+        text_element.text = (text_element.text or "") + "\nDETERMINISTIC-MUTATION\n"
+        ET.ElementTree(text_root).write(
+            text_mutation, encoding="utf-8", xml_declaration=True
+        )
+        text_raw = text_mutation.read_text(encoding="utf-8")
+        expect(text_raw != raw, "the diagnostic mutation did not change the raw report")
+        expect(
+            junit_canonicalize.canonical_bytes(text_raw) == canonical,
+            "a masked diagnostic mutation changed the canonical JUnit form",
+        )
+
+        classification_root = ET.fromstring(raw)
+        classification_element = next(
+            (
+                element
+                for element in classification_root.iter()
+                if element.tag in {"failure", "error"}
+                and "type" in element.attrib
+            ),
+            None,
+        )
+        expect(
+            classification_element is not None,
+            "the real JUnit report has no classified failure/error child",
+        )
+        classification_element.set(
+            "type", classification_element.attrib["type"] + "-MUTATED"
+        )
+        ET.ElementTree(classification_root).write(
+            classification_mutation, encoding="utf-8", xml_declaration=True
+        )
+        classification_raw = classification_mutation.read_text(encoding="utf-8")
+        expect(
+            classification_raw != raw,
+            "the classification mutation did not change the raw report",
+        )
+        expect(
+            junit_canonicalize.canonical_bytes(classification_raw) != canonical,
+            "an unmasked classification mutation was lost from the canonical form",
+        )
+        return (
+            "two sequential reports canonicalize equally; deterministic time/text "
+            "mutations are masked and classification remains visible"
+        )
 
 
 def s_junit_prior_report_intact(manifest: dict) -> str:

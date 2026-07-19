@@ -14,12 +14,13 @@ legitimately varies between two runs of the same suite is masked:
   `stackTrace`, and the `flakyFailure`/`flakyError`/`rerunFailure`/`rerunError`
   children — captured child output, assertion detail, and crash stack traces.
   Their `message`/`type` ATTRIBUTES are kept (they are classification, not
-  wall-clock or address noise).
+  volatile diagnostic text).
 
-Masking the embedded text as well as `time` is load-bearing: a crash artifact
-carries ASLR-randomized addresses in its stack text, so masking `time` alone
-would leave two runs' byte streams unequal. Raw masked-`time`-only byte equality
-holding anywhere a crash appears would therefore be a bug this masking prevents.
+The E2E determinism oracle proves that boundary with derived copies of one real
+report: changing a `time` attribute or a masked diagnostic body makes the raw
+XML unequal while preserving canonical equality, and changing an unmasked
+classification attribute makes both the raw and canonical forms unequal. The
+proof therefore does not depend on two real runs incidentally differing.
 
 The canonical form is then emitted through C14N so attribute ordering and
 whitespace are stable, and two runs' canonical bytes are compared directly.
@@ -38,7 +39,7 @@ _MASK_TIME = "0.000"
 _MASK_TEXT = "«masked»"
 """The single value every volatile text body is collapsed to."""
 # Elements whose TEXT bodies are volatile between two runs of the same suite
-# (captured output, assertion detail, crash stack with ASLR addresses). Their
+# (captured output, assertion detail, and crash stack text). Their
 # `message`/`type` ATTRIBUTES are classification and are deliberately kept.
 _MASKED_TEXT_TAGS = frozenset(
     {
@@ -76,8 +77,7 @@ def canonical_bytes(xml_text: str) -> bytes:
             element.set("time", _MASK_TIME)
         # Determinism invariant: only `time` and the volatile TEXT bodies are
         # masked; the `message`/`type` ATTRIBUTES ride through unmasked. That is
-        # load-bearing — a message/type that varies run-to-run (e.g. an ASLR
-        # address or a wall-clock in an assertion message) leaves the two
+        # load-bearing — a message/type that varies run-to-run leaves the two
         # canonical byte streams UNEQUAL and FAILS the e2e loudly. It never
         # silently passes, so those attributes must stay stable at their source.
         if element.tag in _MASKED_TEXT_TAGS and element.text is not None:
