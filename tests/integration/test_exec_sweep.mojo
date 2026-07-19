@@ -10,8 +10,9 @@ clean exit, never TimedOut. A descendant can leave that group with `setsid()`;
 if it retains a capture pipe, the bounded post-leader drain raises a named
 machinery error instead of laundering the leader's exit 0 into success.
 """
-from std.os import remove
+from std.os import remove, rmdir
 from std.os.path import exists
+from std.tempfile import mkdtemp
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
 from std.time import perf_counter_ns
 
@@ -23,9 +24,8 @@ from exec_helpers import bytes_to_str, target, py_spec
 def test_group_sweep_reaches_grandchild_on_normal_exit() raises:
     var runtime = ExecRuntime()
     runtime.open()
-    var sentinel = String("build/tests/sweep_sentinel.txt")
-    if exists(sentinel):
-        remove(sentinel)
+    var scratch = mkdtemp()
+    var sentinel = scratch + "/sweep_sentinel.txt"
     var argv = List[String]()
     argv.append(target("grandchild_exit0.py"))
     argv.append(sentinel)
@@ -43,14 +43,19 @@ def test_group_sweep_reaches_grandchild_on_normal_exit() raises:
     wait.append("import time; time.sleep(3)")
     _ = run_supervised(runtime, ProcessSpec.command(wait^))
     runtime.close()
-    assert_false(exists(sentinel), "grandchild survived the normal-exit sweep")
+    var survived = exists(sentinel)
+    if survived:
+        remove(sentinel)
+    rmdir(scratch)
+    assert_false(survived, "grandchild survived the normal-exit sweep")
 
 
 def test_escaped_descendant_retaining_pipe_is_never_success() raises:
     var runtime = ExecRuntime()
     runtime.open()
-    var control_path = String("build/tests/escaped-descendant-") + String(
-        perf_counter_ns()
+    var scratch = mkdtemp()
+    var control_path = (
+        scratch + "/escaped-descendant-" + String(perf_counter_ns())
     )
     var ready_path = control_path + ".ready"
     var stop_path = control_path + ".stop"
@@ -82,6 +87,14 @@ def test_escaped_descendant_retaining_pipe_is_never_success() raises:
     var cleanup = run_supervised(runtime, py_spec(cleanup_argv^, 6000))
     runtime.close()
 
+    var ready_remained = exists(ready_path)
+    var stop_remained = exists(stop_path)
+    if ready_remained:
+        remove(ready_path)
+    if stop_remained:
+        remove(stop_path)
+    rmdir(scratch)
+
     assert_false(returned_success, "leader exit 0 was accepted as success")
     assert_equal(
         message,
@@ -91,15 +104,16 @@ def test_escaped_descendant_retaining_pipe_is_never_success() raises:
     assert_true(cleanup.termination.is_exited(), String(cleanup.termination))
     assert_equal(cleanup.termination.value, 0)
     assert_equal(bytes_to_str(cleanup.stdout_bytes), "CLEANED\n")
-    assert_false(exists(ready_path), "escapee left its ready marker behind")
-    assert_false(exists(stop_path), "cleanup left its stop marker behind")
+    assert_false(ready_remained, "escapee left its ready marker behind")
+    assert_false(stop_remained, "cleanup left its stop marker behind")
 
 
 def test_escapee_cleanup_without_acknowledgement_fails_loudly() raises:
     var runtime = ExecRuntime()
     runtime.open()
-    var control_path = String("build/tests/unresponsive-escapee-") + String(
-        perf_counter_ns()
+    var scratch = mkdtemp()
+    var control_path = (
+        scratch + "/unresponsive-escapee-" + String(perf_counter_ns())
     )
     var ready_path = control_path + ".ready"
     var stop_path = control_path + ".stop"
@@ -119,6 +133,7 @@ def test_escapee_cleanup_without_acknowledgement_fails_loudly() raises:
         remove(ready_path)
     if exists(stop_path):
         remove(stop_path)
+    rmdir(scratch)
     runtime.close()
 
     assert_true(setup.termination.is_exited(), String(setup.termination))
