@@ -338,7 +338,14 @@ def serialize_event(e: Event) -> String:
         return _internal_error(e)
     if e.kind == EventKind.TEST_REPORTED:
         return _test_reported(e)
-    return _session_finished(e)
+    if e.kind == EventKind.SESSION_FINISHED:
+        return _session_finished(e)
+    # Unreachable: the EventKind vocabulary is closed and every kind is handled
+    # above. Returning an empty (invalid) line rather than mislabeling an
+    # unhandled kind as a session_finished record means a future kind added
+    # without its own serializer surfaces loudly to the strict consumer instead
+    # of being silently misencoded.
+    return String("")
 
 
 # --- Per-kind serializers ---------------------------------------------------

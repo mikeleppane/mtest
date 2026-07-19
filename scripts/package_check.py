@@ -18,10 +18,11 @@ toolchain. This script is that proof, run in five ordered stages:
      and `mtest --help` with THIS PROCESS's own child environment scrubbed --
      the dev pixi env absent from PATH, LD_LIBRARY_PATH empty. This is us
      scrubbing our own env for our own artifact, not the forbidden
-     child-process env scrub inside the product. notes/phase-04-spike.md
-     recorded that the raw dev build (`build/mtest`) is NOT loader-clean this
-     way (it needs `libKGENCompilerRTShared.so` from the Mojo runtime); the
-     INSTALLED package must be, purely via the `mojo-compiler` run dependency.
+     child-process env scrub inside the product. The raw dev build
+     (`build/mtest`) is NOT loader-clean this way: it needs
+     `libKGENCompilerRTShared.so` from the Mojo runtime, which the dev pixi env
+     supplies but a scrubbed env does not. The INSTALLED package must be
+     loader-clean purely via the `mojo-compiler` run dependency.
      A soname failure here is a recipe run-dependency gap, not a retry-able
      flake -- this script stops and reports it.
   4. Toolchain-threaded suite run: mtest's own tests/ suite, run through the

@@ -34,15 +34,18 @@ requirements:
   build:
     - mojo ==1.0.0b2
     - clang ==18.1.8
-  # Run-time: the installed `mtest` binary is NOT loader-clean. `readelf -d`
-  # shows a direct NEEDED on `libKGENCompilerRTShared.so`, whose transitive
-  # closure (libstdc++, libMSupportGlobals, libAsyncRTRuntimeGlobals, libNVPTX,
-  # libAsyncRTMojoBindings) resolves entirely within the Mojo runtime; a
-  # conda-meta ownership check attributes every one of those libraries to
-  # `mojo-compiler-1.0.0b2-release`. The native adapter is statically linked
-  # (no extra NEEDED entry), so it adds no run dependency of its own. The
-  # package therefore declares this run dependency instead of vendoring the
-  # runtime libs.
+  # Run-time: the installed `mtest` binary is NOT loader-clean on its own.
+  # `readelf -d` shows a direct NEEDED on `libKGENCompilerRTShared.so`, whose
+  # transitive closure pulls in the Mojo-runtime libraries (libMSupportGlobals,
+  # libAsyncRTRuntimeGlobals, libNVPTX, libAsyncRTMojoBindings) that
+  # `mojo-compiler-1.0.0b2-release` owns, plus the standard C++/GCC runtime
+  # (libstdc++, libgcc_s) — which the base environment provides and
+  # `mojo-compiler` itself depends on, NOT libraries mtest vendors or that
+  # mojo-compiler "owns". The native adapter is statically linked (no extra
+  # NEEDED entry), so it adds no run dependency of its own. Declaring
+  # `mojo-compiler` therefore drags in the whole closure transitively; the
+  # package-check test PROVES this empirically — a fresh env carrying only this
+  # run dependency loads and runs the installed binary.
   run:
     - mojo-compiler ==1.0.0b2
 
