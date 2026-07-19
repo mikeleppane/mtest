@@ -27,14 +27,10 @@ from mtest.exec.signals import _reset_interrupt
 from exec_helpers import target
 
 comptime _SIGINT = 2
-comptime _CONSTANT_SIGSTOP = 2
-comptime _CONSTANT_SIGCONT = 3
 comptime _CONSTANT_EIO = 4
 comptime _CONSTANT_ETXTBSY = 5
 comptime _OP_CHILD_EXECVE = 24
 comptime _DELAY_MS = 10
-comptime _STOP_DELAY_MS = 5
-comptime _STOP_DURATION_MS = 100
 """Milliseconds the SIGINT helper polls (10 ms) so the interrupt latch flips a
 short way INTO the busy-exec retry window — late enough that the group SIGTERM's
 grace escalation does not preempt the child before it reaches the errno path
@@ -73,46 +69,6 @@ def _inject_etxtbsy_then_exec_error() raises:
     assert_true(status == 0, "could not configure terminal child execve fault")
 
 
-def _schedule_self_stop_then_continue() raises -> Int32:
-    """Stop the supervisor across its deadline, then let it resume."""
-    # SAFETY: `poll_storage` owns one initialized Int64 cell before fork. Each
-    # nfds-zero poll ignores the pointer, and the child's COW copy stays live
-    # until it exits without destructors. The parent frees only its own copy.
-    var poll_storage = alloc[Int64](1)
-    memset_zero(poll_storage.bitcast[UInt8](), 8)
-    var sigstop = _native_constant(_CONSTANT_SIGSTOP)
-    var sigcont = _native_constant(_CONSTANT_SIGCONT)
-    # SAFETY: getpid and fork use their exact POSIX scalar/no-argument ABIs,
-    # retain no pointer, and all child-visible storage is initialized pre-fork.
-    var self_pid = external_call["getpid", Int32]()
-    var pid = external_call["fork", Int32]()
-    if Int(pid) == 0:
-        # SAFETY: after fork the helper calls only poll, kill, and _exit, all
-        # async-signal-safe. Both nfds-zero polls ignore the live COW pointer;
-        # bounded scalar delays bracket header-derived SIGSTOP/SIGCONT delivery
-        # to the parent's pid, and no call retains a pointer or returns ownership.
-        _ = external_call["poll", Int32](
-            poll_storage.bitcast[UInt8](), UInt64(0), Int32(_STOP_DELAY_MS)
-        )
-        _ = external_call["kill", Int32](self_pid, sigstop)
-        _ = external_call["poll", Int32](
-            poll_storage.bitcast[UInt8](), UInt64(0), Int32(_STOP_DURATION_MS)
-        )
-        _ = external_call["kill", Int32](self_pid, sigcont)
-        # SAFETY: _exit is async-signal-safe, accepts the exact scalar status,
-        # retains no state, and terminates without running Mojo destructors.
-        external_call["_exit", NoneType](Int32(0))
-    if Int(pid) < 0:
-        # SAFETY: fork failed, so the parent uniquely owns the allocation and
-        # may free it exactly once before raising.
-        poll_storage.free()
-        raise Error("could not fork stop/continue test helper")
-    # SAFETY: parent and child now have distinct COW images. Freeing the unique
-    # parent allocation cannot invalidate the child's still-live copy.
-    poll_storage.free()
-    return pid
-
-
 def _reap_helper(helper: Int32) raises:
     """Reap one exact test helper without consuming a supervised child."""
     # SAFETY: `st` owns one zero-initialized aligned Int32. waitpid writes at
@@ -135,12 +91,10 @@ def test_deadline_beats_stuck_etxtbsy_exec_latches_timed_out() raises:
     runtime.open()
     _reset_interrupt()
     _inject_etxtbsy_then_exec_error()
-    var helper = _schedule_self_stop_then_continue()
     var t = target("etxtbsy_target.sh")
     var argv = List[String]()
     argv.append(t)
     var r = run_supervised(runtime, ProcessSpec.command(argv^, 20))
-    _reap_helper(helper)
     # SAFETY: this test-only scalar ABI clears only native fault-table state;
     # it accepts no pointer, retains nothing, and the runtime has no live child.
     external_call["mtest_exec_test_fault_reset", NoneType]()
