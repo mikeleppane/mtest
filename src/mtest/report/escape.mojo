@@ -93,15 +93,41 @@ def json_escape_string(s: String) -> String:
     return _bytes_to_string(out)
 
 
+def _string_bytes(s: String) -> List[UInt8]:
+    """A copy of `s`'s UTF-8 bytes as an owned, indexable list. Pure."""
+    var out = List[UInt8]()
+    for b in s.as_bytes():
+        out.append(b)
+    return out^
+
+
+def _is_xml_noncharacter(data: List[UInt8], i: Int) -> Bool:
+    """Whether an XML-1.0-forbidden noncharacter begins at byte `i`. Pure.
+
+    XML 1.0's `Char` production excludes U+FFFE and U+FFFF (its BMP range stops
+    at U+FFFD): they are valid UTF-8 scalars — `EF BF BE` and `EF BF BF` — that
+    `lossy_utf8` correctly passes through, but a document containing them is
+    well-formed UTF-8 yet illegal XML 1.0 (`xmllint` rejects it). Detected here
+    (input is already valid UTF-8) so the XML escapers can replace them; JSON,
+    which permits these scalars, is unaffected.
+    """
+    if i + 3 > len(data):
+        return False
+    if Int(data[i]) != 0xEF or Int(data[i + 1]) != 0xBF:
+        return False
+    var last = Int(data[i + 2])
+    return last == 0xBE or last == 0xBF
+
+
 def xml_escape_text(s: String) -> String:
     """Escape `s` for XML TEXT content (element body text). Pure.
 
     `&` `<` `>` become entities. Literal Tab/LF/CR pass through unchanged
     (they are valid XML 1.0 `Char`s and TEXT context does not normalize
-    whitespace). Every other control byte below 0x20 — an invalid XML 1.0
-    code point — is REPLACED with U+FFFD, not escaped, per the settled
-    design. No CDATA is ever emitted. Every other byte passes through
-    unchanged.
+    whitespace). Every other control byte below 0x20 — and the XML-forbidden
+    noncharacters U+FFFE/U+FFFF — an invalid XML 1.0 code point, is REPLACED
+    with U+FFFD, not escaped, per the settled design. No CDATA is ever emitted.
+    Every other byte passes through unchanged.
 
     Args:
         s: The already-UTF-8-valid text to escape. Not mutated.
@@ -109,9 +135,16 @@ def xml_escape_text(s: String) -> String:
     Returns:
         `s` escaped for a well-formed XML 1.0 text node. Does not raise.
     """
+    var data = _string_bytes(s)
+    var n = len(data)
     var out = List[UInt8]()
-    for b in s.as_bytes():
-        var v = Int(b)
+    var i = 0
+    while i < n:
+        if _is_xml_noncharacter(data, i):  # U+FFFE/U+FFFF: illegal XML 1.0.
+            _push_str(out, _FFFD)
+            i += 3
+            continue
+        var v = Int(data[i])
         if v == 38:  # '&'
             _push_str(out, "&amp;")
         elif v == 60:  # '<'
@@ -119,11 +152,12 @@ def xml_escape_text(s: String) -> String:
         elif v == 62:  # '>'
             _push_str(out, "&gt;")
         elif v == 9 or v == 10 or v == 13:  # Tab, LF, CR: valid, pass through.
-            out.append(b)
+            out.append(data[i])
         elif v < 0x20:  # Invalid XML 1.0 control code point.
             _push_str(out, _FFFD)
         else:
-            out.append(b)
+            out.append(data[i])
+        i += 1
     return _bytes_to_string(out)
 
 
@@ -135,8 +169,9 @@ def xml_escape_attribute(s: String) -> String:
     references — `&#9;` / `&#10;` / `&#13;` — rather than passed through
     literally: attribute-value normalization would otherwise fold them to an
     ordinary space and silently corrupt a hostile node-id path reconstructed
-    from the attribute. Every other control byte below 0x20 is REPLACED with
-    U+FFFD, identically to TEXT context. No CDATA is ever emitted.
+    from the attribute. Every other control byte below 0x20 — and the
+    XML-forbidden noncharacters U+FFFE/U+FFFF — is REPLACED with U+FFFD,
+    identically to TEXT context. No CDATA is ever emitted.
 
     Args:
         s: The already-UTF-8-valid text to escape. Not mutated.
@@ -145,9 +180,16 @@ def xml_escape_attribute(s: String) -> String:
         `s` escaped for a well-formed, round-trip-safe XML 1.0 attribute
         value. Does not raise.
     """
+    var data = _string_bytes(s)
+    var n = len(data)
     var out = List[UInt8]()
-    for b in s.as_bytes():
-        var v = Int(b)
+    var i = 0
+    while i < n:
+        if _is_xml_noncharacter(data, i):  # U+FFFE/U+FFFF: illegal XML 1.0.
+            _push_str(out, _FFFD)
+            i += 3
+            continue
+        var v = Int(data[i])
         if v == 38:  # '&'
             _push_str(out, "&amp;")
         elif v == 60:  # '<'
@@ -165,7 +207,8 @@ def xml_escape_attribute(s: String) -> String:
         elif v < 0x20:  # Invalid XML 1.0 control code point.
             _push_str(out, _FFFD)
         else:
-            out.append(b)
+            out.append(data[i])
+        i += 1
     return _bytes_to_string(out)
 
 

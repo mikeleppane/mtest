@@ -130,6 +130,18 @@ def test_xml_text_angle_storm() raises:
     )
 
 
+def test_xml_text_noncharacters_become_fffd() raises:
+    # U+FFFE/U+FFFF are valid UTF-8 scalars but excluded by XML 1.0's Char
+    # production, so `xmllint` rejects a document that inlines them; they are
+    # replaced with U+FFFD. Adjacent code points that ARE valid XML 1.0 Chars —
+    # U+FFFD itself and the U+FDD0 noncharacter — must pass through untouched.
+    assert_equal(xml_escape_text(chr(0xFFFE)), "�")
+    assert_equal(xml_escape_text(chr(0xFFFF)), "�")
+    assert_equal(xml_escape_text("a" + chr(0xFFFE) + "b" + chr(0xFFFF)), "a�b�")
+    assert_equal(xml_escape_text(chr(0xFFFD)), chr(0xFFFD))
+    assert_equal(xml_escape_text(chr(0xFDD0)), chr(0xFDD0))
+
+
 # --- XML attribute-context escaping -----------------------------------------
 
 
@@ -155,10 +167,25 @@ def test_xml_attribute_quote_storm() raises:
     assert_equal(xml_escape_attribute('"""'), "&quot;&quot;&quot;")
 
 
+def test_xml_attribute_noncharacters_become_fffd() raises:
+    assert_equal(xml_escape_attribute(chr(0xFFFE)), "�")
+    assert_equal(xml_escape_attribute(chr(0xFFFF)), "�")
+    assert_equal(
+        xml_escape_attribute("a" + chr(0xFFFE) + "b" + chr(0xFFFF)), "a�b�"
+    )
+    assert_equal(xml_escape_attribute(chr(0xFFFD)), chr(0xFFFD))
+    assert_equal(xml_escape_attribute(chr(0xFDD0)), chr(0xFDD0))
+
+
 def test_xml_both_contexts_hostile_corpus() raises:
-    var s = 'path/"a"<b>&c\t\n\r\x00\x1f'
+    var s = 'path/"a"<b>&c\t\n\r\x00\x1f' + chr(0xFFFE) + chr(0xFFFF)
     var text_got = xml_escape_text(s)
     var attr_got = xml_escape_attribute(s)
+    # The XML-forbidden noncharacters never survive raw in either context.
+    assert_false(chr(0xFFFE) in text_got)
+    assert_false(chr(0xFFFF) in text_got)
+    assert_false(chr(0xFFFE) in attr_got)
+    assert_false(chr(0xFFFF) in attr_got)
     # TEXT: literal quote passes, tab/lf/cr pass literally, control -> FFFD.
     assert_true('"a"' in text_got)
     assert_true("&lt;b&gt;" in text_got)
