@@ -19,7 +19,7 @@ All FFI stays below in `exec` — `stdout_isatty()` is the terminal probe; argv,
 cwd, getenv, and exit are ordinary program-level operations via `std`.
 """
 from std.io import FileDescriptor
-from std.os import getenv
+from std.os import getenv, listdir, remove, rmdir
 from std.pathlib import cwd
 from std.sys import argv, exit
 from std.tempfile import mkdtemp
@@ -85,6 +85,36 @@ def _close_runtime(mut runtime: ExecRuntime) -> Bool:
     except e:
         _eprintln("mtest: internal error: " + String(e))
         return False
+
+
+def _discard_junit_scratch(spool_dir: String, temp_path: String):
+    """Best-effort removal of the JUnit spool directory (with every spooled
+    fragment) and any leftover temp file. Non-raising; safe on empty/missing.
+
+    `main` OWNS this scratch — it created the spool with `mkdtemp` and the temp
+    with `open_junit_artifact` — so it frees them on every exit path once the
+    session has finished with them. On success the temp has already been renamed
+    onto the report target (so removing `temp_path` is a no-op that never touches
+    the published report); on failure the reporter already discarded the temp;
+    either way the fragments and the spool directory are the leftovers to clear.
+    Called after the session returns and on the pre-run/raise error paths, so a
+    run never leaks a `mkdtemp` directory per invocation.
+    """
+    if temp_path != "":
+        try:
+            remove(temp_path)
+        except:
+            pass
+    if spool_dir != "":
+        try:
+            for name in listdir(spool_dir):
+                try:
+                    remove(spool_dir + "/" + name)
+                except:
+                    pass
+            rmdir(spool_dir)
+        except:
+            pass
 
 
 def main():
@@ -232,12 +262,15 @@ def main():
     var junit_target = String("")
     if junit_active:
         try:
-            var spool = mkdtemp()
-            var artifact = open_junit_artifact(spool, config.junit_dest)
-            junit_spool = artifact.spool_dir
+            # Assign the spool to the outer name FIRST, so a later failure to
+            # open the target temp still leaves the mkdtemp directory tracked for
+            # cleanup rather than leaking it.
+            junit_spool = mkdtemp()
+            var artifact = open_junit_artifact(junit_spool, config.junit_dest)
             junit_temp = artifact.temp_path
             junit_target = artifact.target_path
         except junit_error:
+            _discard_junit_scratch(junit_spool, junit_temp)
             if json_owns_fd:
                 # Already exiting 3 (an internal error outranks a close failure);
                 # the close status cannot escalate further, so discard it.
@@ -265,7 +298,10 @@ def main():
         code = run_session[1, 2, 3](runtime, config, root, comp)
     except e:
         # The only raise the session propagates is a discover: usage error;
-        # like a cli usage error it exits 4 to stderr.
+        # like a cli usage error it exits 4 to stderr. The session raised before
+        # finalizing, so clear the junit scratch it never got to publish.
+        if junit_active:
+            _discard_junit_scratch(junit_spool, junit_temp)
         if json_owns_fd:
             # A usage error already routes to exit 4, which dominates any
             # close-failure escalation, so discard the close status here.
@@ -315,6 +351,12 @@ def main():
         # code under the terminal-write-failure precedence (2 stands, 3 stays,
         # 0/1/5 -> 3): an undelivered machine report must not exit success.
         code = escalate_on_close_failure(code, close_json_fd(json_fd))
+    if junit_active:
+        # The session has finalized (the report was renamed onto its target, or
+        # left intact on failure); free the spool directory and fragments main
+        # created for it so no run leaks a mkdtemp directory. Covers the success,
+        # interrupt, finalize-failure, and spool-failure paths alike.
+        _discard_junit_scratch(junit_spool, junit_temp)
     if not _close_runtime(runtime):
         exit(3)
     exit(code)

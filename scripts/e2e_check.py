@@ -2743,6 +2743,33 @@ def s_json_terminal_write_failure(manifest: dict) -> str:
     )
 
 
+def s_junit_scratch_cleanup(manifest: dict) -> str:
+    """A `--junit-xml` run leaves no spool directory behind. `main` owns the
+    `mkdtemp` scratch it creates for per-suite fragments and frees it on exit;
+    a busy /tmp would otherwise accrete one leaked directory (plus a fragment)
+    per invocation, and eventually a `mkdtemp` failure before tests even run."""
+    report_dir = tempfile.mkdtemp()
+    tmpdir = tempfile.mkdtemp()  # the isolated TMPDIR the run's mkdtemp lands in
+    try:
+        report_path = os.path.join(report_dir, "report.xml")
+        run = run_mtest(
+            ["e2e/suite", "--junit-xml", report_path],
+            env_overrides={"TMPDIR": tmpdir},
+        )
+        expect_exit(run, 1)  # the default suite's known outcome: a normal finalize
+        expect(os.path.exists(report_path), "the junit report was not written")
+        junit_check.check_artifact(Path(report_path))
+        leftovers = os.listdir(tmpdir)
+        expect(
+            leftovers == [],
+            f"the junit spool leaked into TMPDIR after the run: {leftovers}",
+        )
+        return "a --junit-xml run leaves no spool directory in TMPDIR (report valid)"
+    finally:
+        shutil.rmtree(report_dir, ignore_errors=True)
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def s_junit_schema_gate(manifest: dict) -> str:
     """`--junit-xml PATH` writes a document that PASSES the junit-10 oracle
     (schema + arithmetic), including a flaky suite in chronological order and a
@@ -3174,6 +3201,7 @@ SCENARIOS = [
     ("json-truncation-sigkill", s_json_truncation_sigkill),
     ("json-truncation-dead-pipe", s_json_truncation_dead_pipe),
     ("json-terminal-write-failure", s_json_terminal_write_failure),
+    ("junit-scratch-cleanup", s_junit_scratch_cleanup),
     ("junit-schema-gate", s_junit_schema_gate),
     ("junit-determinism", s_junit_determinism),
     ("junit-prior-report-intact", s_junit_prior_report_intact),
