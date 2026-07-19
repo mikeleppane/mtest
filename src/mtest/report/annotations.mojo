@@ -60,6 +60,7 @@ from mtest.model.outcome import Outcome
 from mtest.model.parse_disposition import ParseDisposition
 from mtest.model.test_result import TestResult
 from mtest.report.escape import gh_escape_message, gh_escape_property
+from mtest.report.signals import _signal_name_for_target
 
 # --- Platform bounds ---------------------------------------------------------
 # Re-verified against GitHub's own documentation (July 2026): a workflow STEP
@@ -215,38 +216,6 @@ def _test_fail_row(t: TestResult) -> _AnnotationRow:
 # --- Crash-class / file-level failure ---------------------------------------
 
 
-def _signal_name(signo: Int) -> String:
-    """The `"SIGNAME, description"` words for a common terminating signal, or
-    `""` outside that set. Pure; mirrors `console.mojo`'s table (this module
-    does not import console — a small duplicated lookup table costs far less
-    than a cross-reporter coupling)."""
-    if signo == 1:
-        return String("SIGHUP, hangup")
-    if signo == 2:
-        return String("SIGINT, interrupt")
-    if signo == 3:
-        return String("SIGQUIT, quit")
-    if signo == 4:
-        return String("SIGILL, illegal instruction")
-    if signo == 5:
-        return String("SIGTRAP, trace/breakpoint trap")
-    if signo == 6:
-        return String("SIGABRT, abort")
-    if signo == 7:
-        return String("SIGBUS, bus error")
-    if signo == 8:
-        return String("SIGFPE, floating-point exception")
-    if signo == 9:
-        return String("SIGKILL, killed")
-    if signo == 11:
-        return String("SIGSEGV, segmentation fault")
-    if signo == 13:
-        return String("SIGPIPE, broken pipe")
-    if signo == 15:
-        return String("SIGTERM, terminated")
-    return String("")
-
-
 def _is_file_level_crash_class(o: Outcome) -> Bool:
     """Whether `o` is a whole-file abnormal outcome with no per-test rows.
 
@@ -265,7 +234,7 @@ def _outcome_words(e: Event) -> String:
     Pure; total over the outcomes `_is_file_level_crash_class` accepts.
     """
     if e.outcome == Outcome.CRASH:
-        var name = _signal_name(e.signal_number)
+        var name = _signal_name_for_target(e.signal_number)
         if name != "":
             return (
                 "crashed (signal "
@@ -343,7 +312,7 @@ def _precompile_ending_words(e: Event) -> String:
     if not e.ending_known:
         return String("")
     if e.term_kind == 1:
-        var name = _signal_name(e.term_value)
+        var name = _signal_name_for_target(e.term_value)
         var base = "died by signal " + String(e.term_value)
         if name != "":
             base += " (" + name + ")"

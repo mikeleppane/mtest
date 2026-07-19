@@ -5,12 +5,13 @@ means; the console now composes the detail string from the event's
 `signal_number`, so the words have to live in `report`. This locks the
 known-signal shape (`signal 4 — SIGILL, illegal instruction`) and the
 unknown-signal fallback (`signal 99`, no dangling `— `), reached through the
-same private-helper seam `test_session_mangle.mojo` uses for `_mangle`.
+shared report-layer signal helper.
 """
 from std.testing import assert_equal, assert_true, TestSuite
 
 from mtest.model import Event, Outcome
-from mtest.report.console import _outcome_detail, _signal_name
+from mtest.report.console import _outcome_detail
+from mtest.report.signals import _signal_name_for_target
 
 
 def _crash_detail(signo: Int) -> String:
@@ -29,7 +30,7 @@ def _crash_detail(signo: Int) -> String:
 
 
 def test_signal_name_names_a_known_signal_in_words() raises:
-    var name = _signal_name(4)
+    var name = _signal_name_for_target(4)
     assert_true("SIGILL" in name, name)
     assert_true("illegal instruction" in name, name)
 

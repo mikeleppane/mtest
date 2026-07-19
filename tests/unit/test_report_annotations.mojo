@@ -10,6 +10,7 @@ vs property) over hostile input — including a would-be forged `::error` inside
 a message, neutralized because the CR/LF that would start a new output line is
 escaped away.
 """
+from std.sys.info import CompilationTarget
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.model.events import Event
@@ -169,6 +170,18 @@ def test_crash_class_row_names_the_signal_in_words() raises:
             " 11 — SIGSEGV, segmentation fault)"
         ),
     )
+
+    var platform_events = List[Event]()
+    platform_events.append(
+        _file_finished(
+            "tests/test_platform_signal.mojo", Outcome.CRASH, signal_number=7
+        )
+    )
+    var platform_out = render_annotations(platform_events)
+    comptime if CompilationTarget.is_macos():
+        assert_true("signal 7 — SIGEMT, emulation trap" in platform_out[0])
+    else:
+        assert_true("signal 7 — SIGBUS, bus error" in platform_out[0])
 
 
 def test_crash_class_row_never_carries_a_line_property() raises:

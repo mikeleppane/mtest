@@ -54,6 +54,7 @@ UNIT_SUITES = {
     "test_report_junit_finalize.mojo",
     "test_report_junit_reporter.mojo",
     "test_report_recording.mojo",
+    "test_report_signals.mojo",
     "test_select_logic.mojo",
     "test_select_operands.mojo",
     "test_session_attribution.mojo",

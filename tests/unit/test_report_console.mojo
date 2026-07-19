@@ -10,6 +10,7 @@ is off, signals named in words, and captured output rendered verbatim. The
 console learns every printed fact from the events — only version and config are
 passed in.
 """
+from std.sys.info import CompilationTarget
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
 
 from mtest.config import ColorWhen, Verbosity, ShowOutput
@@ -269,6 +270,26 @@ def test_crash_names_signal_in_words() raises:
     _feed_mock_run(c)
     var out = c.output()
     assert_true("signal 4 — SIGILL, illegal instruction" in out)
+
+    var platform = _console()
+    platform.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    platform.handle(Event.file_started("tests/test_platform_signal.mojo"))
+    platform.handle(
+        Event.file_finished(
+            "tests/test_platform_signal.mojo",
+            Outcome.CRASH,
+            0.1,
+            _argv("tests/test_platform_signal.mojo"),
+            0.1,
+            List[UInt8](),
+            List[UInt8](),
+            signal_number=7,
+        )
+    )
+    comptime if CompilationTarget.is_macos():
+        assert_true("signal 7 — SIGEMT, emulation trap" in platform.output())
+    else:
+        assert_true("signal 7 — SIGBUS, bus error" in platform.output())
 
 
 def test_timeout_notes_the_deadline() raises:
