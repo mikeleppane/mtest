@@ -149,7 +149,7 @@ def test_promotion_failure_never_reports_a_compiler_ending() raises:
     )
 
     var console = ConsoleReporter(
-        "0.1.0-dev",
+        "0.4.0",
         ColorWhen.NEVER,
         is_tty=False,
         no_color=False,

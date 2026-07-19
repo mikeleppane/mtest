@@ -451,7 +451,7 @@ def build_matrix() -> list[Check]:
     served = [("--retries", "2"), ("--compile-timeout", "600"), ("--json", "out.ndjson"), ("--junit-xml", "r.xml"), ("--gh-annotations", "auto")]
     checks = [
         # Version identity (§19) — discriminating, not a bare "mtest".
-        Check("help: version prints the version", "§19", ["version"], 0, out_has=["mtest 0.1.0"]),
+        Check("help: version prints the version", "§19", ["version"], 0, out_has=["mtest 0.4.0"]),
         # Outcomes + FROZEN exit codes (§9,§10). CRASH must stay distinct from FAIL (§10).
         Check("outcome: passing tests/ -> 0, exact count", "§9,§10", I + ["tests"], 0,
               any_has=["4 passed", "NO-TESTS"]),

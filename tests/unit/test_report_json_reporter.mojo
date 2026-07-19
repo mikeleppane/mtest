@@ -46,24 +46,24 @@ def _lines(content: String) -> List[String]:
 def test_header_is_emitted_first_on_construction() raises:
     var path = _scratch("header.ndjson")
     var fd = open_json_fd(path)
-    var rep = JsonStreamReporter(fd, "0.1.0-dev", True)
+    var rep = JsonStreamReporter(fd, "0.4.0", True)
     close_json_fd(fd)
     var content = _read_file(path)
     var lines = _lines(content)
     assert_equal(len(lines), 1)
-    assert_equal(lines[0], stream_header("0.1.0-dev"))
+    assert_equal(lines[0], stream_header("0.4.0"))
 
 
 def test_events_are_written_as_ndjson_lines() raises:
     var path = _scratch("events.ndjson")
     var fd = open_json_fd(path)
-    var rep = JsonStreamReporter(fd, "0.1.0-dev", True)
+    var rep = JsonStreamReporter(fd, "0.4.0", True)
     rep.handle(Event.file_started("tests/test_a.mojo"))
     rep.handle(Event.session_finished(Summary.zeros(), 0.0, 0))
     close_json_fd(fd)
     var lines = _lines(_read_file(path))
     assert_equal(len(lines), 3)
-    assert_equal(lines[0], stream_header("0.1.0-dev"))
+    assert_equal(lines[0], stream_header("0.4.0"))
     assert_equal(
         lines[1], serialize_event(Event.file_started("tests/test_a.mojo"))
     )
@@ -76,7 +76,7 @@ def test_events_are_written_as_ndjson_lines() raises:
 def test_active_reporter_status_starts_clean() raises:
     var path = _scratch("clean.ndjson")
     var fd = open_json_fd(path)
-    var rep = JsonStreamReporter(fd, "0.1.0-dev", True)
+    var rep = JsonStreamReporter(fd, "0.4.0", True)
     var st = rep.status()
     close_json_fd(fd)
     assert_false(st.failed)
@@ -88,7 +88,7 @@ def test_write_failure_latches_and_later_handles_noop() raises:
     var path = _scratch("latch.ndjson")
     var fd = open_json_fd(path)
     close_json_fd(fd)
-    var rep = JsonStreamReporter(fd, "0.1.0-dev", True)
+    var rep = JsonStreamReporter(fd, "0.4.0", True)
     var st = rep.status()
     assert_true(st.failed)
     assert_true(st.errno != 0)

@@ -1,6 +1,6 @@
 [workspace]
 name = "mtest"
-version = "0.1.0"
+version = "0.4.0"
 description = "A pytest-like test runner for Mojo that orchestrates the stdlib's per-file TestSuite"
 channels = ["https://conda.modular.com/max/", "conda-forge"]
 # Linux is the gate platform; macOS is a v1 target and shares the same POSIX
@@ -34,6 +34,12 @@ libxml2 = "==2.15.3"
 # Print the pinned Mojo version — first CI step, fails fast on a broken toolchain
 # and stamps the exact build into the log next to the transcript headers.
 mojo-version = "mojo --version"
+
+# Assert MTEST_VERSION (src/mtest/cli/parser.mojo) and this manifest's `version`
+# agree with each other and with the version this repo currently ships. Cheap
+# and dependency-free, so it runs first — a drift here means every later gate
+# (goldens, packaging) would be validating a lie about which release they cover.
+version-check = "python scripts/version_check.py"
 
 # Precompile the src/mtest package into build/mtest.mojopkg. This is the
 # package-compiles GATE: an empty-but-broken package fails here before any test
@@ -166,12 +172,13 @@ depends-on = ["build-bin"]
 cmd = "python scripts/e2e_check.py"
 depends-on = ["build-bin"]
 
-# The aggregate gate CI runs. Ordered fail-fast: formatting, then the package
-# compile gate, then the protocol-transcript diff, then the Mojo tests (the
-# mtest-independent glob-driven twin first, then mtest dogfooding its own
-# suite), then the end-to-end binary gate.
+# The aggregate gate CI runs. Ordered fail-fast: the version-identity check,
+# then formatting, then the package compile gate, then the protocol-transcript
+# diff, then the Mojo tests (the mtest-independent glob-driven twin first, then
+# mtest dogfooding its own suite), then the end-to-end binary gate.
 [tasks.ci]
 depends-on = [
+    "version-check",
     "fmt-check",
     "harness-check",
     "safety-check",
