@@ -41,6 +41,7 @@ from mtest.report import (
     JsonStreamReporter,
     JunitReporter,
     close_json_fd,
+    escalate_on_close_failure,
     open_json_fd,
     open_junit_artifact,
     resume_delimiter,
@@ -238,7 +239,9 @@ def main():
             junit_target = artifact.target_path
         except junit_error:
             if json_owns_fd:
-                close_json_fd(json_fd)
+                # Already exiting 3 (an internal error outranks a close failure);
+                # the close status cannot escalate further, so discard it.
+                _ = close_json_fd(json_fd)
             _eprintln("mtest: internal error: " + String(junit_error))
             if not _close_runtime(runtime):
                 exit(3)
@@ -264,7 +267,9 @@ def main():
         # The only raise the session propagates is a discover: usage error;
         # like a cli usage error it exits 4 to stderr.
         if json_owns_fd:
-            close_json_fd(json_fd)
+            # A usage error already routes to exit 4; a close failure on this
+            # path is immaterial (nothing was streamed), so discard the status.
+            _ = close_json_fd(json_fd)
         _eprintln(String(e))
         if not _close_runtime(runtime):
             exit(3)
@@ -304,7 +309,12 @@ def main():
         print(rendered, end="", file=FileDescriptor(console_fd), flush=True)
 
     if json_owns_fd:
-        close_json_fd(json_fd)
+        # The close of the destination main OWNS can surface a deferred write
+        # error (a quota/network filesystem that reports ENOSPC/EIO only at
+        # close), which the session could not have seen. Escalate the resolved
+        # code under the terminal-write-failure precedence (2 stands, 3 stays,
+        # 0/1/5 -> 3): an undelivered machine report must not exit success.
+        code = escalate_on_close_failure(code, close_json_fd(json_fd))
     if not _close_runtime(runtime):
         exit(3)
     exit(code)

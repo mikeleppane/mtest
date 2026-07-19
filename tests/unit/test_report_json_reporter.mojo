@@ -15,6 +15,7 @@ from mtest.model import Event, Summary
 from mtest.report import (
     JsonStreamReporter,
     close_json_fd,
+    escalate_on_close_failure,
     open_json_fd,
     serialize_event,
     stream_header,
@@ -105,6 +106,34 @@ def test_inert_reporter_writes_nothing_and_never_latches() raises:
     rep.handle(Event.file_started("x"))
     rep.handle(Event.session_finished(Summary.zeros(), 0.0, 0))
     assert_false(rep.status().failed)
+
+
+def test_close_json_fd_reports_failure_on_a_dead_descriptor() raises:
+    # A descriptor closed once, then closed again: the second close hits EBADF
+    # and must be REPORTED (True), not swallowed — a deferred write error on a
+    # quota/network filesystem surfaces exactly this way.
+    var fd = open_json_fd(_scratch("closefail"))
+    assert_false(close_json_fd(fd), "the first close of a live fd succeeds")
+    assert_true(
+        close_json_fd(fd), "closing an already-closed fd reports failure"
+    )
+
+
+def test_escalate_on_close_failure_precedence() raises:
+    # No close failure: the resolved code is untouched, whatever it is.
+    assert_equal(escalate_on_close_failure(0, False), 0)
+    assert_equal(escalate_on_close_failure(1, False), 1)
+    assert_equal(escalate_on_close_failure(2, False), 2)
+    assert_equal(escalate_on_close_failure(5, False), 5)
+    assert_equal(escalate_on_close_failure(3, False), 3)
+    # A close failure escalates a resolved 0/1/5 to 3 (the machine report was
+    # not durably committed), a resolved 2 STANDS (interrupt dominates), and a
+    # resolved 3 stays 3.
+    assert_equal(escalate_on_close_failure(0, True), 3)
+    assert_equal(escalate_on_close_failure(1, True), 3)
+    assert_equal(escalate_on_close_failure(5, True), 3)
+    assert_equal(escalate_on_close_failure(2, True), 2)
+    assert_equal(escalate_on_close_failure(3, True), 3)
 
 
 def main() raises:

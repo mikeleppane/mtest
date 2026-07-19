@@ -63,6 +63,7 @@ from mtest.report.json_stream_reporter import (
     JsonStreamReporter,
     StreamStatus,
     close_json_fd,
+    escalate_on_close_failure,
     open_json_fd,
 )
 from mtest.report.junit import (

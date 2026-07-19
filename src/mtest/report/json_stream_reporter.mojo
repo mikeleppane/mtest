@@ -125,16 +125,39 @@ def open_json_fd(path: String) raises -> Int:
     return Int(fd)
 
 
-def close_json_fd(fd: Int):
-    """Close a descriptor opened by `open_json_fd`; never raises.
+def close_json_fd(fd: Int) -> Bool:
+    """Close a descriptor opened by `open_json_fd`; never raises. Returns
+    whether the close FAILED.
 
-    A close error on a write destination is not actionable (the bytes are
-    already committed or lost), so it is swallowed — the session's exit code is
-    decided by the stream's own write latch, not by this close.
+    On a destination the caller OWNS (a `--json PATH` file, or the process's
+    own stdout under `--json -`), a deferred write error can surface only at
+    `close`: a quota- or network-backed filesystem may buffer the byte-drained
+    writes and report `ENOSPC`/`EIO` only when the descriptor is closed. That
+    IS actionable — the machine report was not durably committed — so the
+    caller escalates the exit code exactly as a live write failure would. The
+    stream's own live write latch is independent of this result.
     """
     # SAFETY: libc `close` has the ABI `int close(int)`. `fd` is a descriptor the
-    # caller owns and does not use again; the scalar result is ignored.
-    _ = external_call["close", Int32](Int32(fd))
+    # caller owns and does not use again; a nonzero result means the close failed.
+    return external_call["close", Int32](Int32(fd)) != 0
+
+
+def escalate_on_close_failure(code: Int, close_failed: Bool) -> Int:
+    """Apply the terminal-write-failure precedence when the OWNED `--json`
+    destination's close failed. Pure.
+
+    The close of the descriptor the owner opened is the one `--json` I/O the
+    session cannot observe — it happens after the session resolved the code, and
+    the fd outlives the run. A deferred write error surfacing only at close means
+    the machine report was not durably committed, so its 0/1/5 verdict is no
+    longer authoritative. The precedence mirrors the stream's live write failure
+    (see the session's terminal-code resolution): a resolved 2 STANDS (an
+    interrupt is never displaced by a later I/O failure), a resolved 3 stays 3,
+    and a resolved 0/1/5 ESCALATES to 3.
+    """
+    if close_failed and code != 2 and code != 3:
+        return 3
+    return code
 
 
 @fieldwise_init
