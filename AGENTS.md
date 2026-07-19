@@ -588,6 +588,68 @@ Accumulated the hard way; append as later phases teach more.
   property (a stand-in that skips the write, a fixture that takes the other
   branch), watch the test go RED, then revert — before calling anything a
   pin. "I ran it and it looked right" is an observation, not a guard.
+- **Mojo test binaries inherit a huge `RLIMIT_NOFILE` (~1,048,576) from the
+  MAX runtime.** Symptom: spawning a subprocess (python/xmllint) from INSIDE
+  a built Mojo test binary is pathologically slow — tens of seconds per
+  spawn, worse under host load — because the elevated fd-table ceiling makes
+  every child's startup crawl. Correct move: validate an emitted artifact via
+  a SEPARATE Python CI gate over the REAL binary's output (the
+  `junit_render_check.py` pattern: build the binary, run it, oracle-check the
+  file it actually wrote), never via an in-Mojo-test subprocess spawn; keep
+  Mojo unit tests to in-process structural/exact-output assertions.
+- **Multibyte UTF-8 characters anywhere in `native/*.c`, comments included,
+  misalign `postfork_check.py`'s byte-offset AST.** `scripts/postfork_check.py`
+  reads the source as a Python `str` (`source.read_text(encoding="utf-8")`,
+  codepoint-indexed) but slices and line-counts it using RAW BYTE offsets
+  straight from clang's `-ast-dump=json` (`_offset`/`_line`/`_source_segment`)
+  — a multibyte character earlier in the file (an em-dash, a curly quote, any
+  non-ASCII byte) shifts every later byte offset past its matching codepoint
+  position. Symptom: `postfork-check` fails on otherwise-valid C — wrong line
+  numbers, a truncated or garbled source segment — after adding Unicode
+  punctuation to a comment. Correct move: keep `native/*.c` comments, and all
+  of `native/`, strictly ASCII.
+- **A raw `external_call["isatty", ...]` fails to link once its module is
+  imported alongside `std.testing.TestSuite` in a unit test.** `std.io.
+  FileDescriptor` already declares that libc symbol for TestSuite's own
+  pass/fail output; a second, independently-attributed `external_call
+  ["isatty", ...]` declaration for the identical C symbol in the same
+  compiled binary is a link-time attribute conflict the toolchain rejects
+  outright (documented in `src/mtest/exec/tty.mojo`). Symptom: a
+  previously-fine FFI wrapper suddenly fails to compile the moment a new
+  test imports it next to TestSuite. Correct move: delegate to the std
+  wrapper (`FileDescriptor(fd).isatty()`) instead of declaring the raw call
+  yourself — the same reuse-the-stdlib's-declaration discipline that already
+  governs `write` (see the FFI-spike Lesson above).
+- **Reaching a CONCRETE reporter through a generic `CompositeReporter[*Rs]`
+  pack (for an out-of-trait call like `status()`/`finalize()`/
+  `note_not_run()`) uses a comptime index plus a typed `Pointer(to=element)`
+  binding, never a bare `rebind`.** `src/mtest/session/session.mojo`'s
+  `_stream_failed`, `_junit_note_not_run`, `_junit_finalize`, and
+  `annotation_lines` each take a defaulted comptime index (`stream_index`/
+  `junit_index`/`ann_index`, default `-1`), reach `ref element =
+  reporter.reporters[i]`, and bind `Pointer[ConcreteType, origin_of(element)]
+  = Pointer(to=element)` — a COMPILE-TIME type assertion: an index naming the
+  wrong tuple element fails to COMPILE rather than reinterpreting the wrong
+  concrete type as UB. Symptom/trap: the prior code `rebind`-ed through the
+  pointer instead, which would have silently accepted a mis-index (latent
+  UB) had the composition order ever drifted from the index. Correct move:
+  the typed-Pointer binding, with the index defaulted so bare-composite call
+  sites (test drivers passing a recording-only composite) are unaffected — a
+  comptime `if index >= 0` elides the whole reach when no such reporter is
+  composed.
+- **A tool that COMMITS captured program output containing filesystem paths
+  must sanitize the ephemeral run root to a stable placeholder before
+  writing.** `scripts/pty_capture.py` captures the real `build/mtest`
+  binary's ANSI console output into `notes/console-captures/`; the
+  throwaway suite's `mkdtemp` root (carved from the ambient `TMPDIR`, which
+  varies per run and per machine) is rewritten, before any file is written,
+  to a fixed neutral placeholder — both the literal and the
+  symlink-resolved (`os.path.realpath`) spelling are covered, since the
+  child's `cwd()` may canonicalize. Symptom: skip the rewrite and a
+  machine-specific `TMPDIR`/sandbox scratch path ends up baked into a
+  committed capture or fixture. Correct move: sanitize captured output at
+  write time, substituting the ephemeral run-root for a stable placeholder —
+  the same discipline `gen_transcripts.py` applies to the repo-root prefix.
 
 ## Skills index
 
