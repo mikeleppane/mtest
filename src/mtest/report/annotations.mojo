@@ -167,12 +167,40 @@ def _detail_line_number(first_line: String) -> Int:
     return _parse_uint(String(parts[1]))
 
 
+def _bound_row_detail(s: String) -> String:
+    """`s` cut to a bounded raw prefix on a codepoint boundary, so a row never
+    retains more than the render bound can ever emit. Pure; never raises.
+
+    A row's message is escaped and cut to `_MESSAGE_MAX_BYTES` ESCAPED bytes at
+    render time; because `gh_escape_message` never shrinks, that final window
+    derives from at most `_MESSAGE_MAX_BYTES` RAW bytes. Keeping whole
+    codepoints until at least that many raw bytes are retained therefore
+    reproduces the rendered line byte-for-byte while bounding what the row pins
+    in memory — a single newline-free assertion detail can be capture-sized, and
+    without this the accumulator would retain every such detail in full.
+    """
+    if s.byte_length() <= _MESSAGE_MAX_BYTES:
+        return s.copy()
+    var out = String("")
+    var used = 0
+    for cp in s.codepoint_slices():
+        var piece = String(cp)
+        out += piece
+        used += piece.byte_length()
+        if used >= _MESSAGE_MAX_BYTES:
+            break
+    return out^
+
+
 def _test_fail_row(t: TestResult) -> _AnnotationRow:
     """The per-test FAIL row: `<node id>: <first assertion line>`, `line=`
     only when that line carries one. Pure; never raises.
     """
     var node_id = t.node.render()
     var first = _first_line(t.detail)
+    # `line=` is read from the leading backtrace pointer, so it is computed from
+    # the full first line; only the retained message is bounded (see
+    # `_bound_row_detail`) so the row cannot pin a capture-sized detail.
     var line = _detail_line_number(first)
     return _AnnotationRow(
         sort_key=node_id,
@@ -180,7 +208,7 @@ def _test_fail_row(t: TestResult) -> _AnnotationRow:
         file=t.node.path,
         has_line=line >= 0,
         line=line if line >= 0 else 0,
-        message=node_id + ": " + first,
+        message=node_id + ": " + _bound_row_detail(first),
     )
 
 

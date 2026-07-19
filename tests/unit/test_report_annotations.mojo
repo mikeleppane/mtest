@@ -604,5 +604,49 @@ def test_reporter_retention_is_independent_of_capture_size() raises:
     )
 
 
+def _big_line(n: Int) -> String:
+    # A single newline-free run of 'x' at least n bytes long, built by doubling
+    # so the test is not dominated by byte-by-byte construction.
+    var s = String("x")
+    while s.byte_length() < n:
+        var half = s.copy()
+        s += half
+    return s^
+
+
+def _reporter_retention_detail(files: Int, detail: String) raises -> Int:
+    var rep = AnnotationsReporter(True)
+    for i in range(files):
+        rep.handle(
+            _fail("tests/test_" + String(i) + ".mojo", "test_case", detail)
+        )
+    rep.handle(Event.session_finished(Summary.zeros(), 0.0, 0))
+    return rep.retained_message_bytes()
+
+
+def test_reporter_retention_is_bounded_by_detail_size() raises:
+    # A newline-free assertion detail is capture-sized: `_first_line` returns the
+    # whole detail. The row must keep only a bounded prefix, so retention cannot
+    # scale with the fed detail bytes. (The pre-fix `_test_fail_row` embedded the
+    # entire first line, so one multi-MiB single-line detail per file pinned
+    # megabytes per retained row — an OOM at CI scale before any annotation
+    # could be emitted.)
+    # Both fed details are far larger than the 4096-byte per-message bound and
+    # differ 4x from each other; a capture-scale row would retain 4x more for the
+    # larger one. Sizes are kept modest so the test stays fast.
+    var files = 12
+    var small = _reporter_retention_detail(files, _big_line(16_384))
+    var large = _reporter_retention_detail(files, _big_line(65_536))
+    # Beyond the per-message bound, extra detail bytes are simply not retained,
+    # so the 4x-larger detail retains the SAME number of bytes.
+    assert_equal(small, large)
+    # Absolute bound: ~one bounded row per file (node id + ": " + <=4096 detail
+    # bytes), far under the tens of KiB fed per file, let alone across the run.
+    assert_true(
+        small < files * 8192,
+        "retention must be O(rows*bound): " + String(small),
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
