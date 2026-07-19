@@ -318,7 +318,11 @@ def test_timeout_terminates_the_whole_process_group() -> None:
             raise AssertionError("timeout let the descendant finish after cleanup")
 
 
-def _assert_cancellation_reaches_process_group(signum: int) -> None:
+def _assert_cancellation_reaches_process_group(
+    signum: int,
+    *,
+    followup_signum: int | None = None,
+) -> None:
     """A caller cancellation reaches the leader and its inherited group."""
     with tempfile.TemporaryDirectory(prefix="mtest-watchdog-") as raw_tmp:
         tmp = Path(raw_tmp)
@@ -341,46 +345,54 @@ def _assert_cancellation_reaches_process_group(signum: int) -> None:
                     "import time",
                     "role, ready, received, child_ready, child_received = sys.argv[1:6]",
                     "signum = int(sys.argv[6])",
+                    "linger_after_signal = sys.argv[8] == 'linger'",
                     "def handle(actual, _frame):",
                     "    Path(received).write_text(str(actual))",
+                    "    if linger_after_signal:",
+                    "        return",
                     "    raise SystemExit(0)",
                     "signal.signal(signum, handle)",
                     "if role == 'leader':",
                     "    Path(sys.argv[7]).write_text(str(os.getpid()))",
-                    "    subprocess.Popen([sys.executable, __file__, 'descendant', child_ready, child_received, '', '', str(signum)])",
+                    "    subprocess.Popen([sys.executable, __file__, 'descendant', child_ready, child_received, '', '', str(signum), '', sys.argv[8]])",
                     "Path(ready).write_text('ready')",
                     "time.sleep(60)",
                 ]
             ),
             encoding="utf-8",
         )
+        watchdog_args = [
+            "--source",
+            "tests/unit/test_watchdog.mojo",
+            "--step",
+            "run",
+            "--deadline-sentinel",
+            str(deadline_sentinel),
+            "--",
+            PYTHON,
+            str(actor),
+            "leader",
+            str(leader_ready),
+            str(leader_signal),
+            str(descendant_ready),
+            str(descendant_signal),
+            str(signum),
+            str(leader_pid),
+            "linger" if followup_signum is not None else "exit",
+        ]
+        command = [PYTHON, str(WATCHDOG), *watchdog_args]
         watchdog = subprocess.Popen(
-            [
-                PYTHON,
-                str(WATCHDOG),
-                "--source",
-                "tests/unit/test_watchdog.mojo",
-                "--step",
-                "run",
-                "--deadline-sentinel",
-                str(deadline_sentinel),
-                "--",
-                PYTHON,
-                str(actor),
-                "leader",
-                str(leader_ready),
-                str(leader_signal),
-                str(descendant_ready),
-                str(descendant_signal),
-                str(signum),
-                str(leader_pid),
-            ],
+            command,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
         )
         try:
             _wait_for_paths((leader_ready, descendant_ready, leader_pid))
             os.kill(watchdog.pid, signum)
+            if followup_signum is not None:
+                _wait_for_paths((leader_signal, descendant_signal))
+                os.kill(watchdog.pid, followup_signum)
             status = watchdog.wait(timeout=8.0)
             if status != -signum:
                 raise AssertionError(
@@ -393,8 +405,29 @@ def _assert_cancellation_reaches_process_group(signum: int) -> None:
                     raise AssertionError(
                         f"process-group member received {actual}, expected {signum}"
                     )
+            if followup_signum is not None:
+                group_deadline = time.monotonic() + 2.0
+                while True:
+                    try:
+                        os.killpg(
+                            int(leader_pid.read_text(encoding="utf-8")),
+                            0,
+                        )
+                    except ProcessLookupError:
+                        break
+                    if time.monotonic() >= group_deadline:
+                        raise AssertionError(
+                            "double cancellation left the child group alive"
+                        )
+                    time.sleep(0.01)
             if not deadline_sentinel.exists():
                 raise AssertionError("cancellation removed the deadline sentinel")
+            assert watchdog.stderr is not None
+            diagnostic = watchdog.stderr.read()
+            if "Traceback" in diagnostic:
+                raise AssertionError(
+                    f"double cancellation escaped watchdog cleanup:\n{diagnostic}"
+                )
         finally:
             if watchdog.poll() is None:
                 watchdog.kill()
@@ -416,6 +449,71 @@ def test_sigint_is_forwarded_to_the_process_group() -> None:
     _assert_cancellation_reaches_process_group(signal.SIGINT)
 
 
+def test_first_signal_wins_during_forced_cleanup() -> None:
+    """A follow-up signal during forced cleanup cannot replace the first."""
+    _assert_cancellation_reaches_process_group(
+        signal.SIGTERM,
+        followup_signum=signal.SIGINT,
+    )
+
+
+def test_cancellation_wins_when_spawn_then_raises() -> None:
+    """A signal delivered inside a failing spawn remains the terminal status."""
+    with tempfile.TemporaryDirectory(prefix="mtest-watchdog-") as raw_tmp:
+        tmp = Path(raw_tmp)
+        sentinel = tmp / "deadline-sentinel"
+        sentinel.touch()
+        wrapper = tmp / "cancelled_spawn_watchdog.py"
+        wrapper.write_text(
+            "\n".join(
+                [
+                    "import os",
+                    "import signal",
+                    "import sys",
+                    "sys.path.insert(0, sys.argv[1])",
+                    "import process_watchdog as watchdog",
+                    "def cancelled_spawn(*_args, **_kwargs):",
+                    "    os.kill(os.getpid(), signal.SIGTERM)",
+                    "    raise FileNotFoundError('injected spawn failure')",
+                    "watchdog.subprocess.Popen = cancelled_spawn",
+                    "raise SystemExit(watchdog.main(sys.argv[2:]))",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [
+                PYTHON,
+                str(wrapper),
+                str(WATCHDOG.parent),
+                "--source",
+                "tests/unit/test_watchdog.mojo",
+                "--step",
+                "run",
+                "--deadline-sentinel",
+                str(sentinel),
+                "--",
+                PYTHON,
+                "-c",
+                "raise SystemExit(0)",
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5.0,
+        )
+        if result.returncode != -signal.SIGTERM:
+            raise AssertionError(
+                "expected cancellation to outrank spawn failure, got "
+                f"{result.returncode}:\n{result.stderr}"
+            )
+        if "Traceback" in result.stderr:
+            raise AssertionError(f"spawn cancellation escaped:\n{result.stderr}")
+        if not sentinel.exists():
+            raise AssertionError("spawn cancellation removed the deadline sentinel")
+
+
 def main() -> int:
     """Run every watchdog invariant without an external test framework."""
     for test in (
@@ -432,6 +530,8 @@ def main() -> int:
         test_timeout_terminates_the_whole_process_group,
         test_sigterm_is_forwarded_to_the_process_group,
         test_sigint_is_forwarded_to_the_process_group,
+        test_first_signal_wins_during_forced_cleanup,
+        test_cancellation_wins_when_spawn_then_raises,
     ):
         test()
     print("process-watchdog: OK")

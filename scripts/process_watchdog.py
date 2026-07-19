@@ -140,15 +140,18 @@ def run_command(
     process: subprocess.Popen[object] | None = None
     pending_signum: int | None = None
     previous_handlers: dict[int, signal.Handlers] = {}
-    managed_signals = set(_FORWARDED_SIGNALS)
-    previous_mask: set[signal.Signals] | None = None
 
     def request_cancellation(signum: int, _frame: object) -> None:
-        """Record a spawn-race signal or leave the blocking wait immediately."""
+        """Record the first signal and leave the blocking wait exactly once."""
         nonlocal pending_signum
+        # Python signal callbacks run serially on the main thread. Recording
+        # first-signal precedence before raising also closes the small window
+        # before the exception handler blocks further cancellation: a prompt
+        # second signal observes this value and cannot raise through cleanup.
+        if pending_signum is not None:
+            return
+        pending_signum = signum
         if process is None:
-            if pending_signum is None:
-                pending_signum = signum
             return
         raise _WatchdogCancellation(signum)
 
@@ -157,7 +160,16 @@ def run_command(
             previous_handlers[signum] = signal.getsignal(signum)
             signal.signal(signum, request_cancellation)
         try:
-            process = subprocess.Popen(command, start_new_session=True)
+            try:
+                process = subprocess.Popen(command, start_new_session=True)
+            except OSError:
+                # Popen can report an exec/spawn error after a cancellation was
+                # already delivered in its call. No child handle is available
+                # to clean up, but cancellation remains the truthful terminal
+                # status instead of being overwritten by the spawn exception.
+                if pending_signum is not None:
+                    return -pending_signum
+                raise
             if pending_signum is not None:
                 raise _WatchdogCancellation(pending_signum)
             try:
@@ -170,20 +182,15 @@ def run_command(
                 deadline_sentinel.unlink()
             return status
         except _WatchdogCancellation as cancellation:
-            # A Python handler only raises the private control-flow exception.
-            # Block further cancellations while normal code forwards the first
-            # signal, sweeps lingering descendants, and reaps the group leader.
-            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, managed_signals)
+            # The first callback already recorded precedence. Keep the handlers
+            # live during cleanup so later managed signals are synchronously
+            # consumed by their no-op path instead of becoming pending signals
+            # that escape when the caller's dispositions are restored.
             _forward_signal_and_cleanup(process, cancellation.signum)
             return -cancellation.signum
     finally:
-        if previous_mask is None:
-            previous_mask = signal.pthread_sigmask(
-                signal.SIG_BLOCK, managed_signals
-            )
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
-        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
