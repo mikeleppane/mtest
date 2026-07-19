@@ -267,8 +267,8 @@ def main():
         # The only raise the session propagates is a discover: usage error;
         # like a cli usage error it exits 4 to stderr.
         if json_owns_fd:
-            # A usage error already routes to exit 4; a close failure on this
-            # path is immaterial (nothing was streamed), so discard the status.
+            # A usage error already routes to exit 4, which dominates any
+            # close-failure escalation, so discard the close status here.
             _ = close_json_fd(json_fd)
         _eprintln(String(e))
         if not _close_runtime(runtime):

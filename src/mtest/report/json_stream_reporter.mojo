@@ -127,19 +127,27 @@ def open_json_fd(path: String) raises -> Int:
 
 def close_json_fd(fd: Int) -> Bool:
     """Close a descriptor opened by `open_json_fd`; never raises. Returns
-    whether the close FAILED.
+    whether the close reported a genuine delivery FAILURE.
 
-    On a destination the caller OWNS (a `--json PATH` file, or the process's
-    own stdout under `--json -`), a deferred write error can surface only at
-    `close`: a quota- or network-backed filesystem may buffer the byte-drained
-    writes and report `ENOSPC`/`EIO` only when the descriptor is closed. That
-    IS actionable — the machine report was not durably committed — so the
-    caller escalates the exit code exactly as a live write failure would. The
-    stream's own live write latch is independent of this result.
+    Only an OWNED `--json PATH` file reaches this call (main gates it on
+    `json_owns_fd`); `--json -` writes to the inherited stdout, which the process
+    never closes on itself. On such a file a deferred write error can surface
+    only at `close`: a quota- or network-backed filesystem may buffer the
+    byte-drained writes and report `ENOSPC`/`EIO` only when the descriptor is
+    closed. That IS actionable — the machine report was not durably committed —
+    so the caller escalates the exit code exactly as a live write failure would.
+    The stream's own live write latch is independent of this result.
+
+    `EINTR` is NOT a failure: on Linux a close interrupted by a signal has still
+    released the descriptor (retrying would risk double-closing a reused fd), so
+    a signal landing mid-close must not escalate a clean run — mirroring how the
+    live write path treats `EINTR` as retry, not failure.
     """
     # SAFETY: libc `close` has the ABI `int close(int)`. `fd` is a descriptor the
-    # caller owns and does not use again; a nonzero result means the close failed.
-    return external_call["close", Int32](Int32(fd)) != 0
+    # caller owns and does not use again; a nonzero result is inspected below.
+    if external_call["close", Int32](Int32(fd)) == 0:
+        return False
+    return _errno_now() != _EINTR
 
 
 def escalate_on_close_failure(code: Int, close_failed: Bool) -> Int:
