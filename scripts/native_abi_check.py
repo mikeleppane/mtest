@@ -43,6 +43,8 @@ TEST_ONLY_SYMBOLS = {
     "mtest_exec_test_fault_configure_secondary",
     "mtest_exec_test_fault_reset",
     "mtest_exec_test_fault_seen",
+    "mtest_exec_test_group_signal_eperm_configure",
+    "mtest_exec_test_group_signal_eperm_seen",
     "mtest_exec_test_deliver_interrupt_after",
     "mtest_exec_test_memcheck_fd_leak",
     "mtest_exec_test_memcheck_invalid",

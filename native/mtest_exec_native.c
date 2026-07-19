@@ -35,6 +35,8 @@ extern char **environ;
 #define MTEST_ETXTBSY_RETRIES 5u
 #define MTEST_ETXTBSY_DELAY_MS 50
 #define MTEST_ABORT_SLICE_NS 10000000L
+#define MTEST_DARWIN_GROUP_EPERM_RETRIES 20u
+#define MTEST_DARWIN_GROUP_EPERM_RETRY_NS 1000000L
 
 _Static_assert(sizeof(sig_atomic_t) <= sizeof(int32_t), "sig_atomic_t width");
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "runtime ownership must be lock-free");
@@ -111,15 +113,14 @@ struct mtest_fault_state {
 static struct mtest_fault_state mtest_faults[MTEST_EXEC_OP_WAITPID + 1];
 static uint32_t mtest_interrupt_delivery_operation;
 static int mtest_interrupt_delivery_signal;
+static uint32_t mtest_group_signal_eperm_operation;
+static uint32_t mtest_group_signal_eperm_forced_failures;
+static uint32_t mtest_group_signal_eperm_seen;
 
 int32_t mtest_exec_test_constant(uint32_t constant_id) {
     switch (constant_id) {
         case MTEST_EXEC_TEST_CONSTANT_SIGCHLD:
             return SIGCHLD;
-        case MTEST_EXEC_TEST_CONSTANT_SIGSTOP:
-            return SIGSTOP;
-        case MTEST_EXEC_TEST_CONSTANT_SIGCONT:
-            return SIGCONT;
         case MTEST_EXEC_TEST_CONSTANT_EIO:
             return EIO;
         case MTEST_EXEC_TEST_CONSTANT_ETXTBSY:
@@ -168,6 +169,9 @@ void mtest_exec_test_fault_reset(void) {
     memset(mtest_faults, 0, sizeof(mtest_faults));
     mtest_interrupt_delivery_operation = MTEST_EXEC_OP_NONE;
     mtest_interrupt_delivery_signal = 0;
+    mtest_group_signal_eperm_operation = MTEST_EXEC_OP_NONE;
+    mtest_group_signal_eperm_forced_failures = 0;
+    mtest_group_signal_eperm_seen = 0;
 }
 
 int32_t mtest_exec_test_fault_configure(
@@ -246,6 +250,27 @@ uint32_t mtest_exec_test_fault_seen(uint32_t operation) {
     }
     const struct mtest_fault_state *fault = &mtest_faults[operation];
     return fault->operation == operation ? fault->seen : 0;
+}
+
+int32_t mtest_exec_test_group_signal_eperm_configure(
+    uint32_t operation,
+    uint32_t forced_failures
+) {
+    if ((operation != MTEST_EXEC_OP_GROUP_TERM &&
+         operation != MTEST_EXEC_OP_GROUP_KILL) ||
+        forced_failures == 0) {
+        return -1;
+    }
+    mtest_group_signal_eperm_operation = operation;
+    mtest_group_signal_eperm_forced_failures = forced_failures;
+    mtest_group_signal_eperm_seen = 0;
+    return 0;
+}
+
+uint32_t mtest_exec_test_group_signal_eperm_seen(uint32_t operation) {
+    return operation == mtest_group_signal_eperm_operation
+        ? mtest_group_signal_eperm_seen
+        : 0;
 }
 
 void mtest_exec_test_reset_interrupt(void) {
@@ -1828,6 +1853,29 @@ static uint32_t mtest_group_operation(uint32_t action) {
     return MTEST_EXEC_OP_GROUP_KILL;
 }
 
+static int mtest_signal_process_group(
+    pid_t process_group,
+    int signal_number,
+    uint32_t operation
+) {
+#if MTEST_EXEC_TESTING
+    /* This seam emulates a real kill(2) EPERM sequence and is deliberately
+       separate from named fault injection. The latter must remain an immediate
+       fail-closed error and never enter Darwin's transient retry path. */
+    if (operation == mtest_group_signal_eperm_operation) {
+        mtest_group_signal_eperm_seen += 1;
+        if (mtest_group_signal_eperm_seen <=
+            mtest_group_signal_eperm_forced_failures) {
+            errno = EPERM;
+            return -1;
+        }
+    }
+#else
+    (void)operation;
+#endif
+    return kill(-process_group, signal_number);
+}
+
 #if defined(__APPLE__)
 static int mtest_darwin_group_is_zombie_only(pid_t process_group) {
     int query[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PGRP, process_group};
@@ -1856,6 +1904,26 @@ static int mtest_darwin_group_is_zombie_only(pid_t process_group) {
 }
 #endif
 
+#if defined(__APPLE__) || MTEST_EXEC_TESTING
+static int mtest_group_eperm_can_retry(uint32_t operation) {
+#if defined(__APPLE__)
+    (void)operation;
+    return 1;
+#else
+    return operation == mtest_group_signal_eperm_operation;
+#endif
+}
+
+static int mtest_group_is_proven_zombie_only(pid_t process_group) {
+#if defined(__APPLE__)
+    return mtest_darwin_group_is_zombie_only(process_group);
+#else
+    (void)process_group;
+    return 0;
+#endif
+}
+#endif
+
 static int mtest_process_group_checked(
     struct mtest_exec_process *process,
     uint32_t action,
@@ -1866,32 +1934,56 @@ static int mtest_process_group_checked(
         ? 0
         : (action == MTEST_EXEC_GROUP_TERM ? SIGTERM : SIGKILL);
     uint32_t operation = mtest_group_operation(action);
-    int fault_injected = mtest_fail_if_requested(operation);
-    int group_status = fault_injected
-        ? -1
-        : kill(-process->process_group, signal_number);
-    if (group_status != 0) {
+#if defined(__APPLE__) || MTEST_EXEC_TESTING
+    uint32_t eperm_retries = 0;
+#endif
+    for (;;) {
+        int fault_injected = mtest_fail_if_requested(operation);
+        int group_status = fault_injected
+            ? -1
+            : mtest_signal_process_group(
+                process->process_group, signal_number, operation
+            );
+        if (group_status == 0) {
+            break;
+        }
         int group_errno = errno;
         if (group_errno == ESRCH) {
             result->state = MTEST_EXEC_GROUP_GONE;
             process->group_swept = 1;
             return 0;
         }
-#if defined(__APPLE__)
+#if defined(__APPLE__) || MTEST_EXEC_TESTING
         /* Darwin's process-group signal path excludes zombies from its member
            iteration, then returns EPERM when only terminal members remain.
-           Query the complete group snapshot before treating TERM or KILL as a
-           completed sweep. This proof does not require prior waitid observation:
-           the unreaped group-leader zombie pins the PGID, and an all-zombie
-           group has no member capable of executing or forking. A live member,
-           a probe action, an injected EPERM, or any query failure remains an
-           error, so cleanup still fails closed. */
+           Query the complete group snapshot on every real EPERM before treating
+           TERM or KILL as a completed sweep. This proof does not require prior
+           waitid observation: the unreaped group-leader zombie pins the PGID,
+           and an all-zombie group has no member capable of executing or forking.
+
+           XNU can also return EPERM briefly while a post-TERM member is exiting
+           but has not reached SZOMB. Retry that real Darwin result for one small,
+           explicit bound. A probe action, an injected EPERM, an incomplete or
+           mixed snapshot after the bound, or any other errno remains an error,
+           so cleanup still fails closed. The MTEST_EXEC_TESTING branch exercises
+           this Darwin-only algorithm on Linux without changing production Linux
+           behavior. */
         if (!fault_injected && group_errno == EPERM &&
             action != MTEST_EXEC_GROUP_PROBE &&
-            mtest_darwin_group_is_zombie_only(process->process_group)) {
-            process->group_swept = 1;
-            result->state = MTEST_EXEC_GROUP_PRESENT;
-            return 0;
+            mtest_group_eperm_can_retry(operation)) {
+            if (mtest_group_is_proven_zombie_only(process->process_group)) {
+                process->group_swept = 1;
+                result->state = MTEST_EXEC_GROUP_PRESENT;
+                return 0;
+            }
+            if (eperm_retries < MTEST_DARWIN_GROUP_EPERM_RETRIES) {
+                const struct timespec delay = {
+                    0, MTEST_DARWIN_GROUP_EPERM_RETRY_NS
+                };
+                eperm_retries += 1;
+                (void)nanosleep(&delay, NULL);
+                continue;
+            }
         }
 #endif
         mtest_set_error(

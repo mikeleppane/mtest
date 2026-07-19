@@ -31,21 +31,11 @@ static struct mtest_exec_bytes bytes(const char *text) {
 
 static int exercise_platform_constants(void) {
     CHECK(MTEST_EXEC_TEST_CONSTANT_SIGCHLD == 1, "SIGCHLD constant id");
-    CHECK(MTEST_EXEC_TEST_CONSTANT_SIGSTOP == 2, "SIGSTOP constant id");
-    CHECK(MTEST_EXEC_TEST_CONSTANT_SIGCONT == 3, "SIGCONT constant id");
     CHECK(MTEST_EXEC_TEST_CONSTANT_EIO == 4, "EIO constant id");
     CHECK(MTEST_EXEC_TEST_CONSTANT_ETXTBSY == 5, "ETXTBSY constant id");
     CHECK(
         mtest_exec_test_constant(MTEST_EXEC_TEST_CONSTANT_SIGCHLD) == SIGCHLD,
         "SIGCHLD constant is header-derived"
-    );
-    CHECK(
-        mtest_exec_test_constant(MTEST_EXEC_TEST_CONSTANT_SIGSTOP) == SIGSTOP,
-        "SIGSTOP constant is header-derived"
-    );
-    CHECK(
-        mtest_exec_test_constant(MTEST_EXEC_TEST_CONSTANT_SIGCONT) == SIGCONT,
-        "SIGCONT constant is header-derived"
     );
     CHECK(
         mtest_exec_test_constant(MTEST_EXEC_TEST_CONSTANT_EIO) == EIO,
@@ -697,6 +687,83 @@ static int exercise_retryable_abort_group_kill(void) {
     return 0;
 }
 
+static int exercise_transient_group_signal_eperm(void) {
+    struct mtest_exec_bytes argv[2] = {bytes("/bin/sleep"), bytes("30")};
+    struct mtest_exec_process_spec spec;
+    memset(&spec, 0, sizeof(spec));
+    spec.argv = argv;
+    spec.argc = 2;
+    struct mtest_exec_process_ref process;
+    struct mtest_exec_group_result group;
+    struct mtest_exec_error error;
+
+    CHECK(mtest_exec_process_open(&spec, &process, &error) == 0,
+          "open child for transient group-signal EPERM");
+    CHECK(mtest_exec_test_group_signal_eperm_configure(
+              MTEST_EXEC_OP_GROUP_KILL, 2
+          ) == 0,
+          "configure transient group-kill EPERM sequence");
+    CHECK(mtest_exec_test_fault_configure(
+              MTEST_EXEC_OP_GROUP_KILL, 1, EPERM, 0
+          ) == 0,
+          "configure injected group-kill EPERM before transient sequence");
+    CHECK(mtest_exec_process_group(
+              process.handle, MTEST_EXEC_GROUP_KILL, &group, &error
+          ) == -1,
+          "injected group-kill EPERM remains immediate");
+    CHECK(error.operation == MTEST_EXEC_OP_GROUP_KILL &&
+              error.error_number == EPERM,
+          "injected group-kill EPERM remains exact");
+    CHECK(mtest_exec_test_fault_seen(MTEST_EXEC_OP_GROUP_KILL) == 1,
+          "injected group-kill EPERM is consumed once");
+    CHECK(mtest_exec_test_group_signal_eperm_seen(
+              MTEST_EXEC_OP_GROUP_KILL
+          ) == 0,
+          "injected group-kill EPERM bypasses transient syscall retry");
+    CHECK(mtest_exec_process_group(
+              process.handle, MTEST_EXEC_GROUP_KILL, &group, &error
+          ) == 0,
+          "transient group-kill EPERM is retried");
+    CHECK(group.state == MTEST_EXEC_GROUP_PRESENT,
+          "retried group kill reports present");
+    CHECK(mtest_exec_test_group_signal_eperm_seen(
+              MTEST_EXEC_OP_GROUP_KILL
+          ) == 3,
+          "two transient EPERMs precede one successful group kill");
+    /* Named fault accounting runs once per group-loop visit: the first call
+       injects at seen=1, then the second call visits twice for EPERM and once
+       for the successful kill, producing the exact composite count of four. */
+    CHECK(mtest_exec_test_fault_seen(MTEST_EXEC_OP_GROUP_KILL) == 4,
+          "named fault observes its injected call plus all three retry calls");
+    mtest_exec_test_fault_reset();
+    CHECK(mtest_exec_process_abort(process.handle, 0, &error) == 0,
+          "abort consumes transient group-signal child");
+
+    CHECK(mtest_exec_process_open(&spec, &process, &error) == 0,
+          "open child for bounded group-signal EPERM");
+    CHECK(mtest_exec_test_group_signal_eperm_configure(
+              MTEST_EXEC_OP_GROUP_TERM, 100
+          ) == 0,
+          "configure persistent group-term EPERM sequence");
+    CHECK(mtest_exec_process_group(
+              process.handle, MTEST_EXEC_GROUP_TERM, &group, &error
+          ) == -1,
+          "persistent group-term EPERM remains visible after retry bound");
+    CHECK(error.operation == MTEST_EXEC_OP_GROUP_TERM &&
+              error.error_number == EPERM,
+          "bounded group-term EPERM error is exact");
+    CHECK(mtest_exec_test_group_signal_eperm_seen(
+              MTEST_EXEC_OP_GROUP_TERM
+          ) == 21,
+          "group-term EPERM retry count is exactly bounded");
+    CHECK(mtest_exec_test_fault_seen(MTEST_EXEC_OP_GROUP_TERM) == 0,
+          "bounded syscall seam does not consume the fault-injection seam");
+    mtest_exec_test_fault_reset();
+    CHECK(mtest_exec_process_abort(process.handle, 0, &error) == 0,
+          "abort consumes bounded group-signal child");
+    return 0;
+}
+
 int main(void) {
     CHECK(exercise_platform_constants() == 0, "platform constants");
     struct mtest_exec_error error;
@@ -736,6 +803,8 @@ int main(void) {
           "consumed close error ownership");
     CHECK(exercise_retryable_abort_group_kill() == 0,
           "retryable abort group kill");
+    CHECK(exercise_transient_group_signal_eperm() == 0,
+          "transient group-signal EPERM retry");
     CHECK(mtest_exec_test_fault_configure(
               MTEST_EXEC_OP_CHILD_SETUP_WRITE, 1, EIO, 9
           ) == -1,
