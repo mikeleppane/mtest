@@ -1,3 +1,8 @@
+/* KERN_PROC_PGRP is a Darwin extension whose public structures use BSD types
+   hidden by a strict POSIX feature level. Request both namespaces explicitly. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
 #define _POSIX_C_SOURCE 200809L
 
 #include "mtest_exec_native.h"
