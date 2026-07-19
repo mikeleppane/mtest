@@ -18,6 +18,7 @@ import sys
 import tempfile
 import tomllib
 
+import e2e_check
 from transcript_compare import compare_directories
 
 
@@ -631,6 +632,144 @@ def check_e2e_native_fixture_layout() -> None:
         )
 
 
+def check_e2e_interposer_command_topology() -> None:
+    """The E2E write-fault interposer has exact target-specific build steps."""
+    command_builder = getattr(
+        e2e_check, "_json_terminal_write_fault_commands", None
+    )
+    if command_builder is None:
+        raise AssertionError("E2E interposer command builder is missing")
+    directory = "/tmp/mtest-json-terminal-fault"
+    source = e2e_check.JSON_TERMINAL_WRITE_FAULT
+    object_path = os.path.join(directory, "mtest_json_terminal_fault.o")
+    common_compile = [
+        "/pinned/clang",
+        "-std=c17",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-Wpedantic",
+        "-fPIC",
+        "-c",
+        source,
+        "-o",
+        object_path,
+    ]
+
+    darwin_library, darwin_steps = command_builder(
+        directory,
+        "/pinned/clang",
+        platform="darwin",
+        platform_driver="/usr/bin/cc",
+    )
+    expected_darwin_library = os.path.join(
+        directory, "libmtest_json_terminal_fault.dylib"
+    )
+    expected_darwin_steps = [
+        ("compile", common_compile),
+        (
+            "link",
+            [
+                "/usr/bin/cc",
+                "-dynamiclib",
+                object_path,
+                "-o",
+                expected_darwin_library,
+            ],
+        ),
+    ]
+    if (darwin_library, darwin_steps) != (
+        expected_darwin_library,
+        expected_darwin_steps,
+    ):
+        raise AssertionError(
+            "Darwin E2E interposer command topology mismatch: "
+            f"actual={(darwin_library, darwin_steps)!r}"
+        )
+
+    linux_library, linux_steps = command_builder(
+        directory,
+        "/pinned/clang",
+        platform="linux",
+        platform_driver="/unused/platform/driver",
+    )
+    expected_linux_library = os.path.join(
+        directory, "libmtest_json_terminal_fault.so"
+    )
+    expected_linux_steps = [
+        ("compile", common_compile),
+        (
+            "link",
+            [
+                "/pinned/clang",
+                "-shared",
+                object_path,
+                "-o",
+                expected_linux_library,
+                "-ldl",
+            ],
+        ),
+    ]
+    if (linux_library, linux_steps) != (
+        expected_linux_library,
+        expected_linux_steps,
+    ):
+        raise AssertionError(
+            "Linux E2E interposer command topology mismatch: "
+            f"actual={(linux_library, linux_steps)!r}"
+        )
+
+
+def check_e2e_interposer_failure_propagation() -> None:
+    """Compile and link failures stop at, and name, their exact build step."""
+    false_program = shutil.which("false")
+    compiler = shutil.which("clang")
+    if false_program is None or compiler is None:
+        raise AssertionError("harness lacks clang/false for E2E interposer probes")
+    with tempfile.TemporaryDirectory(prefix="mtest-e2e-interposer-") as raw_tmp:
+        tmp = Path(raw_tmp)
+        link_marker = tmp / "link-ran"
+        marker_linker = tmp / "marker-linker"
+        _write_executable(
+            marker_linker,
+            "#!/usr/bin/env python3\n"
+            "from pathlib import Path\n"
+            f"Path({str(link_marker)!r}).touch()\n",
+        )
+        try:
+            e2e_check._build_json_terminal_write_fault(
+                raw_tmp,
+                platform="darwin",
+                compiler=false_program,
+                platform_driver=str(marker_linker),
+            )
+        except e2e_check.ScenarioError as exc:
+            if "could not compile" not in str(exc):
+                raise AssertionError(
+                    f"interposer compile failure lost its step: {exc}"
+                ) from exc
+        else:
+            raise AssertionError("interposer compile failure was accepted")
+        if link_marker.exists():
+            raise AssertionError("interposer link ran after compilation failed")
+
+        try:
+            e2e_check._build_json_terminal_write_fault(
+                raw_tmp,
+                platform="darwin",
+                compiler=compiler,
+                platform_driver=false_program,
+            )
+        except e2e_check.ScenarioError as exc:
+            if "could not link" not in str(exc):
+                raise AssertionError(
+                    f"interposer link failure lost its step: {exc}"
+                ) from exc
+        else:
+            raise AssertionError("interposer link failure was accepted")
+
+
 def check_transcript_comparator() -> None:
     """The real snapshot comparator accepts only an explicit path relocation."""
     with tempfile.TemporaryDirectory(prefix="mtest-transcript-compare-") as raw_tmp:
@@ -1099,6 +1238,8 @@ def main() -> int:
         check_suite_layout()
         check_exec_fixture_layout()
         check_e2e_native_fixture_layout()
+        check_e2e_interposer_command_topology()
+        check_e2e_interposer_failure_propagation()
         check_transcript_comparator()
         check_protocol_asset_layout()
         check_e2e_layout()

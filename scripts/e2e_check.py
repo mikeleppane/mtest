@@ -2624,18 +2624,16 @@ def s_json_truncation_dead_pipe(manifest: dict) -> str:
     return "dead pipe: fatal abort exit 3 (not 141), no orphan, clean partial stream"
 
 
-def _build_json_terminal_write_fault(directory: str) -> str:
-    """Build the test-only terminal-record write interposer in `directory`."""
-    compiler = os.environ.get("CC", "clang")
-    if sys.platform == "darwin":
-        library = os.path.join(directory, "libmtest_json_terminal_fault.dylib")
-        platform_flags = ["-dynamiclib"]
-        link_libraries: list[str] = []
-    else:
-        library = os.path.join(directory, "libmtest_json_terminal_fault.so")
-        platform_flags = ["-shared", "-fPIC"]
-        link_libraries = ["-ldl"]
-    argv = [
+def _json_terminal_write_fault_commands(
+    directory: str,
+    compiler: str,
+    *,
+    platform: str = sys.platform,
+    platform_driver: str = "/usr/bin/cc",
+) -> tuple[str, list[tuple[str, list[str]]]]:
+    """Return the target-specific interposer output and ordered build steps."""
+    object_path = os.path.join(directory, "mtest_json_terminal_fault.o")
+    compile_command = [
         compiler,
         "-std=c17",
         "-O2",
@@ -2643,34 +2641,72 @@ def _build_json_terminal_write_fault(directory: str) -> str:
         "-Wextra",
         "-Werror",
         "-Wpedantic",
-        *platform_flags,
+        "-fPIC",
+        "-c",
         JSON_TERMINAL_WRITE_FAULT,
         "-o",
-        library,
-        *link_libraries,
+        object_path,
     ]
-    proc = subprocess.Popen(
-        argv,
-        cwd=REPO_ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        start_new_session=True,
+    if platform == "darwin":
+        library = os.path.join(directory, "libmtest_json_terminal_fault.dylib")
+        link_command = [
+            platform_driver,
+            "-dynamiclib",
+            object_path,
+            "-o",
+            library,
+        ]
+    else:
+        library = os.path.join(directory, "libmtest_json_terminal_fault.so")
+        link_command = [
+            compiler,
+            "-shared",
+            object_path,
+            "-o",
+            library,
+            "-ldl",
+        ]
+    return library, [("compile", compile_command), ("link", link_command)]
+
+
+def _build_json_terminal_write_fault(
+    directory: str,
+    *,
+    platform: str = sys.platform,
+    compiler: str | None = None,
+    platform_driver: str = "/usr/bin/cc",
+) -> str:
+    """Build the test-only terminal-record write interposer in `directory`."""
+    selected_compiler = compiler or os.environ.get("CC", "clang")
+    library, steps = _json_terminal_write_fault_commands(
+        directory,
+        selected_compiler,
+        platform=platform,
+        platform_driver=platform_driver,
     )
-    try:
-        output, _ = proc.communicate(timeout=SHORT_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        _kill_group(proc)
-        output, _ = proc.communicate()
-        raise ScenarioError(
-            "the JSON terminal-write fault interposer did not compile within "
-            f"{SHORT_TIMEOUT}s:\n{output}"
+    for step, argv in steps:
+        proc = subprocess.Popen(
+            argv,
+            cwd=REPO_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
         )
-    expect(
-        proc.returncode == 0,
-        f"could not compile the JSON terminal-write fault interposer "
-        f"({proc.returncode}):\n{output}",
-    )
+        try:
+            output, _ = proc.communicate(timeout=SHORT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            _kill_group(proc)
+            output, _ = proc.communicate()
+            raise ScenarioError(
+                f"the JSON terminal-write fault interposer did not {step} within "
+                f"{SHORT_TIMEOUT}s:\n{output}"
+            )
+        expect(
+            proc.returncode == 0,
+            f"could not {step} the JSON terminal-write fault interposer "
+            f"({proc.returncode}):\n{output}",
+        )
     return library
 
 
