@@ -17,6 +17,10 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
+
 #if MTEST_EXEC_TESTING
 #include "mtest_exec_native_test.h"
 #endif
@@ -1819,6 +1823,34 @@ static uint32_t mtest_group_operation(uint32_t action) {
     return MTEST_EXEC_OP_GROUP_KILL;
 }
 
+#if defined(__APPLE__)
+static int mtest_darwin_group_is_zombie_only(pid_t process_group) {
+    int query[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PGRP, process_group};
+    size_t length = 0;
+    if (sysctl(query, 4, NULL, &length, NULL, 0) != 0 || length == 0) {
+        return 0;
+    }
+    struct kinfo_proc *members = malloc(length);
+    if (members == NULL) {
+        return 0;
+    }
+    int complete = sysctl(query, 4, members, &length, NULL, 0) == 0 &&
+        length > 0 && length % sizeof(*members) == 0;
+    int zombie_only = complete;
+    if (complete) {
+        size_t count = length / sizeof(*members);
+        for (size_t index = 0; index < count; ++index) {
+            if (members[index].kp_proc.p_stat != SZOMB) {
+                zombie_only = 0;
+                break;
+            }
+        }
+    }
+    free(members);
+    return zombie_only;
+}
+#endif
+
 static int mtest_process_group_checked(
     struct mtest_exec_process *process,
     uint32_t action,
@@ -1829,15 +1861,35 @@ static int mtest_process_group_checked(
         ? 0
         : (action == MTEST_EXEC_GROUP_TERM ? SIGTERM : SIGKILL);
     uint32_t operation = mtest_group_operation(action);
-    if (mtest_fail_if_requested(operation) ||
-        kill(-process->process_group, signal_number) != 0) {
-        if (errno == ESRCH) {
+    int fault_injected = mtest_fail_if_requested(operation);
+    int group_status = fault_injected
+        ? -1
+        : kill(-process->process_group, signal_number);
+    if (group_status != 0) {
+        int group_errno = errno;
+        if (group_errno == ESRCH) {
             result->state = MTEST_EXEC_GROUP_GONE;
             process->group_swept = 1;
             return 0;
         }
+#if defined(__APPLE__)
+        /* Darwin's process-group signal path excludes zombies from its member
+           iteration, then returns EPERM when the observed leader is the only
+           remaining member. Query the complete group snapshot before treating
+           that result as a completed sweep: a live descendant or any query
+           failure remains an error, so cleanup still fails closed. The owned
+           all-zombie group has no member capable of forking after this point. */
+        if (!fault_injected && group_errno == EPERM && process->observed &&
+            action == MTEST_EXEC_GROUP_KILL &&
+            mtest_darwin_group_is_zombie_only(process->process_group)) {
+            process->group_swept = 1;
+            result->state = MTEST_EXEC_GROUP_PRESENT;
+            return 0;
+        }
+#endif
         mtest_set_error(
-            error, operation, errno, 0, -((int64_t)process->process_group)
+            error, operation, group_errno, 0,
+            -((int64_t)process->process_group)
         );
         return -1;
     }

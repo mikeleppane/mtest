@@ -163,6 +163,20 @@ static int exercise_process(void) {
     CHECK(waitable, "leader became waitable");
 
     struct mtest_exec_group_result group;
+    CHECK(mtest_exec_test_fault_configure(
+              MTEST_EXEC_OP_GROUP_KILL, 1, EPERM, 0
+          ) == 0,
+          "configure observed group-kill permission failure");
+    CHECK(mtest_exec_process_group(
+              process.handle, MTEST_EXEC_GROUP_KILL, &group, &error
+          ) == -1,
+          "injected observed group-kill failure remains visible");
+    CHECK(error.operation == MTEST_EXEC_OP_GROUP_KILL &&
+              error.error_number == EPERM,
+          "injected observed group-kill error is exact");
+    CHECK(mtest_exec_test_fault_seen(MTEST_EXEC_OP_GROUP_KILL) == 1,
+          "observed group-kill fault is consumed exactly once");
+    mtest_exec_test_fault_reset();
     CHECK(mtest_exec_process_group(
               process.handle, MTEST_EXEC_GROUP_KILL, &group, &error
           ) == 0,
