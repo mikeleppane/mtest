@@ -664,10 +664,38 @@ dominates a failing outcome (→ 1), which dominates "nothing collected" (→ 5)
 
 ## 17. Determinism
 
-Given the same inputs, `mtest` produces byte-identical machine output: the
-console summary, the `collect` listing, and the JUnit XML are all ordered by node
-id, independent of the order in which parallel workers finished. Parallelism
-never changes *what* is reported, only how fast.
+Given the same inputs, `mtest` orders every machine and console surface
+deterministically — the console summary, the `collect` listing, and the
+`--junit-xml` document are all sorted by node id, independent of the order in
+which files or parallel workers finished. Parallelism never changes *what* is
+reported, only how fast.
+
+That shared ordering does not mean every surface is byte-identical across runs;
+each below states its actual promise, scoped precisely:
+
+- **`collect`** output stays **byte-identical** across runs of the same inputs:
+  the frozen listing (§16, §20) carries no wall-clock or captured-text content
+  to vary.
+- **`--junit-xml`** (§15.2) is deterministic in **structure, identity,
+  classification, and counts** — the `<testsuite>`/`<testcase>` shape, node-id
+  names, `classname`, the `message`/`type` attributes on outcome children, and
+  the `tests`/`failures`/`errors`/`skipped` aggregates — but it is **not**
+  byte-identical: `time` (the runner's own wall clock, §15.2) and every embedded
+  captured/diagnostic text body (`system-out`/`system-err`, a `failure`/`error`
+  detail, a stack trace, a rerun/flaky child's text) are exactly the payload
+  classes the `--json` projection excludes below, and the committed
+  canonicalizer masks precisely those two classes before comparing two runs'
+  documents.
+- **`--json`** (§15.4; normatively `docs/json-stream.md` §10) promises equality
+  under a **closed projection** — outcomes, per-test sets, counts, dispositions,
+  flags, casualty lists, totals, and the final exit code — never byte order and
+  never a duration or byte-payload field. Two runs' raw streams may differ line
+  for line while still agreeing on that projection.
+
+§17 carries no byte-identity claim over anything wall-clock- or payload-bearing:
+not `--junit-xml`'s `time` or embedded captured/diagnostic text, and not
+`--json`'s measured `*_us` durations or its capture/argv/casualty payload
+fields.
 
 ---
 
@@ -737,8 +765,12 @@ pinning is only meaningful once tests would otherwise run in parallel.
 ## 20. Stability tiers
 
 - **FROZEN at v1.0** — subcommands; flag names and semantics; exit codes; the
-  node-id grammar; the JUnit mapping; the annotation shapes; the `collect`
-  format; the test-module contract.
+  node-id grammar; the JUnit mapping; the annotation shapes; the `--json` event
+  stream schema (§15.4; normatively `docs/json-stream.md`) — its framing,
+  header, event and field names, and token vocabularies, frozen at stream
+  `version` 1 and growing only additively (new fields and kinds; a removal or a
+  meaning-change bumps the header version); the `collect` format; the
+  test-module contract.
 - **STABLE-INTENT** — default values (timeouts, `auto` worker sizing) may be
   tuned in minor versions.
 - **INFORMAL** — console text layout and colors.
@@ -778,6 +810,25 @@ divergence in crash reporting is absorbed by the structured termination model
 (a terminating signal is recorded as a signal, never as a shell-encoded
 `128+N`).
 
+**The packaged artifact.** The distribution recipe builds `mtest` **in-env from
+source**, inside an isolated build environment pinned to the same
+`mojo`/`clang` versions this repo itself builds against — the prebuilt-binary
+branch (repackaging an already-linked executable) is **not** taken. The
+installed binary is not loader-clean: it carries a direct link dependency on
+the Mojo runtime's shared libraries, whose transitive closure is owned by the
+`mojo-compiler` conda package, so the recipe declares `mojo-compiler ==1.0.0b2`
+as a **conda run dependency** rather than vendoring those libraries — a fresh
+environment carrying only that declared dependency (not the full build
+toolchain) is proven sufficient to load and run the installed binary.
+**linux-64 is the gated platform**: a dedicated CI job builds the package into
+a local channel, installs it into a scratch environment from that channel, and
+exercises the installed binary. **osx-arm64 is declared, not gated**: it
+matches the recipe's and the build tool's platform list and the package
+channels solve for it, but no CI runner builds or installs the packaged
+artifact there — macOS coverage stops at package build, executable link, and
+an `--help` smoke run (the same ceiling stated above), so packaged-artifact
+runtime supervision on macOS is a documented ceiling, not a proven target.
+
 ---
 
 ## 23. Worked examples
@@ -803,6 +854,9 @@ mtest --precompile src/mylib:build/mylib.mojopkg -I build \
 
 # Produce CI artifacts.
 mtest --junit-xml report.xml --gh-annotations auto tests/
+
+# Machine-readable run for tooling — the versioned event stream to a file.
+mtest --json report.ndjson tests/
 
 # List node ids without running anything.
 mtest collect tests/

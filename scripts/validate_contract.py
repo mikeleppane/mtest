@@ -442,13 +442,25 @@ class Runner:
 # --------------------------------------------------------------------------- #
 def build_matrix() -> list[Check]:
     I = ["-I", "build"]  # noqa: E741
+    # Still refused (§24.1): exactly -n/--workers and --serial. Every other v1
+    # flag this build knows the spelling of is served now.
     refused = [("--workers", "4", "parallel workers"), ("-n", "4", "parallel workers"),
                ("--serial", "*.mojo", "serial")]
-    # Newly served (§24.1): --retries, --compile-timeout, and --shard are wired
-    # up — the parser accepts them and they run, so they must NOT exit 4 with the
-    # not-available refusal. Assert the flip so the validator stops asserting a
-    # falsehood, without duplicating the e2e's behavior coverage.
-    served = [("--retries", "2"), ("--compile-timeout", "600"), ("--json", "out.ndjson"), ("--junit-xml", "r.xml"), ("--gh-annotations", "auto")]
+    # Newly served (§24.1): --retries, --compile-timeout, --shard, --junit-xml,
+    # --gh-annotations, and --json are all wired up — the parser accepts them and
+    # they run, so none of them may exit 4 with the not-available refusal. Assert
+    # the flip so the validator stops asserting a falsehood, without duplicating
+    # the e2e's behavior coverage.
+    served = [
+        ("--retries", "2", "§13,§24.1"),
+        ("--compile-timeout", "600", "§18,§24.1"),
+        ("--junit-xml", "r.xml", "§15.2,§24.1"),
+        ("--gh-annotations", "auto", "§15.3,§24.1"),
+        # A file destination, not "-": "-" would make --json own stdout, which
+        # collides with the default --gh-annotations auto (§15.3) — a distinct,
+        # deliberate usage error, not the "not served" refusal this check probes.
+        ("--json", "out.ndjson", "§15.4,§24.1"),
+    ]
     checks = [
         # Version identity (§19) — discriminating, not a bare "mtest".
         Check("help: version prints the version", "§19", ["version"], 0, out_has=["mtest 0.4.0"]),
@@ -535,10 +547,10 @@ def build_matrix() -> list[Check]:
     for flag, val, _cap in refused:
         checks.append(Check(f"refused: {flag} -> 4 names flag + v1 contract", "§24.1",
                             I + [flag, val, "tests"], 4, any_has=["v1 contract", flag]))
-    # Served resilience flags (§24.1): accepted on the clean suite -> 0, never the
+    # Served flags (§24.1): accepted on the clean suite -> 0, never the
     # not-available refusal.
-    for flag, val in served:
-        checks.append(Check(f"served: {flag} accepted (not exit 4)", "§13,§18,§24.1",
+    for flag, val, ref in served:
+        checks.append(Check(f"served: {flag} accepted (not exit 4)", ref,
                             I + [flag, val, "tests"], 0, any_absent=["v1 contract"]))
     checks.append(Check("served: collect --shard partitions (not exit 4)", "§18,§24.1",
                         ["collect"] + I + ["--shard", "1/2", "tests"], 0, any_absent=["v1 contract"]))
