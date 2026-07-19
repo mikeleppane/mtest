@@ -881,6 +881,8 @@ def check_ci_workflow() -> None:
     """The hosted gate has independent platform-local preflight/matrix chains."""
     workflow_path = REPO_ROOT / ".github" / "workflows" / "ci.yml"
     workflow = workflow_path.read_text(encoding="utf-8")
+    if "continue-on-error:" in workflow:
+        raise AssertionError("CI workflow must not contain continue-on-error")
     triggers = _yaml_mapping_keys(_yaml_block(workflow, "on:"), 2)
     expected_triggers = ["push", "pull_request", "workflow_dispatch"]
     if triggers != expected_triggers or "schedule:" in _yaml_block(workflow, "on:"):
@@ -923,10 +925,23 @@ def check_ci_workflow() -> None:
         "linux-test-matrix": LINUX_MATRIX_ROWS,
         "macos-test-matrix": MACOS_MATRIX_ROWS,
     }
+    expected_fail_fast = {
+        "linux-test-matrix": "true",
+        "macos-test-matrix": "false",
+    }
     for name, expected in matrices.items():
         job = job_blocks[name]
-        if "    strategy:\n      fail-fast: true\n      matrix:\n        include:" not in job:
-            raise AssertionError(f"CI job {name!r} is not an explicit fail-fast matrix")
+        expected_strategy = (
+            "    strategy:\n"
+            f"      fail-fast: {expected_fail_fast[name]}\n"
+            "      matrix:\n"
+            "        include:"
+        )
+        if expected_strategy not in job:
+            raise AssertionError(
+                f"CI job {name!r} strategy/fail-fast layout mismatch: "
+                f"expected={expected_strategy!r}"
+            )
         actual = _matrix_rows(job)
         if actual != expected:
             raise AssertionError(

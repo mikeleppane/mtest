@@ -187,10 +187,12 @@ junit-render-check -> transcripts-check` in that exact fail-fast order. The
 canonical local `pixi run ci` remains serial: `ci-preflight -> test-direct ->
 test -> e2e`. Hosted CI runs the same logical floor with two platform-local
 chains: Linux preflight releases fail-fast `test-direct`, `test`, `e2e`, ASan,
-and Valgrind cells; macOS preflight releases fail-fast `test-direct`, `test`,
-and `e2e` cells. The Linux package-consumption job remains independent. Memory
-safety therefore runs on every pull request and configured-main-branch push,
-not on a schedule. Neither platform waits for the other platform's preflight.
+and Valgrind cells; macOS preflight releases `test-direct`, `test`, and `e2e`
+cells with `fail-fast: false` so a failing lane does not cancel its siblings.
+Every Linux and macOS lane remains a blocking check. The Linux
+package-consumption job remains independent. Memory safety therefore runs on
+every pull request and configured-main-branch push, not on a schedule. Neither
+platform waits for the other platform's preflight.
 
 `native-check` depends on `postfork-check`, so invoking the native gate alone
 cannot omit the recurring child call-graph audit. `test-direct` and `test` both

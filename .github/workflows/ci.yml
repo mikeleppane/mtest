@@ -193,7 +193,7 @@ jobs:
     name: macOS arm64 / ${{ matrix.lane }}
     needs: macos-preflight
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - runner: macos-15
