@@ -29,6 +29,9 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
+
+import json_stream_check
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MTEST = os.path.join(REPO_ROOT, "build", "mtest")
@@ -42,6 +45,7 @@ TESTS_DIR = os.path.join(REPO_ROOT, "tests")
 # genuine hang; it never times an individual file the way mtest's own
 # `--timeout` does.
 TIMEOUT_SECONDS = 900.0
+PROGRESS_INTERVAL_SECONDS = 30.0
 
 # Mirrors e2e_check.py's HEADER_RE: the session-started header line is
 # `root: <path>   selected: <N> files   excluded: <M> files`.
@@ -92,8 +96,64 @@ def _kill_group(proc: subprocess.Popen) -> None:
         time.sleep(0.3)
 
 
+def _mtest_argv(
+    mtest_path: str,
+    native_object: str,
+    progress_path: str | None = None,
+) -> list[str]:
+    """Build the self-host command, optionally enabling live NDJSON progress."""
+    argv = [
+        mtest_path,
+        "-I",
+        "build",
+        "-I",
+        "tests/support",
+        "--build-arg=-Xlinker",
+        f"--build-arg={native_object}",
+    ]
+    if progress_path is not None:
+        argv.extend(["--json", progress_path])
+    argv.append("tests/")
+    return argv
+
+
+def _progress_snapshot(progress_path: Path) -> str:
+    """Summarize the latest committed record in a live NDJSON stream."""
+    try:
+        text = progress_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "stream=not-created"
+    except OSError as exc:
+        return f"stream=unreadable error={exc}"
+    if text == "":
+        return "stream=empty"
+    try:
+        report = json_stream_check.parse_stream(text)
+    except json_stream_check.StreamError as exc:
+        return f"stream=invalid error={exc}"
+    if not report.records:
+        return f"records=0 torn_tail={'true' if report.torn_tail else 'false'}"
+
+    last = report.records[-1]
+    parts = [
+        f"records={len(report.records)}",
+        f"last_event={last.get('event', '<missing>')}",
+    ]
+    path = last.get("path")
+    if isinstance(path, str):
+        parts.append(f"path={path}")
+    outcome = last.get("outcome")
+    if isinstance(outcome, str):
+        parts.append(f"outcome={outcome}")
+    if report.torn_tail:
+        parts.append("torn_tail=true")
+    return " ".join(parts)
+
+
 def run_mtest_over_own_suite(
-    mtest_path: str = MTEST, native_object: str = NATIVE_OBJECT
+    mtest_path: str = MTEST,
+    native_object: str = NATIVE_OBJECT,
+    progress_path: str | None = None,
 ) -> tuple[int, str]:
     """Spawn mtest over tests/ with its support include, streaming output to
     this process's stdout live and also capturing it for the header parse.
@@ -122,16 +182,10 @@ def run_mtest_over_own_suite(
         )
         return 1, ""
 
-    argv = [
-        mtest_path,
-        "-I",
-        "build",
-        "-I",
-        "tests/support",
-        "--build-arg=-Xlinker",
-        f"--build-arg={native_object}",
-        "tests/",
-    ]
+    argv = _mtest_argv(mtest_path, native_object, progress_path)
+    progress = Path(progress_path) if progress_path is not None else None
+    if progress is not None:
+        progress.unlink(missing_ok=True)
     proc = subprocess.Popen(
         argv,
         cwd=REPO_ROOT,
@@ -143,15 +197,28 @@ def run_mtest_over_own_suite(
     assert proc.stdout is not None  # guaranteed by stdout=PIPE above
 
     chunks: list[str] = []
-    deadline = time.monotonic() + TIMEOUT_SECONDS
+    started_at = time.monotonic()
+    deadline = started_at + TIMEOUT_SECONDS
+    next_progress_at = started_at + PROGRESS_INTERVAL_SECONDS
     timed_out = False
     fd = proc.stdout.fileno()
     while True:
-        remaining = deadline - time.monotonic()
+        now = time.monotonic()
+        remaining = deadline - now
         if remaining <= 0:
             timed_out = True
             break
-        ready, _, _ = select.select([fd], [], [], remaining)
+        if progress is not None and now >= next_progress_at:
+            print(
+                "self_host_check: progress "
+                f"elapsed={now - started_at:.0f}s {_progress_snapshot(progress)}",
+                flush=True,
+            )
+            next_progress_at = now + PROGRESS_INTERVAL_SECONDS
+        wait_seconds = remaining
+        if progress is not None:
+            wait_seconds = min(wait_seconds, max(0.0, next_progress_at - now))
+        ready, _, _ = select.select([fd], [], [], wait_seconds)
         if not ready:
             continue
         text = os.read(fd, 4096).decode("utf-8", errors="replace")
@@ -164,6 +231,13 @@ def run_mtest_over_own_suite(
     if timed_out:
         _kill_group(proc)
         proc.wait(timeout=5)
+        if progress is not None:
+            print(
+                "self_host_check: final progress "
+                f"elapsed={time.monotonic() - started_at:.0f}s "
+                f"{_progress_snapshot(progress)}",
+                flush=True,
+            )
         print(
             f"FATAL: self_host_check: `{' '.join(argv)}` did not finish "
             f"within {TIMEOUT_SECONDS:.0f}s -- killed its process group "
@@ -176,14 +250,20 @@ def run_mtest_over_own_suite(
     return returncode, "".join(chunks)
 
 
-def verify(mtest_path: str = MTEST, native_object: str = NATIVE_OBJECT) -> int:
+def verify(
+    mtest_path: str = MTEST,
+    native_object: str = NATIVE_OBJECT,
+    progress_path: str | None = None,
+) -> int:
     """Run mtest over its own suite and check the result for completeness.
 
     Parameterized so scripts/package_check.py can reuse this exact dogfood +
     completeness gate against the INSTALLED package binary; `pixi run test`
     (via `main` below) calls it with this repo's own dev build.
     """
-    code, output = run_mtest_over_own_suite(mtest_path, native_object)
+    code, output = run_mtest_over_own_suite(
+        mtest_path, native_object, progress_path
+    )
 
     try:
         disk_files = discovered_test_files()

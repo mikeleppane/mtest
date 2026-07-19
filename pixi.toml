@@ -176,7 +176,7 @@ test-integration = "bash scripts/test_all.sh tests/integration"
 # Fast self-tests for repository harness behavior. Uses disposable test inputs
 # and a fake compiler to prove recursive root selection and injective binary
 # paths without rebuilding the full Mojo suite.
-harness-check = "python scripts/harness_check.py"
+harness-check = "python scripts/self_host_check_test.py && python scripts/harness_check.py"
 
 # DOGFOOD gate: run mtest over its OWN tests/ suite, executing the built binary
 # directly (`build/mtest -I build -I tests/support tests/` — never `mojo run`, for the same

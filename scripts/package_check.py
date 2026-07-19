@@ -89,6 +89,7 @@ CONDA_FORGE_CHANNEL = "conda-forge"
 # build -- the exact pair scripts/self_host_check.py uses for `pixi run test`.
 MOJOPKG_INCLUDE_DIR = REPO_ROOT / "build"
 NATIVE_TEST_OBJECT = REPO_ROOT / "build" / "native" / "mtest_exec_native_test.o"
+SELF_HOST_PROGRESS = SCRATCH_ROOT / "self-host-progress.ndjson"
 
 PIXI_VERSION_RE = re.compile(r'(?m)^version = "([^"]*)"')
 
@@ -329,7 +330,11 @@ def stage_suite_run_with_installed_binary(mtest_bin: Path) -> None:
             "(the package-check pixi task depends on it)"
         )
 
-    code = self_host_check.verify(str(mtest_bin), str(NATIVE_TEST_OBJECT))
+    code = self_host_check.verify(
+        str(mtest_bin),
+        str(NATIVE_TEST_OBJECT),
+        progress_path=str(SELF_HOST_PROGRESS),
+    )
     if code != 0:
         raise PackageCheckError(
             "the installed binary did not drive mtest's own suite green "
