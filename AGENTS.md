@@ -142,43 +142,64 @@ phase notes.
 
 ## Hermetic by construction
 
-Ordinary CI touches the network exactly once: the locked `pixi install`.
-Everything after is offline — the fixtures and the transcript generator are
-committed, and the generator rebuilds the fixtures with the locked toolchain. A
-change that needs the network in the ordinary gate is wrong. One narrow
-exception is approved only for the scheduled/manual Valgrind job: after Pixi,
-it may update apt metadata and install exactly the `libc6-dbg` version matching
-the runner's already-installed `libc6`. The job logs apt provenance and fails if
-that exact package is unavailable, if libc changes, or if the versions differ.
-The exception does not apply to ordinary CI or any other package/network step.
+The ordinary source, test, and memory-analysis lanes touch the network once for
+the locked `pixi install`. Everything after is offline — the fixtures and the
+transcript generator are committed, and the generator rebuilds the fixtures
+with the locked toolchain — except for one narrow Valgrind-cell exception. On
+pull requests, configured `main`/`master` pushes, and manual unified-CI runs,
+that Linux cell may update apt metadata and install exactly the `libc6-dbg`
+version matching the runner's already-installed `libc6`. It logs apt provenance
+and fails if that exact package is unavailable, if libc changes, or if the
+versions differ. No other source, test, or memory-analysis step has that
+post-Pixi network exception.
+
+The independent Linux package-consumption job has a separate approved network
+contract. Its isolated rattler-build environment solves against the pinned
+Modular and conda-forge channels; its fresh scratch installs consume the local
+artifact while using those external channels to resolve the declared
+`mojo-compiler` runtime dependency (including the fallback package-format
+probe). Nothing uploads, publishes, or authenticates. Do not describe that job
+as hermetic or collapse its required package solves into the Valgrind exception.
 
 ## Toolchain and the quality floor
 
 The floor before any change is done — all green, in this order:
 
 ```text
-pixi run fmt              # format in place (run locally before committing)
-pixi run harness-check    # validate exact harness membership and invariants
-pixi run safety-check     # inventory every unsafe Mojo operation and local proof
-pixi run postfork-check   # audit production/testing post-fork call graphs
-pixi run native-check     # verify native ABI/layout/exports and lifecycle
-pixi run build            # the package-compiles gate
-pixi run transcripts-check# regenerate to a temp dir and diff byte-for-byte
-pixi run test-direct      # the independent glob-driven twin: build+execute
-                           # each unit/integration suite directly, no mtest involved
-pixi run test             # the self-hosted dogfood run: build/mtest over its
-                           # own tests/, plus exact path-membership verification
-                           # against an independent classified inventory
-pixi run e2e              # build the binary, drive it against e2e/
-                            # (manifest.json), assert exact exit codes/output
+pixi run fmt               # format in place (run locally before committing)
+pixi run version-check     # manifest, CLI, and shipped-version identity
+pixi run harness-check     # validate exact harness/CI membership and invariants
+pixi run safety-check      # inventory every unsafe Mojo operation and local proof
+pixi run postfork-check    # audit production/testing post-fork call graphs
+pixi run native-check      # verify native ABI/layout/exports and lifecycle
+pixi run junit-check       # validate the committed JUnit oracle and checker
+pixi run build             # the package-compiles gate
+pixi run junit-render-check# validate bytes emitted by the real JUnit reporter
+pixi run transcripts-check # regenerate to a temp dir and diff byte-for-byte
+pixi run test-direct       # independent glob-driven build+direct-execute twin
+pixi run test              # self-hosted dogfood plus independent membership proof
+pixi run e2e               # exact CLI exits and output against e2e/manifest.json
 ```
 
-`pixi run ci` chains `fmt-check -> harness-check -> safety-check -> postfork-check -> native-check -> build -> transcripts-check -> test-direct -> test -> e2e`
-fail-fast and is exactly what ordinary CI runs. `native-check`
-also depends on `postfork-check`, so invoking the native gate alone cannot omit
-the recurring child call-graph audit. `test-direct` and `test` both
+`pixi run ci-preflight` chains `version-check -> fmt-check -> harness-check ->
+safety-check -> postfork-check -> native-check -> junit-check -> build ->
+junit-render-check -> transcripts-check` in that exact fail-fast order. The
+canonical local `pixi run ci` remains serial: `ci-preflight -> test-direct ->
+test -> e2e`. Hosted CI runs the same logical floor with two platform-local
+chains: Linux preflight releases fail-fast `test-direct`, `test`, `e2e`, ASan,
+and Valgrind cells; macOS preflight releases fail-fast `test-direct`, `test`,
+and `e2e` cells. The Linux package-consumption job remains independent. Memory
+safety therefore runs on every pull request and configured-main-branch push,
+not on a schedule. Neither platform waits for the other platform's preflight.
+
+`native-check` depends on `postfork-check`, so invoking the native gate alone
+cannot omit the recurring child call-graph audit. `test-direct` and `test` both
 build-then-execute the binary directly — never `mojo run` anywhere in the gate,
-because it masks crash exit codes to 1.
+because it masks crash exit codes to 1. Transcripts, ASan/Valgrind, and packaged
+artifact consumption remain Linux-only. The workflow requires macOS native/build
+smoke plus the full direct, dogfood, and end-to-end behavioral inventory; the
+README must keep executed evidence at build/link/`--help` until those hosted
+behavioral cells first pass.
 
 ## Pin policy and Ask-first boundaries
 

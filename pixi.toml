@@ -3,10 +3,10 @@ name = "mtest"
 version = "0.4.0"
 description = "A pytest-like test runner for Mojo that orchestrates the stdlib's per-file TestSuite"
 channels = ["https://conda.modular.com/max/", "conda-forge"]
-# Linux is the gate platform; macOS is a v1 target and shares the same POSIX
-# process surface the runner depends on. Bumping the platform set is an
-# Ask-first decision — the protocol snapshots are stamped with os/arch and a
-# regeneration on a foreign platform diffs loudly by design.
+# Linux and macOS are gate targets and share the POSIX process surface the
+# runner depends on. Bumping the platform set is an Ask-first decision; the
+# Linux-only protocol snapshots are stamped with os/arch, so regenerating them
+# on a foreign platform diffs loudly by design.
 platforms = ["linux-64", "osx-arm64"]
 
 [dependencies]
@@ -72,8 +72,8 @@ build-bin = { cmd = "mojo build -I build src/main.mojo -o build/mtest -Xlinker b
 # conda-forge channels), builds mtest FROM SOURCE inside that sandbox (mirroring
 # build -> build-native -> build-bin), and writes the resulting .conda under
 # build/conda-channel — a plain directory with repodata.json, nothing uploaded
-# or published anywhere. Not wired into `pixi run ci`; the dedicated CI job is a
-# later task.
+# or published anywhere. Not wired into `pixi run ci`; the dedicated Linux
+# package job runs independently from both platform test chains.
 package-build = "rattler-build build --recipe recipe/recipe.yaml -c https://conda.modular.com/max/ -c conda-forge --output-dir build/conda-channel"
 
 # The packaged-artifact consumption GATE: build -> install the .conda into a
@@ -85,7 +85,7 @@ package-build = "rattler-build build --recipe recipe/recipe.yaml -c https://cond
 # on build + build-native (not build-bin) so this repo's own build/mtest.mojopkg
 # and the test-variant native object exist for the suite run — the binary under
 # test is the INSTALLED one, never build/mtest. Standalone: NOT wired into
-# `pixi run ci` (the dedicated CI job is a later task). Nothing uploads or
+# `pixi run ci`; its dedicated Linux CI job is independent. Nothing uploads or
 # publishes anywhere.
 package-check = { cmd = "python scripts/package_check.py", depends-on = [
     "build",
@@ -128,9 +128,10 @@ asan-check = "python scripts/asan_check.py"
 # under the locked Linux-only Memcheck binary. Undefined-value, invalid-access,
 # leak, and fd controls run first; reviewed runtime-reachable allocations are
 # matched exactly and project/native frames are forbidden from that baseline.
-# The scheduled/manual workflow has a narrow approved apt exception for the exact
-# debug-symbol version matching the runner's preinstalled glibc; ordinary CI has
-# no such exception, and the Valgrind job itself is not described as hermetic.
+# The unified CI workflow's Valgrind cell has a narrow approved apt exception
+# for the exact debug-symbol version matching the runner's preinstalled glibc;
+# no other source/test/memory step has that exception, and this task is not
+# hermetic. The independent package job has its own external-channel contract.
 valgrind-check = "python scripts/valgrind_check_test.py && python scripts/valgrind_check.py"
 
 # Gate the JUnit report tooling ahead of the renderer that will use it: recorded
@@ -206,11 +207,10 @@ depends-on = ["build-bin"]
 cmd = "python scripts/e2e_check.py"
 depends-on = ["build-bin"]
 
-# The aggregate gate CI runs. Ordered fail-fast: the version-identity check,
-# then formatting, then the package compile gate, then the protocol-transcript
-# diff, then the Mojo tests (the mtest-independent glob-driven twin first, then
-# mtest dogfooding its own suite), then the end-to-end binary gate.
-[tasks.ci]
+# The cheap hosted-CI release barrier. Every non-behavioral member of the local
+# floor stays in its exact fail-fast order; GitHub releases the independent
+# behavioral and memory-safety lanes only after this aggregate passes.
+[tasks.ci-preflight]
 depends-on = [
     "version-check",
     "fmt-check",
@@ -222,6 +222,14 @@ depends-on = [
     "build",
     "junit-render-check",
     "transcripts-check",
+]
+
+# The canonical serial local floor. Hosted CI runs the exact preflight above,
+# then gives each independent behavioral gate a fresh parallel matrix cell;
+# local development keeps one ordered aggregate for reproducible handoff.
+[tasks.ci]
+depends-on = [
+    "ci-preflight",
     "test-direct",
     "test",
     "e2e",

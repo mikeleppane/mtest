@@ -10,11 +10,13 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import tomllib
 
 from transcript_compare import compare_directories
 
@@ -137,6 +139,102 @@ PROTOCOL_FIXTURES = {
 E2E_NATIVE_FIXTURES = {
     "e2e_json_terminal_write_fault.c",
 }
+
+CI_PREFLIGHT_TASKS = [
+    "version-check",
+    "fmt-check",
+    "harness-check",
+    "safety-check",
+    "postfork-check",
+    "native-check",
+    "junit-check",
+    "build",
+    "junit-render-check",
+    "transcripts-check",
+]
+CI_TASKS = ["ci-preflight", "test-direct", "test", "e2e"]
+CI_FLOOR_TASKS = {
+    *CI_PREFLIGHT_TASKS,
+    "test-direct",
+    "test",
+    "e2e",
+}
+LINUX_MATRIX_ROWS = [
+    {
+        "runner": "ubuntu-24.04",
+        "lane": "direct tests",
+        "task": "test-direct",
+        "libc_debug": "false",
+        "safety_artifact": "false",
+        "artifact_name": "none",
+        "artifact_path": "none",
+    },
+    {
+        "runner": "ubuntu-24.04",
+        "lane": "self-hosted tests",
+        "task": "test",
+        "libc_debug": "false",
+        "safety_artifact": "false",
+        "artifact_name": "none",
+        "artifact_path": "none",
+    },
+    {
+        "runner": "ubuntu-24.04",
+        "lane": "end-to-end tests",
+        "task": "e2e",
+        "libc_debug": "false",
+        "safety_artifact": "false",
+        "artifact_name": "none",
+        "artifact_path": "none",
+    },
+    {
+        "runner": "ubuntu-24.04",
+        "lane": "ASan + LSan",
+        "task": "asan-check",
+        "libc_debug": "false",
+        "safety_artifact": "true",
+        "artifact_name": "asan-logs",
+        "artifact_path": "build/safety/asan/*.log",
+    },
+    {
+        "runner": "ubuntu-24.04",
+        "lane": "Valgrind Memcheck",
+        "task": "valgrind-check",
+        "libc_debug": "true",
+        "safety_artifact": "true",
+        "artifact_name": "valgrind-logs",
+        "artifact_path": "build/safety/valgrind/*.log",
+    },
+]
+MACOS_MATRIX_ROWS = [
+    {
+        "runner": "macos-15",
+        "lane": "direct tests",
+        "task": "test-direct",
+        "libc_debug": "false",
+        "safety_artifact": "false",
+        "artifact_name": "none",
+        "artifact_path": "none",
+    },
+    {
+        "runner": "macos-15",
+        "lane": "self-hosted tests",
+        "task": "test",
+        "libc_debug": "false",
+        "safety_artifact": "false",
+        "artifact_name": "none",
+        "artifact_path": "none",
+    },
+    {
+        "runner": "macos-15",
+        "lane": "end-to-end tests",
+        "task": "e2e",
+        "libc_debug": "false",
+        "safety_artifact": "false",
+        "artifact_name": "none",
+        "artifact_path": "none",
+    },
+]
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -645,6 +743,320 @@ def check_format_roots() -> None:
         raise AssertionError(f"format task root coverage mismatch: missing={missing}")
 
 
+def _yaml_block(text: str, header: str) -> str:
+    """Return the indented body under one exact YAML mapping header."""
+    lines = text.splitlines()
+    matches = [index for index, line in enumerate(lines) if line == header]
+    if len(matches) != 1:
+        raise AssertionError(
+            f"workflow expected one {header!r} header, found {len(matches)}"
+        )
+    start = matches[0]
+    indent = len(header) - len(header.lstrip(" "))
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        stripped = line.lstrip(" ")
+        if not stripped or stripped.startswith("#"):
+            continue
+        line_indent = len(line) - len(stripped)
+        if line_indent <= indent:
+            end = index
+            break
+    return "\n".join(lines[start + 1 : end])
+
+
+def _yaml_mapping_keys(block: str, indent: int) -> list[str]:
+    """Return exact mapping keys at one absolute indentation level."""
+    prefix = re.escape(" " * indent)
+    pattern = re.compile(rf"^{prefix}([A-Za-z0-9_-]+):(?:\s.*)?$")
+    return [
+        match.group(1)
+        for line in block.splitlines()
+        if (match := pattern.match(line)) is not None
+    ]
+
+
+def _matrix_rows(job: str) -> list[dict[str, str]]:
+    """Parse the workflow's deliberately scalar-only matrix include rows."""
+    rows: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    for line in job.splitlines():
+        first = re.match(r"^          - ([a-z_-]+): (.+)$", line)
+        if first is not None:
+            if current is not None:
+                rows.append(current)
+            current = {first.group(1): first.group(2)}
+            continue
+        field = re.match(r"^            ([a-z_-]+): (.+)$", line)
+        if current is not None and field is not None:
+            current[field.group(1)] = field.group(2)
+    if current is not None:
+        rows.append(current)
+    return rows
+
+
+def _step_attributes(job: str, name: str) -> dict[str, str]:
+    """Return executable scalar attributes from one exact named workflow step."""
+    block = _yaml_block(job, f"      - name: {name}")
+    attributes: dict[str, str] = {}
+    for line in block.splitlines():
+        match = re.match(r"^        (if|run|uses): (.+)$", line)
+        if match is None:
+            continue
+        key = match.group(1)
+        if key in attributes:
+            raise AssertionError(f"workflow step {name!r} repeats {key!r}")
+        attributes[key] = match.group(2)
+    return attributes
+
+
+def _task_dependencies(tasks: dict[str, object], name: str) -> list[str]:
+    """Read one Pixi task's direct dependency list without accepting shorthands."""
+    task = tasks.get(name)
+    if not isinstance(task, dict):
+        raise AssertionError(f"Pixi task {name!r} must be a dependency aggregate")
+    dependencies = task.get("depends-on")
+    if not isinstance(dependencies, list) or not all(
+        isinstance(item, str) for item in dependencies
+    ):
+        raise AssertionError(f"Pixi task {name!r} has no string dependency list")
+    return dependencies
+
+
+def _transitive_tasks(tasks: dict[str, object], root: str) -> set[str]:
+    """Expand declared Pixi task dependencies from one aggregate root."""
+    seen: set[str] = set()
+    pending = [root]
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        task = tasks.get(name)
+        if isinstance(task, dict):
+            dependencies = task.get("depends-on", [])
+            if not isinstance(dependencies, list) or not all(
+                isinstance(item, str) for item in dependencies
+            ):
+                raise AssertionError(f"Pixi task {name!r} has invalid dependencies")
+            pending.extend(dependencies)
+    return seen
+
+
+def check_ci_task_graph() -> None:
+    """The serial local floor is the exact preflight plus behavioral lanes."""
+    with (REPO_ROOT / "pixi.toml").open("rb") as manifest:
+        tasks = tomllib.load(manifest)["tasks"]
+    preflight = _task_dependencies(tasks, "ci-preflight")
+    if preflight != CI_PREFLIGHT_TASKS:
+        raise AssertionError(
+            "ci-preflight membership/order mismatch: "
+            f"expected={CI_PREFLIGHT_TASKS}, actual={preflight}"
+        )
+    ci = _task_dependencies(tasks, "ci")
+    if ci != CI_TASKS:
+        raise AssertionError(
+            f"ci membership/order mismatch: expected={CI_TASKS}, actual={ci}"
+        )
+    closure = _transitive_tasks(tasks, "ci")
+    missing = sorted(CI_FLOOR_TASKS - closure)
+    if missing:
+        raise AssertionError(f"ci transitive floor is missing gates: {missing}")
+    exact_safety_tasks = {
+        "asan-check": "python scripts/asan_check.py",
+        "valgrind-check": (
+            "python scripts/valgrind_check_test.py && "
+            "python scripts/valgrind_check.py"
+        ),
+    }
+    for name, command in exact_safety_tasks.items():
+        if tasks.get(name) != command:
+            raise AssertionError(
+                f"{name} no longer runs its exact negative-control harness"
+            )
+
+
+def check_ci_workflow() -> None:
+    """The hosted gate has independent platform-local preflight/matrix chains."""
+    workflow_path = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+    workflow = workflow_path.read_text(encoding="utf-8")
+    triggers = _yaml_mapping_keys(_yaml_block(workflow, "on:"), 2)
+    expected_triggers = ["push", "pull_request", "workflow_dispatch"]
+    if triggers != expected_triggers or "schedule:" in _yaml_block(workflow, "on:"):
+        raise AssertionError(
+            f"CI workflow trigger mismatch: expected={expected_triggers}, actual={triggers}"
+        )
+    if "    branches: [main, master]" not in _yaml_block(workflow, "on:"):
+        raise AssertionError("CI push trigger no longer pins main and master")
+
+    jobs = _yaml_mapping_keys(_yaml_block(workflow, "jobs:"), 2)
+    expected_jobs = [
+        "linux-preflight",
+        "linux-test-matrix",
+        "package",
+        "macos-preflight",
+        "macos-test-matrix",
+    ]
+    if jobs != expected_jobs:
+        raise AssertionError(
+            f"CI workflow job membership mismatch: expected={expected_jobs}, actual={jobs}"
+        )
+    job_blocks = {name: _yaml_block(workflow, f"  {name}:") for name in jobs}
+    expected_needs = {
+        "linux-preflight": None,
+        "linux-test-matrix": "linux-preflight",
+        "package": None,
+        "macos-preflight": None,
+        "macos-test-matrix": "macos-preflight",
+    }
+    for name, expected in expected_needs.items():
+        matches = re.findall(r"^    needs:(.*)$", job_blocks[name], re.MULTILINE)
+        expected_lines = [] if expected is None else [f" {expected}"]
+        if matches != expected_lines:
+            raise AssertionError(
+                f"CI job {name!r} needs mismatch: "
+                f"expected={expected_lines}, actual={matches}"
+            )
+
+    matrices = {
+        "linux-test-matrix": LINUX_MATRIX_ROWS,
+        "macos-test-matrix": MACOS_MATRIX_ROWS,
+    }
+    for name, expected in matrices.items():
+        job = job_blocks[name]
+        if "    strategy:\n      fail-fast: true\n      matrix:\n        include:" not in job:
+            raise AssertionError(f"CI job {name!r} is not an explicit fail-fast matrix")
+        actual = _matrix_rows(job)
+        if actual != expected:
+            raise AssertionError(
+                f"CI job {name!r} matrix mismatch: expected={expected}, actual={actual}"
+            )
+        runs_on = re.findall(r"^    runs-on: (.+)$", job, re.MULTILINE)
+        if runs_on != ["${{ matrix.runner }}"]:
+            raise AssertionError(
+                f"CI job {name!r} runner dispatch mismatch: actual={runs_on}"
+            )
+        run_step = _step_attributes(job, "Run ${{ matrix.lane }}")
+        if run_step != {"run": "pixi run ${{ matrix.task }}"}:
+            raise AssertionError(
+                f"CI job {name!r} matrix task dispatch mismatch: actual={run_step}"
+            )
+
+    linux_preflight = job_blocks["linux-preflight"]
+    linux_commands = re.findall(r"^        run: (.+)$", linux_preflight, re.MULTILINE)
+    expected_linux_commands = ["pixi run mojo-version", "pixi run ci-preflight"]
+    if linux_commands != expected_linux_commands:
+        raise AssertionError(
+            "Linux preflight command mismatch: "
+            f"expected={expected_linux_commands}, actual={linux_commands}"
+        )
+    macos_preflight = job_blocks["macos-preflight"]
+    macos_commands = re.findall(r"^        run: (.+)$", macos_preflight, re.MULTILINE)
+    expected_macos_commands = [
+        "|",
+        "pixi run native-check",
+        "pixi run build-bin",
+        "./build/mtest --help",
+    ]
+    if macos_commands != expected_macos_commands:
+        raise AssertionError(
+            "macOS preflight prerequisite order mismatch: "
+            f"expected={expected_macos_commands}, actual={macos_commands}"
+        )
+
+    package_commands = re.findall(
+        r"^        run: (.+)$", job_blocks["package"], re.MULTILINE
+    )
+    expected_package_commands = [
+        "pixi run mojo-version",
+        "pixi run package-check",
+    ]
+    if package_commands != expected_package_commands:
+        raise AssertionError(
+            "independent package command mismatch: "
+            f"expected={expected_package_commands}, actual={package_commands}"
+        )
+
+    linux_matrix = job_blocks["linux-test-matrix"]
+    expected_linux_steps = {
+        "Install matching glibc debug symbols": {
+            "if": "${{ matrix.libc_debug }}",
+            "run": "|",
+        },
+        "Tool provenance": {"run": "|"},
+        "Valgrind provenance": {
+            "if": "${{ matrix.libc_debug }}",
+            "run": "pixi run valgrind --version",
+        },
+        "Build safety prerequisite": {
+            "if": "${{ matrix.safety_artifact }}",
+            "run": "pixi run build",
+        },
+        "Upload safety logs": {
+            "if": "${{ always() && matrix.safety_artifact }}",
+            "uses": "actions/upload-artifact@v4",
+        },
+    }
+    for name, expected in expected_linux_steps.items():
+        actual = _step_attributes(linux_matrix, name)
+        if actual != expected:
+            raise AssertionError(
+                f"Linux matrix step {name!r} mismatch: "
+                f"expected={expected}, actual={actual}"
+            )
+
+    required_linux_lines = [
+        "libc_version=\"$(dpkg-query -W -f='${Version}' libc6)\"",
+        "sudo apt-get update",
+        "apt-cache policy libc6 libc6-dbg",
+        'sudo apt-get install --yes --no-install-recommends "libc6-dbg=$libc_version"',
+        "installed_libc_version=\"$(dpkg-query -W -f='${Version}' libc6)\"",
+        "debug_version=\"$(dpkg-query -W -f='${Version}' libc6-dbg)\"",
+        'test "$installed_libc_version" = "$libc_version"',
+        'test "$debug_version" = "$libc_version"',
+        "pixi run mojo-version",
+        "pixi run clang --version",
+        "ldd --version | head -1",
+    ]
+    linux_lines = linux_matrix.splitlines()
+    missing_lines = [
+        line for line in required_linux_lines if f"          {line}" not in linux_lines
+    ]
+    if missing_lines:
+        raise AssertionError(
+            f"Linux matrix lost memory-safety commands: missing={missing_lines}"
+        )
+    upload_block = _yaml_block(linux_matrix, "      - name: Upload safety logs")
+    expected_upload_lines = {
+        "          name: ${{ matrix.artifact_name }}",
+        "          path: ${{ matrix.artifact_path }}",
+        "          if-no-files-found: warn",
+        "          retention-days: 30",
+    }
+    actual_upload_lines = {
+        line for line in upload_block.splitlines() if line.startswith("          ")
+    }
+    if actual_upload_lines != expected_upload_lines:
+        raise AssertionError(
+            "Linux safety artifact inputs mismatch: "
+            f"expected={sorted(expected_upload_lines)}, "
+            f"actual={sorted(actual_upload_lines)}"
+        )
+
+    for name, job in job_blocks.items():
+        if job.count("uses: actions/checkout@v4") != 1:
+            raise AssertionError(f"CI job {name!r} does not pin checkout@v4 once")
+        if job.count("uses: prefix-dev/setup-pixi@v0.10.0") != 1:
+            raise AssertionError(f"CI job {name!r} does not pin setup-pixi once")
+        if "          locked: true" not in job or "          cache: true" not in job:
+            raise AssertionError(f"CI job {name!r} lacks locked cached Pixi setup")
+
+    legacy = REPO_ROOT / ".github" / "workflows" / "memory-safety.yml"
+    if legacy.exists():
+        raise AssertionError("legacy scheduled memory-safety workflow still exists")
+
+
 def main() -> int:
     try:
         check_process_watchdog()
@@ -659,6 +1071,8 @@ def main() -> int:
         check_protocol_asset_layout()
         check_e2e_layout()
         check_format_roots()
+        check_ci_task_graph()
+        check_ci_workflow()
     except (AssertionError, OSError, subprocess.SubprocessError) as exc:
         print(f"harness-check: FAIL: {exc}", file=sys.stderr)
         return 1

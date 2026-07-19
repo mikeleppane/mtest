@@ -803,12 +803,26 @@ is its own deliverable.
 ## 22. Platforms
 
 Linux and macOS are the v1 targets. Linux carries the native lifecycle,
-process-supervision, and dynamic memory-analysis gates. macOS arm64 carries a
-native post-fork call-graph audit plus package build, executable link, and
-`--help` smoke coverage; runtime supervision remains unverified there. Platform
-divergence in crash reporting is absorbed by the structured termination model
-(a terminating signal is recorded as a signal, never as a shell-encoded
-`128+N`).
+process-supervision, transcript, dynamic memory-analysis, and packaged-artifact
+gates. The unified workflow requires the macOS arm64 preflight to run the native
+post-fork/lifecycle audit, package build, executable link, and `--help` smoke;
+on success it will dispatch the full direct, self-hosted dogfood, and end-to-end
+behavioral inventory. This is the required topology, not yet an executed-evidence
+claim: until the first hosted macOS matrix is green and recorded, current macOS
+evidence remains the earlier build/link/`--help` smoke and runtime supervision
+there remains unverified. Platform divergence in crash reporting is absorbed by
+the structured termination model (a terminating signal is recorded as a signal,
+never as a shell-encoded `128+N`).
+
+The canonical local `pixi run ci` floor is serial and fail-fast. Hosted CI
+preserves that logical floor while overlapping independent work: a Linux
+preflight releases separate direct, dogfood, end-to-end, ASan/LSan, and
+Valgrind cells; a macOS preflight independently releases separate direct,
+dogfood, and end-to-end cells. The Linux packaged-artifact job starts
+independently. Memory-safety cells run for every pull request, configured
+`main`/`master` push, and manual unified-CI invocation; there is no scheduled
+memory-safety workflow. Protocol transcripts, sanitizers, and packaged-artifact
+consumption remain Linux-only.
 
 **The packaged artifact.** The distribution recipe builds `mtest` **in-env from
 source**, inside an isolated build environment pinned to the same
@@ -822,12 +836,14 @@ environment carrying only that declared dependency (not the full build
 toolchain) is proven sufficient to load and run the installed binary.
 **linux-64 is the gated platform**: a dedicated CI job builds the package into
 a local channel, installs it into a scratch environment from that channel, and
-exercises the installed binary. **osx-arm64 is declared, not gated**: it
-matches the recipe's and the build tool's platform list and the package
-channels solve for it, but no CI runner builds or installs the packaged
-artifact there — macOS coverage stops at package build, executable link, and
-an `--help` smoke run (the same ceiling stated above), so packaged-artifact
-runtime supervision on macOS is a documented ceiling, not a proven target.
+exercises the installed binary. **osx-arm64 packaged-artifact consumption is
+declared, not gated**: it matches the recipe's and the build tool's platform
+list and the package channels solve for it, but no CI runner builds or installs
+the conda artifact there. This is a packaging ceiling only: the source-checkout
+workflow now requires full direct, dogfood, and end-to-end macOS cells, whose
+first hosted green is still pending as stated above. Runtime supervision from
+the installed macOS conda artifact remains a documented ceiling, not a proven
+target.
 
 ---
 

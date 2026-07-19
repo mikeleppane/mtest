@@ -53,9 +53,11 @@ directly against `mtest`'s own suite.
   the installed binary end to end.
 - **osx-arm64 is declared, not gated.** It matches the recipe's platform list
   and the package channels solve for it, but no CI runner installs or runs
-  the packaged artifact there. macOS coverage stops at package build,
-  executable link, and an `--help` smoke run — packaged-artifact **runtime
-  supervision on macOS is a documented ceiling, not a proven target** (see
+  the packaged artifact there. Current executed macOS evidence stops at package
+  build, executable link, and an `--help` smoke run. The unified workflow now
+  requires direct, dogfood, and end-to-end source-checkout cells, but their first
+  hosted green is still pending; packaged-artifact **runtime supervision on
+  macOS remains a documented ceiling, not a proven target** (see
   [Status](#status)).
 
 The package is not yet published to a public channel. Build it locally with
@@ -70,6 +72,12 @@ Both tasks are standalone — a dedicated CI job runs them, but neither is part
 of the ordinary `pixi run ci` gate (see [Developing](#developing)). To build
 and run `mtest` straight from a checkout instead of installing a package, see
 [Developing](#developing).
+
+The independent package job is intentionally networked: rattler-build solves
+its isolated build environment against the Modular and conda-forge channels,
+and the fresh scratch installs use the local artifact channel plus those
+external channels to resolve its declared runtime dependency. Nothing uploads,
+publishes, or authenticates.
 
 ## Why
 
@@ -1214,16 +1222,17 @@ open, and are stated honestly here rather than glossed over.
   otherwise-fast file is invisible to it. A per-test granularity is reserved
   (`docs/cli-contract.md` §21), blocked on the same upstream per-test-timing
   gap that blocks per-test attribution above.
-- **macOS arm64 has build/link smoke coverage, not runtime coverage — and
-  that ceiling extends to the packaged artifact.** The `macos-15` job audits
-  both native post-fork call graphs with the pinned Clang, precompiles the
-  package, links the executable, and runs `--help`. Native lifecycle tests,
-  Mojo process-supervision suites, and ASan/Valgrind dynamic analysis remain
-  Linux-only, so successful macOS runtime supervision is still unverified —
-  for the source build and, identically, for the conda package: `osx-arm64`
-  is declared in [`recipe/recipe.yaml`](recipe/recipe.yaml) and the channels
-  solve for it, but no CI runner installs or runs the packaged binary there
-  (see [Installation](#installation)).
+- **Recorded macOS arm64 evidence is still build/link smoke, not runtime
+  coverage — and packaged-artifact runtime remains a ceiling.** The last
+  executed hosted evidence audits the native post-fork call graphs with the
+  pinned Clang, precompiles the package, links the executable, and runs
+  `--help`. The unified workflow now requires native lifecycle preflight plus
+  direct, dogfood, and end-to-end source-checkout cells, but their first hosted
+  green is pending, so successful macOS runtime supervision is still
+  unverified. ASan/Valgrind remain Linux-only. Separately, `osx-arm64` is
+  declared in [`recipe/recipe.yaml`](recipe/recipe.yaml) and the channels solve
+  for it, but no CI runner installs or runs the packaged binary there (see
+  [Installation](#installation)).
 - **The installed binary's linkage is a verdict about loading, not about
   behavior.** The packaged `mtest` is not loader-clean — `readelf -d` shows a
   direct `NEEDED` on `libKGENCompilerRTShared.so`, whose transitive closure
@@ -1278,17 +1287,32 @@ Requires [pixi](https://pixi.sh). The toolchain (Mojo `1.0.0b2`) and all tasks
 are pinned in [pixi.toml](pixi.toml).
 
 ```console
-$ pixi install                 # local setup; ordinary CI's only networked step
-$ pixi run ci                  # fmt-check -> harness-check -> safety-check -> postfork-check -> native-check -> build -> transcripts-check -> test-direct -> test -> e2e
+$ pixi install                 # locked local environment setup
+$ pixi run ci                  # ci-preflight -> test-direct -> test -> e2e
 ```
 
-`pixi run ci` is the full gate. Individually:
+`pixi run ci` is the canonical serial local floor. `ci-preflight` runs the
+version, formatting, harness, safety, post-fork, native, JUnit, build, rendered-
+JUnit, and transcript checks in fail-fast order before the three behavioral
+gates above.
+
+GitHub preserves the same logical floor without serializing independent work.
+Linux preflight releases separate fail-fast `test-direct`, dogfood `test`,
+`e2e`, ASan/LSan, and Valgrind cells; macOS preflight independently releases
+configured `test-direct`, `test`, and `e2e` cells. The Linux package-consumption
+job starts independently. Memory safety therefore runs on every pull request,
+configured `main`/`master` push, and manual workflow invocation, with no
+scheduled memory-safety workflow. The first green hosted macOS behavioral
+matrix is still pending, so this topology is not yet a runtime-evidence claim.
+
+Individually:
 
 | Task | What it does |
 |------|--------------|
 | `pixi run build` | precompile `src/mtest` to `build/mtest.mojopkg` — the compile gate |
 | `pixi run build-bin` | link the runnable binary at `build/mtest` from `src/main.mojo` |
-| `pixi run harness-check` | fast self-tests for recursive suite enumeration and collision-free binary paths |
+| `pixi run ci-preflight` | run the exact ten-step static/build/transcript barrier used by Linux hosted CI |
+| `pixi run harness-check` | fast self-tests for recursive suite enumeration, collision-free binary paths, and exact CI topology |
 | `pixi run safety-check` | mutation-test and run the unsafe-Mojo inventory; enforces adjacent `# SAFETY:` proofs, but does not establish that those proofs are true |
 | `pixi run postfork-check` | mutation-test the Clang AST auditor, traverse the complete production/testing child call graphs, and require the exact reviewed platform-call set; proves allowlist conformance, not syscall correctness |
 | `pixi run native-check` | run `postfork-check`, strict C17 ABI/layout/export checks, and native lifecycle/fault tests; does not replace dynamic analysis |
@@ -1302,13 +1326,14 @@ $ pixi run ci                  # fmt-check -> harness-check -> safety-check -> p
 | `pixi run asan-check` | on Linux, prove live OOB/UAF/leak controls are detected and source-build the highest-risk exec suites with ASan/LSan; this is risk-weighted coverage, not a whole-program proof |
 | `pixi run valgrind-check` | on Linux, prove Memcheck controls and source-build the exec/native coverage under the pinned Valgrind binary; it does not prove all paths leak- or corruption-free |
 
-The scheduled Valgrind workflow also needs matching glibc debug symbols. It
-has a narrow approved apt exception after the locked Pixi install, scoped only
-to scheduled/manual Memcheck: it captures the runner's preinstalled `libc6`
+The Valgrind matrix cell needs matching glibc debug symbols on every pull
+request, configured `main`/`master` push, and manual workflow run. Among source,
+test, and memory-analysis lanes, it alone has a narrow approved apt exception
+after the locked Pixi install: it captures the runner's preinstalled `libc6`
 version, logs apt provenance, requests exactly `libc6-dbg=<that-version>`, and
-fails if the package is unavailable, libc changes, or the versions differ.
-Ordinary CI remains locked-Pixi-only after setup; this exception is not a claim
-that the Valgrind job itself is hermetic.
+fails if the package is unavailable, libc changes, or the versions differ. The
+independent package lane has the separate external-channel contract described
+under [Installation](#installation); neither exception makes its job hermetic.
 
 See [Self-hosting](#self-hosting) for how `test` and `test-direct` relate.
 
