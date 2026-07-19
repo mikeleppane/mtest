@@ -92,9 +92,17 @@ def _kill_group(proc: subprocess.Popen) -> None:
         time.sleep(0.3)
 
 
-def run_mtest_over_own_suite() -> tuple[int, str]:
+def run_mtest_over_own_suite(
+    mtest_path: str = MTEST, native_object: str = NATIVE_OBJECT
+) -> tuple[int, str]:
     """Spawn mtest over tests/ with its support include, streaming output to
     this process's stdout live and also capturing it for the header parse.
+
+    `mtest_path`/`native_object` default to this repo's own dev build
+    (build/mtest + the test-variant native object) so `pixi run test` behaves
+    exactly as before; scripts/package_check.py reuses this function with the
+    INSTALLED package binary instead to dogfood the packaged artifact against
+    the same suite.
 
     Runs in its own process group with the inherited environment, so `mojo`
     stays on PATH for the per-file build children mtest spawns -- the same
@@ -106,22 +114,22 @@ def run_mtest_over_own_suite() -> tuple[int, str]:
         mtest's own code) when the binary is missing or the run times out --
         both are this script's own failures, not a verdict from the suite.
     """
-    if not os.path.exists(MTEST):
+    if not os.path.exists(mtest_path):
         print(
-            f"FATAL: self_host_check: binary not found at {MTEST}; "
+            f"FATAL: self_host_check: binary not found at {mtest_path}; "
             f"run `pixi run build-bin`",
             file=sys.stderr,
         )
         return 1, ""
 
     argv = [
-        MTEST,
+        mtest_path,
         "-I",
         "build",
         "-I",
         "tests/support",
         "--build-arg=-Xlinker",
-        f"--build-arg={NATIVE_OBJECT}",
+        f"--build-arg={native_object}",
         "tests/",
     ]
     proc = subprocess.Popen(
@@ -168,8 +176,14 @@ def run_mtest_over_own_suite() -> tuple[int, str]:
     return returncode, "".join(chunks)
 
 
-def main() -> int:
-    code, output = run_mtest_over_own_suite()
+def verify(mtest_path: str = MTEST, native_object: str = NATIVE_OBJECT) -> int:
+    """Run mtest over its own suite and check the result for completeness.
+
+    Parameterized so scripts/package_check.py can reuse this exact dogfood +
+    completeness gate against the INSTALLED package binary; `pixi run test`
+    (via `main` below) calls it with this repo's own dev build.
+    """
+    code, output = run_mtest_over_own_suite(mtest_path, native_object)
 
     try:
         disk_files = discovered_test_files()
@@ -234,11 +248,16 @@ def main() -> int:
         return 1
 
     print(
-        f"self_host_check: OK -- mtest selected {selected} file(s) of its "
-        f"own suite; its exact PASS-row path set matches all {disk_count} "
-        f"independently inventoried classified suites; mtest exited 0"
+        f"self_host_check: OK -- mtest ({mtest_path}) selected {selected} "
+        f"file(s) of its own suite; its exact PASS-row path set matches all "
+        f"{disk_count} independently inventoried classified suites; mtest "
+        f"exited 0"
     )
     return 0
+
+
+def main() -> int:
+    return verify(MTEST, NATIVE_OBJECT)
 
 
 if __name__ == "__main__":

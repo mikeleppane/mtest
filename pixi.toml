@@ -29,6 +29,11 @@ clang = "==18.1.8"
 # the vendored junit-10.xsd against the shipped artifact directly; pinned so the
 # gate's accept/reject verdict cannot drift with an unpinned system copy.
 libxml2 = "==2.15.3"
+# Builds recipe/recipe.yaml into a local conda channel (build-time packaging
+# tool only; the shipped mtest binary has zero dependency on it). Pinned exact
+# so the recipe's proven isolated-build-env behavior cannot drift with an
+# unpinned rattler-build release.
+rattler-build = "==0.69.1"
 
 [tasks]
 # Print the pinned Mojo version — first CI step, fails fast on a broken toolchain
@@ -58,6 +63,31 @@ build-native = "python scripts/build_native.py"
 # test runner uses), so main compiles against a binary dependency, not the whole
 # source tree. This is the first artifact a human can actually run.
 build-bin = { cmd = "mojo build -I build src/main.mojo -o build/mtest -Xlinker build/native/mtest_exec_native.o", depends-on = [
+    "build",
+    "build-native",
+] }
+
+# Build recipe/recipe.yaml into a LOCAL conda channel: rattler-build solves an
+# isolated build env (mojo ==1.0.0b2 + the C toolchain, from the modular +
+# conda-forge channels), builds mtest FROM SOURCE inside that sandbox (mirroring
+# build -> build-native -> build-bin), and writes the resulting .conda under
+# build/conda-channel — a plain directory with repodata.json, nothing uploaded
+# or published anywhere. Not wired into `pixi run ci`; the dedicated CI job is a
+# later task.
+package-build = "rattler-build build --recipe recipe/recipe.yaml -c https://conda.modular.com/max/ -c conda-forge --output-dir build/conda-channel"
+
+# The packaged-artifact consumption GATE: build -> install the .conda into a
+# FRESH scratch env from the local channel (proving it pulls mojo-compiler
+# ==1.0.0b2) -> a loader-clean probe on the INSTALLED binary (dev pixi env
+# absent from PATH, empty LD_LIBRARY_PATH) -> mtest's own suite run through
+# that installed binary with the toolchain threaded so its build children can
+# still resolve mojo -> a tar-bz2 fallback-format install + smoke-run. Depends
+# on build + build-native (not build-bin) so this repo's own build/mtest.mojopkg
+# and the test-variant native object exist for the suite run — the binary under
+# test is the INSTALLED one, never build/mtest. Standalone: NOT wired into
+# `pixi run ci` (the dedicated CI job is a later task). Nothing uploads or
+# publishes anywhere.
+package-check = { cmd = "python scripts/package_check.py", depends-on = [
     "build",
     "build-native",
 ] }

@@ -1,0 +1,61 @@
+# mtest distribution recipe (rattler-build).
+#
+# Builds mtest FROM SOURCE inside rattler-build's ISOLATED build environment —
+# `mojo ==1.0.0b2` (+ the pinned C toolchain) installs and runs there, so this
+# recipe mirrors the repo's own build -> build-native -> build-bin pipeline
+# rather than repackaging a prebuilt binary. See recipe/build.sh for the exact
+# steps.
+#
+# Targets: linux-64 is the GATED platform (the only one exercised by a CI
+# runner). osx-arm64 is declared here as a target — it matches pixi.toml's
+# `platforms` list and the modular/conda-forge channels solve for it — but it
+# is UNGATED in this phase: no CI runner builds or executes it, so it is a
+# documented ceiling, not a proven target.
+schema_version: 1
+
+context:
+  version: "0.4.0"
+
+package:
+  name: mtest
+  version: ${{ version }}
+
+source:
+  - path: ..
+
+build:
+  number: 0
+  script: build.sh
+
+requirements:
+  # Build-time only: the isolated env this script runs in. Pinned to the same
+  # versions pixi.toml pins for local/CI builds so the recipe's build matches
+  # the repo's proven build exactly.
+  build:
+    - mojo ==1.0.0b2
+    - clang ==18.1.8
+  # Run-time: the installed `mtest` binary is NOT loader-clean. `readelf -d`
+  # shows a direct NEEDED on `libKGENCompilerRTShared.so`, whose transitive
+  # closure (libstdc++, libMSupportGlobals, libAsyncRTRuntimeGlobals, libNVPTX,
+  # libAsyncRTMojoBindings) resolves entirely within the Mojo runtime; a
+  # conda-meta ownership check attributes every one of those libraries to
+  # `mojo-compiler-1.0.0b2-release`. The native adapter is statically linked
+  # (no extra NEEDED entry), so it adds no run dependency of its own. The
+  # package therefore declares this run dependency instead of vendoring the
+  # runtime libs.
+  run:
+    - mojo-compiler ==1.0.0b2
+
+tests:
+  # Installs the just-built package into a fresh test env carrying ONLY the
+  # declared run dependency (mojo-compiler, not the full mojo build toolchain)
+  # and executes the installed binary directly — proving the run dependency
+  # above is both necessary and sufficient for the binary to load and run.
+  - script:
+      - mtest --version
+
+about:
+  homepage: https://github.com/mikeleppane/mtest
+  license: MIT
+  license_file: LICENSE
+  summary: A pytest-like test runner for Mojo that orchestrates the stdlib's per-file TestSuite
