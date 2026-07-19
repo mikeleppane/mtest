@@ -36,6 +36,7 @@ same symbol is not declared twice in one binary — the identical rule `tty.mojo
 follows for `isatty`. Each is documented with a `# SAFETY:` comment.
 """
 from std.ffi import external_call
+from std.sys.info import CompilationTarget
 
 from mtest.model import Event
 from mtest.report.json_stream import serialize_event, stream_header
@@ -43,10 +44,14 @@ from mtest.report.reporter import Reporter
 
 # Open flags for a report destination file: write-only, create if absent,
 # truncate an existing file. A live stream cannot rename atomically (JUnit will
-# differ), so a pre-existing destination is overwritten at session start.
+# differ), so a pre-existing destination is overwritten at session start. The
+# create/truncate bit values are platform ABI: Linux uses 0100/01000, Darwin
+# uses 0x0200/0x0400. `O_WRONLY` (1), the create mode, and `EINTR` (4) are the
+# same on both. Selected at compile time so the emitted binary carries only its
+# target's values.
 comptime _O_WRONLY = 1
-comptime _O_CREAT = 64
-comptime _O_TRUNC = 512
+comptime _O_CREAT = 0x0200 if CompilationTarget.is_macos() else 0o100
+comptime _O_TRUNC = 0x0400 if CompilationTarget.is_macos() else 0o1000
 comptime _CREATE_MODE = 0o644
 comptime _EINTR = 4
 """`errno` for an interrupted syscall — a `write` to retry, not a failure."""
@@ -55,16 +60,25 @@ comptime _EINTR = 4
 def _errno_now() -> Int:
     """The current thread's `errno`. Pure read; never raises.
 
-    Reads glibc's `__errno_location`, the thread-local errno slot. Only called
-    immediately after a failed `write`/`open` to capture the cause.
+    Reads the thread-local errno slot through the platform accessor —
+    `__errno_location` on Linux (glibc), `__error` on Darwin — chosen at compile
+    time. Only called immediately after a failed `write`/`open` to capture the
+    cause.
     """
-    # SAFETY: `__errno_location` takes no arguments and returns a valid pointer
-    # to this thread's `errno` int for the lifetime of the thread; dereferencing
-    # it reads a live, correctly-typed `int`. No ownership is taken.
-    var loc = external_call[
-        "__errno_location", UnsafePointer[Int32, MutAnyOrigin]
-    ]()
-    return Int(loc[])
+    comptime if CompilationTarget.is_macos():
+        # SAFETY: `__error` takes no arguments and returns a valid pointer to this
+        # thread's `errno` int for the lifetime of the thread; dereferencing it
+        # reads a live, correctly-typed `int`. No ownership is taken.
+        var loc = external_call["__error", UnsafePointer[Int32, MutAnyOrigin]]()
+        return Int(loc[])
+    else:
+        # SAFETY: `__errno_location` takes no arguments and returns a valid pointer
+        # to this thread's `errno` int for the lifetime of the thread;
+        # dereferencing it reads a live, correctly-typed `int`. No ownership taken.
+        var loc = external_call[
+            "__errno_location", UnsafePointer[Int32, MutAnyOrigin]
+        ]()
+        return Int(loc[])
 
 
 def _raw_write[o: Origin](fd: Int, ptr: UnsafePointer[UInt8, o], n: Int) -> Int:

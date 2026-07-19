@@ -108,6 +108,22 @@ def test_inert_reporter_writes_nothing_and_never_latches() raises:
     assert_false(rep.status().failed)
 
 
+def test_open_json_fd_truncates_a_preexisting_destination() raises:
+    # A stale, longer prior report must be truncated on open, not left as a tail
+    # after the fresh header (the failure mode a wrong O_TRUNC ABI value causes).
+    var path = _scratch("truncate.ndjson")
+    with open(path, "w") as stale:
+        stale.write("STALE-TAIL-" * 512)
+    var fd = open_json_fd(path)
+    var rep = JsonStreamReporter(fd, "0.4.0", True)
+    _ = close_json_fd(fd)
+    var lines = _lines(_read_file(path))
+    assert_equal(
+        len(lines), 1, "the truncated file holds only the fresh header"
+    )
+    assert_equal(lines[0], stream_header("0.4.0"))
+
+
 def test_close_json_fd_reports_failure_on_a_dead_descriptor() raises:
     # A descriptor closed once, then closed again: the second close hits EBADF
     # and must be REPORTED (True), not swallowed — a deferred write error on a
