@@ -140,6 +140,19 @@ PROTOCOL_FIXTURES = {
 E2E_NATIVE_FIXTURES = {
     "e2e_json_terminal_write_fault.c",
 }
+DARWIN_INTERPOSE_DECLARATION = r"""#if defined(__APPLE__)
+#define DYLD_INTERPOSE(_replacement, _replacee) \
+    __attribute__((used)) static struct { \
+        const void *replacement; \
+        const void *replacee; \
+    } _interpose_##_replacee \
+        __attribute__((section("__DATA,__interpose,interposing"))) = { \
+            (const void *)(unsigned long)&_replacement, \
+            (const void *)(unsigned long)&_replacee, \
+        };
+#else
+#include <dlfcn.h>
+#endif"""
 
 CI_PREFLIGHT_TASKS = [
     "version-check",
@@ -632,20 +645,12 @@ def check_e2e_native_fixture_layout() -> None:
         )
 
 
-def check_e2e_interposer_source_policy() -> None:
-    """The write-fault fixture uses each platform's forwarding contract."""
-    source = Path(e2e_check.JSON_TERMINAL_WRITE_FAULT).read_text(encoding="utf-8")
-    include_split = (
-        "#if defined(__APPLE__)\n"
-        "#include <mach-o/dyld-interposing.h>\n"
-        "#else\n"
-        "#include <dlfcn.h>\n"
-        "#endif"
-    )
-    if include_split not in source:
+def _check_e2e_interposer_source_policy(source: str) -> None:
+    """Validate the write-fault fixture's platform forwarding contracts."""
+    if source.count(DARWIN_INTERPOSE_DECLARATION) != 1:
         raise AssertionError(
-            "E2E interposer must select dyld-interposing.h only on Darwin "
-            "and dlfcn.h only elsewhere"
+            "E2E interposer must contain the canonical local Darwin declaration "
+            "and select dlfcn.h only elsewhere"
         )
 
     split_marker = "#if defined(__APPLE__)"
@@ -709,6 +714,42 @@ def check_e2e_interposer_source_policy() -> None:
             "E2E interposer platform implementation split must contain all "
             "active trailing code"
         )
+
+
+def check_e2e_interposer_source_policy() -> None:
+    """The interposer policy rejects known source-level bypass mutations."""
+    source = Path(e2e_check.JSON_TERMINAL_WRITE_FAULT).read_text(encoding="utf-8")
+    _check_e2e_interposer_source_policy(source)
+
+    registration = "DYLD_INTERPOSE(mtest_faulting_write, write)"
+    call_through = "return write(fd, buffer, count);"
+    wrapper = (
+        "ssize_t write(int fd, const void *buffer, size_t count) {\n"
+        "    return mtest_faulting_write(fd, buffer, count);\n"
+        "}\n\n"
+    )
+    mutations = {
+        "commented Darwin registration": source.replace(
+            registration, "// " + registration, 1
+        ),
+        "commented Darwin call-through": source.replace(
+            call_through, "// " + call_through, 1
+        ),
+        "exported Darwin write wrapper": source.replace(
+            registration + "\n", registration + "\n\n" + wrapper, 1
+        ),
+        "legacy Darwin section declaration": source.replace(
+            "__DATA,__interpose,interposing", "__DATA,__interpose", 1
+        ),
+    }
+    for name, mutation in mutations.items():
+        if mutation == source:
+            raise AssertionError(f"E2E interposer mutation did not apply: {name}")
+        try:
+            _check_e2e_interposer_source_policy(mutation)
+        except AssertionError:
+            continue
+        raise AssertionError(f"E2E interposer policy accepted mutation: {name}")
 
 
 def check_e2e_interposer_command_topology() -> None:
