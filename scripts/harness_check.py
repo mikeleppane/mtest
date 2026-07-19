@@ -943,6 +943,23 @@ def check_ci_workflow() -> None:
                 f"CI job {name!r} matrix task dispatch mismatch: actual={run_step}"
             )
 
+    behavioral_floor = CI_TASKS[1:]
+    expected_matrix_tasks = {
+        "linux-test-matrix": [
+            *behavioral_floor,
+            "asan-check",
+            "valgrind-check",
+        ],
+        "macos-test-matrix": behavioral_floor,
+    }
+    for name, expected_tasks in expected_matrix_tasks.items():
+        actual_tasks = [row.get("task") for row in _matrix_rows(job_blocks[name])]
+        if actual_tasks != expected_tasks:
+            raise AssertionError(
+                f"CI job {name!r} task coverage mismatch against the required "
+                f"floor: expected={expected_tasks}, actual={actual_tasks}"
+            )
+
     linux_preflight = job_blocks["linux-preflight"]
     linux_commands = re.findall(r"^        run: (.+)$", linux_preflight, re.MULTILINE)
     expected_linux_commands = ["pixi run mojo-version", "pixi run ci-preflight"]
