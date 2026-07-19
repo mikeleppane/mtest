@@ -246,8 +246,74 @@ static int exercise_process(void) {
     return 0;
 }
 
+static int exercise_preobserve_zombie_only_term(void) {
+    struct mtest_exec_bytes argv[1] = {bytes("/usr/bin/true")};
+    struct mtest_exec_process_spec spec;
+    memset(&spec, 0, sizeof(spec));
+    spec.argv = argv;
+    spec.argc = 1;
+
+    struct mtest_exec_process_ref process;
+    struct mtest_exec_error error;
+    CHECK(mtest_exec_process_open(&spec, &process, &error) == 0,
+          "open child for pre-observe group TERM");
+
+    int waitable = 0;
+    for (int attempt = 0; attempt < 500 && !waitable; ++attempt) {
+        siginfo_t information;
+        memset(&information, 0, sizeof(information));
+        CHECK(waitid(
+                  P_PID,
+                  (id_t)process.leader_pid,
+                  &information,
+                  WEXITED | WNOHANG | WNOWAIT
+              ) == 0,
+              "external waitid for pre-observe group TERM");
+        waitable = information.si_pid == process.leader_pid;
+        if (!waitable) {
+            const struct timespec delay = {0, 1000000L};
+            (void)nanosleep(&delay, NULL);
+        }
+    }
+    CHECK(waitable, "pre-observe group TERM child became waitable");
+
+    struct mtest_exec_group_result group;
+#if defined(__APPLE__)
+    CHECK(mtest_exec_process_group(
+              process.handle, MTEST_EXEC_GROUP_PROBE, &group, &error
+          ) == -1,
+          "pre-observe zombie-only group probe remains fail-closed");
+    CHECK(error.operation == MTEST_EXEC_OP_GROUP_PROBE &&
+              error.error_number == EPERM,
+          "pre-observe zombie-only group probe error is exact");
+#endif
+    CHECK(mtest_exec_test_fault_configure(
+              MTEST_EXEC_OP_GROUP_TERM, 1, EPERM, 0
+          ) == 0,
+          "configure pre-observe group-TERM permission failure");
+    CHECK(mtest_exec_process_group(
+              process.handle, MTEST_EXEC_GROUP_TERM, &group, &error
+          ) == -1,
+          "injected pre-observe group-TERM failure remains visible");
+    CHECK(error.operation == MTEST_EXEC_OP_GROUP_TERM &&
+              error.error_number == EPERM,
+          "injected pre-observe group-TERM error is exact");
+    CHECK(mtest_exec_test_fault_seen(MTEST_EXEC_OP_GROUP_TERM) == 1,
+          "pre-observe group-TERM fault is consumed exactly once");
+    mtest_exec_test_fault_reset();
+    CHECK(mtest_exec_process_group(
+              process.handle, MTEST_EXEC_GROUP_TERM, &group, &error
+          ) == 0,
+          "pre-observe zombie-only group TERM is complete");
+    CHECK(group.state == MTEST_EXEC_GROUP_PRESENT,
+          "pre-observe zombie-only group TERM reports present");
+    CHECK(mtest_exec_process_abort(process.handle, 0, &error) == 0,
+          "abort consumes pre-observe zombie-only group TERM child");
+    return 0;
+}
+
 static int exercise_reaped_unswept_abort_child(void) {
-    struct mtest_exec_bytes argv[1] = {bytes("/bin/true")};
+    struct mtest_exec_bytes argv[1] = {bytes("/usr/bin/true")};
     struct mtest_exec_process_spec spec;
     memset(&spec, 0, sizeof(spec));
     spec.argv = argv;
@@ -334,7 +400,7 @@ static int exercise_reaped_unswept_abort(void) {
 }
 
 static int exercise_terminal_setpgid_cleanup_child(void) {
-    struct mtest_exec_bytes argv[1] = {bytes("/bin/true")};
+    struct mtest_exec_bytes argv[1] = {bytes("/usr/bin/true")};
     struct mtest_exec_process_spec spec;
     memset(&spec, 0, sizeof(spec));
     spec.argv = argv;
@@ -654,6 +720,8 @@ int main(void) {
     CHECK(mtest_exec_monotonic_ms(&now, &error) == 0 && now > 0,
           "monotonic clock");
     CHECK(exercise_process() == 0, "real process supervision seam");
+    CHECK(exercise_preobserve_zombie_only_term() == 0,
+          "pre-observe zombie-only group TERM");
     CHECK(exercise_reaped_unswept_abort() == 0,
           "reaped unswept abort stays terminal");
     CHECK(exercise_terminal_setpgid_cleanup() == 0,
@@ -673,7 +741,7 @@ int main(void) {
           ) == -1,
           "reject oversized setup-record fault");
 
-    struct mtest_exec_bytes fault_argv[1] = {bytes("/bin/true")};
+    struct mtest_exec_bytes fault_argv[1] = {bytes("/usr/bin/true")};
     struct mtest_exec_process_spec fault_spec;
     memset(&fault_spec, 0, sizeof(fault_spec));
     fault_spec.argv = fault_argv;
@@ -887,7 +955,7 @@ int main(void) {
     CHECK(error.operation == MTEST_EXEC_OP_SIGACTION_RESTORE_TERM &&
               error.error_number == EIO,
           "restoration failure is named exactly");
-    struct mtest_exec_bytes blocked_argv[1] = {bytes("/bin/true")};
+    struct mtest_exec_bytes blocked_argv[1] = {bytes("/usr/bin/true")};
     struct mtest_exec_process_spec blocked_spec;
     memset(&blocked_spec, 0, sizeof(blocked_spec));
     blocked_spec.argv = blocked_argv;

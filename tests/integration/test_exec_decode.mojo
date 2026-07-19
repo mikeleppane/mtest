@@ -2,7 +2,7 @@
 
 Asserts the structural status decode keeps a crash distinct from a failure and a
 spawn failure distinct from a genuine nonzero exit:
-- `/bin/false` exits 1 -> `Exited(1)`;
+- `/usr/bin/false` exits 1 -> `Exited(1)`;
 - the self-signaler dies by SIGABRT -> `Signaled(6)`, never an exit code;
 - a nonexistent binary -> `SpawnFailed(ENOENT=2)` via the errno pipe;
 - a process that genuinely exits 127 -> `Exited(127)`, NOT `SpawnFailed`.
@@ -11,14 +11,14 @@ from std.testing import assert_equal, assert_true, TestSuite
 
 from mtest.exec import ExecRuntime, ProcessSpec, run_supervised
 
-from exec_helpers import target, py_spec
+from exec_helpers import false_binary, target, true_binary, py_spec
 
 
 def test_clean_nonzero_exit_is_exited() raises:
     var runtime = ExecRuntime()
     runtime.open()
     var argv = List[String]()
-    argv.append("/bin/false")
+    argv.append(false_binary())
     var r = run_supervised(runtime, ProcessSpec.command(argv^))
     runtime.close()
     assert_true(r.termination.is_exited(), String(r.termination))
@@ -29,7 +29,7 @@ def test_true_exits_zero() raises:
     var runtime = ExecRuntime()
     runtime.open()
     var argv = List[String]()
-    argv.append("/bin/true")
+    argv.append(true_binary())
     var r = run_supervised(runtime, ProcessSpec.command(argv^))
     runtime.close()
     assert_true(r.termination.is_exited(), String(r.termination))

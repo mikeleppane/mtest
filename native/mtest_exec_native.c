@@ -1879,13 +1879,15 @@ static int mtest_process_group_checked(
         }
 #if defined(__APPLE__)
         /* Darwin's process-group signal path excludes zombies from its member
-           iteration, then returns EPERM when the observed leader is the only
-           remaining member. Query the complete group snapshot before treating
-           that result as a completed sweep: a live descendant or any query
-           failure remains an error, so cleanup still fails closed. The owned
-           all-zombie group has no member capable of forking after this point. */
-        if (!fault_injected && group_errno == EPERM && process->observed &&
-            action == MTEST_EXEC_GROUP_KILL &&
+           iteration, then returns EPERM when only terminal members remain.
+           Query the complete group snapshot before treating TERM or KILL as a
+           completed sweep. This proof does not require prior waitid observation:
+           the unreaped group-leader zombie pins the PGID, and an all-zombie
+           group has no member capable of executing or forking. A live member,
+           a probe action, an injected EPERM, or any query failure remains an
+           error, so cleanup still fails closed. */
+        if (!fault_injected && group_errno == EPERM &&
+            action != MTEST_EXEC_GROUP_PROBE &&
             mtest_darwin_group_is_zombie_only(process->process_group)) {
             process->group_swept = 1;
             result->state = MTEST_EXEC_GROUP_PRESENT;

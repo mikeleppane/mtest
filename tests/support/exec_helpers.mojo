@@ -1,8 +1,9 @@
 """Shared helpers for the `exec` tests (via `-I tests/support`, not a suite).
 
 Small conveniences the exec tests share: turning captured raw bytes into a
-`String` for readable assertions, counting bytes matching a value, and building
-the `["python3", <script>, ...]` argv for a committed helper target.
+`String` for readable assertions, counting bytes matching a value, naming
+portable system exit binaries, and building the `["python3", <script>, ...]`
+argv for a committed helper target.
 """
 from mtest.config import lossy_utf8
 from mtest.exec import ProcessSpec
@@ -33,6 +34,16 @@ def count_byte(b: List[UInt8], value: UInt8) -> Int:
 def target(name: String) -> String:
     """The repo-relative path of a committed exec helper target."""
     return String("tests/fixtures/exec/") + name
+
+
+def false_binary() -> String:
+    """The absolute false(1) path shared by Linux and macOS."""
+    return String("/usr/bin/false")
+
+
+def true_binary() -> String:
+    """The absolute true(1) path shared by Linux and macOS."""
+    return String("/usr/bin/true")
 
 
 def py_spec(var argv: List[String], timeout_ms: Int = 0) -> ProcessSpec:
