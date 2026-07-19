@@ -649,17 +649,29 @@ def check_e2e_interposer_source_policy() -> None:
         )
 
     split_marker = "#if defined(__APPLE__)"
-    platform_split = source.rsplit(split_marker, 1)
-    if len(platform_split) != 2:
-        raise AssertionError("E2E interposer lacks its platform implementation split")
-    apple_branch, separator, other_branch = platform_split[1].partition("#else")
+    platform_splits = source.split(split_marker)
+    if len(platform_splits) != 3:
+        raise AssertionError(
+            "E2E interposer must contain exactly one include split and one "
+            "platform implementation split"
+        )
+    apple_branch, separator, remainder = platform_splits[2].partition("#else")
     if not separator:
         raise AssertionError("E2E interposer platform split lacks a non-Darwin branch")
+    other_branch, terminator, tail = remainder.partition("#endif")
+    if not terminator:
+        raise AssertionError("E2E interposer platform split lacks its #endif")
 
-    active_apple = re.sub(r"/\*.*?\*/", "", apple_branch, flags=re.DOTALL)
-    active_apple_lines = {
-        line.split("//", 1)[0].strip() for line in active_apple.splitlines()
-    }
+    def active_source(branch: str) -> str:
+        without_blocks = re.sub(r"/\*.*?\*/", "", branch, flags=re.DOTALL)
+        return "\n".join(
+            line.split("//", 1)[0] for line in without_blocks.splitlines()
+        )
+
+    active_apple = active_source(apple_branch)
+    active_other = active_source(other_branch)
+    active_tail = active_source(tail)
+    active_apple_lines = {line.strip() for line in active_apple.splitlines()}
     apple_required = {
         "return write(fd, buffer, count);",
         "DYLD_INTERPOSE(mtest_faulting_write, write)",
@@ -680,18 +692,23 @@ def check_e2e_interposer_source_policy() -> None:
             "Darwin E2E interposer must use DYLD_INTERPOSE and direct write "
             "call-through"
         )
-    if any(fragment in apple_branch for fragment in apple_forbidden):
+    if any(fragment in active_apple for fragment in apple_forbidden):
         raise AssertionError(
             "Darwin E2E interposer contains Linux forwarding or a hand-rolled "
             "interpose tuple"
         )
-    if any(fragment not in other_branch for fragment in other_required):
+    if any(fragment not in active_other for fragment in other_required):
         raise AssertionError(
             "non-Darwin E2E interposer must retain constructor-resolved "
             "RTLD_NEXT forwarding"
         )
-    if "DYLD_INTERPOSE" in other_branch:
+    if "DYLD_INTERPOSE" in active_other:
         raise AssertionError("non-Darwin E2E interposer contains Darwin forwarding")
+    if active_tail.strip():
+        raise AssertionError(
+            "E2E interposer platform implementation split must contain all "
+            "active trailing code"
+        )
 
 
 def check_e2e_interposer_command_topology() -> None:
