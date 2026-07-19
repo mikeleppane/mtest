@@ -38,6 +38,7 @@ TEST_ONLY_SYMBOLS = {
     "mtest_exec_test_asan_leak",
     "mtest_exec_test_asan_oob",
     "mtest_exec_test_asan_uaf",
+    "mtest_exec_test_constant",
     "mtest_exec_test_fault_configure",
     "mtest_exec_test_fault_configure_secondary",
     "mtest_exec_test_fault_reset",
@@ -161,7 +162,10 @@ def main() -> int:
             f"  extra={sorted(testing_got - expected_testing)}",
         )
 
-    print("native-abi-check: OK -- ABI v1 layouts and 15/27 symbols exact")
+    print(
+        "native-abi-check: OK -- ABI v1 layouts and "
+        f"{len(PRODUCTION_SYMBOLS)}/{len(expected_testing)} symbols exact"
+    )
     return 0
 
 

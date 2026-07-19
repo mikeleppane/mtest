@@ -7,6 +7,7 @@ plain construct-and-drop of a `ProcessResult` to prove its owned buffers release
 cleanly.
 """
 from std.os import listdir
+from std.sys.info import CompilationTarget
 from std.testing import assert_true, assert_equal, TestSuite
 
 from mtest.exec import ExecRuntime, ProcessSpec, ProcessResult, run_supervised
@@ -14,10 +15,14 @@ from mtest.exec.termination import Termination
 
 
 def _open_fd_count() raises -> Int:
-    """How many fds this process currently has open (via /proc/self/fd)."""
+    """Count open fds through the target platform's descriptor directory."""
     var n = 0
-    for _ in listdir("/proc/self/fd"):
-        n += 1
+    comptime if CompilationTarget.is_macos():
+        for _ in listdir("/dev/fd"):
+            n += 1
+    else:
+        for _ in listdir("/proc/self/fd"):
+            n += 1
     return n
 
 

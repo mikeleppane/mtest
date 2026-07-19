@@ -28,6 +28,41 @@ static struct mtest_exec_bytes bytes(const char *text) {
     value.length = strlen(text);
     return value;
 }
+
+static int exercise_platform_constants(void) {
+    CHECK(MTEST_EXEC_TEST_CONSTANT_SIGCHLD == 1, "SIGCHLD constant id");
+    CHECK(MTEST_EXEC_TEST_CONSTANT_SIGSTOP == 2, "SIGSTOP constant id");
+    CHECK(MTEST_EXEC_TEST_CONSTANT_SIGCONT == 3, "SIGCONT constant id");
+    CHECK(MTEST_EXEC_TEST_CONSTANT_EIO == 4, "EIO constant id");
+    CHECK(MTEST_EXEC_TEST_CONSTANT_ETXTBSY == 5, "ETXTBSY constant id");
+    CHECK(
+        mtest_exec_test_constant(MTEST_EXEC_TEST_CONSTANT_SIGCHLD) == SIGCHLD,
+        "SIGCHLD constant is header-derived"
+    );
+    CHECK(
+        mtest_exec_test_constant(MTEST_EXEC_TEST_CONSTANT_SIGSTOP) == SIGSTOP,
+        "SIGSTOP constant is header-derived"
+    );
+    CHECK(
+        mtest_exec_test_constant(MTEST_EXEC_TEST_CONSTANT_SIGCONT) == SIGCONT,
+        "SIGCONT constant is header-derived"
+    );
+    CHECK(
+        mtest_exec_test_constant(MTEST_EXEC_TEST_CONSTANT_EIO) == EIO,
+        "EIO constant is header-derived"
+    );
+    CHECK(
+        mtest_exec_test_constant(MTEST_EXEC_TEST_CONSTANT_ETXTBSY) == ETXTBSY,
+        "ETXTBSY constant is header-derived"
+    );
+    CHECK(mtest_exec_test_constant(0) == -1, "zero constant id is rejected");
+    CHECK(
+        mtest_exec_test_constant(UINT32_MAX) == -1,
+        "unknown constant id is rejected"
+    );
+    return 0;
+}
+
 static int drain_channel(
     uint64_t handle,
     uint32_t channel,
@@ -583,6 +618,7 @@ static int exercise_retryable_abort_group_kill(void) {
 }
 
 int main(void) {
+    CHECK(exercise_platform_constants() == 0, "platform constants");
     struct mtest_exec_error error;
     CHECK(mtest_exec_native_abi_version() == MTEST_EXEC_NATIVE_ABI_VERSION,
           "ABI version");

@@ -16,17 +16,27 @@ from mtest.exec import ExecRuntime, ProcessSpec, run_supervised
 
 from exec_helpers import target, py_spec
 
-comptime _SIGCHLD = 17
+comptime _CONSTANT_SIGCHLD = 1
 comptime _SIG_IGN = 1
+
+
+def _native_constant(constant_id: Int) -> Int32:
+    """Read one platform-header value from the testing adapter."""
+    # SAFETY: this test-only ABI takes one scalar closed identifier and returns
+    # one scalar C-header constant. It receives no pointer and retains no state.
+    return external_call["mtest_exec_test_constant", Int32](UInt32(constant_id))
 
 
 def _inherit_sigchld_ignored():
     """Set this process's SIGCHLD disposition to SIG_IGN, the way a parent shell
     or supervisor might, so any child we then spawn is kernel auto-reaped."""
-    # SAFETY: on the Linux integration gate `signal` has the pointer-sized
-    # handler return ABI modeled by Int; SIGCHLD and SIG_IGN are valid constants,
-    # no pointer argument is retained, and ExecRuntime saves/restores this state.
-    _ = external_call["signal", Int](Int32(_SIGCHLD), Int(_SIG_IGN))
+    # SAFETY: on supported POSIX targets `signal` has the pointer-sized handler
+    # return ABI modeled by Int. The header-derived SIGCHLD and POSIX SIG_IGN
+    # sentinel are valid; no pointer argument is retained, and ExecRuntime
+    # saves/restores this state.
+    _ = external_call["signal", Int](
+        _native_constant(_CONSTANT_SIGCHLD), Int(_SIG_IGN)
+    )
 
 
 def test_nonzero_exit_not_laundered_under_ignored_sigchld() raises:

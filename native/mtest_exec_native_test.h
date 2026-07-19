@@ -8,6 +8,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+MTEST_EXEC_EXPORT int32_t mtest_exec_test_constant(uint32_t constant_id);
 MTEST_EXEC_EXPORT void mtest_exec_test_fault_reset(void);
 MTEST_EXEC_EXPORT int32_t mtest_exec_test_fault_configure(uint32_t operation, uint32_t occurrence, int32_t error_number, int64_t result_value);
 MTEST_EXEC_EXPORT int32_t mtest_exec_test_fault_configure_secondary(

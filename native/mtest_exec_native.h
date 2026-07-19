@@ -110,6 +110,16 @@ enum mtest_exec_operation {
     MTEST_EXEC_OP_WAITPID = 35
 };
 
+#if MTEST_EXEC_TESTING
+enum mtest_exec_test_constant {
+    MTEST_EXEC_TEST_CONSTANT_SIGCHLD = 1,
+    MTEST_EXEC_TEST_CONSTANT_SIGSTOP = 2,
+    MTEST_EXEC_TEST_CONSTANT_SIGCONT = 3,
+    MTEST_EXEC_TEST_CONSTANT_EIO = 4,
+    MTEST_EXEC_TEST_CONSTANT_ETXTBSY = 5
+};
+#endif
+
 struct mtest_exec_bytes {
     const uint8_t *data;
     uint64_t length;

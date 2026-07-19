@@ -27,10 +27,10 @@ from mtest.exec.signals import _reset_interrupt
 from exec_helpers import target
 
 comptime _SIGINT = 2
-comptime _SIGCONT = 18
-comptime _SIGSTOP = 19
-comptime _EIO = 5
-comptime _ETXTBSY = 26
+comptime _CONSTANT_SIGSTOP = 2
+comptime _CONSTANT_SIGCONT = 3
+comptime _CONSTANT_EIO = 4
+comptime _CONSTANT_ETXTBSY = 5
 comptime _OP_CHILD_EXECVE = 24
 comptime _DELAY_MS = 10
 comptime _STOP_DELAY_MS = 5
@@ -41,6 +41,13 @@ grace escalation does not preempt the child before it reaches the errno path
 (the race in which the latch must still win), yet well inside the window."""
 
 
+def _native_constant(constant_id: Int) -> Int32:
+    """Read one platform-header value from the testing adapter."""
+    # SAFETY: this test-only ABI takes one scalar closed identifier and returns
+    # one scalar C-header constant. It receives no pointer and retains no state.
+    return external_call["mtest_exec_test_constant", Int32](UInt32(constant_id))
+
+
 def _inject_etxtbsy_then_exec_error() raises:
     """Make child execve return ETXTBSY once, then a terminal EIO."""
     # SAFETY: these test-only ABI calls use scalar values only. The operation
@@ -48,14 +55,20 @@ def _inject_etxtbsy_then_exec_error() raises:
     # nonzero; both errno values are positive; no pointer crosses either ABI.
     external_call["mtest_exec_test_fault_reset", NoneType]()
     var status = external_call["mtest_exec_test_fault_configure", Int32](
-        UInt32(_OP_CHILD_EXECVE), UInt32(1), Int32(_ETXTBSY), Int64(0)
+        UInt32(_OP_CHILD_EXECVE),
+        UInt32(1),
+        _native_constant(_CONSTANT_ETXTBSY),
+        Int64(0),
     )
     assert_true(status == 0, "could not configure child execve fault")
     # SAFETY: this secondary test-only ABI also accepts scalars only; occurrence
     # two follows the configured primary occurrence, EIO is positive, the result
     # payload is zero as required for an error, and no pointer crosses the ABI.
     status = external_call["mtest_exec_test_fault_configure_secondary", Int32](
-        UInt32(_OP_CHILD_EXECVE), UInt32(2), Int32(_EIO), Int64(0)
+        UInt32(_OP_CHILD_EXECVE),
+        UInt32(2),
+        _native_constant(_CONSTANT_EIO),
+        Int64(0),
     )
     assert_true(status == 0, "could not configure terminal child execve fault")
 
@@ -67,23 +80,25 @@ def _schedule_self_stop_then_continue() raises -> Int32:
     # until it exits without destructors. The parent frees only its own copy.
     var poll_storage = alloc[Int64](1)
     memset_zero(poll_storage.bitcast[UInt8](), 8)
-    # SAFETY: getpid and fork use their exact Linux scalar/no-argument ABIs,
+    var sigstop = _native_constant(_CONSTANT_SIGSTOP)
+    var sigcont = _native_constant(_CONSTANT_SIGCONT)
+    # SAFETY: getpid and fork use their exact POSIX scalar/no-argument ABIs,
     # retain no pointer, and all child-visible storage is initialized pre-fork.
     var self_pid = external_call["getpid", Int32]()
     var pid = external_call["fork", Int32]()
     if Int(pid) == 0:
         # SAFETY: after fork the helper calls only poll, kill, and _exit, all
         # async-signal-safe. Both nfds-zero polls ignore the live COW pointer;
-        # bounded scalar delays bracket exact Linux SIGSTOP/SIGCONT delivery to
-        # the parent's pid, and no call retains a pointer or returns ownership.
+        # bounded scalar delays bracket header-derived SIGSTOP/SIGCONT delivery
+        # to the parent's pid, and no call retains a pointer or returns ownership.
         _ = external_call["poll", Int32](
             poll_storage.bitcast[UInt8](), UInt64(0), Int32(_STOP_DELAY_MS)
         )
-        _ = external_call["kill", Int32](self_pid, Int32(_SIGSTOP))
+        _ = external_call["kill", Int32](self_pid, sigstop)
         _ = external_call["poll", Int32](
             poll_storage.bitcast[UInt8](), UInt64(0), Int32(_STOP_DURATION_MS)
         )
-        _ = external_call["kill", Int32](self_pid, Int32(_SIGCONT))
+        _ = external_call["kill", Int32](self_pid, sigcont)
         # SAFETY: _exit is async-signal-safe, accepts the exact scalar status,
         # retains no state, and terminates without running Mojo destructors.
         external_call["_exit", NoneType](Int32(0))

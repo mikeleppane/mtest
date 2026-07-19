@@ -103,6 +103,23 @@ static struct mtest_fault_state mtest_faults[MTEST_EXEC_OP_WAITPID + 1];
 static uint32_t mtest_interrupt_delivery_operation;
 static int mtest_interrupt_delivery_signal;
 
+int32_t mtest_exec_test_constant(uint32_t constant_id) {
+    switch (constant_id) {
+        case MTEST_EXEC_TEST_CONSTANT_SIGCHLD:
+            return SIGCHLD;
+        case MTEST_EXEC_TEST_CONSTANT_SIGSTOP:
+            return SIGSTOP;
+        case MTEST_EXEC_TEST_CONSTANT_SIGCONT:
+            return SIGCONT;
+        case MTEST_EXEC_TEST_CONSTANT_EIO:
+            return EIO;
+        case MTEST_EXEC_TEST_CONSTANT_ETXTBSY:
+            return ETXTBSY;
+        default:
+            return -1;
+    }
+}
+
 static int mtest_fail_if_requested(uint32_t operation) {
     if (operation == MTEST_EXEC_OP_NONE || operation > MTEST_EXEC_OP_WAITPID) {
         return 0;
