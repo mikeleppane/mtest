@@ -257,7 +257,7 @@ no unbounded field anywhere in the stream.
 | `captured_stdout` / `captured_stderr` (`file_finished`) | 64 KiB head + 64 KiB tail | ≤ 131 075 each |
 | `compiler_output`, `detail` | 64 KiB head + 64 KiB tail | ≤ 131 075 |
 | `build_argv` / `attempt_argv` / `casualties` | 256 entries × 4 KiB | ≤ 1 048 576 |
-| runner strings (`path`, `toolchain`, patterns, names, `timing`, …) | 4 KiB head | ≤ 4 096 |
+| runner strings (`path`, `toolchain`, patterns, names, `timing`, …) | 4 KiB head+tail window | ≤ 4 096 |
 | `captured_stdout` / `captured_stderr` (`attempt_finished`) | whole (clamped at capture) | ≤ 131 072 each |
 
 A head+tail window keeps the first 64 KiB and the last 64 KiB with a visible
@@ -274,6 +274,14 @@ total":
   bytes actually retained by capture (pre-escape).
 - `*_omitted` (`build_argv_omitted`, `attempt_argv_omitted`,
   `casualties_omitted`) — entries elided from a bounded list.
+- `*_omitted_bytes` on a bounded LIST (`build_argv_omitted_bytes`,
+  `attempt_argv_omitted_bytes`, `casualties_omitted_bytes`) — total bytes
+  elided from the KEPT entries by the per-element 4 KiB bound, so per-element
+  truncation of a user-supplied value (a long `build_argv` entry) is quantifiable,
+  not just the count of whole entries dropped. A capped element itself is kept as
+  a head+tail window with the visible elision marker (`…`) between, never a silent
+  cut; the scalar runner strings use the same visible marker (a formality cap that
+  carries no separate count, since their truncation is self-evident in the value).
 - the capture-level truncation booleans (`stdout_truncated`,
   `stderr_truncated`) — the authoritative statement that capture itself
   overflowed, distinct from the serializer's own window elision.

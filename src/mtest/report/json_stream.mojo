@@ -48,6 +48,11 @@ comptime _TEXT_TAIL = 65536
 comptime _ARGV_ELEM_MAX = 4096
 comptime _ARGV_LIST_MAX = 256
 comptime _RUNNER_STRING_MAX = 4096
+# A capped runner string is kept as a head+tail window (summing to
+# _RUNNER_STRING_MAX retained bytes) with the visible elision marker between,
+# so a truncated value is never silently cut.
+comptime _RUNNER_HEAD_MAX = 3072
+comptime _RUNNER_TAIL_MAX = 1024
 
 comptime _US_PER_SEC = 1_000_000
 comptime _I64_MAX = 9223372036854775807
@@ -186,21 +191,33 @@ def _string_bytes(s: String) -> List[UInt8]:
     return out^
 
 
-def _cap_runner_string(s: String) -> String:
-    """A runner-authored string, capped and JSON-escaped for inline use. Pure.
+def _cap_runner_excerpt(s: String) -> _Excerpt:
+    """A runner-authored string bounded to a head+tail window, escaped, with its
+    dropped-byte count. Pure.
 
-    Runner-authored strings (paths, patterns, labels, toolchain, names) are
-    already valid UTF-8 and never realistically long; the 4 KiB head cap is a
-    formality that keeps a pathological value from unbounding a line. A cut at
-    the byte boundary is re-decoded through `lossy_utf8` so a split multi-byte
-    sequence cannot produce invalid UTF-8. No omission metadata rides with a
-    formality cap.
+    Most runner-authored strings (toolchain, labels, short paths) are never
+    realistically long, so the bound is a formality that just keeps a
+    pathological value from unbounding a line. But some — notably `build_argv` /
+    `attempt_argv` elements, which carry user-supplied build arguments — CAN be
+    arbitrarily long. So rather than a silent cut, a value over
+    `_RUNNER_STRING_MAX` bytes is kept as a head+tail window joined by the
+    visible elision marker (never silently truncated), and the count of dropped
+    middle bytes rides alongside for callers that surface it (the list
+    serializers aggregate it into `*_omitted_bytes`). Each window is decoded
+    through `lossy_utf8` independently so a split multi-byte sequence degrades to
+    U+FFFD rather than producing invalid UTF-8.
     """
-    if s.byte_length() <= _RUNNER_STRING_MAX:
-        return json_escape_string(s)
-    return json_escape_string(
-        lossy_utf8(_cap_bytes_head(_string_bytes(s), _RUNNER_STRING_MAX))
-    )
+    return _excerpt_string(s, _RUNNER_HEAD_MAX, _RUNNER_TAIL_MAX)
+
+
+def _cap_runner_string(s: String) -> String:
+    """A scalar runner field's visibly-bounded, JSON-escaped inline value. Pure.
+
+    The escaped value from `_cap_runner_excerpt`; a scalar field signals its own
+    truncation through the visible elision marker in the value (these fields are
+    formality-capped and carry no separate count).
+    """
+    return _cap_runner_excerpt(s).escaped
 
 
 def _excerpt_bytes(data: List[UInt8], head_max: Int, tail_max: Int) -> _Excerpt:
@@ -238,33 +255,41 @@ def _excerpt_string(s: String, head_max: Int, tail_max: Int) -> _Excerpt:
 
 @fieldwise_init
 struct _ArrayResult(Copyable, Movable):
-    """A bounded list serialized as a JSON array plus its omitted-entry count.
+    """A bounded list serialized as a JSON array plus its omission counts.
 
     `text` is the complete `[...]` array literal; `omitted` is how many entries
-    past the list cap were dropped (0 when the whole list fit).
+    past the list cap were dropped (0 when the whole list fit); `omitted_bytes`
+    is the total bytes elided from the KEPT entries by the per-element head+tail
+    bound (0 when every kept entry fit), so a consumer can detect and quantify
+    per-element truncation of user-supplied values, not just dropped entries.
     """
 
     var text: String
     var omitted: Int
+    var omitted_bytes: Int
 
 
 def _string_array(items: List[String]) -> _ArrayResult:
     """A bounded JSON array of runner-authored strings. Pure.
 
     The list is capped at `_ARGV_LIST_MAX` entries and each element at
-    `_ARGV_ELEM_MAX` bytes; the count of entries dropped past the cap rides
+    `_ARGV_ELEM_MAX` bytes. The count of entries dropped past the list cap and
+    the total bytes elided from kept entries by the per-element bound both ride
     beside the array as its omission metadata.
     """
     var n = len(items)
     var kept = n if n <= _ARGV_LIST_MAX else _ARGV_LIST_MAX
     var text = String("[")
+    var omitted_bytes = 0
     for i in range(kept):
         if i > 0:
             text += ","
-        text += '"' + _cap_runner_string(items[i]) + '"'
+        var element = _cap_runner_excerpt(items[i])
+        text += '"' + element.escaped + '"'
+        omitted_bytes += element.omitted
     text += "]"
     var omitted = 0 if n <= _ARGV_LIST_MAX else n - _ARGV_LIST_MAX
-    return _ArrayResult(text^, omitted)
+    return _ArrayResult(text^, omitted, omitted_bytes)
 
 
 # --- Public surface ---------------------------------------------------------
@@ -349,6 +374,7 @@ def _precompile_failed(e: Event) -> String:
     s += ',"casualty_count":' + String(e.casualty_count)
     s += ',"casualties":' + cas.text
     s += ',"casualties_omitted":' + String(cas.omitted)
+    s += ',"casualties_omitted_bytes":' + String(cas.omitted_bytes)
     s += ',"ending_known":' + _b(e.ending_known)
     s += ',"term_kind":' + String(e.term_kind)
     s += ',"term_value":' + String(e.term_value)
@@ -376,6 +402,7 @@ def _file_finished(e: Event) -> String:
     s += ',"duration_us":' + String(_seconds_to_us(e.duration_seconds))
     s += ',"build_argv":' + argv.text
     s += ',"build_argv_omitted":' + String(argv.omitted)
+    s += ',"build_argv_omitted_bytes":' + String(argv.omitted_bytes)
     s += ',"build_duration_us":' + String(
         _seconds_to_us(e.build_duration_seconds)
     )
@@ -436,6 +463,7 @@ def _attempt_finished(e: Event) -> String:
     s += ',"stderr_truncated":' + _b(e.stderr_truncated)
     s += ',"attempt_argv":' + argv.text
     s += ',"attempt_argv_omitted":' + String(argv.omitted)
+    s += ',"attempt_argv_omitted_bytes":' + String(argv.omitted_bytes)
     s += "}"
     return s^
 

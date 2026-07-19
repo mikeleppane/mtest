@@ -138,7 +138,8 @@ def test_precompile_failed_exact() raises:
         serialize_event(e),
         '{"event":"precompile_failed","step":"build","compiler_output":"boom",'
         + '"compiler_output_omitted_bytes":0,"casualty_count":2,"casualties":'
-        + '["a.mojo","b.mojo"],"casualties_omitted":0,"ending_known":true,'
+        + '["a.mojo","b.mojo"],"casualties_omitted":0,'
+        + '"casualties_omitted_bytes":0,"ending_known":true,'
         + '"term_kind":2,"term_value":0,"escalated":true,"timeout_us":5000000,'
         + '"attempts_used":2}',
     )
@@ -168,7 +169,8 @@ def test_file_finished_exact() raises:
         serialize_event(e),
         '{"event":"file_finished","path":"t/a.mojo","outcome":"pass",'
         + '"duration_us":1500000,"build_argv":["mojo","build"],'
-        + '"build_argv_omitted":0,"build_duration_us":500000,'
+        + '"build_argv_omitted":0,"build_argv_omitted_bytes":0,'
+        + '"build_duration_us":500000,'
         + '"captured_stdout":"hi","stdout_capture_bytes":2,'
         + '"stdout_stream_omitted_bytes":0,"captured_stderr":"",'
         + '"stderr_capture_bytes":0,"stderr_stream_omitted_bytes":0,'
@@ -208,7 +210,8 @@ def test_attempt_finished_exact() raises:
         + '"retry_eligible":true,"classification":"signal","duration_us":250000,'
         + '"captured_stdout":"out","captured_stderr":"err",'
         + '"stdout_truncated":false,"stderr_truncated":true,'
-        + '"attempt_argv":["./a"],"attempt_argv_omitted":0}',
+        + '"attempt_argv":["./a"],"attempt_argv_omitted":0,'
+        + '"attempt_argv_omitted_bytes":0}',
     )
 
 
@@ -496,9 +499,26 @@ def test_argv_list_and_element_bounds() raises:
         List[UInt8](),
     )
     var line = serialize_event(e)
-    assert_true(('"' + _repeat("b", 4096) + '"') in line)  # capped element
-    assert_false(_repeat("b", 4097) in line)
-    assert_true('"build_argv_omitted":44' in line)  # 300 - 256
+    # The over-long element is kept as a head+tail window (3072 + 1024 = 4096
+    # retained bytes) with the visible elision marker between, never a silent
+    # cut: the longest contiguous run is the 3072-byte head, and the dropped
+    # middle bytes (5000 - 4096 = 904) ride in build_argv_omitted_bytes.
+    assert_true(_repeat("b", 3072) in line)  # the head window
+    assert_false(_repeat("b", 3073) in line)  # nothing longer survives
+    assert_true("…" in line)  # the visible elision marker
+    assert_true('"build_argv_omitted":44' in line)  # 300 - 256 entries
+    assert_true('"build_argv_omitted_bytes":904' in line)  # 5000 - 4096 bytes
+
+
+def test_scalar_runner_string_is_visibly_bounded_not_silently_cut() raises:
+    # A pathological scalar runner field (here a 5000-byte path) is kept as a
+    # head+tail window with the visible elision marker, never silently truncated
+    # to a value indistinguishable from a genuine 4 KiB one.
+    var e = Event.file_started(_repeat("p", 5000))
+    var line = serialize_event(e)
+    assert_true(_repeat("p", 3072) in line)  # the head window survives
+    assert_false(_repeat("p", 3073) in line)  # nothing longer
+    assert_true("…" in line)  # truncation is visible in the value itself
 
 
 def test_casualties_list_bound_count_authoritative() raises:
