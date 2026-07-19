@@ -4,18 +4,72 @@ A pytest-like test runner for [Mojo](https://www.modular.com/mojo) that
 orchestrates the standard library's per-file `TestSuite` — it never replaces it.
 
 > [!NOTE]
-> **Status: walking skeleton, now with a resilience layer.** `build/mtest` is a
+> **Status: walking skeleton, now with machine reporters.** `build/mtest` is a
 > real binary — it discovers files, builds each one, executes it directly,
 > parses each file's `TestSuite` report, and reports a truthful exit code at
 > per-test granularity: `-k`, node-id selection, `--maxfail`, `mtest collect`,
-> `--durations`, `--retries` (with a FLAKY verdict), `--compile-timeout`, and
-> `--shard` are all live today. What's still missing: **concurrency** — there
+> `--durations`, `--retries` (with a FLAKY verdict), `--compile-timeout`,
+> `--shard`, and the three machine reporters (`--json`, `--junit-xml`,
+> `--gh-annotations`) are all live today, and the project ships a conda
+> package built from source. What's still missing: **concurrency** — there
 > is no worker pool yet, `-n`/`--workers` and `--serial` are refused, and the
 > runner is single-child and sequential; a crash's isolation-rerun attribution
 > is bounded and diagnostic-only, never a verdict; captured output is
-> file-scoped (not per test); and the whole runner is exercised on Linux only
-> so far. See [Status](#status) for exactly what that means before you rely on
-> it.
+> file-scoped (not per test); packaged-artifact runtime supervision on macOS is
+> unverified; and GitHub's real Checks-UI rendering of the annotation lines is
+> a manual, maintainer-run gate that has not been recorded yet. See
+> [Status](#status) for exactly what that means before you rely on it.
+
+## Installation
+
+`mtest` ships as a conda package built by
+[rattler-build](https://prefix-dev.github.io/rattler-build/) from
+[`recipe/recipe.yaml`](recipe/recipe.yaml). The recipe builds `mtest`
+**from source**, inside an isolated build environment pinned to the same
+toolchain this repo itself builds against (`mojo ==1.0.0b2`, `clang
+==18.1.8`) — it never repackages an already-linked binary.
+
+The installed binary is not loader-clean: `readelf -d` shows a direct
+`NEEDED` on `libKGENCompilerRTShared.so`, whose transitive closure resolves
+entirely inside the Mojo runtime. Rather than vendor those libraries, the
+recipe declares a conda **run** dependency:
+
+```yaml
+requirements:
+  run:
+    - mojo-compiler ==1.0.0b2
+```
+
+A dedicated CI job proves that dependency is both necessary and sufficient:
+it builds the package into a local conda channel, installs it into a
+**fresh** scratch environment carrying only the declared run dependency (not
+the full `mojo`/`clang` build toolchain), and runs the installed binary
+directly against `mtest`'s own suite.
+
+**Platforms:**
+
+- **linux-64 is the gated platform.** A CI job builds the package, installs
+  it from a local channel into that fresh scratch environment, and exercises
+  the installed binary end to end.
+- **osx-arm64 is declared, not gated.** It matches the recipe's platform list
+  and the package channels solve for it, but no CI runner installs or runs
+  the packaged artifact there. macOS coverage stops at package build,
+  executable link, and an `--help` smoke run — packaged-artifact **runtime
+  supervision on macOS is a documented ceiling, not a proven target** (see
+  [Status](#status)).
+
+The package is not yet published to a public channel. Build it locally with
+the recipe and install from the resulting local channel:
+
+```console
+$ pixi run package-build   # rattler-build -> build/conda-channel/*.conda; nothing uploaded
+$ pixi run package-check   # installs into a fresh scratch env, runs the installed binary
+```
+
+Both tasks are standalone — a dedicated CI job runs them, but neither is part
+of the ordinary `pixi run ci` gate (see [Developing](#developing)). To build
+and run `mtest` straight from a checkout instead of installing a package, see
+[Developing](#developing).
 
 ## Why
 
@@ -41,8 +95,9 @@ aggregating tests across files, and reporting them the way CI expects.
   `1` and never appears in the gate.
 - **A crash is not a failure.** An assertion that fails (FAIL) and a process
   that aborts or dies by signal (CRASH) are different events with different
-  causes. They stay distinct in the console summary and the exit code; the
-  JUnit XML mapping is still to come.
+  causes. They stay distinct in the console summary, the exit code, and the
+  JUnit XML mapping: FAIL becomes a `<failure>`, CRASH a sentinel `<error>`
+  (see [Machine reporters](#machine-reporters)).
 - **Loud over silent.** Every excluded file is reported with an `EXCLUDED`
   line today; a skipped, deselected, or truncated run must never look like a
   run that passed everything. Retry and compile-timeout reporting extend this
@@ -51,10 +106,11 @@ aggregating tests across files, and reporting them the way CI expects.
   attribution pass is announced before it runs and never lets a stopped search
   read as a soft accusation.
 - **CI is the customer.** Deterministic, path-sorted console output and a
-  hermetic, zero-runtime-dependency build are in place now, and `--shard` lets
-  one suite spread across a CI matrix deterministically. Machine-readable
-  reports (JUnit XML, GitHub annotations) and parallel workers are the next
-  milestones toward that goal — see [Status](#status).
+  hermetic, zero-runtime-dependency build are in place now, `--shard` lets
+  one suite spread across a CI matrix deterministically, and machine-readable
+  reports — JUnit XML and GitHub annotations — are live (see
+  [Machine reporters](#machine-reporters)). Parallel workers are the
+  remaining milestone toward that goal — see [Status](#status).
 
 ## What works today
 
@@ -130,14 +186,25 @@ aggregating tests across files, and reporting them the way CI expects.
 - **A clean interrupt.** Ctrl-C stops scheduling, tears down the in-flight
   child's process group, prints a partial summary with NOT-RUN accounting, and
   exits `2`.
+- **Three machine reporters**, composable with the console and with each
+  other. `--json PATH|-` writes the versioned NDJSON event stream
+  ([docs/json-stream.md](docs/json-stream.md) is the normative spec).
+  `--junit-xml PATH` writes a schema-validated JUnit report assembled from
+  the runner's own typed events — never a parse of console text — atomically
+  renamed onto `PATH` so a prior report survives any failure.
+  `--gh-annotations MODE` (`off|on|auto`, default `auto` — on iff
+  `GITHUB_ACTIONS=true`) emits GitHub Actions workflow-command annotations in
+  a deterministic tail, with every echoed region of captured child output
+  wrapped in a per-run `::stop-commands::` fence so a test's own output can
+  never forge a workflow command. See [Machine reporters](#machine-reporters)
+  below and [Extending mtest](#extending-mtest) for the honest ceilings.
 - **A deterministic console summary** and a documented, honest set of
   remaining limits — see [Status](#status).
 
 What is **not** built yet: **concurrency** — parallel workers (`-n`/
-`--workers`) and serial pinning (`--serial`, meaningless without a pool) —
-plus the machine event stream (`--json`) and machine reporters (`--junit-xml`,
-`--gh-annotations`). Each is recognized by the parser and refused before any
-test runs — see [CLI reference](#cli-reference).
+`--workers`) and serial pinning (`--serial`, meaningless without a pool).
+Each is recognized by the parser and refused before any test runs — see
+[CLI reference](#cli-reference).
 
 ## Examples
 
@@ -153,7 +220,7 @@ $ pixi run build-bin
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/suite/test_passing.mojo'
-mtest 0.1.0-dev (mojo)
+mtest 0.4.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 PASS           e2e/suite/test_passing.mojo  0.07s
@@ -170,7 +237,7 @@ individually (`3 passed`), not the one file that held them.
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/suite'
-mtest 0.1.0-dev (mojo)
+mtest 0.4.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 7 files   excluded: 0
 
 PASS           e2e/suite/nested/test_nested.mojo  0.07s
@@ -254,16 +321,18 @@ mtest — a pytest-like test runner for Mojo
 
 usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]
 
-This build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo, -x/--exitfirst, --timeout, -s/--show-output, -q, -v, --color, -k, --maxfail, --durations, collect/--collect-only, --help, --version
+This build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo, -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v, --color, -k, --maxfail, --durations, --shard, --retries, --json, --junit-xml, --gh-annotations, collect/--collect-only, --help, --version
 $ echo $?
 0
 ```
+
+(this is the same output the [CLI reference](#cli-reference)'s freshness-contracted block below shows — the two are kept in sync, never independently drifted)
 
 ### `version`
 
 ```console
 $ pixi run bash -c 'build/mtest version'
-mtest 0.1.0-dev
+mtest 0.4.0
 $ echo $?
 0
 ```
@@ -272,7 +341,7 @@ $ echo $?
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/suite --exclude "*_failing.mojo" --exclude "*_crashing.mojo" --exclude "*_compile_error.mojo"'
-mtest 0.1.0-dev (mojo)
+mtest 0.4.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 4 files   excluded: 3
 
 EXCLUDED       e2e/suite/test_compile_error.mojo  (*_compile_error.mojo)
@@ -302,7 +371,7 @@ exactly this: `test_alpha.mojo` (`test_alpha_one`, `test_alpha_two`,
 
 ```console
 $ pixi run bash -c 'build/mtest -k one e2e/matrix'
-mtest 0.1.0-dev (mojo)
+mtest 0.4.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
 
 PASS           e2e/matrix/test_alpha.mojo 0.02s
@@ -322,7 +391,7 @@ test in the file is deselected the same way:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/matrix/test_alpha.mojo::test_alpha_two'
-mtest 0.1.0-dev (mojo)
+mtest 0.4.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 PASS           e2e/matrix/test_alpha.mojo 0.03s
@@ -337,7 +406,7 @@ and is counted `not run` (distinct from the per-test `deselected` count):
 
 ```console
 $ pixi run bash -c 'build/mtest -k passing e2e/suite/test_passing.mojo e2e/suite/test_noisy.mojo e2e/suite/test_failing.mojo'
-mtest 0.1.0-dev (mojo)
+mtest 0.4.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0
 
 PASS           e2e/suite/test_passing.mojo  0.02s
@@ -357,7 +426,7 @@ has nothing to run and exits `5`.
 
 ```console
 $ pixi run bash -c 'build/mtest --maxfail 1 e2e/maxfail'
-mtest 0.1.0-dev (mojo)
+mtest 0.4.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0
 
 FAIL           e2e/maxfail/test_a_fail.mojo  0.07s
@@ -436,7 +505,7 @@ does not pad the list:
 
 ```console
 $ pixi run bash -c 'build/mtest --durations 10 e2e/matrix'
-mtest 0.1.0-dev (mojo)
+mtest 0.4.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
 
 PASS           e2e/matrix/test_alpha.mojo 0.02s
@@ -468,7 +537,7 @@ it finished):
 ```console
 $ pixi run bash -c 'build/mtest e2e/slow'
 # ^C sent to the process group ~1.5s after the header printed
-mtest 0.1.0-dev (mojo)
+mtest 0.4.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0
 
 
@@ -491,7 +560,7 @@ ordering (the way `scripts/e2e_check.py`'s `retries-flaky` scenario does):
 ```console
 $ rm -f build/e2e-scratch/flaky_marker
 $ pixi run bash -c 'build/mtest e2e/flaky/test_flaky.mojo --retries 1'
-mtest 0.1.0-dev (mojo)
+mtest 0.4.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 TRY            e2e/flaky/test_flaky.mojo       attempt 1/2  run signal  (signal 11 — SIGSEGV, segmentation fault)  1.13s
@@ -511,7 +580,7 @@ final, only outcome:
 ```console
 $ rm -f build/e2e-scratch/flaky_marker
 $ pixi run bash -c 'build/mtest e2e/flaky/test_flaky.mojo --retries 0'
-mtest 0.1.0-dev (mojo)
+mtest 0.4.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 CRASH          e2e/flaky/test_flaky.mojo       1.12s  (signal 11 — SIGSEGV, segmentation fault)
@@ -547,7 +616,7 @@ top, never a second verdict:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/attribution/test_deterministic_crasher.mojo'
-mtest 0.1.0-dev (mojo)
+mtest 0.4.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 CRASH          e2e/attribution/test_deterministic_crasher.mojo  1.12s  (signal 4 — SIGILL, illegal instruction)
@@ -563,7 +632,7 @@ $ echo $?
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/attribution/test_order_dependent_crasher.mojo'
-mtest 0.1.0-dev (mojo)
+mtest 0.4.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 CRASH          e2e/attribution/test_order_dependent_crasher.mojo  1.18s  (signal 11 — SIGSEGV, segmentation fault)
@@ -593,7 +662,7 @@ out a real stalled compile:
 
 ```console
 $ pixi run bash -c 'build/mtest --mojo scripts/fake_slow_mojo.py e2e/suite/test_passing.mojo --compile-timeout 1'
-mtest 0.1.0-dev (scripts/fake_slow_mojo.py)
+mtest 0.4.0 (scripts/fake_slow_mojo.py)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 COMPILE-TIMEOUT  e2e/suite/test_passing.mojo     0.00s  (timed out after 1s)
@@ -616,7 +685,7 @@ against a fresh, quarantined module cache, announced with a loud `WARNING`:
 
 ```console
 $ pixi run bash -c 'build/mtest --mojo scripts/fake_slow_mojo.py e2e/suite/test_passing.mojo --compile-timeout 1 --retries 1'
-mtest 0.1.0-dev (scripts/fake_slow_mojo.py)
+mtest 0.4.0 (scripts/fake_slow_mojo.py)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 TRY            e2e/suite/test_passing.mojo     attempt 1/2  build compile-timeout  (timed out)  1.02s
@@ -643,7 +712,7 @@ to be force-killed, so it says so in words, not a bare exit status:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/stubborn/test_stubborn.mojo --timeout 1 --retries 0'
-mtest 0.1.0-dev (mojo)
+mtest 0.4.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 TIMEOUT        e2e/stubborn/test_stubborn.mojo 1.31s  (timed out after 1s, escalated to SIGKILL)
@@ -707,6 +776,120 @@ same shard, every time, because `hash:` assignment is a pure function of the
 path. `--shard` applies to `run` the same way, partitioning which files get
 built and executed rather than which node ids get listed.
 
+### Machine reporters
+
+Three reporters — `--json`, `--junit-xml`, and `--gh-annotations` — compose
+with the console and with each other; each is
+described in full in [contract §15](docs/cli-contract.md#15-reporters). What
+follows is real, captured output from each.
+
+#### The JSON event stream — `--json PATH|-`
+
+`--json -` makes stdout the byte-pure NDJSON stream and relocates the console
+to stderr; `--gh-annotations` defaults to `auto`, which is a usage error
+alongside `--json -` (the two would fight over stdout), so a `--json -` run
+must say `--gh-annotations off` explicitly:
+
+```console
+$ pixi run bash -c 'build/mtest --json - --gh-annotations off e2e/matrix' 1>/tmp/stream.ndjson
+mtest 0.4.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
+
+PASS           e2e/matrix/test_alpha.mojo      0.02s
+PASS           e2e/matrix/test_beta.mojo       0.02s
+
+===== 5 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 0.8s =====
+$ echo $?
+0
+```
+
+(the console above printed to stderr; `/tmp/stream.ndjson` on stdout carries
+only stream lines). Line 1 is the frozen header, then one JSON object per
+event, in the order the session produced them:
+
+```console
+$ head -n 4 /tmp/stream.ndjson
+{"event":"stream","version":1,"generator":"mtest 0.4.0"}
+{"event":"session_started","root":"/home/mikko/dev/mtest","toolchain":"mojo","selected_count":2,"excluded_count":0,"shard_label":"","sharded_out_count":0}
+{"event":"file_started","path":"e2e/matrix/test_alpha.mojo"}
+{"event":"test_reported","path":"e2e/matrix/test_alpha.mojo","name":"test_alpha_one","outcome":"pass","detail":"","detail_omitted_bytes":0,"timing":"0.001"}
+$ tail -n 1 /tmp/stream.ndjson
+{"event":"session_finished","summary":{"pass":2,"fail":0,"skip":0,"crash":0,"timeout":0,"compile_error":0,"compile_timeout":0,"malformed_suite":0,"precompile_error":0,"flaky":0,"deselected":0,"excluded":0,"not_run":0},"wall_time_us":808900,"exit_code":0,"test_counts":{"passed":5,"failed":0,"skipped":0,"deselected":0},"flaky_files":0}
+```
+
+`file_finished` records (omitted above for length) carry the full build
+argv, captured output, and per-attempt disposition for that file —
+[docs/json-stream.md](docs/json-stream.md) documents every field.
+
+#### JUnit XML — `--junit-xml PATH`
+
+```console
+$ pixi run bash -c 'build/mtest --junit-xml build/scratch/report.xml e2e/suite'
+mtest 0.4.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 7 files   excluded: 0
+[...console output as in the mixed-run example above...]
+===== 9 passed, 1 failed, 0 skipped, 1 crashed, 1 compile error (0 excluded, 0 not run) in 4.8s =====
+$ echo $?
+1
+```
+
+The report at `build/scratch/report.xml` (a real one, opening with the
+frozen `<testsuites>` root and two representative `<testsuite>` children —
+one plain pass, one file-level error):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="mtest" tests="12" failures="1" errors="2">
+<testsuite name="e2e/suite/nested/test_nested.mojo" tests="1" failures="0" errors="0" skipped="0" time="0.017"><testcase name="e2e/suite/nested/test_nested.mojo::test_nested_passes" classname="e2e.suite.nested.test_nested"/><system-out>
+Running 1 tests for /home/mikko/dev/mtest/e2e/suite/nested/test_nested.mojo 
+    PASS [ 0.001 ] test_nested_passes
+--------
+Summary [ 0.001 ] 1 tests run: 1 passed , 0 failed , 0 skipped 
+
+</system-out></testsuite>
+<testsuite name="e2e/suite/test_compile_error.mojo" tests="1" failures="0" errors="1" skipped="0" time="0.000"><testcase name="[build]" classname="e2e.suite.test_compile_error"><error message="build failed" type="CompileError">/home/mikko/dev/mtest/e2e/suite/test_compile_error.mojo:12:17: error: use of unknown declaration 'this_symbol_is_never_defined_anywhere'
+    var value = this_symbol_is_never_defined_anywhere()
+                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+mojo: error: failed to parse the provided Mojo source module
+</error></testcase>[...system-err omitted...]</testsuite>
+[...5 more <testsuite> elements omitted...]
+</testsuites>
+```
+
+`errors="2"` on the root counts the COMPILE-ERROR and CRASH files (each maps
+to an `<error>`-carrying sentinel testcase, `[build]` here since neither was
+retried); `failures="1"` is `test_failing.mojo::test_second_fails`'s
+`<failure>`. The document validates against the committed
+`scripts/schemas/junit-10.xsd` — the settled dialect `scripts/junit_check.py`
+blesses (see [Status](#status) for why "settled dialect" is not the same
+claim as "the one true JUnit schema").
+
+#### GitHub Actions annotations — `--gh-annotations MODE`
+
+`MODE` is `off|on|auto` (default `auto`, on iff `GITHUB_ACTIONS=true`). Here
+it's forced `on` so the tail renders without a real Actions environment:
+
+```console
+$ pixi run bash -c 'build/mtest --gh-annotations on e2e/suite'
+mtest 0.4.0 (mojo)
+[...console output as in the mixed-run example above, ending with the summary band, then:...]
+::error file=e2e/suite/test_compile_error.mojo::e2e/suite/test_compile_error.mojo: compile error
+::error file=e2e/suite/test_crashing.mojo::e2e/suite/test_crashing.mojo: crashed (signal 4 — SIGILL, illegal instruction)
+::error file=e2e/suite/test_failing.mojo,line=14::e2e/suite/test_failing.mojo::test_second_fails:       At /home/mikko/dev/mtest/e2e/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:
+::notice::9 passed, 1 failed, 0 skipped, 1 crashed, 1 compile error (0 excluded, 0 not run) in 5.0s
+$ echo $?
+1
+```
+
+Every `::error`/`::warning` line is node-id-sorted within its own block
+(errors, then warnings, then the single `::notice`) — never interleaved
+across kinds. `test_compile_error.mojo` and `test_crashing.mojo` are
+file-level errors (no `line=`, no per-test location exists for a whole-file
+outcome); `test_failing.mojo`'s row carries `line=14` because its assertion
+detail carried an `At <path>:14:17:` pointer. There is no `::warning` line in
+this run (no FLAKY file); see [Status](#status) for the caps and the
+`file=` root assumption these annotations rely on.
+
 ## CLI reference
 
 This section is generated against `build/mtest --help` — it is not allowed to
@@ -718,7 +901,7 @@ mtest — a pytest-like test runner for Mojo
 
 usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]
 
-This build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo, -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v, --color, -k, --maxfail, --durations, --shard, --retries, collect/--collect-only, --help, --version
+This build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo, -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v, --color, -k, --maxfail, --durations, --shard, --retries, --json, --junit-xml, --gh-annotations, collect/--collect-only, --help, --version
 ```
 
 Flags this build serves:
@@ -744,6 +927,9 @@ Flags this build serves:
 | `-v` | verbose: add the build command, per-step timing, and the `SLOW`-step label |
 | `--color WHEN` | `auto` (default), `always`, or `never`; `NO_COLOR` also disables color |
 | `--shard [hash:\|slice:]M/N` | run (or `collect`) only shard `M` of `N`, `1<=M<=N`; `hash:` (default, stable FNV-1a over the path) or `slice:` (sorted round-robin); a malformed value is a usage error |
+| `--json PATH\|-` | write the versioned NDJSON event stream to `PATH`, or to stdout when `-` ([docs/json-stream.md](docs/json-stream.md) is normative); run-only |
+| `--junit-xml PATH` | write a schema-validated JUnit XML report, assembled from typed events and renamed atomically onto `PATH` |
+| `--gh-annotations MODE` | `off\|on\|auto` (default `auto`, on iff `GITHUB_ACTIONS=true`); emit a GitHub Actions annotation tail after the console summary; `--json -` requires `--gh-annotations off` explicitly |
 | `collect [PATHS] [flags]`, `--collect-only` | list node ids, sorted lexicographically, instead of running anything |
 | `-h`, `--help` | print this usage text and exit 0 |
 | `--version` | print the version and exit 0 |
@@ -752,14 +938,12 @@ Flags this build serves:
 spelling and arity) but **refused before any test runs**, with a usage error
 naming the flag and the capability that brings it, per the contract's
 [availability status](docs/cli-contract.md#24-availability-status-this-build):
-`-n`/`--workers` (parallel workers), `--serial` (serial execution pinning,
-meaningless without a worker pool), `--junit-xml` and `--gh-annotations`
-(machine report artifacts), and `--json` (the machine event stream). For
-example:
+`-n`/`--workers` (parallel workers) and `--serial` (serial execution pinning,
+meaningless without a worker pool). For example:
 
 ```console
 $ pixi run bash -c 'build/mtest -n 2 e2e/suite'
-cli: '-n' is part of the mtest v1 contract but is not available in this build (it arrives with parallel workers); this build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo, -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v, --color, -k, --maxfail, --durations, --shard, --retries, collect/--collect-only, --help, --version (see mtest --help)
+cli: '-n' is part of the mtest v1 contract but is not available in this build (it arrives with parallel workers); this build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo, -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v, --color, -k, --maxfail, --durations, --shard, --retries, --json, --junit-xml, --gh-annotations, collect/--collect-only, --help, --version (see mtest --help)
 $ echo $?
 4
 ```
@@ -768,6 +952,46 @@ The full target surface — every flag, the frozen exit-code table, the node-id
 grammar, and the outcome vocabulary — is specified in
 [docs/cli-contract.md](docs/cli-contract.md); §24 there is the single source of
 truth for what this build serves versus refuses.
+
+## Extending mtest
+
+`mtest` has no plugin API, and it never will in the way a Python test runner
+does: Mojo cannot load code at runtime, so there is no hook, no entry point,
+and nothing to `import` into the process. The `--json` event stream **is**
+the extension mechanism instead — the same posture Go's own `go test -json`
+/ `test2json` and tools like `gotestsum` take: don't extend the runner
+in-process, run it once and let separate-process consumers subscribe to its
+typed event stream.
+
+A consumer is any program — Python, a shell pipeline, another Mojo binary, a
+CI step — that reads the NDJSON lines from `--json PATH` or `--json -` and
+reacts to them: a custom dashboard, a flaky-test tracker, a Slack notifier, a
+coverage aggregator, a second-opinion JUnit renderer. None of that runs
+inside `mtest`; all of it runs in a separate process reading a stream mtest
+already produces for its own console and JUnit reporters.
+
+[docs/json-stream.md](docs/json-stream.md) is the **normative** spec — the
+stable contract, distinct from the console's informal text layout, which is
+free to change. Two obligations make that contract usable by anyone else's
+code:
+
+- **The stream is versioned on its header line, and only there** —
+  `{"event":"stream","version":1,"generator":"mtest <version>"}`. Version 1
+  freezes the NDJSON framing, the header shape, every event name, every
+  field's name and meaning, and the token vocabularies.
+- **A conforming consumer MUST ignore unknown fields and unknown event
+  kinds.** Growth within version 1 is additive only — new fields on existing
+  records, new event kinds — never a silent meaning change; a removal or a
+  meaning change bumps the header `version`. A consumer that rejects a
+  record merely because it carries a field or an `event` it has never seen
+  is not conforming to the contract and will break on the next additive
+  release, not because mtest broke compatibility.
+
+The [worked consumer skeleton](docs/json-stream.md#12-a-worked-consumer-skeleton)
+in the spec shows the whole discipline in about twenty lines: strict about
+what version 1 freezes (reject non-finite tokens, reject duplicate keys),
+tolerant of anything it doesn't recognize, and treating a missing terminal
+`session_finished` record as the truncation signal it is.
 
 ## Architecture
 
@@ -990,19 +1214,62 @@ open, and are stated honestly here rather than glossed over.
   otherwise-fast file is invisible to it. A per-test granularity is reserved
   (`docs/cli-contract.md` §21), blocked on the same upstream per-test-timing
   gap that blocks per-test attribution above.
-- **macOS arm64 has build/link smoke coverage, not runtime coverage.** The
-  `macos-15` job audits both native post-fork call graphs with the pinned Clang,
-  precompiles the package, links the executable, and runs `--help`. Native
-  lifecycle tests, Mojo process-supervision suites, and ASan/Valgrind dynamic
-  analysis remain Linux-only, so successful macOS runtime supervision is still
-  unverified.
+- **macOS arm64 has build/link smoke coverage, not runtime coverage — and
+  that ceiling extends to the packaged artifact.** The `macos-15` job audits
+  both native post-fork call graphs with the pinned Clang, precompiles the
+  package, links the executable, and runs `--help`. Native lifecycle tests,
+  Mojo process-supervision suites, and ASan/Valgrind dynamic analysis remain
+  Linux-only, so successful macOS runtime supervision is still unverified —
+  for the source build and, identically, for the conda package: `osx-arm64`
+  is declared in [`recipe/recipe.yaml`](recipe/recipe.yaml) and the channels
+  solve for it, but no CI runner installs or runs the packaged binary there
+  (see [Installation](#installation)).
+- **The installed binary's linkage is a verdict about loading, not about
+  behavior.** The packaged `mtest` is not loader-clean — `readelf -d` shows a
+  direct `NEEDED` on `libKGENCompilerRTShared.so`, whose transitive closure
+  resolves entirely inside the Mojo runtime — so the recipe declares
+  `mojo-compiler ==1.0.0b2` as a conda run dependency rather than vendoring
+  those libraries. The linux-64 packaging gate proves a fresh environment
+  carrying only that declared dependency is sufficient to **load and run**
+  the binary; it is not a claim that the installed artifact's behavior has
+  been independently re-verified beyond that load-and-smoke check.
+- **The JUnit dialect is a settled choice, not a universal standard.** JUnit
+  XML has no single canonical schema across every consumer. `mtest` commits
+  to one dialect (`scripts/schemas/junit-10.xsd`) and validates every emitted
+  report against it with the same oracle (`scripts/junit_check.py`) CI runs —
+  that is honesty about conformance to *this* schema, not a claim that every
+  JUnit-consuming tool in the wild agrees on one true dialect.
+- **GitHub annotations are capped, and their `file=` paths assume the
+  invocation root is the repository root.** Each annotation message is
+  bounded to 4096 escaped bytes; the per-run per-workflow-step caps are 10
+  error and 10 warning annotations (a GitHub Actions workflow-step limit,
+  distinct from the Checks API's separate 50-per-request cap some readers
+  conflate it with) — past the cap, the first `cap - 1` rows render
+  individually and one aggregate `… and N more …` line accounts for the
+  rest. Separately, every `file=` property is emitted relative to mtest's own
+  invocation root (§2 of the contract: the current working directory at
+  invocation), on the assumption that root **is** the repository root GitHub
+  checked out — an annotation run from any other directory will point GitHub
+  at the wrong file.
+- **The real-Actions annotation rendering is a manual, maintainer-run gate —
+  not yet recorded.** Every annotation shape, sort order, cap, and the
+  stop-commands fence around echoed child output is verified in-repo: unit
+  tests pin the renderer, `scripts/annotations_check.py` is a local proxy for
+  what GitHub's own Checks runner does with workflow-command lines, and the
+  e2e cells drive the real binary end to end, including a hostile-console
+  case with a forged `::error` line. What none of that can prove is that
+  GitHub's real Checks UI places the inline annotations where expected and
+  neutralizes a forged workflow command exactly as the local proxy models —
+  confirming that requires a human pushing a throwaway workflow to a fork and
+  reading the result in the GitHub UI. That run has not happened yet, so
+  treat the annotation *shapes* in this README as verified, and their
+  rendering in a real GitHub Actions run as **pending**.
 - **Interrupt behavior is implemented**, not aspirational: Ctrl-C cleans up the
   in-flight child's process group, prints the partial summary with NOT-RUN
   accounting, and exits `2`. See the
   [example above](#interrupt-behavior).
 - **Not built yet**: parallel workers (`-n`/`--workers`) and serial pinning
-  (`--serial`, meaningless without a pool), the machine event stream
-  (`--json`), JUnit XML, and GitHub annotations. Each is refused explicitly
+  (`--serial`, meaningless without a pool). Each is refused explicitly
   (exit 4) rather than silently accepted — see [CLI reference](#cli-reference).
 
 ## Developing
