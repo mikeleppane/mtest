@@ -45,7 +45,8 @@ enum mtest_exec_setup_stage {
     MTEST_EXEC_STAGE_DUP2_STDERR = 4,
     MTEST_EXEC_STAGE_CLOSE = 5,
     MTEST_EXEC_STAGE_EXECVE = 6,
-    MTEST_EXEC_STAGE_SETUP_WRITE = 7
+    MTEST_EXEC_STAGE_SETUP_WRITE = 7,
+    MTEST_EXEC_STAGE_SIGPIPE_RESTORE = 8
 };
 
 enum mtest_exec_group_action {

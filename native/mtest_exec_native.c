@@ -1227,8 +1227,27 @@ static void mtest_child_exec(
 ) {
     /* SAFETY: this is the complete post-fork child region. Every pointer and
        argv slot was fully constructed in the parent and survives in the child's
-       copy-on-write image. Only setpgid, chdir, dup2, close, execve, poll,
-       write, and _exit are called; none retains a pointer after failed exec. */
+       copy-on-write image. Only sigaction, setpgid, chdir, dup2, close, execve,
+       poll, write, and _exit are called; none retains a pointer after failed
+       exec. sigaction, setpgid, dup2, close, execve, poll, and write are all on
+       POSIX's async-signal-safe list. */
+
+    /* Restore the SIGPIPE disposition the runtime saved before installing its
+       process-wide SIG_IGN carve-out. That carve-out is PARENT-local: it keeps
+       mtest's own writes to a dead --json pipe from dying at 141. But an ignored
+       disposition survives execve, so without this the exec'd test binary would
+       inherit SIG_IGN and a direct SIGPIPE crash would be silently swallowed
+       into a false PASS. mtest_old_pipe is a file-scope static populated before
+       fork and readable in the copy-on-write child. Restoring a known-valid
+       disposition to SIGPIPE cannot fail in practice (EINVAL/EFAULT are
+       impossible here); the check is defense-in-depth, so it takes no
+       fault-injection hook, and reuses the same report-and-exit path as the
+       other pre-exec setup steps. */
+    if (sigaction(SIGPIPE, &mtest_old_pipe, NULL) != 0) {
+        mtest_child_report(
+            setup_write, MTEST_EXEC_STAGE_SIGPIPE_RESTORE, errno
+        );
+    }
     if (mtest_fail_if_requested(MTEST_EXEC_OP_CHILD_SETPGID) ||
         setpgid(0, 0) != 0) {
         mtest_child_report(setup_write, MTEST_EXEC_STAGE_SETPGID, errno);
@@ -1652,7 +1671,7 @@ static int mtest_validate_setup_record(struct mtest_exec_setup_state *state) {
     memcpy(&stage, state->raw, sizeof(stage));
     memcpy(&error_number, state->raw + sizeof(stage), sizeof(error_number));
     if (stage < MTEST_EXEC_STAGE_SETPGID ||
-        stage > MTEST_EXEC_STAGE_SETUP_WRITE || error_number <= 0) {
+        stage > MTEST_EXEC_STAGE_SIGPIPE_RESTORE || error_number <= 0) {
         state->outcome = MTEST_EXEC_SETUP_CORRUPT;
         return 0;
     }

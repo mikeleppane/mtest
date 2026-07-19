@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Audit every call reachable in the native adapter's post-fork child region.
 
-The platform allowlist is deliberately exact: setpgid, chdir, dup2, close,
-execve, poll, write, and _exit, plus the compiler-visible errno accessor
-(`__errno_location` on Linux or `__error` on Darwin). Repository-defined
-helpers are never opaque allowlist entries; their bodies are traversed.
+The platform allowlist is deliberately exact: sigaction, setpgid, chdir, dup2,
+close, execve, poll, write, and _exit, plus the compiler-visible errno accessor
+(`__errno_location` on Linux or `__error` on Darwin). Every entry is on POSIX's
+async-signal-safe list; `sigaction` is permitted because the child restores its
+pre-runtime SIGPIPE disposition before execve (a `sigaction` call POSIX
+guarantees is async-signal-safe). Repository-defined helpers are never opaque
+allowlist entries; their bodies are traversed.
 """
 
 from __future__ import annotations
@@ -24,7 +27,17 @@ SOURCE = ROOT / "native" / "mtest_exec_native.c"
 ROOT_FUNCTION = "mtest_child_exec"
 OPEN_FUNCTION = "mtest_exec_process_open"
 _PLATFORM_ENTRY_POINTS = frozenset(
-    {"setpgid", "chdir", "dup2", "close", "execve", "poll", "write", "_exit"}
+    {
+        "sigaction",
+        "setpgid",
+        "chdir",
+        "dup2",
+        "close",
+        "execve",
+        "poll",
+        "write",
+        "_exit",
+    }
 )
 _ERRNO_ACCESSOR = {
     "linux": "__errno_location",
