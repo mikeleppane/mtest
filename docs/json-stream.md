@@ -87,6 +87,7 @@ The event names, in the order they can appear (§7):
 | `casualty_count` | int | authoritative dependent-file count |
 | `casualties` | array&lt;string&gt; | bounded list (§4) of dependent files |
 | `casualties_omitted` | int | entries elided from `casualties` |
+| `casualties_omitted_bytes` | int | bytes elided from the kept entries (§4) |
 | `ending_known` | bool | whether `term_*` names a real ending |
 | `term_kind` | int | termination discriminant (§6) |
 | `term_value` | int | termination value (§6) |
@@ -124,6 +125,7 @@ One per **non-final** crash-class retry attempt (a `TRY` line on the console).
 | `stderr_truncated` | bool | capture-level overflow flag |
 | `attempt_argv` | array&lt;string&gt; | bounded list (§4) |
 | `attempt_argv_omitted` | int | entries elided from `attempt_argv` |
+| `attempt_argv_omitted_bytes` | int | bytes elided from the kept entries (§4) |
 
 ### 2.6 `file_finished`
 
@@ -136,6 +138,7 @@ The file's verdict.
 | `duration_us` | int | run wall time (§3) |
 | `build_argv` | array&lt;string&gt; | bounded list (§4) |
 | `build_argv_omitted` | int | entries elided from `build_argv` |
+| `build_argv_omitted_bytes` | int | bytes elided from the kept entries (§4) |
 | `build_duration_us` | int | build wall time (§3) |
 | `captured_stdout` | string | head+tail bounded (§4) |
 | `stdout_capture_bytes` | int | retained stdout bytes (pre-escape) |
@@ -207,7 +210,7 @@ The single terminal record (§8).
 |---|---|---|
 | `summary` | object | 13 outcome-token keys → int (see below) |
 | `wall_time_us` | int | session wall time (§3) |
-| `exit_code` | int | the final resolved process exit code |
+| `exit_code` | int | the exit code resolved at session end; the process exit is authoritative and may be escalated afterward (§9) |
 | `test_counts` | object | `{passed,failed,skipped,deselected}` → int |
 | `flaky_files` | int | files that passed only after a retry |
 
@@ -256,8 +259,8 @@ no unbounded field anywhere in the stream.
 |---|---|---|
 | `captured_stdout` / `captured_stderr` (`file_finished`) | 64 KiB head + 64 KiB tail | ≤ 131 075 each |
 | `compiler_output`, `detail` | 64 KiB head + 64 KiB tail | ≤ 131 075 |
-| `build_argv` / `attempt_argv` / `casualties` | 256 entries × 4 KiB | ≤ 1 048 576 |
-| runner strings (`path`, `toolchain`, patterns, names, `timing`, …) | 4 KiB head+tail window | ≤ 4 096 |
+| `build_argv` / `attempt_argv` / `casualties` | 256 entries × 4 KiB head+tail | ≤ 1 049 344 |
+| runner strings (`path`, `toolchain`, patterns, names, `timing`, …) | 3 KiB head + 1 KiB tail window | ≤ 4 099 |
 | `captured_stdout` / `captured_stderr` (`attempt_finished`) | whole (clamped at capture) | ≤ 131 072 each |
 
 A head+tail window keeps the first 64 KiB and the last 64 KiB with a visible
@@ -396,6 +399,17 @@ failure on the stream — a `--json -` consumer that closed early (`mtest --json
 | head`), a full or unwritable file — is a **fatal abort**: mtest stops
 scheduling, best-effort finalizes the other artifacts, and resolves exit **3**.
 It never dies at 141, and it never runs to completion writing into a void.
+
+When the stream is an **owned file destination** (`--json PATH`, not `-`), the
+`session_finished` record carries the `exit_code` resolved at session end, then
+that file is closed. A destination that defers its error to `close(2)` — an
+`ENOSPC`/`EIO` a network filesystem reports only at close — is detected *after*
+the terminal record is already committed, and **escalates the process exit to
+3** (it never lowers a resolved `2`/`3`). So the committed record can read
+`"exit_code": 0` while the process exits `3`: the **process exit status is
+authoritative**, and a consumer that also cares about durability should treat a
+nonzero process exit as overriding a `0` in the record. On `--json -` there is
+no owned close, so this divergence cannot arise.
 
 ---
 
