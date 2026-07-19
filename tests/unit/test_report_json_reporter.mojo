@@ -8,8 +8,8 @@ suite proves the SINK — that lines reach the fd, that a write failure latches
 and turns every later `handle` into a no-op, and that an inert reporter writes
 nothing at all.
 """
-from std.os import getenv
-from std.tempfile import mkdtemp
+from std.os import getenv, remove
+from std.os.path import exists
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.model import Event, Summary
@@ -48,7 +48,10 @@ def _lines(content: String) -> List[String]:
 def test_created_destination_is_readable_with_header_first() raises:
     # The path must be absent so this exercises the create-mode ABI, not merely
     # O_TRUNC on a file whose existing permissions hide a bad mode argument.
-    var path = mkdtemp() + "/created.ndjson"
+    var path = _scratch("created.ndjson")
+    if exists(path):
+        remove(path)
+    assert_false(exists(path))
     var fd = open_json_fd(path)
     var rep = JsonStreamReporter(fd, "0.4.0", True)
     _ = close_json_fd(fd)
@@ -56,6 +59,7 @@ def test_created_destination_is_readable_with_header_first() raises:
     var lines = _lines(content)
     assert_equal(len(lines), 1)
     assert_equal(lines[0], stream_header("0.4.0"))
+    remove(path)
 
 
 def test_events_are_written_as_ndjson_lines() raises:
