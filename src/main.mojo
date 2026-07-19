@@ -152,9 +152,9 @@ def main():
         try:
             collected = run_collect(runtime, config, root)
         except e:
+            _eprintln(String(e))
             if not _close_runtime(runtime):
                 exit(3)
-            _eprintln(String(e))
             exit(4)
         for line in collected.diagnostics:
             _eprintln(line)
@@ -187,11 +187,10 @@ def main():
         try:
             json_fd = open_json_fd(config.json_dest)
         except open_error:
+            _eprintln("mtest: internal error: " + String(open_error))
             if not _close_runtime(runtime):
                 exit(3)
-            _eprintln("mtest: internal error: " + String(open_error))
             exit(3)
-            return
         json_active = True
         json_owns_fd = True
 
@@ -240,11 +239,10 @@ def main():
         except junit_error:
             if json_owns_fd:
                 close_json_fd(json_fd)
+            _eprintln("mtest: internal error: " + String(junit_error))
             if not _close_runtime(runtime):
                 exit(3)
-            _eprintln("mtest: internal error: " + String(junit_error))
             exit(3)
-            return
 
     # A fixed composition ORDER: index 0 the console, index 1 the machine stream
     # (inert when `--json` is absent), index 2 the JUnit report (inert when
@@ -267,9 +265,9 @@ def main():
         # like a cli usage error it exits 4 to stderr.
         if json_owns_fd:
             close_json_fd(json_fd)
+        _eprintln(String(e))
         if not _close_runtime(runtime):
             exit(3)
-        _eprintln(String(e))
         exit(4)
 
     # Flush the console's fully rendered buffer verbatim (it already ends in a

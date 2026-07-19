@@ -74,6 +74,12 @@ def canonical_bytes(xml_text: str) -> bytes:
     for element in root.iter():
         if "time" in element.attrib:
             element.set("time", _MASK_TIME)
+        # Determinism invariant: only `time` and the volatile TEXT bodies are
+        # masked; the `message`/`type` ATTRIBUTES ride through unmasked. That is
+        # load-bearing — a message/type that varies run-to-run (e.g. an ASLR
+        # address or a wall-clock in an assertion message) leaves the two
+        # canonical byte streams UNEQUAL and FAILS the e2e loudly. It never
+        # silently passes, so those attributes must stay stable at their source.
         if element.tag in _MASKED_TEXT_TAGS and element.text is not None:
             element.text = _MASK_TEXT
     raw = ET.tostring(root, encoding="unicode")

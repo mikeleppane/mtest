@@ -46,6 +46,14 @@ ONLY escaping path, applied to already-decoded `String` fields (every field
 this module reads — paths, node ids, assertion detail — is built from a
 `lossy_utf8`-decoded source upstream in the protocol/session layers, so this
 module never re-decodes and never touches raw captured bytes).
+
+Root convention: every `file=` value is the test/file's RUN-ROOT-RELATIVE path,
+emitted verbatim. GitHub resolves a workflow-command `file=` against the
+repository root of the checkout, so an annotation lands on the right source line
+ONLY when the invocation root is the repository root (`mtest` run from the repo
+root, the ordinary case). Run from a subdirectory the same path still renders,
+but GitHub would anchor it under that subdirectory — the convention this module
+assumes, stated here rather than inherited transitively from the path fields.
 """
 from mtest.model.events import Event, EventKind
 from mtest.model.outcome import Outcome

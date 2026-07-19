@@ -356,7 +356,7 @@
       "reached_only_by": [
         "annotations-fencing"
       ],
-      "disposition": "VALID",
+      "disposition": "PARSED",
       "rationale": "A FAIL whose captured stdout forges a ::error workflow command and seeds a stop-commands fence with a guessed token. Under GITHUB_ACTIONS the echoed region is wrapped in a collision-proof fence minted after this child exited, so the forge cannot land and the seeded token cannot re-enable commands."
     },
     "e2e/annotations/test_many_fail.mojo": {
@@ -366,7 +366,7 @@
       "reached_only_by": [
         "annotations-caps"
       ],
-      "disposition": "VALID",
+      "disposition": "PARSED",
       "rationale": "Twelve per-test failures exceed the 10-error per-step annotation cap: the tail keeps nine node-id-sorted rows plus one '... and 3 more errors' aggregate, so the error block never exceeds ten lines."
     }
   },
