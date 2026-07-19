@@ -71,12 +71,16 @@ mkdir -p build/tests
 
 failed=0
 count=0
-watchdog_timeout_args=()
+watchdog_command=(python scripts/process_watchdog.py)
 # Test-only harness probes may lower this without changing the production
 # ceiling. Ordinary invocations always omit it and retain the hard 300-second
-# watchdog default.
+# watchdog default. Keep this command array non-empty: Bash 3.2 treats an empty
+# array expansion as unbound under `set -u`.
 if [[ -n "${MTEST_TEST_ALL_TIMEOUT_SECONDS:-}" ]]; then
-    watchdog_timeout_args=(--timeout-seconds "$MTEST_TEST_ALL_TIMEOUT_SECONDS")
+    watchdog_command=(
+        python scripts/process_watchdog.py
+        --timeout-seconds "$MTEST_TEST_ALL_TIMEOUT_SECONDS"
+    )
 fi
 # Python is already a locked build-time tool. It gives both GNU/Linux and macOS
 # the same bytewise ordering and NUL-delimited path handling; the set removes a
@@ -91,11 +95,10 @@ while IFS= read -r -d '' test_file; do
     rm -f "$build_deadline_sentinel"
     : > "$build_deadline_sentinel"
     set +e
-    python scripts/process_watchdog.py \
+    "${watchdog_command[@]}" \
         --source "$test_file" \
         --step build \
         --deadline-sentinel "$build_deadline_sentinel" \
-        "${watchdog_timeout_args[@]}" \
         -- mojo build "${INCLUDE[@]}" "$test_file" -o "$bin"
     status=$?
     set -e
@@ -117,11 +120,10 @@ while IFS= read -r -d '' test_file; do
     rm -f "$run_deadline_sentinel"
     : > "$run_deadline_sentinel"
     set +e
-    python scripts/process_watchdog.py \
+    "${watchdog_command[@]}" \
         --source "$test_file" \
         --step run \
         --deadline-sentinel "$run_deadline_sentinel" \
-        "${watchdog_timeout_args[@]}" \
         -- "$bin"
     status=$?
     set -e
