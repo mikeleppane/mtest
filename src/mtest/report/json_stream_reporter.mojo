@@ -30,7 +30,7 @@ Descriptor OWNERSHIP stays with the caller: `open_json_fd` opens a PATH and
 the reporter only borrows the descriptor. That keeps the type trivially
 `Copyable, Movable` (an fd is an integer) with no double-close hazard.
 
-The write and open/close primitives go through `external_call` against libc,
+The write and create/close primitives go through `external_call` against libc,
 matching the stdlib's own `write` declaration (an opaque byte pointer) so the
 same symbol is not declared twice in one binary — the identical rule `tty.mojo`
 follows for `isatty`. Each is documented with a `# SAFETY:` comment.
@@ -42,16 +42,11 @@ from mtest.model import Event
 from mtest.report.json_stream import serialize_event, stream_header
 from mtest.report.reporter import Reporter
 
-# Open flags for a report destination file: write-only, create if absent,
-# truncate an existing file. A live stream cannot rename atomically (JUnit will
-# differ), so a pre-existing destination is overwritten at session start. The
-# create/truncate bit values are platform ABI: Linux uses 0100/01000, Darwin
-# uses 0x0200/0x0400. `O_WRONLY` (1), the create mode, and `EINTR` (4) are the
-# same on both. Selected at compile time so the emitted binary carries only its
-# target's values.
-comptime _O_WRONLY = 1
-comptime _O_CREAT = 0x0200 if CompilationTarget.is_macos() else 0o100
-comptime _O_TRUNC = 0x0400 if CompilationTarget.is_macos() else 0o1000
+# A live stream cannot rename atomically (JUnit differs), so `creat(2)` opens
+# write-only, creates when absent, and truncates an existing destination at
+# session start. Darwin's `mode_t` is UInt16; Linux's is UInt32. Select the exact
+# fixed-parameter ABI at compile time: unlike variadic `open(2)`, `creat` does
+# not put the mode argument in Darwin arm64's variadic stack area.
 comptime _CREATE_MODE = 0o644
 comptime _EINTR = 4
 """`errno` for an interrupted syscall — a `write` to retry, not a failure."""
@@ -62,7 +57,7 @@ def _errno_now() -> Int:
 
     Reads the thread-local errno slot through the platform accessor —
     `__errno_location` on Linux (glibc), `__error` on Darwin — chosen at compile
-    time. Only called immediately after a failed `write`/`open` to capture the
+    time. Only called immediately after a failed `write`/`creat` to capture the
     cause.
     """
     comptime if CompilationTarget.is_macos():
@@ -115,27 +110,39 @@ def open_json_fd(path: String) raises -> Int:
     resolves that to the internal-error exit code, a pre-run environment failure.
 
     Raises:
-        Error: if `open(2)` failed; the message names the errno.
+        Error: if `creat(2)` failed; the message names the errno.
     """
     var c = _cstring(path)
-    # SAFETY: libc `open` has the ABI `int open(const char*, int, mode_t)`. `c`
-    # is a complete NUL-terminated byte copy this call uniquely owns; the
-    # borrowed pointer stays valid for the whole synchronous call (`c` is used
-    # again just below), and `open` retains no pointer. The result is a scalar fd.
-    var fd = external_call["open", Int32](
-        c.unsafe_ptr().bitcast[NoneType](),
-        Int32(_O_WRONLY | _O_CREAT | _O_TRUNC),
-        Int32(_CREATE_MODE),
-    )
-    _ = c^
+    var fd: Int32
+    comptime if CompilationTarget.is_macos():
+        # SAFETY: Darwin libc `creat` has the fixed ABI
+        # `int creat(const char*, mode_t)` with a UInt16 `mode_t`. `c` is a
+        # complete NUL-terminated byte copy this call uniquely owns; its pointer
+        # stays valid for the synchronous call, and `creat` retains nothing. The
+        # result is a scalar fd.
+        fd = external_call["creat", Int32](
+            c.unsafe_ptr().bitcast[NoneType](), UInt16(_CREATE_MODE)
+        )
+    else:
+        # SAFETY: Linux libc `creat` has the fixed ABI
+        # `int creat(const char*, mode_t)` with a UInt32 `mode_t`. `c` is a
+        # complete NUL-terminated byte copy this call uniquely owns; its pointer
+        # stays valid for the synchronous call, and `creat` retains nothing. The
+        # result is a scalar fd.
+        fd = external_call["creat", Int32](
+            c.unsafe_ptr().bitcast[NoneType](), UInt32(_CREATE_MODE)
+        )
     if Int(fd) < 0:
+        var err = _errno_now()
+        _ = c^
         raise Error(
             "exec: could not open --json destination '"
             + path
             + "' (errno "
-            + String(_errno_now())
+            + String(err)
             + ")"
         )
+    _ = c^
     return Int(fd)
 
 

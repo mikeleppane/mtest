@@ -9,6 +9,7 @@ and turns every later `handle` into a no-op, and that an inert reporter writes
 nothing at all.
 """
 from std.os import getenv
+from std.tempfile import mkdtemp
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.model import Event, Summary
@@ -44,8 +45,10 @@ def _lines(content: String) -> List[String]:
     return out^
 
 
-def test_header_is_emitted_first_on_construction() raises:
-    var path = _scratch("header.ndjson")
+def test_created_destination_is_readable_with_header_first() raises:
+    # The path must be absent so this exercises the create-mode ABI, not merely
+    # O_TRUNC on a file whose existing permissions hide a bad mode argument.
+    var path = mkdtemp() + "/created.ndjson"
     var fd = open_json_fd(path)
     var rep = JsonStreamReporter(fd, "0.4.0", True)
     _ = close_json_fd(fd)
