@@ -1,7 +1,8 @@
 """Known-outcome fixture: a test that aborts the process mid-suite.
 
 Verdict CRASH, exit-class 1. Death is by signal, not a nonzero exit: `abort`
-raises SIGILL (signal 4), so the runner reports CRASH — a different event from a
+raises the target trap — SIGILL (signal 4) on linux-64/x86_64 and SIGTRAP
+(signal 5) on osx-arm64 — so the runner reports CRASH, a different event from a
 FAIL. The abort message is MANDATORY: a bare `abort()` emits no ABORT line and
 the crash has nothing to anchor on.
 """

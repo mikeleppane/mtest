@@ -285,9 +285,11 @@ Accumulated the hard way; append as later phases teach more.
 - **`mojo run` masks crash exit codes to 1** and can JIT-crash in CI, so it never
   appears in the gate. The runner and this repo's own `test` task both build a
   binary and execute it directly — the only way a crashing process's signal
-  death is distinguishable from an assertion failure. A direct-executed abort
-  exits `132` at the shell (`128 + SIGILL(4)`); the transcript generator records
-  the raw signal number structurally (`termination: signal 4`), never `132`.
+  death is distinguishable from an assertion failure. On linux-64/x86_64 a
+  direct-executed `std.os.abort` exits `132` at the shell (`128 + SIGILL(4)`),
+  while on osx-arm64 the target trap is SIGTRAP(5). The Linux-only transcript
+  generator records the raw signal number structurally (`termination: signal
+  4`), never `132`.
 - **`mojo build` bakes the ABSOLUTE canonicalized source path** into every
   location line (`Running … for <path>`, `At <path>:…`, `ABORT: <path>:…`), even
   when built with a repo-relative path. Transcript portability therefore requires

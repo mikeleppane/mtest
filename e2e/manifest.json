@@ -76,7 +76,7 @@
       "exit_class": 1,
       "in_default_suite": true,
       "disposition": "NO_REPORT",
-      "rationale": "A test calls abort(\"simulated hard crash\"); the process dies by signal 4 (SIGILL). A crash is not a failure and stays a separate outcome; the parser is unconsulted."
+      "rationale": "A test calls abort(\"simulated hard crash\"); the process dies by the target trap: signal 4 (SIGILL) on linux-64/x86_64 and signal 5 (SIGTRAP) on osx-arm64. A crash is not a failure and stays a separate outcome; the parser is unconsulted."
     },
     "e2e/suite/test_zero.mojo": {
       "verdict": "PASS",
@@ -222,7 +222,7 @@
         "crash-attribution"
       ],
       "disposition": "NO_REPORT",
-      "rationale": "The ATTRIBUTED half of the crash-attribution honesty pair. test_boom aborts unconditionally (SIGILL), so the file CRASHes and the bounded isolation post-pass reproduces the crash with test_boom run alone and names it as the culprit. The two passing siblings give attribution something to exclude. The listed verdict is the whole-file one: CRASH, exit 1 \u2014 the SAME verdict the file gets whether or not attribution names anything, which is the doctrine this pair exists to pin."
+      "rationale": "The ATTRIBUTED half of the crash-attribution honesty pair. test_boom aborts unconditionally with the target trap (signal 4/SIGILL on linux-64/x86_64; signal 5/SIGTRAP on osx-arm64), so the file CRASHes and the bounded isolation post-pass reproduces the crash with test_boom run alone and names it as the culprit. The two passing siblings give attribution something to exclude. The listed verdict is the whole-file one: CRASH, exit 1 \u2014 the SAME verdict the file gets whether or not attribution names anything, which is the doctrine this pair exists to pin."
     },
     "e2e/attribution/test_order_dependent_crasher.mojo": {
       "verdict": "CRASH",

@@ -463,7 +463,9 @@ def _suite_tests(manifest: dict) -> dict:
 # death BY SIGNAL is driven. No scenario kills a `build` step with a signal —
 # that rule is exercised one step over, not directly.
 RESILIENCE_MATRIX = {
-    "run crash: abort/SIGILL": "default-suite",
+    "run crash: std.os.abort target trap (SIGILL x86_64 / SIGTRAP arm64)": (
+        "default-suite"
+    ),
     "run crash: SIGSEGV": "retries-flaky",
     "run timeout: polite exit inside the grace": "timeout",
     "run timeout: SIGKILL escalation past the grace": "timeout-escalation",
@@ -553,20 +555,27 @@ def s_default_suite(manifest: dict) -> str:
         if token == "COMPILE-ERROR":
             compile_error_files.append(rel)
 
-    # Standing pin: the crashing fixture dies by SIGILL (signal 4). mtest
-    # renders the terminating signal both as the bare number and named in words
-    # ("signal 4 — SIGILL, illegal instruction") on the verdict line, so a
-    # regression that changes the death signal OR drops the word-name is caught
-    # here rather than only by a one-time manual cross-check.
+    # Standing pin: std.os.abort lowers to the served target's trap instruction:
+    # SIGILL (signal 4) on linux-64/x86_64, SIGTRAP (signal 5) on osx-arm64.
+    # Require the exact number/name association on the verdict line, so neither a
+    # changed death signal nor lost word-name can hide behind a generic CRASH.
     expect(len(crash_lines) == 1, f"expected exactly one CRASH fixture, got {crash_lines}")
+    target = (sys.platform.lower(), os.uname().machine.lower())
+    abort_expectations = {
+        ("linux", "x86_64"): (int(signal.SIGILL), "SIGILL"),
+        ("darwin", "arm64"): (int(signal.SIGTRAP), "SIGTRAP"),
+    }
+    expect(
+        target in abort_expectations,
+        f"std.os.abort signal is not pinned for target {target[0]}/{target[1]}",
+    )
+    abort_signal, abort_name = abort_expectations[target]
+    expected_abort_detail = f"signal {abort_signal} — {abort_name},"
     for rel, line in crash_lines.items():
         expect(
-            "signal 4" in line,
-            f"CRASH verdict line for {rel} lost its signal-4 detail: {line!r}",
-        )
-        expect(
-            "SIGILL" in line,
-            f"CRASH verdict line for {rel} lost its worded signal name: {line!r}",
+            expected_abort_detail in line,
+            f"CRASH verdict line for {rel} lost its target-pinned detail "
+            f"{expected_abort_detail!r}: {line!r}",
         )
 
     # Standing pin: the compile-error fixture provokes a NAME-RESOLUTION error,
