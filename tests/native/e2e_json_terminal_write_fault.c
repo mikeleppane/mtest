@@ -1,6 +1,11 @@
 #define _GNU_SOURCE
 
+#if defined(__APPLE__)
+#include <mach-o/dyld-interposing.h>
+#else
 #include <dlfcn.h>
+#endif
+
 #include <errno.h>
 #include <stddef.h>
 #include <string.h>
@@ -8,15 +13,11 @@
 
 /*
  * Test-only write interposer for the real CLI E2E terminal-record failure.
- * It rejects only the exact JSON event marker; every other write delegates to
- * the next dynamic-library definition. This source is never linked into mtest.
+ * It rejects only the exact JSON event marker; every other write follows the
+ * platform interposition contract. This source is never linked into mtest.
  */
 
 static const char mtest_terminal_marker[] = "\"event\":\"session_finished\"";
-
-typedef ssize_t (*mtest_write_fn)(int, const void *, size_t);
-
-static mtest_write_fn mtest_real_write;
 
 static int mtest_contains_terminal_marker(const void *buffer, size_t count) {
     const unsigned char *bytes = buffer;
@@ -32,6 +33,24 @@ static int mtest_contains_terminal_marker(const void *buffer, size_t count) {
     }
     return 0;
 }
+
+#if defined(__APPLE__)
+
+static ssize_t mtest_faulting_write(int fd, const void *buffer, size_t count) {
+    if (mtest_contains_terminal_marker(buffer, count)) {
+        errno = EIO;
+        return -1;
+    }
+    return write(fd, buffer, count);
+}
+
+DYLD_INTERPOSE(mtest_faulting_write, write)
+
+#else
+
+typedef ssize_t (*mtest_write_fn)(int, const void *, size_t);
+
+static mtest_write_fn mtest_real_write;
 
 __attribute__((constructor)) static void mtest_resolve_real_write(void) {
     void *symbol = dlsym(RTLD_NEXT, "write");
@@ -54,18 +73,6 @@ static ssize_t mtest_faulting_write(int fd, const void *buffer, size_t count) {
     }
     return mtest_real_write(fd, buffer, count);
 }
-
-#if defined(__APPLE__)
-
-__attribute__((used)) static struct {
-    mtest_write_fn replacement;
-    mtest_write_fn replacee;
-} mtest_interpose_write __attribute__((section("__DATA,__interpose"))) = {
-    mtest_faulting_write,
-    write,
-};
-
-#else
 
 ssize_t write(int fd, const void *buffer, size_t count) {
     return mtest_faulting_write(fd, buffer, count);

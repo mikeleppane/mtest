@@ -632,6 +632,68 @@ def check_e2e_native_fixture_layout() -> None:
         )
 
 
+def check_e2e_interposer_source_policy() -> None:
+    """The write-fault fixture uses each platform's forwarding contract."""
+    source = Path(e2e_check.JSON_TERMINAL_WRITE_FAULT).read_text(encoding="utf-8")
+    include_split = (
+        "#if defined(__APPLE__)\n"
+        "#include <mach-o/dyld-interposing.h>\n"
+        "#else\n"
+        "#include <dlfcn.h>\n"
+        "#endif"
+    )
+    if include_split not in source:
+        raise AssertionError(
+            "E2E interposer must select dyld-interposing.h only on Darwin "
+            "and dlfcn.h only elsewhere"
+        )
+
+    split_marker = "#if defined(__APPLE__)"
+    platform_split = source.rsplit(split_marker, 1)
+    if len(platform_split) != 2:
+        raise AssertionError("E2E interposer lacks its platform implementation split")
+    apple_branch, separator, other_branch = platform_split[1].partition("#else")
+    if not separator:
+        raise AssertionError("E2E interposer platform split lacks a non-Darwin branch")
+
+    active_apple = re.sub(r"/\*.*?\*/", "", apple_branch, flags=re.DOTALL)
+    active_apple_lines = {
+        line.split("//", 1)[0].strip() for line in active_apple.splitlines()
+    }
+    apple_required = {
+        "return write(fd, buffer, count);",
+        "DYLD_INTERPOSE(mtest_faulting_write, write)",
+    }
+    apple_forbidden = (
+        "RTLD_NEXT",
+        "mtest_real_write",
+        "__interpose",
+        "ssize_t write(int fd, const void *buffer, size_t count)",
+    )
+    other_required = (
+        "__attribute__((constructor))",
+        'dlsym(RTLD_NEXT, "write")',
+        "ssize_t write(int fd, const void *buffer, size_t count)",
+    )
+    if not apple_required.issubset(active_apple_lines):
+        raise AssertionError(
+            "Darwin E2E interposer must use DYLD_INTERPOSE and direct write "
+            "call-through"
+        )
+    if any(fragment in apple_branch for fragment in apple_forbidden):
+        raise AssertionError(
+            "Darwin E2E interposer contains Linux forwarding or a hand-rolled "
+            "interpose tuple"
+        )
+    if any(fragment not in other_branch for fragment in other_required):
+        raise AssertionError(
+            "non-Darwin E2E interposer must retain constructor-resolved "
+            "RTLD_NEXT forwarding"
+        )
+    if "DYLD_INTERPOSE" in other_branch:
+        raise AssertionError("non-Darwin E2E interposer contains Darwin forwarding")
+
+
 def check_e2e_interposer_command_topology() -> None:
     """The E2E write-fault interposer has exact target-specific build steps."""
     command_builder = getattr(
@@ -1238,6 +1300,7 @@ def main() -> int:
         check_suite_layout()
         check_exec_fixture_layout()
         check_e2e_native_fixture_layout()
+        check_e2e_interposer_source_policy()
         check_e2e_interposer_command_topology()
         check_e2e_interposer_failure_propagation()
         check_transcript_comparator()
