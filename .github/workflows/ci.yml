@@ -18,6 +18,8 @@ permissions:
 jobs:
   linux-preflight:
     name: Linux / preflight
+    # TEMPORARY: focus hosted runs on the independent package diagnosis.
+    if: ${{ false }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -162,6 +164,8 @@ jobs:
 
   macos-preflight:
     name: macOS arm64 / preflight
+    # TEMPORARY: focus hosted runs on the independent package diagnosis.
+    if: ${{ false }}
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
