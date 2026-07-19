@@ -30,6 +30,7 @@ Usage:  pixi run e2e        (builds the binary first, then runs this)
 
 from __future__ import annotations
 
+import fcntl
 import inspect
 import json
 import os
@@ -2611,6 +2612,137 @@ def s_json_truncation_dead_pipe(manifest: dict) -> str:
     return "dead pipe: fatal abort exit 3 (not 141), no orphan, clean partial stream"
 
 
+def _race_close_after_line(fd: int, marker: str, deadline: float) -> bool | None:
+    """Read `fd` and close it the INSTANT a committed line containing `marker`
+    is the last thing received, before anything after it has arrived.
+
+    Returns True when the close landed exactly there (the race was WON — the
+    producer's next write, if any, races against a fully closed read end),
+    False when `marker` appeared but more bytes (a further committed line, or
+    even a trailing partial one) had already arrived by the time this noticed
+    (the race was LOST — that later write, if any, already had a live reader
+    and cannot be blamed on this close), or None on EOF/timeout before
+    `marker` was ever seen.
+
+    A blocking `select()` wakeup is too slow for this: the producer's next
+    write can land before the scheduler even resumes the waiting reader. The
+    descriptor is put in NONBLOCKING mode and polled in a tight loop instead,
+    so the read reacts to newly arrived bytes as fast as this process can spin
+    — the only mechanism that reliably closes ahead of a producer's very next
+    write rather than after it.
+    """
+    fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+    buf = bytearray()
+    while time.monotonic() < deadline:
+        try:
+            chunk = os.read(fd, 65536)
+        except BlockingIOError:
+            continue
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        buf += chunk
+        text = buf.decode("utf-8", "replace")
+        ends_clean = text.endswith("\n")
+        committed = text.split("\n")[:-1]
+        if not committed:
+            continue
+        if marker in committed[-1]:
+            if ends_clean:
+                os.close(fd)
+                return True
+            # The marker line is committed but a further, still-partial line
+            # has already started arriving — too late.
+            os.close(fd)
+            return False
+        if any(marker in line for line in committed):
+            os.close(fd)
+            return False
+    return None
+
+
+def s_json_terminal_write_failure(manifest: dict) -> str:
+    """The terminal record's OWN write can fail too — after the exit code was
+    already resolved. `session_finished` is dispatched AFTER Phase 1 resolves
+    `code`, and that dispatch is itself a stream write: a consumer that reads
+    through the last `file_finished` line and closes its read end right then
+    (before the writer reaches the terminal line) makes that write EPIPE,
+    exactly as a `--json -` consumer that stops reading the instant it has
+    everything it needs, or a file destination that hits ENOSPC precisely on
+    the terminal line. The fixture run here is a clean all-pass file — a
+    plain exit 0 for anyone who never saw the pipe close — so a process that
+    still exits 0 on a provably torn stream is a false success.
+
+    A tiny run fits the 64 KiB pipe buffer whole, so closing only AFTER the
+    terminal record has already rendered would never reproduce the race (the
+    write already succeeded against a still-open, merely unread, pipe) — the
+    reader must close while the LAST thing it has seen is `file_finished`,
+    with nothing after it yet. `_race_close_after_line` is timing-sensitive by
+    nature (it is racing an internal write this process cannot observe
+    directly), so a handful of fresh attempts are given: losing the race just
+    means the run completed normally (exit 0, a healthy complete stream) and
+    proves nothing either way, so that attempt is discarded and retried
+    fresh, never counted as a scenario failure by itself."""
+    if not os.path.exists(MTEST):
+        raise ScenarioError(f"binary not found at {MTEST}; run `pixi run build-bin`")
+    rel = "e2e/suite/test_passing.mojo"
+    argv = [MTEST, rel, "--json", "-", "--gh-annotations", "off"]
+
+    attempts = 8
+    for attempt in range(attempts):
+        proc = subprocess.Popen(
+            argv, cwd=REPO_ROOT, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+        pgid = os.getpgid(proc.pid)
+        fd = proc.stdout.fileno()
+        won = _race_close_after_line(
+            fd, '"event":"file_finished"', time.monotonic() + SHORT_TIMEOUT
+        )
+        try:
+            proc.wait(timeout=DEFAULT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            _kill_group(proc)
+            proc.wait()
+            raise ScenarioError(
+                f"mtest did not exit after its stream pipe closed (attempt "
+                f"{attempt})"
+            )
+        finally:
+            if proc.poll() is None:
+                _kill_group(proc)
+        if won:
+            expect(
+                proc.returncode == 3,
+                f"a terminal-write EPIPE after a clean all-pass run must "
+                f"escalate to exit 3 (the pre-dispatch code was 0), got "
+                f"{proc.returncode} — the exit code silently escaped the "
+                f"torn stream",
+            )
+            time.sleep(0.5)
+            orphan = True
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                orphan = False
+            expect(
+                not orphan,
+                f"process group {pgid} still alive after fatal abort (orphan)",
+            )
+            return (
+                f"terminal-record EPIPE after a clean run escalates 0 -> "
+                f"exit 3 (attempt {attempt + 1}/{attempts}), no orphan"
+            )
+        # The race was lost (or never reproduced) this attempt: a fresh
+        # process, tried again, up to the attempt ceiling.
+    raise ScenarioError(
+        f"never won the close-before-terminal-write race in {attempts} "
+        f"attempts — the reproduction is not landing on this machine"
+    )
+
+
 def s_junit_schema_gate(manifest: dict) -> str:
     """`--junit-xml PATH` writes a document that PASSES the junit-10 oracle
     (schema + arithmetic), including a flaky suite in chronological order and a
@@ -3041,6 +3173,7 @@ SCENARIOS = [
     ("json-truncation-interrupt", s_json_truncation_interrupt),
     ("json-truncation-sigkill", s_json_truncation_sigkill),
     ("json-truncation-dead-pipe", s_json_truncation_dead_pipe),
+    ("json-terminal-write-failure", s_json_terminal_write_failure),
     ("junit-schema-gate", s_junit_schema_gate),
     ("junit-determinism", s_junit_determinism),
     ("junit-prior-report-intact", s_junit_prior_report_intact),

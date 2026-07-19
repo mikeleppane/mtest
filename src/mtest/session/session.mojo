@@ -3809,6 +3809,31 @@ def run_session[
             flaky_files=flaky_files,
         )
     )
+
+    # The dispatch just above is ITSELF a stream write, and can latch a NEW
+    # failure during that very write (a `--json -` consumer that closes its
+    # read end right after `file_finished`; a file destination that hits
+    # ENOSPC exactly on the terminal line) — a failure `stream_dead` above
+    # could not have seen, because it did not exist yet. Re-poll the SAME
+    # latch Phase 1 already polls; if it is now set and was not already
+    # folded into `stream_dead`, re-resolve with the pure function again,
+    # passing the SAME interrupt/error/drift/precompile/outcome inputs (a
+    # finalization-phase interrupt still must not move the code — only the
+    # terminal-write outcome does) and `terminal_write_failed=True`. The same
+    # precedence applies: a resolved 2 still stands, a resolved 3 stays 3, a
+    # resolved 0/1/5 escalates to 3. The already-attempted terminal record
+    # (torn or absent on the now-dead stream) is the consumer's truncation
+    # signal; the EXIT CODE is the out-of-band signal and must not lie about
+    # it by returning the code resolved before the stream died.
+    if not stream_dead and _stream_failed[stream_index](reporter):
+        code = _resolve_terminal_code(
+            interrupt_latched,
+            internal_error,
+            drift,
+            precompile_failed,
+            outcome_code,
+            True,
+        )
     return code
 
 
