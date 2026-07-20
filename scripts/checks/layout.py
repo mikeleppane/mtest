@@ -337,7 +337,6 @@ REGISTRATION_RE = re.compile(
 README_SCAN_EXCLUDED_DIRS = {
     ".git",
     ".pixi",
-    ".superpowers",
     "build",
     "notes",
 }
