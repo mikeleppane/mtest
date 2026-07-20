@@ -52,10 +52,11 @@ replace the two-model gate, they prepare for it.
 
 ## Before reading a line
 
-1. **Reproduce the floor.** Run the chain yourself, in order: `pixi run
-   fmt-check`, `pixi run build`, `pixi run transcripts-check`, `pixi run test` —
-   or `pixi run ci`, which is the same chain, fail-fast (AGENTS.md defines it). A
-   red gate is finding #1 — stop and report it, and name *which* stage went red (a
+1. **Reproduce the floor.** Run `pixi run ci`, the canonical fail-fast chain:
+   preflight, exhaustive `test`, the three-probe `dogfood-check`, then `e2e`
+   (AGENTS.md defines the exact membership). Use `pixi run test-file -- PATH`
+   only as the focused reproducer while investigating. A red gate is finding #1
+   — stop and report it, and name *which* stage went red (a
    byte diff in `transcripts-check` and a test failure indict different things —
    see axes 2 and 1). *Exception:* for a **docs-only diff** (Markdown,
    docstrings, comments — nothing under `src/`, `tests/`, or `scripts/`), a

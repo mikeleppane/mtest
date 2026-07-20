@@ -39,11 +39,11 @@ CI_PREFLIGHT_TASKS = [
     "junit-render-check",
     "transcripts-check",
 ]
-CI_TASKS = ["ci-preflight", "test-direct", "test", "e2e"]
+CI_TASKS = ["ci-preflight", "test", "dogfood-check", "e2e"]
 CI_FLOOR_TASKS = {
     *CI_PREFLIGHT_TASKS,
-    "test-direct",
     "test",
+    "dogfood-check",
     "e2e",
 }
 
@@ -51,7 +51,7 @@ LINUX_MATRIX_ROWS = [
     {
         "runner": "ubuntu-24.04",
         "lane": "direct tests",
-        "task": "test-direct",
+        "task": "test",
         "libc_debug": "false",
         "safety_artifact": "false",
         "artifact_name": "none",
@@ -60,7 +60,7 @@ LINUX_MATRIX_ROWS = [
     {
         "runner": "ubuntu-24.04",
         "lane": "self-hosted tests",
-        "task": "test",
+        "task": "dogfood-check",
         "libc_debug": "false",
         "safety_artifact": "false",
         "artifact_name": "none",
@@ -98,7 +98,7 @@ MACOS_MATRIX_ROWS = [
     {
         "runner": "macos-15",
         "lane": "direct tests",
-        "task": "test-direct",
+        "task": "test",
         "libc_debug": "false",
         "safety_artifact": "false",
         "artifact_name": "none",
@@ -107,7 +107,7 @@ MACOS_MATRIX_ROWS = [
     {
         "runner": "macos-15",
         "lane": "self-hosted tests",
-        "task": "test",
+        "task": "dogfood-check",
         "libc_debug": "false",
         "safety_artifact": "false",
         "artifact_name": "none",
@@ -239,8 +239,10 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
             f"expected={expected_harness_command!r}, "
             f"actual={tasks.get('harness-check')!r}"
         )
+    if "test-direct" in tasks:
+        raise AssertionError("obsolete test-direct Pixi alias still exists")
     expected_classified_tasks = {
-        "test-direct": (
+        "test": (
             "python -m scripts.harness.classified tests/unit tests/integration"
         ),
         "test-unit": "python -m scripts.harness.classified tests/unit",
@@ -255,6 +257,15 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
                 f"{name} classified task command mismatch: "
                 f"expected={command!r}, actual={tasks.get(name)!r}"
             )
+    expected_dogfood = {
+        "cmd": "python -m scripts.harness.dogfood",
+        "depends-on": ["build-bin"],
+    }
+    if tasks.get("dogfood-check") != expected_dogfood:
+        raise AssertionError(
+            "dogfood-check task mismatch: "
+            f"expected={expected_dogfood!r}, actual={tasks.get('dogfood-check')!r}"
+        )
     preflight = _task_dependencies(tasks, "ci-preflight")
     if preflight != CI_PREFLIGHT_TASKS:
         raise AssertionError(

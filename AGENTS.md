@@ -176,36 +176,40 @@ pixi run junit-check       # validate the committed JUnit oracle and checker
 pixi run build             # the package-compiles gate
 pixi run junit-render-check# validate bytes emitted by the real JUnit reporter
 pixi run transcripts-check # regenerate to a temp dir and diff byte-for-byte
-pixi run test-direct       # compile the exhaustive inventory into one direct-run binary
-pixi run test              # run focused dogfood probes through the built mtest binary
+pixi run test              # compile the exhaustive inventory into one direct-run binary
+pixi run dogfood-check     # run three focused probes through the built mtest binary
 pixi run e2e               # exact CLI exits and output against e2e/manifest.json
 ```
 
 `pixi run ci-preflight` chains `version-check -> fmt-check -> harness-check ->
 safety-check -> postfork-check -> native-check -> junit-check -> build ->
 junit-render-check -> transcripts-check` in that exact fail-fast order. The
-canonical local `pixi run ci` remains serial: `ci-preflight -> test-direct ->
-test -> e2e`. Hosted CI runs the same logical floor with two platform-local
-chains: Linux preflight releases fail-fast `test-direct`, `test`, `e2e`, ASan,
-and Valgrind cells; macOS preflight releases `test-direct`, `test`, and `e2e`
+canonical local `pixi run ci` remains serial: `ci-preflight -> test ->
+dogfood-check -> e2e`. Hosted CI runs the same logical floor with two
+platform-local chains: Linux preflight releases fail-fast `test`,
+`dogfood-check`, `e2e`, ASan, and Valgrind cells; macOS preflight releases
+`test`, `dogfood-check`, and `e2e`
 cells with `fail-fast: false` so a failing lane does not cancel its siblings.
 Every Linux and macOS lane remains a blocking check. The Linux
 package-consumption job remains independent. Memory safety therefore runs on
 every pull request and configured-main-branch push, not on a schedule. Neither
-platform waits for the other platform's preflight.
+platform waits for the other platform's preflight. The matrix lane display
+values `direct tests` and `self-hosted tests` are externally configured required
+check names and stay stable even though their task fields are `test` and
+`dogfood-check`.
 
 `native-check` depends on `postfork-check`, so invoking the native gate alone
-cannot omit the recurring child call-graph audit. `test-direct` generates one
+cannot omit the recurring child call-graph audit. `test` generates one
 explicit entrypoint that registers every test function in the classified
 unit/integration inventory, builds it once, and executes that aggregate binary
-directly. `test` sends three standalone probes through the built mtest binary,
-covering its real discover/build/run/parse/report path without recompiling the
-exhaustive inventory per file. Neither gate uses `mojo run`, because it masks
-crash exit codes to 1. Transcripts, ASan/Valgrind, and packaged artifact
-consumption remain Linux-only. The workflow requires macOS native/build smoke
-plus the full direct, dogfood, and end-to-end behavioral inventory; the README
-must keep executed evidence at build/link/`--help` until those hosted behavioral
-cells first pass.
+directly. `dogfood-check` sends three standalone probes through the built mtest
+binary, covering its real discover/build/run/parse/report path without
+recompiling the exhaustive inventory per file. Neither gate uses `mojo run`,
+because it masks crash exit codes to 1. Transcripts, ASan/Valgrind, and packaged
+artifact consumption remain Linux-only. The workflow requires macOS
+native/build smoke plus the full direct, dogfood, and end-to-end behavioral
+inventory; the README must keep executed evidence at build/link/`--help` until
+those hosted behavioral cells first pass.
 
 Classified modules under `tests/unit/` and `tests/integration/` are import-only:
 they declare `test_*` functions and MUST NOT declare `main()`. The generator
@@ -289,7 +293,7 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `report` | `src/mtest/report` (event consumers, reporters) |
 | `cli` | `src/mtest/cli` (arg parsing, main) |
 | `cache` | in-session build/collection reuse |
-| `test` | test infrastructure (`scripts/harness/classified.py`, `scripts/build/mojo_package.sh`, shared helpers) |
+| `test` | test infrastructure (`scripts/harness/{classified,dogfood}.py`, `scripts/build/mojo_package.sh`, shared helpers) |
 | `e2e` | end-to-end harness (`scripts/e2e/`) and its `e2e/` manifest and scenarios |
 | `bench` | `benchmarks/` |
 | `docs` | docstrings, `docs/` |

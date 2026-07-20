@@ -7,7 +7,7 @@ small executable probes through the real ``build/mtest`` binary. That keeps
 coverage of mtest's discover/build/run/parse/report path without asking mtest
 to compile the exhaustive suite one source file at a time.
 
-Usage:  pixi run test
+Usage:  pixi run dogfood-check
         python -m scripts.harness.dogfood
 """
 

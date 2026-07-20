@@ -40,7 +40,7 @@ Two techniques defeat it, and the validator is built on them:
 - After any change to `cli`, `discover`, `select`, `session`, `protocol`, or
   `report` — confirm no user-facing promise regressed.
 
-Not for: internal unit correctness (`pixi run test-direct`) or protocol-snapshot
+Not for: internal unit correctness (`pixi run test`) or protocol-snapshot
 drift (`pixi run transcripts-check`).
 
 ## Quick start — run the oracle
@@ -172,7 +172,8 @@ Severity by user impact: silent-wrong > wrong-exit-code > confusing-output.
 
 ## Complementary gates (do not reinvent)
 
-`pixi run e2e` (known-outcome fixture tree), `pixi run test-direct` (Mojo unit +
-integration), `pixi run transcripts-check` (protocol pin). This skill is the
+`pixi run e2e` (known-outcome fixture tree), `pixi run test` (exhaustive Mojo
+unit + integration), `pixi run dogfood-check` (three focused real-pipeline
+probes), and `pixi run transcripts-check` (protocol pin). This skill is the
 black-box, user-perspective layer **on top** of those; if it and `e2e` ever
 disagree about a promise, that disagreement is itself a finding.

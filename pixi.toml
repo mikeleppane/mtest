@@ -169,13 +169,13 @@ transcripts-check = "python -m scripts.checks.protocol_snapshots"
 # `pixi run contract-check -- --strict`.
 contract-check = "python -m scripts.qa.contract"
 
-# The INDEPENDENT exhaustive gate: generates one explicit entrypoint for every
+# The conventional exhaustive test gate: generates one explicit entrypoint for every
 # unit/integration test function, builds it once, and executes that aggregate
 # binary directly with no mtest involved. `mojo run` never appears in the gate
 # because it masks crash exit codes to 1. A focused path can be passed through
 # `pixi run test-file -- tests/unit/test_model_outcome.mojo` when investigating
 # a failure.
-test-direct = "python -m scripts.harness.classified tests/unit tests/integration"
+test = "python -m scripts.harness.classified tests/unit tests/integration"
 test-unit = "python -m scripts.harness.classified tests/unit"
 test-integration = "python -m scripts.harness.classified tests/integration"
 test-file = "python -m scripts.harness.classified"
@@ -188,10 +188,10 @@ harness-check = "python -m scripts.tests.test_aggregate && python -m scripts.tes
 # DOGFOOD gate: run three focused executable probes through the built mtest
 # binary. This exercises mtest's real discover/build/run/parse/report path and
 # checks exact header/PASS-row membership independently of mtest. The exhaustive
-# 913-test inventory belongs to test-direct's single aggregate binary; compiling
+# 913-test inventory belongs to test's single aggregate binary; compiling
 # all source files separately here would duplicate compiler work without adding
 # behavioral coverage.
-[tasks.test]
+[tasks.dogfood-check]
 cmd = "python -m scripts.harness.dogfood"
 depends-on = ["build-bin"]
 
@@ -229,8 +229,8 @@ depends-on = [
 [tasks.ci]
 depends-on = [
     "ci-preflight",
-    "test-direct",
     "test",
+    "dogfood-check",
     "e2e",
 ]
 

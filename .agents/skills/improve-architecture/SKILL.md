@@ -240,10 +240,12 @@ not progress to applaud:)
      (or why the seam is now sealed).
    - **Migration** — the ordered atomic commits (`refactor(<scope>): …`), each
      green under `pixi run ci` on its own.
-   - **Risk & proof** — what could break, and the test that guards it. Call out
-     any AGENTS.md Ask-first boundary the refactor would cross (a CLI-contract or
-     public API rename → `!` commit; anything touching the transcript format or a
-     pin → confirm first).
+   - **Risk & proof** — what could break, and the test that guards it. The
+     conventional `pixi run test` is the exhaustive classified suite;
+     `dogfood-check` and `e2e` are separate proof when the real pipeline or CLI
+     boundary changes. Call out any AGENTS.md Ask-first boundary the refactor
+     would cross (a CLI-contract or public API rename → `!` commit; anything
+     touching the transcript format or a pin → confirm first).
    - **Explicitly out of scope** — what you are *not* changing, so the plan stays
      reviewable.
 

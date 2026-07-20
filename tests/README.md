@@ -31,9 +31,10 @@ errors, or intentionally malformed suites as ordinary product tests.
 Run the classified suites directly with:
 
 ```console
+$ pixi run test-file -- PATH
+$ pixi run test
 $ pixi run test-unit
 $ pixi run test-integration
-$ pixi run test-direct
 $ pixi run safety-check
 $ pixi run postfork-check
 $ pixi run native-check
@@ -41,9 +42,14 @@ $ pixi run asan-check
 $ pixi run valgrind-check
 ```
 
-`test-direct` is the aggregate independent executor. `pixi run test` is the
-separate self-hosted check that drives `build/mtest` over the same unit and
-integration suites, while `pixi run e2e` exercises the external CLI corpus.
+`pixi run test-file -- PATH` is the focused loop while coding. `pixi run test`
+is the exhaustive independent executor for every classified unit and
+integration module. Those classifications remain useful maintainer diagnostics
+through `test-unit` and `test-integration`; they are not required sequential
+local phases. `pixi run dogfood-check` separately drives three standalone
+probes through the real `build/mtest` pipeline, while `pixi run e2e` exercises
+the external CLI corpus after CLI, session, exec, or reporter behavior changes.
+Run `pixi run ci` before a PR.
 
 `asan-check` source-builds the adapter and the highest-risk exec suites with
 matching ASan/LSan instrumentation. It first proves that heap overflow,

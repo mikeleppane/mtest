@@ -1067,15 +1067,15 @@ the walking skeleton always had.
 
 The exhaustive source suite and the runner dogfood use complementary paths:
 
-- `pixi run test-direct` discovers all classified modules under `tests/unit/`
+- `pixi run test` discovers all classified modules under `tests/unit/`
   and `tests/integration/`, generates explicit `TestSuite` registrations for
   every `test_*` function, compiles one aggregate binary, and executes it
   directly. It covers 77 modules and 913 tests without invoking `mtest` or
   paying 77 separate compiler startups.
-- `pixi run test` builds the real `build/mtest` binary and sends three small,
-  standalone probes through its discover/build/run/parse/report pipeline. The
-  harness independently pins the exact probe paths and requires three PASS
-  rows, `selected: 3`, `excluded: 0`, and process exit 0.
+- `pixi run dogfood-check` builds the real `build/mtest` binary and sends three
+  small, standalone probes through its discover/build/run/parse/report
+  pipeline. The harness independently pins the exact probe paths and requires
+  three PASS rows, `selected: 3`, `excluded: 0`, and process exit 0.
 
 Both paths build native binaries and execute them directly; neither uses
 `mojo run`. A focused aggregate keeps failures easy to reproduce:
@@ -1094,7 +1094,7 @@ The focused dogfood run used by both the source-checkout and installed-package
 gates is intentionally small:
 
 ```console
-$ pixi run test
+$ pixi run dogfood-check
 root: /checkout/mtest   selected: 3 files   excluded: 0
 
 PASS           tests/dogfood/exec_probe.mojo
@@ -1273,22 +1273,43 @@ are pinned in [pixi.toml](pixi.toml).
 
 ```console
 $ pixi install                 # locked local environment setup
-$ pixi run ci                  # ci-preflight -> test-direct -> test -> e2e
 ```
 
-`pixi run ci` is the canonical serial local floor. `ci-preflight` runs the
-version, formatting, harness, safety, post-fork, native, JUnit, build, rendered-
-JUnit, and transcript checks in fail-fast order before the three behavioral
-gates above.
+The normal contributor workflow is:
+
+```console
+$ pixi run fmt
+$ pixi run test-file -- PATH
+$ pixi run test
+$ pixi run e2e
+$ pixi run ci
+```
+
+Use the focused file command while coding. After an internal change, `test`
+runs every classified unit and integration test in one aggregate binary. Run
+`e2e` after CLI, session, exec, or reporter behavior changes, and run `ci`
+before opening a PR. Unit and integration remain meaningful classifications
+and useful maintainer diagnostics through `test-unit` and `test-integration`;
+they are not mandatory sequential local phases.
+
+`pixi run ci` is the canonical serial local floor: `ci-preflight -> test ->
+dogfood-check -> e2e`. `ci-preflight` runs the version, formatting, harness,
+safety, post-fork, native, JUnit, build, rendered-JUnit, and transcript checks
+in fail-fast order. `dogfood-check` is the separate three-probe real-pipeline
+check, not the exhaustive suite. Specialized safety, native, memory,
+transcript, JUnit, package, and contract gates remain independent maintainer,
+hosted-CI, or release-QA tools.
 
 GitHub preserves the same logical floor without serializing independent work.
-Linux preflight releases separate fail-fast `test-direct`, dogfood `test`,
-`e2e`, ASan/LSan, and Valgrind cells; macOS preflight independently releases
-configured `test-direct`, `test`, and `e2e` cells. The Linux package-consumption
-job starts independently. Memory safety therefore runs on every pull request,
-configured `main`/`master` push, and manual workflow invocation, with no
-scheduled memory-safety workflow. Hosted macOS direct and dogfood cells have
-passed; the end-to-end cell remains the outstanding behavioral proof.
+Linux preflight releases separate fail-fast exhaustive `test`,
+`dogfood-check`, `e2e`, ASan/LSan, and Valgrind cells; macOS preflight
+independently releases configured `test`, `dogfood-check`, and `e2e` cells.
+Their externally configured lane display names remain `direct tests` and
+`self-hosted tests`. The Linux package-consumption job starts independently.
+Memory safety therefore runs on every pull request, configured `main`/`master`
+push, and manual workflow invocation, with no scheduled memory-safety workflow.
+Hosted macOS direct and dogfood cells have passed; the end-to-end cell remains
+the outstanding behavioral proof.
 
 Individually:
 
@@ -1305,9 +1326,9 @@ Individually:
 | `pixi run transcripts-check` | regenerate to a temp dir and diff byte-for-byte — the protocol pin |
 | `pixi run test-unit` | compile the unit modules into one aggregate binary and execute it directly |
 | `pixi run test-integration` | compile the integration modules into one aggregate binary and execute it directly |
-| `pixi run test-direct` | generate, build, and directly execute one aggregate binary containing all 77 classified modules and 913 tests, with no `mtest` involved |
 | `pixi run test-file -- PATH` | generate, build, and directly execute a focused aggregate for one classified module |
-| `pixi run test` | run three focused probes through `build/mtest`, requiring exact independent header and PASS-row membership |
+| `pixi run test` | generate, build, and directly execute one aggregate binary containing all 77 classified modules and 913 tests, with no `mtest` involved |
+| `pixi run dogfood-check` | run three focused probes through `build/mtest`, requiring exact independent header and PASS-row membership |
 | `pixi run e2e` | build `build/mtest`, then drive it against `e2e/` and assert exact exit codes and console structure |
 | `pixi run asan-check` | on Linux, prove live OOB/UAF/leak controls are detected and source-build the highest-risk exec suites with ASan/LSan; this is risk-weighted coverage, not a whole-program proof |
 | `pixi run valgrind-check` | on Linux, prove Memcheck controls and source-build the exec/native coverage under the pinned Valgrind binary; it does not prove all paths leak- or corruption-free |
@@ -1321,7 +1342,8 @@ fails if the package is unavailable, libc changes, or the versions differ. The
 independent package lane has the separate external-channel contract described
 under [Installation](#installation); neither exception makes its job hermetic.
 
-See [Self-hosting](#self-hosting) for how `test` and `test-direct` relate.
+See [Self-hosting](#self-hosting) for how the exhaustive `test` gate and focused
+`dogfood-check` relate.
 
 The protocol snapshots are the project's contract with the toolchain: a red
 `transcripts-check` after a repository change indicts the change, not the

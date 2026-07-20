@@ -44,14 +44,19 @@ The rest of this skill is the project's *coding* contract on top of that syntax.
 Before any Mojo change is done:
 
 ```bash
-pixi run fmt   # mojo format — never hand-format, let the tool decide
-pixi run ci    # the aggregate gate, fail-fast (AGENTS.md defines the chain); the file you touched must be covered and green
+pixi run fmt                 # mojo format — never hand-format
+pixi run test-file -- PATH  # focused classified module while coding
+pixi run test                # every classified unit + integration test
+pixi run e2e                 # after CLI/session/exec/reporter behavior changes
+pixi run ci                  # complete fail-fast floor before a PR
 ```
 
 `mojo format` is the arbiter of layout. Don't argue with it in review — if it
 reformats your code, that's the house style. Remember tests run against the
 **precompiled package**: after a `src/` edit, `pixi run build` before running a
-single test file by hand, or the test exercises stale code.
+single test file by hand, or the test exercises stale code. `dogfood-check` is
+the separate three-probe real-pipeline gate; unit/integration tasks remain
+useful maintainer diagnostics rather than mandatory sequential phases.
 
 ---
 

@@ -84,7 +84,7 @@ CONDA_FORGE_CHANNEL = "conda-forge"
 # Artifacts stage 4 needs from THIS repo checkout (not from the isolated
 # rattler-build sandbox): the precompiled package the probes import against,
 # and the test-variant native object linked into each probe build -- the exact
-# pair scripts/harness/dogfood.py uses for `pixi run test`.
+# pair scripts/harness/dogfood.py uses for `pixi run dogfood-check`.
 MOJOPKG_INCLUDE_DIR = REPO_ROOT / "build"
 NATIVE_TEST_OBJECT = REPO_ROOT / "build" / "native" / "mtest_exec_native_test.o"
 
@@ -313,7 +313,7 @@ def stage_suite_run_with_installed_binary(mtest_bin: Path) -> None:
     children can resolve `mojo` on PATH.
 
     Reuses dogfood's membership-and-completeness gate, which
-    itself defaults to build/mtest for `pixi run test` -- here it is
+    itself defaults to build/mtest for `pixi run dogfood-check` -- here it is
     parameterized onto the installed binary instead.
     """
     _banner("stage 4/5 -- toolchain-threaded suite run with the INSTALLED binary")
