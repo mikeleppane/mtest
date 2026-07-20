@@ -10,9 +10,10 @@ of how the child then dies, and the kill targets the process group:
   not completion);
 - a grandchild that inherits the pipe is reached by the group kill.
 """
-from std.os import remove
+from std.os import remove, rmdir
 from std.os.path import exists
-from std.testing import assert_equal, assert_true, assert_false, TestSuite
+from std.tempfile import mkdtemp
+from std.testing import assert_equal, assert_true, assert_false
 
 from mtest.exec import ExecRuntime, ProcessSpec, run_supervised
 
@@ -76,9 +77,8 @@ def test_close_streams_then_hang_killed_by_deadline() raises:
 def test_group_kill_reaches_grandchild() raises:
     var runtime = ExecRuntime()
     runtime.open()
-    var sentinel = String("build/tests/grandchild_sentinel.txt")
-    if exists(sentinel):
-        remove(sentinel)
+    var scratch = mkdtemp()
+    var sentinel = scratch + "/grandchild_sentinel.txt"
     var argv = List[String]()
     argv.append(target("grandchild_spawner.py"))
     argv.append(sentinel)
@@ -92,8 +92,8 @@ def test_group_kill_reaches_grandchild() raises:
     wait.append("import time; time.sleep(3)")
     _ = run_supervised(runtime, ProcessSpec.command(wait^))
     runtime.close()
-    assert_false(exists(sentinel), "grandchild survived the group kill")
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()
+    var survived = exists(sentinel)
+    if survived:
+        remove(sentinel)
+    rmdir(scratch)
+    assert_false(survived, "grandchild survived the group kill")

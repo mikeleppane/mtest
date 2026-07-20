@@ -8,7 +8,7 @@ not match). The corruption pins then plant one defect at a time and assert which
 of OFF_GRAMMAR / AMBIGUOUS it lands in: a structural break a user cannot fake is
 OFF_GRAMMAR; a pattern a test's own stdout CAN produce is AMBIGUOUS.
 """
-from std.testing import assert_equal, assert_true, assert_false, TestSuite
+from std.testing import assert_equal, assert_true, assert_false
 
 from mtest.model import Outcome
 from mtest.protocol import ReportVerdict, parse_report
@@ -498,7 +498,3 @@ def test_fail_detail_header_lookalike_reconciles_valid() raises:
     assert_equal(len(r.rows), 1)
     assert_true(r.rows[0].outcome == Outcome.FAIL)
     assert_true("Running 1 tests for" in r.rows[0].detail)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

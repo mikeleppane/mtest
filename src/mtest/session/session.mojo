@@ -73,7 +73,14 @@ from mtest.protocol import (
     collection_disqualifier,
     collection_names,
 )
-from mtest.report import CompositeReporter, Reporter
+from mtest.report import (
+    AnnotationsReporter,
+    CompositeReporter,
+    JsonStreamReporter,
+    JunitFinalizeResult,
+    JunitReporter,
+    Reporter,
+)
 from mtest.select import (
     FileIntent,
     NamedTarget,
@@ -454,6 +461,13 @@ struct _AttemptResult(Copyable, Movable):
     """The resolved report the run's stdout was trusted to carry."""
     var cls: Classification
     """The TOTAL per-test classification of the run."""
+    var run_stdout_truncated: Bool
+    """Whether the run's captured stdout overflowed the capture bound (the
+    run-phase `ProcessResult`'s own flag, carried through to the file's
+    `FileFinished`; False when no run happened)."""
+    var run_stderr_truncated: Bool
+    """Whether the run's captured stderr overflowed the capture bound (as
+    `run_stdout_truncated`, but for stderr)."""
 
     @staticmethod
     def _internal(var e: Event) -> Self:
@@ -473,6 +487,8 @@ struct _AttemptResult(Copyable, Movable):
             0.0,
             TrustedReport(ParsedReport.absent(), False),
             _blank_classification(),
+            False,
+            False,
         )
 
     @staticmethod
@@ -493,6 +509,8 @@ struct _AttemptResult(Copyable, Movable):
             0.0,
             TrustedReport(ParsedReport.absent(), False),
             _blank_classification(),
+            False,
+            False,
         )
 
     @staticmethod
@@ -520,6 +538,8 @@ struct _AttemptResult(Copyable, Movable):
             0.0,
             TrustedReport(ParsedReport.absent(), False),
             _blank_classification(),
+            False,
+            False,
         )
 
     @staticmethod
@@ -529,6 +549,8 @@ struct _AttemptResult(Copyable, Movable):
         var run_stdout: List[UInt8],
         var run_stderr: List[UInt8],
         rdur: Float64,
+        run_stdout_truncated: Bool = False,
+        run_stderr_truncated: Bool = False,
     ) -> Self:
         """A RAN result for a selection run, so `_make_attempt_finished` can
         emit its TRY line. The selection path already built the binary in phase
@@ -549,6 +571,8 @@ struct _AttemptResult(Copyable, Movable):
             rdur,
             TrustedReport(ParsedReport.absent(), False),
             _blank_classification(),
+            run_stdout_truncated,
+            run_stderr_truncated,
         )
 
 
@@ -724,6 +748,8 @@ def _single_attempt(
         rdur,
         trusted^,
         cls^,
+        rres.stdout_truncated,
+        rres.stderr_truncated,
     )
 
 
@@ -1029,6 +1055,8 @@ def _finalize_attempt(
         flaky=flaky,
         escalated=escalated,
         slow=is_slow(att.bdur, att.rdur),
+        stdout_truncated=att.run_stdout_truncated,
+        stderr_truncated=att.run_stderr_truncated,
     )
     var fr = FileResult.classified(
         pre^,
@@ -1044,19 +1072,62 @@ def _finalize_attempt(
     return fr^
 
 
-def _finalize_exit_code(code: Int, interrupt_pending: Bool) -> Int:
-    """Let a late interrupt DOMINATE the already-resolved exit code.
+def _resolve_terminal_code(
+    interrupt_latched: Bool,
+    internal_error: Bool,
+    drift: Bool,
+    precompile_failed: Bool,
+    outcome_code: Int,
+    terminal_write_failed: Bool,
+) -> Int:
+    """Resolve the FINAL exit code from the run's latched flags. Pure.
 
-    The exit `code` is computed BEFORE the crash-attribution post-pass, from the
-    run-phase interrupt flag. An interrupt that ARRIVES during that pass (a
-    Ctrl-C mid-attribution) must still resolve to exit 2 — interrupt dominates,
-    consistent with the post-pass's own contract that exit 2 never waits on
-    diagnostics. An already-2 code is unchanged; every other code yields to a
-    pending interrupt. Pure.
+    The two-phase terminal protocol's Phase 2, resolved AROUND the unchanged
+    `exit_code_for` (whose result arrives as `outcome_code`). Two precedences
+    compose:
+
+    - The frozen §9 base precedence: an interrupt dominates (→ 2, above a
+      resolved internal error, because the run was truncated on purpose); else an
+      internal error or protocol drift is the internal-error tier (→ 3); else a
+      precompile failure (→ 1); else the pure outcome code (1/5/0).
+    - The terminal-write-failure precedence, applied last: a resolved 2 STANDS
+      (an interrupt is never displaced by a later I/O failure), a resolved 3
+      stays 3, and a resolved 0/1/5 ESCALATES to 3 when a terminal artifact
+      could not be delivered (a dead `--json` destination, or a JUnit report that
+      could not be published). The run's own 1/5/0 verdict is not authoritative
+      once its product could not be written.
+
+    Args:
+        interrupt_latched: Whether an interrupt was latched at Phase-1 entry (a
+            run-time interrupt, or one that arrived during crash attribution). A
+            later, finalization-phase interrupt is deliberately NOT reflected
+            here — it does not change the resolved code.
+        internal_error: Whether a spawn failure or machinery raise occurred.
+        drift: Whether any report drifted off the pinned grammar.
+        precompile_failed: Whether a precompile step failed.
+        outcome_code: The pure `exit_code_for` result over the run outcomes.
+        terminal_write_failed: Whether any terminal artifact failed to deliver (a
+            latched machine-stream write, or a failed JUnit finalization).
+
+    Returns:
+        The resolved process exit code. Does not raise.
     """
-    if interrupt_pending and code != 2:
+    var base: Int
+    if interrupt_latched:
+        base = 2
+    elif internal_error:
+        base = 3
+    elif drift:
+        base = 3
+    elif precompile_failed:
+        base = 1
+    else:
+        base = outcome_code
+    if base == 2:
         return 2
-    return code
+    if terminal_write_failed:
+        return 3
+    return base
 
 
 def _compile_crash_residual(
@@ -1503,12 +1574,17 @@ def _probe_terminal(
     signal_number: Int = 0,
     timeout_seconds: Int = 0,
     escalated: Bool = False,
+    stdout_truncated: Bool = False,
+    stderr_truncated: Bool = False,
 ) -> FileResult:
     """A file-level terminal FileResult for a probe that did not qualify.
 
     `escalated` is the probe `Termination`'s latched SIGKILL escalation, passed
     by the timeout caller so a probe killed at the deadline reads like every
-    other TIMEOUT verdict.
+    other TIMEOUT verdict. `stdout_truncated`/`stderr_truncated` are the
+    probe's own `ProcessResult` truncation booleans — the probe genuinely
+    executes the file's binary, so a truncated probe capture is real
+    truncation of that file's run.
     """
     var pre = List[Event]()
     if warning_kind != "":
@@ -1526,6 +1602,8 @@ def _probe_terminal(
         parse_disposition=disposition,
         escalated=escalated,
         slow=is_slow(bdur, 0.0),
+        stdout_truncated=stdout_truncated,
+        stderr_truncated=stderr_truncated,
     )
     var exits = List[Outcome]()
     if not is_drift:
@@ -1607,6 +1685,8 @@ def _probe_file(
                 pres.stderr_bytes.copy(),
                 False,
                 signal_number=pterm.value,
+                stdout_truncated=pres.stdout_truncated,
+                stderr_truncated=pres.stderr_truncated,
             ),
             False,
             False,
@@ -1629,6 +1709,8 @@ def _probe_file(
                 False,
                 timeout_seconds=config.timeout_secs,
                 escalated=pterm.escalated,
+                stdout_truncated=pres.stdout_truncated,
+                stderr_truncated=pres.stderr_truncated,
             ),
             False,
             False,
@@ -1662,6 +1744,8 @@ def _probe_file(
                 pres.stdout_bytes.copy(),
                 pres.stderr_bytes.copy(),
                 False,
+                stdout_truncated=pres.stdout_truncated,
+                stderr_truncated=pres.stderr_truncated,
             ),
             False,
             False,
@@ -1699,6 +1783,8 @@ def _probe_file(
                 pres.stdout_bytes.copy(),
                 pres.stderr_bytes.copy(),
                 True,
+                stdout_truncated=pres.stdout_truncated,
+                stderr_truncated=pres.stderr_truncated,
             ),
             False,
             False,
@@ -1723,6 +1809,8 @@ def _probe_file(
             pres.stdout_bytes.copy(),
             pres.stderr_bytes.copy(),
             False,
+            stdout_truncated=pres.stdout_truncated,
+            stderr_truncated=pres.stderr_truncated,
         ),
         False,
         False,
@@ -1945,6 +2033,8 @@ def _reconcile_and_classify(
         attempts_used=attempts_used,
         flaky=flaky,
         slow=is_slow(bdur, rdur),
+        stdout_truncated=term.stdout_truncated,
+        stderr_truncated=term.stderr_truncated,
     )
     return FileResult.classified(
         pre^,
@@ -2001,6 +2091,8 @@ def _run_terminal_file(
         attempts_used=attempts_used,
         escalated=escalated,
         slow=is_slow(bdur, rdur),
+        stdout_truncated=term.stdout_truncated,
+        stderr_truncated=term.stderr_truncated,
     )
     return FileResult.classified(
         pre^,
@@ -2045,6 +2137,8 @@ def _classified_terminal(
         deselected_tests=deselected_count,
         attempts_used=attempts_used,
         slow=is_slow(bdur, rdur),
+        stdout_truncated=term.stdout_truncated,
+        stderr_truncated=term.stderr_truncated,
     )
     return FileResult.classified(
         pre^,
@@ -2422,6 +2516,8 @@ def _run_selected_with_recovery(
                     rres.stdout_bytes.copy(),
                     rres.stderr_bytes.copy(),
                     rdur,
+                    rres.stdout_truncated,
+                    rres.stderr_truncated,
                 )
                 pre_stream.append(
                     _make_attempt_finished(
@@ -3173,8 +3269,110 @@ def _run_crash_attribution[
             return
 
 
+def _stream_failed[
+    stream_index: Int, *Rs: Reporter
+](ref reporter: CompositeReporter[*Rs]) -> Bool:
+    """Whether the stream reporter at `stream_index` has latched a write failure.
+
+    The composition order is FIXED by the caller (`main` builds the reporter
+    tuple as `(console, json_stream, junit)`), so `stream_index` names WHICH
+    tuple element is the concrete `JsonStreamReporter`. A comptime-known index
+    recovers that element by reference and binds a `Pointer[JsonStreamReporter,
+    …]` DIRECTLY to it — no `rebind`. That direct binding is a COMPILE-TIME type
+    assertion: if the index names an element that is not a `JsonStreamReporter`,
+    the binding fails to compile rather than reinterpreting the wrong type as UB.
+    (The prior code `rebind`-ed through the pointer, which would have silently
+    accepted a mis-index — the convention-only footgun this fixes.) The call
+    goes through the CONCRETE tuple element, never the trait pack, so
+    `CompositeReporter`, the `Reporter` trait, and `handle` stay untouched.
+    `stream_index < 0` means no stream reporter is composed (the session's own
+    test drivers, which pass a bare recording composite): the comptime branch is
+    elided, so those composites need no `status()` at all.
+    """
+    comptime if stream_index >= 0:
+        ref element = reporter.reporters[stream_index]
+        var probe: Pointer[JsonStreamReporter, origin_of(element)] = Pointer(
+            to=element
+        )
+        return probe[].status().failed
+    else:
+        return False
+
+
+def _junit_note_not_run[
+    junit_index: Int, *Rs: Reporter
+](mut reporter: CompositeReporter[*Rs], selected_paths: List[String]):
+    """Fan the terminal `[not-run]` synthesis to the concrete JUnit reporter.
+
+    Reaches the `JunitReporter` at the comptime `junit_index` DIRECTLY (a
+    `Pointer[JunitReporter, …]` bound to the element — the same compile-time type
+    assertion as `_stream_failed`) and calls its `note_not_run`, so an
+    interrupted or early-aborted run's report still carries a `[not-run]` row for
+    every selected file that never produced a verdict. This is a JUnit-only side
+    channel: the console and the JSON stream are UNTOUCHED (they never receive
+    synthetic NOT-RUN events), preserving the deliberate reporter asymmetry.
+    `junit_index < 0` (no JUnit reporter composed) elides the whole call.
+    """
+    comptime if junit_index >= 0:
+        ref element = reporter.reporters[junit_index]
+        var probe: Pointer[JunitReporter, origin_of(element)] = Pointer(
+            to=element
+        )
+        probe[].note_not_run(selected_paths)
+
+
+def _junit_finalize[
+    junit_index: Int, *Rs: Reporter
+](mut reporter: CompositeReporter[*Rs]) -> JunitFinalizeResult:
+    """Finalize the concrete JUnit reporter's artifact at the comptime index.
+
+    Reaches the `JunitReporter` DIRECTLY (the same compile-time type-checked
+    binding as `_stream_failed`) and calls its non-raising `finalize`: assemble
+    the spool in node-id order, verify-write the unique temp, and atomically
+    rename it onto the target PATH. Returns the finalize result so the session's
+    Phase 1 can collect and loudly report a finalization failure. An inert
+    reporter (no `--junit-xml`, or `junit_index < 0`) is a no-op success.
+    """
+    comptime if junit_index >= 0:
+        ref element = reporter.reporters[junit_index]
+        var probe: Pointer[JunitReporter, origin_of(element)] = Pointer(
+            to=element
+        )
+        return probe[].finalize()
+    else:
+        return JunitFinalizeResult(False, "")
+
+
+def annotation_lines[
+    ann_index: Int, *Rs: Reporter
+](ref reporter: CompositeReporter[*Rs]) -> List[String]:
+    """The rendered annotation tail from the concrete `AnnotationsReporter`.
+
+    Reaches the reporter at the comptime `ann_index` DIRECTLY (a
+    `Pointer[AnnotationsReporter, …]` bound to the element — the same
+    compile-time type assertion as `_stream_failed`/`_junit_finalize`: a wrong
+    index fails to COMPILE rather than reinterpret the wrong type) and returns
+    its `render()`. `main` calls this AFTER `run_session` returns — the whole
+    event stream, `SessionFinished` included, has been accumulated — and writes
+    the lines to stdout in the deterministic tail after the console summary band.
+    An inert reporter (annotations resolved off) renders an empty list;
+    `ann_index < 0` (none composed) elides the whole call. Never raises.
+    """
+    comptime if ann_index >= 0:
+        ref element = reporter.reporters[ann_index]
+        var probe: Pointer[AnnotationsReporter, origin_of(element)] = Pointer(
+            to=element
+        )
+        return probe[].render()
+    else:
+        return List[String]()
+
+
 def run_session[
-    *Rs: Reporter
+    stream_index: Int = -1,
+    junit_index: Int = -1,
+    ann_index: Int = -1,
+    *Rs: Reporter,
 ](
     mut runtime: ExecRuntime,
     config: RunnerConfig,
@@ -3186,8 +3384,13 @@ def run_session[
     Discovers the file set (a `discover:` usage error PROPAGATES — main maps it
     to exit 4), then emits `SessionStarted`, the loud excluded/stale-warning
     events, runs the precompile steps, the gates, and the run files in that
-    fixed order, and finally emits `SessionFinished` with the full summary. The
-    session emits events only; it prints nothing.
+    fixed order. It then runs the TWO-PHASE TERMINAL PROTOCOL: Phase 1 seals the
+    run accounting and finalizes each machine artifact (the JUnit report is
+    assembled, verify-written, and atomically renamed; a finalization failure is
+    collected and loudly reported), with interrupt linearization fixed at Phase-1
+    entry; Phase 2 resolves the final exit code per §9 and dispatches
+    `SessionFinished` EXACTLY ONCE carrying it. The session emits events only; it
+    prints nothing.
 
     Args:
         runtime: Exclusive owner of process-global exec and signal state.
@@ -3196,8 +3399,30 @@ def run_session[
         reporter: The composed reporters the session fans every event to.
 
     Returns:
-        The resolved exit code: 2 on interrupt, 3 on an internal error, 1 on a
-        precompile failure, else `exit_code_for` over the run outcomes (1/5/0).
+        The resolved exit code: 2 on interrupt, 3 on an internal error, a latched
+        machine-stream failure (a dead `--json` destination), or a failed JUnit
+        finalization, 1 on a precompile failure, else `exit_code_for` over the
+        run outcomes (1/5/0).
+
+    Parameters:
+        stream_index: The fixed tuple position of the composed
+            `JsonStreamReporter`, or `-1` (the default) when no stream reporter
+            is composed. When non-negative the session polls that reporter's
+            latch at each scheduling boundary and treats a write failure as a
+            fatal abort; when `-1` the poll is a comptime no-op.
+        junit_index: The fixed tuple position of the composed `JunitReporter`, or
+            `-1` (the default) when none is composed. When non-negative the
+            session synthesizes `[not-run]` rows and finalizes the report at
+            Phase 1; when `-1` both are comptime no-ops.
+        ann_index: The fixed tuple position of the composed `AnnotationsReporter`,
+            or `-1` (the default) when none is composed. The annotations reporter
+            is PASSIVE — it accumulates the event stream through the ordinary
+            composite fan-out and needs no scheduling-boundary poll or terminal
+            synthesis — so the session performs no `ann_index`-keyed work; `main`
+            renders its tail via `annotation_lines[ann_index]` after this returns.
+            Named here so the composition is `run_session[stream, junit, ann]`.
+        Rs: The reporter pack composed into `reporter`, inferred from the
+            argument.
 
     Raises:
         Error: a `discover:` usage error only; every other failure is caught and
@@ -3264,6 +3489,12 @@ def run_session[
     var internal_error = False
     var precompile_failed = False
     var drift = False
+    # A latched machine-stream write failure (a dead `--json -` pipe, a full or
+    # unwritable destination) is a FATAL ABORT: the run's product is no longer
+    # deliverable, so the session stops scheduling and resolves exit 3. It is
+    # polled at each scheduling boundary (like `interrupt_requested`); the poll
+    # is a comptime no-op when no stream reporter is composed.
+    var stream_dead = _stream_failed[stream_index](reporter)
     # The registry the selection/collect probe machinery records builds and
     # qualifying listings into. The plain run loop keeps no entry here — it never
     # probes — so the attribution post-pass falls back to a fresh probe for its
@@ -3284,6 +3515,9 @@ def run_session[
     for pc in config.precompiles:
         if interrupt_requested():
             interrupted = True
+            break
+        if _stream_failed[stream_index](reporter):
+            stream_dead = True
             break
         try:
             var pr = _run_precompile(
@@ -3330,13 +3564,18 @@ def run_session[
             break
 
     var gate_abort = False
-    var proceed = not (interrupted or internal_error or precompile_failed)
+    var proceed = not (
+        interrupted or internal_error or precompile_failed or stream_dead
+    )
 
     # Gates first: a failing gate aborts the whole session immediately.
     if proceed:
         for gi in range(len(disc.gate_files)):
             if interrupt_requested():
                 interrupted = True
+                break
+            if _stream_failed[stream_index](reporter):
+                stream_dead = True
                 break
             reporter.handle(Event.file_started(disc.gate_files[gi]))
             try:
@@ -3379,7 +3618,11 @@ def run_session[
                 break
 
     var proceed_runs = not (
-        interrupted or internal_error or precompile_failed or gate_abort
+        interrupted
+        or internal_error
+        or precompile_failed
+        or gate_abort
+        or stream_dead
     )
 
     # SELECTION is active when any operand is a node id or `-k` is present.
@@ -3421,6 +3664,9 @@ def run_session[
         for ri in range(len(disc.run_files)):
             if interrupt_requested():
                 interrupted = True
+                break
+            if _stream_failed[stream_index](reporter):
+                stream_dead = True
                 break
             reporter.handle(Event.file_started(disc.run_files[ri]))
             try:
@@ -3475,31 +3721,30 @@ def run_session[
     var not_run = selected - ran_files
     summary.counts[Outcome.NOT_RUN.code] += not_run
 
-    # Exit-code precedence (high to low): interrupt (2), internal error (3) and
-    # drift (3, the same tier), precompile failure (1), else the pure
-    # `exit_code_for` over the run outcomes at TEST granularity (1/5/0).
-    var code: Int
-    if interrupted:
-        code = 2
-    elif internal_error:
-        code = 3
-    elif drift:
-        code = 3
-    elif precompile_failed:
-        code = 1
-    else:
-        code = exit_code_for(run_outcomes)
+    # A stream failure that latched during the run loop (not caught at a
+    # scheduling boundary because it tripped on the final file's own events) is
+    # picked up here so a dead pipe on the last file still resolves to the fatal
+    # exit 3 rather than the run's own code.
+    if _stream_failed[stream_index](reporter):
+        stream_dead = True
+
+    # The pure exit-code outcome over the run outcomes at TEST granularity
+    # (1/5/0), computed BEFORE the terminal protocol so `exit_code_for` stays the
+    # sole authority for that tier and is never touched by the resolution around
+    # it.
+    var outcome_code = exit_code_for(run_outcomes)
 
     # The bounded crash-attribution post-pass. It runs HERE — after every file
-    # has its verdict, after the summary is tallied, and after `code` is already
-    # resolved above — precisely so it CANNOT influence any of them: the only
-    # thing left for it to do is emit `CrashAttribution` events. A crashed file's
-    # verdict and this process's exit code are byte-identical whether the pass
-    # names a culprit, fails to reproduce the crash, or is skipped entirely. It
-    # is skipped under an interrupt: exit 2 must not wait on diagnostics. A raise
-    # out of it would be a machinery failure AFTER the run is decided, so it is
-    # caught and dropped rather than allowed to rewrite a settled exit code.
-    if not interrupted:
+    # has its verdict and the summary is tallied — precisely so it CANNOT
+    # influence either: the only thing left for it to do is emit
+    # `CrashAttribution` events. A crashed file's verdict and this process's exit
+    # code are byte-identical whether the pass names a culprit, fails to
+    # reproduce the crash, or is skipped entirely. It is skipped under an
+    # interrupt (exit 2 must not wait on diagnostics) and under a stream death (a
+    # fatal abort must not spend time on diagnostics whose consumer is gone). A
+    # raise out of it is caught and dropped rather than allowed to disturb the
+    # settled accounting.
+    if not interrupted and not stream_dead:
         try:
             _run_crash_attribution(
                 runtime, config, root, crash_files, reg, reporter
@@ -3507,9 +3752,49 @@ def run_session[
         except:
             pass
 
-    # An interrupt delivered DURING the attribution pass (Ctrl-C mid-diagnostics)
-    # must dominate the already-resolved code: exit 2 never waits on diagnostics.
-    code = _finalize_exit_code(code, interrupt_requested())
+    # --- PHASE 1: finalize. Seal the accounting and publish each artifact. -----
+    #
+    # INTERRUPT LINEARIZATION is fixed HERE, at Phase-1 entry: a run-time
+    # interrupt (recorded during scheduling) OR one that arrived during the
+    # crash-attribution pass resolves toward exit 2. A finalization-PHASE
+    # interrupt (one delivered after this point) does NOT change the resolved
+    # code — a Ctrl-C during finalize truncates nothing already accounted, and
+    # in-flight finalize steps complete.
+    var interrupt_latched = interrupted or interrupt_requested()
+
+    # A latched machine-stream write failure that tripped on the final file's own
+    # events (missed at the scheduling boundaries) is the JSON stream's "finalize"
+    # tier — picked up here so a dead pipe on the last file still escalates.
+    if _stream_failed[stream_index](reporter):
+        stream_dead = True
+
+    # Synthesize a `[not-run]` row into the JUnit report for every selected file
+    # that never produced a verdict (interrupt/gate-abort/--maxfail casualties),
+    # then finalize the report: assemble in node-id order, verify-write the
+    # unique temp, atomic-rename onto PATH. The prior report survives every
+    # failure. A latched junit SPOOL failure did NOT abort the run mid-flight (the
+    # deliberate asymmetry vs the stream's fatal abort); it surfaces NOW.
+    _junit_note_not_run[junit_index](reporter, casualty_files)
+    var junit_fin = _junit_finalize[junit_index](reporter)
+    var finalize_failed = junit_fin.failed
+    if finalize_failed:
+        # Loudly report the finalization failure — the console shows it and the
+        # JSON stream carries it, both BEFORE the terminal record.
+        reporter.handle(Event.warning("junit-finalize", junit_fin.detail))
+
+    # --- PHASE 2: resolve + dispatch. Resolve once, dispatch SessionFinished ----
+    # exactly once carrying that code. `exit_code_for` is untouched: the two-phase
+    # protocol resolves AROUND it. Terminal-write precedence: a resolved 2 stands,
+    # a resolved 0/1/5 escalates to 3 on a stream death or a failed finalization,
+    # a resolved 3 stays 3.
+    var code = _resolve_terminal_code(
+        interrupt_latched,
+        internal_error,
+        drift,
+        precompile_failed,
+        outcome_code,
+        stream_dead or finalize_failed,
+    )
 
     var wall = Float64(perf_counter_ns() - started_ns) / 1.0e9
     # A file that passed only after a crash-class retry tallied under FLAKY; that
@@ -3524,11 +3809,39 @@ def run_session[
             flaky_files=flaky_files,
         )
     )
+
+    # The dispatch just above is ITSELF a stream write, and can latch a NEW
+    # failure during that very write (a `--json -` consumer that closes its
+    # read end right after `file_finished`; a file destination that hits
+    # ENOSPC exactly on the terminal line) — a failure `stream_dead` above
+    # could not have seen, because it did not exist yet. Re-poll the SAME
+    # latch Phase 1 already polls; if it is now set and was not already
+    # folded into `stream_dead`, re-resolve with the pure function again,
+    # passing the SAME interrupt/error/drift/precompile/outcome inputs (a
+    # finalization-phase interrupt still must not move the code — only the
+    # terminal-write outcome does) and `terminal_write_failed=True`. The same
+    # precedence applies: a resolved 2 still stands, a resolved 3 stays 3, a
+    # resolved 0/1/5 escalates to 3. The already-attempted terminal record
+    # (torn or absent on the now-dead stream) is the consumer's truncation
+    # signal; the EXIT CODE is the out-of-band signal and must not lie about
+    # it by returning the code resolved before the stream died.
+    if not stream_dead and _stream_failed[stream_index](reporter):
+        code = _resolve_terminal_code(
+            interrupt_latched,
+            internal_error,
+            drift,
+            precompile_failed,
+            outcome_code,
+            True,
+        )
     return code
 
 
 def run_session[
-    *Rs: Reporter
+    stream_index: Int = -1,
+    junit_index: Int = -1,
+    ann_index: Int = -1,
+    *Rs: Reporter,
 ](
     config: RunnerConfig, root: String, mut reporter: CompositeReporter[*Rs]
 ) raises -> Int:
@@ -3538,11 +3851,15 @@ def run_session[
     open failures map to internal exit 3 before session error handling.
     This convenience overload preserves the session test/library surface while
     still passing exclusive mutable ownership to every supervised child.
+    `stream_index`/`junit_index`/`ann_index` forward to the primary overload (see
+    it for the meaning).
     """
     var runtime = ExecRuntime()
     try:
         runtime.open()
-        var code = run_session(runtime, config, root, reporter)
+        var code = run_session[stream_index, junit_index, ann_index](
+            runtime, config, root, reporter
+        )
         runtime.close()
         return code
     except error:

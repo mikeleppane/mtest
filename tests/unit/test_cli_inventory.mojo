@@ -11,10 +11,10 @@ The remaining tests pin every refused spelling's message shape: it names the
 token, states it is part of the mtest v1 contract, and says it is not available
 in this build.
 """
-from std.testing import assert_equal, assert_raises, assert_true, TestSuite
+from std.testing import assert_equal, assert_raises, assert_true
 
 from mtest.cli import flag_specs, parse_args
-from mtest.config import ShardMode
+from mtest.config import AnnotationsMode, ShardMode
 
 
 @fieldwise_init
@@ -66,12 +66,14 @@ def frozen_inventory() -> List[InvRow]:
         # In the v1 contract but not served by this build.
         InvRow("-n", 1, False, False),
         InvRow("--workers", 1, False, False),
-        InvRow("--junit-xml", 1, False, False),
-        InvRow("--gh-annotations", 1, False, False),
         # `--serial GLOB`: repeatable.
         InvRow("--serial", 1, True, False),
-        # `--json PATH|-`.
-        InvRow("--json", 1, False, False),
+        # `--gh-annotations off|on|auto`: now served.
+        InvRow("--gh-annotations", 1, False, True),
+        # `--json PATH|-`: now served.
+        InvRow("--json", 1, False, True),
+        # `--junit-xml PATH`: now served.
+        InvRow("--junit-xml", 1, False, True),
         # Served by this build (collect mode).
         InvRow("--collect-only", 0, False, True),
     ]
@@ -229,12 +231,117 @@ def test_gate_is_served_and_accumulates() raises:
     assert_equal(r.config.gates[1], "y")
 
 
-def test_refuse_junit_xml() raises:
-    _assert_refused("--junit-xml")
+def test_junit_xml_path_is_served_when_parent_exists() raises:
+    # `--junit-xml` is now served: a PATH whose parent directory exists parses
+    # cleanly into the config rather than being refused.
+    var argv: List[String] = ["--junit-xml", "tests/report.xml"]
+    var r = parse_args(argv)
+    assert_equal(r.config.junit_dest, "tests/report.xml")
 
 
-def test_refuse_gh_annotations() raises:
-    _assert_refused("--gh-annotations")
+def test_junit_xml_bare_filename_is_served() raises:
+    # A bare filename (no directory part) targets the current directory.
+    var argv: List[String] = ["--junit-xml", "report.xml"]
+    var r = parse_args(argv)
+    assert_equal(r.config.junit_dest, "report.xml")
+
+
+def test_junit_xml_default_is_absent() raises:
+    var argv: List[String] = ["tests/"]
+    var r = parse_args(argv)
+    assert_equal(r.config.junit_dest, "")
+
+
+def test_junit_xml_empty_value_is_usage_error() raises:
+    var argv: List[String] = ["--junit-xml", ""]
+    with assert_raises(contains="--junit-xml"):
+        _ = parse_args(argv)
+
+
+def test_junit_xml_nonexistent_parent_is_usage_error() raises:
+    var argv: List[String] = ["--junit-xml", "/no/such/dir/report.xml"]
+    with assert_raises(contains="--junit-xml"):
+        _ = parse_args(argv)
+
+
+def test_junit_xml_has_no_stdout_dash_form() raises:
+    # Unlike `--json -`, a bare `-` is NOT a stdout stream for `--junit-xml`
+    # (the document is renamed atomically, never streamed): `-` is a normal
+    # positional PATH operand and the flag itself is absent.
+    var argv: List[String] = ["--junit-xml", "report.xml", "-"]
+    var r = parse_args(argv)
+    assert_equal(r.config.junit_dest, "report.xml")
+
+
+def test_gh_annotations_auto_is_served_and_default() raises:
+    # `--gh-annotations` is now served: `auto` parses cleanly and is the default.
+    var argv: List[String] = ["--gh-annotations", "auto"]
+    var r = parse_args(argv)
+    assert_true(r.config.gh_annotations == AnnotationsMode.AUTO)
+
+
+def test_gh_annotations_on_parses() raises:
+    var argv: List[String] = ["--gh-annotations", "on"]
+    var r = parse_args(argv)
+    assert_true(r.config.gh_annotations == AnnotationsMode.ON)
+
+
+def test_gh_annotations_off_parses() raises:
+    var argv: List[String] = ["--gh-annotations", "off"]
+    var r = parse_args(argv)
+    assert_true(r.config.gh_annotations == AnnotationsMode.OFF)
+
+
+def test_gh_annotations_default_is_auto() raises:
+    var argv: List[String] = ["tests/"]
+    var r = parse_args(argv)
+    assert_true(r.config.gh_annotations == AnnotationsMode.AUTO)
+
+
+def test_gh_annotations_bad_value_is_usage_error() raises:
+    var argv: List[String] = ["--gh-annotations", "sometimes"]
+    with assert_raises(contains="off|on|auto"):
+        _ = parse_args(argv)
+
+
+def test_gh_annotations_inline_value_parses() raises:
+    var argv: List[String] = ["--gh-annotations=on"]
+    var r = parse_args(argv)
+    assert_true(r.config.gh_annotations == AnnotationsMode.ON)
+
+
+def test_json_dash_with_annotations_on_is_usage_error() raises:
+    # `--json -` owns stdout; annotations `on` cannot share it — exit 4, and the
+    # message names both fixes.
+    var argv: List[String] = ["--json", "-", "--gh-annotations", "on"]
+    with assert_raises(contains="--gh-annotations off"):
+        _ = parse_args(argv)
+    var argv2: List[String] = ["--json", "-", "--gh-annotations", "on"]
+    with assert_raises(contains="--json PATH"):
+        _ = parse_args(argv2)
+
+
+def test_json_dash_with_annotations_auto_is_usage_error() raises:
+    # The DEFAULT (auto) also conflicts with `--json -`: only explicit off runs.
+    var argv: List[String] = ["--json", "-"]
+    with assert_raises(contains="--gh-annotations off"):
+        _ = parse_args(argv)
+
+
+def test_json_dash_with_annotations_off_runs_clean() raises:
+    # Explicit off is the ONLY combination that runs beside `--json -`.
+    var argv: List[String] = ["--json", "-", "--gh-annotations", "off"]
+    var r = parse_args(argv)
+    assert_equal(r.config.json_dest, "-")
+    assert_true(r.config.gh_annotations == AnnotationsMode.OFF)
+
+
+def test_json_path_with_annotations_on_runs_clean() raises:
+    # `--json PATH` does NOT own stdout, so annotations may ride alongside it.
+    var argv: List[String] = ["--json", "out.ndjson", "--gh-annotations", "on"]
+    var r = parse_args(argv)
+    assert_equal(r.config.json_dest, "out.ndjson")
+    assert_true(r.config.gh_annotations == AnnotationsMode.ON)
 
 
 def test_shard_is_served_hash_default() raises:
@@ -272,8 +379,45 @@ def test_refuse_serial() raises:
     _assert_refused("--serial")
 
 
-def test_refuse_json() raises:
-    _assert_refused("--json")
+def test_json_dash_is_served_and_sets_stdout_destination() raises:
+    # `--json -` is now served: the stream destination is stdout (`-`). It must
+    # carry an explicit `--gh-annotations off`, since the default `auto` conflicts
+    # with the byte-pure stream owning stdout.
+    var argv: List[String] = ["--json", "-", "--gh-annotations", "off"]
+    var r = parse_args(argv)
+    assert_equal(r.config.json_dest, "-")
+
+
+def test_json_path_is_served_when_parent_exists() raises:
+    # A PATH whose parent directory exists parses cleanly.
+    var argv: List[String] = ["--json", "tests/out.ndjson"]
+    var r = parse_args(argv)
+    assert_equal(r.config.json_dest, "tests/out.ndjson")
+
+
+def test_json_bare_filename_is_served() raises:
+    # A bare filename (no directory part) targets the current directory.
+    var argv: List[String] = ["--json", "out.ndjson"]
+    var r = parse_args(argv)
+    assert_equal(r.config.json_dest, "out.ndjson")
+
+
+def test_json_default_is_absent() raises:
+    var argv: List[String] = ["tests/"]
+    var r = parse_args(argv)
+    assert_equal(r.config.json_dest, "")
+
+
+def test_json_empty_value_is_usage_error() raises:
+    var argv: List[String] = ["--json", ""]
+    with assert_raises(contains="--json"):
+        _ = parse_args(argv)
+
+
+def test_json_nonexistent_parent_is_usage_error() raises:
+    var argv: List[String] = ["--json", "/no/such/dir/out.ndjson"]
+    with assert_raises(contains="--json"):
+        _ = parse_args(argv)
 
 
 def test_collect_only_is_served_and_sets_collect_mode() raises:
@@ -294,7 +438,3 @@ def test_refuse_equals_form_still_names_flag() raises:
     var argv: List[String] = ["--workers=3"]
     with assert_raises(contains="--workers"):
         _ = parse_args(argv)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

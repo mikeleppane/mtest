@@ -7,17 +7,24 @@ plain construct-and-drop of a `ProcessResult` to prove its owned buffers release
 cleanly.
 """
 from std.os import listdir
-from std.testing import assert_true, assert_equal, TestSuite
+from std.sys.info import CompilationTarget
+from std.testing import assert_true, assert_equal
 
 from mtest.exec import ExecRuntime, ProcessSpec, ProcessResult, run_supervised
 from mtest.exec.termination import Termination
 
+from exec_helpers import true_binary
+
 
 def _open_fd_count() raises -> Int:
-    """How many fds this process currently has open (via /proc/self/fd)."""
+    """Count open fds through the target platform's descriptor directory."""
     var n = 0
-    for _ in listdir("/proc/self/fd"):
-        n += 1
+    comptime if CompilationTarget.is_macos():
+        for _ in listdir("/dev/fd"):
+            n += 1
+    else:
+        for _ in listdir("/proc/self/fd"):
+            n += 1
     return n
 
 
@@ -26,13 +33,13 @@ def test_repeated_spawns_do_not_leak_fds() raises:
     runtime.open()
     # Warm up once so any one-time mappings (the interrupt flag page) exist.
     var warm = List[String]()
-    warm.append("/bin/true")
+    warm.append(true_binary())
     _ = run_supervised(runtime, ProcessSpec.command(warm^))
 
     var before = _open_fd_count()
     for _ in range(100):
         var argv = List[String]()
-        argv.append("/bin/true")
+        argv.append(true_binary())
         var r = run_supervised(runtime, ProcessSpec.command(argv^))
         assert_true(r.termination.is_exited(), String(r.termination))
     var after = _open_fd_count()
@@ -54,7 +61,3 @@ def test_process_result_construct_and_drop() raises:
             out^, err^, False, False, Termination.exited(0), 5
         )
         assert_equal(len(pr.stdout_bytes), 1)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

@@ -5,7 +5,7 @@ console will later render. `detail` and `timing` are stored VERBATIM -- these
 tests pin that nothing here interprets or reformats them -- and the
 convenience two-arg constructor must leave both empty.
 """
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_true
 
 from mtest.model import NodeId, Outcome, TestResult
 
@@ -37,7 +37,3 @@ def test_copy_is_independent_and_equal_in_value() raises:
     assert_true(c.node == r.node)
     assert_true(c.outcome == r.outcome)
     assert_equal(c.detail, r.detail)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

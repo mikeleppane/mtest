@@ -12,10 +12,12 @@ prints help/version to stdout with exit 0 and prints a usage error to stderr wit
 exit 4.
 """
 from std.os import getenv
+from std.os.path import dirname, isdir
 
 from mtest.cli.flag_spec import FlagId, FlagSpec, flag_specs
 from mtest.cli.parse_result import ParseResult
 from mtest.config import (
+    AnnotationsMode,
     ColorWhen,
     Precompile,
     RunnerConfig,
@@ -25,14 +27,14 @@ from mtest.config import (
     resolve_mojo_path,
 )
 
-comptime MTEST_VERSION = "0.1.0-dev"
+comptime MTEST_VERSION = "0.4.0"
 """The single source of the version string; `main` reuses this exact value."""
 
 comptime SUPPORTED_SUMMARY = (
     "paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo,"
     " -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v,"
-    " --color, -k, --maxfail, --durations, --shard, --retries,"
-    " collect/--collect-only, --help, --version"
+    " --color, -k, --maxfail, --durations, --shard, --retries, --json,"
+    " --junit-xml, --gh-annotations, collect/--collect-only, --help, --version"
 )
 """A stable one-line list of what this build serves, quoted in refusals."""
 
@@ -138,6 +140,68 @@ def _parse_show_output(value: String) raises -> ShowOutput:
         return ShowOutput.NONE
     raise _err(
         "'--show-output' wants one of failures|all|none, got '" + value + "'"
+    )
+
+
+def _validate_json_dest(value: String) raises -> String:
+    """Syntactically validate a `--json` destination; return it unchanged.
+
+    `-` is the stdout stream and always valid. Any other value is a filesystem
+    PATH: it must be non-empty and its parent directory (when it names one) must
+    already exist. This is the PARSE-time, pre-run check — an empty value or a
+    nonexistent parent is a usage error (exit 4) BEFORE any build or run; a
+    runtime open failure (permissions, descriptor exhaustion) is the session's
+    to detect and is a different exit code.
+    """
+    if value == "-":
+        return value
+    if value.byte_length() == 0:
+        raise _err(
+            "'--json' wants a destination PATH or '-', got an empty value"
+        )
+    var parent = String(dirname(value))
+    if parent != "" and not isdir(parent):
+        raise _err(
+            "'--json' destination parent directory does not exist: '"
+            + parent
+            + "'"
+        )
+    return value
+
+
+def _validate_junit_dest(value: String) raises -> String:
+    """Syntactically validate a `--junit-xml` destination; return it unchanged.
+
+    A `--junit-xml` value is always a filesystem PATH (no `-` stdout form — a
+    JUnit document is assembled and renamed atomically, never streamed live): it
+    must be non-empty and its parent directory (when it names one) must already
+    exist. This is the PARSE-time, pre-run check — an empty value or a
+    nonexistent parent is a usage error (exit 4) BEFORE any build or run; a
+    runtime creation failure (permissions, the target dir removed after this
+    check) is the session's to detect and is a different exit code.
+    """
+    if value.byte_length() == 0:
+        raise _err("'--junit-xml' wants a destination PATH, got an empty value")
+    var parent = String(dirname(value))
+    if parent != "" and not isdir(parent):
+        raise _err(
+            "'--junit-xml' destination parent directory does not exist: '"
+            + parent
+            + "'"
+        )
+    return value
+
+
+def _parse_annotations(value: String) raises -> AnnotationsMode:
+    """Parse a `--gh-annotations` mode: `off`, `on`, or `auto`."""
+    if value == "off":
+        return AnnotationsMode.OFF
+    if value == "on":
+        return AnnotationsMode.ON
+    if value == "auto":
+        return AnnotationsMode.AUTO
+    raise _err(
+        "'--gh-annotations' wants one of off|on|auto, got '" + value + "'"
     )
 
 
@@ -302,6 +366,13 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var shard_m = 0
     var shard_n = 0
     var retries = 0
+    var saw_retries = False
+    var json_dest = String("")
+    var saw_json = False
+    var junit_dest = String("")
+    var saw_junit = False
+    var gh_annotations = AnnotationsMode.AUTO
+    var saw_annotations = False
     var saw_show_output = False
     var saw_quiet = False
     var saw_verbose = False
@@ -432,6 +503,16 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             shard_n = parsed[2]
         elif s.id == FlagId.RETRIES:
             retries = _parse_retries(value)
+            saw_retries = True
+        elif s.id == FlagId.JSON:
+            json_dest = _validate_json_dest(value)
+            saw_json = True
+        elif s.id == FlagId.JUNIT_XML:
+            junit_dest = _validate_junit_dest(value)
+            saw_junit = True
+        elif s.id == FlagId.GH_ANNOTATIONS:
+            gh_annotations = _parse_annotations(value)
+            saw_annotations = True
 
     # Collect mode is a listing, not a run: the run-only knobs that shape which
     # tests execute or when to stop scheduling are meaningless against it and are
@@ -463,6 +544,26 @@ def parse_args(argv: List[String]) raises -> ParseResult:
                 "'--durations' is a run-only flag and cannot be combined"
                 " with collect mode"
             )
+        if saw_retries:
+            raise _err(
+                "'--retries' is a run-only flag and cannot be combined with"
+                " collect mode"
+            )
+        if saw_json:
+            raise _err(
+                "'--json' is a run-only flag and cannot be combined with"
+                " collect mode"
+            )
+        if saw_junit:
+            raise _err(
+                "'--junit-xml' is a run-only flag and cannot be combined with"
+                " collect mode"
+            )
+        if saw_annotations:
+            raise _err(
+                "'--gh-annotations' is a run-only flag and cannot be combined"
+                " with collect mode"
+            )
 
     if saw_quiet and saw_verbose:
         raise _err("'-q' and '-v' are mutually exclusive")
@@ -471,6 +572,18 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         verbosity = Verbosity.QUIET
     elif saw_verbose:
         verbosity = Verbosity.VERBOSE
+
+    # `--json -` owns stdout for the byte-pure event stream, so nothing else may
+    # write there. The annotation tail renders to stdout too, so the ONLY way the
+    # two combine is with annotations EXPLICITLY off. The default `auto` and an
+    # explicit `on` are BOTH usage errors here, detected at parse time; the
+    # message names both fixes so a reader can resolve it either way.
+    if json_dest == "-" and gh_annotations != AnnotationsMode.OFF:
+        raise _err(
+            "'--json -' streams machine output to stdout, which the"
+            " '--gh-annotations' tail cannot share; drop '--json -' (use"
+            " '--json PATH'), or set '--gh-annotations off'"
+        )
 
     var mojo_path = resolve_mojo_path(mojo_flag, _env_mojo())
 
@@ -496,5 +609,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         shard_n=shard_n,
         retries=retries,
         compile_timeout_secs=compile_timeout_secs,
+        json_dest=json_dest^,
+        gh_annotations=gh_annotations,
+        junit_dest=junit_dest^,
     )
     return ParseResult.run(cfg^)

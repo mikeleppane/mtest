@@ -6,7 +6,7 @@ Covers explicit-file bypass, operand dedup, gate-overlap promotion, exclusion
 (and its win over gates), stale excludes, the default-path rule, and the exit-4
 raises for a node id, a nonexistent path, and a root escape.
 """
-from std.testing import assert_equal, assert_raises, TestSuite
+from std.testing import assert_equal, assert_raises
 
 from mtest.config import RunnerConfig
 from mtest.discover import discover
@@ -203,7 +203,3 @@ def test_root_escaping_operand_raises() raises:
     with assert_raises(contains="escapes the invocation root"):
         _ = discover(_cfg(["../outside"], List[String](), List[String]()), root)
     remove_tree(root)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

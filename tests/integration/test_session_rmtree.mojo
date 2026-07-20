@@ -10,7 +10,7 @@ symlink is unlinked, never traversed. Real filesystem I/O under a disposable
 """
 from std.os import listdir, makedirs, rmdir, symlink
 from std.os.path import exists, islink
-from std.testing import assert_false, assert_true, TestSuite
+from std.testing import assert_false, assert_true
 
 from mtest.session.session import _rmtree
 
@@ -52,7 +52,3 @@ def test_rmtree_does_not_follow_symlink_out_of_tree() raises:
     )
 
     _reset(base)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

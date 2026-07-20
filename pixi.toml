@@ -1,12 +1,12 @@
 [workspace]
 name = "mtest"
-version = "0.1.0"
+version = "0.4.0"
 description = "A pytest-like test runner for Mojo that orchestrates the stdlib's per-file TestSuite"
 channels = ["https://conda.modular.com/max/", "conda-forge"]
-# Linux is the gate platform; macOS is a v1 target and shares the same POSIX
-# process surface the runner depends on. Bumping the platform set is an
-# Ask-first decision — the protocol snapshots are stamped with os/arch and a
-# regeneration on a foreign platform diffs loudly by design.
+# Linux and macOS are gate targets and share the POSIX process surface the
+# runner depends on. Bumping the platform set is an Ask-first decision; the
+# Linux-only protocol snapshots are stamped with os/arch, so regenerating them
+# on a foreign platform diffs loudly by design.
 platforms = ["linux-64", "osx-arm64"]
 
 [dependencies]
@@ -25,11 +25,26 @@ python = "3.12.*"
 # one compiler on both supported targets so its ABI and sanitizer behavior are
 # reproducible; the linked object adds no runtime library dependency.
 clang = "==18.1.8"
+# The JUnit report gate needs a schema validator. xmllint (from libxml2) checks
+# the vendored junit-10.xsd against the shipped artifact directly; pinned so the
+# gate's accept/reject verdict cannot drift with an unpinned system copy.
+libxml2 = "==2.15.3"
+# Builds recipe/recipe.yaml into a local conda channel (build-time packaging
+# tool only; the shipped mtest binary has zero dependency on it). Pinned exact
+# so the recipe's proven isolated-build-env behavior cannot drift with an
+# unpinned rattler-build release.
+rattler-build = "==0.69.1"
 
 [tasks]
 # Print the pinned Mojo version — first CI step, fails fast on a broken toolchain
 # and stamps the exact build into the log next to the transcript headers.
 mojo-version = "mojo --version"
+
+# Assert MTEST_VERSION (src/mtest/cli/parser.mojo) and this manifest's `version`
+# agree with each other and with the version this repo currently ships. Cheap
+# and dependency-free, so it runs first — a drift here means every later gate
+# (goldens, packaging) would be validating a lie about which release they cover.
+version-check = "python scripts/version_check.py"
 
 # Precompile the src/mtest package into build/mtest.mojopkg. This is the
 # package-compiles GATE: an empty-but-broken package fails here before any test
@@ -52,13 +67,38 @@ build-bin = { cmd = "mojo build -I build src/main.mojo -o build/mtest -Xlinker b
     "build-native",
 ] }
 
+# Build recipe/recipe.yaml into a LOCAL conda channel: rattler-build solves an
+# isolated build env (mojo ==1.0.0b2 + the C toolchain, from the modular +
+# conda-forge channels), builds mtest FROM SOURCE inside that sandbox (mirroring
+# build -> build-native -> build-bin), and writes the resulting .conda under
+# build/conda-channel — a plain directory with repodata.json, nothing uploaded
+# or published anywhere. Not wired into `pixi run ci`; the dedicated Linux
+# package job runs independently from both platform test chains.
+package-build = "rattler-build build --recipe recipe/recipe.yaml -c https://conda.modular.com/max/ -c conda-forge --output-dir build/conda-channel"
+
+# The packaged-artifact consumption GATE: build -> install the .conda into a
+# FRESH scratch env from the local channel (proving it pulls mojo-compiler
+# ==1.0.0b2) -> a loader-clean probe on the INSTALLED binary (dev pixi env
+# absent from PATH, empty LD_LIBRARY_PATH) -> focused dogfood probes run through
+# that installed binary with the toolchain threaded so its build children can
+# still resolve mojo -> a tar-bz2 fallback-format install + smoke-run. Depends
+# on build + build-native (not build-bin) so this repo's own build/mtest.mojopkg
+# and the test-variant native object exist for the probe run — the binary under
+# test is the INSTALLED one, never build/mtest. Standalone: NOT wired into
+# `pixi run ci`; its dedicated Linux CI job is independent. Nothing uploads or
+# publishes anywhere.
+package-check = { cmd = "python scripts/package_check.py", depends-on = [
+    "build",
+    "build-native",
+] }
+
 # Rewrite Mojo files in place — run locally before committing. Protocol fixtures
 # live beneath tests/, so this covers the runner, fixtures, and suites.
-fmt = "mojo format src tests e2e"
+fmt = "python scripts/format_all.py"
 # CI gate: format, then fail if anything changed (never edits in CI). A format
 # that shifts a fixture's `At <path>:<line>:<col>` coordinates is an oracle-side
 # change — regenerate transcripts, do not fight the gate.
-fmt-check = "mojo format src tests e2e && git diff --exit-code"
+fmt-check = "python scripts/format_all.py && git diff --exit-code"
 
 # Stdlib-only unsafe-operation inventory. Mutation tests pin every syntax family
 # and string/comment exclusion; the complete product/test inventory must remain
@@ -75,23 +115,42 @@ postfork-check = "python scripts/postfork_check_test.py && python scripts/postfo
 # private exec adapter. The standalone post-fork audit is a prerequisite. This
 # remains separate from the Mojo suite so the test object can expose deterministic
 # fault and sanitizer controls that production linkage proves absent.
-native-check = { cmd = "python scripts/native_check.py", depends-on = [
+native-check = { cmd = "python scripts/native_check_test.py && python scripts/native_check.py", depends-on = [
     "postfork-check",
 ] }
 
 # Source-build the native adapter and a risk-weighted exec subset with matching
 # AddressSanitizer instrumentation. Live OOB/UAF/leak controls prove that both
 # the compiler instrumentation and fail-closed harness remain effective.
-asan-check = "python scripts/asan_check.py"
+asan-check = "python scripts/asan_check_test.py && python scripts/asan_check.py"
 
 # Source-build every exec integration suite with debug information and run it
 # under the locked Linux-only Memcheck binary. Undefined-value, invalid-access,
 # leak, and fd controls run first; reviewed runtime-reachable allocations are
 # matched exactly and project/native frames are forbidden from that baseline.
-# The scheduled/manual workflow has a narrow approved apt exception for the exact
-# debug-symbol version matching the runner's preinstalled glibc; ordinary CI has
-# no such exception, and the Valgrind job itself is not described as hermetic.
+# The unified CI workflow's Valgrind cell has a narrow approved apt exception
+# for the exact debug-symbol version matching the runner's preinstalled glibc;
+# no other source/test/memory step has that exception, and this task is not
+# hermetic. The independent package job has its own external-channel contract.
 valgrind-check = "python scripts/valgrind_check_test.py && python scripts/valgrind_check.py"
+
+# Gate the JUnit report tooling ahead of the renderer that will use it: recorded
+# unit tests first prove the checker actually rejects a broken artifact, then
+# the checker runs xmllint against the vendored junit-10.xsd plus the
+# arithmetic/structural invariants the schema cannot express over the
+# committed byte-faithful mock.
+junit-check = "python scripts/junit_check_test.py && python scripts/junit_check.py"
+
+# Gate mtest's OWN rendered JUnit document through the same junit-10 oracle:
+# build and run scripts/junit_emit.mojo (which drives the real JunitReporter
+# over every sentinel-matrix cell), then run the schema + arithmetic checker over
+# the emitted document and confirm a tampered copy is rejected. Depends on the
+# precompiled package so the emitter can import mtest.report. This validates the
+# shipped renderer's bytes, complementing junit-check's mock and the Mojo unit
+# tests that pin the renderer structure directly.
+junit-render-check = { cmd = "python scripts/junit_render_check.py", depends-on = [
+    "build",
+] }
 
 # Regenerate the protocol snapshots IN PLACE from the committed fixtures at the
 # pinned toolchain. Local use only (updating the committed snapshots); never run in
@@ -103,32 +162,28 @@ transcripts = "python scripts/gen_transcripts.py"
 # diff after a mojo re-pin is the protocol changelog. Hermetic.
 transcripts-check = "bash scripts/transcripts_check.sh"
 
-# The INDEPENDENT glob-driven twin: builds the package first (fail-fast), then
-# BUILDS each unit/integration test_*.mojo and EXECUTES the binary directly, one process per
-# file, with no mtest involved. `mojo run` never appears in the gate — it masks
-# crash exit codes to 1 and can JIT-crash in CI (#6413). The repo eats the same
-# build-then-execute rule the runner enforces. Kept in `ci` alongside `test` (the
-# dogfood run below) as an mtest-independent oracle: if the two ever disagree on
-# outcome, that disagreement is a self-hosting bug in mtest, not noise.
+# The INDEPENDENT exhaustive gate: generates one explicit entrypoint for every
+# unit/integration test function, builds it once, and executes that aggregate
+# binary directly with no mtest involved. `mojo run` never appears in the gate
+# because it masks crash exit codes to 1. A focused path can be passed through
+# `pixi run test-file -- tests/unit/test_model_outcome.mojo` when investigating
+# a failure.
 test-direct = "bash scripts/test_all.sh tests/unit tests/integration"
 test-unit = "bash scripts/test_all.sh tests/unit"
 test-integration = "bash scripts/test_all.sh tests/integration"
+test-file = "bash scripts/test_all.sh"
 
 # Fast self-tests for repository harness behavior. Uses disposable test inputs
-# and a fake compiler to prove recursive root selection and injective binary
-# paths without rebuilding the full Mojo suite.
-harness-check = "python scripts/harness_check.py"
+# and a fake compiler to prove deterministic aggregate generation, one-build
+# execution, timeout handling, and exact hosted-CI topology.
+harness-check = "python scripts/aggregate_tests_test.py && python scripts/format_all_test.py && python scripts/self_host_check_test.py && python scripts/harness_check.py"
 
-# DOGFOOD gate: run mtest over its OWN tests/ suite, executing the built binary
-# directly (`build/mtest -I build -I tests/support tests/` — never `mojo run`, for the same
-# crash-exit-code reason as test-direct). Depends on build-bin so build/mtest and
-# the precompiled package both exist. `scripts/self_host_check.py` runs the
-# binary, propagates its exit code (the suite must PASS through mtest), and
-# checks COMPLETENESS independently of mtest: it walks the classified suite roots
-# (without asking mtest) and fails if that count disagrees with the file count
-# mtest reported selecting — proof mtest discovered every test file and silently
-# skipped none. This is an ADDITIONAL gate beside test-direct, never a
-# replacement: both run the same built binaries, so their outcomes must agree.
+# DOGFOOD gate: run three focused executable probes through the built mtest
+# binary. This exercises mtest's real discover/build/run/parse/report path and
+# checks exact header/PASS-row membership independently of mtest. The exhaustive
+# 907-test inventory belongs to test-direct's single aggregate binary; compiling
+# all source files separately here would duplicate compiler work without adding
+# behavioral coverage.
 [tasks.test]
 cmd = "python scripts/self_host_check.py"
 depends-on = ["build-bin"]
@@ -144,19 +199,29 @@ depends-on = ["build-bin"]
 cmd = "python scripts/e2e_check.py"
 depends-on = ["build-bin"]
 
-# The aggregate gate CI runs. Ordered fail-fast: formatting, then the package
-# compile gate, then the protocol-transcript diff, then the Mojo tests (the
-# mtest-independent glob-driven twin first, then mtest dogfooding its own
-# suite), then the end-to-end binary gate.
-[tasks.ci]
+# The cheap hosted-CI release barrier. Every non-behavioral member of the local
+# floor stays in its exact fail-fast order; GitHub releases the independent
+# behavioral and memory-safety lanes only after this aggregate passes.
+[tasks.ci-preflight]
 depends-on = [
+    "version-check",
     "fmt-check",
     "harness-check",
     "safety-check",
     "postfork-check",
     "native-check",
+    "junit-check",
     "build",
+    "junit-render-check",
     "transcripts-check",
+]
+
+# The canonical serial local floor. Hosted CI runs the exact preflight above,
+# then gives each independent behavioral gate a fresh parallel matrix cell;
+# local development keeps one ordered aggregate for reproducible handoff.
+[tasks.ci]
+depends-on = [
+    "ci-preflight",
     "test-direct",
     "test",
     "e2e",

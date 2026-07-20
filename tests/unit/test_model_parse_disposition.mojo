@@ -4,7 +4,7 @@ Five distinct values, closed like `Outcome`. These tests pin that every value
 is distinct and that equality compares by code, so a later parser can branch on
 disposition without risking two values silently comparing equal.
 """
-from std.testing import assert_equal, assert_true, assert_false, TestSuite
+from std.testing import assert_equal, assert_true, assert_false
 
 from mtest.model import ParseDisposition
 
@@ -35,7 +35,3 @@ def test_eq_and_ne_compare_by_code() raises:
     assert_true(ParseDisposition.PARSED == ParseDisposition.PARSED)
     assert_false(ParseDisposition.PARSED == ParseDisposition.NO_REPORT)
     assert_true(ParseDisposition.PARSED != ParseDisposition.NO_REPORT)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

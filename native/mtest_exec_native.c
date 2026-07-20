@@ -1,3 +1,8 @@
+/* KERN_PROC_PGRP is a Darwin extension whose public structures use BSD types
+   hidden by a strict POSIX feature level. Request both namespaces explicitly. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
 #define _POSIX_C_SOURCE 200809L
 
 #include "mtest_exec_native.h"
@@ -17,6 +22,10 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
+
 #if MTEST_EXEC_TESTING
 #include "mtest_exec_native_test.h"
 #endif
@@ -26,6 +35,8 @@ extern char **environ;
 #define MTEST_ETXTBSY_RETRIES 5u
 #define MTEST_ETXTBSY_DELAY_MS 50
 #define MTEST_ABORT_SLICE_NS 10000000L
+#define MTEST_DARWIN_GROUP_EPERM_RETRIES 20u
+#define MTEST_DARWIN_GROUP_EPERM_RETRY_NS 1000000L
 
 _Static_assert(sizeof(sig_atomic_t) <= sizeof(int32_t), "sig_atomic_t width");
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "runtime ownership must be lock-free");
@@ -71,14 +82,25 @@ static uint64_t mtest_next_handle = 1;
 static struct sigaction mtest_old_int;
 static struct sigaction mtest_old_term;
 static struct sigaction mtest_old_chld;
+static struct sigaction mtest_old_pipe;
 static int mtest_old_int_saved;
 static int mtest_old_term_saved;
 static int mtest_old_chld_saved;
+static int mtest_old_pipe_saved;
 static int mtest_int_installed;
 static int mtest_term_installed;
 static int mtest_chld_installed;
+/* SIGPIPE is ignored for the runtime's lifetime (the SECOND deliberate exec
+   carve-out, after the tty probe): a broken destination pipe -- a `--json -`
+   consumer that closed early, e.g. `mtest --json - | head` -- must return EPIPE
+   to the reporter's write so it can latch a fatal abort, never kill mtest with
+   the default SIGPIPE disposition (death at 141). The previous disposition is
+   saved here and restored on close, symmetrically with SIGINT/SIGTERM. */
+static int mtest_pipe_installed;
 
 #if MTEST_EXEC_TESTING
+#define MTEST_TEST_MONOTONIC_WAIT_MAX_MS 10000u
+
 struct mtest_fault_state {
     uint32_t operation;
     uint32_t occurrence;
@@ -93,6 +115,26 @@ struct mtest_fault_state {
 static struct mtest_fault_state mtest_faults[MTEST_EXEC_OP_WAITPID + 1];
 static uint32_t mtest_interrupt_delivery_operation;
 static int mtest_interrupt_delivery_signal;
+static uint32_t mtest_group_signal_eperm_operation;
+static uint32_t mtest_group_signal_eperm_forced_failures;
+static uint32_t mtest_group_signal_eperm_seen;
+static uint32_t mtest_monotonic_wait_occurrence;
+static uint32_t mtest_monotonic_wait_seen;
+static uint32_t mtest_monotonic_wait_max_ms;
+static uint32_t mtest_monotonic_wait_fired;
+
+int32_t mtest_exec_test_constant(uint32_t constant_id) {
+    switch (constant_id) {
+        case MTEST_EXEC_TEST_CONSTANT_SIGCHLD:
+            return SIGCHLD;
+        case MTEST_EXEC_TEST_CONSTANT_EIO:
+            return EIO;
+        case MTEST_EXEC_TEST_CONSTANT_ETXTBSY:
+            return ETXTBSY;
+        default:
+            return -1;
+    }
+}
 
 static int mtest_fail_if_requested(uint32_t operation) {
     if (operation == MTEST_EXEC_OP_NONE || operation > MTEST_EXEC_OP_WAITPID) {
@@ -133,6 +175,13 @@ void mtest_exec_test_fault_reset(void) {
     memset(mtest_faults, 0, sizeof(mtest_faults));
     mtest_interrupt_delivery_operation = MTEST_EXEC_OP_NONE;
     mtest_interrupt_delivery_signal = 0;
+    mtest_group_signal_eperm_operation = MTEST_EXEC_OP_NONE;
+    mtest_group_signal_eperm_forced_failures = 0;
+    mtest_group_signal_eperm_seen = 0;
+    mtest_monotonic_wait_occurrence = 0;
+    mtest_monotonic_wait_seen = 0;
+    mtest_monotonic_wait_max_ms = 0;
+    mtest_monotonic_wait_fired = 0;
 }
 
 int32_t mtest_exec_test_fault_configure(
@@ -211,6 +260,83 @@ uint32_t mtest_exec_test_fault_seen(uint32_t operation) {
     }
     const struct mtest_fault_state *fault = &mtest_faults[operation];
     return fault->operation == operation ? fault->seen : 0;
+}
+
+int32_t mtest_exec_test_group_signal_eperm_configure(
+    uint32_t operation,
+    uint32_t forced_failures
+) {
+    if ((operation != MTEST_EXEC_OP_GROUP_TERM &&
+         operation != MTEST_EXEC_OP_GROUP_KILL) ||
+        forced_failures == 0) {
+        return -1;
+    }
+    mtest_group_signal_eperm_operation = operation;
+    mtest_group_signal_eperm_forced_failures = forced_failures;
+    mtest_group_signal_eperm_seen = 0;
+    return 0;
+}
+
+uint32_t mtest_exec_test_group_signal_eperm_seen(uint32_t operation) {
+    return operation == mtest_group_signal_eperm_operation
+        ? mtest_group_signal_eperm_seen
+        : 0;
+}
+
+int32_t mtest_exec_test_monotonic_wait_configure(
+    uint32_t occurrence,
+    uint32_t max_wait_ms
+) {
+    if (occurrence == 0 || max_wait_ms == 0 ||
+        max_wait_ms > MTEST_TEST_MONOTONIC_WAIT_MAX_MS) {
+        return -1;
+    }
+    mtest_monotonic_wait_occurrence = occurrence;
+    mtest_monotonic_wait_seen = 0;
+    mtest_monotonic_wait_max_ms = max_wait_ms;
+    mtest_monotonic_wait_fired = 0;
+    return 0;
+}
+
+uint32_t mtest_exec_test_monotonic_wait_fired(void) {
+    return mtest_monotonic_wait_fired;
+}
+
+static void mtest_wait_before_monotonic_if_requested(void) {
+    if (mtest_monotonic_wait_occurrence == 0) {
+        return;
+    }
+    mtest_monotonic_wait_seen += 1;
+    if (mtest_monotonic_wait_seen != mtest_monotonic_wait_occurrence ||
+        mtest_process.handle == 0 || mtest_process.leader <= 0) {
+        return;
+    }
+    const struct timespec delay = {0, 1000000L};
+    for (uint32_t attempt = 0;
+         attempt <= mtest_monotonic_wait_max_ms;
+         ++attempt) {
+        siginfo_t information;
+        memset(&information, 0, sizeof(information));
+        int wait_status;
+        do {
+            wait_status = waitid(
+                P_PID,
+                (id_t)mtest_process.leader,
+                &information,
+                WEXITED | WNOHANG | WNOWAIT
+            );
+        } while (wait_status != 0 && errno == EINTR);
+        if (wait_status != 0) {
+            return;
+        }
+        if (information.si_pid == mtest_process.leader) {
+            mtest_monotonic_wait_fired = 1;
+            return;
+        }
+        if (attempt < mtest_monotonic_wait_max_ms) {
+            (void)nanosleep(&delay, NULL);
+        }
+    }
 }
 
 void mtest_exec_test_reset_interrupt(void) {
@@ -838,8 +964,87 @@ int32_t mtest_exec_runtime_open(struct mtest_exec_error *error) {
         return -1;
     }
     mtest_chld_installed = 1;
+    /* Ignore SIGPIPE for the runtime's lifetime, saving the old disposition to
+       restore on close (mirroring SIGINT/SIGTERM). A plain sigaction like
+       SIGCHLD: this carve-out installs a disposition, not a fault-injectable
+       mtest handler, so it needs no operation code. Realistically infallible
+       for a valid signal, but a failure rolls the whole transaction back. */
+    if (sigaction(SIGPIPE, NULL, &mtest_old_pipe) != 0) {
+        saved_errno = errno;
+        goto sigpipe_rollback;
+    }
+    mtest_old_pipe_saved = 1;
+    {
+        struct sigaction pipe_action;
+        memset(&pipe_action, 0, sizeof(pipe_action));
+        pipe_action.sa_handler = SIG_IGN;
+        if (sigemptyset(&pipe_action.sa_mask) != 0 ||
+            sigaction(SIGPIPE, &pipe_action, NULL) != 0) {
+            saved_errno = errno;
+            mtest_old_pipe_saved = 0;
+            goto sigpipe_rollback;
+        }
+    }
+    mtest_pipe_installed = 1;
     atomic_store(&mtest_runtime_state, MTEST_RUNTIME_OPEN);
     return 0;
+
+sigpipe_rollback:
+    /* SIGPIPE setup failed with nothing SIGPIPE-side installed. Best-effort
+       restore SIGCHLD, then SIGTERM, then SIGINT -- the reverse of the install
+       order -- before failing closed, exactly as the SIGCHLD-install failure
+       path does. A rollback that itself fails leaves RESTORE_REQUIRED for the
+       owner's later close to retry. */
+    if (sigaction(SIGCHLD, &mtest_old_chld, NULL) != 0) {
+        if (rollback_errno == 0) {
+            rollback_errno = errno;
+        }
+    } else {
+        mtest_chld_installed = 0;
+    }
+    {
+        uint32_t rollback_operation = MTEST_EXEC_OP_NONE;
+        if (mtest_checked_sigaction(
+                MTEST_EXEC_OP_SIGACTION_RESTORE_TERM,
+                SIGTERM,
+                &mtest_old_term,
+                NULL
+            ) != 0) {
+            if (rollback_errno == 0) {
+                rollback_operation = MTEST_EXEC_OP_SIGACTION_RESTORE_TERM;
+                rollback_errno = errno;
+            }
+        } else {
+            mtest_term_installed = 0;
+        }
+        if (mtest_checked_sigaction(
+                MTEST_EXEC_OP_SIGACTION_RESTORE_INT,
+                SIGINT,
+                &mtest_old_int,
+                NULL
+            ) != 0) {
+            if (rollback_errno == 0) {
+                rollback_operation = MTEST_EXEC_OP_SIGACTION_RESTORE_INT;
+                rollback_errno = errno;
+            }
+        } else {
+            mtest_int_installed = 0;
+        }
+        if (rollback_errno == 0) {
+            mtest_old_int_saved = 0;
+            mtest_old_term_saved = 0;
+            mtest_old_chld_saved = 0;
+            mtest_old_pipe_saved = 0;
+            atomic_store(&mtest_runtime_state, MTEST_RUNTIME_CLOSED);
+        } else {
+            atomic_store(&mtest_runtime_state, MTEST_RUNTIME_RESTORE_REQUIRED);
+        }
+        mtest_set_error(error, MTEST_EXEC_OP_NONE, saved_errno, 0, SIGPIPE);
+        if (rollback_errno != 0) {
+            mtest_set_cleanup_error(error, rollback_operation, rollback_errno);
+        }
+        return -1;
+    }
 }
 
 int32_t mtest_exec_runtime_close(struct mtest_exec_error *error) {
@@ -890,9 +1095,21 @@ retry_runtime_ownership:
         return -1;
     }
 restore_handlers:
+    /* Restore the SIGPIPE disposition first (a plain sigaction like SIGCHLD;
+       the restore order among the independent signals does not matter). */
+    if (mtest_pipe_installed &&
+        sigaction(SIGPIPE, &mtest_old_pipe, NULL) != 0) {
+        first_errno = errno;
+        had_failure = 1;
+    } else {
+        mtest_pipe_installed = 0;
+        mtest_old_pipe_saved = 0;
+    }
     if (mtest_chld_installed &&
         sigaction(SIGCHLD, &mtest_old_chld, NULL) != 0) {
-        first_errno = errno;
+        if (!had_failure) {
+            first_errno = errno;
+        }
         had_failure = 1;
     } else {
         mtest_chld_installed = 0;
@@ -953,6 +1170,9 @@ int32_t mtest_exec_monotonic_ms(
         mtest_set_error(error, MTEST_EXEC_OP_CLOCK_MONOTONIC, EINVAL, 0, 0);
         return -1;
     }
+#if MTEST_EXEC_TESTING
+    mtest_wait_before_monotonic_if_requested();
+#endif
     if (mtest_fail_if_requested(MTEST_EXEC_OP_CLOCK_MONOTONIC) ||
         clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
         mtest_set_error(error, MTEST_EXEC_OP_CLOCK_MONOTONIC, errno, 0, 0);
@@ -1127,8 +1347,27 @@ static void mtest_child_exec(
 ) {
     /* SAFETY: this is the complete post-fork child region. Every pointer and
        argv slot was fully constructed in the parent and survives in the child's
-       copy-on-write image. Only setpgid, chdir, dup2, close, execve, poll,
-       write, and _exit are called; none retains a pointer after failed exec. */
+       copy-on-write image. Only sigaction, setpgid, chdir, dup2, close, execve,
+       poll, write, and _exit are called; none retains a pointer after failed
+       exec. sigaction, setpgid, dup2, close, execve, poll, and write are all on
+       POSIX's async-signal-safe list. */
+
+    /* Restore the SIGPIPE disposition the runtime saved before installing its
+       process-wide SIG_IGN carve-out. That carve-out is PARENT-local: it keeps
+       mtest's own writes to a dead --json pipe from dying at 141. But an ignored
+       disposition survives execve, so without this the exec'd test binary would
+       inherit SIG_IGN and a direct SIGPIPE crash would be silently swallowed
+       into a false PASS. mtest_old_pipe is a file-scope static populated before
+       fork and readable in the copy-on-write child. Restoring a known-valid
+       disposition to SIGPIPE cannot fail in practice (EINVAL/EFAULT are
+       impossible here); the check is defense-in-depth, so it takes no
+       fault-injection hook, and reuses the same report-and-exit path as the
+       other pre-exec setup steps. */
+    if (sigaction(SIGPIPE, &mtest_old_pipe, NULL) != 0) {
+        mtest_child_report(
+            setup_write, MTEST_EXEC_STAGE_SIGPIPE_RESTORE, errno
+        );
+    }
     if (mtest_fail_if_requested(MTEST_EXEC_OP_CHILD_SETPGID) ||
         setpgid(0, 0) != 0) {
         mtest_child_report(setup_write, MTEST_EXEC_STAGE_SETPGID, errno);
@@ -1552,7 +1791,7 @@ static int mtest_validate_setup_record(struct mtest_exec_setup_state *state) {
     memcpy(&stage, state->raw, sizeof(stage));
     memcpy(&error_number, state->raw + sizeof(stage), sizeof(error_number));
     if (stage < MTEST_EXEC_STAGE_SETPGID ||
-        stage > MTEST_EXEC_STAGE_SETUP_WRITE || error_number <= 0) {
+        stage > MTEST_EXEC_STAGE_SIGPIPE_RESTORE || error_number <= 0) {
         state->outcome = MTEST_EXEC_SETUP_CORRUPT;
         return 0;
     }
@@ -1683,6 +1922,77 @@ static uint32_t mtest_group_operation(uint32_t action) {
     return MTEST_EXEC_OP_GROUP_KILL;
 }
 
+static int mtest_signal_process_group(
+    pid_t process_group,
+    int signal_number,
+    uint32_t operation
+) {
+#if MTEST_EXEC_TESTING
+    /* This seam emulates a real kill(2) EPERM sequence and is deliberately
+       separate from named fault injection. The latter must remain an immediate
+       fail-closed error and never enter Darwin's transient retry path. */
+    if (operation == mtest_group_signal_eperm_operation) {
+        mtest_group_signal_eperm_seen += 1;
+        if (mtest_group_signal_eperm_seen <=
+            mtest_group_signal_eperm_forced_failures) {
+            errno = EPERM;
+            return -1;
+        }
+    }
+#else
+    (void)operation;
+#endif
+    return kill(-process_group, signal_number);
+}
+
+#if defined(__APPLE__)
+static int mtest_darwin_group_is_zombie_only(pid_t process_group) {
+    int query[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PGRP, process_group};
+    size_t length = 0;
+    if (sysctl(query, 4, NULL, &length, NULL, 0) != 0 || length == 0) {
+        return 0;
+    }
+    struct kinfo_proc *members = malloc(length);
+    if (members == NULL) {
+        return 0;
+    }
+    int complete = sysctl(query, 4, members, &length, NULL, 0) == 0 &&
+        length > 0 && length % sizeof(*members) == 0;
+    int zombie_only = complete;
+    if (complete) {
+        size_t count = length / sizeof(*members);
+        for (size_t index = 0; index < count; ++index) {
+            if (members[index].kp_proc.p_stat != SZOMB) {
+                zombie_only = 0;
+                break;
+            }
+        }
+    }
+    free(members);
+    return zombie_only;
+}
+#endif
+
+#if defined(__APPLE__) || MTEST_EXEC_TESTING
+static int mtest_group_eperm_can_retry(uint32_t operation) {
+#if defined(__APPLE__)
+    (void)operation;
+    return 1;
+#else
+    return operation == mtest_group_signal_eperm_operation;
+#endif
+}
+
+static int mtest_group_is_proven_zombie_only(pid_t process_group) {
+#if defined(__APPLE__)
+    return mtest_darwin_group_is_zombie_only(process_group);
+#else
+    (void)process_group;
+    return 0;
+#endif
+}
+#endif
+
 static int mtest_process_group_checked(
     struct mtest_exec_process *process,
     uint32_t action,
@@ -1693,15 +2003,65 @@ static int mtest_process_group_checked(
         ? 0
         : (action == MTEST_EXEC_GROUP_TERM ? SIGTERM : SIGKILL);
     uint32_t operation = mtest_group_operation(action);
-    if (mtest_fail_if_requested(operation) ||
-        kill(-process->process_group, signal_number) != 0) {
-        if (errno == ESRCH) {
+#if defined(__APPLE__) || MTEST_EXEC_TESTING
+    uint32_t eperm_retries = 0;
+#endif
+    /* In testing builds, named fault occurrence accounting advances once per
+       loop visit, including visits caused by the transient-EPERM seam. An
+       occurrence-N named group fault may therefore fire during such a retry;
+       production builds have no fault table or transient test seam. */
+    for (;;) {
+        int fault_injected = mtest_fail_if_requested(operation);
+        int group_status = fault_injected
+            ? -1
+            : mtest_signal_process_group(
+                process->process_group, signal_number, operation
+            );
+        if (group_status == 0) {
+            break;
+        }
+        int group_errno = errno;
+        if (group_errno == ESRCH) {
             result->state = MTEST_EXEC_GROUP_GONE;
             process->group_swept = 1;
             return 0;
         }
+#if defined(__APPLE__) || MTEST_EXEC_TESTING
+        /* Darwin's process-group signal path excludes zombies from its member
+           iteration, then returns EPERM when only terminal members remain.
+           Query the complete group snapshot on every real EPERM before treating
+           TERM or KILL as a completed sweep. This proof does not require prior
+           waitid observation: the unreaped group-leader zombie pins the PGID,
+           and an all-zombie group has no member capable of executing or forking.
+
+           XNU can also return EPERM briefly while a post-TERM member is exiting
+           but has not reached SZOMB. Retry that real Darwin result for one small,
+           explicit bound. A probe action, an injected EPERM, an incomplete or
+           mixed snapshot after the bound, or any other errno remains an error,
+           so cleanup still fails closed. The MTEST_EXEC_TESTING branch exercises
+           this Darwin-only algorithm on Linux without changing production Linux
+           behavior. */
+        if (!fault_injected && group_errno == EPERM &&
+            action != MTEST_EXEC_GROUP_PROBE &&
+            mtest_group_eperm_can_retry(operation)) {
+            if (mtest_group_is_proven_zombie_only(process->process_group)) {
+                process->group_swept = 1;
+                result->state = MTEST_EXEC_GROUP_PRESENT;
+                return 0;
+            }
+            if (eperm_retries < MTEST_DARWIN_GROUP_EPERM_RETRIES) {
+                const struct timespec delay = {
+                    0, MTEST_DARWIN_GROUP_EPERM_RETRY_NS
+                };
+                eperm_retries += 1;
+                (void)nanosleep(&delay, NULL);
+                continue;
+            }
+        }
+#endif
         mtest_set_error(
-            error, operation, errno, 0, -((int64_t)process->process_group)
+            error, operation, group_errno, 0,
+            -((int64_t)process->process_group)
         );
         return -1;
     }

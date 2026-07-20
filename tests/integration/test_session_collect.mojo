@@ -9,10 +9,11 @@ qualifying files are listed; a compile error / crash / timeout / malformed suite
 writes a diagnostic and the listing CONTINUES (exit-1 class); an off-grammar
 probe is DRIFT (exit 3); nothing collectable is exit 5.
 """
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_true
 
 from mtest.session import run_collect
 
+from exec_helpers import true_binary
 from session_fixtures import (
     SRC_COMPILE_ERROR,
     SRC_CRASH,
@@ -154,15 +155,15 @@ def test_truncated_probe_refuses_forged_head_report_exit_1() raises:
 
 
 def test_probe_spawn_failure_is_internal_exit_3() raises:
-    # A fake compiler (`/bin/true`) exits 0 without producing the binary, so the
-    # build "succeeds" but the probe cannot spawn the (nonexistent) binary: a
+    # A fake compiler (`/usr/bin/true`) exits 0 without producing the binary.
+    # The build "succeeds" but the probe cannot spawn the nonexistent binary: a
     # SpawnFailed termination. That is an internal machinery failure (exit 3),
     # NOT a malformed suite (exit 1).
     var root = temp_root()
     write_file(root, "tests/test_x.mojo", SRC_PASS)
     var cfg = base_config()
     cfg.collect = True
-    cfg.mojo_path = "/bin/true"
+    cfg.mojo_path = true_binary()
     cfg.paths.append("tests")
 
     var res = run_collect(cfg, root)
@@ -215,7 +216,3 @@ def test_nothing_collectable_is_exit_5() raises:
     assert_equal(res.code, 5, "nothing collectable -> exit 5")
     assert_equal(len(res.listing), 0)
     assert_equal(len(res.diagnostics), 0, "a clean zero-test probe is silent")
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

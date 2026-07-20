@@ -5,7 +5,7 @@ asserts the exact sorted `run_files` list before tearing the tree down. Covers
 the `test_*.mojo` pattern, per-directory sort order, and symlinked-directory
 non-traversal.
 """
-from std.testing import assert_equal, assert_false, TestSuite
+from std.testing import assert_equal, assert_false
 
 from mtest.config import RunnerConfig
 from mtest.discover import discover
@@ -73,7 +73,3 @@ def test_nested_directory_operand_is_walked() raises:
         result.run_files, ["tests/a/test_a.mojo", "tests/b/test_b.mojo"]
     )
     remove_tree(root)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

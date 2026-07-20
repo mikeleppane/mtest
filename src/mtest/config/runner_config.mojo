@@ -6,6 +6,7 @@ one from argv; the session layer (a later module) only reads it. An empty
 `paths` list means "use discovery's own default root", not "nothing to do" —
 that rule is discover's, not config's, to apply.
 """
+from mtest.config.annotations_mode import AnnotationsMode
 from mtest.config.color_when import ColorWhen
 from mtest.config.precompile import Precompile
 from mtest.config.shard_mode import ShardMode
@@ -100,6 +101,31 @@ struct RunnerConfig(Copyable, Movable):
     compile-specific grace) and reported COMPILE_TIMEOUT — a crash-class failure
     `--retries` will retry against a quarantined module cache."""
 
+    var json_dest: String
+    """`--json PATH|-`: the machine event-stream destination. Empty means the
+    flag was absent (no stream). `"-"` streams to stdout (byte-pure), relocating
+    the console to stderr. Any other value is a filesystem PATH the stream is
+    written to live, overwriting a pre-existing file at session start. The
+    parser validates it syntactically (a non-empty value with an existing parent
+    directory); a runtime open failure is resolved by the session."""
+
+    var gh_annotations: AnnotationsMode
+    """`--gh-annotations off|on|auto`: whether to emit GitHub Actions annotation
+    workflow-command lines in the deterministic stdout tail. `auto` (the default)
+    is on iff `GITHUB_ACTIONS=true`; `on` always renders; `off` never does. The
+    stop-commands FENCING of echoed child output is a separate console-path
+    concern keyed on `GITHUB_ACTIONS`, active regardless of this mode."""
+
+    var junit_dest: String
+    """`--junit-xml PATH`: the JUnit XML report destination. Empty means the flag
+    was absent (no report). Any other value is a filesystem PATH the assembled
+    `<testsuites>` document is written to. Unlike `--json`, the destination is
+    NEVER truncated live: the report is assembled at finalization, written to a
+    unique temp beside the target, and renamed atomically onto PATH only after a
+    verified complete write, so a prior report survives every failure. The parser
+    validates it syntactically (a non-empty value with an existing parent
+    directory); a runtime creation failure is resolved by the session."""
+
     @staticmethod
     def default() -> RunnerConfig:
         """A config with every field at its contract default. Allocates.
@@ -109,7 +135,9 @@ struct RunnerConfig(Copyable, Movable):
         `color=AUTO`, `exitfirst=False`, `maxfail=0` (no limit),
         `durations=0` (no report), `collect=False`, UNSHARDED
         (`shard_mode=HASH`, `shard_m=0`, `shard_n=0`), `retries=0` (no
-        retries), and `compile_timeout_secs=600`.
+        retries), `compile_timeout_secs=600`, `json_dest=""` (no stream),
+        `gh_annotations=AUTO` (on iff `GITHUB_ACTIONS=true`), and
+        `junit_dest=""` (no JUnit report).
         """
         return RunnerConfig(
             paths=[],
@@ -133,4 +161,7 @@ struct RunnerConfig(Copyable, Movable):
             shard_n=0,
             retries=0,
             compile_timeout_secs=600,
+            json_dest="",
+            gh_annotations=AnnotationsMode.AUTO,
+            junit_dest="",
         )

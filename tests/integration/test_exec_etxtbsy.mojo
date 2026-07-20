@@ -1,21 +1,25 @@
 """Text-file-busy latch precedence for the `exec` supervisor.
 
-When a deadline or an interrupt fires while the child is still retrying a
-text-file-busy (ETXTBSY) exec, the run must report TimedOut — our own kill won
-the race — never a SpawnFailed machinery error. The testing adapter injects
-ETXTBSY at the first child execve call, placing the child in the real bounded
-retry delay without relying on an ambient filesystem race, then injects EIO at
-the second call so SpawnFailed genuinely competes with the timeout latch.
-Because the child inherits our SIGTERM handler, it survives the group SIGTERM
-long enough to reach the errno-reporting path — the exact race in which the
-latch must still win.
+When a deadline or an interrupt fires around a text-file-busy (ETXTBSY) exec,
+the run must report TimedOut — our own kill won the race — never a SpawnFailed
+machinery error. The testing adapter injects ETXTBSY at the first child execve
+call, placing the child in the real bounded retry delay without relying on an
+ambient filesystem race, then injects EIO at the second call so SpawnFailed
+genuinely competes with the timeout latch.
+
+The deadline case delays the supervisor's first post-open clock read until both
+the deadline and child exit are in the past. It therefore pins the loop ordering:
+the timeout latch must be set before an observation of the already-waitable child
+can end the loop. The interrupt case instead delivers SIGINT during the retry;
+the child inherits our SIGTERM handler and survives long enough to reach the
+errno-reporting path under the already-set latch.
 
 Kept in its own module because it installs signal handlers and drives the process
 wide interrupt latch, which it resets so no state leaks into the other suites.
 """
 from std.ffi import external_call
 from std.memory import alloc, memset_zero
-from std.testing import assert_true, TestSuite
+from std.testing import assert_true
 
 from mtest.exec import (
     ProcessSpec,
@@ -27,18 +31,23 @@ from mtest.exec.signals import _reset_interrupt
 from exec_helpers import target
 
 comptime _SIGINT = 2
-comptime _SIGCONT = 18
-comptime _SIGSTOP = 19
-comptime _EIO = 5
-comptime _ETXTBSY = 26
+comptime _CONSTANT_EIO = 4
+comptime _CONSTANT_ETXTBSY = 5
 comptime _OP_CHILD_EXECVE = 24
 comptime _DELAY_MS = 10
-comptime _STOP_DELAY_MS = 5
-comptime _STOP_DURATION_MS = 100
+comptime _CLOCK_WAIT_OCCURRENCE = 2
+comptime _CLOCK_WAIT_MAX_MS = 1000
 """Milliseconds the SIGINT helper polls (10 ms) so the interrupt latch flips a
 short way INTO the busy-exec retry window — late enough that the group SIGTERM's
 grace escalation does not preempt the child before it reaches the errno path
 (the race in which the latch must still win), yet well inside the window."""
+
+
+def _native_constant(constant_id: Int) -> Int32:
+    """Read one platform-header value from the testing adapter."""
+    # SAFETY: this test-only ABI takes one scalar closed identifier and returns
+    # one scalar C-header constant. It receives no pointer and retains no state.
+    return external_call["mtest_exec_test_constant", Int32](UInt32(constant_id))
 
 
 def _inject_etxtbsy_then_exec_error() raises:
@@ -48,54 +57,37 @@ def _inject_etxtbsy_then_exec_error() raises:
     # nonzero; both errno values are positive; no pointer crosses either ABI.
     external_call["mtest_exec_test_fault_reset", NoneType]()
     var status = external_call["mtest_exec_test_fault_configure", Int32](
-        UInt32(_OP_CHILD_EXECVE), UInt32(1), Int32(_ETXTBSY), Int64(0)
+        UInt32(_OP_CHILD_EXECVE),
+        UInt32(1),
+        _native_constant(_CONSTANT_ETXTBSY),
+        Int64(0),
     )
     assert_true(status == 0, "could not configure child execve fault")
     # SAFETY: this secondary test-only ABI also accepts scalars only; occurrence
     # two follows the configured primary occurrence, EIO is positive, the result
     # payload is zero as required for an error, and no pointer crosses the ABI.
     status = external_call["mtest_exec_test_fault_configure_secondary", Int32](
-        UInt32(_OP_CHILD_EXECVE), UInt32(2), Int32(_EIO), Int64(0)
+        UInt32(_OP_CHILD_EXECVE),
+        UInt32(2),
+        _native_constant(_CONSTANT_EIO),
+        Int64(0),
     )
     assert_true(status == 0, "could not configure terminal child execve fault")
 
 
-def _schedule_self_stop_then_continue() raises -> Int32:
-    """Stop the supervisor across its deadline, then let it resume."""
-    # SAFETY: `poll_storage` owns one initialized Int64 cell before fork. Each
-    # nfds-zero poll ignores the pointer, and the child's COW copy stays live
-    # until it exits without destructors. The parent frees only its own copy.
-    var poll_storage = alloc[Int64](1)
-    memset_zero(poll_storage.bitcast[UInt8](), 8)
-    # SAFETY: getpid and fork use their exact Linux scalar/no-argument ABIs,
-    # retain no pointer, and all child-visible storage is initialized pre-fork.
-    var self_pid = external_call["getpid", Int32]()
-    var pid = external_call["fork", Int32]()
-    if Int(pid) == 0:
-        # SAFETY: after fork the helper calls only poll, kill, and _exit, all
-        # async-signal-safe. Both nfds-zero polls ignore the live COW pointer;
-        # bounded scalar delays bracket exact Linux SIGSTOP/SIGCONT delivery to
-        # the parent's pid, and no call retains a pointer or returns ownership.
-        _ = external_call["poll", Int32](
-            poll_storage.bitcast[UInt8](), UInt64(0), Int32(_STOP_DELAY_MS)
-        )
-        _ = external_call["kill", Int32](self_pid, Int32(_SIGSTOP))
-        _ = external_call["poll", Int32](
-            poll_storage.bitcast[UInt8](), UInt64(0), Int32(_STOP_DURATION_MS)
-        )
-        _ = external_call["kill", Int32](self_pid, Int32(_SIGCONT))
-        # SAFETY: _exit is async-signal-safe, accepts the exact scalar status,
-        # retains no state, and terminates without running Mojo destructors.
-        external_call["_exit", NoneType](Int32(0))
-    if Int(pid) < 0:
-        # SAFETY: fork failed, so the parent uniquely owns the allocation and
-        # may free it exactly once before raising.
-        poll_storage.free()
-        raise Error("could not fork stop/continue test helper")
-    # SAFETY: parent and child now have distinct COW images. Freeing the unique
-    # parent allocation cannot invalidate the child's still-live copy.
-    poll_storage.free()
-    return pid
+def _wait_before_first_post_open_clock_read() raises:
+    """Let both the 20 ms deadline and child exit precede loop observation."""
+    # The first monotonic call captures run_supervised's start time. The second
+    # is the first loop-top deadline reading after process_open. At that exact
+    # call the test adapter waits, without consuming the child, until the one
+    # 50 ms ETXTBSY backoff reaches its terminal EIO and the child is waitable.
+    # That exit necessarily also follows the 20 ms deadline.
+    # SAFETY: this test-only ABI accepts two bounded scalar values, retains no
+    # pointer, and changes only testing-adapter clock-wait state.
+    var status = external_call[
+        "mtest_exec_test_monotonic_wait_configure", Int32
+    ](UInt32(_CLOCK_WAIT_OCCURRENCE), UInt32(_CLOCK_WAIT_MAX_MS))
+    assert_true(status == 0, "could not configure monotonic clock wait")
 
 
 def _reap_helper(helper: Int32) raises:
@@ -120,15 +112,20 @@ def test_deadline_beats_stuck_etxtbsy_exec_latches_timed_out() raises:
     runtime.open()
     _reset_interrupt()
     _inject_etxtbsy_then_exec_error()
-    var helper = _schedule_self_stop_then_continue()
+    _wait_before_first_post_open_clock_read()
     var t = target("etxtbsy_target.sh")
     var argv = List[String]()
     argv.append(t)
     var r = run_supervised(runtime, ProcessSpec.command(argv^, 20))
-    _reap_helper(helper)
-    # SAFETY: this test-only scalar ABI clears only native fault-table state;
-    # it accepts no pointer, retains nothing, and the runtime has no live child.
+    # SAFETY: this test-only scalar ABI reports whether the configured delay
+    # fired. It accepts no pointer and neither mutates nor retains Mojo state.
+    var wait_fired = external_call[
+        "mtest_exec_test_monotonic_wait_fired", UInt32
+    ]()
+    # SAFETY: this test-only scalar ABI clears native test-control state; it
+    # accepts no pointer, retains nothing, and the runtime has no live child.
     external_call["mtest_exec_test_fault_reset", NoneType]()
+    assert_true(wait_fired == 1, "first post-open clock wait did not fire")
     assert_true(r.termination.is_timed_out(), String(r.termination))
     assert_true(r.termination.final_is_exited(), String(r.termination))
     # The target exits 0, so a nonzero final exit proves the injected terminal
@@ -200,8 +197,8 @@ def test_interrupt_beats_stuck_etxtbsy_exec_latches_timed_out() raises:
     # nor the interrupt state can leak into the rest of the suite.
     _reap_helper(helper)
     _reset_interrupt()
-    # SAFETY: this test-only scalar ABI clears only native fault-table state;
-    # it accepts no pointer, retains nothing, and the runtime has no live child.
+    # SAFETY: this test-only scalar ABI clears native test-control state; it
+    # accepts no pointer, retains nothing, and the runtime has no live child.
     external_call["mtest_exec_test_fault_reset", NoneType]()
     runtime.close()
     assert_true(r.termination.is_timed_out(), String(r.termination))
@@ -209,7 +206,3 @@ def test_interrupt_beats_stuck_etxtbsy_exec_latches_timed_out() raises:
     # As above, nonzero discriminates the EIO setup failure from target exit 0
     # without coupling this correctness test to a memory tool's error-exit value.
     assert_true(r.termination.final_value != 0, String(r.termination))
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

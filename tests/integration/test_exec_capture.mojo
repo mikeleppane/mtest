@@ -10,7 +10,6 @@ from std.testing import (
     assert_true,
     assert_false,
     assert_raises,
-    TestSuite,
 )
 
 from mtest.config import lossy_utf8
@@ -181,7 +180,3 @@ def test_lossy_utf8_replaces_invalid_preserves_valid() raises:
     assert_true(s.startswith("h"), s)
     assert_true("�" in s, s)  # replacement char for 0xFF
     assert_true(s.endswith("é"), s)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

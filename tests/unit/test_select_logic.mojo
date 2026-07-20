@@ -11,7 +11,6 @@ from std.testing import (
     assert_false,
     assert_true,
     assert_raises,
-    TestSuite,
 )
 
 from mtest.select import FileIntent, contains_ci, select_from
@@ -123,7 +122,3 @@ def test_contains_ci_basic() raises:
     assert_true(contains_ci("test_add", "ADD"))
     assert_false(contains_ci("test_add", "sub"))
     assert_true(contains_ci("anything", ""))
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

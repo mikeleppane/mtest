@@ -6,18 +6,19 @@ adversarial review found broken, reached through the same private-helper seam
 filesystem, no clock — so the policy is pinned in isolation from the orchestration
 that consumes it.
 """
-from std.testing import assert_equal, assert_false, assert_true, TestSuite
+from std.testing import assert_equal, assert_false, assert_true
 
-from mtest.exec import Termination
-from mtest.model import Outcome
+from mtest.exec import ProcessResult, Termination
+from mtest.model import Outcome, ParseDisposition
 from mtest.session.retry_class import RetryClass
 from mtest.session.session import (
     _compile_crash_residual,
-    _finalize_exit_code,
     _flaky_eligible,
     _invocation_nonce,
+    _probe_terminal,
     _quarantine_dir,
     _retry_out_bin,
+    _run_terminal_file,
     _select_names,
 )
 
@@ -46,30 +47,12 @@ def test_flaky_eligible_rejects_real_failures() raises:
     assert_false(_flaky_eligible(Outcome.MALFORMED_SUITE))
 
 
-# ---- Fix 5: a late interrupt DOMINATES the resolved exit code ------------------
-
-
-def test_finalize_exit_code_interrupt_dominates_crash_exit() raises:
-    # A run that CRASHED resolves code 1 before attribution; an interrupt that
-    # arrives DURING the pass must still exit 2, not the laundered 1.
-    assert_equal(_finalize_exit_code(1, True), 2)
-
-
-def test_finalize_exit_code_interrupt_dominates_any_nonzero() raises:
-    assert_equal(_finalize_exit_code(5, True), 2)
-    assert_equal(_finalize_exit_code(0, True), 2)
-    assert_equal(_finalize_exit_code(3, True), 2)
-
-
-def test_finalize_exit_code_no_interrupt_is_untouched() raises:
-    assert_equal(_finalize_exit_code(1, False), 1)
-    assert_equal(_finalize_exit_code(0, False), 0)
-    assert_equal(_finalize_exit_code(5, False), 5)
-
-
-def test_finalize_exit_code_already_two_is_stable() raises:
-    assert_equal(_finalize_exit_code(2, True), 2)
-    assert_equal(_finalize_exit_code(2, False), 2)
+# ---- Fix 5: the late-interrupt DOMINANCE now lives in the terminal protocol ----
+#
+# The interrupt-linearization that a late (mid-attribution) interrupt dominates
+# the resolved exit code is fixed at the two-phase terminal protocol's Phase-1
+# entry and resolved by `_resolve_terminal_code`; its dedicated pins live in
+# `test_session_terminal.mojo`.
 
 
 # ---- Fix 7: the residual warning does not claim "killed" for a self-exited ICE -
@@ -183,5 +166,61 @@ def test_retry_out_bin_distinct_per_attempt() raises:
     assert_false(a == b, "two attempts shared a retry binary")
 
 
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()
+# ---- FileFinished carries the file-scope process result's own truncation ------
+
+
+def test_run_terminal_file_propagates_truncation_from_process_result() raises:
+    # A selection-run CRASH/TIMEOUT/malformed terminal is built straight from
+    # the run's own ProcessResult; its truncation booleans must ride the
+    # verdict per-stream, not collapse to a shared or defaulted flag.
+    var term = ProcessResult(
+        List[UInt8](),
+        List[UInt8](),
+        True,
+        False,
+        Termination.signaled(11),
+        5,
+    )
+    var fr = _run_terminal_file(
+        "tests/test_x.mojo",
+        Outcome.CRASH,
+        ParseDisposition.NO_REPORT,
+        "",
+        "",
+        List[String](),
+        0.0,
+        0.0,
+        term,
+        0,
+        signal_number=11,
+    )
+    assert_true(fr.event.stdout_truncated, "stdout truncation must propagate")
+    assert_false(
+        fr.event.stderr_truncated, "an untruncated stream must stay False"
+    )
+
+
+def test_probe_terminal_propagates_truncation_from_probe_result() raises:
+    # The --skip-all probe genuinely executes the file's binary, so a
+    # truncated probe capture is real truncation of that file's run and must
+    # ride the terminal FileFinished the probe produces on a crash/timeout/
+    # malformed/overflow probe.
+    var fr = _probe_terminal(
+        "tests/test_x.mojo",
+        Outcome.CRASH,
+        ParseDisposition.NO_REPORT,
+        "",
+        "",
+        List[String](),
+        0.0,
+        List[UInt8](),
+        List[UInt8](),
+        False,
+        signal_number=11,
+        stdout_truncated=False,
+        stderr_truncated=True,
+    )
+    assert_false(
+        fr.event.stdout_truncated, "an untruncated stream must stay False"
+    )
+    assert_true(fr.event.stderr_truncated, "stderr truncation must propagate")

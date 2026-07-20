@@ -8,7 +8,7 @@ that policy table with synthesized `Termination` + `ParsedReport` inputs — no
 processes, no filesystem — exactly as `test_session_verdict.mojo` pins the bare
 mapping. `resolve_report` (the capture-overflow tail reparse) is pinned here too.
 """
-from std.testing import assert_equal, assert_false, assert_true, TestSuite
+from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.exec import Termination
 from mtest.model import Outcome, ParseDisposition
@@ -274,7 +274,3 @@ def test_resolve_truncated_forged_head_marker_not_trusted() raises:
     assert_true(
         tr.is_overflow, "a forged head marker/report must not rescue overflow"
     )
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

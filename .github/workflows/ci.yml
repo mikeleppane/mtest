@@ -4,8 +4,9 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_dispatch:
 
-# A newer push to the same branch/PR cancels the older, still-running job.
+# A newer push to the same branch/PR cancels the older, still-running workflow.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -15,8 +16,8 @@ permissions:
   contents: read
 
 jobs:
-  ci:
-    name: fmt + transcripts + tests
+  linux-preflight:
+    name: Linux / preflight
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -24,37 +25,143 @@ jobs:
       - name: Set up pixi
         uses: prefix-dev/setup-pixi@v0.10.0
         with:
-          # Install exactly what pixi.lock pins; fail if the lock is stale. This
-          # is the ONLY network step — everything after is hermetic (the
-          # fixtures and transcripts are committed; the generator builds and
-          # runs the fixtures with the locked toolchain).
+          # Install exactly what pixi.lock pins; fail if the lock is stale.
           locked: true
-          # Cache the solved environment keyed on pixi.lock.
           cache: true
 
       - name: Mojo version
         run: pixi run mojo-version
 
-      # The aggregate gate, fail-fast in order:
-      #   fmt-check         — mojo format then `git diff --exit-code` (never edits in CI)
-      #   harness-check     — exercise recursive suite enumeration and output mapping
-      #   safety-check      — reject undocumented unsafe Mojo operations
-      #   postfork-check    — audit the production/testing post-fork call graphs
-      #   native-check      — verify native ABI/layout/symbol isolation and lifecycle
-      #   build             — precompile src/mtest (the package-compiles gate)
-      #   transcripts-check — regenerate every transcript to a temp dir and diff
-      #                       byte-for-byte against committed protocol snapshots (also a
-      #                       toolchain-drift detector via the pinned header)
-      #   test-direct       — build each classified suite and EXECUTE the binary
-      #                       directly (never `mojo run`, which masks crash codes)
-      #   test              — dogfood mtest over the same exact path inventory
-      #   e2e               — assert exact CLI exit codes and console structure
-      # No network is touched here.
-      - name: CI gate
-        run: pixi run ci
+      # The exact cheap fail-fast barrier: identity and static policy, native
+      # audit, package compilation, JUnit tooling, and transcript fidelity.
+      - name: Static and transcript preflight
+        run: pixi run ci-preflight
 
-  macos-build:
-    name: macOS arm64 build + link
+  linux-test-matrix:
+    name: Linux / ${{ matrix.lane }}
+    needs: linux-preflight
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            lane: direct tests
+            task: test-direct
+            libc_debug: false
+            safety_artifact: false
+            artifact_name: none
+            artifact_path: none
+          - runner: ubuntu-24.04
+            lane: self-hosted tests
+            task: test
+            libc_debug: false
+            safety_artifact: false
+            artifact_name: none
+            artifact_path: none
+          - runner: ubuntu-24.04
+            lane: end-to-end tests
+            task: e2e
+            libc_debug: false
+            safety_artifact: false
+            artifact_name: none
+            artifact_path: none
+          - runner: ubuntu-24.04
+            lane: ASan + LSan
+            task: asan-check
+            libc_debug: false
+            safety_artifact: true
+            artifact_name: asan-logs
+            artifact_path: build/safety/asan/*.log
+          - runner: ubuntu-24.04
+            lane: Valgrind Memcheck
+            task: valgrind-check
+            libc_debug: true
+            safety_artifact: true
+            artifact_name: valgrind-logs
+            artifact_path: build/safety/valgrind/*.log
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          locked: true
+          cache: true
+
+      # This is the only post-Pixi network exception among source, test, and
+      # memory-analysis lanes. It is confined to the Valgrind cell on PRs,
+      # main/master pushes, and manual unified-CI runs. The independent package
+      # lane has its own external-channel solve contract. Installing the exact
+      # matching debug package must not upgrade libc.
+      - name: Install matching glibc debug symbols
+        if: ${{ matrix.libc_debug }}
+        run: |
+          libc_version="$(dpkg-query -W -f='${Version}' libc6)"
+          echo "preinstalled libc6 $libc_version"
+          sudo apt-get update
+          apt-cache policy libc6 libc6-dbg
+          sudo apt-get install --yes --no-install-recommends "libc6-dbg=$libc_version"
+          installed_libc_version="$(dpkg-query -W -f='${Version}' libc6)"
+          debug_version="$(dpkg-query -W -f='${Version}' libc6-dbg)"
+          test "$installed_libc_version" = "$libc_version"
+          test "$debug_version" = "$libc_version"
+          echo "libc6 before=$libc_version after=$installed_libc_version"
+          echo "libc6-dbg $debug_version"
+
+      - name: Tool provenance
+        run: |
+          pixi run mojo-version
+          pixi run clang --version
+          ldd --version | head -1
+
+      - name: Valgrind provenance
+        if: ${{ matrix.libc_debug }}
+        run: pixi run valgrind --version
+
+      # Preserve the sanitizer jobs' package-build prerequisite. The three
+      # behavioral tasks already own their appropriate build dependencies.
+      - name: Build safety prerequisite
+        if: ${{ matrix.safety_artifact }}
+        run: pixi run build
+
+      - name: Run ${{ matrix.lane }}
+        run: pixi run ${{ matrix.task }}
+
+      - name: Upload safety logs
+        if: ${{ always() && matrix.safety_artifact }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: warn
+          retention-days: 30
+
+  package:
+    name: Linux / packaged artifact
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          locked: true
+          cache: true
+
+      - name: Mojo version
+        run: pixi run mojo-version
+
+      # This independent Linux-only lane intentionally solves the build
+      # environment against Modular + conda-forge, then installs the local
+      # artifact into fresh scratch environments while using those channels to
+      # resolve its declared runtime dependency. Nothing uploads, publishes, or
+      # authenticates.
+      - name: Package check
+        run: pixi run package-check
+
+  macos-preflight:
+    name: macOS arm64 / preflight
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -65,17 +172,65 @@ jobs:
           locked: true
           cache: true
 
-      - name: Mojo version
-        run: pixi run mojo-version
+      - name: Tool provenance
+        run: |
+          pixi run mojo-version
+          pixi run clang --version
 
-      - name: Audit post-fork call graph
-        run: pixi run postfork-check
+      # native-check owns postfork-check. build-bin owns build and
+      # build-native, so invoking those dependencies separately would repeat
+      # work without strengthening the gate.
+      - name: Audit native adapter
+        run: pixi run native-check
 
-      - name: Precompile package
-        run: pixi run build
-
-      - name: Link executable
+      - name: Build executable
         run: pixi run build-bin
 
       - name: Smoke-test executable
         run: ./build/mtest --help
+
+  macos-test-matrix:
+    name: macOS arm64 / ${{ matrix.lane }}
+    needs: macos-preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            lane: direct tests
+            task: test-direct
+            libc_debug: false
+            safety_artifact: false
+            artifact_name: none
+            artifact_path: none
+          - runner: macos-15
+            lane: self-hosted tests
+            task: test
+            libc_debug: false
+            safety_artifact: false
+            artifact_name: none
+            artifact_path: none
+          - runner: macos-15
+            lane: end-to-end tests
+            task: e2e
+            libc_debug: false
+            safety_artifact: false
+            artifact_name: none
+            artifact_path: none
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          locked: true
+          cache: true
+
+      - name: Tool provenance
+        run: |
+          pixi run mojo-version
+          pixi run clang --version
+
+      - name: Run ${{ matrix.lane }}
+        run: pixi run ${{ matrix.task }}

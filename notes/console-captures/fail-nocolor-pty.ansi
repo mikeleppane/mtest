@@ -1,0 +1,29 @@
+mtest 0.1.0-dev (mojo)
+root: <suite-root>/failing   selected: 2 files   excluded: 0
+
+FAIL           test_failing.mojo               0.03s
+PASS           test_passing.mojo               0.02s
+
+--- FAIL test_failing.mojo::test_second_fails ---
+At test_failing.mojo:10:17: AssertionError: `left == right` comparison failed:
+   left: 4
+  right: 5
+reproduce: mtest test_failing.mojo::test_second_fails
+
+--- FAIL test_failing.mojo (exit 1) — captured output (file-scoped; TestSuite does not attribute output to individual tests) ---
+Unhandled exception caught during execution: 
+Running 3 tests for <suite-root>/failing/test_failing.mojo 
+    PASS [ 0.001 ] test_first_passes
+    FAIL [ 0.026 ] test_second_fails
+      At <suite-root>/failing/test_failing.mojo:10:17: AssertionError: `left == right` comparison failed:
+         left: 4
+        right: 5
+    PASS [ 0.001 ] test_third_passes
+--------
+Summary [ 0.026 ] 3 tests run: 2 passed , 1 failed , 0 skipped 
+Test suite' <suite-root>/failing/test_failing.mojo 'failed! 
+
+--- captured stderr ---
+
+
+===== 5 passed, 1 failed, 0 skipped (0 excluded, 0 not run) in 0.8s =====

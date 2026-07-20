@@ -142,43 +142,79 @@ phase notes.
 
 ## Hermetic by construction
 
-Ordinary CI touches the network exactly once: the locked `pixi install`.
-Everything after is offline — the fixtures and the transcript generator are
-committed, and the generator rebuilds the fixtures with the locked toolchain. A
-change that needs the network in the ordinary gate is wrong. One narrow
-exception is approved only for the scheduled/manual Valgrind job: after Pixi,
-it may update apt metadata and install exactly the `libc6-dbg` version matching
-the runner's already-installed `libc6`. The job logs apt provenance and fails if
-that exact package is unavailable, if libc changes, or if the versions differ.
-The exception does not apply to ordinary CI or any other package/network step.
+The ordinary source, test, and memory-analysis lanes touch the network once for
+the locked `pixi install`. Everything after is offline — the fixtures and the
+transcript generator are committed, and the generator rebuilds the fixtures
+with the locked toolchain — except for one narrow Valgrind-cell exception. On
+pull requests, configured `main`/`master` pushes, and manual unified-CI runs,
+that Linux cell may update apt metadata and install exactly the `libc6-dbg`
+version matching the runner's already-installed `libc6`. It logs apt provenance
+and fails if that exact package is unavailable, if libc changes, or if the
+versions differ. No other source, test, or memory-analysis step has that
+post-Pixi network exception.
+
+The independent Linux package-consumption job has a separate approved network
+contract. Its isolated rattler-build environment solves against the pinned
+Modular and conda-forge channels; its fresh scratch installs consume the local
+artifact while using those external channels to resolve the declared
+`mojo-compiler` runtime dependency (including the fallback package-format
+probe). Nothing uploads, publishes, or authenticates. Do not describe that job
+as hermetic or collapse its required package solves into the Valgrind exception.
 
 ## Toolchain and the quality floor
 
 The floor before any change is done — all green, in this order:
 
 ```text
-pixi run fmt              # format in place (run locally before committing)
-pixi run harness-check    # validate exact harness membership and invariants
-pixi run safety-check     # inventory every unsafe Mojo operation and local proof
-pixi run postfork-check   # audit production/testing post-fork call graphs
-pixi run native-check     # verify native ABI/layout/exports and lifecycle
-pixi run build            # the package-compiles gate
-pixi run transcripts-check# regenerate to a temp dir and diff byte-for-byte
-pixi run test-direct      # the independent glob-driven twin: build+execute
-                           # each unit/integration suite directly, no mtest involved
-pixi run test             # the self-hosted dogfood run: build/mtest over its
-                           # own tests/, plus exact path-membership verification
-                           # against an independent classified inventory
-pixi run e2e              # build the binary, drive it against e2e/
-                            # (manifest.json), assert exact exit codes/output
+pixi run fmt               # format in place (run locally before committing)
+pixi run version-check     # manifest, CLI, and shipped-version identity
+pixi run harness-check     # validate exact harness/CI membership and invariants
+pixi run safety-check      # inventory every unsafe Mojo operation and local proof
+pixi run postfork-check    # audit production/testing post-fork call graphs
+pixi run native-check      # verify native ABI/layout/exports and lifecycle
+pixi run junit-check       # validate the committed JUnit oracle and checker
+pixi run build             # the package-compiles gate
+pixi run junit-render-check# validate bytes emitted by the real JUnit reporter
+pixi run transcripts-check # regenerate to a temp dir and diff byte-for-byte
+pixi run test-direct       # compile the exhaustive inventory into one direct-run binary
+pixi run test              # run focused dogfood probes through the built mtest binary
+pixi run e2e               # exact CLI exits and output against e2e/manifest.json
 ```
 
-`pixi run ci` chains `fmt-check -> harness-check -> safety-check -> postfork-check -> native-check -> build -> transcripts-check -> test-direct -> test -> e2e`
-fail-fast and is exactly what ordinary CI runs. `native-check`
-also depends on `postfork-check`, so invoking the native gate alone cannot omit
-the recurring child call-graph audit. `test-direct` and `test` both
-build-then-execute the binary directly — never `mojo run` anywhere in the gate,
-because it masks crash exit codes to 1.
+`pixi run ci-preflight` chains `version-check -> fmt-check -> harness-check ->
+safety-check -> postfork-check -> native-check -> junit-check -> build ->
+junit-render-check -> transcripts-check` in that exact fail-fast order. The
+canonical local `pixi run ci` remains serial: `ci-preflight -> test-direct ->
+test -> e2e`. Hosted CI runs the same logical floor with two platform-local
+chains: Linux preflight releases fail-fast `test-direct`, `test`, `e2e`, ASan,
+and Valgrind cells; macOS preflight releases `test-direct`, `test`, and `e2e`
+cells with `fail-fast: false` so a failing lane does not cancel its siblings.
+Every Linux and macOS lane remains a blocking check. The Linux
+package-consumption job remains independent. Memory safety therefore runs on
+every pull request and configured-main-branch push, not on a schedule. Neither
+platform waits for the other platform's preflight.
+
+`native-check` depends on `postfork-check`, so invoking the native gate alone
+cannot omit the recurring child call-graph audit. `test-direct` generates one
+explicit entrypoint that registers every test function in the classified
+unit/integration inventory, builds it once, and executes that aggregate binary
+directly. `test` sends three standalone probes through the built mtest binary,
+covering its real discover/build/run/parse/report path without recompiling the
+exhaustive inventory per file. Neither gate uses `mojo run`, because it masks
+crash exit codes to 1. Transcripts, ASan/Valgrind, and packaged artifact
+consumption remain Linux-only. The workflow requires macOS native/build smoke
+plus the full direct, dogfood, and end-to-end behavioral inventory; the README
+must keep executed evidence at build/link/`--help` until those hosted behavioral
+cells first pass.
+
+Classified modules under `tests/unit/` and `tests/integration/` are import-only:
+they declare `test_*` functions and MUST NOT declare `main()`. The generator
+`scripts/aggregate_tests.py` imports those modules and registers every test
+function explicitly, failing if a module has no tests or retains an entrypoint.
+Standalone protocol fixtures, E2E fixtures, and focused dogfood probes still
+declare their own `main()` because mtest compiles them as individual programs.
+Use `pixi run test-file -- <classified-test.mojo>` for a focused aggregate build
+while investigating a failure.
 
 ## Pin policy and Ask-first boundaries
 
@@ -264,9 +300,11 @@ Accumulated the hard way; append as later phases teach more.
 - **`mojo run` masks crash exit codes to 1** and can JIT-crash in CI, so it never
   appears in the gate. The runner and this repo's own `test` task both build a
   binary and execute it directly — the only way a crashing process's signal
-  death is distinguishable from an assertion failure. A direct-executed abort
-  exits `132` at the shell (`128 + SIGILL(4)`); the transcript generator records
-  the raw signal number structurally (`termination: signal 4`), never `132`.
+  death is distinguishable from an assertion failure. On linux-64/x86_64 a
+  direct-executed `std.os.abort` exits `132` at the shell (`128 + SIGILL(4)`),
+  while on osx-arm64 the target trap is SIGTRAP(5). The Linux-only transcript
+  generator records the raw signal number structurally (`termination: signal
+  4`), never `132`.
 - **`mojo build` bakes the ABSOLUTE canonicalized source path** into every
   location line (`Running … for <path>`, `At <path>:…`, `ABORT: <path>:…`), even
   when built with a repo-relative path. Transcript portability therefore requires
@@ -588,6 +626,68 @@ Accumulated the hard way; append as later phases teach more.
   property (a stand-in that skips the write, a fixture that takes the other
   branch), watch the test go RED, then revert — before calling anything a
   pin. "I ran it and it looked right" is an observation, not a guard.
+- **Mojo test binaries inherit a huge `RLIMIT_NOFILE` (~1,048,576) from the
+  MAX runtime.** Symptom: spawning a subprocess (python/xmllint) from INSIDE
+  a built Mojo test binary is pathologically slow — tens of seconds per
+  spawn, worse under host load — because the elevated fd-table ceiling makes
+  every child's startup crawl. Correct move: validate an emitted artifact via
+  a SEPARATE Python CI gate over the REAL binary's output (the
+  `junit_render_check.py` pattern: build the binary, run it, oracle-check the
+  file it actually wrote), never via an in-Mojo-test subprocess spawn; keep
+  Mojo unit tests to in-process structural/exact-output assertions.
+- **Multibyte UTF-8 characters anywhere in `native/*.c`, comments included,
+  misalign `postfork_check.py`'s byte-offset AST.** `scripts/postfork_check.py`
+  reads the source as a Python `str` (`source.read_text(encoding="utf-8")`,
+  codepoint-indexed) but slices and line-counts it using RAW BYTE offsets
+  straight from clang's `-ast-dump=json` (`_offset`/`_line`/`_source_segment`)
+  — a multibyte character earlier in the file (an em-dash, a curly quote, any
+  non-ASCII byte) shifts every later byte offset past its matching codepoint
+  position. Symptom: `postfork-check` fails on otherwise-valid C — wrong line
+  numbers, a truncated or garbled source segment — after adding Unicode
+  punctuation to a comment. Correct move: keep `native/*.c` comments, and all
+  of `native/`, strictly ASCII.
+- **A raw `external_call["isatty", ...]` fails to link once its module is
+  imported alongside `std.testing.TestSuite` in a unit test.** `std.io.
+  FileDescriptor` already declares that libc symbol for TestSuite's own
+  pass/fail output; a second, independently-attributed `external_call
+  ["isatty", ...]` declaration for the identical C symbol in the same
+  compiled binary is a link-time attribute conflict the toolchain rejects
+  outright (documented in `src/mtest/exec/tty.mojo`). Symptom: a
+  previously-fine FFI wrapper suddenly fails to compile the moment a new
+  test imports it next to TestSuite. Correct move: delegate to the std
+  wrapper (`FileDescriptor(fd).isatty()`) instead of declaring the raw call
+  yourself — the same reuse-the-stdlib's-declaration discipline that already
+  governs `write` (see the FFI-spike Lesson above).
+- **Reaching a CONCRETE reporter through a generic `CompositeReporter[*Rs]`
+  pack (for an out-of-trait call like `status()`/`finalize()`/
+  `note_not_run()`) uses a comptime index plus a typed `Pointer(to=element)`
+  binding, never a bare `rebind`.** `src/mtest/session/session.mojo`'s
+  `_stream_failed`, `_junit_note_not_run`, `_junit_finalize`, and
+  `annotation_lines` each take a defaulted comptime index (`stream_index`/
+  `junit_index`/`ann_index`, default `-1`), reach `ref element =
+  reporter.reporters[i]`, and bind `Pointer[ConcreteType, origin_of(element)]
+  = Pointer(to=element)` — a COMPILE-TIME type assertion: an index naming the
+  wrong tuple element fails to COMPILE rather than reinterpreting the wrong
+  concrete type as UB. Symptom/trap: the prior code `rebind`-ed through the
+  pointer instead, which would have silently accepted a mis-index (latent
+  UB) had the composition order ever drifted from the index. Correct move:
+  the typed-Pointer binding, with the index defaulted so bare-composite call
+  sites (test drivers passing a recording-only composite) are unaffected — a
+  comptime `if index >= 0` elides the whole reach when no such reporter is
+  composed.
+- **A tool that COMMITS captured program output containing filesystem paths
+  must sanitize the ephemeral run root to a stable placeholder before
+  writing.** `scripts/pty_capture.py` captures the real `build/mtest`
+  binary's ANSI console output into `notes/console-captures/`; the
+  throwaway suite's `mkdtemp` root (carved from the ambient `TMPDIR`, which
+  varies per run and per machine) is rewritten, before any file is written,
+  to a fixed neutral placeholder — both the literal and the
+  symlink-resolved (`os.path.realpath`) spelling are covered, since the
+  child's `cwd()` may canonicalize. Symptom: skip the rewrite and a
+  machine-specific `TMPDIR`/sandbox scratch path ends up baked into a
+  committed capture or fixture. Correct move: sanitize captured output at
+  write time, substituting the ephemeral run-root for a stable placeholder —
+  the same discipline `gen_transcripts.py` applies to the repo-root prefix.
 
 ## Skills index
 

@@ -248,8 +248,8 @@ Mirrors pytest, and is **FROZEN**:
 | 0 | the session ran; every selected test's outcome is PASS or SKIP (exclusions allowed) |
 | 1 | at least one selected outcome is FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, or PRECOMPILE-ERROR |
 | 2 | interrupted (SIGINT/SIGTERM); a partial summary is printed |
-| 3 | internal `mtest` error — including protocol drift (a report present but off-grammar) |
-| 4 | CLI usage error (unknown flag, bad value, nonexistent path, unknown node id, forbidden build argument) — detected **before any test runs** |
+| 3 | internal `mtest` error — including protocol drift (a report present but off-grammar), and an environment/I-O failure such as a runtime report-destination open/write failure (a `--json` destination that cannot be opened at session start, or whose stream write later fails — a fatal abort; or a `--junit-xml` target that cannot be created at session start, or whose report cannot be finalized and renamed onto PATH) |
+| 4 | CLI usage error (unknown flag, bad value, nonexistent path, unknown node id, forbidden build argument, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, or the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout) — detected **before any test runs** |
 | 5 | no tests collected (empty walk, `-k` matched nothing, everything excluded) |
 
 **Precedence** when outcomes mix. A usage error aborts before the run with 4.
@@ -394,6 +394,9 @@ Child stdout and stderr are captured separately and byte-exactly.
 - `--show-output MODE`: `failures` (default) shows captured output for FAIL and
   crash-class outcomes; `all` shows it for every test; `none` suppresses it.
 - `-s` is an alias for `--show-output all`.
+- `--show-output` governs the **console's** display of captured output only; the
+  machine reporters (`--junit-xml`, §15.2; `--json`, §15.4) carry capture per
+  their own bounded, always-on rules, unaffected by this flag.
 
 ---
 
@@ -405,6 +408,13 @@ Child stdout and stderr are captured separately and byte-exactly.
 `--color WHEN` is `auto|always|never`; `NO_COLOR` is respected, and the flag
 wins over it. The console summary is ordered deterministically (§17), not by
 completion order. Console text layout and color are **informal** and may change.
+
+**Console destination.** The console writes to **stdout** by default, and to
+**stderr** when `--json -` owns stdout for the byte-pure event stream (§15.4) —
+one resolved destination through which every console byte flows, so a `--json -`
+run's stdout carries only stream lines. `--color auto` decides against that
+**resolved** destination: stdout's terminal-ness normally, stderr's when the
+console is relocated there.
 
 There is **no live progress counter** in this build (a running `k/n` line, which
 arrives with the worker pool); a file's result prints when the file finishes, and
@@ -435,51 +445,190 @@ quiet mode. `N=0` (the default) disables the list. `--durations` is a
 
 ### 15.2 JUnit XML — `--junit-xml PATH`
 
-Written atomically (temp file, then rename). Mapping over the outcome
-vocabulary, total:
+`--junit-xml` is **served**: it writes a JUnit XML report — the settled
+junit-10 dialect (`scripts/schemas/junit-10.xsd`), the same the committed
+`scripts/junit_check.py` oracle blesses — assembled from the runner's own typed
+events, never from a parse of the console text.
 
-| Outcome | XML |
-|---------|-----|
-| PASS | `<testcase>` (no child) |
-| FAIL | `<testcase>` with `<failure>` |
-| SKIP | `<testcase>` with `<skipped/>` |
-| CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, PRECOMPILE-ERROR | `<testcase>` with `<error type="...">` |
-| FLAKY | passing `<testcase>` with the retry count in `<system-out>` |
+- **Document shape.** One `<testsuites>` root carrying `name`, `tests`,
+  `failures`, and `errors` — and **not** `skipped` (junit-10 defines no root
+  `skipped`; the root skipped total is an arithmetic fact recomputed from the
+  child suites). One `<testsuite>` **per file**, carrying all four aggregate
+  counts (including `skipped`). Each `<testcase>` carries `name` and `classname`
+  (the file's dotted stem) and, optionally, ONE primary outcome child
+  (`failure`/`error`/`skipped`) plus any number of ordered rerun/flaky children.
+- **Outcome mapping**, total over the vocabulary:
 
-- File-level outcomes (which have no single test identity) attach to one
-  synthesized testcase, `<testcase name="<file>::[build]">`, inside that file's
-  `<testsuite>`.
-- All text is XML-escaped; invalid XML control characters are stripped. Captured
-  output attaches as `<system-out>`/`<system-err>` on failing testcases, bounded
-  in size with truncation marked.
-- Ordering is **deterministic**: testcases are sorted by node id, independent of
-  parallel completion order. Suite-level `time` is the runner's own wall-clock
-  per file; per-testcase `time` is **omitted** while upstream per-test timings
-  are untrustworthy (honesty over decoration).
+  | Outcome | XML |
+  |---------|-----|
+  | PASS | `<testcase>` (no child) |
+  | FAIL | `<testcase>` with `<failure>` (the verbatim assertion detail) |
+  | SKIP | `<testcase>` with `<skipped/>` |
+  | CRASH | `<testcase>`/sentinel with `<error>` |
+  | TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, PRECOMPILE-ERROR | sentinel `<testcase>` with `<error type="...">` |
+
+- **Sentinels.** A file-level outcome (no single test identity) attaches to one
+  synthesized sentinel testcase inside that file's suite: `[build]` for a
+  non-retried file-level failure, or `[attempts]` for a retried one. The two are
+  **mutually exclusive** — a suite carries at most ONE outcome-carrying
+  sentinel, or none when per-test rows already carry the verdict. A precompile
+  failure emits its own `mtest::precompile` suite with a `[precompile]` error,
+  plus one `[not-run]` suite per NAMED casualty; a bare casualty count with no
+  names invents no rows. A file that was selected but never ran — a precompile
+  casualty, or an interrupt/`--maxfail`/gate-abort skip — appears as a
+  synthesized `[not-run]` skipped testcase, so the report is total over the
+  selected set.
+- **Retries and flakiness** ride Surefire chronology in the `[attempts]` row: a
+  flaky pass carries one `<flakyFailure>` per earlier failed attempt (in attempt
+  order); a rerun-exhausted failure carries the FIRST failed attempt as the
+  primary and every later attempt (the final included) as a `<rerunFailure>`/
+  `<rerunError>`. Every rerun/flaky child carries the schema-required `type`.
+- **Capture.** Captured child output attaches once per suite as
+  `<system-out>`/`<system-err>`, bounded (64 KiB head + 64 KiB tail, elision
+  marked) and always-on — independent of `--show-output`, which governs only the
+  console (§14). All text is XML-escaped through the one shared path; a sentinel
+  `name` (`[build]`, `[attempts]`, `[not-run]`) is emitted verbatim.
+- **Time.** Suite-level `time` is the runner's own wall clock per file, formatted
+  as fixed-three-decimal seconds (JUnit's own policy, distinct from the JSON
+  stream's integer microseconds). Per-testcase `time` and suite `timestamp` are
+  **omitted** (schema-optional) while upstream per-test timings are untrustworthy
+  (honesty over decoration).
+- **Ordering is deterministic**: testcases are sorted by node id, and suites by
+  their key, independent of completion order. A testcase whose `name` already
+  contains `::` is its own node id (used verbatim); a bracket sentinel is keyed
+  as `<file>::[sentinel]` but never renamed.
+- **Artifact lifecycle.** A unique temp file is created in the TARGET directory
+  at session start — proving it writable BEFORE any build or run — and the
+  assembled document is written there and renamed **atomically** onto PATH only
+  after a verified complete write. Unlike the live `--json` stream, the prior
+  report at PATH is **NEVER truncated**: on any failure the target is left
+  exactly as it was. A syntactically bad destination (an empty value or a
+  nonexistent parent directory) is a pre-run usage error (exit 4, §9); a runtime
+  creation or finalization failure (an unwritable or vanished target) is an
+  internal error (exit 3, §9). Report destinations are not root-constrained.
 
 ### 15.3 GitHub annotations — `--gh-annotations MODE`
 
-`auto|on|off`; `auto` is on iff `GITHUB_ACTIONS=true`.
+`--gh-annotations` is **served**: it emits GitHub Actions annotation
+workflow-command lines to **stdout**, in a deterministic tail after the console
+summary band. `MODE` is `off|on|auto`; **`auto` (the default) is on iff
+`GITHUB_ACTIONS=true`**, `on` always renders, `off` never does. The tail renders
+only when resolved-on.
 
-- FAIL → `::error file=<f>,line=<l>::<node id>: <first assertion line>` (location
-  taken from the `At <path>:<line>:<col>:` detail).
-- Crash-class → `::error file=<f>::…`.
-- Plus one summary `::notice`.
-- Every payload escapes `%`, CR, and LF as `%25`, `%0D`, `%0A`, and is
-  length-bounded. User-controlled paths, names, and assertion text are never
-  interpolated raw into a workflow command.
+**The frozen annotation shapes**, one clear entry per kind:
 
-### 15.4 Machine event stream — `--json PATH|-` (not yet served)
+- **Per-test FAIL** → `::error file=<f>,line=<l>::<node id>: <first assertion
+  line>`. `line=` is present **only** when that first line itself carries a
+  recognizable `At <path>:<line>:<col>:` backtrace pointer (the same shape the
+  console renders root-relative); a detail with no such pointer (e.g. a bare
+  `raise`) omits `line=` rather than guess one — **location honesty**: `line`
+  appears only where the assertion detail carried it, and `file=` paths assume
+  the invocation root is the repo root.
+- **Crash-class / file-level** (CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT,
+  MALFORMED-SUITE) → `::error file=<f>::<f>: <outcome in words>`. Never carries
+  `line=` (there is no per-test location for a whole-file abnormal outcome). A
+  plain per-test FAIL file is covered entirely by its per-test rows above.
+- **FLAKY** → `::warning file=<f>::<f>: flaky — passed on attempt K of N`.
+- **Precompile failure** → one `::error::<step>: …` with **no** `file=` property:
+  the failure belongs to the STEP, not any one file; the casualty files appear as
+  JUnit rows, not per-file annotations, so an annotation flood never burns the
+  error cap on a derivative fact.
+- **The summary notice** → exactly **one** `::notice::<band text>` per run, never
+  subject to the caps.
 
-`--json` is part of the frozen v1 contract but **not yet served**: the parser
-recognizes the spelling and its arity, but this build refuses it before any
-test runs (§24). Its intended shape is a newline-delimited stream of the
-runner's own typed events — the same events the console and JUnit reporters
-already consume internally — written to `PATH`, or to stdout when the value
-is `-`. `--json` is a **run-only** flag in v1 (§4). This gives CI systems and
-other tooling a stable machine artifact for the full event timeline without
-depending on the informal console text (§15.1) or on a separate plugin
-mechanism.
+**Level mapping**: failing → `::error`; FLAKY → `::warning`; the single run
+summary → `::notice`.
+
+**The tail is PER-KIND GROUPED**, each block node-id-sorted: the whole
+node-id-sorted `::error` block, then the whole node-id-sorted `::warning` block,
+then the single `::notice`. This is **not** a global node-id interleave across
+error and warning lines — the per-kind caps and the cap-minus-one aggregate line
+make per-kind grouping the deterministic, unambiguous form.
+
+**Bounds**. Each payload is escaped via the message escaper (`%`→`%25`,
+CR→`%0D`, LF→`%0A`) and each `file=` value via the property escaper (adds
+`:`→`%3A`, `,`→`%2C`); user-controlled paths, names, and assertion text are never
+interpolated raw into a workflow command, and an escaped-away CR/LF means a
+would-be forged second command line can never form. Each message is bounded to
+**4096 escaped bytes** (measured after escaping), with a truncation marker when
+cut. The **per-run per-STEP caps are 10 errors and 10 warnings** (a workflow STEP
+is capped at 10 error and 10 warning annotations; the "50" some readers conflate
+is the Checks **API**'s own per-request limit, a REST surface mtest never calls);
+past the cap the first `cap - 1` sorted rows render individually and one
+**aggregate** line (`… and N more …`) replaces the rest, so a block never exceeds
+its cap.
+
+**Stop-commands FENCING of echoed child output.** Whenever `GITHUB_ACTIONS=true`
+— independent of `MODE`, even `off` — every echoed region of captured **child**
+output the console renders (captured stdout/stderr under `--show-output`, failure
+and precompile excerpt regions) is wrapped in `::stop-commands::<token>` …
+`::<token>::` fencing, so a child's own `::error`-shaped bytes cannot forge a
+workflow command. The token is **high-entropy** (≥128-bit random, from
+`/dev/urandom`), **per-run-unique**, minted **after** the producing child has
+exited, never exposed to any child (not in its env or argv), and **regenerated**
+until the complete resume delimiter `::<token>::` is absent from the region being
+fenced. Restoration runs through an **always-runs epilogue**: a final resume
+delimiter is emitted before mtest's own annotation lines, so no error or
+partial-write path can leave workflow commands disabled or a fence unterminated.
+
+A **PRECOMPILE-ERROR** annotates with **no** `file=` (the failure belongs to the
+step; its casualties appear as JUnit rows, not per-file annotations).
+
+**The `--json -` interplay.** `--json -` makes stdout the byte-pure event stream,
+which the annotation tail cannot share. Beside `--json -`, annotations must be
+**explicitly `off`** — the only combination that runs. Both an explicit
+`--gh-annotations on` and the **default `auto`** are usage errors (exit 4, §9),
+detected at parse time, and the message names both fixes (drop `--json -`, or set
+`--gh-annotations off`). `--json PATH` does not own stdout, so annotations may
+ride alongside it.
+
+### 15.4 Machine event stream — `--json PATH|-`
+
+`--json` is **served**: it writes a newline-delimited stream of the runner's own
+typed events — the same events the console reporter consumes — to `PATH`, or to
+stdout when the value is `-`. `docs/json-stream.md` is the **normative** spec;
+this section summarizes it.
+
+- **Framing and header.** NDJSON: one complete JSON object per `\n`-terminated
+  line, valid escaped UTF-8, no floats (`Infinity`/`-Infinity`/`NaN` never
+  appear). Line 1 is the frozen header `{"event":"stream","version":1,
+  "generator":"mtest <version>"}`.
+- **Events.** The stream mirrors every session event the console reporter sees,
+  with the `progress` kind **excluded** (there is no live progress in this build,
+  §15.1). Each record mirrors the model's payload 1:1 under its own field names.
+- **`*_us` durations.** The sole naming exception: every `*_seconds` duration is
+  emitted as an integer-microsecond `*_us` field, so the stream carries no
+  floating-point value.
+- **Ordering.** An informal timeline with frozen split invariants: per session,
+  header → `session_started` → precompile records → per-file events →
+  `crash_attribution` → `session_finished` last; per file, contiguous
+  `test_reported` rows and monotonic `attempt_finished` records precede that
+  file's `file_finished`.
+- **Terminal.** Exactly one `session_finished` is dispatched in every scenario
+  (normal, interrupt, fatal abort), carrying the final `exit_code`. The stream
+  therefore carries zero-or-one terminal record: its **absence** (or a torn final
+  fragment) is the truncation signal.
+- **Determinism.** Two runs of the same inputs are equal under a closed
+  projection (outcomes, per-test sets, counts, dispositions, flags, casualty
+  lists, totals, exit code); the byte-payload fields with their omission metadata
+  and every measured `*_us` duration are excluded from that comparison.
+- **Writes and SIGPIPE.** Each line is drained through a `write_all` loop, so a
+  cut stream leaves complete lines plus at most one torn final fragment. SIGPIPE
+  is ignored for the run; a latched stream-write failure (a `--json -` consumer
+  that closed early, a full or unwritable destination) is a **fatal abort** to
+  exit 3, never death at 141.
+- **Destinations.** `-` makes stdout the byte-pure stream (the console relocates
+  to stderr, §15.1). A `PATH` is written live and a pre-existing file is
+  **overwritten** at session start (a live stream cannot rename atomically, so
+  this differs from JUnit's atomic write, §15.2); report destinations are not
+  root-constrained. A syntactically bad destination is a pre-run usage error
+  (exit 4, §9); a runtime open failure is a pre-run internal error (exit 3, §9).
+- **Versioning.** Version 1 freezes the framing, header, event names, field
+  meanings, and vocabularies. Growth is additive (new fields and kinds);
+  consumers **must ignore** unknown fields and kinds. A removal or
+  meaning-change bumps the header version; the version lives only on the header.
+
+`--json` is a **run-only** flag in v1 (§4).
 
 ---
 
@@ -515,10 +664,38 @@ dominates a failing outcome (→ 1), which dominates "nothing collected" (→ 5)
 
 ## 17. Determinism
 
-Given the same inputs, `mtest` produces byte-identical machine output: the
-console summary, the `collect` listing, and the JUnit XML are all ordered by node
-id, independent of the order in which parallel workers finished. Parallelism
-never changes *what* is reported, only how fast.
+Given the same inputs, `mtest` orders every machine and console surface
+deterministically — the console summary, the `collect` listing, and the
+`--junit-xml` document are all sorted by node id, independent of the order in
+which files or parallel workers finished. Parallelism never changes *what* is
+reported, only how fast.
+
+That shared ordering does not mean every surface is byte-identical across runs;
+each below states its actual promise, scoped precisely:
+
+- **`collect`** output stays **byte-identical** across runs of the same inputs:
+  the frozen listing (§16, §20) carries no wall-clock or captured-text content
+  to vary.
+- **`--junit-xml`** (§15.2) is deterministic in **structure, identity,
+  classification, and counts** — the `<testsuite>`/`<testcase>` shape, node-id
+  names, `classname`, the `message`/`type` attributes on outcome children, and
+  the `tests`/`failures`/`errors`/`skipped` aggregates — but it is **not**
+  byte-identical: `time` (the runner's own wall clock, §15.2) and every embedded
+  captured/diagnostic text body (`system-out`/`system-err`, a `failure`/`error`
+  detail, a stack trace, a rerun/flaky child's text) are exactly the payload
+  classes the `--json` projection excludes below, and the committed
+  canonicalizer masks precisely those two classes before comparing two runs'
+  documents.
+- **`--json`** (§15.4; normatively `docs/json-stream.md` §10) promises equality
+  under a **closed projection** — outcomes, per-test sets, counts, dispositions,
+  flags, casualty lists, totals, and the final exit code — never byte order and
+  never a duration or byte-payload field. Two runs' raw streams may differ line
+  for line while still agreeing on that projection.
+
+§17 carries no byte-identity claim over anything wall-clock- or payload-bearing:
+not `--junit-xml`'s `time` or embedded captured/diagnostic text, and not
+`--json`'s measured `*_us` durations or its capture/argv/casualty payload
+fields.
 
 ---
 
@@ -588,8 +765,12 @@ pinning is only meaningful once tests would otherwise run in parallel.
 ## 20. Stability tiers
 
 - **FROZEN at v1.0** — subcommands; flag names and semantics; exit codes; the
-  node-id grammar; the JUnit mapping; the annotation shapes; the `collect`
-  format; the test-module contract.
+  node-id grammar; the JUnit mapping; the annotation shapes; the `--json` event
+  stream schema (§15.4; normatively `docs/json-stream.md`) — its framing,
+  header, event and field names, and token vocabularies, frozen at stream
+  `version` 1 and growing only additively (new fields and kinds; a removal or a
+  meaning-change bumps the header version); the `collect` format; the
+  test-module contract.
 - **STABLE-INTENT** — default values (timeouts, `auto` worker sizing) may be
   tuned in minor versions.
 - **INFORMAL** — console text layout and colors.
@@ -622,12 +803,47 @@ is its own deliverable.
 ## 22. Platforms
 
 Linux and macOS are the v1 targets. Linux carries the native lifecycle,
-process-supervision, and dynamic memory-analysis gates. macOS arm64 carries a
-native post-fork call-graph audit plus package build, executable link, and
-`--help` smoke coverage; runtime supervision remains unverified there. Platform
-divergence in crash reporting is absorbed by the structured termination model
-(a terminating signal is recorded as a signal, never as a shell-encoded
-`128+N`).
+process-supervision, transcript, dynamic memory-analysis, and packaged-artifact
+gates. The unified workflow requires the macOS arm64 preflight to run the native
+post-fork/lifecycle audit, package build, executable link, and `--help` smoke;
+on success it will dispatch the full direct, self-hosted dogfood, and end-to-end
+behavioral inventory. This is the required topology, not yet an executed-evidence
+claim: until the first hosted macOS matrix is green and recorded, current macOS
+evidence remains the earlier build/link/`--help` smoke and runtime supervision
+there remains unverified. Platform divergence in crash reporting is absorbed by
+the structured termination model (a terminating signal is recorded as a signal,
+never as a shell-encoded `128+N`).
+
+The canonical local `pixi run ci` floor is serial and fail-fast. Hosted CI
+preserves that logical floor while overlapping independent work: a Linux
+preflight releases separate direct, dogfood, end-to-end, ASan/LSan, and
+Valgrind cells; a macOS preflight independently releases separate direct,
+dogfood, and end-to-end cells. The Linux packaged-artifact job starts
+independently. Memory-safety cells run for every pull request, configured
+`main`/`master` push, and manual unified-CI invocation; there is no scheduled
+memory-safety workflow. Protocol transcripts, sanitizers, and packaged-artifact
+consumption remain Linux-only.
+
+**The packaged artifact.** The distribution recipe builds `mtest` **in-env from
+source**, inside an isolated build environment pinned to the same
+`mojo`/`clang` versions this repo itself builds against — the prebuilt-binary
+branch (repackaging an already-linked executable) is **not** taken. The
+installed binary is not loader-clean: it carries a direct link dependency on
+the Mojo runtime's shared libraries, whose transitive closure is owned by the
+`mojo-compiler` conda package, so the recipe declares `mojo-compiler ==1.0.0b2`
+as a **conda run dependency** rather than vendoring those libraries — a fresh
+environment carrying only that declared dependency (not the full build
+toolchain) is proven sufficient to load and run the installed binary.
+**linux-64 is the gated platform**: a dedicated CI job builds the package into
+a local channel, installs it into a scratch environment from that channel, and
+exercises the installed binary. **osx-arm64 packaged-artifact consumption is
+declared, not gated**: it matches the recipe's and the build tool's platform
+list and the package channels solve for it, but no CI runner builds or installs
+the conda artifact there. This is a packaging ceiling only: the source-checkout
+workflow now requires full direct, dogfood, and end-to-end macOS cells, whose
+first hosted green is still pending as stated above. Runtime supervision from
+the installed macOS conda artifact remains a documented ceiling, not a proven
+target.
 
 ---
 
@@ -655,6 +871,9 @@ mtest --precompile src/mylib:build/mylib.mojopkg -I build \
 # Produce CI artifacts.
 mtest --junit-xml report.xml --gh-annotations auto tests/
 
+# Machine-readable run for tooling — the versioned event stream to a file.
+mtest --json report.ndjson tests/
+
 # List node ids without running anything.
 mtest collect tests/
 ```
@@ -678,16 +897,17 @@ above — it only reports which of those surfaces are wired up yet.
 `--shard`, `--gate`, `-s`/`--show-output`, `--durations`, `-q`/`-v`, `--color`,
 `-h`/`--help`, `--version`, and the `run`, `collect`, `version`, and `help`
 subcommands (`--collect-only` too, as an alias that behaves as `collect`).
-`--shard` applies under both `run` and `collect`.
+`--shard` applies under both `run` and `collect`. `--json` (the machine event
+stream, §15.4), `--junit-xml` (the JUnit report, §15.2), and `--gh-annotations`
+(the CI annotation tail, §15.3) are served too — see §24.2 for how they are now
+reached.
 
-**Still refused**: `-n`/`--workers`, `--junit-xml`, `--gh-annotations`,
-`--serial`, `--json`. Each is recognized by the parser — it knows the spelling
-and its arity — but is **refused before any test runs**, with a usage error
-that names the flag, states that it is part of the v1 contract, names the
-capability that brings it (`-n`/`--workers` arrive with parallel workers;
-`--junit-xml`, `--gh-annotations`, and `--json` arrive with machine report
-artifacts and CI annotations; `--serial` arrives with serial execution
-pinning), and lists what this build does serve.
+**Still refused**: `-n`/`--workers`, `--serial`. Each is recognized by the
+parser — it knows the spelling and its arity — but is **refused before any test
+runs**, with a usage error that names the flag, states that it is part of the v1
+contract, names the capability that brings it (`-n`/`--workers` arrive with
+parallel workers; `--serial` arrives with serial execution pinning), and lists
+what this build does serve.
 
 **A transitional exit-4 subcase.** That refusal is a usage error and exits 4,
 but it is a distinct, *temporary* subcase of §9's exit code 4 — it is not one
@@ -716,10 +936,41 @@ today.
   process group is cleaned up. The parallel-workers interrupt story arrives
   with parallel workers.
 - **3** — reachable via a spawn failure (the runner could not spawn `mojo` or
-  a built binary) and via protocol drift (a report present but off-grammar,
-  §6), in both `run` and `collect`.
-- **4** — reachable for every frozen cause in §9, plus the transitional
-  not-yet-available-flag refusal subcase in §24.1 above.
+  a built binary), via protocol drift (a report present but off-grammar,
+  §6) in both `run` and `collect`, and via a runtime `--json`
+  report-destination failure (§9): the destination could not be opened at
+  session start, or a stream write later failed (a dead `--json -` pipe, a full
+  or unwritable file) and the run was fatally aborted.
+- **4** — reachable for every frozen cause in §9 — now including a syntactically
+  invalid `--json` destination (an empty value or a nonexistent parent
+  directory), detected pre-run — plus the transitional not-yet-available-flag
+  refusal subcase in §24.1 above.
+
+**`--json` reachability.** `--json PATH|-` is served (§15.4): it is parsed into a
+live event-stream reporter composed beside the console. Its destination is
+validated syntactically at parse time (exit 4 on an empty value or a nonexistent
+parent directory) and opened at session start (exit 3 on a runtime open failure);
+a stream write that fails mid-run is a fatal abort to exit 3. The §9 causes are
+cited here, never restated.
+
+**`--junit-xml` reachability.** `--junit-xml PATH` is served (§15.2): it is
+parsed into a JUnit report reporter composed beside the console and the stream.
+Its destination is validated syntactically at parse time (exit 4 on an empty
+value or a nonexistent parent directory) and a unique temp is created in the
+target directory at session start to prove it writable (exit 3 on a runtime
+creation failure). Unlike the stream, a spool failure never aborts mid-run; it
+surfaces at finalization, where the report is assembled and renamed atomically
+onto PATH (exit 3 on a finalization failure, with the prior report never
+truncated). The §9 causes are cited here, never restated.
+
+**`--gh-annotations` reachability.** `--gh-annotations off|on|auto` is served
+(§15.3): it is parsed into a self-gating annotations reporter composed beside the
+console, the stream, and the JUnit report. `auto` (the default) resolves on iff
+`GITHUB_ACTIONS=true`; the tail renders to stdout after the console band only when
+resolved-on. Beside `--json -` it must be explicitly `off` — the default `auto`
+and an explicit `on` are usage errors (exit 4) detected at parse time (§9). The
+stop-commands fencing of echoed child output is active whenever
+`GITHUB_ACTIONS=true`, independent of the mode.
 - **5** — reachable via an empty walk, via the everything-excluded case, and
   via deselection (`-k` matched nothing, §9).
 

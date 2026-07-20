@@ -9,7 +9,7 @@ This module pins EVERY cell of the frozen policy table with synthesized
 `Termination` + stderr inputs — no processes, no filesystem — exactly as
 `test_session_verdict.mojo` and `test_session_classify.mojo` pin their policies.
 """
-from std.testing import assert_equal, assert_false, assert_true, TestSuite
+from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.exec import Termination
 from mtest.session import RetryClass, has_crash_signature, retry_classify
@@ -309,7 +309,3 @@ def test_sig_digits_no_module_token() raises:
 def test_sig_hash_token_before_0x() raises:
     # "#<n> <tok> 0x<hex>" — the symbolized form needs 0x right after the space.
     assert_false(has_crash_signature(_bytes("#4 foo 0x1\n")))
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

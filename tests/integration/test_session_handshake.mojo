@@ -9,13 +9,14 @@ spoke no report), a forger that appends a second block is MALFORMED_SUITE
 (DRIFT), and a suite that collects ZERO tests is a PASS that ran zero tests — the
 closed zero-test ceiling, PASS-from-a-parsed-report, never PASS-from-exit-status.
 """
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_true
 
 from mtest.model import Event, EventKind, Outcome, ParseDisposition
 from mtest.report import CompositeReporter, RecordingReporter
 from mtest.session import run_session
 
 from session_fixtures import (
+    SRC_FLOOD_PROBE,
     SRC_FORGER,
     SRC_LIAR,
     SRC_SILENT,
@@ -133,5 +134,29 @@ def test_zero_test_report_is_pass_that_ran_zero_tests() raises:
     assert_equal(test_reports, 0)
 
 
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()
+def test_plain_run_overflow_marks_stdout_truncated() raises:
+    # A real one-test suite that prints a complete report, then floods stdout
+    # far past the capture bound. The plain (non-selection) run path applies
+    # the SAME truncation-distrust policy the probe does, so the overflow is a
+    # failing outcome — and the file-scope process result's own truncation
+    # must ride the verdict honestly, not silently default to "nothing was
+    # cut".
+    var root = temp_root()
+    write_file(root, "tests/test_flood.mojo", SRC_FLOOD_PROBE)
+    var cfg = base_config()
+    cfg.timeout_secs = 30
+
+    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var code = run_session(cfg, root, comp)
+
+    assert_equal(code, 1, "an overflowing plain run is a failing outcome")
+    ref rec = comp.reporters[0]
+    var finished = _finished(rec)
+    assert_true(
+        finished.parse_disposition == ParseDisposition.CAPTURE_OVERFLOW,
+        "an overflowing plain run is CAPTURE_OVERFLOW",
+    )
+    assert_true(
+        finished.stdout_truncated,
+        "the plain run's own overflow must mark stdout_truncated",
+    )

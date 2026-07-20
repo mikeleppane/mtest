@@ -11,7 +11,6 @@ from std.testing import (
     assert_true,
     assert_false,
     assert_raises,
-    TestSuite,
 )
 
 from mtest.cache import BuildProduct, BuildRegistry
@@ -127,7 +126,3 @@ def test_once_probed_check_then_record_yields_one_probe() raises:
             probes += 1
             reg.record_probe("q.mojo", True, _listing("q::t1", "q::t2"))
     assert_equal(probes, 1)  # exactly one probe across four passes
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

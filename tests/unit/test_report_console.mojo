@@ -10,7 +10,8 @@ is off, signals named in words, and captured output rendered verbatim. The
 console learns every printed fact from the events — only version and config are
 passed in.
 """
-from std.testing import assert_equal, assert_true, assert_false, TestSuite
+from std.sys.info import CompilationTarget
+from std.testing import assert_equal, assert_true, assert_false
 
 from mtest.config import ColorWhen, Verbosity, ShowOutput
 from mtest.model import (
@@ -59,7 +60,7 @@ def _console(
 ) -> ConsoleReporter:
     """A console reporter with the mock's version and the given config."""
     return ConsoleReporter(
-        "0.1.0-dev",
+        "0.4.0",
         color,
         is_tty=is_tty,
         no_color=no_color,
@@ -207,7 +208,7 @@ def test_header_learns_facts_from_session_started() raises:
     var c = _console()
     c.handle(Event.session_started("tests", "mojo 1.0.0b2", 5, 1))
     var out = c.output()
-    assert_true("mtest 0.1.0-dev (mojo 1.0.0b2)" in out)
+    assert_true("mtest 0.4.0 (mojo 1.0.0b2)" in out)
     assert_true("root: tests" in out)
     assert_true("selected: 5 files" in out)
     assert_true("excluded: 1" in out)
@@ -269,6 +270,26 @@ def test_crash_names_signal_in_words() raises:
     _feed_mock_run(c)
     var out = c.output()
     assert_true("signal 4 — SIGILL, illegal instruction" in out)
+
+    var platform = _console()
+    platform.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    platform.handle(Event.file_started("tests/test_platform_signal.mojo"))
+    platform.handle(
+        Event.file_finished(
+            "tests/test_platform_signal.mojo",
+            Outcome.CRASH,
+            0.1,
+            _argv("tests/test_platform_signal.mojo"),
+            0.1,
+            List[UInt8](),
+            List[UInt8](),
+            signal_number=7,
+        )
+    )
+    comptime if CompilationTarget.is_macos():
+        assert_true("signal 7 — SIGEMT, emulation trap" in platform.output())
+    else:
+        assert_true("signal 7 — SIGBUS, bus error" in platform.output())
 
 
 def test_timeout_notes_the_deadline() raises:
@@ -736,6 +757,100 @@ def test_compile_timeout_promises_no_quarantine_when_no_retry_ran() raises:
     assert_false("retried" in out)
 
 
+# --- stop-commands FENCING of echoed captured child output (Actions only) ---
+
+comptime _FORGED: StaticString = "::error file=evil.mojo::forged by the child"
+
+
+def _fence_opener_token(rendered: String) raises -> String:
+    """The token from the FIRST `::stop-commands::<token>` opener in `rendered`.
+    """
+    var marker = "::stop-commands::"
+    assert_true(marker in rendered, "no stop-commands opener in fenced output")
+    var after = String(rendered.split(marker, 1)[1])
+    return String(after.split("\n", 1)[0])
+
+
+def _gh_console(gh_actions: Bool) -> ConsoleReporter:
+    """A console reporter under `show-output all`, optionally under Actions."""
+    return ConsoleReporter(
+        "0.4.0",
+        ColorWhen.NEVER,
+        is_tty=False,
+        no_color=False,
+        verbosity=Verbosity.NORMAL,
+        show_output=ShowOutput.ALL,
+        mtest_build_flags="",
+        durations=0,
+        gh_actions=gh_actions,
+    )
+
+
+def _feed_forged_capture(mut c: ConsoleReporter):
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_hostile.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_hostile.mojo",
+            Outcome.FAIL,
+            0.1,
+            _argv("tests/test_hostile.mojo"),
+            1.0,
+            _bytes(String(_FORGED) + "\n"),
+            List[UInt8](),
+            exit_status=1,
+            parse_disposition=ParseDisposition.PARSED,
+        )
+    )
+
+
+def test_captured_output_is_not_fenced_without_actions() raises:
+    var c = _gh_console(gh_actions=False)
+    _feed_forged_capture(c)
+    var out = c.output()
+    # The forged bytes echo verbatim, and NO stop-commands fence is emitted.
+    assert_true(String(_FORGED) in out)
+    assert_false("::stop-commands::" in out)
+
+
+def test_captured_output_is_fenced_under_actions() raises:
+    var c = _gh_console(gh_actions=True)
+    _feed_forged_capture(c)
+    var out = c.output()
+    # The forged region is wrapped: an opener with a high-entropy token, the
+    # forged bytes inside, and a MATCHING resume delimiter that terminates it.
+    assert_true("::stop-commands::" in out)
+    var token = _fence_opener_token(out)
+    assert_equal(token.byte_length(), 32, "fence token is not 128-bit hex")
+    assert_true(String(_FORGED) in out, "the forged bytes were not echoed")
+    assert_true(
+        ("::" + token + "::") in out, "the fence has no matching resume"
+    )
+    # The opener precedes the forged bytes, and the resume follows them: the
+    # forged command is sealed inside the fence.
+    var opener = "::stop-commands::" + token
+    assert_true(out.find(opener) < out.find(String(_FORGED)))
+    assert_true(out.find(String(_FORGED)) < out.rfind("::" + token + "::"))
+
+
+def test_fence_token_getter_matches_the_opener() raises:
+    var c = _gh_console(gh_actions=True)
+    _feed_forged_capture(c)
+    var out = c.output()
+    var primary = c.fence_token()
+    assert_equal(primary.byte_length(), 32)
+    # The primary token is the one the (single, uncolliding) region fenced with,
+    # and is what `main`'s always-runs epilogue restores with.
+    assert_true(("::stop-commands::" + primary) in out)
+
+
+def test_fence_token_empty_before_any_fenced_region() raises:
+    var c = _gh_console(gh_actions=True)
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    # No captured-output region rendered yet: nothing to restore.
+    assert_equal(c.fence_token(), "")
+
+
 def test_compile_timeout_names_the_quarantine_when_a_retry_ran() raises:
     # attempts_used > 1: a quarantined rebuild really did run. A retried build
     # failure is always quarantined (a run-crash retry does not rebuild), so the
@@ -1018,7 +1133,7 @@ def test_quiet_suppresses_header_and_pass_lines() raises:
     var c = _console(verbosity=Verbosity.QUIET)
     _feed_mock_run(c)
     var out = c.output()
-    assert_false("mtest 0.1.0-dev" in out)
+    assert_false("mtest 0.4.0" in out)
     assert_false("PASS      tests/test_alpha.mojo" in out)
     # Non-pass verdicts and the summary still appear.
     assert_true("FAIL" in out)
@@ -1635,7 +1750,3 @@ def test_durations_zero_files_run_renders_nothing() raises:
     )
     var out = c.output()
     assert_false("slowest" in out)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

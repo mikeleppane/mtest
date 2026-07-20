@@ -30,9 +30,10 @@ on.
 
 mtest's own tests are ordinary `def ... raises` functions discovered by
 `TestSuite` and run against the **precompiled package** (`build/mtest.mojopkg` —
-`mojo package` does not exist in `1.0.0b2`, only `mojo precompile`). Every test
-file ends with the same runner, exactly as `tests/integration/test_transcripts_smoke.mojo`
-does today:
+`mojo package` does not exist in `1.0.0b2`, only `mojo precompile`). Classified
+modules under `tests/unit/` and `tests/integration/` declare only their helpers
+and `test_*` functions. They are imported by the generated aggregate entrypoint,
+so they MUST NOT declare `main()`:
 
 ```mojo
 from std.testing import assert_equal, assert_true, assert_raises, TestSuite
@@ -48,40 +49,32 @@ def test_false_binary_exits_nonzero() raises:
 def test_bad_timeout_flag_raises() raises:
     with assert_raises(contains="--timeout wants an integer"):
         _ = parse_args(["--timeout", "soon"])
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()
 ```
 
 **Crucially, the repo eats the discipline the product sells.** The suite is run
-by `scripts/test_all.sh`, which for each classified suite **builds a binary
-with `mojo build` and executes it directly** — never `mojo run`, which masks a
-crashing process's exit code to 1 and can JIT-crash in CI (#6413). Run the whole
-suite (the canonical green gate), or one file while iterating:
+by `scripts/test_all.sh`, which generates one explicit `TestSuite` registration
+entrypoint, **builds one aggregate binary and executes it directly** — never
+`mojo run`, which masks a crashing process's exit code to 1. Run the whole suite
+(the canonical green gate), or generate a focused aggregate while iterating:
 
 ```bash
-pixi run test-direct                               # independent gate — build pkg, then build+execute every suite
-pixi run build && mojo build --no-optimization -I build -I tests/support \
-    tests/integration/test_exec_capture.mojo -o build/tests/integration/test_exec_capture && build/tests/integration/test_exec_capture
+pixi run test-direct
+pixi run test-file -- tests/integration/test_exec_capture.mojo
 ```
 
 `scripts/test_all.sh` builds the package first (fail-fast on a broken toolchain
 or a package that no longer compiles), then recursively inventories the requested
-classified roots in sorted order — no hand-maintained execution list to drift. A stale `build/mtest.mojopkg` is the
-classic "my change did nothing" trap: after any `src/` edit, rebuild before
-running a single test file by hand, or the test exercises stale code. One file
-per unit under test, named `tests/unit/test_<thing>.mojo` or
+classified roots in bytewise-sorted order, parses each module's top-level
+`test_*` declarations, and emits explicit registrations — no hand-maintained
+execution list to drift. It fails closed on an empty module, a duplicate name,
+or a classified module that retains `main()`. One file per unit under test,
+named `tests/unit/test_<thing>.mojo` or
 `tests/integration/test_<thing>.mojo` according to the boundary it crosses.
 
-**Keep test modules small.** Mojo `#6554` is a `TestSuite`-discovery compile
-stall that scales with a module's *function count*, not file size. A file that
-grows past a dozen or so `test_*` functions is a stall risk. When a file starts
-stalling, split it along the natural seam (`test_exec.mojo`,
-`test_protocol.mojo`, `test_discover.mojo` rather than one giant
-`test_mtest.mojo`) and add a `SLOW_6554` exclusion array to
-`scripts/test_all.sh`. Per-test bracketed timings are unreliable on `1.0.0b2` —
-measure wall time with `time`, not the harness's own numbers.
+**Keep test modules cohesive.** A failing aggregate prints `==> <module path>`
+before each module and TestSuite names the exact failing function. Re-run that
+module with `pixi run test-file -- <path>`; split a module when its failures no
+longer share a natural investigation boundary.
 
 ---
 
@@ -297,7 +290,7 @@ float legitimately appears is a timing number under `bench` — those are
 - [ ] A new transcript scenario or fixture gets a self-verify assertion in the
       generator, mirroring `gen_transcripts.py`'s hard asserts
 - [ ] A refactor commit does not move a transcript or a tripwire's pinned value
-- [ ] Test module stays small (function count, not just file size) — split and
-      add to `SLOW_6554` in `scripts/test_all.sh` if it starts stalling
+- [ ] Classified test module has no `main()` and stays cohesive enough for its
+      `==> <module path>` failure marker to be useful
 - [ ] `pixi run test-direct` and `pixi run test` green; the new file is in the
       correct classified suite root

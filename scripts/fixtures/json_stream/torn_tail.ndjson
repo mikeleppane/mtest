@@ -1,0 +1,4 @@
+{"event":"stream","version":1,"generator":"mtest 0.4.0"}
+{"event":"session_started","root":"/repo","toolchain":"mojo","selected_count":2,"excluded_count":0,"shard_label":"","sharded_out_count":0}
+{"event":"file_started","path":"tests/test_a.mojo"}
+{"event":"file_finished","path":"tests/test_a.mojo","outcome":"pa

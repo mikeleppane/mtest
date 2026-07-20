@@ -12,7 +12,6 @@ from std.testing import (
     assert_true,
     assert_false,
     assert_raises,
-    TestSuite,
 )
 
 from mtest.model import Event, EventKind, Outcome, ParseDisposition
@@ -238,6 +237,10 @@ def test_selected_overflow_run_is_capture_overflow_exit_1() raises:
         ):
             saw_overflow = True
     assert_true(saw_overflow, "an overflowing run must warn with the hint")
+    assert_true(
+        finished.stdout_truncated,
+        "the selected run's own overflow must mark stdout_truncated",
+    )
 
 
 def test_valid_fail_printing_stale_phrase_is_not_stale_name() raises:
@@ -284,7 +287,3 @@ def test_malformed_node_id_raises_even_when_a_gate_fails() raises:
     var comp = CompositeReporter(Tuple(RecordingReporter()))
     with assert_raises(contains="malformed node id"):
         _ = run_session(cfg, root, comp)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

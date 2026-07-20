@@ -7,7 +7,7 @@ non-error directives. Grammar edges (passthrough, forbidden args, arity errors,
 refusals, the frozen inventory) live in sibling files to keep each module's test
 count modest.
 """
-from std.testing import assert_equal, assert_false, assert_true, TestSuite
+from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.cli import ParseResult, parse_args, version_text, help_text
 from mtest.config import ColorWhen, ShowOutput, Verbosity
@@ -223,12 +223,8 @@ def test_color_modes() raises:
 
 
 def test_version_text_uses_version_constant() raises:
-    assert_equal(version_text(), "mtest 0.1.0-dev")
+    assert_equal(version_text(), "mtest 0.4.0")
 
 
 def test_help_text_mentions_usage() raises:
     assert_true("usage: mtest" in help_text())
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

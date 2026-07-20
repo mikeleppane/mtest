@@ -16,6 +16,28 @@ The surface:
   version string and the color/verbosity/output config are passed at
   construction (build constants, not session facts).
 - `RecordingReporter` — a stateful test double that records the event stream.
+- `escape` — pure machine-text escaping primitives (JSON string escaping, XML
+  text/attribute escaping, GitHub-annotation message/property escaping, and
+  the collision-proof stop-commands fencing helper) shared by the machine
+  reporters this layer is growing.
+- `json_stream` — the pure NDJSON event serializer (`stream_header` and
+  `serialize_event`): one `Event` to one machine line, plus the stream header.
+- `json_stream_reporter` — the live-writing sink for that serializer
+  (`JsonStreamReporter`, its `StreamStatus`, and the `open_json_fd`/
+  `close_json_fd` descriptor helpers): writes each event line to a resolved
+  destination and latches a write failure.
+- `junit` — the pure JUnit XML renderer (typed suite state to `<testsuite>`
+  fragments and a node-id-sorted `<testsuites>` document), validated by the
+  vendored junit-10 schema + arithmetic oracle.
+- `junit_reporter` — the stateful shell (`JunitReporter`, its `JunitStatus`):
+  accumulates the typed event state, spools one `<testsuite>` fragment per
+  finished file, and assembles the full document from the spool.
+- `annotations` — the pure GitHub Actions annotations renderer
+  (`render_annotations`): a run's events to node-id-sorted, capped, escaped
+  `::error`/`::warning`/`::notice` workflow-command lines.
+- `annotations_reporter` — the stateful shell (`AnnotationsReporter`): a
+  self-gating `Reporter` that accumulates the event stream and renders the
+  deterministic annotation tail on demand for `main` to print to stdout.
 
 The public surface is re-exported here so callers write
 `from mtest.report import Reporter, CompositeReporter, ConsoleReporter, ...`.
@@ -24,3 +46,45 @@ from mtest.report.reporter import Reporter
 from mtest.report.composite import CompositeReporter
 from mtest.report.console import ConsoleReporter
 from mtest.report.recording import RecordingReporter
+from mtest.report.escape import (
+    contains_resume_delimiter,
+    fence_region,
+    gh_escape_message,
+    gh_escape_property,
+    json_escape_string,
+    resume_delimiter,
+    select_collision_free_token,
+    stop_commands_opener,
+    xml_escape_attribute,
+    xml_escape_text,
+)
+from mtest.report.json_stream import serialize_event, stream_header
+from mtest.report.json_stream_reporter import (
+    JsonStreamReporter,
+    StreamStatus,
+    close_json_fd,
+    escalate_on_close_failure,
+    open_json_fd,
+)
+from mtest.report.junit import (
+    JunitCase,
+    JunitPrimary,
+    JunitRerun,
+    JunitSuite,
+    RenderedSuite,
+    assemble,
+    bounded_text_from_bytes,
+    dotted_classname,
+    format_seconds,
+    node_sort_key,
+    render_suite,
+)
+from mtest.report.junit_reporter import (
+    JunitArtifact,
+    JunitFinalizeResult,
+    JunitReporter,
+    JunitStatus,
+    open_junit_artifact,
+)
+from mtest.report.annotations import render_annotations
+from mtest.report.annotations_reporter import AnnotationsReporter

@@ -226,11 +226,15 @@ struct Event(Copyable, Movable):
     """A short classification label for the attempt (e.g. "signal",
     "compile-timeout", "compile-crash")."""
     var stdout_truncated: Bool
-    """Whether the captured stdout excerpt was truncated by the caller's bound,
-    so the reporter can print a loud "excerpt" marker (AttemptFinished)."""
+    """Whether the captured stdout was truncated by the capture bound, so the
+    reporter can print a loud "excerpt"/truncation marker (AttemptFinished: the
+    retry excerpt's own bound; FileFinished: the file-scope process result's
+    stdout truncation, propagated by the session)."""
     var stderr_truncated: Bool
-    """Whether the captured stderr excerpt was truncated by the caller's bound
-    (AttemptFinished)."""
+    """Whether the captured stderr was truncated by the capture bound
+    (AttemptFinished: the retry excerpt's own bound; FileFinished: the
+    file-scope process result's stderr truncation, propagated by the
+    session)."""
     var attempt_argv: List[String]
     """The argv this attempt ran, for the reproduce/diagnostic line
     (AttemptFinished)."""
@@ -449,13 +453,18 @@ struct Event(Copyable, Movable):
         flaky: Bool = False,
         slow: Bool = False,
         escalated: Bool = False,
+        stdout_truncated: Bool = False,
+        stderr_truncated: Bool = False,
     ) -> Event:
         """A file's run finished, carrying the data the reporter renders from.
 
         The per-outcome specifics ride as data: `signal_number` for a CRASH,
         `exit_status` for a FAIL, `timeout_seconds` for a TIMEOUT, and
         `exclusion_pattern` for an EXCLUDED line. The build command rides as
-        `build_argv`, and the captured streams as raw bytes. `parse_disposition`
+        `build_argv`, and the captured streams as raw bytes, with
+        `stdout_truncated`/`stderr_truncated` saying whether each stream
+        overflowed the capture bound — the file-scope process result's own
+        truncation booleans, propagated by the session. `parse_disposition`
         and the four `*_tests` totals carry the test-granularity read of this
         file's report. `attempts_used`/`flaky`/`slow` carry the resilience
         summary of the run. `escalated` is the run `Termination`'s latched
@@ -485,6 +494,8 @@ struct Event(Copyable, Movable):
         e.flaky = flaky
         e.slow = slow
         e.escalated = escalated
+        e.stdout_truncated = stdout_truncated
+        e.stderr_truncated = stderr_truncated
         return e^
 
     @staticmethod

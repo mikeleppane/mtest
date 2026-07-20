@@ -7,7 +7,7 @@ successful step adds its output directory to the include set of every
 subsequent build, which the faithful build command records.
 """
 from std.os import listdir, makedirs
-from std.testing import assert_equal, assert_false, assert_true, TestSuite
+from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.config import (
     ColorWhen,
@@ -149,7 +149,7 @@ def test_promotion_failure_never_reports_a_compiler_ending() raises:
     )
 
     var console = ConsoleReporter(
-        "0.1.0-dev",
+        "0.4.0",
         ColorWhen.NEVER,
         is_tty=False,
         no_color=False,
@@ -190,7 +190,3 @@ def test_precompile_spawn_failure_names_the_real_errno() raises:
     assert_equal(ie.program, "/no/such/mojo/compiler")
     assert_equal(ie.errno, 2)  # ENOENT — the real spawn cause, not 0
     assert_false(ie.errno == 0, "the real spawn errno was dropped")
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

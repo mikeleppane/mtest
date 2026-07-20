@@ -28,6 +28,31 @@ static struct mtest_exec_bytes bytes(const char *text) {
     value.length = strlen(text);
     return value;
 }
+
+static int exercise_platform_constants(void) {
+    CHECK(MTEST_EXEC_TEST_CONSTANT_SIGCHLD == 1, "SIGCHLD constant id");
+    CHECK(MTEST_EXEC_TEST_CONSTANT_EIO == 4, "EIO constant id");
+    CHECK(MTEST_EXEC_TEST_CONSTANT_ETXTBSY == 5, "ETXTBSY constant id");
+    CHECK(
+        mtest_exec_test_constant(MTEST_EXEC_TEST_CONSTANT_SIGCHLD) == SIGCHLD,
+        "SIGCHLD constant is header-derived"
+    );
+    CHECK(
+        mtest_exec_test_constant(MTEST_EXEC_TEST_CONSTANT_EIO) == EIO,
+        "EIO constant is header-derived"
+    );
+    CHECK(
+        mtest_exec_test_constant(MTEST_EXEC_TEST_CONSTANT_ETXTBSY) == ETXTBSY,
+        "ETXTBSY constant is header-derived"
+    );
+    CHECK(mtest_exec_test_constant(0) == -1, "zero constant id is rejected");
+    CHECK(
+        mtest_exec_test_constant(UINT32_MAX) == -1,
+        "unknown constant id is rejected"
+    );
+    return 0;
+}
+
 static int drain_channel(
     uint64_t handle,
     uint32_t channel,
@@ -128,6 +153,20 @@ static int exercise_process(void) {
     CHECK(waitable, "leader became waitable");
 
     struct mtest_exec_group_result group;
+    CHECK(mtest_exec_test_fault_configure(
+              MTEST_EXEC_OP_GROUP_KILL, 1, EPERM, 0
+          ) == 0,
+          "configure observed group-kill permission failure");
+    CHECK(mtest_exec_process_group(
+              process.handle, MTEST_EXEC_GROUP_KILL, &group, &error
+          ) == -1,
+          "injected observed group-kill failure remains visible");
+    CHECK(error.operation == MTEST_EXEC_OP_GROUP_KILL &&
+              error.error_number == EPERM,
+          "injected observed group-kill error is exact");
+    CHECK(mtest_exec_test_fault_seen(MTEST_EXEC_OP_GROUP_KILL) == 1,
+          "observed group-kill fault is consumed exactly once");
+    mtest_exec_test_fault_reset();
     CHECK(mtest_exec_process_group(
               process.handle, MTEST_EXEC_GROUP_KILL, &group, &error
           ) == 0,
@@ -197,8 +236,74 @@ static int exercise_process(void) {
     return 0;
 }
 
+static int exercise_preobserve_zombie_only_term(void) {
+    struct mtest_exec_bytes argv[1] = {bytes("/usr/bin/true")};
+    struct mtest_exec_process_spec spec;
+    memset(&spec, 0, sizeof(spec));
+    spec.argv = argv;
+    spec.argc = 1;
+
+    struct mtest_exec_process_ref process;
+    struct mtest_exec_error error;
+    CHECK(mtest_exec_process_open(&spec, &process, &error) == 0,
+          "open child for pre-observe group TERM");
+
+    int waitable = 0;
+    for (int attempt = 0; attempt < 500 && !waitable; ++attempt) {
+        siginfo_t information;
+        memset(&information, 0, sizeof(information));
+        CHECK(waitid(
+                  P_PID,
+                  (id_t)process.leader_pid,
+                  &information,
+                  WEXITED | WNOHANG | WNOWAIT
+              ) == 0,
+              "external waitid for pre-observe group TERM");
+        waitable = information.si_pid == process.leader_pid;
+        if (!waitable) {
+            const struct timespec delay = {0, 1000000L};
+            (void)nanosleep(&delay, NULL);
+        }
+    }
+    CHECK(waitable, "pre-observe group TERM child became waitable");
+
+    struct mtest_exec_group_result group;
+#if defined(__APPLE__)
+    CHECK(mtest_exec_process_group(
+              process.handle, MTEST_EXEC_GROUP_PROBE, &group, &error
+          ) == -1,
+          "pre-observe zombie-only group probe remains fail-closed");
+    CHECK(error.operation == MTEST_EXEC_OP_GROUP_PROBE &&
+              error.error_number == EPERM,
+          "pre-observe zombie-only group probe error is exact");
+#endif
+    CHECK(mtest_exec_test_fault_configure(
+              MTEST_EXEC_OP_GROUP_TERM, 1, EPERM, 0
+          ) == 0,
+          "configure pre-observe group-TERM permission failure");
+    CHECK(mtest_exec_process_group(
+              process.handle, MTEST_EXEC_GROUP_TERM, &group, &error
+          ) == -1,
+          "injected pre-observe group-TERM failure remains visible");
+    CHECK(error.operation == MTEST_EXEC_OP_GROUP_TERM &&
+              error.error_number == EPERM,
+          "injected pre-observe group-TERM error is exact");
+    CHECK(mtest_exec_test_fault_seen(MTEST_EXEC_OP_GROUP_TERM) == 1,
+          "pre-observe group-TERM fault is consumed exactly once");
+    mtest_exec_test_fault_reset();
+    CHECK(mtest_exec_process_group(
+              process.handle, MTEST_EXEC_GROUP_TERM, &group, &error
+          ) == 0,
+          "pre-observe zombie-only group TERM is complete");
+    CHECK(group.state == MTEST_EXEC_GROUP_PRESENT,
+          "pre-observe zombie-only group TERM reports present");
+    CHECK(mtest_exec_process_abort(process.handle, 0, &error) == 0,
+          "abort consumes pre-observe zombie-only group TERM child");
+    return 0;
+}
+
 static int exercise_reaped_unswept_abort_child(void) {
-    struct mtest_exec_bytes argv[1] = {bytes("/bin/true")};
+    struct mtest_exec_bytes argv[1] = {bytes("/usr/bin/true")};
     struct mtest_exec_process_spec spec;
     memset(&spec, 0, sizeof(spec));
     spec.argv = argv;
@@ -285,7 +390,7 @@ static int exercise_reaped_unswept_abort(void) {
 }
 
 static int exercise_terminal_setpgid_cleanup_child(void) {
-    struct mtest_exec_bytes argv[1] = {bytes("/bin/true")};
+    struct mtest_exec_bytes argv[1] = {bytes("/usr/bin/true")};
     struct mtest_exec_process_spec spec;
     memset(&spec, 0, sizeof(spec));
     spec.argv = argv;
@@ -582,7 +687,85 @@ static int exercise_retryable_abort_group_kill(void) {
     return 0;
 }
 
+static int exercise_transient_group_signal_eperm(void) {
+    struct mtest_exec_bytes argv[2] = {bytes("/bin/sleep"), bytes("30")};
+    struct mtest_exec_process_spec spec;
+    memset(&spec, 0, sizeof(spec));
+    spec.argv = argv;
+    spec.argc = 2;
+    struct mtest_exec_process_ref process;
+    struct mtest_exec_group_result group;
+    struct mtest_exec_error error;
+
+    CHECK(mtest_exec_process_open(&spec, &process, &error) == 0,
+          "open child for transient group-signal EPERM");
+    CHECK(mtest_exec_test_group_signal_eperm_configure(
+              MTEST_EXEC_OP_GROUP_KILL, 2
+          ) == 0,
+          "configure transient group-kill EPERM sequence");
+    CHECK(mtest_exec_test_fault_configure(
+              MTEST_EXEC_OP_GROUP_KILL, 1, EPERM, 0
+          ) == 0,
+          "configure injected group-kill EPERM before transient sequence");
+    CHECK(mtest_exec_process_group(
+              process.handle, MTEST_EXEC_GROUP_KILL, &group, &error
+          ) == -1,
+          "injected group-kill EPERM remains immediate");
+    CHECK(error.operation == MTEST_EXEC_OP_GROUP_KILL &&
+              error.error_number == EPERM,
+          "injected group-kill EPERM remains exact");
+    CHECK(mtest_exec_test_fault_seen(MTEST_EXEC_OP_GROUP_KILL) == 1,
+          "injected group-kill EPERM is consumed once");
+    CHECK(mtest_exec_test_group_signal_eperm_seen(
+              MTEST_EXEC_OP_GROUP_KILL
+          ) == 0,
+          "injected group-kill EPERM bypasses transient syscall retry");
+    CHECK(mtest_exec_process_group(
+              process.handle, MTEST_EXEC_GROUP_KILL, &group, &error
+          ) == 0,
+          "transient group-kill EPERM is retried");
+    CHECK(group.state == MTEST_EXEC_GROUP_PRESENT,
+          "retried group kill reports present");
+    CHECK(mtest_exec_test_group_signal_eperm_seen(
+              MTEST_EXEC_OP_GROUP_KILL
+          ) == 3,
+          "two transient EPERMs precede one successful group kill");
+    /* Named fault accounting runs once per group-loop visit: the first call
+       injects at seen=1, then the second call visits twice for EPERM and once
+       for the successful kill, producing the exact composite count of four. */
+    CHECK(mtest_exec_test_fault_seen(MTEST_EXEC_OP_GROUP_KILL) == 4,
+          "named fault observes its injected call plus all three retry calls");
+    mtest_exec_test_fault_reset();
+    CHECK(mtest_exec_process_abort(process.handle, 0, &error) == 0,
+          "abort consumes transient group-signal child");
+
+    CHECK(mtest_exec_process_open(&spec, &process, &error) == 0,
+          "open child for bounded group-signal EPERM");
+    CHECK(mtest_exec_test_group_signal_eperm_configure(
+              MTEST_EXEC_OP_GROUP_TERM, 100
+          ) == 0,
+          "configure persistent group-term EPERM sequence");
+    CHECK(mtest_exec_process_group(
+              process.handle, MTEST_EXEC_GROUP_TERM, &group, &error
+          ) == -1,
+          "persistent group-term EPERM remains visible after retry bound");
+    CHECK(error.operation == MTEST_EXEC_OP_GROUP_TERM &&
+              error.error_number == EPERM,
+          "bounded group-term EPERM error is exact");
+    CHECK(mtest_exec_test_group_signal_eperm_seen(
+              MTEST_EXEC_OP_GROUP_TERM
+          ) == 21,
+          "group-term EPERM retry count is exactly bounded");
+    CHECK(mtest_exec_test_fault_seen(MTEST_EXEC_OP_GROUP_TERM) == 0,
+          "bounded syscall seam does not consume the fault-injection seam");
+    mtest_exec_test_fault_reset();
+    CHECK(mtest_exec_process_abort(process.handle, 0, &error) == 0,
+          "abort consumes bounded group-signal child");
+    return 0;
+}
+
 int main(void) {
+    CHECK(exercise_platform_constants() == 0, "platform constants");
     struct mtest_exec_error error;
     CHECK(mtest_exec_native_abi_version() == MTEST_EXEC_NATIVE_ABI_VERSION,
           "ABI version");
@@ -604,6 +787,8 @@ int main(void) {
     CHECK(mtest_exec_monotonic_ms(&now, &error) == 0 && now > 0,
           "monotonic clock");
     CHECK(exercise_process() == 0, "real process supervision seam");
+    CHECK(exercise_preobserve_zombie_only_term() == 0,
+          "pre-observe zombie-only group TERM");
     CHECK(exercise_reaped_unswept_abort() == 0,
           "reaped unswept abort stays terminal");
     CHECK(exercise_terminal_setpgid_cleanup() == 0,
@@ -618,12 +803,14 @@ int main(void) {
           "consumed close error ownership");
     CHECK(exercise_retryable_abort_group_kill() == 0,
           "retryable abort group kill");
+    CHECK(exercise_transient_group_signal_eperm() == 0,
+          "transient group-signal EPERM retry");
     CHECK(mtest_exec_test_fault_configure(
               MTEST_EXEC_OP_CHILD_SETUP_WRITE, 1, EIO, 9
           ) == -1,
           "reject oversized setup-record fault");
 
-    struct mtest_exec_bytes fault_argv[1] = {bytes("/bin/true")};
+    struct mtest_exec_bytes fault_argv[1] = {bytes("/usr/bin/true")};
     struct mtest_exec_process_spec fault_spec;
     memset(&fault_spec, 0, sizeof(fault_spec));
     fault_spec.argv = fault_argv;
@@ -837,7 +1024,7 @@ int main(void) {
     CHECK(error.operation == MTEST_EXEC_OP_SIGACTION_RESTORE_TERM &&
               error.error_number == EIO,
           "restoration failure is named exactly");
-    struct mtest_exec_bytes blocked_argv[1] = {bytes("/bin/true")};
+    struct mtest_exec_bytes blocked_argv[1] = {bytes("/usr/bin/true")};
     struct mtest_exec_process_spec blocked_spec;
     memset(&blocked_spec, 0, sizeof(blocked_spec));
     blocked_spec.argv = blocked_argv;

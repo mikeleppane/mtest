@@ -9,7 +9,7 @@ Kept in its own module because the interrupt flag latches until explicit reset
 or the next runtime open, so these tests share no state with the others.
 """
 from std.ffi import external_call
-from std.testing import assert_equal, assert_true, assert_false, TestSuite
+from std.testing import assert_equal, assert_true, assert_false
 
 from mtest.exec import (
     ProcessSpec,
@@ -19,7 +19,7 @@ from mtest.exec import (
 )
 from mtest.exec.signals import _reset_interrupt, _raise_self
 
-from exec_helpers import target, py_spec
+from exec_helpers import target, true_binary, py_spec
 
 comptime _SIGINT = 2
 comptime _EIO = 5
@@ -79,7 +79,7 @@ def test_run_supervised_bails_out_promptly_on_interrupt() raises:
 def test_inactive_runtime_rejects_supervision() raises:
     var runtime = ExecRuntime()
     assert_false(runtime.active, "new token must not claim native ownership")
-    var argv = [String("/bin/true")]
+    var argv = [true_binary()]
     var message = String("")
     try:
         _ = run_supervised(runtime, ProcessSpec.command(argv^))
@@ -207,7 +207,7 @@ def test_cleanup_diagnostic_does_not_leak_native_child_slot() raises:
     _reset_faults()
 
     var followup = List[String]()
-    followup.append("/bin/true")
+    followup.append(true_binary())
     var result = run_supervised(runtime, ProcessSpec.command(followup^))
     runtime.close()
 
@@ -249,7 +249,7 @@ def test_runtime_close_retries_a_retained_native_child_handle() raises:
     # A fresh lifecycle proves neither the child slot nor signal ownership leaked.
     runtime.open()
     var followup = List[String]()
-    followup.append("/bin/true")
+    followup.append(true_binary())
     var result = run_supervised(runtime, ProcessSpec.command(followup^))
     runtime.close()
 
@@ -262,7 +262,3 @@ def test_runtime_close_retries_a_retained_native_child_handle() raises:
     )
     assert_true(result.termination.is_exited(), String(result.termination))
     assert_equal(result.termination.value, 0)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

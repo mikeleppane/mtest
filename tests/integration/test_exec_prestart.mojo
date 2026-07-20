@@ -17,7 +17,7 @@ run whose child exec's and then hangs is still ended promptly by the deadline
 full hang. The spawn-failed (4-byte) and exec-ran (EOF) branches of the same loop
 are pinned by the decode tests, which still pass after the refactor.
 """
-from std.testing import assert_true, TestSuite
+from std.testing import assert_true
 
 from mtest.exec import ExecRuntime, run_supervised
 
@@ -35,7 +35,3 @@ def test_deadline_governs_the_run_not_a_blocking_preread() raises:
     runtime.close()
     assert_true(r.termination.is_timed_out(), String(r.termination))
     assert_true(r.duration_ms < 5000, String(r.duration_ms))
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

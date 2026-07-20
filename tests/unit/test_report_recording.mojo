@@ -5,7 +5,7 @@ session and composition tests can assert ordering, kinds, and key payload
 fields. It records; it never prints. These tests fan a fixed event stream
 through it and read the recorded kinds, paths, and outcomes back in order.
 """
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_true
 
 from mtest.model import (
     EventKind,
@@ -120,7 +120,3 @@ def test_records_file_finished_parse_disposition() raises:
         )
     )
     assert_true(r.parse_disposition_at(0) == ParseDisposition.DRIFT)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

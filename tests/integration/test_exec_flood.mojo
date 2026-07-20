@@ -15,7 +15,7 @@ stay responsive under that pressure:
 Both assertions carry a hard wall-clock bound: a regression that lets either path
 spin does not merely fail these — it hangs, which is the intended loud signal.
 """
-from std.testing import assert_equal, assert_true, assert_false, TestSuite
+from std.testing import assert_equal, assert_true, assert_false
 
 from mtest.exec import ExecRuntime, run_supervised
 
@@ -55,7 +55,3 @@ def test_flooding_grandchild_in_run_times_out_promptly() raises:
     assert_true(r.termination.is_timed_out(), String(r.termination))
     # Hard wall-clock bound: a spinning in-run drain would never reach here.
     assert_true(r.duration_ms < 5000, String(r.duration_ms))
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

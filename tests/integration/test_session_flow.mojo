@@ -7,7 +7,7 @@ pairs -> SessionFinished), the selected/excluded counts, the per-file verdicts
 (a real PASS and a real FAIL, kept distinct), the summary tally, and the exact
 resolved exit code. Both recorders must observe the identical stream.
 """
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_true
 
 from mtest.model import EventKind, Outcome, ParseDisposition
 from mtest.report import CompositeReporter, RecordingReporter
@@ -98,7 +98,3 @@ def test_flow_pass_fail_excluded_warning_exit1() raises:
     # The N=2 seam: the second recorder observed the identical stream.
     assert_equal(comp.reporters[1].count(), 10)
     assert_true(comp.reporters[1].kind_at(9) == EventKind.SESSION_FINISHED)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

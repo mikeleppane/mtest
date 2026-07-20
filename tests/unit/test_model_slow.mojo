@@ -7,7 +7,7 @@ pinned explicitly with synthetic values — 59.9s is never slow, 60.0s always is
 — rather than derived from the constant, so a future edit to the constant
 cannot silently move the boundary out from under an unchanged test.
 """
-from std.testing import assert_equal, assert_false, assert_true, TestSuite
+from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.model import is_slow, slow_step_label
 
@@ -59,7 +59,3 @@ def test_zero_durations_are_not_slow() raises:
     # must never read as slow.
     assert_false(is_slow(0.0, 0.0))
     assert_equal(slow_step_label(0.0, 0.0), "")
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

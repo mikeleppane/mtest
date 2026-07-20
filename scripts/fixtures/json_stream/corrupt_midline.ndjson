@@ -1,0 +1,3 @@
+{"event":"stream","version":1,"generator":"mtest 0.4.0"}
+{"event":"file_started", this is not valid json}
+{"event":"file_finished","path":"tests/test_a.mojo","outcome":"pass"}

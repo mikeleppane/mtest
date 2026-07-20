@@ -5,7 +5,7 @@ Verifies that the full v1 outcome vocabulary exists as distinct values and that
 and everything else. The classification is asserted member by member over the
 whole enumerated vocabulary, not sampled.
 """
-from std.testing import assert_equal, assert_true, assert_false, TestSuite
+from std.testing import assert_equal, assert_true, assert_false
 
 from mtest.model import Outcome
 
@@ -70,7 +70,3 @@ def test_failing_class_size_is_seven() raises:
         if o.is_failing():
             failing += 1
     assert_equal(failing, 7)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

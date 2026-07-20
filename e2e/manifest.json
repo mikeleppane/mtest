@@ -5,15 +5,15 @@
   "suite_root": "e2e/suite",
   "hostile_root": "e2e/hostile",
   "exit_class_meaning": {
-    "0": "PASS or SKIP — contributes exit 0 (the session is clean unless another file fails)",
-    "1": "FAIL, CRASH, TIMEOUT, COMPILE-ERROR, MALFORMED-SUITE, or CAPTURE-OVERFLOW — contributes exit 1",
-    "3": "DRIFT — an off-grammar report routes to the internal-error tier (exit 3), never the run-outcome multiset"
+    "0": "PASS or SKIP \u2014 contributes exit 0 (the session is clean unless another file fails)",
+    "1": "FAIL, CRASH, TIMEOUT, COMPILE-ERROR, MALFORMED-SUITE, or CAPTURE-OVERFLOW \u2014 contributes exit 1",
+    "3": "DRIFT \u2014 an off-grammar report routes to the internal-error tier (exit 3), never the run-outcome multiset"
   },
   "disposition_meaning": {
     "PARSED": "a VALID report was parsed and its per-test rows drive the verdict",
     "NO_REPORT": "no matching report block (a crash, a timeout, or a silent binary)",
-    "AMBIGUOUS": "multiple/forged report blocks — a pattern user bytes can produce",
-    "DRIFT": "an off-grammar report from the pinned toolchain — the format moved",
+    "AMBIGUOUS": "multiple/forged report blocks \u2014 a pattern user bytes can produce",
+    "DRIFT": "an off-grammar report from the pinned toolchain \u2014 the format moved",
     "CAPTURE_OVERFLOW": "output truncated with no valid report surviving in the tail"
   },
   "tests": {
@@ -21,7 +21,9 @@
       "verdict": "PASS",
       "exit_class": 0,
       "in_default_suite": false,
-      "reached_only_by": ["collect"],
+      "reached_only_by": [
+        "collect"
+      ],
       "disposition": "PARSED",
       "rationale": "A clean two-test suite for the collect scenario. Under --skip-all the probe lists test_one and test_two, running no body, so `mtest collect` emits its two node ids. A whole run PASSes; reached only by the collect scenario."
     },
@@ -29,7 +31,9 @@
       "verdict": "CRASH",
       "exit_class": 1,
       "in_default_suite": false,
-      "reached_only_by": ["collect"],
+      "reached_only_by": [
+        "collect"
+      ],
       "disposition": "NO_REPORT",
       "rationale": "The crash is in main, not a test body, so --skip-all cannot skip past it: the collection probe dies by signal. `mtest collect` writes a crash diagnostic to STDERR and the listing continues for the other files. Reached only by the collect scenario."
     },
@@ -37,7 +41,9 @@
       "verdict": "TIMEOUT",
       "exit_class": 1,
       "in_default_suite": false,
-      "reached_only_by": ["collect"],
+      "reached_only_by": [
+        "collect"
+      ],
       "disposition": "NO_REPORT",
       "rationale": "The hang is in main, before any suite runs, so --skip-all cannot skip it: the collection probe never returns and is bounded by --timeout. `mtest collect` writes a timeout diagnostic to STDERR and the listing continues. Reached only by the collect scenario under a short --timeout, so it can never hang the gate."
     },
@@ -46,7 +52,11 @@
       "exit_class": 0,
       "in_default_suite": true,
       "disposition": "PARSED",
-      "per_test": { "passed": 3, "failed": 0, "skipped": 0 },
+      "per_test": {
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0
+      },
       "rationale": "Three passing tests; the file exits 0 and emits a VALID three-row report. The exit-0 baseline and the single-file pass case."
     },
     "e2e/suite/test_failing.mojo": {
@@ -54,7 +64,11 @@
       "exit_class": 1,
       "in_default_suite": true,
       "disposition": "PARSED",
-      "per_test": { "passed": 2, "failed": 1, "skipped": 0 },
+      "per_test": {
+        "passed": 2,
+        "failed": 1,
+        "skipped": 0
+      },
       "rationale": "Three tests; the middle one fails its assertion, the other two pass. The file compiles, runs, and exits nonzero with a VALID three-row report. Reported FAIL, distinct from CRASH."
     },
     "e2e/suite/test_crashing.mojo": {
@@ -62,7 +76,7 @@
       "exit_class": 1,
       "in_default_suite": true,
       "disposition": "NO_REPORT",
-      "rationale": "A test calls abort(\"simulated hard crash\"); the process dies by signal 4 (SIGILL). A crash is not a failure and stays a separate outcome; the parser is unconsulted."
+      "rationale": "A test calls abort(\"simulated hard crash\"); the process dies by the target trap: signal 4 (SIGILL) on linux-64/x86_64 and signal 5 (SIGTRAP) on osx-arm64. A crash is not a failure and stays a separate outcome; the parser is unconsulted."
     },
     "e2e/suite/test_zero.mojo": {
       "verdict": "PASS",
@@ -70,15 +84,23 @@
       "in_default_suite": true,
       "zero_tests": true,
       "disposition": "PARSED",
-      "per_test": { "passed": 0, "failed": 0, "skipped": 0 },
-      "rationale": "Collects ZERO tests and emits a VALID zero-test report, exiting 0. The verdict is now a NO-TESTS pass — PASS-from-a-parsed-zero-test-report — not the old PASS-from-exit-status ceiling. As a member of suite/ it contributes to the exit-0 class; run entirely alone it would exit 5 (nothing ran)."
+      "per_test": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0
+      },
+      "rationale": "Collects ZERO tests and emits a VALID zero-test report, exiting 0. The verdict is now a NO-TESTS pass \u2014 PASS-from-a-parsed-zero-test-report \u2014 not the old PASS-from-exit-status ceiling. As a member of suite/ it contributes to the exit-0 class; run entirely alone it would exit 5 (nothing ran)."
     },
     "e2e/suite/test_noisy.mojo": {
       "verdict": "PASS",
       "exit_class": 0,
       "in_default_suite": true,
       "disposition": "PARSED",
-      "per_test": { "passed": 3, "failed": 0, "skipped": 0 },
+      "per_test": {
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0
+      },
       "rationale": "Every test passes while the file floods stdout and stderr with report-shaped and timing-shaped lookalike lines; the noise precedes the real buffered report block and must not change the PASS verdict."
     },
     "e2e/suite/test_compile_error.mojo": {
@@ -93,14 +115,20 @@
       "exit_class": 0,
       "in_default_suite": true,
       "disposition": "PARSED",
-      "per_test": { "passed": 1, "failed": 0, "skipped": 0 },
+      "per_test": {
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0
+      },
       "rationale": "A passing suite one directory down; proves the directory walk recurses."
     },
     "e2e/hostile/test_silent.mojo": {
       "verdict": "MALFORMED-SUITE",
       "exit_class": 1,
       "in_default_suite": false,
-      "reached_only_by": ["hostile"],
+      "reached_only_by": [
+        "hostile"
+      ],
       "disposition": "NO_REPORT",
       "rationale": "Compiles, runs, exits 0, prints NO report block -> ABSENT -> MALFORMED-SUITE. The file ran but spoke no report; a clean exit is no longer a PASS. The heart of the closed zero-test ceiling."
     },
@@ -108,7 +136,9 @@
       "verdict": "MALFORMED-SUITE",
       "exit_class": 1,
       "in_default_suite": false,
-      "reached_only_by": ["hostile"],
+      "reached_only_by": [
+        "hostile"
+      ],
       "disposition": "AMBIGUOUS",
       "rationale": "Prints a complete VALID report, then appends a second complete block for the same path -> AMBIGUOUS -> MALFORMED-SUITE. A forged extra block never launders into a VALID verdict."
     },
@@ -116,7 +146,9 @@
       "verdict": "DRIFT",
       "exit_class": 3,
       "in_default_suite": false,
-      "reached_only_by": ["hostile"],
+      "reached_only_by": [
+        "hostile"
+      ],
       "disposition": "DRIFT",
       "rationale": "Prints an off-grammar report (a trailing Summary with no rule before it) -> OFF_GRAMMAR -> DRIFT, which routes to exit 3. The sanctioned user-authored path to the internal-error tier; contributes nothing to the run-outcome multiset."
     },
@@ -124,7 +156,9 @@
       "verdict": "FAIL",
       "exit_class": 1,
       "in_default_suite": false,
-      "reached_only_by": ["hostile"],
+      "reached_only_by": [
+        "hostile"
+      ],
       "disposition": "CAPTURE_OVERFLOW",
       "rationale": "Floods stdout past the 8 MiB capture bound and exits 0 with no report surviving in the retained tail -> CAPTURE-OVERFLOW -> FAIL. A truncated capture never yields a successful verdict, never a PASS, never a drift."
     },
@@ -132,7 +166,10 @@
       "verdict": "TIMEOUT",
       "exit_class": 1,
       "in_default_suite": false,
-      "reached_only_by": ["--timeout", "interrupt"],
+      "reached_only_by": [
+        "--timeout",
+        "interrupt"
+      ],
       "disposition": "NO_REPORT",
       "rationale": "Sleeps forever. Reached ONLY under --timeout (killed and reported TIMEOUT) or the interrupt scenario. No default scenario walks slow/, so it can never hang the gate."
     },
@@ -154,7 +191,9 @@
       "verdict": "TIMEOUT",
       "exit_class": 1,
       "in_default_suite": false,
-      "reached_only_by": ["timeout-escalation"],
+      "reached_only_by": [
+        "timeout-escalation"
+      ],
       "disposition": "NO_REPORT",
       "rationale": "Disarms SIGTERM (SIG_IGN) and then sleeps forever, so the supervisor's polite SIGTERM cannot end it and the kill protocol MUST escalate to SIGKILL after the 300ms run-step grace. The escalation is latched on the Termination and surfaces on the retry TRY line. Reached ONLY by the timeout-escalation scenario (--timeout 1 --retries 1), which mtest bounds; it lives in its OWN directory so no scenario that walks slow/ (notably interrupt) can reach a child that refuses the polite signal."
     },
@@ -169,7 +208,9 @@
       "verdict": "CRASH",
       "exit_class": 1,
       "in_default_suite": false,
-      "reached_only_by": ["retries"],
+      "reached_only_by": [
+        "retries"
+      ],
       "disposition": "NO_REPORT",
       "rationale": "The retry fixture: keyed by a per-file marker under build/e2e-scratch/ (owned/reset by the harness), it CRASHES by SIGSEGV on its first run (no marker) then PASSES on a re-run (marker present). The listed verdict is the fresh-marker first-run state: with an empty scratch and --retries 0 it dies by signal and mtest reports CRASH (exit 1). The retries scenario resets the marker and runs it twice: --retries 1 -> FLAKY (exit 0, a TRY line for the crashed first attempt), --retries 0 -> CRASH (exit 1). Reached only by the retries scenario; never in the default suite."
     },
@@ -177,43 +218,65 @@
       "verdict": "CRASH",
       "exit_class": 1,
       "in_default_suite": false,
-      "reached_only_by": ["crash-attribution"],
+      "reached_only_by": [
+        "crash-attribution"
+      ],
       "disposition": "NO_REPORT",
-      "rationale": "The ATTRIBUTED half of the crash-attribution honesty pair. test_boom aborts unconditionally (SIGILL), so the file CRASHes and the bounded isolation post-pass reproduces the crash with test_boom run alone and names it as the culprit. The two passing siblings give attribution something to exclude. The listed verdict is the whole-file one: CRASH, exit 1 — the SAME verdict the file gets whether or not attribution names anything, which is the doctrine this pair exists to pin."
+      "rationale": "The ATTRIBUTED half of the crash-attribution honesty pair. test_boom aborts unconditionally with the target trap (signal 4/SIGILL on linux-64/x86_64; signal 5/SIGTRAP on osx-arm64), so the file CRASHes and the bounded isolation post-pass reproduces the crash with test_boom run alone and names it as the culprit. The two passing siblings give attribution something to exclude. The listed verdict is the whole-file one: CRASH, exit 1 \u2014 the SAME verdict the file gets whether or not attribution names anything, which is the doctrine this pair exists to pin."
     },
     "e2e/attribution/test_order_dependent_crasher.mojo": {
       "verdict": "CRASH",
       "exit_class": 1,
       "in_default_suite": false,
-      "reached_only_by": ["crash-attribution"],
+      "reached_only_by": [
+        "crash-attribution"
+      ],
       "disposition": "NO_REPORT",
-      "rationale": "The NO-REPRODUCTION half of the crash-attribution honesty pair. It crashes (SIGSEGV) only when its tests run TOGETHER: the first corrupts an in-process environment variable the second trips over. Each test run ALONE under --only passes, so isolation cannot reproduce the crash and the pass reports NO_REPRODUCTION — the culprit stays UNATTRIBUTED and is never guessed. Its verdict and summary band are IDENTICAL to the deterministic sibling's (CRASH, exit 1, 1 crashed): attribution success changes no verdict."
+      "rationale": "The NO-REPRODUCTION half of the crash-attribution honesty pair. It crashes (SIGSEGV) only when its tests run TOGETHER: the first corrupts an in-process environment variable the second trips over. Each test run ALONE under --only passes, so isolation cannot reproduce the crash and the pass reports NO_REPRODUCTION \u2014 the culprit stays UNATTRIBUTED and is never guessed. Its verdict and summary band are IDENTICAL to the deterministic sibling's (CRASH, exit 1, 1 crashed): attribution success changes no verdict."
     },
     "e2e/maxfail/test_a_fail.mojo": {
       "verdict": "FAIL",
       "exit_class": 1,
       "in_default_suite": false,
-      "reached_only_by": ["maxfail"],
+      "reached_only_by": [
+        "maxfail"
+      ],
       "disposition": "PARSED",
-      "per_test": { "passed": 0, "failed": 1, "skipped": 0 },
+      "per_test": {
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0
+      },
       "rationale": "The --maxfail spread, file 1 of 3. One failing test; sorts first among the maxfail/ siblings, so `--maxfail 1` stops scheduling right after this file contributes its one failing test."
     },
     "e2e/maxfail/test_b_fail.mojo": {
       "verdict": "FAIL",
       "exit_class": 1,
       "in_default_suite": false,
-      "reached_only_by": ["maxfail"],
+      "reached_only_by": [
+        "maxfail"
+      ],
       "disposition": "PARSED",
-      "per_test": { "passed": 0, "failed": 1, "skipped": 0 },
+      "per_test": {
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0
+      },
       "rationale": "The --maxfail spread, file 2 of 3. One failing test; sorts second among the maxfail/ siblings, so `--maxfail 2` stops scheduling right after this file, leaving the third (passing) sibling NOT-RUN."
     },
     "e2e/maxfail/test_c_pass.mojo": {
       "verdict": "PASS",
       "exit_class": 0,
       "in_default_suite": false,
-      "reached_only_by": ["maxfail"],
+      "reached_only_by": [
+        "maxfail"
+      ],
       "disposition": "PARSED",
-      "per_test": { "passed": 1, "failed": 0, "skipped": 0 },
+      "per_test": {
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0
+      },
       "rationale": "The --maxfail spread, file 3 of 3. Sorts last; under `--maxfail 1` or `--maxfail 2` it stays NOT-RUN, proving the early stop; under `--maxfail 0` (no limit) it runs and passes."
     },
     "e2e/pkg/test_uses_pkg.mojo": {
@@ -228,13 +291,29 @@
       "verdict": "PASS",
       "exit_class": 0,
       "in_default_suite": false,
-      "reached_only_by": ["selection"],
+      "reached_only_by": [
+        "selection"
+      ],
       "disposition": "PARSED",
-      "per_test": { "passed": 3, "failed": 0, "skipped": 0, "deselected": 0 },
+      "per_test": {
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0,
+        "deselected": 0
+      },
       "selection": {
-        "-k two": { "passed": 1, "deselected": 2 },
-        "node-id test_alpha_one": { "passed": 1, "deselected": 2 },
-        "dir + node-id union": { "passed": 3, "deselected": 0 }
+        "-k two": {
+          "passed": 1,
+          "deselected": 2
+        },
+        "node-id test_alpha_one": {
+          "passed": 1,
+          "deselected": 2
+        },
+        "dir + node-id union": {
+          "passed": 3,
+          "deselected": 0
+        }
       },
       "rationale": "The selection-matrix file: three distinctly named passing tests probed with --skip-all, then run under --only. A whole run passes all three; `-k two` or a node id selects one and deselects the other two; the dir+node-id union keeps all three (the plain dir operand beats the node id). DESELECTED is a summary count, never a listed row. Reached only by the selection scenarios."
     },
@@ -242,19 +321,53 @@
       "verdict": "PASS",
       "exit_class": 0,
       "in_default_suite": false,
-      "reached_only_by": ["selection"],
+      "reached_only_by": [
+        "selection"
+      ],
       "disposition": "PARSED",
-      "per_test": { "passed": 2, "failed": 0, "skipped": 0, "deselected": 0 },
-      "rationale": "The matrix sibling: two passing tests. Its role is the mixed-operand union — `mtest e2e/matrix e2e/matrix/test_alpha.mojo::test_alpha_one` keeps the whole tree (the plain dir operand beats the node id), so both files run whole and nothing is deselected."
+      "per_test": {
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "deselected": 0
+      },
+      "rationale": "The matrix sibling: two passing tests. Its role is the mixed-operand union \u2014 `mtest e2e/matrix e2e/matrix/test_alpha.mojo::test_alpha_one` keeps the whole tree (the plain dir operand beats the node id), so both files run whole and nothing is deselected."
     },
     "e2e/chameleon/test_chameleon.mojo": {
       "verdict": "MALFORMED-SUITE",
       "exit_class": 1,
       "in_default_suite": false,
-      "reached_only_by": ["selection"],
+      "reached_only_by": [
+        "selection"
+      ],
       "disposition": "NO_REPORT",
-      "per_test": { "passed": 0, "failed": 0, "skipped": 0, "deselected": 1 },
-      "rationale": "The chameleon: under --skip-all it lists test_real AND test_ghost (a qualifying two-test collection), but under --only it registers only test_real, so `--only test_ghost` raises the stdlib's `… test not found in suite:`. A subset selection drives the loud recollect-once, then a second identical refusal -> MALFORMED-SUITE (exit-1 class), NEVER exit 3. The sanctioned proof that user code can refuse a name it just listed."
+      "per_test": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "deselected": 1
+      },
+      "rationale": "The chameleon: under --skip-all it lists test_real AND test_ghost (a qualifying two-test collection), but under --only it registers only test_real, so `--only test_ghost` raises the stdlib's `\u2026 test not found in suite:`. A subset selection drives the loud recollect-once, then a second identical refusal -> MALFORMED-SUITE (exit-1 class), NEVER exit 3. The sanctioned proof that user code can refuse a name it just listed."
+    },
+    "e2e/annotations/test_console_forger.mojo": {
+      "verdict": "FAIL",
+      "exit_class": 1,
+      "in_default_suite": false,
+      "reached_only_by": [
+        "annotations-fencing"
+      ],
+      "disposition": "PARSED",
+      "rationale": "A FAIL whose captured stdout forges a ::error workflow command and seeds a stop-commands fence with a guessed token. Under GITHUB_ACTIONS the echoed region is wrapped in a collision-proof fence minted after this child exited, so the forge cannot land and the seeded token cannot re-enable commands."
+    },
+    "e2e/annotations/test_many_fail.mojo": {
+      "verdict": "FAIL",
+      "exit_class": 1,
+      "in_default_suite": false,
+      "reached_only_by": [
+        "annotations-caps"
+      ],
+      "disposition": "PARSED",
+      "rationale": "Twelve per-test failures exceed the 10-error per-step annotation cap: the tail keeps nine node-id-sorted rows plus one '... and 3 more errors' aggregate, so the error block never exceeds ten lines."
     }
   },
   "non_discovered": {

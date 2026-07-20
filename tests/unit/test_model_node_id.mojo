@@ -5,7 +5,7 @@ only one field and silently merge two distinct tests. `split_node_token` is
 pure and policy-free: these tests pin its behavior across every separator count
 the session's classifier depends on (0/1/2/3, plus the empty-part edges).
 """
-from std.testing import assert_equal, assert_true, assert_false, TestSuite
+from std.testing import assert_equal, assert_true, assert_false
 
 from mtest.model import NodeId, NodeIdSplit, split_node_token
 
@@ -76,7 +76,3 @@ def test_split_trailing_separator_yields_empty_name_part() raises:
     assert_equal(s.sep_count, 1)
     assert_equal(s.file_part, "a")
     assert_equal(s.name_part, "")
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

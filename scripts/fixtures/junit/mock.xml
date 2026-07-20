@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Byte-faithful mock of mtest's intended JUnit document (validation dialect:
+     scripts/schemas/junit-10.xsd). The <testsuites> root carries no `skipped`
+     attribute on purpose: junit-10 defines no such root attribute, and
+     scripts/junit_check.py recomputes the root skipped total arithmetically
+     from the child <testsuite> elements instead. -->
+<testsuites name="mtest" tests="9" failures="1" errors="1">
+  <testsuite name="e2e/suite/test_failing.mojo" tests="4" failures="1" errors="0" skipped="1" time="0.043">
+    <testcase name="[build]" classname="e2e.suite.test_failing"/>
+    <testcase name="e2e/suite/test_failing.mojo::test_first_passes" classname="e2e.suite.test_failing"/>
+    <testcase name="e2e/suite/test_failing.mojo::test_not_run" classname="e2e.suite.test_failing">
+      <skipped message="deselected by -k" type="pytest.skip"/>
+    </testcase>
+    <testcase name="e2e/suite/test_failing.mojo::test_second_fails" classname="e2e.suite.test_failing">
+      <failure message="`left == right` comparison failed: left: 1 right: 2" type="AssertionError">At /repo/e2e/suite/test_failing.mojo:14:17: AssertionError</failure>
+      <rerunFailure message="`left == right` comparison failed" type="AssertionError">
+        <stackTrace>At /repo/e2e/suite/test_failing.mojo:14:17 (rerun 1)</stackTrace>
+        <system-out>rerun 1 captured stdout</system-out>
+        <system-err>rerun 1 captured stderr</system-err>
+      </rerunFailure>
+      <rerunFailure message="`left == right` comparison failed" type="AssertionError">
+        <stackTrace>At /repo/e2e/suite/test_failing.mojo:14:17 (rerun 2)</stackTrace>
+      </rerunFailure>
+    </testcase>
+    <system-out>Running 4 tests for e2e/suite/test_failing.mojo</system-out>
+  </testsuite>
+  <testsuite name="e2e/suite/test_flaky.mojo" tests="5" failures="0" errors="1" skipped="0" time="0.210">
+    <testcase name="[attempts]" classname="e2e.suite.test_flaky"/>
+    <testcase name="e2e/suite/test_flaky.mojo::test_retried_then_passes" classname="e2e.suite.test_flaky">
+      <flakyFailure message="transient failure on attempt 1" type="AssertionError">
+        <stackTrace>At /repo/e2e/suite/test_flaky.mojo:9:5 (attempt 1)</stackTrace>
+        <system-out>attempt 1 captured stdout</system-out>
+        <system-err>attempt 1 captured stderr</system-err>
+      </flakyFailure>
+    </testcase>
+    <testcase name="e2e/suite/test_flaky.mojo::test_errors_exhausted" classname="e2e.suite.test_flaky">
+      <error message="segmentation fault" type="CrashError">signal 11</error>
+      <rerunError message="segmentation fault" type="CrashError">
+        <stackTrace>signal 11 (rerun 1)</stackTrace>
+      </rerunError>
+    </testcase>
+    <testcase name="[not-run]" classname="e2e.suite.test_flaky"/>
+    <testcase name="[output]" classname="e2e.suite.test_flaky"/>
+    <system-out>Running 2 tests for e2e/suite/test_flaky.mojo</system-out>
+  </testsuite>
+</testsuites>

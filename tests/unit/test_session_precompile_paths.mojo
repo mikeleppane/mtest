@@ -18,7 +18,7 @@ package can hide from the include scan is a `.tmp` subdirectory of its own. Reac
 through the same private-helper seam `test_session_mangle.mojo` uses.
 """
 from std.os.path import basename, dirname
-from std.testing import assert_equal, assert_false, assert_true, TestSuite
+from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.session.session import _precompile_temp_path
 
@@ -113,7 +113,3 @@ def test_temp_path_is_not_in_the_out_directory_itself() raises:
     assert_true(dirname(t).endswith(".tmp"))
     # It keeps OUT's own basename, so the promotion is a pure rename.
     assert_equal(basename(t), basename(out))
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

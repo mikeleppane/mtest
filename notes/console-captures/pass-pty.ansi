@@ -1,0 +1,6 @@
+mtest 0.1.0-dev (mojo)
+root: <suite-root>/passing   selected: 1 files   excluded: 0
+
+[32mPASS           test_passing.mojo               0.02s[0m
+
+[32m===== 3 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 1.9s =====[0m

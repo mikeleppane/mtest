@@ -19,24 +19,67 @@ TEST_SOURCES = (
 )
 
 
+def link_command(
+    cc: str,
+    objects: tuple[Path, ...],
+    output: Path,
+    *,
+    platform: str = sys.platform,
+) -> list[str]:
+    """Return the platform link command for precompiled native test objects.
+
+    The pinned conda-forge Clang 18 Darwin driver names a versioned libLTO
+    file that newer Apple linkers reject. Compilation remains pinned; only the
+    final object-file link uses Apple's platform driver.
+    """
+    linker = "/usr/bin/cc" if platform == "darwin" else cc
+    return [linker, *(str(path) for path in objects), "-o", str(output)]
+
+
 def main() -> int:
     """Run ABI verification, then strict native lifecycle executables."""
     native_abi_check.main()
     cc = native_abi_check.compiler()
     with tempfile.TemporaryDirectory(prefix="mtest-native-check-") as raw_tmp:
         tmp = Path(raw_tmp)
+        adapter = tmp / "mtest_exec_native_test.o"
+        adapter_command = [
+            cc,
+            *native_abi_check.STRICT_FLAGS,
+            "-DMTEST_EXEC_TESTING=1",
+            "-I",
+            str(ROOT / "native"),
+            "-c",
+            str(NATIVE_SOURCE),
+            "-o",
+            str(adapter),
+        ]
+        compiled_adapter = subprocess.run(
+            adapter_command,
+            cwd=ROOT,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        if compiled_adapter.returncode != 0:
+            raise SystemExit(
+                "native-check: compile failed for native/mtest_exec_native.c:\n"
+                + compiled_adapter.stdout
+            )
         for source in TEST_SOURCES:
             output = tmp / source.stem
+            test_object = tmp / f"{source.stem}.o"
             command = [
                 cc,
                 *native_abi_check.STRICT_FLAGS,
                 "-DMTEST_EXEC_TESTING=1",
                 "-I",
                 str(ROOT / "native"),
-                str(NATIVE_SOURCE),
+                "-c",
                 str(source),
                 "-o",
-                str(output),
+                str(test_object),
             ]
             compiled = subprocess.run(
                 command,
@@ -50,6 +93,19 @@ def main() -> int:
                 raise SystemExit(
                     f"native-check: compile failed for {source.relative_to(ROOT)}:\n"
                     + compiled.stdout
+                )
+            linked = subprocess.run(
+                link_command(cc, (adapter, test_object), output),
+                cwd=ROOT,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            if linked.returncode != 0:
+                raise SystemExit(
+                    f"native-check: link failed for {source.relative_to(ROOT)}:\n"
+                    + linked.stdout
                 )
             executed = subprocess.run(
                 [str(output)],

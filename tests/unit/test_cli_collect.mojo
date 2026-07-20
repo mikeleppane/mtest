@@ -2,11 +2,13 @@
 
 Collect mode is set by the `collect` subcommand OR the `--collect-only` flag, and
 the two are identical. Run-only flags served by this build (`-x`/`--exitfirst`,
-`--maxfail`, `--durations`, `--gate`, `-s`/`--show-output`) combined with collect
-are a usage error; `--timeout` is NOT refused — it bounds the collection probes.
-Operands (paths, node ids) and `-k` remain allowed.
+`--maxfail`, `--durations`, `--gate`, `-s`/`--show-output`, `--retries`, and the
+reporters `--json`/`--junit-xml`/`--gh-annotations`) combined with collect are a
+usage error — the reporters and `--retries` on PROVISION, so even
+`--gh-annotations off` is refused; `--timeout` is NOT refused — it bounds the
+collection probes. Operands (paths, node ids) and `-k` remain allowed.
 """
-from std.testing import assert_equal, assert_raises, assert_true, TestSuite
+from std.testing import assert_equal, assert_raises, assert_true
 
 from mtest.cli import parse_args
 
@@ -92,6 +94,41 @@ def test_show_output_long_with_collect_is_usage_error() raises:
         _ = parse_args(argv2)
 
 
+def test_retries_with_collect_is_usage_error() raises:
+    var argv: List[String] = ["collect", "--retries", "1"]
+    with assert_raises(contains="--retries"):
+        _ = parse_args(argv)
+    var argv2: List[String] = ["collect", "--retries", "1"]
+    with assert_raises(contains="run-only"):
+        _ = parse_args(argv2)
+
+
+def test_json_with_collect_is_usage_error() raises:
+    var argv: List[String] = ["collect", "--json", "out.ndjson"]
+    with assert_raises(contains="--json"):
+        _ = parse_args(argv)
+    var argv2: List[String] = ["collect", "--json", "out.ndjson"]
+    with assert_raises(contains="run-only"):
+        _ = parse_args(argv2)
+
+
+def test_junit_xml_with_collect_is_usage_error() raises:
+    var argv: List[String] = ["collect", "--junit-xml", "r.xml"]
+    with assert_raises(contains="--junit-xml"):
+        _ = parse_args(argv)
+
+
+def test_gh_annotations_with_collect_is_usage_error_even_off() raises:
+    # Refused on PROVISION, not value: an explicit `off` is still a usage error
+    # (a caller must not pass a run-only reporter flag to a listing at all).
+    var argv: List[String] = ["collect", "--gh-annotations", "off"]
+    with assert_raises(contains="--gh-annotations"):
+        _ = parse_args(argv)
+    var argv2: List[String] = ["collect", "--gh-annotations", "off"]
+    with assert_raises(contains="run-only"):
+        _ = parse_args(argv2)
+
+
 def test_timeout_with_collect_is_allowed() raises:
     var argv: List[String] = ["collect", "--timeout", "5"]
     var r = parse_args(argv)
@@ -104,7 +141,3 @@ def test_keyword_with_collect_is_allowed() raises:
     var r = parse_args(argv)
     assert_true(r.config.collect)
     assert_equal(r.config.keyword, "add")
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

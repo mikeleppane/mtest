@@ -45,7 +45,8 @@ enum mtest_exec_setup_stage {
     MTEST_EXEC_STAGE_DUP2_STDERR = 4,
     MTEST_EXEC_STAGE_CLOSE = 5,
     MTEST_EXEC_STAGE_EXECVE = 6,
-    MTEST_EXEC_STAGE_SETUP_WRITE = 7
+    MTEST_EXEC_STAGE_SETUP_WRITE = 7,
+    MTEST_EXEC_STAGE_SIGPIPE_RESTORE = 8
 };
 
 enum mtest_exec_group_action {
@@ -108,6 +109,14 @@ enum mtest_exec_operation {
     MTEST_EXEC_OP_WAITID = 34,
     MTEST_EXEC_OP_WAITPID = 35
 };
+
+#if MTEST_EXEC_TESTING
+enum mtest_exec_test_constant {
+    MTEST_EXEC_TEST_CONSTANT_SIGCHLD = 1,
+    MTEST_EXEC_TEST_CONSTANT_EIO = 4,
+    MTEST_EXEC_TEST_CONSTANT_ETXTBSY = 5
+};
+#endif
 
 struct mtest_exec_bytes {
     const uint8_t *data;

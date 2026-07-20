@@ -36,7 +36,64 @@ from mtest.model import (
     slow_step_label,
 )
 
+from mtest.report.escape import fence_region, select_collision_free_token
 from mtest.report.reporter import Reporter
+from mtest.report.signals import _signal_name_for_target
+
+comptime _HEX: StaticString = "0123456789abcdef"
+"""Lowercase hex alphabet for rendering a fence token's random bytes."""
+
+comptime _FENCE_TOKEN_BYTES = 16
+"""Random bytes per fence token candidate — 16 bytes = 128 bits of entropy."""
+
+comptime _FENCE_TOKEN_POOL = 4
+"""How many independent candidate tokens to mint per run. A region that already
+contains the primary token's resume delimiter falls through to the next
+candidate; four independent 128-bit tokens make an all-collision draw
+impossible in practice while keeping the collision path exercised."""
+
+comptime _FENCE_WITHHELD: StaticString = (
+    "[mtest: captured output withheld — no fence entropy available]"
+)
+"""Placeholder emitted in the vanishing case that no fence token could be minted:
+never echo unfenced child bytes under Actions, where they could forge a command.
+"""
+
+
+def _mint_fence_tokens(count: Int) raises -> List[String]:
+    """Mint `count` independent high-entropy fence tokens from `/dev/urandom`.
+
+    Each token is `_FENCE_TOKEN_BYTES` (16) random bytes rendered as lowercase
+    hex — 128 bits of entropy apiece, per-run-unique. The entropy comes from
+    ordinary std file I/O over `/dev/urandom`; the exec/native layers are never
+    touched. Raises if `/dev/urandom` cannot be read (the caller withholds the
+    echoed region rather than emit it unfenced).
+
+    Args:
+        count: How many tokens to mint.
+
+    Returns:
+        `count` hex token strings, in draw order.
+
+    Raises:
+        Error: if `/dev/urandom` could not be read.
+    """
+    var need = count * _FENCE_TOKEN_BYTES
+    var raw: List[UInt8]
+    with open("/dev/urandom", "r") as f:
+        raw = f.read_bytes(need)
+    if len(raw) < need:
+        raise Error("console: short read from /dev/urandom for fence tokens")
+    var out = List[String]()
+    for t in range(count):
+        var token = String("")
+        for b in range(_FENCE_TOKEN_BYTES):
+            var v = Int(raw[t * _FENCE_TOKEN_BYTES + b])
+            token += String(_HEX[byte=v >> 4])
+            token += String(_HEX[byte=v & 0xF])
+        out.append(token^)
+    return out^
+
 
 # ANSI escape codes. Green for PASS, red for FAIL, red-bold for the crash class
 # (CRASH/TIMEOUT/COMPILE-ERROR and their kin), yellow for exclusions/warnings.
@@ -147,40 +204,6 @@ def _ensure_trailing_newline(s: String) -> String:
     return s + "\n"
 
 
-def _signal_name(signo: Int) -> String:
-    """The `"SIGNAME, description"` words for a common Linux terminating signal.
-
-    Covers the signals a supervised child can plausibly die by. Returns `""`
-    for a signal number outside that set, so the caller can fall back to the
-    bare number. Pure.
-    """
-    if signo == 1:
-        return String("SIGHUP, hangup")
-    if signo == 2:
-        return String("SIGINT, interrupt")
-    if signo == 3:
-        return String("SIGQUIT, quit")
-    if signo == 4:
-        return String("SIGILL, illegal instruction")
-    if signo == 5:
-        return String("SIGTRAP, trace/breakpoint trap")
-    if signo == 6:
-        return String("SIGABRT, abort")
-    if signo == 7:
-        return String("SIGBUS, bus error")
-    if signo == 8:
-        return String("SIGFPE, floating-point exception")
-    if signo == 9:
-        return String("SIGKILL, killed")
-    if signo == 11:
-        return String("SIGSEGV, segmentation fault")
-    if signo == 13:
-        return String("SIGPIPE, broken pipe")
-    if signo == 15:
-        return String("SIGTERM, terminated")
-    return String("")
-
-
 def _term_phrase(
     kind: Int, value: Int, final_kind: Int, final_value: Int, escalated: Bool
 ) -> String:
@@ -193,7 +216,7 @@ def _term_phrase(
     EXITED is a compiler ICE that exited under its own control.
     """
     if kind == 1:
-        var name = _signal_name(value)
+        var name = _signal_name_for_target(value)
         if name != "":
             return String("signal ") + String(value) + " — " + name
         return String("signal ") + String(value)
@@ -220,7 +243,7 @@ def _precompile_ending_phrase(
     so this layer imports nothing above it.
     """
     if term_kind == 1:
-        var name = _signal_name(term_value)
+        var name = _signal_name_for_target(term_value)
         var base = String("died by signal ") + String(term_value)
         if name != "":
             return base + " (" + name + ")"
@@ -275,7 +298,7 @@ def _outcome_detail(e: Event) -> String:
         return String("exit ") + String(e.exit_status)
     if e.outcome == Outcome.CRASH:
         var base = String("signal ") + String(e.signal_number)
-        var name = _signal_name(e.signal_number)
+        var name = _signal_name_for_target(e.signal_number)
         if name.byte_length() > 0:
             return base + " — " + name
         return base
@@ -565,6 +588,19 @@ struct ConsoleReporter(Reporter):
     """The current file's TEST_REPORTED results, reset on FILE_STARTED."""
     var _last_warning_detail: String
     """The most recent warning's detail, for folding into a DRIFT banner."""
+    var _gh_actions: Bool
+    """Whether the run is inside GitHub Actions (`GITHUB_ACTIONS=true`). When
+    True, EVERY echoed region of captured CHILD output is wrapped in
+    stop-commands fencing so a child's `::error`-shaped bytes cannot forge a
+    workflow command. Independent of the `--gh-annotations` mode: fencing is a
+    console-path safety measure, active even when annotations are off."""
+    var _fence_tokens: List[String]
+    """The per-run high-entropy fence-token pool, minted LAZILY the first time a
+    region is fenced (after the producing child has already exited) and reused
+    for the whole run. Empty until minted (or if minting failed)."""
+    var _fence_tokens_tried: Bool
+    """Whether token minting has been attempted, so a failed `/dev/urandom` read
+    is not retried on every subsequent region."""
 
     def __init__(
         out self,
@@ -576,6 +612,7 @@ struct ConsoleReporter(Reporter):
         show_output: ShowOutput,
         var mtest_build_flags: String,
         durations: Int,
+        gh_actions: Bool = False,
     ):
         """Construct a reporter and resolve color once.
 
@@ -594,6 +631,9 @@ struct ConsoleReporter(Reporter):
                 lines (empty when none are in effect).
             durations: `--durations N` from config; `0` disables the
                 slowest-files list.
+            gh_actions: Whether the run is inside GitHub Actions
+                (`GITHUB_ACTIONS=true`); when True, echoed captured child output
+                is wrapped in collision-proof stop-commands fencing.
         """
         self.version = version^
         if color == ColorWhen.ALWAYS:
@@ -614,6 +654,9 @@ struct ConsoleReporter(Reporter):
         self._file_tests = List[TestResult]()
         self._last_warning_detail = String("")
         self._file_durations = List[_FileDuration]()
+        self._gh_actions = gh_actions
+        self._fence_tokens = List[String]()
+        self._fence_tokens_tried = False
 
     def _paint(self, code: StaticString, text: String) -> String:
         """Wrap `text` in an ANSI color unless color is off or the code is empty.
@@ -624,6 +667,59 @@ struct ConsoleReporter(Reporter):
         if not self.color_enabled or code.byte_length() == 0:
             return text.copy()
         return String(code) + text + String(_RESET)
+
+    def _ensure_fence_tokens(mut self):
+        """Mint the per-run fence-token pool once, on first need. Never raises.
+
+        Called only under `_gh_actions`, at the first captured-output region —
+        which is rendered from a `FileFinished`/`PrecompileFailed`, i.e. AFTER
+        the producing child has exited, so the token is minted after the child is
+        gone and is never exposed to it. A `/dev/urandom` read failure leaves the
+        pool empty and is not retried; `_fence` then withholds the region.
+        """
+        if self._fence_tokens_tried:
+            return
+        self._fence_tokens_tried = True
+        try:
+            self._fence_tokens = _mint_fence_tokens(_FENCE_TOKEN_POOL)
+        except:
+            self._fence_tokens = List[String]()
+
+    def _fence(self, region: String) -> String:
+        """Wrap one captured child-output `region` in stop-commands fencing.
+
+        A no-op returning `region` unchanged when not under Actions. Under
+        Actions it selects the first pool candidate whose complete resume
+        delimiter `::<token>::` is ABSENT from `region` (regenerating past a
+        seeded delimiter), then returns the region wrapped by `fence_region` — an
+        opener line, the region, and the resume delimiter, the resume ALWAYS
+        present. The token pool must already be minted (the `mut` callers call
+        `_ensure_fence_tokens` first); this method only READS it, so it is safe
+        to call while iterating the per-test list. If the pool is empty or every
+        candidate collides, the region is WITHHELD rather than echoed unfenced,
+        since unfenced child bytes could forge a workflow command. Never raises.
+        """
+        if not self._gh_actions:
+            return region.copy()
+        if len(self._fence_tokens) == 0:
+            return String(_FENCE_WITHHELD)
+        try:
+            var token = select_collision_free_token(region, self._fence_tokens)
+            return fence_region(token, region)
+        except:
+            return String(_FENCE_WITHHELD)
+
+    def fence_token(self) -> String:
+        """The primary per-run fence token, or `""` if none was minted.
+
+        `main` reads this to emit the ALWAYS-RUNS restoration epilogue (a final
+        resume delimiter) before its own annotation lines, guaranteeing workflow
+        commands are re-enabled even on a partial/error path. Empty means no
+        region was ever fenced (nothing to restore). Does not mutate or raise.
+        """
+        if len(self._fence_tokens) == 0:
+            return String("")
+        return self._fence_tokens[0].copy()
 
     def output(self) -> String:
         """The full rendered buffer so far. Does not mutate or raise.
@@ -868,7 +964,9 @@ struct ConsoleReporter(Reporter):
         self._head += self._paint(_RED_BOLD, banner) + "\n"
         for c in e.casualties:
             self._head += "  " + c + "\n"
-        self._head += _ensure_trailing_newline(e.compiler_output)
+        if self._gh_actions:
+            self._ensure_fence_tokens()
+        self._head += _ensure_trailing_newline(self._fence(e.compiler_output))
         self._head += "\n"
 
     def _on_file_finished(mut self, e: Event):
@@ -945,6 +1043,11 @@ struct ConsoleReporter(Reporter):
                     self._head += self._render_test_row(t)
 
         if self._should_show_section(e.outcome):
+            # Mint the per-run fence tokens before rendering any captured-output
+            # region (the child has exited by now); the read-only render helpers
+            # then fence each region from the minted pool.
+            if self._gh_actions:
+                self._ensure_fence_tokens()
             self._sections += self._render_section(e)
         self._reset_file()
 
@@ -1035,7 +1138,9 @@ struct ConsoleReporter(Reporter):
             + "s) — mtest killed the build at the compile timeout; the"
             + " compiler said: ---\n"
         )
-        out += _ensure_trailing_newline(lossy_utf8(e.captured_stderr))
+        out += _ensure_trailing_newline(
+            self._fence(lossy_utf8(e.captured_stderr))
+        )
         out += (
             "the build exceeded the "
             + secs
@@ -1065,7 +1170,9 @@ struct ConsoleReporter(Reporter):
                 + e.path
                 + " — mojo build said: ---\n"
             )
-            out += _ensure_trailing_newline(lossy_utf8(e.captured_stderr))
+            out += _ensure_trailing_newline(
+                self._fence(lossy_utf8(e.captured_stderr))
+            )
             out += "reproduce: " + shell_join(e.build_argv) + "\n\n"
             return out
 
@@ -1089,7 +1196,7 @@ struct ConsoleReporter(Reporter):
         var out = String("--- FAIL ") + node + " ---\n"
         var d = _transform_detail(t.detail, self._run_root)
         if d.byte_length() > 0:
-            out += _ensure_trailing_newline(d)
+            out += _ensure_trailing_newline(self._fence(d))
         out += self._repro_line(node) + "\n\n"
         return out
 
@@ -1112,9 +1219,13 @@ struct ConsoleReporter(Reporter):
             " output to individual tests) ---\n"
         )
         var out = header
-        out += _ensure_trailing_newline(lossy_utf8(e.captured_stdout))
+        out += _ensure_trailing_newline(
+            self._fence(lossy_utf8(e.captured_stdout))
+        )
         out += "--- captured stderr ---\n"
-        out += _ensure_trailing_newline(lossy_utf8(e.captured_stderr))
+        out += _ensure_trailing_newline(
+            self._fence(lossy_utf8(e.captured_stderr))
+        )
         if not has_pertest:
             out += self._repro_line(e.path) + "\n"
         out += "\n"
