@@ -38,8 +38,8 @@ for root in "${roots[@]}"; do
     normalized_roots+=("$root")
 done
 
-bash scripts/build_pkg.sh
-python -m scripts.build_native
+bash scripts/build/mojo_package.sh
+python -m scripts.build.native
 
 mkdir -p build/tests
 aggregate_source=build/tests/aggregate_main.mojo

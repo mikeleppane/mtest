@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -190,6 +191,35 @@ class DirectInvocationPolicyTests(unittest.TestCase):
             {violation.split(":", 1)[0] for violation in violations},
             {path.as_posix() for path in relative_paths},
         )
+
+
+class BuildSourceVisibilityTests(unittest.TestCase):
+    def _repo(self, root: Path, ignore_rule: str) -> None:
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        (root / ".gitignore").write_text(ignore_rule + "\n", encoding="utf-8")
+        for relative in harness_check.BUILD_SOURCE_PATHS:
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# fixture\n", encoding="utf-8")
+
+    def test_unanchored_build_ignore_rejects_source_package(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            self._repo(repo, "build/")
+
+            with self.assertRaisesRegex(AssertionError, "ignored"):
+                harness_check.check_build_source_visibility(repo)
+
+    def test_untracked_build_source_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            self._repo(repo, "/build/")
+            subprocess.run(
+                ["git", "-C", str(repo), "add", ".gitignore"], check=True
+            )
+
+            with self.assertRaisesRegex(AssertionError, "untracked"):
+                harness_check.check_build_source_visibility(repo)
 
 
 if __name__ == "__main__":

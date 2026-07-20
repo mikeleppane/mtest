@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds mtest FROM SOURCE inside rattler-build's isolated build environment,
 # mirroring the repo's own build -> build-native -> build-bin pipeline
-# (scripts/build_pkg.sh, scripts/build_native.py, pixi.toml's build-bin task).
+# (scripts/build/mojo_package.sh, scripts/build/native.py, and pixi.toml's
+# build-bin task).
 #
 # Runs with $SRC_DIR as the working directory (the recipe's `source: path: ../`
 # copy of this repository). $PREFIX is the isolated build env supplying

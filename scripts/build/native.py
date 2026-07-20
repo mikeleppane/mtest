@@ -9,7 +9,7 @@ import sys
 from scripts import native_abi_check
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / "build" / "native" / "mtest_exec_native.o"
 TEST_OUTPUT = ROOT / "build" / "native" / "mtest_exec_native_test.o"
 

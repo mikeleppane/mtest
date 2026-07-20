@@ -29,6 +29,12 @@ from scripts.transcript_compare import compare_directories
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+BUILD_SOURCE_PATHS = (
+    Path("scripts/build/__init__.py"),
+    Path("scripts/build/mojo_package.sh"),
+    Path("scripts/build/native.py"),
+    Path("scripts/build/package_consumption.py"),
+)
 UNIT_SUITES = {
     "test_cache_registry.mojo",
     "test_cli_arity.mojo",
@@ -1584,6 +1590,58 @@ def check_python_package_invocation() -> None:
         )
 
 
+def check_build_source_visibility(repo_root: Path = REPO_ROOT) -> None:
+    """Require the build-tool package to be complete, visible, and tracked."""
+    build_dir = repo_root / "scripts" / "build"
+    actual = {
+        path.relative_to(repo_root)
+        for path in build_dir.iterdir()
+        if path.is_file()
+    } if build_dir.is_dir() else set()
+    expected = set(BUILD_SOURCE_PATHS)
+    if actual != expected:
+        raise AssertionError(
+            "scripts/build source membership mismatch: "
+            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+        )
+
+    operands = [path.as_posix() for path in BUILD_SOURCE_PATHS]
+    ignored = subprocess.run(
+        ["git", "-C", str(repo_root), "check-ignore", "--no-index", *operands],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if ignored.returncode not in (0, 1):
+        raise AssertionError(
+            f"could not inspect scripts/build ignore status: {ignored.stderr.strip()}"
+        )
+    if ignored.returncode == 0:
+        raise AssertionError(
+            "scripts/build source is ignored: "
+            f"{ignored.stdout.splitlines()}"
+        )
+
+    tracked = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "ls-files",
+            "--error-unmatch",
+            "--",
+            *operands,
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if tracked.returncode != 0:
+        raise AssertionError("scripts/build source is untracked")
+
+
 def _yaml_block(text: str, header: str) -> str:
     """Return the indented body under one exact YAML mapping header."""
     lines = text.splitlines()
@@ -1971,6 +2029,7 @@ def main() -> int:
         check_e2e_layout()
         check_format_roots()
         check_python_package_invocation()
+        check_build_source_visibility()
         check_ci_task_graph()
         check_ci_workflow()
     except (AssertionError, OSError, subprocess.SubprocessError) as exc:

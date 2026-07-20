@@ -2,7 +2,7 @@
 .pixi/*
 !.pixi/config.toml
 # compiled Mojo package output
-build/
+/build/
 *.mojopkg
 # in-session build/collection cache
 .mtest-cache/

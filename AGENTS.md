@@ -289,7 +289,7 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `report` | `src/mtest/report` (event consumers, reporters) |
 | `cli` | `src/mtest/cli` (arg parsing, main) |
 | `cache` | in-session build/collection reuse |
-| `test` | test infrastructure (`scripts/test_all.sh`, `scripts/build_pkg.sh`, shared helpers) |
+| `test` | test infrastructure (`scripts/test_all.sh`, `scripts/build/mojo_package.sh`, shared helpers) |
 | `e2e` | end-to-end harness (`scripts/e2e_check.py`) and its `e2e/` manifest and scenarios |
 | `bench` | `benchmarks/` |
 | `docs` | docstrings, `docs/` |

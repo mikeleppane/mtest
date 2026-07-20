@@ -50,12 +50,12 @@ version-check = "python -m scripts.version_check"
 # package-compiles GATE: an empty-but-broken package fails here before any test
 # does. `mojo package` does not exist in 1.0.0b2 — only `mojo precompile`, which
 # produces the same artifact.
-build = "bash scripts/build_pkg.sh"
+build = "bash scripts/build/mojo_package.sh"
 
 # Compile the exec-private C adapter to the one production object linked into
 # every Mojo executable that can instantiate mtest.exec. The ABI checker proves
 # the test-only fault/sanitizer controls are absent from this artifact.
-build-native = "python -m scripts.build_native"
+build-native = "python -m scripts.build.native"
 
 # Link the runnable binary at build/mtest from src/main.mojo. Depends on `build`
 # so the package is precompiled to build/mtest.mojopkg FIRST — `-I build`
@@ -87,7 +87,7 @@ package-build = "rattler-build build --recipe recipe/recipe.yaml -c https://cond
 # test is the INSTALLED one, never build/mtest. Standalone: NOT wired into
 # `pixi run ci`; its dedicated Linux CI job is independent. Nothing uploads or
 # publishes anywhere.
-package-check = { cmd = "python -m scripts.package_check", depends-on = [
+package-check = { cmd = "python -m scripts.build.package_consumption", depends-on = [
     "build",
     "build-native",
 ] }
