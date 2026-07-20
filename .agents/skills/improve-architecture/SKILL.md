@@ -55,7 +55,8 @@ imports now** — start every pass by grepping them, not by trusting the diagram
 
 The harness under `scripts/` remains fair game with the same discipline.
 `gen_transcripts.py` is the transcript generator and normalizer that
-`transcripts_check.sh` drives, and it is the harness's own deep module:
+`scripts/checks/protocol_snapshots.py` drives, and it is the harness's own deep
+module:
 `normalize(raw, *, is_crash_stream) -> text` is one call that hides the
 anchored timing-token rewrite (only on report-grammar lines at or after the
 LAST `Running <N> tests for`), the repo-root → `<REPO>` rewrite, the stack-dump

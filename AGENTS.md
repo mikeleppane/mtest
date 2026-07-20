@@ -275,7 +275,7 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `scaffold` | repo skeleton, license/readme/gitignore/gitattributes |
 | `pixi` | `pixi.toml`, `pixi.lock`, tasks, the environment |
 | `fixtures` | `tests/fixtures/` — protocol probes and subprocess actors |
-| `transcripts` | `tests/snapshots/protocol/` + generator/check scripts |
+| `transcripts` | protocol snapshots plus `scripts/gen_transcripts.py` and `scripts/checks/{protocol_snapshots,transcript_compare}.py` |
 | `spec` | `docs/cli-contract.md` |
 | `agents` | `AGENTS.md` |
 | `notes` | `notes/` |

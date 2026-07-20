@@ -160,7 +160,7 @@ transcripts = "python -m scripts.gen_transcripts"
 # against tests/snapshots/protocol/ (MANIFEST included) — byte-identical or red. This
 # is the protocol pin: a red diff after a repo change indicts THE CHANGE; a red
 # diff after a mojo re-pin is the protocol changelog. Hermetic.
-transcripts-check = "bash scripts/transcripts_check.sh"
+transcripts-check = "python -m scripts.checks.protocol_snapshots"
 
 # Manually run the exhaustive CLI contract oracle against an external throwaway
 # project. This intentionally remains outside ci/ci-preflight and hosted CI: the
