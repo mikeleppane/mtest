@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -107,6 +108,86 @@ INTEGRATION_SUITES = {
     "test_session_selection.mojo",
     "test_transcripts_smoke.mojo",
 }
+CLASSIFIED_PATHS = (
+    "tests/integration/test_discover_pipeline.mojo",
+    "tests/integration/test_discover_walk.mojo",
+    "tests/integration/test_exec_capture.mojo",
+    "tests/integration/test_exec_decode.mojo",
+    "tests/integration/test_exec_etxtbsy.mojo",
+    "tests/integration/test_exec_fdhygiene.mojo",
+    "tests/integration/test_exec_flood.mojo",
+    "tests/integration/test_exec_interrupt.mojo",
+    "tests/integration/test_exec_paths.mojo",
+    "tests/integration/test_exec_prestart.mojo",
+    "tests/integration/test_exec_reap.mojo",
+    "tests/integration/test_exec_sweep.mojo",
+    "tests/integration/test_exec_timeout.mojo",
+    "tests/integration/test_protocol_collection.mojo",
+    "tests/integration/test_protocol_report.mojo",
+    "tests/integration/test_session_annotations.mojo",
+    "tests/integration/test_session_collect.mojo",
+    "tests/integration/test_session_exit_codes.mojo",
+    "tests/integration/test_session_flow.mojo",
+    "tests/integration/test_session_gates.mojo",
+    "tests/integration/test_session_handshake.mojo",
+    "tests/integration/test_session_interrupt.mojo",
+    "tests/integration/test_session_json_stream.mojo",
+    "tests/integration/test_session_junit.mojo",
+    "tests/integration/test_session_maxfail.mojo",
+    "tests/integration/test_session_outcomes.mojo",
+    "tests/integration/test_session_precompile.mojo",
+    "tests/integration/test_session_rmtree.mojo",
+    "tests/integration/test_session_selection.mojo",
+    "tests/integration/test_transcripts_smoke.mojo",
+    "tests/unit/test_cache_registry.mojo",
+    "tests/unit/test_cli_arity.mojo",
+    "tests/unit/test_cli_arity0.mojo",
+    "tests/unit/test_cli_build_flags.mojo",
+    "tests/unit/test_cli_collect.mojo",
+    "tests/unit/test_cli_grammar.mojo",
+    "tests/unit/test_cli_inventory.mojo",
+    "tests/unit/test_cli_parse.mojo",
+    "tests/unit/test_config.mojo",
+    "tests/unit/test_discover_fnmatch.mojo",
+    "tests/unit/test_discover_normalize.mojo",
+    "tests/unit/test_exec_spec.mojo",
+    "tests/unit/test_exec_tty.mojo",
+    "tests/unit/test_model_events.mojo",
+    "tests/unit/test_model_exit_code.mojo",
+    "tests/unit/test_model_node_id.mojo",
+    "tests/unit/test_model_outcome.mojo",
+    "tests/unit/test_model_parse_disposition.mojo",
+    "tests/unit/test_model_slow.mojo",
+    "tests/unit/test_model_test_counts.mojo",
+    "tests/unit/test_model_test_result.mojo",
+    "tests/unit/test_protocol_corruption.mojo",
+    "tests/unit/test_protocol_matrix.mojo",
+    "tests/unit/test_report_annotations.mojo",
+    "tests/unit/test_report_composite.mojo",
+    "tests/unit/test_report_console.mojo",
+    "tests/unit/test_report_escape.mojo",
+    "tests/unit/test_report_json_reporter.mojo",
+    "tests/unit/test_report_json_stream.mojo",
+    "tests/unit/test_report_junit.mojo",
+    "tests/unit/test_report_junit_finalize.mojo",
+    "tests/unit/test_report_junit_reporter.mojo",
+    "tests/unit/test_report_recording.mojo",
+    "tests/unit/test_report_signals.mojo",
+    "tests/unit/test_select_logic.mojo",
+    "tests/unit/test_select_operands.mojo",
+    "tests/unit/test_session_attribution.mojo",
+    "tests/unit/test_session_clamp.mojo",
+    "tests/unit/test_session_classify.mojo",
+    "tests/unit/test_session_detail.mojo",
+    "tests/unit/test_session_mangle.mojo",
+    "tests/unit/test_session_precompile_paths.mojo",
+    "tests/unit/test_session_resilience.mojo",
+    "tests/unit/test_session_retry_class.mojo",
+    "tests/unit/test_session_shard.mojo",
+    "tests/unit/test_session_terminal.mojo",
+    "tests/unit/test_session_verdict.mojo",
+)
+CLASSIFIED_TEST_COUNT = 913
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",
@@ -178,6 +259,67 @@ CI_FLOOR_TASKS = {
     "test",
     "e2e",
 }
+E2E_SCENARIO_NAMES = (
+    "manifest-completeness",
+    "resilience-matrix",
+    "default-suite",
+    "hostile",
+    "single-pass",
+    "exitfirst",
+    "maxfail",
+    "retries-flaky",
+    "crash-attribution",
+    "attribution-reruns-crashed-binary",
+    "compile-timeout",
+    "compile-crash-signature",
+    "exclude+stale",
+    "all-excluded",
+    "empty-dir",
+    "failing-gate",
+    "timeout",
+    "timeout-escalation",
+    "precompile",
+    "precompile-timeout",
+    "precompile-crash-retry",
+    "precompile-promotion",
+    "quiet-verbose",
+    "show-output",
+    "durations",
+    "color",
+    "usage-refusals",
+    "selection-keyword",
+    "selection-node-id",
+    "selection-union",
+    "selection-malformed-node-id",
+    "selection-unknown-test",
+    "selection-empty",
+    "selection-chameleon",
+    "single-build",
+    "stale-recovery-two-builds",
+    "collect",
+    "passthrough+forbidden",
+    "out-of-root",
+    "internal-error",
+    "runtime-open-failure",
+    "interrupt",
+    "json-forward-compat",
+    "json-purity",
+    "json-color-relocated-stderr",
+    "json-destination-taxonomy",
+    "json-truncation-interrupt",
+    "json-truncation-sigkill",
+    "json-truncation-dead-pipe",
+    "json-terminal-write-failure",
+    "junit-scratch-cleanup",
+    "junit-schema-gate",
+    "junit-determinism",
+    "junit-prior-report-intact",
+    "junit-finalization-and-interrupt",
+    "annotations-modes",
+    "annotations-caps",
+    "annotations-conflict",
+    "annotations-fencing",
+)
 LINUX_MATRIX_ROWS = [
     {
         "runner": "ubuntu-24.04",
@@ -280,6 +422,7 @@ def check_recursive_direct_runner() -> None:
         tools_dir = tmp / "tools"
         tools_dir.mkdir()
         log_path = tmp / "mojo-log.jsonl"
+        run_log_path = tmp / "aggregate-run-log"
         fake_mojo = tools_dir / "mojo"
         _write_executable(
             fake_mojo,
@@ -304,7 +447,7 @@ with open(os.environ["MTEST_FAKE_MOJO_LOG"], "a", encoding="utf-8") as log:
         "output": str(out),
         "generated": Path(source).read_text(encoding="utf-8"),
     }) + "\\n")
-out.write_text("#!/usr/bin/env bash\\nprintf '%s\\n' RAN:aggregate\\n", encoding="utf-8")
+out.write_text("#!/usr/bin/env bash\\nprintf '%s\\n' RAN:aggregate\\nprintf '%s\\n' run >> \\"$MTEST_FAKE_RUN_LOG\\"\\n", encoding="utf-8")
 out.chmod(out.stat().st_mode | stat.S_IXUSR)
 """,
         )
@@ -316,6 +459,7 @@ out.chmod(out.stat().st_mode | stat.S_IXUSR)
         env = os.environ.copy()
         env["PATH"] = f"{tools_dir}{os.pathsep}{env['PATH']}"
         env["MTEST_FAKE_MOJO_LOG"] = str(log_path)
+        env["MTEST_FAKE_RUN_LOG"] = str(run_log_path)
         result = subprocess.run(
             ["bash", "scripts/test_all.sh", *roots],
             cwd=REPO_ROOT,
@@ -364,6 +508,11 @@ out.chmod(out.stat().st_mode | stat.S_IXUSR)
                 raise AssertionError(f"aggregate entrypoint did not import {path}")
         if "RAN:aggregate" not in result.stdout:
             raise AssertionError("direct runner did not execute the aggregate binary")
+        runs = run_log_path.read_text(encoding="utf-8").splitlines()
+        if runs != ["run"]:
+            raise AssertionError(
+                f"direct runner did not execute the aggregate exactly once: {runs}"
+            )
 
 
 def check_process_watchdog() -> None:
@@ -389,10 +538,14 @@ def check_process_watchdog() -> None:
 
 
 def _run_direct_runner_failure(
-    mode: str, step: str
+    mode: str,
+    step: str,
+    *,
+    exit_code: int = 124,
+    signum: int = signal.SIGTERM,
 ) -> tuple[subprocess.CompletedProcess[str], list[str], bool]:
     """Run one disposable direct-suite failure at its build or run boundary."""
-    if mode not in {"ordinary", "timeout", "spawn"}:
+    if mode not in {"ordinary", "signal", "timeout", "spawn"}:
         raise AssertionError(f"unknown direct-runner failure mode: {mode}")
     if step not in {"build", "run"}:
         raise AssertionError(f"unknown direct-runner failure step: {step}")
@@ -419,6 +572,7 @@ def _run_direct_runner_failure(
             """#!/usr/bin/env python3
 import os
 from pathlib import Path
+import signal
 import stat
 import sys
 import time
@@ -426,6 +580,8 @@ import time
 args = sys.argv[1:]
 mode = os.environ["MTEST_DIRECT_FAILURE_MODE"]
 step = os.environ["MTEST_DIRECT_FAILURE_STEP"]
+exit_code = int(os.environ["MTEST_DIRECT_FAILURE_EXIT"])
+signum = int(os.environ["MTEST_DIRECT_FAILURE_SIGNAL"])
 if args[0] == "precompile":
     if mode == "spawn" and step == "build":
         Path(sys.argv[0]).unlink()
@@ -437,13 +593,21 @@ with open(os.environ["MTEST_FAKE_MOJO_LOG"], "a", encoding="utf-8") as log:
     log.write(source + "\\n")
 if step == "build":
     if mode == "ordinary":
-        raise SystemExit(124)
+        raise SystemExit(exit_code)
+    if mode == "signal":
+        os.kill(os.getpid(), signum)
     if mode == "timeout":
         time.sleep(60)
 out = Path(args[args.index("-o") + 1])
 out.parent.mkdir(parents=True, exist_ok=True)
 if step == "run" and mode == "ordinary":
-    program = "#!/usr/bin/env bash\\nexit 124\\n"
+    program = "#!/usr/bin/env bash\\nexit " + str(exit_code) + "\\n"
+elif step == "run" and mode == "signal":
+    program = (
+        "#!/usr/bin/env python3\\n"
+        "import os, signal\\n"
+        "os.kill(os.getpid(), " + str(signum) + ")\\n"
+    )
 elif step == "run" and mode == "timeout":
     program = "#!/usr/bin/env bash\\nsleep 60\\n"
 elif step == "run" and mode == "spawn":
@@ -458,6 +622,8 @@ out.chmod(out.stat().st_mode | stat.S_IXUSR)
         env["PATH"] = f"{tools_dir}{os.pathsep}{env['PATH']}"
         env["MTEST_DIRECT_FAILURE_MODE"] = mode
         env["MTEST_DIRECT_FAILURE_STEP"] = step
+        env["MTEST_DIRECT_FAILURE_EXIT"] = str(exit_code)
+        env["MTEST_DIRECT_FAILURE_SIGNAL"] = str(signum)
         env["MTEST_FAKE_MOJO_LOG"] = str(log_path)
         if mode == "timeout":
             env["MTEST_TEST_ALL_TIMEOUT_SECONDS"] = "0.1"
@@ -491,29 +657,66 @@ out.chmod(out.stat().st_mode | stat.S_IXUSR)
         return result, built, deadline_sentinel.exists()
 
 
-def check_direct_runner_exit_124_is_not_a_timeout() -> None:
-    """An ordinary aggregate build or run exit 124 is not called a timeout."""
-    for step in ("build", "run"):
-        result, built, sentinel_exists = _run_direct_runner_failure("ordinary", step)
-        if result.returncode != 1:
-            raise AssertionError(
-                "ordinary exit 124 did not remain a normal suite failure: "
-                f"step={step}, status={result.returncode}\n{result.stdout}"
+def check_direct_runner_ordinary_exits_are_failures() -> None:
+    """Ordinary aggregate exits 124, 137, and 143 stay non-timeout failures."""
+    for exit_code in (124, 137, 143):
+        for step in ("build", "run"):
+            result, built, sentinel_exists = _run_direct_runner_failure(
+                "ordinary", step, exit_code=exit_code
             )
-        if f"FAILED: aggregate suite ({step} exit 124)" not in result.stdout:
-            raise AssertionError(
-                "ordinary exit 124 lost its truthful failure diagnostic:\n"
-                f"{result.stdout}"
+            if result.returncode != 1:
+                raise AssertionError(
+                    f"ordinary exit {exit_code} did not remain a normal suite "
+                    f"failure: step={step}, status={result.returncode}\n{result.stdout}"
+                )
+            if (
+                f"FAILED: aggregate suite ({step} exit {exit_code})"
+                not in result.stdout
+            ):
+                raise AssertionError(
+                    f"ordinary exit {exit_code} lost its truthful failure "
+                    f"diagnostic:\n{result.stdout}"
+                )
+            if f"timed-out aggregate {step}" in result.stdout or sentinel_exists:
+                raise AssertionError(
+                    f"ordinary exit {exit_code} was treated as a timeout:\n"
+                    f"{result.stdout}"
+                )
+            if built != ["build/tests/aggregate_main.mojo"]:
+                raise AssertionError(
+                    f"ordinary {step} exit {exit_code} did not build the "
+                    f"aggregate: {built}"
+                )
+
+
+def check_direct_runner_current_signal_flattening() -> None:
+    """Pin the shell harness's known flattening of child signals to exit 1."""
+    for signum in (signal.SIGKILL, signal.SIGTERM):
+        shell_status = 128 + signum
+        for step in ("build", "run"):
+            result, built, sentinel_exists = _run_direct_runner_failure(
+                "signal", step, signum=signum
             )
-        if f"timed-out aggregate {step}" in result.stdout or sentinel_exists:
-            raise AssertionError(
-                "ordinary exit 124 was treated as a timeout:\n"
-                f"{result.stdout}"
-            )
-        if built != ["build/tests/aggregate_main.mojo"]:
-            raise AssertionError(
-                f"ordinary {step} exit 124 did not build the aggregate: {built}"
-            )
+            if result.returncode != 1:
+                raise AssertionError(
+                    "direct runner no longer has its characterized signal "
+                    f"flattening: signal={signum}, step={step}, "
+                    f"status={result.returncode}\n{result.stdout}"
+                )
+            expected = f"FAILED: aggregate suite ({step} exit {shell_status})"
+            if expected not in result.stdout:
+                raise AssertionError(
+                    "direct runner lost the shell's signal-derived status before "
+                    f"flattening it: expected={expected!r}\n{result.stdout}"
+                )
+            if f"timed-out aggregate {step}" in result.stdout or sentinel_exists:
+                raise AssertionError(
+                    f"signal {signum} was treated as a timeout:\n{result.stdout}"
+                )
+            if built != ["build/tests/aggregate_main.mojo"]:
+                raise AssertionError(
+                    f"signal {signum} at {step} had unexpected builds: {built}"
+                )
 
 
 def check_direct_runner_timeout_stops_before_following_suite() -> None:
@@ -599,6 +802,53 @@ def check_suite_layout() -> None:
             "tests/ contains a test module outside unit/integration: "
             f"{sorted(str(path) for path in all_suites - classified)}"
         )
+    discovered = aggregate_tests.discover_test_files(
+        REPO_ROOT,
+        [Path("tests/unit"), Path("tests/integration")],
+    )
+    actual_paths = tuple(path.as_posix() for path in discovered)
+    if actual_paths != CLASSIFIED_PATHS:
+        raise AssertionError(
+            "classified path ordering/membership mismatch: "
+            f"expected={list(CLASSIFIED_PATHS)}, actual={list(actual_paths)}"
+        )
+    modules = aggregate_tests.load_modules(REPO_ROOT, discovered)
+    if sum(len(module.test_functions) for module in modules) != CLASSIFIED_TEST_COUNT:
+        raise AssertionError(
+            "classified test count mismatch: "
+            f"expected={CLASSIFIED_TEST_COUNT}, "
+            f"actual={sum(len(module.test_functions) for module in modules)}"
+        )
+    generated = aggregate_tests.render_entrypoint(modules)
+    generated_lines = generated.splitlines()
+    expected_imports = [
+        f"import {path.removesuffix('.mojo').replace('/', '.')} "
+        f"as _mtest_module_{index}"
+        for index, path in enumerate(CLASSIFIED_PATHS)
+    ]
+    actual_imports = [
+        line for line in generated_lines if line.startswith("import tests.")
+    ]
+    if actual_imports != expected_imports:
+        raise AssertionError("aggregate entrypoint import membership/order drifted")
+    expected_markers = [
+        f'    print("==> {path}", flush=True)' for path in CLASSIFIED_PATHS
+    ]
+    actual_markers = [
+        line for line in generated_lines if line.startswith('    print("==> tests/')
+    ]
+    if actual_markers != expected_markers:
+        raise AssertionError("aggregate entrypoint marker membership/order drifted")
+    expected_registrations = [
+        f"    suite_{index}.test[_mtest_module_{index}.{function}]()"
+        for index, module in enumerate(modules)
+        for function in module.test_functions
+    ]
+    actual_registrations = [
+        line for line in generated_lines if re.match(r"^    suite_\d+\.test\[", line)
+    ]
+    if actual_registrations != expected_registrations:
+        raise AssertionError("aggregate entrypoint test registration membership drifted")
     for package in (tests_dir, tests_dir / "unit", tests_dir / "integration"):
         if not (package / "__init__.mojo").is_file():
             raise AssertionError(f"aggregate package marker missing: {package}")
@@ -938,8 +1188,13 @@ def check_transcript_comparator() -> None:
             b"source: " + new + b"passing.mojo\nFAIL\n"
         )
         mutated = compare_directories(before, after, replacement=(old, new))
-        if mutated.ok:
-            raise AssertionError("snapshot comparator accepted a non-path mutation")
+        if mutated.ok or not any(
+            "expected/case.txt" in error and "actual/case.txt" in error
+            for error in mutated.errors
+        ):
+            raise AssertionError(
+                "snapshot comparator did not report a byte mutation exactly"
+            )
 
         (after / "case.txt").write_bytes((before / "case.txt").read_bytes())
         exact = compare_directories(before, after)
@@ -947,8 +1202,13 @@ def check_transcript_comparator() -> None:
             raise AssertionError(f"exact snapshot comparator rejected equality: {exact.errors}")
         (after / "extra.txt").write_bytes(b"unexpected\n")
         extra = compare_directories(before, after)
-        if extra.ok:
-            raise AssertionError("snapshot comparator accepted an extra file")
+        if extra.ok or "unexpected snapshot files: ['extra.txt']" not in extra.errors:
+            raise AssertionError("snapshot comparator did not report an added file")
+        (after / "extra.txt").unlink()
+        (after / "case.txt").unlink()
+        missing = compare_directories(before, after)
+        if missing.ok or "missing snapshot files: ['case.txt']" not in missing.errors:
+            raise AssertionError("snapshot comparator did not report a deleted file")
 
 
 def check_protocol_asset_layout() -> None:
@@ -1000,6 +1260,16 @@ def check_e2e_layout() -> None:
         raise AssertionError(
             "e2e manifest/discovery mismatch: "
             f"missing={sorted(discovered - rows)}, stale={sorted(rows - discovered)}"
+        )
+    scenario_names = tuple(name for name, _function in e2e_check.SCENARIOS)
+    if scenario_names != E2E_SCENARIO_NAMES:
+        raise AssertionError(
+            "E2E scenario membership/order mismatch: "
+            f"expected={list(E2E_SCENARIO_NAMES)}, actual={list(scenario_names)}"
+        )
+    if len(scenario_names) != 59 or len(set(scenario_names)) != len(scenario_names):
+        raise AssertionError(
+            "E2E scenarios must contain 59 unique names in the pinned order"
         )
     referenced = {
         *rows,
@@ -1144,10 +1414,28 @@ def check_ci_task_graph() -> None:
         raise AssertionError(
             f"ci membership/order mismatch: expected={CI_TASKS}, actual={ci}"
         )
+    expected_preflight_closure = {"ci-preflight", *CI_PREFLIGHT_TASKS}
+    preflight_closure = _transitive_tasks(tasks, "ci-preflight")
+    if preflight_closure != expected_preflight_closure:
+        raise AssertionError(
+            "ci-preflight transitive closure mismatch: "
+            f"missing={sorted(expected_preflight_closure - preflight_closure)}, "
+            f"extra={sorted(preflight_closure - expected_preflight_closure)}"
+        )
+    expected_ci_closure = {
+        "ci",
+        "ci-preflight",
+        "build-bin",
+        "build-native",
+        *CI_FLOOR_TASKS,
+    }
     closure = _transitive_tasks(tasks, "ci")
-    missing = sorted(CI_FLOOR_TASKS - closure)
-    if missing:
-        raise AssertionError(f"ci transitive floor is missing gates: {missing}")
+    if closure != expected_ci_closure:
+        raise AssertionError(
+            "ci transitive floor mismatch: "
+            f"missing={sorted(expected_ci_closure - closure)}, "
+            f"extra={sorted(closure - expected_ci_closure)}"
+        )
     exact_safety_tasks = {
         "asan-check": (
             "python scripts/asan_check_test.py && python scripts/asan_check.py"
@@ -1382,7 +1670,8 @@ def main() -> int:
     try:
         check_process_watchdog()
         check_recursive_direct_runner()
-        check_direct_runner_exit_124_is_not_a_timeout()
+        check_direct_runner_ordinary_exits_are_failures()
+        check_direct_runner_current_signal_flattening()
         check_direct_runner_timeout_stops_before_following_suite()
         check_direct_runner_spawn_failure_is_not_a_timeout()
         check_suite_layout()

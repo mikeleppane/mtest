@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import self_host_check
 
@@ -24,9 +27,62 @@ class SelfHostDogfoodTests(unittest.TestCase):
                 "tests/support",
                 "--build-arg=-Xlinker",
                 "--build-arg=/tmp/native.o",
-                *self_host_check.DOGFOOD_TEST_FILES,
+                "tests/dogfood/exec_probe.mojo",
+                "tests/dogfood/model_probe.mojo",
+                "tests/dogfood/session_probe.mojo",
             ],
         )
+
+    def test_verify_accepts_exact_pass_row_membership(self) -> None:
+        output = (
+            "root: /repo   selected: 3 files   excluded: 0 files\n"
+            "PASS tests/dogfood/exec_probe.mojo 0.01s\n"
+            "PASS tests/dogfood/model_probe.mojo 0.01s\n"
+            "PASS tests/dogfood/session_probe.mojo 0.01s\n"
+        )
+        exact_files = [
+            "tests/dogfood/exec_probe.mojo",
+            "tests/dogfood/model_probe.mojo",
+            "tests/dogfood/session_probe.mojo",
+        ]
+        with (
+            patch.object(self_host_check, "dogfood_test_files", return_value=exact_files),
+            patch.object(
+                self_host_check,
+                "run_mtest_over_own_suite",
+                return_value=(0, output),
+            ),
+            redirect_stdout(StringIO()),
+            redirect_stderr(StringIO()),
+        ):
+            result = self_host_check.verify("/tmp/mtest", "/tmp/native.o")
+
+        self.assertEqual(result, 0)
+
+    def test_verify_rejects_a_missing_pass_row(self) -> None:
+        output = (
+            "root: /repo   selected: 3 files   excluded: 0 files\n"
+            "PASS tests/dogfood/exec_probe.mojo 0.01s\n"
+            "PASS tests/dogfood/model_probe.mojo 0.01s\n"
+        )
+        exact_files = [
+            "tests/dogfood/exec_probe.mojo",
+            "tests/dogfood/model_probe.mojo",
+            "tests/dogfood/session_probe.mojo",
+        ]
+        with (
+            patch.object(self_host_check, "dogfood_test_files", return_value=exact_files),
+            patch.object(
+                self_host_check,
+                "run_mtest_over_own_suite",
+                return_value=(0, output),
+            ),
+            redirect_stdout(StringIO()),
+            redirect_stderr(StringIO()),
+        ):
+            result = self_host_check.verify("/tmp/mtest", "/tmp/native.o")
+
+        self.assertEqual(result, 1)
 
     def test_inventory_accepts_exact_declared_probe_set(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
