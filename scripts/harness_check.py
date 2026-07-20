@@ -144,6 +144,7 @@ E2E_NATIVE_FIXTURES = {
     "e2e_json_terminal_write_fault.c",
 }
 DARWIN_INTERPOSE_DECLARATION = r"""#if defined(__APPLE__)
+#define MTEST_PRELOAD_VARIABLE "DYLD_INSERT_LIBRARIES"
 #define DYLD_INTERPOSE(_replacement, _replacee) \
     __attribute__((used)) static struct { \
         const void *replacement; \
@@ -154,6 +155,7 @@ DARWIN_INTERPOSE_DECLARATION = r"""#if defined(__APPLE__)
             (const void *)(unsigned long)&_replacee, \
         };
 #else
+#define MTEST_PRELOAD_VARIABLE "LD_PRELOAD"
 #include <dlfcn.h>
 #endif"""
 
@@ -654,6 +656,17 @@ def _check_e2e_interposer_source_policy(source: str) -> None:
             "E2E interposer must contain the canonical local Darwin declaration "
             "and select dlfcn.h only elsewhere"
         )
+    inheritance_guard = (
+        "__attribute__((constructor)) static void "
+        "mtest_stop_preload_inheritance(void) {\n"
+        "    unsetenv(MTEST_PRELOAD_VARIABLE);\n"
+        "}"
+    )
+    if source.count(inheritance_guard) != 1:
+        raise AssertionError(
+            "E2E interposer must clear its loader variable before mtest spawns "
+            "the Mojo compiler"
+        )
 
     split_marker = "#if defined(__APPLE__)"
     platform_splits = source.split(split_marker)
@@ -744,6 +757,11 @@ def check_e2e_interposer_source_policy() -> None:
         ),
         "legacy Darwin section declaration": source.replace(
             "__DATA,__interpose,interposing", "__DATA,__interpose", 1
+        ),
+        "preload inherited by compiler child": source.replace(
+            "    unsetenv(MTEST_PRELOAD_VARIABLE);",
+            "    // unsetenv(MTEST_PRELOAD_VARIABLE);",
+            1,
         ),
     }
     for name, mutation in mutations.items():

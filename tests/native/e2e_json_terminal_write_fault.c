@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #if defined(__APPLE__)
+#define MTEST_PRELOAD_VARIABLE "DYLD_INSERT_LIBRARIES"
 #define DYLD_INTERPOSE(_replacement, _replacee) \
     __attribute__((used)) static struct { \
         const void *replacement; \
@@ -11,11 +12,13 @@
             (const void *)(unsigned long)&_replacee, \
         };
 #else
+#define MTEST_PRELOAD_VARIABLE "LD_PRELOAD"
 #include <dlfcn.h>
 #endif
 
 #include <errno.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -27,6 +30,10 @@
  */
 
 static const char mtest_terminal_marker[] = "\"event\":\"session_finished\"";
+
+__attribute__((constructor)) static void mtest_stop_preload_inheritance(void) {
+    unsetenv(MTEST_PRELOAD_VARIABLE);
+}
 
 static int mtest_contains_terminal_marker(const void *buffer, size_t count) {
     const unsigned char *bytes = buffer;
