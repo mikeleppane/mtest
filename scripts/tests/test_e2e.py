@@ -71,6 +71,23 @@ SELECTION_SCENARIOS = (
     "stale-recovery-two-builds",
     "collect",
 )
+RESILIENCE_SCENARIOS = (
+    "resilience-matrix",
+    "retries-flaky",
+    "crash-attribution",
+    "attribution-reruns-crashed-binary",
+    "compile-timeout",
+    "compile-crash-signature",
+    "timeout",
+    "timeout-escalation",
+    "precompile",
+    "precompile-timeout",
+    "precompile-crash-retry",
+    "precompile-promotion",
+    "internal-error",
+    "runtime-open-failure",
+    "interrupt",
+)
 
 
 def _check_e2e_interposer_source_policy(source: str) -> None:
@@ -357,6 +374,19 @@ class E2EFaultTopologyTests(unittest.TestCase):
         )
         self.assertEqual(owned, SELECTION_SCENARIOS)
 
+    def test_resilience_scenarios_have_one_feature_owner(self) -> None:
+        from scripts.e2e.scenarios import resilience
+
+        owned = tuple(
+            name
+            for name, scenario in e2e_check.SCENARIOS
+            if scenario.__module__ == resilience.__name__
+        )
+        self.assertEqual(owned, RESILIENCE_SCENARIOS)
+        source = inspect.getsource(resilience.s_resilience_matrix)
+        self.assertIn("context.registry", source)
+        self.assertNotIn("__main__", inspect.getsource(resilience))
+
     def test_runner_owns_results_manifest_access_and_hard_timeouts(self) -> None:
         from scripts.e2e import assertions, runner
 
@@ -453,10 +483,12 @@ class E2EFaultTopologyTests(unittest.TestCase):
         self.assertEqual(harness.results[1], ("passes", True, "continued"))
 
     def test_resilience_audit_reads_the_context_registry(self) -> None:
+        from scripts.e2e.scenarios import resilience
+
         def harmless(_context: e2e_check.ScenarioContext) -> str:
             return ""
 
-        names = tuple(dict.fromkeys(e2e_check.RESILIENCE_MATRIX.values()))
+        names = tuple(dict.fromkeys(resilience.RESILIENCE_MATRIX.values()))
         context = e2e_check.ScenarioContext(
             manifest={},
             registry=tuple((name, harmless) for name in names),
@@ -464,7 +496,7 @@ class E2EFaultTopologyTests(unittest.TestCase):
         original = e2e_check.SCENARIOS
         e2e_check.SCENARIOS = ()
         try:
-            detail = e2e_check.s_resilience_matrix(context)
+            detail = resilience.s_resilience_matrix(context)
         finally:
             e2e_check.SCENARIOS = original
 

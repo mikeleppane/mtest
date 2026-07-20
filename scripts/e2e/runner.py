@@ -186,6 +186,72 @@ class E2ERunner:
             )
         return returncode, bytes(out)
 
+    def run_mtest_signaled(
+        self,
+        args: list[str],
+        *,
+        signal_number: int,
+        delay: float,
+        timeout: float,
+        env_overrides: dict[str, str] | None = None,
+    ) -> tuple[Run, int]:
+        """Signal a live mtest process, capture it, and enforce one deadline."""
+        binary = os.fspath(self.mtest)
+        if not os.path.exists(binary):
+            raise ScenarioError(
+                f"binary not found at {binary}; run `pixi run build-bin`"
+            )
+        argv = [binary, *args]
+        child_env = dict(os.environ)
+        child_env["GITHUB_ACTIONS"] = ""
+        if env_overrides:
+            child_env.update(env_overrides)
+        start = time.monotonic()
+        deadline = start + timeout
+        proc = subprocess.Popen(
+            argv,
+            cwd=os.fspath(self.repo_root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+            env=child_env,
+        )
+        pgid = os.getpgid(proc.pid)
+        try:
+            time.sleep(delay)
+            if proc.poll() is not None:
+                stdout, stderr = proc.communicate()
+                raise ScenarioError(
+                    f"mtest exited before signal {signal_number} could be sent: "
+                    f"{argv}\n{stdout}\n{stderr}"
+                )
+            os.killpg(pgid, signal_number)
+            try:
+                stdout, stderr = proc.communicate(
+                    timeout=max(0.0, deadline - time.monotonic())
+                )
+            except subprocess.TimeoutExpired:
+                self.kill_group(proc)
+                stdout, stderr = proc.communicate()
+                raise ScenarioError(
+                    f"mtest did not exit within {timeout}s after signal "
+                    f"{signal_number}: {argv}\n{stdout}\n{stderr}"
+                )
+        finally:
+            if proc.poll() is None:
+                self.kill_group(proc)
+        return (
+            Run(
+                argv=argv,
+                returncode=proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
+                wall=time.monotonic() - start,
+            ),
+            pgid,
+        )
+
     @staticmethod
     def kill_group(proc: subprocess.Popen) -> None:
         """Terminate, then kill, the process group containing ``proc``."""
