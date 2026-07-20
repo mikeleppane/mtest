@@ -7,7 +7,7 @@ repeated flag never re-splits its value on spaces, everything after `--` is
 forwarded verbatim yet still policed for forbidden arguments, and bundled short
 flags are refused.
 """
-from std.testing import assert_equal, assert_raises, assert_true, TestSuite
+from std.testing import assert_equal, assert_raises, assert_true
 
 from mtest.cli import parse_args
 
@@ -142,7 +142,3 @@ def test_show_output_last_occurrence_wins() raises:
     var r = parse_args(argv)
     # -s means all; the later --show-output none overrides it.
     assert_true(r.config.show_output.value == 2)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

@@ -9,7 +9,7 @@ spoke no report), a forger that appends a second block is MALFORMED_SUITE
 (DRIFT), and a suite that collects ZERO tests is a PASS that ran zero tests — the
 closed zero-test ceiling, PASS-from-a-parsed-report, never PASS-from-exit-status.
 """
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_true
 
 from mtest.model import Event, EventKind, Outcome, ParseDisposition
 from mtest.report import CompositeReporter, RecordingReporter
@@ -160,7 +160,3 @@ def test_plain_run_overflow_marks_stdout_truncated() raises:
         finished.stdout_truncated,
         "the plain run's own overflow must mark stdout_truncated",
     )
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

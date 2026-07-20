@@ -13,7 +13,7 @@ The stream is forced dead the honest way: a real descriptor is opened and then
 closed out from under the reporter, so its very first write (the header) fails
 and latches before the session schedules anything.
 """
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_true
 
 from mtest.model import EventKind
 from mtest.report import (
@@ -69,7 +69,3 @@ def test_dead_stream_forces_fatal_abort_exit_3_with_terminal_dispatch() raises:
         rec.kind_at(n - 1) == EventKind.SESSION_FINISHED,
         "SessionFinished is the last event dispatched",
     )
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

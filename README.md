@@ -44,7 +44,8 @@ A dedicated CI job proves that dependency is both necessary and sufficient:
 it builds the package into a local conda channel, installs it into a
 **fresh** scratch environment carrying only the declared run dependency (not
 the full `mojo`/`clang` build toolchain), and runs the installed binary
-directly against `mtest`'s own suite.
+directly against three focused dogfood probes covering the model, native
+process supervisor, and session verdict layers.
 
 **Platforms:**
 
@@ -55,8 +56,8 @@ directly against `mtest`'s own suite.
   and the package channels solve for it, but no CI runner installs or runs
   the packaged artifact there. Current executed macOS evidence stops at package
   build, executable link, and an `--help` smoke run. The unified workflow now
-  requires direct, dogfood, and end-to-end source-checkout cells, but their first
-  hosted green is still pending; packaged-artifact **runtime supervision on
+  requires direct, dogfood, and end-to-end source-checkout cells; direct and
+  dogfood have passed on hosted macOS, while packaged-artifact **runtime supervision on
   macOS remains a documented ceiling, not a proven target** (see
   [Status](#status)).
 
@@ -1063,65 +1064,48 @@ the walking skeleton always had.
 
 ## Self-hosting
 
-`mtest` runs its own test suite. `pixi run test` builds `build/mtest` and then
-runs `build/mtest -I build -I tests/support tests/` — the real binary,
-executing itself over its own 55 classified unit/integration suites, never
-`mojo run` — and
-`scripts/self_host_check.py` propagates that exit code *and* independently
-inventories `tests/unit/` and `tests/integration/` (without asking `mtest`) to
-confirm the exact result-row path set agrees with disk: proof the runner
-discovered every one of its own test files and silently skipped none. Executed
-for this report:
+The exhaustive source suite and the runner dogfood use complementary paths:
+
+- `pixi run test-direct` discovers all classified modules under `tests/unit/`
+  and `tests/integration/`, generates explicit `TestSuite` registrations for
+  every `test_*` function, compiles one aggregate binary, and executes it
+  directly. It covers 77 modules and 907 tests without invoking `mtest` or
+  paying 77 separate compiler startups.
+- `pixi run test` builds the real `build/mtest` binary and sends three small,
+  standalone probes through its discover/build/run/parse/report pipeline. The
+  harness independently pins the exact probe paths and requires three PASS
+  rows, `selected: 3`, `excluded: 0`, and process exit 0.
+
+Both paths build native binaries and execute them directly; neither uses
+`mojo run`. A focused aggregate keeps failures easy to reproduce:
 
 ```console
-$ pixi run bash -c 'build/mtest --durations 5 -q -I build -I tests/support tests/'
-===== 522 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 133.1s =====
-
-slowest 5 files:
-  tests/integration/test_session_maxfail.mojo  27.39s
-  tests/integration/test_session_collect.mojo  17.54s
-  tests/integration/test_session_selection.mojo  17.08s
-  tests/integration/test_session_gates.mojo  7.21s
-  tests/integration/test_session_handshake.mojo  6.27s
-$ echo $?
-0
+$ pixi run test-file -- tests/integration/test_exec_capture.mojo
+aggregate-tests: generated build/tests/aggregate_main.mojo for 1 module(s), 12 test(s)
+==> building aggregate test binary -> build/tests/aggregate
+==> running aggregate test binary
+==> tests/integration/test_exec_capture.mojo
+...
+All aggregate test modules passed.
 ```
 
-`mtest collect -I build -I tests/support tests/` lists all 522 node ids the dogfood run above
-selected (abbreviated here):
+The focused dogfood run used by both the source-checkout and installed-package
+gates is intentionally small:
 
 ```console
-$ pixi run bash -c 'build/mtest collect -I build -I tests/support tests/'
-tests/integration/test_discover_pipeline.mojo::test_default_path_falls_back_to_root
-tests/integration/test_discover_pipeline.mojo::test_default_path_prefers_tests_dir
-tests/integration/test_discover_pipeline.mojo::test_empty_walk_is_not_an_error
-tests/integration/test_discover_pipeline.mojo::test_exclude_removes_and_records_and_flags_stale
-tests/integration/test_discover_pipeline.mojo::test_exclude_wins_over_gate
-tests/integration/test_discover_pipeline.mojo::test_explicit_file_operand_bypasses_pattern
-tests/integration/test_discover_pipeline.mojo::test_gate_overlap_is_promoted_to_gate_only
-tests/integration/test_discover_pipeline.mojo::test_malformed_node_id_operand_raises
-... (508 more lines omitted; 522 node ids across 55 files) ...
-tests/unit/test_session_verdict.mojo::test_build_verdict_timed_out_is_compile_error
-tests/unit/test_session_verdict.mojo::test_run_verdict_exit_nonzero_is_fail
-tests/unit/test_session_verdict.mojo::test_run_verdict_exit_zero_is_pass
-tests/unit/test_session_verdict.mojo::test_run_verdict_signal_is_crash
-tests/unit/test_session_verdict.mojo::test_run_verdict_spawn_failed_is_not_run_sentinel
-tests/unit/test_session_verdict.mojo::test_run_verdict_timed_out_is_timeout
-$ echo $?
-0
+$ pixi run test
+root: /checkout/mtest   selected: 3 files   excluded: 0
+
+PASS           tests/dogfood/exec_probe.mojo
+PASS           tests/dogfood/model_probe.mojo
+PASS           tests/dogfood/session_probe.mojo
+
+===== 3 passed, 0 failed, 0 skipped (0 excluded, 0 not run) =====
+self_host_check: OK -- selected and passed all 3 focused dogfood probes
 ```
 
-This dogfood run is **an additional gate, not the only executor** of
-`tests/`. `pixi run ci` runs its independent checks in order, and `test`
-(the dogfood above) is only one of them:
+`pixi run ci` also keeps two independent product-level oracles:
 
-- **`test-direct`** — the mtest-**independent** twin: builds and executes
-  every suite under `tests/unit/` and `tests/integration/` directly, one process per file, with no
-  `mtest` involved at all. If `test-direct` and `test` (mtest running the same
-  files on itself) ever disagree on outcome, that disagreement is a
-  self-hosting bug in `mtest`, not noise — the two are meant to agree because
-  they run the identical built binaries.
-- **`test`** — the dogfood gate described above (`self_host_check.py`).
 - **`e2e`** — the binary end-to-end gate: builds `build/mtest`, then drives it
   against the committed known-outcome tree under `e2e/` (via
   `e2e/manifest.json`) and asserts exact exit codes and console
@@ -1302,8 +1286,8 @@ Linux preflight releases separate fail-fast `test-direct`, dogfood `test`,
 configured `test-direct`, `test`, and `e2e` cells. The Linux package-consumption
 job starts independently. Memory safety therefore runs on every pull request,
 configured `main`/`master` push, and manual workflow invocation, with no
-scheduled memory-safety workflow. The first green hosted macOS behavioral
-matrix is still pending, so this topology is not yet a runtime-evidence claim.
+scheduled memory-safety workflow. Hosted macOS direct and dogfood cells have
+passed; the end-to-end cell remains the outstanding behavioral proof.
 
 Individually:
 
@@ -1312,16 +1296,17 @@ Individually:
 | `pixi run build` | precompile `src/mtest` to `build/mtest.mojopkg` — the compile gate |
 | `pixi run build-bin` | link the runnable binary at `build/mtest` from `src/main.mojo` |
 | `pixi run ci-preflight` | run the exact ten-step static/build/transcript barrier used by Linux hosted CI |
-| `pixi run harness-check` | fast self-tests for recursive suite enumeration, collision-free binary paths, and exact CI topology |
+| `pixi run harness-check` | fast self-tests for deterministic aggregate generation, focused dogfood membership, watchdog behavior, and exact CI topology |
 | `pixi run safety-check` | mutation-test and run the unsafe-Mojo inventory; enforces adjacent `# SAFETY:` proofs, but does not establish that those proofs are true |
 | `pixi run postfork-check` | mutation-test the Clang AST auditor, traverse the complete production/testing child call graphs, and require the exact reviewed platform-call set; proves allowlist conformance, not syscall correctness |
 | `pixi run native-check` | run `postfork-check`, strict C17 ABI/layout/export checks, and native lifecycle/fault tests; does not replace dynamic analysis |
 | `pixi run transcripts` | regenerate protocol snapshots in place (local only) |
 | `pixi run transcripts-check` | regenerate to a temp dir and diff byte-for-byte — the protocol pin |
-| `pixi run test-unit` | directly build and execute the in-memory unit suites only |
-| `pixi run test-integration` | directly build and execute the filesystem/compiler/process integration suites only |
-| `pixi run test-direct` | the **independent** twin: build and execute every unit/integration suite directly, one process per file, with no `mtest` involved |
-| `pixi run test` | the **dogfood** gate: `build/mtest -I build -I tests/support tests/` running mtest over its own suite, plus exact path-membership verification independent of mtest |
+| `pixi run test-unit` | compile the unit modules into one aggregate binary and execute it directly |
+| `pixi run test-integration` | compile the integration modules into one aggregate binary and execute it directly |
+| `pixi run test-direct` | generate, build, and directly execute one aggregate binary containing all 77 classified modules and 907 tests, with no `mtest` involved |
+| `pixi run test-file -- PATH` | generate, build, and directly execute a focused aggregate for one classified module |
+| `pixi run test` | run three focused probes through `build/mtest`, requiring exact independent header and PASS-row membership |
 | `pixi run e2e` | build `build/mtest`, then drive it against `e2e/` and assert exact exit codes and console structure |
 | `pixi run asan-check` | on Linux, prove live OOB/UAF/leak controls are detected and source-build the highest-risk exec suites with ASan/LSan; this is risk-weighted coverage, not a whole-program proof |
 | `pixi run valgrind-check` | on Linux, prove Memcheck controls and source-build the exec/native coverage under the pinned Valgrind binary; it does not prove all paths leak- or corruption-free |

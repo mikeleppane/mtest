@@ -6,7 +6,7 @@ built: `--mojo` (only when non-default), `-I`, `--build-arg`, and `--precompile`
 This file asserts the empty case, the ordering across flag kinds, that a default
 mojo path contributes nothing, and that a value needing the shell is quoted.
 """
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_true
 
 from mtest.cli import build_flags_string
 from mtest.config import Precompile, RunnerConfig
@@ -58,7 +58,3 @@ def test_mixed_with_quoted_value() raises:
     c.mojo_path = "/opt/mojo"
     c.build_args = ["a b"]
     assert_equal(build_flags_string(c), "--mojo /opt/mojo --build-arg 'a b'")
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

@@ -18,7 +18,10 @@ import sys
 import tempfile
 import tomllib
 
+import aggregate_tests
 import e2e_check
+import format_all
+import self_host_check
 from transcript_compare import compare_directories
 
 
@@ -257,10 +260,10 @@ def _write_executable(path: Path, source: str) -> None:
 
 
 def check_recursive_direct_runner() -> None:
-    """The direct runner selects supplied roots and maps paths injectively."""
+    """The direct runner registers supplied roots in one aggregate binary."""
     tests_dir = REPO_ROOT / "tests"
     with tempfile.TemporaryDirectory(
-        prefix=".harness-check-", dir=tests_dir
+        prefix="_harness_check_", dir=tests_dir
     ) as raw_tmp:
         tmp = Path(raw_tmp)
         root_a = tmp / "first"
@@ -269,9 +272,8 @@ def check_recursive_direct_runner() -> None:
         root_b.mkdir()
         source_a = root_a / "test_same_name.mojo"
         source_b = root_b / "test_same_name.mojo"
-        source_a.write_text("# harness fixture A\n", encoding="utf-8")
-        source_b.write_text("# harness fixture B\n", encoding="utf-8")
-        disposable_outputs = REPO_ROOT / "build" / "tests" / tmp.name
+        source_a.write_text("def test_fixture_a():\n    pass\n", encoding="utf-8")
+        source_b.write_text("def test_fixture_b():\n    pass\n", encoding="utf-8")
 
         tools_dir = tmp / "tools"
         tools_dir.mkdir()
@@ -295,8 +297,12 @@ if args[0] != "build":
     raise SystemExit(f"unexpected fake mojo command: {args}")
 source = next(arg for arg in args if arg.endswith(".mojo"))
 with open(os.environ["MTEST_FAKE_MOJO_LOG"], "a", encoding="utf-8") as log:
-    log.write(json.dumps({"source": source, "output": str(out)}) + "\\n")
-out.write_text("#!/usr/bin/env bash\\nprintf '%s\\n' " + repr("RAN:" + source) + "\\n", encoding="utf-8")
+    log.write(json.dumps({
+        "source": source,
+        "output": str(out),
+        "generated": Path(source).read_text(encoding="utf-8"),
+    }) + "\\n")
+out.write_text("#!/usr/bin/env bash\\nprintf '%s\\n' RAN:aggregate\\n", encoding="utf-8")
 out.chmod(out.stat().st_mode | stat.S_IXUSR)
 """,
         )
@@ -308,48 +314,54 @@ out.chmod(out.stat().st_mode | stat.S_IXUSR)
         env = os.environ.copy()
         env["PATH"] = f"{tools_dir}{os.pathsep}{env['PATH']}"
         env["MTEST_FAKE_MOJO_LOG"] = str(log_path)
-        try:
-            result = subprocess.run(
-                ["bash", "scripts/test_all.sh", *roots],
-                cwd=REPO_ROOT,
-                env=env,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                timeout=30,
-                check=False,
+        result = subprocess.run(
+            ["bash", "scripts/test_all.sh", *roots],
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise AssertionError(
+                f"recursive direct-runner probe exited {result.returncode}:\n"
+                f"{result.stdout}"
             )
-            if result.returncode != 0:
-                raise AssertionError(
-                    f"recursive direct-runner probe exited {result.returncode}:\n"
-                    f"{result.stdout}"
-                )
 
-            records = [
-                json.loads(line)
-                for line in log_path.read_text(encoding="utf-8").splitlines()
-            ]
-            expected_sources = {
-                roots[index] + "/test_same_name.mojo" for index in range(2)
-            }
-            actual_sources = {record["source"] for record in records}
-            if actual_sources != expected_sources:
-                raise AssertionError(
-                    "direct runner did not select exactly the supplied recursive "
-                    f"roots: expected {sorted(expected_sources)}, got "
-                    f"{sorted(actual_sources)}\n{result.stdout}"
-                )
-            outputs = {record["output"] for record in records}
-            if len(outputs) != 2:
-                raise AssertionError(
-                    "same-basename suites mapped to a colliding output path: "
-                    f"{sorted(outputs)}"
-                )
-            for source in sorted(expected_sources):
-                if f"RAN:{source}" not in result.stdout:
-                    raise AssertionError(f"direct runner did not execute {source}")
-        finally:
-            shutil.rmtree(disposable_outputs, ignore_errors=True)
+        records = [
+            json.loads(line)
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+        ]
+        if len(records) != 1:
+            raise AssertionError(
+                "direct runner did not issue exactly one aggregate build: "
+                f"{records}\n{result.stdout}"
+            )
+        record = records[0]
+        if record["source"] != "build/tests/aggregate_main.mojo":
+            raise AssertionError(
+                "direct runner compiled an unexpected source: "
+                f"{record['source']}"
+            )
+        expected_paths = [
+            roots[index] + "/test_same_name.mojo" for index in range(2)
+        ]
+        generated = record["generated"]
+        markers = [
+            generated.index(f'print("==> {path}", flush=True)')
+            for path in expected_paths
+        ]
+        if markers != sorted(markers):
+            raise AssertionError("aggregate modules were not emitted bytewise-sorted")
+        for index, path in enumerate(expected_paths):
+            module = path.removesuffix(".mojo").replace("/", ".")
+            alias = f"_mtest_module_{index}"
+            if f"import {module} as {alias}" not in generated:
+                raise AssertionError(f"aggregate entrypoint did not import {path}")
+        if "RAN:aggregate" not in result.stdout:
+            raise AssertionError("direct runner did not execute the aggregate binary")
 
 
 def check_process_watchdog() -> None:
@@ -376,7 +388,7 @@ def check_process_watchdog() -> None:
 
 def _run_direct_runner_failure(
     mode: str, step: str
-) -> tuple[subprocess.CompletedProcess[str], list[str], str, str, bool]:
+) -> tuple[subprocess.CompletedProcess[str], list[str], bool]:
     """Run one disposable direct-suite failure at its build or run boundary."""
     if mode not in {"ordinary", "timeout", "spawn"}:
         raise AssertionError(f"unknown direct-runner failure mode: {mode}")
@@ -384,16 +396,13 @@ def _run_direct_runner_failure(
         raise AssertionError(f"unknown direct-runner failure step: {step}")
     tests_dir = REPO_ROOT / "tests"
     with tempfile.TemporaryDirectory(
-        prefix=".harness-check-", dir=tests_dir
+        prefix="_harness_check_", dir=tests_dir
     ) as raw_tmp:
         tmp = Path(raw_tmp)
-        root = tmp / f"direct-{mode}-{step}"
+        root = tmp / f"direct_{mode}_{step}"
         root.mkdir()
-        failing = root / "test_a_failure.mojo"
-        following = root / "test_z_following.mojo"
-        failing.write_text("# direct-runner failure fixture\n", encoding="utf-8")
-        following.write_text("# direct-runner continuation fixture\n", encoding="utf-8")
-        disposable_outputs = REPO_ROOT / "build" / "tests" / tmp.name
+        suite = root / "test_failure.mojo"
+        suite.write_text("def test_failure():\n    pass\n", encoding="utf-8")
 
         tools_dir = tmp / "tools"
         tools_dir.mkdir()
@@ -424,18 +433,18 @@ if args[0] != "build":
 source = next(arg for arg in args if arg.endswith(".mojo"))
 with open(os.environ["MTEST_FAKE_MOJO_LOG"], "a", encoding="utf-8") as log:
     log.write(source + "\\n")
-if source.endswith("test_a_failure.mojo") and step == "build":
+if step == "build":
     if mode == "ordinary":
         raise SystemExit(124)
     if mode == "timeout":
         time.sleep(60)
 out = Path(args[args.index("-o") + 1])
 out.parent.mkdir(parents=True, exist_ok=True)
-if source.endswith("test_a_failure.mojo") and step == "run" and mode == "ordinary":
+if step == "run" and mode == "ordinary":
     program = "#!/usr/bin/env bash\\nexit 124\\n"
-elif source.endswith("test_a_failure.mojo") and step == "run" and mode == "timeout":
+elif step == "run" and mode == "timeout":
     program = "#!/usr/bin/env bash\\nsleep 60\\n"
-elif source.endswith("test_a_failure.mojo") and step == "run" and mode == "spawn":
+elif step == "run" and mode == "spawn":
     program = "#!/definitely-missing-mtest-interpreter\\n"
 else:
     program = "#!/usr/bin/env bash\\nprintf '%s\\n' " + repr("RAN:" + source) + "\\n"
@@ -461,85 +470,67 @@ out.chmod(out.stat().st_mode | stat.S_IXUSR)
             env["CC"] = cc
             env["NM"] = nm
         relative_root = os.path.relpath(root, REPO_ROOT)
-        try:
-            result = subprocess.run(
-                ["bash", "scripts/test_all.sh", relative_root],
-                cwd=REPO_ROOT,
-                env=env,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                timeout=15 if mode == "timeout" else 30,
-                check=False,
-            )
-            built = (
-                log_path.read_text(encoding="utf-8").splitlines()
-                if log_path.exists()
-                else []
-            )
-            deadline_sentinel = disposable_outputs / root.name / f"test_a_failure.{step}-deadline"
-            return (
-                result,
-                built,
-                str(failing.relative_to(REPO_ROOT)),
-                str(following.relative_to(REPO_ROOT)),
-                deadline_sentinel.exists(),
-            )
-        finally:
-            shutil.rmtree(disposable_outputs, ignore_errors=True)
+        result = subprocess.run(
+            ["bash", "scripts/test_all.sh", relative_root],
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=15 if mode == "timeout" else 30,
+            check=False,
+        )
+        built = (
+            log_path.read_text(encoding="utf-8").splitlines()
+            if log_path.exists()
+            else []
+        )
+        deadline_sentinel = REPO_ROOT / "build" / "tests" / f"aggregate.{step}-deadline"
+        return result, built, deadline_sentinel.exists()
 
 
 def check_direct_runner_exit_124_is_not_a_timeout() -> None:
-    """An ordinary build or run exit 124 fails but continues to later suites."""
+    """An ordinary aggregate build or run exit 124 is not called a timeout."""
     for step in ("build", "run"):
-        result, built, failing, following, sentinel_exists = _run_direct_runner_failure(
-            "ordinary", step
-        )
+        result, built, sentinel_exists = _run_direct_runner_failure("ordinary", step)
         if result.returncode != 1:
             raise AssertionError(
                 "ordinary exit 124 did not remain a normal suite failure: "
                 f"step={step}, status={result.returncode}\n{result.stdout}"
             )
-        if f"FAILED: {failing} ({step} exit 124)" not in result.stdout:
+        if f"FAILED: aggregate suite ({step} exit 124)" not in result.stdout:
             raise AssertionError(
                 "ordinary exit 124 lost its truthful failure diagnostic:\n"
                 f"{result.stdout}"
             )
-        if f"RAN:{following}" not in result.stdout:
-            raise AssertionError(
-                "ordinary exit 124 stopped the direct runner before later suites:\n"
-                f"{result.stdout}"
-            )
-        if f"timed-out {step}" in result.stdout or sentinel_exists:
+        if f"timed-out aggregate {step}" in result.stdout or sentinel_exists:
             raise AssertionError(
                 "ordinary exit 124 was treated as a timeout:\n"
                 f"{result.stdout}"
             )
-        if built != [failing, following]:
+        if built != ["build/tests/aggregate_main.mojo"]:
             raise AssertionError(
-                f"ordinary {step} exit 124 did not build both suites: {built}"
+                f"ordinary {step} exit 124 did not build the aggregate: {built}"
             )
 
 
 def check_direct_runner_timeout_stops_before_following_suite() -> None:
-    """A real build or run timeout exits 124 before a later suite starts."""
+    """A real aggregate build or run timeout exits 124 with its sentinel."""
     for step in ("build", "run"):
-        result, built, failing, following, sentinel_exists = _run_direct_runner_failure(
-            "timeout", step
-        )
+        result, built, sentinel_exists = _run_direct_runner_failure("timeout", step)
         if result.returncode != 124:
             raise AssertionError(
                 "direct-runner timeout did not preserve exit 124: "
                 f"step={step}, status={result.returncode}\n{result.stdout}"
             )
-        if f"timed-out {step}" not in result.stdout:
+        if f"timed-out aggregate {step}" not in result.stdout:
             raise AssertionError(
                 "direct-runner timeout omitted its stopping diagnostic:\n"
                 f"{result.stdout}"
             )
-        if built != [failing] or f"RAN:{following}" in result.stdout:
+        if built != ["build/tests/aggregate_main.mojo"]:
             raise AssertionError(
-                f"direct-runner {step} timeout reached a later suite:\n{result.stdout}"
+                f"direct-runner {step} timeout missed its aggregate build:\n{result.stdout}"
             )
         if not sentinel_exists:
             raise AssertionError(f"real {step} timeout removed its deadline sentinel")
@@ -548,15 +539,13 @@ def check_direct_runner_timeout_stops_before_following_suite() -> None:
 def check_direct_runner_spawn_failure_is_not_a_timeout() -> None:
     """A failed build or run start stops as internal error, never a timeout."""
     for step in ("build", "run"):
-        result, built, failing, following, sentinel_exists = _run_direct_runner_failure(
-            "spawn", step
-        )
+        result, built, sentinel_exists = _run_direct_runner_failure("spawn", step)
         if result.returncode != 70:
             raise AssertionError(
                 "direct-runner spawn failure did not preserve internal exit 70: "
                 f"step={step}, status={result.returncode}\n{result.stdout}"
             )
-        if f"timed-out {step}" in result.stdout:
+        if f"timed-out aggregate {step}" in result.stdout:
             raise AssertionError(
                 "direct-runner spawn failure claimed timeout:\n"
                 f"{result.stdout}"
@@ -566,17 +555,17 @@ def check_direct_runner_spawn_failure_is_not_a_timeout() -> None:
                 "direct-runner spawn failure missed its distinct diagnostic:\n"
                 f"{result.stdout}"
             )
-        expected_built = [] if step == "build" else [failing]
-        if built != expected_built or f"RAN:{following}" in result.stdout:
+        expected_built = [] if step == "build" else ["build/tests/aggregate_main.mojo"]
+        if built != expected_built:
             raise AssertionError(
-                f"direct-runner {step} spawn failure reached a later suite:\n{result.stdout}"
+                f"direct-runner {step} spawn failure had unexpected builds:\n{result.stdout}"
             )
         if not sentinel_exists:
             raise AssertionError(f"spawn failure removed its {step} deadline sentinel")
 
 
 def check_suite_layout() -> None:
-    """Every executable suite and support module has its classified home."""
+    """Every aggregate module and support module has its classified home."""
     tests_dir = REPO_ROOT / "tests"
     actual_unit = {path.name for path in (tests_dir / "unit").glob("test_*.mojo")}
     actual_integration = {
@@ -605,9 +594,22 @@ def check_suite_layout() -> None:
     }
     if all_suites != classified:
         raise AssertionError(
-            "tests/ contains an executable suite outside unit/integration: "
+            "tests/ contains a test module outside unit/integration: "
             f"{sorted(str(path) for path in all_suites - classified)}"
         )
+    for package in (tests_dir, tests_dir / "unit", tests_dir / "integration"):
+        if not (package / "__init__.mojo").is_file():
+            raise AssertionError(f"aggregate package marker missing: {package}")
+    for relative in sorted(classified, key=lambda path: os.fsencode(str(path))):
+        source = (tests_dir / relative).read_text(encoding="utf-8")
+        try:
+            aggregate_tests.test_function_names(source)
+        except ValueError as exc:
+            raise AssertionError(f"invalid aggregate module {relative}: {exc}") from exc
+    try:
+        self_host_check.dogfood_test_files(REPO_ROOT)
+    except RuntimeError as exc:
+        raise AssertionError(str(exc)) from exc
     actual_support = {
         path.name for path in (tests_dir / "support").glob("*.mojo")
     }
@@ -994,12 +996,16 @@ def check_format_roots() -> None:
     """Both formatting tasks cover every Mojo source family."""
     pixi = (REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
     expected = {
-        'fmt = "mojo format src tests e2e"',
-        'fmt-check = "mojo format src tests e2e && git diff --exit-code"',
+        'fmt = "python scripts/format_all.py"',
+        'fmt-check = "python scripts/format_all.py && git diff --exit-code"',
     }
     missing = sorted(line for line in expected if line not in pixi)
     if missing:
         raise AssertionError(f"format task root coverage mismatch: missing={missing}")
+    if tuple(format_all.FORMAT_ROOTS) != ("src", "tests", "e2e"):
+        raise AssertionError(
+            f"format source roots drifted: {format_all.FORMAT_ROOTS}"
+        )
 
 
 def _yaml_block(text: str, header: str) -> str:
@@ -1172,6 +1178,8 @@ def check_ci_workflow() -> None:
         "macos-test-matrix": "macos-preflight",
     }
     for name, expected in expected_needs.items():
+        if re.search(r"^    if:", job_blocks[name], re.MULTILINE):
+            raise AssertionError(f"CI job {name!r} must not be conditionally disabled")
         matches = re.findall(r"^    needs:(.*)$", job_blocks[name], re.MULTILINE)
         expected_lines = [] if expected is None else [f" {expected}"]
         if matches != expected_lines:

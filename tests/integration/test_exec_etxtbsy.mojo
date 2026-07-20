@@ -19,7 +19,7 @@ wide interrupt latch, which it resets so no state leaks into the other suites.
 """
 from std.ffi import external_call
 from std.memory import alloc, memset_zero
-from std.testing import assert_true, TestSuite
+from std.testing import assert_true
 
 from mtest.exec import (
     ProcessSpec,
@@ -206,7 +206,3 @@ def test_interrupt_beats_stuck_etxtbsy_exec_latches_timed_out() raises:
     # As above, nonzero discriminates the EIO setup failure from target exit 0
     # without coupling this correctness test to a memory tool's error-exit value.
     assert_true(r.termination.final_value != 0, String(r.termination))
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

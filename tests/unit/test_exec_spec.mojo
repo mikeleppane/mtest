@@ -7,7 +7,7 @@ longer one without changing any other caller. These tests pin both halves of tha
 contract: every existing factory call site keeps the 300 ms grace it always had,
 and an explicit grace threads through untouched.
 """
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_true
 
 from mtest.exec.spec import ProcessSpec
 
@@ -44,7 +44,3 @@ def test_a_deadline_without_a_grace_keeps_the_default_grace() raises:
     var s = ProcessSpec.command_in(["/bin/true"], "/tmp", 250)
     assert_equal(s.timeout_ms, 250)
     assert_equal(s.grace_ms, 300)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

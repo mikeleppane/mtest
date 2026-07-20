@@ -1,7 +1,7 @@
 """Pure tests for platform-aware report-layer signal narration."""
 
 from std.sys.info import CompilationTarget
-from std.testing import assert_equal, TestSuite
+from std.testing import assert_equal
 
 from mtest.report.signals import (
     _signal_name_for_platform,
@@ -75,7 +75,3 @@ def test_target_entry_selects_the_compilation_platform() raises:
         _signal_name_for_target(7),
         _signal_name_for_platform(7, CompilationTarget.is_macos()),
     )
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

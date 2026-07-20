@@ -5,7 +5,7 @@
 empty case, and mixed multisets that prove a single failing outcome dominates
 any number of passing ones. Assertions are exact integer comparisons.
 """
-from std.testing import assert_equal, TestSuite
+from std.testing import assert_equal
 
 from mtest.model import (
     Outcome,
@@ -110,7 +110,3 @@ def test_multiple_failing_outcomes_still_one() raises:
     assert_equal(
         exit_code_for([Outcome.COMPILE_ERROR, Outcome.PASS, Outcome.FAIL]), 1
     )
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

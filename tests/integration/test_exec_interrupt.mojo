@@ -9,7 +9,7 @@ Kept in its own module because the interrupt flag latches until explicit reset
 or the next runtime open, so these tests share no state with the others.
 """
 from std.ffi import external_call
-from std.testing import assert_equal, assert_true, assert_false, TestSuite
+from std.testing import assert_equal, assert_true, assert_false
 
 from mtest.exec import (
     ProcessSpec,
@@ -262,7 +262,3 @@ def test_runtime_close_retries_a_retained_native_child_handle() raises:
     )
     assert_true(result.termination.is_exited(), String(result.termination))
     assert_equal(result.termination.value, 0)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

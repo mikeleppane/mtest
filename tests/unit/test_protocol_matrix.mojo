@@ -14,7 +14,7 @@ lands OFF_GRAMMAR (toolchain drift); a pattern user bytes CAN produce lands
 AMBIGUOUS; and noise a FAIL absorbs as verbatim detail leaves a genuine single
 report VALID. No corrupted input reaches VALID unless it truly is one report.
 """
-from std.testing import assert_true, TestSuite
+from std.testing import assert_true
 
 from mtest.protocol import ReportVerdict, parse_report
 
@@ -232,7 +232,3 @@ def test_post_header_lookalike_second_block_ambiguous() raises:
     var second = _join([N_HEADER, ROW1, RULE, SUMMARY])
     var text = _at_post("") + "\n" + second
     assert_true(parse_report(text, SP).verdict == V.AMBIGUOUS)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

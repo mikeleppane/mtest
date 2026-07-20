@@ -9,7 +9,7 @@ excerpt plus the omitted count), and hostile payloads (control bytes, invalid
 UTF-8 pre-lossy, quote/backslash storms, NDJSON-lookalike content inside a
 string). No floating-point ever appears in the output.
 """
-from std.testing import assert_equal, assert_false, assert_true, TestSuite
+from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.cli.parser import MTEST_VERSION
 from mtest.model.attribution import AttributionDisposition
@@ -561,7 +561,3 @@ def test_hostile_captured_bytes_escaped_and_ndjson_safe() raises:
 def test_hostile_quote_backslash_storm_in_path() raises:
     var e = Event.file_started('"\\"\\"\\')
     assert_true('"path":"\\"\\\\\\"\\\\\\"\\\\"' in serialize_event(e))
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

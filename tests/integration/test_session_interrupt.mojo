@@ -6,7 +6,7 @@ not-yet-completed file NOT_RUN, and resolves exit 2 regardless of anything else.
 Kept in its own module because the interrupt flag latches for the process life,
 so this test installs handlers, self-signals, asserts, and resets the flag.
 """
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_true
 
 from mtest.exec import ExecRuntime, interrupt_requested
 from mtest.exec.signals import _raise_self, _reset_interrupt
@@ -48,7 +48,3 @@ def test_interrupt_before_files_is_exit_2_all_not_run() raises:
     # Both discovered files are accounted for as NOT_RUN, none as TIMEOUT.
     assert_equal(last.summary.count_of(Outcome.NOT_RUN), 2)
     assert_equal(last.summary.count_of(Outcome.TIMEOUT), 0)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

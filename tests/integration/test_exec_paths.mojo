@@ -10,7 +10,6 @@ from std.testing import (
     assert_true,
     assert_false,
     assert_raises,
-    TestSuite,
 )
 
 from mtest.exec import canonicalize
@@ -40,7 +39,3 @@ def test_symlink_resolves_to_target_canonical() raises:
 def test_nonexistent_path_raises_naming_the_path() raises:
     with assert_raises(contains="/no/such/mtest/xyz123"):
         _ = canonicalize("/no/such/mtest/xyz123")
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

@@ -6,7 +6,7 @@ flag is recognized wherever it sits, after-`--` cases prove a flag token is
 forwarded verbatim once passthrough starts, and the unknown-flag cases prove an
 unrecognized token is a located usage error.
 """
-from std.testing import assert_equal, assert_raises, assert_true, TestSuite
+from std.testing import assert_equal, assert_raises, assert_true
 
 from mtest.cli import parse_args
 
@@ -123,7 +123,3 @@ def test_unknown_flag_with_equals_value() raises:
     var argv: List[String] = ["--frobnicate=1"]
     with assert_raises(contains="unknown flag '--frobnicate'"):
         _ = parse_args(argv)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

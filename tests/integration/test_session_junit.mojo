@@ -11,7 +11,7 @@ agree, and a prior report survives.
 from std.os import makedirs
 from std.os.path import exists
 from std.tempfile import mkdtemp
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_true
 
 from mtest.model import EventKind
 from mtest.report import (
@@ -106,7 +106,3 @@ def test_junit_finalization_failure_escalates_to_exit_3() raises:
 
     ref rec = comp.reporters[0]
     _one_session_finished(rec, 3)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

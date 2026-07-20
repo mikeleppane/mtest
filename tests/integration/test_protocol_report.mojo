@@ -7,7 +7,7 @@ pins the verdict, the parsed rows, the counts, and — for the FAIL cases — th
 verbatim detail. A crash or usage-error snapshot carries no report block, so it
 must classify ABSENT, never a partial VALID.
 """
-from std.testing import assert_equal, assert_true, assert_false, TestSuite
+from std.testing import assert_equal, assert_true, assert_false
 
 from mtest.model import Outcome
 from mtest.protocol import ParsedReport, ReportVerdict, parse_report
@@ -278,7 +278,3 @@ def test_usage_error_snapshots_are_absent() raises:
         var r = _parse(String(name))
         assert_true(r.verdict == ReportVerdict.ABSENT)
         assert_equal(len(r.rows), 0)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

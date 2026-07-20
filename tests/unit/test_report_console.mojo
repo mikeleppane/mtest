@@ -11,7 +11,7 @@ console learns every printed fact from the events — only version and config ar
 passed in.
 """
 from std.sys.info import CompilationTarget
-from std.testing import assert_equal, assert_true, assert_false, TestSuite
+from std.testing import assert_equal, assert_true, assert_false
 
 from mtest.config import ColorWhen, Verbosity, ShowOutput
 from mtest.model import (
@@ -1750,7 +1750,3 @@ def test_durations_zero_files_run_renders_nothing() raises:
     )
     var out = c.output()
     assert_false("slowest" in out)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

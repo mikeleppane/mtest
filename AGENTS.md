@@ -176,8 +176,8 @@ pixi run junit-check       # validate the committed JUnit oracle and checker
 pixi run build             # the package-compiles gate
 pixi run junit-render-check# validate bytes emitted by the real JUnit reporter
 pixi run transcripts-check # regenerate to a temp dir and diff byte-for-byte
-pixi run test-direct       # independent glob-driven build+direct-execute twin
-pixi run test              # self-hosted dogfood plus independent membership proof
+pixi run test-direct       # compile the exhaustive inventory into one direct-run binary
+pixi run test              # run focused dogfood probes through the built mtest binary
 pixi run e2e               # exact CLI exits and output against e2e/manifest.json
 ```
 
@@ -195,13 +195,26 @@ every pull request and configured-main-branch push, not on a schedule. Neither
 platform waits for the other platform's preflight.
 
 `native-check` depends on `postfork-check`, so invoking the native gate alone
-cannot omit the recurring child call-graph audit. `test-direct` and `test` both
-build-then-execute the binary directly — never `mojo run` anywhere in the gate,
-because it masks crash exit codes to 1. Transcripts, ASan/Valgrind, and packaged
-artifact consumption remain Linux-only. The workflow requires macOS native/build
-smoke plus the full direct, dogfood, and end-to-end behavioral inventory; the
-README must keep executed evidence at build/link/`--help` until those hosted
-behavioral cells first pass.
+cannot omit the recurring child call-graph audit. `test-direct` generates one
+explicit entrypoint that registers every test function in the classified
+unit/integration inventory, builds it once, and executes that aggregate binary
+directly. `test` sends three standalone probes through the built mtest binary,
+covering its real discover/build/run/parse/report path without recompiling the
+exhaustive inventory per file. Neither gate uses `mojo run`, because it masks
+crash exit codes to 1. Transcripts, ASan/Valgrind, and packaged artifact
+consumption remain Linux-only. The workflow requires macOS native/build smoke
+plus the full direct, dogfood, and end-to-end behavioral inventory; the README
+must keep executed evidence at build/link/`--help` until those hosted behavioral
+cells first pass.
+
+Classified modules under `tests/unit/` and `tests/integration/` are import-only:
+they declare `test_*` functions and MUST NOT declare `main()`. The generator
+`scripts/aggregate_tests.py` imports those modules and registers every test
+function explicitly, failing if a module has no tests or retains an entrypoint.
+Standalone protocol fixtures, E2E fixtures, and focused dogfood probes still
+declare their own `main()` because mtest compiles them as individual programs.
+Use `pixi run test-file -- <classified-test.mojo>` for a focused aggregate build
+while investigating a failure.
 
 ## Pin policy and Ask-first boundaries
 

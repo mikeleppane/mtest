@@ -10,7 +10,7 @@ real nonzero exit is reported truthfully; a residual reap failure surfaces as a
 spawn-failure sentinel (internal error), never as a test outcome.
 """
 from std.ffi import external_call
-from std.testing import assert_equal, assert_true, assert_false, TestSuite
+from std.testing import assert_equal, assert_true, assert_false
 
 from mtest.exec import ExecRuntime, ProcessSpec, run_supervised
 
@@ -56,7 +56,3 @@ def test_nonzero_exit_not_laundered_under_ignored_sigchld() raises:
         r.termination.is_exited() and r.termination.value == 0,
         "a waitpid failure was laundered into a false Exited(0) PASS",
     )
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

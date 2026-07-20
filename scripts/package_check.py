@@ -25,13 +25,11 @@ toolchain. This script is that proof, run in five ordered stages:
      loader-clean purely via the `mojo-compiler` run dependency.
      A soname failure here is a recipe run-dependency gap, not a retry-able
      flake -- this script stops and reports it.
-  4. Toolchain-threaded suite run: mtest's own tests/ suite, run through the
-     INSTALLED binary (never `build/mtest`). Unlike stage 3, this stage does
-     NOT scrub the environment -- the suite's children need `mojo` on PATH to
-     build each test file, so the full inherited environment (this script runs
-     under `pixi run package-check`, which puts the dev toolchain on PATH) is
-     passed straight through. Reuses self_host_check's dogfood + completeness
-     gate, parameterized onto the installed binary.
+  4. Toolchain-threaded dogfood run: three focused executable probes, run
+     through the INSTALLED binary (never `build/mtest`). Unlike stage 3, this
+     stage does NOT scrub the environment -- the probes' compiler children need
+     `mojo` on PATH. Reuses self_host_check's exact-membership gate,
+     parameterized onto the installed binary.
   5. Tarball fallback smoke-run: build the SAME recipe in the classic tar-bz2
      package format into its own local channel, install it into a second
      scratch env, and run `--version` -- proving the fallback distribution
@@ -84,12 +82,11 @@ MODULAR_CHANNEL = "https://conda.modular.com/max/"
 CONDA_FORGE_CHANNEL = "conda-forge"
 
 # Artifacts stage 4 needs from THIS repo checkout (not from the isolated
-# rattler-build sandbox): the precompiled package the test files import
-# against, and the test-variant native object -Xlinker'd into each per-file
-# build -- the exact pair scripts/self_host_check.py uses for `pixi run test`.
+# rattler-build sandbox): the precompiled package the probes import against,
+# and the test-variant native object linked into each probe build -- the exact
+# pair scripts/self_host_check.py uses for `pixi run test`.
 MOJOPKG_INCLUDE_DIR = REPO_ROOT / "build"
 NATIVE_TEST_OBJECT = REPO_ROOT / "build" / "native" / "mtest_exec_native_test.o"
-SELF_HOST_PROGRESS = SCRATCH_ROOT / "self-host-progress.ndjson"
 
 PIXI_VERSION_RE = re.compile(r'(?m)^version = "([^"]*)"')
 
@@ -310,9 +307,10 @@ def stage_loader_clean_probe(mtest_bin: Path) -> None:
 
 
 def stage_suite_run_with_installed_binary(mtest_bin: Path) -> None:
-    """Stage 4: run mtest's own tests/ suite through the INSTALLED binary,
-    with the environment fully inherited (unlike stage 3) so per-file `mojo
-    build` children can resolve `mojo` on PATH.
+    """Stage 4: run focused dogfood probes through the INSTALLED binary.
+
+    The environment is fully inherited (unlike stage 3) so probe compiler
+    children can resolve `mojo` on PATH.
 
     Reuses self_host_check's dogfood-and-verify-completeness gate, which
     itself defaults to build/mtest for `pixi run test` -- here it is
@@ -333,11 +331,10 @@ def stage_suite_run_with_installed_binary(mtest_bin: Path) -> None:
     code = self_host_check.verify(
         str(mtest_bin),
         str(NATIVE_TEST_OBJECT),
-        progress_path=str(SELF_HOST_PROGRESS),
     )
     if code != 0:
         raise PackageCheckError(
-            "the installed binary did not drive mtest's own suite green "
+            "the installed binary did not drive the dogfood probes green "
             "(see self_host_check output above)"
         )
 
@@ -435,7 +432,7 @@ def main() -> int:
     print(
         "\npackage-check: OK -- built, installed from the local channel "
         "(mojo-compiler run dep confirmed), loader-clean on the installed "
-        "binary, installed binary drove mtest's own suite green, and the "
+        "binary, installed binary passed the focused dogfood probes, and the "
         "tar-bz2 fallback form installed and ran cleanly. Nothing uploaded "
         "or published.",
         flush=True,

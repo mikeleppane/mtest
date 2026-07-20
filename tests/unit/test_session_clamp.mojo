@@ -5,7 +5,7 @@ flagging whether any bytes were dropped. A non-final retry attempt keeps only a
 bounded excerpt of each stream; the final attempt keeps the full capture. The
 helper is pure — no processes, no filesystem — and total over its inputs.
 """
-from std.testing import assert_equal, assert_false, assert_true, TestSuite
+from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.session import ClampedStream, clamp_stream
 
@@ -52,7 +52,3 @@ def test_empty_is_untruncated() raises:
     var c = clamp_stream(List[UInt8](), 8, 8)
     assert_false(c.truncated)
     assert_equal(len(c.bytes), 0)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

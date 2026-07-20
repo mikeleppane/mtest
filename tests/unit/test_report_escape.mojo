@@ -12,7 +12,6 @@ from std.testing import (
     assert_false,
     assert_raises,
     assert_true,
-    TestSuite,
 )
 
 from mtest.report.escape import (
@@ -296,7 +295,3 @@ def test_fence_region_epilogue_present_even_with_hostile_region() raises:
     var out = fence_region("realtoken", hostile)
     assert_true(out.endswith("::realtoken::"))
     assert_true(hostile in out)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

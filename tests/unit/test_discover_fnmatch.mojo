@@ -5,7 +5,7 @@ classes with ranges and negation, exact-equality of a metacharacter-free
 pattern, and non-matches. Kept in its own module (no filesystem) so it builds
 fast and stays clear of the temp-tree tests.
 """
-from std.testing import assert_false, assert_true, TestSuite
+from std.testing import assert_false, assert_true
 
 from mtest.discover import fnmatch
 
@@ -53,7 +53,3 @@ def test_char_class_negation() raises:
 def test_star_and_class_combined() raises:
     assert_true(fnmatch("tests/test_slow_01.mojo", "tests/test_slow_*.mojo"))
     assert_false(fnmatch("tests/test_fast_01.mojo", "tests/test_slow_*.mojo"))
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

@@ -12,7 +12,7 @@ event->fragment mapping and the spool mechanism are pinned directly.
 """
 from std.os import listdir
 from std.tempfile import mkdtemp
-from std.testing import assert_equal, assert_false, assert_true, TestSuite
+from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.model.events import Event
 from mtest.model.node_id import NodeId
@@ -345,7 +345,3 @@ def test_write_failure_latches_and_does_not_raise() raises:
     rep.handle(_finished("e2e/x.mojo", Outcome.FAIL, _bytes(""), _bytes("")))
     assert_true(rep.status().failed)
     assert_equal(rep.suite_count(), 0)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

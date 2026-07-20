@@ -9,7 +9,7 @@ STANDS (never displaced to 3 by a later I/O failure), a resolved 0/1/5 ESCALATES
 to 3, and a resolved 3 stays 3. These tests pin those rules directly, without
 building or running a session.
 """
-from std.testing import assert_equal, TestSuite
+from std.testing import assert_equal
 
 from mtest.session.session import _resolve_terminal_code
 
@@ -77,7 +77,3 @@ def test_interrupt_stands_over_a_later_write_failure() raises:
     # a resolved 2 stays 2 even when finalization also failed.
     assert_equal(_resolve_terminal_code(True, False, False, False, 0, True), 2)
     assert_equal(_resolve_terminal_code(True, False, False, True, 1, True), 2)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

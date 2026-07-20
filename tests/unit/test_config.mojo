@@ -6,7 +6,7 @@ file asserts two things exhaustively: every field of a freshly-built config
 sits at its contract default, and `resolve_mojo_path` implements the
 flag > MTEST_MOJO env > "mojo" precedence for all four presence combinations.
 """
-from std.testing import assert_equal, assert_false, assert_true, TestSuite
+from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.config import (
     AnnotationsMode,
@@ -162,7 +162,3 @@ def test_shell_join_empty_list_is_empty_string() raises:
 def test_shell_join_quotes_each_token_and_space_joins() raises:
     var tokens: List[String] = ["mojo", "build", "-I", "my dir"]
     assert_equal(shell_join(tokens), "mojo build -I 'my dir'")
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

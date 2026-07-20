@@ -13,7 +13,7 @@ of how the child then dies, and the kill targets the process group:
 from std.os import remove, rmdir
 from std.os.path import exists
 from std.tempfile import mkdtemp
-from std.testing import assert_equal, assert_true, assert_false, TestSuite
+from std.testing import assert_equal, assert_true, assert_false
 
 from mtest.exec import ExecRuntime, ProcessSpec, run_supervised
 
@@ -97,7 +97,3 @@ def test_group_kill_reaches_grandchild() raises:
         remove(sentinel)
     rmdir(scratch)
     assert_false(survived, "grandchild survived the group kill")
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

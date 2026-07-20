@@ -1,51 +1,44 @@
 #!/usr/bin/env python3
-"""The `test` gate: mtest dogfoods its own suite, checked for completeness.
+"""Run focused self-host probes through mtest and verify exact membership.
 
-Runs the real `build/mtest -I build -I tests/support tests/` binary (never
-`mojo run` — see
-scripts/test_all.sh for why) over this repo's own tests/ directory, streaming
-its output live and propagating its exit code: the suite must PASS *through
-mtest itself* for this gate to pass.
+The exhaustive unit/integration inventory is compiled once by
+``scripts/test_all.sh``. This independent dogfood gate instead sends three
+small executable probes through the real ``build/mtest`` binary. That keeps
+coverage of mtest's discover/build/run/parse/report path without asking mtest
+to compile the exhaustive suite one source file at a time.
 
-That alone is not proof mtest saw every test file — a discovery bug could
-silently drop one and still exit 0. So this script also runs an
-MTEST-INDEPENDENT completeness check: it recursively inventories the classified
-suite roots with nothing but the stdlib, and fails loudly unless mtest's result
-rows name that exact path set. The header count is checked independently too.
-
-Console layout is an informal surface (see scripts/e2e_check.py's HEADER_RE),
-so this parses the header line, not raw bytes.
-
-Usage:  pixi run test        (depends on build-bin, so build/mtest exists first)
+Usage:  pixi run test
         python scripts/self_host_check.py
 """
 
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import re
 import select
 import signal
 import subprocess
 import sys
 import time
-from pathlib import Path
 
-import json_stream_check
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MTEST = os.path.join(REPO_ROOT, "build", "mtest")
-NATIVE_OBJECT = os.path.join(
-    REPO_ROOT, "build", "native", "mtest_exec_native_test.o"
+REPO_ROOT_PATH = Path(__file__).resolve().parent.parent
+REPO_ROOT = str(REPO_ROOT_PATH)
+MTEST = str(REPO_ROOT_PATH / "build" / "mtest")
+NATIVE_OBJECT = str(
+    REPO_ROOT_PATH / "build" / "native" / "mtest_exec_native_test.o"
 )
-TESTS_DIR = os.path.join(REPO_ROOT, "tests")
+DOGFOOD_TEST_FILES = (
+    "tests/dogfood/exec_probe.mojo",
+    "tests/dogfood/model_probe.mojo",
+    "tests/dogfood/session_probe.mojo",
+)
 
-# The full 55-file suite runs several minutes serially (some files spawn their
-# own nested `mojo build` children). This ceiling only guards against a
-# genuine hang; it never times an individual file the way mtest's own
-# `--timeout` does.
-TIMEOUT_SECONDS = 900.0
-PROGRESS_INTERVAL_SECONDS = 30.0
+# Three small probes should finish comfortably inside this ceiling. It remains
+# deliberately generous because the hosted package lane may have a cold Mojo
+# compiler cache; the limit exists only to prevent a genuine runner hang.
+TIMEOUT_SECONDS = 300.0
 
 # Mirrors e2e_check.py's HEADER_RE: the session-started header line is
 # `root: <path>   selected: <N> files   excluded: <M> files`.
@@ -53,37 +46,33 @@ HEADER_RE = re.compile(
     r"root:\s+.*?selected:\s+(?P<selected>\d+)\s+files\s+excluded:\s+(?P<excluded>\d+)"
 )
 PASS_ROW_RE = re.compile(
-    r"^PASS\s+(?P<path>tests/(?:unit|integration)/test_\S+\.mojo)\s",
+    r"^PASS\s+(?P<path>tests/dogfood/[^\s]+\.mojo)\s",
     re.MULTILINE,
 )
 
 
-def discovered_test_files() -> list[str]:
-    """Classified root-relative suite paths, found WITHOUT asking mtest.
-
-    Walks tests/ directly with the stdlib only, matching the same basename
-    pattern mtest's own discovery uses. Every suite must be directly under
-    tests/unit or tests/integration; fixture/support/snapshot suites are a
-    structural error. This function never calls mtest or reads its output.
-    """
-    found: list[str] = []
-    for dirpath, _dirs, files in os.walk(TESTS_DIR):
-        for name in files:
-            if name.startswith("test_") and name.endswith(".mojo"):
-                abs_path = os.path.join(dirpath, name)
-                relative = os.path.relpath(abs_path, REPO_ROOT)
-                parent = os.path.dirname(relative)
-                if parent not in {"tests/unit", "tests/integration"}:
-                    raise RuntimeError(
-                        f"executable suite outside classified roots: {relative}"
-                    )
-                found.append(relative)
-    return sorted(found)
+def dogfood_test_files(repo_root: Path = REPO_ROOT_PATH) -> list[str]:
+    """Return the exact declared dogfood inventory, independently of mtest."""
+    dogfood_dir = repo_root / "tests" / "dogfood"
+    actual = {
+        str(path.relative_to(repo_root))
+        for path in dogfood_dir.glob("*.mojo")
+    }
+    expected = set(DOGFOOD_TEST_FILES)
+    if actual != expected:
+        raise RuntimeError(
+            "dogfood inventory mismatch: "
+            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+        )
+    for relative in DOGFOOD_TEST_FILES:
+        path = repo_root / relative
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError(f"dogfood probe is not a real file: {relative}")
+    return list(DOGFOOD_TEST_FILES)
 
 
-def _kill_group(proc: subprocess.Popen) -> None:
-    """Kill proc's whole process group so a hung mtest (and any `mojo build`
-    children it spawned) can never wedge the gate."""
+def _kill_group(proc: subprocess.Popen[str]) -> None:
+    """Kill proc's process group, including any compiler children."""
     try:
         pgid = os.getpgid(proc.pid)
     except ProcessLookupError:
@@ -96,13 +85,9 @@ def _kill_group(proc: subprocess.Popen) -> None:
         time.sleep(0.3)
 
 
-def _mtest_argv(
-    mtest_path: str,
-    native_object: str,
-    progress_path: str | None = None,
-) -> list[str]:
-    """Build the self-host command, optionally enabling live NDJSON progress."""
-    argv = [
+def _mtest_argv(mtest_path: str, native_object: str) -> list[str]:
+    """Build the self-host command with every dogfood probe named explicitly."""
+    return [
         mtest_path,
         "-I",
         "build",
@@ -110,82 +95,24 @@ def _mtest_argv(
         "tests/support",
         "--build-arg=-Xlinker",
         f"--build-arg={native_object}",
+        *DOGFOOD_TEST_FILES,
     ]
-    if progress_path is not None:
-        argv.extend(["--json", progress_path])
-    argv.append("tests/")
-    return argv
-
-
-def _progress_snapshot(progress_path: Path) -> str:
-    """Summarize the latest committed record in a live NDJSON stream."""
-    try:
-        text = progress_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return "stream=not-created"
-    except OSError as exc:
-        return f"stream=unreadable error={exc}"
-    if text == "":
-        return "stream=empty"
-    try:
-        report = json_stream_check.parse_stream(text)
-    except json_stream_check.StreamError as exc:
-        return f"stream=invalid error={exc}"
-    if not report.records:
-        return f"records=0 torn_tail={'true' if report.torn_tail else 'false'}"
-
-    last = report.records[-1]
-    parts = [
-        f"records={len(report.records)}",
-        f"last_event={last.get('event', '<missing>')}",
-    ]
-    path = last.get("path")
-    if isinstance(path, str):
-        parts.append(f"path={path}")
-    outcome = last.get("outcome")
-    if isinstance(outcome, str):
-        parts.append(f"outcome={outcome}")
-    if report.torn_tail:
-        parts.append("torn_tail=true")
-    return " ".join(parts)
 
 
 def run_mtest_over_own_suite(
     mtest_path: str = MTEST,
     native_object: str = NATIVE_OBJECT,
-    progress_path: str | None = None,
 ) -> tuple[int, str]:
-    """Spawn mtest over tests/ with its support include, streaming output to
-    this process's stdout live and also capturing it for the header parse.
-
-    `mtest_path`/`native_object` default to this repo's own dev build
-    (build/mtest + the test-variant native object) so `pixi run test` behaves
-    exactly as before; scripts/package_check.py reuses this function with the
-    INSTALLED package binary instead to dogfood the packaged artifact against
-    the same suite.
-
-    Runs in its own process group with the inherited environment, so `mojo`
-    stays on PATH for the per-file build children mtest spawns -- the same
-    contract scripts/e2e_check.py relies on. A hard wall-clock deadline kills
-    the whole group on a hang rather than wedging the gate.
-
-    Returns:
-        The (exit_code, combined stdout+stderr) pair. `exit_code` is 1 (never
-        mtest's own code) when the binary is missing or the run times out --
-        both are this script's own failures, not a verdict from the suite.
-    """
+    """Run focused probes through mtest, streaming and capturing its output."""
     if not os.path.exists(mtest_path):
         print(
             f"FATAL: self_host_check: binary not found at {mtest_path}; "
-            f"run `pixi run build-bin`",
+            "run `pixi run build-bin`",
             file=sys.stderr,
         )
         return 1, ""
 
-    argv = _mtest_argv(mtest_path, native_object, progress_path)
-    progress = Path(progress_path) if progress_path is not None else None
-    if progress is not None:
-        progress.unlink(missing_ok=True)
+    argv = _mtest_argv(mtest_path, native_object)
     proc = subprocess.Popen(
         argv,
         cwd=REPO_ROOT,
@@ -194,144 +121,100 @@ def run_mtest_over_own_suite(
         text=True,
         start_new_session=True,
     )
-    assert proc.stdout is not None  # guaranteed by stdout=PIPE above
+    assert proc.stdout is not None
 
     chunks: list[str] = []
-    started_at = time.monotonic()
-    deadline = started_at + TIMEOUT_SECONDS
-    next_progress_at = started_at + PROGRESS_INTERVAL_SECONDS
-    timed_out = False
+    deadline = time.monotonic() + TIMEOUT_SECONDS
     fd = proc.stdout.fileno()
-    while True:
-        now = time.monotonic()
-        remaining = deadline - now
+    stream_open = True
+    while proc.poll() is None:
+        remaining = deadline - time.monotonic()
         if remaining <= 0:
-            timed_out = True
-            break
-        if progress is not None and now >= next_progress_at:
+            _kill_group(proc)
+            proc.wait(timeout=5)
             print(
-                "self_host_check: progress "
-                f"elapsed={now - started_at:.0f}s {_progress_snapshot(progress)}",
-                flush=True,
+                f"FATAL: self_host_check: `{' '.join(argv)}` did not finish "
+                f"within {TIMEOUT_SECONDS:.0f}s -- killed its process group "
+                "(possible runner hang)",
+                file=sys.stderr,
             )
-            next_progress_at = now + PROGRESS_INTERVAL_SECONDS
-        wait_seconds = remaining
-        if progress is not None:
-            wait_seconds = min(wait_seconds, max(0.0, next_progress_at - now))
-        ready, _, _ = select.select([fd], [], [], wait_seconds)
+            return 1, "".join(chunks)
+        if not stream_open:
+            time.sleep(min(0.05, remaining))
+            continue
+        ready, _, _ = select.select([fd], [], [], min(remaining, 0.25))
         if not ready:
             continue
         text = os.read(fd, 4096).decode("utf-8", errors="replace")
         if not text:
-            break  # EOF: the child closed its end
+            stream_open = False
+            continue
         sys.stdout.write(text)
         sys.stdout.flush()
         chunks.append(text)
 
-    if timed_out:
-        _kill_group(proc)
-        proc.wait(timeout=5)
-        if progress is not None:
-            print(
-                "self_host_check: final progress "
-                f"elapsed={time.monotonic() - started_at:.0f}s "
-                f"{_progress_snapshot(progress)}",
-                flush=True,
-            )
-        print(
-            f"FATAL: self_host_check: `{' '.join(argv)}` did not finish "
-            f"within {TIMEOUT_SECONDS:.0f}s -- killed its process group "
-            f"(possible runner hang)",
-            file=sys.stderr,
-        )
-        return 1, "".join(chunks)
-
-    returncode = proc.wait(timeout=5)
-    return returncode, "".join(chunks)
+    if stream_open:
+        tail = proc.stdout.read()
+        if tail:
+            sys.stdout.write(tail)
+            sys.stdout.flush()
+            chunks.append(tail)
+    return proc.wait(timeout=5), "".join(chunks)
 
 
 def verify(
     mtest_path: str = MTEST,
     native_object: str = NATIVE_OBJECT,
-    progress_path: str | None = None,
 ) -> int:
-    """Run mtest over its own suite and check the result for completeness.
-
-    Parameterized so scripts/package_check.py can reuse this exact dogfood +
-    completeness gate against the INSTALLED package binary; `pixi run test`
-    (via `main` below) calls it with this repo's own dev build.
-    """
-    code, output = run_mtest_over_own_suite(
-        mtest_path, native_object, progress_path
-    )
-
+    """Run the focused dogfood probes and verify exact result membership."""
     try:
-        disk_files = discovered_test_files()
+        disk_files = dogfood_test_files()
     except RuntimeError as exc:
         print(f"FATAL: self_host_check: {exc}", file=sys.stderr)
         return 1
-    disk_count = len(disk_files)
 
+    code, output = run_mtest_over_own_suite(mtest_path, native_object)
     match = HEADER_RE.search(output)
     if match is None:
         print(
             "FATAL: self_host_check: no 'selected: N files ... excluded: M "
-            "files' header found in mtest's output -- cannot verify "
-            "completeness",
+            "files' header found in mtest's output -- cannot verify completeness",
             file=sys.stderr,
         )
         return 1
+
     selected = int(match.group("selected"))
     excluded = int(match.group("excluded"))
-    accounted_for = selected + excluded
     reported_files = sorted(set(PASS_ROW_RE.findall(output)))
-
     ok = True
-
     if code != 0:
         print(
-            f"FATAL: self_host_check: mtest exited {code} running its own "
-            f"suite (must be 0 -- the suite must PASS through mtest itself)",
+            f"FATAL: self_host_check: mtest exited {code} running focused "
+            "dogfood probes (must be 0)",
             file=sys.stderr,
         )
         ok = False
-
-    if accounted_for != disk_count:
+    if selected != len(disk_files) or excluded != 0:
         print(
-            f"FATAL: self_host_check: completeness mismatch -- mtest "
-            f"reported selected={selected} + excluded={excluded} = "
-            f"{accounted_for} test file(s), but an independent glob of "
-            f"the classified suite roots (computed without mtest) found {disk_count}: "
-            f"{disk_files}",
+            "FATAL: self_host_check: completeness mismatch -- "
+            f"selected={selected}, excluded={excluded}, "
+            f"declared probes={disk_files}",
             file=sys.stderr,
         )
         ok = False
-    elif reported_files != disk_files:
+    if reported_files != disk_files:
         print(
             "FATAL: self_host_check: exact path membership mismatch -- "
-            f"mtest PASS rows named {reported_files}, but the independent "
-            f"classified inventory is {disk_files}",
+            f"mtest PASS rows named {reported_files}, declared probes are {disk_files}",
             file=sys.stderr,
         )
         ok = False
-    elif excluded != 0:
-        # `pixi run test` never passes --exclude, so any nonzero excluded
-        # count here is itself a surprise worth naming loudly, even though
-        # the completeness arithmetic above still balances.
-        print(
-            f"WARNING: self_host_check: {excluded} file(s) excluded on an "
-            f"unconfigured run of mtest over its own suite",
-            file=sys.stderr,
-        )
-
     if not ok:
         return 1
 
     print(
-        f"self_host_check: OK -- mtest ({mtest_path}) selected {selected} "
-        f"file(s) of its own suite; its exact PASS-row path set matches all "
-        f"{disk_count} independently inventoried classified suites; mtest "
-        f"exited 0"
+        f"self_host_check: OK -- mtest ({mtest_path}) selected and passed "
+        f"all {len(disk_files)} focused dogfood probes; exact paths match"
     )
     return 0
 

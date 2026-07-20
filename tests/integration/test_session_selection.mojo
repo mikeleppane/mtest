@@ -12,7 +12,6 @@ from std.testing import (
     assert_true,
     assert_false,
     assert_raises,
-    TestSuite,
 )
 
 from mtest.model import Event, EventKind, Outcome, ParseDisposition
@@ -288,7 +287,3 @@ def test_malformed_node_id_raises_even_when_a_gate_fails() raises:
     var comp = CompositeReporter(Tuple(RecordingReporter()))
     with assert_raises(contains="malformed node id"):
         _ = run_session(cfg, root, comp)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

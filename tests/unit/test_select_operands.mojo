@@ -11,7 +11,6 @@ from std.testing import (
     assert_false,
     assert_true,
     assert_raises,
-    TestSuite,
 )
 
 from mtest.select import parse_operands, selection_active
@@ -87,7 +86,3 @@ def test_selection_active_by_node_id() raises:
 def test_selection_inactive_for_plain_operands_no_keyword() raises:
     var ops: List[String] = ["tests/", "tests/test_a.mojo"]
     assert_false(selection_active(ops, ""))
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

@@ -10,7 +10,7 @@ nothing at all.
 """
 from std.os import getenv, remove
 from std.os.path import exists
-from std.testing import assert_equal, assert_false, assert_true, TestSuite
+from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.model import Event, Summary
 from mtest.report import (
@@ -157,7 +157,3 @@ def test_escalate_on_close_failure_precedence() raises:
     assert_equal(escalate_on_close_failure(5, True), 3)
     assert_equal(escalate_on_close_failure(2, True), 2)
     assert_equal(escalate_on_close_failure(3, True), 3)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

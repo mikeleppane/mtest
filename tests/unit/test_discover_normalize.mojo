@@ -5,7 +5,7 @@ fold of `.`/`..`, absolute operands under the root, and the exit-4 raise for an
 operand that escapes the invocation root (both a climbing `..` and an outside
 absolute path).
 """
-from std.testing import assert_equal, assert_raises, TestSuite
+from std.testing import assert_equal, assert_raises
 
 from mtest.discover import normalize_operand, normalize_root
 
@@ -55,7 +55,3 @@ def test_climbing_dotdot_escapes_root_raises() raises:
 def test_outside_absolute_operand_escapes_root_raises() raises:
     with assert_raises(contains="escapes the invocation root"):
         _ = normalize_operand("/elsewhere/test_a.mojo", "/root")
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

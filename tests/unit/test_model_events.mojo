@@ -6,7 +6,7 @@ build one event of each kind through its factory and read the payload back,
 proving the console reporter can recover every field it needs purely from the
 event — no side channel. The `Summary` tally is checked over the outcome codes.
 """
-from std.testing import assert_equal, assert_true, assert_false, TestSuite
+from std.testing import assert_equal, assert_true, assert_false
 
 from mtest.model import (
     EventKind,
@@ -430,7 +430,3 @@ def test_event_kinds_are_distinct() raises:
                 assert_true(kinds[i] == kinds[j])
             else:
                 assert_false(kinds[i] == kinds[j])
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

@@ -7,7 +7,7 @@ spawn failure distinct from a genuine nonzero exit:
 - a nonexistent binary -> `SpawnFailed(ENOENT=2)` via the errno pipe;
 - a process that genuinely exits 127 -> `Exited(127)`, NOT `SpawnFailed`.
 """
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_true
 
 from mtest.exec import ExecRuntime, ProcessSpec, run_supervised
 
@@ -72,7 +72,3 @@ def test_genuine_exit_127_is_exited_not_spawn_failed() raises:
     assert_true(r.termination.is_exited(), String(r.termination))
     assert_equal(r.termination.value, 127)
     assert_true(not r.termination.is_spawn_failed(), String(r.termination))
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

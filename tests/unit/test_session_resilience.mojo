@@ -6,7 +6,7 @@ adversarial review found broken, reached through the same private-helper seam
 filesystem, no clock — so the policy is pinned in isolation from the orchestration
 that consumes it.
 """
-from std.testing import assert_equal, assert_false, assert_true, TestSuite
+from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.exec import ProcessResult, Termination
 from mtest.model import Outcome, ParseDisposition
@@ -224,7 +224,3 @@ def test_probe_terminal_propagates_truncation_from_probe_result() raises:
         fr.event.stdout_truncated, "an untruncated stream must stay False"
     )
     assert_true(fr.event.stderr_truncated, "stderr truncation must propagate")
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

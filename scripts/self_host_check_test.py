@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for self-host command construction and progress diagnostics."""
+"""Unit tests for the focused self-host dogfood inventory and command."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import unittest
 import self_host_check
 
 
-class SelfHostProgressTests(unittest.TestCase):
-    def test_ordinary_command_does_not_enable_json_reporting(self) -> None:
+class SelfHostDogfoodTests(unittest.TestCase):
+    def test_command_names_each_probe_explicitly(self) -> None:
         command = self_host_check._mtest_argv("/tmp/mtest", "/tmp/native.o")
 
         self.assertEqual(
@@ -24,62 +24,43 @@ class SelfHostProgressTests(unittest.TestCase):
                 "tests/support",
                 "--build-arg=-Xlinker",
                 "--build-arg=/tmp/native.o",
-                "tests/",
+                *self_host_check.DOGFOOD_TEST_FILES,
             ],
         )
 
-    def test_diagnostic_command_writes_json_progress_to_requested_path(self) -> None:
-        command = self_host_check._mtest_argv(
-            "/tmp/mtest", "/tmp/native.o", progress_path="/tmp/progress.ndjson"
-        )
-
-        self.assertEqual(
-            command[-3:], ["--json", "/tmp/progress.ndjson", "tests/"]
-        )
-
-    def test_progress_snapshot_names_last_committed_event_and_path(self) -> None:
+    def test_inventory_accepts_exact_declared_probe_set(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
-            stream = Path(raw_tmp) / "progress.ndjson"
-            text = (
-                '{"event":"stream","version":1,"generator":"mtest 0.4.0"}\n'
-                '{"event":"session_started","selected_count":2}\n'
-                '{"event":"file_started","path":"tests/unit/test_alpha.mojo"}\n'
-            )
-            stream.write_text(text, encoding="utf-8")
+            repo = Path(raw_tmp)
+            for relative in self_host_check.DOGFOOD_TEST_FILES:
+                path = repo / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("probe\n", encoding="utf-8")
 
-            snapshot = self_host_check._progress_snapshot(stream)
+            found = self_host_check.dogfood_test_files(repo)
 
-        self.assertEqual(
-            snapshot,
-            "records=3 last_event=file_started "
-            "path=tests/unit/test_alpha.mojo",
-        )
+        self.assertEqual(found, list(self_host_check.DOGFOOD_TEST_FILES))
 
-    def test_progress_snapshot_ignores_torn_tail(self) -> None:
+    def test_inventory_rejects_an_undeclared_mojo_probe(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
-            stream = Path(raw_tmp) / "progress.ndjson"
-            text = (
-                '{"event":"stream","version":1,"generator":"mtest 0.4.0"}\n'
-                '{"event":"file_started","path":"tests/unit/test_alpha.mojo"}\n'
-                '{"event":"file_finished","path":"tests/unit/test_alpha'
-            )
-            stream.write_text(text, encoding="utf-8")
+            repo = Path(raw_tmp)
+            for relative in self_host_check.DOGFOOD_TEST_FILES:
+                path = repo / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("probe\n", encoding="utf-8")
+            extra = repo / "tests/dogfood/extra_probe.mojo"
+            extra.write_text("probe\n", encoding="utf-8")
 
-            snapshot = self_host_check._progress_snapshot(stream)
+            with self.assertRaisesRegex(RuntimeError, "inventory mismatch"):
+                self_host_check.dogfood_test_files(repo)
 
-        self.assertEqual(
-            snapshot,
-            "records=2 last_event=file_started "
-            "path=tests/unit/test_alpha.mojo torn_tail=true",
-        )
-
-    def test_progress_snapshot_reports_absent_stream(self) -> None:
+    def test_inventory_rejects_a_missing_declared_probe(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
-            stream = Path(raw_tmp) / "progress.ndjson"
+            repo = Path(raw_tmp)
+            dogfood = repo / "tests/dogfood"
+            dogfood.mkdir(parents=True)
 
-            snapshot = self_host_check._progress_snapshot(stream)
-
-        self.assertEqual(snapshot, "stream=not-created")
+            with self.assertRaisesRegex(RuntimeError, "inventory mismatch"):
+                self_host_check.dogfood_test_files(repo)
 
 
 if __name__ == "__main__":

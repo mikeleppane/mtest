@@ -14,7 +14,7 @@ the PTY-positive half (a real terminal fd reporting `True`) have no
 deterministic fixture here and are left to the color e2e that owns a PTY
 oracle.
 """
-from std.testing import assert_equal, TestSuite
+from std.testing import assert_equal
 
 from mtest.exec.tty import _fd_isatty, stderr_isatty
 
@@ -36,7 +36,3 @@ def test_stderr_isatty_delegates_to_fd_isatty_of_fd_2() raises:
     # terminal on one fd and not the other; that PTY-positive discrimination
     # is left to the color e2e in the next task.
     assert_equal(stderr_isatty(), _fd_isatty(2))
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

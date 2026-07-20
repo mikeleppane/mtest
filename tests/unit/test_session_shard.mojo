@@ -17,7 +17,6 @@ from std.testing import (
     assert_false,
     assert_raises,
     assert_true,
-    TestSuite,
 )
 
 from mtest.cli.parser import _parse_shard
@@ -240,7 +239,3 @@ def test_grammar_rejects_empty() raises:
 
 def test_grammar_rejects_unknown_prefix() raises:
     _assert_shard_rejected("bogus:2/5")
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

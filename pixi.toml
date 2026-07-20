@@ -79,11 +79,11 @@ package-build = "rattler-build build --recipe recipe/recipe.yaml -c https://cond
 # The packaged-artifact consumption GATE: build -> install the .conda into a
 # FRESH scratch env from the local channel (proving it pulls mojo-compiler
 # ==1.0.0b2) -> a loader-clean probe on the INSTALLED binary (dev pixi env
-# absent from PATH, empty LD_LIBRARY_PATH) -> mtest's own suite run through
+# absent from PATH, empty LD_LIBRARY_PATH) -> focused dogfood probes run through
 # that installed binary with the toolchain threaded so its build children can
 # still resolve mojo -> a tar-bz2 fallback-format install + smoke-run. Depends
 # on build + build-native (not build-bin) so this repo's own build/mtest.mojopkg
-# and the test-variant native object exist for the suite run — the binary under
+# and the test-variant native object exist for the probe run — the binary under
 # test is the INSTALLED one, never build/mtest. Standalone: NOT wired into
 # `pixi run ci`; its dedicated Linux CI job is independent. Nothing uploads or
 # publishes anywhere.
@@ -94,11 +94,11 @@ package-check = { cmd = "python scripts/package_check.py", depends-on = [
 
 # Rewrite Mojo files in place — run locally before committing. Protocol fixtures
 # live beneath tests/, so this covers the runner, fixtures, and suites.
-fmt = "mojo format src tests e2e"
+fmt = "python scripts/format_all.py"
 # CI gate: format, then fail if anything changed (never edits in CI). A format
 # that shifts a fixture's `At <path>:<line>:<col>` coordinates is an oracle-side
 # change — regenerate transcripts, do not fight the gate.
-fmt-check = "mojo format src tests e2e && git diff --exit-code"
+fmt-check = "python scripts/format_all.py && git diff --exit-code"
 
 # Stdlib-only unsafe-operation inventory. Mutation tests pin every syntax family
 # and string/comment exclusion; the complete product/test inventory must remain
@@ -162,32 +162,28 @@ transcripts = "python scripts/gen_transcripts.py"
 # diff after a mojo re-pin is the protocol changelog. Hermetic.
 transcripts-check = "bash scripts/transcripts_check.sh"
 
-# The INDEPENDENT glob-driven twin: builds the package first (fail-fast), then
-# BUILDS each unit/integration test_*.mojo and EXECUTES the binary directly, one process per
-# file, with no mtest involved. `mojo run` never appears in the gate — it masks
-# crash exit codes to 1 and can JIT-crash in CI (#6413). The repo eats the same
-# build-then-execute rule the runner enforces. Kept in `ci` alongside `test` (the
-# dogfood run below) as an mtest-independent oracle: if the two ever disagree on
-# outcome, that disagreement is a self-hosting bug in mtest, not noise.
+# The INDEPENDENT exhaustive gate: generates one explicit entrypoint for every
+# unit/integration test function, builds it once, and executes that aggregate
+# binary directly with no mtest involved. `mojo run` never appears in the gate
+# because it masks crash exit codes to 1. A focused path can be passed through
+# `pixi run test-file -- tests/unit/test_model_outcome.mojo` when investigating
+# a failure.
 test-direct = "bash scripts/test_all.sh tests/unit tests/integration"
 test-unit = "bash scripts/test_all.sh tests/unit"
 test-integration = "bash scripts/test_all.sh tests/integration"
+test-file = "bash scripts/test_all.sh"
 
 # Fast self-tests for repository harness behavior. Uses disposable test inputs
-# and a fake compiler to prove recursive root selection and injective binary
-# paths without rebuilding the full Mojo suite.
-harness-check = "python scripts/self_host_check_test.py && python scripts/harness_check.py"
+# and a fake compiler to prove deterministic aggregate generation, one-build
+# execution, timeout handling, and exact hosted-CI topology.
+harness-check = "python scripts/aggregate_tests_test.py && python scripts/format_all_test.py && python scripts/self_host_check_test.py && python scripts/harness_check.py"
 
-# DOGFOOD gate: run mtest over its OWN tests/ suite, executing the built binary
-# directly (`build/mtest -I build -I tests/support tests/` — never `mojo run`, for the same
-# crash-exit-code reason as test-direct). Depends on build-bin so build/mtest and
-# the precompiled package both exist. `scripts/self_host_check.py` runs the
-# binary, propagates its exit code (the suite must PASS through mtest), and
-# checks COMPLETENESS independently of mtest: it walks the classified suite roots
-# (without asking mtest) and fails if that count disagrees with the file count
-# mtest reported selecting — proof mtest discovered every test file and silently
-# skipped none. This is an ADDITIONAL gate beside test-direct, never a
-# replacement: both run the same built binaries, so their outcomes must agree.
+# DOGFOOD gate: run three focused executable probes through the built mtest
+# binary. This exercises mtest's real discover/build/run/parse/report path and
+# checks exact header/PASS-row membership independently of mtest. The exhaustive
+# 907-test inventory belongs to test-direct's single aggregate binary; compiling
+# all source files separately here would duplicate compiler work without adding
+# behavioral coverage.
 [tasks.test]
 cmd = "python scripts/self_host_check.py"
 depends-on = ["build-bin"]

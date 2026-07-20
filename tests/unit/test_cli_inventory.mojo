@@ -11,7 +11,7 @@ The remaining tests pin every refused spelling's message shape: it names the
 token, states it is part of the mtest v1 contract, and says it is not available
 in this build.
 """
-from std.testing import assert_equal, assert_raises, assert_true, TestSuite
+from std.testing import assert_equal, assert_raises, assert_true
 
 from mtest.cli import flag_specs, parse_args
 from mtest.config import AnnotationsMode, ShardMode
@@ -438,7 +438,3 @@ def test_refuse_equals_form_still_names_flag() raises:
     var argv: List[String] = ["--workers=3"]
     with assert_raises(contains="--workers"):
         _ = parse_args(argv)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

@@ -7,7 +7,7 @@ known-signal shape (`signal 4 — SIGILL, illegal instruction`) and the
 unknown-signal fallback (`signal 99`, no dangling `— `), reached through the
 shared report-layer signal helper.
 """
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_true
 
 from mtest.model import Event, Outcome
 from mtest.report.console import _outcome_detail
@@ -45,7 +45,3 @@ def test_crash_detail_names_a_known_signal_in_words() raises:
 def test_crash_detail_falls_back_for_an_unknown_signal() raises:
     var detail = _crash_detail(99)
     assert_equal(detail, "signal 99")
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

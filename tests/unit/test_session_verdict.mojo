@@ -6,7 +6,7 @@ that dies by a signal is a BUILD failure, never a test crash. These tests pin
 `run_verdict` and `build_verdict` over EVERY `Termination` kind so that honesty
 can never silently blur.
 """
-from std.testing import assert_true, TestSuite
+from std.testing import assert_true
 
 from mtest.exec import Termination
 from mtest.model import Outcome
@@ -80,7 +80,3 @@ def test_build_verdict_timed_out_escalated_is_also_compile_timeout() raises:
 
 def test_build_verdict_spawn_failed_is_not_run_sentinel() raises:
     assert_true(build_verdict(Termination.spawn_failed(2)) == Outcome.NOT_RUN)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

@@ -8,7 +8,7 @@ cleanly.
 """
 from std.os import listdir
 from std.sys.info import CompilationTarget
-from std.testing import assert_true, assert_equal, TestSuite
+from std.testing import assert_true, assert_equal
 
 from mtest.exec import ExecRuntime, ProcessSpec, ProcessResult, run_supervised
 from mtest.exec.termination import Termination
@@ -61,7 +61,3 @@ def test_process_result_construct_and_drop() raises:
             out^, err^, False, False, Termination.exited(0), 5
         )
         assert_equal(len(pr.stdout_bytes), 1)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

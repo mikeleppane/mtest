@@ -11,7 +11,7 @@ a message, neutralized because the CR/LF that would start a new output line is
 escaped away.
 """
 from std.sys.info import CompilationTarget
-from std.testing import assert_equal, assert_false, assert_true, TestSuite
+from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.model.events import Event
 from mtest.model.node_id import NodeId
@@ -659,7 +659,3 @@ def test_reporter_retention_is_bounded_by_detail_size() raises:
         small < files * 8192,
         "retention must be O(rows*bound): " + String(small),
     )
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

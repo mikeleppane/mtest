@@ -7,7 +7,7 @@ drives real snapshot bytes via `transcript_cases`, or a hand-built literal for a
 synthesized disqualifier the committed snapshots don't carry — mirroring the
 literal-report style already used in `test_protocol_corruption.mojo`.
 """
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_true
 
 from mtest.protocol import (
     ParsedReport,
@@ -124,7 +124,3 @@ def test_lone_pass_among_skips_names_that_row() raises:
         collection_disqualifier(r),
         "a test body ran under collection: test_b",
     )
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

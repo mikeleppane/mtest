@@ -5,7 +5,7 @@ them end to end: 0 (all ran and passed), 5 (nothing was runnable), and 1 via a
 failing file. Also pins -x: after the first failing file the session stops
 scheduling and every remaining run file becomes NOT_RUN.
 """
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_true
 
 from mtest.model import EventKind, Outcome
 from mtest.report import CompositeReporter, RecordingReporter
@@ -96,7 +96,3 @@ def test_spawn_failure_is_exit_3() raises:
     # No verdict was recorded; the file is accounted for as NOT_RUN.
     assert_equal(last.summary.count_of(Outcome.NOT_RUN), 1)
     assert_equal(last.summary.count_of(Outcome.COMPILE_ERROR), 0)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

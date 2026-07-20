@@ -9,7 +9,7 @@ per-kind-grouped tail (node-id-sorted `::error` block, then `::warning` block,
 then the single `::notice`); an inert reporter renders nothing; and the tail's
 `::notice` carries the same exit-independent summary the console band does.
 """
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_true
 
 from mtest.report import (
     AnnotationsReporter,
@@ -87,7 +87,3 @@ def test_ann_index_negative_one_elides_the_tail() raises:
     assert_equal(code, 0, "a passing suite resolves to exit 0")
     # No annotations reporter composed: the comptime branch is elided.
     assert_equal(len(annotation_lines[-1](comp)), 0)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

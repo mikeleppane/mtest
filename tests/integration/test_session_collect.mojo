@@ -9,7 +9,7 @@ qualifying files are listed; a compile error / crash / timeout / malformed suite
 writes a diagnostic and the listing CONTINUES (exit-1 class); an off-grammar
 probe is DRIFT (exit 3); nothing collectable is exit 5.
 """
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_true
 
 from mtest.session import run_collect
 
@@ -216,7 +216,3 @@ def test_nothing_collectable_is_exit_5() raises:
     assert_equal(res.code, 5, "nothing collectable -> exit 5")
     assert_equal(len(res.listing), 0)
     assert_equal(len(res.diagnostics), 0, "a clean zero-test probe is silent")
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()
