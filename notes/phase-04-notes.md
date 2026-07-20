@@ -543,3 +543,31 @@ came from.
   unrelated work-in-progress included, before any test ever executes. A
   full verification pass needs a clean tracked tree first, not just a
   clean version of the file actually under test.
+- **Compiler topology mattered more than test execution.** The old package
+  self-host stage spent about 14m43s compiling 77 classified modules one at
+  a time. The exhaustive aggregate lanes retained all 907 tests and completed
+  in 7m09s on Linux and 6m28s on macOS, while the package-consumption job
+  completed in 1m58s after it was narrowed to three artifact probes. Those are
+  two distinct gains: aggregation reduced repeated compiler startup, and lane
+  specialization stopped package validation from duplicating the exhaustive
+  inventory. The 1m58s package result is therefore not a like-for-like 7.5x
+  compiler speedup.
+- **A test module's executable shape is a cross-lane contract.** Making
+  classified modules import-only fixed the primary aggregate topology but left
+  ASan and Valgrind trying to compile those modules as standalone programs.
+  One entrypoint generator now owns full, focused, and memory-safety execution;
+  changing that seam requires auditing every harness consumer, not just the
+  first green lane.
+- **Instrumentation defines a compatibility boundary below the source.** A
+  hosted runner advertised `x86-64-v4`, Mojo emitted AVX-512/EVEX instructions,
+  and Valgrind failed in its decoder before Memcheck reached project memory.
+  Pinning only the Valgrind-built Mojo binaries to `x86-64-v3` kept the complete
+  test and memory policy while making the executable understandable to the
+  instrument that runs it.
+- **Fault injection needs an explicit process-tree boundary.** A loader
+  interposer intended to reject mtest's terminal JSON write was inherited by
+  the spawned Mojo compiler on macOS, so the run failed during build instead.
+  Clearing the loader variable after the library entered mtest confined the
+  fault to its intended process. Printing the committed event sequence exposed
+  the boundary error immediately: the stream ended at `internal_error(build)`,
+  before any `file_finished` event.
