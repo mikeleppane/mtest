@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from contextlib import redirect_stderr
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -12,9 +15,24 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+
+from scripts.harness import aggregate
+from scripts.harness import classified
+from scripts.harness import watchdog
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_repository_root_tracks_the_nested_runner() -> None:
+    """The contributor runner anchors paths at the repository, not scripts/."""
+    if classified.REPO_ROOT != REPO_ROOT:
+        raise AssertionError(
+            f"classified root is {classified.REPO_ROOT}, expected {REPO_ROOT}"
+        )
+
 
 def _write_executable(path: Path, source: str) -> None:
     path.write_text(source, encoding="utf-8")
@@ -79,7 +97,7 @@ out.chmod(out.stat().st_mode | stat.S_IXUSR)
         env["MTEST_FAKE_MOJO_LOG"] = str(log_path)
         env["MTEST_FAKE_RUN_LOG"] = str(run_log_path)
         result = subprocess.run(
-            ["bash", "scripts/test_all.sh", *roots],
+            [sys.executable, "-m", "scripts.harness.classified", *roots],
             cwd=REPO_ROOT,
             env=env,
             text=True,
@@ -131,6 +149,283 @@ out.chmod(out.stat().st_mode | stat.S_IXUSR)
             raise AssertionError(
                 f"direct runner did not execute the aggregate exactly once: {runs}"
             )
+
+
+def test_root_modes_discover_focused_unit_integration_and_full_inventory() -> None:
+    """Every contributor root mode reaches its deterministic classified inventory."""
+    cases = (
+        (("tests/unit/test_model_outcome.mojo",), 1, "tests/unit/"),
+        (("tests/unit",), 47, "tests/unit/"),
+        (("tests/integration",), 30, "tests/integration/"),
+        ((), 77, "tests/"),
+    )
+    for arguments, expected_count, prefix in cases:
+        roots = classified._normalized_roots(REPO_ROOT, arguments)
+        paths = aggregate.discover_test_files(REPO_ROOT, roots)
+        if len(paths) != expected_count:
+            raise AssertionError(
+                f"root mode {arguments!r} found {len(paths)}, expected {expected_count}"
+            )
+        if any(not path.as_posix().startswith(prefix) for path in paths):
+            raise AssertionError(f"root mode {arguments!r} escaped {prefix}: {paths}")
+        if paths != sorted(paths, key=lambda path: os.fsencode(str(path))):
+            raise AssertionError(f"root mode {arguments!r} was not bytewise sorted")
+
+
+def test_pipeline_builds_each_artifact_once_and_runs_aggregate_once() -> None:
+    """The deep pipeline has one package/native/aggregate build and one direct run."""
+    with tempfile.TemporaryDirectory(prefix="mtest-classified-pipeline-") as raw_tmp:
+        repo = Path(raw_tmp)
+        suite = repo / "tests" / "unit" / "test_probe.mojo"
+        suite.parent.mkdir(parents=True)
+        suite.write_text("def test_probe():\n    pass\n", encoding="utf-8")
+        calls: list[tuple[str, str, tuple[str, ...]]] = []
+
+        def successful_supervisor(
+            command: Sequence[str], **kwargs: object
+        ) -> watchdog.Termination:
+            sentinel = kwargs["deadline_sentinel"]
+            if not isinstance(sentinel, Path):
+                raise AssertionError(f"unexpected sentinel: {sentinel!r}")
+            sentinel.unlink()
+            calls.append(
+                (
+                    str(kwargs["source"]),
+                    str(kwargs["step"]),
+                    tuple(command),
+                )
+            )
+            return watchdog.Exited(0)
+
+        result = classified.run_pipeline(
+            [Path("tests/unit/test_probe.mojo")],
+            repo_root=repo,
+            environment={},
+            supervisor=successful_supervisor,
+        )
+
+    if result.termination != watchdog.Exited(0):
+        raise AssertionError(f"successful fake pipeline returned {result!r}")
+    if [(source, step) for source, step, _command in calls] != [
+        ("package", "build"),
+        ("native adapter", "build"),
+        ("aggregate suite", "build"),
+        ("aggregate suite", "run"),
+    ]:
+        raise AssertionError(f"classified pipeline topology drifted: {calls}")
+    aggregate_build = calls[2][2]
+    aggregate_run = calls[3][2]
+    if aggregate_build[:2] != ("mojo", "build"):
+        raise AssertionError(f"aggregate was not compiled directly: {aggregate_build}")
+    if aggregate_run != (str(repo / classified.AGGREGATE_BINARY),):
+        raise AssertionError(f"aggregate was not executed directly: {aggregate_run}")
+
+
+def test_sentinel_kind_disagreements_are_internal_errors() -> None:
+    """Neither a bare timeout kind nor a lingering non-timeout sentinel is trusted."""
+    with tempfile.TemporaryDirectory(prefix="mtest-classified-sentinel-") as raw_tmp:
+        repo = Path(raw_tmp)
+
+        def unproved_timeout(
+            _command: Sequence[str], **kwargs: object
+        ) -> watchdog.Termination:
+            sentinel = kwargs["deadline_sentinel"]
+            if not isinstance(sentinel, Path):
+                raise AssertionError(f"unexpected sentinel: {sentinel!r}")
+            sentinel.unlink()
+            return watchdog.TimedOut()
+
+        timeout_result = classified._run_step(
+            ["unused"],
+            repo_root=repo,
+            source="aggregate suite",
+            step="run",
+            timeout_seconds=1.0,
+            supervisor=unproved_timeout,
+        )
+        if not isinstance(timeout_result.termination, watchdog.HarnessError):
+            raise AssertionError(f"unproved timeout was accepted: {timeout_result!r}")
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            exit_code = classified._exit_for_result(timeout_result)
+        if exit_code != classified.INTERNAL_ERROR_EXIT_CODE:
+            raise AssertionError(f"sentinel disagreement exited {exit_code}")
+        if "missing deadline sentinel" not in stderr.getvalue():
+            raise AssertionError(
+                f"sentinel disagreement lost its diagnostic: {stderr.getvalue()}"
+            )
+
+        def uncleared_exit(
+            _command: Sequence[str], **_kwargs: object
+        ) -> watchdog.Termination:
+            return watchdog.Exited(0)
+
+        exit_result = classified._run_step(
+            ["unused"],
+            repo_root=repo,
+            source="aggregate suite",
+            step="run",
+            timeout_seconds=1.0,
+            supervisor=uncleared_exit,
+        )
+        if not isinstance(exit_result.termination, watchdog.HarnessError):
+            raise AssertionError(f"uncleared non-timeout was accepted: {exit_result!r}")
+
+
+def test_caller_sigint_and_sigterm_remain_cancelled() -> None:
+    """Caller signals interrupt supervision without becoming child crashes."""
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        with tempfile.TemporaryDirectory(prefix="mtest-classified-cancel-") as raw_tmp:
+            repo = Path(raw_tmp)
+            timer = threading.Timer(
+                0.1,
+                os.kill,
+                args=(os.getpid(), signum),
+            )
+            timer.start()
+            try:
+                result = classified._run_step(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import signal, sys, time; "
+                        f"signal.signal({signum}, lambda *_: sys.exit(0)); "
+                        "time.sleep(60)",
+                    ],
+                    repo_root=repo,
+                    source="aggregate suite",
+                    step="run",
+                    timeout_seconds=10.0,
+                    supervisor=watchdog.run_command,
+                )
+            finally:
+                timer.cancel()
+                timer.join()
+            if result.termination != watchdog.Cancelled(signum):
+                raise AssertionError(
+                    f"caller signal {signum} became {result.termination!r}"
+                )
+            sentinel = repo / classified._sentinel_for("aggregate suite", "run")
+            if sentinel.exists():
+                raise AssertionError(f"cancellation {signum} left its sentinel")
+
+
+def test_cancelled_results_re_raise_the_caller_signal() -> None:
+    """The command boundary reproduces both supported cancellation signals."""
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        source = (
+            "from scripts.harness import classified, watchdog; "
+            "result = classified.StepResult('aggregate suite', 'run', "
+            f"watchdog.Cancelled({signum})); "
+            "raise SystemExit(classified._exit_for_result(result))"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", source],
+            cwd=REPO_ROOT,
+            check=False,
+        )
+        if completed.returncode != -signum:
+            raise AssertionError(
+                f"Cancelled({signum}) exited {completed.returncode}"
+            )
+
+
+def test_cancellation_outranks_a_racing_spawn_failure() -> None:
+    """A signal delivered inside failing spawn remains Cancelled at the CLI."""
+    sentinel = REPO_ROOT / "build" / "tests" / "package.build-deadline"
+    sentinel.unlink(missing_ok=True)
+    source = "\n".join(
+        (
+            "import os",
+            "import signal",
+            "from scripts.harness import classified, watchdog",
+            "def cancelled_spawn(*_args, **_kwargs):",
+            "    os.kill(os.getpid(), signal.SIGTERM)",
+            "    raise FileNotFoundError('injected spawn failure')",
+            "watchdog.subprocess.Popen = cancelled_spawn",
+            "raise SystemExit(classified.main(['tests/unit/test_model_outcome.mojo']))",
+        )
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", source],
+        cwd=REPO_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=5.0,
+        check=False,
+    )
+    if completed.returncode != -signal.SIGTERM:
+        raise AssertionError(
+            "spawn cancellation lost precedence: "
+            f"status={completed.returncode}\n{completed.stderr}"
+        )
+    if sentinel.exists():
+        raise AssertionError("spawn cancellation left the package sentinel")
+
+
+def test_closed_streams_do_not_defeat_the_run_deadline() -> None:
+    """EOF on both inherited streams is not mistaken for child completion."""
+    with tempfile.TemporaryDirectory(prefix="mtest-classified-closed-") as raw_tmp:
+        repo = Path(raw_tmp)
+        result = classified._run_step(
+            [
+                sys.executable,
+                str(REPO_ROOT / "tests/fixtures/exec/close_streams_then_hang.py"),
+            ],
+            repo_root=repo,
+            source="aggregate suite",
+            step="run",
+            timeout_seconds=0.1,
+            supervisor=watchdog.run_command,
+        )
+        if not isinstance(result.termination, watchdog.TimedOut):
+            raise AssertionError(f"closed-stream hang returned {result!r}")
+
+
+def test_timeout_kills_the_aggregate_process_group() -> None:
+    """A deadline sweep kills a SIGTERM-ignoring aggregate grandchild."""
+    with tempfile.TemporaryDirectory(prefix="mtest-classified-group-") as raw_tmp:
+        repo = Path(raw_tmp)
+        ready = repo / "grandchild-ready"
+        survived = repo / "grandchild-survived"
+        actor = repo / "actor.py"
+        actor.write_text(
+            "\n".join(
+                (
+                    "from pathlib import Path",
+                    "import signal",
+                    "import subprocess",
+                    "import sys",
+                    "import time",
+                    "grandchild = (",
+                    "    'from pathlib import Path; import signal, sys, time; '",
+                    "    'signal.signal(signal.SIGTERM, signal.SIG_IGN); '",
+                    "    'Path(sys.argv[1]).touch(); time.sleep(6); '",
+                    "    'Path(sys.argv[2]).touch()'",
+                    ")",
+                    "subprocess.Popen([sys.executable, '-c', grandchild, sys.argv[1], sys.argv[2]])",
+                    "while not Path(sys.argv[1]).exists(): time.sleep(0.01)",
+                    "time.sleep(60)",
+                )
+            ),
+            encoding="utf-8",
+        )
+        result = classified._run_step(
+            [sys.executable, str(actor), str(ready), str(survived)],
+            repo_root=repo,
+            source="aggregate suite",
+            step="run",
+            timeout_seconds=0.2,
+            supervisor=watchdog.run_command,
+        )
+        if not isinstance(result.termination, watchdog.TimedOut):
+            raise AssertionError(f"group timeout returned {result!r}")
+        if not ready.exists():
+            raise AssertionError("grandchild was not ready before the timeout")
+        time.sleep(1.0)
+        if survived.exists():
+            raise AssertionError("aggregate grandchild survived process-group cleanup")
 
 
 
@@ -236,7 +531,7 @@ out.chmod(out.stat().st_mode | stat.S_IXUSR)
             env["NM"] = nm
         relative_root = os.path.relpath(root, REPO_ROOT)
         result = subprocess.run(
-            ["bash", "scripts/test_all.sh", relative_root],
+            [sys.executable, "-m", "scripts.harness.classified", relative_root],
             cwd=REPO_ROOT,
             env=env,
             text=True,
@@ -286,25 +581,24 @@ def test_direct_runner_ordinary_exits_are_failures() -> None:
                 )
 
 
-def test_direct_runner_current_signal_flattening() -> None:
-    """Pin the shell harness's known flattening of child signals to exit 1."""
+def test_direct_runner_signal_deaths_are_re_raised() -> None:
+    """Genuine aggregate child signals terminate the harness by that signal."""
     for signum in (signal.SIGKILL, signal.SIGTERM):
-        shell_status = 128 + signum
         for step in ("build", "run"):
             result, built, sentinel_exists = _run_direct_runner_failure(
                 "signal", step, signum=signum
             )
-            if result.returncode != 1:
+            if result.returncode != -signum:
                 raise AssertionError(
-                    "direct runner no longer has its characterized signal "
-                    f"flattening: signal={signum}, step={step}, "
+                    "classified harness did not re-raise the child signal: "
+                    f"signal={signum}, step={step}, "
                     f"status={result.returncode}\n{result.stdout}"
                 )
-            expected = f"FAILED: aggregate suite ({step} exit {shell_status})"
+            expected = f"CRASHED: aggregate suite ({step} signal {signum})"
             if expected not in result.stdout:
                 raise AssertionError(
-                    "direct runner lost the shell's signal-derived status before "
-                    f"flattening it: expected={expected!r}\n{result.stdout}"
+                    "classified harness lost the signal diagnostic before "
+                    f"re-raising it: expected={expected!r}\n{result.stdout}"
                 )
             if f"timed-out aggregate {step}" in result.stdout or sentinel_exists:
                 raise AssertionError(
@@ -362,17 +656,24 @@ def test_direct_runner_spawn_failure_is_not_a_timeout() -> None:
             raise AssertionError(
                 f"direct-runner {step} spawn failure had unexpected builds:\n{result.stdout}"
             )
-        if not sentinel_exists:
-            raise AssertionError(f"spawn failure removed its {step} deadline sentinel")
-
-
+        if sentinel_exists:
+            raise AssertionError(f"spawn failure left its {step} deadline sentinel")
 
 def main() -> int:
     """Run every classified-harness behavior test serially."""
     for test in (
+        test_repository_root_tracks_the_nested_runner,
         test_recursive_direct_runner,
+        test_root_modes_discover_focused_unit_integration_and_full_inventory,
+        test_pipeline_builds_each_artifact_once_and_runs_aggregate_once,
+        test_sentinel_kind_disagreements_are_internal_errors,
+        test_caller_sigint_and_sigterm_remain_cancelled,
+        test_cancelled_results_re_raise_the_caller_signal,
+        test_cancellation_outranks_a_racing_spawn_failure,
+        test_closed_streams_do_not_defeat_the_run_deadline,
+        test_timeout_kills_the_aggregate_process_group,
         test_direct_runner_ordinary_exits_are_failures,
-        test_direct_runner_current_signal_flattening,
+        test_direct_runner_signal_deaths_are_re_raised,
         test_direct_runner_timeout_stops_before_following_suite,
         test_direct_runner_spawn_failure_is_not_a_timeout,
     ):

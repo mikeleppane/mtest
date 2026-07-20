@@ -45,6 +45,20 @@ class CiTopologyTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "serial owner chain"):
                 ci_topology.check_ci_task_graph(repo)
 
+    def test_classified_task_shell_regression_is_rejected(self) -> None:
+        source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
+        mutated = source.replace(
+            'test-file = "python -m scripts.harness.classified"',
+            'test-file = "bash scripts/legacy_runner.sh"',
+            1,
+        )
+        self.assertNotEqual(mutated, source)
+        with tempfile.TemporaryDirectory(prefix="mtest-ci-topology-") as raw_tmp:
+            repo = Path(raw_tmp)
+            (repo / "pixi.toml").write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "classified task"):
+                ci_topology.check_ci_task_graph(repo)
+
     def test_matrix_role_mutation_is_rejected_by_fixed_oracle(self) -> None:
         workflow = (
             ci_topology.REPO_ROOT / ".github" / "workflows" / "ci.yml"

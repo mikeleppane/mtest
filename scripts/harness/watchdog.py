@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import math
 import os
 import signal
@@ -18,6 +19,42 @@ DEFAULT_TIMEOUT_SECONDS = 300.0
 TERMINATION_GRACE_SECONDS = 5.0
 TIMEOUT_EXIT_CODE = 124
 _FORWARDED_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+
+
+@dataclass(frozen=True)
+class Exited:
+    """A successfully spawned child exited under its own control."""
+
+    code: int
+
+
+@dataclass(frozen=True)
+class Signaled:
+    """A successfully spawned child was reaped after signal death."""
+
+    signo: int
+
+
+@dataclass(frozen=True)
+class TimedOut:
+    """The watchdog deadline expired and process-group cleanup completed."""
+
+
+@dataclass(frozen=True)
+class Cancelled:
+    """The watchdog caller received SIGINT or SIGTERM."""
+
+    signo: int
+
+
+@dataclass(frozen=True)
+class HarnessError:
+    """The watchdog could not establish a truthful child termination."""
+
+    detail: str
+
+
+Termination = Exited | Signaled | TimedOut | Cancelled | HarnessError
 
 
 class _WatchdogCancellation(BaseException):
@@ -81,7 +118,7 @@ def _validate_deadline_sentinel(deadline_sentinel: Path | None) -> None:
     """Fail before spawn unless the caller supplied a regular deadline sentinel."""
     if deadline_sentinel is None:
         return
-    if not deadline_sentinel.is_file():
+    if not deadline_sentinel.is_file() or deadline_sentinel.is_symlink():
         raise ValueError(
             "watchdog deadline sentinel must exist as a regular file before spawn: "
             f"{deadline_sentinel}"
@@ -103,13 +140,54 @@ def _notify_timeout(source: str, step: str, timeout_seconds: float) -> None:
     """Best-effort timeout diagnostic after process-group cleanup."""
     try:
         print(
-            "FATAL: test_all: "
+            "FATAL: classified: "
             f"{source}: {step} exceeded {timeout_seconds:g}s; "
             "terminating its process group",
             file=sys.stderr,
         )
     except (BrokenPipeError, OSError):
         pass
+
+
+def validate_deadline_proof(
+    termination: Termination,
+    deadline_sentinel: Path | None,
+) -> Termination:
+    """Return ``termination`` only when its sentinel state agrees with its kind."""
+    sentinel_present = deadline_sentinel is not None and (
+        deadline_sentinel.exists() or deadline_sentinel.is_symlink()
+    )
+    sentinel_matches = (
+        sentinel_present
+        and deadline_sentinel is not None
+        and deadline_sentinel.is_file()
+        and not deadline_sentinel.is_symlink()
+    )
+    if isinstance(termination, TimedOut):
+        if not sentinel_matches:
+            return HarnessError(
+                "timeout result disagrees with its missing deadline sentinel"
+            )
+        return termination
+    if sentinel_present:
+        return HarnessError(
+            "non-timeout result disagrees with its remaining deadline sentinel"
+        )
+    return termination
+
+
+def _clear_non_timeout_sentinel(
+    termination: Termination,
+    deadline_sentinel: Path | None,
+) -> Termination:
+    """Remove a valid sentinel for every result except a proven timeout."""
+    if isinstance(termination, TimedOut) or deadline_sentinel is None:
+        return validate_deadline_proof(termination, deadline_sentinel)
+    try:
+        deadline_sentinel.unlink(missing_ok=True)
+    except OSError as exc:
+        return HarnessError(f"could not clear deadline sentinel: {exc}")
+    return validate_deadline_proof(termination, deadline_sentinel)
 
 
 def run_command(
@@ -119,8 +197,9 @@ def run_command(
     step: str,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     deadline_sentinel: Path | None = None,
-) -> int:
-    """Run ``command`` and return its status, bounding its process group.
+    cwd: Path | None = None,
+) -> Termination:
+    """Run ``command`` and return structured, signal-truthful termination.
 
     Args:
         command: Direct executable argv, without shell interpretation.
@@ -128,14 +207,25 @@ def run_command(
         step: Either the suite's ``build`` or ``run`` step.
         timeout_seconds: Positive wall-clock ceiling for the command.
         deadline_sentinel: Pre-created file removed only after non-timeout exit.
+        cwd: Optional child working directory.
 
     Returns:
-        The direct child's normal ``Popen.returncode``. A timeout returns 124.
+        Exactly one structured termination kind. ``Signaled`` is created only
+        from a negative wait status after successful spawn.
     """
     if not command:
-        raise ValueError("watchdog command must not be empty")
-    _validate_timeout_seconds(timeout_seconds)
-    _validate_deadline_sentinel(deadline_sentinel)
+        return _clear_non_timeout_sentinel(
+            HarnessError("watchdog command must not be empty"),
+            deadline_sentinel,
+        )
+    try:
+        _validate_timeout_seconds(timeout_seconds)
+        _validate_deadline_sentinel(deadline_sentinel)
+    except (OSError, ValueError) as exc:
+        return _clear_non_timeout_sentinel(
+            HarnessError(str(exc)),
+            deadline_sentinel,
+        )
 
     process: subprocess.Popen[object] | None = None
     pending_signum: int | None = None
@@ -161,15 +251,24 @@ def run_command(
             signal.signal(signum, request_cancellation)
         try:
             try:
-                process = subprocess.Popen(command, start_new_session=True)
-            except OSError:
+                process = subprocess.Popen(
+                    command,
+                    cwd=cwd,
+                    start_new_session=True,
+                )
+            except OSError as exc:
                 # Popen can report an exec/spawn error after a cancellation was
                 # already delivered in its call. No child handle is available
                 # to clean up, but cancellation remains the truthful terminal
                 # status instead of being overwritten by the spawn exception.
                 if pending_signum is not None:
-                    return -pending_signum
-                raise
+                    return _clear_non_timeout_sentinel(
+                        Cancelled(pending_signum), deadline_sentinel
+                    )
+                return _clear_non_timeout_sentinel(
+                    HarnessError(f"could not spawn child: {command[0]}: {exc}"),
+                    deadline_sentinel,
+                )
             if pending_signum is not None:
                 raise _WatchdogCancellation(pending_signum)
             try:
@@ -177,17 +276,35 @@ def run_command(
             except subprocess.TimeoutExpired:
                 _terminate_process_group(process)
                 _notify_timeout(source, step, timeout_seconds)
-                return TIMEOUT_EXIT_CODE
-            if deadline_sentinel is not None:
-                deadline_sentinel.unlink()
-            return status
+                return validate_deadline_proof(TimedOut(), deadline_sentinel)
+            termination: Termination
+            if status < 0:
+                # The leader is already reaped, but descendants may still own
+                # its process group. Sweep them before exposing the signal.
+                _terminate_process_group(process)
+                termination = Signaled(-status)
+            else:
+                termination = Exited(status)
+            return _clear_non_timeout_sentinel(termination, deadline_sentinel)
         except _WatchdogCancellation as cancellation:
             # The first callback already recorded precedence. Keep the handlers
             # live during cleanup so later managed signals are synchronously
             # consumed by their no-op path instead of becoming pending signals
             # that escape when the caller's dispositions are restored.
             _forward_signal_and_cleanup(process, cancellation.signum)
-            return -cancellation.signum
+            return _clear_non_timeout_sentinel(
+                Cancelled(cancellation.signum), deadline_sentinel
+            )
+    except Exception as exc:
+        detail = f"watchdog internal failure: {exc}"
+        if process is not None and process.poll() is None:
+            try:
+                _terminate_process_group(process)
+            except Exception as cleanup_exc:
+                detail += f"; process-group cleanup failed: {cleanup_exc}"
+        return _clear_non_timeout_sentinel(
+            HarnessError(detail), deadline_sentinel
+        )
     finally:
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
@@ -219,11 +336,16 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     return parsed
 
 
-def _exit_with_child_status(status: int) -> int:
-    """Return normal exits and reproduce signal exits for the shell caller."""
-    if status >= 0:
-        return status
-    signum = -status
+def _exit_with_termination(termination: Termination) -> int:
+    """Map structured termination onto a truthful command-line process status."""
+    if isinstance(termination, Exited):
+        return termination.code
+    if isinstance(termination, TimedOut):
+        return TIMEOUT_EXIT_CODE
+    if isinstance(termination, HarnessError):
+        print(f"FATAL: watchdog: {termination.detail}", file=sys.stderr)
+        return 70
+    signum = termination.signo
     if signum not in (signal.SIGKILL, signal.SIGSTOP):
         signal.signal(signum, signal.SIG_DFL)
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signum})
@@ -234,14 +356,14 @@ def _exit_with_child_status(status: int) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the requested command and expose its truthful terminal status."""
     parsed = _parse_args(sys.argv[1:] if argv is None else argv)
-    status = run_command(
+    termination = run_command(
         parsed.command,
         source=parsed.source,
         step=parsed.step,
         timeout_seconds=parsed.timeout_seconds,
         deadline_sentinel=parsed.deadline_sentinel,
     )
-    return _exit_with_child_status(status)
+    return _exit_with_termination(termination)
 
 
 if __name__ == "__main__":

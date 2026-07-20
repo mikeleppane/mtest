@@ -3,7 +3,7 @@
 #
 # Two jobs: (1) it is the compile GATE — `test` and `ci` run this first, so an
 # empty-but-broken package fails fast before any test does; (2) it produces the
-# binary package that scripts/test_all.sh builds the tests against, so each test
+# binary package that scripts/harness/classified.py builds the tests against, so each test
 # compiles only its own small file against a binary dependency instead of
 # re-optimizing the whole source tree per run.
 #

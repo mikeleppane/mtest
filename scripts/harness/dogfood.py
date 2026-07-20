@@ -2,7 +2,7 @@
 """Run focused self-host probes through mtest and verify exact membership.
 
 The exhaustive unit/integration inventory is compiled once by
-``scripts/test_all.sh``. This independent dogfood gate instead sends three
+``scripts/harness/classified.py``. This independent dogfood gate instead sends three
 small executable probes through the real ``build/mtest`` binary. That keeps
 coverage of mtest's discover/build/run/parse/report path without asking mtest
 to compile the exhaustive suite one source file at a time.

@@ -168,10 +168,10 @@ transcripts-check = "bash scripts/transcripts_check.sh"
 # because it masks crash exit codes to 1. A focused path can be passed through
 # `pixi run test-file -- tests/unit/test_model_outcome.mojo` when investigating
 # a failure.
-test-direct = "bash scripts/test_all.sh tests/unit tests/integration"
-test-unit = "bash scripts/test_all.sh tests/unit"
-test-integration = "bash scripts/test_all.sh tests/integration"
-test-file = "bash scripts/test_all.sh"
+test-direct = "python -m scripts.harness.classified tests/unit tests/integration"
+test-unit = "python -m scripts.harness.classified tests/unit"
+test-integration = "python -m scripts.harness.classified tests/integration"
+test-file = "python -m scripts.harness.classified"
 
 # Fast self-tests for repository harness behavior. Uses disposable test inputs
 # and a fake compiler to prove deterministic aggregate generation, one-build
@@ -181,7 +181,7 @@ harness-check = "python -m scripts.tests.test_aggregate && python -m scripts.tes
 # DOGFOOD gate: run three focused executable probes through the built mtest
 # binary. This exercises mtest's real discover/build/run/parse/report path and
 # checks exact header/PASS-row membership independently of mtest. The exhaustive
-# 907-test inventory belongs to test-direct's single aggregate binary; compiling
+# 913-test inventory belongs to test-direct's single aggregate binary; compiling
 # all source files separately here would duplicate compiler work without adding
 # behavioral coverage.
 [tasks.test]

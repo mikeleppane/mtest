@@ -236,6 +236,22 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
             f"expected={expected_harness_command!r}, "
             f"actual={tasks.get('harness-check')!r}"
         )
+    expected_classified_tasks = {
+        "test-direct": (
+            "python -m scripts.harness.classified tests/unit tests/integration"
+        ),
+        "test-unit": "python -m scripts.harness.classified tests/unit",
+        "test-integration": (
+            "python -m scripts.harness.classified tests/integration"
+        ),
+        "test-file": "python -m scripts.harness.classified",
+    }
+    for name, command in expected_classified_tasks.items():
+        if tasks.get(name) != command:
+            raise AssertionError(
+                f"{name} classified task command mismatch: "
+                f"expected={command!r}, actual={tasks.get(name)!r}"
+            )
     preflight = _task_dependencies(tasks, "ci-preflight")
     if preflight != CI_PREFLIGHT_TASKS:
         raise AssertionError(

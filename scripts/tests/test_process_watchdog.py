@@ -12,7 +12,15 @@ import sys
 import tempfile
 import time
 
-from scripts.harness.watchdog import TIMEOUT_EXIT_CODE, run_command
+from scripts.harness.watchdog import (
+    Cancelled,
+    Exited,
+    HarnessError,
+    Signaled,
+    TimedOut,
+    TIMEOUT_EXIT_CODE,
+    run_command,
+)
 
 
 PYTHON = sys.executable
@@ -155,30 +163,74 @@ def test_ordinary_exit_124_removes_its_deadline_sentinel() -> None:
             raise AssertionError("ordinary exit 124 left its deadline sentinel behind")
 
 
+def test_in_process_ordinary_137_is_structured_as_exited() -> None:
+    """The in-process seam never infers a signal from 128-plus-N."""
+    with tempfile.TemporaryDirectory(prefix="mtest-watchdog-") as raw_tmp:
+        sentinel = Path(raw_tmp) / "deadline-sentinel"
+        sentinel.touch()
+        termination = run_command(
+            [PYTHON, "-c", "raise SystemExit(137)"],
+            source="tests/unit/test_watchdog.mojo",
+            step="run",
+            deadline_sentinel=sentinel,
+        )
+        if termination != Exited(137):
+            raise AssertionError(f"expected Exited(137), got {termination!r}")
+        if sentinel.exists():
+            raise AssertionError("structured ordinary exit left its sentinel")
+
+
+def test_in_process_signal_is_structured_as_signaled() -> None:
+    """A negative wait status becomes Signaled only after successful spawn."""
+    with tempfile.TemporaryDirectory(prefix="mtest-watchdog-") as raw_tmp:
+        sentinel = Path(raw_tmp) / "deadline-sentinel"
+        sentinel.touch()
+        termination = run_command(
+            [
+                PYTHON,
+                "-c",
+                "import os, signal; os.kill(os.getpid(), signal.SIGTERM)",
+            ],
+            source="tests/unit/test_watchdog.mojo",
+            step="run",
+            deadline_sentinel=sentinel,
+        )
+        if termination != Signaled(signal.SIGTERM):
+            raise AssertionError(
+                f"expected Signaled({signal.SIGTERM}), got {termination!r}"
+            )
+        if sentinel.exists():
+            raise AssertionError("structured signal result left its sentinel")
+
+
 def test_invalid_run_command_timeouts_never_spawn_payloads() -> None:
     """Non-finite and over-ceiling direct calls fail before creating a child."""
     for timeout_seconds in (math.nan, math.inf, -math.inf, 301.0):
         with tempfile.TemporaryDirectory(prefix="mtest-watchdog-") as raw_tmp:
             marker = Path(raw_tmp) / "payload-started"
-            try:
-                run_command(
-                    [
-                        PYTHON,
-                        "-c",
-                        "from pathlib import Path; import sys; "
-                        "Path(sys.argv[1]).write_text('started')",
-                        str(marker),
-                    ],
-                    source="tests/unit/test_watchdog.mojo",
-                    step="run",
-                    timeout_seconds=timeout_seconds,
+            sentinel = Path(raw_tmp) / "deadline-sentinel"
+            sentinel.touch()
+            termination = run_command(
+                [
+                    PYTHON,
+                    "-c",
+                    "from pathlib import Path; import sys; "
+                    "Path(sys.argv[1]).write_text('started')",
+                    str(marker),
+                ],
+                source="tests/unit/test_watchdog.mojo",
+                step="run",
+                timeout_seconds=timeout_seconds,
+                deadline_sentinel=sentinel,
+            )
+            if not isinstance(termination, HarnessError):
+                raise AssertionError(
+                    f"timeout {timeout_seconds!r} returned {termination!r}"
                 )
-            except ValueError:
-                pass
-            else:
-                raise AssertionError(f"timeout {timeout_seconds!r} did not raise")
             if marker.exists():
                 raise AssertionError(f"timeout {timeout_seconds!r} started its payload")
+            if sentinel.exists():
+                raise AssertionError(f"timeout {timeout_seconds!r} left its sentinel")
 
 
 def test_parser_rejects_invalid_timeouts_before_payload_start() -> None:
@@ -213,12 +265,12 @@ def test_spawn_failure_is_not_a_timeout() -> None:
             [str(Path(raw_tmp) / "does-not-exist")],
             deadline_sentinel=sentinel,
         )
-        if result.returncode == TIMEOUT_EXIT_CODE:
-            raise AssertionError("spawn failure was encoded as timeout status 124")
+        if result.returncode != 70:
+            raise AssertionError(f"spawn failure exited {result.returncode}, expected 70")
         if "exceeded" in result.stderr or "timed out" in result.stderr:
             raise AssertionError(f"spawn failure claimed timeout:\n{result.stderr}")
-        if not sentinel.exists():
-            raise AssertionError("spawn failure removed the deadline sentinel")
+        if sentinel.exists():
+            raise AssertionError("spawn failure left the deadline sentinel")
 
 
 def test_broken_timeout_diagnostic_leaves_the_deadline_sentinel() -> None:
@@ -238,7 +290,7 @@ def test_broken_timeout_diagnostic_leaves_the_deadline_sentinel() -> None:
         original_stderr = sys.stderr
         sys.stderr = BrokenStderr()
         try:
-            status = run_command(
+            termination = run_command(
                 [PYTHON, "-c", "import time; time.sleep(60)"],
                 source="tests/unit/test_watchdog.mojo",
                 step="run",
@@ -247,8 +299,8 @@ def test_broken_timeout_diagnostic_leaves_the_deadline_sentinel() -> None:
             )
         finally:
             sys.stderr = original_stderr
-        if status != TIMEOUT_EXIT_CODE:
-            raise AssertionError(f"expected timeout exit {TIMEOUT_EXIT_CODE}, got {status}")
+        if not isinstance(termination, TimedOut):
+            raise AssertionError(f"expected TimedOut, got {termination!r}")
         if not sentinel.exists():
             raise AssertionError("broken timeout diagnostic cleared the deadline sentinel")
 
@@ -421,8 +473,8 @@ def _assert_cancellation_reaches_process_group(
                             "double cancellation left the child group alive"
                         )
                     time.sleep(0.01)
-            if not deadline_sentinel.exists():
-                raise AssertionError("cancellation removed the deadline sentinel")
+            if deadline_sentinel.exists():
+                raise AssertionError("cancellation left the deadline sentinel")
             assert watchdog.stderr is not None
             diagnostic = watchdog.stderr.read()
             if "Traceback" in diagnostic:
@@ -511,8 +563,8 @@ def test_cancellation_wins_when_spawn_then_raises() -> None:
             )
         if "Traceback" in result.stderr:
             raise AssertionError(f"spawn cancellation escaped:\n{result.stderr}")
-        if not sentinel.exists():
-            raise AssertionError("spawn cancellation removed the deadline sentinel")
+        if sentinel.exists():
+            raise AssertionError("spawn cancellation left the deadline sentinel")
 
 
 def main() -> int:
@@ -524,6 +576,8 @@ def main() -> int:
         test_sigkill_death_is_preserved,
         test_inherited_blocked_sigterm_is_preserved,
         test_ordinary_exit_124_removes_its_deadline_sentinel,
+        test_in_process_ordinary_137_is_structured_as_exited,
+        test_in_process_signal_is_structured_as_signaled,
         test_invalid_run_command_timeouts_never_spawn_payloads,
         test_parser_rejects_invalid_timeouts_before_payload_start,
         test_spawn_failure_is_not_a_timeout,

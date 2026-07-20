@@ -52,8 +52,9 @@ def test_bad_timeout_flag_raises() raises:
 ```
 
 **Crucially, the repo eats the discipline the product sells.** The suite is run
-by `scripts/test_all.sh`, which generates one explicit `TestSuite` registration
-entrypoint, **builds one aggregate binary and executes it directly** — never
+by `scripts/harness/classified.py`, which generates one explicit `TestSuite`
+registration entrypoint, **builds one aggregate binary and executes it
+directly** — never
 `mojo run`, which masks a crashing process's exit code to 1. Run the whole suite
 (the canonical green gate), or generate a focused aggregate while iterating:
 
@@ -62,12 +63,12 @@ pixi run test-direct
 pixi run test-file -- tests/integration/test_exec_capture.mojo
 ```
 
-`scripts/test_all.sh` builds the package first (fail-fast on a broken toolchain
-or a package that no longer compiles), then recursively inventories the requested
-classified roots in bytewise-sorted order, parses each module's top-level
-`test_*` declarations, and emits explicit registrations — no hand-maintained
-execution list to drift. It fails closed on an empty module, a duplicate name,
-or a classified module that retains `main()`. One file per unit under test,
+`scripts/harness/classified.py` validates and inventories the requested roots
+in bytewise-sorted order, parses each module's top-level `test_*` declarations,
+and emits explicit registrations before building the package, native adapter,
+and aggregate. There is no hand-maintained execution list to drift. It fails
+closed on an empty module, a duplicate name, or a classified module that
+retains `main()`. One file per unit under test,
 named `tests/unit/test_<thing>.mojo` or
 `tests/integration/test_<thing>.mojo` according to the boundary it crosses.
 

@@ -69,8 +69,9 @@ for two independent reasons that both destroy the product:
 - **It can JIT-crash in CI** (Mojo #6413), turning a healthy test suite red for
   reasons that have nothing to do with the tests.
 
-A prebuilt binary's termination status is the ground truth. `scripts/test_all.sh`
-already eats this discipline for mtest's own suite; the runner must enforce the
+A prebuilt binary's termination status is the ground truth.
+`scripts/harness/classified.py` already eats this discipline for mtest's own
+suite; the runner must enforce the
 same rule on the code it tests. Anything that shells out to `mojo run`, or that
 reads an exit code from a process it did not build-then-exec, is a bug.
 

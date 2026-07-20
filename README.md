@@ -1069,7 +1069,7 @@ The exhaustive source suite and the runner dogfood use complementary paths:
 - `pixi run test-direct` discovers all classified modules under `tests/unit/`
   and `tests/integration/`, generates explicit `TestSuite` registrations for
   every `test_*` function, compiles one aggregate binary, and executes it
-  directly. It covers 77 modules and 907 tests without invoking `mtest` or
+  directly. It covers 77 modules and 913 tests without invoking `mtest` or
   paying 77 separate compiler startups.
 - `pixi run test` builds the real `build/mtest` binary and sends three small,
   standalone probes through its discover/build/run/parse/report pipeline. The
@@ -1304,7 +1304,7 @@ Individually:
 | `pixi run transcripts-check` | regenerate to a temp dir and diff byte-for-byte — the protocol pin |
 | `pixi run test-unit` | compile the unit modules into one aggregate binary and execute it directly |
 | `pixi run test-integration` | compile the integration modules into one aggregate binary and execute it directly |
-| `pixi run test-direct` | generate, build, and directly execute one aggregate binary containing all 77 classified modules and 907 tests, with no `mtest` involved |
+| `pixi run test-direct` | generate, build, and directly execute one aggregate binary containing all 77 classified modules and 913 tests, with no `mtest` involved |
 | `pixi run test-file -- PATH` | generate, build, and directly execute a focused aggregate for one classified module |
 | `pixi run test` | run three focused probes through `build/mtest`, requiring exact independent header and PASS-row membership |
 | `pixi run e2e` | build `build/mtest`, then drive it against `e2e/` and assert exact exit codes and console structure |
