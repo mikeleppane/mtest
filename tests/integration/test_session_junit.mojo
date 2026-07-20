@@ -10,7 +10,6 @@ agree, and a prior report survives.
 """
 from std.os import makedirs
 from std.os.path import exists
-from std.tempfile import mkdtemp
 from std.testing import assert_equal, assert_true
 
 from mtest.model import EventKind
@@ -19,6 +18,7 @@ from mtest.report import (
     JunitReporter,
     RecordingReporter,
     open_junit_artifact,
+    open_junit_spool,
 )
 from mtest.session import run_session
 
@@ -56,8 +56,8 @@ def test_junit_report_published_and_one_terminal_dispatched() raises:
     write_file(root, "tests/test_fail.mojo", SRC_FAIL)
     var config = base_config()
 
-    var target = mkdtemp() + "/report.xml"
-    var spool = mkdtemp()
+    var target = temp_root() + "/report.xml"
+    var spool = open_junit_spool()
     var art = open_junit_artifact(spool, target)
     var junit = JunitReporter(
         art.spool_dir, True, art.target_path, art.temp_path
@@ -90,10 +90,10 @@ def test_junit_finalization_failure_escalates_to_exit_3() raises:
     # The target PATH is an existing DIRECTORY: the atomic rename cannot replace
     # it, so finalization fails and a resolved 0 escalates to exit 3 by the
     # terminal-write precedence — the single dispatched terminal agrees.
-    var parent = mkdtemp()
+    var parent = temp_root()
     var target = parent + "/report.xml"
     makedirs(target)
-    var spool = mkdtemp()
+    var spool = open_junit_spool()
     var art = open_junit_artifact(spool, target)
     var junit = JunitReporter(
         art.spool_dir, True, art.target_path, art.temp_path

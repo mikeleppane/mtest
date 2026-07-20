@@ -12,19 +12,19 @@ machinery error instead of laundering the leader's exit 0 into success.
 """
 from std.os import remove, rmdir
 from std.os.path import exists
-from std.tempfile import mkdtemp
 from std.testing import assert_equal, assert_true, assert_false
 from std.time import perf_counter_ns
 
 from mtest.exec import ExecRuntime, ProcessSpec, run_supervised
 
+from tmptree import temp_root
 from exec_helpers import bytes_to_str, target, py_spec
 
 
 def test_group_sweep_reaches_grandchild_on_normal_exit() raises:
     var runtime = ExecRuntime()
     runtime.open()
-    var scratch = mkdtemp()
+    var scratch = temp_root()
     var sentinel = scratch + "/sweep_sentinel.txt"
     var argv = List[String]()
     argv.append(target("grandchild_exit0.py"))
@@ -53,7 +53,7 @@ def test_group_sweep_reaches_grandchild_on_normal_exit() raises:
 def test_escaped_descendant_retaining_pipe_is_never_success() raises:
     var runtime = ExecRuntime()
     runtime.open()
-    var scratch = mkdtemp()
+    var scratch = temp_root()
     var control_path = (
         scratch + "/escaped-descendant-" + String(perf_counter_ns())
     )
@@ -111,7 +111,7 @@ def test_escaped_descendant_retaining_pipe_is_never_success() raises:
 def test_escapee_cleanup_without_acknowledgement_fails_loudly() raises:
     var runtime = ExecRuntime()
     runtime.open()
-    var scratch = mkdtemp()
+    var scratch = temp_root()
     var control_path = (
         scratch + "/unresponsive-escapee-" + String(perf_counter_ns())
     )

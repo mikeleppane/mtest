@@ -6,10 +6,14 @@ source into a temp tree so the session can genuinely build-and-execute it — th
 only faithful way to exercise the keystone — and returns configs wired to that
 tree. Keep every fixture as small as its outcome demands: build output lands
 under the temp root's own `build/`, never the repo's.
+
+`temp_root` is re-exported from `tmptree` — one scratch-root primitive for the
+whole suite — so `from session_fixtures import temp_root` keeps working.
 """
 from std.os import makedirs
 from std.os.path import dirname, exists
-from std.tempfile import mkdtemp
+
+from tmptree import temp_root
 
 from mtest.config import (
     ColorWhen,
@@ -201,11 +205,6 @@ comptime SRC_FAIL_PHRASE = (
     "def main() raises:\n"
     "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
 )
-
-
-def temp_root() raises -> String:
-    """Create and return a fresh, empty temp directory to use as a root."""
-    return mkdtemp()
 
 
 def write_file(root: String, rel: String, content: String) raises:

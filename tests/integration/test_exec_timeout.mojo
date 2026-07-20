@@ -12,11 +12,11 @@ of how the child then dies, and the kill targets the process group:
 """
 from std.os import remove, rmdir
 from std.os.path import exists
-from std.tempfile import mkdtemp
 from std.testing import assert_equal, assert_true, assert_false
 
 from mtest.exec import ExecRuntime, ProcessSpec, run_supervised
 
+from tmptree import temp_root
 from exec_helpers import target, py_spec
 
 
@@ -77,7 +77,7 @@ def test_close_streams_then_hang_killed_by_deadline() raises:
 def test_group_kill_reaches_grandchild() raises:
     var runtime = ExecRuntime()
     runtime.open()
-    var scratch = mkdtemp()
+    var scratch = temp_root()
     var sentinel = scratch + "/grandchild_sentinel.txt"
     var argv = List[String]()
     argv.append(target("grandchild_spawner.py"))

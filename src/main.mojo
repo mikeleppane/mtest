@@ -22,7 +22,6 @@ from std.io import FileDescriptor
 from std.os import getenv, listdir, remove, rmdir
 from std.pathlib import cwd
 from std.sys import argv, exit
-from std.tempfile import mkdtemp
 
 from mtest.cli import (
     MTEST_VERSION,
@@ -44,6 +43,7 @@ from mtest.report import (
     escalate_on_close_failure,
     open_json_fd,
     open_junit_artifact,
+    open_junit_spool,
     resume_delimiter,
 )
 from mtest.session import (
@@ -91,14 +91,14 @@ def _discard_junit_scratch(spool_dir: String, temp_path: String):
     """Best-effort removal of the JUnit spool directory (with every spooled
     fragment) and any leftover temp file. Non-raising; safe on empty/missing.
 
-    `main` OWNS this scratch — it created the spool with `mkdtemp` and the temp
-    with `open_junit_artifact` — so it frees them on every exit path once the
-    session has finished with them. On success the temp has already been renamed
-    onto the report target (so removing `temp_path` is a no-op that never touches
-    the published report); on failure the reporter already discarded the temp;
+    `main` OWNS this scratch — it created the spool with `open_junit_spool` and
+    the temp with `open_junit_artifact` — so it frees them on every exit path
+    once the session has finished with them. On success the temp has already
+    been renamed onto the report target (so removing `temp_path` is a no-op that
+    never touches the published report); on failure the reporter discarded it;
     either way the fragments and the spool directory are the leftovers to clear.
     Called after the session returns and on the pre-run/raise error paths, so a
-    run never leaks a `mkdtemp` directory per invocation.
+    run never leaks a spool directory per invocation.
     """
     if temp_path != "":
         try:
@@ -263,9 +263,9 @@ def main():
     if junit_active:
         try:
             # Assign the spool to the outer name FIRST, so a later failure to
-            # open the target temp still leaves the mkdtemp directory tracked for
+            # open the target temp still leaves the spool directory tracked for
             # cleanup rather than leaking it.
-            junit_spool = mkdtemp()
+            junit_spool = open_junit_spool()
             var artifact = open_junit_artifact(junit_spool, config.junit_dest)
             junit_temp = artifact.temp_path
             junit_target = artifact.target_path
@@ -354,7 +354,7 @@ def main():
     if junit_active:
         # The session has finalized (the report was renamed onto its target, or
         # left intact on failure); free the spool directory and fragments main
-        # created for it so no run leaks a mkdtemp directory. Covers the success,
+        # created for it so no run leaks a spool directory. Covers the success,
         # interrupt, finalize-failure, and spool-failure paths alike.
         _discard_junit_scratch(junit_spool, junit_temp)
     if not _close_runtime(runtime):

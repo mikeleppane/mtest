@@ -11,14 +11,19 @@ never spooled a real one.
 """
 from std.os import makedirs
 from std.os.path import exists
-from std.tempfile import mkdtemp
 from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.model.events import Event
 from mtest.model.node_id import NodeId
 from mtest.model.outcome import Outcome
 from mtest.model.test_result import TestResult
-from mtest.report.junit_reporter import JunitReporter, open_junit_artifact
+from mtest.report.junit_reporter import (
+    JunitReporter,
+    open_junit_artifact,
+    open_junit_spool,
+)
+
+from tmptree import temp_root
 
 
 def _bytes(s: String) -> List[UInt8]:
@@ -43,7 +48,7 @@ def _pass_finished(path: String) -> Event:
 
 def _active_reporter(target: String) raises -> JunitReporter:
     """An active reporter whose spool and temp live beside `target`."""
-    var spool = mkdtemp()
+    var spool = open_junit_spool()
     var art = open_junit_artifact(spool, target)
     return JunitReporter(art.spool_dir, True, art.target_path, art.temp_path)
 
@@ -57,7 +62,7 @@ def _drive_one_pass(mut rep: JunitReporter, path: String):
 
 
 def test_finalize_publishes_the_document_at_the_target_path() raises:
-    var dir = mkdtemp()
+    var dir = temp_root()
     var target = dir + "/report.xml"
     var rep = _active_reporter(target)
     _drive_one_pass(rep, "e2e/suite/test_a.mojo")
@@ -74,9 +79,9 @@ def test_finalize_publishes_the_document_at_the_target_path() raises:
 
 
 def test_finalize_removes_the_temp_after_a_clean_publish() raises:
-    var dir = mkdtemp()
+    var dir = temp_root()
     var target = dir + "/report.xml"
-    var spool = mkdtemp()
+    var spool = open_junit_spool()
     var art = open_junit_artifact(spool, target)
     var rep = JunitReporter(art.spool_dir, True, art.target_path, art.temp_path)
     _drive_one_pass(rep, "e2e/suite/test_a.mojo")
@@ -96,7 +101,7 @@ def test_latched_spool_failure_surfaces_at_finalization() raises:
     # A spool whose directory does not exist latches on the first fragment write
     # (handle stays non-raising). The failure did NOT abort the run — it rides to
     # finalization and surfaces here as a finalization failure.
-    var target = mkdtemp() + "/report.xml"
+    var target = temp_root() + "/report.xml"
     var rep = JunitReporter("/no/such/spool/dir", True, target, target + ".tmp")
     _drive_one_pass(rep, "e2e/suite/test_a.mojo")
     assert_true(rep.status().failed, "precondition: the spool latched")
@@ -108,12 +113,12 @@ def test_latched_spool_failure_surfaces_at_finalization() raises:
 def test_finalize_write_failure_leaves_a_prior_report_intact() raises:
     # A temp whose parent directory does not exist fails the verified write; the
     # PRIOR report at the target survives byte-for-byte (junit never truncates).
-    var dir = mkdtemp()
+    var dir = temp_root()
     var target = dir + "/report.xml"
     var prior = String("<PRIOR-REPORT/>\n")
     with open(target, "w") as f:
         f.write(prior)
-    var spool = mkdtemp()
+    var spool = open_junit_spool()
     var rep = JunitReporter(spool, True, target, "/no/such/dir/report.tmp")
     _drive_one_pass(rep, "e2e/suite/test_a.mojo")
     var result = rep.finalize()
@@ -128,10 +133,10 @@ def test_finalize_rename_onto_a_directory_leaves_the_target_intact() raises:
     # The target PATH is an existing directory: the temp write succeeds but the
     # atomic rename refuses (a file cannot replace a directory). The directory
     # survives and no partial report is left in its place.
-    var parent = mkdtemp()
+    var parent = temp_root()
     var target = parent + "/report.xml"
     makedirs(target)  # target is now a DIRECTORY
-    var spool = mkdtemp()
+    var spool = open_junit_spool()
     var art = open_junit_artifact(spool, target)
     var rep = JunitReporter(art.spool_dir, True, art.target_path, art.temp_path)
     _drive_one_pass(rep, "e2e/suite/test_a.mojo")
@@ -141,7 +146,7 @@ def test_finalize_rename_onto_a_directory_leaves_the_target_intact() raises:
 
 
 def test_note_not_run_synthesizes_only_for_unspooled_files() raises:
-    var target = mkdtemp() + "/report.xml"
+    var target = temp_root() + "/report.xml"
     var rep = _active_reporter(target)
     # One file actually ran and spooled a real suite.
     _drive_one_pass(rep, "e2e/suite/ran.mojo")

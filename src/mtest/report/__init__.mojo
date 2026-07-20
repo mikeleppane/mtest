@@ -31,7 +31,10 @@ The surface:
   vendored junit-10 schema + arithmetic oracle.
 - `junit_reporter` — the stateful shell (`JunitReporter`, its `JunitStatus`):
   accumulates the typed event state, spools one `<testsuite>` fragment per
-  finished file, and assembles the full document from the spool.
+  finished file, and assembles the full document from the spool. It also owns
+  the destination helpers `main` calls at session start: `open_junit_spool`
+  (the run's private fragment directory) and `open_junit_artifact` (the temp
+  file whose creation proves the target directory writable).
 - `annotations` — the pure GitHub Actions annotations renderer
   (`render_annotations`): a run's events to node-id-sorted, capped, escaped
   `::error`/`::warning`/`::notice` workflow-command lines.
@@ -85,6 +88,7 @@ from mtest.report.junit_reporter import (
     JunitReporter,
     JunitStatus,
     open_junit_artifact,
+    open_junit_spool,
 )
 from mtest.report.annotations import render_annotations
 from mtest.report.annotations_reporter import AnnotationsReporter
