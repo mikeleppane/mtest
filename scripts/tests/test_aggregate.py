@@ -8,10 +8,13 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts import aggregate_tests
+from scripts.harness import aggregate
 
 
 class AggregateDiscoveryTests(unittest.TestCase):
+    def test_repository_root_tracks_the_nested_module_location(self) -> None:
+        self.assertEqual(aggregate.REPO_ROOT, Path(__file__).resolve().parents[2])
+
     def test_discovery_is_recursive_sorted_deduplicated_and_no_follow(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp)
@@ -25,7 +28,7 @@ class AggregateDiscoveryTests(unittest.TestCase):
             ignored.write_text("def test_no():\n    pass\n", encoding="utf-8")
             os.symlink(second.parent, tests / "unit" / "linked")
 
-            found = aggregate_tests.discover_test_files(
+            found = aggregate.discover_test_files(
                 repo, [tests / "unit", second.parent]
             )
 
@@ -44,7 +47,7 @@ class AggregateDiscoveryTests(unittest.TestCase):
             outside.mkdir()
 
             with self.assertRaisesRegex(ValueError, "must be tests/ or below"):
-                aggregate_tests.discover_test_files(repo, [outside])
+                aggregate.discover_test_files(repo, [outside])
 
     def test_empty_inventory_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -53,7 +56,7 @@ class AggregateDiscoveryTests(unittest.TestCase):
             root.mkdir(parents=True)
 
             with self.assertRaisesRegex(ValueError, "no test_\\*\\.mojo"):
-                aggregate_tests.discover_test_files(repo, [root])
+                aggregate.discover_test_files(repo, [root])
 
 
 class AggregateRenderingTests(unittest.TestCase):
@@ -64,24 +67,24 @@ class AggregateRenderingTests(unittest.TestCase):
             "def test_second(value: Int = 1) raises:\n    pass\n"
         )
         self.assertEqual(
-            aggregate_tests.test_function_names(source),
+            aggregate.test_function_names(source),
             ["test_first", "test_second"],
         )
 
         with self.assertRaisesRegex(ValueError, "must not define main"):
-            aggregate_tests.test_function_names(source + "\ndef main():\n    pass\n")
+            aggregate.test_function_names(source + "\ndef main():\n    pass\n")
 
     def test_entrypoint_imports_and_registers_each_module_in_order(self) -> None:
         modules = [
-            aggregate_tests.TestModule(
+            aggregate.TestModule(
                 Path("tests/integration/test_same.mojo"), ["test_beta"]
             ),
-            aggregate_tests.TestModule(
+            aggregate.TestModule(
                 Path("tests/unit/test_same.mojo"), ["test_alpha", "test_gamma"]
             ),
         ]
 
-        rendered = aggregate_tests.render_entrypoint(modules)
+        rendered = aggregate.render_entrypoint(modules)
 
         self.assertIn(
             "import tests.integration.test_same as _mtest_module_0",
@@ -106,12 +109,12 @@ class AggregateRenderingTests(unittest.TestCase):
         self.assertIn("suite_1^.run()", rendered)
 
     def test_invalid_mojo_module_path_is_rejected(self) -> None:
-        module = aggregate_tests.TestModule(
+        module = aggregate.TestModule(
             Path("tests/bad-directory/test_probe.mojo"), ["test_probe"]
         )
 
         with self.assertRaisesRegex(ValueError, "valid Mojo module path"):
-            aggregate_tests.render_entrypoint([module])
+            aggregate.render_entrypoint([module])
 
 
 if __name__ == "__main__":

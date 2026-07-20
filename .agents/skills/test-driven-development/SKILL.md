@@ -76,7 +76,7 @@ whether classified modules own `main()`, how their entrypoint is generated, or
 which inventory a lane runs MUST cover `test-direct`, `test-file`, ASan,
 Valgrind, self-host, and package consumption. A classified module is import-only
 in every lane: any consumer that executes one generates its entrypoint through
-`scripts/aggregate_tests.py`; none compiles the module path directly. Add a
+`scripts/harness/aggregate.py`; none compiles the module path directly. Add a
 harness regression that inspects each affected build command — a green primary
 test gate does not prove the specialized consumers use the same module contract.
 

@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 
-from scripts import aggregate_tests
+from scripts.harness import aggregate
 from scripts.checks import native_abi as native_abi_check
 
 
@@ -176,7 +176,7 @@ def compile_and_run_test(source: Path, env: dict[str, str]) -> None:
     """Build one Mojo suite from product sources and execute it directly."""
     binary = OUT / source.stem
     entrypoint = OUT / f"{source.stem}_main.mojo"
-    aggregate_tests.write_entrypoint(ROOT, entrypoint, [source])
+    aggregate.write_entrypoint(ROOT, entrypoint, [source])
     compiled = run(
         [
             "mojo",

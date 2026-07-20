@@ -44,7 +44,7 @@ python -m scripts.build.native
 mkdir -p build/tests
 aggregate_source=build/tests/aggregate_main.mojo
 aggregate_binary=build/tests/aggregate
-python -m scripts.aggregate_tests \
+python -m scripts.harness.aggregate \
     --output "$aggregate_source" "${normalized_roots[@]}"
 
 include=(
@@ -55,10 +55,10 @@ include=(
     -Xlinker build/native/mtest_exec_native_test.o
 )
 
-watchdog_command=(python -m scripts.process_watchdog)
+watchdog_command=(python -m scripts.harness.watchdog)
 if [[ -n "${MTEST_TEST_ALL_TIMEOUT_SECONDS:-}" ]]; then
     watchdog_command=(
-        python -m scripts.process_watchdog
+        python -m scripts.harness.watchdog
         --timeout-seconds "$MTEST_TEST_ALL_TIMEOUT_SECONDS"
     )
 fi

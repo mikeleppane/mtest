@@ -176,7 +176,7 @@ test-file = "bash scripts/test_all.sh"
 # Fast self-tests for repository harness behavior. Uses disposable test inputs
 # and a fake compiler to prove deterministic aggregate generation, one-build
 # execution, timeout handling, and exact hosted-CI topology.
-harness-check = "python -m scripts.aggregate_tests_test && python -m scripts.tests.test_format && python -m scripts.self_host_check_test && python -m scripts.harness_check_test && python -m scripts.harness_check"
+harness-check = "python -m scripts.tests.test_aggregate && python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_format && python -m scripts.tests.test_dogfood && python -m scripts.harness_check_test && python -m scripts.harness_check"
 
 # DOGFOOD gate: run three focused executable probes through the built mtest
 # binary. This exercises mtest's real discover/build/run/parse/report path and
@@ -185,7 +185,7 @@ harness-check = "python -m scripts.aggregate_tests_test && python -m scripts.tes
 # all source files separately here would duplicate compiler work without adding
 # behavioral coverage.
 [tasks.test]
-cmd = "python -m scripts.self_host_check"
+cmd = "python -m scripts.harness.dogfood"
 depends-on = ["build-bin"]
 
 # End-to-end gate: build the runnable binary, then drive it against the committed

@@ -10,10 +10,10 @@ import tempfile
 import unittest
 from unittest import mock
 
-from scripts import aggregate_tests
 from scripts import e2e_check
 from scripts import harness_check
 from scripts.fixtures.toolchain import fake_retry_crash_mojo
+from scripts.harness import aggregate
 
 
 class AggregateMembershipOracleTests(unittest.TestCase):
@@ -34,7 +34,7 @@ class AggregateMembershipOracleTests(unittest.TestCase):
             paths = self._fixture(repo)
 
             with mock.patch.object(
-                aggregate_tests,
+                aggregate,
                 "test_function_names",
                 return_value=["test_wrong_a", "test_wrong_b"],
             ):
@@ -56,7 +56,7 @@ class AggregateMembershipOracleTests(unittest.TestCase):
             paths = self._fixture(repo)
 
             with mock.patch.object(
-                aggregate_tests,
+                aggregate,
                 "test_function_names",
                 return_value=["test_alpha", "test_gamma"],
             ):
@@ -73,7 +73,7 @@ class AggregateMembershipOracleTests(unittest.TestCase):
             paths = self._fixture(repo)
 
             with mock.patch.object(
-                aggregate_tests,
+                aggregate,
                 "test_function_names",
                 return_value=["test_beta", "test_alpha"],
             ):

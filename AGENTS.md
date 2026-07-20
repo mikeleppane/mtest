@@ -209,7 +209,7 @@ cells first pass.
 
 Classified modules under `tests/unit/` and `tests/integration/` are import-only:
 they declare `test_*` functions and MUST NOT declare `main()`. The generator
-`scripts/aggregate_tests.py` imports those modules and registers every test
+`scripts/harness/aggregate.py` imports those modules and registers every test
 function explicitly, failing if a module has no tests or retains an entrypoint.
 Every harness that executes a classified module, including `test-file`, ASan,
 and Valgrind, generates an entrypoint through that script; compiling the module

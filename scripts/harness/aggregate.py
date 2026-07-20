@@ -11,7 +11,7 @@ import re
 import sys
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 TEST_DEF_RE = re.compile(r"(?m)^def (test_[A-Za-z0-9_]+)\s*\(")
 MAIN_DEF_RE = re.compile(r"(?m)^def main\s*\(")
 MODULE_PART_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -101,7 +101,7 @@ def _module_name(path: Path) -> str:
 def render_entrypoint(modules: list[TestModule]) -> str:
     """Render an aggregate executable with one explicit TestSuite per module."""
     lines = [
-        '"""Generated aggregate runner; edit scripts/aggregate_tests.py."""',
+        '"""Generated aggregate runner; edit scripts/harness/aggregate.py."""',
         "",
         "from std.testing import TestSuite",
         "",

@@ -12,12 +12,12 @@ import sys
 import tempfile
 import time
 
-from scripts.process_watchdog import TIMEOUT_EXIT_CODE, run_command
+from scripts.harness.watchdog import TIMEOUT_EXIT_CODE, run_command
 
 
 PYTHON = sys.executable
-REPO_ROOT = Path(__file__).resolve().parent.parent
-WATCHDOG_COMMAND = [PYTHON, "-m", "scripts.process_watchdog"]
+REPO_ROOT = Path(__file__).resolve().parents[2]
+WATCHDOG_COMMAND = [PYTHON, "-m", "scripts.harness.watchdog"]
 
 
 def _wait_for_paths(paths: tuple[Path, ...], timeout_seconds: float = 3.0) -> None:
@@ -117,7 +117,7 @@ def test_inherited_blocked_sigterm_is_preserved() -> None:
             "-c",
             launcher,
             "-m",
-            "scripts.process_watchdog",
+            "scripts.harness.watchdog",
             "--source",
             "tests/unit/test_watchdog.mojo",
             "--step",
@@ -472,7 +472,7 @@ def test_cancellation_wins_when_spawn_then_raises() -> None:
                     "import signal",
                     "import sys",
                     "sys.path.insert(0, sys.argv[1])",
-                    "from scripts import process_watchdog as watchdog",
+                    "from scripts.harness import watchdog",
                     "def cancelled_spawn(*_args, **_kwargs):",
                     "    os.kill(os.getpid(), signal.SIGTERM)",
                     "    raise FileNotFoundError('injected spawn failure')",

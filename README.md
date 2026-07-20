@@ -1101,7 +1101,7 @@ PASS           tests/dogfood/model_probe.mojo
 PASS           tests/dogfood/session_probe.mojo
 
 ===== 3 passed, 0 failed, 0 skipped (0 excluded, 0 not run) =====
-self_host_check: OK -- selected and passed all 3 focused dogfood probes
+dogfood: OK -- selected and passed all 3 focused dogfood probes
 ```
 
 `pixi run ci` also keeps two independent product-level oracles:

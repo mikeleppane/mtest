@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one direct-test command with a bounded process-group lifetime."""
+"""Supervise one direct command with a bounded process-group lifetime."""
 
 from __future__ import annotations
 

@@ -28,7 +28,7 @@ toolchain. This script is that proof, run in five ordered stages:
   4. Toolchain-threaded dogfood run: three focused executable probes, run
      through the INSTALLED binary (never `build/mtest`). Unlike stage 3, this
      stage does NOT scrub the environment -- the probes' compiler children need
-     `mojo` on PATH. Reuses self_host_check's exact-membership gate,
+     `mojo` on PATH. Reuses dogfood's exact-membership gate,
      parameterized onto the installed binary.
   5. Tarball fallback smoke-run: build the SAME recipe in the classic tar-bz2
      package format into its own local channel, install it into a second
@@ -53,7 +53,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts import self_host_check
+from scripts.harness import dogfood
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PIXI_TOML = REPO_ROOT / "pixi.toml"
@@ -84,7 +84,7 @@ CONDA_FORGE_CHANNEL = "conda-forge"
 # Artifacts stage 4 needs from THIS repo checkout (not from the isolated
 # rattler-build sandbox): the precompiled package the probes import against,
 # and the test-variant native object linked into each probe build -- the exact
-# pair scripts/self_host_check.py uses for `pixi run test`.
+# pair scripts/harness/dogfood.py uses for `pixi run test`.
 MOJOPKG_INCLUDE_DIR = REPO_ROOT / "build"
 NATIVE_TEST_OBJECT = REPO_ROOT / "build" / "native" / "mtest_exec_native_test.o"
 
@@ -312,7 +312,7 @@ def stage_suite_run_with_installed_binary(mtest_bin: Path) -> None:
     The environment is fully inherited (unlike stage 3) so probe compiler
     children can resolve `mojo` on PATH.
 
-    Reuses self_host_check's dogfood-and-verify-completeness gate, which
+    Reuses dogfood's membership-and-completeness gate, which
     itself defaults to build/mtest for `pixi run test` -- here it is
     parameterized onto the installed binary instead.
     """
@@ -328,14 +328,14 @@ def stage_suite_run_with_installed_binary(mtest_bin: Path) -> None:
             "(the package-check pixi task depends on it)"
         )
 
-    code = self_host_check.verify(
+    code = dogfood.verify(
         str(mtest_bin),
         str(NATIVE_TEST_OBJECT),
     )
     if code != 0:
         raise PackageCheckError(
             "the installed binary did not drive the dogfood probes green "
-            "(see self_host_check output above)"
+            "(see dogfood output above)"
         )
 
 

@@ -21,10 +21,10 @@ import sys
 import tempfile
 import tomllib
 
-from scripts import aggregate_tests
 from scripts import e2e_check
 from scripts.checks import format as format_check
-from scripts import self_host_check
+from scripts.harness import aggregate
+from scripts.harness import dogfood
 from scripts.transcript_compare import compare_directories
 
 
@@ -563,7 +563,7 @@ out.chmod(out.stat().st_mode | stat.S_IXUSR)
 def check_process_watchdog() -> None:
     """The direct-suite watchdog keeps ordinary exits and bounds hangs."""
     result = subprocess.run(
-        [sys.executable, "-m", "scripts.process_watchdog_test"],
+        [sys.executable, "-m", "scripts.tests.test_process_watchdog"],
         cwd=REPO_ROOT,
         text=True,
         stdout=subprocess.PIPE,
@@ -815,7 +815,7 @@ def check_direct_runner_spawn_failure_is_not_a_timeout() -> None:
 
 
 def _independent_test_function_names(source: str) -> tuple[str, ...]:
-    """Parse top-level test declarations without aggregate_tests helpers."""
+    """Parse top-level test declarations without aggregate helpers."""
     names: list[str] = []
     for line in source.splitlines():
         if not line.startswith("def "):
@@ -871,8 +871,8 @@ def check_classified_entrypoint(
             f"expected={expected_count}, actual={len(expected_membership)}"
         )
 
-    modules = aggregate_tests.load_modules(repo_root, [Path(path) for path in paths])
-    generated_lines = aggregate_tests.render_entrypoint(modules).splitlines()
+    modules = aggregate.load_modules(repo_root, [Path(path) for path in paths])
+    generated_lines = aggregate.render_entrypoint(modules).splitlines()
     expected_imports = [
         f"import {path.removesuffix('.mojo').replace('/', '.')} "
         f"as _mtest_module_{index}"
@@ -950,7 +950,7 @@ def check_suite_layout() -> None:
             "tests/ contains a test module outside unit/integration: "
             f"{sorted(str(path) for path in all_suites - classified)}"
         )
-    discovered = aggregate_tests.discover_test_files(
+    discovered = aggregate.discover_test_files(
         REPO_ROOT,
         [Path("tests/unit"), Path("tests/integration")],
     )
@@ -971,11 +971,11 @@ def check_suite_layout() -> None:
     for relative in sorted(classified, key=lambda path: os.fsencode(str(path))):
         source = (tests_dir / relative).read_text(encoding="utf-8")
         try:
-            aggregate_tests.test_function_names(source)
+            aggregate.test_function_names(source)
         except ValueError as exc:
             raise AssertionError(f"invalid aggregate module {relative}: {exc}") from exc
     try:
-        self_host_check.dogfood_test_files(REPO_ROOT)
+        dogfood.dogfood_test_files(REPO_ROOT)
     except RuntimeError as exc:
         raise AssertionError(str(exc)) from exc
     actual_support = {

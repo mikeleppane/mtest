@@ -8,7 +8,7 @@ coverage of mtest's discover/build/run/parse/report path without asking mtest
 to compile the exhaustive suite one source file at a time.
 
 Usage:  pixi run test
-        python -m scripts.self_host_check
+        python -m scripts.harness.dogfood
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import sys
 import time
 
 
-REPO_ROOT_PATH = Path(__file__).resolve().parent.parent
+REPO_ROOT_PATH = Path(__file__).resolve().parents[2]
 REPO_ROOT = str(REPO_ROOT_PATH)
 MTEST = str(REPO_ROOT_PATH / "build" / "mtest")
 NATIVE_OBJECT = str(
@@ -106,7 +106,7 @@ def run_mtest_over_own_suite(
     """Run focused probes through mtest, streaming and capturing its output."""
     if not os.path.exists(mtest_path):
         print(
-            f"FATAL: self_host_check: binary not found at {mtest_path}; "
+            f"FATAL: dogfood: binary not found at {mtest_path}; "
             "run `pixi run build-bin`",
             file=sys.stderr,
         )
@@ -133,7 +133,7 @@ def run_mtest_over_own_suite(
             _kill_group(proc)
             proc.wait(timeout=5)
             print(
-                f"FATAL: self_host_check: `{' '.join(argv)}` did not finish "
+                f"FATAL: dogfood: `{' '.join(argv)}` did not finish "
                 f"within {TIMEOUT_SECONDS:.0f}s -- killed its process group "
                 "(possible runner hang)",
                 file=sys.stderr,
@@ -170,14 +170,14 @@ def verify(
     try:
         disk_files = dogfood_test_files()
     except RuntimeError as exc:
-        print(f"FATAL: self_host_check: {exc}", file=sys.stderr)
+        print(f"FATAL: dogfood: {exc}", file=sys.stderr)
         return 1
 
     code, output = run_mtest_over_own_suite(mtest_path, native_object)
     match = HEADER_RE.search(output)
     if match is None:
         print(
-            "FATAL: self_host_check: no 'selected: N files ... excluded: M "
+            "FATAL: dogfood: no 'selected: N files ... excluded: M "
             "files' header found in mtest's output -- cannot verify completeness",
             file=sys.stderr,
         )
@@ -189,14 +189,14 @@ def verify(
     ok = True
     if code != 0:
         print(
-            f"FATAL: self_host_check: mtest exited {code} running focused "
+            f"FATAL: dogfood: mtest exited {code} running focused "
             "dogfood probes (must be 0)",
             file=sys.stderr,
         )
         ok = False
     if selected != len(disk_files) or excluded != 0:
         print(
-            "FATAL: self_host_check: completeness mismatch -- "
+            "FATAL: dogfood: completeness mismatch -- "
             f"selected={selected}, excluded={excluded}, "
             f"declared probes={disk_files}",
             file=sys.stderr,
@@ -204,7 +204,7 @@ def verify(
         ok = False
     if reported_files != disk_files:
         print(
-            "FATAL: self_host_check: exact path membership mismatch -- "
+            "FATAL: dogfood: exact path membership mismatch -- "
             f"mtest PASS rows named {reported_files}, declared probes are {disk_files}",
             file=sys.stderr,
         )
@@ -213,7 +213,7 @@ def verify(
         return 1
 
     print(
-        f"self_host_check: OK -- mtest ({mtest_path}) selected and passed "
+        f"dogfood: OK -- mtest ({mtest_path}) selected and passed "
         f"all {len(disk_files)} focused dogfood probes; exact paths match"
     )
     return 0
