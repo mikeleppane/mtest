@@ -1296,7 +1296,7 @@ Individually:
 | `pixi run build` | precompile `src/mtest` to `build/mtest.mojopkg` — the compile gate |
 | `pixi run build-bin` | link the runnable binary at `build/mtest` from `src/main.mojo` |
 | `pixi run ci-preflight` | run the exact ten-step static/build/transcript barrier used by Linux hosted CI |
-| `pixi run harness-check` | fast self-tests for deterministic aggregate generation, focused dogfood membership, watchdog behavior, and exact CI topology |
+| `pixi run harness-check` | serial focused owners for aggregate generation, classified supervision, repository layout, dogfood membership, and exact CI topology |
 | `pixi run safety-check` | mutation-test and run the unsafe-Mojo inventory; enforces adjacent `# SAFETY:` proofs, but does not establish that those proofs are true |
 | `pixi run postfork-check` | mutation-test the Clang AST auditor, traverse the complete production/testing child call graphs, and require the exact reviewed platform-call set; proves allowlist conformance, not syscall correctness |
 | `pixi run native-check` | run `postfork-check`, strict C17 ABI/layout/export checks, and native lifecycle/fault tests; does not replace dynamic analysis |

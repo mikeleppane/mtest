@@ -3,17 +3,39 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
-from scripts import e2e_check
-from scripts import harness_check
-from scripts.fixtures.toolchain import fake_retry_crash_mojo
+from scripts.checks import layout
 from scripts.harness import aggregate
+
+
+class LayoutInventoryPolicyTests(unittest.TestCase):
+    def test_repository_root_tracks_the_nested_checker(self) -> None:
+        self.assertEqual(layout.REPO_ROOT, Path(__file__).resolve().parents[2])
+
+    def test_every_intended_inventory_fails_closed_when_empty(self) -> None:
+        cases = (
+            ("UNIT_SUITES", layout.check_suite_layout),
+            ("INTEGRATION_SUITES", layout.check_suite_layout),
+            ("CLASSIFIED_PATHS", layout.check_suite_layout),
+            ("SUPPORT_MODULES", layout.check_suite_layout),
+            ("EXEC_FIXTURES", layout.check_exec_fixture_layout),
+            ("E2E_NATIVE_FIXTURES", layout.check_e2e_native_fixture_layout),
+            ("PROTOCOL_FIXTURES", layout.check_protocol_asset_layout),
+            ("E2E_SCENARIO_NAMES", layout.check_e2e_layout),
+            ("BUILD_SOURCE_PATHS", layout.check_build_source_visibility),
+        )
+        for name, check in cases:
+            with self.subTest(inventory=name):
+                with mock.patch.object(layout, name, ()):
+                    with self.assertRaisesRegex(
+                        AssertionError, "intended inventory is empty"
+                    ):
+                        check()
 
 
 class AggregateMembershipOracleTests(unittest.TestCase):
@@ -38,7 +60,7 @@ class AggregateMembershipOracleTests(unittest.TestCase):
                 "test_function_names",
                 return_value=["test_wrong_a", "test_wrong_b"],
             ):
-                membership = harness_check.independent_registration_membership(
+                membership = layout.independent_registration_membership(
                     repo, paths
                 )
 
@@ -63,7 +85,7 @@ class AggregateMembershipOracleTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     AssertionError, "registration membership/order"
                 ):
-                    harness_check.check_classified_entrypoint(
+                    layout.check_classified_entrypoint(
                         repo, paths, expected_count=2
                     )
 
@@ -80,7 +102,7 @@ class AggregateMembershipOracleTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     AssertionError, "registration membership/order"
                 ):
-                    harness_check.check_classified_entrypoint(
+                    layout.check_classified_entrypoint(
                         repo, paths, expected_count=2
                     )
 
@@ -97,7 +119,7 @@ class DirectInvocationPolicyTests(unittest.TestCase):
         for form in forms:
             with self.subTest(form=form):
                 self.assertTrue(
-                    harness_check.direct_script_invocations(
+                    layout.direct_script_invocations(
                         Path("README.md"), form
                     )
                 )
@@ -112,7 +134,7 @@ class DirectInvocationPolicyTests(unittest.TestCase):
         )
 
         self.assertTrue(
-            harness_check.direct_script_invocations(
+            layout.direct_script_invocations(
                 Path("scripts/caller.py"), source
             )
         )
@@ -134,12 +156,12 @@ class DirectInvocationPolicyTests(unittest.TestCase):
         for path, contents in cases:
             with self.subTest(path=path):
                 self.assertTrue(
-                    harness_check.direct_script_invocations(path, contents)
+                    layout.direct_script_invocations(path, contents)
                 )
 
     def test_module_invocation_is_accepted(self) -> None:
         self.assertFalse(
-            harness_check.direct_script_invocations(
+            layout.direct_script_invocations(
                 Path("README.md"), "python -u -m scripts.probe"
             )
         )
@@ -155,8 +177,8 @@ class DirectInvocationPolicyTests(unittest.TestCase):
                 f"python -u {self.SCRIPT_PATH}\n", encoding="utf-8"
             )
 
-            files = harness_check.live_command_files(repo)
-            violations = harness_check.live_direct_invocations(repo)
+            files = layout.live_command_files(repo)
+            violations = layout.live_direct_invocations(repo)
 
         self.assertEqual(files, (Path("README.md"),))
         self.assertEqual(violations, ())
@@ -186,8 +208,8 @@ class DirectInvocationPolicyTests(unittest.TestCase):
                     command = "# " + command
                 path.write_text(command + f" # {index}\n", encoding="utf-8")
 
-            files = harness_check.live_command_files(repo)
-            violations = harness_check.live_direct_invocations(repo)
+            files = layout.live_command_files(repo)
+            violations = layout.live_direct_invocations(repo)
 
         self.assertEqual(set(files), set(relative_paths))
         self.assertEqual(
@@ -200,7 +222,7 @@ class BuildSourceVisibilityTests(unittest.TestCase):
     def _repo(self, root: Path, ignore_rule: str) -> None:
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         (root / ".gitignore").write_text(ignore_rule + "\n", encoding="utf-8")
-        for relative in harness_check.BUILD_SOURCE_PATHS:
+        for relative in layout.BUILD_SOURCE_PATHS:
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("# fixture\n", encoding="utf-8")
@@ -211,7 +233,7 @@ class BuildSourceVisibilityTests(unittest.TestCase):
             self._repo(repo, "build/")
 
             with self.assertRaisesRegex(AssertionError, "ignored"):
-                harness_check.check_build_source_visibility(repo)
+                layout.check_build_source_visibility(repo)
 
     def test_untracked_build_source_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -222,42 +244,8 @@ class BuildSourceVisibilityTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(AssertionError, "untracked"):
-                harness_check.check_build_source_visibility(repo)
+                layout.check_build_source_visibility(repo)
 
-
-class ToolchainFixturePathTests(unittest.TestCase):
-    def test_e2e_paths_and_retry_marker_are_repository_anchored(self) -> None:
-        root = Path(__file__).resolve().parent.parent
-        fixture_root = root / "scripts" / "fixtures" / "toolchain"
-        self.assertEqual(
-            (
-                Path(e2e_check.LOGGING_MOJO),
-                Path(e2e_check.FAKE_SLOW_MOJO),
-                Path(e2e_check.FAKE_CRASH_MOJO),
-                Path(e2e_check.FAKE_RETRY_CRASH_MOJO),
-            ),
-            (
-                fixture_root / "logging_mojo.py",
-                fixture_root / "fake_slow_mojo.py",
-                fixture_root / "fake_crash_mojo.py",
-                fixture_root / "fake_retry_crash_mojo.py",
-            ),
-        )
-        self.assertEqual(Path(fake_retry_crash_mojo.REPO_ROOT), root)
-        self.assertEqual(
-            Path(fake_retry_crash_mojo.MARKER),
-            root / "build" / "e2e-scratch" / "retry_crash_build_marker",
-        )
-
-    def test_toolchain_fixtures_remain_executable(self) -> None:
-        for fixture in (
-            e2e_check.LOGGING_MOJO,
-            e2e_check.FAKE_SLOW_MOJO,
-            e2e_check.FAKE_CRASH_MOJO,
-            e2e_check.FAKE_RETRY_CRASH_MOJO,
-        ):
-            with self.subTest(fixture=fixture):
-                self.assertTrue(os.access(fixture, os.X_OK))
 
 if __name__ == "__main__":
     unittest.main()

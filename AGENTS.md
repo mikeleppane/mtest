@@ -614,7 +614,7 @@ Accumulated the hard way; append as later phases teach more.
   gate's REAL exit as its own statement (`cmd; echo "x=$?"`) — a trailing
   pipe/echo silently reports 0 even when the gate itself failed.
 - **The harness gates enforce explicit membership, not just presence.**
-  `scripts/harness_check.py` pins exact suite/fixture sets (`UNIT_SUITES`,
+  `scripts/checks/layout.py` pins exact suite/fixture sets (`UNIT_SUITES`,
   `INTEGRATION_SUITES`, `PROTOCOL_FIXTURES`) and exact counts (22 protocol
   snapshots, 29 e2e fixtures); a new `tests/unit/*.mojo`,
   `tests/integration/*.mojo`, snapshot, or `e2e/**/test_*.mojo` that isn't
