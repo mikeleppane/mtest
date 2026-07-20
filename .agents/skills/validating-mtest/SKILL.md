@@ -46,13 +46,13 @@ drift (`pixi run transcripts-check`).
 ## Quick start — run the oracle
 
 ```bash
-python -m scripts.validate_contract            # rebuild-if-stale, run all ~55 checks
-python -m scripts.validate_contract -k select  # filter by check name
-python -m scripts.validate_contract --strict   # a SKIP of a safety-critical check FAILS
-python -m scripts.validate_contract -v --keep  # dump streams on failure, keep scaffold
+pixi run contract-check --                 # rebuild-if-stale, run all ~55 checks
+pixi run contract-check -- -k select       # filter by check name
+pixi run contract-check -- --strict        # safety-critical SKIP fails
+pixi run contract-check -- -v --keep       # dump streams, keep scaffold
 ```
 
-`scripts/validate_contract.py` (Python lives under `scripts/`, per AGENTS.md)
+`scripts/qa/contract.py` (Python lives under `scripts/`, per AGENTS.md)
 scaffolds a throwaway user project — a library, clean all-pass suites with a
 **known exact node-id set**, and **poison** files — outside the repo, then drives
 `build/mtest` across the contract matrix, printing PASS/FAIL per check tagged
@@ -112,7 +112,7 @@ against a stale binary proves nothing.
 
 ## Validation matrix (what the oracle asserts)
 
-Every row below is a check in `validate_contract.py` unless marked *(manual)*.
+Every row below is a check in `scripts/qa/contract.py` unless marked *(manual)*.
 
 | Area | Assertion (frozen-surface / poison) | §|
 |------|--------|--|

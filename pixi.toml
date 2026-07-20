@@ -162,6 +162,13 @@ transcripts = "python -m scripts.gen_transcripts"
 # diff after a mojo re-pin is the protocol changelog. Hermetic.
 transcripts-check = "bash scripts/transcripts_check.sh"
 
+# Manually run the exhaustive CLI contract oracle against an external throwaway
+# project. This intentionally remains outside ci/ci-preflight and hosted CI: the
+# committed E2E corpus owns the ordinary gate, while this task is release QA.
+# Pixi forwards arguments after `--`, for example:
+# `pixi run contract-check -- --strict`.
+contract-check = "python -m scripts.qa.contract"
+
 # The INDEPENDENT exhaustive gate: generates one explicit entrypoint for every
 # unit/integration test function, builds it once, and executes that aggregate
 # binary directly with no mtest involved. `mojo run` never appears in the gate
@@ -176,7 +183,7 @@ test-file = "python -m scripts.harness.classified"
 # Fast self-tests for repository harness behavior. Uses disposable test inputs
 # and a fake compiler to prove deterministic aggregate generation, one-build
 # execution, timeout handling, and exact hosted-CI topology.
-harness-check = "python -m scripts.tests.test_aggregate && python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_format && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_classified && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_ci_topology && python -m scripts.checks.ci_topology"
+harness-check = "python -m scripts.tests.test_aggregate && python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_format && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_classified && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_contract && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_ci_topology && python -m scripts.checks.ci_topology"
 
 # DOGFOOD gate: run three focused executable probes through the built mtest
 # binary. This exercises mtest's real discover/build/run/parse/report path and

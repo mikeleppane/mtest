@@ -18,6 +18,7 @@ HARNESS_CHECK_MODULES = (
     "scripts.tests.test_classified",
     "scripts.tests.test_e2e",
     "scripts.tests.test_e2e_json",
+    "scripts.tests.test_contract",
     "scripts.tests.test_transcript_compare",
     "scripts.tests.test_layout",
     "scripts.checks.layout",
