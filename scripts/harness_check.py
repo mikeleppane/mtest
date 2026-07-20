@@ -1782,11 +1782,12 @@ def check_ci_task_graph() -> None:
         )
     exact_safety_tasks = {
         "asan-check": (
-            "python -m scripts.asan_check_test && python -m scripts.asan_check"
+            "python -m scripts.tests.test_asan && "
+            "python -m scripts.checks.memory.asan"
         ),
         "valgrind-check": (
-            "python -m scripts.valgrind_check_test && "
-            "python -m scripts.valgrind_check"
+            "python -m scripts.tests.test_valgrind && "
+            "python -m scripts.checks.memory.valgrind"
         ),
     }
     for name, command in exact_safety_tasks.items():

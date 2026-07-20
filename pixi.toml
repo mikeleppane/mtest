@@ -122,7 +122,7 @@ native-check = { cmd = "python -m scripts.tests.test_native && python -m scripts
 # Source-build the native adapter and a risk-weighted exec subset with matching
 # AddressSanitizer instrumentation. Live OOB/UAF/leak controls prove that both
 # the compiler instrumentation and fail-closed harness remain effective.
-asan-check = "python -m scripts.asan_check_test && python -m scripts.asan_check"
+asan-check = "python -m scripts.tests.test_asan && python -m scripts.checks.memory.asan"
 
 # Source-build every exec integration suite with debug information and run it
 # under the locked Linux-only Memcheck binary. Undefined-value, invalid-access,
@@ -132,7 +132,7 @@ asan-check = "python -m scripts.asan_check_test && python -m scripts.asan_check"
 # for the exact debug-symbol version matching the runner's preinstalled glibc;
 # no other source/test/memory step has that exception, and this task is not
 # hermetic. The independent package job has its own external-channel contract.
-valgrind-check = "python -m scripts.valgrind_check_test && python -m scripts.valgrind_check"
+valgrind-check = "python -m scripts.tests.test_valgrind && python -m scripts.checks.memory.valgrind"
 
 # Gate the JUnit report tooling ahead of the renderer that will use it: recorded
 # unit tests first prove the checker actually rejects a broken artifact, then

@@ -14,7 +14,7 @@ from scripts import aggregate_tests
 from scripts.checks import native_abi as native_abi_check
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[3]
 OUT = ROOT / "build" / "safety" / "asan"
 NATIVE_SOURCE = ROOT / "native" / "mtest_exec_native.c"
 NATIVE_PRODUCTION_OBJECT = OUT / "mtest_exec_native.o"
@@ -221,6 +221,7 @@ def compile_and_run_test(source: Path, env: dict[str, str]) -> None:
 
 def main() -> int:
     """Run live controls followed by the source-built exec risk subset."""
+    require(bool(TESTS), "source inventory is empty")
     if OUT.exists():
         shutil.rmtree(OUT)
     OUT.mkdir(parents=True)

@@ -9,10 +9,37 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts import valgrind_check
+from scripts.checks.memory import valgrind as valgrind_check
 
 
 class ValgrindCheckTests(unittest.TestCase):
+    def test_repository_root_is_exact(self) -> None:
+        self.assertEqual(valgrind_check.ROOT, Path(__file__).resolve().parents[2])
+
+    def test_scanned_roots_are_exact(self) -> None:
+        self.assertEqual(
+            valgrind_check.EXEC_TEST_ROOT.relative_to(valgrind_check.ROOT).as_posix(),
+            "tests/integration",
+        )
+        self.assertEqual(
+            valgrind_check.CONFIG_TEST.relative_to(valgrind_check.ROOT).as_posix(),
+            "tests/unit/test_config.mojo",
+        )
+
+    def test_source_inventories_are_nonempty(self) -> None:
+        self.assertGreater(len(valgrind_check.NATIVE_TESTS), 0)
+        self.assertGreater(len(valgrind_check.TESTS), 0)
+
+    def test_empty_native_source_inventory_is_rejected(self) -> None:
+        with patch.object(valgrind_check, "NATIVE_TESTS", ()):
+            with self.assertRaisesRegex(SystemExit, "native source inventory is empty"):
+                valgrind_check.main()
+
+    def test_empty_mojo_source_inventory_is_rejected(self) -> None:
+        with patch.object(valgrind_check, "TESTS", ()):
+            with self.assertRaisesRegex(SystemExit, "Mojo source inventory is empty"):
+                valgrind_check.main()
+
     def test_classified_suite_builds_generated_entrypoint(self) -> None:
         source = valgrind_check.ROOT / "tests" / "unit" / "test_config.mojo"
         completed = subprocess.CompletedProcess(

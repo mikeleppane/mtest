@@ -9,10 +9,33 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts import asan_check
+from scripts.checks.memory import asan as asan_check
 
 
 class AsanCheckTests(unittest.TestCase):
+    def test_repository_root_is_exact(self) -> None:
+        self.assertEqual(asan_check.ROOT, Path(__file__).resolve().parents[2])
+
+    def test_source_inventory_is_nonempty_and_exact(self) -> None:
+        self.assertEqual(
+            tuple(path.relative_to(asan_check.ROOT).as_posix() for path in asan_check.TESTS),
+            (
+                "tests/integration/test_exec_capture.mojo",
+                "tests/integration/test_exec_flood.mojo",
+                "tests/integration/test_exec_timeout.mojo",
+                "tests/integration/test_exec_interrupt.mojo",
+                "tests/integration/test_exec_etxtbsy.mojo",
+                "tests/integration/test_exec_reap.mojo",
+                "tests/integration/test_exec_fdhygiene.mojo",
+            ),
+        )
+        self.assertGreater(len(asan_check.TESTS), 0)
+
+    def test_empty_source_inventory_is_rejected(self) -> None:
+        with patch.object(asan_check, "TESTS", ()):
+            with self.assertRaisesRegex(SystemExit, "source inventory is empty"):
+                asan_check.main()
+
     def test_classified_suite_builds_generated_entrypoint(self) -> None:
         source = asan_check.ROOT / "tests" / "unit" / "test_config.mojo"
         expected = asan_check.test_count(source)

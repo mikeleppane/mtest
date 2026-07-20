@@ -14,7 +14,7 @@ from scripts import aggregate_tests
 from scripts.checks import native_abi as native_abi_check
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[3]
 OUT = ROOT / "build" / "safety" / "valgrind"
 TEST_SCRATCH = ROOT / "build" / "tests"
 NATIVE_SOURCE = ROOT / "native" / "mtest_exec_native.c"
@@ -28,9 +28,9 @@ NATIVE_TESTS = (
         "signal-transaction: OK",
     ),
 )
-TESTS = tuple(sorted((ROOT / "tests" / "integration").glob("test_exec_*.mojo"))) + (
-    ROOT / "tests" / "unit" / "test_config.mojo",
-)
+EXEC_TEST_ROOT = ROOT / "tests" / "integration"
+CONFIG_TEST = ROOT / "tests" / "unit" / "test_config.mojo"
+TESTS = tuple(sorted(EXEC_TEST_ROOT.glob("test_exec_*.mojo"))) + (CONFIG_TEST,)
 VALGRIND_FLAGS = (
     "--tool=memcheck",
     "--leak-check=full",
@@ -378,6 +378,8 @@ def compile_and_run_test(source: Path, env: dict[str, str]) -> None:
 
 def main() -> int:
     """Run negative controls, then every exec suite and lossy-UTF8 coverage."""
+    require(bool(NATIVE_TESTS), "native source inventory is empty")
+    require(bool(TESTS), "Mojo source inventory is empty")
     if OUT.exists():
         shutil.rmtree(OUT)
     OUT.mkdir(parents=True)
