@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -398,6 +399,43 @@ MACOS_MATRIX_ROWS = [
     },
 ]
 
+LIVE_COMMAND_FIXED_PATHS = (
+    Path("README.md"),
+    Path("AGENTS.md"),
+    Path("pixi.toml"),
+    Path("notes/console-captures/README.md"),
+)
+LIVE_COMMAND_GLOBS = (
+    "scripts/**/*.py",
+    "scripts/**/*.sh",
+    "src/**/*.mojo",
+    "tests/**/*.mojo",
+    "tests/**/*.py",
+    "tests/**/*.sh",
+    "e2e/**/*.mojo",
+    "e2e/**/*.py",
+    "e2e/**/*.sh",
+    "native/**/*.c",
+    "native/**/*.h",
+    ".github/workflows/**/*.yml",
+    ".github/workflows/**/*.yaml",
+    "recipe/**/*",
+    ".agents/skills/**/SKILL.md",
+)
+PYTHON_EXECUTABLE_RE = re.compile(r"python(?:\d+(?:\.\d+)*)?")
+DIRECT_SCRIPT_RE = re.compile(r"scripts/[A-Za-z0-9_./-]+\.py")
+REGISTRATION_RE = re.compile(
+    r"^    suite_(\d+)\.test\[_mtest_module_(\d+)\."
+    r"(test_[A-Za-z0-9_]+)\]\(\)$"
+)
+README_SCAN_EXCLUDED_DIRS = {
+    ".git",
+    ".pixi",
+    ".superpowers",
+    "build",
+    "notes",
+}
+
 
 def _write_executable(path: Path, source: str) -> None:
     path.write_text(source, encoding="utf-8")
@@ -770,6 +808,109 @@ def check_direct_runner_spawn_failure_is_not_a_timeout() -> None:
             raise AssertionError(f"spawn failure removed its {step} deadline sentinel")
 
 
+def _independent_test_function_names(source: str) -> tuple[str, ...]:
+    """Parse top-level test declarations without aggregate_tests helpers."""
+    names: list[str] = []
+    for line in source.splitlines():
+        if not line.startswith("def "):
+            continue
+        declaration = line.removeprefix("def ")
+        opening = declaration.find("(")
+        if opening == -1:
+            continue
+        prefix = declaration[:opening]
+        name = prefix.rstrip()
+        if prefix[len(name) :] and not prefix[len(name) :].isspace():
+            continue
+        if not name.startswith("test_") or len(name) == len("test_"):
+            continue
+        if not name or any(
+            not (character.isascii() and (character.isalnum() or character == "_"))
+            for character in name
+        ):
+            continue
+        names.append(name)
+    if not names:
+        raise AssertionError("independent oracle found no test_* functions")
+    if len(names) != len(set(names)):
+        raise AssertionError("independent oracle found duplicate test function names")
+    return tuple(names)
+
+
+def independent_registration_membership(
+    repo_root: Path, paths: tuple[str, ...]
+) -> tuple[tuple[str, str], ...]:
+    """Return ordered path/function membership from an independent source parser."""
+    membership: list[tuple[str, str]] = []
+    for relative in paths:
+        source = (repo_root / relative).read_text(encoding="utf-8")
+        membership.extend(
+            (relative, function)
+            for function in _independent_test_function_names(source)
+        )
+    return tuple(membership)
+
+
+def check_classified_entrypoint(
+    repo_root: Path,
+    paths: tuple[str, ...],
+    *,
+    expected_count: int,
+) -> None:
+    """Check generated imports and registrations against independent source truth."""
+    expected_membership = independent_registration_membership(repo_root, paths)
+    if len(expected_membership) != expected_count:
+        raise AssertionError(
+            "classified test count mismatch: "
+            f"expected={expected_count}, actual={len(expected_membership)}"
+        )
+
+    modules = aggregate_tests.load_modules(repo_root, [Path(path) for path in paths])
+    generated_lines = aggregate_tests.render_entrypoint(modules).splitlines()
+    expected_imports = [
+        f"import {path.removesuffix('.mojo').replace('/', '.')} "
+        f"as _mtest_module_{index}"
+        for index, path in enumerate(paths)
+    ]
+    actual_imports = [
+        line for line in generated_lines if line.startswith("import tests.")
+    ]
+    if actual_imports != expected_imports:
+        raise AssertionError("aggregate entrypoint import membership/order drifted")
+
+    expected_markers = [
+        f'    print("==> {path}", flush=True)' for path in paths
+    ]
+    actual_markers = [
+        line for line in generated_lines if line.startswith('    print("==> tests/')
+    ]
+    if actual_markers != expected_markers:
+        raise AssertionError("aggregate entrypoint marker membership/order drifted")
+
+    actual_membership: list[tuple[str, str]] = []
+    for line in generated_lines:
+        if not line.startswith("    suite_") or ".test[" not in line:
+            continue
+        match = REGISTRATION_RE.fullmatch(line)
+        if match is None:
+            raise AssertionError(
+                "aggregate entrypoint test registration syntax drifted: "
+                f"{line!r}"
+            )
+        suite_index = int(match.group(1))
+        module_index = int(match.group(2))
+        if suite_index != module_index or module_index >= len(paths):
+            raise AssertionError(
+                "aggregate entrypoint test registration alias drifted: "
+                f"{line!r}"
+            )
+        actual_membership.append((paths[module_index], match.group(3)))
+    if tuple(actual_membership) != expected_membership:
+        raise AssertionError(
+            "aggregate entrypoint test registration membership/order drifted"
+        )
+
+
 def check_suite_layout() -> None:
     """Every aggregate module and support module has its classified home."""
     tests_dir = REPO_ROOT / "tests"
@@ -813,43 +954,11 @@ def check_suite_layout() -> None:
             "classified path ordering/membership mismatch: "
             f"expected={list(CLASSIFIED_PATHS)}, actual={list(actual_paths)}"
         )
-    modules = aggregate_tests.load_modules(REPO_ROOT, discovered)
-    if sum(len(module.test_functions) for module in modules) != CLASSIFIED_TEST_COUNT:
-        raise AssertionError(
-            "classified test count mismatch: "
-            f"expected={CLASSIFIED_TEST_COUNT}, "
-            f"actual={sum(len(module.test_functions) for module in modules)}"
-        )
-    generated = aggregate_tests.render_entrypoint(modules)
-    generated_lines = generated.splitlines()
-    expected_imports = [
-        f"import {path.removesuffix('.mojo').replace('/', '.')} "
-        f"as _mtest_module_{index}"
-        for index, path in enumerate(CLASSIFIED_PATHS)
-    ]
-    actual_imports = [
-        line for line in generated_lines if line.startswith("import tests.")
-    ]
-    if actual_imports != expected_imports:
-        raise AssertionError("aggregate entrypoint import membership/order drifted")
-    expected_markers = [
-        f'    print("==> {path}", flush=True)' for path in CLASSIFIED_PATHS
-    ]
-    actual_markers = [
-        line for line in generated_lines if line.startswith('    print("==> tests/')
-    ]
-    if actual_markers != expected_markers:
-        raise AssertionError("aggregate entrypoint marker membership/order drifted")
-    expected_registrations = [
-        f"    suite_{index}.test[_mtest_module_{index}.{function}]()"
-        for index, module in enumerate(modules)
-        for function in module.test_functions
-    ]
-    actual_registrations = [
-        line for line in generated_lines if re.match(r"^    suite_\d+\.test\[", line)
-    ]
-    if actual_registrations != expected_registrations:
-        raise AssertionError("aggregate entrypoint test registration membership drifted")
+    check_classified_entrypoint(
+        REPO_ROOT,
+        CLASSIFIED_PATHS,
+        expected_count=CLASSIFIED_TEST_COUNT,
+    )
     for package in (tests_dir, tests_dir / "unit", tests_dir / "integration"):
         if not (package / "__init__.mojo").is_file():
             raise AssertionError(f"aggregate package marker missing: {package}")
@@ -1299,6 +1408,147 @@ def check_format_roots() -> None:
         )
 
 
+def live_command_files(repo_root: Path) -> tuple[Path, ...]:
+    """Return live source and command surfaces, excluding historical notes."""
+    candidates = {
+        relative
+        for relative in LIVE_COMMAND_FIXED_PATHS
+        if (repo_root / relative).is_file()
+    }
+    for pattern in LIVE_COMMAND_GLOBS:
+        candidates.update(
+            path.relative_to(repo_root)
+            for path in repo_root.glob(pattern)
+            if path.is_file()
+        )
+    for directory, dirnames, filenames in os.walk(repo_root, followlinks=False):
+        dirnames[:] = [
+            name for name in dirnames if name not in README_SCAN_EXCLUDED_DIRS
+        ]
+        if "README.md" not in filenames:
+            continue
+        path = Path(directory) / "README.md"
+        candidates.add(path.relative_to(repo_root))
+    return tuple(sorted(candidates, key=lambda path: os.fsencode(str(path))))
+
+
+def _normalized_shell_word(word: str) -> str:
+    """Strip presentation punctuation without changing command path content."""
+    return word.strip("`'\"[]{}(),:")
+
+
+def _is_python_executable(word: str) -> bool:
+    """Return whether a shell word names a Python interpreter executable."""
+    normalized = _normalized_shell_word(word)
+    return PYTHON_EXECUTABLE_RE.fullmatch(Path(normalized).name.lower()) is not None
+
+
+def _is_direct_script(word: str) -> bool:
+    """Return whether a shell word is a repository-relative Python script."""
+    return DIRECT_SCRIPT_RE.fullmatch(_normalized_shell_word(word)) is not None
+
+
+def _shell_words(text: str) -> list[str]:
+    """Split one command-like line, including commands inside quoted fields."""
+    try:
+        lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|()")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        words = list(lexer)
+    except ValueError:
+        return []
+    expanded: list[str] = []
+    for word in words:
+        if any(character.isspace() for character in word):
+            expanded.extend(_shell_words(word))
+        else:
+            expanded.append(word)
+    return expanded
+
+
+def _argv_has_direct_script(words: list[str]) -> bool:
+    """Detect a script operand after an interpreter and its options."""
+    option_takes_value = {"-W", "-X", "--check-hash-based-pycs"}
+    for interpreter_index, word in enumerate(words):
+        if not _is_python_executable(word):
+            continue
+        index = interpreter_index + 1
+        while index < len(words):
+            candidate = _normalized_shell_word(words[index])
+            if candidate in {";", "&&", "||", "|", "(", ")"}:
+                break
+            if candidate in {"-m", "-c"}:
+                break
+            if candidate.startswith("-"):
+                consumes_value = candidate in option_takes_value
+                index += 2 if consumes_value else 1
+                continue
+            if _is_direct_script(candidate):
+                return True
+            break
+    return False
+
+
+def _ast_argv_has_direct_script(node: ast.AST) -> bool:
+    """Detect a literal argv headed by sys.executable or a Python path."""
+    if not isinstance(node, (ast.List, ast.Tuple)) or not node.elts:
+        return False
+    first = node.elts[0]
+    if (
+        isinstance(first, ast.Attribute)
+        and isinstance(first.value, ast.Name)
+        and first.value.id == "sys"
+        and first.attr == "executable"
+    ):
+        words = ["python"]
+    elif isinstance(first, ast.Constant) and isinstance(first.value, str):
+        if not _is_python_executable(first.value):
+            return False
+        words = [first.value]
+    else:
+        return False
+    for element in node.elts[1:]:
+        if not isinstance(element, ast.Constant) or not isinstance(element.value, str):
+            return False
+        words.append(element.value)
+    return _argv_has_direct_script(words)
+
+
+def direct_script_invocations(path: Path, contents: str) -> tuple[str, ...]:
+    """Return direct Python-script command forms found in one live surface."""
+    findings: set[str] = set()
+    for line_number, line in enumerate(contents.splitlines(), start=1):
+        if _argv_has_direct_script(_shell_words(line)):
+            findings.add(f"{path.as_posix()}:{line_number}: direct command")
+    if path.suffix == ".py":
+        try:
+            tree = ast.parse(contents, filename=str(path))
+        except SyntaxError:
+            tree = None
+        if tree is not None:
+            for node in ast.walk(tree):
+                if _ast_argv_has_direct_script(node):
+                    findings.add(
+                        f"{path.as_posix()}:{node.lineno}: direct argv"
+                    )
+    return tuple(sorted(findings))
+
+
+def live_direct_invocations(repo_root: Path) -> tuple[str, ...]:
+    """Return direct script invocations from live repository command surfaces."""
+    findings: list[str] = []
+    for relative in live_command_files(repo_root):
+        path = repo_root / relative
+        try:
+            contents = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise AssertionError(
+                f"could not inspect live file {relative}: {exc}"
+            ) from exc
+        findings.extend(direct_script_invocations(relative, contents))
+    return tuple(findings)
+
+
 def check_python_package_invocation() -> None:
     """Python harnesses use package imports and repository-root module commands."""
     scripts_dir = REPO_ROOT / "scripts"
@@ -1325,31 +1575,11 @@ def check_python_package_invocation() -> None:
     if flat_imports:
         raise AssertionError(f"flat scripts imports remain: {flat_imports}")
 
-    tracked = subprocess.run(
-        ["git", "ls-files", "-z"],
-        cwd=REPO_ROOT,
-        check=True,
-        stdout=subprocess.PIPE,
-    ).stdout.split(b"\0")
-    direct_command = re.compile(rb"\bpython(?:3)?\s+scripts/[A-Za-z0-9_./-]+\.py")
-    direct_invocations: list[str] = []
-    for raw_relative in tracked:
-        if not raw_relative:
-            continue
-        relative = os.fsdecode(raw_relative)
-        path = REPO_ROOT / relative
-        try:
-            contents = path.read_bytes()
-        except OSError as exc:
-            raise AssertionError(
-                f"could not inspect tracked file {relative}: {exc}"
-            ) from exc
-        if direct_command.search(contents):
-            direct_invocations.append(relative)
+    direct_invocations = live_direct_invocations(REPO_ROOT)
     if direct_invocations:
         raise AssertionError(
             "direct Python script invocations remain: "
-            f"{sorted(direct_invocations)}"
+            f"{list(direct_invocations)}"
         )
 
 
