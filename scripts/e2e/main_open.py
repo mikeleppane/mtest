@@ -14,7 +14,7 @@ import time
 from scripts.checks import native_abi as native_abi_check
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 HELPER_SOURCE = ROOT / "tests" / "native" / "main_open_fault.c"
 TEST_ADAPTER = ROOT / "build" / "native" / "mtest_exec_native_test.o"
 MAIN_SOURCE = ROOT / "src" / "main.mojo"

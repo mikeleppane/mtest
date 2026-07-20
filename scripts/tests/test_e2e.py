@@ -11,6 +11,7 @@ import re
 import shutil
 import stat
 import tempfile
+import time
 import unittest
 
 from scripts import e2e_check
@@ -304,6 +305,59 @@ def check_e2e_interposer_failure_propagation() -> None:
 
 
 class E2EFaultTopologyTests(unittest.TestCase):
+    def test_runner_owns_results_manifest_access_and_hard_timeouts(self) -> None:
+        from scripts.e2e import assertions, runner
+
+        with tempfile.TemporaryDirectory(prefix="mtest-e2e-runner-") as raw_tmp:
+            tmp = Path(raw_tmp)
+            closes_streams = tmp / "closes-streams"
+            _write_executable(
+                closes_streams,
+                "#!/usr/bin/env python3\n"
+                "import os\n"
+                "import time\n"
+                "os.close(1)\n"
+                "os.close(2)\n"
+                "time.sleep(30)\n",
+            )
+            process_runner = runner.E2ERunner(
+                repo_root=tmp,
+                mtest=closes_streams,
+                default_timeout=0.1,
+                short_timeout=0.1,
+            )
+
+            started = time.monotonic()
+            with self.assertRaisesRegex(
+                runner.ScenarioError, "did not return within 0.1s"
+            ):
+                process_runner.run_mtest([])
+            self.assertLess(time.monotonic() - started, 2.0)
+
+            started = time.monotonic()
+            with self.assertRaisesRegex(
+                runner.ScenarioError, "closed its pty but never exited"
+            ):
+                process_runner.run_mtest_pty([])
+            self.assertLess(time.monotonic() - started, 2.0)
+
+        self.assertIs(e2e_check.Run, runner.Run)
+        self.assertIs(e2e_check.ScenarioContext, runner.ScenarioContext)
+        self.assertIs(e2e_check.expect_exit, assertions.expect_exit)
+        self.assertEqual(
+            runner.load_manifest()["e2e_root"],
+            "e2e",
+        )
+        self.assertEqual(
+            set(runner.load_manifest()["tests"]),
+            runner.discovered_test_files(),
+        )
+
+    def test_main_open_check_has_one_package_owner(self) -> None:
+        from scripts.e2e import main_open
+
+        self.assertIs(e2e_check.main_open_check, main_open)
+
     def test_scenarios_receive_an_explicit_immutable_context(self) -> None:
         registry = tuple(e2e_check.SCENARIOS)
         context = e2e_check.ScenarioContext(manifest={}, registry=registry)

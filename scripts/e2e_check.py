@@ -30,9 +30,7 @@ Usage:  pixi run e2e        (builds the binary first, then runs this)
 
 from __future__ import annotations
 
-from collections.abc import Callable
 import inspect
-import json
 import os
 import pty
 import re
@@ -52,385 +50,44 @@ from scripts.checks.reports import annotations as annotations_check
 from scripts.checks.reports import json_stream as json_stream_check
 from scripts.checks.reports import junit as junit_check
 from scripts.checks.reports import junit_canonicalize
-from scripts import main_open_check
-
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MTEST = os.path.join(REPO_ROOT, "build", "mtest")
-E2E_ROOT = os.path.join(REPO_ROOT, "e2e")
-MANIFEST_PATH = os.path.join(E2E_ROOT, "manifest.json")
-TOOLCHAIN_FIXTURES = os.path.join(REPO_ROOT, "scripts", "fixtures", "toolchain")
-LOGGING_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "logging_mojo.py")
-FAKE_SLOW_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_slow_mojo.py")
-FAKE_CRASH_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_crash_mojo.py")
-FAKE_RETRY_CRASH_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_retry_crash_mojo.py")
-JSON_TERMINAL_WRITE_FAULT = os.path.join(
-    REPO_ROOT, "tests", "native", "e2e_json_terminal_write_fault.c"
+from scripts.e2e import main_open as main_open_check
+from scripts.e2e.assertions import (
+    SUMMARY_RE,
+    VERDICT_TO_BUCKET,
+    expect,
+    expect_accounting,
+    expect_exit,
+    expect_report,
+    summary,
+    verdict_line,
+    verdict_paths_in_order,
+)
+from scripts.e2e.runner import (
+    DEFAULT_RUNNER,
+    E2E_ROOT,
+    FAKE_CRASH_MOJO,
+    FAKE_RETRY_CRASH_MOJO,
+    FAKE_SLOW_MOJO,
+    JSON_TERMINAL_WRITE_FAULT,
+    LOGGING_MOJO,
+    MTEST,
+    REPO_ROOT,
+    SHORT_TIMEOUT,
+    DEFAULT_TIMEOUT,
+    Run,
+    Scenario,
+    ScenarioContext,
+    ScenarioError,
+    ScenarioRegistry,
+    bootstrap_build_bin,
+    discovered_test_files,
+    load_manifest,
 )
 
-# Generous per-spawn wall-clock ceilings. Cold `mojo build` is slow, so these are
-# roomy — their only job is to keep a hung runner from wedging CI, never to time
-# a scenario. The TIMEOUT and interrupt scenarios assert their own tighter bounds.
-DEFAULT_TIMEOUT = 180.0
-SHORT_TIMEOUT = 30.0
-
-# The summary band counts TESTS for pass/fail/skip and FILES for the abnormals.
-# pass/fail/skip always appear; each file-level abnormal appears only when
-# nonzero, so every abnormal segment (and the trailing deselected count) is
-# optional. Named groups keep call sites robust to the optional segments.
-SUMMARY_RE = re.compile(
-    r"=====\s+(?P<passed>\d+) passed,\s+(?P<failed>\d+) failed,\s+"
-    r"(?P<skipped>\d+) skipped"
-    r"(?:,\s+(?P<crashed>\d+) crashed)?"
-    r"(?:,\s+(?P<timed_out>\d+) timed out)?"
-    r"(?:,\s+(?P<compile_error>\d+) compile error)?"
-    r"(?:,\s+(?P<malformed>\d+) malformed suite)?"
-    r"[^(]*"
-    r"\((?P<excluded>\d+) excluded,\s+(?P<not_run>\d+) not run"
-    r"(?:,\s+(?P<deselected>\d+) deselected)?\)"
-    r"\s+in\s+(?P<seconds>[\d.]+)s\s+====="
-)
-HEADER_RE = re.compile(r"root:\s+.*?selected:\s+(\d+) files\s+excluded:\s+(\d+)")
-
-VERDICT_TO_BUCKET = {
-    "PASS": "passed",
-    "FAIL": "failed",
-    "CRASH": "crashed",
-    "TIMEOUT": "timed_out",
-    "COMPILE-ERROR": "compile_error",
-}
-
-# A per-file verdict line starts at column 0 with one of these tokens, then the
-# root-relative path (never contains whitespace in this tree). NO-TESTS is a
-# valid zero-test pass line and must be counted for the ordering check. Used to
-# check contract §17's determinism promise: the console summary is ordered
-# lexicographically by path, independent of finish order.
-VERDICT_LINE_TOKENS = list(VERDICT_TO_BUCKET) + ["NO-TESTS"]
-VERDICT_LINE_RE = re.compile(
-    r"^(?:" + "|".join(re.escape(t) for t in VERDICT_LINE_TOKENS) + r")\s+(\S+)",
-    re.MULTILINE,
-)
-
-
-def verdict_paths_in_order(run: Run) -> list[str]:
-    """Root-relative paths named by run-outcome verdict lines, in stdout order."""
-    return VERDICT_LINE_RE.findall(run.stdout)
-
-
-@dataclass
-class Summary:
-    # passed/failed/skipped are per-TEST totals; crashed/timed_out/compile_error/
-    # malformed are per-FILE abnormal counts (omitted from the band when zero, so
-    # they parse as 0 here). excluded/not_run/deselected are separate counts.
-    passed: int
-    failed: int
-    skipped: int
-    crashed: int
-    timed_out: int
-    compile_error: int
-    malformed: int
-    excluded: int
-    not_run: int
-    seconds: float
-    deselected: int = 0
-
-
-class ScenarioError(AssertionError):
-    pass
-
-
-@dataclass
-class Run:
-    argv: list[str]
-    returncode: int
-    stdout: str
-    stderr: str
-    wall: float
-
-    @property
-    def combined(self) -> str:
-        return self.stdout + "\n" + self.stderr
-
-    def summary(self) -> Summary:
-        m = SUMMARY_RE.search(self.combined)
-        if not m:
-            # ScenarioError (not bare AssertionError): Harness.scenario() only
-            # catches ScenarioError, so a missing summary band must raise that
-            # subclass to be reported as a clean scenario FAILURE rather than
-            # crashing the whole harness with a raw traceback.
-            raise ScenarioError(
-                f"no summary band in output for {self.argv}\n{self.combined}"
-            )
-        g = m.groupdict()
-
-        def num(key: str) -> int:
-            return int(g[key]) if g.get(key) is not None else 0
-
-        return Summary(
-            passed=num("passed"),
-            failed=num("failed"),
-            skipped=num("skipped"),
-            crashed=num("crashed"),
-            timed_out=num("timed_out"),
-            compile_error=num("compile_error"),
-            malformed=num("malformed"),
-            excluded=num("excluded"),
-            not_run=num("not_run"),
-            deselected=num("deselected"),
-            seconds=float(g["seconds"]),
-        )
-
-    def header(self) -> tuple[int, int]:
-        m = HEADER_RE.search(self.combined)
-        if not m:
-            raise ScenarioError(
-                f"no header band in output for {self.argv}\n{self.combined}"
-            )
-        return int(m.group(1)), int(m.group(2))
-
-    def verdict_line(self, token: str, path: str) -> str | None:
-        """A verdict line starts with the token and names the path; framed
-        sections start with '---', so startswith(token) never matches them."""
-        for line in self.stdout.splitlines():
-            if line.startswith(token) and path in line:
-                return line
-        return None
-
-
-def run_mtest(
-    args: list[str],
-    *,
-    timeout: float = DEFAULT_TIMEOUT,
-    check_binary: bool = True,
-    env_overrides: dict[str, str] | None = None,
-) -> Run:
-    """Spawn build/mtest with an explicit argv (never a shell) in its own process
-    group, with the inherited environment (mojo stays on PATH). On timeout the
-    whole group is killed so a hung runner cannot wedge the gate.
-
-    `env_overrides`, when given, layers on top of the inherited environment
-    (never replaces it) — the harness still never scrubs the environment, it
-    only adds or overrides a handful of keys for a single scenario (e.g.
-    NO_COLOR)."""
-    if check_binary and not os.path.exists(MTEST):
-        raise ScenarioError(f"binary not found at {MTEST}; run `pixi run build-bin`")
-    argv = [MTEST, *args]
-    # Pin GITHUB_ACTIONS OFF by default so the console's stop-commands fencing —
-    # keyed on GITHUB_ACTIONS, independent of --gh-annotations — never perturbs a
-    # scenario's structural assertions when this gate itself runs inside Actions.
-    # The annotation cells opt back IN with env_overrides={"GITHUB_ACTIONS":"true"}.
-    # This is a determinism control over one CI-detection variable, not an
-    # environment scrub: PATH and the toolchain still pass straight through.
-    child_env = dict(os.environ)
-    child_env["GITHUB_ACTIONS"] = ""
-    if env_overrides:
-        child_env.update(env_overrides)
-    start = time.monotonic()
-    proc = subprocess.Popen(
-        argv,
-        cwd=REPO_ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-        env=child_env,
-    )
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _kill_group(proc)
-        out, err = proc.communicate()
-        raise ScenarioError(
-            f"mtest did not return within {timeout}s for argv {argv} — "
-            f"killed its process group (possible runner hang)"
-        )
-    wall = time.monotonic() - start
-    return Run(argv=argv, returncode=proc.returncode, stdout=out, stderr=err, wall=wall)
-
-
-def run_mtest_pty(
-    args: list[str],
-    *,
-    env_overrides: dict[str, str | None] | None = None,
-    timeout: float = SHORT_TIMEOUT,
-) -> tuple[int, bytes]:
-    """Spawn build/mtest with stdout+stderr attached to a real pty, in its own
-    process group, hard-timeout guarded exactly like run_mtest.
-
-    Only the color scenario needs this: a piped stdout (run_mtest) is NEVER a
-    tty, so ColorWhen.AUTO is colorless regardless of NO_COLOR — an assertion
-    built on a pipe would pass even if NO_COLOR were silently ignored. A real
-    pty is required to prove NO_COLOR actually overrides an AUTO run that would
-    otherwise be colored.
-    """
-    if not os.path.exists(MTEST):
-        raise ScenarioError(f"binary not found at {MTEST}; run `pixi run build-bin`")
-    argv = [MTEST, *args]
-    env = dict(os.environ)
-    env["GITHUB_ACTIONS"] = ""  # deterministic: no fencing unless a cell opts in
-    if env_overrides:
-        # A None value REMOVES the key from the child environment (a plain
-        # dict.update cannot clear an ambient key). This lets a scenario prove
-        # behavior with a variable explicitly absent, not merely overridden.
-        for key, value in env_overrides.items():
-            if value is None:
-                env.pop(key, None)
-            else:
-                env[key] = value
-    master_fd, slave_fd = pty.openpty()
-    proc = subprocess.Popen(
-        argv,
-        cwd=REPO_ROOT,
-        stdout=slave_fd,
-        stderr=slave_fd,
-        env=env,
-        start_new_session=True,
-    )
-    os.close(slave_fd)
-    out = bytearray()
-    deadline = time.monotonic() + timeout
-    timed_out = False
-    try:
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                timed_out = True
-                break
-            ready, _, _ = select.select([master_fd], [], [], remaining)
-            if not ready:
-                continue
-            try:
-                chunk = os.read(master_fd, 4096)
-            except OSError:
-                break  # pty closed on the child side: EOF
-            if not chunk:
-                break
-            out += chunk
-    finally:
-        os.close(master_fd)
-
-    if timed_out:
-        _kill_group(proc)
-        proc.wait(timeout=5)
-        raise ScenarioError(
-            f"mtest did not return within {timeout}s for argv {argv} under a pty "
-            f"— killed its process group (possible runner hang)"
-        )
-    try:
-        returncode = proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        _kill_group(proc)
-        proc.wait(timeout=5)
-        raise ScenarioError(
-            f"mtest closed its pty but never exited for argv {argv} — "
-            f"killed its process group (possible runner hang)"
-        )
-    return returncode, bytes(out)
-
-
-def _kill_group(proc: subprocess.Popen) -> None:
-    try:
-        pgid = os.getpgid(proc.pid)
-    except ProcessLookupError:
-        return
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(pgid, sig)
-        except ProcessLookupError:
-            return
-        time.sleep(0.3)
-
-
-# ---- assertion helpers -------------------------------------------------------
-
-
-def expect(cond: bool, msg: str) -> None:
-    if not cond:
-        raise ScenarioError(msg)
-
-
-def expect_exit(run: Run, code: int) -> None:
-    expect(
-        run.returncode == code,
-        f"expected exit {code}, got {run.returncode} for {run.argv}\n"
-        f"--- stdout ---\n{run.stdout}\n--- stderr ---\n{run.stderr}",
-    )
-
-
-def expect_report(run: Run, path: str | Path, what: str) -> Path:
-    """Assert `run` actually produced the artifact a later assertion will read.
-
-    A run whose exit code is right but which wrote no report surfaces at the
-    first read as a raw FileNotFoundError: an exception that names a temp path
-    and nothing else — not the argv behind it, not the exit code, not the
-    stderr that said why. Asserting the prerequisite here turns that into an
-    ordinary scenario FAILURE carrying all three. It is a prerequisite check,
-    never a substitute for the artifact's own oracle: the caller still runs
-    `junit_check.check_artifact` / `parse_stream` on the file this returns.
-    """
-    report = Path(path)
-    expect(
-        report.exists(),
-        f"{what} was never written to {report}: {run.argv} exited "
-        f"{run.returncode} and produced no report\n"
-        f"--- stdout ---\n{run.stdout}\n--- stderr ---\n{run.stderr}",
-    )
-    return report
-
-
-def expect_accounting(run: Run) -> Summary:
-    """The file-count invariant that still holds now that pass/fail/skip count
-    TESTS, not files: the summary and the header agree on the excluded FILE count.
-
-    (The old run-outcomes+not-run==selected file-count identity no longer holds
-    — passed/failed are per-test, and `s_default_suite` asserts that exact
-    test-count arithmetic separately; here we keep the band parseable and the
-    excluded counts reconciled for every scenario, not just the default suite.)
-    """
-    summ = run.summary()
-    _selected, hdr_excluded = run.header()
-    expect(
-        summ.excluded == hdr_excluded,
-        f"excluded mismatch: summary {summ.excluded} vs header {hdr_excluded} "
-        f"for {run.argv}",
-    )
-    return summ
-
-
-# ---- manifest ----------------------------------------------------------------
-
-
-def load_manifest() -> dict:
-    with open(MANIFEST_PATH, encoding="utf-8") as fh:
-        return json.load(fh)
-
-
-def discovered_test_files() -> set[str]:
-    root = E2E_ROOT
-    found: set[str] = set()
-    for dirpath, _dirs, files in os.walk(root):
-        for name in files:
-            if name.startswith("test_") and name.endswith(".mojo"):
-                abs_p = os.path.join(dirpath, name)
-                found.add(os.path.relpath(abs_p, REPO_ROOT))
-    return found
-
-
-# ---- scenarios ---------------------------------------------------------------
-#
-# Each scenario is a function taking the shared context and raising ScenarioError
-# on any structural or exit-code mismatch. Registry order determines execution.
-
-
-Scenario = Callable[["ScenarioContext"], str]
-ScenarioRegistry = tuple[tuple[str, Scenario], ...]
-
-
-@dataclass(frozen=True)
-class ScenarioContext:
-    """Immutable access to one run's manifest and fully composed registry."""
-
-    manifest: dict
-    registry: ScenarioRegistry
+run_mtest = DEFAULT_RUNNER.run_mtest
+run_mtest_pty = DEFAULT_RUNNER.run_mtest_pty
+_kill_group = DEFAULT_RUNNER.kill_group
+_bootstrap_build_bin = bootstrap_build_bin
 
 
 @dataclass
@@ -612,7 +269,7 @@ def s_default_suite(context: ScenarioContext) -> str:
     for rel, row in suite.items():
         # A zero-test file renders NO-TESTS, not the manifest's PASS verdict.
         token = "NO-TESTS" if row.get("zero_tests") else row["verdict"]
-        line = run.verdict_line(token, rel)
+        line = verdict_line(run, token, rel)
         expect(line is not None, f"missing verdict line {token} for {rel}")
         if token == "CRASH":
             crash_lines[rel] = line
@@ -671,7 +328,7 @@ def s_default_suite(context: ScenarioContext) -> str:
     zero = [r for r, row in suite.items() if row.get("zero_tests")]
     expect(len(zero) == 1, "expected exactly one zero-test file")
     expect(
-        run.verdict_line("NO-TESTS", zero[0]) is not None,
+        verdict_line(run, "NO-TESTS", zero[0]) is not None,
         "zero-test file did not show a NO-TESTS verdict (never a plain PASS)",
     )
     # helper.mojo (non-discovered) must never appear.
@@ -781,7 +438,7 @@ def s_hostile(context: ScenarioContext) -> str:
     run = run_mtest([silent])
     expect_exit(run, 1)
     expect(
-        run.verdict_line("MALFORMED-SUITE", silent) is not None,
+        verdict_line(run, "MALFORMED-SUITE", silent) is not None,
         f"silent binary did not report MALFORMED-SUITE:\n{run.stdout}",
     )
 
@@ -789,7 +446,7 @@ def s_hostile(context: ScenarioContext) -> str:
     run = run_mtest([forger])
     expect_exit(run, 1)
     expect(
-        run.verdict_line("MALFORMED-SUITE", forger) is not None,
+        verdict_line(run, "MALFORMED-SUITE", forger) is not None,
         f"forger did not report MALFORMED-SUITE:\n{run.stdout}",
     )
 
@@ -807,7 +464,7 @@ def s_hostile(context: ScenarioContext) -> str:
     run = run_mtest([overflow, "--show-output", "none"])
     expect_exit(run, 1)
     expect(
-        run.verdict_line("FAIL", overflow) is not None,
+        verdict_line(run, "FAIL", overflow) is not None,
         f"overflow flood did not report FAIL:\n{run.stdout}",
     )
     return "silent/forger MALFORMED-SUITE, liar DRIFT exit 3, overflow FAIL"
@@ -817,7 +474,7 @@ def s_single_pass(context: ScenarioContext) -> str:
     rel = "e2e/suite/test_passing.mojo"
     run = run_mtest([rel])
     expect_exit(run, 0)
-    expect(run.verdict_line("PASS", rel) is not None, "no PASS verdict line")
+    expect(verdict_line(run, "PASS", rel) is not None, "no PASS verdict line")
     expect_accounting(run)
     return "single passing file -> exit 0"
 
@@ -842,7 +499,7 @@ def s_maxfail(context: ScenarioContext) -> str:
     expect(summ.failed == 1, f"--maxfail 1 let {summ.failed} FAILs run, expected 1")
     expect(summ.not_run == 2, f"--maxfail 1 left {summ.not_run} NOT-RUN, expected 2")
     expect(
-        run.verdict_line("FAIL", "e2e/maxfail/test_a_fail.mojo") is not None,
+        verdict_line(run, "FAIL", "e2e/maxfail/test_a_fail.mojo") is not None,
         "the file that tripped --maxfail did not report FAIL",
     )
     return f"--maxfail 1 stopped after 1 failing test; {summ.not_run} NOT-RUN, accounting holds"
@@ -874,12 +531,12 @@ def s_retries_flaky(context: ScenarioContext) -> str:
         run1 = run_mtest([rel, "--retries", "1"], timeout=SHORT_TIMEOUT)
         expect_exit(run1, 0)
         expect(
-            run1.verdict_line("TRY", rel) is not None,
+            verdict_line(run1, "TRY", rel) is not None,
             f"--retries 1 showed no TRY line for the crashed first attempt:\n"
             f"{run1.stdout}",
         )
         expect(
-            run1.verdict_line("FLAKY", rel) is not None,
+            verdict_line(run1, "FLAKY", rel) is not None,
             f"--retries 1 did not report the file FLAKY:\n{run1.stdout}",
         )
         expect_accounting(run1)
@@ -889,7 +546,7 @@ def s_retries_flaky(context: ScenarioContext) -> str:
         run0 = run_mtest([rel, "--retries", "0"], timeout=SHORT_TIMEOUT)
         expect_exit(run0, 1)
         expect(
-            run0.verdict_line("CRASH", rel) is not None,
+            verdict_line(run0, "CRASH", rel) is not None,
             f"--retries 0 did not report the file CRASH:\n{run0.stdout}",
         )
 
@@ -902,11 +559,11 @@ def s_retries_flaky(context: ScenarioContext) -> str:
         )
         expect_exit(runk, 0)
         expect(
-            runk.verdict_line("TRY", rel) is not None,
+            verdict_line(runk, "TRY", rel) is not None,
             f"-k selection + --retries 1 showed no TRY line:\n{runk.stdout}",
         )
         expect(
-            runk.verdict_line("FLAKY", rel) is not None,
+            verdict_line(runk, "FLAKY", rel) is not None,
             f"-k selection + --retries 1 did not report FLAKY:\n{runk.stdout}",
         )
     finally:
@@ -942,7 +599,7 @@ def s_crash_attribution(context: ScenarioContext) -> str:
         run = run_mtest([rel], timeout=SHORT_TIMEOUT)
         # THE claim: the CRASH verdict and the exit code stand on their own.
         expect_exit(run, 1)
-        crash_line = run.verdict_line("CRASH", rel)
+        crash_line = verdict_line(run, "CRASH", rel)
         expect(
             crash_line is not None,
             f"{rel} did not report the file CRASH:\n{run.stdout}",
@@ -958,7 +615,7 @@ def s_crash_attribution(context: ScenarioContext) -> str:
             "crash-attribution-start" in run.combined,
             f"{rel}: the attribution pass never announced itself:\n{run.stdout}",
         )
-        line = run.verdict_line("ATTRIBUTION", rel)
+        line = verdict_line(run, "ATTRIBUTION", rel)
         expect(
             line is not None,
             f"{rel}: no ATTRIBUTION line for a crashed file:\n{run.stdout}",
@@ -1032,10 +689,10 @@ def s_crash_attribution(context: ScenarioContext) -> str:
     )
     expect_exit(keyword, 1)
     expect(
-        keyword.verdict_line("CRASH", attributed_rel) is not None,
+        verdict_line(keyword, "CRASH", attributed_rel) is not None,
         f"-k boom did not report the file CRASH:\n{keyword.stdout}",
     )
-    keyword_line = keyword.verdict_line("ATTRIBUTION", attributed_rel)
+    keyword_line = verdict_line(keyword, "ATTRIBUTION", attributed_rel)
     expect(
         keyword_line is not None,
         f"-k boom produced no ATTRIBUTION line:\n{keyword.stdout}",
@@ -1099,15 +756,15 @@ def s_attribution_reruns_the_binary_that_crashed(context: ScenarioContext) -> st
         # the verdict is CRASH, exit 1 — attribution changes neither.
         expect_exit(run, 1)
         expect(
-            run.verdict_line("TRY", rel) is not None,
+            verdict_line(run, "TRY", rel) is not None,
             f"the killed first build showed no TRY line:\n{run.stdout}",
         )
         expect(
-            run.verdict_line("CRASH", rel) is not None,
+            verdict_line(run, "CRASH", rel) is not None,
             f"the rebuilt binary's runtime crash was not reported CRASH:\n"
             f"{run.stdout}",
         )
-        line = run.verdict_line("ATTRIBUTION", rel)
+        line = verdict_line(run, "ATTRIBUTION", rel)
         expect(
             line is not None,
             f"no ATTRIBUTION line for the retried-build crash:\n{run.stdout}",
@@ -1155,7 +812,7 @@ def s_compile_timeout(context: ScenarioContext) -> str:
     )
     expect_exit(run, 1)
     expect(
-        run.verdict_line("COMPILE-TIMEOUT", rel) is not None,
+        verdict_line(run, "COMPILE-TIMEOUT", rel) is not None,
         f"--compile-timeout 1 did not report COMPILE-TIMEOUT:\n{run.stdout}",
     )
     expect(
@@ -1168,7 +825,7 @@ def s_compile_timeout(context: ScenarioContext) -> str:
         f"{run.stdout}",
     )
     expect(
-        run.verdict_line("COMPILE-ERROR", rel) is None,
+        verdict_line(run, "COMPILE-ERROR", rel) is None,
         f"a build WE killed was reported as a COMPILE-ERROR:\n{run.stdout}",
     )
     expect_accounting(run)
@@ -1180,7 +837,7 @@ def s_compile_timeout(context: ScenarioContext) -> str:
     )
     expect_exit(runr, 1)
     expect(
-        runr.verdict_line("TRY", rel) is not None,
+        verdict_line(runr, "TRY", rel) is not None,
         f"--retries 1 showed no TRY line for the timed-out first compile:\n"
         f"{runr.stdout}",
     )
@@ -1193,7 +850,7 @@ def s_compile_timeout(context: ScenarioContext) -> str:
         f"the retried compile never mentioned the cache quarantine:\n{runr.stdout}",
     )
     expect(
-        runr.verdict_line("COMPILE-TIMEOUT", rel) is not None,
+        verdict_line(runr, "COMPILE-TIMEOUT", rel) is not None,
         f"a retry-exhausted compile timeout is still COMPILE-TIMEOUT:\n{runr.stdout}",
     )
     expect_accounting(runr)
@@ -1236,7 +893,7 @@ def s_compile_crash_signature(context: ScenarioContext) -> str:
     )
     expect_exit(sig, 1)
     expect(
-        sig.verdict_line("TRY", rel) is not None,
+        verdict_line(sig, "TRY", rel) is not None,
         f"a nonzero build with a crash banner was NOT retried (no TRY line) — the "
         f"crash-signature scan is not reaching the retry decision:\n{sig.stdout}",
     )
@@ -1249,7 +906,7 @@ def s_compile_crash_signature(context: ScenarioContext) -> str:
         f"a crash-class build fired no quarantined-rebuild warning:\n{sig.stdout}",
     )
     expect(
-        sig.verdict_line("COMPILE-ERROR", rel) is not None,
+        verdict_line(sig, "COMPILE-ERROR", rel) is not None,
         f"the retry-exhausted crash-class build did not land on COMPILE-ERROR:\n"
         f"{sig.stdout}",
     )
@@ -1261,7 +918,7 @@ def s_compile_crash_signature(context: ScenarioContext) -> str:
     )
     expect_exit(plain, 1)
     expect(
-        plain.verdict_line("TRY", rel) is None,
+        verdict_line(plain, "TRY", rel) is None,
         f"an ordinary compile error was RETRIED — `--retries` must never re-run a "
         f"deterministic build failure, and only the stderr text differs from the "
         f"crash-class run:\n{plain.stdout}",
@@ -1272,7 +929,7 @@ def s_compile_crash_signature(context: ScenarioContext) -> str:
         f"{plain.stdout}",
     )
     expect(
-        plain.verdict_line("COMPILE-ERROR", rel) is not None,
+        verdict_line(plain, "COMPILE-ERROR", rel) is not None,
         f"an ordinary compile error did not report COMPILE-ERROR:\n{plain.stdout}",
     )
     expect_accounting(plain)
@@ -1298,7 +955,7 @@ def s_exclude_and_stale(context: ScenarioContext) -> str:
     expect_exit(run, 0)
     summ = expect_accounting(run)
     expect(
-        run.verdict_line("EXCLUDED", "e2e/excluded/test_excluded.mojo") is not None,
+        verdict_line(run, "EXCLUDED", "e2e/excluded/test_excluded.mojo") is not None,
         "no loud EXCLUDED line",
     )
     expect(
@@ -1315,7 +972,7 @@ def s_all_excluded(context: ScenarioContext) -> str:
     )
     expect_exit(run, 5)
     expect(
-        run.verdict_line("EXCLUDED", "e2e/excluded/test_excluded.mojo") is not None,
+        verdict_line(run, "EXCLUDED", "e2e/excluded/test_excluded.mojo") is not None,
         "no EXCLUDED line",
     )
     return "everything excluded -> exit 5"
@@ -1358,7 +1015,7 @@ def s_timeout(context: ScenarioContext) -> str:
     expect_exit(run, 1)
     summ = expect_accounting(run)
     expect(summ.timed_out == 1, f"expected 1 timed out, got {summ.timed_out}")
-    verdict = run.verdict_line("TIMEOUT", rel)
+    verdict = verdict_line(run, "TIMEOUT", rel)
     expect(verdict is not None, "no TIMEOUT verdict line")
     expect(
         "timed out after 1s" in verdict,
@@ -1405,7 +1062,7 @@ def s_timeout_escalation(context: ScenarioContext) -> str:
         "TRY" not in run0.stdout,
         f"--retries 0 scheduled only one attempt but showed a TRY line:\n{run0.stdout}",
     )
-    verdict0 = run0.verdict_line("TIMEOUT", rel)
+    verdict0 = verdict_line(run0, "TIMEOUT", rel)
     expect(verdict0 is not None, f"no TIMEOUT verdict line:\n{run0.stdout}")
     expect(
         "escalated to SIGKILL" in verdict0,
@@ -1422,7 +1079,7 @@ def s_timeout_escalation(context: ScenarioContext) -> str:
     expect_exit(run, 1)
     summ = expect_accounting(run)
     expect(summ.timed_out == 1, f"expected 1 timed out, got {summ.timed_out}")
-    try_line = run.verdict_line("TRY", rel)
+    try_line = verdict_line(run, "TRY", rel)
     expect(
         try_line is not None,
         f"the timed-out first attempt showed no TRY line:\n{run.stdout}",
@@ -1436,7 +1093,7 @@ def s_timeout_escalation(context: ScenarioContext) -> str:
         "timed out" in try_line,
         f"the TRY line did not name the deadline as the cause:\n{try_line}",
     )
-    verdict = run.verdict_line("TIMEOUT", rel)
+    verdict = verdict_line(run, "TIMEOUT", rel)
     expect(verdict is not None, f"no final TIMEOUT verdict line:\n{run.stdout}")
     expect(
         "escalated to SIGKILL" in verdict,
@@ -1453,7 +1110,7 @@ def s_precompile(context: ScenarioContext) -> str:
     # Success: package precompiled, auto -I resolves the import -> PASS.
     ok = run_mtest([rel, "--precompile", "e2e/pkg/mathlib"])
     expect_exit(ok, 0)
-    expect(ok.verdict_line("PASS", rel) is not None, "precompiled import did not PASS")
+    expect(verdict_line(ok, "PASS", rel) is not None, "precompiled import did not PASS")
     expect(
         "COMPILE-ERROR" not in ok.stdout,
         "auto -I failed: importing test hit a COMPILE-ERROR",
@@ -1469,7 +1126,7 @@ def s_precompile(context: ScenarioContext) -> str:
         "could not run" in bad.combined or "casualt" in bad.combined.lower(),
         "failed precompile did not list dependent files as casualties",
     )
-    bsumm = bad.summary()
+    bsumm = summary(bad)
     expect(bsumm.not_run >= 1, "casualty file not accounted as NOT-RUN")
     return "precompile PASS (auto -I) + broken precompile banner/casualty exit 1"
 
@@ -1555,7 +1212,7 @@ def s_precompile_crash_retry(context: ScenarioContext) -> str:
     runr = run_mtest([*base, "--retries", "1"], timeout=SHORT_TIMEOUT)
     expect_exit(runr, 1)
     expect(
-        runr.verdict_line("TRY", "e2e/pkg/mathlib") is not None,
+        verdict_line(runr, "TRY", "e2e/pkg/mathlib") is not None,
         f"--retries 1 showed no TRY line for the crashed precompile:\n{runr.stdout}",
     )
     expect(
@@ -2009,7 +1666,7 @@ def s_passthrough_and_forbidden(context: ScenarioContext) -> str:
     rel = "e2e/suite/test_passing.mojo"
     good = run_mtest([rel, "--", "--no-optimization"])
     expect_exit(good, 0)
-    expect(good.verdict_line("PASS", rel) is not None, "forwarded build arg broke the run")
+    expect(verdict_line(good, "PASS", rel) is not None, "forwarded build arg broke the run")
 
     forbidden = [
         [rel, "--", "-o", "/tmp/x"],
@@ -2048,7 +1705,7 @@ def s_selection_keyword(context: ScenarioContext) -> str:
     expect_exit(run, 0)
     summ = expect_accounting(run)
     expect(
-        run.verdict_line("PASS", MATRIX_ALPHA) is not None,
+        verdict_line(run, "PASS", MATRIX_ALPHA) is not None,
         "the -k subset selection did not PASS the file",
     )
     expect(
@@ -2064,7 +1721,7 @@ def s_selection_node_id(context: ScenarioContext) -> str:
     expect_exit(run, 0)
     summ = expect_accounting(run)
     expect(
-        run.verdict_line("PASS", MATRIX_ALPHA) is not None,
+        verdict_line(run, "PASS", MATRIX_ALPHA) is not None,
         "the node-id selection did not PASS the file",
     )
     expect(
@@ -2085,11 +1742,11 @@ def s_selection_union(context: ScenarioContext) -> str:
     expect_exit(run, 0)
     summ = expect_accounting(run)
     expect(
-        run.verdict_line("PASS", MATRIX_ALPHA) is not None,
+        verdict_line(run, "PASS", MATRIX_ALPHA) is not None,
         "union run did not PASS test_alpha.mojo",
     )
     expect(
-        run.verdict_line("PASS", MATRIX_BETA) is not None,
+        verdict_line(run, "PASS", MATRIX_BETA) is not None,
         "union run did not PASS test_beta.mojo (the dir must keep it whole)",
     )
     expect(
@@ -2146,7 +1803,7 @@ def s_selection_chameleon(context: ScenarioContext) -> str:
     run = run_mtest([CHAMELEON, "-k", "ghost"], timeout=SHORT_TIMEOUT)
     expect_exit(run, 1)
     expect(
-        run.verdict_line("MALFORMED-SUITE", CHAMELEON) is not None,
+        verdict_line(run, "MALFORMED-SUITE", CHAMELEON) is not None,
         f"the chameleon was not reported MALFORMED-SUITE:\n{run.stdout}",
     )
     expect(
@@ -2238,7 +1895,7 @@ def s_stale_recovery_two_builds(context: ScenarioContext) -> str:
         )
         expect_exit(run, 1)
         expect(
-            run.verdict_line("MALFORMED-SUITE", CHAMELEON) is not None,
+            verdict_line(run, "MALFORMED-SUITE", CHAMELEON) is not None,
             "the chameleon was not reported MALFORMED-SUITE under the logging "
             f"wrapper:\n{run.stdout}",
         )
@@ -2290,7 +1947,7 @@ def s_internal_error(context: ScenarioContext) -> str:
     )
     # No false verdict: the file must never be reported PASS (or any verdict).
     expect(
-        run.verdict_line("PASS", rel) is None,
+        verdict_line(run, "PASS", rel) is None,
         f"spawn failure produced a false PASS verdict for {rel}",
     )
     expect(
@@ -2387,37 +2044,6 @@ def s_interrupt(context: ScenarioContext) -> str:
         orphan = False
     expect(not orphan, f"process group {pgid} still alive after mtest exit (orphan)")
     return f"exit 2; partial summary with {not_run} NOT-RUN; no orphaned process group"
-
-
-BUILD_BIN_TIMEOUT = 600.0
-"""Hard wall-clock ceiling for the bare-invocation `pixi run build-bin`
-bootstrap. Generous — a cold precompile+link is slow — but finite: every
-subprocess spawn in this file is hard-timeout-guarded so a wedged toolchain can
-never hang the gate, and this bootstrap path is no exception."""
-
-
-def _bootstrap_build_bin() -> int | None:
-    """Run `pixi run build-bin` in its own process group with a hard timeout,
-    mirroring run_mtest's no-hang guarantee. Returns None on success, or an
-    exit code for main() to return on failure/timeout."""
-    argv = ["pixi", "run", "build-bin"]
-    proc = subprocess.Popen(argv, cwd=REPO_ROOT, start_new_session=True)
-    try:
-        proc.communicate(timeout=BUILD_BIN_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        _kill_group(proc)
-        proc.communicate()
-        print(
-            f"FATAL: `pixi run build-bin` did not finish within "
-            f"{BUILD_BIN_TIMEOUT:.0f}s — killed its process group "
-            f"(possible toolchain hang)",
-            file=sys.stderr,
-        )
-        return 1
-    if proc.returncode != 0:
-        print(f"FATAL: `pixi run build-bin` exited {proc.returncode}", file=sys.stderr)
-        return proc.returncode
-    return None
 
 
 def _looks_like_stream_line(line: str) -> bool:
