@@ -211,6 +211,10 @@ Classified modules under `tests/unit/` and `tests/integration/` are import-only:
 they declare `test_*` functions and MUST NOT declare `main()`. The generator
 `scripts/aggregate_tests.py` imports those modules and registers every test
 function explicitly, failing if a module has no tests or retains an entrypoint.
+Every harness that executes a classified module, including `test-file`, ASan,
+and Valgrind, generates an entrypoint through that script; compiling the module
+path directly is invalid. A change to this executable topology audits self-host
+and package consumption too, even though those lanes run standalone probes.
 Standalone protocol fixtures, E2E fixtures, and focused dogfood probes still
 declare their own `main()` because mtest compiles them as individual programs.
 Use `pixi run test-file -- <classified-test.mojo>` for a focused aggregate build
@@ -369,6 +373,22 @@ Accumulated the hard way; append as later phases teach more.
   cache never reaches a fresh attempt. `mojo build --num-threads N` / `-j` exists
   (default 0 = all threads), so `mojo build` is multi-threaded and parallel
   worker sizing must not oversubscribe compiler threads.
+- **Valgrind needs an instruction-set ceiling, not the runner's host default.**
+  Hosted x86 runners may advertise `x86-64-v4`, letting Mojo emit AVX-512/EVEX
+  instructions that Valgrind 3.27.1 cannot decode; Memcheck then dies on an
+  unrecognized instruction before it can judge project memory. Correct move:
+  compile the Mojo binaries exercised by Valgrind with the reviewed
+  `--target-cpu x86-64-v3` baseline. This changes code generation for that lane,
+  not its checks, suppressions, optimization, or test inventory.
+- **Dynamic-loader fault injection inherits into every spawned process.**
+  `LD_PRELOAD` and `DYLD_INSERT_LIBRARIES` set for mtest also reach its
+  `mojo build` and test children, so an interposer aimed at the runner can
+  instead break the compiler before the intended fault point. Correct move: a
+  test-only interposer clears its platform loader variable in a constructor
+  after the library has loaded into mtest, unless descendant instrumentation is
+  the explicit subject. A hosted-only assertion prints the committed
+  intermediate artifact and event sequence so a failure before the target
+  operation is visible from the failed job.
 - **`mojo package` does not exist in 1.0.0b2** — only `mojo precompile`, which
   produces the same `.mojopkg` (with a deprecation warning suggesting `.mojoc`;
   the name is kept so `-I build` resolves `from mtest import …`).
