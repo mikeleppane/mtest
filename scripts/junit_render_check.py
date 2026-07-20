@@ -25,7 +25,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-import junit_check
+from scripts import junit_check
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

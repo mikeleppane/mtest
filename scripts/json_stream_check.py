@@ -26,7 +26,7 @@ LENIENT (the forward-compatibility obligation)
     truncation signal — the writer died mid-line), never as corruption. Its
     ABSENCE of a terminal record is how a consumer learns the run was cut short.
 
-Run directly (`python scripts/json_stream_check.py`) to self-test against the
+Run directly (`python -m scripts.json_stream_check`) to self-test against the
 forward-compatibility and truncation fixtures under `scripts/fixtures/`.
 """
 from __future__ import annotations

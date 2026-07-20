@@ -33,7 +33,7 @@ redundant reinforcement, never the sole signal — contrast `fail-pty.ansi` with
 
 ```sh
 pixi run build-bin                       # produce build/mtest
-pixi run python scripts/pty_capture.py   # runs under the pixi env so `mojo` is on PATH
+pixi run python -m scripts.pty_capture   # runs under the pixi env so `mojo` is on PATH
 ```
 
 The harness (`scripts/pty_capture.py`) drives the built binary against tiny

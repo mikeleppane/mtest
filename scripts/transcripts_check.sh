@@ -25,9 +25,9 @@ cd "$(dirname "$0")/.."
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-python scripts/gen_transcripts.py --out "$TMP" >/dev/null
+python -m scripts.gen_transcripts --out "$TMP" >/dev/null
 
-if ! python scripts/transcript_compare.py tests/snapshots/protocol "$TMP"; then
+if ! python -m scripts.transcript_compare tests/snapshots/protocol "$TMP"; then
     echo "" >&2
     echo "transcripts-check: committed snapshots differ from a fresh" >&2
     echo "  regeneration. A repo change must not move these bytes. If the" >&2

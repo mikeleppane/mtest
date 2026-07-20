@@ -10,7 +10,7 @@ what the console looks like for representative runs; they are deliberately NOT
 wired into any oracle or CI check, so an incidental byte (a timing, a token) never
 freezes a gate.
 
-Regenerate with `python scripts/pty_capture.py` after building the binary
+Regenerate with `python -m scripts.pty_capture` after building the binary
 (`pixi run build-bin`). Each scenario writes `<name>.ansi` (raw, view with
 `cat`/`less -R`) next to this module's output directory. Turning a capture into a
 PNG screenshot for docs is an OPTIONAL maintainer step (e.g. pipe a capture

@@ -11,7 +11,7 @@ import sys
 import tempfile
 import time
 
-import native_abi_check
+from scripts import native_abi_check
 
 
 ROOT = Path(__file__).resolve().parent.parent

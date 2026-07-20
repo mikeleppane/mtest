@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import self_host_check
+from scripts import self_host_check
 
 
 class SelfHostDogfoodTests(unittest.TestCase):

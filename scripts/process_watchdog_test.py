@@ -12,11 +12,12 @@ import sys
 import tempfile
 import time
 
-from process_watchdog import TIMEOUT_EXIT_CODE, run_command
+from scripts.process_watchdog import TIMEOUT_EXIT_CODE, run_command
 
 
 PYTHON = sys.executable
-WATCHDOG = Path(__file__).with_name("process_watchdog.py")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+WATCHDOG_COMMAND = [PYTHON, "-m", "scripts.process_watchdog"]
 
 
 def _wait_for_paths(paths: tuple[Path, ...], timeout_seconds: float = 3.0) -> None:
@@ -43,8 +44,7 @@ def _run(
         sentinel_args = ["--deadline-sentinel", str(deadline_sentinel)]
     return subprocess.run(
         [
-            PYTHON,
-            str(WATCHDOG),
+            *WATCHDOG_COMMAND,
             "--source",
             "tests/unit/test_watchdog.mojo",
             "--step",
@@ -116,7 +116,8 @@ def test_inherited_blocked_sigterm_is_preserved() -> None:
             PYTHON,
             "-c",
             launcher,
-            str(WATCHDOG),
+            "-m",
+            "scripts.process_watchdog",
             "--source",
             "tests/unit/test_watchdog.mojo",
             "--step",
@@ -380,7 +381,7 @@ def _assert_cancellation_reaches_process_group(
             str(leader_pid),
             "linger" if followup_signum is not None else "exit",
         ]
-        command = [PYTHON, str(WATCHDOG), *watchdog_args]
+        command = [*WATCHDOG_COMMAND, *watchdog_args]
         watchdog = subprocess.Popen(
             command,
             stdout=subprocess.DEVNULL,
@@ -471,7 +472,7 @@ def test_cancellation_wins_when_spawn_then_raises() -> None:
                     "import signal",
                     "import sys",
                     "sys.path.insert(0, sys.argv[1])",
-                    "import process_watchdog as watchdog",
+                    "from scripts import process_watchdog as watchdog",
                     "def cancelled_spawn(*_args, **_kwargs):",
                     "    os.kill(os.getpid(), signal.SIGTERM)",
                     "    raise FileNotFoundError('injected spawn failure')",
@@ -485,7 +486,7 @@ def test_cancellation_wins_when_spawn_then_raises() -> None:
             [
                 PYTHON,
                 str(wrapper),
-                str(WATCHDOG.parent),
+                str(REPO_ROOT),
                 "--source",
                 "tests/unit/test_watchdog.mojo",
                 "--step",

@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import asan_check
+from scripts import asan_check
 
 
 class AsanCheckTests(unittest.TestCase):

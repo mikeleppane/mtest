@@ -46,10 +46,10 @@ drift (`pixi run transcripts-check`).
 ## Quick start — run the oracle
 
 ```bash
-python scripts/validate_contract.py            # rebuild-if-stale, run all ~55 checks
-python scripts/validate_contract.py -k select  # filter by check name
-python scripts/validate_contract.py --strict   # a SKIP of a safety-critical check FAILS
-python scripts/validate_contract.py -v --keep   # dump streams on failure, keep scaffold
+python -m scripts.validate_contract            # rebuild-if-stale, run all ~55 checks
+python -m scripts.validate_contract -k select  # filter by check name
+python -m scripts.validate_contract --strict   # a SKIP of a safety-critical check FAILS
+python -m scripts.validate_contract -v --keep  # dump streams on failure, keep scaffold
 ```
 
 `scripts/validate_contract.py` (Python lives under `scripts/`, per AGENTS.md)

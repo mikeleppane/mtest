@@ -23,10 +23,10 @@ Design (hardened after adversarial review):
     non-zero. Setup failures exit 2 (distinct from a contract failure's 1).
 
 Usage:
-    python scripts/validate_contract.py                 # rebuild-if-stale, run all
-    python scripts/validate_contract.py -k selection    # filter by check name
-    python scripts/validate_contract.py --strict         # SKIP of a check -> failure
-    python scripts/validate_contract.py --keep --no-rebuild -v
+    python -m scripts.validate_contract                 # rebuild-if-stale, run all
+    python -m scripts.validate_contract -k selection    # filter by check name
+    python -m scripts.validate_contract --strict         # SKIP of a check -> failure
+    python -m scripts.validate_contract --keep --no-rebuild -v
 
 Exit: 0 all passed; 1 a contract check failed (or --strict skip / zero checks);
 2 setup failure (no toolchain, binary won't build). CI-usable.

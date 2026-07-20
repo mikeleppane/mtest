@@ -7,6 +7,7 @@ shell orchestration without recompiling the product test suite.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 from pathlib import Path
@@ -19,11 +20,11 @@ import sys
 import tempfile
 import tomllib
 
-import aggregate_tests
-import e2e_check
-import format_all
-import self_host_check
-from transcript_compare import compare_directories
+from scripts import aggregate_tests
+from scripts import e2e_check
+from scripts import format_all
+from scripts import self_host_check
+from scripts.transcript_compare import compare_directories
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -518,7 +519,7 @@ out.chmod(out.stat().st_mode | stat.S_IXUSR)
 def check_process_watchdog() -> None:
     """The direct-suite watchdog keeps ordinary exits and bounds hangs."""
     result = subprocess.run(
-        [sys.executable, "scripts/process_watchdog_test.py"],
+        [sys.executable, "-m", "scripts.process_watchdog_test"],
         cwd=REPO_ROOT,
         text=True,
         stdout=subprocess.PIPE,
@@ -1286,8 +1287,8 @@ def check_format_roots() -> None:
     """Both formatting tasks cover every Mojo source family."""
     pixi = (REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
     expected = {
-        'fmt = "python scripts/format_all.py"',
-        'fmt-check = "python scripts/format_all.py && git diff --exit-code"',
+        'fmt = "python -m scripts.format_all"',
+        'fmt-check = "python -m scripts.format_all && git diff --exit-code"',
     }
     missing = sorted(line for line in expected if line not in pixi)
     if missing:
@@ -1295,6 +1296,60 @@ def check_format_roots() -> None:
     if tuple(format_all.FORMAT_ROOTS) != ("src", "tests", "e2e"):
         raise AssertionError(
             f"format source roots drifted: {format_all.FORMAT_ROOTS}"
+        )
+
+
+def check_python_package_invocation() -> None:
+    """Python harnesses use package imports and repository-root module commands."""
+    scripts_dir = REPO_ROOT / "scripts"
+    if not (scripts_dir / "__init__.py").is_file():
+        raise AssertionError("scripts package marker is missing")
+
+    module_names = {path.stem for path in scripts_dir.glob("*.py")}
+    flat_imports: list[str] = []
+    for path in sorted(scripts_dir.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for imported in node.names:
+                    if imported.name in module_names:
+                        flat_imports.append(
+                            f"{path.relative_to(REPO_ROOT)}:{node.lineno}: "
+                            f"import {imported.name}"
+                        )
+            elif isinstance(node, ast.ImportFrom) and node.module in module_names:
+                flat_imports.append(
+                    f"{path.relative_to(REPO_ROOT)}:{node.lineno}: "
+                    f"from {node.module} import ..."
+                )
+    if flat_imports:
+        raise AssertionError(f"flat scripts imports remain: {flat_imports}")
+
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=REPO_ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout.split(b"\0")
+    direct_command = re.compile(rb"\bpython(?:3)?\s+scripts/[A-Za-z0-9_./-]+\.py")
+    direct_invocations: list[str] = []
+    for raw_relative in tracked:
+        if not raw_relative:
+            continue
+        relative = os.fsdecode(raw_relative)
+        path = REPO_ROOT / relative
+        try:
+            contents = path.read_bytes()
+        except OSError as exc:
+            raise AssertionError(
+                f"could not inspect tracked file {relative}: {exc}"
+            ) from exc
+        if direct_command.search(contents):
+            direct_invocations.append(relative)
+    if direct_invocations:
+        raise AssertionError(
+            "direct Python script invocations remain: "
+            f"{sorted(direct_invocations)}"
         )
 
 
@@ -1438,11 +1493,11 @@ def check_ci_task_graph() -> None:
         )
     exact_safety_tasks = {
         "asan-check": (
-            "python scripts/asan_check_test.py && python scripts/asan_check.py"
+            "python -m scripts.asan_check_test && python -m scripts.asan_check"
         ),
         "valgrind-check": (
-            "python scripts/valgrind_check_test.py && "
-            "python scripts/valgrind_check.py"
+            "python -m scripts.valgrind_check_test && "
+            "python -m scripts.valgrind_check"
         ),
     }
     for name, command in exact_safety_tasks.items():
@@ -1684,6 +1739,7 @@ def main() -> int:
         check_protocol_asset_layout()
         check_e2e_layout()
         check_format_roots()
+        check_python_package_invocation()
         check_ci_task_graph()
         check_ci_workflow()
     except (AssertionError, OSError, subprocess.SubprocessError) as exc:

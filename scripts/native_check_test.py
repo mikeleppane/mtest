@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 import unittest
 
-import native_check
+from scripts import native_check
 
 
 class NativeCheckCommandTests(unittest.TestCase):

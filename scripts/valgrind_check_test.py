@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import valgrind_check
+from scripts import valgrind_check
 
 
 class ValgrindCheckTests(unittest.TestCase):

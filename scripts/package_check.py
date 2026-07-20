@@ -40,7 +40,7 @@ publishes, or authenticates anywhere. `mojo run` never appears -- every binary
 is BUILT then EXECUTED directly.
 
 Usage:  pixi run package-check
-        python scripts/package_check.py
+        python -m scripts.package_check
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import self_host_check
+from scripts import self_host_check
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PIXI_TOML = REPO_ROOT / "pixi.toml"

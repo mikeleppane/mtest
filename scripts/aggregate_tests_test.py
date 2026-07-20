@@ -8,7 +8,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-import aggregate_tests
+from scripts import aggregate_tests
 
 
 class AggregateDiscoveryTests(unittest.TestCase):

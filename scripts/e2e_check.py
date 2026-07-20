@@ -25,7 +25,7 @@ straight through, and the `e2e` pixi task runs it under `pixi run`, so the pixi
 toolchain (with mojo on PATH) is inherited by build/mtest and its build children.
 
 Usage:  pixi run e2e        (builds the binary first, then runs this)
-        python scripts/e2e_check.py
+        python -m scripts.e2e_check
 """
 
 from __future__ import annotations
@@ -47,11 +47,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-import annotations_check
-import json_stream_check
-import junit_canonicalize
-import junit_check
-import main_open_check
+from scripts import annotations_check
+from scripts import json_stream_check
+from scripts import junit_canonicalize
+from scripts import junit_check
+from scripts import main_open_check
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MTEST = os.path.join(REPO_ROOT, "build", "mtest")

@@ -39,12 +39,12 @@ for root in "${roots[@]}"; do
 done
 
 bash scripts/build_pkg.sh
-python scripts/build_native.py
+python -m scripts.build_native
 
 mkdir -p build/tests
 aggregate_source=build/tests/aggregate_main.mojo
 aggregate_binary=build/tests/aggregate
-python scripts/aggregate_tests.py \
+python -m scripts.aggregate_tests \
     --output "$aggregate_source" "${normalized_roots[@]}"
 
 include=(
@@ -55,10 +55,10 @@ include=(
     -Xlinker build/native/mtest_exec_native_test.o
 )
 
-watchdog_command=(python scripts/process_watchdog.py)
+watchdog_command=(python -m scripts.process_watchdog)
 if [[ -n "${MTEST_TEST_ALL_TIMEOUT_SECONDS:-}" ]]; then
     watchdog_command=(
-        python scripts/process_watchdog.py
+        python -m scripts.process_watchdog
         --timeout-seconds "$MTEST_TEST_ALL_TIMEOUT_SECONDS"
     )
 fi

@@ -8,7 +8,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-import format_all
+from scripts import format_all
 
 
 class FormatInventoryTests(unittest.TestCase):

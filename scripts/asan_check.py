@@ -10,8 +10,8 @@ import shutil
 import subprocess
 import sys
 
-import aggregate_tests
-import native_abi_check
+from scripts import aggregate_tests
+from scripts import native_abi_check
 
 
 ROOT = Path(__file__).resolve().parent.parent

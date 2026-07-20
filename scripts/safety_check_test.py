@@ -6,7 +6,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-import safety_check
+from scripts import safety_check
 
 
 class SafetyCheckTests(unittest.TestCase):

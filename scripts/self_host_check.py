@@ -8,7 +8,7 @@ coverage of mtest's discover/build/run/parse/report path without asking mtest
 to compile the exhaustive suite one source file at a time.
 
 Usage:  pixi run test
-        python scripts/self_host_check.py
+        python -m scripts.self_host_check
 """
 
 from __future__ import annotations

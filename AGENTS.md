@@ -596,7 +596,7 @@ Accumulated the hard way; append as later phases teach more.
   one shared parent env, or two children spawning in the same window will
   race each other's cache directory.
 - **A `pixi run`-less invocation of the e2e Python driver looks like a real
-  regression, not a setup error.** `python scripts/e2e_check.py` run outside
+  regression, not a setup error.** `python -m scripts.e2e_check` run outside
   the pixi env fails many scenarios with a real `INTERNAL-ERROR` banner —
   `could not execute 'mojo' (errno 2) — no such file or directory` — because
   the driver's own PATH lacks `mojo`, and that PATH is what the `build/mtest`

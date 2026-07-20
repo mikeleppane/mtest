@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-import junit_check
+from scripts import junit_check
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "junit"
