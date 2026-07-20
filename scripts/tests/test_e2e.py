@@ -58,6 +58,19 @@ CORE_SCENARIOS = (
     "passthrough+forbidden",
     "out-of-root",
 )
+SELECTION_SCENARIOS = (
+    "usage-refusals",
+    "selection-keyword",
+    "selection-node-id",
+    "selection-union",
+    "selection-malformed-node-id",
+    "selection-unknown-test",
+    "selection-empty",
+    "selection-chameleon",
+    "single-build",
+    "stale-recovery-two-builds",
+    "collect",
+)
 
 
 def _check_e2e_interposer_source_policy(source: str) -> None:
@@ -333,6 +346,16 @@ class E2EFaultTopologyTests(unittest.TestCase):
             if scenario.__module__ == core.__name__
         )
         self.assertEqual(owned, CORE_SCENARIOS)
+
+    def test_selection_scenarios_have_one_feature_owner(self) -> None:
+        from scripts.e2e.scenarios import selection
+
+        owned = tuple(
+            name
+            for name, scenario in e2e_check.SCENARIOS
+            if scenario.__module__ == selection.__name__
+        )
+        self.assertEqual(owned, SELECTION_SCENARIOS)
 
     def test_runner_owns_results_manifest_access_and_hard_timeouts(self) -> None:
         from scripts.e2e import assertions, runner
