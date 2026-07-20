@@ -2772,10 +2772,14 @@ def s_json_terminal_write_failure(manifest: dict) -> str:
             for record in report.records
             if record.get("event") == "file_finished"
         ]
+        event_names = [record.get("event") for record in report.records]
         expect(
             len(file_finishes) == 1,
             f"expected one committed pre-terminal file_finished record, got "
-            f"{len(file_finishes)}",
+            f"{len(file_finishes)}\n"
+            f"events={event_names!r} torn_tail={report.torn_tail}\n"
+            f"--- stream ---\n{text}\n"
+            f"--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
         )
         expect(
             file_finishes[0].get("path") == rel

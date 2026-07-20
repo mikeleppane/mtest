@@ -36,6 +36,11 @@ class ValgrindCheckTests(unittest.TestCase):
             entrypoint = out / "test_config_main.mojo"
             compile_command = mocked_run.call_args_list[0].args[0]
             self.assertIn(str(entrypoint), compile_command)
+            target_index = compile_command.index("--target-cpu")
+            self.assertEqual(
+                compile_command[target_index : target_index + 2],
+                ["--target-cpu", "x86-64-v3"],
+            )
             self.assertNotIn(
                 str(source.relative_to(valgrind_check.ROOT)), compile_command
             )

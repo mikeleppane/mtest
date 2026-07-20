@@ -58,6 +58,7 @@ POSTFORK_FLAGS = (
     "--default-suppressions=no",
 )
 EXPECTED_REACHABLE = (78_596, 10)
+VALGRIND_TARGET_CPU = "x86-64-v3"
 
 
 def run(
@@ -346,6 +347,8 @@ def compile_and_run_test(source: Path, env: dict[str, str]) -> None:
             "mojo",
             "build",
             "-g",
+            "--target-cpu",
+            VALGRIND_TARGET_CPU,
             "-I",
             ".",
             "-I",
