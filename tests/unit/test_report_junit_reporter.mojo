@@ -8,17 +8,29 @@ flaky attempt order, the precompile suite plus per-casualty not-run rows and the
 empty-list degenerate case, deselected/excluded absence, the suite-level
 capture, and the non-raising write latch. The junit-10 oracle is run over the
 real assembled output by the `scripts/junit_render_check.py` CI gate; here the
-event->fragment mapping and the spool mechanism are pinned directly.
+event->fragment mapping and the spool mechanism are pinned directly, including
+`open_junit_spool` — the spool-directory primitive the reporter is handed.
 """
-from std.os import listdir
-from std.tempfile import mkdtemp
-from std.testing import assert_equal, assert_false, assert_true
+from std.os import getenv, listdir, mkdir, rmdir, setenv, unsetenv
+from std.os.path import exists, isdir
+from std.testing import (
+    assert_equal,
+    assert_false,
+    assert_raises,
+    assert_true,
+)
 
 from mtest.model.events import Event
 from mtest.model.node_id import NodeId
 from mtest.model.outcome import Outcome
 from mtest.model.test_result import TestResult
-from mtest.report.junit_reporter import JunitReporter
+from mtest.report.junit_reporter import (
+    _SPOOL_ATTEMPTS,
+    JunitReporter,
+    open_junit_spool,
+)
+
+from tmptree import remove_tree, temp_root
 
 
 def _bytes(s: String) -> List[UInt8]:
@@ -29,7 +41,7 @@ def _bytes(s: String) -> List[UInt8]:
 
 
 def _reporter() raises -> JunitReporter:
-    return JunitReporter(mkdtemp(), True)
+    return JunitReporter(open_junit_spool(), True)
 
 
 def _count_occurrences(haystack: String, needle: String) -> Int:
@@ -345,3 +357,189 @@ def test_write_failure_latches_and_does_not_raise() raises:
     rep.handle(_finished("e2e/x.mojo", Outcome.FAIL, _bytes(""), _bytes("")))
     assert_true(rep.status().failed)
     assert_equal(rep.suite_count(), 0)
+
+
+# --- The spool directory primitive -------------------------------------------
+# `open_junit_spool` replaces `std.tempfile.mkdtemp`, whose unseeded candidate
+# generator makes every process walk the SAME name sequence and fail outright in
+# a shared `/tmp` where those names already exist. These pin what the
+# replacement must guarantee: a real empty directory, distinct names within one
+# process, a spool that still opens against a temp base ALREADY FULL of the
+# names a previous run chose (the regression itself), the documented
+# TMPDIR/TEMP/TMP precedence, and a raise naming the underlying cause when the
+# base is unusable (which `main` resolves to exit 3).
+#
+# Every test here mutates process-wide state (TMPDIR) or leaves a directory on
+# disk, so each restores and cleans up in a `finally` — a raising assertion must
+# not leak a redirected TMPDIR into every later test in this binary — and every
+# assertion runs BEFORE the cleanup, so a cleanup failure cannot displace the
+# real diagnostic.
+
+
+def test_open_junit_spool_creates_a_fresh_empty_directory() raises:
+    var spool = open_junit_spool()
+    try:
+        assert_true(
+            isdir(spool), "the spool path names a real directory: " + spool
+        )
+        assert_equal(len(listdir(spool)), 0, "a fresh spool starts empty")
+    finally:
+        remove_tree(spool)
+
+
+def test_open_junit_spool_does_not_collide_within_one_process() raises:
+    # One process opens a spool per run, but the aggregate test binary opens
+    # many; the per-attempt clock reading is what keeps them apart.
+    var first = open_junit_spool()
+    var second = open_junit_spool()
+    try:
+        assert_true(isdir(first), "the first spool exists on disk: " + first)
+        assert_true(isdir(second), "the second spool exists on disk: " + second)
+        assert_true(first != second, "two spools in one process differ")
+    finally:
+        remove_tree(first)
+        remove_tree(second)
+
+
+def test_open_junit_spool_survives_a_temp_base_full_of_stale_spools() raises:
+    # THE regression, pinned. A temp base already holding the spool names this
+    # process would choose is the shared-`/tmp` condition the whole fix exists
+    # for: bare `mkdtemp()` walked one unseeded name sequence into exactly this
+    # and raised before a single test was built, and a bounded walk over a
+    # FIXED per-pid stem exhausts the same way the moment a recycled pid meets
+    # leftovers from its own earlier incarnation (containers with a persisted
+    # `/tmp` restart pids low and repeat them). Only a key re-read per attempt
+    # cannot be walked into again.
+    var base = temp_root()
+    var prev = getenv("TMPDIR", "")
+    _ = setenv("TMPDIR", base, True)
+    try:
+        # Learn this run's stem FROM THE IMPLEMENTATION, so the clutter below
+        # is exactly the candidate set a fixed-stem walk would try, whatever
+        # pid this process happens to have.
+        var probe = open_junit_spool()
+        var leaf = String(probe.removeprefix(base + "/"))
+        assert_true(
+            leaf.startswith("mtest-junit-"),
+            "the spool keeps its run-identifying prefix: " + probe,
+        )
+        var fields = leaf.split("-")
+        var stem = base + "/mtest-junit-" + String(fields[2]) + "-"
+        for n in range(_SPOOL_ATTEMPTS):
+            var stale = stem + String(n)
+            if not exists(stale):
+                mkdir(stale, 0o700)
+        var spool = open_junit_spool()
+        assert_true(
+            isdir(spool),
+            "a spool still opens beside a full budget of stale ones: " + spool,
+        )
+        assert_true(
+            spool.startswith(stem),
+            "the fresh spool keeps this run's prefix: " + spool,
+        )
+    finally:
+        if prev != "":
+            _ = setenv("TMPDIR", prev, True)
+        else:
+            _ = unsetenv("TMPDIR")
+        remove_tree(base)
+
+
+def test_open_junit_spool_honors_tmpdir() raises:
+    var base = temp_root()
+    var prev = getenv("TMPDIR", "")
+    _ = setenv("TMPDIR", base, True)
+    try:
+        var spool = open_junit_spool()
+        assert_true(
+            spool.startswith(base + "/"),
+            "the spool lands under TMPDIR: " + spool,
+        )
+    finally:
+        if prev != "":
+            _ = setenv("TMPDIR", prev, True)
+        else:
+            _ = unsetenv("TMPDIR")
+        remove_tree(base)
+
+
+def test_open_junit_spool_falls_back_to_temp_then_tmp() raises:
+    # The `gettempdir()` behind the replaced `mkdtemp()` consults TMPDIR, then
+    # TEMP, then TMP (measured at the pinned toolchain), so a run that confines
+    # its scratch with TEMP or TMP alone must keep working.
+    var temp_base = temp_root()
+    var tmp_base = temp_root()
+    var prev_tmpdir = getenv("TMPDIR", "")
+    var prev_temp = getenv("TEMP", "")
+    var prev_tmp = getenv("TMP", "")
+    try:
+        _ = unsetenv("TMPDIR")
+        _ = setenv("TEMP", temp_base, True)
+        _ = setenv("TMP", tmp_base, True)
+        var via_temp = open_junit_spool()
+        assert_true(
+            via_temp.startswith(temp_base + "/"),
+            "TEMP is honored when TMPDIR is unset: " + via_temp,
+        )
+        _ = unsetenv("TEMP")
+        var via_tmp = open_junit_spool()
+        assert_true(
+            via_tmp.startswith(tmp_base + "/"),
+            "TMP is honored when TMPDIR and TEMP are unset: " + via_tmp,
+        )
+    finally:
+        if prev_tmpdir != "":
+            _ = setenv("TMPDIR", prev_tmpdir, True)
+        else:
+            _ = unsetenv("TMPDIR")
+        if prev_temp != "":
+            _ = setenv("TEMP", prev_temp, True)
+        else:
+            _ = unsetenv("TEMP")
+        if prev_tmp != "":
+            _ = setenv("TMP", prev_tmp, True)
+        else:
+            _ = unsetenv("TMP")
+        remove_tree(temp_base)
+        remove_tree(tmp_base)
+
+
+def test_open_junit_spool_raises_when_the_temp_base_is_unusable() raises:
+    # A missing base, a base that is a regular file, a read-only filesystem and
+    # a full disk all burn the whole budget identically, so the message must
+    # carry the underlying cause verbatim — naming only the base would make the
+    # unusable-base failure indistinguishable from a stale-directory one.
+    var prev_tmpdir = getenv("TMPDIR", "")
+    var prev_temp = getenv("TEMP", "")
+    var prev_tmp = getenv("TMP", "")
+    _ = setenv("TMPDIR", "/nonexistent-mtest-temp-base-xyz", True)
+    _ = unsetenv("TEMP")
+    _ = unsetenv("TMP")
+    try:
+        with assert_raises(
+            contains=(
+                "report: could not create a junit spool directory under"
+                " '/nonexistent-mtest-temp-base-xyz' ("
+                + String(_SPOOL_ATTEMPTS)
+                + " attempts; last: "
+            )
+        ):
+            _ = open_junit_spool()
+        # The errno text is the actionable half: this is ENOENT, not a base
+        # merely crowded with leftovers.
+        with assert_raises(contains="No such file or directory"):
+            _ = open_junit_spool()
+    finally:
+        if prev_tmpdir != "":
+            _ = setenv("TMPDIR", prev_tmpdir, True)
+        else:
+            _ = unsetenv("TMPDIR")
+        if prev_temp != "":
+            _ = setenv("TEMP", prev_temp, True)
+        else:
+            _ = unsetenv("TEMP")
+        if prev_tmp != "":
+            _ = setenv("TMP", prev_tmp, True)
+        else:
+            _ = unsetenv("TMP")

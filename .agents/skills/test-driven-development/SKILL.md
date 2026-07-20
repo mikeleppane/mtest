@@ -71,6 +71,15 @@ or a classified module that retains `main()`. One file per unit under test,
 named `tests/unit/test_<thing>.mojo` or
 `tests/integration/test_<thing>.mojo` according to the boundary it crosses.
 
+**Audit every harness consumer when executable topology changes.** A change to
+whether classified modules own `main()`, how their entrypoint is generated, or
+which inventory a lane runs MUST cover `test-direct`, `test-file`, ASan,
+Valgrind, self-host, and package consumption. A classified module is import-only
+in every lane: any consumer that executes one generates its entrypoint through
+`scripts/aggregate_tests.py`; none compiles the module path directly. Add a
+harness regression that inspects each affected build command — a green primary
+test gate does not prove the specialized consumers use the same module contract.
+
 **Keep test modules cohesive.** A failing aggregate prints `==> <module path>`
 before each module and TestSuite names the exact failing function. Re-run that
 module with `pixi run test-file -- <path>`; split a module when its failures no
@@ -292,5 +301,8 @@ float legitimately appears is a timing number under `bench` — those are
 - [ ] A refactor commit does not move a transcript or a tripwire's pinned value
 - [ ] Classified test module has no `main()` and stays cohesive enough for its
       `==> <module path>` failure marker to be useful
+- [ ] A test-execution topology change audits `test-direct`, `test-file`, ASan,
+      Valgrind, self-host, and package consumption; every classified-module
+      consumer generates an entrypoint instead of compiling the module directly
 - [ ] `pixi run test-direct` and `pixi run test` green; the new file is in the
       correct classified suite root

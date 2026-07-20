@@ -33,8 +33,9 @@ stream reporter), after which the reporter goes silent. An INERT reporter (the
 no-`--junit-xml` shape) owns no spool directory and does nothing.
 """
 from std.ffi import external_call
-from std.os import remove
+from std.os import getenv, mkdir, remove
 from std.os.path import basename, dirname
+from std.time import perf_counter_ns
 
 from mtest.model.events import Event, EventKind
 from mtest.model.outcome import Outcome
@@ -58,6 +59,12 @@ comptime _TERM_SIGNALED = 1
 comptime _TERM_TIMED_OUT = 2
 comptime _TERM_SPAWN_FAILED = 3
 
+# How many distinct spool-directory names one call may try before giving up.
+# Every candidate re-reads the nanosecond clock, so a repeat needs two readings
+# to land on the same nanosecond; the budget therefore guards against an
+# unusable temp base rather than a collision rate.
+comptime _SPOOL_ATTEMPTS = 64
+
 
 def _junit_nonce() -> String:
     """A per-process token isolating this run's JUnit spool and temp paths.
@@ -72,6 +79,72 @@ def _junit_nonce() -> String:
     # Int32; there is nothing to misuse and the call cannot fail.
     var pid = external_call["getpid", Int32]()
     return String(Int(pid))
+
+
+def open_junit_spool() raises -> String:
+    """Create and return this run's private temp directory for suite fragments.
+
+    Deliberately does NOT use `std.tempfile.mkdtemp`. At the pinned toolchain
+    its candidate-name generator is unseeded, so every process walks the SAME
+    name sequence; in a shared `/tmp` those exact names already exist from
+    earlier runs, mkdtemp exhausts its internal attempts, and `--junit-xml`
+    dies before a single test is built. The key here is instead a monotonic
+    nanosecond reading taken FRESH on every attempt, with `mkdir`'s own atomic
+    exclusive create as the arbiter, under a `mtest-junit-<pid>-` prefix that
+    ties a stray directory back to the run that left it. The pid alone must NOT
+    be the key: pids recur across pid namespaces and after wraparound, so a
+    fixed per-pid stem walked in index order has to step over every leftover a
+    previous same-pid run abandoned — which re-creates, against a persisted
+    `/tmp`, the exact budget exhaustion this function exists to remove. A
+    re-read clock cannot be walked into again.
+
+    Honors `TMPDIR`, then `TEMP`, then `TMP`, falling back to `/tmp` — the same
+    precedence `gettempdir()` applies behind the `mkdtemp()` this replaces, so
+    confining a run's scratch keeps working exactly as it did before.
+
+    Returns:
+        The path of the freshly created, empty directory (mode 0o700). The
+        caller owns it and is responsible for removing it. Allocates the
+        returned String.
+
+    Raises:
+        Error: if no candidate could be created within the attempt budget —
+            the temp base is missing, is not a directory, or is unwritable.
+            The message carries the LAST underlying failure verbatim, because
+            every one of those causes burns the whole budget identically and
+            only the errno text tells them apart. The caller resolves that to
+            the pre-run internal-error exit code.
+    """
+    var base = getenv("TMPDIR", "")
+    if base == "":
+        base = getenv("TEMP", "")
+    if base == "":
+        base = getenv("TMP", "")
+    if base == "":
+        base = String("/tmp")
+    if base.byte_length() > 1 and base.endswith("/"):
+        base = String(base.removesuffix("/"))
+    var stem = base + "/mtest-junit-" + _junit_nonce() + "-"
+    # Seeded so the raise below is always well-formed; the budget is positive,
+    # so a real failure always overwrites this.
+    var last = String("no attempt was made")
+    for attempt in range(_SPOOL_ATTEMPTS):
+        var candidate = stem + String(perf_counter_ns()) + "-" + String(attempt)
+        try:
+            mkdir(candidate, 0o700)
+        except e:
+            last = String(e)
+            continue
+        return candidate^
+    raise Error(
+        "report: could not create a junit spool directory under '"
+        + base
+        + "' ("
+        + String(_SPOOL_ATTEMPTS)
+        + " attempts; last: "
+        + last
+        + ")"
+    )
 
 
 def _cstring(value: String) -> List[UInt8]:

@@ -10,13 +10,11 @@ per-suite fragments, assembles the whole `<testsuites>` document, and prints it
 to stdout. The gate then runs `scripts/junit_check.py` over that output — so the
 oracle validates the shipped renderer's OWN bytes, not a hand-authored mock.
 """
-from std.tempfile import mkdtemp
-
 from mtest.model.events import Event
 from mtest.model.node_id import NodeId
 from mtest.model.outcome import Outcome
 from mtest.model.test_result import TestResult
-from mtest.report.junit_reporter import JunitReporter
+from mtest.report.junit_reporter import JunitReporter, open_junit_spool
 
 
 def _bytes(s: String) -> List[UInt8]:
@@ -74,7 +72,7 @@ def _finished(
 
 
 def main() raises:
-    var rep = JunitReporter(mkdtemp(), True)
+    var rep = JunitReporter(open_junit_spool(), True)
 
     # Cell 1: non-retried file-level failure -> [build].
     rep.handle(Event.file_started("e2e/c1_build.mojo"))
