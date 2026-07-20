@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Crashing-compiler `--mojo` stand-in — drives the compiler crash-retry paths.
 
-Stands in for the real `mojo` binary the same way `scripts/logging_mojo.py` and
-`scripts/fake_slow_mojo.py` do: `mtest --mojo scripts/fake_crash_mojo.py ...`
-routes every child mtest spawns through this script first. It splits by
+Stands in for the real `mojo` binary the same way the adjacent
+`logging_mojo.py` and `fake_slow_mojo.py` do. It routes every child mtest
+spawns through this script first and splits by
 subcommand:
 
 * `precompile` — TRUNCATES its `-o` output path, prints a compiler-crash banner to

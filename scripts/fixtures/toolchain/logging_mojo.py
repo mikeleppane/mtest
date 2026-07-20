@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Logging `--mojo` wrapper — proves the single-build reuse guarantee.
 
-Stands in for the real `mojo` binary: `mtest --mojo scripts/logging_mojo.py
-...` routes every child mtest spawns (`mojo build <file> ...`, `mojo
+Passing this file to `mtest --mojo` routes every child mtest spawns (`mojo
+build <file> ...`, `mojo
 precompile <file> ...`) through this script first. It:
 
 1. Reads a log file path from the `MTEST_MOJO_LOG` environment variable.

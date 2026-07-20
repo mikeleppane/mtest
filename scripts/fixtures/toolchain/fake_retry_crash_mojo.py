@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Retry-then-crash `--mojo` stand-in — drives the BUILD-RETRY attribution path.
 
-Stands in for the real `mojo` binary the same way `scripts/fake_slow_mojo.py`
-does: `mtest --mojo scripts/fake_retry_crash_mojo.py ...` routes every child
+Stands in for the real `mojo` binary the same way the adjacent
+`fake_slow_mojo.py` does. It routes every child
 mtest spawns through this script first. It exists to reach ONE otherwise
 unreachable state: a file whose CRASH verdict was earned by a binary at
 `build/bin/<mangled>.attempt-N` rather than `build/bin/<mangled>`.
@@ -53,7 +53,9 @@ import time
 SLEEP_SECONDS = 300.0
 SIGTERM_EXIT = 128 + signal.SIGTERM
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 MARKER = os.path.join(REPO_ROOT, "build", "e2e-scratch", "retry_crash_build_marker")
 
 # The fixture's tests, in source order, and the one that dies. Kept in step with
@@ -65,7 +67,7 @@ CULPRIT = "test_boom"
 # The emitted binary. It speaks the toolchain's pinned report grammar (trailing
 # spaces are load-bearing) for the canonical source path baked in at write time.
 FAKE_BINARY = '''#!/usr/bin/env python3
-"""Written by scripts/fake_retry_crash_mojo.py — not a committed artifact."""
+"""Written by fake_retry_crash_mojo.py — not a committed artifact."""
 import os
 import signal
 import sys

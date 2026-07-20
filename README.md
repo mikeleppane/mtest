@@ -664,14 +664,14 @@ line says so (`RUN-CAP`, `TIME-BUDGET`) instead of guessing.
 ### Compile timeout
 
 `--compile-timeout SECS` bounds a file's *build* the same way `--timeout`
-bounds its run. The committed `scripts/fake_slow_mojo.py` — a `--mojo`
+bounds its run. The committed `scripts/fixtures/toolchain/fake_slow_mojo.py` — a `--mojo`
 stand-in that sleeps forever on `build` but honors the terminate signal
 promptly — makes this fast and deterministic to demonstrate without waiting
 out a real stalled compile:
 
 ```console
-$ pixi run bash -c 'build/mtest --mojo scripts/fake_slow_mojo.py e2e/suite/test_passing.mojo --compile-timeout 1'
-mtest 0.4.0 (scripts/fake_slow_mojo.py)
+$ pixi run bash -c 'build/mtest --mojo scripts/fixtures/toolchain/fake_slow_mojo.py e2e/suite/test_passing.mojo --compile-timeout 1'
+mtest 0.4.0 (scripts/fixtures/toolchain/fake_slow_mojo.py)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 COMPILE-TIMEOUT  e2e/suite/test_passing.mojo     0.00s  (timed out after 1s)
@@ -680,7 +680,7 @@ COMPILE-TIMEOUT  e2e/suite/test_passing.mojo     0.00s  (timed out after 1s)
 fake_slow_mojo.py: build: lowering module (this will not finish)
 fake_slow_mojo.py: SIGTERM received; exiting
 the build exceeded the 1s compile timeout — split the module into smaller files or exclude it (raise the deadline with --compile-timeout N, or --compile-timeout 0 to remove it)
-reproduce: mtest --mojo scripts/fake_slow_mojo.py --compile-timeout 1 e2e/suite/test_passing.mojo
+reproduce: mtest --mojo scripts/fixtures/toolchain/fake_slow_mojo.py --compile-timeout 1 e2e/suite/test_passing.mojo
 
 ===== 0 passed, 0 failed, 0 skipped, 1 compile timeout (0 excluded, 0 not run) in 1.0s =====
 $ echo $?
@@ -693,17 +693,17 @@ COMPILE-ERROR. Combined with `--retries`, a killed compile's rebuild runs
 against a fresh, quarantined module cache, announced with a loud `WARNING`:
 
 ```console
-$ pixi run bash -c 'build/mtest --mojo scripts/fake_slow_mojo.py e2e/suite/test_passing.mojo --compile-timeout 1 --retries 1'
-mtest 0.4.0 (scripts/fake_slow_mojo.py)
+$ pixi run bash -c 'build/mtest --mojo scripts/fixtures/toolchain/fake_slow_mojo.py e2e/suite/test_passing.mojo --compile-timeout 1 --retries 1'
+mtest 0.4.0 (scripts/fixtures/toolchain/fake_slow_mojo.py)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
-TRY            e2e/suite/test_passing.mojo     attempt 1/2  build compile-timeout  (timed out)  1.02s
-WARNING  compile-kill-residual: the compile of 'e2e/suite/test_passing.mojo' was killed (compile-timeout); the shared module cache may be suspect, so the rebuild ran quarantined against a fresh per-attempt cache (the shared cache was neither used nor deleted)
+TRY            e2e/suite/test_passing.mojo     attempt 1/2  build compile-timeout  (timed out)  1.00s
+WARNING  compile-kill-residual: the compile of 'e2e/suite/test_passing.mojo' was killed at the compile deadline (compile-timeout); the shared module cache may be suspect, so the rebuild ran quarantined against a fresh per-attempt cache (the shared cache was neither used nor deleted)
 COMPILE-TIMEOUT  e2e/suite/test_passing.mojo     0.00s  (timed out after 1s)
 
 [...captured output omitted...]
 
-===== 0 passed, 0 failed, 0 skipped, 1 compile timeout (0 excluded, 0 not run) in 2.1s =====
+===== 0 passed, 0 failed, 0 skipped, 1 compile timeout (0 excluded, 0 not run) in 2.0s =====
 $ echo $?
 1
 ```

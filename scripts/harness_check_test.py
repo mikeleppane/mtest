@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -10,7 +11,9 @@ import unittest
 from unittest import mock
 
 from scripts import aggregate_tests
+from scripts import e2e_check
 from scripts import harness_check
+from scripts.fixtures.toolchain import fake_retry_crash_mojo
 
 
 class AggregateMembershipOracleTests(unittest.TestCase):
@@ -221,6 +224,40 @@ class BuildSourceVisibilityTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "untracked"):
                 harness_check.check_build_source_visibility(repo)
 
+
+class ToolchainFixturePathTests(unittest.TestCase):
+    def test_e2e_paths_and_retry_marker_are_repository_anchored(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        fixture_root = root / "scripts" / "fixtures" / "toolchain"
+        self.assertEqual(
+            (
+                Path(e2e_check.LOGGING_MOJO),
+                Path(e2e_check.FAKE_SLOW_MOJO),
+                Path(e2e_check.FAKE_CRASH_MOJO),
+                Path(e2e_check.FAKE_RETRY_CRASH_MOJO),
+            ),
+            (
+                fixture_root / "logging_mojo.py",
+                fixture_root / "fake_slow_mojo.py",
+                fixture_root / "fake_crash_mojo.py",
+                fixture_root / "fake_retry_crash_mojo.py",
+            ),
+        )
+        self.assertEqual(Path(fake_retry_crash_mojo.REPO_ROOT), root)
+        self.assertEqual(
+            Path(fake_retry_crash_mojo.MARKER),
+            root / "build" / "e2e-scratch" / "retry_crash_build_marker",
+        )
+
+    def test_toolchain_fixtures_remain_executable(self) -> None:
+        for fixture in (
+            e2e_check.LOGGING_MOJO,
+            e2e_check.FAKE_SLOW_MOJO,
+            e2e_check.FAKE_CRASH_MOJO,
+            e2e_check.FAKE_RETRY_CRASH_MOJO,
+        ):
+            with self.subTest(fixture=fixture):
+                self.assertTrue(os.access(fixture, os.X_OK))
 
 if __name__ == "__main__":
     unittest.main()

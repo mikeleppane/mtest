@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Slow-compiler `--mojo` stand-in — drives the COMPILE-TIMEOUT path.
 
-Stands in for the real `mojo` binary the same way `scripts/logging_mojo.py`
-does: `mtest --mojo scripts/fake_slow_mojo.py ...` routes every child mtest
+Stands in for the real `mojo` binary the same way the adjacent
+`logging_mojo.py` does. It routes every child mtest
 spawns through this script first. It splits by subcommand:
 
 * `build` and `precompile` — TRUNCATE the `-o` output path (see below), write one

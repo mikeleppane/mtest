@@ -57,10 +57,11 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MTEST = os.path.join(REPO_ROOT, "build", "mtest")
 E2E_ROOT = os.path.join(REPO_ROOT, "e2e")
 MANIFEST_PATH = os.path.join(E2E_ROOT, "manifest.json")
-LOGGING_MOJO = os.path.join(REPO_ROOT, "scripts", "logging_mojo.py")
-FAKE_SLOW_MOJO = os.path.join(REPO_ROOT, "scripts", "fake_slow_mojo.py")
-FAKE_CRASH_MOJO = os.path.join(REPO_ROOT, "scripts", "fake_crash_mojo.py")
-FAKE_RETRY_CRASH_MOJO = os.path.join(REPO_ROOT, "scripts", "fake_retry_crash_mojo.py")
+TOOLCHAIN_FIXTURES = os.path.join(REPO_ROOT, "scripts", "fixtures", "toolchain")
+LOGGING_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "logging_mojo.py")
+FAKE_SLOW_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_slow_mojo.py")
+FAKE_CRASH_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_crash_mojo.py")
+FAKE_RETRY_CRASH_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_retry_crash_mojo.py")
 JSON_TERMINAL_WRITE_FAULT = os.path.join(
     REPO_ROOT, "tests", "native", "e2e_json_terminal_write_fault.c"
 )
@@ -1053,7 +1054,7 @@ def s_attribution_reruns_the_binary_that_crashed(manifest: dict) -> str:
     and a stale binary can yield a culprit out of code that never ran: a
     misleading ATTRIBUTED.
 
-    The shim (scripts/fake_retry_crash_mojo.py) makes that divergence real: its
+    The fake retry-crash toolchain fixture makes that divergence real: its
     first `build` truncates `-o` and hangs until `--compile-timeout` kills it
     (crash-class -> retried), and its second writes a working binary at the
     retry's fresh `.attempt-2` path. So `build/bin/<mangled>` exists but is
@@ -1120,7 +1121,7 @@ def s_compile_timeout(manifest: dict) -> str:
     """`--compile-timeout` bounds the BUILD; a blown deadline is COMPILE-TIMEOUT.
 
     Uses the committed slow-compiler `--mojo` stand-in
-    (scripts/fake_slow_mojo.py), which sleeps forever on `build` but honors
+    (scripts/fixtures/toolchain/fake_slow_mojo.py), which sleeps forever on `build` but honors
     SIGTERM promptly — so this exercises the GRACEFUL half of the supervised kill
     protocol against a normal, perfectly valid fixture. The file is only slow to
     compile, never broken: that is exactly what separates COMPILE-TIMEOUT from
@@ -1465,7 +1466,7 @@ def s_precompile_timeout(manifest: dict) -> str:
     """`--compile-timeout` bounds a `--precompile` step too; a blown deadline is
     a PRECOMPILE-ERROR that NAMES the timeout.
 
-    Uses the slow-compiler stand-in (scripts/fake_slow_mojo.py), which sleeps
+    Uses the slow-compiler stand-in (scripts/fixtures/toolchain/fake_slow_mojo.py), which sleeps
     forever on `precompile` and honors SIGTERM promptly. The package is fine; only
     the compiler is slow — so this separates "we killed it at our deadline" from
     "the compiler rejected the code", which read identically at exit 1 unless the
@@ -1511,7 +1512,7 @@ def s_precompile_timeout(manifest: dict) -> str:
 def s_precompile_crash_retry(manifest: dict) -> str:
     """A crash-class precompile is retried under `--retries`, then reported.
 
-    Uses the crashing-compiler stand-in (scripts/fake_crash_mojo.py), which dies
+    Uses the crashing-compiler stand-in (scripts/fixtures/toolchain/fake_crash_mojo.py), which dies
     by SIGSEGV on `precompile`. A signal death is crash-class, so:
 
       * --retries 0 -> one attempt, PRECOMPILE-ERROR naming the signal, exit 1;
@@ -2173,7 +2174,7 @@ def _count_builds(lines: list[str], rel: str) -> int:
 def s_single_build(manifest: dict) -> str:
     """The BuildProducts registry shares ONE `mojo build` per file between the
     selection probe and the run — proved with the committed logging `--mojo`
-    wrapper (scripts/logging_mojo.py) over a SINGLE selection-run invocation.
+    wrapper (scripts/fixtures/toolchain/logging_mojo.py) over a SINGLE selection-run invocation.
     Two separate `mtest` invocations would legitimately rebuild; this scenario
     never does that.
 
