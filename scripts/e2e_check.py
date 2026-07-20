@@ -30,6 +30,7 @@ Usage:  pixi run e2e        (builds the binary first, then runs this)
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import inspect
 import json
 import os
@@ -416,19 +417,30 @@ def discovered_test_files() -> set[str]:
 
 # ---- scenarios ---------------------------------------------------------------
 #
-# Each scenario is a function taking the loaded manifest and raising
-# ScenarioError on any structural or exit-code mismatch. The name is the dict
-# key; ordering in RESULTS follows insertion.
+# Each scenario is a function taking the shared context and raising ScenarioError
+# on any structural or exit-code mismatch. Registry order determines execution.
+
+
+Scenario = Callable[["ScenarioContext"], str]
+ScenarioRegistry = tuple[tuple[str, Scenario], ...]
+
+
+@dataclass(frozen=True)
+class ScenarioContext:
+    """Immutable access to one run's manifest and fully composed registry."""
+
+    manifest: dict
+    registry: ScenarioRegistry
 
 
 @dataclass
 class Harness:
-    manifest: dict
+    context: ScenarioContext
     results: list[tuple[str, bool, str]] = field(default_factory=list)
 
-    def scenario(self, name: str, fn) -> None:
+    def scenario(self, name: str, fn: Scenario) -> None:
         try:
-            detail = fn(self.manifest)
+            detail = fn(self.context)
             self.results.append((name, True, detail or ""))
             print(f"PASS  {name}  {detail or ''}")
         except ScenarioError as exc:
@@ -468,8 +480,8 @@ class Harness:
         return all(passed for _n, passed, _d in self.results)
 
 
-def s_manifest_completeness(manifest: dict) -> str:
-    tests = manifest["tests"]
+def s_manifest_completeness(context: ScenarioContext) -> str:
+    tests = context.manifest["tests"]
     rows = set(tests.keys())
     disk = discovered_test_files()
     missing_rows = disk - rows
@@ -482,8 +494,8 @@ def s_manifest_completeness(manifest: dict) -> str:
             f"manifest row {rel} names a missing file",
         )
     # Non-discovered and support files exist but are not test_*.mojo.
-    for rel in list(manifest.get("non_discovered", {})) + list(
-        manifest.get("support_files", {})
+    for rel in list(context.manifest.get("non_discovered", {})) + list(
+        context.manifest.get("support_files", {})
     ):
         expect(
             os.path.exists(os.path.join(REPO_ROOT, rel)),
@@ -539,7 +551,7 @@ RESILIENCE_MATRIX = {
 RESILIENCE_SHIM_MARKERS = ("FAKE_CRASH_MOJO", "FAKE_SLOW_MOJO", "FAKE_RETRY_CRASH_MOJO")
 
 
-def s_resilience_matrix(manifest: dict) -> str:
+def s_resilience_matrix(context: ScenarioContext) -> str:
     """The matrix as a WHOLE: every kill/timeout/crash class has a live scenario.
 
     The individual scenarios prove their own behavior; this one pins the SET, so
@@ -555,7 +567,7 @@ def s_resilience_matrix(manifest: dict) -> str:
 
     This asserts COVERAGE, never behavior — it runs no mtest of its own.
     """
-    registered = {name for name, _fn in SCENARIOS}
+    registered = {name for name, _fn in context.registry}
     classified = set(RESILIENCE_MATRIX.values())
 
     dangling = sorted(
@@ -571,7 +583,7 @@ def s_resilience_matrix(manifest: dict) -> str:
 
     unclassified = sorted(
         name
-        for name, fn in SCENARIOS
+        for name, fn in context.registry
         if name not in classified
         and any(marker in inspect.getsource(fn) for marker in RESILIENCE_SHIM_MARKERS)
     )
@@ -586,8 +598,8 @@ def s_resilience_matrix(manifest: dict) -> str:
     )
 
 
-def s_default_suite(manifest: dict) -> str:
-    suite = _suite_tests(manifest)
+def s_default_suite(context: ScenarioContext) -> str:
+    suite = _suite_tests(context.manifest)
     run = run_mtest(["e2e/suite"])
     # Any exit_class-1 member means the session exits 1.
     any_failing = any(row["exit_class"] == 1 for row in suite.values())
@@ -663,7 +675,7 @@ def s_default_suite(manifest: dict) -> str:
         "zero-test file did not show a NO-TESTS verdict (never a plain PASS)",
     )
     # helper.mojo (non-discovered) must never appear.
-    for rel in manifest.get("non_discovered", {}):
+    for rel in context.manifest.get("non_discovered", {}):
         expect(rel not in run.stdout, f"non-discovered file {rel} appeared in output")
 
     # Summary arithmetic under the TEST-count band: crashed/timed-out/compile-
@@ -749,7 +761,7 @@ def s_default_suite(manifest: dict) -> str:
     )
 
 
-def s_hostile(manifest: dict) -> str:
+def s_hostile(context: ScenarioContext) -> str:
     """The hostile handshake set: each report-shaped adversary, run alone.
 
     silent -> MALFORMED-SUITE (exit 1); forger (two blocks) -> MALFORMED-SUITE
@@ -760,7 +772,7 @@ def s_hostile(manifest: dict) -> str:
     straight from the manifest rows for e2e/hostile/*."""
     hostile = {
         rel: row
-        for rel, row in manifest["tests"].items()
+        for rel, row in context.manifest["tests"].items()
         if rel.startswith("e2e/hostile/")
     }
     expect(len(hostile) == 4, f"expected 4 hostile fixtures, got {len(hostile)}")
@@ -801,7 +813,7 @@ def s_hostile(manifest: dict) -> str:
     return "silent/forger MALFORMED-SUITE, liar DRIFT exit 3, overflow FAIL"
 
 
-def s_single_pass(manifest: dict) -> str:
+def s_single_pass(context: ScenarioContext) -> str:
     rel = "e2e/suite/test_passing.mojo"
     run = run_mtest([rel])
     expect_exit(run, 0)
@@ -810,7 +822,7 @@ def s_single_pass(manifest: dict) -> str:
     return "single passing file -> exit 0"
 
 
-def s_exitfirst(manifest: dict) -> str:
+def s_exitfirst(context: ScenarioContext) -> str:
     run = run_mtest(["e2e/suite", "-x"])
     expect_exit(run, 1)
     summ = expect_accounting(run)
@@ -818,7 +830,7 @@ def s_exitfirst(manifest: dict) -> str:
     return f"-x stopped scheduling; {summ.not_run} NOT-RUN, accounting holds"
 
 
-def s_maxfail(manifest: dict) -> str:
+def s_maxfail(context: ScenarioContext) -> str:
     """`--maxfail N` stops scheduling once N failing TESTS have accumulated.
 
     e2e/maxfail/ sorts test_a_fail, test_b_fail, test_c_pass; each failing
@@ -836,7 +848,7 @@ def s_maxfail(manifest: dict) -> str:
     return f"--maxfail 1 stopped after 1 failing test; {summ.not_run} NOT-RUN, accounting holds"
 
 
-def s_retries_flaky(manifest: dict) -> str:
+def s_retries_flaky(context: ScenarioContext) -> str:
     """`--retries` re-runs a crash-class failure; a late pass is FLAKY.
 
     The flaky fixture crashes by SIGSEGV on its first run (dropping a marker) and
@@ -906,7 +918,7 @@ def s_retries_flaky(manifest: dict) -> str:
     )
 
 
-def s_crash_attribution(manifest: dict) -> str:
+def s_crash_attribution(context: ScenarioContext) -> str:
     """A CRASH file gets a bounded isolation post-pass that NEVER moves the verdict.
 
     The honesty pair, and the doctrine's core claim asserted directly:
@@ -1042,7 +1054,7 @@ def s_crash_attribution(manifest: dict) -> str:
     )
 
 
-def s_attribution_reruns_the_binary_that_crashed(manifest: dict) -> str:
+def s_attribution_reruns_the_binary_that_crashed(context: ScenarioContext) -> str:
     """Attribution reruns the binary that ACTUALLY crashed, not a reconstructed name.
 
     The one path where the pass could point at the WRONG thing. A crash-class
@@ -1117,7 +1129,7 @@ def s_attribution_reruns_the_binary_that_crashed(manifest: dict) -> str:
     )
 
 
-def s_compile_timeout(manifest: dict) -> str:
+def s_compile_timeout(context: ScenarioContext) -> str:
     """`--compile-timeout` bounds the BUILD; a blown deadline is COMPILE-TIMEOUT.
 
     Uses the committed slow-compiler `--mojo` stand-in
@@ -1192,7 +1204,7 @@ def s_compile_timeout(manifest: dict) -> str:
     )
 
 
-def s_compile_crash_signature(manifest: dict) -> str:
+def s_compile_crash_signature(context: ScenarioContext) -> str:
     """The stderr CRASH SIGNATURE — not the nonzero exit — decides a build retry.
 
     A compiler can crash and still exit under its own control: an ICE that prints
@@ -1272,7 +1284,7 @@ def s_compile_crash_signature(manifest: dict) -> str:
     )
 
 
-def s_exclude_and_stale(manifest: dict) -> str:
+def s_exclude_and_stale(context: ScenarioContext) -> str:
     run = run_mtest(
         [
             "e2e/excluded",
@@ -1297,7 +1309,7 @@ def s_exclude_and_stale(manifest: dict) -> str:
     return "one EXCLUDED + stale-exclusion warning; excluded=1"
 
 
-def s_all_excluded(manifest: dict) -> str:
+def s_all_excluded(context: ScenarioContext) -> str:
     run = run_mtest(
         ["e2e/excluded", "--exclude", "e2e/excluded/test_excluded.mojo"]
     )
@@ -1309,7 +1321,7 @@ def s_all_excluded(manifest: dict) -> str:
     return "everything excluded -> exit 5"
 
 
-def s_empty_dir(manifest: dict) -> str:
+def s_empty_dir(context: ScenarioContext) -> str:
     # Must live inside the invocation root (an out-of-root operand is exit 4).
     tmp = tempfile.mkdtemp(prefix=".e2e_empty_", dir=E2E_ROOT)
     try:
@@ -1321,7 +1333,7 @@ def s_empty_dir(manifest: dict) -> str:
     return "empty directory -> exit 5"
 
 
-def s_failing_gate(manifest: dict) -> str:
+def s_failing_gate(context: ScenarioContext) -> str:
     run = run_mtest(
         ["e2e/suite", "--gate", "e2e/suite/test_failing.mojo"]
     )
@@ -1332,7 +1344,7 @@ def s_failing_gate(manifest: dict) -> str:
     return f"failing gate aborts; {summ.not_run} NOT-RUN"
 
 
-def s_timeout(manifest: dict) -> str:
+def s_timeout(context: ScenarioContext) -> str:
     """The POLITE half of the escalation pair (the stubborn half is
     timeout-escalation). This fixture sleeps without disarming SIGTERM, so the
     supervisor's polite signal ends it inside the grace and NO SIGKILL is ever
@@ -1365,7 +1377,7 @@ def s_timeout(manifest: dict) -> str:
     )
 
 
-def s_timeout_escalation(manifest: dict) -> str:
+def s_timeout_escalation(context: ScenarioContext) -> str:
     """A child that IGNORES SIGTERM forces the supervisor's full kill protocol:
     SIGTERM -> 300ms run-step grace -> SIGKILL. The escalation is latched on the
     Termination, and BOTH places that can narrate it must:
@@ -1436,7 +1448,7 @@ def s_timeout_escalation(manifest: dict) -> str:
     )
 
 
-def s_precompile(manifest: dict) -> str:
+def s_precompile(context: ScenarioContext) -> str:
     rel = "e2e/pkg/test_uses_pkg.mojo"
     # Success: package precompiled, auto -I resolves the import -> PASS.
     ok = run_mtest([rel, "--precompile", "e2e/pkg/mathlib"])
@@ -1462,7 +1474,7 @@ def s_precompile(manifest: dict) -> str:
     return "precompile PASS (auto -I) + broken precompile banner/casualty exit 1"
 
 
-def s_precompile_timeout(manifest: dict) -> str:
+def s_precompile_timeout(context: ScenarioContext) -> str:
     """`--compile-timeout` bounds a `--precompile` step too; a blown deadline is
     a PRECOMPILE-ERROR that NAMES the timeout.
 
@@ -1509,7 +1521,7 @@ def s_precompile_timeout(manifest: dict) -> str:
     return "precompile --compile-timeout 1 -> PRECOMPILE-ERROR naming the timeout + casualties (exit 1)"
 
 
-def s_precompile_crash_retry(manifest: dict) -> str:
+def s_precompile_crash_retry(context: ScenarioContext) -> str:
     """A crash-class precompile is retried under `--retries`, then reported.
 
     Uses the crashing-compiler stand-in (scripts/fixtures/toolchain/fake_crash_mojo.py), which dies
@@ -1568,7 +1580,7 @@ def s_precompile_crash_retry(manifest: dict) -> str:
     )
 
 
-def s_precompile_promotion(manifest: dict) -> str:
+def s_precompile_promotion(context: ScenarioContext) -> str:
     """THE promotion guarantee: a failed precompile never touches OUT.
 
     An attempt builds to a temp path and is renamed onto OUT only after it exits
@@ -1642,7 +1654,7 @@ def s_precompile_promotion(manifest: dict) -> str:
     )
 
 
-def s_quiet_verbose(manifest: dict) -> str:
+def s_quiet_verbose(context: ScenarioContext) -> str:
     rel = "e2e/suite/test_passing.mojo"
     quiet = run_mtest([rel, "-q"])
     expect_exit(quiet, 0)
@@ -1659,7 +1671,7 @@ def s_quiet_verbose(manifest: dict) -> str:
     return "-q omits PASS lines; -v adds build cmd + timing"
 
 
-def s_show_output(manifest: dict) -> str:
+def s_show_output(context: ScenarioContext) -> str:
     fail = "e2e/suite/test_failing.mojo"
     pass_ = "e2e/suite/test_passing.mojo"
     none = run_mtest([fail, "--show-output", "none"])
@@ -1687,11 +1699,11 @@ def s_show_output(manifest: dict) -> str:
 DURATIONS_ROW_RE = re.compile(r"^  (\S+)\s+([\d.]+)s\s*$")
 
 
-def s_durations(manifest: dict) -> str:
+def s_durations(context: ScenarioContext) -> str:
     """`--durations N` renders a file-level slowest-files list, INFORMAL tier:
     structure only (presence, size, order, `-q` survival) — never exact
     timings."""
-    suite = _suite_tests(manifest)
+    suite = _suite_tests(context.manifest)
     files_run = sum(1 for row in suite.values() if row["verdict"] != "COMPILE-ERROR")
     cerr_rel = next(
         rel for rel, row in suite.items() if row["verdict"] == "COMPILE-ERROR"
@@ -1751,7 +1763,7 @@ def s_durations(manifest: dict) -> str:
     return f"absent w/o flag; {shown} rows (capped from {requested}), descending, survives -q"
 
 
-def s_color(manifest: dict) -> str:
+def s_color(context: ScenarioContext) -> str:
     """NO_COLOR must silence AUTO color even on a real tty; --color always is
     absolute and paints regardless of NO_COLOR or tty-ness.
 
@@ -1807,7 +1819,7 @@ COLLECT_DIR_EXPECTED = [
 ]
 
 
-def s_collect(manifest: dict) -> str:
+def s_collect(context: ScenarioContext) -> str:
     """`collect` / `--collect-only`: STDOUT is byte-clean and is ONLY the sorted
     node-id listing; every diagnostic goes to STDERR; the total per-file policy
     holds (qualifying listed; compile-error/crash/timeout/malformed -> stderr +
@@ -1912,7 +1924,7 @@ def s_collect(manifest: dict) -> str:
     )
 
 
-def s_usage_refusals(manifest: dict) -> str:
+def s_usage_refusals(context: ScenarioContext) -> str:
     """collect is now served, so the collect-subcommand refusal is gone. The
     remaining usage refusal this build enforces is a RUN-ONLY flag combined with
     collect mode: a listing is not a run, so every served run-only flag
@@ -1993,7 +2005,7 @@ def s_usage_refusals(manifest: dict) -> str:
     )
 
 
-def s_passthrough_and_forbidden(manifest: dict) -> str:
+def s_passthrough_and_forbidden(context: ScenarioContext) -> str:
     rel = "e2e/suite/test_passing.mojo"
     good = run_mtest([rel, "--", "--no-optimization"])
     expect_exit(good, 0)
@@ -2011,7 +2023,7 @@ def s_passthrough_and_forbidden(manifest: dict) -> str:
     return "passthrough build arg works; -o/--emit/extra-source each exit 4"
 
 
-def s_out_of_root(manifest: dict) -> str:
+def s_out_of_root(context: ScenarioContext) -> str:
     run = run_mtest(["../outside_the_root.mojo"], timeout=SHORT_TIMEOUT)
     expect_exit(run, 4)
     expect(
@@ -2026,7 +2038,7 @@ MATRIX_BETA = "e2e/matrix/test_beta.mojo"
 CHAMELEON = "e2e/chameleon/test_chameleon.mojo"
 
 
-def s_selection_keyword(manifest: dict) -> str:
+def s_selection_keyword(context: ScenarioContext) -> str:
     """`-k` narrows a file to a subset run under --only; the rest are DESELECTED.
 
     `-k two` selects only test_alpha_two of the three; the file runs under
@@ -2046,7 +2058,7 @@ def s_selection_keyword(manifest: dict) -> str:
     return "-k selects a subset (--only), rest DESELECTED; exit 0"
 
 
-def s_selection_node_id(manifest: dict) -> str:
+def s_selection_node_id(context: ScenarioContext) -> str:
     """A node-id operand selects exactly one test; the rest are DESELECTED."""
     run = run_mtest([f"{MATRIX_ALPHA}::test_alpha_one"])
     expect_exit(run, 0)
@@ -2062,7 +2074,7 @@ def s_selection_node_id(manifest: dict) -> str:
     return "node-id operand selects one test; 2 DESELECTED; exit 0"
 
 
-def s_selection_union(manifest: dict) -> str:
+def s_selection_union(context: ScenarioContext) -> str:
     """A dir operand UNIONs with a node id under it: the whole tree still runs.
 
     `mtest e2e/matrix e2e/matrix/test_alpha.mojo::test_alpha_one`
@@ -2087,7 +2099,7 @@ def s_selection_union(manifest: dict) -> str:
     return "dir + node-id union runs the whole tree; 0 DESELECTED; exit 0"
 
 
-def s_selection_malformed_node_id(manifest: dict) -> str:
+def s_selection_malformed_node_id(context: ScenarioContext) -> str:
     """More than one `::` is a MALFORMED node id -> exit 4, never 'unknown test'.
     """
     run = run_mtest(
@@ -2105,7 +2117,7 @@ def s_selection_malformed_node_id(manifest: dict) -> str:
     return "malformed node id (>1 '::') -> exit 4, names it, never 'unknown test'"
 
 
-def s_selection_unknown_test(manifest: dict) -> str:
+def s_selection_unknown_test(context: ScenarioContext) -> str:
     """A node id naming a test the file does not collect -> exit 4 'unknown test'.
     """
     run = run_mtest([f"{MATRIX_ALPHA}::test_does_not_exist"], timeout=SHORT_TIMEOUT)
@@ -2117,7 +2129,7 @@ def s_selection_unknown_test(manifest: dict) -> str:
     return "unknown test name (after the probe) -> exit 4"
 
 
-def s_selection_empty(manifest: dict) -> str:
+def s_selection_empty(context: ScenarioContext) -> str:
     """A `-k` that matches nothing deselects every test -> nothing runs -> exit 5.
     """
     run = run_mtest([MATRIX_ALPHA, "-k", "no_such_keyword_zzz"])
@@ -2125,7 +2137,7 @@ def s_selection_empty(manifest: dict) -> str:
     return "empty final selection (all deselected) -> exit 5"
 
 
-def s_selection_chameleon(manifest: dict) -> str:
+def s_selection_chameleon(context: ScenarioContext) -> str:
     """The chameleon: recollect-once then MALFORMED-SUITE (exit-1), never exit 3.
 
     Selecting the ghost forces a --only run; the suite lists it under --skip-all
@@ -2171,7 +2183,7 @@ def _count_builds(lines: list[str], rel: str) -> int:
     return count
 
 
-def s_single_build(manifest: dict) -> str:
+def s_single_build(context: ScenarioContext) -> str:
     """The BuildProducts registry shares ONE `mojo build` per file between the
     selection probe and the run — proved with the committed logging `--mojo`
     wrapper (scripts/fixtures/toolchain/logging_mojo.py) over a SINGLE selection-run invocation.
@@ -2211,7 +2223,7 @@ def s_single_build(manifest: dict) -> str:
             os.remove(log_path)
 
 
-def s_stale_recovery_two_builds(manifest: dict) -> str:
+def s_stale_recovery_two_builds(context: ScenarioContext) -> str:
     """The chameleon's stale-name recovery rebuilds the file EXACTLY TWICE: the
     initial Phase-1 build, then the one recollect-once rebuild the recovery
     flow triggers when the suite refuses under `--only` a name it just listed
@@ -2246,7 +2258,7 @@ def s_stale_recovery_two_builds(manifest: dict) -> str:
             os.remove(log_path)
 
 
-def s_internal_error(manifest: dict) -> str:
+def s_internal_error(context: ScenarioContext) -> str:
     """A spawn/machinery failure must surface a diagnostic, not a silent exit 3.
 
     Point the runner at a nonexistent `--mojo`, so spawning `mojo build` fails
@@ -2318,7 +2330,7 @@ def s_internal_error(manifest: dict) -> str:
     )
 
 
-def s_runtime_open_failure(manifest: dict) -> str:
+def s_runtime_open_failure(context: ScenarioContext) -> str:
     """The real CLI main must report and explicitly repair failed signal open."""
     try:
         return main_open_check.check_main_open_failure()
@@ -2326,7 +2338,7 @@ def s_runtime_open_failure(manifest: dict) -> str:
         raise ScenarioError(str(error)) from error
 
 
-def s_interrupt(manifest: dict) -> str:
+def s_interrupt(context: ScenarioContext) -> str:
     """Spawn mtest against slow/ in its OWN process group, wait until it has
     clearly started (its header appears), let it enter the hang, then SIGINT the
     group. Assert exit 2, a partial summary with NOT-RUN accounting, and that the
@@ -2413,7 +2425,7 @@ def _looks_like_stream_line(line: str) -> bool:
     return line.startswith('{"event":')
 
 
-def s_json_forward_compat(manifest: dict) -> str:
+def s_json_forward_compat(context: ScenarioContext) -> str:
     """The strict consumer is the ORACLE, and it honors the ignore-unknowns
     obligation: a forward-compat fixture with unknown fields AND an unknown event
     kind is ACCEPTED, a torn tail is classified as truncation (not corruption),
@@ -2434,7 +2446,7 @@ def s_json_forward_compat(manifest: dict) -> str:
     return "strict consumer accepts unknown fields+kinds; rejects corruption"
 
 
-def s_json_purity(manifest: dict) -> str:
+def s_json_purity(context: ScenarioContext) -> str:
     """`--json -` makes stdout the BYTE-PURE event stream and relocates the whole
     console to stderr. Every stdout byte is a stream line the strict consumer
     accepts (header first, exactly one terminal, exit_code == the real exit); the
@@ -2466,7 +2478,7 @@ def s_json_purity(manifest: dict) -> str:
     return f"stdout byte-pure ({report.line_count if hasattr(report,'line_count') else len(report.records)} records); console on stderr; exit {run.returncode}"
 
 
-def s_json_color_on_relocated_stderr(manifest: dict) -> str:
+def s_json_color_on_relocated_stderr(context: ScenarioContext) -> str:
     """`--color auto` decides against the console's RESOLVED destination. Under
     `--json -` with stdout PIPED (never a tty) and stderr on a real PTY, the
     console lives on stderr, so color renders on STDERR (the tty-probe's
@@ -2536,7 +2548,7 @@ def s_json_color_on_relocated_stderr(manifest: dict) -> str:
     return "color renders on the relocated stderr; stream on stdout stays ANSI-free"
 
 
-def s_json_destination_taxonomy(manifest: dict) -> str:
+def s_json_destination_taxonomy(context: ScenarioContext) -> str:
     """The destination taxonomy split. A SYNTACTIC badness is a parse-time usage
     error (exit 4) BEFORE any build: an empty value, and a nonexistent parent
     directory. A RUNTIME open failure (the path is an existing directory, so
@@ -2564,7 +2576,7 @@ def s_json_destination_taxonomy(manifest: dict) -> str:
     return "empty->4, bad-parent->4 (pre-build), existing-dir open->3 (session-start)"
 
 
-def s_json_truncation_interrupt(manifest: dict) -> str:
+def s_json_truncation_interrupt(context: ScenarioContext) -> str:
     """Truncation trio (1/3): an INTERRUPTED run ends the stream WITH its terminal
     record and exit_code 2. The session fires SessionFinished on interrupt; the
     file destination is alive, so the terminal record is committed."""
@@ -2599,7 +2611,7 @@ def s_json_truncation_interrupt(manifest: dict) -> str:
     return "interrupt: stream ends WITH terminal record, exit_code 2"
 
 
-def s_json_truncation_sigkill(manifest: dict) -> str:
+def s_json_truncation_sigkill(context: ScenarioContext) -> str:
     """Truncation trio (2/3): a SIGKILLed mtest leaves COMPLETE lines and at most
     one torn tail — never corruption — and NO terminal record. The absence of the
     terminal is the truncation signal."""
@@ -2629,7 +2641,7 @@ def s_json_truncation_sigkill(manifest: dict) -> str:
     return "sigkill: complete lines + at most one torn tail; no terminal record"
 
 
-def s_json_truncation_dead_pipe(manifest: dict) -> str:
+def s_json_truncation_dead_pipe(context: ScenarioContext) -> str:
     """Truncation trio (3/3): `mtest --json - | head` — a consumer that closes the
     pipe early. SIGPIPE is ignored, so the reporter's write returns EPIPE and
     latches a FATAL ABORT: mtest neither dies at 141 nor runs to completion — it
@@ -2762,7 +2774,7 @@ def _build_json_terminal_write_fault(
     return library
 
 
-def s_json_terminal_write_failure(manifest: dict) -> str:
+def s_json_terminal_write_failure(context: ScenarioContext) -> str:
     """A deterministic terminal-record write failure escalates clean 0 to 3.
 
     A test-only dynamic-library interposer rejects only the real CLI's write
@@ -2858,7 +2870,7 @@ def s_json_terminal_write_failure(manifest: dict) -> str:
         return "terminal write fault: clean PASS escalates 0 -> 3, no orphan"
 
 
-def s_junit_scratch_cleanup(manifest: dict) -> str:
+def s_junit_scratch_cleanup(context: ScenarioContext) -> str:
     """A `--junit-xml` run leaves no spool directory behind. `main` owns the
     `mkdtemp` scratch it creates for per-suite fragments and frees it on exit;
     a busy /tmp would otherwise accrete one leaked directory (plus a fragment)
@@ -2885,7 +2897,7 @@ def s_junit_scratch_cleanup(manifest: dict) -> str:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def s_junit_schema_gate(manifest: dict) -> str:
+def s_junit_schema_gate(context: ScenarioContext) -> str:
     """`--junit-xml PATH` writes a document that PASSES the junit-10 oracle
     (schema + arithmetic), including a flaky suite in chronological order and a
     rerun-exhausted suite with the FIRST attempt as the initial primary."""
@@ -2957,7 +2969,7 @@ def s_junit_schema_gate(manifest: dict) -> str:
     return "junit passes the junit-10 oracle: base + flaky (chronological) + rerun-exhausted (initial-primary)"
 
 
-def s_junit_determinism(manifest: dict) -> str:
+def s_junit_determinism(context: ScenarioContext) -> str:
     """Two repeated SEQUENTIAL `--junit-xml` runs of the same suite are equal
     under the JUnit CANONICAL form (`time` and embedded text masked; structure,
     identity, classification, and counts kept). Derived copies prove each mask is
@@ -3070,7 +3082,7 @@ def s_junit_determinism(manifest: dict) -> str:
         )
 
 
-def s_junit_prior_report_intact(manifest: dict) -> str:
+def s_junit_prior_report_intact(context: ScenarioContext) -> str:
     """A finalization failure -> exit 3 AND the PRIOR report at PATH survives
     unmodified. Unlike `--json` (which truncates its destination at open), JUnit
     never touches PATH until the final atomic rename, so a doomed run leaves a
@@ -3098,7 +3110,7 @@ def s_junit_prior_report_intact(manifest: dict) -> str:
     return "unwritable junit target -> exit 3 pre-run; the prior report survives byte-for-byte"
 
 
-def s_junit_finalization_and_interrupt(manifest: dict) -> str:
+def s_junit_finalization_and_interrupt(context: ScenarioContext) -> str:
     """The finalize/exit-code agreement, with and without a run-time interrupt.
 
     (1) A junit target that fails at rename (an existing directory) escalates a
@@ -3199,7 +3211,7 @@ def _annotation_lines(stdout: str) -> list[str]:
     return annotations_check.annotation_tail_outside_fences(stdout)
 
 
-def s_annotations_modes(manifest: dict) -> str:
+def s_annotations_modes(context: ScenarioContext) -> str:
     """MODE resolution: `on` always renders the tail; `auto` follows
     GITHUB_ACTIONS; `off` never renders even under Actions.
 
@@ -3250,7 +3262,7 @@ def s_annotations_modes(manifest: dict) -> str:
     return "on renders; auto follows GITHUB_ACTIONS; off never renders"
 
 
-def s_annotations_caps(manifest: dict) -> str:
+def s_annotations_caps(context: ScenarioContext) -> str:
     """The 10-error per-STEP cap: twelve failures render nine node-id-sorted
     rows plus ONE `... and 3 more errors` aggregate — never eleven lines."""
     run = run_mtest(
@@ -3271,7 +3283,7 @@ def s_annotations_caps(manifest: dict) -> str:
     return "12 failures -> 9 rows + '... and 3 more errors' (10 lines, capped)"
 
 
-def s_annotations_conflict(manifest: dict) -> str:
+def s_annotations_conflict(context: ScenarioContext) -> str:
     """The `--json -` conflict rule, BOTH endings plus the one that runs.
 
     `--json - --gh-annotations on` and the default `auto` beside `--json -` are
@@ -3307,7 +3319,7 @@ def s_annotations_conflict(manifest: dict) -> str:
     return "on/auto beside --json - -> exit 4 (both fixes named); off runs clean"
 
 
-def s_annotations_fencing(manifest: dict) -> str:
+def s_annotations_fencing(context: ScenarioContext) -> str:
     """The Actions-oriented HOSTILE-CONSOLE cell.
 
     A child forges a `::error` and seeds a stop-commands fence with a guessed
@@ -3363,7 +3375,7 @@ def s_annotations_fencing(manifest: dict) -> str:
     )
 
 
-SCENARIOS = [
+SCENARIOS: ScenarioRegistry = (
     ("manifest-completeness", s_manifest_completeness),
     ("resilience-matrix", s_resilience_matrix),
     ("default-suite", s_default_suite),
@@ -3423,7 +3435,7 @@ SCENARIOS = [
     ("annotations-caps", s_annotations_caps),
     ("annotations-conflict", s_annotations_conflict),
     ("annotations-fencing", s_annotations_fencing),
-]
+)
 
 
 def main() -> int:
@@ -3434,11 +3446,11 @@ def main() -> int:
         if bootstrap_rc is not None:
             return bootstrap_rc
 
-    manifest = load_manifest()
-    h = Harness(manifest)
+    context = ScenarioContext(manifest=load_manifest(), registry=SCENARIOS)
+    h = Harness(context)
 
     print("=== mtest end-to-end gate ===", flush=True)
-    for name, fn in SCENARIOS:
+    for name, fn in context.registry:
         h.scenario(name, fn)
 
     passed = sum(1 for _n, ok, _d in h.results if ok)

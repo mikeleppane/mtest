@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import inspect
+from dataclasses import FrozenInstanceError
 import os
 from pathlib import Path
 import re
@@ -302,6 +304,66 @@ def check_e2e_interposer_failure_propagation() -> None:
 
 
 class E2EFaultTopologyTests(unittest.TestCase):
+    def test_scenarios_receive_an_explicit_immutable_context(self) -> None:
+        registry = tuple(e2e_check.SCENARIOS)
+        context = e2e_check.ScenarioContext(manifest={}, registry=registry)
+
+        self.assertIs(context.registry, registry)
+        with self.assertRaises(FrozenInstanceError):
+            context.registry = ()
+        for name, scenario in registry:
+            with self.subTest(scenario=name):
+                self.assertEqual(
+                    tuple(inspect.signature(scenario).parameters),
+                    ("context",),
+                )
+
+    def test_harness_passes_the_context_and_contains_later_scenarios(self) -> None:
+        registry = ()
+        context = e2e_check.ScenarioContext(
+            manifest={"sentinel": 42}, registry=registry
+        )
+        harness = e2e_check.Harness(context)
+        received: list[e2e_check.ScenarioContext] = []
+
+        def crashes(scenario_context: e2e_check.ScenarioContext) -> str:
+            received.append(scenario_context)
+            raise RuntimeError("escaped")
+
+        def passes(scenario_context: e2e_check.ScenarioContext) -> str:
+            received.append(scenario_context)
+            return "continued"
+
+        harness.scenario("crashes", crashes)
+        harness.scenario("passes", passes)
+
+        self.assertEqual(received, [context, context])
+        self.assertEqual(
+            [name for name, _ok, _detail in harness.results],
+            ["crashes", "passes"],
+        )
+        self.assertFalse(harness.results[0][1])
+        self.assertIn("RuntimeError escaped", harness.results[0][2])
+        self.assertEqual(harness.results[1], ("passes", True, "continued"))
+
+    def test_resilience_audit_reads_the_context_registry(self) -> None:
+        def harmless(_context: e2e_check.ScenarioContext) -> str:
+            return ""
+
+        names = tuple(dict.fromkeys(e2e_check.RESILIENCE_MATRIX.values()))
+        context = e2e_check.ScenarioContext(
+            manifest={},
+            registry=tuple((name, harmless) for name in names),
+        )
+        original = e2e_check.SCENARIOS
+        e2e_check.SCENARIOS = ()
+        try:
+            detail = e2e_check.s_resilience_matrix(context)
+        finally:
+            e2e_check.SCENARIOS = original
+
+        self.assertIn("each covered by a registered scenario", detail)
+
     def test_paths_and_retry_marker_are_repository_anchored(self) -> None:
         root = Path(__file__).resolve().parents[2]
         fixture_root = root / "scripts" / "fixtures" / "toolchain"
