@@ -83,6 +83,13 @@ JSON_SCENARIOS = (
     "json-truncation-dead-pipe",
     "json-terminal-write-failure",
 )
+JUNIT_SCENARIOS = (
+    "junit-scratch-cleanup",
+    "junit-schema-gate",
+    "junit-determinism",
+    "junit-prior-report-intact",
+    "junit-finalization-and-interrupt",
+)
 
 
 
@@ -136,6 +143,16 @@ class E2EFaultTopologyTests(unittest.TestCase):
             if scenario.__module__ == json_reporter.__name__
         )
         self.assertEqual(owned, JSON_SCENARIOS)
+
+    def test_junit_scenarios_have_one_feature_owner(self) -> None:
+        from scripts.e2e.scenarios import junit_reporter
+
+        owned = tuple(
+            name
+            for name, scenario in e2e_check.SCENARIOS
+            if scenario.__module__ == junit_reporter.__name__
+        )
+        self.assertEqual(owned, JUNIT_SCENARIOS)
 
     def test_runner_owns_results_manifest_access_and_hard_timeouts(self) -> None:
         from scripts.e2e import assertions, runner
