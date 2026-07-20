@@ -19,6 +19,7 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
 
     def test_every_intended_inventory_fails_closed_when_empty(self) -> None:
         cases = (
+            ("TOP_LEVEL_SCRIPT_FILES", layout.check_top_level_script_layout),
             ("UNIT_SUITES", layout.check_suite_layout),
             ("INTEGRATION_SUITES", layout.check_suite_layout),
             ("CLASSIFIED_PATHS", layout.check_suite_layout),
@@ -37,6 +38,24 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
                         AssertionError, "intended inventory is empty"
                     ):
                         check()
+
+    def test_top_level_script_membership_is_exact(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-layout-") as raw_tmp:
+            repo = Path(raw_tmp)
+            for relative in layout.TOP_LEVEL_SCRIPT_FILES:
+                path = repo / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# fixture\n", encoding="utf-8")
+
+            layout.check_top_level_script_layout(repo)
+            extra = repo / "scripts" / "unexpected.py"
+            extra.write_text("# accidental top-level tool\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                AssertionError,
+                "top-level scripts membership mismatch",
+            ):
+                layout.check_top_level_script_layout(repo)
 
 
 class AggregateMembershipOracleTests(unittest.TestCase):

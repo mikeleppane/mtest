@@ -10,8 +10,8 @@ what the console looks like for representative runs; they are deliberately NOT
 wired into any oracle or CI check, so an incidental byte (a timing, a token) never
 freezes a gate.
 
-Regenerate with `python -m scripts.pty_capture` after building the binary
-(`pixi run build-bin`). Each scenario writes `<name>.ansi` (raw, view with
+Regenerate with `python -m scripts.maintenance.pty_capture` after building the
+binary (`pixi run build-bin`). Each scenario writes `<name>.ansi` (raw, view with
 `cat`/`less -R`) next to this module's output directory. Turning a capture into a
 PNG screenshot for docs is an OPTIONAL maintainer step (e.g. pipe a capture
 through a terminal-to-image tool); this script only produces the text captures.
@@ -30,7 +30,7 @@ import tempfile
 import time
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 MTEST = REPO_ROOT / "build" / "mtest"
 OUTPUT_DIR = REPO_ROOT / "notes" / "console-captures"
 RUN_TIMEOUT = 120.0

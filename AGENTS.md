@@ -697,7 +697,7 @@ Accumulated the hard way; append as later phases teach more.
   composed.
 - **A tool that COMMITS captured program output containing filesystem paths
   must sanitize the ephemeral run root to a stable placeholder before
-  writing.** `scripts/pty_capture.py` captures the real `build/mtest`
+  writing.** `scripts/maintenance/pty_capture.py` captures the real `build/mtest`
   binary's ANSI console output into `notes/console-captures/`; the
   throwaway suite's `mkdtemp` root (carved from the ambient `TMPDIR`, which
   varies per run and per machine) is rewritten, before any file is written,

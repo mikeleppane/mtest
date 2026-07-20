@@ -20,6 +20,11 @@ from scripts.harness import dogfood
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+TOP_LEVEL_SCRIPT_FILES = {
+    Path("scripts/__init__.py"),
+    Path("scripts/gen_transcripts.py"),
+}
+
 BUILD_SOURCE_PATHS = (
     Path("scripts/build/__init__.py"),
     Path("scripts/build/mojo_package.sh"),
@@ -337,6 +342,23 @@ README_SCAN_EXCLUDED_DIRS = {
     "notes",
 }
 
+
+
+def check_top_level_script_layout(repo_root: Path = REPO_ROOT) -> None:
+    """Pin the sole provenance-required exceptions to nested script packages."""
+    _require_nonempty("top-level script", TOP_LEVEL_SCRIPT_FILES)
+    scripts_dir = repo_root / "scripts"
+    actual = {
+        path.relative_to(repo_root)
+        for path in scripts_dir.iterdir()
+        if path.is_file() or path.is_symlink()
+    }
+    expected = set(TOP_LEVEL_SCRIPT_FILES)
+    if actual != expected:
+        raise AssertionError(
+            "top-level scripts membership mismatch: "
+            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+        )
 
 
 def _independent_test_function_names(source: str) -> tuple[str, ...]:
@@ -889,6 +911,7 @@ def _require_nonempty(name: str, values: object) -> None:
 def main() -> int:
     """Run every repository layout and command-policy check serially."""
     try:
+        check_top_level_script_layout()
         check_suite_layout()
         check_exec_fixture_layout()
         check_e2e_native_fixture_layout()

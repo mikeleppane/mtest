@@ -193,8 +193,8 @@ machine contracts, not gate tooling, not test fixtures.
 
 ### PTY/ANSI captures
 
-`scripts/pty_capture.py` drives the built binary under a real PTY and records the
-console's raw ANSI output for representative scenarios into
+`scripts/maintenance/pty_capture.py` drives the built binary under a real PTY
+and records the console's raw ANSI output for representative scenarios into
 `notes/console-captures/` (`pass-pty`, `fail-pty`, `fail-verbose-pty`,
 `fail-quiet-pty`, `fail-nocolor-pty`). These are DOCUMENTATION of the console's
 real appearance, deliberately NOT wired into any gate — see that directory's

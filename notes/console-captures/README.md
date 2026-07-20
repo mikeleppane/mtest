@@ -33,15 +33,15 @@ redundant reinforcement, never the sole signal — contrast `fail-pty.ansi` with
 
 ```sh
 pixi run build-bin                       # produce build/mtest
-pixi run python -m scripts.pty_capture   # runs under the pixi env so `mojo` is on PATH
+pixi run python -m scripts.maintenance.pty_capture  # `mojo` stays on PATH
 ```
 
-The harness (`scripts/pty_capture.py`) drives the built binary against tiny
-throwaway suites it writes itself, over a real PTY, and rewrites the `*.ansi`
-files here. The suite lives in a throwaway temp directory whose real path varies
-per run and per machine, so the harness rewrites that ephemeral root to the
-stable placeholder `<suite-root>` in every capture BEFORE writing — no
-machine-specific or sandbox path is ever committed. Wall-clock timings still
+The harness (`scripts/maintenance/pty_capture.py`) drives the built binary
+against tiny throwaway suites it writes itself, over a real PTY, and rewrites
+the `*.ansi` files here. The suite lives in a throwaway temp directory whose
+real path varies per run and per machine, so the harness rewrites that ephemeral
+root to the stable placeholder `<suite-root>` in every capture BEFORE writing —
+no machine-specific or sandbox path is ever committed. Wall-clock timings still
 reflect the generating run; that residual variance is expected and is exactly
 why these are documentation, not wired into any check.
 
