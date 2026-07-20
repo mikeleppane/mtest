@@ -124,22 +124,29 @@ def render_entrypoint(modules: list[TestModule]) -> str:
     return "\n".join(lines)
 
 
+def write_entrypoint(
+    repo_root: Path, output: Path, roots: list[Path]
+) -> list[TestModule]:
+    """Write an aggregate executable for validated roots and return its modules."""
+    paths = discover_test_files(repo_root, roots)
+    modules = load_modules(repo_root, paths)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(render_entrypoint(modules), encoding="utf-8")
+    return modules
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("roots", nargs="+", type=Path)
     args = parser.parse_args(argv[1:])
     try:
-        paths = discover_test_files(REPO_ROOT, args.roots)
-        modules = load_modules(REPO_ROOT, paths)
-        source = render_entrypoint(modules)
+        modules = write_entrypoint(REPO_ROOT, args.output, args.roots)
     except (OSError, ValueError) as exc:
         print(f"FATAL: aggregate-tests: {exc}", file=sys.stderr)
         return 2
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(source, encoding="utf-8")
     print(
-        f"aggregate-tests: generated {args.output} for {len(paths)} module(s), "
+        f"aggregate-tests: generated {args.output} for {len(modules)} module(s), "
         f"{sum(len(module.test_functions) for module in modules)} test(s)",
         flush=True,
     )

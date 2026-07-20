@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <stddef.h>
 #include <string.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 /*
@@ -49,7 +50,8 @@ static ssize_t mtest_faulting_write(int fd, const void *buffer, size_t count) {
         errno = EIO;
         return -1;
     }
-    return write(fd, buffer, count);
+    struct iovec vector = {(void *)buffer, count};
+    return writev(fd, &vector, 1);
 }
 
 DYLD_INTERPOSE(mtest_faulting_write, write)

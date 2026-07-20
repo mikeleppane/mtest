@@ -122,7 +122,7 @@ native-check = { cmd = "python scripts/native_check_test.py && python scripts/na
 # Source-build the native adapter and a risk-weighted exec subset with matching
 # AddressSanitizer instrumentation. Live OOB/UAF/leak controls prove that both
 # the compiler instrumentation and fail-closed harness remain effective.
-asan-check = "python scripts/asan_check.py"
+asan-check = "python scripts/asan_check_test.py && python scripts/asan_check.py"
 
 # Source-build every exec integration suite with debug information and run it
 # under the locked Linux-only Memcheck binary. Undefined-value, invalid-access,

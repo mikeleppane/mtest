@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 
+import aggregate_tests
 import native_abi_check
 
 
@@ -338,16 +339,20 @@ def check_postfork_output(result: subprocess.CompletedProcess[str], source: Path
 def compile_and_run_test(source: Path, env: dict[str, str]) -> None:
     """Build one suite from product sources, then execute it directly in Memcheck."""
     binary = OUT / source.stem
+    entrypoint = OUT / f"{source.stem}_main.mojo"
+    aggregate_tests.write_entrypoint(ROOT, entrypoint, [source])
     compiled = run(
         [
             "mojo",
             "build",
             "-g",
             "-I",
+            ".",
+            "-I",
             "src",
             "-I",
             "tests/support",
-            str(source.relative_to(ROOT)),
+            str(entrypoint),
             "-o",
             str(binary),
             "-Xlinker",

@@ -680,13 +680,15 @@ def _check_e2e_interposer_source_policy(source: str) -> None:
     active_tail = active_source(tail)
     active_apple_lines = {line.strip() for line in active_apple.splitlines()}
     apple_required = {
-        "return write(fd, buffer, count);",
+        "struct iovec vector = {(void *)buffer, count};",
+        "return writev(fd, &vector, 1);",
         "DYLD_INTERPOSE(mtest_faulting_write, write)",
     }
     apple_forbidden = (
         "RTLD_NEXT",
         "mtest_real_write",
         "__interpose",
+        "return write(fd, buffer, count);",
         "ssize_t write(int fd, const void *buffer, size_t count)",
     )
     other_required = (
@@ -696,8 +698,8 @@ def _check_e2e_interposer_source_policy(source: str) -> None:
     )
     if not apple_required.issubset(active_apple_lines):
         raise AssertionError(
-            "Darwin E2E interposer must use DYLD_INTERPOSE and direct write "
-            "call-through"
+            "Darwin E2E interposer must use DYLD_INTERPOSE and writev "
+            "forwarding"
         )
     if any(fragment in active_apple for fragment in apple_forbidden):
         raise AssertionError(
@@ -724,7 +726,7 @@ def check_e2e_interposer_source_policy() -> None:
     _check_e2e_interposer_source_policy(source)
 
     registration = "DYLD_INTERPOSE(mtest_faulting_write, write)"
-    call_through = "return write(fd, buffer, count);"
+    call_through = "return writev(fd, &vector, 1);"
     wrapper = (
         "ssize_t write(int fd, const void *buffer, size_t count) {\n"
         "    return mtest_faulting_write(fd, buffer, count);\n"
@@ -1129,7 +1131,9 @@ def check_ci_task_graph() -> None:
     if missing:
         raise AssertionError(f"ci transitive floor is missing gates: {missing}")
     exact_safety_tasks = {
-        "asan-check": "python scripts/asan_check.py",
+        "asan-check": (
+            "python scripts/asan_check_test.py && python scripts/asan_check.py"
+        ),
         "valgrind-check": (
             "python scripts/valgrind_check_test.py && "
             "python scripts/valgrind_check.py"

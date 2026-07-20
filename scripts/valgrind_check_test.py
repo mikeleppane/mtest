@@ -13,6 +13,37 @@ import valgrind_check
 
 
 class ValgrindCheckTests(unittest.TestCase):
+    def test_classified_suite_builds_generated_entrypoint(self) -> None:
+        source = valgrind_check.ROOT / "tests" / "unit" / "test_config.mojo"
+        completed = subprocess.CompletedProcess(
+            args=["valgrind"], returncode=0, stdout=""
+        )
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            out = Path(raw_tmp)
+            with (
+                patch.object(valgrind_check, "OUT", out),
+                patch.object(
+                    valgrind_check, "run", return_value=completed
+                ) as mocked_run,
+                patch.object(
+                    valgrind_check, "valgrind", return_value=completed
+                ),
+                patch.object(valgrind_check, "check_product_output"),
+                patch.object(valgrind_check, "check_postfork_output"),
+            ):
+                valgrind_check.compile_and_run_test(source, {})
+
+            entrypoint = out / "test_config_main.mojo"
+            compile_command = mocked_run.call_args_list[0].args[0]
+            self.assertIn(str(entrypoint), compile_command)
+            self.assertNotIn(
+                str(source.relative_to(valgrind_check.ROOT)), compile_command
+            )
+            self.assertIn(
+                "import tests.unit.test_config as _mtest_module_0",
+                entrypoint.read_text(encoding="utf-8"),
+            )
+
     def test_prepare_test_scratch_creates_missing_parent_tree(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             scratch = Path(raw_tmp) / "build" / "tests"
