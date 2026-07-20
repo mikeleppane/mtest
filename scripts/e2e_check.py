@@ -42,6 +42,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -353,6 +354,27 @@ def expect_exit(run: Run, code: int) -> None:
     )
 
 
+def expect_report(run: Run, path: str | Path, what: str) -> Path:
+    """Assert `run` actually produced the artifact a later assertion will read.
+
+    A run whose exit code is right but which wrote no report surfaces at the
+    first read as a raw FileNotFoundError: an exception that names a temp path
+    and nothing else — not the argv behind it, not the exit code, not the
+    stderr that said why. Asserting the prerequisite here turns that into an
+    ordinary scenario FAILURE carrying all three. It is a prerequisite check,
+    never a substitute for the artifact's own oracle: the caller still runs
+    `junit_check.check_artifact` / `parse_stream` on the file this returns.
+    """
+    report = Path(path)
+    expect(
+        report.exists(),
+        f"{what} was never written to {report}: {run.argv} exited "
+        f"{run.returncode} and produced no report\n"
+        f"--- stdout ---\n{run.stdout}\n--- stderr ---\n{run.stderr}",
+    )
+    return report
+
+
 def expect_accounting(run: Run) -> Summary:
     """The file-count invariant that still holds now that pass/fail/skip count
     TESTS, not files: the summary and the header agree on the excluded FILE count.
@@ -411,6 +433,35 @@ class Harness:
         except ScenarioError as exc:
             self.results.append((name, False, str(exc)))
             print(f"FAIL  {name}\n      {exc}")
+        except Exception as exc:
+            # CONTAINMENT. ScenarioError above is the EXPECTED failure channel;
+            # anything else — an OSError from a lost race against a child
+            # process, a FileNotFoundError on an artifact a run never wrote, a
+            # plain bug in the scenario — used to escape `main` as a traceback
+            # and tear the gate down mid-table. Every scenario registered AFTER
+            # the offender then never ran, and its silence read as coverage:
+            # that is how a real defect in a late scenario's subject can hide
+            # behind an early scenario's crash. Contained here it is still a
+            # real FAILURE (`ok()` is False, `main` returns 1) — nothing is
+            # swallowed into a PASS — and the traceback is kept verbatim as the
+            # detail so the cause stays diagnosable. KeyboardInterrupt and
+            # SystemExit derive from BaseException, so an operator's Ctrl-C and
+            # a deliberate exit still stop the gate immediately.
+            #
+            # The label states only what is known — that an exception escaped
+            # by a path other than the expected one. It deliberately does NOT
+            # blame the harness: an OSError while reaping a child, or a missing
+            # artifact a run was supposed to write, is frequently caused BY
+            # mtest, and pre-assigning the fault here would misdirect triage.
+            # The traceback below is the evidence; read it before concluding.
+            detail = (
+                f"{type(exc).__name__} escaped the scenario outside the "
+                f"expected ScenarioError channel — cause undetermined, see the "
+                f"traceback:\n"
+                f"{traceback.format_exc()}"
+            )
+            self.results.append((name, False, detail))
+            print(f"FAIL  {name}\n      {detail}")
 
     def ok(self) -> bool:
         return all(passed for _n, passed, _d in self.results)
@@ -2764,6 +2815,12 @@ def s_json_terminal_write_failure(manifest: dict) -> str:
             f"escalate 0 -> 3, got {proc.returncode}\n"
             f"--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
         )
+        expect(
+            os.path.exists(stream_path),
+            f"the run wrote no --json stream at {stream_path} (exit "
+            f"{proc.returncode}) — there is no terminal-record delivery to judge"
+            f"\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+        )
         text = Path(stream_path).read_text(encoding="utf-8")
         report = json_stream_check.parse_stream(text)
         expect(report.terminal is None, "the rejected terminal record reached the stream")
@@ -2814,7 +2871,7 @@ def s_junit_scratch_cleanup(manifest: dict) -> str:
             env_overrides={"TMPDIR": tmpdir},
         )
         expect_exit(run, 1)  # the default suite's known outcome: a normal finalize
-        expect(os.path.exists(report_path), "the junit report was not written")
+        expect_report(run, report_path, "the junit report")
         junit_check.check_artifact(Path(report_path))
         leftovers = os.listdir(tmpdir)
         expect(
@@ -2840,6 +2897,7 @@ def s_junit_schema_gate(manifest: dict) -> str:
     suite_path = os.path.join(tmp, "suite.xml")
     run = run_mtest(["e2e/suite", "--junit-xml", suite_path])
     expect_exit(run, 1)
+    expect_report(run, suite_path, "the base junit report")
     junit_check.check_artifact(Path(suite_path))
     suite_doc = Path(suite_path).read_text()
     expect(
@@ -2861,6 +2919,7 @@ def s_junit_schema_gate(manifest: dict) -> str:
         timeout=SHORT_TIMEOUT,
     )
     expect_exit(frun, 0)
+    expect_report(frun, flaky_path, "the flaky suite's junit report")
     junit_check.check_artifact(Path(flaky_path))
     expect(
         "<flakyFailure" in Path(flaky_path).read_text(),
@@ -2884,6 +2943,7 @@ def s_junit_schema_gate(manifest: dict) -> str:
         timeout=SHORT_TIMEOUT,
     )
     expect_exit(srun, 1)
+    expect_report(srun, stub_path, "the rerun-exhausted junit report")
     junit_check.check_artifact(Path(stub_path))
     stub_doc = Path(stub_path).read_text()
     expect('name="[attempts]"' in stub_doc, "no [attempts] sentinel on the rerun-exhausted suite")
@@ -2914,6 +2974,12 @@ def s_junit_determinism(manifest: dict) -> str:
         second_run = run_mtest(["e2e/suite", "--junit-xml", str(second)])
         expect_exit(first_run, 1)
         expect_exit(second_run, 1)
+        # Both reports must EXIST before anything reads them. A run that exits
+        # as expected having written no report is a product defect to report
+        # with its exit code and stderr, not a FileNotFoundError to raise out of
+        # the comparison below.
+        expect_report(first_run, first, "the first determinism junit report")
+        expect_report(second_run, second, "the second determinism junit report")
         junit_canonicalize.assert_equal_runs(first, second)
 
         raw = first.read_text(encoding="utf-8")
@@ -3049,6 +3115,7 @@ def s_junit_finalization_and_interrupt(manifest: dict) -> str:
     stream1 = os.path.join(tmp, "s1.ndjson")
     run = run_mtest(["e2e/suite", "--json", stream1, "--junit-xml", undir])
     expect_exit(run, 3)
+    expect_report(run, stream1, "the co-composed --json stream")
     report1 = json_stream_check.parse_stream(Path(stream1).read_text())
     expect(
         report1.terminal is not None and report1.exit_code == 3,
@@ -3109,6 +3176,11 @@ def _run_and_interrupt(args: list[str]) -> tuple[int, int | None]:
         if proc.poll() is None:
             _kill_group(proc)
     term_code: int | None = None
+    expect(
+        os.path.exists(stream_path),
+        f"the interrupted run wrote no --json stream at {stream_path} (exit "
+        f"{proc.returncode}) — there is no terminal record to recover",
+    )
     text = Path(stream_path).read_text()
     if text:
         report = json_stream_check.parse_stream(text)
