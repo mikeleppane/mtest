@@ -113,6 +113,26 @@ class DirectInvocationPolicyTests(unittest.TestCase):
             )
         )
 
+    def test_dot_relative_script_operands_are_rejected(self) -> None:
+        operand = "./" + self.SCRIPT_PATH
+        cases = (
+            (Path("README.md"), f"python {operand}"),
+            (
+                Path("scripts/caller.py"),
+                "import subprocess\n"
+                "import sys\n"
+                "subprocess.run([sys.executable, "
+                + repr(operand)
+                + "])\n",
+            ),
+        )
+
+        for path, contents in cases:
+            with self.subTest(path=path):
+                self.assertTrue(
+                    harness_check.direct_script_invocations(path, contents)
+                )
+
     def test_module_invocation_is_accepted(self) -> None:
         self.assertFalse(
             harness_check.direct_script_invocations(

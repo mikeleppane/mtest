@@ -1445,7 +1445,8 @@ def _is_python_executable(word: str) -> bool:
 
 def _is_direct_script(word: str) -> bool:
     """Return whether a shell word is a repository-relative Python script."""
-    return DIRECT_SCRIPT_RE.fullmatch(_normalized_shell_word(word)) is not None
+    normalized = _normalized_shell_word(word).removeprefix("./")
+    return DIRECT_SCRIPT_RE.fullmatch(normalized) is not None
 
 
 def _shell_words(text: str) -> list[str]:
