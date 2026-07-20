@@ -652,7 +652,7 @@ Accumulated the hard way; append as later phases teach more.
   spawn, worse under host load — because the elevated fd-table ceiling makes
   every child's startup crawl. Correct move: validate an emitted artifact via
   a SEPARATE Python CI gate over the REAL binary's output (the
-  `junit_render_check.py` pattern: build the binary, run it, oracle-check the
+  `scripts/checks/reports/junit_render.py` pattern: build the binary, run it, oracle-check the
   file it actually wrote), never via an in-Mojo-test subprocess spawn; keep
   Mojo unit tests to in-process structural/exact-output assertions.
 - **Multibyte UTF-8 characters anywhere in `native/*.c`, comments included,

@@ -22,7 +22,7 @@ import sys
 from xml.etree import ElementTree as ET
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[3]
 SCHEMA = ROOT / "scripts" / "schemas" / "junit-10.xsd"
 DEFAULT_ARTIFACT = ROOT / "scripts" / "fixtures" / "junit" / "mock.xml"
 _BUILD_SENTINEL = "[build]"

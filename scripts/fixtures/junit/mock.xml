@@ -2,7 +2,7 @@
 <!-- Byte-faithful mock of mtest's intended JUnit document (validation dialect:
      scripts/schemas/junit-10.xsd). The <testsuites> root carries no `skipped`
      attribute on purpose: junit-10 defines no such root attribute, and
-     scripts/junit_check.py recomputes the root skipped total arithmetically
+     scripts/checks/reports/junit.py recomputes the root skipped total arithmetically
      from the child <testsuite> elements instead. -->
 <testsuites name="mtest" tests="9" failures="1" errors="1">
   <testsuite name="e2e/suite/test_failing.mojo" tests="4" failures="1" errors="0" skipped="1" time="0.043">

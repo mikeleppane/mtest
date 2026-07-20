@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Canonicalize a JUnit XML artifact for cross-run DETERMINISM comparison.
 
-The schema/arithmetic oracle (`junit_check.py`) proves ONE artifact is valid.
+The schema/arithmetic oracle (`junit.py`) proves ONE artifact is valid.
 This proves TWO artifacts of the same suite are the SAME up to the volatile
 bits: wall-clock `time` and embedded TEXT. Structure, identity, classification,
 and counts are preserved — the `<testsuite>`/`<testcase>` shape, node-id names,

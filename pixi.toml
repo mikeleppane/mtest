@@ -139,16 +139,16 @@ valgrind-check = "python -m scripts.tests.test_valgrind && python -m scripts.che
 # the checker runs xmllint against the vendored junit-10.xsd plus the
 # arithmetic/structural invariants the schema cannot express over the
 # committed byte-faithful mock.
-junit-check = "python -m scripts.junit_check_test && python -m scripts.junit_check"
+junit-check = "python -m scripts.tests.test_junit && python -m scripts.checks.reports.junit"
 
 # Gate mtest's OWN rendered JUnit document through the same junit-10 oracle:
-# build and run scripts/junit_emit.mojo (which drives the real JunitReporter
+# build and run tests/fixtures/junit/junit_emit.mojo (which drives the real JunitReporter
 # over every sentinel-matrix cell), then run the schema + arithmetic checker over
 # the emitted document and confirm a tampered copy is rejected. Depends on the
 # precompiled package so the emitter can import mtest.report. This validates the
 # shipped renderer's bytes, complementing junit-check's mock and the Mojo unit
 # tests that pin the renderer structure directly.
-junit-render-check = { cmd = "python -m scripts.junit_render_check", depends-on = [
+junit-render-check = { cmd = "python -m scripts.checks.reports.junit_render", depends-on = [
     "build",
 ] }
 

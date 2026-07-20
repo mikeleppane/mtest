@@ -869,7 +869,7 @@ mojo: error: failed to parse the provided Mojo source module
 to an `<error>`-carrying sentinel testcase, `[build]` here since neither was
 retried); `failures="1"` is `test_failing.mojo::test_second_fails`'s
 `<failure>`. The document validates against the committed
-`scripts/schemas/junit-10.xsd` — the settled dialect `scripts/junit_check.py`
+`scripts/schemas/junit-10.xsd` — the settled dialect `scripts/checks/reports/junit.py`
 blesses (see [Status](#status) for why "settled dialect" is not the same
 claim as "the one true JUnit schema").
 
@@ -1229,7 +1229,7 @@ open, and are stated honestly here rather than glossed over.
 - **The JUnit dialect is a settled choice, not a universal standard.** JUnit
   XML has no single canonical schema across every consumer. `mtest` commits
   to one dialect (`scripts/schemas/junit-10.xsd`) and validates every emitted
-  report against it with the same oracle (`scripts/junit_check.py`) CI runs —
+  report against it with the same oracle (`scripts/checks/reports/junit.py`) CI runs —
   that is honesty about conformance to *this* schema, not a claim that every
   JUnit-consuming tool in the wild agrees on one true dialect.
 - **GitHub annotations are capped, and their `file=` paths assume the
@@ -1247,7 +1247,7 @@ open, and are stated honestly here rather than glossed over.
 - **The real-Actions annotation rendering is a manual, maintainer-run gate —
   not yet recorded.** Every annotation shape, sort order, cap, and the
   stop-commands fence around echoed child output is verified in-repo: unit
-  tests pin the renderer, `scripts/annotations_check.py` is a local proxy for
+  tests pin the renderer, `scripts/checks/reports/annotations.py` is a local proxy for
   what GitHub's own Checks runner does with workflow-command lines, and the
   e2e cells drive the real binary end to end, including a hostile-console
   case with a forged `::error` line. What none of that can prove is that

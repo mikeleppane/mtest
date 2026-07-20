@@ -8,7 +8,7 @@ only knows how to turn a `JunitSuite` value into a valid `<testsuite>` fragment
 and how to wrap a set of fragments in the `<testsuites>` root.
 
 The dialect is the vendored junit-10 one (`scripts/schemas/junit-10.xsd`), the
-same the committed `scripts/junit_check.py` oracle blesses:
+same the committed `scripts/checks/reports/junit.py` oracle blesses:
 
 - One `<testsuites>` root. It carries `name`, `tests`, `failures`, `errors` and
   NOT `skipped` — junit-10 defines no root `skipped`, so the root skipped total

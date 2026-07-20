@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Gate mtest's REAL rendered JUnit document through the junit-10 oracle.
 
-`junit_check.py` proves the checker blesses a hand-authored mock; this gate
+`junit.py` proves the checker blesses a hand-authored mock; this gate
 proves the shipped renderer's OWN output passes it. It builds the tiny
-`scripts/junit_emit.mojo` tool against the prebuilt package, runs it to emit a
+`tests/fixtures/junit/junit_emit.mojo` tool against the prebuilt package, runs it to emit a
 full `<testsuites>` document that exercises every sentinel-matrix cell (build /
 attempts / flaky / rerun-exhausted / retried per-test / non-retried per-test /
 not-run / precompile + casualties / suite capture), and runs the schema +
@@ -25,11 +25,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-from scripts import junit_check
+from scripts.checks.reports import junit as junit_check
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-EMITTER_SRC = REPO_ROOT / "scripts" / "junit_emit.mojo"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+EMITTER_SRC = REPO_ROOT / "tests" / "fixtures" / "junit" / "junit_emit.mojo"
 PACKAGE_DIR = REPO_ROOT / "build"
 
 

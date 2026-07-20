@@ -447,7 +447,7 @@ quiet mode. `N=0` (the default) disables the list. `--durations` is a
 
 `--junit-xml` is **served**: it writes a JUnit XML report — the settled
 junit-10 dialect (`scripts/schemas/junit-10.xsd`), the same the committed
-`scripts/junit_check.py` oracle blesses — assembled from the runner's own typed
+`scripts/checks/reports/junit.py` oracle blesses — assembled from the runner's own typed
 events, never from a parse of the console text.
 
 - **Document shape.** One `<testsuites>` root carrying `name`, `tests`,

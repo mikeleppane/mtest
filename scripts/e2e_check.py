@@ -47,10 +47,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from scripts import annotations_check
-from scripts import json_stream_check
-from scripts import junit_canonicalize
-from scripts import junit_check
+from scripts.checks.reports import annotations as annotations_check
+from scripts.checks.reports import json_stream as json_stream_check
+from scripts.checks.reports import junit as junit_check
+from scripts.checks.reports import junit_canonicalize
 from scripts import main_open_check
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

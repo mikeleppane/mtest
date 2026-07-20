@@ -14,10 +14,10 @@ import unittest
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from scripts import junit_check
+from scripts.checks.reports import junit as junit_check
 
 
-FIXTURES = Path(__file__).resolve().parent / "fixtures" / "junit"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "junit"
 BROKEN_FIXTURE = FIXTURES / "mock-broken.xml"
 MOCK_FIXTURE = FIXTURES / "mock.xml"
 
@@ -27,6 +27,17 @@ def _suite(fragment: str) -> ET.Element:
 
 
 class SuiteArithmeticTests(unittest.TestCase):
+    def test_repository_root_and_oracle_inputs_are_exact(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        self.assertEqual(junit_check.ROOT, root)
+        self.assertEqual(junit_check.DEFAULT_ARTIFACT, FIXTURES / "mock.xml")
+        self.assertEqual(
+            junit_check.SCHEMA,
+            root / "scripts" / "schemas" / "junit-10.xsd",
+        )
+        self.assertTrue(junit_check.DEFAULT_ARTIFACT.is_file())
+        self.assertTrue(junit_check.SCHEMA.is_file())
+
     def test_consistent_counts_including_sentinel_rows_are_clean(self) -> None:
         suite = _suite(
             '<testsuite name="s" tests="3" failures="1" errors="0" skipped="0">'
