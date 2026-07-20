@@ -90,6 +90,12 @@ JUNIT_SCENARIOS = (
     "junit-prior-report-intact",
     "junit-finalization-and-interrupt",
 )
+ANNOTATION_SCENARIOS = (
+    "annotations-modes",
+    "annotations-caps",
+    "annotations-conflict",
+    "annotations-fencing",
+)
 
 
 
@@ -153,6 +159,16 @@ class E2EFaultTopologyTests(unittest.TestCase):
             if scenario.__module__ == junit_reporter.__name__
         )
         self.assertEqual(owned, JUNIT_SCENARIOS)
+
+    def test_annotation_scenarios_have_one_feature_owner(self) -> None:
+        from scripts.e2e.scenarios import annotations
+
+        owned = tuple(
+            name
+            for name, scenario in e2e_check.SCENARIOS
+            if scenario.__module__ == annotations.__name__
+        )
+        self.assertEqual(owned, ANNOTATION_SCENARIOS)
 
     def test_runner_owns_results_manifest_access_and_hard_timeouts(self) -> None:
         from scripts.e2e import assertions, runner
