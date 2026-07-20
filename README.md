@@ -564,7 +564,8 @@ processes left behind.
 `e2e/flaky/test_flaky.mojo` is built for exactly this: it CRASHes (a real
 SIGSEGV) on its first run, then PASSES on a re-run, keyed by a marker file
 under `build/e2e-scratch/` that must be reset between runs for deterministic
-ordering (the way `scripts/e2e_check.py`'s `retries-flaky` scenario does):
+ordering (the way `scripts.e2e.scenarios.resilience`'s `retries-flaky`
+scenario does):
 
 ```console
 $ rm -f build/e2e-scratch/flaky_marker

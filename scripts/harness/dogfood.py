@@ -40,7 +40,7 @@ DOGFOOD_TEST_FILES = (
 # compiler cache; the limit exists only to prevent a genuine runner hang.
 TIMEOUT_SECONDS = 300.0
 
-# Mirrors e2e_check.py's HEADER_RE: the session-started header line is
+# Mirrors scripts.e2e.assertions.HEADER_RE's session-started header shape:
 # `root: <path>   selected: <N> files   excluded: <M> files`.
 HEADER_RE = re.compile(
     r"root:\s+.*?selected:\s+(?P<selected>\d+)\s+files\s+excluded:\s+(?P<excluded>\d+)"

@@ -11,8 +11,9 @@ import re
 import shlex
 import subprocess
 import sys
+import tomllib
 
-from scripts import e2e_check
+from scripts.e2e import __main__ as e2e_main
 from scripts.harness import aggregate
 from scripts.harness import dogfood
 
@@ -221,6 +222,20 @@ PROTOCOL_FIXTURES = {
 }
 E2E_NATIVE_FIXTURES = {
     "e2e_json_terminal_write_fault.c",
+}
+E2E_HARNESS_PATHS = {
+    Path("scripts/e2e/__init__.py"),
+    Path("scripts/e2e/__main__.py"),
+    Path("scripts/e2e/assertions.py"),
+    Path("scripts/e2e/main_open.py"),
+    Path("scripts/e2e/runner.py"),
+    Path("scripts/e2e/scenarios/__init__.py"),
+    Path("scripts/e2e/scenarios/annotations.py"),
+    Path("scripts/e2e/scenarios/core.py"),
+    Path("scripts/e2e/scenarios/json_reporter.py"),
+    Path("scripts/e2e/scenarios/junit_reporter.py"),
+    Path("scripts/e2e/scenarios/resilience.py"),
+    Path("scripts/e2e/scenarios/selection.py"),
 }
 
 E2E_SCENARIO_NAMES = (
@@ -567,6 +582,35 @@ def check_protocol_asset_layout() -> None:
 def check_e2e_layout() -> None:
     """Known-outcome CLI inputs stay outside self-host discovery."""
     _require_nonempty("E2E scenario", E2E_SCENARIO_NAMES)
+    _require_nonempty("E2E harness path", E2E_HARNESS_PATHS)
+    harness_root = REPO_ROOT / "scripts" / "e2e"
+    harness_paths = {
+        path.relative_to(REPO_ROOT)
+        for path in harness_root.rglob("*.py")
+        if path.is_file()
+    }
+    if harness_paths != E2E_HARNESS_PATHS:
+        raise AssertionError(
+            "E2E harness package mismatch: "
+            f"missing={sorted(E2E_HARNESS_PATHS - harness_paths)}, "
+            f"extra={sorted(harness_paths - E2E_HARNESS_PATHS)}"
+        )
+    obsolete_paths = (
+        REPO_ROOT / "scripts" / "e2e_check.py",
+        REPO_ROOT / "scripts" / "main_open_check.py",
+    )
+    if any(path.exists() for path in obsolete_paths):
+        raise AssertionError("obsolete top-level E2E compatibility module remains")
+
+    pixi_manifest = tomllib.loads(
+        (REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
+    )
+    e2e_command = pixi_manifest.get("tasks", {}).get("e2e", {}).get("cmd")
+    if e2e_command != "python -m scripts.e2e":
+        raise AssertionError(
+            "the sole E2E task command must be `python -m scripts.e2e`"
+        )
+
     e2e_root = REPO_ROOT / "e2e"
     manifest_path = e2e_root / "manifest.json"
     if not manifest_path.is_file():
@@ -584,7 +628,7 @@ def check_e2e_layout() -> None:
             "e2e manifest/discovery mismatch: "
             f"missing={sorted(discovered - rows)}, stale={sorted(rows - discovered)}"
         )
-    scenario_names = tuple(name for name, _function in e2e_check.SCENARIOS)
+    scenario_names = tuple(name for name, _function in e2e_main.SCENARIOS)
     if scenario_names != E2E_SCENARIO_NAMES:
         raise AssertionError(
             "E2E scenario membership/order mismatch: "

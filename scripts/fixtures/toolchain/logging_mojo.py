@@ -8,8 +8,8 @@ precompile <file> ...`) through this script first. It:
 1. Reads a log file path from the `MTEST_MOJO_LOG` environment variable.
 2. Appends one line recording the subcommand (`build`/`precompile`/...) and
    the target source path — the first two tokens after the subcommand — plus
-   the full argv for debugging. `scripts/e2e_check.py` parses the first two
-   fields to count how many times a given file was built.
+   the full argv for debugging. `scripts.e2e.scenarios.selection` parses the
+   first two fields to count how many times a given file was built.
 3. EXECS the real `mojo` found on `PATH` with the untouched argv. `os.execv`
    replaces this process image outright, so exit code, stdout, and stderr are
    byte-for-byte what the real compiler produces — mtest cannot tell the

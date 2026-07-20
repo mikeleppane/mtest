@@ -12,7 +12,10 @@ import tempfile
 import time
 import unittest
 
-from scripts import e2e_check
+from scripts.checks import layout
+from scripts.e2e import __main__ as e2e_main
+from scripts.e2e import main_open
+from scripts.e2e import runner
 from scripts.fixtures.toolchain import fake_retry_crash_mojo
 
 
@@ -107,12 +110,19 @@ ANNOTATION_SCENARIOS = (
 
 
 class E2EFaultTopologyTests(unittest.TestCase):
+    def test_master_registry_has_exact_pinned_order_and_unique_names(self) -> None:
+        names = tuple(name for name, _scenario in e2e_main.SCENARIOS)
+
+        self.assertEqual(names, layout.E2E_SCENARIO_NAMES)
+        self.assertEqual(len(names), 59)
+        self.assertEqual(len(set(names)), len(names))
+
     def test_core_scenarios_have_one_feature_owner(self) -> None:
         from scripts.e2e.scenarios import core
 
         owned = tuple(
             name
-            for name, scenario in e2e_check.SCENARIOS
+            for name, scenario in e2e_main.SCENARIOS
             if scenario.__module__ == core.__name__
         )
         self.assertEqual(owned, CORE_SCENARIOS)
@@ -122,7 +132,7 @@ class E2EFaultTopologyTests(unittest.TestCase):
 
         owned = tuple(
             name
-            for name, scenario in e2e_check.SCENARIOS
+            for name, scenario in e2e_main.SCENARIOS
             if scenario.__module__ == selection.__name__
         )
         self.assertEqual(owned, SELECTION_SCENARIOS)
@@ -132,7 +142,7 @@ class E2EFaultTopologyTests(unittest.TestCase):
 
         owned = tuple(
             name
-            for name, scenario in e2e_check.SCENARIOS
+            for name, scenario in e2e_main.SCENARIOS
             if scenario.__module__ == resilience.__name__
         )
         self.assertEqual(owned, RESILIENCE_SCENARIOS)
@@ -145,7 +155,7 @@ class E2EFaultTopologyTests(unittest.TestCase):
 
         owned = tuple(
             name
-            for name, scenario in e2e_check.SCENARIOS
+            for name, scenario in e2e_main.SCENARIOS
             if scenario.__module__ == json_reporter.__name__
         )
         self.assertEqual(owned, JSON_SCENARIOS)
@@ -155,7 +165,7 @@ class E2EFaultTopologyTests(unittest.TestCase):
 
         owned = tuple(
             name
-            for name, scenario in e2e_check.SCENARIOS
+            for name, scenario in e2e_main.SCENARIOS
             if scenario.__module__ == junit_reporter.__name__
         )
         self.assertEqual(owned, JUNIT_SCENARIOS)
@@ -165,14 +175,12 @@ class E2EFaultTopologyTests(unittest.TestCase):
 
         owned = tuple(
             name
-            for name, scenario in e2e_check.SCENARIOS
+            for name, scenario in e2e_main.SCENARIOS
             if scenario.__module__ == annotations.__name__
         )
         self.assertEqual(owned, ANNOTATION_SCENARIOS)
 
     def test_runner_owns_results_manifest_access_and_hard_timeouts(self) -> None:
-        from scripts.e2e import assertions, runner
-
         with tempfile.TemporaryDirectory(prefix="mtest-e2e-runner-") as raw_tmp:
             tmp = Path(raw_tmp)
             closes_streams = tmp / "closes-streams"
@@ -206,9 +214,7 @@ class E2EFaultTopologyTests(unittest.TestCase):
                 process_runner.run_mtest_pty([])
             self.assertLess(time.monotonic() - started, 2.0)
 
-        self.assertIs(e2e_check.Run, runner.Run)
-        self.assertIs(e2e_check.ScenarioContext, runner.ScenarioContext)
-        self.assertIs(e2e_check.expect_exit, assertions.expect_exit)
+        self.assertIs(e2e_main.ScenarioContext, runner.ScenarioContext)
         self.assertEqual(
             runner.load_manifest()["e2e_root"],
             "e2e",
@@ -218,14 +224,12 @@ class E2EFaultTopologyTests(unittest.TestCase):
             runner.discovered_test_files(),
         )
 
-    def test_main_open_check_has_one_package_owner(self) -> None:
-        from scripts.e2e import main_open
-
-        self.assertIs(e2e_check.main_open_check, main_open)
+    def test_main_open_has_one_package_owner(self) -> None:
+        self.assertEqual(main_open.__name__, "scripts.e2e.main_open")
 
     def test_scenarios_receive_an_explicit_immutable_context(self) -> None:
-        registry = tuple(e2e_check.SCENARIOS)
-        context = e2e_check.ScenarioContext(manifest={}, registry=registry)
+        registry = tuple(e2e_main.SCENARIOS)
+        context = runner.ScenarioContext(manifest={}, registry=registry)
 
         self.assertIs(context.registry, registry)
         with self.assertRaises(FrozenInstanceError):
@@ -239,17 +243,17 @@ class E2EFaultTopologyTests(unittest.TestCase):
 
     def test_harness_passes_the_context_and_contains_later_scenarios(self) -> None:
         registry = ()
-        context = e2e_check.ScenarioContext(
+        context = runner.ScenarioContext(
             manifest={"sentinel": 42}, registry=registry
         )
-        harness = e2e_check.Harness(context)
-        received: list[e2e_check.ScenarioContext] = []
+        harness = e2e_main.Harness(context)
+        received: list[runner.ScenarioContext] = []
 
-        def crashes(scenario_context: e2e_check.ScenarioContext) -> str:
+        def crashes(scenario_context: runner.ScenarioContext) -> str:
             received.append(scenario_context)
             raise RuntimeError("escaped")
 
-        def passes(scenario_context: e2e_check.ScenarioContext) -> str:
+        def passes(scenario_context: runner.ScenarioContext) -> str:
             received.append(scenario_context)
             return "continued"
 
@@ -268,20 +272,20 @@ class E2EFaultTopologyTests(unittest.TestCase):
     def test_resilience_audit_reads_the_context_registry(self) -> None:
         from scripts.e2e.scenarios import resilience
 
-        def harmless(_context: e2e_check.ScenarioContext) -> str:
+        def harmless(_context: runner.ScenarioContext) -> str:
             return ""
 
         names = tuple(dict.fromkeys(resilience.RESILIENCE_MATRIX.values()))
-        context = e2e_check.ScenarioContext(
+        context = runner.ScenarioContext(
             manifest={},
             registry=tuple((name, harmless) for name in names),
         )
-        original = e2e_check.SCENARIOS
-        e2e_check.SCENARIOS = ()
+        original = e2e_main.SCENARIOS
+        e2e_main.SCENARIOS = ()
         try:
             detail = resilience.s_resilience_matrix(context)
         finally:
-            e2e_check.SCENARIOS = original
+            e2e_main.SCENARIOS = original
 
         self.assertIn("each covered by a registered scenario", detail)
 
@@ -290,10 +294,10 @@ class E2EFaultTopologyTests(unittest.TestCase):
         fixture_root = root / "scripts" / "fixtures" / "toolchain"
         self.assertEqual(
             (
-                Path(e2e_check.LOGGING_MOJO),
-                Path(e2e_check.FAKE_SLOW_MOJO),
-                Path(e2e_check.FAKE_CRASH_MOJO),
-                Path(e2e_check.FAKE_RETRY_CRASH_MOJO),
+                Path(runner.LOGGING_MOJO),
+                Path(runner.FAKE_SLOW_MOJO),
+                Path(runner.FAKE_CRASH_MOJO),
+                Path(runner.FAKE_RETRY_CRASH_MOJO),
             ),
             (
                 fixture_root / "logging_mojo.py",
@@ -310,10 +314,10 @@ class E2EFaultTopologyTests(unittest.TestCase):
 
     def test_toolchain_fixtures_remain_executable(self) -> None:
         for fixture in (
-            e2e_check.LOGGING_MOJO,
-            e2e_check.FAKE_SLOW_MOJO,
-            e2e_check.FAKE_CRASH_MOJO,
-            e2e_check.FAKE_RETRY_CRASH_MOJO,
+            runner.LOGGING_MOJO,
+            runner.FAKE_SLOW_MOJO,
+            runner.FAKE_CRASH_MOJO,
+            runner.FAKE_RETRY_CRASH_MOJO,
         ):
             with self.subTest(fixture=fixture):
                 self.assertTrue(os.access(fixture, os.X_OK))

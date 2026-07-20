@@ -27,6 +27,7 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
             ("E2E_NATIVE_FIXTURES", layout.check_e2e_native_fixture_layout),
             ("PROTOCOL_FIXTURES", layout.check_protocol_asset_layout),
             ("E2E_SCENARIO_NAMES", layout.check_e2e_layout),
+            ("E2E_HARNESS_PATHS", layout.check_e2e_layout),
             ("BUILD_SOURCE_PATHS", layout.check_build_source_visibility),
         )
         for name, check in cases:

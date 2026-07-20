@@ -8,7 +8,7 @@ import shutil
 import signal
 import time
 
-from scripts.e2e import main_open as main_open_check
+from scripts.e2e import main_open
 from scripts.e2e.assertions import (
     SUMMARY_RE,
     expect,
@@ -919,8 +919,8 @@ def s_internal_error(context: ScenarioContext) -> str:
 def s_runtime_open_failure(context: ScenarioContext) -> str:
     """The real CLI main must report and explicitly repair failed signal open."""
     try:
-        return main_open_check.check_main_open_failure()
-    except main_open_check.MainOpenCheckError as error:
+        return main_open.check_main_open_failure()
+    except main_open.MainOpenCheckError as error:
         raise ScenarioError(str(error)) from error
 
 

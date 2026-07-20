@@ -196,7 +196,7 @@ depends-on = ["build-bin"]
 # `mojo build` children need it. The harness stdlib-only Python; every subprocess
 # spawn is hard-timeout-guarded so a runner hang can never wedge CI.
 [tasks.e2e]
-cmd = "python -m scripts.e2e_check"
+cmd = "python -m scripts.e2e"
 depends-on = ["build-bin"]
 
 # The cheap hosted-CI release barrier. Every non-behavioral member of the local
