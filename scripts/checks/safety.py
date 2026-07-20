@@ -15,6 +15,7 @@ from typing import Iterable
 
 
 MAX_COVERAGE_LINES = 8
+DEFAULT_ROOTS = ("src", "tests", "e2e")
 
 
 @dataclass(frozen=True)
@@ -248,15 +249,20 @@ def mojo_files(roots: Iterable[Path]) -> list[Path]:
     )
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("roots", nargs="*", type=Path, default=[])
-    args = parser.parse_args()
-    roots = args.roots or [Path("src"), Path("tests"), Path("e2e")]
+    args = parser.parse_args(argv)
+    roots = args.roots or [Path(root) for root in DEFAULT_ROOTS]
+
+    paths = mojo_files(roots)
+    if not paths:
+        print("SAFETY check failed: source inventory is empty")
+        return 1
 
     findings: list[Finding] = []
     inventory: list[InventoryItem] = []
-    for path in mojo_files(roots):
+    for path in paths:
         current_findings, current_inventory = scan_text(
             path, path.read_text(encoding="utf-8")
         )

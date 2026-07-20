@@ -656,7 +656,7 @@ Accumulated the hard way; append as later phases teach more.
   file it actually wrote), never via an in-Mojo-test subprocess spawn; keep
   Mojo unit tests to in-process structural/exact-output assertions.
 - **Multibyte UTF-8 characters anywhere in `native/*.c`, comments included,
-  misalign `postfork_check.py`'s byte-offset AST.** `scripts/postfork_check.py`
+  misalign `postfork.py`'s byte-offset AST.** `scripts/checks/postfork.py`
   reads the source as a Python `str` (`source.read_text(encoding="utf-8")`,
   codepoint-indexed) but slices and line-counts it using RAW BYTE offsets
   straight from clang's `-ast-dump=json` (`_offset`/`_line`/`_source_segment`)

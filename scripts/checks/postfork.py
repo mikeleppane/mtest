@@ -19,10 +19,10 @@ import subprocess
 import sys
 from typing import Iterator
 
-from scripts import native_abi_check
+from scripts.checks import native_abi as native_abi_check
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "native" / "mtest_exec_native.c"
 ROOT_FUNCTION = "mtest_child_exec"
 OPEN_FUNCTION = "mtest_exec_process_open"

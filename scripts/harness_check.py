@@ -23,7 +23,7 @@ import tomllib
 
 from scripts import aggregate_tests
 from scripts import e2e_check
-from scripts import format_all
+from scripts.checks import format as format_check
 from scripts import self_host_check
 from scripts.transcript_compare import compare_directories
 
@@ -1402,15 +1402,15 @@ def check_format_roots() -> None:
     """Both formatting tasks cover every Mojo source family."""
     pixi = (REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
     expected = {
-        'fmt = "python -m scripts.format_all"',
-        'fmt-check = "python -m scripts.format_all && git diff --exit-code"',
+        'fmt = "python -m scripts.checks.format"',
+        'fmt-check = "python -m scripts.checks.format && git diff --exit-code"',
     }
     missing = sorted(line for line in expected if line not in pixi)
     if missing:
         raise AssertionError(f"format task root coverage mismatch: missing={missing}")
-    if tuple(format_all.FORMAT_ROOTS) != ("src", "tests", "e2e"):
+    if tuple(format_check.FORMAT_ROOTS) != ("src", "tests", "e2e"):
         raise AssertionError(
-            f"format source roots drifted: {format_all.FORMAT_ROOTS}"
+            f"format source roots drifted: {format_check.FORMAT_ROOTS}"
         )
 
 

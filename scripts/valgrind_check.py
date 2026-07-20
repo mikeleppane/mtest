@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 from scripts import aggregate_tests
-from scripts import native_abi_check
+from scripts.checks import native_abi as native_abi_check
 
 
 ROOT = Path(__file__).resolve().parent.parent

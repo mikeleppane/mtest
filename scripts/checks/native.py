@@ -8,10 +8,10 @@ import subprocess
 import sys
 import tempfile
 
-from scripts import native_abi_check
+from scripts.checks import native_abi as native_abi_check
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 NATIVE_SOURCE = ROOT / "native" / "mtest_exec_native.c"
 TEST_SOURCES = (
     ROOT / "tests" / "native" / "test_exec_native.c",
@@ -38,6 +38,8 @@ def link_command(
 
 def main() -> int:
     """Run ABI verification, then strict native lifecycle executables."""
+    if not TEST_SOURCES:
+        raise SystemExit("native-check: source inventory is empty")
     native_abi_check.main()
     cc = native_abi_check.compiler()
     with tempfile.TemporaryDirectory(prefix="mtest-native-check-") as raw_tmp:

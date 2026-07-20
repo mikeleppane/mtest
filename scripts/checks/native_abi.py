@@ -10,11 +10,12 @@ import sys
 import tempfile
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 NATIVE = ROOT / "native"
 SOURCE = NATIVE / "mtest_exec_native.c"
 HEADER = NATIVE / "mtest_exec_native.h"
 TEST_HEADER = NATIVE / "mtest_exec_native_test.h"
+SOURCE_FILES = (SOURCE, HEADER, TEST_HEADER)
 
 PRODUCTION_SYMBOLS = {
     "mtest_exec_interrupt_requested",
@@ -139,7 +140,8 @@ def defined_symbols(object_path: Path) -> set[str]:
 
 def main() -> int:
     """Verify files, strict compilation, layouts, and symbol isolation."""
-    for path in (SOURCE, HEADER, TEST_HEADER):
+    require(bool(SOURCE_FILES), "source inventory is empty")
+    for path in SOURCE_FILES:
         require(path.is_file(), f"missing required file: {path.relative_to(ROOT)}")
 
     cc = compiler()

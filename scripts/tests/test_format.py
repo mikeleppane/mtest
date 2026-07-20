@@ -7,8 +7,9 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
-from scripts import format_all
+from scripts.checks import format as format_check
 
 
 class FormatInventoryTests(unittest.TestCase):
@@ -28,9 +29,25 @@ class FormatInventoryTests(unittest.TestCase):
             ignored.write_text("pass\n", encoding="utf-8")
             os.symlink(repo / "tests" / "nested", repo / "tests" / "linked")
 
-            actual = format_all.mojo_sources(repo)
+            actual = format_check.mojo_sources(repo)
 
         self.assertEqual(actual, expected)
+
+    def test_default_roots_are_exact(self) -> None:
+        self.assertEqual(format_check.FORMAT_ROOTS, ("src", "tests", "e2e"))
+
+    def test_repository_root_is_exact(self) -> None:
+        self.assertEqual(
+            format_check.REPO_ROOT,
+            Path(__file__).resolve().parents[2],
+        )
+
+    def test_repository_inventory_is_nonempty(self) -> None:
+        self.assertGreater(len(format_check.mojo_sources()), 0)
+
+    def test_empty_inventory_is_rejected(self) -> None:
+        with mock.patch.object(format_check, "mojo_sources", return_value=[]):
+            self.assertEqual(format_check.main(), 1)
 
 
 if __name__ == "__main__":

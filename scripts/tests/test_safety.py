@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+import tempfile
 
-from scripts import safety_check
+from scripts.checks import safety as safety_check
 
 
 class SafetyCheckTests(unittest.TestCase):
@@ -132,6 +133,18 @@ class SafetyCheckTests(unittest.TestCase):
             [item.kind for item in inventory],
             ["possible pointer arithmetic", "possible typed dereference"],
         )
+
+    def test_default_roots_are_exact(self) -> None:
+        self.assertEqual(safety_check.DEFAULT_ROOTS, ("src", "tests", "e2e"))
+
+    def test_repository_inventory_is_nonempty(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        roots = [repo_root / root for root in safety_check.DEFAULT_ROOTS]
+        self.assertGreater(len(safety_check.mojo_files(roots)), 0)
+
+    def test_empty_inventory_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            self.assertEqual(safety_check.main([raw_tmp]), 1)
 
 
 if __name__ == "__main__":

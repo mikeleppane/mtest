@@ -44,7 +44,7 @@ mojo-version = "mojo --version"
 # agree with each other and with the version this repo currently ships. Cheap
 # and dependency-free, so it runs first — a drift here means every later gate
 # (goldens, packaging) would be validating a lie about which release they cover.
-version-check = "python -m scripts.version_check"
+version-check = "python -m scripts.checks.version"
 
 # Precompile the src/mtest package into build/mtest.mojopkg. This is the
 # package-compiles GATE: an empty-but-broken package fails here before any test
@@ -94,28 +94,28 @@ package-check = { cmd = "python -m scripts.build.package_consumption", depends-o
 
 # Rewrite Mojo files in place — run locally before committing. Protocol fixtures
 # live beneath tests/, so this covers the runner, fixtures, and suites.
-fmt = "python -m scripts.format_all"
+fmt = "python -m scripts.checks.format"
 # CI gate: format, then fail if anything changed (never edits in CI). A format
 # that shifts a fixture's `At <path>:<line>:<col>` coordinates is an oracle-side
 # change — regenerate transcripts, do not fight the gate.
-fmt-check = "python -m scripts.format_all && git diff --exit-code"
+fmt-check = "python -m scripts.checks.format && git diff --exit-code"
 
 # Stdlib-only unsafe-operation inventory. Mutation tests pin every syntax family
 # and string/comment exclusion; the complete product/test inventory must remain
 # locally documented before the ordinary CI gate can proceed.
-safety-check = "python -m scripts.safety_check_test && python -m scripts.safety_check"
+safety-check = "python -m scripts.tests.test_safety && python -m scripts.checks.safety"
 
 # Recurring Clang call-graph audit for the complete post-fork child region.
 # Mutation tests prove forbidden direct, wrapped, and indirect calls fail closed;
 # both production and testing preprocessing variants must match the exact
 # platform allowlist.
-postfork-check = "python -m scripts.postfork_check_test && python -m scripts.postfork_check"
+postfork-check = "python -m scripts.tests.test_postfork && python -m scripts.checks.postfork"
 
 # Strict C17 ABI/layout/symbol verification plus native lifecycle tests for the
 # private exec adapter. The standalone post-fork audit is a prerequisite. This
 # remains separate from the Mojo suite so the test object can expose deterministic
 # fault and sanitizer controls that production linkage proves absent.
-native-check = { cmd = "python -m scripts.native_check_test && python -m scripts.native_check", depends-on = [
+native-check = { cmd = "python -m scripts.tests.test_native && python -m scripts.checks.native", depends-on = [
     "postfork-check",
 ] }
 
@@ -176,7 +176,7 @@ test-file = "bash scripts/test_all.sh"
 # Fast self-tests for repository harness behavior. Uses disposable test inputs
 # and a fake compiler to prove deterministic aggregate generation, one-build
 # execution, timeout handling, and exact hosted-CI topology.
-harness-check = "python -m scripts.aggregate_tests_test && python -m scripts.format_all_test && python -m scripts.self_host_check_test && python -m scripts.harness_check_test && python -m scripts.harness_check"
+harness-check = "python -m scripts.aggregate_tests_test && python -m scripts.tests.test_format && python -m scripts.self_host_check_test && python -m scripts.harness_check_test && python -m scripts.harness_check"
 
 # DOGFOOD gate: run three focused executable probes through the built mtest
 # binary. This exercises mtest's real discover/build/run/parse/report path and

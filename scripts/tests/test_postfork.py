@@ -6,16 +6,39 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
-from scripts import native_abi_check
-from scripts import postfork_check
+from scripts.checks import native_abi as native_abi_check
+from scripts.checks import postfork as postfork_check
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "native" / "mtest_exec_native.c"
 
 
 class PostforkCheckTests(unittest.TestCase):
+    def test_repository_roots_are_exact(self) -> None:
+        self.assertEqual(postfork_check.ROOT, ROOT)
+        self.assertEqual(native_abi_check.ROOT, ROOT)
+
+    def test_source_inventories_are_nonempty_and_exact(self) -> None:
+        self.assertEqual(postfork_check.SOURCE, SOURCE)
+        self.assertTrue(postfork_check.SOURCE.is_file())
+        self.assertEqual(
+            tuple(path.name for path in native_abi_check.SOURCE_FILES),
+            (
+                "mtest_exec_native.c",
+                "mtest_exec_native.h",
+                "mtest_exec_native_test.h",
+            ),
+        )
+        self.assertGreater(len(native_abi_check.SOURCE_FILES), 0)
+
+    def test_empty_native_abi_source_inventory_is_rejected(self) -> None:
+        with mock.patch.object(native_abi_check, "SOURCE_FILES", ()):
+            with self.assertRaisesRegex(SystemExit, "source inventory is empty"):
+                native_abi_check.main()
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.cc = native_abi_check.compiler()

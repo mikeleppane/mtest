@@ -17,7 +17,7 @@ echo "==> precompiling src/mtest -> build/mtest.mojopkg"
 mojo precompile src/mtest -o build/mtest.mojopkg
 
 # Compile ONLY the production adapter variant (MTEST_EXEC_TESTING=0) with the
-# exact flags scripts/native_abi_check.py uses for the shipped object — the
+# exact flags scripts/checks/native_abi.py uses for the shipped object — the
 # test-only variant is a dev/CI artifact, never part of the installed package.
 echo "==> compiling native/mtest_exec_native.c -> build/native/mtest_exec_native.o"
 clang \
