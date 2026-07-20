@@ -49,6 +49,7 @@ class Run:
     stdout: str
     stderr: str
     wall: float
+    pgid: int | None = None
 
     @property
     def combined(self) -> str:
@@ -95,6 +96,7 @@ class E2ERunner:
             start_new_session=True,
             env=child_env,
         )
+        pgid = os.getpgid(proc.pid)
         try:
             out, err = proc.communicate(timeout=wall_limit)
         except subprocess.TimeoutExpired:
@@ -110,6 +112,7 @@ class E2ERunner:
             stdout=out,
             stderr=err,
             wall=time.monotonic() - start,
+            pgid=pgid,
         )
 
     def run_mtest_pty(
@@ -248,9 +251,148 @@ class E2ERunner:
                 stdout=stdout,
                 stderr=stderr,
                 wall=time.monotonic() - start,
+                pgid=pgid,
             ),
             pgid,
         )
+
+    def run_mtest_split_pty(
+        self,
+        args: list[str],
+        *,
+        env_overrides: dict[str, str | None] | None = None,
+        timeout: float | None = None,
+    ) -> tuple[int, bytes, bytes]:
+        """Capture stdout by pipe and stderr by PTY under one hard deadline."""
+        binary = os.fspath(self.mtest)
+        if not os.path.exists(binary):
+            raise ScenarioError(
+                f"binary not found at {binary}; run `pixi run build-bin`"
+            )
+        argv = [binary, *args]
+        env = dict(os.environ)
+        env["GITHUB_ACTIONS"] = ""
+        if env_overrides:
+            for key, value in env_overrides.items():
+                if value is None:
+                    env.pop(key, None)
+                else:
+                    env[key] = value
+        wall_limit = self.short_timeout if timeout is None else timeout
+        stdout_read, stdout_write = os.pipe()
+        stderr_master, stderr_slave = pty.openpty()
+        proc = subprocess.Popen(
+            argv,
+            cwd=os.fspath(self.repo_root),
+            stdout=stdout_write,
+            stderr=stderr_slave,
+            env=env,
+            start_new_session=True,
+        )
+        os.close(stdout_write)
+        os.close(stderr_slave)
+        stdout = bytearray()
+        stderr = bytearray()
+        deadline = time.monotonic() + wall_limit
+        open_fds = {stdout_read, stderr_master}
+        try:
+            while open_fds:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.kill_group(proc)
+                    proc.wait(timeout=5)
+                    raise ScenarioError(
+                        f"mtest did not return within {wall_limit}s for argv "
+                        f"{argv} with split PTY capture"
+                    )
+                ready, _, _ = select.select(list(open_fds), [], [], remaining)
+                for fd in ready:
+                    try:
+                        chunk = os.read(fd, 4096)
+                    except OSError:
+                        chunk = b""
+                    if not chunk:
+                        open_fds.discard(fd)
+                        continue
+                    (stdout if fd == stdout_read else stderr).extend(chunk)
+        finally:
+            os.close(stdout_read)
+            os.close(stderr_master)
+        try:
+            returncode = proc.wait(
+                timeout=max(0.0, deadline - time.monotonic())
+            )
+        except subprocess.TimeoutExpired:
+            self.kill_group(proc)
+            proc.wait(timeout=5)
+            raise ScenarioError(
+                f"mtest closed split capture streams but never exited for argv "
+                f"{argv}"
+            )
+        return returncode, bytes(stdout), bytes(stderr)
+
+    def run_mtest_dead_pipe(
+        self,
+        args: list[str],
+        *,
+        read_size: int,
+        timeout: float | None = None,
+    ) -> tuple[int, bytes, int]:
+        """Close mtest's captured stdout early and guard its process group."""
+        binary = os.fspath(self.mtest)
+        if not os.path.exists(binary):
+            raise ScenarioError(
+                f"binary not found at {binary}; run `pixi run build-bin`"
+            )
+        argv = [binary, *args]
+        env = dict(os.environ)
+        env["GITHUB_ACTIONS"] = ""
+        wall_limit = self.default_timeout if timeout is None else timeout
+        proc = subprocess.Popen(
+            argv,
+            cwd=os.fspath(self.repo_root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            env=env,
+        )
+        pgid = os.getpgid(proc.pid)
+        deadline = time.monotonic() + wall_limit
+        captured = bytearray()
+        try:
+            assert proc.stdout is not None
+            stdout_fd = proc.stdout.fileno()
+            while len(captured) < read_size:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.kill_group(proc)
+                    proc.wait(timeout=5)
+                    raise ScenarioError(
+                        f"mtest produced fewer than {read_size} bytes before "
+                        f"the {wall_limit}s dead-pipe deadline"
+                    )
+                ready, _, _ = select.select([stdout_fd], [], [], remaining)
+                if not ready:
+                    continue
+                chunk = os.read(stdout_fd, read_size - len(captured))
+                if not chunk:
+                    break
+                captured.extend(chunk)
+            proc.stdout.close()
+            try:
+                returncode = proc.wait(
+                    timeout=max(0.0, deadline - time.monotonic())
+                )
+            except subprocess.TimeoutExpired:
+                self.kill_group(proc)
+                proc.wait(timeout=5)
+                raise ScenarioError(
+                    f"mtest did not exit after its stdout pipe closed: {argv}"
+                )
+        finally:
+            if proc.poll() is None:
+                self.kill_group(proc)
+        return returncode, bytes(captured), pgid
 
     @staticmethod
     def kill_group(proc: subprocess.Popen) -> None:
