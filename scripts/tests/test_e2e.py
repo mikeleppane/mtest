@@ -40,6 +40,25 @@ DARWIN_INTERPOSE_DECLARATION = r"""#if defined(__APPLE__)
 #include <dlfcn.h>
 #endif"""
 
+CORE_SCENARIOS = (
+    "manifest-completeness",
+    "default-suite",
+    "hostile",
+    "single-pass",
+    "exitfirst",
+    "maxfail",
+    "exclude+stale",
+    "all-excluded",
+    "empty-dir",
+    "failing-gate",
+    "quiet-verbose",
+    "show-output",
+    "durations",
+    "color",
+    "passthrough+forbidden",
+    "out-of-root",
+)
+
 
 def _check_e2e_interposer_source_policy(source: str) -> None:
     """Validate the write-fault fixture's platform forwarding contracts."""
@@ -305,6 +324,16 @@ def check_e2e_interposer_failure_propagation() -> None:
 
 
 class E2EFaultTopologyTests(unittest.TestCase):
+    def test_core_scenarios_have_one_feature_owner(self) -> None:
+        from scripts.e2e.scenarios import core
+
+        owned = tuple(
+            name
+            for name, scenario in e2e_check.SCENARIOS
+            if scenario.__module__ == core.__name__
+        )
+        self.assertEqual(owned, CORE_SCENARIOS)
+
     def test_runner_owns_results_manifest_access_and_hard_timeouts(self) -> None:
         from scripts.e2e import assertions, runner
 
