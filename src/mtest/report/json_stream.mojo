@@ -48,7 +48,6 @@ comptime _STREAM_HEAD = 65536
 comptime _STREAM_TAIL = 65536
 comptime _TEXT_HEAD = 65536
 comptime _TEXT_TAIL = 65536
-comptime _ARGV_ELEM_MAX = 4096
 comptime _ARGV_LIST_MAX = 256
 comptime _RUNNER_STRING_MAX = 4096
 # A capped runner string is kept as a head+tail window (summing to
@@ -171,17 +170,6 @@ struct _Excerpt(Copyable, Movable):
 
     var escaped: String
     var omitted: Int
-
-
-def _cap_bytes_head(data: List[UInt8], max_bytes: Int) -> List[UInt8]:
-    """The first `max_bytes` bytes of `data`, or all of it if shorter."""
-    var n = len(data)
-    if n <= max_bytes:
-        return data.copy()
-    var head = List[UInt8]()
-    for i in range(max_bytes):
-        head.append(data[i])
-    return head^
 
 
 def _string_bytes(s: String) -> List[UInt8]:

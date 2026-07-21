@@ -174,7 +174,7 @@ def test_shard_owns_matches_partition_hash() raises:
     var shard = partition(universe.copy(), ShardMode.HASH, m, n)
     for p in universe:
         assert_equal(
-            shard_owns(p, ShardMode.HASH, m, n),
+            shard_owns(p, m, n),
             _contains(shard, p),
             "shard_owns disagrees with partition for " + p,
         )

@@ -59,17 +59,15 @@ def _owns_index(hash_or_index: UInt64, m: Int, n: Int) -> Bool:
     return Int(hash_or_index % UInt64(n)) == m - 1
 
 
-def shard_owns(path: String, mode: ShardMode, m: Int, n: Int) -> Bool:
+def shard_owns(path: String, m: Int, n: Int) -> Bool:
     """Whether shard `m` of `n` owns `path` by hash.
 
-    Meaningful only for HASH mode: SLICE ownership is by list index, which a
-    lone path does not carry, so use `partition` for slice sharding. Assumes a
-    validated `1 <= m <= n`, which the cli parser enforces.
+    Hash ownership only. SLICE ownership is by list index, which a lone path
+    does not carry, so use `partition` for slice sharding. Assumes a validated
+    `1 <= m <= n`, which the cli parser enforces.
 
     Args:
         path: The lexical root-relative path (a `disc.run_files` element).
-        mode: The shard mode. Not inspected; ownership is always computed by
-            hash. Present so call sites can pass the configured mode.
         m: This shard's 1-based index.
         n: The total shard count.
 
