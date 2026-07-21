@@ -145,6 +145,40 @@ comptime SRC_CHAMELEON = (
 )
 
 
+# A chameleon whose stale-name RECOVERY re-probe dies by signal. The first
+# --skip-all lists both tests and drops a marker in the invocation root; the
+# --only run then refuses the ghost it just listed, driving recover-once. The
+# rebuild reproduces the same binary from the same source, so the second
+# --skip-all sees the marker and aborts -> the recovery probe is terminal CRASH.
+# That file must still reach the crash-attribution post-pass.
+comptime SRC_CHAMELEON_PROBE_CRASH = (
+    "from std.sys import argv\n"
+    "from std.ffi import external_call\n"
+    "from std.os.path import exists\n"
+    "from std.testing import TestSuite, assert_true\n\n\n"
+    "def test_real() raises:\n    assert_true(True)\n\n\n"
+    "def test_ghost() raises:\n    assert_true(True)\n\n\n"
+    "def main() raises:\n"
+    "    var probing = False\n"
+    "    var has_only = False\n"
+    "    for a in argv():\n"
+    '        if a == "--skip-all":\n'
+    "            probing = True\n"
+    '        if a == "--only":\n'
+    "            has_only = True\n"
+    "    if probing:\n"
+    '        if exists("probe_crash_marker"):\n'
+    '            _ = external_call["abort", Int32]()\n'
+    '        with open("probe_crash_marker", "w") as f:\n'
+    '            f.write("1")\n'
+    "    var s = TestSuite()\n"
+    "    s.test[test_real]()\n"
+    "    if not has_only:\n"
+    "        s.test[test_ghost]()\n"
+    "    s^.run()\n"
+)
+
+
 # A real one-test suite that, under --skip-all, prints a complete exact-path
 # all-SKIP report (in the retained HEAD) and THEN floods stdout far past the
 # capture bound, so the genuine report is lost to truncation and only junk

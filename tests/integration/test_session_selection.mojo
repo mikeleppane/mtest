@@ -24,6 +24,7 @@ from mtest.session import run_session
 
 from session_fixtures import (
     SRC_CHAMELEON,
+    SRC_CHAMELEON_PROBE_CRASH,
     SRC_FAIL,
     SRC_FAIL_PHRASE,
     SRC_MATRIX,
@@ -193,6 +194,53 @@ def test_chameleon_recollects_once_then_malformed_suite() raises:
         ):
             saw_stale = True
     assert_true(saw_stale, "the recover-once flow must warn loudly")
+
+
+def test_recovery_probe_crash_still_reaches_crash_attribution() raises:
+    # Recover-once fires, the rebuild succeeds, and the re-probe dies by signal.
+    # That CRASH is a crash like any other: it must be handed to the bounded
+    # attribution post-pass, or the pass sees an empty candidate list, never
+    # announces itself, and the file's culprit is never named.
+    var root = temp_root()
+    write_file(root, "tests/test_probe_crash.mojo", SRC_CHAMELEON_PROBE_CRASH)
+    var cfg = base_config()
+    # Select only the ghost -> a subset run under --only -> the stale-name path.
+    cfg.paths.append("tests/test_probe_crash.mojo")
+    cfg.keyword = "ghost"
+
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    _ = run_session(cfg, root, comp)
+
+    ref rec = comp.composite.reporters[0]
+    var finished = _finished(rec)
+    assert_true(
+        finished.outcome == Outcome.CRASH,
+        "a recovery re-probe that dies by signal is a CRASH",
+    )
+    # Recovery really did fire -- otherwise this proves nothing about recovery.
+    var saw_stale = False
+    for i in range(rec.count()):
+        if (
+            rec.kind_at(i) == EventKind.WARNING
+            and rec.event_at(i).warning_kind == "stale-name"
+        ):
+            saw_stale = True
+    assert_true(saw_stale, "the run must have gone through recover-once")
+    # The guard: the attribution pass announces itself only when it was handed
+    # at least one crashed file. Drop the file and this warning vanishes.
+    var saw_attribution = False
+    for i in range(rec.count()):
+        if (
+            rec.kind_at(i) == EventKind.WARNING
+            and rec.event_at(i).warning_kind == "crash-attribution-start"
+        ):
+            saw_attribution = True
+    assert_true(
+        saw_attribution,
+        "a recovery-probe CRASH must reach the crash-attribution pass",
+    )
 
 
 def test_selected_off_grammar_run_is_drift_exit_3() raises:

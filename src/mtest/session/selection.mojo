@@ -911,6 +911,21 @@ def _run_selection[
                     summary.counts[pfr.outcome.code] += 1
                     run_outcomes.extend(pfr.exit_outcomes.copy())
                     ran_files += 1
+                    if pfr.outcome == Outcome.CRASH:
+                        # A recovery re-probe that dies by signal is a crash
+                        # like any other: it must reach the attribution pass,
+                        # or its banner count is short and its
+                        # `CrashAttribution` row never renders. The rebuild
+                        # rewrites the binary in place — `_mangle(rel)` is
+                        # injective in `rel` alone — so the path here is the
+                        # same string the pre-rebuild build produced.
+                        crash_files.append(
+                            _CrashFile(
+                                collected[i].rel,
+                                collected[i].binary,
+                                collected[i].selected.copy(),
+                            )
+                        )
                     pipeline.record_verdict(
                         i,
                         pfr.outcome.is_failing(),
