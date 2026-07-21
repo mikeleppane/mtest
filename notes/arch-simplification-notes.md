@@ -77,3 +77,60 @@ other fact false, and the base stage is the identity for any value when no
 fact is set. The field docstring names the constraint; the type does not
 enforce it. A future caller that set a control-flow fact alongside an
 already-resolved 2 would get 3 where the old code gave 2.
+
+## Naming the report-layer seam instead of reaching through it
+
+`063e549`, `b52d9c9`, `eb57946`, `ea89d2e`
+
+The `Reporter` trait exposed one method, `handle`, yet five lifecycle
+interactions reached concrete reporters at fixed comptime tuple indices:
+`run_session[1, 2, 3]`, two `comp.reporters[0]` calls in `main`, and four
+session helpers that bound a typed pointer to a tuple element. The composition
+order was a hand-kept convention restated in prose in three places, with
+nothing type-checking any of them against the others, and `session` imported
+three concrete reporter types.
+
+Lifecycle now goes through a `ReportCoordinator` trait with named methods, and
+two conformers exist from the first commit: the production set, and a recording
+coordinator the session's own drivers use. `session` imports no concrete
+reporter type — verified by grep, not by inspection.
+
+The production coordinator owns its four reporters as **named fields** rather
+than as an indexed composite. Holding a composite inside it and reaching
+elements by index would have relocated the escape hatch into the report layer
+rather than deleted it. `CompositeReporter` itself survives, inside the
+recording coordinator, where a comptime pack is what the drivers actually want.
+
+The inert-path equivalence was checked at source level rather than inferred
+from green gates, because it is where a silent exit-code regression would hide:
+an always-present but inactive reporter must return exactly what the old
+compile-time-elided branch returned. It does, for all five interactions —
+stream health `False`, JUnit finalize `JunitFinalizeResult(False, "")`,
+annotation tail an empty list. A discrepancy would have escalated a clean run
+to exit 3.
+
+The byte-equality guard was mutation-proven before being trusted: dropping
+WARNING events made exactly that one test go RED, and it was then reverted.
+An observed green test is not a guard.
+
+Evidence: `ci_exit=0` at each commit (59/59 e2e each), plus `junit-check`,
+`junit-render-check`, and `transcripts-check` all exit 0 at HEAD. Transcripts
+were never regenerated — a red `transcripts-check` after a repo change indicts
+the change.
+
+### The movable-only reporter-pack probe
+
+The question was whether the pinned compiler accepts dropping `Copyable` from
+`trait Reporter`'s bounds, so a reporter could own a file descriptor.
+
+**It accepts it** — the package and the whole classified inventory build clean
+with `trait Reporter(Movable)`. The relaxation was *not* adopted, because
+nothing owns a non-copyable resource yet and a widened bound no caller
+exercises fails the rent test. It is recorded in AGENTS.md so it need not be
+re-probed when a reporter does need to own an fd.
+
+A second, undirected probe corrected a false Lesson. AGENTS.md claimed a
+composite may "never" be nested inside another struct. That over-generalized a
+`Copyable` failure: `Movable` does synthesize, and declaring
+`struct CompositeReporter[*Rs: Reporter](Movable)` lets a coordinator own its
+pack. Had the claim been believed, this design would have looked impossible.
