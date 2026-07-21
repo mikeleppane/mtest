@@ -58,6 +58,7 @@ UNIT_SUITES = {
     "test_report_annotations.mojo",
     "test_report_composite.mojo",
     "test_report_console.mojo",
+    "test_report_coordinator.mojo",
     "test_report_escape.mojo",
     "test_report_json_reporter.mojo",
     "test_report_json_stream.mojo",
@@ -168,6 +169,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_report_annotations.mojo",
     "tests/unit/test_report_composite.mojo",
     "tests/unit/test_report_console.mojo",
+    "tests/unit/test_report_coordinator.mojo",
     "tests/unit/test_report_escape.mojo",
     "tests/unit/test_report_json_reporter.mojo",
     "tests/unit/test_report_json_stream.mojo",
@@ -189,7 +191,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 914
+CLASSIFIED_TEST_COUNT = 919
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",

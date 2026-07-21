@@ -78,6 +78,17 @@ heterogeneous trait-object list, because 1.0.0b2 polymorphism is static. The
 first console reporter must already flow through this composition: the seam is
 proven the first time it exists.
 
+Above that sits a second named seam: the **`ReportCoordinator` trait**, which is
+how `session` and `main` reach the report layer. Reporters share one event
+method, but a few lifecycle interactions belong to specific reporters — machine
+stream health, JUnit `[not-run]` synthesis and finalize, the annotation tail,
+the console's rendered output and fence token. Those are **named methods on the
+coordinator**, never a concrete reporter type or a position in a composition
+tuple, so `session` imports no concrete reporter. Two coordinators conform:
+`StandardReportCoordinator` (the production set) and `RecordingCoordinator`
+(the session's own drivers, whose console slot is a comptime reporter pack).
+Adding a reporter stays a local change inside a coordinator.
+
 ## Mojo, not Python
 
 `src/` is **pure Mojo**. The approved native boundary is confined to `native/`:

@@ -11,13 +11,18 @@ from mtest.model import Event
 from mtest.report.reporter import Reporter
 
 
-struct CompositeReporter[*Rs: Reporter]:
+struct CompositeReporter[*Rs: Reporter](Movable):
     """Fans one event to a comptime tuple of reporters via static dispatch.
 
     Stores the reporters in a `Tuple` and, on each event, iterates the pack at
     compile time so every reporter's concrete `handle` is called directly — no
     virtual dispatch, no boxing. Build it at the call site with a pre-built
     tuple: `CompositeReporter(Tuple(a, b))`, letting `Rs` be inferred.
+
+    `Movable` is declared so a composite can be moved into a coordinator's
+    field. `Copyable` cannot be: `Tuple[*Self.Rs]` has no synthesizable copy
+    constructor, so a copy-bounded conformance fails to compile even when every
+    element type is itself copyable.
 
     Parameters:
         Rs: The concrete reporter types to compose, in fan-out order.
