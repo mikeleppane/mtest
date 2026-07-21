@@ -4,6 +4,7 @@ The runner is built in layers, and the layering is one-directional — every
 layer may import only from layers above it, never sideways or downward:
 
     Layer 0  model     outcomes, node ids, events, exit codes
+    Layer 0  platform  the narrow platform-I/O boundary
     Layer 1  config    RunnerConfig
     Layer 2  discover | protocol (report/collect parsing) | report
              select (operand and name selection) | cache (build reuse)

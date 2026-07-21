@@ -40,6 +40,7 @@ from std.time import perf_counter_ns
 from mtest.model.events import Event, EventKind
 from mtest.model.outcome import Outcome
 from mtest.model.test_result import TestResult
+from mtest.platform import process_id
 from mtest.report.junit import (
     JunitCase,
     JunitPrimary,
@@ -78,10 +79,7 @@ def _junit_nonce() -> String:
     Returns:
         The process id, rendered in decimal.
     """
-    # SAFETY: `getpid` takes no arguments and returns this process's id as an
-    # Int32; there is nothing to misuse and the call cannot fail.
-    var pid = external_call["getpid", Int32]()
-    return String(Int(pid))
+    return String(process_id())
 
 
 def open_junit_spool() raises -> String:

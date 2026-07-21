@@ -5,12 +5,13 @@ per-invocation and per-attempt directory naming, the recursive delete, and the
 `MODULAR_CACHE_DIR` restore that the build, attempt, and precompile paths share.
 Every entity here is pure path arithmetic, a filesystem operation, or an
 environment restore — none of it knows about outcomes, events, or verdicts, so
-it imports nothing from `mtest` and sits below every other module in the
-package.
+it sits below every other module in `session` and reaches only for the platform
+boundary at Layer 0.
 """
-from std.ffi import external_call
 from std.os import listdir, makedirs, remove, rmdir, setenv, unsetenv
 from std.os.path import basename, dirname, exists, isdir, islink, join
+
+from mtest.platform import process_id
 
 
 def _mangle(rel: String) -> String:
@@ -111,10 +112,7 @@ def _invocation_nonce() -> String:
     Returns:
         This process's id, as a decimal string.
     """
-    # SAFETY: `getpid` takes no arguments and returns this process's id as an
-    # Int32; there is nothing to misuse and the call cannot fail.
-    var pid = external_call["getpid", Int32]()
-    return String(Int(pid))
+    return String(process_id())
 
 
 def _quarantine_dir(

@@ -56,6 +56,7 @@ Every layer may import only from layers above it, never sideways or downward:
 
 ```text
 Layer 0  model     outcomes, node ids, events, exit-code resolution        (no internal imports)
+Layer 0  platform  the narrow platform-I/O boundary                        (no internal imports)
 Layer 1  config    RunnerConfig
 Layer 2  discover | protocol (report/collect parsing) | report
          select (operand and name selection) | cache (build reuse)
@@ -327,6 +328,7 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `notes` | `notes/` |
 | `readme` | `README.md` |
 | `model` | `src/mtest/model` (outcomes, node ids, events, exit codes) |
+| `platform` | `src/mtest/platform` (the narrow platform-I/O boundary) |
 | `config` | `src/mtest/config` (RunnerConfig) |
 | `discover` | `src/mtest/discover` (file walking) |
 | `protocol` | `src/mtest/protocol` (report/collect parsing) |
