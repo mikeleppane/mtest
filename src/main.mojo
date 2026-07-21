@@ -91,44 +91,114 @@ def _eprintln(text: String):
     print(text, file=FileDescriptor(2), flush=True)
 
 
-def _close_runtime(mut runtime: ExecRuntime) -> Bool:
-    """Restore exec state; report to stderr and return False on failure."""
-    try:
-        runtime.close()
-        return True
-    except e:
-        _eprintln("mtest: internal error: " + String(e))
-        return False
+@fieldwise_init
+struct RunResources:
+    """Everything a configured run owns, and the one ladder that releases it.
 
+    `main` takes these resources at three different points — the exec runtime
+    first, then the machine-stream descriptor, then the JUnit scratch — and
+    every exit path from there on has to release all of them, in one order,
+    under one precedence. Holding them together is what lets `close_into` state
+    that ladder once instead of once per exit path.
 
-def _discard_junit_scratch(spool_dir: String, temp_path: String):
-    """Remove the JUnit spool directory, its fragments, and any leftover temp.
-
-    `main` owns this scratch — it created the spool with `open_junit_spool` and
-    the temp with `open_junit_artifact` — so it frees them on every exit path
-    once the session has finished with them. On success the temp has already
-    been renamed onto the report target, making its removal a no-op that never
-    touches the published report; on failure the reporter discarded it. Either
-    way the fragments and the spool directory are what is left to clear.
-
-    Best-effort and non-raising, so it is safe to call on the error paths and
-    with empty or missing paths.
+    A resource is recorded here at the moment ownership is actually taken, so
+    an empty path or a false ownership flag means there is nothing to release.
     """
-    if temp_path != "":
+
+    var runtime: ExecRuntime
+    """The process-global exec and signal state, owned from a successful open."""
+
+    var json_fd: Int
+    """The machine-stream descriptor; meaningful only when `json_owns_fd`."""
+
+    var json_owns_fd: Bool
+    """Whether `main` opened `json_fd` and so must close it.
+
+    False under `--json -`, where the stream writes to the inherited stdout
+    that `main` never opened and must not close.
+    """
+
+    var junit_spool: String
+    """The JUnit spool directory `main` created, or "" when it owns none."""
+
+    var junit_temp: String
+    """The JUnit target temp file `main` created, or "" when it owns none."""
+
+    def _discard_junit_scratch(self):
+        """Remove the JUnit spool directory, its fragments, and any leftover temp.
+
+        `main` owns this scratch — it created the spool with `open_junit_spool`
+        and the temp with `open_junit_artifact` — so it frees them once the
+        session has finished with them. On success the temp has already been
+        renamed onto the report target, making its removal a no-op that never
+        touches the published report; on failure the reporter discarded it.
+        Either way the fragments and the spool directory are what is left.
+
+        Best-effort and non-raising, so it is safe on every error path and with
+        empty or missing paths.
+        """
+        if self.junit_temp != "":
+            try:
+                remove(self.junit_temp)
+            except:
+                pass
+        if self.junit_spool != "":
+            try:
+                for name in listdir(self.junit_spool):
+                    try:
+                        remove(self.junit_spool + "/" + name)
+                    except:
+                        pass
+                rmdir(self.junit_spool)
+            except:
+                pass
+
+    def close_into(mut self, code: Int, rank_delivery: Bool) -> Int:
+        """Release every owned resource and return the code to exit with.
+
+        The ladder, stated once: discard the JUnit scratch, close the
+        machine-stream descriptor when `main` owns it, then restore the exec
+        runtime. The precedence over `code` follows from what each release can
+        observe. A descriptor close can surface a deferred write error (a quota
+        or network filesystem that reports ENOSPC/EIO only at close), which is
+        a delivery fact this presents to `resolve_exit_code` rather than a code
+        it transforms itself. A runtime close failure is the runner's own
+        machinery failing, reported to stderr, and it yields the internal-error
+        code over anything else.
+
+        Args:
+            code: The code the caller reached this exit path carrying.
+            rank_delivery: Whether `code` is a run code the model ranks, so a
+                deferred write error may escalate it. False for a usage
+                refusal, which was decided before any run existed and so has
+                no run facts to rank against.
+
+        Returns:
+            The process exit code. Mutates: every owned resource is released,
+            so the result is meaningful once. Never raises.
+        """
+        self._discard_junit_scratch()
+        var resolved = code
+        if self.json_owns_fd:
+            var delivery_failed = close_json_fd(self.json_fd)
+            self.json_owns_fd = False
+            if rank_delivery:
+                resolved = resolve_exit_code(
+                    TerminalFacts(
+                        interrupted=False,
+                        internal_error=False,
+                        drift=False,
+                        precompile_failed=False,
+                        outcome_code=code,
+                        delivery_failed=delivery_failed,
+                    )
+                )
         try:
-            remove(temp_path)
-        except:
-            pass
-    if spool_dir != "":
-        try:
-            for name in listdir(spool_dir):
-                try:
-                    remove(spool_dir + "/" + name)
-                except:
-                    pass
-            rmdir(spool_dir)
-        except:
-            pass
+            self.runtime.close()
+        except e:
+            _eprintln("mtest: internal error: " + String(e))
+            return EXIT_INTERNAL_ERROR
+        return resolved
 
 
 def main():
@@ -186,6 +256,11 @@ def main():
         exit(EXIT_INTERNAL_ERROR)
         return
 
+    # From here on the runtime is owned, and every exit path has to release it.
+    # The machine-stream descriptor and the JUnit scratch join it below, each
+    # recorded the moment it is actually opened.
+    var resources = RunResources(runtime^, -1, False, String(""), String(""))
+
     # Collect mode: probe every discovered file for its node ids and print the
     # SORTED listing to STDOUT, byte-clean, running no test body. This print is
     # the SECOND sanctioned exception to the event seam (usage errors are the
@@ -195,21 +270,17 @@ def main():
     if config.collect:
         var collected = CollectResult(List[String](), List[String](), 0)
         try:
-            collected = run_collect(runtime, config, root)
+            collected = run_collect(resources.runtime, config, root)
         except e:
             _eprintln(String(e))
-            if not _close_runtime(runtime):
-                exit(EXIT_INTERNAL_ERROR)
-            exit(EXIT_USAGE_ERROR)
+            exit(resources.close_into(EXIT_USAGE_ERROR, rank_delivery=False))
         for line in collected.diagnostics:
             _eprintln(line)
         var listing = String("")
         for nid in collected.listing:
             listing += nid + "\n"
         print(listing, end="", flush=True)
-        if not _close_runtime(runtime):
-            exit(EXIT_INTERNAL_ERROR)
-        exit(collected.code)
+        exit(resources.close_into(collected.code, rank_delivery=True))
 
     # Resolve the machine-stream destination and, with it, the console's own
     # destination. Under `--json -` the stream OWNS stdout (byte-pure), so the
@@ -220,7 +291,6 @@ def main():
     var console_fd = 1
     var json_fd = -1
     var json_active = False
-    var json_owns_fd = False
     if config.json_dest == "-":
         json_fd = 1
         json_active = True
@@ -233,11 +303,10 @@ def main():
             json_fd = open_json_fd(config.json_dest)
         except open_error:
             _eprintln("mtest: internal error: " + String(open_error))
-            if not _close_runtime(runtime):
-                exit(EXIT_INTERNAL_ERROR)
-            exit(EXIT_INTERNAL_ERROR)
+            exit(resources.close_into(EXIT_INTERNAL_ERROR, rank_delivery=True))
         json_active = True
-        json_owns_fd = True
+        resources.json_fd = json_fd
+        resources.json_owns_fd = True
 
     # The GitHub Actions probe drives BOTH the `auto` annotation resolution and
     # the console's stop-commands FENCING of echoed child output. Fencing is
@@ -276,23 +345,18 @@ def main():
     var junit_target = String("")
     if junit_active:
         try:
-            # Assign the spool to the outer name FIRST, so a later failure to
-            # open the target temp still leaves the spool directory tracked for
-            # cleanup rather than leaking it.
+            # Record the spool as owned FIRST, so a later failure to open the
+            # target temp still leaves the spool directory tracked for cleanup
+            # rather than leaking it.
             junit_spool = open_junit_spool()
+            resources.junit_spool = junit_spool
             var artifact = open_junit_artifact(junit_spool, config.junit_dest)
             junit_temp = artifact.temp_path
+            resources.junit_temp = junit_temp
             junit_target = artifact.target_path
         except junit_error:
-            _discard_junit_scratch(junit_spool, junit_temp)
-            if json_owns_fd:
-                # Already exiting 3 (an internal error outranks a close failure);
-                # the close status cannot escalate further, so discard it.
-                _ = close_json_fd(json_fd)
             _eprintln("mtest: internal error: " + String(junit_error))
-            if not _close_runtime(runtime):
-                exit(EXIT_INTERNAL_ERROR)
-            exit(EXIT_INTERNAL_ERROR)
+            exit(resources.close_into(EXIT_INTERNAL_ERROR, rank_delivery=True))
 
     # Each reporter is independently inert when its feature is off: no `--json`,
     # no `--junit-xml`, annotations resolved off. The coordinator exposes the
@@ -309,21 +373,15 @@ def main():
 
     var code = 0
     try:
-        code = run_session(runtime, config, root, comp)
+        code = run_session(resources.runtime, config, root, comp)
     except e:
         # The only raise the session propagates is a discover: usage error;
         # like a cli usage error it exits 4 to stderr. The session raised before
-        # finalizing, so clear the junit scratch it never got to publish.
-        if junit_active:
-            _discard_junit_scratch(junit_spool, junit_temp)
-        if json_owns_fd:
-            # A usage error already routes to exit 4, which dominates any
-            # close-failure escalation, so discard the close status here.
-            _ = close_json_fd(json_fd)
+        # finalizing, so the epilogue clears the junit scratch it never got to
+        # publish. A usage error dominates any close-failure escalation, so the
+        # descriptor's close status is not ranked against it.
         _eprintln(String(e))
-        if not _close_runtime(runtime):
-            exit(EXIT_INTERNAL_ERROR)
-        exit(EXIT_USAGE_ERROR)
+        exit(resources.close_into(EXIT_USAGE_ERROR, rank_delivery=False))
 
     # Flush the console's fully rendered buffer verbatim (it already ends in a
     # newline) to its RESOLVED destination — stdout normally, stderr under
@@ -357,29 +415,10 @@ def main():
             rendered += line + "\n"
         print(rendered, end="", file=FileDescriptor(console_fd), flush=True)
 
-    if json_owns_fd:
-        # The close of the destination main OWNS can surface a deferred write
-        # error (a quota/network filesystem that reports ENOSPC/EIO only at
-        # close), which the session could not have seen. Present the code the
-        # session already resolved, plus that late delivery fact, to the same
-        # resolver: it re-applies the delivery precedence (2 stands, 3 stays,
-        # 0/1/5 -> 3), so an undelivered machine report cannot exit success.
-        code = resolve_exit_code(
-            TerminalFacts(
-                interrupted=False,
-                internal_error=False,
-                drift=False,
-                precompile_failed=False,
-                outcome_code=code,
-                delivery_failed=close_json_fd(json_fd),
-            )
-        )
-    if junit_active:
-        # The session has finalized (the report was renamed onto its target, or
-        # left intact on failure); free the spool directory and fragments main
-        # created for it so no run leaks a spool directory. Covers the success,
-        # interrupt, finalize-failure, and spool-failure paths alike.
-        _discard_junit_scratch(junit_spool, junit_temp)
-    if not _close_runtime(runtime):
-        exit(EXIT_INTERNAL_ERROR)
-    exit(code)
+    # The session has finalized (the JUnit report was renamed onto its target,
+    # or left intact on failure), so the epilogue frees the spool directory and
+    # fragments main created for it, closes the machine-stream descriptor main
+    # owns — whose deferred write error, if any, the session could not have
+    # seen and the resolver re-ranks — and restores the exec runtime. Covers
+    # the success, interrupt, finalize-failure, and spool-failure paths alike.
+    exit(resources.close_into(code, rank_delivery=True))
