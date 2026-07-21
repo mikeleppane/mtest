@@ -26,9 +26,9 @@ an interrupt is 2; an internal error (spawn failure or machinery raise) is 3; a
 report that drifted off the pinned grammar is also 3; a precompile failure is 1;
 otherwise `exit_code_for` over the run outcomes decides 1, 5, or 0. A terminal
 artifact that could not be delivered then escalates anything below 2 to 3. The
-selection, probe, and gate paths route
-non-valid reports through the same `resolve_report`/`classify` machinery as the
-default path, so a forged or off-grammar report resolves identically either way.
+selection, probe, and gate paths route non-valid reports through the same
+`resolve_report`/`classify` machinery as the default path, so a forged or
+off-grammar report resolves identically either way.
 """
 from std.builtin.sort import sort
 from std.ffi import external_call

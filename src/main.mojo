@@ -20,9 +20,9 @@ Every decision `main` makes is delegated. The parser resolves the config
 supplies; the session states the run's facts and `resolve_exit_code` in the
 model layer ranks them. `main` names no exit code of its own except
 `EXIT_USAGE_ERROR`, which is refused before any run exists and so has no facts
-to rank. Otherwise it only wires and moves bytes. All FFI stays below in `exec` — `stdout_isatty()` and `stderr_isatty()`
-are the terminal probes, while argv, cwd, getenv, and exit are ordinary
-program-level operations via `std`.
+to rank. Otherwise it only wires and moves bytes. All FFI stays below in `exec`
+— `stdout_isatty()` and `stderr_isatty()` are the terminal probes, while argv,
+cwd, getenv, and exit are ordinary program-level operations via `std`.
 """
 from std.io import FileDescriptor
 from std.os import getenv, listdir, remove, rmdir
