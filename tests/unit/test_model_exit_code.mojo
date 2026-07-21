@@ -22,9 +22,9 @@ from mtest.model import (
     EXIT_SUCCESS,
     EXIT_FAILURE,
     EXIT_NOTHING_RAN,
-    EXIT_INTERRUPTED,
     EXIT_INTERNAL_ERROR,
 )
+from mtest.model.exit_code import EXIT_INTERRUPTED
 
 
 def _all_outcomes() -> List[Outcome]:
