@@ -32,7 +32,6 @@ step is the fragment file write, which is wrapped and latched as in the JSON
 stream reporter, after which the reporter goes silent. An inert reporter, the
 no-`--junit-xml` shape, owns no spool directory and does nothing.
 """
-from std.ffi import external_call
 from std.os import getenv, mkdir, remove
 from std.os.path import basename, dirname
 from std.time import perf_counter_ns
@@ -40,7 +39,7 @@ from std.time import perf_counter_ns
 from mtest.model.events import Event, EventKind
 from mtest.model.outcome import Outcome
 from mtest.model.test_result import TestResult
-from mtest.platform import process_id
+from mtest.platform import process_id, rename_path
 from mtest.report.junit import (
     JunitCase,
     JunitPrimary,
@@ -146,50 +145,6 @@ def open_junit_spool() raises -> String:
         + last
         + ")"
     )
-
-
-def _cstring(value: String) -> List[UInt8]:
-    """An owned NUL-terminated byte copy of `value`, for one libc call."""
-    var out = List[UInt8]()
-    for b in value.as_bytes():
-        out.append(b)
-    out.append(0)
-    return out^
-
-
-def _rename(src: String, dst: String) raises:
-    """Atomically rename `src` onto `dst`, replacing `dst` if it exists.
-
-    The report layer performs its own libc calls, as `json_stream_reporter` does
-    for `write`/`open`/`close`, rather than reaching up into `exec`, so the
-    reporter stays self-contained. Both paths share a filesystem because the
-    caller derives `src` from `dst`'s directory, so `rename(2)` is indivisible:
-    on success `dst` names what `src` named, and on failure neither path is
-    modified. That is why the JUnit artifact is renamed rather than written in
-    place.
-
-    Args:
-        src: The existing temp file to rename.
-        dst: The path to replace.
-
-    Raises:
-        Error: When `rename(2)` failed, because the target is a directory,
-            straddles filesystems, or its directory became unwritable.
-    """
-    var s = _cstring(src)
-    var d = _cstring(dst)
-    # SAFETY: libc rename has the exact `int rename(const char*, const char*)`
-    # ABI. Both arguments are complete NUL-terminated byte copies this function
-    # uniquely owns; the borrowed pointers stay valid for the whole synchronous
-    # call (both lists are used again below), and rename retains neither pointer
-    # and writes through neither. The result is a plain scalar status.
-    var rc = external_call["rename", Int32](s.unsafe_ptr(), d.unsafe_ptr())
-    _ = s^
-    _ = d^
-    if rc != 0:
-        raise Error(
-            "report: junit rename failed: '" + src + "' -> '" + dst + "'"
-        )
 
 
 @fieldwise_init
@@ -607,7 +562,7 @@ struct JunitReporter(Reporter):
             var doc = self.assemble("mtest")
             with open(self._temp_path, "w") as f:
                 f.write(doc)
-            _rename(self._temp_path, self._target_path)
+            rename_path(self._temp_path, self._target_path)
         except e:
             self._discard_temp()
             return JunitFinalizeResult(

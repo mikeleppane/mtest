@@ -21,6 +21,7 @@ safe call wins and no foreign declaration is written at all — deleting an unsa
 operation beats wrapping it.
 
 The public surface is re-exported here so callers write
-`from mtest.platform import process_id`.
+`from mtest.platform import process_id, rename_path`.
 """
+from mtest.platform.fs import rename_path
 from mtest.platform.process import process_id

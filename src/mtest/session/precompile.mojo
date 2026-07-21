@@ -22,10 +22,10 @@ from mtest.exec import (
     ProcessSpec,
     Termination,
     interrupt_requested,
-    rename_path,
     run_supervised,
 )
 from mtest.model import Event
+from mtest.platform import rename_path
 from mtest.session.attempt import (
     _AttemptResult,
     _compile_crash_residual,
