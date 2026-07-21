@@ -155,9 +155,9 @@ def test_root_modes_discover_focused_unit_integration_and_full_inventory() -> No
     """Every contributor root mode reaches its deterministic classified inventory."""
     cases = (
         (("tests/unit/test_model_outcome.mojo",), 1, "tests/unit/"),
-        (("tests/unit",), 47, "tests/unit/"),
+        (("tests/unit",), 46, "tests/unit/"),
         (("tests/integration",), 30, "tests/integration/"),
-        ((), 77, "tests/"),
+        ((), 76, "tests/"),
     )
     for arguments, expected_count, prefix in cases:
         roots = classified._normalized_roots(REPO_ROOT, arguments)

@@ -51,8 +51,8 @@ def test_flaky_eligible_rejects_real_failures() raises:
 #
 # The interrupt-linearization that a late (mid-attribution) interrupt dominates
 # the resolved exit code is fixed at the two-phase terminal protocol's Phase-1
-# entry and resolved by `_resolve_terminal_code`; its dedicated pins live in
-# `test_session_terminal.mojo`.
+# entry, which reports it as a fact to `resolve_exit_code`; the precedence's
+# dedicated pins live in `test_model_exit_code.mojo`.
 
 
 # ---- Fix 7: the residual warning does not claim "killed" for a self-exited ICE -

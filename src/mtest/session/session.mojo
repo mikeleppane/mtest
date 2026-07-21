@@ -20,10 +20,13 @@ CLI usage errors belong to main. Only two failures propagate out of
 of which main maps to exit 4. Every other failure — an `exec:` machinery raise
 or a spawn failure — is caught here and resolved to internal-error exit 3.
 
-Exit-code precedence, high to low: an interrupt is 2; an internal error (spawn
-failure or machinery raise) is 3; a report that drifted off the pinned grammar
-is also 3; a precompile failure is 1; otherwise `exit_code_for` over the run
-outcomes decides 1, 5, or 0. The selection, probe, and gate paths route
+The session does not decide the exit code: it states the facts it observed and
+`resolve_exit_code` in the model layer ranks them. The precedence, high to low:
+an interrupt is 2; an internal error (spawn failure or machinery raise) is 3; a
+report that drifted off the pinned grammar is also 3; a precompile failure is 1;
+otherwise `exit_code_for` over the run outcomes decides 1, 5, or 0. A terminal
+artifact that could not be delivered then escalates anything below 2 to 3. The
+selection, probe, and gate paths route
 non-valid reports through the same `resolve_report`/`classify` machinery as the
 default path, so a forged or off-grammar report resolves identically either way.
 """
@@ -62,10 +65,12 @@ from mtest.model import (
     Outcome,
     ParseDisposition,
     Summary,
+    TerminalFacts,
     TestCounts,
     TestResult,
     exit_code_for,
     is_slow,
+    resolve_exit_code,
 )
 from mtest.protocol import (
     ParsedReport,
@@ -1276,65 +1281,6 @@ def _finalize_attempt(
     # `.attempt-N` path. Crash attribution reruns this, never a reconstruction.
     fr.binary_path = att.out_bin
     return fr^
-
-
-def _resolve_terminal_code(
-    interrupt_latched: Bool,
-    internal_error: Bool,
-    drift: Bool,
-    precompile_failed: Bool,
-    outcome_code: Int,
-    terminal_write_failed: Bool,
-) -> Int:
-    """Resolve the final exit code from the run's latched flags.
-
-    Runs after the run accounting has been sealed and every machine artifact
-    finalized, resolved around `exit_code_for`, whose result arrives as
-    `outcome_code`. Two precedences compose:
-
-    - The base precedence: an interrupt dominates and yields 2, ranking above a
-      resolved internal error because the run was truncated on purpose; else an
-      internal error or protocol drift yields 3; else a precompile failure
-      yields 1; else the outcome code (1, 5, or 0) stands.
-    - The terminal-write-failure precedence, applied last: a resolved 2 stands,
-      so an interrupt is never displaced by a later I/O failure; a resolved 3
-      stays 3; and a resolved 0, 1, or 5 escalates to 3 when a terminal artifact
-      could not be delivered, such as a dead `--json` destination or a JUnit
-      report that could not be published. The run's own verdict is not
-      authoritative once its product could not be written.
-
-    Args:
-        interrupt_latched: Whether an interrupt was latched at the moment the
-            run accounting was sealed, whether at run time or during crash
-            attribution. An interrupt arriving after that, while the artifacts
-            are being finalized, is deliberately not reflected here; it does not
-            change the resolved code.
-        internal_error: Whether a spawn failure or machinery raise occurred.
-        drift: Whether any report drifted off the pinned grammar.
-        precompile_failed: Whether a precompile step failed.
-        outcome_code: The `exit_code_for` result over the run outcomes.
-        terminal_write_failed: Whether any terminal artifact failed to deliver,
-            via a latched machine-stream write or a failed JUnit finalization.
-
-    Returns:
-        The resolved process exit code.
-    """
-    var base: Int
-    if interrupt_latched:
-        base = 2
-    elif internal_error:
-        base = 3
-    elif drift:
-        base = 3
-    elif precompile_failed:
-        base = 1
-    else:
-        base = outcome_code
-    if base == 2:
-        return 2
-    if terminal_write_failed:
-        return 3
-    return base
 
 
 def _compile_crash_residual(
@@ -4318,16 +4264,19 @@ def run_session[
 
     # --- PHASE 2: resolve + dispatch. Resolve once, dispatch SessionFinished ----
     # exactly once carrying that code. `exit_code_for` is untouched: the two-phase
-    # protocol resolves AROUND it. Terminal-write precedence: a resolved 2 stands,
-    # a resolved 0/1/5 escalates to 3 on a stream death or a failed finalization,
-    # a resolved 3 stays 3.
-    var code = _resolve_terminal_code(
-        interrupt_latched,
-        internal_error,
-        drift,
-        precompile_failed,
-        outcome_code,
-        stream_dead or finalize_failed,
+    # protocol resolves AROUND it. The session states the FACTS it observed and
+    # the model ranks them, so the precedence lives in one place for every caller
+    # that reaches an exit code. A stream death or a failed JUnit finalization is
+    # the same fact to the resolver: a terminal artifact was not delivered.
+    var code = resolve_exit_code(
+        TerminalFacts(
+            interrupted=interrupt_latched,
+            internal_error=internal_error,
+            drift=drift,
+            precompile_failed=precompile_failed,
+            outcome_code=outcome_code,
+            delivery_failed=stream_dead or finalize_failed,
+        )
     )
 
     var wall = Float64(perf_counter_ns() - started_ns) / 1.0e9
@@ -4351,22 +4300,24 @@ def run_session[
     # could not have seen, because it did not exist yet. Re-poll the SAME
     # latch Phase 1 already polls; if it is now set and was not already
     # folded into `stream_dead`, re-resolve with the pure function again,
-    # passing the SAME interrupt/error/drift/precompile/outcome inputs (a
+    # passing the SAME interrupt/error/drift/precompile/outcome facts (a
     # finalization-phase interrupt still must not move the code — only the
-    # terminal-write outcome does) and `terminal_write_failed=True`. The same
+    # delivery outcome does) and `delivery_failed=True`. The same
     # precedence applies: a resolved 2 still stands, a resolved 3 stays 3, a
     # resolved 0/1/5 escalates to 3. The already-attempted terminal record
     # (torn or absent on the now-dead stream) is the consumer's truncation
     # signal; the EXIT CODE is the out-of-band signal and must not lie about
     # it by returning the code resolved before the stream died.
     if not stream_dead and _stream_failed[stream_index](reporter):
-        code = _resolve_terminal_code(
-            interrupt_latched,
-            internal_error,
-            drift,
-            precompile_failed,
-            outcome_code,
-            True,
+        code = resolve_exit_code(
+            TerminalFacts(
+                interrupted=interrupt_latched,
+                internal_error=internal_error,
+                drift=drift,
+                precompile_failed=precompile_failed,
+                outcome_code=outcome_code,
+                delivery_failed=True,
+            )
         )
     return code
 

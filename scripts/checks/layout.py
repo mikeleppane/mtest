@@ -77,7 +77,6 @@ UNIT_SUITES = {
     "test_session_resilience.mojo",
     "test_session_retry_class.mojo",
     "test_session_shard.mojo",
-    "test_session_terminal.mojo",
     "test_session_verdict.mojo",
 }
 INTEGRATION_SUITES = {
@@ -188,10 +187,9 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_resilience.mojo",
     "tests/unit/test_session_retry_class.mojo",
     "tests/unit/test_session_shard.mojo",
-    "tests/unit/test_session_terminal.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 926
+CLASSIFIED_TEST_COUNT = 915
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",
