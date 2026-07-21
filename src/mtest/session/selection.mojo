@@ -1,18 +1,30 @@
 """The selection sub-session: probe every run file, then run its chosen subset.
 
-Layer 4, the path taken when any operand is a node id or `-k` is present. A
-first pass builds and probes every run file so the run-wide selected and
-deselected totals are known before a single body executes; a second pass runs
-each file's subset under `--only`, suppressing the deselected rows, and
-reconciles what came back against the universe the probe collected. A row set
-that disagrees with the universe, or a deselected test that ran anyway, is a
-malformed suite at exit 1 — never drift, which stays reserved for a report that
-left the pinned grammar.
+Layer 4, the path taken when any operand is a node id or `-k` is present. This
+module is the DRIVER: it asks `pipeline`'s `RunPipeline` kernel which step the
+run wants next — build this file, probe it, announce the collection, replay a
+terminal verdict, skip a fully deselected file, run a selection — executes that
+one step against `exec`, and folds what happened back into the kernel. The
+kernel decides; the driver performs. Exactly one step is ever in flight.
 
-Two recovery mechanisms compose here with separate budgets: a bounded
-recover-once for a suite that refuses a name it just listed, and the `--retries`
-crash-class budget. It sits above `build`, `attempt`, `file_result`, and
-`names`, and below `session`, which folds its summary into the run accounting.
+The kernel's collection barrier is what makes the run two-pass: every run file
+is built and probed so the run-wide selected and deselected totals are known
+before a single body executes, and only then does each file's subset run under
+`--only`, suppressing the deselected rows and reconciling what came back
+against the universe the probe collected. A row set that disagrees with the
+universe, or a deselected test that ran anyway, is a malformed suite at exit 1 —
+never drift, which stays reserved for a report that left the pinned grammar.
+
+Two recovery mechanisms compose here with separate budgets, both admitted by the
+kernel: a bounded recover-once for a suite that refuses a name it just listed
+(rebuild, re-probe, re-select, run again), and the `--retries` crash-class
+budget (re-run the same binary, no rebuild). A stale-name refusal is an
+`Exited(1)` diagnostic, so it is never crash-class and the two never contend for
+the same failure. Their events interleave in one chronological stream prepended
+to the file's verdict.
+
+It sits above `pipeline`, `build`, `attempt`, `file_result`, and `names`, and
+below `session`, which folds its summary into the run accounting.
 """
 from std.os.path import isdir
 
@@ -56,6 +68,12 @@ from mtest.session.file_result import (
     _prepend_events,
 )
 from mtest.session.names import _same_set, _str_in
+from mtest.session.pipeline import (
+    FileStage,
+    PipelineHalt,
+    RunPipeline,
+    StepKind,
+)
 from mtest.session.retry_class import retry_classify
 
 
@@ -139,9 +157,12 @@ def _intent_for(
 
 @fieldwise_init
 struct _Collected(Copyable, Movable):
-    """One file after the build, probe, and select pass: terminal or runnable.
+    """One run file's payload, carried across the steps the pipeline requests.
 
-    Owns its lists and its terminal result; copies are explicit.
+    Owns its lists and its terminal result; copies are explicit. The build and
+    probe fields are replaced wholesale by a stale-name recovery rebuild, never
+    patched field by field, so no stale binary, canonical source, or universe
+    survives one.
     """
 
     var rel: String
@@ -155,6 +176,38 @@ struct _Collected(Copyable, Movable):
     var canonical: String
     var build_argv: List[String]
     var bdur: Float64
+    var pre_stream: List[Event]
+    """The attempt and recovery events accumulated across this file's steps,
+    prepended to its verdict when it finally settles."""
+    var had_crash_retry: Bool
+    """Whether an earlier attempt was crash-class, which promotes a late pass
+    to FLAKY."""
+
+
+def _blank_collected(rel: String) -> _Collected:
+    """An admitted-but-untouched run file, before its build step runs.
+
+    Args:
+        rel: The root-relative path of the discovered file.
+
+    Returns:
+        The file's initial payload. Allocates its empty lists.
+    """
+    return _Collected(
+        rel,
+        False,
+        _blank_file_result(),
+        List[String](),
+        List[String](),
+        List[String](),
+        FileIntent.whole_file(),
+        "",
+        "",
+        List[String](),
+        0.0,
+        List[Event](),
+        False,
+    )
 
 
 def _selected_view(
@@ -558,223 +611,88 @@ struct SelectionSummary(Copyable, Movable):
     outcome multiset, and no exit code."""
 
 
-def _run_selected_with_recovery(
-    mut runtime: ExecRuntime,
-    config: RunnerConfig,
-    root: String,
-    c: _Collected,
-    mut reg: BuildRegistry,
-    include_paths: List[String],
-) raises -> FileResult:
-    """Run one file's selected subset, with recover-once and crash retries.
-
-    Runs plain when the selection is the whole universe, else with `--only`. Two
-    orthogonal recovery mechanisms compose here, each with its own budget:
-
-    - Stale-name recover-once: if the run reports `test not found in suite:`,
-      meaning the suite refused a name it just listed, emit a warning, rebuild
-      with an atomic registry replace, re-probe, re-validate, and re-run once. A
-      second stale-name error is `MALFORMED_SUITE`, the exit-1 class, never
-      exit 3.
-    - Crash-class retries, under `--retries N`: a run that dies by signal or
-      deadline — never an interrupt, which is short-circuited first — is re-run
-      on the same already-built binary, with no rebuild, up to `retries` extra
-      times. Each non-final attempt is reported immediately, and a late pass is
-      flaky.
-
-    A stale-name refusal is an `Exited(1)` diagnostic, so it is never
-    crash-class and the two mechanisms never contend for the same failure. Their
-    events interleave in one chronological stream prepended to the file's
-    verdict.
+def _selection_run_argv(
+    binary: String, selected: List[String], universe: List[String]
+) -> List[String]:
+    """Build one selected run's argv: plain when whole, else under `--only`.
 
     Args:
-        runtime: The exec runtime supervising the run, rebuild, and probe.
-        config: The resolved runner configuration.
-        root: The invocation root the children run in.
-        c: The collected file, carrying its binary, universe, and selection.
-        reg: The build registry, updated by a stale-name rebuild and re-probe.
-        include_paths: Directories passed to the compiler on a rebuild.
+        binary: The built binary to execute.
+        selected: The names the selection chose to run.
+        universe: The names the probe collected.
 
     Returns:
-        The file's terminal `FileResult`, with its attempt and recovery events
-        prepended.
-
-    Raises:
-        Error: If re-selection after a stale-name rebuild finds a named test
-            missing from the fresh universe, a `select:` usage error. The run,
-            rebuild, and probe calls are each caught here and turned into
-            internal-error results instead.
+        The argv to supervise. Allocates the list.
     """
-    var binary = c.binary
-    var canonical = c.canonical
-    var build_argv = c.build_argv.copy()
-    var bdur = c.bdur
-    var universe = c.universe.copy()
-    var selected = c.selected.copy()
-    var deselected = c.deselected.copy()
-    var pre_stream = List[Event]()
-    var attempts = 0
-    var attempts_planned = config.retries + 1
-    var crash_attempt = 1
-    var had_crash_retry = False
+    var argv = List[String]()
+    argv.append(binary)
+    if not _same_set(selected, universe):
+        argv.append("--only")
+        for nm in selected:
+            argv.append(nm)
+    return argv^
 
-    while True:
-        var run_argv = List[String]()
-        run_argv.append(binary)
-        if not _same_set(selected, universe):
-            run_argv.append("--only")
-            for nm in selected:
-                run_argv.append(nm)
-        var rres: ProcessResult
-        try:
-            rres = run_supervised(
-                runtime,
-                ProcessSpec.command_in(
-                    run_argv^, root, config.timeout_secs * 1000
-                ),
-            )
-        except:
-            return FileResult.internal(Event.internal_error("run", binary, 0))
-        var rterm = rres.termination
-        if rterm.is_spawn_failed():
-            return FileResult.internal(
-                Event.internal_error("run", binary, rterm.value)
-            )
-        if rterm.is_timed_out() and interrupt_requested():
-            return FileResult.interrupt()
 
-        # Stale-name detection PARSES the report first: a VALID report — even a
-        # FAIL — is a genuine per-test result, never a stale-name refusal. Only
-        # when the run produced NO valid report AND the stdlib's anchored refusal
-        # diagnostic appears is this a stale name (which a bare substring in a
-        # test's own output must never forge).
-        var stdout_text = lossy_utf8(rres.stdout_bytes)
-        var run_trusted = resolve_report(
-            stdout_text, canonical, rres.stdout_truncated
-        )
-        var no_valid_report = run_trusted.report.verdict != ReportVerdict.VALID
-        var is_stale = (
-            rterm.is_exited()
-            and rterm.value == 1
-            and no_valid_report
-            and _has_stale_name_diagnostic(stdout_text)
-        )
-        if not is_stale:
-            # A crash-class run (signal / deadline; an interrupt was
-            # short-circuited above, so `interrupted` is False) is re-run when
-            # attempts remain. Deterministic outcomes (a FAIL, malformed suite,
-            # capture overflow, drift) classify NOT eligible and finalize now.
-            var rc = retry_classify("run", rterm, False, rres.stderr_bytes)
-            if rc.retry_eligible and crash_attempt < attempts_planned:
-                had_crash_retry = True
-                var rdur = Float64(rres.duration_ms) / 1000.0
-                var att = _AttemptResult._selection_run(
-                    binary,
-                    rterm,
-                    rres.stdout_bytes.copy(),
-                    rres.stderr_bytes.copy(),
-                    rdur,
-                    rres.stdout_truncated,
-                    rres.stderr_truncated,
-                )
-                pre_stream.append(
-                    _make_attempt_finished(
-                        c.rel, rc, att, crash_attempt, attempts_planned
-                    )
-                )
-                crash_attempt += 1
-                continue
-            var fr = _reconcile_and_classify(
-                config,
-                c.rel,
-                rres,
-                universe,
-                selected,
-                deselected,
-                build_argv,
-                bdur,
-                canonical,
-                attempts_used=crash_attempt,
-                flaky_if_pass=had_crash_retry,
-            )
-            return _prepend_events(pre_stream^, fr^)
+def _stale_name_warning(rel: String) -> Event:
+    """The loud warning a first stale-name refusal emits before recovering.
 
-        if attempts >= 1:
-            # A second stale-name error after a fresh rebuild+recollect: the
-            # suite is a chameleon that keeps refusing names it just listed.
-            var rdur = Float64(rres.duration_ms) / 1000.0
-            var fr = _run_terminal_file(
-                c.rel,
-                Outcome.MALFORMED_SUITE,
-                ParseDisposition.NO_REPORT,
-                "malformed-suite",
-                (
-                    "the suite refused a selected test it had just listed, then"
-                    " refused again after a fresh rebuild + recollect (the"
-                    " '"
-                    + _STALE_NAME_PHRASE
-                    + "' chameleon); the module's --skip-all listing disagrees"
-                    " with the names it accepts under --only"
-                ),
-                build_argv,
-                bdur,
-                rdur,
-                rres,
-                len(deselected),
-                attempts_used=crash_attempt,
-            )
-            return _prepend_events(pre_stream^, fr^)
+    Args:
+        rel: The root-relative path of the refusing file.
 
-        attempts += 1
-        pre_stream.append(
-            Event.warning(
-                "stale-name",
-                (
-                    "the suite for '"
-                    + c.rel
-                    + "' refused a test it listed under --skip-all ('"
-                    + _STALE_NAME_PHRASE
-                    + "'); rebuilding and recollecting once before retrying"
-                ),
-            )
-        )
-        # REBUILD (atomic registry replace), then RE-PROBE and RE-VALIDATE.
-        var bo: _BuildOutcome
-        try:
-            bo = _build_for_selection(
-                runtime, config, root, c.rel, include_paths, reg
-            )
-        except:
-            return FileResult.internal(
-                Event.internal_error("build", config.mojo_path, 0)
-            )
-        if bo.terminal:
-            return _prepend_events(pre_stream^, bo.result.copy())
-        binary = bo.binary
-        canonical = bo.canonical
-        build_argv = bo.build_argv.copy()
-        bdur = bo.bdur
-        var po: _ProbeOutcome
-        try:
-            po = _probe_file(
-                runtime,
-                config,
-                root,
-                c.rel,
-                binary,
-                canonical,
-                build_argv,
-                bdur,
-                reg,
-            )
-        except:
-            return FileResult.internal(Event.internal_error("probe", binary, 0))
-        if po.terminal:
-            return _prepend_events(pre_stream^, po.result.copy())
-        universe = po.universe.copy()
-        var sr = select_from(universe, c.rel, c.intent, config.keyword)
-        selected = sr.selected.copy()
-        deselected = sr.deselected.copy()
+    Returns:
+        The `Warning` event to prepend to the file's verdict.
+    """
+    return Event.warning(
+        "stale-name",
+        (
+            "the suite for '"
+            + rel
+            + "' refused a test it listed under --skip-all ('"
+            + _STALE_NAME_PHRASE
+            + "'); rebuilding and recollecting once before retrying"
+        ),
+    )
+
+
+def _chameleon_result(
+    c: _Collected,
+    term: ProcessResult,
+    attempts_used: Int,
+) -> FileResult:
+    """The verdict for a suite that refused a listed name twice running.
+
+    A second stale-name refusal after a fresh rebuild and recollect is a
+    malformed suite at exit 1 — the module's `--skip-all` listing disagrees
+    with the names it accepts under `--only` — never drift.
+
+    Args:
+        c: The refusing file's payload.
+        term: The refusing run's process result.
+        attempts_used: How many attempts the run spent.
+
+    Returns:
+        The terminal `FileResult`.
+    """
+    return _run_terminal_file(
+        c.rel,
+        Outcome.MALFORMED_SUITE,
+        ParseDisposition.NO_REPORT,
+        "malformed-suite",
+        (
+            "the suite refused a selected test it had just listed, then"
+            " refused again after a fresh rebuild + recollect (the"
+            " '"
+            + _STALE_NAME_PHRASE
+            + "' chameleon); the module's --skip-all listing disagrees"
+            " with the names it accepts under --only"
+        ),
+        c.build_argv,
+        c.bdur,
+        Float64(term.duration_ms) / 1000.0,
+        term,
+        len(c.deselected),
+        attempts_used=attempts_used,
+    )
 
 
 def _run_selection[
@@ -792,10 +710,13 @@ def _run_selection[
 ) raises -> SelectionSummary:
     """Run the selection sub-session: probe every run file, then run it.
 
-    A first pass builds, probes, and selects every run file, sharing each build
-    through the registry, so the run-wide selected and deselected totals are
-    known and emitted as `collection_known` before any test body runs. A second
-    pass then runs each file's selected subset, suppressing the deselected rows.
+    Drives the `RunPipeline` kernel, which decides which step comes next; this
+    function only executes the step it is handed and folds the result back. The
+    kernel's collection barrier is what makes the run two-pass: every file is
+    built, probed, and selected before the run-wide selected and deselected
+    totals are emitted as `collection_known`, and only then does any test body
+    execute. Exactly one step is ever in flight.
+
     A machinery failure resolves to exit 3.
 
     Parameters:
@@ -820,9 +741,6 @@ def _run_selection[
             which main maps to exit 4.
     """
     var nroot = normalize_root(root)
-    var collected = List[_Collected]()
-    var interrupted = False
-    var internal_error = False
 
     # --exclude beats a node id: a node-id file that was excluded is dropped
     # loudly rather than silently ignored.
@@ -846,109 +764,365 @@ def _run_selection[
                 )
                 break
 
-    # PHASE 1: build + probe + select every run file.
+    var collected = List[_Collected]()
     for ri in range(len(disc.run_files)):
-        if interrupt_requested():
-            interrupted = True
+        collected.append(_blank_collected(disc.run_files[ri]))
+
+    var pipeline = RunPipeline(
+        len(disc.run_files), config.retries, config.exitfirst, config.maxfail
+    )
+    var attempts_planned = config.retries + 1
+
+    var announced = False
+    var run_outcomes = List[Outcome]()
+    var test_totals = TestCounts.zeros()
+    var ran_files = 0
+    var drift = False
+    var crash_files = List[_CrashFile]()
+
+    while True:
+        var step = pipeline.next_step()
+        if step.kind == StepKind.NOTHING:
             break
-        var rel = disc.run_files[ri]
-        var bo: _BuildOutcome
-        try:
-            bo = _build_for_selection(
-                runtime, config, root, rel, include_paths, reg
-            )
-        except:
-            reporter.handle(Event.internal_error("build", config.mojo_path, 0))
-            internal_error = True
-            break
-        if bo.terminal:
-            if bo.result.interrupted:
-                interrupted = True
-                break
-            if bo.result.internal_error:
-                reporter.handle(bo.result.event)
-                internal_error = True
-                break
-            # A compile-error terminal: replay it in phase 2 with the others.
-            collected.append(
-                _Collected(
-                    rel,
-                    True,
-                    bo.result.copy(),
-                    List[String](),
-                    List[String](),
-                    List[String](),
-                    FileIntent.whole_file(),
-                    "",
-                    "",
-                    bo.build_argv.copy(),
-                    bo.bdur,
+
+        if step.kind == StepKind.ANNOUNCE_COLLECTION:
+            # Collection is known: emit the run-wide totals before any body
+            # runs. A file that never became runnable contributes neither.
+            var sel_total = 0
+            var desel_total = 0
+            for c in collected:
+                if not c.terminal:
+                    sel_total += len(c.selected)
+                    desel_total += len(c.deselected)
+            reporter.handle(Event.collection_known(sel_total, desel_total))
+            announced = True
+            pipeline.record_collection_announced()
+            continue
+
+        var i = step.file_index
+
+        if step.kind == StepKind.BUILD_FILE:
+            # The interrupt poll sits at each file's FIRST step of a pass, not
+            # at every step: a recovery rebuild belongs to a file already in
+            # flight and is not a fresh scheduling boundary.
+            if not step.recovering and interrupt_requested():
+                pipeline.halt_interrupted()
+                continue
+            var bo: _BuildOutcome
+            try:
+                bo = _build_for_selection(
+                    runtime, config, root, collected[i].rel, include_paths, reg
                 )
+            except:
+                reporter.handle(
+                    Event.internal_error("build", config.mojo_path, 0)
+                )
+                pipeline.halt_internal_error()
+                continue
+            if bo.terminal:
+                if bo.result.interrupted:
+                    pipeline.halt_interrupted()
+                    continue
+                if bo.result.internal_error:
+                    reporter.handle(bo.result.event)
+                    pipeline.halt_internal_error()
+                    continue
+                if step.recovering:
+                    # The file's verdict stream is already open: settle it now,
+                    # carrying the recovery events that precede it.
+                    var rfr = _prepend_events(
+                        collected[i].pre_stream.copy(), bo.result.copy()
+                    )
+                    collected[i].build_argv = bo.build_argv.copy()
+                    collected[i].bdur = bo.bdur
+                    for pe in rfr.pre_events:
+                        reporter.handle(pe)
+                    reporter.handle(rfr.event)
+                    test_totals.deselected += rfr.test_counts.deselected
+                    if rfr.is_drift:
+                        drift = True
+                        pipeline.record_settled(i)
+                        continue
+                    summary.counts[rfr.outcome.code] += 1
+                    run_outcomes.extend(rfr.exit_outcomes.copy())
+                    ran_files += 1
+                    pipeline.record_verdict(
+                        i,
+                        rfr.outcome.is_failing(),
+                        _failing_count(run_outcomes),
+                    )
+                    continue
+                # A compile-error terminal: replay it in the run pass with the
+                # others, so it honors discovery order and the stop limits.
+                collected[i].terminal = True
+                collected[i].terminal_result = bo.result.copy()
+                collected[i].build_argv = bo.build_argv.copy()
+                collected[i].bdur = bo.bdur
+                pipeline.record_build_terminal(i)
+                continue
+            # A rebuild replaces the whole product, never a field at a time.
+            collected[i].binary = bo.binary
+            collected[i].canonical = bo.canonical
+            collected[i].build_argv = bo.build_argv.copy()
+            collected[i].bdur = bo.bdur
+            pipeline.record_build_ready(i)
+            continue
+
+        if step.kind == StepKind.PROBE_FILE:
+            var po: _ProbeOutcome
+            try:
+                po = _probe_file(
+                    runtime,
+                    config,
+                    root,
+                    collected[i].rel,
+                    collected[i].binary,
+                    collected[i].canonical,
+                    collected[i].build_argv,
+                    collected[i].bdur,
+                    reg,
+                )
+            except:
+                reporter.handle(
+                    Event.internal_error("probe", collected[i].binary, 0)
+                )
+                pipeline.halt_internal_error()
+                continue
+            if po.interrupted:
+                pipeline.halt_interrupted()
+                continue
+            if po.internal_error:
+                reporter.handle(po.result.event)
+                pipeline.halt_internal_error()
+                continue
+            if po.terminal:
+                if step.recovering:
+                    var pfr = _prepend_events(
+                        collected[i].pre_stream.copy(), po.result.copy()
+                    )
+                    for pe in pfr.pre_events:
+                        reporter.handle(pe)
+                    reporter.handle(pfr.event)
+                    test_totals.deselected += pfr.test_counts.deselected
+                    if pfr.is_drift:
+                        drift = True
+                        pipeline.record_settled(i)
+                        continue
+                    summary.counts[pfr.outcome.code] += 1
+                    run_outcomes.extend(pfr.exit_outcomes.copy())
+                    ran_files += 1
+                    pipeline.record_verdict(
+                        i,
+                        pfr.outcome.is_failing(),
+                        _failing_count(run_outcomes),
+                    )
+                    continue
+                collected[i].terminal = True
+                collected[i].terminal_result = po.result.copy()
+                pipeline.record_probe_terminal(i)
+                continue
+            # Qualified: select from the fresh universe. An unknown named test
+            # is a `select:` usage error and propagates to exit 4.
+            collected[i].universe = po.universe.copy()
+            if not step.recovering:
+                collected[i].intent = _intent_for(collected[i].rel, plan, nroot)
+            var sr = select_from(
+                collected[i].universe,
+                collected[i].rel,
+                collected[i].intent,
+                config.keyword,
+            )
+            collected[i].selected = sr.selected.copy()
+            collected[i].deselected = sr.deselected.copy()
+            pipeline.record_probe_qualified(i, len(sr.selected) == 0)
+            continue
+
+        # --- the run pass: replay, skip, or run one file --------------------
+        # A file's first step in this pass is its scheduling boundary: poll the
+        # interrupt there and announce it started. A crash retry or a recovery
+        # re-run is a continuation of a file already announced.
+        var first_touch = pipeline.stage_of(i) == FileStage.COLLECTED
+        if first_touch:
+            if interrupt_requested():
+                pipeline.halt_interrupted()
+                continue
+            reporter.handle(Event.file_started(collected[i].rel))
+
+        if step.kind == StepKind.REPLAY_TERMINAL:
+            var fr = collected[i].terminal_result.copy()
+            for pe in fr.pre_events:
+                reporter.handle(pe)
+            reporter.handle(fr.event)
+            test_totals.deselected += fr.test_counts.deselected
+            if fr.is_drift:
+                drift = True
+                pipeline.record_settled(i)
+                continue
+            summary.counts[fr.outcome.code] += 1
+            run_outcomes.extend(fr.exit_outcomes.copy())
+            ran_files += 1
+            if fr.outcome == Outcome.CRASH:
+                crash_files.append(
+                    _CrashFile(
+                        collected[i].rel,
+                        collected[i].binary,
+                        collected[i].selected.copy(),
+                    )
+                )
+            pipeline.record_verdict(
+                i, fr.outcome.is_failing(), _failing_count(run_outcomes)
             )
             continue
 
-        var po: _ProbeOutcome
+        if step.kind == StepKind.SKIP_DESELECTED:
+            # Every test deselected: the file is NOT executed. Account the
+            # deselections; the file itself lands in the NOT-RUN accounting.
+            reporter.handle(
+                Event.file_finished(
+                    collected[i].rel,
+                    Outcome.NOT_RUN,
+                    0.0,
+                    collected[i].build_argv.copy(),
+                    collected[i].bdur,
+                    List[UInt8](),
+                    List[UInt8](),
+                    deselected_tests=len(collected[i].deselected),
+                    slow=is_slow(collected[i].bdur, 0.0),
+                )
+            )
+            test_totals.deselected += len(collected[i].deselected)
+            pipeline.record_settled(i)
+            continue
+
+        # StepKind.RUN_SELECTION.
+        var run_argv = _selection_run_argv(
+            collected[i].binary, collected[i].selected, collected[i].universe
+        )
+        var rres: ProcessResult
         try:
-            po = _probe_file(
+            rres = run_supervised(
                 runtime,
-                config,
-                root,
-                rel,
-                bo.binary,
-                bo.canonical,
-                bo.build_argv,
-                bo.bdur,
-                reg,
+                ProcessSpec.command_in(
+                    run_argv^, root, config.timeout_secs * 1000
+                ),
             )
         except:
-            reporter.handle(Event.internal_error("probe", bo.binary, 0))
-            internal_error = True
-            break
-        if po.interrupted:
-            interrupted = True
-            break
-        if po.internal_error:
-            reporter.handle(po.result.event)
-            internal_error = True
-            break
-        if po.terminal:
-            collected.append(
-                _Collected(
-                    rel,
-                    True,
-                    po.result.copy(),
-                    List[String](),
-                    List[String](),
-                    List[String](),
-                    FileIntent.whole_file(),
-                    bo.binary,
-                    bo.canonical,
-                    bo.build_argv.copy(),
-                    bo.bdur,
-                )
+            reporter.handle(Event.internal_error("run", collected[i].binary, 0))
+            pipeline.halt_internal_error()
+            continue
+        var rterm = rres.termination
+        if rterm.is_spawn_failed():
+            reporter.handle(
+                Event.internal_error("run", collected[i].binary, rterm.value)
             )
+            pipeline.halt_internal_error()
+            continue
+        if rterm.is_timed_out() and interrupt_requested():
+            pipeline.halt_interrupted()
             continue
 
-        # Qualified: select from the universe (unknown test -> exit 4, propagated).
-        var intent = _intent_for(rel, plan, nroot)
-        var sr = select_from(po.universe, rel, intent, config.keyword)
-        collected.append(
-            _Collected(
-                rel,
-                False,
-                _blank_file_result(),
-                po.universe.copy(),
-                sr.selected.copy(),
-                sr.deselected.copy(),
-                intent^,
-                bo.binary,
-                bo.canonical,
-                bo.build_argv.copy(),
-                bo.bdur,
-            )
+        # Stale-name detection PARSES the report first: a VALID report — even a
+        # FAIL — is a genuine per-test result, never a stale-name refusal. Only
+        # when the run produced NO valid report AND the stdlib's anchored
+        # refusal diagnostic appears is this a stale name (which a bare
+        # substring in a test's own output must never forge).
+        var stdout_text = lossy_utf8(rres.stdout_bytes)
+        var run_trusted = resolve_report(
+            stdout_text, collected[i].canonical, rres.stdout_truncated
+        )
+        var no_valid_report = run_trusted.report.verdict != ReportVerdict.VALID
+        var is_stale = (
+            rterm.is_exited()
+            and rterm.value == 1
+            and no_valid_report
+            and _has_stale_name_diagnostic(stdout_text)
         )
 
-    if interrupted or internal_error:
+        var fr: FileResult
+        if is_stale:
+            if pipeline.admit_stale_name_recovery(i):
+                # Warn loudly, then rebuild with an atomic registry replace and
+                # re-probe before retrying. The kernel routes the next two
+                # steps; a second refusal after that is the chameleon.
+                collected[i].pre_stream.append(
+                    _stale_name_warning(collected[i].rel)
+                )
+                continue
+            fr = _chameleon_result(collected[i], rres, step.attempt)
+        else:
+            # A crash-class run (signal / deadline; an interrupt was
+            # short-circuited above) is re-run when attempts remain.
+            # Deterministic outcomes (a FAIL, malformed suite, capture
+            # overflow, drift) classify NOT eligible and finalize now.
+            var rc = retry_classify("run", rterm, False, rres.stderr_bytes)
+            if rc.retry_eligible and pipeline.admit_crash_retry(i):
+                collected[i].had_crash_retry = True
+                var att = _AttemptResult._selection_run(
+                    collected[i].binary,
+                    rterm,
+                    rres.stdout_bytes.copy(),
+                    rres.stderr_bytes.copy(),
+                    Float64(rres.duration_ms) / 1000.0,
+                    rres.stdout_truncated,
+                    rres.stderr_truncated,
+                )
+                collected[i].pre_stream.append(
+                    _make_attempt_finished(
+                        collected[i].rel,
+                        rc,
+                        att,
+                        step.attempt,
+                        attempts_planned,
+                    )
+                )
+                continue
+            fr = _reconcile_and_classify(
+                config,
+                collected[i].rel,
+                rres,
+                collected[i].universe,
+                collected[i].selected,
+                collected[i].deselected,
+                collected[i].build_argv,
+                collected[i].bdur,
+                collected[i].canonical,
+                attempts_used=step.attempt,
+                flaky_if_pass=collected[i].had_crash_retry,
+            )
+
+        var settled = _prepend_events(collected[i].pre_stream.copy(), fr^)
+        for pe in settled.pre_events:
+            reporter.handle(pe)
+        reporter.handle(settled.event)
+        test_totals.passed += settled.test_counts.passed
+        test_totals.failed += settled.test_counts.failed
+        test_totals.skipped += settled.test_counts.skipped
+        test_totals.deselected += settled.test_counts.deselected
+        if settled.is_drift:
+            drift = True
+            pipeline.record_settled(i)
+            continue
+        summary.counts[settled.outcome.code] += 1
+        run_outcomes.extend(settled.exit_outcomes.copy())
+        ran_files += 1
+        if settled.outcome == Outcome.CRASH:
+            crash_files.append(
+                _CrashFile(
+                    collected[i].rel,
+                    collected[i].binary,
+                    collected[i].selected.copy(),
+                )
+            )
+        pipeline.record_verdict(
+            i, settled.outcome.is_failing(), _failing_count(run_outcomes)
+        )
+
+    var interrupted = pipeline.halt() == PipelineHalt.INTERRUPTED
+    var internal_error = pipeline.halt() == PipelineHalt.INTERNAL_ERROR
+
+    # An abort before the collection barrier discards the front half's work:
+    # nothing ran, so the sub-session folds back no outcomes and no totals.
+    if not announced:
         return SelectionSummary(
             List[Outcome](),
             TestCounts.zeros(),
@@ -958,112 +1132,6 @@ def _run_selection[
             False,
             List[_CrashFile](),
         )
-
-    # Collection is known: emit the run-wide totals before any body runs.
-    var sel_total = 0
-    var desel_total = 0
-    for c in collected:
-        if not c.terminal:
-            sel_total += len(c.selected)
-            desel_total += len(c.deselected)
-    reporter.handle(Event.collection_known(sel_total, desel_total))
-
-    # PHASE 2: run each file's selected subset (or replay its terminal result).
-    var run_outcomes = List[Outcome]()
-    var test_totals = TestCounts.zeros()
-    var ran_files = 0
-    var drift = False
-    var crash_files = List[_CrashFile]()
-
-    for ci in range(len(collected)):
-        if interrupt_requested():
-            interrupted = True
-            break
-        ref c = collected[ci]
-        reporter.handle(Event.file_started(c.rel))
-
-        if c.terminal:
-            var fr = c.terminal_result.copy()
-            for pe in fr.pre_events:
-                reporter.handle(pe)
-            reporter.handle(fr.event)
-            test_totals.deselected += fr.test_counts.deselected
-            if fr.is_drift:
-                drift = True
-                continue
-            summary.counts[fr.outcome.code] += 1
-            run_outcomes.extend(fr.exit_outcomes.copy())
-            ran_files += 1
-            if fr.outcome == Outcome.CRASH:
-                crash_files.append(
-                    _CrashFile(c.rel, c.binary, c.selected.copy())
-                )
-            # Mirror the runnable branch's early-stop below (and the
-            # non-selection loop's): a TERMINAL file — compile error, probe
-            # crash, probe timeout, or malformed suite — must honor -x /
-            # --maxfail exactly like a runnable one, or the remaining files
-            # keep scheduling past a limit the non-selection path would have
-            # respected.
-            if config.exitfirst and fr.outcome.is_failing():
-                break
-            if (
-                config.maxfail > 0
-                and _failing_count(run_outcomes) >= config.maxfail
-            ):
-                break
-            continue
-
-        if len(c.selected) == 0:
-            # Every test deselected: the file is NOT executed. Account the
-            # deselections; the file itself lands in the NOT-RUN accounting.
-            reporter.handle(
-                Event.file_finished(
-                    c.rel,
-                    Outcome.NOT_RUN,
-                    0.0,
-                    c.build_argv.copy(),
-                    c.bdur,
-                    List[UInt8](),
-                    List[UInt8](),
-                    deselected_tests=len(c.deselected),
-                    slow=is_slow(c.bdur, 0.0),
-                )
-            )
-            test_totals.deselected += len(c.deselected)
-            continue
-
-        var fr = _run_selected_with_recovery(
-            runtime, config, root, c, reg, include_paths
-        )
-        if fr.interrupted:
-            interrupted = True
-            break
-        if fr.internal_error:
-            reporter.handle(fr.event)
-            internal_error = True
-            break
-        for pe in fr.pre_events:
-            reporter.handle(pe)
-        reporter.handle(fr.event)
-        test_totals.passed += fr.test_counts.passed
-        test_totals.failed += fr.test_counts.failed
-        test_totals.skipped += fr.test_counts.skipped
-        test_totals.deselected += fr.test_counts.deselected
-        if fr.is_drift:
-            drift = True
-            continue
-        summary.counts[fr.outcome.code] += 1
-        run_outcomes.extend(fr.exit_outcomes.copy())
-        ran_files += 1
-        if fr.outcome == Outcome.CRASH:
-            crash_files.append(_CrashFile(c.rel, c.binary, c.selected.copy()))
-        if config.exitfirst and fr.outcome.is_failing():
-            break
-        if (
-            config.maxfail > 0
-            and _failing_count(run_outcomes) >= config.maxfail
-        ):
-            break
 
     return SelectionSummary(
         run_outcomes^,
