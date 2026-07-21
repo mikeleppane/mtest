@@ -1,11 +1,11 @@
 """The `--junit-xml` finalize wiring and the two-phase terminal protocol (L4).
 
-Drives `run_session` with a real `JunitReporter` behind the report
-coordinator's JUnit channel, a recorder standing in for the console. Pins: a real run PUBLISHES the report at PATH and
-dispatches EXACTLY ONE `SessionFinished`; a finalization failure (an undirectory
-target) escalates a resolved 0/1 to exit 3 by the terminal-write precedence,
-with the SAME code carried on the single dispatched terminal — the two phases
-agree, and a prior report survives.
+Drives `run_session` with a real `JunitReporter` behind the report coordinator's
+JUnit channel, a recorder standing in for the console. Pins: a real run PUBLISHES
+the report at PATH and dispatches EXACTLY ONE `SessionFinished`; a finalization
+failure (an undirectory target) escalates a resolved 0/1 to exit 3 by the
+terminal-write precedence, with the SAME code carried on the single dispatched
+terminal — the two phases agree, and a prior report survives.
 """
 from std.os import makedirs
 from std.os.path import exists

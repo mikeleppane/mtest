@@ -7,9 +7,8 @@ destination and with it the console's own descriptor, then resolves the JUnit
 report destination, composes the console, stream, JUnit, and annotation
 reporters into a `StandardReportCoordinator` (the report-layer interface the
 session drives), runs the session, flushes the console's rendered buffer to its
-resolved
-descriptor (stdout, or stderr under `--json -` so stdout carries only the
-byte-pure stream), and exits with the session's resolved code.
+resolved descriptor (stdout, or stderr under `--json -` so stdout carries only
+the byte-pure stream), and exits with the session's resolved code.
 
 Two writes bypass the event seam, both by design: a pre-session usage error
 goes straight to stderr with exit 4, having no reporter to route through, and

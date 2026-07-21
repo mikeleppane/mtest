@@ -709,22 +709,29 @@ Accumulated the hard way; append as later phases teach more.
   yourself — the same reuse-the-stdlib's-declaration discipline that already
   governs `write` (see the FFI-spike Lesson above).
 - **Reaching a CONCRETE reporter through a generic `CompositeReporter[*Rs]`
-  pack (for an out-of-trait call like `status()`/`finalize()`/
-  `note_not_run()`) uses a comptime index plus a typed `Pointer(to=element)`
-  binding, never a bare `rebind`.** `src/mtest/session/session.mojo`'s
-  `_stream_failed`, `_junit_note_not_run`, `_junit_finalize`, and
-  `annotation_lines` each take a defaulted comptime index (`stream_index`/
-  `junit_index`/`ann_index`, default `-1`), reach `ref element =
-  reporter.reporters[i]`, and bind `Pointer[ConcreteType, origin_of(element)]
-  = Pointer(to=element)` — a COMPILE-TIME type assertion: an index naming the
-  wrong tuple element fails to COMPILE rather than reinterpreting the wrong
-  concrete type as UB. Symptom/trap: the prior code `rebind`-ed through the
-  pointer instead, which would have silently accepted a mis-index (latent
-  UB) had the composition order ever drifted from the index. Correct move:
-  the typed-Pointer binding, with the index defaulted so bare-composite call
-  sites (test drivers passing a recording-only composite) are unaffected — a
-  comptime `if index >= 0` elides the whole reach when no such reporter is
-  composed.
+  pack takes a comptime index plus a typed reference binding to the tuple
+  element, never a bare `rebind`, so an index naming the wrong element fails
+  to COMPILE instead of reinterpreting the wrong concrete type as UB.**
+  `RecordingCoordinator` (`src/mtest/report/coordinator.mojo`) holds exactly
+  this pack in its `composite` field, and a test driver that composes one
+  reaches its own recorder back out through `comp.composite.reporters[i]` at a
+  comptime index (see `tests/integration/test_session_maxfail.mojo`,
+  `tests/unit/test_report_coordinator.mojo`) — the compiler already knows the
+  exact type living at that tuple position, so a `rebind` through the pack
+  instead would silently accept a mis-index (latent UB) had the composition
+  order ever drifted from the index. Correct move: this comptime-index reach
+  stays legitimate only for a driver pulling its own recorder out of a pack it
+  composed, never for session-level reporter lifecycle. Machine-stream health,
+  JUnit `[not-run]` synthesis and finalize, and the annotation tail no longer
+  reach into a pack by index at all — they go through the `ReportCoordinator`
+  trait's named methods (`stream_failed`, `note_not_run`, `finalize_junit`,
+  `annotation_tail`) on whichever of `StandardReportCoordinator` or
+  `RecordingCoordinator` the caller was handed
+  (`src/mtest/report/coordinator.mojo`). Adding a reporter to the production
+  set means adding a field and a fan-out line inside
+  `StandardReportCoordinator`; the tuple-element-at-the-call-site pattern
+  still describes `CompositeReporter` itself, wherever a driver composes one
+  inside `RecordingCoordinator`.
 - **A tool that COMMITS captured program output containing filesystem paths
   must sanitize the ephemeral run root to a stable placeholder before
   writing.** `scripts/maintenance/pty_capture.py` captures the real `build/mtest`

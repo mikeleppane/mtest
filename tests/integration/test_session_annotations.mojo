@@ -1,11 +1,12 @@
-"""The `--gh-annotations` composite reindex and tail rendering (L4).
+"""The `--gh-annotations` coordinator wiring and tail rendering (L4).
 
 Drives `run_session` with a real `AnnotationsReporter` behind the report
 coordinator's annotation channel, a recorder standing in for the console, then
-renders the tail through the coordinator's named `annotation_tail`. Pins: the accumulated stream renders the deterministic
-per-kind-grouped tail (node-id-sorted `::error` block, then `::warning` block,
-then the single `::notice`); an inert reporter renders nothing; and the tail's
-`::notice` carries the same exit-independent summary the console band does.
+renders the tail through the coordinator's named `annotation_tail`. Pins: the
+accumulated stream renders the deterministic per-kind-grouped tail
+(node-id-sorted `::error` block, then `::warning` block, then the single
+`::notice`); an inert reporter renders nothing; and the tail's `::notice` carries
+the same exit-independent summary the console band does.
 """
 from std.testing import assert_equal, assert_true
 
@@ -28,7 +29,7 @@ from session_fixtures import (
 )
 
 
-def test_annotations_tail_rendered_via_composite_index() raises:
+def test_annotations_tail_rendered_through_the_coordinator() raises:
     var root = temp_root()
     write_file(root, "tests/test_pass.mojo", SRC_PASS)
     write_file(root, "tests/test_fail.mojo", SRC_FAIL)
@@ -85,7 +86,7 @@ def test_inactive_annotations_reporter_renders_nothing() raises:
     )
 
 
-def test_ann_index_negative_one_elides_the_tail() raises:
+def test_annotation_tail_empty_when_no_reporter_is_composed() raises:
     var root = temp_root()
     write_file(root, "tests/test_pass.mojo", SRC_PASS)
     var config = base_config()
