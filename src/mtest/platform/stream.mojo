@@ -108,20 +108,41 @@ def write_fd[o: Origin](fd: Int, ptr: UnsafePointer[UInt8, o], n: Int) -> Int:
     return external_call["write", Int](fd, ptr.bitcast[NoneType](), n)
 
 
-def create_truncate_fd(path: String) -> Int:
-    """Create or truncate `path` write-only; return the raw descriptor result.
+@fieldwise_init
+struct CreatResult(Copyable, Movable):
+    """The outcome of a `create_truncate_fd` call: descriptor and captured errno.
+
+    `err` is meaningful only when `fd` is negative; on success it is a filler
+    `0` the caller must not consult. Bundling the two lets `create_truncate_fd`
+    snapshot `errno` while it still owns the fresh error, before its transient
+    C-string is freed, so a caller need not — and must not — re-read `errno`
+    after the call, when an intervening `free` may already have clobbered it.
+    """
+
+    var fd: Int
+    """The open descriptor, or a negative value on error."""
+    var err: Int32
+    """The `errno` captured at the failing `creat`; only valid when `fd < 0`."""
+
+
+def create_truncate_fd(path: String) -> CreatResult:
+    """Create or truncate `path` write-only; return the descriptor and errno.
 
     Wraps `creat(2)`, which opens `path` write-only, creating it with mode 0o644
-    when absent and truncating it when present. Performs no error interpretation:
-    on failure it returns a negative value with `errno` set, which the caller
-    reads with `errno_now` before forming its own message.
+    when absent and truncating it when present. Performs no error interpretation.
+    On failure `creat` sets `errno`; this function snapshots it before releasing
+    its transient C-string, because `free` is not guaranteed to preserve `errno`,
+    and returns it in the result so the caller forms its message without a
+    post-call `errno_now` read.
 
     Args:
         path: The destination file to create or truncate.
 
     Returns:
-        The open descriptor, or a negative value on error with `errno` set.
-        Allocates a transient C-string copy that is freed before returning.
+        A `CreatResult` whose `fd` is the open descriptor, or a negative value on
+        error, and whose `err` holds the failing `creat`'s `errno` when `fd < 0`
+        (a filler `0` on success). Allocates a transient C-string copy that is
+        freed before returning.
     """
     var c = path.as_bytes()
     var terminated = List[UInt8]()
@@ -159,8 +180,13 @@ def create_truncate_fd(path: String) -> Int:
         fd = external_call["creat", Int32](
             terminated.unsafe_ptr().bitcast[NoneType](), UInt32(_CREATE_MODE)
         )
+    # Snapshot `errno` while the failing `creat` is still the last syscall, before
+    # `terminated^` frees the C-string: `free` may overwrite `errno`, so a read
+    # after it could report a stale or zeroed value. On success `errno` is
+    # meaningless, so it is only captured on the error branch.
+    var err = errno_now() if fd < 0 else 0
     _ = terminated^
-    return Int(fd)
+    return CreatResult(Int(fd), Int32(err))
 
 
 def close_fd(fd: Int) -> Int:

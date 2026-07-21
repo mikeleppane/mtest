@@ -70,17 +70,16 @@ def open_json_fd(path: String) raises -> Int:
             exhaustion. The message names the errno. The caller resolves this
             to the internal-error exit code, a pre-run environment failure.
     """
-    var fd = create_truncate_fd(path)
-    if fd < 0:
-        var err = errno_now()
+    var result = create_truncate_fd(path)
+    if result.fd < 0:
         raise Error(
             "report: could not open --json destination '"
             + path
             + "' (errno "
-            + String(err)
+            + String(result.err)
             + ")"
         )
-    return fd
+    return result.fd
 
 
 def close_json_fd(fd: Int) -> Bool:
