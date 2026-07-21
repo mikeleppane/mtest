@@ -20,7 +20,7 @@ through the same private-helper seam `test_session_mangle.mojo` uses.
 from std.os.path import basename, dirname
 from std.testing import assert_equal, assert_false, assert_true
 
-from mtest.session.session import _precompile_temp_path
+from mtest.session.scratch import _precompile_temp_path
 
 
 def test_temp_path_is_derived_from_out_with_attempt_index() raises:

@@ -12,7 +12,7 @@ from std.os import listdir, makedirs, rmdir, symlink
 from std.os.path import exists, islink
 from std.testing import assert_false, assert_true
 
-from mtest.session.session import _rmtree
+from mtest.session.scratch import _rmtree
 
 
 def _reset(path: String) raises:

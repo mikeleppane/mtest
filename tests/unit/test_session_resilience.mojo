@@ -11,13 +11,15 @@ from std.testing import assert_equal, assert_false, assert_true
 from mtest.exec import ProcessResult, Termination
 from mtest.model import Outcome, ParseDisposition
 from mtest.session.retry_class import RetryClass
+from mtest.session.scratch import (
+    _invocation_nonce,
+    _quarantine_dir,
+    _retry_out_bin,
+)
 from mtest.session.session import (
     _compile_crash_residual,
     _flaky_eligible,
-    _invocation_nonce,
     _probe_terminal,
-    _quarantine_dir,
-    _retry_out_bin,
     _run_terminal_file,
     _select_names,
 )
