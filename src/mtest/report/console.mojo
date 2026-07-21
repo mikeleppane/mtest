@@ -207,9 +207,7 @@ def _ensure_trailing_newline(s: String) -> String:
     return s + "\n"
 
 
-def _term_phrase(
-    kind: Int, value: Int, final_kind: Int, final_value: Int, escalated: Bool
-) -> String:
+def _term_phrase(kind: Int, value: Int, escalated: Bool) -> String:
     """A short human phrase for an attempt's decomposed termination.
 
     The `AttemptFinished` event carries the termination as plain integers, the
@@ -856,13 +854,7 @@ struct ConsoleReporter(Reporter):
         and classification, and a short phrase for the termination. An excerpt
         marker says when the captured streams were clamped.
         """
-        var phrase = _term_phrase(
-            e.term_kind,
-            e.term_value,
-            e.term_final_kind,
-            e.term_final_value,
-            e.escalated,
-        )
+        var phrase = _term_phrase(e.term_kind, e.term_value, e.escalated)
         var line = _col("TRY", _TOKEN_W) + _col(e.path, _PATH_W)
         line += (
             String("attempt ")
