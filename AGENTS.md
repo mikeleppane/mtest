@@ -55,13 +55,18 @@ actors under `tests/fixtures/exec/`.
 Every layer may import only from layers above it, never sideways or downward:
 
 ```text
-Layer 0  model     outcomes, node ids, events, exit codes   (no internal imports)
+Layer 0  model     outcomes, node ids, events, exit-code mapping (0/1/5)   (no internal imports)
 Layer 1  config    RunnerConfig
-Layer 2  discover | protocol (report/collect parsing) | report (event consumers)
+Layer 2  discover | protocol (report/collect parsing) | report
+         select (operand and name selection) | cache (build reuse)
 Layer 3  exec      the POSIX process adapter, timeouts
 Layer 4  session   orchestration: discover -> build -> run -> parse -> events
-Layer 5  cli       hand-rolled argument parsing -> RunnerConfig; main
+Layer 5  cli       hand-rolled argument parsing -> RunnerConfig
 ```
+
+`main` sits above every layer as the composition root, not inside `cli`: it is
+the only `exit()` caller, wiring the reporters and the session together, and
+owning argv/env/exit and nothing else.
 
 `exec` is the **deepest module**: a small process-control interface hiding pipes,
 concurrent draining, FFI, platform differences, and cleanup invariants. Its
@@ -288,6 +293,7 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `config` | `src/mtest/config` (RunnerConfig) |
 | `discover` | `src/mtest/discover` (file walking) |
 | `protocol` | `src/mtest/protocol` (report/collect parsing) |
+| `select` | `src/mtest/select` (operand and name selection) |
 | `exec` | `src/mtest/exec` (the POSIX process adapter) |
 | `session` | `src/mtest/session` (orchestration) |
 | `report` | `src/mtest/report` (event consumers, reporters) |
