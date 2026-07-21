@@ -37,6 +37,7 @@ from mtest.cli import (
 )
 from mtest.exec import ExecRuntime, stderr_isatty, stdout_isatty
 from mtest.config import annotations_resolved_on
+from mtest.model import TerminalFacts, resolve_exit_code
 from mtest.report import (
     AnnotationsReporter,
     CompositeReporter,
@@ -44,7 +45,6 @@ from mtest.report import (
     JsonStreamReporter,
     JunitReporter,
     close_json_fd,
-    escalate_on_close_failure,
     open_json_fd,
     open_junit_artifact,
     open_junit_spool,
@@ -351,10 +351,20 @@ def main():
     if json_owns_fd:
         # The close of the destination main OWNS can surface a deferred write
         # error (a quota/network filesystem that reports ENOSPC/EIO only at
-        # close), which the session could not have seen. Escalate the resolved
-        # code under the terminal-write-failure precedence (2 stands, 3 stays,
-        # 0/1/5 -> 3): an undelivered machine report must not exit success.
-        code = escalate_on_close_failure(code, close_json_fd(json_fd))
+        # close), which the session could not have seen. Present the code the
+        # session already resolved, plus that late delivery fact, to the same
+        # resolver: it re-applies the delivery precedence (2 stands, 3 stays,
+        # 0/1/5 -> 3), so an undelivered machine report cannot exit success.
+        code = resolve_exit_code(
+            TerminalFacts(
+                interrupted=False,
+                internal_error=False,
+                drift=False,
+                precompile_failed=False,
+                outcome_code=code,
+                delivery_failed=close_json_fd(json_fd),
+            )
+        )
     if junit_active:
         # The session has finalized (the report was renamed onto its target, or
         # left intact on failure); free the spool directory and fragments main

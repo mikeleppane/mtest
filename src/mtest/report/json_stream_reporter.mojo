@@ -172,9 +172,10 @@ def close_json_fd(fd: Int) -> Bool:
     surface only at `close`: a quota- or network-backed filesystem may buffer
     the byte-drained writes and report `ENOSPC` or `EIO` only when the
     descriptor is closed. That is actionable, because the machine report was
-    not durably committed, so the caller escalates the exit code exactly as a
-    live write failure would. The stream's own live write latch is independent
-    of this result.
+    not durably committed, so the caller presents this to the exit-code
+    resolver as an artifact-delivery failure, exactly as a live write failure
+    is. This reporter reports the fact and never transforms a code itself. The
+    stream's own live write latch is independent of this result.
 
     `EINTR` is not a failure: on Linux a close interrupted by a signal has
     still released the descriptor, and retrying would risk double-closing a
@@ -192,30 +193,6 @@ def close_json_fd(fd: Int) -> Bool:
     if external_call["close", Int32](Int32(fd)) == 0:
         return False
     return _errno_now() != _EINTR
-
-
-def escalate_on_close_failure(code: Int, close_failed: Bool) -> Int:
-    """Apply the terminal-write-failure precedence to a resolved exit code.
-
-    The close of the descriptor the owner opened is the one `--json` I/O the
-    session cannot observe: it happens after the session resolved the code, and
-    the fd outlives the run. A deferred write error surfacing only at close
-    means the machine report was not durably committed, so a 0, 1, or 5 verdict
-    is no longer authoritative. The precedence mirrors the stream's live write
-    failure, as in the session's terminal-code resolution: a resolved 2 stands,
-    since an interrupt is never displaced by a later I/O failure; a resolved 3
-    stays 3; and a resolved 0, 1, or 5 escalates to 3.
-
-    Args:
-        code: The exit code the session already resolved.
-        close_failed: Whether `close_json_fd` reported a delivery failure.
-
-    Returns:
-        The code to exit with, escalated to 3 where the precedence requires it.
-    """
-    if close_failed and code != 2 and code != 3:
-        return 3
-    return code
 
 
 @fieldwise_init
