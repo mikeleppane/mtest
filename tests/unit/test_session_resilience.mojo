@@ -16,12 +16,12 @@ from mtest.session.scratch import (
     _quarantine_dir,
     _retry_out_bin,
 )
+from mtest.session.names import _select_names
 from mtest.session.session import (
     _compile_crash_residual,
     _flaky_eligible,
     _probe_terminal,
     _run_terminal_file,
-    _select_names,
 )
 
 
