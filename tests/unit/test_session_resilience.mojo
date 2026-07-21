@@ -16,13 +16,10 @@ from mtest.session.scratch import (
     _quarantine_dir,
     _retry_out_bin,
 )
+from mtest.session.attempt import _compile_crash_residual, _flaky_eligible
 from mtest.session.build import _probe_terminal
 from mtest.session.names import _select_names
-from mtest.session.session import (
-    _compile_crash_residual,
-    _flaky_eligible,
-    _run_terminal_file,
-)
+from mtest.session.session import _run_terminal_file
 
 
 # ---- Fix 1: a crash-then-DRIFT final attempt is NOT flaky ----------------------
