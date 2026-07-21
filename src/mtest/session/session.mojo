@@ -68,6 +68,9 @@ from mtest.model import (
     TerminalFacts,
     TestCounts,
     TestResult,
+    EXIT_FAILURE,
+    EXIT_NOTHING_RAN,
+    EXIT_SUCCESS,
     exit_code_for,
     is_slow,
     resolve_exit_code,
@@ -4593,19 +4596,29 @@ def run_collect(
 
     sort(node_ids)
 
-    var code: Int
-    if interrupted:
-        code = 2
-    elif internal:
-        code = 3
-    elif drift:
-        code = 3
-    elif any_failing:
-        code = 1
+    # Collect's own outcome tier, in `exit_code_for`'s shape over the listing it
+    # produced: a file that failed to yield node ids is failing, an empty
+    # listing means nothing was collectable, else success. The control-flow
+    # facts rank above it in the model resolver, exactly as they do for a run.
+    # A collect probe precompiles nothing and publishes no terminal artifact, so
+    # those two facts are false by construction rather than by omission.
+    var outcome_code: Int
+    if any_failing:
+        outcome_code = EXIT_FAILURE
     elif len(node_ids) == 0:
-        code = 5
+        outcome_code = EXIT_NOTHING_RAN
     else:
-        code = 0
+        outcome_code = EXIT_SUCCESS
+    var code = resolve_exit_code(
+        TerminalFacts(
+            interrupted=interrupted,
+            internal_error=internal,
+            drift=drift,
+            precompile_failed=False,
+            outcome_code=outcome_code,
+            delivery_failed=False,
+        )
+    )
     return CollectResult(node_ids^, diags^, code)
 
 
