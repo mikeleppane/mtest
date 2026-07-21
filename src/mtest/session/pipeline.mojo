@@ -54,9 +54,6 @@ struct FileStage(Equatable, ImplicitlyCopyable, Movable):
     comptime FINISHED = Self(6)
     """Its verdict is settled; the pipeline asks nothing more of it."""
 
-    comptime COUNT = 7
-    """The number of distinct values in the vocabulary."""
-
     def __eq__(self, other: Self) -> Bool:
         """Two stages are equal iff their discriminants match."""
         return self.code == other.code
@@ -95,9 +92,6 @@ struct StepKind(Equatable, ImplicitlyCopyable, Movable):
     comptime NOTHING = Self(6)
     """No step remains: the run completed, or it halted."""
 
-    comptime COUNT = 7
-    """The number of distinct values in the vocabulary."""
-
     def __eq__(self, other: Self) -> Bool:
         """Two step kinds are equal iff their discriminants match."""
         return self.code == other.code
@@ -127,9 +121,6 @@ struct PipelineHalt(Equatable, ImplicitlyCopyable, Movable):
     """A spawn or machinery failure aborted the run (exit 3)."""
     comptime LIMIT_REACHED = Self(3)
     """`-x`/`--exitfirst` or `--maxfail` stopped scheduling."""
-
-    comptime COUNT = 4
-    """The number of distinct values in the vocabulary."""
 
     def __eq__(self, other: Self) -> Bool:
         """Two halt reasons are equal iff their discriminants match."""
