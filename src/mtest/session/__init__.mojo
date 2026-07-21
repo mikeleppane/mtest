@@ -10,7 +10,8 @@ belong to main.
 The public surface is re-exported here, so callers write
 `from mtest.session import run_session, run_verdict, build_verdict`.
 """
-from mtest.session.session import CollectResult, run_collect, run_session
+from mtest.session.session import run_session
+from mtest.session.collect import CollectResult, run_collect
 from mtest.session.verdict import run_verdict, build_verdict
 from mtest.session.classify import (
     Classification,
