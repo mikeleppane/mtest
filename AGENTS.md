@@ -446,10 +446,19 @@ Accumulated the hard way; append as later phases teach more.
   `Copyable`-bounded trait, even when every `Rs` element does, because
   `Tuple[*Self.Rs]` is not synthesizably `Copyable` (symptom: "cannot
   synthesize copy constructor because field '...' has non-copyable type
-  'Tuple[*Rs.values]'") — use such a composite as the top-level type a consumer
-  is generic over, never nested inside another struct. Correct move: adding a
-  reporter means adding a tuple element at the call site — dispatch stays fully
-  static.
+  'Tuple[*Rs.values]'"). `Movable`, by contrast, DOES synthesize: declaring
+  `struct CompositeReporter[*Rs: Reporter](Movable)` lets a composite be moved
+  into another struct's field, which is how a report coordinator owns its pack.
+  Without that explicit conformance the move fails with "cannot transfer value
+  into destination, because 'CompositeReporter[...]' doesn't conform to
+  'Movable'" — the trap is reading the copy restriction as a blanket ban on
+  nesting. Correct move: adding a reporter means adding a tuple element at the
+  call site — dispatch stays fully static. Separately probed and recorded so it
+  need not be re-probed: the pinned compiler ACCEPTS a movable-only reporter
+  pack — dropping `Copyable` from `trait Reporter`'s bounds builds the package
+  and the whole classified inventory clean. That relaxation is therefore
+  available whenever a reporter must own a non-copyable resource such as a file
+  descriptor; the bound is kept today only because nothing owns one yet.
 - **`fn` is fully removed in 1.0.0b2** — the compiler rejects it outright
   (`'fn' has been removed; use 'def' instead`), including as a function-VALUE
   type: write `def(...) -> ...`, never `fn(...) -> ...`.
