@@ -55,7 +55,7 @@ actors under `tests/fixtures/exec/`.
 Every layer may import only from layers above it, never sideways or downward:
 
 ```text
-Layer 0  model     outcomes, node ids, events, exit-code mapping (0/1/5)   (no internal imports)
+Layer 0  model     outcomes, node ids, events, exit-code resolution        (no internal imports)
 Layer 1  config    RunnerConfig
 Layer 2  discover | protocol (report/collect parsing) | report
          select (operand and name selection) | cache (build reuse)
