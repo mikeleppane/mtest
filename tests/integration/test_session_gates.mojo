@@ -8,7 +8,11 @@ the summary tally over a real build+run of tiny fixtures.
 from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.model import EventKind, Outcome
-from mtest.report import CompositeReporter, RecordingReporter
+from mtest.report import (
+    CompositeReporter,
+    RecordingCoordinator,
+    RecordingReporter,
+)
 from mtest.session import run_session
 
 from session_fixtures import (
@@ -29,11 +33,13 @@ def test_failing_gate_aborts_and_fans_out_not_run() raises:
     var config = base_config()
     config.gates.append("tests/test_gate.mojo")
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(config, root, comp)
 
     assert_equal(code, 1, "a failing gate resolves to exit 1")
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     # start + gate triple (started, test_reported, finished) + finish = 5; the
     # run file is NEVER started.
     assert_equal(rec.count(), 5)
@@ -62,11 +68,13 @@ def test_drifting_gate_aborts_and_fans_out_not_run() raises:
     var config = base_config()
     config.gates.append("tests/test_gate.mojo")
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(config, root, comp)
 
     assert_equal(code, 3, "a drifting gate forces exit 3")
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     # The run file is NEVER started: the drifting gate aborted scheduling.
     var started_run = False
     for i in range(rec.count()):
@@ -89,11 +97,13 @@ def test_passing_gate_lets_run_files_proceed() raises:
     var config = base_config()
     config.gates.append("tests/test_gate.mojo")
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(config, root, comp)
 
     assert_equal(code, 0, "all pass resolves to exit 0")
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     # start + gate triple + run triple + finish = 8. Gate is scheduled BEFORE
     # the run; each triple is started, a per-test row, then finished.
     assert_equal(rec.count(), 8)

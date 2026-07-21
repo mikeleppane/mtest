@@ -11,7 +11,11 @@ from std.testing import assert_equal, assert_true
 
 from mtest.config import shell_join
 from mtest.model import EventKind, Outcome
-from mtest.report import CompositeReporter, RecordingReporter
+from mtest.report import (
+    CompositeReporter,
+    RecordingCoordinator,
+    RecordingReporter,
+)
 from mtest.session import run_session
 
 from session_fixtures import (
@@ -29,11 +33,13 @@ def test_signal_death_is_crash_not_fail() raises:
     var root = temp_root()
     write_file(root, "tests/test_crash.mojo", SRC_CRASH)
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(base_config(), root, comp)
 
     assert_equal(code, 1)
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     var finished = rec.event_at(2)
     assert_true(finished.kind == EventKind.FILE_FINISHED)
     assert_true(finished.outcome == Outcome.CRASH, "signal death must be CRASH")
@@ -44,11 +50,13 @@ def test_compiler_rejection_is_compile_error_not_crash() raises:
     var root = temp_root()
     write_file(root, "tests/test_cerr.mojo", SRC_COMPILE_ERROR)
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(base_config(), root, comp)
 
     assert_equal(code, 1)
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     var finished = rec.event_at(2)
     assert_true(
         finished.outcome == Outcome.COMPILE_ERROR,
@@ -68,11 +76,13 @@ def test_compile_error_build_command_is_shell_quoted() raises:
     var config = base_config()
     config.build_args.append("path with space")
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(config, root, comp)
 
     assert_equal(code, 1)
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     var finished = rec.event_at(2)
     assert_true(finished.outcome == Outcome.COMPILE_ERROR)
     # The raw space-bearing arg rides in the argv; the reproduce line shell-joins
@@ -89,11 +99,13 @@ def test_deadline_overrun_is_timeout_not_fail() raises:
     var config = base_config()
     config.timeout_secs = 1  # keep the deadline short for the test
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(config, root, comp)
 
     assert_equal(code, 1)
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     var finished = rec.event_at(2)
     assert_true(
         finished.outcome == Outcome.TIMEOUT, "a deadline overrun is TIMEOUT"
@@ -110,11 +122,13 @@ def test_spawn_failure_routes_to_exit_3_and_emits_diagnostic() raises:
     var config = base_config()
     config.mojo_path = "/no/such/mojo/compiler"
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(config, root, comp)
 
     assert_equal(code, 3, "a spawn failure resolves to exit 3")
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
 
     var saw_internal = False
     var saw_verdict = False

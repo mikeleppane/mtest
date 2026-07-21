@@ -12,7 +12,11 @@ closed zero-test ceiling, PASS-from-a-parsed-report, never PASS-from-exit-status
 from std.testing import assert_equal, assert_true
 
 from mtest.model import Event, EventKind, Outcome, ParseDisposition
-from mtest.report import CompositeReporter, RecordingReporter
+from mtest.report import (
+    CompositeReporter,
+    RecordingCoordinator,
+    RecordingReporter,
+)
 from mtest.session import run_session
 
 from session_fixtures import (
@@ -43,11 +47,13 @@ def test_silent_binary_is_malformed_suite() raises:
     var root = temp_root()
     write_file(root, "tests/test_silent.mojo", SRC_SILENT)
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(base_config(), root, comp)
 
     assert_equal(code, 1, "a malformed suite is in the failing class")
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     var finished = _finished(rec)
     assert_true(
         finished.outcome == Outcome.MALFORMED_SUITE,
@@ -60,11 +66,13 @@ def test_forger_two_blocks_is_malformed_suite_ambiguous() raises:
     var root = temp_root()
     write_file(root, "tests/test_forger.mojo", SRC_FORGER)
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(base_config(), root, comp)
 
     assert_equal(code, 1)
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     var finished = _finished(rec)
     assert_true(finished.outcome == Outcome.MALFORMED_SUITE)
     assert_true(
@@ -83,11 +91,13 @@ def test_liar_off_grammar_routes_to_exit_3_drift() raises:
     var root = temp_root()
     write_file(root, "tests/test_liar.mojo", SRC_LIAR)
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(base_config(), root, comp)
 
     assert_equal(code, 3, "an off-grammar report routes to exit 3 (drift)")
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     var finished = _finished(rec)
     assert_true(
         finished.parse_disposition == ParseDisposition.DRIFT,
@@ -113,14 +123,16 @@ def test_zero_test_report_is_pass_that_ran_zero_tests() raises:
     var root = temp_root()
     write_file(root, "tests/test_zero.mojo", SRC_ZERO)
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(base_config(), root, comp)
 
     # A single zero-test file: it PASSED at the file level, but no test actually
     # ran, so the run-outcome multiset is empty -> exit 5 (nothing ran). The
     # ceiling is closed: this is PASS-from-a-parsed-zero-test-report.
     assert_equal(code, 5)
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     var finished = _finished(rec)
     assert_true(finished.outcome == Outcome.PASS)
     assert_true(finished.parse_disposition == ParseDisposition.PARSED)
@@ -146,11 +158,13 @@ def test_plain_run_overflow_marks_stdout_truncated() raises:
     var cfg = base_config()
     cfg.timeout_secs = 30
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(cfg, root, comp)
 
     assert_equal(code, 1, "an overflowing plain run is a failing outcome")
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     var finished = _finished(rec)
     assert_true(
         finished.parse_disposition == ParseDisposition.CAPTURE_OVERFLOW,

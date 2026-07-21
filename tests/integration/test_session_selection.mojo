@@ -15,7 +15,11 @@ from std.testing import (
 )
 
 from mtest.model import Event, EventKind, Outcome, ParseDisposition
-from mtest.report import CompositeReporter, RecordingReporter
+from mtest.report import (
+    CompositeReporter,
+    RecordingCoordinator,
+    RecordingReporter,
+)
 from mtest.session import run_session
 
 from session_fixtures import (
@@ -63,11 +67,13 @@ def test_keyword_subset_runs_only_selected_and_counts_deselected() raises:
     cfg.paths.append("tests/test_matrix.mojo")
     cfg.keyword = "add"
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(cfg, root, comp)
 
     assert_equal(code, 0, "a passing subset selection exits 0")
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     var finished = _finished(rec)
     assert_true(finished.outcome == Outcome.PASS)
     # Two selected tests passed; one (test_sub_one) was deselected.
@@ -92,11 +98,13 @@ def test_node_id_selects_a_single_test() raises:
     var cfg = base_config()
     cfg.paths.append("tests/test_matrix.mojo::test_sub_one")
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(cfg, root, comp)
 
     assert_equal(code, 0)
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     var finished = _finished(rec)
     assert_equal(finished.passed_tests, 1)
     assert_equal(finished.deselected_tests, 2)
@@ -109,7 +117,9 @@ def test_unknown_test_name_raises_before_any_body() raises:
     var cfg = base_config()
     cfg.paths.append("tests/test_matrix.mojo::test_nope")
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     with assert_raises(contains="unknown test"):
         _ = run_session(cfg, root, comp)
 
@@ -121,11 +131,13 @@ def test_empty_final_selection_exits_5() raises:
     cfg.paths.append("tests/test_matrix.mojo")
     cfg.keyword = "no_such_test_zzz"
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(cfg, root, comp)
 
     assert_equal(code, 5, "every test deselected -> nothing ran -> exit 5")
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     # No per-test row was reported; all three tests were deselected.
     assert_equal(_count_kind(rec, EventKind.TEST_REPORTED), 0)
     var last = rec.event_at(rec.count() - 1)
@@ -138,11 +150,13 @@ def test_selected_failing_test_reports_fail() raises:
     var cfg = base_config()
     cfg.paths.append("tests/test_mf.mojo::test_bad")
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(cfg, root, comp)
 
     assert_equal(code, 1, "a selected failing test -> exit 1")
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     var finished = _finished(rec)
     assert_true(finished.outcome == Outcome.FAIL)
     assert_equal(finished.failed_tests, 1)
@@ -157,12 +171,14 @@ def test_chameleon_recollects_once_then_malformed_suite() raises:
     cfg.paths.append("tests/test_chameleon.mojo")
     cfg.keyword = "ghost"
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(cfg, root, comp)
 
     # The stale-name path is MALFORMED-SUITE (exit-1 class), NEVER exit 3.
     assert_equal(code, 1, "a chameleon suite is MALFORMED-SUITE, exit 1")
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     var finished = _finished(rec)
     assert_true(
         finished.outcome == Outcome.MALFORMED_SUITE,
@@ -189,11 +205,13 @@ def test_selected_off_grammar_run_is_drift_exit_3() raises:
     var cfg = base_config()
     cfg.paths.append("tests/test_ol.mojo::test_one")
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(cfg, root, comp)
 
     assert_equal(code, 3, "a selected off-grammar run is DRIFT, exit 3")
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     var finished = _finished(rec)
     assert_true(
         finished.parse_disposition == ParseDisposition.DRIFT,
@@ -219,11 +237,13 @@ def test_selected_overflow_run_is_capture_overflow_exit_1() raises:
     cfg.timeout_secs = 30
     cfg.paths.append("tests/test_of.mojo::test_one")
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(cfg, root, comp)
 
     assert_equal(code, 1, "a selected overflow run is exit-1 class")
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     var finished = _finished(rec)
     assert_true(
         finished.parse_disposition == ParseDisposition.CAPTURE_OVERFLOW,
@@ -253,11 +273,13 @@ def test_valid_fail_printing_stale_phrase_is_not_stale_name() raises:
     var cfg = base_config()
     cfg.paths.append("tests/test_fp.mojo::test_prints_phrase_and_fails")
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(cfg, root, comp)
 
     assert_equal(code, 1, "a genuine FAIL resolves to exit 1")
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     var finished = _finished(rec)
     assert_true(
         finished.outcome == Outcome.FAIL,
@@ -284,6 +306,8 @@ def test_malformed_node_id_raises_even_when_a_gate_fails() raises:
     cfg.gates.append("tests/test_gate.mojo")
     cfg.paths.append("bad::node::id")
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     with assert_raises(contains="malformed node id"):
         _ = run_session(cfg, root, comp)

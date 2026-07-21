@@ -10,7 +10,11 @@ resolved exit code. Both recorders must observe the identical stream.
 from std.testing import assert_equal, assert_true
 
 from mtest.model import EventKind, Outcome, ParseDisposition
-from mtest.report import CompositeReporter, RecordingReporter
+from mtest.report import (
+    CompositeReporter,
+    RecordingCoordinator,
+    RecordingReporter,
+)
 from mtest.session import run_session
 
 from session_fixtures import (
@@ -32,14 +36,14 @@ def test_flow_pass_fail_excluded_warning_exit1() raises:
     config.excludes.append("*skipme*")
     config.excludes.append("ghost_*")  # matches nothing -> stale warning
 
-    var comp = CompositeReporter(
-        Tuple(RecordingReporter(), RecordingReporter())
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter(), RecordingReporter()))
     )
     var code = run_session(config, root, comp)
 
     assert_equal(code, 1, "a FAIL must resolve to exit 1")
 
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     # Full ordered stream: 1 start + 1 excluded + 1 warning + 2 file triples
     # (started, one retrospective test_reported, finished) + 1 finish = 10.
     assert_equal(rec.count(), 10)
@@ -96,5 +100,7 @@ def test_flow_pass_fail_excluded_warning_exit1() raises:
     assert_true("tests/test_a_pass.mojo" in argv)
 
     # The N=2 seam: the second recorder observed the identical stream.
-    assert_equal(comp.reporters[1].count(), 10)
-    assert_true(comp.reporters[1].kind_at(9) == EventKind.SESSION_FINISHED)
+    assert_equal(comp.composite.reporters[1].count(), 10)
+    assert_true(
+        comp.composite.reporters[1].kind_at(9) == EventKind.SESSION_FINISHED
+    )

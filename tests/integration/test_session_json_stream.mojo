@@ -1,8 +1,7 @@
 """The seam status-latch and the fatal-abort it drives.
 
-The session polls the concrete `JsonStreamReporter`'s write latch through a
-fixed comptime tuple index (`run_session[1]`, matching `main`'s composition of
-`(console, json_stream)`). When that stream's destination dies, the run's
+The session polls the machine stream's write latch through the report
+coordinator's named `stream_failed`. When that stream's destination dies, the run's
 product can no longer be delivered, so the session performs a FATAL ABORT: it
 stops scheduling and resolves exit 3, while STILL dispatching exactly one
 `SessionFinished` through the seam (its terminal record is absent from the dead
@@ -17,8 +16,11 @@ from std.testing import assert_equal, assert_true
 
 from mtest.model import EventKind
 from mtest.report import (
+    AnnotationsReporter,
     CompositeReporter,
     JsonStreamReporter,
+    JunitReporter,
+    RecordingCoordinator,
     RecordingReporter,
     close_json_fd,
     open_json_fd,
@@ -41,10 +43,15 @@ def test_dead_stream_forces_fatal_abort_exit_3_with_terminal_dispatch() raises:
     var stream = JsonStreamReporter(dead_fd, "0.4.0", True)
     assert_true(stream.status().failed, "precondition: the stream is latched")
 
-    # Fixed composition order: index 0 the recorder (the console's stand-in),
-    # index 1 the machine stream the session polls via `run_session[1]`.
-    var comp = CompositeReporter(Tuple(RecordingReporter(), stream^))
-    var code = run_session[1](config, root, comp)
+    # A recorder stands in for the console; the real machine stream answers the
+    # coordinator's stream-health channel, which the session polls by name.
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter())),
+        stream^,
+        JunitReporter.inert(),
+        AnnotationsReporter.inert(),
+    )
+    var code = run_session(config, root, comp)
 
     # A latched stream is a fatal abort: exit 3, outranking the 1/5/0 a plain
     # run would resolve to.
@@ -52,7 +59,7 @@ def test_dead_stream_forces_fatal_abort_exit_3_with_terminal_dispatch() raises:
 
     # Exactly ONE SessionFinished is still dispatched through the seam, carrying
     # the final resolved code, and the other reporter observes it.
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     var n = rec.count()
     assert_true(n > 0)
     var finishes = 0

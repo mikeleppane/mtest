@@ -5,8 +5,9 @@ the terminal, and calls `exit`. It parses argv, prints help or the version and
 exits 0, constructs the exec runtime, resolves the machine-stream (`--json`)
 destination and with it the console's own descriptor, then resolves the JUnit
 report destination, composes the console, stream, JUnit, and annotation
-reporters into a fixed-order `CompositeReporter` (the type the session drives),
-runs the session, flushes the console's rendered buffer to its resolved
+reporters into a `StandardReportCoordinator` (the report-layer interface the
+session drives), runs the session, flushes the console's rendered buffer to its
+resolved
 descriptor (stdout, or stderr under `--json -` so stdout carries only the
 byte-pure stream), and exits with the session's resolved code.
 
@@ -46,22 +47,17 @@ from mtest.model import (
 )
 from mtest.report import (
     AnnotationsReporter,
-    CompositeReporter,
     ConsoleReporter,
     JsonStreamReporter,
     JunitReporter,
+    StandardReportCoordinator,
     close_json_fd,
     open_json_fd,
     open_junit_artifact,
     open_junit_spool,
     resume_delimiter,
 )
-from mtest.session import (
-    CollectResult,
-    annotation_lines,
-    run_collect,
-    run_session,
-)
+from mtest.session import CollectResult, run_collect, run_session
 
 
 comptime EXIT_USAGE_ERROR = 4
@@ -299,22 +295,22 @@ def main():
                 exit(EXIT_INTERNAL_ERROR)
             exit(EXIT_INTERNAL_ERROR)
 
-    # A fixed composition ORDER: index 0 the console, index 1 the machine stream
-    # (inert when `--json` is absent), index 2 the JUnit report (inert when
-    # `--junit-xml` is absent), index 3 the annotations reporter (inert when
-    # resolved off). The session polls index 1's stream latch, finalizes index 2's
-    # report, and reaches index 3 for its tail by those fixed positions —
-    # `run_session[1, 2, 3]` below names them.
+    # Each reporter is independently inert when its feature is off: no `--json`,
+    # no `--junit-xml`, annotations resolved off. The coordinator exposes the
+    # stream latch, the JUnit finalize, and the annotation tail by name, so no
+    # caller depends on the order they are constructed in.
     var stream = JsonStreamReporter(json_fd, MTEST_VERSION, json_active)
     var junit = JunitReporter(
         junit_spool, junit_active, junit_target, junit_temp
     )
     var annotations = AnnotationsReporter(annotations_on)
-    var comp = CompositeReporter(Tuple(console^, stream^, junit^, annotations^))
+    var comp = StandardReportCoordinator(
+        console^, stream^, junit^, annotations^
+    )
 
     var code = 0
     try:
-        code = run_session[1, 2, 3](runtime, config, root, comp)
+        code = run_session(runtime, config, root, comp)
     except e:
         # The only raise the session propagates is a discover: usage error;
         # like a cli usage error it exits 4 to stderr. The session raised before
@@ -335,7 +331,7 @@ def main():
     # `--json -` so stdout carries only the byte-pure stream. Even on an
     # interrupt or partial-summary path.
     print(
-        comp.reporters[0].output(),
+        comp.console_output(),
         end="",
         file=FileDescriptor(console_fd),
         flush=True,
@@ -347,9 +343,8 @@ def main():
     # resume delimiter FIRST so workflow commands are guaranteed re-enabled before
     # mtest's OWN `::error`/`::warning`/`::notice` lines — no error or partial path
     # can leave commands disabled. The tail itself renders only when annotations
-    # resolved on (never beside `--json -`, refused at parse time). `annotation_lines`
-    # reaches the concrete reporter at the fixed composite index 3.
-    var fence_token = comp.reporters[0].fence_token()
+    # resolved on (never beside `--json -`, refused at parse time).
+    var fence_token = comp.fence_token()
     if gh_actions and fence_token != "":
         print(
             resume_delimiter(fence_token),
@@ -357,7 +352,7 @@ def main():
             flush=True,
         )
     if annotations_on:
-        var tail = annotation_lines[3](comp)
+        var tail = comp.annotation_tail()
         var rendered = String("")
         for line in tail:
             rendered += line + "\n"

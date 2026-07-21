@@ -20,6 +20,7 @@ from mtest.model import EventKind, Outcome
 from mtest.report import (
     CompositeReporter,
     ConsoleReporter,
+    RecordingCoordinator,
     RecordingReporter,
 )
 from mtest.session import run_session
@@ -43,11 +44,13 @@ def test_failed_precompile_fans_out_all_as_not_run() raises:
     var config = base_config()
     config.precompiles.append(Precompile("badpkg", None))
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(config, root, comp)
 
     assert_equal(code, 1, "a failed precompile resolves to exit 1")
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     # start + precompile_failed + finish = 3; NO file is ever started.
     assert_equal(rec.count(), 3)
     assert_true(rec.kind_at(0) == EventKind.SESSION_STARTED)
@@ -72,11 +75,13 @@ def test_successful_precompile_widens_include_path() raises:
     var config = base_config()
     config.precompiles.append(Precompile("goodpkg", None))
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(config, root, comp)
 
     assert_equal(code, 0, "a clean precompile plus a passing file is exit 0")
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     # start + file triple (started, test_reported, finished) + finish = 5 (no
     # PrecompileFailed event on success).
     assert_equal(rec.count(), 5)
@@ -102,7 +107,9 @@ def test_failed_precompile_leaves_a_good_out_package_untouched() raises:
     var config = base_config()
     config.precompiles.append(Precompile("badpkg", None))
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(config, root, comp)
 
     assert_equal(code, 1, "a failed precompile resolves to exit 1")
@@ -132,11 +139,13 @@ def test_promotion_failure_never_reports_a_compiler_ending() raises:
     var config = base_config()
     config.precompiles.append(Precompile("goodpkg", None))
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(config, root, comp)
 
     assert_equal(code, 1, "an unpromotable package resolves to exit 1")
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     assert_true(rec.kind_at(1) == EventKind.PRECOMPILE_FAILED)
     var pf = rec.event_at(1)
     assert_false(
@@ -177,11 +186,13 @@ def test_precompile_spawn_failure_names_the_real_errno() raises:
     config.mojo_path = "/no/such/mojo/compiler"
     config.precompiles.append(Precompile("somepkg", None))
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(config, root, comp)
 
     assert_equal(code, 3, "a precompile spawn failure resolves to exit 3")
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     # start + internal_error + finish = 3; no file is ever started.
     assert_equal(rec.count(), 3)
     assert_true(rec.kind_at(1) == EventKind.INTERNAL_ERROR)

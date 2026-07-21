@@ -82,14 +82,7 @@ from mtest.protocol import (
     collection_disqualifier,
     collection_names,
 )
-from mtest.report import (
-    AnnotationsReporter,
-    CompositeReporter,
-    JsonStreamReporter,
-    JunitFinalizeResult,
-    JunitReporter,
-    Reporter,
-)
+from mtest.report import ReportCoordinator
 from mtest.select import (
     FileIntent,
     NamedTarget,
@@ -2994,7 +2987,7 @@ def _run_selected_with_recovery(
 
 
 def _run_selection[
-    *Rs: Reporter
+    C: ReportCoordinator
 ](
     mut runtime: ExecRuntime,
     config: RunnerConfig,
@@ -3002,7 +2995,7 @@ def _run_selection[
     disc: DiscoveryResult,
     include_paths: List[String],
     plan: OperandParse,
-    mut reporter: CompositeReporter[*Rs],
+    mut reporter: C,
     mut summary: Summary,
     mut reg: BuildRegistry,
 ) raises -> SelectionSummary:
@@ -3015,7 +3008,7 @@ def _run_selection[
     A machinery failure resolves to exit 3.
 
     Parameters:
-        Rs: The reporter types composed in `reporter`.
+        C: The report coordinator this step fans events to.
 
     Args:
         runtime: The exec runtime supervising every build, probe, and run.
@@ -3463,7 +3456,7 @@ def _attribution_listing(
 
 
 def _attribute_one[
-    *Rs: Reporter
+    C: ReportCoordinator
 ](
     mut runtime: ExecRuntime,
     config: RunnerConfig,
@@ -3473,7 +3466,7 @@ def _attribute_one[
     selected: List[String],
     reg: BuildRegistry,
     pass_started_ns: UInt,
-    mut reporter: CompositeReporter[*Rs],
+    mut reporter: C,
 ) raises -> Bool:
     """Attribute one crashed file, normally emitting one `CrashAttribution`.
 
@@ -3499,7 +3492,7 @@ def _attribute_one[
     here propagates: attribution must not fail a session.
 
     Parameters:
-        Rs: The reporter types composed in `reporter`.
+        C: The report coordinator this step fans events to.
 
     Args:
         runtime: The exec runtime supervising the listing probe and the reruns.
@@ -3645,14 +3638,14 @@ def _attribute_one[
 
 
 def _run_crash_attribution[
-    *Rs: Reporter
+    C: ReportCoordinator
 ](
     mut runtime: ExecRuntime,
     config: RunnerConfig,
     root: String,
     crash_files: List[_CrashFile],
     reg: BuildRegistry,
-    mut reporter: CompositeReporter[*Rs],
+    mut reporter: C,
 ) raises:
     """Run the bounded crash-attribution post-pass over every crashed file.
 
@@ -3669,7 +3662,7 @@ def _run_crash_attribution[
     mid-pass: exit 2 must not wait on diagnostics.
 
     Parameters:
-        Rs: The reporter types composed in `reporter`.
+        C: The report coordinator this step fans events to.
 
     Args:
         runtime: The exec runtime supervising the probes and reruns.
@@ -3710,155 +3703,13 @@ def _run_crash_attribution[
             return
 
 
-def _stream_failed[
-    stream_index: Int, *Rs: Reporter
-](ref reporter: CompositeReporter[*Rs]) -> Bool:
-    """Whether the stream reporter at `stream_index` latched a write failure.
-
-    The caller fixes the composition order — `main` builds the reporter tuple as
-    `(console, stream, junit, annotations)` and calls `run_session[1, 2, 3]` —
-    so `stream_index` names which tuple element is the concrete
-    `JsonStreamReporter`. A comptime-known index
-    recovers that element by reference and binds a
-    `Pointer[JsonStreamReporter, ...]` directly to it, with no `rebind`. That
-    direct binding is a compile-time type assertion: an index naming an element
-    that is not a `JsonStreamReporter` fails to compile rather than
-    reinterpreting the wrong type. The call goes through the concrete tuple
-    element, never the trait pack, so `CompositeReporter`, the `Reporter` trait,
-    and `handle` stay untouched.
-
-    Parameters:
-        stream_index: The tuple position of the `JsonStreamReporter`, or
-            negative when none is composed — as in the session's own test
-            drivers, which pass a bare recording composite. A negative index
-            elides the comptime branch, so those composites need no `status()`.
-        Rs: The reporter types composed in `reporter`.
-
-    Args:
-        reporter: The composed reporter tuple.
-
-    Returns:
-        True when the stream reporter has latched a write failure.
-    """
-    comptime if stream_index >= 0:
-        ref element = reporter.reporters[stream_index]
-        var probe: Pointer[JsonStreamReporter, origin_of(element)] = Pointer(
-            to=element
-        )
-        return probe[].status().failed
-    else:
-        return False
-
-
-def _junit_note_not_run[
-    junit_index: Int, *Rs: Reporter
-](mut reporter: CompositeReporter[*Rs], selected_paths: List[String]):
-    """Fan the terminal `[not-run]` synthesis to the concrete JUnit reporter.
-
-    Reaches the `JunitReporter` at the comptime `junit_index` directly, with the
-    same compile-time type assertion `_stream_failed` uses, and calls its
-    `note_not_run`, so an interrupted or early-aborted run's report still
-    carries a `[not-run]` row for every selected file that never produced a
-    verdict. This is a JUnit-only side channel: the console and the JSON stream
-    never receive synthetic not-run events, preserving the deliberate reporter
-    asymmetry.
-
-    Parameters:
-        junit_index: The tuple position of the `JunitReporter`, or negative when
-            none is composed, which elides the whole call.
-        Rs: The reporter types composed in `reporter`.
-
-    Args:
-        reporter: The composed reporter tuple.
-        selected_paths: The selected files that must appear in the report.
-    """
-    comptime if junit_index >= 0:
-        ref element = reporter.reporters[junit_index]
-        var probe: Pointer[JunitReporter, origin_of(element)] = Pointer(
-            to=element
-        )
-        probe[].note_not_run(selected_paths)
-
-
-def _junit_finalize[
-    junit_index: Int, *Rs: Reporter
-](mut reporter: CompositeReporter[*Rs]) -> JunitFinalizeResult:
-    """Finalize the concrete JUnit reporter's artifact at the comptime index.
-
-    Reaches the `JunitReporter` directly, with the same compile-time
-    type-checked binding `_stream_failed` uses, and calls its `finalize`, which
-    assembles the spool in node-id order, verify-writes a unique temp, and
-    atomically renames it onto the target path. An inert reporter — no
-    `--junit-xml` — is a no-op success.
-
-    Parameters:
-        junit_index: The tuple position of the `JunitReporter`, or negative when
-            none is composed, which yields a no-op success.
-        Rs: The reporter types composed in `reporter`.
-
-    Args:
-        reporter: The composed reporter tuple.
-
-    Returns:
-        The finalize result, so the session's artifact-finalization step can
-        collect and report a finalization failure.
-    """
-    comptime if junit_index >= 0:
-        ref element = reporter.reporters[junit_index]
-        var probe: Pointer[JunitReporter, origin_of(element)] = Pointer(
-            to=element
-        )
-        return probe[].finalize()
-    else:
-        return JunitFinalizeResult(False, "")
-
-
-def annotation_lines[
-    ann_index: Int, *Rs: Reporter
-](ref reporter: CompositeReporter[*Rs]) -> List[String]:
-    """Render the annotation tail from the concrete `AnnotationsReporter`.
-
-    Reaches the reporter at the comptime `ann_index` directly, with the same
-    compile-time type assertion `_stream_failed` and `_junit_finalize` use, and
-    returns its `render()`. `main` calls this after `run_session` returns, once
-    the whole event stream including `SessionFinished` has accumulated, and
-    writes the lines to stdout in the deterministic tail after the console
-    summary band. An inert reporter — annotations resolved off — renders an
-    empty list.
-
-    Parameters:
-        ann_index: The tuple position of the `AnnotationsReporter`, or negative
-            when none is composed, which elides the whole call.
-        Rs: The reporter types composed in `reporter`.
-
-    Args:
-        reporter: The composed reporter tuple.
-
-    Returns:
-        The annotation lines: the sorted `::error` lines, then the sorted
-        `::warning` lines, then the single `::notice` line. Each group is
-        ordered by row sort key, not by the order the events arrived.
-    """
-    comptime if ann_index >= 0:
-        ref element = reporter.reporters[ann_index]
-        var probe: Pointer[AnnotationsReporter, origin_of(element)] = Pointer(
-            to=element
-        )
-        return probe[].render()
-    else:
-        return List[String]()
-
-
 def run_session[
-    stream_index: Int = -1,
-    junit_index: Int = -1,
-    ann_index: Int = -1,
-    *Rs: Reporter,
+    C: ReportCoordinator
 ](
     mut runtime: ExecRuntime,
     config: RunnerConfig,
     root: String,
-    mut reporter: CompositeReporter[*Rs],
+    mut reporter: C,
 ) raises -> Int:
     """Orchestrate a whole run and return the resolved process exit code.
 
@@ -3873,31 +3724,20 @@ def run_session[
     exactly once, carrying it. The session emits events only; it prints nothing.
 
     Parameters:
-        stream_index: The fixed tuple position of the composed
-            `JsonStreamReporter`, or `-1` when none is composed. When
-            non-negative the session polls that reporter's latch at each
-            scheduling boundary and treats a write failure as a fatal abort;
-            at `-1` the poll is a comptime no-op.
-        junit_index: The fixed tuple position of the composed `JunitReporter`,
-            or `-1` when none is composed. When non-negative the session
-            synthesizes `[not-run]` rows and finalizes the report while sealing
-            the accounting, before the exit code is resolved; at `-1` both are
-            comptime no-ops.
-        ann_index: The fixed tuple position of the composed
-            `AnnotationsReporter`, or `-1` when none is composed. That reporter
-            is passive — it accumulates the event stream through the ordinary
-            composite fan-out — so the session performs no `ann_index`-keyed
-            work; `main` renders its tail via `annotation_lines[ann_index]`
-            after this returns. It is named here so the composition reads
-            `run_session[stream, junit, ann]`.
-        Rs: The reporter pack composed into `reporter`, inferred from the
-            argument.
+        C: The report coordinator this session drives, inferred from the
+            argument. The session polls its stream health at each scheduling
+            boundary and treats a latched write failure as a fatal abort, and
+            synthesizes `[not-run]` rows and finalizes the JUnit report while
+            sealing the accounting. A coordinator with no reporter behind a
+            channel answers inertly, so the session never branches on what is
+            composed. The annotation tail is rendered by `main` after this
+            returns, from the same coordinator.
 
     Args:
         runtime: Exclusive owner of process-global exec and signal state.
         config: Every knob the run reads.
         root: The invocation root; built binaries and paths are relative to it.
-        reporter: The composed reporters the session fans every event to.
+        reporter: The coordinator the session fans every event to.
 
     Returns:
         The resolved exit code: 2 on an interrupt; 3 on an internal error, a
@@ -3977,7 +3817,7 @@ def run_session[
     # deliverable, so the session stops scheduling and resolves exit 3. It is
     # polled at each scheduling boundary (like `interrupt_requested`); the poll
     # is a comptime no-op when no stream reporter is composed.
-    var stream_dead = _stream_failed[stream_index](reporter)
+    var stream_dead = reporter.stream_failed()
     # The registry the selection/collect probe machinery records builds and
     # qualifying listings into. The plain run loop keeps no entry here — it never
     # probes — so the attribution post-pass falls back to a fresh probe for its
@@ -3999,7 +3839,7 @@ def run_session[
         if interrupt_requested():
             interrupted = True
             break
-        if _stream_failed[stream_index](reporter):
+        if reporter.stream_failed():
             stream_dead = True
             break
         try:
@@ -4057,7 +3897,7 @@ def run_session[
             if interrupt_requested():
                 interrupted = True
                 break
-            if _stream_failed[stream_index](reporter):
+            if reporter.stream_failed():
                 stream_dead = True
                 break
             reporter.handle(Event.file_started(disc.gate_files[gi]))
@@ -4148,7 +3988,7 @@ def run_session[
             if interrupt_requested():
                 interrupted = True
                 break
-            if _stream_failed[stream_index](reporter):
+            if reporter.stream_failed():
                 stream_dead = True
                 break
             reporter.handle(Event.file_started(disc.run_files[ri]))
@@ -4208,7 +4048,7 @@ def run_session[
     # scheduling boundary because it tripped on the final file's own events) is
     # picked up here so a dead pipe on the last file still resolves to the fatal
     # exit 3 rather than the run's own code.
-    if _stream_failed[stream_index](reporter):
+    if reporter.stream_failed():
         stream_dead = True
 
     # The pure exit-code outcome over the run outcomes at TEST granularity
@@ -4248,7 +4088,7 @@ def run_session[
     # A latched machine-stream write failure that tripped on the final file's own
     # events (missed at the scheduling boundaries) is the JSON stream's "finalize"
     # tier — picked up here so a dead pipe on the last file still escalates.
-    if _stream_failed[stream_index](reporter):
+    if reporter.stream_failed():
         stream_dead = True
 
     # Synthesize a `[not-run]` row into the JUnit report for every selected file
@@ -4257,8 +4097,8 @@ def run_session[
     # unique temp, atomic-rename onto PATH. The prior report survives every
     # failure. A latched junit SPOOL failure did NOT abort the run mid-flight (the
     # deliberate asymmetry vs the stream's fatal abort); it surfaces NOW.
-    _junit_note_not_run[junit_index](reporter, casualty_files)
-    var junit_fin = _junit_finalize[junit_index](reporter)
+    reporter.note_not_run(casualty_files)
+    var junit_fin = reporter.finalize_junit()
     var finalize_failed = junit_fin.failed
     if finalize_failed:
         # Loudly report the finalization failure — the console shows it and the
@@ -4311,7 +4151,7 @@ def run_session[
     # (torn or absent on the now-dead stream) is the consumer's truncation
     # signal; the EXIT CODE is the out-of-band signal and must not lie about
     # it by returning the code resolved before the stream died.
-    if not stream_dead and _stream_failed[stream_index](reporter):
+    if not stream_dead and reporter.stream_failed():
         code = resolve_exit_code(
             TerminalFacts(
                 interrupted=interrupt_latched,
@@ -4326,13 +4166,8 @@ def run_session[
 
 
 def run_session[
-    stream_index: Int = -1,
-    junit_index: Int = -1,
-    ann_index: Int = -1,
-    *Rs: Reporter,
-](
-    config: RunnerConfig, root: String, mut reporter: CompositeReporter[*Rs]
-) raises -> Int:
+    C: ReportCoordinator
+](config: RunnerConfig, root: String, mut reporter: C) raises -> Int:
     """Run a session with a locally owned runtime, for direct library callers.
 
     The CLI uses the overload that accepts an already-open runtime, so a runtime
@@ -4341,16 +4176,13 @@ def run_session[
     exclusive mutable ownership to every supervised child.
 
     Parameters:
-        stream_index: Forwarded to the primary overload.
-        junit_index: Forwarded to the primary overload.
-        ann_index: Forwarded to the primary overload.
-        Rs: The reporter pack composed into `reporter`, inferred from the
+        C: The report coordinator this session drives, inferred from the
             argument.
 
     Args:
         config: Every knob the run reads.
         root: The invocation root; built binaries and paths are relative to it.
-        reporter: The composed reporters the session fans every event to.
+        reporter: The coordinator the session fans every event to.
 
     Returns:
         The resolved exit code, as the primary overload defines it.
@@ -4363,9 +4195,7 @@ def run_session[
     var runtime = ExecRuntime()
     try:
         runtime.open()
-        var code = run_session[stream_index, junit_index, ann_index](
-            runtime, config, root, reporter
-        )
+        var code = run_session(runtime, config, root, reporter)
         runtime.close()
         return code
     except error:
