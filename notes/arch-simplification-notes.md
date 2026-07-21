@@ -134,3 +134,82 @@ composite may "never" be nested inside another struct. That over-generalized a
 `Copyable` failure: `Movable` does synthesize, and declaring
 `struct CompositeReporter[*Rs: Reporter](Movable)` lets a coordinator own its
 pack. Had the claim been believed, this design would have looked impossible.
+
+## Splitting session.mojo and extracting the pipeline kernel
+
+Stage 1 (move-only): `1a8d1d2` `77885af` `4a5960a` `4352659` `4b55fde`
+`cb73029` `61c8994` `0e866fc`
+Stage 2 (structural): `fdfb061` `c6d2395` `f9cba39`, fixes `8a7b856` `b7fc3df`
+
+`session/session.mojo` was 4,482 lines in one file spanning scratch plumbing,
+build orchestration, attempt machinery, probe/reconcile, the recovery loop,
+crash attribution and the entry points. Stage 1 moved those clusters into
+focused satellite modules following the package's existing pattern; the file is
+now 559 lines (the two `run_session` overloads). The move was proven mechanical
+by an entity-level diff: 58 entities in, 58 out, none added, removed or
+renamed, bodies and signatures byte-identical — the only deltas were three
+trailing section-banner comments becoming module docstrings.
+
+Stage 2 was the one genuinely structural change: the sequential two-pass driver
+became an explicit state machine (`session/pipeline.mojo`) with per-file state,
+explicit step requests and explicit completions, driven sequentially at
+capacity one. The split that matters is that the kernel decides the next step
+and the driver executes it — a later phase replaces only the driver with a
+worker pool while admission, retry, maxfail and accounting policy stay in the
+session. The seam is named in AGENTS.md, including the dependency on a versioned
+multi-child native adapter that does not yet exist, so the reader knows the
+second driver is named rather than imminent.
+
+An adversarial review of the cutover found one real divergence the differential
+console-capture could not have caught: a stale-name recovery whose rebuilt
+binary's re-probe crashes lost its crash-attribution entry, because the old
+code's recovery-probe result flowed back out into a shared append the kernel
+split had hoisted inline. Rendered bytes only — the exit code and counts were
+unaffected — but the attribution banner count and one `CrashAttribution` event
+would have gone missing. Fixed by mirroring the append into the recovery branch
+(`8a7b856`), with a new fixture-driven test that was mutation-proven: removing
+the append turned exactly that test RED. The rebuild reproduces the same binary
+path (the mangle is a pure injective function of the relative path), so the
+attributed binary matches the old behavior.
+
+The kernel's vocabulary is mtest's own — `RunPipeline`, `FileStage`, `StepKind`,
+`BUILD_FILE`, `PROBE_FILE`, `RUN_SELECTION`, `admit_crash_retry` — never a
+generic job/task/scheduler abstraction. The rent argument: every stage, step
+kind and completion field is reached by the sequential driver today and pinned
+by 28 unit tests; none exists only for a future pool.
+
+## One owning epilogue in main
+
+`e5f293c`
+
+`main.mojo` repeated a resource-teardown ladder — discard the JUnit scratch,
+close the JSON fd, close the runtime, apply a precedence — across most of its
+18 `exit(` paths. One `RunResources` struct with a single
+`close_into(code, rank_delivery) -> Int` now implements that ladder once; the
+18 `exit(` sites became 12 and `main` stays the only `exit()` caller. The JSON
+close remains a delivery fact fed to the model resolver, not a locally
+transformed code — the reviewed consolidation is preserved. `close_into` takes
+a `rank_delivery` flag because the two usage-refusal paths own code 4 and must
+not route it through the delivery precedence (which would turn 4 into 3); main,
+which owns code 4, makes that call.
+
+## One audited platform-I/O boundary below report
+
+`54bb495` `5e8165c` `8f58f73`
+
+Four modules across three layers carried platform ABI knowledge: `getpid` in
+`session/scratch.mojo` and `report/junit_reporter.mojo`, `rename` implemented
+twice (`exec/fs.mojo` and `junit_reporter.mojo`), and the JSON stream's
+`write`/`creat`/`close`/`__error` cluster. The root cause was structural —
+`report` (Layer 2) cannot import `exec` (Layer 3), so fd-owning reporters had
+nowhere blessed to get `write`.
+
+A new `src/mtest/platform` package at Layer 0 (it imports no internal module,
+so no cycle) now wraps pid, rename, and the streaming open/write/close, and
+every higher-layer `external_call` declaration is deleted — verified by grep
+that nothing outside `exec/` and `platform/` declares one. `rename` has one
+implementation instead of two. AGENTS.md's FFI wording now names the two
+audited boundaries — the platform module and `exec`/`native` — rather than
+claiming all FFI lives in `exec`. Done in three slices (pid, rename, stream),
+each green on `ci`, `safety-check`, `postfork-check` and `native-check`, with
+the dead-pipe and artifact-preservation e2e scenarios passing.
