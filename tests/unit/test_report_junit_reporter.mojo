@@ -7,7 +7,7 @@ outcome / per-test rows, the Surefire chronology of a rerun-exhausted failure,
 flaky attempt order, the precompile suite plus per-casualty not-run rows and the
 empty-list degenerate case, deselected/excluded absence, the suite-level
 capture, and the non-raising write latch. The junit-10 oracle is run over the
-real assembled output by the `scripts/junit_render_check.py` CI gate; here the
+real assembled output by the `scripts/checks/reports/junit_render.py` CI gate; here the
 event->fragment mapping and the spool mechanism are pinned directly, including
 `open_junit_spool` — the spool-directory primitive the reporter is handed.
 """

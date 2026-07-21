@@ -564,7 +564,8 @@ processes left behind.
 `e2e/flaky/test_flaky.mojo` is built for exactly this: it CRASHes (a real
 SIGSEGV) on its first run, then PASSES on a re-run, keyed by a marker file
 under `build/e2e-scratch/` that must be reset between runs for deterministic
-ordering (the way `scripts/e2e_check.py`'s `retries-flaky` scenario does):
+ordering (the way `scripts.e2e.scenarios.resilience`'s `retries-flaky`
+scenario does):
 
 ```console
 $ rm -f build/e2e-scratch/flaky_marker
@@ -664,14 +665,14 @@ line says so (`RUN-CAP`, `TIME-BUDGET`) instead of guessing.
 ### Compile timeout
 
 `--compile-timeout SECS` bounds a file's *build* the same way `--timeout`
-bounds its run. The committed `scripts/fake_slow_mojo.py` — a `--mojo`
+bounds its run. The committed `scripts/fixtures/toolchain/fake_slow_mojo.py` — a `--mojo`
 stand-in that sleeps forever on `build` but honors the terminate signal
 promptly — makes this fast and deterministic to demonstrate without waiting
 out a real stalled compile:
 
 ```console
-$ pixi run bash -c 'build/mtest --mojo scripts/fake_slow_mojo.py e2e/suite/test_passing.mojo --compile-timeout 1'
-mtest 0.4.0 (scripts/fake_slow_mojo.py)
+$ pixi run bash -c 'build/mtest --mojo scripts/fixtures/toolchain/fake_slow_mojo.py e2e/suite/test_passing.mojo --compile-timeout 1'
+mtest 0.4.0 (scripts/fixtures/toolchain/fake_slow_mojo.py)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 COMPILE-TIMEOUT  e2e/suite/test_passing.mojo     0.00s  (timed out after 1s)
@@ -680,7 +681,7 @@ COMPILE-TIMEOUT  e2e/suite/test_passing.mojo     0.00s  (timed out after 1s)
 fake_slow_mojo.py: build: lowering module (this will not finish)
 fake_slow_mojo.py: SIGTERM received; exiting
 the build exceeded the 1s compile timeout — split the module into smaller files or exclude it (raise the deadline with --compile-timeout N, or --compile-timeout 0 to remove it)
-reproduce: mtest --mojo scripts/fake_slow_mojo.py --compile-timeout 1 e2e/suite/test_passing.mojo
+reproduce: mtest --mojo scripts/fixtures/toolchain/fake_slow_mojo.py --compile-timeout 1 e2e/suite/test_passing.mojo
 
 ===== 0 passed, 0 failed, 0 skipped, 1 compile timeout (0 excluded, 0 not run) in 1.0s =====
 $ echo $?
@@ -693,17 +694,17 @@ COMPILE-ERROR. Combined with `--retries`, a killed compile's rebuild runs
 against a fresh, quarantined module cache, announced with a loud `WARNING`:
 
 ```console
-$ pixi run bash -c 'build/mtest --mojo scripts/fake_slow_mojo.py e2e/suite/test_passing.mojo --compile-timeout 1 --retries 1'
-mtest 0.4.0 (scripts/fake_slow_mojo.py)
+$ pixi run bash -c 'build/mtest --mojo scripts/fixtures/toolchain/fake_slow_mojo.py e2e/suite/test_passing.mojo --compile-timeout 1 --retries 1'
+mtest 0.4.0 (scripts/fixtures/toolchain/fake_slow_mojo.py)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
-TRY            e2e/suite/test_passing.mojo     attempt 1/2  build compile-timeout  (timed out)  1.02s
-WARNING  compile-kill-residual: the compile of 'e2e/suite/test_passing.mojo' was killed (compile-timeout); the shared module cache may be suspect, so the rebuild ran quarantined against a fresh per-attempt cache (the shared cache was neither used nor deleted)
+TRY            e2e/suite/test_passing.mojo     attempt 1/2  build compile-timeout  (timed out)  1.00s
+WARNING  compile-kill-residual: the compile of 'e2e/suite/test_passing.mojo' was killed at the compile deadline (compile-timeout); the shared module cache may be suspect, so the rebuild ran quarantined against a fresh per-attempt cache (the shared cache was neither used nor deleted)
 COMPILE-TIMEOUT  e2e/suite/test_passing.mojo     0.00s  (timed out after 1s)
 
 [...captured output omitted...]
 
-===== 0 passed, 0 failed, 0 skipped, 1 compile timeout (0 excluded, 0 not run) in 2.1s =====
+===== 0 passed, 0 failed, 0 skipped, 1 compile timeout (0 excluded, 0 not run) in 2.0s =====
 $ echo $?
 1
 ```
@@ -869,7 +870,7 @@ mojo: error: failed to parse the provided Mojo source module
 to an `<error>`-carrying sentinel testcase, `[build]` here since neither was
 retried); `failures="1"` is `test_failing.mojo::test_second_fails`'s
 `<failure>`. The document validates against the committed
-`scripts/schemas/junit-10.xsd` — the settled dialect `scripts/junit_check.py`
+`scripts/schemas/junit-10.xsd` — the settled dialect `scripts/checks/reports/junit.py`
 blesses (see [Status](#status) for why "settled dialect" is not the same
 claim as "the one true JUnit schema").
 
@@ -1066,15 +1067,15 @@ the walking skeleton always had.
 
 The exhaustive source suite and the runner dogfood use complementary paths:
 
-- `pixi run test-direct` discovers all classified modules under `tests/unit/`
+- `pixi run test` discovers all classified modules under `tests/unit/`
   and `tests/integration/`, generates explicit `TestSuite` registrations for
   every `test_*` function, compiles one aggregate binary, and executes it
-  directly. It covers 77 modules and 907 tests without invoking `mtest` or
+  directly. It covers 77 modules and 913 tests without invoking `mtest` or
   paying 77 separate compiler startups.
-- `pixi run test` builds the real `build/mtest` binary and sends three small,
-  standalone probes through its discover/build/run/parse/report pipeline. The
-  harness independently pins the exact probe paths and requires three PASS
-  rows, `selected: 3`, `excluded: 0`, and process exit 0.
+- `pixi run dogfood-check` builds the real `build/mtest` binary and sends three
+  small, standalone probes through its discover/build/run/parse/report
+  pipeline. The harness independently pins the exact probe paths and requires
+  three PASS rows, `selected: 3`, `excluded: 0`, and process exit 0.
 
 Both paths build native binaries and execute them directly; neither uses
 `mojo run`. A focused aggregate keeps failures easy to reproduce:
@@ -1093,7 +1094,7 @@ The focused dogfood run used by both the source-checkout and installed-package
 gates is intentionally small:
 
 ```console
-$ pixi run test
+$ pixi run dogfood-check
 root: /checkout/mtest   selected: 3 files   excluded: 0
 
 PASS           tests/dogfood/exec_probe.mojo
@@ -1101,7 +1102,7 @@ PASS           tests/dogfood/model_probe.mojo
 PASS           tests/dogfood/session_probe.mojo
 
 ===== 3 passed, 0 failed, 0 skipped (0 excluded, 0 not run) =====
-self_host_check: OK -- selected and passed all 3 focused dogfood probes
+dogfood: OK -- selected and passed all 3 focused dogfood probes
 ```
 
 `pixi run ci` also keeps two independent product-level oracles:
@@ -1229,7 +1230,7 @@ open, and are stated honestly here rather than glossed over.
 - **The JUnit dialect is a settled choice, not a universal standard.** JUnit
   XML has no single canonical schema across every consumer. `mtest` commits
   to one dialect (`scripts/schemas/junit-10.xsd`) and validates every emitted
-  report against it with the same oracle (`scripts/junit_check.py`) CI runs —
+  report against it with the same oracle (`scripts/checks/reports/junit.py`) CI runs —
   that is honesty about conformance to *this* schema, not a claim that every
   JUnit-consuming tool in the wild agrees on one true dialect.
 - **GitHub annotations are capped, and their `file=` paths assume the
@@ -1247,7 +1248,7 @@ open, and are stated honestly here rather than glossed over.
 - **The real-Actions annotation rendering is a manual, maintainer-run gate —
   not yet recorded.** Every annotation shape, sort order, cap, and the
   stop-commands fence around echoed child output is verified in-repo: unit
-  tests pin the renderer, `scripts/annotations_check.py` is a local proxy for
+  tests pin the renderer, `scripts/checks/reports/annotations.py` is a local proxy for
   what GitHub's own Checks runner does with workflow-command lines, and the
   e2e cells drive the real binary end to end, including a hostile-console
   case with a forged `::error` line. What none of that can prove is that
@@ -1272,22 +1273,43 @@ are pinned in [pixi.toml](pixi.toml).
 
 ```console
 $ pixi install                 # locked local environment setup
-$ pixi run ci                  # ci-preflight -> test-direct -> test -> e2e
 ```
 
-`pixi run ci` is the canonical serial local floor. `ci-preflight` runs the
-version, formatting, harness, safety, post-fork, native, JUnit, build, rendered-
-JUnit, and transcript checks in fail-fast order before the three behavioral
-gates above.
+The normal contributor workflow is:
+
+```console
+$ pixi run fmt
+$ pixi run test-file -- PATH
+$ pixi run test
+$ pixi run e2e
+$ pixi run ci
+```
+
+Use the focused file command while coding. After an internal change, `test`
+runs every classified unit and integration test in one aggregate binary. Run
+`e2e` after CLI, session, exec, or reporter behavior changes, and run `ci`
+before opening a PR. Unit and integration remain meaningful classifications
+and useful maintainer diagnostics through `test-unit` and `test-integration`;
+they are not mandatory sequential local phases.
+
+`pixi run ci` is the canonical serial local floor: `ci-preflight -> test ->
+dogfood-check -> e2e`. `ci-preflight` runs the version, formatting, harness,
+safety, post-fork, native, JUnit, build, rendered-JUnit, and transcript checks
+in fail-fast order. `dogfood-check` is the separate three-probe real-pipeline
+check, not the exhaustive suite. Specialized safety, native, memory,
+transcript, JUnit, package, and contract gates remain independent maintainer,
+hosted-CI, or release-QA tools.
 
 GitHub preserves the same logical floor without serializing independent work.
-Linux preflight releases separate fail-fast `test-direct`, dogfood `test`,
-`e2e`, ASan/LSan, and Valgrind cells; macOS preflight independently releases
-configured `test-direct`, `test`, and `e2e` cells. The Linux package-consumption
-job starts independently. Memory safety therefore runs on every pull request,
-configured `main`/`master` push, and manual workflow invocation, with no
-scheduled memory-safety workflow. Hosted macOS direct and dogfood cells have
-passed; the end-to-end cell remains the outstanding behavioral proof.
+Linux preflight releases separate fail-fast exhaustive `test`,
+`dogfood-check`, `e2e`, ASan/LSan, and Valgrind cells; macOS preflight
+independently releases configured `test`, `dogfood-check`, and `e2e` cells.
+Their externally configured lane display names remain `direct tests` and
+`self-hosted tests`. The Linux package-consumption job starts independently.
+Memory safety therefore runs on every pull request, configured `main`/`master`
+push, and manual workflow invocation, with no scheduled memory-safety workflow.
+Hosted macOS direct and dogfood cells have passed; the end-to-end cell remains
+the outstanding behavioral proof.
 
 Individually:
 
@@ -1296,7 +1318,7 @@ Individually:
 | `pixi run build` | precompile `src/mtest` to `build/mtest.mojopkg` — the compile gate |
 | `pixi run build-bin` | link the runnable binary at `build/mtest` from `src/main.mojo` |
 | `pixi run ci-preflight` | run the exact ten-step static/build/transcript barrier used by Linux hosted CI |
-| `pixi run harness-check` | fast self-tests for deterministic aggregate generation, focused dogfood membership, watchdog behavior, and exact CI topology |
+| `pixi run harness-check` | serial focused owners for aggregate generation, classified supervision, repository layout, dogfood membership, and exact CI topology |
 | `pixi run safety-check` | mutation-test and run the unsafe-Mojo inventory; enforces adjacent `# SAFETY:` proofs, but does not establish that those proofs are true |
 | `pixi run postfork-check` | mutation-test the Clang AST auditor, traverse the complete production/testing child call graphs, and require the exact reviewed platform-call set; proves allowlist conformance, not syscall correctness |
 | `pixi run native-check` | run `postfork-check`, strict C17 ABI/layout/export checks, and native lifecycle/fault tests; does not replace dynamic analysis |
@@ -1304,9 +1326,9 @@ Individually:
 | `pixi run transcripts-check` | regenerate to a temp dir and diff byte-for-byte — the protocol pin |
 | `pixi run test-unit` | compile the unit modules into one aggregate binary and execute it directly |
 | `pixi run test-integration` | compile the integration modules into one aggregate binary and execute it directly |
-| `pixi run test-direct` | generate, build, and directly execute one aggregate binary containing all 77 classified modules and 907 tests, with no `mtest` involved |
 | `pixi run test-file -- PATH` | generate, build, and directly execute a focused aggregate for one classified module |
-| `pixi run test` | run three focused probes through `build/mtest`, requiring exact independent header and PASS-row membership |
+| `pixi run test` | generate, build, and directly execute one aggregate binary containing all 77 classified modules and 913 tests, with no `mtest` involved |
+| `pixi run dogfood-check` | run three focused probes through `build/mtest`, requiring exact independent header and PASS-row membership |
 | `pixi run e2e` | build `build/mtest`, then drive it against `e2e/` and assert exact exit codes and console structure |
 | `pixi run asan-check` | on Linux, prove live OOB/UAF/leak controls are detected and source-build the highest-risk exec suites with ASan/LSan; this is risk-weighted coverage, not a whole-program proof |
 | `pixi run valgrind-check` | on Linux, prove Memcheck controls and source-build the exec/native coverage under the pinned Valgrind binary; it does not prove all paths leak- or corruption-free |
@@ -1320,7 +1342,8 @@ fails if the package is unavailable, libc changes, or the versions differ. The
 independent package lane has the separate external-channel contract described
 under [Installation](#installation); neither exception makes its job hermetic.
 
-See [Self-hosting](#self-hosting) for how `test` and `test-direct` relate.
+See [Self-hosting](#self-hosting) for how the exhaustive `test` gate and focused
+`dogfood-check` relate.
 
 The protocol snapshots are the project's contract with the toolchain: a red
 `transcripts-check` after a repository change indicts the change, not the

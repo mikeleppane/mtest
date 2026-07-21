@@ -7,9 +7,9 @@ head+tail text bound, the recomputed suite counts, the frozen node-id row order,
 the one-outcome-sentinel-per-suite invariant asserted DIRECTLY, and the exact
 element shapes of every sentinel-matrix cell (build / attempts file-level /
 attempts flaky / attempts per-test / non-retried per-test / not-run / suite
-capture). The junit-10 schema + arithmetic oracle (`scripts/junit_check.py`) is
+capture). The junit-10 schema + arithmetic oracle (`scripts/checks/reports/junit.py`) is
 run over the REAL rendered output of these same cells by the
-`scripts/junit_render_check.py` CI gate; here the shapes and counts are pinned
+`scripts/checks/reports/junit_render.py` CI gate; here the shapes and counts are pinned
 directly so a regression names itself.
 """
 from std.testing import assert_equal, assert_false, assert_true

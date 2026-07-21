@@ -52,10 +52,11 @@ replace the two-model gate, they prepare for it.
 
 ## Before reading a line
 
-1. **Reproduce the floor.** Run the chain yourself, in order: `pixi run
-   fmt-check`, `pixi run build`, `pixi run transcripts-check`, `pixi run test` —
-   or `pixi run ci`, which is the same chain, fail-fast (AGENTS.md defines it). A
-   red gate is finding #1 — stop and report it, and name *which* stage went red (a
+1. **Reproduce the floor.** Run `pixi run ci`, the canonical fail-fast chain:
+   preflight, exhaustive `test`, the three-probe `dogfood-check`, then `e2e`
+   (AGENTS.md defines the exact membership). Use `pixi run test-file -- PATH`
+   only as the focused reproducer while investigating. A red gate is finding #1
+   — stop and report it, and name *which* stage went red (a
    byte diff in `transcripts-check` and a test failure indict different things —
    see axes 2 and 1). *Exception:* for a **docs-only diff** (Markdown,
    docstrings, comments — nothing under `src/`, `tests/`, or `scripts/`), a
@@ -110,10 +111,10 @@ Walk the diff once per axis. The triage prompts are starting points, not a scrip
   `<STACK-DUMP>`. A new rewrite is a deliberate, reviewed extension, never a quiet
   addition.
 - **`transcripts-check` regenerates and diffs — it does not trust a hash.** If a
-  change to `transcripts_check.sh` (or the generator) makes it compare a hash, a
-  size, or a sampled slice instead of regenerating every transcript to a temp dir
-  and diffing byte-for-byte, that's a **Critical** finding — it silently weakens
-  the strongest gate in the repo.
+  change to `scripts/checks/protocol_snapshots.py` (or the generator) makes it
+  compare a hash, a size, or a sampled slice instead of regenerating every
+  transcript to a temp dir and diffing byte-for-byte, that's a **Critical**
+  finding — it silently weakens the strongest gate in the repo.
 - **Are the generator's self-asserts hard failures, on every scenario?**
   `gen_transcripts.py` must hard-assert MANIFEST-equals-matrix, no-absolute-path,
   crash-dies-by-signal, impostor-survives-byte-exact, count reconciliation, and
@@ -190,10 +191,10 @@ Walk the diff once per axis. The triage prompts are starting points, not a scrip
 - `raises` present iff the function can raise? Correct `.copy()` / `^` transfer
   for non-`ImplicitlyCopyable` types?
 - **Determinism.** Does a touched script (`gen_transcripts.py`,
-  `transcripts_check.sh`) avoid timestamps, absolute paths, and unsorted
-  `dict`/`set` iteration in anything it writes? Everything committed must reproduce
-  byte-for-byte on a second run — the generator's double-generation self-check
-  enforces this; don't let a change slip past it.
+  `scripts/checks/protocol_snapshots.py`) avoid timestamps, absolute paths, and
+  unsorted `dict`/`set` iteration in anything it writes? Everything committed
+  must reproduce byte-for-byte on a second run — the generator's
+  double-generation self-check enforces this; don't let a change slip past it.
 
 ### 6. Architecture
 

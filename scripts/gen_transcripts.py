@@ -19,8 +19,8 @@ and (3) collapsing a crash stack dump to <STACK-DUMP>. Everything else is
 captured verbatim.
 
 Usage:
-    python scripts/gen_transcripts.py              # write into tests/snapshots/protocol/
-    python scripts/gen_transcripts.py --out DIR    # write into DIR (check harness)
+    python -m scripts.gen_transcripts              # write into tests/snapshots/protocol/
+    python -m scripts.gen_transcripts --out DIR    # write into DIR (check harness)
 """
 from __future__ import annotations
 

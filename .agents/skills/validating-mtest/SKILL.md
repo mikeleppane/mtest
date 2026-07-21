@@ -40,19 +40,19 @@ Two techniques defeat it, and the validator is built on them:
 - After any change to `cli`, `discover`, `select`, `session`, `protocol`, or
   `report` — confirm no user-facing promise regressed.
 
-Not for: internal unit correctness (`pixi run test-direct`) or protocol-snapshot
+Not for: internal unit correctness (`pixi run test`) or protocol-snapshot
 drift (`pixi run transcripts-check`).
 
 ## Quick start — run the oracle
 
 ```bash
-python scripts/validate_contract.py            # rebuild-if-stale, run all ~55 checks
-python scripts/validate_contract.py -k select  # filter by check name
-python scripts/validate_contract.py --strict   # a SKIP of a safety-critical check FAILS
-python scripts/validate_contract.py -v --keep   # dump streams on failure, keep scaffold
+pixi run contract-check --                 # rebuild-if-stale, run all ~55 checks
+pixi run contract-check -- -k select       # filter by check name
+pixi run contract-check -- --strict        # safety-critical SKIP fails
+pixi run contract-check -- -v --keep       # dump streams, keep scaffold
 ```
 
-`scripts/validate_contract.py` (Python lives under `scripts/`, per AGENTS.md)
+`scripts/qa/contract.py` (Python lives under `scripts/`, per AGENTS.md)
 scaffolds a throwaway user project — a library, clean all-pass suites with a
 **known exact node-id set**, and **poison** files — outside the repo, then drives
 `build/mtest` across the contract matrix, printing PASS/FAIL per check tagged
@@ -102,7 +102,7 @@ A false finding wastes everyone's time. Most come from the harness, not mtest:
 - **Session suites need the native object.** A bare
   `build/mtest tests/integration/test_session_*.mojo` link-fails on
   `mtest_exec_*` symbols — a missing `-Xlinker build/native/...`, a harness
-  artifact, **not** a COMPILE-ERROR bug. `scripts/test_all.sh` links it.
+  artifact, **not** a COMPILE-ERROR bug. `scripts/harness/classified.py` links it.
 
 **Reproduce before you report.** Re-run a suspected finding cleanly (fresh CWD,
 direct exit capture, correct build) before writing it up. The original pass
@@ -112,7 +112,7 @@ against a stale binary proves nothing.
 
 ## Validation matrix (what the oracle asserts)
 
-Every row below is a check in `validate_contract.py` unless marked *(manual)*.
+Every row below is a check in `scripts/qa/contract.py` unless marked *(manual)*.
 
 | Area | Assertion (frozen-surface / poison) | §|
 |------|--------|--|
@@ -172,7 +172,8 @@ Severity by user impact: silent-wrong > wrong-exit-code > confusing-output.
 
 ## Complementary gates (do not reinvent)
 
-`pixi run e2e` (known-outcome fixture tree), `pixi run test-direct` (Mojo unit +
-integration), `pixi run transcripts-check` (protocol pin). This skill is the
+`pixi run e2e` (known-outcome fixture tree), `pixi run test` (exhaustive Mojo
+unit + integration), `pixi run dogfood-check` (three focused real-pipeline
+probes), and `pixi run transcripts-check` (protocol pin). This skill is the
 black-box, user-perspective layer **on top** of those; if it and `e2e` ever
 disagree about a promise, that disagreement is itself a finding.

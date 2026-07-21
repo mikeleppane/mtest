@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds mtest FROM SOURCE inside rattler-build's isolated build environment,
 # mirroring the repo's own build -> build-native -> build-bin pipeline
-# (scripts/build_pkg.sh, scripts/build_native.py, pixi.toml's build-bin task).
+# (scripts/build/mojo_package.sh, scripts/build/native.py, and pixi.toml's
+# build-bin task).
 #
 # Runs with $SRC_DIR as the working directory (the recipe's `source: path: ../`
 # copy of this repository). $PREFIX is the isolated build env supplying
@@ -16,7 +17,7 @@ echo "==> precompiling src/mtest -> build/mtest.mojopkg"
 mojo precompile src/mtest -o build/mtest.mojopkg
 
 # Compile ONLY the production adapter variant (MTEST_EXEC_TESTING=0) with the
-# exact flags scripts/native_abi_check.py uses for the shipped object — the
+# exact flags scripts/checks/native_abi.py uses for the shipped object — the
 # test-only variant is a dev/CI artifact, never part of the installed package.
 echo "==> compiling native/mtest_exec_native.c -> build/native/mtest_exec_native.o"
 clang \

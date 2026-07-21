@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Deliberately-broken variant of mock.xml for scripts/junit_check_test.py:
+<!-- Deliberately-broken variant of mock.xml for scripts/tests/test_junit.py:
      the aggregate `skipped` attribute is added to the <testsuites> root,
      which junit-10.xsd defines no such attribute for and rejects. Everything
      else is identical to the faithful mock, isolating this one violation. -->

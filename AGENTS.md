@@ -176,40 +176,44 @@ pixi run junit-check       # validate the committed JUnit oracle and checker
 pixi run build             # the package-compiles gate
 pixi run junit-render-check# validate bytes emitted by the real JUnit reporter
 pixi run transcripts-check # regenerate to a temp dir and diff byte-for-byte
-pixi run test-direct       # compile the exhaustive inventory into one direct-run binary
-pixi run test              # run focused dogfood probes through the built mtest binary
+pixi run test              # compile the exhaustive inventory into one direct-run binary
+pixi run dogfood-check     # run three focused probes through the built mtest binary
 pixi run e2e               # exact CLI exits and output against e2e/manifest.json
 ```
 
 `pixi run ci-preflight` chains `version-check -> fmt-check -> harness-check ->
 safety-check -> postfork-check -> native-check -> junit-check -> build ->
 junit-render-check -> transcripts-check` in that exact fail-fast order. The
-canonical local `pixi run ci` remains serial: `ci-preflight -> test-direct ->
-test -> e2e`. Hosted CI runs the same logical floor with two platform-local
-chains: Linux preflight releases fail-fast `test-direct`, `test`, `e2e`, ASan,
-and Valgrind cells; macOS preflight releases `test-direct`, `test`, and `e2e`
+canonical local `pixi run ci` remains serial: `ci-preflight -> test ->
+dogfood-check -> e2e`. Hosted CI runs the same logical floor with two
+platform-local chains: Linux preflight releases fail-fast `test`,
+`dogfood-check`, `e2e`, ASan, and Valgrind cells; macOS preflight releases
+`test`, `dogfood-check`, and `e2e`
 cells with `fail-fast: false` so a failing lane does not cancel its siblings.
 Every Linux and macOS lane remains a blocking check. The Linux
 package-consumption job remains independent. Memory safety therefore runs on
 every pull request and configured-main-branch push, not on a schedule. Neither
-platform waits for the other platform's preflight.
+platform waits for the other platform's preflight. The matrix lane display
+values `direct tests` and `self-hosted tests` are externally configured required
+check names and stay stable even though their task fields are `test` and
+`dogfood-check`.
 
 `native-check` depends on `postfork-check`, so invoking the native gate alone
-cannot omit the recurring child call-graph audit. `test-direct` generates one
+cannot omit the recurring child call-graph audit. `test` generates one
 explicit entrypoint that registers every test function in the classified
 unit/integration inventory, builds it once, and executes that aggregate binary
-directly. `test` sends three standalone probes through the built mtest binary,
-covering its real discover/build/run/parse/report path without recompiling the
-exhaustive inventory per file. Neither gate uses `mojo run`, because it masks
-crash exit codes to 1. Transcripts, ASan/Valgrind, and packaged artifact
-consumption remain Linux-only. The workflow requires macOS native/build smoke
-plus the full direct, dogfood, and end-to-end behavioral inventory; the README
-must keep executed evidence at build/link/`--help` until those hosted behavioral
-cells first pass.
+directly. `dogfood-check` sends three standalone probes through the built mtest
+binary, covering its real discover/build/run/parse/report path without
+recompiling the exhaustive inventory per file. Neither gate uses `mojo run`,
+because it masks crash exit codes to 1. Transcripts, ASan/Valgrind, and packaged
+artifact consumption remain Linux-only. The workflow requires macOS
+native/build smoke plus the full direct, dogfood, and end-to-end behavioral
+inventory; the README must keep executed evidence at build/link/`--help` until
+those hosted behavioral cells first pass.
 
 Classified modules under `tests/unit/` and `tests/integration/` are import-only:
 they declare `test_*` functions and MUST NOT declare `main()`. The generator
-`scripts/aggregate_tests.py` imports those modules and registers every test
+`scripts/harness/aggregate.py` imports those modules and registers every test
 function explicitly, failing if a module has no tests or retains an entrypoint.
 Every harness that executes a classified module, including `test-file`, ASan,
 and Valgrind, generates an entrypoint through that script; compiling the module
@@ -275,7 +279,7 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `scaffold` | repo skeleton, license/readme/gitignore/gitattributes |
 | `pixi` | `pixi.toml`, `pixi.lock`, tasks, the environment |
 | `fixtures` | `tests/fixtures/` — protocol probes and subprocess actors |
-| `transcripts` | `tests/snapshots/protocol/` + generator/check scripts |
+| `transcripts` | protocol snapshots plus `scripts/gen_transcripts.py` and `scripts/checks/{protocol_snapshots,transcript_compare}.py` |
 | `spec` | `docs/cli-contract.md` |
 | `agents` | `AGENTS.md` |
 | `notes` | `notes/` |
@@ -289,8 +293,8 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `report` | `src/mtest/report` (event consumers, reporters) |
 | `cli` | `src/mtest/cli` (arg parsing, main) |
 | `cache` | in-session build/collection reuse |
-| `test` | test infrastructure (`scripts/test_all.sh`, `scripts/build_pkg.sh`, shared helpers) |
-| `e2e` | end-to-end harness (`scripts/e2e_check.py`) and its `e2e/` manifest and scenarios |
+| `test` | test infrastructure (`scripts/harness/{classified,dogfood}.py`, `scripts/build/mojo_package.sh`, shared helpers) |
+| `e2e` | end-to-end harness (`scripts/e2e/`) and its `e2e/` manifest and scenarios |
 | `bench` | `benchmarks/` |
 | `docs` | docstrings, `docs/` |
 | `build` | packaging |
@@ -596,7 +600,7 @@ Accumulated the hard way; append as later phases teach more.
   one shared parent env, or two children spawning in the same window will
   race each other's cache directory.
 - **A `pixi run`-less invocation of the e2e Python driver looks like a real
-  regression, not a setup error.** `python scripts/e2e_check.py` run outside
+  regression, not a setup error.** `python -m scripts.e2e` run outside
   the pixi env fails many scenarios with a real `INTERNAL-ERROR` banner —
   `could not execute 'mojo' (errno 2) — no such file or directory` — because
   the driver's own PATH lacks `mojo`, and that PATH is what the `build/mtest`
@@ -614,7 +618,7 @@ Accumulated the hard way; append as later phases teach more.
   gate's REAL exit as its own statement (`cmd; echo "x=$?"`) — a trailing
   pipe/echo silently reports 0 even when the gate itself failed.
 - **The harness gates enforce explicit membership, not just presence.**
-  `scripts/harness_check.py` pins exact suite/fixture sets (`UNIT_SUITES`,
+  `scripts/checks/layout.py` pins exact suite/fixture sets (`UNIT_SUITES`,
   `INTEGRATION_SUITES`, `PROTOCOL_FIXTURES`) and exact counts (22 protocol
   snapshots, 29 e2e fixtures); a new `tests/unit/*.mojo`,
   `tests/integration/*.mojo`, snapshot, or `e2e/**/test_*.mojo` that isn't
@@ -652,11 +656,11 @@ Accumulated the hard way; append as later phases teach more.
   spawn, worse under host load — because the elevated fd-table ceiling makes
   every child's startup crawl. Correct move: validate an emitted artifact via
   a SEPARATE Python CI gate over the REAL binary's output (the
-  `junit_render_check.py` pattern: build the binary, run it, oracle-check the
+  `scripts/checks/reports/junit_render.py` pattern: build the binary, run it, oracle-check the
   file it actually wrote), never via an in-Mojo-test subprocess spawn; keep
   Mojo unit tests to in-process structural/exact-output assertions.
 - **Multibyte UTF-8 characters anywhere in `native/*.c`, comments included,
-  misalign `postfork_check.py`'s byte-offset AST.** `scripts/postfork_check.py`
+  misalign `postfork.py`'s byte-offset AST.** `scripts/checks/postfork.py`
   reads the source as a Python `str` (`source.read_text(encoding="utf-8")`,
   codepoint-indexed) but slices and line-counts it using RAW BYTE offsets
   straight from clang's `-ast-dump=json` (`_offset`/`_line`/`_source_segment`)
@@ -697,7 +701,7 @@ Accumulated the hard way; append as later phases teach more.
   composed.
 - **A tool that COMMITS captured program output containing filesystem paths
   must sanitize the ephemeral run root to a stable placeholder before
-  writing.** `scripts/pty_capture.py` captures the real `build/mtest`
+  writing.** `scripts/maintenance/pty_capture.py` captures the real `build/mtest`
   binary's ANSI console output into `notes/console-captures/`; the
   throwaway suite's `mkdtemp` root (carved from the ambient `TMPDIR`, which
   varies per run and per machine) is rewritten, before any file is written,

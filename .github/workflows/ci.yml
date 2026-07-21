@@ -46,14 +46,14 @@ jobs:
         include:
           - runner: ubuntu-24.04
             lane: direct tests
-            task: test-direct
+            task: test
             libc_debug: false
             safety_artifact: false
             artifact_name: none
             artifact_path: none
           - runner: ubuntu-24.04
             lane: self-hosted tests
-            task: test
+            task: dogfood-check
             libc_debug: false
             safety_artifact: false
             artifact_name: none
@@ -198,14 +198,14 @@ jobs:
         include:
           - runner: macos-15
             lane: direct tests
-            task: test-direct
+            task: test
             libc_debug: false
             safety_artifact: false
             artifact_name: none
             artifact_path: none
           - runner: macos-15
             lane: self-hosted tests
-            task: test
+            task: dogfood-check
             libc_debug: false
             safety_artifact: false
             artifact_name: none

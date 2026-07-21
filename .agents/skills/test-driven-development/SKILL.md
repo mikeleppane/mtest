@@ -52,31 +52,32 @@ def test_bad_timeout_flag_raises() raises:
 ```
 
 **Crucially, the repo eats the discipline the product sells.** The suite is run
-by `scripts/test_all.sh`, which generates one explicit `TestSuite` registration
-entrypoint, **builds one aggregate binary and executes it directly** — never
+by `scripts/harness/classified.py`, which generates one explicit `TestSuite`
+registration entrypoint, **builds one aggregate binary and executes it
+directly** — never
 `mojo run`, which masks a crashing process's exit code to 1. Run the whole suite
 (the canonical green gate), or generate a focused aggregate while iterating:
 
 ```bash
-pixi run test-direct
+pixi run test
 pixi run test-file -- tests/integration/test_exec_capture.mojo
 ```
 
-`scripts/test_all.sh` builds the package first (fail-fast on a broken toolchain
-or a package that no longer compiles), then recursively inventories the requested
-classified roots in bytewise-sorted order, parses each module's top-level
-`test_*` declarations, and emits explicit registrations — no hand-maintained
-execution list to drift. It fails closed on an empty module, a duplicate name,
-or a classified module that retains `main()`. One file per unit under test,
+`scripts/harness/classified.py` validates and inventories the requested roots
+in bytewise-sorted order, parses each module's top-level `test_*` declarations,
+and emits explicit registrations before building the package, native adapter,
+and aggregate. There is no hand-maintained execution list to drift. It fails
+closed on an empty module, a duplicate name, or a classified module that
+retains `main()`. One file per unit under test,
 named `tests/unit/test_<thing>.mojo` or
 `tests/integration/test_<thing>.mojo` according to the boundary it crosses.
 
 **Audit every harness consumer when executable topology changes.** A change to
 whether classified modules own `main()`, how their entrypoint is generated, or
-which inventory a lane runs MUST cover `test-direct`, `test-file`, ASan,
-Valgrind, self-host, and package consumption. A classified module is import-only
+which inventory a lane runs MUST cover `test`, `test-file`, ASan, Valgrind,
+dogfood, self-host, and package consumption. A classified module is import-only
 in every lane: any consumer that executes one generates its entrypoint through
-`scripts/aggregate_tests.py`; none compiles the module path directly. Add a
+`scripts/harness/aggregate.py`; none compiles the module path directly. Add a
 harness regression that inspects each affected build command — a green primary
 test gate does not prove the specialized consumers use the same module contract.
 
@@ -278,8 +279,9 @@ float legitimately appears is a timing number under `bench` — those are
    binaries for `exec`, the known-outcome tree for `session`) instead of
    re-deriving expected output by hand — those are already the oracle,
    self-verified at generation time.
-5. **Run the floor** — `pixi run fmt`, `pixi run test` (or `pixi run ci` for the
-   full chain, including `transcripts-check`) — before declaring done.
+5. **Run the floor** — `pixi run fmt`, the exhaustive `pixi run test`, and any
+   affected product-level gate (`pixi run dogfood-check` or `pixi run e2e`), or
+   use `pixi run ci` for the complete chain including `transcripts-check`.
 
 ---
 
@@ -301,8 +303,8 @@ float legitimately appears is a timing number under `bench` — those are
 - [ ] A refactor commit does not move a transcript or a tripwire's pinned value
 - [ ] Classified test module has no `main()` and stays cohesive enough for its
       `==> <module path>` failure marker to be useful
-- [ ] A test-execution topology change audits `test-direct`, `test-file`, ASan,
-      Valgrind, self-host, and package consumption; every classified-module
+- [ ] A test-execution topology change audits `test`, `test-file`, ASan,
+      Valgrind, dogfood, self-host, and package consumption; every classified-module
       consumer generates an entrypoint instead of compiling the module directly
-- [ ] `pixi run test-direct` and `pixi run test` green; the new file is in the
-      correct classified suite root
+- [ ] `pixi run test` is green; `pixi run dogfood-check` is green when the real
+      pipeline changed; the new file is in the correct classified suite root
