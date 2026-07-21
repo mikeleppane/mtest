@@ -1,16 +1,16 @@
-"""`TestCounts`: authoritative per-test totals (Layer 0).
+"""`TestCounts`: the authoritative per-test totals.
 
-The session's per-run tally at TEST granularity, distinct from the per-FILE
-`Summary` in `events.mojo`. Trivial Int fields with no owned resources, so the
-type is `ImplicitlyCopyable`.
+The session's per-run tally at test granularity, distinct from the per-file
+`Summary` in `events.mojo`.
 """
 
 
 @fieldwise_init
 struct TestCounts(ImplicitlyCopyable, Movable):
-    """The authoritative passed/failed/skipped/deselected test totals.
+    """The authoritative passed, failed, skipped, and deselected test totals.
 
-    Four plain Int fields; copies and moves are trivial and it never raises.
+    Four plain Int fields with no owned resources, so copies and moves are
+    trivial.
     """
 
     var passed: Int
@@ -24,5 +24,5 @@ struct TestCounts(ImplicitlyCopyable, Movable):
 
     @staticmethod
     def zeros() -> TestCounts:
-        """Every count at zero. Never raises."""
+        """A tally with every count at zero."""
         return TestCounts(passed=0, failed=0, skipped=0, deselected=0)

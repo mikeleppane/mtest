@@ -1,33 +1,36 @@
-"""The pure NDJSON event serializer (Layer 2): `Event` -> one machine line.
+"""The pure NDJSON event serializer: one `Event` to one machine line.
 
-This is the machine-readable twin of the console reporter. Where the console
-renders English, this turns each landed `Event` into exactly one NDJSON object
-line and produces the one-line stream header, so a second consumer recovers
-every fact the session emitted without parsing prose. It is a PURE serializer:
-`Event -> String` and a header `String`, no I/O, no sink; the caller writes the
-lines later.
+The machine-readable twin of the console reporter. Where the console renders
+English, this turns each landed `Event` into exactly one NDJSON object line and
+produces the one-line stream header, so a second consumer recovers every fact
+the session emitted without parsing prose. It is a pure serializer — `Event` to
+`String`, plus a header `String` — with no I/O and no sink; the caller writes
+the lines later.
 
 The mapping is mechanical: every event object opens with
 `"event":"<snake_case_kind>"` and then mirrors the landed model's payload
-fields 1:1 under their model field names, with a SINGLE naming exception —
-every `*_seconds` duration becomes an integer-microsecond `*_us` field, because
-the v1 stream carries NO floating-point values at all (a strict consumer never
-sees a NaN, an Infinity, or a lossy float). Counts and indices are plain
-integers; the closed-vocabulary types (`Outcome`, `ParseDisposition`,
-`AttributionDisposition`) serialize as their frozen lowercase string tokens;
-booleans serialize as `true`/`false`.
+fields one to one under their model field names, with a single naming
+exception. Every `*_seconds` duration becomes an integer-microsecond `*_us`
+field, because the v1 stream carries no floating-point values at all, so a
+strict consumer never sees a NaN, an Infinity, or a lossy float. Counts and
+indices are plain integers; the closed-vocabulary types (`Outcome`,
+`ParseDisposition`, `AttributionDisposition`) serialize as their frozen
+lowercase string tokens; booleans serialize as `true`/`false`.
 
-Every variable-length field is BOUNDED at serialization so no single line can
-grow without limit: the captured streams and the long text fields are kept as a
-head window plus a tail window with a visible elision marker between, and each
-bounded field rides beside derivable omission metadata (a retained-byte count
-and/or an omitted-byte or omitted-entry count) computed here — never a parsed
-human truncation marker and never an invented "original total".
+No single line grows without limit, but the bound is not applied in one place.
+Most variable-length fields are bounded here at serialization: the captured
+streams and the long text fields become a head window plus a tail window with a
+visible elision marker between, and each such field rides beside omission
+metadata computed here — a retained-byte count, an omitted-byte count, or an
+omitted-entry count — rather than a parsed human truncation marker or an
+inferred original total. The exception is `attempt_finished`, whose captured
+streams the session already clamped when it built the event; those serialize
+whole, carrying the event's own `*_truncated` markers.
 
 Every string value is escaped through the shared `json_escape_string`, and
 every value that originates as raw child-process bytes is first decoded through
-the shared `lossy_utf8` so it is guaranteed valid UTF-8 before escaping. There
-is no second escaper and no second lossy path here.
+the shared `lossy_utf8` so it is valid UTF-8 before escaping. There is no
+second escaper and no second lossy path here.
 """
 from mtest.config.lossy_utf8 import lossy_utf8
 from mtest.model.attribution import AttributionDisposition
@@ -66,14 +69,14 @@ comptime _ELISION: StaticString = "…"
 
 
 def _b(v: Bool) -> StaticString:
-    """`true`/`false` for a JSON boolean. Pure; never raises."""
+    """`true`/`false` for a JSON boolean."""
     return "true" if v else "false"
 
 
 def _seconds_to_us(seconds: Float64) -> Int:
-    """A Float64 second duration as integer microseconds. Pure.
+    """A `Float64` second duration as integer microseconds.
 
-    Clamps a negative (or NaN) input to 0, rounds half AWAY FROM ZERO to the
+    Clamps a negative or NaN input to 0, rounds half away from zero to the
     nearest microsecond, and saturates at the integer maximum. The v1 stream
     carries no floating-point values, so every duration passes through here.
     """
@@ -88,7 +91,7 @@ def _seconds_to_us(seconds: Float64) -> Int:
 
 
 def _timeout_us(seconds: Int) -> Int:
-    """An integer-second timeout as integer microseconds. Pure.
+    """An integer-second timeout as integer microseconds.
 
     Clamps a negative input to 0 and saturates at the integer maximum. The
     input is already an integer count of seconds, so the conversion is exact.
@@ -101,7 +104,7 @@ def _timeout_us(seconds: Int) -> Int:
 
 
 def _outcome_token(o: Outcome) -> StaticString:
-    """The frozen lowercase token for an outcome value. Pure; total."""
+    """The frozen lowercase token for an outcome value, total over the enum."""
     if o == Outcome.PASS:
         return "pass"
     if o == Outcome.FAIL:
@@ -130,7 +133,7 @@ def _outcome_token(o: Outcome) -> StaticString:
 
 
 def _parse_disposition_token(d: ParseDisposition) -> StaticString:
-    """The frozen lowercase token for a parse disposition. Pure; total."""
+    """The frozen lowercase token for a disposition, total over the enum."""
     if d == ParseDisposition.PARSED:
         return "parsed"
     if d == ParseDisposition.NO_REPORT:
@@ -143,8 +146,7 @@ def _parse_disposition_token(d: ParseDisposition) -> StaticString:
 
 
 def _attribution_disposition_token(d: AttributionDisposition) -> StaticString:
-    """The frozen lowercase token for an attribution disposition. Pure; total.
-    """
+    """The frozen lowercase token for a disposition, total over the enum."""
     if d == AttributionDisposition.ATTRIBUTED:
         return "attributed"
     if d == AttributionDisposition.NO_REPRODUCTION:
@@ -172,8 +174,7 @@ struct _Excerpt(Copyable, Movable):
 
 
 def _cap_bytes_head(data: List[UInt8], max_bytes: Int) -> List[UInt8]:
-    """The first `max_bytes` bytes of `data` (or all of it). Pure; never raises.
-    """
+    """The first `max_bytes` bytes of `data`, or all of it if shorter."""
     var n = len(data)
     if n <= max_bytes:
         return data.copy()
@@ -184,7 +185,7 @@ def _cap_bytes_head(data: List[UInt8], max_bytes: Int) -> List[UInt8]:
 
 
 def _string_bytes(s: String) -> List[UInt8]:
-    """A copy of `s`'s UTF-8 bytes as an owned list. Pure; never raises."""
+    """A copy of `s`'s UTF-8 bytes as an owned list."""
     var out = List[UInt8]()
     for b in s.as_bytes():
         out.append(b)
@@ -192,41 +193,40 @@ def _string_bytes(s: String) -> List[UInt8]:
 
 
 def _cap_runner_excerpt(s: String) -> _Excerpt:
-    """A runner-authored string bounded to a head+tail window, escaped, with its
-    dropped-byte count. Pure.
+    """A runner-authored string bounded to a head and tail window, escaped.
 
-    Most runner-authored strings (toolchain, labels, short paths) are never
-    realistically long, so the bound is a formality that just keeps a
-    pathological value from unbounding a line. But some — notably `build_argv` /
-    `attempt_argv` elements, which carry user-supplied build arguments — CAN be
-    arbitrarily long. So rather than a silent cut, a value over
-    `_RUNNER_STRING_MAX` bytes is kept as a head+tail window joined by the
-    visible elision marker (never silently truncated), and the count of dropped
-    middle bytes rides alongside for callers that surface it (the list
-    serializers aggregate it into `*_omitted_bytes`). Each window is decoded
-    through `lossy_utf8` independently so a split multi-byte sequence degrades to
-    U+FFFD rather than producing invalid UTF-8.
+    Most runner-authored strings — toolchain, labels, short paths — are never
+    realistically long, so the bound is a formality that keeps a pathological
+    value from unbounding a line. Some are not: `build_argv` and `attempt_argv`
+    elements carry user-supplied build arguments and can be arbitrarily long.
+    A value over `_RUNNER_STRING_MAX` bytes is therefore kept as a head plus
+    tail window joined by the visible elision marker rather than silently cut,
+    and the count of dropped middle bytes rides alongside for callers that
+    surface it (the list serializers aggregate it into `*_omitted_bytes`).
+
+    Each window is decoded through `lossy_utf8` independently, so a split
+    multi-byte sequence degrades to U+FFFD instead of producing invalid UTF-8.
     """
     return _excerpt_string(s, _RUNNER_HEAD_MAX, _RUNNER_TAIL_MAX)
 
 
 def _cap_runner_string(s: String) -> String:
-    """A scalar runner field's visibly-bounded, JSON-escaped inline value. Pure.
+    """A scalar runner field's bounded, JSON-escaped inline value.
 
-    The escaped value from `_cap_runner_excerpt`; a scalar field signals its own
-    truncation through the visible elision marker in the value (these fields are
-    formality-capped and carry no separate count).
+    The escaped value from `_cap_runner_excerpt`. A scalar field signals its
+    own truncation through the visible elision marker in the value; these
+    fields are formality-capped and carry no separate omitted-byte count.
     """
     return _cap_runner_excerpt(s).escaped
 
 
 def _excerpt_bytes(data: List[UInt8], head_max: Int, tail_max: Int) -> _Excerpt:
-    """Bound raw bytes to a head+tail window, decode, and escape. Pure.
+    """Bound raw bytes to a head and tail window, decode, and escape.
 
-    When the data fits, the whole (lossy-decoded, escaped) value rides with an
+    When the data fits, the whole lossy-decoded, escaped value rides with an
     omitted count of 0. Otherwise the first `head_max` and last `tail_max`
     bytes are kept, joined by the elision marker, and the dropped middle-byte
-    count is reported. The bound is applied to the RAW bytes (pre-escape), and
+    count is reported. The bound applies to the raw bytes, before escaping, and
     each window is decoded independently so a sequence split at either boundary
     degrades to U+FFFD rather than swallowing the marker.
     """
@@ -244,11 +244,11 @@ def _excerpt_bytes(data: List[UInt8], head_max: Int, tail_max: Int) -> _Excerpt:
 
 
 def _excerpt_string(s: String, head_max: Int, tail_max: Int) -> _Excerpt:
-    """Bound an already-UTF-8 string to a head+tail window. Pure.
+    """Bound an already-UTF-8 string to a head and tail window.
 
-    The same head+tail bound as `_excerpt_bytes`, over the string's UTF-8
-    bytes, so a long runner-authored or captured-then-decoded field is kept as
-    a head window plus a tail window with the dropped-byte count reported.
+    The same bound as `_excerpt_bytes`, applied over the string's UTF-8 bytes,
+    so a long runner-authored or captured-then-decoded field is kept as a head
+    window plus a tail window with the dropped-byte count reported.
     """
     return _excerpt_bytes(_string_bytes(s), head_max, tail_max)
 
@@ -257,11 +257,12 @@ def _excerpt_string(s: String, head_max: Int, tail_max: Int) -> _Excerpt:
 struct _ArrayResult(Copyable, Movable):
     """A bounded list serialized as a JSON array plus its omission counts.
 
-    `text` is the complete `[...]` array literal; `omitted` is how many entries
-    past the list cap were dropped (0 when the whole list fit); `omitted_bytes`
-    is the total bytes elided from the KEPT entries by the per-element head+tail
-    bound (0 when every kept entry fit), so a consumer can detect and quantify
-    per-element truncation of user-supplied values, not just dropped entries.
+    `text` is the complete `[...]` array literal. `omitted` is how many entries
+    past the list cap were dropped, 0 when the whole list fit. `omitted_bytes`
+    is the total bytes elided from the kept entries by the per-element head and
+    tail bound, 0 when every kept entry fit, so a consumer can detect and
+    quantify per-element truncation of user-supplied values and not just
+    dropped entries.
     """
 
     var text: String
@@ -270,11 +271,12 @@ struct _ArrayResult(Copyable, Movable):
 
 
 def _string_array(items: List[String]) -> _ArrayResult:
-    """A bounded JSON array of runner-authored strings. Pure.
+    """A bounded JSON array of runner-authored strings.
 
-    The list is capped at `_ARGV_LIST_MAX` entries and each element at
-    `_ARGV_ELEM_MAX` bytes. The count of entries dropped past the list cap and
-    the total bytes elided from kept entries by the per-element bound both ride
+    The list is capped at `_ARGV_LIST_MAX` entries, and each kept entry goes
+    through `_cap_runner_excerpt`, so an element over `_RUNNER_STRING_MAX`
+    bytes is kept as a head plus tail window. The count of entries dropped past
+    the list cap and the total bytes elided from the kept entries both ride
     beside the array as its omission metadata.
     """
     var n = len(items)
@@ -296,13 +298,18 @@ def _string_array(items: List[String]) -> _ArrayResult:
 
 
 def stream_header(version: String) -> String:
-    """The frozen first line of an NDJSON stream. Pure; never raises.
+    """The frozen first line of an NDJSON stream.
 
     Exactly `{"event":"stream","version":1,"generator":"mtest <version>"}`. The
-    stream `version` integer is frozen at 1 and lives ONLY here. `version` is
-    the build's mtest version label (the single source of truth is passed in by
-    the caller, as the console reporter receives it, so this layer imports no
-    higher layer); it is JSON-escaped into the generator field.
+    stream format integer is frozen at 1 and lives only here.
+
+    Args:
+        version: The build's mtest version label, passed in by the caller the
+            same way the console reporter receives it so this module depends on
+            no higher layer. JSON-escaped into the `generator` field.
+
+    Returns:
+        The complete header line, without a trailing newline.
     """
     return (
         '{"event":"stream","version":1,"generator":"mtest '
@@ -312,11 +319,18 @@ def stream_header(version: String) -> String:
 
 
 def serialize_event(e: Event) -> String:
-    """One `Event` as one NDJSON object line (no trailing newline). Pure.
+    """One `Event` as one NDJSON object line.
 
     Dispatches on the event kind and mirrors that kind's landed payload fields.
-    The returned string is a single complete JSON object; the caller appends
-    the newline that delimits it in the stream. Never raises.
+
+    Args:
+        e: The event to serialize.
+
+    Returns:
+        A single complete JSON object, without the trailing newline that
+        delimits it in the stream; the caller appends that. An empty string
+        for an `EventKind` with no serializer, which cannot happen while the
+        vocabulary stays closed.
     """
     if e.kind == EventKind.SESSION_STARTED:
         return _session_started(e)

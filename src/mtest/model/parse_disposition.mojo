@@ -1,9 +1,9 @@
-"""`ParseDisposition`: the closed report-parse vocabulary (Layer 0).
+"""The closed report-parse vocabulary.
 
-Mirrors `Outcome`'s shape: a thin wrapper over a stable integer discriminant
-naming why the protocol layer's report parse landed where it did, so a
-`FileFinished` event can carry the parse verdict as data instead of collapsing
-it into MALFORMED_SUITE before the reporter ever sees it.
+`ParseDisposition` names why the protocol layer's report parse landed where it
+did, so a `FileFinished` event can carry the parse verdict as data rather than
+collapsing it into MALFORMED_SUITE before the reporter sees it. It mirrors
+`Outcome`'s shape: a thin wrapper over a stable integer discriminant.
 """
 
 
@@ -11,8 +11,8 @@ it into MALFORMED_SUITE before the reporter ever sees it.
 struct ParseDisposition(Equatable, ImplicitlyCopyable, Movable):
     """One value from the report-parse disposition vocabulary.
 
-    A thin wrapper over a stable integer discriminant. Holds no owned
-    resources; copies and moves are trivial and it never raises.
+    A thin wrapper over a stable integer discriminant, holding no owned
+    resources, so copies and moves are trivial.
     """
 
     var code: Int
@@ -33,9 +33,9 @@ struct ParseDisposition(Equatable, ImplicitlyCopyable, Movable):
     """The number of distinct values in the vocabulary."""
 
     def __eq__(self, other: Self) -> Bool:
-        """Two dispositions are equal iff their discriminants match. Pure."""
+        """Two dispositions are equal iff their discriminants match."""
         return self.code == other.code
 
     def __ne__(self, other: Self) -> Bool:
-        """Negation of `__eq__`. Pure."""
+        """Negation of `__eq__`."""
         return self.code != other.code

@@ -1,22 +1,26 @@
-"""The `mtest` binary entry point (Layer 5, the top).
+"""The `mtest` binary entry point.
 
 `main` is the only place that reads the process argv and environment, talks to
-the terminal, and calls `exit`. It parses argv, prints help or the version to
-stdout and exits 0, prints a usage error to stderr and exits 4 (the one stated
-exception to the event seam — a pre-session usage error has no reporter to route
-through), resolves the console's color inputs, constructs the exec runtime, resolves the
-machine-stream destination (`--json`) and, with it, the console's own
-destination, composes a `ConsoleReporter` and a `JsonStreamReporter` into a
-fixed-order `CompositeReporter` (the type the session drives), runs the session,
-flushes the console's rendered buffer to its resolved descriptor (stdout, or
-stderr under `--json -` so stdout carries only the byte-pure stream), and exits
-with the session's resolved code.
+the terminal, and calls `exit`. It parses argv, prints help or the version and
+exits 0, constructs the exec runtime, resolves the machine-stream (`--json`)
+destination and with it the console's own descriptor, then resolves the JUnit
+report destination, composes the console, stream, JUnit, and annotation
+reporters into a fixed-order `CompositeReporter` (the type the session drives),
+runs the session, flushes the console's rendered buffer to its resolved
+descriptor (stdout, or stderr under `--json -` so stdout carries only the
+byte-pure stream), and exits with the session's resolved code.
 
-It stays THIN: every decision it makes is delegated. The parser resolves the
-config (including the mojo path); the console resolves color from the inputs main
-supplies; the session resolves the exit code. `main` only wires and moves bytes.
-All FFI stays below in `exec` — `stdout_isatty()` is the terminal probe; argv,
-cwd, getenv, and exit are ordinary program-level operations via `std`.
+Two writes bypass the event seam, both by design: a pre-session usage error
+goes straight to stderr with exit 4, having no reporter to route through, and
+`--collect-only` writes its node-id listing straight to stdout, where it is a
+frozen machine-readable contract.
+
+Every decision `main` makes is delegated. The parser resolves the config
+(including the mojo path); the console resolves color from the inputs main
+supplies; the session resolves the exit code. `main` only wires and moves
+bytes. All FFI stays below in `exec` — `stdout_isatty()` and `stderr_isatty()`
+are the terminal probes, while argv, cwd, getenv, and exit are ordinary
+program-level operations via `std`.
 """
 from std.io import FileDescriptor
 from std.os import getenv, listdir, remove, rmdir
@@ -67,7 +71,7 @@ def _no_color_set() -> Bool:
     """Whether `NO_COLOR` is set to a non-empty value in the environment.
 
     Per the `NO_COLOR` convention any non-empty value disables color; an unset
-    or empty variable does not. The console's `AUTO` mode reads this.
+    or empty variable does not. The console's auto color mode reads this.
     """
     return getenv("NO_COLOR", "").byte_length() > 0
 
@@ -78,7 +82,7 @@ def _eprintln(text: String):
 
 
 def _close_runtime(mut runtime: ExecRuntime) -> Bool:
-    """Explicitly restore exec state; report and return False on failure."""
+    """Restore exec state; report to stderr and return False on failure."""
     try:
         runtime.close()
         return True
@@ -88,17 +92,17 @@ def _close_runtime(mut runtime: ExecRuntime) -> Bool:
 
 
 def _discard_junit_scratch(spool_dir: String, temp_path: String):
-    """Best-effort removal of the JUnit spool directory (with every spooled
-    fragment) and any leftover temp file. Non-raising; safe on empty/missing.
+    """Remove the JUnit spool directory, its fragments, and any leftover temp.
 
-    `main` OWNS this scratch — it created the spool with `open_junit_spool` and
+    `main` owns this scratch — it created the spool with `open_junit_spool` and
     the temp with `open_junit_artifact` — so it frees them on every exit path
     once the session has finished with them. On success the temp has already
-    been renamed onto the report target (so removing `temp_path` is a no-op that
-    never touches the published report); on failure the reporter discarded it;
-    either way the fragments and the spool directory are the leftovers to clear.
-    Called after the session returns and on the pre-run/raise error paths, so a
-    run never leaks a spool directory per invocation.
+    been renamed onto the report target, making its removal a no-op that never
+    touches the published report; on failure the reporter discarded it. Either
+    way the fragments and the spool directory are what is left to clear.
+
+    Best-effort and non-raising, so it is safe to call on the error paths and
+    with empty or missing paths.
     """
     if temp_path != "":
         try:

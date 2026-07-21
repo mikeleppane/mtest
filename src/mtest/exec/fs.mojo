@@ -1,18 +1,18 @@
-"""The atomic filesystem promotion primitive: `rename_path` (Layer 3).
+"""The atomic filesystem promotion primitive: `rename_path`.
 
-A precompile step builds its package to a temp path and PROMOTES it onto the real
-output only once the compiler exited 0, so a killed or crashed attempt can never
-damage a good package an earlier run left behind. That promotion has to be
-indivisible — a copy would leave a window in which OUT is half a package — and
-`rename(2)` is the POSIX call that provides it: within one directory it either
-replaces the destination completely or leaves it entirely alone, with no
-intermediate state a concurrent reader (or a SIGKILLed us) can observe.
+A precompile step builds its package to a temp path and promotes it onto the
+real output only once the compiler exited 0, so a killed or crashed attempt can
+never damage a good package an earlier run left behind. That promotion has to be
+indivisible: a copy would leave a window in which the output is half a package.
+`rename(2)` provides indivisibility — within one directory it either replaces
+the destination completely or leaves it entirely alone, with no intermediate
+state a concurrent reader (or a SIGKILLed mtest) can observe.
 
 The stdlib offers no rename at the pinned toolchain (`std.os` has `remove`,
-`rmdir`, `makedirs`, `listdir` — and nothing that moves a path), so this is one
-libc call. It lives HERE because `exec` is the runner's FFI floor: `tty.mojo`
-states the rule — a syscall above this layer would be a layering break — so the
-session asks for a promotion rather than reaching for a raw syscall of its own.
+`rmdir`, `makedirs`, and `listdir`, but nothing that moves a path), so this is
+one libc call. It lives here because `exec` is the runner's FFI floor: a syscall
+above this layer would be a layering break, so the session asks for a promotion
+rather than making a syscall of its own.
 """
 from std.ffi import external_call
 
@@ -30,19 +30,19 @@ def _c_string_bytes(value: String) -> List[UInt8]:
 def rename_path(src: String, dst: String) raises:
     """Atomically rename `src` onto `dst`, replacing `dst` if it exists.
 
-    Both paths must live on the same filesystem (the caller derives `src` from
-    `dst`, so they share a directory). On success `dst` names what `src` named and
-    `src` is gone; on failure NEITHER path is modified — the promotion is
-    all-or-nothing, which is the whole reason this is a rename and not a copy.
+    Both paths must live on the same filesystem; the caller derives `src` from
+    `dst`, so they share a directory. On success `dst` names what `src` named
+    and `src` is gone; on failure neither path is modified. The promotion is
+    all-or-nothing.
 
     Args:
-        src: The existing path to promote. Not mutated.
+        src: The existing path to promote.
         dst: The path to promote it onto; replaced atomically when it exists.
 
     Raises:
-        Error: if the rename failed (e.g. `src` does not exist, or the paths
-            straddle filesystems). The caller decides what a failed promotion
-            means; nothing here is retried or ignored.
+        Error: If the rename failed, for example because `src` does not exist
+            or the paths straddle filesystems. Nothing here is retried or
+            ignored; the caller decides what a failed promotion means.
     """
     var s = _c_string_bytes(src)
     var d = _c_string_bytes(dst)

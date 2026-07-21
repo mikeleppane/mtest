@@ -1,8 +1,8 @@
-"""The `--show-output` vocabulary of the mtest runner (Layer 1).
+"""The `--show-output` vocabulary.
 
 Controls which files' captured stdout/stderr the console reporter renders: only
-the ones that failed, every file, or none. This is a config concern, not a
-model one — it names a rendering choice, not a run outcome.
+the ones that failed, every file, or none. It names a rendering choice rather
+than a run outcome, which is why it lives in config and not in model.
 """
 
 
@@ -10,9 +10,8 @@ model one — it names a rendering choice, not a run outcome.
 struct ShowOutput(Equatable, ImplicitlyCopyable, Movable):
     """One value from the `--show-output` closed vocabulary.
 
-    A thin wrapper over a stable integer discriminant so the vocabulary is a
-    closed set of named constants that compare by value. Holds no owned
-    resources; copies and moves are trivial and it never raises.
+    A wrapper over a stable integer discriminant, so the vocabulary is a closed
+    set of named constants that compare by value.
     """
 
     var value: Int
@@ -23,9 +22,9 @@ struct ShowOutput(Equatable, ImplicitlyCopyable, Movable):
     comptime NONE = Self(2)
 
     def __eq__(self, other: Self) -> Bool:
-        """Two choices are equal iff their discriminants match. Pure."""
+        """Whether both choices carry the same discriminant."""
         return self.value == other.value
 
     def __ne__(self, other: Self) -> Bool:
-        """Negation of `__eq__`. Pure."""
+        """Whether the two choices carry different discriminants."""
         return self.value != other.value

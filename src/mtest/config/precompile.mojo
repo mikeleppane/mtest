@@ -1,8 +1,8 @@
-"""One `--precompile SRC[:OUT]` entry (Layer 1).
+"""One `--precompile SRC[:OUT]` entry.
 
 `--precompile` is repeatable; each occurrence names a source to precompile and
-an optional output name. This module holds only the data shape — parsing
-`SRC[:OUT]` into the two parts is the parser's concern.
+an optional output name. This module holds only the data shape — splitting
+`SRC[:OUT]` into the two parts is the parser's job.
 """
 
 
@@ -10,8 +10,7 @@ an optional output name. This module holds only the data shape — parsing
 struct Precompile(Copyable, Movable):
     """One `--precompile` entry: a source path and an optional output name.
 
-    Owns its string fields, so copies are explicit; reads do not mutate or
-    raise.
+    Owns its string fields, so every copy is an explicit `.copy()`.
     """
 
     var src: String

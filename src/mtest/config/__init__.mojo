@@ -1,14 +1,15 @@
-"""The config layer of the mtest runner (Layer 1).
+"""The config layer of the mtest runner.
 
-This is `RunnerConfig`, the typed home for every knob the cli parser (a later
-layer) fills and the session (a later layer) reads, plus the config-specific
-closed vocabularies (`ShowOutput`, `Verbosity`, `ColorWhen`), the pure
-mojo-path resolution helper, the shared shell-quoting helpers (`shell_quote`,
-`shell_join`) every later layer's reproduce-line rendering uses, and the shared
-byte->text codec (`lossy_utf8`) every later layer decodes captured streams with.
-It imports only from `model` — and does not today, because none of this data
-needs model's vocabulary. It is DATA plus pure helpers: no parsing, no
-environment or file reads, no printing.
+Centered on `RunnerConfig`, the typed home for every knob the cli parser fills
+and the session reads. Alongside it live the closed vocabularies that name a
+config choice (`ShowOutput`, `Verbosity`, `ColorWhen`, `ShardMode`,
+`AnnotationsMode`), the mojo-path resolution helper, the shell-quoting helpers
+(`shell_quote`, `shell_join`) that every reproduce line is rendered through,
+and the byte-to-text codec (`lossy_utf8`) that every captured stream is decoded
+with.
+
+This layer is data plus pure helpers: no parsing, no environment or file reads,
+no printing. It may import from `model`, but currently needs nothing there.
 
 The public surface is re-exported here so callers write
 `from mtest.config import RunnerConfig, resolve_mojo_path, shell_quote, ...`.

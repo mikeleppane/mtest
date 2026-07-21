@@ -1,46 +1,22 @@
-"""The report layer of the mtest runner (Layer 2): the reporter seam.
+"""The report layer of the mtest runner: the reporter seam.
 
-This is the ONLY layer that formats text for humans. The session (a later
-layer) emits the closed `Event` set and nothing else; reporters consume that
-stream through a single `handle` method and are composed at COMPTIME — a
-variadic type-parameter pack, not a runtime trait-object list, because 1.0.0b2
-polymorphism is static.
+This is the only part of the runner that formats text for humans. The session
+emits the closed `Event` set and nothing else; reporters consume that stream
+through a single `handle` method and are composed at compile time via a
+variadic type-parameter pack rather than a runtime trait-object list, because
+Mojo 1.0.0b2 polymorphism is static.
 
-The surface:
+The seam is two entities: `Reporter`, the trait a reporter conforms to, and
+`CompositeReporter[*Rs]`, which fans one event to a comptime tuple of them.
+Everything else here is a reporter behind that seam (console, JSON stream,
+JUnit, GitHub annotations, and a recording test double) or a rendering
+primitive those reporters share. Each submodule documents its own contract.
 
-- `Reporter` — the trait every reporter conforms to (one method, `handle`).
-- `CompositeReporter[*Rs]` — fans one event to a comptime-known tuple of
-  reporters via static dispatch.
-- `ConsoleReporter` — renders the human-facing console output into an owned,
-  inspectable buffer. It learns every fact it prints from events; only the
-  version string and the color/verbosity/output config are passed at
-  construction (build constants, not session facts).
-- `RecordingReporter` — a stateful test double that records the event stream.
-- `escape` — pure machine-text escaping primitives (JSON string escaping, XML
-  text/attribute escaping, GitHub-annotation message/property escaping, and
-  the collision-proof stop-commands fencing helper) shared by the machine
-  reporters this layer is growing.
-- `json_stream` — the pure NDJSON event serializer (`stream_header` and
-  `serialize_event`): one `Event` to one machine line, plus the stream header.
-- `json_stream_reporter` — the live-writing sink for that serializer
-  (`JsonStreamReporter`, its `StreamStatus`, and the `open_json_fd`/
-  `close_json_fd` descriptor helpers): writes each event line to a resolved
-  destination and latches a write failure.
-- `junit` — the pure JUnit XML renderer (typed suite state to `<testsuite>`
-  fragments and a node-id-sorted `<testsuites>` document), validated by the
-  vendored junit-10 schema + arithmetic oracle.
-- `junit_reporter` — the stateful shell (`JunitReporter`, its `JunitStatus`):
-  accumulates the typed event state, spools one `<testsuite>` fragment per
-  finished file, and assembles the full document from the spool. It also owns
-  the destination helpers `main` calls at session start: `open_junit_spool`
-  (the run's private fragment directory) and `open_junit_artifact` (the temp
-  file whose creation proves the target directory writable).
-- `annotations` — the pure GitHub Actions annotations renderer
-  (`render_annotations`): a run's events to node-id-sorted, capped, escaped
-  `::error`/`::warning`/`::notice` workflow-command lines.
-- `annotations_reporter` — the stateful shell (`AnnotationsReporter`): a
-  self-gating `Reporter` that accumulates the event stream and renders the
-  deterministic annotation tail on demand for `main` to print to stdout.
+Every machine format splits the same way: a pure renderer module with no I/O
+(`json_stream`, `junit`, `annotations`) and a stateful `Reporter` shell that
+owns the destination and its failure latching (`json_stream_reporter`,
+`junit_reporter`, `annotations_reporter`). Reach for the pure half to test a
+format, the shell to compose a run.
 
 The public surface is re-exported here so callers write
 `from mtest.report import Reporter, CompositeReporter, ConsoleReporter, ...`.

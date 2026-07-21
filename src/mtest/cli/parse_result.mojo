@@ -1,8 +1,8 @@
 """`ParseResult`: what a successful parse produces.
 
-Parsing either yields a configured run or a non-error directive to print help or
-the version. A usage error is not a `ParseResult` — it is raised. `main` (a later
-layer) renders help/version to stdout with exit 0 and executes the run config;
+Parsing either yields a configured run or a non-error directive to print help
+or the version. A usage error is not a `ParseResult` — it is raised. `main`
+renders help and version to stdout with exit 0 and executes the run config;
 this layer never prints or exits.
 """
 from mtest.config import RunnerConfig
@@ -12,9 +12,9 @@ from mtest.config import RunnerConfig
 struct ParseResult(Copyable, Movable):
     """The outcome of a successful parse: a run config, or a help/version ask.
 
-    A tagged union over `kind`. When `kind == RUN` the `config` field is the
-    parsed configuration; for the two directives `config` carries a default and
-    is unused. Owns a `RunnerConfig`, so copies are explicit; never raises.
+    A tagged union over `kind`. When `kind == RUN` the `config` field holds the
+    parsed configuration; for the two directives it carries a default config
+    that callers should ignore.
     """
 
     var kind: Int
@@ -29,13 +29,20 @@ struct ParseResult(Copyable, Movable):
 
     @staticmethod
     def run(var config: RunnerConfig) -> ParseResult:
-        """A result that runs `config`. Takes ownership of the config."""
+        """A result that runs `config`.
+
+        Args:
+            config: The parsed configuration. Consumed; the returned result
+                owns it.
+
+        Returns:
+            A result whose `kind` is `RUN`.
+        """
         return ParseResult(kind=Self.RUN, config=config^)
 
     @staticmethod
     def show_help() -> ParseResult:
-        """A result asking `main` to print help (a default config rides along).
-        """
+        """A result asking `main` to print help; its config is a placeholder."""
         return ParseResult(kind=Self.SHOW_HELP, config=RunnerConfig.default())
 
     @staticmethod

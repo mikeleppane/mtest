@@ -1,29 +1,25 @@
-"""The pure mojo-path resolution helper (Layer 1).
+"""Resolution of which `mojo` binary to invoke.
 
-Resolving which `mojo` binary to invoke follows a fixed precedence: an explicit
-`--mojo-path` flag beats the `MTEST_MOJO` environment variable, which beats the
-plain `"mojo"` fallback (resolved via `PATH`). This module does not read the
-environment itself — the cli layer reads `MTEST_MOJO` and passes it in — so the
-precedence is a pure, exhaustively testable function of its two inputs.
+The precedence is fixed: an explicit `--mojo` flag beats the `MTEST_MOJO`
+environment variable, which beats the plain `"mojo"` fallback (resolved via
+`PATH`). This module does not read the environment itself — the cli layer reads
+`MTEST_MOJO` and passes it in — so the precedence is a function of its two
+inputs alone.
 """
 
 
 def resolve_mojo_path(
     flag: Optional[String], env_value: Optional[String]
 ) -> String:
-    """Resolve the mojo binary path: flag > `MTEST_MOJO` env > `"mojo"`.
-
-    Pure: performs no I/O and never reads the environment itself. The caller
-    (cli) is responsible for reading `--mojo-path` and `MTEST_MOJO` and passing
-    their values in.
+    """Resolve the mojo binary path: flag, then `MTEST_MOJO`, then `"mojo"`.
 
     Args:
-        flag: The value of an explicit `--mojo-path` flag, if given.
+        flag: The value of an explicit `--mojo` flag, if one was given.
         env_value: The value of the `MTEST_MOJO` environment variable, if set.
 
     Returns:
-        `flag`'s value if present; else `env_value`'s value if present; else
-        the literal `"mojo"`. Does not mutate or raise.
+        `flag`'s value when present, else `env_value`'s value when present,
+        else the literal `"mojo"`.
     """
     if flag:
         return flag.value()

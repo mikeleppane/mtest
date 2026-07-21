@@ -1,23 +1,19 @@
-"""The discovery layer of the mtest runner (Layer 2).
+"""The discovery layer of the mtest runner.
 
-`discover` turns the operands, gates, and exclude globs in a `RunnerConfig` into
-the concrete, ordered set of files a session will run — the gate files, the
-run files, the excluded files (with the pattern that excluded each), and the
-stale exclude patterns that matched nothing. It READS the filesystem (it walks
-directories) but emits no events, prints nothing, and runs nothing: it returns a
-`DiscoveryResult` data value the session (a later layer) turns into events.
+`discover` turns the operands, gates, and exclude globs in a `RunnerConfig`
+into the concrete, ordered set of files a session will run: the gate files, the
+run files, the excluded files each paired with the pattern that excluded it,
+and the exclude patterns that matched nothing. It reads the filesystem to walk
+directories, but emits no events, prints nothing, and runs nothing — it returns
+a `DiscoveryResult` data value the session turns into events.
 
 Two policies are load-bearing and documented at their definitions:
 
-- **Lexical-only normalization.** Operands are folded to root-relative form by
-  text (`.`/`..` segments), never by resolving symlinks — so a reported path
-  never depends on filesystem link state (contract §2).
-- **Symlink no-follow.** Directory walks never follow a symlink, because
-  lexical normalization cannot detect a cycle; a symlinked subdirectory is not
-  descended into.
-
-The public surface is re-exported here so callers write
-`from mtest.discover import discover, DiscoveryResult, ...`.
+- Lexical-only normalization. Operands are folded to root-relative form by text
+  (`.` and `..` segments), never by resolving symlinks, so a reported path
+  never depends on filesystem link state.
+- Symlink no-follow. Directory walks skip every symlink, whether it names a
+  subdirectory or a file, because lexical normalization cannot detect a cycle.
 """
 from mtest.discover.discover import discover
 from mtest.discover.fnmatch import fnmatch

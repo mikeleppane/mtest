@@ -1,16 +1,21 @@
-"""Exclusive process-global interrupt/runtime ownership (Layer 3).
+"""Exclusive process-global interrupt and runtime ownership.
 
-`ExecRuntime` is the non-copyable token that owns mtest's saved SIGINT, SIGTERM,
-and SIGCHLD dispositions. The native adapter uses the platform's own headers and
-a `volatile sig_atomic_t` latch; Mojo never lays out `struct sigaction`, invents
-a callback pointer, maps a fixed address, or reads libc's private errno storage.
+`ExecRuntime` is the non-copyable token that owns mtest's saved SIGINT,
+SIGTERM, SIGCHLD, and SIGPIPE dispositions. The SIGPIPE save backs a
+process-wide `SIG_IGN` carve-out that keeps mtest's own writes to a dead
+`--json` pipe from killing the runner; it is restored first on close, and each
+child restores it before `execve` so an exec'd test binary cannot inherit the
+ignore and turn a real SIGPIPE crash into a false pass. The native adapter uses
+the platform's own headers and a `volatile sig_atomic_t` latch; Mojo never lays
+out `struct sigaction`, invents a callback pointer, maps a fixed address, or
+reads libc's private errno storage.
 
-An inactive token is materialized before `open()` transactionally installs the
-handlers and rejects a second active runtime. This keeps a live owner available
-when native installation and rollback both fail. `close()` is explicit and
-fallible so restoration failure can never be reported as success. The destructor
-is only a last-resort retry for exceptional unwinding; callers must use `close()`
-on every ordinary path.
+A token is materialized inactive before `open()` transactionally installs the
+handlers and rejects a second active runtime, so a live owner exists even when
+native installation and its rollback both fail. `close()` is explicit and
+fallible, so a restoration failure can never be reported as success. The
+destructor is only a last-resort retry for exceptional unwinding; callers must
+use `close()` on every ordinary path.
 """
 from std.ffi import external_call
 from std.memory import alloc, memset_zero
@@ -27,7 +32,11 @@ def _runtime_error(
     cleanup_operation: Int,
     cleanup_error: Int,
 ) -> Error:
-    """Build one named native-runtime machinery error. Allocates."""
+    """Build one named native-runtime machinery error.
+
+    A nonzero `cleanup_operation` means the rollback failed too, and appends
+    that operation and errno to the message.
+    """
     var message = (
         prefix
         + " (operation "
@@ -47,33 +56,31 @@ def _runtime_error(
 
 
 struct ExecRuntime(Movable):
-    """Exclusive ownership of mtest's process-global exec/signal state.
+    """Exclusive ownership of mtest's process-global exec and signal state.
 
-    Materialize once around a session or direct supervision group, call `open()`,
-    pass it by mutable borrow to child operations, and call `close()` explicitly.
-    A second simultaneously active instance raises `EBUSY` through the native
-    error record. Sequential open/use/close cycles are supported.
+    Materialize once around a session or direct supervision group, call
+    `open()`, pass it by mutable borrow to child operations, then call `close()`
+    explicitly. A second simultaneously active instance raises `EBUSY` through
+    the native error record. Sequential open/use/close cycles are supported.
     """
 
     var active: Bool
     """Whether this token still owns the native runtime."""
 
     def __init__(out self):
-        """Materialize an inactive token before any fallible native operation.
-        """
+        """Materialize an inactive token before any fallible native call."""
         self.active = False
 
     def open(mut self) raises:
         """Install native interrupt handlers and take transactional ownership.
 
-        On an install failure whose rollback also fails, this token remains
-        active and owns the native restoration-required state. The caller can
-        inspect the raised primary-plus-cleanup error and explicitly retry
-        `close()` on the same live value. Temporarily allocates one 32-byte ABI
-        error record and frees it before returning or raising.
+        On an install failure whose rollback also fails, this token stays active
+        and owns the native restoration-required state. The caller can inspect
+        the raised primary-plus-cleanup error and explicitly retry `close()` on
+        the same live value.
 
         Raises:
-            Error: A named `exec: runtime open failed` machinery error containing
+            Error: A named `exec: runtime open failed` machinery error carrying
                 the adapter operation and errno plus any rollback failure.
         """
         # SAFETY: `alloc[UInt64](4)` owns 32 bytes aligned to 8, exactly ABI-v1's
@@ -116,12 +123,12 @@ struct ExecRuntime(Movable):
 
         Idempotent after success. If machinery cleanup retained a child handle,
         close retries its group sweep and reap before restoring signals. On a
-        cleanup or restoration failure the token remains active so the caller can
-        report the error and retry; a new child/runtime remains rejected by the
-        native state machine.
+        cleanup or restoration failure the token stays active so the caller can
+        report the error and retry; the native state machine keeps rejecting a
+        new child or runtime until then.
 
         Raises:
-            Error: A named `exec: runtime close failed` machinery error containing
+            Error: A named `exec: runtime close failed` machinery error carrying
                 the first restoration operation and errno.
         """
         if not self.active:
@@ -155,8 +162,7 @@ struct ExecRuntime(Movable):
         self.active = False
 
     def __del__(deinit self):
-        """Best-effort last-resort restoration; explicit `close()` is required.
-        """
+        """Last-resort restoration; explicit `close()` is required."""
         if not self.active:
             return
         # SAFETY: destructor fallback owns this aligned 32-byte record, fully
@@ -179,8 +185,7 @@ def interrupt_requested() -> Bool:
 
 
 def _reset_interrupt():
-    """Clear the native interrupt latch. Test-only; absent from production ABI.
-    """
+    """Clear the native interrupt latch; absent from the production ABI."""
     # SAFETY: direct-test binaries link the isolated testing adapter object; the
     # function takes no pointer, retains nothing, and only clears sig_atomic_t.
     external_call["mtest_exec_test_reset_interrupt", NoneType]()

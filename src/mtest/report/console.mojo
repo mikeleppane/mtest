@@ -1,20 +1,21 @@
-"""The console design language: `ConsoleReporter` (Layer 2).
+"""The console design language: `ConsoleReporter`.
 
 The one place in the runner that formats text for humans. It renders the event
 stream into an owned `String` buffer, exposed via `output()`, so unit tests can
-assert the structure directly and `main` writes that buffer to stdout (flushing
-even on an interrupt/partial-summary path).
+assert the structure directly and `main` writes that buffer to stdout, flushing
+even on an interrupt or partial-summary path.
 
-Every fact it prints comes from an event — there is no side channel. It tells the
-per-TEST failure story: a framed section for every FAILING test carrying its
+Every fact it prints comes from an event; there is no side channel. It tells the
+per-test failure story: a framed section for every failing test carrying its
 verbatim assertion detail and a copy-pasteable repro line, the captured output
-shown ONCE per file under an explicit file-scope label, `-v` per-test rows, the
-NO-TESTS / MALFORMED-SUITE / DRIFT / capture-overflow tokens, and a summary band
-that counts TESTS for pass/fail/skip and FILES for the abnormals. Only the
-version string (a build constant) and the color/verbosity/show-output config are
-passed at construction; those are not session facts. Color is redundant: the
-verdict tokens carry the meaning, and when color is off no escape code is
-emitted at all.
+shown once per file under an explicit file-scope label, `-v` per-test rows, the
+NO-TESTS, MALFORMED-SUITE, DRIFT and capture-overflow tokens, and a summary band
+that counts tests for pass/fail/skip and files for the abnormals.
+
+Only the version string, a build constant, and the color/verbosity/show-output
+config are passed at construction; those are not session facts. Color is always
+redundant: the verdict tokens carry the meaning, and when color is off no escape
+code is emitted at all.
 """
 from mtest.config import (
     ColorWhen,
@@ -44,30 +45,29 @@ comptime _HEX: StaticString = "0123456789abcdef"
 """Lowercase hex alphabet for rendering a fence token's random bytes."""
 
 comptime _FENCE_TOKEN_BYTES = 16
-"""Random bytes per fence token candidate — 16 bytes = 128 bits of entropy."""
+"""Random bytes per fence token candidate; 16 bytes is 128 bits of entropy."""
 
 comptime _FENCE_TOKEN_POOL = 4
 """How many independent candidate tokens to mint per run. A region that already
 contains the primary token's resume delimiter falls through to the next
 candidate; four independent 128-bit tokens make an all-collision draw
-impossible in practice while keeping the collision path exercised."""
+impossible in practice."""
 
 comptime _FENCE_WITHHELD: StaticString = (
     "[mtest: captured output withheld — no fence entropy available]"
 )
-"""Placeholder emitted in the vanishing case that no fence token could be minted:
-never echo unfenced child bytes under Actions, where they could forge a command.
+"""Placeholder emitted when no fence token could be minted. Unfenced child bytes
+are never echoed under Actions, where they could forge a workflow command.
 """
 
 
 def _mint_fence_tokens(count: Int) raises -> List[String]:
     """Mint `count` independent high-entropy fence tokens from `/dev/urandom`.
 
-    Each token is `_FENCE_TOKEN_BYTES` (16) random bytes rendered as lowercase
-    hex — 128 bits of entropy apiece, per-run-unique. The entropy comes from
-    ordinary std file I/O over `/dev/urandom`; the exec/native layers are never
-    touched. Raises if `/dev/urandom` cannot be read (the caller withholds the
-    echoed region rather than emit it unfenced).
+    Each token is `_FENCE_TOKEN_BYTES` random bytes rendered as lowercase hex,
+    giving 128 bits of entropy apiece, unique per run. The entropy comes from
+    ordinary std file I/O over `/dev/urandom`; the exec and native layers are
+    never touched.
 
     Args:
         count: How many tokens to mint.
@@ -76,7 +76,9 @@ def _mint_fence_tokens(count: Int) raises -> List[String]:
         `count` hex token strings, in draw order.
 
     Raises:
-        Error: if `/dev/urandom` could not be read.
+        Error: When `/dev/urandom` could not be read or returned a short read.
+            The caller withholds the echoed region rather than emit it
+            unfenced.
     """
     var need = count * _FENCE_TOKEN_BYTES
     var raw: List[UInt8]
@@ -112,10 +114,10 @@ comptime _PATH_W = 32
 
 
 def _verdict_token(outcome: Outcome) -> String:
-    """The fixed, ASCII verdict token for an outcome. Total; never raises.
+    """The fixed, ASCII verdict token for an outcome.
 
-    The vocabulary is fixed and glyph-free so it reads identically with or
-    without color and on any terminal.
+    The vocabulary is glyph-free so it reads identically with or without color
+    and on any terminal.
     """
     if outcome == Outcome.PASS:
         return "PASS"
@@ -147,7 +149,7 @@ def _verdict_token(outcome: Outcome) -> String:
 
 
 def _color_for(outcome: Outcome) -> StaticString:
-    """The ANSI code for an outcome's verdict line. Total; never raises."""
+    """The ANSI code for an outcome's verdict line."""
     if outcome == Outcome.PASS:
         return _GREEN
     if outcome == Outcome.FAIL:
@@ -161,7 +163,7 @@ def _color_for(outcome: Outcome) -> StaticString:
 def _col(s: String, w: Int) -> String:
     """Left-justify `s` to width `w`, or a two-space gutter if it overflows.
 
-    Keeps the verdict columns aligned without a table library. Never raises.
+    Keeps the verdict columns aligned without a table library.
     """
     var out = s.copy()
     var n = s.byte_length()
@@ -174,10 +176,11 @@ def _col(s: String, w: Int) -> String:
 
 
 def _fmt_fixed(x: Float64, decimals: Int) -> String:
-    """Format a non-negative number to a fixed number of decimals. Never raises.
+    """Format a non-negative number to a fixed number of decimals.
 
-    Durations are always non-negative, so a simple scale-round-split is enough;
-    it avoids depending on the default float formatting, which is not fixed.
+    Assumes `x` is non-negative, which every duration is, so a simple
+    scale-round-split suffices. Avoids depending on the default float
+    formatting, which is not fixed-width.
     """
     var scale = 1
     for _ in range(decimals):
@@ -207,13 +210,13 @@ def _ensure_trailing_newline(s: String) -> String:
 def _term_phrase(
     kind: Int, value: Int, final_kind: Int, final_value: Int, escalated: Bool
 ) -> String:
-    """A short human phrase for an attempt's decomposed termination. Pure.
+    """A short human phrase for an attempt's decomposed termination.
 
-    The `AttemptFinished` event carries the termination as plain integers (the
-    exec-layer `Termination` kinds: 0 EXITED, 1 SIGNALED, 2 TIMED_OUT, 3
-    SPAWN_FAILED) so this layer imports nothing above it. A signal is named in
-    words when recognized; a deadline notes any SIGKILL escalation; a nonzero
-    EXITED is a compiler ICE that exited under its own control.
+    The `AttemptFinished` event carries the termination as plain integers, the
+    exec-layer `Termination` kinds 0 EXITED, 1 SIGNALED, 2 TIMED_OUT and 3
+    SPAWN_FAILED, so this layer imports nothing above it. A signal is named in
+    words when recognized, a deadline notes any SIGKILL escalation, and a
+    nonzero EXITED is a compiler ICE that exited under its own control.
     """
     if kind == 1:
         var name = _signal_name_for_target(value)
@@ -233,14 +236,14 @@ def _term_phrase(
 def _precompile_ending_phrase(
     term_kind: Int, term_value: Int, escalated: Bool, timeout_seconds: Int
 ) -> String:
-    """How a precompile step's FINAL attempt ended, in words. Pure.
+    """How a precompile step's final attempt ended, in words.
 
-    A step that never produced its package is exit 1 either way, so the ONE thing
-    the banner owes a reader is which ending it was: a deadline WE enforced, a
+    A step that never produced its package exits 1 either way, so what the
+    banner owes a reader is which ending it was: a deadline mtest enforced, a
     compiler that died by a signal, a compiler that rejected the code, or a
-    compiler we could not even spawn. Reads the decomposed exec-layer termination
-    kinds (0 EXITED, 1 SIGNALED, 2 TIMED_OUT, 3 SPAWN_FAILED) the event carries,
-    so this layer imports nothing above it.
+    compiler that could not be spawned. Reads the decomposed exec-layer
+    termination kinds the event carries (0 EXITED, 1 SIGNALED, 2 TIMED_OUT,
+    3 SPAWN_FAILED), so this layer imports nothing above it.
     """
     if term_kind == 1:
         var name = _signal_name_for_target(term_value)
@@ -259,10 +262,10 @@ def _precompile_ending_phrase(
 
 
 def _errno_name(errno: Int) -> String:
-    """The strerror-style words for a common spawn errno. `""` outside the set.
+    """The strerror-style words for a common spawn errno, else `""`.
 
-    Covers the errnos a failed `execve`/`chdir` plausibly reports, so the caller
-    can name the cause and otherwise fall back to the bare number. Pure.
+    Covers the errnos a failed `execve` or `chdir` plausibly reports, so the
+    caller can name the cause and otherwise fall back to the bare number.
     """
     if errno == 2:
         return String("no such file or directory")
@@ -278,20 +281,21 @@ def _errno_name(errno: Int) -> String:
 def _outcome_detail(e: Event) -> String:
     """The per-outcome detail suffix the console renders from event data.
 
-    `FAIL` carries the exit code (`"exit <n>"`), `CRASH` the terminating signal
-    named in words when recognized (`"signal 4 — SIGILL, illegal instruction"`,
-    else just `"signal <n>"`), `TIMEOUT` and `COMPILE_TIMEOUT` the configured
-    deadline (`"timed out after <n>s"` — the run deadline and the compile
-    deadline read the same because both name the deadline WE enforced); every
-    other outcome has no detail. Pure.
+    `FAIL` carries the exit code (`"exit <n>"`). `CRASH` carries the terminating
+    signal, named in words when recognized (`"signal 4 — SIGILL, illegal
+    instruction"`, else just `"signal <n>"`). `TIMEOUT` and `COMPILE_TIMEOUT`
+    carry the configured deadline (`"timed out after <n>s"`); both read the same
+    because both name a deadline mtest enforced. Every other outcome has no
+    detail.
 
-    A deadline that had to be escalated says so, in `_term_phrase`'s words so the
-    verdict line and the TRY lines agree. This is the ONLY place the escalation
-    reaches a reader when no retry ran (a TRY line exists only for a non-final
-    attempt), which is the common `--timeout N` case. The clause is driven by the
-    event's latched `escalated`, so it appears only where the session populates
-    it from a run `Termination` — the compile steps do not yet pass their
-    `bterm.escalated`, and until they do a COMPILE_TIMEOUT simply renders the
+    A deadline that had to be escalated says so, in `_term_phrase`'s words so
+    the verdict line and the TRY lines agree. When no retry ran, this is the
+    only place the escalation reaches a reader, since a TRY line exists only for
+    a non-final attempt; that is the common `--timeout N` case.
+
+    The clause is driven by the event's latched `escalated`, so it appears only
+    where the session populates it from a run `Termination`. The compile steps
+    do not yet pass their `bterm.escalated`, so a COMPILE_TIMEOUT renders the
     bare deadline rather than claiming an escalation nobody recorded.
     """
     if e.outcome == Outcome.FAIL:
@@ -311,11 +315,10 @@ def _outcome_detail(e: Event) -> String:
 
 
 def _is_no_tests(e: Event) -> Bool:
-    """Whether a FileFinished is a NO-TESTS pass: a VALID report that ran zero
-    tests.
+    """Whether a `FileFinished` is a NO-TESTS pass.
 
-    A parsed report with zero passed/failed/skipped rows on a PASS file is a
-    NO-TESTS result — exit-0 class, but it must never read as "passed". Pure.
+    A parsed report with zero passed, failed and skipped rows on a PASS file is
+    a NO-TESTS result: exit-0 class, but it must never read as "passed".
     """
     return (
         e.outcome == Outcome.PASS
@@ -327,7 +330,7 @@ def _is_no_tests(e: Event) -> Bool:
 
 
 def _disposition_note(e: Event) -> String:
-    """A verdict-line note naming a non-plain disposition, or `""`. Pure.
+    """A verdict-line note naming a non-plain disposition, or `""`.
 
     A CAPTURE_OVERFLOW FAIL and a MALFORMED_SUITE each get a distinct sentence
     naming why no report can be trusted, so neither reads as a plain assertion
@@ -354,12 +357,12 @@ def _disposition_note(e: Event) -> String:
 
 
 def _slow_note(e: Event) -> String:
-    """The `-v` clause naming which step(s) were SLOW and their duration(s).
+    """The `-v` clause naming which steps were slow and their durations.
 
-    `slow_step_label` decides WHICH of the two typed duration fields crossed
-    the threshold; the durations rendered here are always those same fields
-    (never invented), so this can never claim a step's time that the event
-    does not itself carry. Called only when `e.slow` is True.
+    `slow_step_label` decides which of the two typed duration fields crossed the
+    threshold, and the durations rendered here are always those same fields, so
+    this cannot claim a step time the event does not itself carry. Called only
+    when `e.slow` is True.
     """
     var label = slow_step_label(e.build_duration_seconds, e.duration_seconds)
     if label == "build":
@@ -378,7 +381,7 @@ def _slow_note(e: Event) -> String:
 
 
 def _common_indent(lines: List[String]) -> Int:
-    """The count of leading spaces shared by every non-empty line, or 0. Pure.
+    """The count of leading spaces shared by every non-empty line, or 0.
 
     Empty lines are ignored; a non-empty line with no leading space forces 0.
     """
@@ -402,12 +405,14 @@ def _common_indent(lines: List[String]) -> Int:
 
 
 def _strip_at_root_prefix(ln: String, root: String) -> String:
-    """Anchored form of transform (2): if `ln`, after any leading spaces, IS a
-    backtrace pointer starting with `At <root>/`, strip only that one
-    `root + "/"` occurrence immediately after `At `. Every other byte on the
-    line — including any LATER occurrence of the root path, e.g. inside an
-    assertion message — rides through untouched. A line that merely contains
-    `"At "` somewhere without being anchored there is left alone. Pure.
+    """Strip the run-root prefix from a line that is a backtrace pointer.
+
+    The anchored form of `_transform_detail`'s second transformation. If `ln`,
+    after any leading spaces, starts with `At <root>/`, that single occurrence
+    of `root + "/"` immediately after `At ` is removed. Every other byte on the
+    line rides through untouched, including any later occurrence of the root
+    path, such as one inside an assertion message. A line that merely contains
+    `"At "` somewhere without being anchored there is left alone.
     """
     if root.byte_length() == 0:
         return ln
@@ -424,17 +429,18 @@ def _strip_at_root_prefix(ln: String, root: String) -> String:
 
 
 def _transform_detail(detail: String, root: String) -> String:
-    """A FAIL's verbatim detail with the TWO permitted transformations only.
+    """A FAIL's verbatim detail with the two permitted transformations applied.
 
-    (1) Strip the common leading-whitespace prefix TestSuite bakes into the
-    detail block — a UNIFORM dedent that keeps the relative shape. (2) On a
-    line that IS a backtrace pointer (`At <path>:<line>:<col>: ...`, optionally
-    indented), render the compiler-baked ABSOLUTE path root-relative by
-    stripping the single run-root prefix (`root + "/"`) that immediately
-    follows `At `. NOTHING else is rewritten — in particular a later
-    occurrence of the run root elsewhere on the same line (e.g. inside the
-    assertion message) is untouched — and every other byte rides through
-    verbatim. Allocates; never raises.
+    First, strip the common leading-whitespace prefix TestSuite bakes into the
+    detail block: a uniform dedent that preserves the relative shape. Second, on
+    a line that is a backtrace pointer (`At <path>:<line>:<col>: ...`,
+    optionally indented), render the compiler-baked absolute path root-relative
+    by stripping the single run-root prefix (`root + "/"`) that immediately
+    follows `At `.
+
+    Nothing else is rewritten. A later occurrence of the run root elsewhere on
+    the same line, such as inside the assertion message, is untouched, and every
+    other byte rides through verbatim.
     """
     if detail.byte_length() == 0:
         return String("")
@@ -458,7 +464,7 @@ def _transform_detail(detail: String, root: String) -> String:
 
 
 def _extra_count(s: Summary, outcome: Outcome, label: String) -> String:
-    """`, <n> <label>` for a nonzero outcome tally, else empty. Never raises."""
+    """`, <n> <label>` for a nonzero outcome tally, else empty."""
     var n = s.count_of(outcome)
     if n == 0:
         return String("")
@@ -467,11 +473,11 @@ def _extra_count(s: Summary, outcome: Outcome, label: String) -> String:
 
 @fieldwise_init
 struct _FileDuration(Copyable, Movable):
-    """One RUN file's root-relative path and its RUN-ONLY wall-clock duration.
+    """One run file's root-relative path and its run-only wall-clock duration.
 
-    Accumulated from `FileFinished` events that reached the run step
-    (`duration_seconds > 0.0`) so the slowest-files list can be sorted after
-    the fact without re-touching the event stream.
+    Accumulated from `FileFinished` events that reached the run step, meaning
+    `duration_seconds > 0.0`, so the slowest-files list can be sorted after the
+    fact without re-touching the event stream.
     """
 
     var path: String
@@ -481,9 +487,9 @@ struct _FileDuration(Copyable, Movable):
 
 
 def _path_less(a: String, b: String) -> Bool:
-    """Byte-wise lexicographic `a < b`. Pure.
+    """Byte-wise lexicographic `a < b`.
 
-    Paths are UTF-8; comparing bytes gives the same order as comparing
+    Paths are UTF-8, and comparing bytes gives the same order as comparing
     codepoints, so this is a correct, dependency-free path tiebreak.
     """
     var ab = a.as_bytes()
@@ -498,21 +504,17 @@ def _path_less(a: String, b: String) -> Bool:
 
 
 def _slower(a: _FileDuration, b: _FileDuration) -> Bool:
-    """Whether `a` sorts before `b`: longer duration first, path breaks ties.
-
-    Pure.
-    """
+    """Whether `a` sorts before `b`: longer duration first, path breaks ties."""
     if a.duration_seconds != b.duration_seconds:
         return a.duration_seconds > b.duration_seconds
     return _path_less(a.path, b.path)
 
 
 def _sort_slowest(mut files: List[_FileDuration]):
-    """In-place selection sort of `files` by `_slower`. Never raises.
+    """In-place selection sort of `files` by `_slower`.
 
-    File counts are small (one run's worth of files), so an O(n^2) selection
-    sort keeps this dependency-free and trivially deterministic; it is not on
-    any hot path.
+    File counts are small, one run's worth, so an O(n^2) selection sort keeps
+    this dependency-free and trivially deterministic. It is not on a hot path.
     """
     var n = len(files)
     for i in range(n):
@@ -527,8 +529,10 @@ def _sort_slowest(mut files: List[_FileDuration]):
 
 
 def _worst_color(s: Summary, tc: TestCounts) -> StaticString:
-    """The summary-band color: red-bold if any crash-class FILE ran, else red if
-    any failing TEST or FAIL file, else green. Never raises.
+    """The summary-band color.
+
+    Red-bold if any crash-class file ran, otherwise red if any test failed or
+    any file is a FAIL, otherwise green.
     """
     if (
         s.count_of(Outcome.CRASH) > 0
@@ -547,11 +551,10 @@ def _worst_color(s: Summary, tc: TestCounts) -> StaticString:
 struct ConsoleReporter(Reporter):
     """Renders the event stream into an owned, inspectable console buffer.
 
-    Accumulates three parts as events arrive — the streamed header/verdict
+    Accumulates three parts as events arrive — the streamed header and verdict
     block, the framed failure sections, and the final summary band — and joins
     them in `output()`. Per file it accumulates the retrospective TEST_REPORTED
-    results so `FILE_FINISHED` can render per-test failure sections. Copyable and
-    Movable so it composes into a `CompositeReporter`.
+    results so `FILE_FINISHED` can render per-test failure sections.
     """
 
     var version: String
@@ -563,11 +566,11 @@ struct ConsoleReporter(Reporter):
     var show_output: ShowOutput
     """Which files' captured output to frame: failures, all, or none."""
     var mtest_build_flags: String
-    """Shell-ready build-affecting flags to echo in a run-failure reproduce line."""
+    """Shell-ready build-affecting flags echoed in a reproduce line."""
     var durations: Int
-    """`--durations N`: how many slowest-running FILES to list after the
-    summary band; `0` (or the flag absent) renders nothing extra. Independent
-    of `verbosity` — an explicit `--durations` survives `-q`."""
+    """`--durations N`: how many slowest-running files to list after the summary
+    band; `0`, or the flag being absent, renders nothing extra. Independent of
+    `verbosity`, so an explicit `--durations` survives `-q`."""
     var _head: String
     """The streamed header, warnings, banners, and verdict/excluded lines."""
     var _sections: String
@@ -576,10 +579,10 @@ struct ConsoleReporter(Reporter):
     """The final summary band, plus the slowest-files list (when `durations`
     is set) appended after it."""
     var _file_durations: List[_FileDuration]
-    """Per-file RUN-ONLY wall-clock durations accumulated from `FileFinished`,
+    """Per-file run-only wall-clock durations accumulated from `FileFinished`,
     for the slowest-files list. Only files that reached the run step
-    (`duration_seconds > 0.0`) are recorded; a COMPILE_ERROR/EXCLUDED/NOT_RUN
-    file carries `0.0` and is never added."""
+    (`duration_seconds > 0.0`) are recorded; a COMPILE_ERROR, EXCLUDED or
+    NOT_RUN file carries `0.0` and is never added."""
     var _run_root: String
     """The run root from SESSION_STARTED, for root-relativizing `At` lines."""
     var _toolchain: String
@@ -590,14 +593,14 @@ struct ConsoleReporter(Reporter):
     """The most recent warning's detail, for folding into a DRIFT banner."""
     var _gh_actions: Bool
     """Whether the run is inside GitHub Actions (`GITHUB_ACTIONS=true`). When
-    True, EVERY echoed region of captured CHILD output is wrapped in
+    True, every echoed region of captured child output is wrapped in
     stop-commands fencing so a child's `::error`-shaped bytes cannot forge a
     workflow command. Independent of the `--gh-annotations` mode: fencing is a
     console-path safety measure, active even when annotations are off."""
     var _fence_tokens: List[String]
-    """The per-run high-entropy fence-token pool, minted LAZILY the first time a
-    region is fenced (after the producing child has already exited) and reused
-    for the whole run. Empty until minted (or if minting failed)."""
+    """The per-run high-entropy fence-token pool, minted lazily the first time a
+    region is fenced, after the producing child has already exited, and reused
+    for the whole run. Empty until minted, or if minting failed."""
     var _fence_tokens_tried: Bool
     """Whether token minting has been attempted, so a failed `/dev/urandom` read
     is not retried on every subsequent region."""
@@ -616,23 +619,27 @@ struct ConsoleReporter(Reporter):
     ):
         """Construct a reporter and resolve color once.
 
-        The `--color` choice wins over the environment: `ALWAYS`/`NEVER` are
-        absolute; `AUTO` enables color iff stdout is a TTY and `NO_COLOR` is not
-        set. All inputs are build constants or config — never session facts.
+        The `--color` choice wins over the environment: `ALWAYS` and `NEVER` are
+        absolute, while `AUTO` enables color only when the resolved console
+        destination is a TTY and `NO_COLOR` is unset. All inputs are build
+        constants or config, never session facts.
 
         Args:
-            version: The mtest version label for the header line.
+            version: The mtest version label for the header line. Consumed.
             color: The resolved `--color` choice.
-            is_tty: Whether stdout is a terminal (for `AUTO`).
-            no_color: Whether `NO_COLOR` is set in the environment (for `AUTO`).
+            is_tty: Whether the resolved console destination is a terminal,
+                consulted for `AUTO`. The caller resolves that destination
+                first: under `--json -` the machine stream owns stdout and the
+                console relocates to stderr, so this is stderr's TTY status.
+            no_color: Whether `NO_COLOR` is set, consulted for `AUTO`.
             verbosity: How much per-file detail to render.
             show_output: Which files' captured output to frame.
             mtest_build_flags: Shell-ready build-affecting flags for reproduce
-                lines (empty when none are in effect).
+                lines; empty when none are in effect. Consumed.
             durations: `--durations N` from config; `0` disables the
                 slowest-files list.
             gh_actions: Whether the run is inside GitHub Actions
-                (`GITHUB_ACTIONS=true`); when True, echoed captured child output
+                (`GITHUB_ACTIONS=true`). When True, echoed captured child output
                 is wrapped in collision-proof stop-commands fencing.
         """
         self.version = version^
@@ -659,23 +666,23 @@ struct ConsoleReporter(Reporter):
         self._fence_tokens_tried = False
 
     def _paint(self, code: StaticString, text: String) -> String:
-        """Wrap `text` in an ANSI color unless color is off or the code is empty.
+        """Wrap `text` in an ANSI color, unless color is off or `code` is empty.
 
-        When color is disabled no escape byte is emitted at all — color is never
-        the sole carrier, so the plain text stands alone. Never raises.
+        When color is disabled no escape byte is emitted at all. Color is never
+        the sole carrier of meaning, so the plain text stands alone.
         """
         if not self.color_enabled or code.byte_length() == 0:
             return text.copy()
         return String(code) + text + String(_RESET)
 
     def _ensure_fence_tokens(mut self):
-        """Mint the per-run fence-token pool once, on first need. Never raises.
+        """Mint the per-run fence-token pool once, on first need.
 
-        Called only under `_gh_actions`, at the first captured-output region —
-        which is rendered from a `FileFinished`/`PrecompileFailed`, i.e. AFTER
-        the producing child has exited, so the token is minted after the child is
-        gone and is never exposed to it. A `/dev/urandom` read failure leaves the
-        pool empty and is not retried; `_fence` then withholds the region.
+        Called only under `_gh_actions`, at the first captured-output region.
+        That region is rendered from a `FileFinished` or `PrecompileFailed`,
+        so the producing child has already exited and the token is never
+        exposed to it. A `/dev/urandom` read failure leaves the pool empty and
+        is not retried; `_fence` then withholds the region.
         """
         if self._fence_tokens_tried:
             return
@@ -688,16 +695,18 @@ struct ConsoleReporter(Reporter):
     def _fence(self, region: String) -> String:
         """Wrap one captured child-output `region` in stop-commands fencing.
 
-        A no-op returning `region` unchanged when not under Actions. Under
-        Actions it selects the first pool candidate whose complete resume
-        delimiter `::<token>::` is ABSENT from `region` (regenerating past a
-        seeded delimiter), then returns the region wrapped by `fence_region` — an
-        opener line, the region, and the resume delimiter, the resume ALWAYS
-        present. The token pool must already be minted (the `mut` callers call
-        `_ensure_fence_tokens` first); this method only READS it, so it is safe
-        to call while iterating the per-test list. If the pool is empty or every
-        candidate collides, the region is WITHHELD rather than echoed unfenced,
-        since unfenced child bytes could forge a workflow command. Never raises.
+        Returns `region` unchanged when not under Actions. Under Actions it
+        selects the first pool candidate whose resume delimiter `::<token>::` is
+        absent from `region`, stepping past a seeded delimiter, then returns the
+        region wrapped by `fence_region` as an opener line, the region, and the
+        resume delimiter.
+
+        The token pool must already be minted, which the `mut` callers arrange
+        by calling `_ensure_fence_tokens` first. This method only reads the
+        pool, so it is safe to call while iterating the per-test list. If the
+        pool is empty or every candidate collides, the region is withheld rather
+        than echoed unfenced, since unfenced child bytes could forge a workflow
+        command.
         """
         if not self._gh_actions:
             return region.copy()
@@ -712,20 +721,20 @@ struct ConsoleReporter(Reporter):
     def fence_token(self) -> String:
         """The primary per-run fence token, or `""` if none was minted.
 
-        `main` reads this to emit the ALWAYS-RUNS restoration epilogue (a final
-        resume delimiter) before its own annotation lines, guaranteeing workflow
-        commands are re-enabled even on a partial/error path. Empty means no
-        region was ever fenced (nothing to restore). Does not mutate or raise.
+        `main` reads this to emit the restoration epilogue, a final resume
+        delimiter, before its own annotation lines. That epilogue always runs,
+        so workflow commands are re-enabled even on a partial or error path.
+        Empty means no region was ever fenced, so there is nothing to restore.
         """
         if len(self._fence_tokens) == 0:
             return String("")
         return self._fence_tokens[0].copy()
 
     def output(self) -> String:
-        """The full rendered buffer so far. Does not mutate or raise.
+        """The full rendered buffer so far.
 
         Joins the streamed head, the framed sections, and the summary band. Safe
-        to read at any point, including a partial run, so main can flush it on an
+        to read at any point, including mid-run, so `main` can flush it on an
         interrupt.
         """
         var out = self._head.copy()
@@ -735,7 +744,10 @@ struct ConsoleReporter(Reporter):
         return out
 
     def handle(mut self, e: Event):
-        """Render one event into the buffer. Total over the event set; never raises.
+        """Render one event into the buffer; total over the event set.
+
+        Args:
+            e: The event to render.
         """
         var k = e.kind
         if k == EventKind.SESSION_STARTED:
@@ -772,10 +784,10 @@ struct ConsoleReporter(Reporter):
         self._last_warning_detail = String("")
 
     def _on_internal_error(mut self, e: Event):
-        """Render a loud red-bold banner naming the step, program, and errno.
+        """Render a red-bold banner naming the step, program, and errno.
 
-        A spawn failure (nonzero errno) names the cause; errno 0 is a machinery
-        failure and carries no errno suffix.
+        A spawn failure, meaning a nonzero errno, names the cause. Errno 0 is a
+        machinery failure and carries no errno suffix.
         """
         var banner = String("INTERNAL-ERROR  ") + e.step + ": "
         if e.errno == 0:
@@ -794,10 +806,11 @@ struct ConsoleReporter(Reporter):
         self._head += self._paint(_RED_BOLD, banner) + "\n"
 
     def _on_session_started(mut self, e: Event):
-        """Render the header: version + toolchain, then root and file counts.
+        """Render the header: version and toolchain, then root and file counts.
 
-        Also latches the run root and toolchain (needed even under quiet, for
-        root-relativizing `At` lines and naming the pin in a DRIFT banner).
+        Also latches the run root and toolchain, which are needed even under
+        quiet for root-relativizing `At` lines and naming the pin in a DRIFT
+        banner.
         """
         self._run_root = e.root.copy()
         self._toolchain = e.toolchain.copy()
@@ -817,10 +830,10 @@ struct ConsoleReporter(Reporter):
         )
 
     def _on_warning(mut self, e: Event):
-        """Render a loud, yellow warning line, composing the sentence per kind.
+        """Render a yellow warning line, composing the sentence per kind.
 
         Latches the detail so a DRIFT file's banner can fold in the offending
-        line the session emitted just before its FileFinished.
+        line the session emitted just before its `FileFinished`.
         """
         var sentence: String
         if e.warning_kind == "stale-exclusion":
@@ -836,12 +849,12 @@ struct ConsoleReporter(Reporter):
         self._head += self._paint(_YELLOW, line) + "\n"
 
     def _on_attempt_finished(mut self, e: Event):
-        """Render a loud "TRY" line for one non-final crash-class retry attempt.
+        """Render a "TRY" line for one non-final crash-class retry attempt.
 
         Reads the attempt's identity from the plain decomposed fields the event
-        carries (never re-parsing bytes): which attempt of how many, the step and
-        classification, and a short phrase for the termination. The excerpt
-        markers say loudly when the captured streams were clamped.
+        carries, never by re-parsing bytes: which attempt of how many, the step
+        and classification, and a short phrase for the termination. An excerpt
+        marker says when the captured streams were clamped.
         """
         var phrase = _term_phrase(
             e.term_kind,
@@ -871,19 +884,19 @@ struct ConsoleReporter(Reporter):
         self._head += self._paint(_YELLOW, line) + "\n"
 
     def _on_crash_attribution(mut self, e: Event):
-        """Render ONE crashed file's bounded-isolation attribution result.
+        """Render one crashed file's bounded-isolation attribution result.
 
         Composed from the event's typed fields only — the disposition, the
         culprit, the rerun count, and the elapsed time — never from a sentence
         the session pre-rendered.
 
-        Attribution is SECONDARY evidence: the file's CRASH verdict was already
-        rendered above and is not restated here as a verdict. So every
-        non-ATTRIBUTED disposition says BOTH that the verdict is unchanged and
-        that the culprit is UNATTRIBUTED — a reader must never be able to read a
-        stopped search as a soft accusation. The token is `ATTRIBUTION`, which
-        deliberately prefixes NO verdict token in the vocabulary: a line-oriented
-        reader scanning for `CRASH` must never match this diagnostic.
+        Attribution is secondary evidence: the file's CRASH verdict was already
+        rendered above and is not restated here as a verdict. Every
+        non-ATTRIBUTED disposition therefore states both that the verdict is
+        unchanged and that the culprit is unattributed, so a stopped search
+        cannot read as a soft accusation. The line's token is `ATTRIBUTION`,
+        which is not a prefix of any verdict token in the vocabulary, so a
+        line-oriented reader scanning for `CRASH` never matches this diagnostic.
         """
         var d = e.attribution_disposition
         var label: String
@@ -932,16 +945,16 @@ struct ConsoleReporter(Reporter):
         self._head += self._paint(_YELLOW, line) + "\n"
 
     def _on_precompile_failed(mut self, e: Event):
-        """Render the precompile-failure banner with the compiler output verbatim.
+        """Render the precompile-failure banner, compiler output verbatim.
 
-        Uses the frozen outcome-vocabulary label (PRECOMPILE-ERROR) and, per
-        §8.3, names each dependent test file as a casualty — not merely a count —
-        so a reader can see exactly which files were denied a run. When the event
-        carries the step's final termination it is named IN WORDS: a step killed
+        Uses the frozen outcome-vocabulary label PRECOMPILE-ERROR and names each
+        dependent test file as a casualty rather than only counting them, so a
+        reader sees exactly which files were denied a run. When the event
+        carries the step's final termination it is named in words: a step killed
         at the compile deadline reads as a timeout, never as the compiler
-        rejecting the code, and a step that burned its retry budget says how many
-        attempts it spent. Rendered from typed fields only; the compiler's own
-        output rides verbatim below.
+        rejecting the code, and a step that burned its retry budget says how
+        many attempts it spent. Rendered from typed fields only; the compiler's
+        own output rides verbatim below.
         """
         var detail = String("")
         if e.ending_known:
@@ -970,8 +983,7 @@ struct ConsoleReporter(Reporter):
         self._head += "\n"
 
     def _on_file_finished(mut self, e: Event):
-        """Render an excluded line, a verdict line, per-test sections, or a banner.
-        """
+        """Render an excluded line, verdict line, sections, or a banner."""
         if e.duration_seconds > 0.0:
             # RUN-ONLY signal: a file that never reached the run step (an
             # EXCLUDED, COMPILE_ERROR-before-run, or NOT_RUN file) carries
@@ -1060,7 +1072,7 @@ struct ConsoleReporter(Reporter):
         return out + "\n"
 
     def _render_drift(mut self, e: Event):
-        """A loud DRIFT banner naming the pin, snapshots, and offending line."""
+        """A DRIFT banner naming the pin, snapshots, and offending line."""
         var banner = (
             String("DRIFT  ")
             + e.path
@@ -1077,8 +1089,7 @@ struct ConsoleReporter(Reporter):
         )
 
     def _should_show_section(self, outcome: Outcome) -> Bool:
-        """Whether a framed section is shown for this outcome under the config.
-        """
+        """Whether a framed section is shown for this outcome, per config."""
         if self.show_output == ShowOutput.NONE:
             return False
         if self.show_output == ShowOutput.ALL:
@@ -1086,7 +1097,7 @@ struct ConsoleReporter(Reporter):
         return outcome.is_failing()
 
     def _repro_line(self, target: String) -> String:
-        """A `reproduce: mtest [<flags>] <target>` line, shell-quoted. Pure."""
+        """A `reproduce: mtest [<flags>] <target>` line, shell-quoted."""
         var repro = String("reproduce: mtest ")
         if self.mtest_build_flags.byte_length() > 0:
             repro += self.mtest_build_flags + " "
@@ -1094,13 +1105,13 @@ struct ConsoleReporter(Reporter):
         return repro
 
     def _compile_timeout_repro(self, e: Event) -> String:
-        """A `reproduce:` line naming the deadline that fired. Pure.
+        """A `reproduce:` line naming the deadline that fired.
 
         The COMPILE-ERROR banner reproduces with the raw `mojo build` argv, but
-        that argv would hang forever — the whole point is that this build does
-        not finish. So a COMPILE-TIMEOUT reproduces through mtest, carrying the
-        `--compile-timeout` that fired so the reader reruns the same experiment
-        rather than a different one.
+        that argv would hang, since this build is precisely one that does not
+        finish. A COMPILE-TIMEOUT therefore reproduces through mtest, carrying
+        the `--compile-timeout` that fired, so the reader reruns the same
+        experiment rather than a different one.
         """
         var repro = String("reproduce: mtest ")
         if self.mtest_build_flags.byte_length() > 0:
@@ -1113,21 +1124,23 @@ struct ConsoleReporter(Reporter):
         """The framed COMPILE-TIMEOUT banner, rendered from typed fields only.
 
         Names the deadline, shows whatever the compiler managed to say verbatim,
-        then carries the one actionable hint (split or exclude) and a repro line.
+        then carries the one actionable hint, split or exclude, and a repro
+        line.
 
-        The quarantine sentence is CONDITIONAL on `attempts_used > 1`: only then
-        did a retry actually run, rebuilding against a fresh quarantined module
-        cache. At `--retries 0` exactly one attempt was scheduled and the banner
-        promises nothing about a rebuild that never happened.
+        The quarantine sentence is conditional on `attempts_used > 1`, because
+        only then did a retry actually run and rebuild against a fresh
+        quarantined module cache. At `--retries 0` exactly one attempt was
+        scheduled, and the banner promises nothing about a rebuild that never
+        happened.
 
-        That sentence says how many attempts ran and NOTHING about how each one
-        ended, because `attempts_used` is a count and no typed field records the
-        per-attempt endings. A first attempt killed by a compiler ICE (crash-
-        class, so the retry rebuilds against a quarantined cache) followed by a
-        second that blew the deadline is also `attempts_used == 2` on a
-        COMPILE-TIMEOUT file — so any claim that the deadline fired every time
-        would be unearned. The verdict line and the sentence above it already say
-        the one ending that IS known: the final attempt's.
+        That sentence reports how many attempts ran and nothing about how each
+        one ended, because `attempts_used` is a count and no typed field records
+        the per-attempt endings. A first attempt killed by a compiler ICE, which
+        is crash-class and so triggers a quarantined-cache rebuild, followed by
+        a second that blew the deadline, is also `attempts_used == 2` on a
+        COMPILE-TIMEOUT file, so claiming the deadline fired every time would be
+        unearned. The verdict line and the sentence above it already state the
+        one ending that is known: the final attempt's.
         """
         var secs = String(e.timeout_seconds)
         var out = (
@@ -1159,7 +1172,11 @@ struct ConsoleReporter(Reporter):
         return out
 
     def _render_section(self, e: Event) -> String:
-        """The file's framed sections: per-test failures then the file-scope block.
+        """The file's sections for one FILE_FINISHED event.
+
+        A compile timeout or a compile error renders its own single block and
+        nothing else. Otherwise: one framed block per failing test in the file,
+        followed by the file-scope block.
         """
         if e.outcome == Outcome.COMPILE_TIMEOUT:
             return self._render_compile_timeout(e)
@@ -1186,10 +1203,10 @@ struct ConsoleReporter(Reporter):
         return out
 
     def _render_test_failure(self, t: TestResult) -> String:
-        """A framed per-test failure: node id header, verbatim detail, repro line.
+        """A framed per-test failure: node id, verbatim detail, repro line.
 
-        The detail carries the two permitted transformations only (a uniform
-        dedent and a root-relative `At` line); the untransformed bytes remain in
+        The detail carries the two permitted transformations only, a uniform
+        dedent and a root-relative `At` line; the untransformed bytes remain in
         the file-scope captured-output block below.
         """
         var node = t.node.render()
@@ -1201,11 +1218,11 @@ struct ConsoleReporter(Reporter):
         return out
 
     def _render_file_scope(self, e: Event, has_pertest: Bool) -> String:
-        """The once-per-file captured-output block under an explicit scope label.
+        """The once-per-file captured-output block, under a scope label.
 
         TestSuite does not attribute captured output per test, so the block is
-        labelled file-scoped and says so on screen. A file-level repro rides here
-        only when no per-test section already carried one.
+        labelled file-scoped and says so on screen. A file-level repro rides
+        here only when no per-test section already carried one.
         """
         var token = String("NO-TESTS") if _is_no_tests(e) else _verdict_token(
             e.outcome
@@ -1234,13 +1251,15 @@ struct ConsoleReporter(Reporter):
     def _on_session_finished(mut self, e: Event):
         """Render the summary band, colored by the worst outcome present.
 
-        Arithmetic: `passed`/`failed`/`skipped` are per-TEST totals (the tests
-        that actually ran); the file-level abnormals (crashed/timed-out/compile-
-        error/malformed-suite and their kin) are per-FILE counts appended only
-        when nonzero — they account for files that produced no per-test
-        attribution. `excluded`/`not run`/`deselected` are separate counts in the
-        parenthetical. So: passed+failed+skipped = tests run, and the file
-        abnormals + excluded + not-run cover every file with no test rows.
+        The arithmetic: `passed`, `failed` and `skipped` are per-test totals
+        over the tests that actually ran. The file-level abnormals — crashed,
+        timed out, compile error, malformed suite and their kin — are per-file
+        counts appended only when nonzero, accounting for files that produced no
+        per-test attribution. `excluded`, `not run` and `deselected` are
+        separate counts in the parenthetical.
+
+        So passed + failed + skipped is the number of tests run, and the file
+        abnormals plus excluded plus not-run cover every file with no test rows.
         """
         var s = e.summary.copy()
         var tc = e.test_counts
@@ -1284,16 +1303,17 @@ struct ConsoleReporter(Reporter):
         self._summary += self._render_slowest_files()
 
     def _render_slowest_files(self) -> String:
-        """The after-band slowest-FILES list, or `""` when it has nothing to say.
+        """The after-band slowest-files list, or `""` when it says nothing.
 
-        Presence-only: `""` when `durations` is `0`/absent, or when no file
-        reached the run step. Otherwise sorts the accumulated RUN-ONLY
-        durations descending, breaking ties by root-relative path ascending,
-        and renders at most `min(durations, files_run)` rows under a header
-        that states the ACTUAL row count shown — never the requested `N` when
-        fewer files ran. This is file-level: the header says "files" and no
-        per-test timing is shown or implied. Renders regardless of
-        `verbosity` (an explicit `--durations` survives `-q`). Never raises.
+        Empty when `durations` is `0` or absent, and also empty when no file
+        reached the run step. Otherwise sorts the accumulated run-only durations
+        descending, breaking ties by root-relative path ascending, and renders
+        at most `min(durations, files_run)` rows under a header stating the
+        actual row count shown, never the requested `N` when fewer files ran.
+
+        This is file-level: the header says "files" and no per-test timing is
+        shown or implied. Renders regardless of `verbosity`, so an explicit
+        `--durations` survives `-q`.
         """
         if self.durations <= 0:
             return String("")

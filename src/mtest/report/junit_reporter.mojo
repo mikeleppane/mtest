@@ -1,36 +1,36 @@
-"""The stateful JUnit reporter and its per-suite fragment spool (Layer 2).
+"""The stateful JUnit reporter and its per-suite fragment spool.
 
-Where `junit` is the PURE renderer (typed suite state -> XML), this is the
+Where `junit` is the pure renderer (typed suite state to XML), this is the
 stateful shell around it: a `Reporter` that accumulates the typed state each
 event carries, renders one `<testsuite>` fragment as each file finishes, and
-SPOOLS that fragment to a session temp directory (one file per suite) so the
+spools that fragment to a session temp directory, one file per suite, so the
 runner's memory never holds every rendered suite at once. The final document is
-built by `assemble`, which reads the spooled fragments back in node-id order and
-wraps them in the `<testsuites>` root — a clean entry point the serving task
-(the `--junit-xml` destination/finalize/atomic-rename protocol) will call, and
-which tests drive end to end.
+built by `assemble`, which reads the spooled fragments back in suite-key order
+and wraps them in the `<testsuites>` root.
 
-Every fact the reporter renders comes from the typed event payloads — never a
+Every fact the reporter renders comes from the typed event payloads, never a
 parse of the human console text and never a session side channel. The sentinel
 matrix is decided from `attempts_used`, the file outcome, and whether any
 per-test row carries a failing outcome:
 
-- `[attempts]` exists iff `attempts_used > 1` — it carries the whole attempt
-  story (a flaky pass's `flakyFailure`s, a rerun-exhausted failure's Surefire
-  chronology with the FIRST failed attempt as the primary and every later
-  attempt as a rerun, or a retried per-test failure's prior attempts as reruns).
-- `[build]` exists iff `attempts_used <= 1` AND the failing outcome is
-  file-level (no per-test row carries it).
-- The two are mutually exclusive by construction — exactly one outcome sentinel
+- `[attempts]` exists exactly when `attempts_used > 1`. It carries the whole
+  attempt story: a flaky pass's `flakyFailure`s, a rerun-exhausted failure's
+  Surefire chronology with the first failed attempt as the primary and every
+  later attempt as a rerun, or a retried per-test failure's prior attempts as
+  reruns.
+- `[build]` exists exactly when `attempts_used <= 1` and the failing outcome is
+  file-level, meaning no per-test row carries it.
+- The two are mutually exclusive by construction: exactly one outcome sentinel
   per suite, or none when per-test rows carry the verdict.
 
-A precompile failure emits its own `mtest::precompile` suite plus one `[not-run]`
-suite per NAMED casualty; a bare casualty COUNT with no names invents no rows.
+A precompile failure emits its own `mtest::precompile` suite plus one
+`[not-run]` suite per named casualty; a bare casualty count with no names
+invents no rows.
 
-`handle` is TOTAL and NON-RAISING per the `Reporter` seam: the only fallible
-step is the fragment file write, which is wrapped and latched (like the JSON
-stream reporter), after which the reporter goes silent. An INERT reporter (the
-no-`--junit-xml` shape) owns no spool directory and does nothing.
+`handle` is total and non-raising per the `Reporter` seam. The only fallible
+step is the fragment file write, which is wrapped and latched as in the JSON
+stream reporter, after which the reporter goes silent. An inert reporter, the
+no-`--junit-xml` shape, owns no spool directory and does nothing.
 """
 from std.ffi import external_call
 from std.os import getenv, mkdir, remove
@@ -69,11 +69,14 @@ comptime _SPOOL_ATTEMPTS = 64
 def _junit_nonce() -> String:
     """A per-process token isolating this run's JUnit spool and temp paths.
 
-    Two mtest PROCESSES writing the same `--junit-xml PATH` (plausible under
-    `--shard`) must never collide on a temp path one's finalize is renaming or a
-    spool dir one's cleanup would delete. The process id is stable within a run
-    and distinct across concurrent runs, so it keys each invocation's disposable
-    paths apart. Never raises.
+    Two mtest processes writing the same `--junit-xml PATH`, which `--shard`
+    makes plausible, must never collide on a temp path one's finalize is
+    renaming or a spool dir one's cleanup would delete. The process id is stable
+    within a run and distinct across concurrent runs, so it keys each
+    invocation's disposable paths apart.
+
+    Returns:
+        The process id, rendered in decimal.
     """
     # SAFETY: `getpid` takes no arguments and returns this process's id as an
     # Int32; there is nothing to misuse and the call cannot fail.
@@ -84,36 +87,36 @@ def _junit_nonce() -> String:
 def open_junit_spool() raises -> String:
     """Create and return this run's private temp directory for suite fragments.
 
-    Deliberately does NOT use `std.tempfile.mkdtemp`. At the pinned toolchain
-    its candidate-name generator is unseeded, so every process walks the SAME
-    name sequence; in a shared `/tmp` those exact names already exist from
-    earlier runs, mkdtemp exhausts its internal attempts, and `--junit-xml`
-    dies before a single test is built. The key here is instead a monotonic
-    nanosecond reading taken FRESH on every attempt, with `mkdir`'s own atomic
-    exclusive create as the arbiter, under a `mtest-junit-<pid>-` prefix that
-    ties a stray directory back to the run that left it. The pid alone must NOT
-    be the key: pids recur across pid namespaces and after wraparound, so a
-    fixed per-pid stem walked in index order has to step over every leftover a
-    previous same-pid run abandoned — which re-creates, against a persisted
-    `/tmp`, the exact budget exhaustion this function exists to remove. A
-    re-read clock cannot be walked into again.
+    Deliberately avoids `std.tempfile.mkdtemp`: at the pinned toolchain its
+    candidate-name generator is unseeded, so every process walks the same name
+    sequence. In a shared `/tmp` those exact names already exist from earlier
+    runs, mkdtemp exhausts its internal attempts, and `--junit-xml` dies before
+    a single test is built.
+
+    The key here is instead a monotonic nanosecond reading taken fresh on every
+    attempt, with `mkdir`'s own atomic exclusive create as the arbiter, under a
+    `mtest-junit-<pid>-` prefix that ties a stray directory back to the run that
+    left it. The pid alone cannot be the key: pids recur across pid namespaces
+    and after wraparound, so a fixed per-pid stem walked in index order would
+    have to step over every leftover a previous same-pid run abandoned, which
+    against a persisted `/tmp` reproduces the budget exhaustion this function
+    exists to remove. A re-read clock cannot be walked into again.
 
     Honors `TMPDIR`, then `TEMP`, then `TMP`, falling back to `/tmp` — the same
     precedence `gettempdir()` applies behind the `mkdtemp()` this replaces, so
     confining a run's scratch keeps working exactly as it did before.
 
     Returns:
-        The path of the freshly created, empty directory (mode 0o700). The
-        caller owns it and is responsible for removing it. Allocates the
-        returned String.
+        The path of the freshly created, empty directory, mode 0o700. The
+        caller owns it and is responsible for removing it.
 
     Raises:
-        Error: if no candidate could be created within the attempt budget —
-            the temp base is missing, is not a directory, or is unwritable.
-            The message carries the LAST underlying failure verbatim, because
-            every one of those causes burns the whole budget identically and
-            only the errno text tells them apart. The caller resolves that to
-            the pre-run internal-error exit code.
+        Error: When no candidate could be created within the attempt budget,
+            because the temp base is missing, is not a directory, or is
+            unwritable. The message carries the last underlying failure
+            verbatim, since every one of those causes burns the whole budget
+            identically and only the errno text tells them apart. The caller
+            resolves this to the pre-run internal-error exit code.
     """
     var base = getenv("TMPDIR", "")
     if base == "":
@@ -159,16 +162,21 @@ def _cstring(value: String) -> List[UInt8]:
 def _rename(src: String, dst: String) raises:
     """Atomically rename `src` onto `dst`, replacing `dst` if it exists.
 
-    The report layer performs its own libc calls (as `json_stream_reporter` does
-    for `write`/`open`/`close`) rather than reaching up into `exec`, so the
-    reporter stays self-contained. Both paths share a filesystem (the caller
-    derives `src` from `dst`'s directory), so `rename(2)` is indivisible: on
-    success `dst` names what `src` named; on failure NEITHER path is modified —
-    the whole reason the JUnit artifact is renamed and not written in place.
+    The report layer performs its own libc calls, as `json_stream_reporter` does
+    for `write`/`open`/`close`, rather than reaching up into `exec`, so the
+    reporter stays self-contained. Both paths share a filesystem because the
+    caller derives `src` from `dst`'s directory, so `rename(2)` is indivisible:
+    on success `dst` names what `src` named, and on failure neither path is
+    modified. That is why the JUnit artifact is renamed rather than written in
+    place.
+
+    Args:
+        src: The existing temp file to rename.
+        dst: The path to replace.
 
     Raises:
-        Error: if `rename(2)` failed (the target is a directory, straddles
-            filesystems, or its directory became unwritable).
+        Error: When `rename(2)` failed, because the target is a directory,
+            straddles filesystems, or its directory became unwritable.
     """
     var s = _cstring(src)
     var d = _cstring(dst)
@@ -190,11 +198,11 @@ def _rename(src: String, dst: String) raises:
 struct JunitArtifact(Copyable, Movable):
     """The resolved `--junit-xml` destination handles, proven writable at start.
 
-    `spool_dir` is a fresh session temp directory for the per-suite fragments;
-    `temp_path` is the unique temp FILE created in the TARGET directory (its
-    creation PROVES that directory writable now), the assembled document is
-    written to it at finalization, and it is renamed atomically onto
-    `target_path`. Owns its Strings; never raises.
+    `spool_dir` is a fresh session temp directory for the per-suite fragments.
+    `temp_path` is the unique temp file created in the target directory, and
+    creating it is what proves that directory writable. The assembled document
+    is written to `temp_path` at finalization, then renamed atomically onto
+    `target_path`.
     """
 
     var spool_dir: String
@@ -202,28 +210,30 @@ struct JunitArtifact(Copyable, Movable):
     var temp_path: String
     """The unique temp file in the target dir; the final document lands here."""
     var target_path: String
-    """The `--junit-xml` PATH the temp is atomically renamed onto."""
+    """The `--junit-xml` path the temp is atomically renamed onto."""
 
 
 def open_junit_artifact(
     spool_dir: String, path: String
 ) raises -> JunitArtifact:
-    """Resolve the JUnit destination and PROVE the target directory writable.
+    """Resolve the JUnit destination and prove the target directory writable.
 
-    Creates a unique temp FILE in the TARGET directory (dirname(`path`)) at
-    session start — its creation proves the directory writable NOW, before any
-    build or run, so a doomed report destination fails fast rather than after a
-    whole run. The prior report at `path` is NEVER touched here (or anywhere
-    before the final atomic rename). Raises on a creation failure — the caller
-    resolves that to the pre-run internal-error exit code.
+    Creates a unique temp file in `dirname(path)` at session start. Creating it
+    proves the directory writable before any build or run, so a doomed report
+    destination fails fast rather than after a whole run. The prior report at
+    `path` is not touched here, nor anywhere before the final atomic rename.
 
     Args:
         spool_dir: The already-created session temp directory for fragments.
-        path: The `--junit-xml` destination PATH.
+        path: The `--junit-xml` destination path.
+
+    Returns:
+        The resolved destination handles.
 
     Raises:
-        Error: if the unique temp file cannot be created (the target directory
-            is unwritable or missing).
+        Error: When the unique temp file cannot be created, because the target
+            directory is unwritable or missing. The caller resolves this to the
+            pre-run internal-error exit code.
     """
     var target_dir = String(dirname(path))
     var temp_name = (
@@ -242,18 +252,18 @@ def open_junit_artifact(
 
 @fieldwise_init
 struct JunitFinalizeResult(Copyable, Movable):
-    """The outcome of finalizing the JUnit artifact: a failure flag + diagnostic.
+    """The outcome of finalizing the JUnit artifact: a failure flag plus detail.
 
-    `failed` is True when the report could not be published (a latched spool, a
-    failed assemble, temp write, or atomic rename); `detail` is the loud
-    diagnostic the session surfaces. An inert or clean finalize is `failed=False`
-    with an empty `detail`.
+    `failed` is True when the report could not be published, whether from a
+    latched spool, a failed assemble, a failed temp write, or a failed atomic
+    rename; `detail` is the diagnostic the session surfaces. An inert or clean
+    finalize is `failed=False` with an empty `detail`.
     """
 
     var failed: Bool
     """Whether finalization could not publish the report."""
     var detail: String
-    """The loud diagnostic when `failed`; empty when clean."""
+    """The diagnostic when `failed`; empty when clean."""
 
 
 @fieldwise_init
@@ -262,13 +272,13 @@ struct _Diag(Copyable, Movable):
     """
 
     var is_error: Bool
-    """Whether this counts as an `<error>` (else a `<failure>`)."""
+    """Whether this counts as an `<error>` rather than a `<failure>`."""
     var type_label: String
     """The `type` attribute value."""
     var message: String
     """The `message` attribute value."""
     var stack: String
-    """The primary body / rerun `stackTrace` text."""
+    """The primary body, or the rerun `stackTrace` text."""
 
 
 @fieldwise_init
@@ -308,9 +318,9 @@ struct _SpoolEntry(Copyable, Movable):
 struct JunitStatus(Copyable, Movable):
     """The pollable health of a `JunitReporter`'s spool.
 
-    `failed` latches on the first fragment-write failure; `context` names what
-    was being spooled when it tripped. An owner treats a latched spool as a
-    fatal artifact condition, exactly as it does the JSON stream's latch.
+    `failed` latches on the first fragment-write failure, and `context` names
+    what was being spooled when it tripped. An owner treats a latched spool as
+    a fatal artifact condition, as it does the JSON stream's latch.
     """
 
     var failed: Bool
@@ -333,7 +343,7 @@ def _bound_str(s: String) -> String:
 
 
 def _attempt_diag(a: _AttemptRec) -> _Diag:
-    """The derived descriptor for one non-final attempt's termination. Pure."""
+    """The derived descriptor for one non-final attempt's termination."""
     if a.term_kind == _TERM_SIGNALED:
         var m = "killed by signal " + String(a.term_value)
         if a.escalated:
@@ -357,7 +367,7 @@ def _attempt_diag(a: _AttemptRec) -> _Diag:
 
 
 def _outcome_diag(e: Event, stderr_text: String) -> _Diag:
-    """The derived descriptor for a file's FINAL failing outcome. Pure."""
+    """The derived descriptor for a file's final failing outcome."""
     var o = e.outcome
     if o == Outcome.FAIL:
         var body = stderr_text if stderr_text != "" else String(
@@ -395,7 +405,7 @@ def _outcome_diag(e: Event, stderr_text: String) -> _Diag:
 
 
 def _primary_from(d: _Diag) -> JunitPrimary:
-    """A primary `<error>`/`<failure>` from a descriptor. Pure."""
+    """A primary `<error>`/`<failure>` from a descriptor."""
     var el = String("error") if d.is_error else String("failure")
     return JunitPrimary(el, d.message, d.type_label, d.stack)
 
@@ -403,7 +413,7 @@ def _primary_from(d: _Diag) -> JunitPrimary:
 def _rerun_from(
     d: _Diag, flaky: Bool, sout: String, serr: String
 ) -> JunitRerun:
-    """A rerun/flaky child from a descriptor. Pure; `type` always rides."""
+    """A rerun/flaky child from a descriptor; `type` always rides along."""
     var el: String
     if flaky:
         el = String("flakyError") if d.is_error else String("flakyFailure")
@@ -413,10 +423,11 @@ def _rerun_from(
 
 
 def _case_for_test(t: TestResult, cn: String) -> JunitCase:
-    """One per-test `<testcase>` row from a typed result. Pure.
+    """One per-test `<testcase>` row from a typed result.
 
-    A FAIL carries its verbatim assertion detail as a `<failure>`; a CRASH an
-    `<error>`; a SKIP a bare `<skipped/>`; every other outcome is a passing row.
+    A FAIL carries its verbatim assertion detail as a `<failure>`, a CRASH as an
+    `<error>`, and a SKIP as a bare `<skipped/>`. Every other outcome yields a
+    passing row.
     """
     var name = t.node.render()
     if t.outcome == Outcome.FAIL:
@@ -447,8 +458,8 @@ def _case_for_test(t: TestResult, cn: String) -> JunitCase:
 
 
 def _is_failing_test(t: TestResult) -> Bool:
-    """Whether a per-test row carries a failing verdict the suite need not
-    re-carry via a sentinel."""
+    """Whether a per-test row already carries the failing verdict, so the suite
+    needs no outcome sentinel for it."""
     return t.outcome == Outcome.FAIL or t.outcome == Outcome.CRASH
 
 
@@ -456,15 +467,13 @@ struct JunitReporter(Reporter):
     """A `Reporter` that spools one `<testsuite>` fragment per finished file.
 
     Accumulates per-file typed state, renders and spools each suite as its file
-    finishes, and assembles the node-id-sorted document on demand. `handle` is
-    total and non-raising; a fragment-write failure latches the reporter silent.
-    An inert reporter owns no spool directory and does nothing. `Copyable,
-    Movable` (owns Strings and Lists) so it slots into the reporter composition.
+    finishes, and assembles the suite-key-sorted document on demand. A
+    fragment-write failure latches the reporter silent. An inert reporter owns
+    no spool directory and does nothing.
     """
 
     var _active: Bool
-    """Whether this reporter spools at all; `False` is the no-`--junit-xml` shape.
-    """
+    """Whether this reporter spools at all; `False` is the inert shape."""
     var _spool_dir: String
     """The session temp directory the per-suite fragments are written to."""
     var _counter: Int
@@ -479,11 +488,11 @@ struct JunitReporter(Reporter):
     var _context: String
     """What was being spooled when the latch tripped ("" while clean)."""
     var _target_path: String
-    """The `--junit-xml` PATH the assembled document is renamed onto ("" when
-    inert or under a test driver that never finalizes)."""
+    """The `--junit-xml` path the assembled document is renamed onto; empty when
+    inert, or under a test driver that never finalizes."""
     var _temp_path: String
     """The unique temp file the assembled document is written to before the
-    atomic rename onto `_target_path` ("" when inert)."""
+    atomic rename onto `_target_path`; empty when inert."""
 
     def __init__(
         out self,
@@ -499,11 +508,11 @@ struct JunitReporter(Reporter):
                 per-suite fragments are written to.
             active: Whether to spool; `False` yields an inert reporter that owns
                 no directory and does nothing.
-            target_path: The `--junit-xml` PATH the finalized document is
-                atomically renamed onto; empty leaves `finalize` a no-op (a test
-                driver that only drives `assemble` never sets it).
-            temp_path: The unique temp file the document is written to before the
-                rename; empty leaves `finalize` a no-op.
+            target_path: The `--junit-xml` path the finalized document is
+                atomically renamed onto. Empty leaves `finalize` a no-op, which
+                is what a test driver that only drives `assemble` wants.
+            temp_path: The unique temp file the document is written to before
+                the rename. Empty leaves `finalize` a no-op.
         """
         self._active = active
         self._spool_dir = spool_dir
@@ -523,13 +532,20 @@ struct JunitReporter(Reporter):
     def note_not_run(mut self, selected_paths: List[String]):
         """Synthesize a `[not-run]` suite for each selected file never spooled.
 
-        Called by the session at the terminal protocol's Phase 1 (outside the
-        `Reporter` trait) so an interrupted, gate-aborted, or `--maxfail`-capped
-        run STILL carries a `[not-run]` skipped row for every selected file that
-        never produced a verdict. A file whose real verdict already spooled a
-        suite — a ran file, a deselected file, or a precompile casualty — is
-        already in the index and is skipped here, so no suite is ever doubled.
-        Total; never raises (the spool write is caught and latched like `handle`).
+        Called by the session during terminal finalization, outside the
+        `Reporter` trait, so an interrupted, gate-aborted, or `--maxfail`-capped
+        run still carries a `[not-run]` skipped row for every selected file that
+        never produced a verdict. A file that already spooled a suite — because
+        it ran, or was a precompile casualty — is in the index and is skipped
+        here, so no suite is ever doubled. Deselected and excluded files never
+        spool a suite at all and so are never in the index; keeping them out of
+        the report is the caller's job, and the session passes only the files
+        that reached no verdict.
+
+        The spool write is caught and latched as in `handle`.
+
+        Args:
+            selected_paths: The selected files that must appear in the report.
         """
         if not self._active or self._failed:
             return
@@ -560,19 +576,27 @@ struct JunitReporter(Reporter):
         return False
 
     def finalize(mut self) -> JunitFinalizeResult:
-        """Publish the JUnit artifact: assemble -> temp write -> atomic rename.
+        """Publish the JUnit artifact: assemble, write the temp, rename it.
 
-        Called by the SESSION on the concrete reporter (outside the `Reporter`
-        trait) at the terminal protocol's Phase 1. NON-RAISING: every failure is
-        caught and returned as a loud diagnostic the session collects.
+        Called by the session on the concrete reporter, outside the `Reporter`
+        trait, during terminal finalization. Every failure is caught and
+        returned as a diagnostic the session collects.
 
-        The deliberate asymmetry vs the JSON stream: a spool-write failure does
-        NOT abort the run mid-flight (unlike a latched stream, a fatal abort) —
-        it rode silently to here and surfaces NOW as a finalization failure. On a
-        clean spool the fragments are assembled in node-id order, written to the
-        unique temp (a verified complete write), and renamed atomically onto the
-        target. The prior report at the target is never truncated: on ANY failure
-        the target is left exactly as it was and the temp is cleaned up.
+        This is deliberately asymmetric with the JSON stream. A latched stream
+        aborts the run mid-flight; a spool-write failure does not, and instead
+        rides silently to here and surfaces as a finalization failure. On a
+        clean spool the fragments are assembled in suite-key order, written to
+        the unique temp, and renamed atomically onto the target.
+
+        The prior report at the target is never truncated: on any failure the
+        target is left exactly as it was. Temp cleanup is narrower — a failure
+        assembling or writing the temp removes it, but a run that arrives here
+        with an already-latched spool failure returns without touching the temp
+        the session created, so that empty temp outlives the run.
+
+        Returns:
+            A clean result when inert or published, otherwise the failure flag
+            and its diagnostic.
         """
         if not self._active or self._target_path == "":
             return JunitFinalizeResult(False, "")
@@ -594,8 +618,7 @@ struct JunitReporter(Reporter):
         return JunitFinalizeResult(False, "")
 
     def _discard_temp(mut self):
-        """Best-effort remove of the leftover temp file after a failed publish.
-        """
+        """Remove the leftover temp file after a failed publish, best-effort."""
         try:
             remove(self._temp_path)
         except:
@@ -604,9 +627,12 @@ struct JunitReporter(Reporter):
     def handle(mut self, e: Event):
         """Consume one event, spooling a suite as each file/precompile finishes.
 
-        Total over the event set; never raises. Accumulation is in-memory list
-        work; only the fragment write is fallible, and it is caught and latched
-        so a dead spool never propagates out of the seam.
+        Accumulation is in-memory list work; only the fragment write is
+        fallible, and it is caught and latched so a dead spool never propagates
+        out of the seam.
+
+        Args:
+            e: The event to consume.
         """
         if not self._active or self._failed:
             return
@@ -637,7 +663,7 @@ struct JunitReporter(Reporter):
             return
 
     def status(self) -> JunitStatus:
-        """The pollable latch state — callable OUTSIDE the `Reporter` trait."""
+        """The pollable latch state; callable outside the `Reporter` trait."""
         return JunitStatus(self._failed, self._context)
 
     def suite_count(self) -> Int:
@@ -651,19 +677,18 @@ struct JunitReporter(Reporter):
     def assemble(self, root_name: String) raises -> String:
         """Read the spooled fragments back and build the full document.
 
-        The clean assembly entry point: reads each per-suite fragment from the
-        spool, orders them by node id, and wraps them in the `<testsuites>` root
-        (root totals summed, no root `skipped`). The serving task calls this to
-        produce the artifact; tests call it to validate end to end.
+        Reads each per-suite fragment from the spool, orders them by suite key,
+        and wraps them in the `<testsuites>` root, with the root totals summed
+        and no root `skipped`.
 
         Args:
-            root_name: The `<testsuites>` `name` (e.g. `"mtest"`).
+            root_name: The `<testsuites>` `name`, for example `"mtest"`.
 
         Returns:
             The complete `<testsuites>` document.
 
         Raises:
-            Error: if a spooled fragment cannot be read back.
+            Error: When a spooled fragment cannot be read back.
         """
         var frags = List[RenderedSuite]()
         for i in range(len(self._index)):
@@ -691,8 +716,7 @@ struct JunitReporter(Reporter):
         return -1
 
     def _ensure_accum(mut self, path: String) -> Int:
-        """The index of `path`'s accumulator, creating an empty one if absent.
-        """
+        """The index of `path`'s accumulator, creating one if absent."""
         var idx = self._accum_index(path)
         if idx >= 0:
             return idx
@@ -773,13 +797,16 @@ struct JunitReporter(Reporter):
         return JunitSuite(e.path, e.duration_seconds, cases^, sout, serr)
 
     def _attempts_flaky(self, cn: String, accum_idx: Int) -> JunitCase:
-        """The `[attempts]` row for a flaky pass: one `<flakyFailure>` per failed
-        attempt, in attempt order, each with its own bounded diagnostics.
+        """The `[attempts]` row for a flaky pass.
 
-        Flaky children are `flakyFailure` (not `flakyError`): the file's final
-        verdict is a PASS, so the earlier attempts are reported as flaky
-        annotations, each carrying the REQUIRED `type` from that attempt's
-        termination — they never count against the suite's failures/errors."""
+        Carries one `<flakyFailure>` per failed attempt, in attempt order, each
+        with its own bounded diagnostics.
+
+        Flaky children are always `flakyFailure`, never `flakyError`. The file's
+        final verdict is a pass, so earlier attempts are reported as flaky
+        annotations that never count against the suite's failures or errors,
+        each carrying the schema-required `type` from that attempt's
+        termination."""
         var reruns = List[JunitRerun]()
         for i in range(len(self._accums[accum_idx].attempts)):
             var a = self._accums[accum_idx].attempts[i].copy()
@@ -798,7 +825,8 @@ struct JunitReporter(Reporter):
 
     def _attempts_pertest(self, cn: String, accum_idx: Int) -> JunitCase:
         """The `[attempts]` row for retried per-test failures: prior attempts as
-        reruns, no primary of its own (the per-test rows carry the verdict)."""
+        reruns, with no primary of its own, since the per-test rows carry the
+        verdict."""
         var reruns = List[JunitRerun]()
         for i in range(len(self._accums[accum_idx].attempts)):
             var a = self._accums[accum_idx].attempts[i].copy()
@@ -811,10 +839,10 @@ struct JunitReporter(Reporter):
     ) -> JunitCase:
         """The `[attempts]` row for a rerun-exhausted file-level failure.
 
-        Surefire chronology: the FIRST failed attempt is the primary; every
+        Surefire chronology: the first failed attempt is the primary, and every
         subsequent failed attempt, the final one included, is a rerun in attempt
-        order. When no non-final attempts were captured, the final outcome is the
-        primary and there are no reruns.
+        order. When no non-final attempts were captured, the final outcome is
+        the primary and there are no reruns.
         """
         var n = len(self._accums[accum_idx].attempts)
         var final_d = _outcome_diag(
@@ -842,10 +870,10 @@ struct JunitReporter(Reporter):
     def _finish_precompile(mut self, e: Event):
         """Emit the precompile suite plus one not-run suite per named casualty.
 
-        The `mtest::precompile` suite carries a `[precompile]` error; each named
-        casualty gets its own `[not-run]` suite. A bare casualty COUNT with no
-        names invents no casualty rows — the degenerate case renders only the
-        precompile suite.
+        The `mtest::precompile` suite carries a `[precompile]` error, and each
+        named casualty gets its own `[not-run]` suite. A bare casualty count
+        with no names invents no casualty rows, so that degenerate case renders
+        only the precompile suite.
         """
         var cn = dotted_classname("mtest::precompile")
         var msg = String("precompile failed (" + e.step + ")")

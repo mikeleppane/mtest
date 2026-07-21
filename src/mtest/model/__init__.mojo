@@ -1,11 +1,11 @@
-"""The model layer of the mtest runner (Layer 0).
+"""The model layer of the mtest runner.
 
-This is the base layer: the outcome vocabulary, the closed typed event set that
-is the only channel from the session to the reporters, and the pure function
-that maps a multiset of run outcomes to a process exit code. It imports nothing
-internal; every layer above imports from here.
+The base layer: the outcome vocabulary, the closed typed event set that is the
+only channel from the session to the reporters, and the function that maps a
+multiset of run outcomes to a process exit code. It imports nothing internal;
+every layer above imports from here.
 
-The public surface is re-exported here so callers write
+The public surface is re-exported here, so callers can write
 `from mtest.model import Outcome, Event, exit_code_for, ...`.
 """
 from mtest.model.outcome import Outcome

@@ -1,22 +1,23 @@
-"""Bounded per-stream capture with a head+tail truncation policy (Layer 3).
+"""Bounded per-stream capture with a head+tail truncation policy.
 
 A supervised child can emit unbounded output, so capture is bounded in memory:
 the first `head_cap` bytes and the last `tail_cap` bytes are always kept. Under
-the bound (total <= head_cap + tail_cap) capture is BYTE-EXACT — nothing is lost
-or reordered. Over the bound, the middle is dropped and a loud, single-line
-marker is spliced between the head and the surviving tail, naming how many bytes
-were omitted. The tail is retained on purpose: a later report parser anchors on
-the LAST report block, so the end of the stream must never be the part that is
-dropped.
+the bound (total <= head_cap + tail_cap) capture is byte-exact; nothing is lost
+or reordered. Over the bound, the middle is dropped and a single-line marker is
+spliced between the head and the surviving tail, naming how many bytes were
+omitted.
+
+The tail is retained deliberately: a later report parser anchors on the last
+report block, so the end of the stream must never be the part that is dropped.
 """
 
 
 struct BoundedCapture(Movable):
     """A memory-bounded byte sink keeping the head and tail of a stream.
 
-    Bytes flow through `push`; `finish` materializes the retained bytes. Owns two
-    backing lists (the head buffer and a tail ring). Construction validates the
-    capacities before creating those lists and can raise; `finish` allocates.
+    Bytes flow in through `push_byte`; `finish` materializes the retained bytes.
+    Owns two backing lists: the head buffer and a tail ring. Construction
+    validates the capacities before creating those lists, and can raise.
     """
 
     var head: List[UInt8]
@@ -30,16 +31,14 @@ struct BoundedCapture(Movable):
     var tail_start: Int
     """The ring index of the oldest tail byte once the ring has wrapped."""
     var tail_count: Int
-    """How many bytes have entered the tail ring in total (may exceed tail_cap).
-    """
+    """How many bytes have entered the tail ring; may exceed `tail_cap`."""
     var total: Int
     """How many bytes have been pushed in total."""
 
     def __init__(out self, head_cap: Int, tail_cap: Int) raises:
         """Initialize a capture after validating both capacities.
 
-        Creates the two initially empty backing lists only after validation;
-        they grow later as bytes are pushed.
+        The two backing lists start empty and grow as bytes are pushed.
 
         Args:
             head_cap: Nonnegative number of leading bytes to retain.
@@ -67,10 +66,13 @@ struct BoundedCapture(Movable):
         self.total = 0
 
     def push_byte(mut self, b: UInt8):
-        """Append one byte, into the head until it is full, then the tail ring.
+        """Append one byte: into the head until it is full, then the tail ring.
 
-        Mutates the buffers; allocates only while the buffers are still growing
-        toward their caps. Does not raise.
+        Once the tail ring is at `tail_cap` it overwrites its oldest byte, so
+        pushing past the bound never grows memory further.
+
+        Args:
+            b: The next byte of the stream, in arrival order.
         """
         self.total += 1
         if len(self.head) < self.head_cap:
@@ -87,14 +89,12 @@ struct BoundedCapture(Movable):
     def was_truncated(self) -> Bool:
         """True iff more bytes were pushed than the head+tail bound could keep.
 
-        Equivalent to whether `finish()` splices the omission marker: over the
-        bound the middle was dropped. Pure — reads `total` against the caps and
-        changes no state.
+        Equivalent to whether `finish()` splices the omission marker.
         """
         return self.total > self.head_cap + self.tail_cap
 
     def _tail_in_order(self) -> List[UInt8]:
-        """The retained tail bytes, oldest first. Allocates; does not raise."""
+        """The retained tail bytes, unwrapped from the ring, oldest first."""
         var out = List[UInt8]()
         if self.tail_count <= self.tail_cap:
             for i in range(len(self.tail)):
@@ -108,8 +108,10 @@ struct BoundedCapture(Movable):
         """Materialize the retained bytes, splicing a marker only if truncated.
 
         Under the bound the result is byte-exact; over the bound it is the head,
-        a loud one-line omission marker, then the surviving tail. Allocates the
-        result; does not raise.
+        a one-line omission marker, then the surviving tail.
+
+        Returns:
+            The retained bytes as a fresh list the caller owns.
         """
         if self.total <= self.head_cap:
             # Everything fit in the head: byte-exact.
@@ -140,7 +142,7 @@ struct BoundedCapture(Movable):
 
 
 def _marker_text(omitted: Int, limit: Int) -> String:
-    """The one-line truncation marker naming the omission. Pure."""
+    """The one-line truncation marker naming `omitted` bytes and the `limit`."""
     return (
         String("[mtest: output truncated — ")
         + String(omitted)

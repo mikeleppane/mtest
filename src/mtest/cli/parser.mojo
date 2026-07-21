@@ -1,15 +1,14 @@
 """The hand-rolled full-contract argument parser.
 
-`parse_args` turns an argument vector into a `ParseResult` — a configured run or
-a help/version directive — or raises a `cli:`-prefixed usage error. It parses the
-*whole* v1 grammar: flags this build does not yet serve are recognized and
-refused with a message naming the milestone that brings them, so later work only
-flips an availability bit rather than teaching the parser a new token.
+`parse_args` turns an argument vector into a `ParseResult` — a configured run
+or a help/version directive — or raises a `cli:`-prefixed usage error. It parses
+the whole v1 grammar: flags this build does not yet serve are still recognized,
+then refused with a message naming the milestone that brings them, so later work
+only flips an availability bit rather than teaching the parser a new token.
 
 Every raise names the offending token, states the expected form, and points at
-`mtest --help`. This layer never prints and never exits; `main` (a later layer)
-prints help/version to stdout with exit 0 and prints a usage error to stderr with
-exit 4.
+`mtest --help`. This layer never prints and never exits; `main` prints help and
+version to stdout with exit 0, and prints a usage error to stderr with exit 4.
 """
 from std.os import getenv
 from std.os.path import dirname, isdir
@@ -59,8 +58,7 @@ def help_text() -> String:
 
 
 def _err(body: String) -> Error:
-    """A `cli:`-prefixed usage error ending in the `see mtest --help` pointer.
-    """
+    """A `cli:`-prefixed usage error ending in the `(see mtest --help)` tail."""
     return Error("cli: " + body + " (see mtest --help)")
 
 
@@ -121,8 +119,7 @@ def _parse_retries(value: String) raises -> Int:
 
 
 def _parse_compile_timeout(value: String) raises -> Int:
-    """Parse a `--compile-timeout` value: a non-negative integer (`0` disables).
-    """
+    """Parse `--compile-timeout`: a non-negative integer, `0` disables."""
     if not _all_digits(value):
         raise _err(
             "'--compile-timeout' wants an integer >= 0, got '" + value + "'"
@@ -146,12 +143,14 @@ def _parse_show_output(value: String) raises -> ShowOutput:
 def _validate_json_dest(value: String) raises -> String:
     """Syntactically validate a `--json` destination; return it unchanged.
 
-    `-` is the stdout stream and always valid. Any other value is a filesystem
-    PATH: it must be non-empty and its parent directory (when it names one) must
-    already exist. This is the PARSE-time, pre-run check — an empty value or a
-    nonexistent parent is a usage error (exit 4) BEFORE any build or run; a
-    runtime open failure (permissions, descriptor exhaustion) is the session's
-    to detect and is a different exit code.
+    `-` names the stdout stream and is always valid. Any other value is a
+    filesystem path: it must be non-empty and its parent directory (when it
+    names one) must already exist.
+
+    This is the parse-time check only. An empty value or a missing parent is a
+    usage error (exit 4) raised before any build or run; a runtime open failure
+    such as a permissions problem or descriptor exhaustion is the session's to
+    detect, under a different exit code.
     """
     if value == "-":
         return value
@@ -172,13 +171,15 @@ def _validate_json_dest(value: String) raises -> String:
 def _validate_junit_dest(value: String) raises -> String:
     """Syntactically validate a `--junit-xml` destination; return it unchanged.
 
-    A `--junit-xml` value is always a filesystem PATH (no `-` stdout form — a
-    JUnit document is assembled and renamed atomically, never streamed live): it
-    must be non-empty and its parent directory (when it names one) must already
-    exist. This is the PARSE-time, pre-run check — an empty value or a
-    nonexistent parent is a usage error (exit 4) BEFORE any build or run; a
-    runtime creation failure (permissions, the target dir removed after this
-    check) is the session's to detect and is a different exit code.
+    The value is always a filesystem path. There is no `-` stdout form, because
+    a JUnit document is assembled and renamed atomically rather than streamed
+    live. It must be non-empty and its parent directory (when it names one) must
+    already exist.
+
+    This is the parse-time check only. An empty value or a missing parent is a
+    usage error (exit 4) raised before any build or run; a runtime creation
+    failure, including the target directory being removed after this check, is
+    the session's to detect, under a different exit code.
     """
     if value.byte_length() == 0:
         raise _err("'--junit-xml' wants a destination PATH, got an empty value")
@@ -234,9 +235,10 @@ def _parse_precompile(value: String) raises -> Precompile:
 def _parse_shard(value: String) raises -> Tuple[ShardMode, Int, Int]:
     """Parse a `--shard [hash:|slice:]M/N` value into (mode, M, N).
 
-    Peels an optional `hash:`/`slice:` mode prefix (split on the FIRST `:`;
-    default `hash`), then splits the remainder on `/` into two positive integers
-    and enforces `1 <= M <= N`. Any deviation raises the standard usage error.
+    Peels an optional `hash:` or `slice:` mode prefix, splitting on the first
+    `:` and defaulting to `hash`, then splits the remainder on `/` into two
+    integers and enforces `1 <= M <= N`. Any deviation raises the standard
+    `--shard` usage error naming the offending value.
     """
     var mode = ShardMode.HASH
     var rest = value
@@ -275,9 +277,9 @@ def _check_build_arg(tok: String) raises:
     """Reject a build argument that would seize control mtest owns.
 
     Forbids output selection (`-o`), emit-type selection (`--emit`), and any
-    extra Mojo source operand (a bare `*.mojo` / `*.🔥` positional handed to
-    `mojo build`). A bare value that is not a source file (a forwarded flag's
-    value) passes.
+    extra Mojo source operand — a bare `*.mojo` or `*.🔥` positional that would
+    reach `mojo build`. A bare value that is not a source file, such as a
+    forwarded flag's value, passes.
     """
     if tok == "-o" or tok.startswith("-o="):
         raise _err(
@@ -318,6 +320,14 @@ def _lookup(name: String) -> Optional[FlagSpec]:
 def parse_args(argv: List[String]) raises -> ParseResult:
     """Parse `argv` into a run config or a help/version directive.
 
+    A leading `help` or `version` token returns that directive immediately. A
+    leading `run` or `collect` token is consumed as a subcommand, with `collect`
+    equivalent to `--collect-only`. Any other first token is left to the
+    general token loop, which reads it as a flag when it starts with `-` (a
+    bare `-` excepted) and as a path operand otherwise, so an argument vector
+    may open with a flag. Everything after a bare `--` is forwarded as a build
+    argument.
+
     Args:
         argv: The argument tokens, excluding the program name.
 
@@ -325,9 +335,11 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         A `ParseResult`: a configured run, or a help/version directive.
 
     Raises:
-        A `cli:`-prefixed usage error for an unknown flag, a missing or
-        malformed value, a forbidden build argument, a bundled short-flag group,
-        `-q`/`-v` together, or a flag/subcommand this build does not yet serve.
+        Error: A `cli:`-prefixed usage error, raised for an unknown flag, a
+            missing or malformed value, a forbidden build argument, a bundled
+            short-flag group, `-q` and `-v` together, a run-only flag combined
+            with collect mode, `--json -` alongside an annotation tail that is
+            not explicitly off, or a flag this build does not yet serve.
     """
     var start = 0
     var collect = False

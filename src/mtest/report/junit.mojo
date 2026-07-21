@@ -1,39 +1,38 @@
-"""The pure JUnit XML renderer (Layer 2): typed suite state -> XML fragments.
+"""The pure JUnit XML renderer: typed suite state in, XML fragments out.
 
-This is the machine-report twin of the console and NDJSON renderers, for the
-`--junit-xml` artifact. It is PURE: typed suite state in, XML strings out, no
-I/O and no sink. The stateful shell that accumulates events, spools per-suite
-fragments, and assembles the document lives in `junit_reporter`; this module
-only knows how to turn a `JunitSuite` value into a valid `<testsuite>` fragment
-and how to wrap a set of fragments in the `<testsuites>` root.
+The machine-report twin of the console and NDJSON renderers, backing the
+`--junit-xml` artifact. It performs no I/O and owns no sink. The stateful shell
+that accumulates events, spools per-suite fragments, and assembles the document
+lives in `junit_reporter`; this module only turns a `JunitSuite` value into a
+valid `<testsuite>` fragment and wraps a set of fragments in the `<testsuites>`
+root.
 
-The dialect is the vendored junit-10 one (`scripts/schemas/junit-10.xsd`), the
-same the committed `scripts/checks/reports/junit.py` oracle blesses:
+The dialect is the vendored junit-10 one (`scripts/schemas/junit-10.xsd`),
+which `scripts/checks/reports/junit.py` validates against:
 
-- One `<testsuites>` root. It carries `name`, `tests`, `failures`, `errors` and
-  NOT `skipped` — junit-10 defines no root `skipped`, so the root skipped total
-  is an arithmetic fact recomputed from the child suites, never a root
-  attribute.
-- Each `<testsuite>` carries the four aggregate counts (INCLUDING `skipped`) and
-  a decimal-seconds `time` from `format_seconds` — JUnit's own wall-clock
-  policy, three fixed decimals, nonnegative, no exponent; separate from the JSON
-  stream's integer-microsecond policy. Per-testcase `time` and suite `timestamp`
-  are omitted (schema-optional).
-- Each `<testcase>` carries `name` and `classname` and, optionally, ONE primary
-  outcome child (`failure`/`error`/`skipped`, mixed-text body) and any number of
-  ordered rerun/flaky children (`rerunFailure`/`rerunError`/`flakyFailure`/
-  `flakyError`), each with a REQUIRED `type` and the optional `stackTrace`/
-  `system-out`/`system-err` child sequence.
+- One `<testsuites>` root, carrying `name`, `tests`, `failures` and `errors`.
+  junit-10 defines no root `skipped`, so the root skipped total is an
+  arithmetic fact recomputed from the child suites, not an attribute.
+- Each `<testsuite>` carries the four aggregate counts, `skipped` among them,
+  and a decimal-seconds `time` from `format_seconds`: JUnit's own wall-clock
+  policy of three fixed decimals, nonnegative, no exponent, separate from the
+  JSON stream's integer-microsecond policy. Per-testcase `time` and suite
+  `timestamp` are omitted, both schema-optional.
+- Each `<testcase>` carries `name` and `classname` plus, optionally, a single
+  primary outcome child (`failure`/`error`/`skipped`, mixed-text body) and any
+  number of ordered rerun/flaky children (`rerunFailure`/`rerunError`/
+  `flakyFailure`/`flakyError`), each with a required `type` and the optional
+  `stackTrace`/`system-out`/`system-err` child sequence.
 
 The count arithmetic is unconditional: per suite `tests == passing rows +
-failures + errors + skipped`, counting sentinel rows; a row that carries only
-rerun/flaky children (or nothing) is a passing row. The renderer computes those
-counts from the rows it is given, so the declared attributes can never disagree
+failures + errors + skipped`, counting sentinel rows; a row carrying only
+rerun/flaky children, or nothing, is a passing row. The renderer computes those
+counts from the rows it is given, so the declared attributes cannot disagree
 with the body.
 
-Escaping is ONLY via the shared `xml_escape_text`/`xml_escape_attribute`; every
-value that originates as raw child bytes is decoded through the shared
-`lossy_utf8` first (see `bounded_text_from_bytes`). No CDATA, no second path.
+Escaping goes only through the shared `xml_escape_text`/`xml_escape_attribute`,
+and every value originating as raw child bytes is decoded through `lossy_utf8`
+first (see `bounded_text_from_bytes`). No CDATA, no second path.
 """
 from mtest.config.lossy_utf8 import lossy_utf8
 from mtest.report.escape import xml_escape_attribute, xml_escape_text
@@ -53,9 +52,9 @@ comptime _TIME_CEIL = 9223372036854775807
 struct JunitRerun(Copyable, Movable):
     """One `rerunFailure`/`rerunError`/`flakyFailure`/`flakyError` child.
 
-    Its `type` is REQUIRED by the schema and is always emitted (even empty). The
-    diagnostics ride as the optional ordered children `stackTrace`, `system-out`,
-    `system-err`; an empty field is omitted. Owns its Strings; never raises.
+    The schema requires `type`, so it is always emitted, even when empty. The
+    diagnostics ride as the optional ordered children `stackTrace`,
+    `system-out`, `system-err`; an empty field is omitted.
     """
 
     var element: String
@@ -64,7 +63,7 @@ struct JunitRerun(Copyable, Movable):
     var message: String
     """The optional `message` attribute value; omitted when empty."""
     var type_label: String
-    """The REQUIRED `type` attribute value; always emitted."""
+    """The `type` attribute value; schema-required, so always emitted."""
     var stack_trace: String
     """The `<stackTrace>` child body; omitted when empty."""
     var system_out: String
@@ -78,11 +77,11 @@ struct JunitPrimary(Copyable, Movable):
     """A testcase's single primary outcome child: `failure`/`error`/`skipped`.
 
     Rendered as a mixed-text element (`<failure ...>body</failure>`), or
-    self-closed when `body` is empty. Owns its Strings; never raises.
+    self-closed when `body` is empty.
     """
 
     var element: String
-    """`failure`, `error`, or `skipped` — what the outcome counts against."""
+    """`failure`, `error`, or `skipped`: the count the outcome lands in."""
     var message: String
     """The optional `message` attribute value; omitted when empty."""
     var type_label: String
@@ -95,9 +94,9 @@ struct JunitPrimary(Copyable, Movable):
 struct JunitCase(Copyable, Movable):
     """One `<testcase>` row: identity plus at most one primary and any reruns.
 
-    A row with no primary (only reruns/flaky children, or none) is a PASSING row
-    for the count arithmetic. `name` is emitted verbatim — sentinels like
-    `[build]` are never renamed. Owns its Strings and lists; never raises.
+    A row with no primary, whether it carries only rerun/flaky children or
+    nothing at all, is a passing row for the count arithmetic. `name` is emitted
+    verbatim; sentinels like `[build]` are never renamed.
     """
 
     var name: String
@@ -118,8 +117,8 @@ struct JunitSuite(Copyable, Movable):
     """The typed state of one `<testsuite>` before rendering.
 
     `cases` may be given in any order; `render_suite` sorts them by the frozen
-    node-id key. Suite-scope captured streams attach ONCE here as `system_out`/
-    `system_err`. Owns its Strings and list; never raises.
+    node-id key. Suite-scope captured streams attach here once, as `system_out`
+    and `system_err`.
     """
 
     var name: String
@@ -142,8 +141,7 @@ struct RenderedSuite(Copyable, Movable):
     """A rendered `<testsuite>` fragment plus its aggregate counts.
 
     The `body` is the whole fragment string; the counts let the assembler sum
-    the root totals without re-parsing. `suite_key` is the frozen order key for
-    the suite (its name). Owns its Strings; never raises.
+    the root totals without re-parsing.
     """
 
     var suite_key: String
@@ -161,7 +159,7 @@ struct RenderedSuite(Copyable, Movable):
 
 
 def _bytes_to_string(bytes: List[UInt8]) -> String:
-    """Render `bytes` as a `String`. Pure; the caller guarantees valid UTF-8."""
+    """Render `bytes` as a `String`; the caller guarantees valid UTF-8."""
     # SAFETY: `unsafe_from_utf8` requires well-formed UTF-8. The only caller
     # (`dotted_classname`) copies already-valid-UTF-8 bytes through unchanged and
     # swaps only the single ASCII byte '/' (0x2F) for '.' (0x2E), so no
@@ -170,18 +168,18 @@ def _bytes_to_string(bytes: List[UInt8]) -> String:
 
 
 def format_seconds(seconds: Float64) -> String:
-    """A duration in seconds as fixed-three-decimal seconds. Pure; never raises.
+    """Format a duration as fixed-three-decimal seconds.
 
     JUnit's own `time` policy, distinct from the JSON stream's integer
     microseconds: a nonnegative decimal with exactly three fractional digits and
-    no exponent. A negative or NaN input clamps to `0.000`; a pathologically
+    no exponent. A negative or NaN input clamps to `0.000`, and a pathologically
     large input saturates rather than overflowing the millisecond scaling.
 
     Args:
-        seconds: The wall-clock duration to format. Not mutated.
+        seconds: The wall-clock duration to format.
 
     Returns:
-        `"<whole>.<3 digits>"`, e.g. `"0.043"`. Does not raise.
+        `"<whole>.<3 digits>"`, for example `"0.043"`.
     """
     if not (seconds > 0.0):
         return "0.000"
@@ -202,18 +200,18 @@ def format_seconds(seconds: Float64) -> String:
 
 
 def dotted_classname(path: String) -> String:
-    """The dashboard-safe dotted stem of a root-relative path. Pure.
+    """The dashboard-safe dotted stem of a root-relative path.
 
     `/` becomes `.` and a trailing `.mojo` is dropped, so
-    `e2e/suite/test_x.mojo` becomes `e2e.suite.test_x`. Dot-damage from a path
-    segment that itself contains a dot is acknowledged and accepted — the stem is
-    for grouping in dashboards, not for round-tripping back to a path.
+    `e2e/suite/test_x.mojo` becomes `e2e.suite.test_x`. A path segment that
+    itself contains a dot is left ambiguous by design: the stem groups suites in
+    dashboards and is not meant to round-trip back to a path.
 
     Args:
-        path: The root-relative path. Not mutated.
+        path: The root-relative path.
 
     Returns:
-        The dotted stem. Does not raise.
+        The dotted stem.
     """
     var noext = String(path.removesuffix(".mojo"))
     var out = List[UInt8]()
@@ -226,20 +224,20 @@ def dotted_classname(path: String) -> String:
 
 
 def node_sort_key(suite_name: String, case_name: String) -> String:
-    """The frozen node-id sort key for a testcase. Pure; never raises.
+    """The frozen node-id sort key for a testcase.
 
-    The sentinel carve-out: a `case_name` that already CONTAINS `::` is its own
-    node id and is used verbatim (real tests carry `path::name`); otherwise the
-    node id is reconstructed as `suite_name + "::" + case_name` (a bracket
-    sentinel like `[build]` becomes `path::[build]`). The key orders BOTH row
-    kinds; sentinels are never renamed, only keyed.
+    A `case_name` that already contains `::` is its own node id and is used
+    verbatim, which is how real tests arrive (`path::name`). Otherwise the node
+    id is reconstructed as `suite_name + "::" + case_name`, so a bracket
+    sentinel like `[build]` keys as `path::[build]`. The key therefore orders
+    both row kinds, and sentinels are keyed without being renamed.
 
     Args:
-        suite_name: The suite's name (its path). Not mutated.
-        case_name: The testcase's `name` attribute. Not mutated.
+        suite_name: The suite's name, which is its path.
+        case_name: The testcase's `name` attribute.
 
     Returns:
-        The node-id string used as the row order key. Does not raise.
+        The node-id string used as the row order key.
     """
     if "::" in case_name:
         return case_name.copy()
@@ -247,21 +245,21 @@ def node_sort_key(suite_name: String, case_name: String) -> String:
 
 
 def bounded_text_from_bytes(data: List[UInt8]) -> String:
-    """Decode raw captured bytes to bounded text for a report body. Pure.
+    """Decode raw captured bytes to bounded text for a report body.
 
-    Mirrors the stream's head+tail bound (64 KiB each) so no single capture can
-    unbound a fragment: when the data fits it is decoded whole through the shared
-    `lossy_utf8`; otherwise the first and last windows are decoded independently
-    (so a multi-byte sequence split at either boundary degrades to U+FFFD rather
-    than swallowing the marker) and joined by the elision marker. The result is
-    plain text ready for `xml_escape_text` at render time — the single escaping
-    path.
+    Mirrors the stream's head+tail bound of 64 KiB each, so no single capture
+    can unbound a fragment. Data that fits is decoded whole through
+    `lossy_utf8`. Larger data has its first and last windows decoded
+    independently, so a multi-byte sequence split at either boundary degrades
+    to U+FFFD instead of swallowing the elision marker that joins them.
+
+    The result is plain text, escaped by `xml_escape_text` at render time.
 
     Args:
-        data: The raw captured bytes. Not mutated.
+        data: The raw captured bytes.
 
     Returns:
-        The bounded, lossy-decoded text. Does not raise.
+        The bounded, lossy-decoded text.
     """
     var n = len(data)
     if n <= _JUNIT_HEAD + _JUNIT_TAIL:
@@ -276,7 +274,7 @@ def bounded_text_from_bytes(data: List[UInt8]) -> String:
 
 
 def _render_primary(p: JunitPrimary) -> String:
-    """Render one primary outcome child. Pure; never raises."""
+    """Render one primary outcome child."""
     var s = "<" + p.element
     if p.message != "":
         s += ' message="' + xml_escape_attribute(p.message) + '"'
@@ -290,7 +288,7 @@ def _render_primary(p: JunitPrimary) -> String:
 
 
 def _render_rerun(r: JunitRerun) -> String:
-    """Render one rerun/flaky child; `type` is always emitted. Pure."""
+    """Render one rerun/flaky child; `type` is always emitted."""
     var s = "<" + r.element
     if r.message != "":
         s += ' message="' + xml_escape_attribute(r.message) + '"'
@@ -312,7 +310,7 @@ def _render_rerun(r: JunitRerun) -> String:
 
 
 def _render_case(c: JunitCase) -> String:
-    """Render one `<testcase>` row with its primary and reruns. Pure."""
+    """Render one `<testcase>` row with its primary and reruns."""
     var s = (
         '<testcase name="'
         + xml_escape_attribute(c.name)
@@ -333,7 +331,7 @@ def _render_case(c: JunitCase) -> String:
 
 
 def _less(a: String, b: String) -> Bool:
-    """Bytewise lexicographic `a < b`. Pure; total; never raises."""
+    """Bytewise lexicographic `a < b`; a total order."""
     var ab = a.as_bytes()
     var bb = b.as_bytes()
     var na = len(ab)
@@ -348,14 +346,14 @@ def _less(a: String, b: String) -> Bool:
 def render_suite(suite: JunitSuite) -> RenderedSuite:
     """Render one `<testsuite>` fragment, node-id-sorted, with computed counts.
 
-    The rows are ordered by the frozen `node_sort_key`; the aggregate counts are
-    RECOMPUTED from the rows (a `failure`/`error`/`skipped` primary counts once
-    against its class, every other row is passing), so the declared attributes
-    can never disagree with the body. Suite-scope `system_out`/`system_err`
-    attach after the rows. Pure; never raises.
+    The rows are ordered by the frozen `node_sort_key`. The aggregate counts are
+    recomputed from the rows — a `failure`/`error`/`skipped` primary counts once
+    against its class, every other row is passing — so the declared attributes
+    cannot disagree with the body. Suite-scope `system_out`/`system_err` attach
+    after the rows.
 
     Args:
-        suite: The typed suite state. Not mutated.
+        suite: The typed suite state.
 
     Returns:
         The rendered fragment plus its counts and order key.
@@ -408,16 +406,16 @@ def render_suite(suite: JunitSuite) -> RenderedSuite:
 
 
 def assemble(root_name: String, frags: List[RenderedSuite]) -> String:
-    """Wrap suite fragments in a node-id-sorted `<testsuites>` document. Pure.
+    """Wrap suite fragments in a suite-key-sorted `<testsuites>` document.
 
-    The fragments are ordered by their suite key; the root `tests`/`failures`/
-    `errors` are the sums over the suites. The root carries NO `skipped`
-    attribute — junit-10 defines none, so the root skipped total lives only in
-    the arithmetic the oracle recomputes. Never raises.
+    The fragments are ordered by their suite key, and the root `tests`,
+    `failures` and `errors` are the sums over the suites. The root carries no
+    `skipped` attribute, since junit-10 defines none; the root skipped total
+    exists only as arithmetic over the child suites.
 
     Args:
-        root_name: The `<testsuites>` `name` (e.g. `"mtest"`). Not mutated.
-        frags: The rendered suite fragments, in any order. Not mutated.
+        root_name: The `<testsuites>` `name`, for example `"mtest"`.
+        frags: The rendered suite fragments, in any order.
 
     Returns:
         The complete, well-formed `<testsuites>` document with a leading XML

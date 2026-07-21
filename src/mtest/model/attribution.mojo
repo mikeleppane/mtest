@@ -1,9 +1,9 @@
-"""`AttributionDisposition`: the closed crash-attribution vocabulary (Layer 0).
+"""The closed crash-attribution vocabulary.
 
-Mirrors `ParseDisposition`'s shape: a thin wrapper over a stable integer
-discriminant naming why a bounded crash-isolation pass stopped where it did, so
-a `CrashAttribution` event can carry the verdict as data instead of collapsing
-it into a rendered sentence before the reporter ever sees it.
+`AttributionDisposition` names why a bounded crash-isolation pass stopped where
+it did, so a `CrashAttribution` event can carry the verdict as data rather than
+as a sentence rendered before the reporter sees it. It mirrors
+`ParseDisposition`'s shape: a thin wrapper over a stable integer discriminant.
 """
 
 
@@ -11,8 +11,8 @@ it into a rendered sentence before the reporter ever sees it.
 struct AttributionDisposition(Equatable, ImplicitlyCopyable, Movable):
     """One value from the crash-attribution disposition vocabulary.
 
-    A thin wrapper over a stable integer discriminant. Holds no owned
-    resources; copies and moves are trivial and it never raises.
+    A thin wrapper over a stable integer discriminant, holding no owned
+    resources, so copies and moves are trivial.
     """
 
     var code: Int
@@ -21,12 +21,14 @@ struct AttributionDisposition(Equatable, ImplicitlyCopyable, Movable):
     comptime ATTRIBUTED = Self(0)
     """A single culprit test was isolated and named as the crash's cause."""
     comptime NO_REPRODUCTION = Self(1)
-    """The crash did not reproduce under isolation; no culprit was attributed."""
+    """The crash did not reproduce under isolation, so no culprit was
+    attributed."""
     comptime PROBE_FAILED = Self(2)
     """An isolation probe could not run (a spawn or machinery failure), so the
     pass gave up before reaching a verdict."""
     comptime RUN_CAP = Self(3)
-    """The isolation rerun budget was exhausted before a culprit was isolated."""
+    """The isolation rerun budget was exhausted before a culprit was
+    isolated."""
     comptime TIME_BUDGET = Self(4)
     """The attribution wall-time budget was exhausted before a verdict."""
 
@@ -34,9 +36,9 @@ struct AttributionDisposition(Equatable, ImplicitlyCopyable, Movable):
     """The number of distinct values in the vocabulary."""
 
     def __eq__(self, other: Self) -> Bool:
-        """Two dispositions are equal iff their discriminants match. Pure."""
+        """Two dispositions are equal iff their discriminants match."""
         return self.code == other.code
 
     def __ne__(self, other: Self) -> Bool:
-        """Negation of `__eq__`. Pure."""
+        """Negation of `__eq__`."""
         return self.code != other.code

@@ -1,23 +1,22 @@
 """An fnmatch-style glob matcher (the stdlib has none).
 
-`discover` needs glob matching in two places: the `test_*.mojo` gate on directory
-walks (matched against a file's basename) and `--exclude GLOB` (matched against a
-whole root-relative path). Both go through `fnmatch` here.
+`discover` needs glob matching in two places: the `test_*.mojo` gate on
+directory walks, matched against a file's basename, and `--exclude GLOB`,
+matched against a whole root-relative path. Both go through `fnmatch` here.
 
 The supported metacharacters mirror POSIX `fnmatch`:
 
-- `*` matches any run of characters, **including `/`** (documented in the
-  command-line contract — an exclude glob is matched against the whole path, not
-  segment by segment).
+- `*` matches any run of characters, including `/`, so an exclude glob is
+  matched against the whole path rather than segment by segment.
 - `?` matches exactly one character.
 - `[...]` is a character class: `[abc]`, ranges `[a-z]`, and negation `[!...]`.
   A `]` immediately after `[` or `[!` is a literal member; an unterminated `[`
   is treated as a literal `[`.
-- Every other character matches itself. A pattern with no metacharacter therefore
-  matches by exact equality, which is the contract's "plain path" rule.
+- Every other character matches itself, so a pattern with no metacharacter
+  matches by exact equality — the contract's "plain path" rule.
 
-Matching is over Unicode codepoints, so `?` matches one codepoint (not one UTF-8
-byte). The matcher is anchored: it succeeds only on a full-string match.
+Matching is over Unicode codepoints, so `?` matches one codepoint, not one
+UTF-8 byte. The matcher is anchored: it succeeds only on a full-string match.
 """
 
 # Codepoint values of the metacharacters, named so the matcher reads clearly.

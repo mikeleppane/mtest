@@ -1,8 +1,9 @@
-"""The `--shard` mode vocabulary of the mtest runner (Layer 1).
+"""The `--shard` mode vocabulary.
 
 Names how a shard claims its files: by a stateless hash of each file's path
 (`hash`, the default) or by the file's index in the sorted run set (`slice`).
-This is a config concern — it names a partitioning choice, not a run outcome.
+It names a partitioning choice rather than a run outcome, which is why it lives
+in config and not in model.
 """
 
 
@@ -10,9 +11,8 @@ This is a config concern — it names a partitioning choice, not a run outcome.
 struct ShardMode(Equatable, ImplicitlyCopyable, Movable):
     """One value from the `--shard` mode closed vocabulary.
 
-    A thin wrapper over a stable integer discriminant so the vocabulary is a
-    closed set of named constants that compare by value. Holds no owned
-    resources; copies and moves are trivial and it never raises.
+    A wrapper over a stable integer discriminant, so the vocabulary is a closed
+    set of named constants that compare by value.
     """
 
     var value: Int
@@ -22,9 +22,9 @@ struct ShardMode(Equatable, ImplicitlyCopyable, Movable):
     comptime SLICE = Self(1)
 
     def __eq__(self, other: Self) -> Bool:
-        """Two modes are equal iff their discriminants match. Pure."""
+        """Whether both modes carry the same discriminant."""
         return self.value == other.value
 
     def __ne__(self, other: Self) -> Bool:
-        """Negation of `__eq__`. Pure."""
+        """Whether the two modes carry different discriminants."""
         return self.value != other.value

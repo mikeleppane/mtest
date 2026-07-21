@@ -1,10 +1,10 @@
 """The data value `discover` returns.
 
-`DiscoveryResult` is pure data: the ordered gate and run file sets, the excluded
-files each paired with the pattern that removed it, and the stale exclude
-patterns that matched nothing. The session (a later layer) turns this into
-events — a loud SKIP line per excluded file, a warning per stale pattern. This
-module reads and prints nothing.
+`DiscoveryResult` is pure data: the ordered gate and run file sets, the
+excluded files each paired with the pattern that removed it, and the stale
+exclude patterns that matched nothing. The session turns this into events — a
+loud skip line per excluded file, a warning per stale pattern. This module
+reads and prints nothing.
 """
 
 
@@ -12,8 +12,8 @@ module reads and prints nothing.
 struct ExcludedEntry(Copyable, Movable):
     """One excluded file: the path removed and the pattern that removed it.
 
-    Owns its strings, so copies are explicit; the session emits one loud SKIP
-    line from each entry. Reads do not mutate or raise.
+    Owns its strings, so copies are explicit; the session emits one loud skip
+    line from each entry.
     """
 
     var path: String
@@ -28,8 +28,7 @@ struct DiscoveryResult(Copyable, Movable):
     """The concrete, ordered file set a session will run.
 
     Deliberately `Copyable, Movable` but not `ImplicitlyCopyable`: it owns
-    several `List`s, so every copy is a visible `.copy()` in review. Reads do
-    not mutate or raise.
+    several `List`s, so every copy is a visible `.copy()` in review.
     """
 
     var gate_files: List[String]

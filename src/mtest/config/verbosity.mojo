@@ -1,8 +1,8 @@
-"""The verbosity vocabulary of the mtest runner (Layer 1).
+"""The verbosity vocabulary.
 
 Controls how much the console reporter prints per file: quiet, normal, or
-verbose. `-q`/`-v` are mutually exclusive on the command line, but that
-enforcement is the parser's concern — this module only names the vocabulary.
+verbose. This module only names the vocabulary; enforcing that `-q` and `-v`
+are mutually exclusive is the parser's job.
 """
 
 
@@ -10,9 +10,8 @@ enforcement is the parser's concern — this module only names the vocabulary.
 struct Verbosity(Equatable, ImplicitlyCopyable, Movable):
     """One value from the verbosity closed vocabulary.
 
-    A thin wrapper over a stable integer discriminant so the vocabulary is a
-    closed set of named constants that compare by value. Holds no owned
-    resources; copies and moves are trivial and it never raises.
+    A wrapper over a stable integer discriminant, so the vocabulary is a closed
+    set of named constants that compare by value.
     """
 
     var value: Int
@@ -23,9 +22,9 @@ struct Verbosity(Equatable, ImplicitlyCopyable, Movable):
     comptime VERBOSE = Self(2)
 
     def __eq__(self, other: Self) -> Bool:
-        """Two levels are equal iff their discriminants match. Pure."""
+        """Whether both levels carry the same discriminant."""
         return self.value == other.value
 
     def __ne__(self, other: Self) -> Bool:
-        """Negation of `__eq__`. Pure."""
+        """Whether the two levels carry different discriminants."""
         return self.value != other.value
