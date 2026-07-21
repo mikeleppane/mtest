@@ -1,22 +1,25 @@
 """The flag-spec table: the single source of truth for every flag spelling.
 
-The parser is table-driven, not a pile of ad-hoc branches. Each accepted
-*spelling* is one `FlagSpec` row carrying its own arity, whether it repeats,
-whether this build serves it, and — for a flag whose feature is not built yet —
-the roadmap milestone that brings it. Two spellings of the same flag (`-x` and
+The parser is table-driven rather than a pile of ad-hoc branches. Each accepted
+*spelling* is one `FlagSpec` row carrying its arity, whether it repeats, whether
+this build serves it, and — for a flag whose feature is not built yet — the
+roadmap milestone that brings it. Two spellings of the same flag (`-x` and
 `--exitfirst`) are two rows sharing one `id`.
 
-`flag_specs()` returns the whole table so a test can cross-check it against an
-independently hand-written inventory of the command-line contract; the table can
-never become its own oracle.
+`flag_specs()` exposes the whole table so the command-line contract can be
+checked against an independently written inventory rather than against itself.
 """
 
 
 struct FlagId:
     """Stable identity of a flag, shared by all its spellings.
 
-    A thin namespace of integer discriminants so the parser routes a matched
-    spelling to the right accumulation regardless of which spelling was typed.
+    A namespace of integer discriminants that lets the parser route a matched
+    spelling to the right accumulation no matter which spelling was typed. Each
+    name is the flag it identifies, but the authoritative mapping from an id to
+    its spellings is the `flag_specs()` table below, which is where the less
+    obvious pairings live: SELECT is `-k`, SHOW_ALL is `-s`, and WORKERS is
+    `-n`/`--workers`.
     """
 
     comptime EXCLUDE = 0
@@ -53,35 +56,39 @@ struct FlagId:
 struct FlagSpec(Copyable, Movable):
     """One accepted flag spelling and everything the parser needs about it.
 
-    Owns its `String` fields, so copies are explicit; reads never mutate or
-    raise.
+    Owns its `String` fields, so every copy is an explicit `.copy()`.
     """
 
     var spelling: String
     """The exact token that names this flag, e.g. `--exclude` or `-x`."""
 
     var id: Int
-    """The flag identity (`FlagId.*`); shared across a flag's spellings."""
+    """The flag identity (`FlagId.*`), shared across a flag's spellings."""
 
     var arity: Int
     """`0` for a valueless flag, `1` for a flag that takes one value."""
 
     var repeatable: Bool
-    """Whether the flag may appear more than once, accumulating values."""
+    """Whether the flag may appear more than once, accumulating values.
+
+    Documents the flag's contract; the tokenizer does not consult it. Whether a
+    repeat accumulates or overwrites is decided by that flag's branch in
+    `parse_args`."""
 
     var available: Bool
-    """Whether this build serves the flag (else it is refused pre-run)."""
+    """Whether this build serves the flag; if not, it is refused before the
+    run starts."""
 
     var arrives_with: String
-    """For a refused flag, the milestone that brings it; empty when available."""
+    """For a refused flag, the milestone that brings it; empty if available."""
 
 
 def flag_specs() -> List[FlagSpec]:
     """The whole flag-spec table, one row per accepted spelling.
 
-    The single source of truth the tokenizer looks flags up in and the
-    inventory test cross-checks. Allocates a fresh list; does not mutate global
-    state or raise.
+    Returns:
+        A freshly allocated list holding every accepted spelling, in table
+        order.
     """
     return [
         # Available in this build.

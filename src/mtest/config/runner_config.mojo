@@ -1,10 +1,9 @@
-"""`RunnerConfig`: the typed home for every runner knob (Layer 1).
+"""`RunnerConfig`: the typed home for every runner knob.
 
 `RunnerConfig` is data plus its contract defaults — no parsing, no environment
-or file reads, no printing. The cli layer (a later module) constructs and fills
-one from argv; the session layer (a later module) only reads it. An empty
-`paths` list means "use discovery's own default root", not "nothing to do" —
-that rule is discover's, not config's, to apply.
+or file reads, no printing. The cli layer constructs and fills one from argv;
+the session layer only reads it. An empty `paths` list means "use discovery's
+own default root", not "nothing to do"; applying that rule is discover's job.
 """
 from mtest.config.annotations_mode import AnnotationsMode
 from mtest.config.color_when import ColorWhen
@@ -19,8 +18,8 @@ struct RunnerConfig(Copyable, Movable):
     """Every knob the parser fills and the session reads.
 
     Deliberately `Copyable, Movable` but not `ImplicitlyCopyable`: it owns
-    several `List`s, so every copy of a config is a visible `.copy()` in
-    review, not a silent implicit one. Reads do not mutate or raise.
+    several `List`s, so every copy of a config is a visible `.copy()` at the
+    call site rather than a silent implicit one.
     """
 
     var paths: List[String]
@@ -42,10 +41,10 @@ struct RunnerConfig(Copyable, Movable):
     """Repeatable `-I` include-path entries."""
 
     var mojo_path: String
-    """The RESOLVED mojo binary path (see `resolve_mojo_path`)."""
+    """The already-resolved mojo binary path (see `resolve_mojo_path`)."""
 
     var timeout_secs: Int
-    """Per-file RUN timeout in seconds; `0` disables it."""
+    """Per-file run timeout in seconds; `0` disables it."""
 
     var show_output: ShowOutput
     """Which files' captured output the console reporter renders."""
@@ -63,81 +62,89 @@ struct RunnerConfig(Copyable, Movable):
     """The `-k` keyword expression; empty means no keyword filter."""
 
     var maxfail: Int
-    """`--maxfail N`: stop scheduling once N failing TESTS have accumulated;
-    `0` disables the limit (no cap)."""
+    """`--maxfail N`: stop scheduling once N failing tests have accumulated;
+    `0` disables the limit."""
 
     var durations: Int
-    """`--durations N`: the number of slowest files to report; `0` disables
-    the report (no listing). The console reporter renders the file-level
-    slowest-files list after the summary band, from this field threaded at
-    construction."""
+    """`--durations N`: how many of the slowest files the console reporter
+    lists after the summary band; `0` suppresses the listing."""
 
     var collect: Bool
-    """Collect mode (`collect` subcommand / `--collect-only`): probe every
+    """Collect mode (`collect` subcommand or `--collect-only`): probe every
     discovered file for its node ids and print the sorted listing, running no
     test body. When True the session takes the collect path, not a run."""
 
     var shard_mode: ShardMode
-    """`--shard` partitioning mode: hash (default) or slice. Only consulted when
-    `shard_n > 0`."""
+    """`--shard` partitioning mode: hash (default) or slice. Consulted only
+    when `shard_n > 0`."""
 
     var shard_m: Int
     """`--shard M/N`: this shard's 1-based index. `0` when unsharded."""
 
     var shard_n: Int
-    """`--shard M/N`: the total shard count. `0` (the default) means UNSHARDED —
-    the whole discovered run set runs. When `> 0` the session keeps only the run
-    files this shard owns; gate files are never sharded."""
+    """`--shard M/N`: the total shard count. `0` (the default) means unsharded,
+    so the whole discovered run set runs. When `> 0` the session keeps only the
+    run files this shard owns; gate files are never sharded."""
 
     var retries: Int
-    """`--retries N`: how many times to RE-RUN a crash-class failure (a real
+    """`--retries N`: how many times to re-run a crash-class failure (a real
     crash or a deadline kill) before accepting it; `0` (the default) disables
-    retries. A file runs up to `retries + 1` attempts; a late pass after a
-    crash-class attempt is FLAKY. Deterministic failures are never retried."""
+    retries. A file runs up to `retries + 1` attempts, and a late pass after a
+    crash-class attempt is flaky. Deterministic failures are never retried."""
 
     var compile_timeout_secs: Int
-    """`--compile-timeout SECS`: per-file BUILD timeout in seconds; `0` disables
-    it. A build that exceeds it is killed under the supervised protocol (with a
-    compile-specific grace) and reported COMPILE_TIMEOUT — a crash-class failure
-    `--retries` will retry against a quarantined module cache."""
+    """`--compile-timeout SECS`: per-file build timeout in seconds; `0`
+    disables it. A build that exceeds it is killed under the supervised
+    protocol (with a compile-specific grace) and reported COMPILE_TIMEOUT, a
+    crash-class failure `--retries` retries against a quarantined module
+    cache."""
 
     var json_dest: String
     """`--json PATH|-`: the machine event-stream destination. Empty means the
-    flag was absent (no stream). `"-"` streams to stdout (byte-pure), relocating
-    the console to stderr. Any other value is a filesystem PATH the stream is
-    written to live, overwriting a pre-existing file at session start. The
-    parser validates it syntactically (a non-empty value with an existing parent
-    directory); a runtime open failure is resolved by the session."""
+    flag was absent, so no stream. `"-"` streams to stdout byte-pure, which
+    relocates the console to stderr. Any other value is a filesystem path the
+    stream is written to live, overwriting a pre-existing file at session
+    start. The parser validates it syntactically (non-empty, with an existing
+    parent directory); a runtime open failure is the session's to resolve."""
 
     var gh_annotations: AnnotationsMode
-    """`--gh-annotations off|on|auto`: whether to emit GitHub Actions annotation
-    workflow-command lines in the deterministic stdout tail. `auto` (the default)
-    is on iff `GITHUB_ACTIONS=true`; `on` always renders; `off` never does. The
-    stop-commands FENCING of echoed child output is a separate console-path
-    concern keyed on `GITHUB_ACTIONS`, active regardless of this mode."""
+    """`--gh-annotations off|on|auto`: whether to emit GitHub Actions
+    annotation workflow-command lines in the deterministic stdout tail. `auto`
+    (the default) renders only when `GITHUB_ACTIONS=true`, `on` always renders,
+    `off` never does. Fencing echoed child output with stop-commands is a
+    separate console concern keyed on `GITHUB_ACTIONS`, active regardless of
+    this mode."""
 
     var junit_dest: String
-    """`--junit-xml PATH`: the JUnit XML report destination. Empty means the flag
-    was absent (no report). Any other value is a filesystem PATH the assembled
-    `<testsuites>` document is written to. Unlike `--json`, the destination is
-    NEVER truncated live: the report is assembled at finalization, written to a
-    unique temp beside the target, and renamed atomically onto PATH only after a
-    verified complete write, so a prior report survives every failure. The parser
-    validates it syntactically (a non-empty value with an existing parent
-    directory); a runtime creation failure is resolved by the session."""
+    """`--junit-xml PATH`: the JUnit XML report destination. Empty means the
+    flag was absent, so no report. Any other value is a filesystem path the
+    assembled `<testsuites>` document is written to. Unlike `--json`, the
+    destination is never truncated live: the report is assembled at
+    finalization, written to a unique temp beside the target, and renamed
+    atomically onto the path only after a verified complete write, so a prior
+    report survives every failure. The parser validates it syntactically
+    (non-empty, with an existing parent directory); a runtime creation failure
+    is the session's to resolve."""
 
     @staticmethod
     def default() -> RunnerConfig:
-        """A config with every field at its contract default. Allocates.
+        """A config with every field at its contract default.
 
-        The defaults: every list empty, `mojo_path="mojo"`,
-        `timeout_secs=300`, `show_output=FAILURES`, `verbosity=NORMAL`,
-        `color=AUTO`, `exitfirst=False`, `maxfail=0` (no limit),
-        `durations=0` (no report), `collect=False`, UNSHARDED
-        (`shard_mode=HASH`, `shard_m=0`, `shard_n=0`), `retries=0` (no
-        retries), `compile_timeout_secs=600`, `json_dest=""` (no stream),
-        `gh_annotations=AUTO` (on iff `GITHUB_ACTIONS=true`), and
-        `junit_dest=""` (no JUnit report).
+        The two deadlines are the only nonzero counts: `timeout_secs=300` and
+        `compile_timeout_secs=600`. Every other numeric field is `0` —
+        `maxfail`, `durations`, `retries`, `shard_m`, `shard_n` — which
+        disables that limit and leaves the run unsharded. Every list is empty,
+        `exitfirst` and `collect` are False, and `keyword`, `json_dest`, and
+        `junit_dest` are `""`, so no keyword filter, event stream, or JUnit
+        report is configured. The rest are `mojo_path="mojo"`,
+        `show_output=FAILURES`, `verbosity=NORMAL`, `color=AUTO`,
+        `shard_mode=HASH`, and `gh_annotations=AUTO`.
+
+        Returns:
+            A freshly allocated config. `parse_args` does not build on this —
+            it constructs its own `RunnerConfig` from the parsed tokens — so
+            the only use is the placeholder config a help or version
+            `ParseResult` carries and callers ignore.
         """
         return RunnerConfig(
             paths=[],

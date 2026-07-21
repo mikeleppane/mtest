@@ -1,12 +1,11 @@
-"""The reporter seam: the `Reporter` trait (Layer 2).
+"""The reporter seam: the `Reporter` trait.
 
-The session (a later layer) emits the closed `Event` set and nothing else, and
-every reporter consumes that stream through a single method, `handle`. This one
-method is what lets heterogeneous reporters compose statically: a
-`CompositeReporter` fans one event to a comptime-known tuple of reporters, each
-conforming to this trait.
+The session emits the closed `Event` set and nothing else, and every reporter
+consumes that stream through a single method, `handle`. That one method is what
+lets heterogeneous reporters compose statically: a `CompositeReporter` fans one
+event to a comptime-known tuple of reporters, each conforming to this trait.
 
-`handle` must be TOTAL over the event set — it must accept every `EventKind`
+`handle` must be total over the event set — it must accept every `EventKind`
 without raising, because the session cannot recover from a reporter that throws
 mid-run. Reporters are `Copyable, Movable` so they can be moved into the
 composition tuple and their state read back by index.
@@ -23,5 +22,12 @@ trait Reporter(Copyable, Movable):
     """
 
     def handle(mut self, e: Event):
-        """Consume one event. Total over the event set; must not raise."""
+        """Consume one event.
+
+        Must accept every `EventKind` and must not raise; the session cannot
+        recover from a reporter that throws mid-run.
+
+        Args:
+            e: The event to consume, in emission order.
+        """
         ...

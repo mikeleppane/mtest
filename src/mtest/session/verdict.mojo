@@ -1,43 +1,43 @@
-"""The pure verdict-mapping functions of the session layer (Layer 4).
+"""The verdict-mapping functions of the session layer.
 
-The session's whole honesty rests on keeping the four run endings distinct — a
-crash is never a failure, our deadline kill is never a crash, a spawn failure is
-never a test outcome at all — and on treating a compiler that dies by a signal
-as a BUILD failure, never a test crash. Those two mappings are isolated here as
-pure, total functions so they can be table-tested over every `Termination` kind
-independently of any process, filesystem, or reporter.
+The session's honesty rests on keeping the four run endings distinct: a crash is
+never a failure, our deadline kill is never a crash, and a spawn failure is not
+a test outcome at all. It also rests on treating a compiler that dies by a
+signal as a build failure rather than a test crash. Those two mappings are
+isolated here as pure, total functions, so they can be table-tested over every
+`Termination` kind independently of any process, filesystem, or reporter.
 
-Neither function performs I/O or raises; each is total over the termination
-kinds. Both borrow two vocabulary values as internal SENTINELS the orchestrator
+Both borrow two vocabulary values as internal sentinels that the orchestrator
 branches on but never emits as a file's outcome:
 
-- `run_verdict` returns `NOT_RUN` for a `SpawnFailed` run — the orchestrator
+- `run_verdict` returns `NOT_RUN` for a `SpawnFailed` run. The orchestrator
   checks `is_spawn_failed()` first and treats it as an internal error (exit 3),
-  so this value is only a total-function placeholder, never recorded.
-- `build_verdict` returns `PASS` for a clean build ("proceed to the run step")
-  and `NOT_RUN` for a `SpawnFailed` build (internal error, exit 3); the real
-  reported outcomes it yields are `COMPILE_ERROR` and `COMPILE_TIMEOUT`.
+  so this value is a total-function placeholder and is never recorded.
+- `build_verdict` returns `PASS` for a clean build, meaning proceed to the run
+  step, and `NOT_RUN` for a `SpawnFailed` build (internal error, exit 3). The
+  outcomes it yields for reporting are `COMPILE_ERROR` and `COMPILE_TIMEOUT`.
 """
 from mtest.exec import Termination
 from mtest.model import Outcome
 
 
 def run_verdict(t: Termination) -> Outcome:
-    """Map a RUN termination to the file's reported outcome.
+    """Map a run termination to the file's reported outcome.
 
-    Total over the termination kinds and pure:
+    Total over the termination kinds:
 
     - `Exited(0)` -> `PASS`; `Exited(nonzero)` -> `FAIL`.
-    - `Signaled(_)` -> `CRASH` (a real crash, never a failure).
-    - `TimedOut` -> `TIMEOUT` (our deadline killed it).
-    - `SpawnFailed` -> `NOT_RUN` sentinel; the caller checks `is_spawn_failed()`
-      first and treats it as an internal error, so this is never recorded.
+    - `Signaled(_)` -> `CRASH`, a real crash rather than a failure.
+    - `TimedOut` -> `TIMEOUT`, meaning our deadline killed it.
+    - `SpawnFailed` -> the `NOT_RUN` sentinel. The caller checks
+      `is_spawn_failed()` first and treats it as an internal error, so this
+      value is never recorded.
 
     Args:
-        t: How the supervised run ended. Not mutated.
+        t: How the supervised run ended.
 
     Returns:
-        The reported `Outcome` for the run. Does not raise.
+        The reported `Outcome` for the run.
     """
     if t.is_exited():
         return Outcome.PASS if t.value == 0 else Outcome.FAIL
@@ -50,29 +50,30 @@ def run_verdict(t: Termination) -> Outcome:
 
 
 def build_verdict(t: Termination) -> Outcome:
-    """Map a BUILD termination to a build signal (pure, total).
+    """Map a build termination to a build signal. Total over the kinds.
 
-    - `Exited(0)` -> `PASS` sentinel: the build succeeded, proceed to the run.
-    - `TimedOut` -> `COMPILE_TIMEOUT`: WE killed the build at
+    - `Exited(0)` -> the `PASS` sentinel: the build succeeded, proceed to the
+      run step.
+    - `TimedOut` -> `COMPILE_TIMEOUT`: we killed the build at
       `--compile-timeout`. The compiler never reached a verdict on the code, so
-      reporting a COMPILE_ERROR would blame the source for our own deadline.
-    - `Exited(nonzero)` or `Signaled(_)` -> `COMPILE_ERROR` (a compiler that
-      dies by a signal is a BUILD failure, never a test crash).
-    - `SpawnFailed` -> `NOT_RUN` sentinel: could not spawn the compiler; the
-      caller checks `is_spawn_failed()` first and treats it as an internal
-      error (exit 3).
+      reporting a `COMPILE_ERROR` would blame the source for our own deadline.
+    - `Exited(nonzero)` or `Signaled(_)` -> `COMPILE_ERROR`. A compiler that
+      dies by a signal is a build failure, not a test crash.
+    - `SpawnFailed` -> the `NOT_RUN` sentinel: the compiler could not be
+      spawned. The caller checks `is_spawn_failed()` first and treats it as an
+      internal error (exit 3).
 
-    An INTERRUPT also surfaces as `TimedOut`; the caller short-circuits an
+    An interrupt also surfaces as `TimedOut`, but the caller short-circuits an
     interrupt before consulting this function, so a `TimedOut` reaching here is
     always a genuine compile deadline.
 
     Args:
-        t: How the supervised build ended. Not mutated.
+        t: How the supervised build ended.
 
     Returns:
         `PASS` to proceed, `COMPILE_TIMEOUT` for a deadline kill,
         `COMPILE_ERROR` on any other failed build, or the `NOT_RUN` spawn
-        sentinel. Does not raise.
+        sentinel.
     """
     if t.is_exited() and t.value == 0:
         return Outcome.PASS

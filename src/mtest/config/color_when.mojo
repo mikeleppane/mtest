@@ -1,4 +1,4 @@
-"""The `--color` vocabulary of the mtest runner (Layer 1).
+"""The `--color` vocabulary.
 
 Controls whether the console reporter colorizes output: automatically (only on
 a TTY), always, or never.
@@ -9,9 +9,8 @@ a TTY), always, or never.
 struct ColorWhen(Equatable, ImplicitlyCopyable, Movable):
     """One value from the `--color` closed vocabulary.
 
-    A thin wrapper over a stable integer discriminant so the vocabulary is a
-    closed set of named constants that compare by value. Holds no owned
-    resources; copies and moves are trivial and it never raises.
+    A wrapper over a stable integer discriminant, so the vocabulary is a closed
+    set of named constants that compare by value.
     """
 
     var value: Int
@@ -22,9 +21,9 @@ struct ColorWhen(Equatable, ImplicitlyCopyable, Movable):
     comptime NEVER = Self(2)
 
     def __eq__(self, other: Self) -> Bool:
-        """Two choices are equal iff their discriminants match. Pure."""
+        """Whether both choices carry the same discriminant."""
         return self.value == other.value
 
     def __ne__(self, other: Self) -> Bool:
-        """Negation of `__eq__`. Pure."""
+        """Whether the two choices carry different discriminants."""
         return self.value != other.value

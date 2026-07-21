@@ -2,14 +2,14 @@
 
 `walk_dir` collects the files under a directory whose basename matches the
 `test_*.mojo` pattern, recursively, with each directory's entries visited in
-sorted order for determinism. The pattern gates directory walks only — an
-explicitly named operand bypasses it (that is handled by the caller, not here).
+sorted order for determinism. The pattern gates directory walks only; an
+explicitly named operand bypasses it, which the caller handles rather than the
+walk.
 
-**Symlink no-follow.** The walk never follows a symlink, neither a symlinked
+Symlink no-follow: the walk never follows a symlink, neither a symlinked
 subdirectory nor a symlinked file. Lexical normalization cannot detect a cycle,
-so a walk that followed links could loop forever or reach outside the root; the
-only safe policy is to not follow any link during a walk. An explicitly named
-symlink operand is the caller's concern, not the walk's.
+so a walk that followed links could loop forever or reach outside the root. An
+explicitly named symlink operand is the caller's concern, not the walk's.
 """
 from std.builtin.sort import sort
 from std.os import listdir
@@ -32,6 +32,9 @@ def walk_dir(abs_dir: String, rel_prefix: String) raises -> List[String]:
     Returns:
         The matching files as root-relative paths. Each directory's entries are
         visited in sorted order; symlinks are skipped (never followed).
+
+    Raises:
+        Error: If a directory cannot be listed during the walk.
     """
     var names = List[String]()
     for entry in listdir(abs_dir):

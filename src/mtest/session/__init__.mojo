@@ -1,13 +1,13 @@
-"""The session layer of the mtest runner (Layer 4): sequential orchestration.
+"""Sequential orchestration of a test session.
 
-`session` is the integration keystone. It calls `discover`, then for each
-discovered file composes the `exec` supervisor to build-then-execute, maps each
-termination to an honest `Outcome` (a crash, a failure, a timeout, and a compile
-error stay distinct), emits the closed `Event` set to the reporter, and resolves
-the process exit code. It emits events and NOTHING else — the reporter formats;
-pre-session usage errors are main's.
+The session calls `discover`, then for each discovered file composes the `exec`
+supervisor to build-then-execute, maps each termination to an honest `Outcome`
+(a crash, a failure, a timeout, and a compile error stay distinct), emits the
+closed `Event` set to the reporter, and resolves the process exit code. It emits
+events and nothing else: the reporter formats, and pre-session usage errors
+belong to main.
 
-The public surface is re-exported here so callers write
+The public surface is re-exported here, so callers write
 `from mtest.session import run_session, run_verdict, build_verdict`.
 """
 from mtest.session.session import (

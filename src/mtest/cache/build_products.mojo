@@ -1,23 +1,22 @@
-"""The session-scoped BuildProducts registry (the `cache` layer, a leaf).
+"""The session-scoped build-products registry.
 
-`mtest` builds each test file once, then may probe it (`--skip-all`) and run it —
-and `collect`, `probe`, and `run` must all SHARE that one build. This registry is
-the passive store that makes the sharing possible: a map keyed by root-relative
-path, each entry carrying the built binary, the canonical source path `mojo build`
-baked in (the report parser's identity key), and — once probed — the qualifying
-collection listing.
+`mtest` builds each test file once, then may probe it (`--skip-all`) and run it,
+and `collect`, `probe`, and `run` must all share that one build. This registry
+is the passive store that makes the sharing possible: a map keyed by
+root-relative path, each entry carrying the built binary, the canonical source
+path `mojo build` baked in (the report parser's identity key), and — once
+probed — the qualifying collection listing.
 
-It is a PURE data structure. It performs no building, probing, or I/O of its own;
-the session drives those and records the results here. That keeps it trivially
-unit-testable, and it is what the once-built / once-probed bookkeeping rests on:
-the store holds the state, and the session's check-then-record pattern (build only
-when `not has(rel)`) is what makes the build happen exactly once.
+It is a data structure only. It performs no building, probing, or I/O; the
+session drives those and records the results here. The once-built and
+once-probed bookkeeping rests on that split: the store holds the state, and the
+session's check-then-record pattern (build only when `not has(rel)`) is what
+makes the build happen exactly once.
 
-Storage is a `Dict[String, Int]` index into a `List[BuildProduct]`: the dict maps
-a rel-path to its slot, so lookup is O(1) and `record_build` replaces a slot's
-whole `BuildProduct` in place — an atomic entry replacement no prior field
-survives, which is exactly what stale-name recovery (rebuild -> fresh entry)
-relies on.
+Storage is a `Dict[String, Int]` index into a `List[BuildProduct]`. The dict
+maps a rel-path to its slot, so lookup is O(1) and `record_build` replaces a
+slot's whole `BuildProduct` in place. No prior field survives that replacement,
+which is what stale-name recovery (rebuild yields a fresh entry) relies on.
 """
 from std.collections import Dict
 
@@ -37,11 +36,10 @@ struct BuildProduct(Copyable, Movable):
     """The built test binary (e.g. `build/bin/<mangled>`); empty on a compile
     error."""
     var canonical_source: String
-    """The realpath `mojo build` baked into the child's report — the parser's
-    identity key; empty on a compile error."""
+    """The realpath `mojo build` baked into the child's report, which is the
+    parser's identity key; empty on a compile error."""
     var compile_error: Bool
-    """The build failed; the session short-circuits probe and run for this file.
-    """
+    """The build failed, so the session skips probe and run for this file."""
     var compile_output: String
     """The captured compiler stderr for the error message (empty if none)."""
     var probed: Bool
@@ -71,8 +69,7 @@ struct BuildProduct(Copyable, Movable):
     def compile_error_product(
         rel_path: String, compile_output: String
     ) -> BuildProduct:
-        """A compile-error product for `rel_path` carrying the compiler output.
-        """
+        """A compile-error product for `rel_path` carrying `compile_output`."""
         return BuildProduct(
             rel_path,
             String(""),
@@ -97,7 +94,7 @@ struct BuildRegistry(Movable):
     var _index: Dict[String, Int]
     """rel_path -> slot in `_items`."""
     var _items: List[BuildProduct]
-    """The entries, in insertion order; a slot is replaced in place on rebuild."""
+    """The entries in insertion order; a rebuild replaces a slot in place."""
 
     def __init__(out self):
         """An empty registry."""
@@ -111,8 +108,14 @@ struct BuildRegistry(Movable):
     def get(self, rel: String) raises -> BuildProduct:
         """A copy of the entry for `rel`; the caller must `has(rel)` first.
 
+        Args:
+            rel: The root-relative path whose entry to read.
+
+        Returns:
+            A copy of the entry, so mutating it cannot reach the registry.
+
         Raises:
-            An error if no entry exists for `rel`.
+            Error: If no entry exists for `rel`.
         """
         var pos = self._index.get(rel)
         if not pos:
@@ -120,12 +123,11 @@ struct BuildRegistry(Movable):
         return self._items[pos.value()].copy()
 
     def record_build(mut self, product: BuildProduct):
-        """Insert `product`, or atomically REPLACE the whole entry for its
-        `rel_path`.
+        """Insert `product`, or replace the whole entry for its `rel_path`.
 
-        On replacement no field of the prior entry survives — the probe state
-        resets unless `product` itself carries it. This is what a stale-name
-        rebuild relies on: a rebuild yields a completely fresh entry.
+        On replacement no field of the prior entry survives, so the probe state
+        resets unless `product` itself carries it. Stale-name rebuilds rely on
+        that: a rebuild yields a completely fresh entry.
         """
         var pos = self._index.get(product.rel_path)
         if pos:
@@ -146,10 +148,10 @@ struct BuildRegistry(Movable):
         """Attach a probe result to the existing entry for `rel`.
 
         Sets `probed=True`, `qualified`, and `listing`. The entry must already
-        exist — the session always builds before probing.
+        exist; the session always builds before probing.
 
         Raises:
-            An error naming `rel` if no entry exists for it.
+            Error: If no entry exists for `rel`. The message names `rel`.
         """
         var pos = self._index.get(rel)
         if not pos:

@@ -1,13 +1,12 @@
-"""The shared shell-quoting helpers behind every reproduce line (Layer 1).
+"""The shared shell-quoting helpers behind every reproduce line.
 
-`shell_quote` and `shell_join` are the SINGLE quoting implementation the
-runner uses to build copy-paste-safe shell commands: `report` (Layer 2) quotes
-a bare path in a run-failure reproduce line, `session` (Layer 4) quotes the
-build argv it stores as `build_command` (the COMPILE-ERROR reproduce line and
-`-v` verbose output), and `cli` (Layer 5) quotes the build-affecting flags it
-echoes. Every caller shares this ONE safe-character set and escaping rule, so
-a reproduce line quotes uniformly end to end regardless of which layer built
-it. Pure: no I/O, no environment reads.
+`shell_quote` and `shell_join` are the runner's only quoting implementation for
+building copy-paste-safe shell commands. `report` quotes the bare path in a
+run-failure reproduce line and shell-joins the event's `build_argv` for the
+compile-error reproduce line and `-v` output, and `cli` quotes the
+build-affecting flags it echoes into the same lines. Sharing one safe-character
+set and escaping rule is what makes a reproduce line quote uniformly end to end
+no matter which layer built it. No I/O, no environment reads.
 """
 
 # Characters that need no shell quoting in a reproduce token.
@@ -17,17 +16,17 @@ comptime _SHELL_SAFE: StaticString = (
 
 
 def shell_quote(s: String) -> String:
-    """Single-quote `s` for a shell if it holds any unsafe character. Pure.
+    """Single-quote `s` for a shell if it holds any unsafe character.
 
-    An already-safe token passes through unchanged; otherwise it is wrapped in
-    single quotes with embedded quotes escaped, so the result is copy-paste
-    safe. An empty token becomes `''`.
+    A token built entirely from safe characters passes through unchanged;
+    otherwise it is wrapped in single quotes with embedded single quotes
+    escaped. An empty token becomes `''`.
 
     Args:
         s: The token to quote.
 
     Returns:
-        A shell-safe token. Does not mutate or raise.
+        A shell-safe token.
     """
     if s.byte_length() == 0:
         return "''"
@@ -50,17 +49,17 @@ def shell_quote(s: String) -> String:
 
 
 def shell_join(tokens: List[String]) -> String:
-    """Shell-quote every token in `tokens` and space-join them. Pure.
+    """Shell-quote every token in `tokens` and space-join them.
 
     Each token is quoted independently via `shell_quote`, then joined with
-    single spaces, so the result is a single copy-paste-safe command line. An
-    empty list yields the empty string.
+    single spaces, giving one copy-paste-safe command line. An empty list
+    yields the empty string.
 
     Args:
         tokens: The argv or flag tokens to join, in order.
 
     Returns:
-        The shell-quoted, space-joined command line. Does not mutate or raise.
+        The shell-quoted, space-joined command line.
     """
     var out = String("")
     for i in range(len(tokens)):

@@ -1,56 +1,51 @@
-"""The PURE crash-class retry classifier of the session layer (Layer 4).
+"""The crash-class retry classifier.
 
-`--retries` re-runs ONLY crash-class failures — a real crash or a deadline kill —
-and NEVER deterministic ones: a failing assertion, a nonzero compile error, or a
-flooded/overflowed capture. Getting this wrong either masks a legitimately
-failing test (retrying a deterministic failure until it "passes") or wastes time
-retrying a flood. This module is the single source of that decision. It is pure,
-total, and never raises; the attempt loop that consumes it is wired separately.
+`--retries` re-runs only crash-class failures, meaning a real crash or a
+deadline kill, and never deterministic ones such as a failing assertion, a
+nonzero compile error, or a flooded capture. Getting this wrong either masks a
+legitimately failing test by retrying it until it passes, or wastes time
+retrying a flood. This module is the single source of that decision; the attempt
+loop that consumes it is wired separately.
 
-`retry_classify` folds four facts — the step (`"run"` vs a compile step), the
-`Termination`, whether an interrupt was pending, and the raw stderr — into one
-`RetryClass`. The policy is TOTAL and pinned row by row in
-`tests/unit/test_session_retry_class.mojo`. In precedence order:
+`retry_classify` folds four facts into one `RetryClass`: the step (`"run"` vs a
+compile step), the `Termination`, whether an interrupt was pending, and the raw
+stderr. The policy is total. In precedence order:
 
-1. `SpawnFailed`             -> NOT eligible, `"spawn-failed"` (an internal error
-                                the session routes to exit 3; never retried).
-2. `TimedOut` + interrupted  -> NOT eligible, `"interrupt"` (an interrupt is
-                                never retryable, whichever step raised it; the
-                                cause comes from the passed `interrupted` flag,
-                                never assumed from the timeout alone).
-3. RUN step, otherwise:
+1. `SpawnFailed`             -> not eligible, `"spawn-failed"` (an internal
+                                error the session routes to exit 3).
+2. `TimedOut` + interrupted  -> not eligible, `"interrupt"`, whichever step
+                                raised it. The cause comes from the passed
+                                `interrupted` flag, not from the timeout alone.
+3. Run step, otherwise:
    - `Signaled`              -> eligible, `"signal"`.
    - `TimedOut` (a deadline) -> eligible, `"run-timeout"`.
-   - `Exited` (ANY code)     -> NOT eligible, `"deterministic"` (a process that
-                                exited under its own control is deterministic —
+   - `Exited` (any code)     -> not eligible, `"deterministic"`. A process that
+                                exited under its own control is deterministic;
                                 this covers worse-of disagreements, a malformed
-                                suite, and a capture-overflow FAIL; flooding is
-                                not flakiness).
-4. BUILD / PRECOMPILE step, otherwise (precompile uses the build rules):
+                                suite, and a capture-overflow FAIL.
+4. Build or precompile step, otherwise (precompile uses the build rules):
    - `Signaled`              -> eligible, `"compile-crash"`.
    - `TimedOut` (a deadline) -> eligible, `"compile-timeout"`.
-   - `Exited(nonzero)` WITH a crash signature -> eligible, `"compile-crash"`
-                                (a compiler ICE that exits nonzero with a banner).
-   - `Exited(nonzero)` WITHOUT a signature -> NOT eligible, `"compile-error"`
-                                (an ordinary compile error — deterministic).
-   - `Exited(0)`            -> NOT eligible, `"deterministic"` (a succeeded build
-                                is not a failure; present only for totality).
+   - `Exited(nonzero)` with a crash signature -> eligible, `"compile-crash"`:
+                                a compiler ICE exiting nonzero with a banner.
+   - `Exited(nonzero)` without a signature -> not eligible, `"compile-error"`:
+                                an ordinary, deterministic compile error.
+   - `Exited(0)`             -> not eligible, `"deterministic"`. A succeeded
+                                build is not a failure; present for totality.
 
-ASSUMPTION-PINNED: the crash-signature marker list in `has_crash_signature` was
-NOT validated against a real Mojo internal compiler error captured on this
-toolchain — no ICE was reproduced during the resilience spike. The markers port
-the INTENT of the transcript normalizer's crash patterns (`scripts/
-gen_transcripts.py`): the LLVM/Mojo "PLEASE submit a bug report" banner, a
-`Stack dump` header line, and the two stack-frame shapes. If a real ICE later
-prints a different banner, extend the list here and re-pin the tests.
+The crash-signature marker list in `has_crash_signature` is assumption-pinned:
+it was not validated against a real Mojo internal compiler error on this
+toolchain, because no ICE was reproduced during the resilience spike. The
+markers port the intent of the transcript normalizer's crash patterns in
+`scripts/gen_transcripts.py`: the LLVM/Mojo "PLEASE submit a bug report"
+banner, a `Stack dump` header line, and the two stack-frame shapes. If a real
+ICE later prints a different banner, extend the list here and re-pin the tests.
 
-The banner match is anchored at a LINE START (`PLEASE submit a bug report`)
-rather than an unanchored substring, so a deterministic compile error that
-merely echoes the phrase mid-line (a quoted assert message or quoted user
-source) is no longer misread as an ICE and wrongly retried. RESIDUAL: a
-deterministic compiler that emits a line whose own start byte-matches the exact
-banner shape could still trip it — a narrow, assumption-pinned corner accepted
-until a real ICE is captured on this toolchain.
+The banner match is anchored at a line start rather than matched as a bare
+substring, so a deterministic compile error that echoes the phrase mid-line, in
+a quoted assert message or quoted user source, is not misread as an ICE and
+retried. A residual corner remains: a deterministic compiler emitting a line
+that itself starts with the banner shape would still trip it.
 """
 from mtest.config import lossy_utf8
 from mtest.exec import Termination
@@ -66,7 +61,7 @@ struct RetryClass(Copyable, Movable):
     """
 
     var retry_eligible: Bool
-    """True iff this failure is crash-class and MAY be retried by `--retries`."""
+    """True iff this failure is crash-class and `--retries` may retry it."""
     var label: String
     """A short, stable classification tag for the reporter / AttemptFinished."""
 
@@ -74,20 +69,20 @@ struct RetryClass(Copyable, Movable):
 def retry_classify(
     step: String, term: Termination, interrupted: Bool, stderr: List[UInt8]
 ) -> RetryClass:
-    """Classify one failed step into the TOTAL retry policy. Pure; never raises.
+    """Classify one failed step under the retry policy.
 
     Args:
-        step: `"run"` for the run step; `"build"` or `"precompile"` for a compile
-            step (both compile steps share the build rules; any non-`"run"` value
-            is treated as a compile step).
-        term: How the supervised step ended. Not mutated.
+        step: `"run"` for the run step; `"build"` or `"precompile"` for a
+            compile step. Both compile steps share the build rules, and any
+            value other than `"run"` is treated as a compile step.
+        term: How the supervised step ended.
         interrupted: Whether an interrupt was pending when the step was killed.
-            An interrupt-caused `TimedOut` is NEVER retried; a deadline one is.
-        stderr: The step's raw captured stderr, scanned only on the build path
-            for a compiler crash signature. Not mutated.
+            An interrupt-caused `TimedOut` is never retried; a deadline one is.
+        stderr: The step's raw captured stderr, scanned for a compiler crash
+            signature only on the build path.
 
     Returns:
-        The eligibility decision and its label. Does not raise.
+        The eligibility decision and its label.
     """
     # Rule 1: a spawn failure is an internal error, never a retryable outcome.
     if term.is_spawn_failed():
@@ -126,12 +121,12 @@ def retry_classify(
 
 
 def _is_digit(b: UInt8) -> Bool:
-    """Whether `b` is an ASCII digit `0`..`9`. Pure."""
+    """Whether `b` is an ASCII digit `0`..`9`."""
     return b >= 48 and b <= 57
 
 
 def _is_hex(b: UInt8) -> Bool:
-    """Whether `b` is an ASCII hex digit, case-insensitive. Pure."""
+    """Whether `b` is an ASCII hex digit, case-insensitive."""
     if _is_digit(b):
         return True
     var lo = b | 0x20  # fold to lowercase
@@ -139,16 +134,15 @@ def _is_hex(b: UInt8) -> Bool:
 
 
 def _is_ws(b: UInt8) -> Bool:
-    """Whether `b` is a space or a tab (the `\\s` of the frame patterns). Pure.
-    """
+    """Whether `b` is a space or a tab (the `\\s` of the frame patterns)."""
     return b == 32 or b == 9
 
 
 def _is_symbolless_frame(lb: Span[UInt8, _]) -> Bool:
-    """Whether `lb` is a symbol-less stack frame line. Pure.
+    """Whether `lb` is a symbol-less stack frame line.
 
-    Ports `^\\d+\\s+\\S+\\s+0x[0-9a-f]+` — the no-symbolizer frame shape
-    `<n>  <module> 0x<hex>` — with a plain forward scan (no regex engine). The
+    Ports `^\\d+\\s+\\S+\\s+0x[0-9a-f]+`, the no-symbolizer frame shape
+    `<n>  <module> 0x<hex>`, as a plain forward scan without a regex engine. The
     complementary `\\d+`/`\\s+`/`\\S+` runs need no backtracking.
     """
     var n = len(lb)
@@ -188,10 +182,10 @@ def _is_symbolless_frame(lb: Span[UInt8, _]) -> Bool:
 
 
 def _is_symbolized_frame(lb: Span[UInt8, _]) -> Bool:
-    """Whether `lb` is a symbolized stack frame line. Pure.
+    """Whether `lb` is a symbolized stack frame line.
 
-    Ports `^\\s*#\\d+ 0x[0-9a-f]+` — the llvm-symbolizer frame shape
-    `#<n> 0x<hex> <sym> <file>:<l>:<c>` — with a plain forward scan.
+    Ports `^\\s*#\\d+ 0x[0-9a-f]+`, the llvm-symbolizer frame shape
+    `#<n> 0x<hex> <sym> <file>:<l>:<c>`, as a plain forward scan.
     """
     var n = len(lb)
     var i = 0
@@ -224,24 +218,24 @@ def _is_symbolized_frame(lb: Span[UInt8, _]) -> Bool:
 
 
 def has_crash_signature(stderr: List[UInt8]) -> Bool:
-    """Whether the raw stderr bytes carry a compiler-crash marker. Pure.
+    """Whether the raw stderr bytes carry a compiler-crash marker.
 
-    A conservative, total, non-raising scan for the ASSUMPTION-PINNED markers
-    (see the module docstring). Matches ANY of:
+    A conservative, total scan for the assumption-pinned markers described in
+    the module docstring. Matches any of:
 
-    - a LINE that starts (leading whitespace tolerated, case-insensitive) with
-      `please submit a bug report` — the LLVM/Mojo ICE banner line opens
-      `PLEASE submit a bug report to <url>`. Anchored at the line start so a
-      deterministic error echoing the phrase mid-line cannot forge it,
-    - a line beginning `Stack dump`,
+    - a line starting with `please submit a bug report`, matched
+      case-insensitively and tolerating leading whitespace. The LLVM/Mojo ICE
+      banner line opens `PLEASE submit a bug report to <url>`, and anchoring at
+      the line start keeps a mid-line echo from forging it.
+    - a line beginning `Stack dump`.
     - a stack-frame line in either shape the runtime emits (see
-      `_is_symbolless_frame` / `_is_symbolized_frame`).
+      `_is_symbolless_frame` and `_is_symbolized_frame`).
 
     Args:
-        stderr: The step's raw captured stderr bytes. Not mutated.
+        stderr: The step's raw captured stderr bytes.
 
     Returns:
-        True iff a crash marker is present. Does not raise.
+        True iff a crash marker is present.
     """
     var text = lossy_utf8(stderr)
     for line in text.split("\n"):

@@ -1,10 +1,11 @@
-"""The shared byte->text codec behind every rendered stream (Layer 1).
+"""The shared byte-to-text codec behind every rendered stream.
 
-`lossy_utf8` is the SINGLE decoder the runner uses to turn raw captured bytes
-into a printable `String`: `exec` (Layer 3) decodes a failed precompile step's
-stderr for the precompile banner, and `report` (Layer 2) decodes every captured
-stdout/stderr and the compile-error compiler banner. It lives here, below both,
-so each layer shares this ONE decoding rule rather than duplicating it. Pure: no
+`lossy_utf8` is the runner's only decoder for turning raw captured bytes into a
+printable `String`. `session` is the heaviest caller: it decodes every child's
+captured stdout and stderr before parsing or classifying, including a failed
+precompile step's stderr and a compile error's compiler banner. `report`
+decodes again for whatever it renders into console, JSON, or JUnit output. It
+lives below both so they share one decoding rule rather than duplicating it. No
 I/O, no environment reads.
 """
 
@@ -12,17 +13,18 @@ I/O, no environment reads.
 def lossy_utf8(bytes: List[UInt8]) -> String:
     """Render raw captured bytes as text, replacing invalid UTF-8 visibly.
 
-    Walks the bytes as UTF-8; a valid sequence is copied through unchanged, and
-    any byte that cannot begin or continue a valid sequence is replaced with the
-    Unicode replacement character (U+FFFD) so the result is always printable and
-    never crashes on binary or invalid input.
+    Walks the bytes as UTF-8, copying each valid sequence through unchanged.
+    Any byte that cannot begin or continue a valid sequence becomes the Unicode
+    replacement character (U+FFFD), so the result is always printable even for
+    binary or malformed input. Overlong encodings, surrogates, and values above
+    U+10FFFF are rejected per RFC 3629 and replaced the same way.
 
     Args:
-        bytes: The raw captured bytes to render. Not mutated.
+        bytes: The raw captured bytes to render.
 
     Returns:
         A `String` with every valid sequence preserved and every invalid byte
-        replaced by U+FFFD. Allocates the result; does not raise.
+        replaced by U+FFFD.
     """
     comptime REPLACEMENT = "�"
     var out = String("")

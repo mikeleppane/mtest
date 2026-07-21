@@ -1,11 +1,12 @@
-"""Portable subprocess supervision over the private native exec adapter (L3).
+"""Portable subprocess supervision over the private native exec adapter.
 
 `run_supervised` is the one blocking entry point. Mojo owns only the typed
-process contract and bounded captures; the C17 adapter owns platform headers,
-PATH planning, pipes, fork/exec, polling, process groups, and wait status. This
-keeps Linux and macOS ABI details out of Mojo while preserving the distinctions
-the product sells: exit versus signal, spawn failure versus exit 127, and an
-mtest deadline/interrupt kill versus the child's underlying final status.
+process contract and the bounded captures; the C17 adapter owns platform
+headers, PATH planning, pipes, fork/exec, polling, process groups, and wait
+status. This keeps Linux and macOS ABI details out of Mojo while preserving the
+distinctions the runner reports on: exit versus signal, spawn failure versus
+exit 127, and an mtest deadline or interrupt kill versus the child's underlying
+final status.
 """
 from std.ffi import external_call
 from std.memory import UnsafePointer, alloc, memset_zero
@@ -26,10 +27,10 @@ comptime _POLL_SLICE_MS = 50
 comptime _GRACE_MS = DEFAULT_GRACE_MS
 """Fallback grace between process-group SIGTERM and SIGKILL.
 
-The deadline/interrupt escalation reads `spec.grace_ms` (which defaults to this
-same value), so a caller can widen the grace for a child that needs longer to
-die cleanly. This constant remains the grace for the machinery-error abort path,
-where there is no spec in hand and nothing is mid-flight worth waiting on.
+The deadline and interrupt escalation reads `spec.grace_ms`, which defaults to
+this same value, so a caller can widen the grace for a child that needs longer
+to die cleanly. This constant is the grace for the machinery-error abort path,
+where there is no spec in hand and nothing mid-flight worth waiting on.
 """
 comptime _POST_LEADER_MS = 300
 """Bound for group sweep and nonblocking drain after leader observation."""
@@ -95,8 +96,8 @@ struct _NativeBuffers(Movable):
         """Allocate and initialize all records before the native process opens.
 
         The process-spec pointer fields borrow `spec` only for the synchronous
-        `process_open` call. The adapter copies argv, cwd, and environment before
-        returning and never retains a Mojo pointer.
+        `process_open` call. The adapter copies argv, cwd, and environment
+        before returning and never retains a Mojo pointer.
         """
         self.owned_strings = List[_BytePtr]()
         # SAFETY: each allocation uses its record's required ABI-v1 alignment
@@ -162,8 +163,7 @@ struct _NativeBuffers(Movable):
             self.spec_record.bitcast[UInt32]()[8] = _PROCESS_HAS_CWD
 
     def __del__(deinit self):
-        """Free every ABI record exactly once after native calls have returned.
-        """
+        """Free every ABI record once, after native calls have returned."""
         # SAFETY: C never retains any string, record, or I/O pointer. This object
         # uniquely owns every allocation and deinitialization runs exactly once.
         for i in range(len(self.owned_strings)):
@@ -191,8 +191,7 @@ struct _NativeBuffers(Movable):
 
 
 def _native_error(prefix: String, error: _U64Ptr) -> String:
-    """Render the adapter's fixed error record without discarding cleanup data.
-    """
+    """Render the adapter's error record, keeping any cleanup failure."""
     # SAFETY: every failing ABI function initializes the complete aligned error
     # record. ABI-v1 fixes operation/errno at 0/4 and cleanup values at 8/12.
     var operation = Int(error.bitcast[UInt32]()[0])
@@ -433,8 +432,7 @@ def _supervise_open_process(
     start_ms: Int,
     mut native: _NativeBuffers,
 ) raises -> ProcessResult:
-    """Drive one already-open native process through observe/sweep/reap/close.
-    """
+    """Drive one open native process through observe, sweep, reap, and close."""
     var out_capture = BoundedCapture(head_cap, tail_cap)
     var err_capture = BoundedCapture(head_cap, tail_cap)
     var stdout_open = True
@@ -564,7 +562,7 @@ def run_supervised(
 
     Args:
         runtime: The active, exclusively borrowed process-global exec runtime.
-        spec: The command, optional cwd, and deadline. Not mutated.
+        spec: The command, optional cwd, and deadline.
         capture_bound_bytes: Positive per-stream head+tail capture limit.
 
     Returns:
@@ -572,8 +570,8 @@ def run_supervised(
         termination, and monotonic duration.
 
     Raises:
-        Error: An input or runner-machinery failure. Child exit, signal, timeout,
-            and spawn failure remain structured data rather than exceptions.
+        Error: An input or runner-machinery failure. Child exit, signal,
+            timeout, and spawn failure stay structured data, not exceptions.
     """
     if len(spec.argv) == 0:
         raise Error("exec: run_supervised got an empty argv")

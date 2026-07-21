@@ -1,17 +1,16 @@
-"""The pure SLOW-threshold policy for a file's BUILD/RUN steps (Layer 0).
+"""The slow-step threshold policy for a file's build and run steps.
 
-A step that runs a very long time is worth naming even when it eventually
-succeeds — a comptime-stalled compile or a crawling test is exactly what a
-reader most wants pointed at, and waiting for the 600s compile deadline (or
-never, for a run with no `--timeout`) to say so is too late. `SLOW` is an
-INFORMAL-tier ANNOTATION on the verdict line, never an outcome: it rides
-alongside a file's real verdict and never changes it, its counts, or the exit
-code (see `mtest.model.events.Event.file_finished`'s `slow` field).
+`SLOW` is an informal-tier annotation on the verdict line, never an outcome: it
+rides alongside a file's real verdict and changes neither that verdict, nor its
+counts, nor the exit code (see the `slow` field on
+`mtest.model.events.Event.file_finished`). It exists so a step that runs a very
+long time gets named even when it eventually succeeds — a comptime-stalled
+compile becomes visible at 60s rather than at the 600s compile deadline, or
+never for a run with no `--timeout`.
 
-Both functions are pure, total over any two non-negative second counts, and
-never raise. `SLOW_THRESHOLD_SECONDS` is the single source of truth for the
-60s threshold (STABLE-INTENT, no flag, no config field): a comptime-stalled
-compile becomes visible at 60s, not at the 600s compile deadline.
+`SLOW_THRESHOLD_SECONDS` is the single source of truth for the threshold; there
+is no flag and no config field for it. Both functions are total over any two
+non-negative second counts.
 """
 
 comptime SLOW_THRESHOLD_SECONDS: Float64 = 60.0
@@ -19,19 +18,17 @@ comptime SLOW_THRESHOLD_SECONDS: Float64 = 60.0
 
 
 def is_slow(build_seconds: Float64, run_seconds: Float64) -> Bool:
-    """Whether either step's wall time crossed the SLOW threshold.
+    """Whether either step's wall time crossed the slow threshold.
 
-    Total and pure: True iff `build_seconds` or `run_seconds` is `>=
-    SLOW_THRESHOLD_SECONDS`. A step whose duration is genuinely unknown (never
-    ran) should be passed as `0.0` — never invented — which this function
-    always reads as not-slow.
+    A step whose duration is genuinely unknown, because it never ran, should be
+    passed as `0.0` rather than invented; this function reads that as not slow.
 
     Args:
-        build_seconds: The BUILD step's wall time, in seconds. Not mutated.
-        run_seconds: The RUN step's wall time, in seconds. Not mutated.
+        build_seconds: The build step's wall time, in seconds.
+        run_seconds: The run step's wall time, in seconds.
 
     Returns:
-        True iff either step is at or above the threshold. Does not raise.
+        True iff either step is at or above `SLOW_THRESHOLD_SECONDS`.
     """
     return (
         build_seconds >= SLOW_THRESHOLD_SECONDS
@@ -40,18 +37,18 @@ def is_slow(build_seconds: Float64, run_seconds: Float64) -> Bool:
 
 
 def slow_step_label(build_seconds: Float64, run_seconds: Float64) -> String:
-    """Name WHICH step(s) crossed the SLOW threshold, for `-v` output only.
+    """Name which steps crossed the slow threshold, for `-v` output only.
 
-    Total and pure: `"build"`, `"run"`, `"build and run"`, or `""` when
-    neither step is slow. The durable verdict-line `SLOW` token itself never
-    depends on this — only the verbose per-step naming does.
+    The durable verdict-line `SLOW` token does not depend on this; only the
+    verbose per-step naming does.
 
     Args:
-        build_seconds: The BUILD step's wall time, in seconds. Not mutated.
-        run_seconds: The RUN step's wall time, in seconds. Not mutated.
+        build_seconds: The build step's wall time, in seconds.
+        run_seconds: The run step's wall time, in seconds.
 
     Returns:
-        The step-naming label. Does not raise.
+        `"build"`, `"run"`, `"build and run"`, or `""` when neither step is
+        slow.
     """
     var build_slow = build_seconds >= SLOW_THRESHOLD_SECONDS
     var run_slow = run_seconds >= SLOW_THRESHOLD_SECONDS

@@ -1,4 +1,4 @@
-"""Platform-aware signal narration shared by the report layer (Layer 2).
+"""Platform-aware signal narration shared by the report layer.
 
 Signal numbers are target ABI facts, so reporters ask this module for the
 human-readable name instead of carrying platform assumptions of their own.
@@ -10,9 +10,9 @@ from std.sys.info import CompilationTarget
 def _signal_name_for_platform(signo: Int, is_macos: Bool) -> String:
     """The common signal name and description for one explicit platform.
 
-    Covers the closed set of terminating signals the reporters narrate. Returns
-    an owned empty string outside that set so callers can retain the bare signal
-    number. Pure; never raises.
+    Covers the closed set of terminating signals the reporters narrate.
+    Returns an owned empty string outside that set so callers can retain the
+    bare signal number.
 
     Args:
         signo: The terminating signal number.

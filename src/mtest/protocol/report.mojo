@@ -1,42 +1,49 @@
-"""The report parser (Layer 2): one file's stdout to one of four verdicts.
+"""The report parser: one file's stdout to one of four verdicts.
 
-`parse_report` reads the decoded stdout of a single child `std.testing.TestSuite`
-binary and classifies it as VALID / ABSENT / OFF_GRAMMAR / AMBIGUOUS. It is
-PURE: it imports only `model`, performs no I/O, holds no FFI, decides no policy,
-and never raises. The session (a higher layer) owns the decode and turns the
-verdict into policy; this module only reads bytes.
+`parse_report` reads the decoded stdout of a single child
+`std.testing.TestSuite` binary and classifies it as VALID, ABSENT, OFF_GRAMMAR,
+or AMBIGUOUS. It imports only `model`, performs no I/O, holds no FFI, decides
+no policy, and never raises. The session owns the decode and turns the verdict
+into policy; this module only reads bytes.
 
-The grammar is exactly what the pinned toolchain emits, frozen in protocol
-snapshots under `tests/snapshots/protocol/`. Trailing spaces are load-bearing. A
-report block for a file whose canonical path is `P`:
+The grammar is exactly what the pinned toolchain emits. The snapshots under
+`tests/snapshots/protocol/` are the only record of that pinned grammar.
+Trailing spaces are load-bearing. A report block for a file whose canonical
+path is `P`:
 
-    Running <N> tests for <P>                (header, trailing space, P byte-exact)
-        PASS|FAIL|SKIP [ <t> ] <name>        (row: 4 spaces; <t> matched loosely)
-          <detail...>                        (FAIL detail: MORE-indented lines)
-    --------                                 (the rule: exactly 8 dashes)
+    Running <N> tests for <P>            (header; trailing space; P byte-exact)
+        PASS|FAIL|SKIP [ <t> ] <name>    (row: 4 spaces; <t> matched loosely)
+          <detail...>                    (FAIL detail: more-indented lines)
+    --------                             (the rule: exactly 8 dashes)
     Summary [ <t> ] <N> tests run: <p> passed , <f> failed , <s> skipped
-    Test suite' <P> 'failed!                 (trailer, present iff f>0)
+    Test suite' <P> 'failed!             (trailer, present iff f>0)
 
-The classifier's central discipline: the report grammar is the toolchain's, so a
-structural break a user's own stdout CANNOT forge (a missing rule, a broken
-count, a fabricated failure trailer, drift from the pinned shape) is OFF_GRAMMAR,
-while a pattern user bytes CAN produce (a second appended block, more rows than
-declared, a duplicate name) is AMBIGUOUS. Identity is EXACT byte-equality on the
-header path, never a suffix — a same-suffix-different-root impostor simply fails
-to match and the report reads ABSENT.
+The classifier's central discipline: the report grammar is the toolchain's, so
+a structural break that a user's own stdout cannot forge — a missing rule, a
+broken count, a fabricated failure trailer, drift from the pinned shape — is
+OFF_GRAMMAR, while a pattern user bytes can produce — a second appended block,
+more rows than declared, a duplicate name — is AMBIGUOUS. Identity is exact
+byte-equality on the header path, never a suffix, so a
+same-suffix-different-root impostor fails to match and the report reads ABSENT.
 
-Summary-grammar junk appended AFTER a complete report is read as terminal by the
-end-scan (which takes the LAST Summary), so the preceding line is no longer the
-rule and the report classifies OFF_GRAMMAR ("missing rule before summary"), not
-AMBIGUOUS. This is intentional: both are non-VALID, and no forgery reaches VALID.
+Summary-grammar junk appended after a complete report is read as terminal by
+the end-scan, which takes the last Summary. The preceding line is then no
+longer the rule, so the report classifies OFF_GRAMMAR ("missing rule before
+summary") and not AMBIGUOUS. Both are non-VALID, so no forgery reaches VALID
+either way.
 
-The header anchor obeys the same buffered-report-after-user-output reality: the
-rows region is measured from the LAST matching header before the terminal rule,
-never the first. A test's own stdout is streamed BEFORE the toolchain's buffered
-report block, so a header-lookalike a test PRINTS appears earlier and is user
-output to ignore; the real report's header is the last one preceding the rule.
+The header anchor follows the same buffered-report-after-user-output reality: a
+test's own stdout is streamed before the toolchain's buffered report block, so
+an earlier header-lookalike is user output to ignore, and the last matching
+header before the terminal rule is the primary anchor. The anchor is settled by
+reconciliation rather than taken blindly, though. A conforming FAIL detail line
+can byte-equal this file's own header, and anchoring there would underflow the
+declared count and misread conforming content as toolchain drift (exit 3). So
+the primary block is parsed first; if it does not reconcile, the earlier
+candidates are tried in backward order until one does. If none reconciles the
+primary verdict stands, so a genuine break is never rescued into a false VALID.
 
-Precedence (the checks fire in this order; the first to fire decides):
+The checks fire in this order, and the first to fire decides:
   1. No header whose path byte-equals `source_path`            -> ABSENT
   2. Header present but no terminal Summary                    -> OFF_GRAMMAR
      Summary present but the preceding line is not the rule    -> OFF_GRAMMAR
@@ -68,27 +75,31 @@ struct ReportVerdict(Equatable, ImplicitlyCopyable, Movable):
     comptime OFF_GRAMMAR = Self(2)
     """A genuine matching header whose bytes violate the pinned grammar."""
     comptime AMBIGUOUS = Self(3)
-    """A pattern user bytes can produce: extra blocks/rows, dup names, forgery."""
+    """A pattern user bytes can produce: extra blocks or rows, duplicate
+    names, forgery."""
 
     comptime COUNT = 4
     """The number of distinct verdicts."""
 
     def __eq__(self, other: Self) -> Bool:
-        """Two verdicts are equal iff their discriminants match. Pure."""
+        """Two verdicts are equal iff their discriminants match."""
         return self.code == other.code
 
     def __ne__(self, other: Self) -> Bool:
-        """Negation of `__eq__`. Pure."""
+        """Negation of `__eq__`."""
         return self.code != other.code
 
 
 @fieldwise_init
 struct ParsedRow(Copyable, Movable):
-    """One parsed per-test result row. Owns its strings; copies are explicit."""
+    """One parsed per-test result row.
+
+    Owns its strings, so copies are explicit.
+    """
 
     var name: String
-    """The test name: nonempty, whitespace-free, `::`-free, unique in the block.
-    """
+    """The test name: nonempty, whitespace-free, `::`-free, and unique within
+    the block."""
     var outcome: Outcome
     """The row's outcome: PASS, FAIL, or SKIP only."""
     var detail: String
@@ -99,7 +110,10 @@ struct ParsedRow(Copyable, Movable):
 
 @fieldwise_init
 struct ParsedReport(Copyable, Movable):
-    """The classified result of parsing one file's report. Owns its rows."""
+    """The classified result of parsing one file's report.
+
+    Owns its rows, so copies are explicit.
+    """
 
     var verdict: ReportVerdict
     """Which of the four verdicts the stdout classified as."""
@@ -116,18 +130,26 @@ struct ParsedReport(Copyable, Movable):
     var has_trailer: Bool
     """Whether the `Test suite' ... 'failed!` trailer was present."""
     var reason: String
-    """A short phrase naming the defect for OFF_GRAMMAR/AMBIGUOUS (`""` else)."""
+    """A short phrase naming the defect for OFF_GRAMMAR or AMBIGUOUS (`""`
+    otherwise)."""
 
     @staticmethod
     def absent() -> Self:
-        """An ABSENT report: no matching header. Allocates empty rows."""
+        """An ABSENT report: no header matched the source path."""
         return Self(
             ReportVerdict.ABSENT, List[ParsedRow](), 0, 0, 0, 0, False, ""
         )
 
     @staticmethod
     def off_grammar(reason: String) -> Self:
-        """An OFF_GRAMMAR report carrying `reason`. Allocates empty rows."""
+        """An OFF_GRAMMAR report carrying a defect phrase.
+
+        Args:
+            reason: A short phrase naming the grammar defect.
+
+        Returns:
+            The report, with no rows and every count at zero.
+        """
         return Self(
             ReportVerdict.OFF_GRAMMAR,
             List[ParsedRow](),
@@ -141,7 +163,14 @@ struct ParsedReport(Copyable, Movable):
 
     @staticmethod
     def ambiguous(reason: String) -> Self:
-        """An AMBIGUOUS report carrying `reason`. Allocates empty rows."""
+        """An AMBIGUOUS report carrying a defect phrase.
+
+        Args:
+            reason: A short phrase naming the ambiguity.
+
+        Returns:
+            The report, with no rows and every count at zero.
+        """
         return Self(
             ReportVerdict.AMBIGUOUS,
             List[ParsedRow](),
@@ -162,7 +191,19 @@ struct ParsedReport(Copyable, Movable):
         skipped: Int,
         has_trailer: Bool,
     ) -> Self:
-        """A VALID report with its rows and reconciled counts. Takes `rows`."""
+        """A VALID report with its rows and reconciled counts.
+
+        Args:
+            rows: The parsed result rows, in report order. Consumed.
+            declared: The header's declared test count.
+            passed: The Summary line's passed tally.
+            failed: The Summary line's failed tally.
+            skipped: The Summary line's skipped tally.
+            has_trailer: Whether the failure trailer was present.
+
+        Returns:
+            The report, with an empty `reason`.
+        """
         return Self(
             ReportVerdict.VALID,
             rows^,
@@ -205,7 +246,7 @@ struct _TrailerParse(ImplicitlyCopyable, Movable):
 
 
 def _split_lines(text: String) -> List[String]:
-    """Split `text` into owned lines on `\\n`. Allocates; never raises."""
+    """Split `text` into owned lines on `\\n`."""
     var out = List[String]()
     for line in text.split("\n"):
         out.append(String(line))
@@ -215,8 +256,8 @@ def _split_lines(text: String) -> List[String]:
 def _parse_nonneg_int(s: String) -> Int:
     """`s` as a non-negative decimal integer, or -1 if it is not one.
 
-    A non-raising replacement for `Int(s)`: `parse_report` must never raise, so
-    every integer field is validated digit-by-digit here. Pure.
+    A non-raising replacement for `Int(s)`. Because `parse_report` must never
+    raise, every integer field is validated digit by digit here instead.
     """
     if s.byte_length() == 0:
         return -1
@@ -232,8 +273,8 @@ def _parse_nonneg_int(s: String) -> Int:
 def _header_n(line: String, source_path: String) -> Int:
     """The declared count `N` if `line` is a matching header, else -1.
 
-    A matching header is EXACTLY `Running <N> tests for <source_path> ` — the
-    trailing space and the byte-exact path are both required. Pure.
+    A matching header is exactly `Running <N> tests for <source_path> `; the
+    trailing space and the byte-exact path are both required.
     """
     var prefix = "Running "
     if not line.startswith(prefix):
@@ -250,7 +291,7 @@ def _parse_summary(line: String) -> _SummaryParse:
     """Match `line` against the Summary grammar and extract its tallies.
 
     Requires the full pinned shape including the trailing space; anything short
-    of it is not a Summary line (`ok == False`). Pure.
+    of it is not a Summary line, and comes back with `ok == False`.
     """
     var miss = _SummaryParse(False, 0, 0, 0, 0)
     if not line.startswith("Summary [ "):
@@ -293,7 +334,7 @@ def _parse_summary(line: String) -> _SummaryParse:
 
 
 def _row_after(line: String, prefix: String, oc: Outcome) -> _RowParse:
-    """Extract the timing and name of a row after its `prefix`. Pure.
+    """Extract the timing and name of a row after its `prefix`.
 
     A row whose ` ] ` separator is missing comes back with an empty name for the
     caller to reject as malformed.
@@ -309,7 +350,7 @@ def _parse_row(line: String) -> _RowParse:
     """Match `line` against the result-row grammar (4 spaces, outcome, timing).
 
     Returns `is_row == True` for any line opening with a row prefix; a non-row
-    line comes back with `is_row == False`. Pure.
+    line comes back with `is_row == False`.
     """
     if line.startswith("    PASS [ "):
         return _row_after(line, "    PASS [ ", Outcome.PASS)
@@ -321,7 +362,7 @@ def _parse_row(line: String) -> _RowParse:
 
 
 def _valid_row_name(name: String) -> Bool:
-    """Whether `name` is nonempty, whitespace-free, and `::`-free. Pure."""
+    """Whether `name` is nonempty, whitespace-free, and `::`-free."""
     if name.byte_length() == 0:
         return False
     if "::" in name:
@@ -337,8 +378,8 @@ def _valid_row_name(name: String) -> Bool:
 def _parse_trailer(line: String) -> _TrailerParse:
     """Match `line` against the failure-trailer grammar and extract its path.
 
-    The trailer is `Test suite' <P> 'failed! ` (note the misquoting and the
-    trailing space, both from the toolchain). Pure.
+    The trailer is `Test suite' <P> 'failed! `. The misquoting and the trailing
+    space both come from the toolchain.
     """
     var prefix = "Test suite' "
     var suffix = " 'failed! "
@@ -359,14 +400,14 @@ def _parse_block(
     n: Int,
     source_path: String,
 ) -> ParsedReport:
-    """Parse and reconcile the block framed by `anchor` .. `rule_i`. Pure.
+    """Parse and reconcile the block framed by `anchor` .. `rule_i`.
 
     Reads the rows strictly between the candidate header at `anchor` and the
-    terminal rule at `rule_i`, then reconciles them against the terminal
-    `summ`/trailer. Returns VALID iff that block fully reconciles (rows match the
-    declared count and the summary tallies, every name is valid and unique, and
-    the trailer agrees with the failure count); otherwise the specific
-    OFF_GRAMMAR/AMBIGUOUS verdict the break warrants. Never raises.
+    terminal rule at `rule_i`, then reconciles them against the terminal `summ`
+    and trailer. The verdict is VALID iff that block fully reconciles: the rows
+    match the declared count and the summary tallies, every name is valid and
+    unique, and the trailer agrees with the failure count. Otherwise it is the
+    specific OFF_GRAMMAR or AMBIGUOUS verdict the break warrants.
     """
     # 4. Rows region: strictly between the anchor header and the terminal rule.
     var rows = List[ParsedRow]()
@@ -441,21 +482,19 @@ def _parse_block(
 
 
 def parse_report(stdout_text: String, source_path: String) -> ParsedReport:
-    """Classify one child's decoded stdout against `source_path`'s report grammar.
+    """Classify one child's decoded stdout against a file's report grammar.
 
-    Pure and total: every input maps to exactly one `ParsedReport`, performs no
-    I/O, and never raises. See the module docstring for the grammar and the
-    full classification precedence.
+    Total: every input maps to exactly one `ParsedReport`. See the module
+    docstring for the grammar and the full classification precedence.
 
     Args:
         stdout_text: The child's stdout, already lossy-decoded to a String by
-            the caller. Not mutated.
+            the caller.
         source_path: The canonical source path the header must byte-equal for a
-            block to be this file's report. Not mutated.
+            block to count as this file's report.
 
     Returns:
         The verdict plus, for VALID, the parsed rows and reconciled counts.
-        Allocates the rows list. Never raises.
     """
     var lines = _split_lines(stdout_text)
     var n = len(lines)

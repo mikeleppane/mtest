@@ -1,25 +1,28 @@
-"""The discovery pipeline: NORMALIZE -> DEDUPLICATE -> ORDER.
+"""The discovery pipeline: normalize, deduplicate, order.
 
-`discover` turns a `RunnerConfig`'s operands, gates, and exclude globs, resolved
-against an explicit invocation `root`, into a `DiscoveryResult`. The `root` is a
-parameter (production passes the current working directory; tests pass a temp
-directory) so the walk is unit-testable without touching the process's cwd.
+`discover` turns a `RunnerConfig`'s operands, gates, and exclude globs,
+resolved against an explicit invocation `root`, into a `DiscoveryResult`. The
+`root` is a parameter — production passes the current working directory, tests
+pass a temp directory — so the walk is unit-testable without touching the
+process's cwd.
 
 The stages:
 
-1. **Default path.** With no operands, walk `tests/` if it exists under the root,
+1. Default path. With no operands, walk `tests/` if it exists under the root,
    else the root itself.
-2. **Normalize** each operand and gate to root-relative form (lexical only). A
-   directory is walked for `test_*.mojo` files; an explicitly named file is taken
-   regardless of the pattern. A nonexistent operand, an operand that escapes the
-   root, and a `::` node-id operand each raise a `discover:` usage error (the
-   exit-4 class). An empty walk is **not** an error — it yields empty run files.
-3. **Deduplicate** on the root-relative path; a file that is both a gate and in a
+2. Normalize each operand and gate to root-relative form, lexically. A
+   directory is walked for `test_*.mojo` files; an explicitly named file is
+   taken regardless of the pattern. A node id (`PATH::TEST`) resolves to its
+   file part. A nonexistent operand, an operand that escapes the root, an
+   operand with more than one `::`, and a node id whose path is a directory
+   each raise a `discover:` usage error (the exit-4 class). An empty walk is
+   not an error — it yields empty run files.
+3. Deduplicate on the root-relative path; a file that is both a gate and in a
    walk lands once, in `gate_files` (gate-overlap promotion).
-4. **Apply excludes** (fnmatch on the whole path). An exclusion wins over both a
-   gate and an explicit path, loudly: the file moves to `excluded` with the
-   pattern that removed it. A pattern that matches nothing becomes a stale entry.
-5. **Order.** `run_files` sorted lexicographically; `gate_files` in listed order;
+4. Apply excludes (fnmatch against the whole path). An exclusion wins over both
+   a gate and an explicit path, loudly: the file moves to `excluded` with the
+   pattern that removed it. A pattern matching nothing becomes a stale entry.
+5. Order. `run_files` sorted lexicographically; `gate_files` in listed order;
    `excluded` sorted by path; `stale_excludes` in listed order.
 """
 from std.builtin.sort import sort
@@ -49,8 +52,7 @@ def _contains(haystack: List[String], needle: String) -> Bool:
 
 
 def _dedup_preserve(items: List[String]) -> List[String]:
-    """`items` with later duplicates dropped, first-occurrence order preserved.
-    """
+    """`items` with later duplicates dropped, first-occurrence order kept."""
     var out = List[String]()
     for x in items:
         if not _contains(out, x):
@@ -70,9 +72,9 @@ def _malformed_node_id_error(op: String) -> Error:
 def _node_id_names_directory_error(op: String, dir_part: String) -> Error:
     """The exit-4 usage error for a node id whose path resolves to a directory.
 
-    A node id is FILE::TEST — it selects one test in one file. If its path is a
-    directory, silently walking it would drop the `::TEST` selector and run the
-    whole tree, so it is refused as malformed rather than degraded to a walk.
+    A node id is FILE::TEST — it selects one test in one file. A directory path
+    is refused as malformed rather than walked, since walking it would drop the
+    `::TEST` selector and run the whole tree.
     """
     return Error(
         "discover: malformed node id '"
@@ -86,12 +88,10 @@ def _node_id_names_directory_error(op: String, dir_part: String) -> Error:
 def _classify(op: String, nroot: String, mut into: List[String]) raises:
     """Resolve one operand into `into` (walked files, or one explicit file).
 
-    A node id (`PATH::TEST`) resolves to its FILE part — the node id implies its
-    file, and per-test name selection is applied later by the session. More than
-    one `::`, or a node id whose PATH is a directory, is a MALFORMED node id
-    (exit-4 usage error) — a directory node id must not silently drop its
-    `::TEST` selector and walk the tree. Also raises for a nonexistent path or an
-    operand escaping the root.
+    A node id (`PATH::TEST`) resolves to its file part; per-test name selection
+    is applied later by the session. More than one `::`, or a node id whose
+    path is a directory, is a malformed node id. Also raises for a nonexistent
+    path or an operand escaping the root. Every raise is the exit-4 class.
     """
     var split = split_node_token(op)
     if split.sep_count > 1:
@@ -122,7 +122,7 @@ def _apply_excludes(
     """Drop files matching any exclude pattern; keep the rest in order.
 
     Marks every pattern that matches any file (for stale detection) and records
-    each dropped file against the FIRST pattern that matched it.
+    each dropped file against the first pattern that matched it.
     """
     var kept = List[String]()
     for f in files:
@@ -152,7 +152,8 @@ def discover(config: RunnerConfig, root: String) raises -> DiscoveryResult:
     """Resolve `config`'s operands against `root` into the file set to run.
 
     Args:
-        config: The runner config (its `paths`, `gates`, and `excludes` are read).
+        config: The runner config; its `paths`, `gates`, and `excludes` are
+            read.
         root: The invocation root the operands resolve against.
 
     Returns:
@@ -160,9 +161,9 @@ def discover(config: RunnerConfig, root: String) raises -> DiscoveryResult:
         files, and the stale exclude patterns.
 
     Raises:
-        A `discover:`-prefixed usage error (exit-4 class) for a nonexistent
-        operand, an operand escaping the root, or a `::` node-id operand. An
-        empty walk is not an error.
+        Error: A `discover:`-prefixed usage error (exit-4 class) for a
+            nonexistent operand, an operand escaping the root, or a malformed
+            node id. An empty walk is not an error.
     """
     var nroot = normalize_root(root)
 
