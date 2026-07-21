@@ -89,6 +89,32 @@ tuple, so `session` imports no concrete reporter. Two coordinators conform:
 (the session's own drivers, whose console slot is a comptime reporter pack).
 Adding a reporter stays a local change inside a coordinator.
 
+Inside `session` sits a third named seam: the **run-file pipeline kernel**
+(`RunPipeline`, `src/mtest/session/pipeline.mojo`). It holds each run file's
+stage between discovery and verdict — needs build, needs probe, collected, needs
+run, needs rebuild, needs reprobe, finished — together with the stale-name
+recover-once budget, the `--retries` crash-class ceiling, and the
+`-x`/`--maxfail` stop policy, and answers one question: which step the run wants
+performed now. It spawns nothing, emits no event, and owns no captured bytes.
+The driver in `session/selection.mojo` executes exactly that step against `exec`
+and folds the completion back. **The kernel decides what step comes next; the
+driver executes it.**
+
+**The sequential driver is the first of two.** It services one step at a time
+through `run_supervised`, which is all the single-child native exec ABI permits
+(see the ABI-v1 Lesson below). The second driver is the worker pool that
+`-n`/`--workers` and `--serial` name: both are part of the frozen v1 CLI
+contract, and this build refuses them explicitly, saying they arrive with
+parallel workers. That driver replaces **only the driver** — spawn and
+wait-for-any in place of run-one-and-block — and it additionally requires the
+versioned multi-child native adapter, which is a deliberate, gated change to
+`native/`. Admission, retry, maxfail, serial, and accounting policy stay in the
+kernel, in `session`, and never move into `exec` or `native`. Nothing in the
+kernel is reserved for that phase: every stage, every step kind, and every halt
+reason is reached by the sequential driver **today**, and
+`tests/unit/test_session_pipeline.mojo` pins each one against a mutation of the
+guard that produces it. A field only a pool would set does not belong here.
+
 ## Mojo, not Python
 
 `src/` is **pure Mojo**. The approved native boundary is confined to `native/`:
