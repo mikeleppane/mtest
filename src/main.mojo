@@ -17,8 +17,10 @@ frozen machine-readable contract.
 
 Every decision `main` makes is delegated. The parser resolves the config
 (including the mojo path); the console resolves color from the inputs main
-supplies; the session resolves the exit code. `main` only wires and moves
-bytes. All FFI stays below in `exec` — `stdout_isatty()` and `stderr_isatty()`
+supplies; the session states the run's facts and `resolve_exit_code` in the
+model layer ranks them. `main` names no exit code of its own except
+`EXIT_USAGE_ERROR`, which is refused before any run exists and so has no facts
+to rank. Otherwise it only wires and moves bytes. All FFI stays below in `exec` — `stdout_isatty()` and `stderr_isatty()`
 are the terminal probes, while argv, cwd, getenv, and exit are ordinary
 program-level operations via `std`.
 """
@@ -37,7 +39,11 @@ from mtest.cli import (
 )
 from mtest.exec import ExecRuntime, stderr_isatty, stdout_isatty
 from mtest.config import annotations_resolved_on
-from mtest.model import TerminalFacts, resolve_exit_code
+from mtest.model import (
+    EXIT_INTERNAL_ERROR,
+    TerminalFacts,
+    resolve_exit_code,
+)
 from mtest.report import (
     AnnotationsReporter,
     CompositeReporter,
@@ -56,6 +62,15 @@ from mtest.session import (
     run_collect,
     run_session,
 )
+
+
+comptime EXIT_USAGE_ERROR = 4
+"""The invocation was refused before any run existed: a usage error.
+
+The one exit code that is not the model's to resolve, and so the one that lives
+here. It is decided before there are any run outcomes or run facts to rank, and
+it dominates every code a run could have produced because no run happened.
+"""
 
 
 def _argv_tail() -> List[String]:
@@ -133,7 +148,7 @@ def main():
         # A pre-session cli: usage error: the one seam exception — straight to
         # stderr with the dedicated usage exit code 4.
         _eprintln(String(e))
-        exit(4)
+        exit(EXIT_USAGE_ERROR)
 
     if result.is_help():
         print(help_text(), end="", flush=True)
@@ -153,7 +168,7 @@ def main():
         root = String(cwd())
     except e:
         _eprintln("mtest: internal error: " + String(e))
-        exit(3)
+        exit(EXIT_INTERNAL_ERROR)
         return
 
     var runtime = ExecRuntime()
@@ -170,10 +185,10 @@ def main():
                 + "; "
                 + String(cleanup_error)
             )
-            exit(3)
+            exit(EXIT_INTERNAL_ERROR)
             return
         _eprintln("mtest: internal error: " + primary)
-        exit(3)
+        exit(EXIT_INTERNAL_ERROR)
         return
 
     # Collect mode: probe every discovered file for its node ids and print the
@@ -189,8 +204,8 @@ def main():
         except e:
             _eprintln(String(e))
             if not _close_runtime(runtime):
-                exit(3)
-            exit(4)
+                exit(EXIT_INTERNAL_ERROR)
+            exit(EXIT_USAGE_ERROR)
         for line in collected.diagnostics:
             _eprintln(line)
         var listing = String("")
@@ -198,7 +213,7 @@ def main():
             listing += nid + "\n"
         print(listing, end="", flush=True)
         if not _close_runtime(runtime):
-            exit(3)
+            exit(EXIT_INTERNAL_ERROR)
         exit(collected.code)
 
     # Resolve the machine-stream destination and, with it, the console's own
@@ -224,8 +239,8 @@ def main():
         except open_error:
             _eprintln("mtest: internal error: " + String(open_error))
             if not _close_runtime(runtime):
-                exit(3)
-            exit(3)
+                exit(EXIT_INTERNAL_ERROR)
+            exit(EXIT_INTERNAL_ERROR)
         json_active = True
         json_owns_fd = True
 
@@ -281,8 +296,8 @@ def main():
                 _ = close_json_fd(json_fd)
             _eprintln("mtest: internal error: " + String(junit_error))
             if not _close_runtime(runtime):
-                exit(3)
-            exit(3)
+                exit(EXIT_INTERNAL_ERROR)
+            exit(EXIT_INTERNAL_ERROR)
 
     # A fixed composition ORDER: index 0 the console, index 1 the machine stream
     # (inert when `--json` is absent), index 2 the JUnit report (inert when
@@ -312,8 +327,8 @@ def main():
             _ = close_json_fd(json_fd)
         _eprintln(String(e))
         if not _close_runtime(runtime):
-            exit(3)
-        exit(4)
+            exit(EXIT_INTERNAL_ERROR)
+        exit(EXIT_USAGE_ERROR)
 
     # Flush the console's fully rendered buffer verbatim (it already ends in a
     # newline) to its RESOLVED destination — stdout normally, stderr under
@@ -372,5 +387,5 @@ def main():
         # interrupt, finalize-failure, and spool-failure paths alike.
         _discard_junit_scratch(junit_spool, junit_temp)
     if not _close_runtime(runtime):
-        exit(3)
+        exit(EXIT_INTERNAL_ERROR)
     exit(code)
