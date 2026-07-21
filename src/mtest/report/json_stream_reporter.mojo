@@ -30,85 +30,26 @@ Descriptor ownership stays with the caller: `open_json_fd` opens a path and
 The reporter only borrows the descriptor, which keeps the type trivially
 `Copyable, Movable` — an fd is an integer — with no double-close hazard.
 
-The write and create/close primitives go through `external_call` against libc,
-matching the stdlib's own `write` declaration (an opaque byte pointer) so the
-same symbol is not declared twice in one binary, the same rule `tty.mojo`
-follows for `isatty`. Each call carries a `# SAFETY:` comment.
+The write and create/close syscalls, and the `errno` reading that classifies
+their failures, are raw platform operations from `mtest.platform.stream`. They
+are imported from that submodule directly rather than through the platform
+package's public surface, so the raw libc `write` declaration reaches only this
+one report module — the layer that already carried it — and not every module
+that merely wants a process id. This module keeps only the policy: the retrying
+write-all loop, the failure latch, the error messages, and the `EINTR` rules.
 """
-from std.ffi import external_call
-from std.sys.info import CompilationTarget
-
 from mtest.model import Event
+from mtest.platform.stream import (
+    close_fd,
+    create_truncate_fd,
+    errno_now,
+    write_fd,
+)
 from mtest.report.json_stream import serialize_event, stream_header
 from mtest.report.reporter import Reporter
 
-# A live stream cannot rename atomically (JUnit differs), so `creat(2)` opens
-# write-only, creates when absent, and truncates an existing destination at
-# session start. Darwin's `mode_t` is UInt16; Linux's is UInt32. Select the exact
-# fixed-parameter ABI at compile time: unlike variadic `open(2)`, `creat` does
-# not put the mode argument in Darwin arm64's variadic stack area.
-comptime _CREATE_MODE = 0o644
 comptime _EINTR = 4
 """`errno` for an interrupted syscall — a `write` to retry, not a failure."""
-
-
-def _errno_now() -> Int:
-    """The current thread's `errno`.
-
-    Reads the thread-local errno slot through the platform accessor chosen at
-    compile time: `__errno_location` on Linux (glibc), `__error` on Darwin.
-    Only called immediately after a failed `write` or `creat`, to capture the
-    cause before anything else can overwrite it.
-    """
-    comptime if CompilationTarget.is_macos():
-        # SAFETY: `__error` takes no arguments and returns a valid pointer to this
-        # thread's `errno` int for the lifetime of the thread; dereferencing it
-        # reads a live, correctly-typed `int`. No ownership is taken.
-        var loc = external_call["__error", UnsafePointer[Int32, MutAnyOrigin]]()
-        return Int(loc[])
-    else:
-        # SAFETY: `__errno_location` takes no arguments and returns a valid pointer
-        # to this thread's `errno` int for the lifetime of the thread;
-        # dereferencing it reads a live, correctly-typed `int`. No ownership taken.
-        var loc = external_call[
-            "__errno_location", UnsafePointer[Int32, MutAnyOrigin]
-        ]()
-        return Int(loc[])
-
-
-def _raw_write[o: Origin](fd: Int, ptr: UnsafePointer[UInt8, o], n: Int) -> Int:
-    """One `write(2)` of `n` bytes at `ptr` to `fd`.
-
-    The pointer is passed as an opaque byte pointer to match the stdlib's own
-    `write` external declaration, so the symbol is not declared twice in one
-    binary.
-
-    Parameters:
-        o: The origin of the byte buffer `ptr` points into.
-
-    Args:
-        fd: The destination descriptor.
-        ptr: The first of `n` initialized bytes to write.
-        n: How many bytes to write.
-
-    Returns:
-        The number of bytes written, which may be short of `n`, or a negative
-        value on error with `errno` set.
-    """
-    # SAFETY: libc `write` has the ABI `ssize_t write(int, const void*, size_t)`.
-    # `ptr` addresses `n` initialized, caller-owned bytes that outlive this
-    # synchronous call; `write` reads at most `n` of them and retains no pointer.
-    # The result is a plain scalar the caller checks.
-    return external_call["write", Int](fd, ptr.bitcast[NoneType](), n)
-
-
-def _cstring(value: String) -> List[UInt8]:
-    """An owned NUL-terminated byte copy of `value`, for one libc call."""
-    var out = List[UInt8]()
-    for b in value.as_bytes():
-        out.append(b)
-    out.append(0)
-    return out^
 
 
 def open_json_fd(path: String) raises -> Int:
@@ -129,38 +70,17 @@ def open_json_fd(path: String) raises -> Int:
             exhaustion. The message names the errno. The caller resolves this
             to the internal-error exit code, a pre-run environment failure.
     """
-    var c = _cstring(path)
-    var fd: Int32
-    comptime if CompilationTarget.is_macos():
-        # SAFETY: Darwin libc `creat` has the fixed ABI
-        # `int creat(const char*, mode_t)` with a UInt16 `mode_t`. `c` is a
-        # complete NUL-terminated byte copy this call uniquely owns; its pointer
-        # stays valid for the synchronous call, and `creat` retains nothing. The
-        # result is a scalar fd.
-        fd = external_call["creat", Int32](
-            c.unsafe_ptr().bitcast[NoneType](), UInt16(_CREATE_MODE)
-        )
-    else:
-        # SAFETY: Linux libc `creat` has the fixed ABI
-        # `int creat(const char*, mode_t)` with a UInt32 `mode_t`. `c` is a
-        # complete NUL-terminated byte copy this call uniquely owns; its pointer
-        # stays valid for the synchronous call, and `creat` retains nothing. The
-        # result is a scalar fd.
-        fd = external_call["creat", Int32](
-            c.unsafe_ptr().bitcast[NoneType](), UInt32(_CREATE_MODE)
-        )
-    if Int(fd) < 0:
-        var err = _errno_now()
-        _ = c^
+    var fd = create_truncate_fd(path)
+    if fd < 0:
+        var err = errno_now()
         raise Error(
-            "exec: could not open --json destination '"
+            "report: could not open --json destination '"
             + path
             + "' (errno "
             + String(err)
             + ")"
         )
-    _ = c^
-    return Int(fd)
+    return fd
 
 
 def close_json_fd(fd: Int) -> Bool:
@@ -188,11 +108,9 @@ def close_json_fd(fd: Int) -> Bool:
     Returns:
         Whether the close reported a genuine delivery failure.
     """
-    # SAFETY: libc `close` has the ABI `int close(int)`. `fd` is a descriptor the
-    # caller owns and does not use again; a nonzero result is inspected below.
-    if external_call["close", Int32](Int32(fd)) == 0:
+    if close_fd(fd) == 0:
         return False
-    return _errno_now() != _EINTR
+    return errno_now() != _EINTR
 
 
 @fieldwise_init
@@ -313,15 +231,15 @@ struct JsonStreamReporter(Reporter):
         var offset = 0
         while offset < total:
             # SAFETY: `b` borrows `s`'s bytes for the whole loop (`s` is a live
-            # argument). `offset` is in `[0, total)` every iteration, so
-            # `unsafe_ptr() + offset` stays inside the `total`-byte buffer, and
-            # the length passed is exactly the remaining `total - offset` bytes;
-            # `_raw_write` only reads through that pointer and retains nothing.
-            var n = _raw_write(
-                self._fd, b.unsafe_ptr() + offset, total - offset
-            )
+            # argument, so its buffer outlives every iteration). `offset` is in
+            # `[0, total)` every iteration, so `unsafe_ptr() + offset` stays
+            # inside the `total`-byte initialized buffer, and the length passed
+            # is exactly the remaining `total - offset` bytes; the derived
+            # pointer does not escape and `write_fd` reads through it and retains
+            # nothing.
+            var n = write_fd(self._fd, b.unsafe_ptr() + offset, total - offset)
             if n < 0:
-                var err = _errno_now()
+                var err = errno_now()
                 if err == _EINTR:
                     continue
                 self._latch(err, context)

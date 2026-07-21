@@ -118,12 +118,38 @@ guard that produces it. A field only a pool would set does not belong here.
 
 ## Mojo, not Python
 
-`src/` is **pure Mojo**. The approved native boundary is confined to `native/`:
-a private C17 POSIX adapter that supplies header-derived signal/process ABI,
-compiled to an object and statically linked into Mojo consumers. It may not
-contain product policy, reporting, parsing, or orchestration. Python lives only
-under `scripts/` (build/test harnesses) and `tests/fixtures/exec/` (test-only
-subprocess actors), and is never a runtime dependency. Follow the
+`src/` is **pure Mojo**, and all of its platform and foreign ABI knowledge is
+centralized in exactly **two audited boundaries** — no layer above `exec`
+carries a raw platform call:
+
+- **`src/mtest/platform`** — the narrow platform-I/O boundary at Layer 0. It
+  holds the small, self-contained per-call libc operations a Mojo caller needs
+  directly (`getpid`, `rename`, and the streaming `write`/`creat`/`close` plus
+  the `errno` read that classifies their failures), each an in-Mojo
+  `external_call` carrying its own local `# SAFETY:` proof, or a delegation to a
+  safe standard-library wrapper where one expresses the exact semantics (the
+  `isatty` probe goes through `std.io.FileDescriptor`, declaring no raw symbol).
+  Where the stdlib can express an operation, the safe call wins and no foreign
+  declaration is written at all. `report`, `session`, and every other layer
+  above Layer 0 reach a platform operation only through this module.
+- **`native/` and the `mtest_exec_*` ABI** — a private C17 POSIX adapter that
+  supplies header-derived signal/process ABI (fork/exec, pipe supervision,
+  signal handling), compiled to an object and statically linked into Mojo
+  consumers. It may not contain product policy, reporting, parsing, or
+  orchestration. `exec` is its sole consumer, calling the exported
+  `mtest_exec_*` symbols via `external_call`; those calls, and the residual
+  test-only `kill(2)` in the exec signal helper, are the only raw foreign
+  declarations that legitimately live in `exec`.
+
+Both boundaries are audited; neither absorbs the other. The C adapter exists for
+the machinery that must be async-signal-safe after a fork, which cannot be
+written in Mojo; the platform module holds the per-call operations that can. A
+new foreign call belongs in the platform module, unless it is native-adapter
+machinery, in which case it belongs in `native/` and is reached through the
+`mtest_exec_*` ABI — never in `report`, `session`, or any layer above `exec`.
+Python lives only under `scripts/` (build/test harnesses) and
+`tests/fixtures/exec/` (test-only subprocess actors), and is never a runtime
+dependency. Follow the
 global `mojo-syntax` skill for all syntax — training data is stale, and this
 toolchain has removed or renamed much of what a model will reach for by default
 (`def` not `fn`, `comptime` not `alias`/`@parameter`, `var` not `let`,
