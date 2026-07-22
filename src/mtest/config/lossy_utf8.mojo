@@ -7,6 +7,14 @@ precompile step's stderr and a compile error's compiler banner. `report`
 decodes again for whatever it renders into console, JSON, or JUnit output. It
 lives below both so they share one decoding rule rather than duplicating it. No
 I/O, no environment reads.
+
+This is a pure cross-cutting text utility, not a configuration concern: it
+reads no `RunnerConfig` and imports nothing internal, so its natural home is
+Layer 0 alongside the other dependency-free primitives. It is parked in
+`config` purely for graph position — a low-enough layer that both `report` and
+`session` can reach it without an upward import — and it stays here because the
+decoder has importers spread across the `config`, `report`, and `session`
+packages, so relocating it would churn every one of them for no behavioral gain.
 """
 
 
