@@ -36,6 +36,7 @@ from mtest.model import (
     Outcome,
     ParseDisposition,
     PrecompileFailedPayload,
+    ProgressPayload,
     SessionFinishedPayload,
     SessionStartedPayload,
     Summary,
@@ -113,8 +114,19 @@ comptime _GREEN: StaticString = "\x1b[32m"
 comptime _RED: StaticString = "\x1b[31m"
 comptime _RED_BOLD: StaticString = "\x1b[1;31m"
 comptime _YELLOW: StaticString = "\x1b[33m"
+comptime _CYAN: StaticString = "\x1b[36m"
 comptime _PLAIN: StaticString = ""
 comptime _RESET: StaticString = "\x1b[0m"
+
+# The live progress counter's width and running-name budget. The counter must
+# stay ONE physical terminal line: the driver erases it with `\r\x1b[K`, which
+# clears a single line only, so a wrapped counter would orphan bytes. The whole
+# rendered line is truncated to `_PROGRESS_MAX_COLS` codepoints, and at most
+# `_PROGRESS_MAX_NAMES` in-flight basenames are named before an ` +N more`
+# overflow marker takes over.
+comptime _PROGRESS_MAX_COLS = 72
+comptime _PROGRESS_MAX_NAMES = 3
+comptime _PROGRESS_MARKER: StaticString = "▸"
 
 # Column widths for the aligned verdict block. Long tokens (COMPILE-ERROR) fall
 # back to a two-space gutter so columns never collide.
@@ -555,6 +567,67 @@ def _worst_color(s: Summary, tc: TestCounts) -> StaticString:
     return _GREEN
 
 
+def _progress_basename(path: String) -> String:
+    """The last path segment of `path`, for naming an in-flight file compactly.
+
+    The counter names files by basename so a deep tree does not blow the single
+    line's width budget. A trailing slash, which a run file never carries, would
+    yield the empty segment, so the whole path is returned unchanged when the
+    last segment is empty.
+
+    Args:
+        path: The file path, root-relative as the pool reports it.
+
+    Returns:
+        The substring after the final `/`, or the whole path when it has none
+        or ends in `/`.
+    """
+    var last = 0
+    var n = path.byte_length()
+    for i in range(n):
+        if path[byte=i] == "/":
+            last = i + 1
+    if last == 0 or last >= n:
+        return path.copy()
+    var seg = String("")
+    var count = 0
+    for cp in path.codepoint_slices():
+        if count >= last:
+            seg += String(cp)
+        count += cp.byte_length()
+    return seg^
+
+
+def _truncate_cols(text: String, limit: Int) -> String:
+    """`text` shortened to at most `limit` codepoints, with an ellipsis when cut.
+
+    The counter must occupy one physical line, so its plain text is capped by
+    codepoint count before any color is applied. When `text` fits it rides
+    through unchanged; when it is longer it is cut to `limit - 1` codepoints and
+    an `…` marks the elision, keeping the visible width at `limit`.
+
+    Args:
+        text: The plain counter text, before painting.
+        limit: The maximum codepoint width of the returned line.
+
+    Returns:
+        `text` unchanged, or its truncated head plus `…`.
+    """
+    if limit <= 0:
+        return String("")
+    if text.count_codepoints() <= limit:
+        return text.copy()
+    var out = String("")
+    var kept = 0
+    for cp in text.codepoint_slices():
+        if kept >= limit - 1:
+            break
+        out += String(cp)
+        kept += 1
+    out += "…"
+    return out^
+
+
 struct ConsoleReporter(Reporter):
     """Renders the event stream into an owned, inspectable console buffer.
 
@@ -568,6 +641,12 @@ struct ConsoleReporter(Reporter):
     """The mtest version label, a build constant passed by main."""
     var color_enabled: Bool
     """Whether to emit ANSI color, resolved once at construction."""
+    var _is_tty: Bool
+    """Whether the resolved console destination is a terminal, retained apart
+    from `color_enabled` so the live progress counter can gate on TTY-ness
+    directly. `--color never` on a real terminal has `color_enabled == False`
+    but `_is_tty == True`, so the counter still shows, just uncolored; a piped
+    destination has `_is_tty == False`, so no counter byte is ever rendered."""
     var verbosity: Verbosity
     """How much per-file detail to print: quiet, normal, or verbose."""
     var show_output: ShowOutput
@@ -619,6 +698,12 @@ struct ConsoleReporter(Reporter):
     var _fence_tokens_tried: Bool
     """Whether token minting has been attempted, so a failed `/dev/urandom` read
     is not retried on every subsequent region."""
+    var _progress_line: String
+    """The current live progress counter, rendered from the latest PROGRESS
+    event and read back by the driver for its ephemeral TTY overlay. Empty
+    unless the run is on a terminal and not quiet, so a non-TTY or `-q` run
+    never carries counter bytes. This is transient decoration and is never part
+    of the drained `_head`/`_sections`/`_summary` buffer the run commits."""
 
     def __init__(
         out self,
@@ -664,6 +749,7 @@ struct ConsoleReporter(Reporter):
             self.color_enabled = False
         else:
             self.color_enabled = is_tty and not no_color
+        self._is_tty = is_tty
         self.verbosity = verbosity
         self.show_output = show_output
         self.mtest_build_flags = mtest_build_flags^
@@ -680,6 +766,7 @@ struct ConsoleReporter(Reporter):
         self._gh_actions = gh_actions
         self._fence_tokens = List[String]()
         self._fence_tokens_tried = False
+        self._progress_line = String("")
 
     def _paint(self, code: StaticString, text: String) -> String:
         """Wrap `text` in an ANSI color, unless color is off or `code` is empty.
@@ -745,6 +832,72 @@ struct ConsoleReporter(Reporter):
         if len(self._fence_tokens) == 0:
             return String("")
         return self._fence_tokens[0].copy()
+
+    def progress_line(self) -> String:
+        """The current live progress counter, or `""` when none is shown.
+
+        The driver reads this as the ephemeral TTY overlay it erases and redraws
+        around each committed console flush. Empty off a terminal or under `-q`,
+        so a non-terminal destination never receives a counter byte.
+
+        Returns:
+            The rendered counter line, without a trailing newline, or empty.
+        """
+        return self._progress_line.copy()
+
+    def _on_progress(mut self, p: ProgressPayload):
+        """Render one live progress tick into the ephemeral counter line.
+
+        Shows a single `▸ completed/total · running <names>` line naming the
+        in-flight files by basename, capped to `_PROGRESS_MAX_NAMES` names with
+        an ` +N more` overflow marker and truncated to `_PROGRESS_MAX_COLS`
+        codepoints so it stays one physical line — the driver's `\\r\\x1b[K`
+        erase clears a single line only. A coarse whole-seconds elapsed hint for
+        the oldest in-flight file trails the names, kept whole-second so it is
+        stable across rapid ticks.
+
+        Gated on the retained TTY-ness and the verbosity: off a terminal or
+        under quiet the line is cleared to `""`, so no counter byte is ever
+        rendered for a piped destination or a `-q` run. The line is painted a
+        dim cyan only when color is enabled; under `--color never` on a terminal
+        it still shows, uncolored.
+
+        Args:
+            p: The progress tick: the completed/total counts and the in-flight
+                paths with their elapsed seconds.
+        """
+        if not self._is_tty or self.verbosity == Verbosity.QUIET:
+            self._progress_line = String("")
+            return
+        var text = (
+            String(_PROGRESS_MARKER)
+            + " "
+            + String(p.completed)
+            + "/"
+            + String(p.total)
+        )
+        var shown = len(p.running_paths)
+        if shown > _PROGRESS_MAX_NAMES:
+            shown = _PROGRESS_MAX_NAMES
+        if shown > 0:
+            text += " · running "
+            for i in range(shown):
+                if i > 0:
+                    text += ", "
+                text += _progress_basename(p.running_paths[i])
+            var overflow = len(p.running_paths) - shown
+            if overflow > 0:
+                text += " +" + String(overflow) + " more"
+        # The oldest in-flight file's elapsed time is the run's leading edge; a
+        # whole-second floor keeps the hint stable while ticks stream past.
+        var oldest = 0.0
+        for i in range(len(p.running_elapsed_seconds)):
+            if p.running_elapsed_seconds[i] > oldest:
+                oldest = p.running_elapsed_seconds[i]
+        if oldest >= 1.0:
+            text += " (" + String(Int(oldest)) + "s)"
+        var line = _truncate_cols(text, _PROGRESS_MAX_COLS)
+        self._progress_line = self._paint(_CYAN, line)
 
     def output(self) -> String:
         """The full rendered buffer so far.
@@ -838,6 +991,8 @@ struct ConsoleReporter(Reporter):
             self._on_attempt_finished(e.data[AttemptFinishedPayload])
         elif k == EventKind.CRASH_ATTRIBUTION:
             self._on_crash_attribution(e.data[CrashAttributionPayload])
+        elif k == EventKind.PROGRESS:
+            self._on_progress(e.data[ProgressPayload])
 
     def _reset_file(mut self):
         """Clear the per-file accumulation after a file is fully rendered."""

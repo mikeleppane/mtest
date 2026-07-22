@@ -177,24 +177,6 @@ struct _PoolFile(Movable):
         self.dispatch_ns = 0
 
 
-def _pool_flush[C: ReportCoordinator](mut reporter: C, console_fd: Int):
-    """Drain the coordinator's pending console bytes to the borrowed handle.
-
-    Best-effort, exactly as the sequential driver's flush: a negative handle or
-    an empty drain writes nothing, and a failed write is not a new exit cause.
-
-    Args:
-        reporter: The coordinator to drain.
-        console_fd: The borrowed console descriptor, or negative when none.
-    """
-    if console_fd < 0:
-        return
-    var chunk = reporter.drain_console(False)
-    if chunk.byte_length() == 0:
-        return
-    print(chunk, end="", file=FileDescriptor(console_fd), flush=True)
-
-
 def _emit_progress[
     C: ReportCoordinator
 ](mut reporter: C, files: List[_PoolFile], completed: Int, total: Int):
@@ -219,6 +201,137 @@ def _emit_progress[
             paths.append(f.rel)
             elapsed.append(Float64(now - f.dispatch_ns) / 1.0e9)
     reporter.handle(Event.progress(completed, total, paths^, elapsed^))
+
+
+# The live-counter emission floor: at most one elapsed-only tick per this many
+# nanoseconds (100 ms → ten per second). A completion or a change in the
+# in-flight set always emits promptly; only a redraw that carries nothing but a
+# fresher elapsed hint is throttled to this rate.
+comptime _PROGRESS_INTERVAL_NS = 100_000_000
+
+
+def _running_signature(state: List[_PoolFile]) -> String:
+    """A stable signature of the in-flight file set, for change detection.
+
+    Two ticks with the same completed count and the same signature differ only
+    in elapsed time, so the throttle may coalesce them. The signature names the
+    in-flight files in index order, which is stable across ticks, so it changes
+    exactly when a file enters or leaves the build/run set.
+
+    Args:
+        state: The batch's per-file state.
+
+    Returns:
+        The `\\n`-joined relative paths of the files currently building or
+        running, in index order.
+    """
+    var sig = String("")
+    for i in range(len(state)):
+        if state[i].phase == _BUILDING or state[i].phase == _RUNNING:
+            sig += state[i].rel + "\n"
+    return sig^
+
+
+def _should_emit_progress(
+    completed: Int,
+    last_completed: Int,
+    running_sig: String,
+    last_sig: String,
+    now_ns: Int,
+    last_ns: Int,
+    interval_ns: Int,
+) -> Bool:
+    """Whether this tick warrants a fresh progress emission.
+
+    A completion or a change in the in-flight set is always shown at once; with
+    neither, an elapsed-only refresh is admitted only once the interval has
+    elapsed since the last emission, bounding the redraw rate.
+
+    Args:
+        completed: The current completed count.
+        last_completed: The completed count at the last emission.
+        running_sig: The current in-flight signature.
+        last_sig: The in-flight signature at the last emission.
+        now_ns: The current monotonic timestamp, in nanoseconds.
+        last_ns: The timestamp of the last emission, in nanoseconds.
+        interval_ns: The minimum spacing between elapsed-only emissions.
+
+    Returns:
+        True when the tick should emit a progress event.
+    """
+    if completed != last_completed or running_sig != last_sig:
+        return True
+    return now_ns - last_ns >= interval_ns
+
+
+def _progress_flush_bytes(
+    chunk: String, overlay: String, counter_shown: Bool
+) -> String:
+    """Assemble one progress-aware console flush's bytes.
+
+    The ephemeral counter is decoration the terminal shows between committed
+    file blocks, never part of the committed stream. Each flush erases the
+    currently-shown counter, writes the newly committed chunk, then redraws the
+    counter beneath it. The erase prefix is emitted only when a counter is
+    actually on screen, and the redraw carries no trailing newline so the
+    counter stays inline on its own line until the next flush erases it.
+
+    Args:
+        chunk: The newly committed console bytes to write, already
+            newline-terminated within each render.
+        overlay: The counter to redraw, or empty to leave none shown.
+        counter_shown: Whether a counter is currently on the terminal and must
+            be erased first.
+
+    Returns:
+        The bytes to write, empty when there is nothing to erase, commit, or
+        redraw.
+    """
+    var out = String("")
+    if counter_shown:
+        # Erase the currently-shown counter: carriage-return to column zero,
+        # then clear to end of the single line the counter occupies.
+        out += "\r\x1b[K"
+    out += chunk
+    out += overlay
+    return out^
+
+
+def _flush_console_with_progress[
+    C: ReportCoordinator
+](mut reporter: C, console_fd: Int, counter_shown: Bool, closing: Bool) -> Bool:
+    """Flush committed console bytes while erasing and redrawing the counter.
+
+    Drains the coordinator's pending committed bytes NON-closing — the session's
+    single terminal flush owns the closing drain that emits the framed sections
+    and summary band, so a batch never emits them — erases any shown counter
+    before those bytes, and redraws the counter after unless `closing`. On a
+    non-terminal destination the overlay is empty and `counter_shown` never
+    becomes True, so no erase or counter byte is ever written to a pipe. A
+    negative handle or an empty assembly writes nothing; the write is
+    best-effort, exactly as the plain pool flush, so a dead destination is not a
+    new exit cause.
+
+    Args:
+        reporter: The coordinator to drain and read the overlay from.
+        console_fd: The borrowed console descriptor, or negative when none.
+        counter_shown: Whether a counter is currently on the terminal.
+        closing: Whether this is the batch's terminal flush, which erases the
+            counter without redrawing it; the committed tail and the session's
+            closing flush follow.
+
+    Returns:
+        Whether a counter is on the terminal after this flush, to thread into
+        the next call.
+    """
+    if console_fd < 0:
+        return False
+    var chunk = reporter.drain_console(False)
+    var overlay = String("") if closing else reporter.progress_overlay()
+    var out = _progress_flush_bytes(chunk, overlay, counter_shown)
+    if out.byte_length() > 0:
+        print(out, end="", file=FileDescriptor(console_fd), flush=True)
+    return overlay.byte_length() > 0
 
 
 def _run_pool_batch[
@@ -311,6 +424,16 @@ def _run_pool_batch[
     var tokens_in_use = 0
     var stop_scheduling = False
     var completed = 0
+
+    # The live progress counter's driver state, LOCAL to this loop (never
+    # reporter state): whether a counter is currently on the terminal, and the
+    # last emission's completed count, in-flight signature, and timestamp for
+    # the throttle. Off a terminal the reporter's overlay is empty, so
+    # `counter_shown` never flips True and no counter byte is ever written.
+    var counter_shown = False
+    var last_completed = -1
+    var last_running_sig = String("")
+    var last_progress_ns = 0
 
     while True:
         # Scheduling boundary: a pending interrupt tears the batch down at once,
@@ -630,8 +753,29 @@ def _run_pool_batch[
                     ):
                         stop_scheduling = True
 
-        _emit_progress(reporter, state, completed, n)
-        _pool_flush(reporter, console_fd)
+        # Emit and redraw a progress tick only when a completion or a change in
+        # the in-flight set warrants it, or the throttle interval has elapsed —
+        # bounding the counter's redraw rate. A committed file block only ever
+        # appears when the completed count changes, so this never withholds a
+        # finished file's bytes: that iteration always emits and flushes.
+        var now_ns = Int(perf_counter_ns())
+        var running_sig = _running_signature(state)
+        if _should_emit_progress(
+            completed,
+            last_completed,
+            running_sig,
+            last_running_sig,
+            now_ns,
+            last_progress_ns,
+            _PROGRESS_INTERVAL_NS,
+        ):
+            _emit_progress(reporter, state, completed, n)
+            counter_shown = _flush_console_with_progress(
+                reporter, console_fd, counter_shown, False
+            )
+            last_completed = completed
+            last_running_sig = running_sig^
+            last_progress_ns = now_ns
 
         if gate_kill:
             try:
@@ -639,6 +783,12 @@ def _run_pool_batch[
             except:
                 pass
             break
+
+    # Batch terminal: erase any counter still on the terminal and flush the last
+    # committed bytes without redrawing it. The counter is ephemeral and must
+    # not survive into the framed sections and summary band, which the session's
+    # single closing flush emits after every batch has returned.
+    _ = _flush_console_with_progress(reporter, console_fd, counter_shown, True)
 
     return result^
 

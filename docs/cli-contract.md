@@ -421,12 +421,19 @@ run's stdout carries only stream lines. `--color auto` decides against that
 **resolved** destination: stdout's terminal-ness normally, stderr's when the
 console is relocated there.
 
-There is **no live progress counter** in this build (a running `k/n` line, which
-arrives with the worker pool); a file's result prints when the file finishes, and
-the summary band, the slowest-files list, and the failure detail (per-attempt
-`TRY` lines from `--retries`, verdict blocks) all print at completion. The
-deterministic surfaces (§17) — the summary band and the sort *order* of any list
-— never depend on completion order.
+A **live progress counter** — a running `completed/total` line naming the files
+currently in flight — is drawn during a parallel run (`-n`/`--workers` > 1). It is
+a **terminal-only** affordance: it renders solely when the resolved console
+destination (§15.1, stdout or the relocated stderr under `--json -`) is a TTY, is
+**erased before** each finished file's result block prints and redrawn beneath it,
+is throttled (at most a few updates per second), and is **suppressed under `-q`**.
+It is **informal** (§20): it writes no bytes to a non-terminal (piped or
+redirected) destination, never appears in the `--json` stream (§15.4, the
+`progress` kind is excluded by design), is never part of the §17 determinism
+guarantee, and a sequential run (the default, one worker) shows no counter at all.
+A file's result still prints when the file finishes; the summary band, the
+slowest-files list, and the failure detail all print at completion, and the
+deterministic surfaces (§17) never depend on completion order.
 
 **The `SLOW` annotation.** A build or run step whose wall time reaches **60 s**
 is flagged `SLOW`. It is an **informal** annotation, never an outcome: it does

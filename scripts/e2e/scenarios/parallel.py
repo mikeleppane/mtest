@@ -476,6 +476,55 @@ def s_parallel_j_rejected(context: ScenarioContext) -> str:
     return "--build-arg -j and --num-threads both rejected exit 4 (name -n/--workers)"
 
 
+_PROGRESS_MARKER = "▸".encode("utf-8")
+
+
+def s_parallel_progress_tty(context: ScenarioContext) -> str:
+    """The live progress counter renders on a PTY at `-n 2` and never on a pipe.
+
+    The counter is a terminal-only affordance: a PTY-attached run at `-n 2` must
+    write the counter marker to the terminal, while a piped run at the same
+    worker count writes not one marker byte to any stream. Only marker
+    presence/absence is asserted — never a timing or count value, which a second
+    process could never reproduce. The `--json` stream at `-n 2` is confirmed to
+    carry no `progress` event, extending the stream-absence pin to two workers.
+    """
+    pty_rc, pty_out = context.runner.run_mtest_pty(
+        [PARALLEL_TREE, "-n", "2", "--gh-annotations", "off"],
+        timeout=240.0,
+    )
+    expect(
+        pty_rc == 0,
+        f"expected exit 0 under a pty at -n 2, got {pty_rc}\n{pty_out!r}",
+    )
+    expect(
+        _PROGRESS_MARKER in pty_out,
+        "the live progress counter marker was absent from a PTY run at -n 2",
+    )
+
+    piped = context.runner.run_mtest(
+        [PARALLEL_TREE, "-n", "2", "--gh-annotations", "off"], timeout=240.0
+    )
+    expect_exit(piped, 0)
+    marker = _PROGRESS_MARKER.decode("utf-8")
+    expect(
+        marker not in piped.stdout
+        and marker not in piped.stderr
+        and "\x1b[K" not in piped.combined,
+        "a progress counter byte leaked into a piped (non-terminal) run",
+    )
+
+    stream = context.runner.run_mtest(
+        [PARALLEL_TREE, "-n", "2", "--json", "-", "--gh-annotations", "off"],
+        timeout=240.0,
+    )
+    expect(
+        not _project_stream(stream.stdout)["has_progress"],
+        "a progress event leaked into the --json stream at -n 2",
+    )
+    return "-n 2: counter present on a PTY, absent on a pipe and in the stream"
+
+
 def s_parallel_junit_canonical_eq(context: ScenarioContext) -> str:
     """`--junit-xml` at `-n 4` canonicalizes equally to `-n 1` over a varied suite.
 

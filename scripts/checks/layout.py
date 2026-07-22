@@ -79,6 +79,7 @@ UNIT_SUITES = {
     "test_session_mangle.mojo",
     "test_session_pipeline.mojo",
     "test_session_pool_plan.mojo",
+    "test_session_pool_progress.mojo",
     "test_session_precompile_paths.mojo",
     "test_session_resilience.mojo",
     "test_session_retry_class.mojo",
@@ -199,13 +200,14 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_mangle.mojo",
     "tests/unit/test_session_pipeline.mojo",
     "tests/unit/test_session_pool_plan.mojo",
+    "tests/unit/test_session_pool_progress.mojo",
     "tests/unit/test_session_precompile_paths.mojo",
     "tests/unit/test_session_resilience.mojo",
     "tests/unit/test_session_retry_class.mojo",
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 1022
+CLASSIFIED_TEST_COUNT = 1037
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",
@@ -331,6 +333,7 @@ E2E_SCENARIO_NAMES = (
     "parallel-json-workers",
     "parallel-j-rejected",
     "parallel-junit-canonical-eq",
+    "parallel-progress-tty",
 )
 
 LIVE_COMMAND_FIXED_PATHS = (
@@ -683,9 +686,9 @@ def check_e2e_layout() -> None:
             "E2E scenario membership/order mismatch: "
             f"expected={list(E2E_SCENARIO_NAMES)}, actual={list(scenario_names)}"
         )
-    if len(scenario_names) != 69 or len(set(scenario_names)) != len(scenario_names):
+    if len(scenario_names) != 70 or len(set(scenario_names)) != len(scenario_names):
         raise AssertionError(
-            "E2E scenarios must contain 69 unique names in the pinned order"
+            "E2E scenarios must contain 70 unique names in the pinned order"
         )
     referenced = {
         *rows,

@@ -157,6 +157,7 @@ SCENARIOS: ScenarioRegistry = (
     ("parallel-json-workers", parallel.s_parallel_json_workers),
     ("parallel-j-rejected", parallel.s_parallel_j_rejected),
     ("parallel-junit-canonical-eq", parallel.s_parallel_junit_canonical_eq),
+    ("parallel-progress-tty", parallel.s_parallel_progress_tty),
 )
 
 

@@ -1762,3 +1762,104 @@ def test_durations_zero_files_run_renders_nothing() raises:
     )
     var out = c.output()
     assert_false("slowest" in out)
+
+
+def _progress(
+    completed: Int, total: Int, paths: List[String], elapsed: List[Float64]
+) -> Event:
+    """A PROGRESS event with the given counts and index-aligned in-flight data.
+    """
+    return Event.progress(completed, total, paths.copy(), elapsed.copy())
+
+
+def test_progress_on_tty_renders_a_single_counter_line() raises:
+    # On a terminal the live counter names the completed/total and the in-flight
+    # files by basename, on ONE physical line (no newline, within the width cap).
+    var c = _console(is_tty=True)
+    c.handle(
+        _progress(
+            3,
+            8,
+            ["tests/parallel/test_foo.mojo", "tests/parallel/test_bar.mojo"],
+            [0.4, 0.2],
+        )
+    )
+    var line = c.progress_line()
+    assert_true(line.byte_length() > 0)
+    assert_true("3/8" in line)
+    assert_true("test_foo.mojo" in line)
+    # A basename, never the full path — the counter must not carry the dir.
+    assert_false("tests/parallel/test_foo.mojo" in line)
+    # One physical line: no embedded newline and within the codepoint cap.
+    assert_false("\n" in line)
+    assert_true(line.count_codepoints() <= 72)
+
+
+def test_progress_off_tty_is_empty() raises:
+    # A piped destination is not a terminal: no counter byte is ever rendered.
+    var c = _console(is_tty=False)
+    c.handle(_progress(1, 4, ["tests/test_a.mojo"], [0.1]))
+    assert_equal(c.progress_line(), String(""))
+
+
+def test_progress_under_quiet_is_empty_even_on_tty() raises:
+    # `-q` suppresses the counter outright, exactly as it suppresses the header.
+    var c = _console(is_tty=True, verbosity=Verbosity.QUIET)
+    c.handle(
+        _progress(2, 5, ["tests/test_a.mojo", "tests/test_b.mojo"], [1.0, 0.5])
+    )
+    assert_equal(c.progress_line(), String(""))
+
+
+def test_progress_color_off_on_tty_shows_but_carries_no_ansi() raises:
+    # `--color never` on a real terminal still SHOWS the counter, just uncolored:
+    # non-empty text with no ANSI escape byte at all.
+    var c = _console(color=ColorWhen.NEVER, is_tty=True)
+    c.handle(_progress(1, 3, ["tests/test_a.mojo"], [0.3]))
+    var line = c.progress_line()
+    assert_true(line.byte_length() > 0)
+    assert_true("1/3" in line)
+    assert_false("\x1b" in line)
+
+
+def test_progress_color_on_tty_paints_the_counter() raises:
+    # AUTO color on a terminal paints the counter; an escape byte is present.
+    var c = _console(color=ColorWhen.AUTO, is_tty=True)
+    c.handle(_progress(0, 2, ["tests/test_a.mojo"], [0.0]))
+    var line = c.progress_line()
+    assert_true(line.byte_length() > 0)
+    assert_true("\x1b" in line)
+
+
+def test_progress_caps_running_names_with_overflow_marker() raises:
+    # More than three in-flight files: at most three basenames are named, and an
+    # ` +N more` marker accounts the rest — the line must not enumerate them all.
+    var c = _console(is_tty=True)
+    c.handle(
+        _progress(
+            0,
+            6,
+            [
+                "tests/test_a.mojo",
+                "tests/test_b.mojo",
+                "tests/test_c.mojo",
+                "tests/test_d.mojo",
+                "tests/test_e.mojo",
+            ],
+            [0.5, 0.4, 0.3, 0.2, 0.1],
+        )
+    )
+    var line = c.progress_line()
+    assert_true("+2 more" in line)
+    assert_false("test_d.mojo" in line)
+    assert_false("test_e.mojo" in line)
+
+
+def test_progress_empty_running_set_still_reports_counts() raises:
+    # A tick with no in-flight files (the final fold, all done) still renders the
+    # completed/total counts so the counter is coherent up to the batch's end.
+    var c = _console(is_tty=True)
+    c.handle(_progress(8, 8, List[String](), List[Float64]()))
+    var line = c.progress_line()
+    assert_true(line.byte_length() > 0)
+    assert_true("8/8" in line)
