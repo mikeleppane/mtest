@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="images/mtest-logo.png" alt="The mtest wordmark: a flame and a gear with a checkmark beside the name" width="620">
+</p>
+
 # mtest
 
 [![CI](https://github.com/mikeleppane/mtest/actions/workflows/ci.yml/badge.svg)](https://github.com/mikeleppane/mtest/actions/workflows/ci.yml)
