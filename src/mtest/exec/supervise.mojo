@@ -76,7 +76,7 @@ def _copy_c_string(value: String) -> _BytePtr:
 
 
 struct _NativeBuffers(Movable):
-    """Aligned storage for the exact native ABI-v1 records of one run."""
+    """Aligned storage for the exact native ABI-v2 records of one run."""
 
     var owned_strings: List[_BytePtr]
     var argv_records: _U64Ptr
@@ -100,12 +100,12 @@ struct _NativeBuffers(Movable):
         before returning and never retains a Mojo pointer.
         """
         self.owned_strings = List[_BytePtr]()
-        # SAFETY: each allocation uses its record's required ABI-v1 alignment
+        # SAFETY: each allocation uses its record's required ABI-v2 alignment
         # (8 for pointer/64-bit records, 4 for 32-bit records). Counts cover the
         # complete fixed layouts asserted by the C header; every allocation has
         # this object as its sole owner and is freed in `__del__`.
         self.argv_records = alloc[UInt64](len(spec.argv) * 2)
-        self.spec_record = alloc[UInt64](5)
+        self.spec_record = alloc[UInt64](7)
         self.error = alloc[UInt64](4)
         self.process_ref = alloc[UInt64](2)
         self.milliseconds = alloc[Int64](1)
@@ -125,7 +125,7 @@ struct _NativeBuffers(Movable):
         # before either Mojo or C reads it. UInt8 has no invalid bit patterns;
         # the I/O buffer is an out-buffer and is read only through returned count.
         memset_zero(self.argv_records.bitcast[UInt8](), len(spec.argv) * 16)
-        memset_zero(self.spec_record.bitcast[UInt8](), 40)
+        memset_zero(self.spec_record.bitcast[UInt8](), 56)
         memset_zero(self.error.bitcast[UInt8](), 32)
         memset_zero(self.process_ref.bitcast[UInt8](), 16)
         memset_zero(self.milliseconds.bitcast[UInt8](), 8)
@@ -146,11 +146,17 @@ struct _NativeBuffers(Movable):
             self.argv_records.bitcast[_BytePtr]()[i * 2] = copied
             self.argv_records[i * 2 + 1] = UInt64(spec.argv[i].byte_length())
 
-        # SAFETY: the first ABI-v1 spec field is a non-retained pointer to the
+        # SAFETY: the first ABI-v2 spec field is a non-retained pointer to the
         # complete 16-byte argv records above. Remaining scalar slots are exact
-        # fixed-width fields; the final 64-bit slot was zeroed, so reserved=0.
+        # fixed-width fields; every slot was zeroed first, so reserved=0.
         self.spec_record.bitcast[_U64Ptr]()[0] = self.argv_records
         self.spec_record[1] = UInt64(len(spec.argv))
+        # SAFETY: the two ABI-v2 spec tail slots are the env-extra pointer at
+        # u64 index 5 (byte 40) and its count at index 6 (byte 48). This commit
+        # writes NULL/0 explicitly -- child environment overrides land later, so
+        # a zero count reproduces the v1 environment snapshot byte for byte.
+        self.spec_record[5] = UInt64(0)
+        self.spec_record[6] = UInt64(0)
         if spec.cwd:
             var copied = _copy_c_string(spec.cwd.value())
             self.owned_strings.append(copied)
@@ -158,8 +164,8 @@ struct _NativeBuffers(Movable):
             # until the native open copies it and returns without retaining it.
             self.spec_record.bitcast[_BytePtr]()[2] = copied
             self.spec_record[3] = UInt64(spec.cwd.value().byte_length())
-            # SAFETY: `spec_record` owns 40 initialized bytes aligned to 8; byte
-            # offset 32 is the exact ABI-v1 UInt32 flags field and value 1 is valid.
+            # SAFETY: `spec_record` owns 56 initialized bytes aligned to 8; byte
+            # offset 32 is the exact ABI-v2 UInt32 flags field and value 1 is valid.
             self.spec_record.bitcast[UInt32]()[8] = _PROCESS_HAS_CWD
 
     def __del__(deinit self):
@@ -214,6 +220,41 @@ def _native_error(prefix: String, error: _U64Ptr) -> String:
             + String(cleanup_error)
         )
     return message^
+
+
+def _native_poll_set(
+    handles: _U64Ptr,
+    count: UInt64,
+    timeout_ms: Int32,
+    results: _BytePtr,
+    error: _BytePtr,
+) -> Int32:
+    """Thin ABI-v2 binding: poll readiness across a set of handles at once.
+
+    The Supervisor's readiness-set driver is wired in a later commit; this is
+    the reachable declaration so it can call the primitive. `handles` names
+    `count` live tokens; `results` addresses `count` 8-byte poll-result records
+    that the native two-phase validation zeroes; C retains neither pointer.
+    """
+    # SAFETY: `handles` and `results` are caller-owned records spanning exactly
+    # `count` entries each, and `error` a complete aligned error record; the ABI
+    # validates the count, writes only within those spans, and retains no
+    # pointer. All four outlive this synchronous call.
+    return external_call["mtest_exec_poll_set", Int32](
+        handles, count, timeout_ms, results, error
+    )
+
+
+def _native_fd_limit(soft_limit: _BytePtr, error: _BytePtr) -> Int32:
+    """Thin ABI-v2 binding: report the RLIMIT_NOFILE soft limit.
+
+    Wired into the Supervisor's effective-cap derivation in a later commit;
+    RLIM_INFINITY arrives as the UINT64_MAX sentinel. C retains no pointer.
+    """
+    # SAFETY: `soft_limit` addresses a caller-owned 8-byte cell and `error` a
+    # complete aligned error record; the ABI writes only those and retains no
+    # pointer. Both outlive this synchronous call.
+    return external_call["mtest_exec_fd_limit", Int32](soft_limit, error)
 
 
 def _monotonic_ms(mut native: _NativeBuffers) raises -> Int:
