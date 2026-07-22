@@ -50,6 +50,7 @@ from mtest.select import NamedTarget, parse_operands, selection_active
 from mtest.session.attempt import _run_one
 from mtest.session.attribution_run import _run_crash_attribution
 from mtest.session.file_result import _CrashFile, _failing_count
+from mtest.session.pipeline import PipelineHalt, RunPipeline
 from mtest.session.precompile import _run_precompile
 from mtest.session.selection import _run_selection
 from mtest.session.shard import partition
@@ -243,7 +244,13 @@ def run_session[
         interrupted or internal_error or precompile_failed or stream_dead
     )
 
-    # Gates first: a failing gate aborts the whole session immediately.
+    # Gates first: a failing gate aborts the whole session immediately. The stop
+    # policy runs through the same `RunPipeline` kernel the selection and plain
+    # run paths use — a gate is always exit-first, so a failing gate latches
+    # `LIMIT_REACHED` and aborts scheduling, exactly as before.
+    var gate_pipeline = RunPipeline(
+        len(disc.gate_files), config.retries, True, 0
+    )
     if proceed:
         for gi in range(len(disc.gate_files)):
             if interrupt_requested():
@@ -282,7 +289,10 @@ def run_session[
                 summary.counts[fr.outcome.code] += 1
                 run_outcomes.extend(fr.exit_outcomes.copy())
                 ran_files += 1
-                if fr.outcome.is_failing():
+                gate_pipeline.record_verdict(
+                    gi, fr.outcome.is_failing(), _failing_count(run_outcomes)
+                )
+                if gate_pipeline.halt() != PipelineHalt.RUNNING:
                     gate_abort = True
                     break
             except:
@@ -336,6 +346,16 @@ def run_session[
             drift = True
         crash_files.extend(sel.crash_files.copy())
     elif proceed_runs:
+        # The plain run path settles each file build-then-run through `_run_one`
+        # and routes its `-x`/`--maxfail` stop policy through the same
+        # `RunPipeline` kernel the selection and gate paths use, rather than
+        # re-deciding the limits inline.
+        var run_pipeline = RunPipeline(
+            len(disc.run_files),
+            config.retries,
+            config.exitfirst,
+            config.maxfail,
+        )
         for ri in range(len(disc.run_files)):
             if interrupt_requested():
                 interrupted = True
@@ -375,12 +395,10 @@ def run_session[
                             disc.run_files[ri], fr.binary_path, List[String]()
                         )
                     )
-                if config.exitfirst and fr.outcome.is_failing():
-                    break
-                if (
-                    config.maxfail > 0
-                    and _failing_count(run_outcomes) >= config.maxfail
-                ):
+                run_pipeline.record_verdict(
+                    ri, fr.outcome.is_failing(), _failing_count(run_outcomes)
+                )
+                if run_pipeline.halt() != PipelineHalt.RUNNING:
                     break
             except:
                 reporter.handle(
