@@ -64,7 +64,7 @@ from mtest.model.outcome import Outcome
 from mtest.model.parse_disposition import ParseDisposition
 from mtest.model.test_result import TestResult
 from mtest.report.escape import gh_escape_message, gh_escape_property
-from mtest.report.signals import _signal_name_for_target
+from mtest.report.signals import signal_name_for_target
 
 # --- Platform bounds ---------------------------------------------------------
 # Re-verified against GitHub's own documentation (July 2026): a workflow STEP
@@ -239,7 +239,7 @@ def _outcome_words(e: FileFinishedPayload) -> String:
     outcome renders as a bare "failed".
     """
     if e.outcome == Outcome.CRASH:
-        var name = _signal_name_for_target(e.signal_number)
+        var name = signal_name_for_target(e.signal_number)
         if name != "":
             return (
                 "crashed (signal "
@@ -317,7 +317,7 @@ def _precompile_ending_words(e: PrecompileFailedPayload) -> String:
     if not e.ending_known:
         return String("")
     if e.term_kind == 1:
-        var name = _signal_name_for_target(e.term_value)
+        var name = signal_name_for_target(e.term_value)
         var base = "died by signal " + String(e.term_value)
         if name != "":
             base += " (" + name + ")"

@@ -48,7 +48,7 @@ from mtest.model import (
 
 from mtest.report.escape import fence_region, select_collision_free_token
 from mtest.report.reporter import Reporter
-from mtest.report.signals import _signal_name_for_target
+from mtest.report.signals import signal_name_for_target
 
 comptime _HEX: StaticString = "0123456789abcdef"
 """Lowercase hex alphabet for rendering a fence token's random bytes."""
@@ -226,7 +226,7 @@ def _term_phrase(kind: Int, value: Int, escalated: Bool) -> String:
     nonzero EXITED is a compiler ICE that exited under its own control.
     """
     if kind == 1:
-        var name = _signal_name_for_target(value)
+        var name = signal_name_for_target(value)
         if name != "":
             return String("signal ") + String(value) + " — " + name
         return String("signal ") + String(value)
@@ -253,7 +253,7 @@ def _precompile_ending_phrase(
     3 SPAWN_FAILED), so this layer imports nothing above it.
     """
     if term_kind == 1:
-        var name = _signal_name_for_target(term_value)
+        var name = signal_name_for_target(term_value)
         var base = String("died by signal ") + String(term_value)
         if name != "":
             return base + " (" + name + ")"
@@ -309,7 +309,7 @@ def _outcome_detail(e: FileFinishedPayload) -> String:
         return String("exit ") + String(e.exit_status)
     if e.outcome == Outcome.CRASH:
         var base = String("signal ") + String(e.signal_number)
-        var name = _signal_name_for_target(e.signal_number)
+        var name = signal_name_for_target(e.signal_number)
         if name.byte_length() > 0:
             return base + " — " + name
         return base
