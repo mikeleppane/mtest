@@ -92,6 +92,13 @@ struct RunnerConfig(Copyable, Movable):
     retries. A file runs up to `retries + 1` attempts, and a late pass after a
     crash-class attempt is flaky. Deterministic failures are never retried."""
 
+    var workers: Int
+    """`-n N`: how many run files to build and execute concurrently. `1` (the
+    default) is the sequential path — one child at a time, argv byte-identical
+    to a single-worker run. A value above one drives the parallel pool. `0`
+    means `auto`, resolved from the machine's core count; the CLI does not yet
+    surface the flag, so every parsed config carries `1` until the flip lands."""
+
     var compile_timeout_secs: Int
     """`--compile-timeout SECS`: per-file build timeout in seconds; `0`
     disables it. A build that exceeds it is killed under the supervised
@@ -167,6 +174,7 @@ struct RunnerConfig(Copyable, Movable):
             shard_m=0,
             shard_n=0,
             retries=0,
+            workers=1,
             compile_timeout_secs=600,
             json_dest="",
             gh_annotations=AnnotationsMode.AUTO,

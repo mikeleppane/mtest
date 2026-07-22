@@ -78,6 +78,7 @@ UNIT_SUITES = {
     "test_session_detail.mojo",
     "test_session_mangle.mojo",
     "test_session_pipeline.mojo",
+    "test_session_pool_plan.mojo",
     "test_session_precompile_paths.mojo",
     "test_session_resilience.mojo",
     "test_session_retry_class.mojo",
@@ -115,6 +116,7 @@ INTEGRATION_SUITES = {
     "test_session_outcomes.mojo",
     "test_session_precompile.mojo",
     "test_session_rmtree.mojo",
+    "test_session_schedule.mojo",
     "test_session_selection.mojo",
     "test_transcripts_smoke.mojo",
 }
@@ -149,6 +151,7 @@ CLASSIFIED_PATHS = (
     "tests/integration/test_session_outcomes.mojo",
     "tests/integration/test_session_precompile.mojo",
     "tests/integration/test_session_rmtree.mojo",
+    "tests/integration/test_session_schedule.mojo",
     "tests/integration/test_session_selection.mojo",
     "tests/integration/test_transcripts_smoke.mojo",
     "tests/unit/test_cache_registry.mojo",
@@ -195,13 +198,14 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_detail.mojo",
     "tests/unit/test_session_mangle.mojo",
     "tests/unit/test_session_pipeline.mojo",
+    "tests/unit/test_session_pool_plan.mojo",
     "tests/unit/test_session_precompile_paths.mojo",
     "tests/unit/test_session_resilience.mojo",
     "tests/unit/test_session_retry_class.mojo",
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 991
+CLASSIFIED_TEST_COUNT = 1012
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",

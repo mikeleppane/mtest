@@ -620,6 +620,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         shard_m=shard_m,
         shard_n=shard_n,
         retries=retries,
+        workers=1,
         compile_timeout_secs=compile_timeout_secs,
         json_dest=json_dest^,
         gh_annotations=gh_annotations,

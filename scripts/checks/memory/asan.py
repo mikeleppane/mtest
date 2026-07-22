@@ -29,6 +29,7 @@ TESTS = (
     ROOT / "tests" / "integration" / "test_exec_reap.mojo",
     ROOT / "tests" / "integration" / "test_exec_fdhygiene.mojo",
     ROOT / "tests" / "integration" / "test_exec_pool.mojo",
+    ROOT / "tests" / "integration" / "test_session_schedule.mojo",
 )
 ASAN_OPTIONS = "detect_leaks=1:halt_on_error=1:abort_on_error=1"
 CONTROL_CASES = {

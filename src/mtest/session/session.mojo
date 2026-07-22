@@ -31,6 +31,7 @@ selection, probe, and gate paths route non-valid reports through the same
 off-grammar report resolves identically either way.
 """
 from std.io import FileDescriptor
+from std.sys import num_logical_cores
 from std.time import perf_counter_ns
 
 from mtest.cache import BuildRegistry
@@ -52,6 +53,7 @@ from mtest.session.attempt import _run_one
 from mtest.session.attribution_run import _run_crash_attribution
 from mtest.session.file_result import _CrashFile, _failing_count
 from mtest.session.pipeline import PipelineHalt, RunPipeline
+from mtest.session.pool import _run_pool_batch, resolve_worker_plan
 from mtest.session.precompile import _run_precompile
 from mtest.session.selection import _run_selection
 from mtest.session.shard import partition
@@ -162,6 +164,25 @@ def run_session[
         sharded_out_count = before - len(disc.run_files)
         shard_label = String(config.shard_m) + "/" + String(config.shard_n)
 
+    # Resolve the worker count before announcing the run: `1` (the default)
+    # stays the sequential path and never queries the descriptor cap; any other
+    # value resolves the pool's capacity against the cores and the effective
+    # cap, clamping loudly. A hard environment fault (a descriptor ceiling too
+    # small for a single child) is folded as an internal error below, resolving
+    # to exit 3 the same as any other machinery failure.
+    var resolved_workers = 1
+    var worker_clamp_note = String("")
+    var worker_env_error = False
+    if config.workers != 1:
+        try:
+            var wp = resolve_worker_plan(config)
+            resolved_workers = wp.resolved
+            if wp.clamped:
+                worker_clamp_note = wp.limiting_note()
+        except:
+            worker_env_error = True
+    var cores = num_logical_cores()
+
     var selected = len(disc.gate_files) + len(disc.run_files)
     var excluded = len(disc.excluded)
     reporter.handle(
@@ -172,8 +193,11 @@ def run_session[
             excluded,
             shard_label=shard_label,
             sharded_out_count=sharded_out_count,
+            workers=resolved_workers,
         )
     )
+    if worker_clamp_note != "":
+        reporter.handle(Event.warning("worker-clamp", worker_clamp_note))
 
     var summary = Summary.zeros()
 
@@ -199,7 +223,9 @@ def run_session[
     var test_totals = TestCounts.zeros()
     var ran_files = 0
     var interrupted = False
-    var internal_error = False
+    # A descriptor-ceiling fault while resolving the worker plan is a machinery
+    # fault: resolve it as an internal error (exit 3), the same as any other.
+    var internal_error = worker_env_error
     var precompile_failed = False
     var drift = False
     # A latched machine-stream write failure (a dead `--json -` pipe, a full or
@@ -288,7 +314,37 @@ def run_session[
     var gate_pipeline = RunPipeline(
         len(disc.gate_files), config.retries, True, 0
     )
-    if proceed:
+    # The parallel pool runs the gates as their own batch, aborting the run on
+    # the first failing or drifting gate exactly as the sequential loop does.
+    if proceed and resolved_workers > 1:
+        var gb = _run_pool_batch(
+            runtime,
+            config,
+            root,
+            disc.gate_files,
+            includes,
+            reporter,
+            summary,
+            resolved_workers,
+            cores,
+            True,
+            console_fd,
+        )
+        run_outcomes.extend(gb.run_outcomes.copy())
+        test_totals.passed += gb.test_totals.passed
+        test_totals.failed += gb.test_totals.failed
+        test_totals.skipped += gb.test_totals.skipped
+        test_totals.deselected += gb.test_totals.deselected
+        ran_files += gb.ran_files
+        if gb.interrupted:
+            interrupted = True
+        if gb.internal_error:
+            internal_error = True
+        if gb.drift:
+            drift = True
+        if gb.aborted:
+            gate_abort = True
+    if proceed and resolved_workers <= 1:
         for gi in range(len(disc.gate_files)):
             if interrupt_requested():
                 interrupted = True
@@ -382,6 +438,37 @@ def run_session[
         if sel.drift:
             drift = True
         crash_files.extend(sel.crash_files.copy())
+    elif proceed_runs and resolved_workers > 1:
+        # The parallel pool drives the run files at capacity `resolved_workers`,
+        # honoring `-x`/`--maxfail` (in-flight files finish, the rest NOT-RUN)
+        # and folding an interrupt back for exit 2. Selection is not pooled
+        # here, so this branch is the non-selection run set only.
+        var rb = _run_pool_batch(
+            runtime,
+            config,
+            root,
+            disc.run_files,
+            includes,
+            reporter,
+            summary,
+            resolved_workers,
+            cores,
+            False,
+            console_fd,
+        )
+        run_outcomes.extend(rb.run_outcomes.copy())
+        test_totals.passed += rb.test_totals.passed
+        test_totals.failed += rb.test_totals.failed
+        test_totals.skipped += rb.test_totals.skipped
+        test_totals.deselected += rb.test_totals.deselected
+        ran_files += rb.ran_files
+        if rb.interrupted:
+            interrupted = True
+        if rb.internal_error:
+            internal_error = True
+        if rb.drift:
+            drift = True
+        crash_files.extend(rb.crash_files.copy())
     elif proceed_runs:
         # The plain run path settles each file build-then-run through `_run_one`
         # and routes its `-x`/`--maxfail` stop policy through the same
