@@ -27,6 +27,7 @@ class AsanCheckTests(unittest.TestCase):
                 "tests/integration/test_exec_etxtbsy.mojo",
                 "tests/integration/test_exec_reap.mojo",
                 "tests/integration/test_exec_fdhygiene.mojo",
+                "tests/integration/test_exec_pool.mojo",
             ),
         )
         self.assertGreater(len(asan_check.TESTS), 0)

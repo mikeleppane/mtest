@@ -45,6 +45,7 @@ UNIT_SUITES = {
     "test_config.mojo",
     "test_discover_fnmatch.mojo",
     "test_discover_normalize.mojo",
+    "test_exec_pool_policy.mojo",
     "test_exec_spec.mojo",
     "test_exec_tty.mojo",
     "test_model_events.mojo",
@@ -93,6 +94,7 @@ INTEGRATION_SUITES = {
     "test_exec_flood.mojo",
     "test_exec_interrupt.mojo",
     "test_exec_paths.mojo",
+    "test_exec_pool.mojo",
     "test_exec_prestart.mojo",
     "test_exec_reap.mojo",
     "test_exec_sweep.mojo",
@@ -125,6 +127,7 @@ CLASSIFIED_PATHS = (
     "tests/integration/test_exec_flood.mojo",
     "tests/integration/test_exec_interrupt.mojo",
     "tests/integration/test_exec_paths.mojo",
+    "tests/integration/test_exec_pool.mojo",
     "tests/integration/test_exec_prestart.mojo",
     "tests/integration/test_exec_reap.mojo",
     "tests/integration/test_exec_sweep.mojo",
@@ -157,6 +160,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_config.mojo",
     "tests/unit/test_discover_fnmatch.mojo",
     "tests/unit/test_discover_normalize.mojo",
+    "tests/unit/test_exec_pool_policy.mojo",
     "tests/unit/test_exec_spec.mojo",
     "tests/unit/test_exec_tty.mojo",
     "tests/unit/test_model_events.mojo",
@@ -195,7 +199,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 949
+CLASSIFIED_TEST_COUNT = 973
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",

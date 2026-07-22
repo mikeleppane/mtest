@@ -13,7 +13,7 @@ from std.memory import UnsafePointer, alloc, memset_zero
 
 from mtest.exec.capture import BoundedCapture
 from mtest.exec.result import ProcessResult
-from mtest.exec.signals import ExecRuntime, interrupt_requested
+from mtest.exec.signals import ExecRuntime, interrupt_count
 from mtest.exec.spec import DEFAULT_GRACE_MS, ProcessSpec
 from mtest.exec.termination import Termination
 
@@ -38,8 +38,17 @@ comptime _POST_LEADER_SLICE_MS = 10
 """Short poll slice while waiting for swept pipes to reach EOF."""
 comptime _BUFSIZE = 65536
 """One native read buffer, reused for both streams."""
-comptime _MAX_DRAIN_CHUNKS = 16
-"""Read cap per ready channel before yielding to lifecycle checks."""
+
+comptime _COMPILE_CAP = 64
+"""The compile-time supervision ceiling: never more than 64 live children."""
+comptime _RESERVED_HEADROOM = 64
+"""Fds held back from the 3N+3 spawn peak for the runner's own descriptors."""
+comptime _MIN_SOFT_FD = _RESERVED_HEADROOM + 6
+"""Smallest RLIMIT_NOFILE soft limit that still fits a single child (N=1)."""
+comptime _SWEEP_BYTE_BUDGET = 8 * _BUFSIZE
+"""Bytes one `wait_any` sweep may read before yielding to the next sweep."""
+comptime _SWEEP_TIME_BUDGET_MS = 50
+"""Wall-clock cap on one sweep's drain phase before it yields."""
 
 comptime _CHANNEL_STDOUT: UInt32 = 1
 comptime _CHANNEL_STDERR: UInt32 = 2
@@ -305,46 +314,48 @@ def _poll(
     return native.poll_result[0]
 
 
-def _drain_channel(
+def _read_quantum(
     handle: UInt64,
     channel: UInt32,
     mut capture: BoundedCapture,
     mut native: _NativeBuffers,
-) raises -> Bool:
-    """Drain a ready channel without blocking; return True only at EOF."""
-    for _ in range(_MAX_DRAIN_CHUNKS):
-        # SAFETY: the live token names the sole active process; `io_buffer` owns
-        # `_BUFSIZE` writable bytes and read-result/error are complete aligned
-        # non-retained records. C rejects counts beyond the supplied capacity.
-        var status = external_call["mtest_exec_process_read", Int32](
-            handle,
-            channel,
-            native.io_buffer,
-            UInt64(_BUFSIZE),
-            native.read_result.bitcast[UInt8](),
-            native.error.bitcast[UInt8](),
-        )
-        if status != 0:
-            raise Error(
-                _native_error("exec: channel read failed", native.error)
-            )
-        # SAFETY: success initialized the 16-byte result. State is bytes 0..3;
-        # count is bytes 8..15 and is read only for READ_BYTES.
-        var state = native.read_result.bitcast[UInt32]()[0]
-        if state == _READ_EOF:
-            return True
-        if state == _READ_WOULD_BLOCK:
-            return False
-        if state != _READ_BYTES:
-            raise Error("exec: native channel returned an invalid read state")
-        var count = Int(native.read_result[1])
-        if count < 0 or count > _BUFSIZE:
-            raise Error("exec: native channel returned an invalid byte count")
-        # SAFETY: C reported `count <= _BUFSIZE` bytes and initialized exactly
-        # that prefix before returning; the buffer remains alive and unaliased.
-        for i in range(count):
-            capture.push_byte(native.io_buffer[i])
-    return False
+) raises -> UInt32:
+    """Read at most one `_BUFSIZE` chunk without blocking.
+
+    Returns the native read state (`_READ_BYTES`, `_READ_EOF`, or
+    `_READ_WOULD_BLOCK`). On `_READ_BYTES` the chunk's bytes are pushed into
+    `capture` and its length is left in `native.read_result[1]` for the caller's
+    sweep budget. This one-chunk quantum is the fair unit the Supervisor charges
+    against its per-sweep byte budget so no single fd monopolizes a sweep.
+    """
+    # SAFETY: the live token names an owned process; `io_buffer` owns `_BUFSIZE`
+    # writable bytes and read-result/error are complete aligned non-retained
+    # records. C rejects counts beyond the supplied capacity.
+    var status = external_call["mtest_exec_process_read", Int32](
+        handle,
+        channel,
+        native.io_buffer,
+        UInt64(_BUFSIZE),
+        native.read_result.bitcast[UInt8](),
+        native.error.bitcast[UInt8](),
+    )
+    if status != 0:
+        raise Error(_native_error("exec: channel read failed", native.error))
+    # SAFETY: success initialized the 16-byte result. State is bytes 0..3;
+    # count is bytes 8..15 and is read only for READ_BYTES.
+    var state = native.read_result.bitcast[UInt32]()[0]
+    if state == _READ_EOF or state == _READ_WOULD_BLOCK:
+        return state
+    if state != _READ_BYTES:
+        raise Error("exec: native channel returned an invalid read state")
+    var count = Int(native.read_result[1])
+    if count < 0 or count > _BUFSIZE:
+        raise Error("exec: native channel returned an invalid byte count")
+    # SAFETY: C reported `count <= _BUFSIZE` bytes and initialized exactly that
+    # prefix before returning; the buffer remains alive and unaliased.
+    for i in range(count):
+        capture.push_byte(native.io_buffer[i])
+    return state
 
 
 def _setup_drain(handle: UInt64, mut native: _NativeBuffers) raises -> UInt32:
@@ -465,141 +476,17 @@ def _abort_process(handle: UInt64, mut native: _NativeBuffers) -> String:
     return String("; ") + _native_error("exec: cleanup failed", native.error)
 
 
-def _supervise_open_process(
-    handle: UInt64,
-    spec: ProcessSpec,
-    head_cap: Int,
-    tail_cap: Int,
-    start_ms: Int,
-    mut native: _NativeBuffers,
-) raises -> ProcessResult:
-    """Drive one open native process through observe, sweep, reap, and close."""
-    var out_capture = BoundedCapture(head_cap, tail_cap)
-    var err_capture = BoundedCapture(head_cap, tail_cap)
-    var stdout_open = True
-    var stderr_open = True
-    var setup_outcome = _SETUP_WAITING
-    var leader_waitable = False
-    var killing = False
-    var escalated = False
-    var timed_out = False
-    var kill_time = 0
-
-    while not leader_waitable or setup_outcome == _SETUP_WAITING:
-        var now = _monotonic_ms(native)
-        if not leader_waitable:
-            if not killing:
-                if interrupt_requested() or (
-                    spec.timeout_ms > 0 and now - start_ms >= spec.timeout_ms
-                ):
-                    _ = _group(handle, _GROUP_TERM, native)
-                    killing = True
-                    timed_out = True
-                    kill_time = now
-            elif not escalated and now - kill_time >= spec.grace_ms:
-                _ = _group(handle, _GROUP_KILL, native)
-                escalated = True
-
-        if _observe(handle, native) == _LEADER_WAITABLE:
-            leader_waitable = True
-
-        setup_outcome = _setup_drain(handle, native)
-        if leader_waitable and setup_outcome != _SETUP_WAITING:
-            break
-
-        var poll_timeout_ms = _POLL_SLICE_MS
-        if not killing and spec.timeout_ms > 0:
-            var remaining_ms = spec.timeout_ms - (now - start_ms)
-            if remaining_ms < poll_timeout_ms:
-                poll_timeout_ms = remaining_ms
-        var readiness = _poll(handle, poll_timeout_ms, native)
-        if stdout_open and (readiness & _READY_STDOUT) != 0:
-            if _drain_channel(handle, _CHANNEL_STDOUT, out_capture, native):
-                stdout_open = False
-        if stderr_open and (readiness & _READY_STDERR) != 0:
-            if _drain_channel(handle, _CHANNEL_STDERR, err_capture, native):
-                stderr_open = False
-
-    var abnormal = String("")
-    if setup_outcome == _SETUP_CORRUPT:
-        abnormal = "exec: corrupt child setup record"
-    elif (
-        setup_outcome != _SETUP_EXEC_SUCCEEDED
-        and setup_outcome != _SETUP_SPAWN_FAILED
-    ):
-        abnormal = "exec: invalid child setup outcome"
-
-    # Keep the observed leader waitable so its pid/pgid cannot be reused while
-    # residual group members are killed and inherited pipe writers are drained.
-    _ = _group(handle, _GROUP_KILL, native)
-    var drain_deadline = _monotonic_ms(native) + _POST_LEADER_MS
-    while True:
-        if not stdout_open and not stderr_open:
-            break
-        var now = _monotonic_ms(native)
-        if now >= drain_deadline:
-            break
-        var readiness = _poll(handle, _POST_LEADER_SLICE_MS, native)
-        if stdout_open and (readiness & _READY_STDOUT) != 0:
-            if _drain_channel(handle, _CHANNEL_STDOUT, out_capture, native):
-                stdout_open = False
-        if stderr_open and (readiness & _READY_STDERR) != 0:
-            if _drain_channel(handle, _CHANNEL_STDERR, err_capture, native):
-                stderr_open = False
-
-    if stdout_open:
-        _close_channel(handle, _CHANNEL_STDOUT, native)
-    if stderr_open:
-        _close_channel(handle, _CHANNEL_STDERR, native)
-    if (stdout_open or stderr_open) and abnormal == "":
-        abnormal = (
-            "exec: descendant retained a capture pipe past the cleanup deadline"
-        )
-
-    var final = _reap(handle, native)
-    var duration_ms = _monotonic_ms(native) - start_ms
-
-    if abnormal != "":
-        raise Error(abnormal)
-
-    var termination: Termination
-    if timed_out:
-        termination = Termination.timed_out(final.kind, final.value, escalated)
-    elif setup_outcome == _SETUP_SPAWN_FAILED:
-        # SAFETY: a validated setup frame fixes stage at byte 16 and errno at
-        # byte 20. SpawnFailed carries the child-side setup/exec errno as data.
-        var error_number = Int(native.setup_state.bitcast[Int32]()[5])
-        termination = Termination.spawn_failed(error_number)
-    else:
-        termination = final
-
-    var stdout_truncated = out_capture.was_truncated()
-    var stderr_truncated = err_capture.was_truncated()
-    var stdout_bytes = out_capture.finish()
-    var stderr_bytes = err_capture.finish()
-    if setup_outcome == _SETUP_SPAWN_FAILED:
-        stdout_bytes = List[UInt8]()
-        stderr_bytes = List[UInt8]()
-        stdout_truncated = False
-        stderr_truncated = False
-
-    _process_close(handle, native)
-    return ProcessResult(
-        stdout_bytes^,
-        stderr_bytes^,
-        stdout_truncated,
-        stderr_truncated,
-        termination,
-        duration_ms,
-    )
-
-
 def run_supervised(
     mut runtime: ExecRuntime,
     spec: ProcessSpec,
     capture_bound_bytes: Int = _DEFAULT_CAP_BYTES,
 ) raises -> ProcessResult:
     """Run one child under exclusive runtime ownership and capture both streams.
+
+    This is the capacity-1 view of the Supervisor: it spawns the one child,
+    drives `wait_any` until that child's `Completion`, and projects the
+    completion's `ProcessResult`. There is a single supervision implementation;
+    the one-process path takes no special case.
 
     Args:
         runtime: The active, exclusively borrowed process-global exec runtime.
@@ -621,17 +508,890 @@ def run_supervised(
     if not runtime.active:
         raise Error("exec: run_supervised requires an active ExecRuntime")
 
-    var head_cap = capture_bound_bytes // 2
-    var tail_cap = capture_bound_bytes - head_cap
-    var native = _NativeBuffers(spec)
-    var start_ms = _monotonic_ms(native)
-    var handle = _process_open(native)
+    var supervisor = Supervisor(1, capture_bound_bytes)
+    _ = supervisor.spawn(spec.copy(), 0)
+    while True:
+        var completed = supervisor.wait_any(_POLL_SLICE_MS)
+        if completed:
+            return completed.take().into_result()
 
-    try:
-        return _supervise_open_process(
-            handle, spec, head_cap, tail_cap, start_ms, native
+
+comptime _KILL_DEADLINE = 1
+"""Kill-cause code: an mtest per-child deadline fired first."""
+comptime _KILL_INTERRUPT = 2
+"""Kill-cause code: an interrupt activation drove the kill."""
+
+
+@fieldwise_init
+struct SlotId(Copyable, Movable):
+    """An opaque in-flight handle: a slot index paired with its generation.
+
+    Slot storage is recycled, so the raw index alone is ambiguous. The
+    generation disambiguates: a `SlotId` from a completed run never matches the
+    next tenant of the same slot, so a stale token is always rejected.
+    """
+
+    var index: Int
+    """The recycled storage index this run occupied."""
+    var generation: Int
+    """The monotonically increasing tenancy stamp that made the index unique."""
+
+
+@fieldwise_init
+struct KillCause(Copyable, Equatable, Movable, Writable):
+    """Why the Supervisor initiated a kill: a per-child deadline or an interrupt.
+
+    The cause latches once, at the first kill initiation for a slot, and is
+    carried out unchanged in the slot's `Completion`.
+    """
+
+    var value: Int
+    """The latched cause code: `DEADLINE` or `INTERRUPT`."""
+
+    comptime DEADLINE = _KILL_DEADLINE
+    comptime INTERRUPT = _KILL_INTERRUPT
+
+    @staticmethod
+    def deadline() -> Self:
+        """The cause for a per-child deadline expiry."""
+        return Self(Self.DEADLINE)
+
+    @staticmethod
+    def interrupt() -> Self:
+        """The cause for an observed interrupt activation."""
+        return Self(Self.INTERRUPT)
+
+    def is_deadline(self) -> Bool:
+        """Whether a deadline drove the kill."""
+        return self.value == Self.DEADLINE
+
+    def is_interrupt(self) -> Bool:
+        """Whether an interrupt drove the kill."""
+        return self.value == Self.INTERRUPT
+
+    def __eq__(self, other: Self) -> Bool:
+        """Structural equality on the latched cause code."""
+        return self.value == other.value
+
+    def __ne__(self, other: Self) -> Bool:
+        """Negation of `__eq__`."""
+        return self.value != other.value
+
+    def write_to(self, mut writer: Some[Writer]):
+        """Render a short debug form for assertion messages."""
+        if self.value == Self.DEADLINE:
+            writer.write("KillCause.DEADLINE")
+        elif self.value == Self.INTERRUPT:
+            writer.write("KillCause.INTERRUPT")
+        else:
+            writer.write("KillCause(", self.value, ")")
+
+
+struct Completion(Movable):
+    """One finalized slot's outcome, extracted before the slot is recycled.
+
+    `tag` is the opaque, caller-assigned identity from `spawn`; the Supervisor
+    returns it so a caller never has to correlate through a recycled slot index.
+    `kill_cause` is set only when the Supervisor initiated a kill.
+    """
+
+    var tag: Int
+    """The opaque identity the caller passed to `spawn` for this run."""
+    var result: ProcessResult
+    """The captured streams, structured termination, and duration."""
+    var kill_cause: Optional[KillCause]
+    """The latched kill cause, or `None` when the child ended on its own."""
+
+    def __init__(
+        out self,
+        tag: Int,
+        var result: ProcessResult,
+        var kill_cause: Optional[KillCause],
+    ):
+        """Take ownership of a finalized slot's projected outcome."""
+        self.tag = tag
+        self.result = result^
+        self.kill_cause = kill_cause^
+
+    def into_result(deinit self) -> ProcessResult:
+        """Consume this completion and hand back just its `ProcessResult`."""
+        return self.result^
+
+
+def effective_cap(soft_fd_limit: UInt64) raises -> Int:
+    """The live-child ceiling that a soft fd limit can honor at the 3N+3 peak.
+
+    Each child costs three descriptors (stdout, stderr, setup) at its spawn
+    peak, atop a reserved headroom for the runner's own fds. The formula is
+    `min(64, (soft - 64 - 3) // 3)` with a reserved headroom of 64. The
+    `UINT64_MAX` sentinel (RLIM_INFINITY) and any limit large enough to reach
+    the compile-time ceiling both yield 64. A limit too small to fit even one
+    child is a hard environment error, never a silent clamp to a capacity the
+    spawn peak cannot honor.
+
+    Args:
+        soft_fd_limit: The RLIMIT_NOFILE soft limit, or the `UINT64_MAX`
+            RLIM_INFINITY sentinel.
+
+    Returns:
+        The effective live-child capacity in `1 ..= 64`.
+
+    Raises:
+        Error: When the soft limit cannot fit even a single child. The message
+            names the offending limit and the required minimum; a caller maps
+            this hard environment fault to exit 3.
+    """
+    if soft_fd_limit == UInt64.MAX:
+        return _COMPILE_CAP
+    if soft_fd_limit >= UInt64(_RESERVED_HEADROOM + 3 * _COMPILE_CAP + 3):
+        return _COMPILE_CAP
+    var soft = Int(soft_fd_limit)
+    if soft < _MIN_SOFT_FD:
+        raise Error(
+            "exec: RLIMIT_NOFILE soft limit "
+            + String(soft)
+            + " is below the minimum "
+            + String(_MIN_SOFT_FD)
+            + " required to supervise a single child"
         )
-    except error:
-        var primary = String(error)
-        var cleanup = _abort_process(handle, native)
-        raise Error(primary + cleanup)
+    return (soft - _RESERVED_HEADROOM - 3) // 3
+
+
+def query_effective_cap() raises -> Int:
+    """Resolve the effective capacity from the live RLIMIT_NOFILE soft limit.
+
+    Reads the soft limit through the native adapter and applies `effective_cap`.
+
+    Raises:
+        Error: A native fd-limit query failure, or the hard environment error
+            from `effective_cap` when even one child does not fit.
+    """
+    # SAFETY: `soft_limit` owns one 8-byte cell and `error` a complete 32-byte
+    # aligned ABI-v1 error record; both are zeroed before the non-retaining query
+    # and freed on every path below. C writes only the soft limit and the error.
+    var soft_limit = alloc[UInt64](1)
+    var error = alloc[UInt64](4)
+    memset_zero(soft_limit.bitcast[UInt8](), 8)
+    memset_zero(error.bitcast[UInt8](), 32)
+    var status = _native_fd_limit(
+        soft_limit.bitcast[UInt8](), error.bitcast[UInt8]()
+    )
+    if status != 0:
+        var message = _native_error("exec: fd limit query failed", error)
+        # SAFETY: both cells are uniquely owned here and C retained neither; free
+        # each exactly once before raising, on this early-return path.
+        soft_limit.free()
+        error.free()
+        raise Error(message)
+    var value = soft_limit[0]
+    # SAFETY: the query succeeded and read `value` out; both uniquely-owned,
+    # non-retained cells are now dead and freed exactly once each.
+    soft_limit.free()
+    error.free()
+    return effective_cap(value)
+
+
+def decide_kill(
+    deadline_expired: Bool, interrupt_activations: Int
+) -> Optional[KillCause]:
+    """The observation-order decision for one unlatched slot in one sweep.
+
+    This is an observation-order rule, not a chronology claim: within a sweep a
+    deadline is evaluated FIRST, so an already-expired deadline latches TIMEOUT
+    even when an interrupt was also observed; only an unlatched slot with no
+    expired deadline and at least one interrupt activation latches on the
+    interrupt. Escalation (a second activation) is a separate axis; see
+    `escalate_on_interrupt`.
+
+    Args:
+        deadline_expired: Whether this slot's deadline has already expired.
+        interrupt_activations: The `interrupt_count()` value observed this sweep.
+
+    Returns:
+        The cause to latch, or `None` when no kill is initiated this sweep.
+    """
+    if deadline_expired:
+        return Optional(KillCause.deadline())
+    if interrupt_activations >= 1:
+        return Optional(KillCause.interrupt())
+    return None
+
+
+def escalate_on_interrupt(interrupt_activations: Int) -> Bool:
+    """Whether a second observed interrupt activation forces immediate SIGKILL.
+
+    Args:
+        interrupt_activations: The `interrupt_count()` value observed this sweep.
+
+    Returns:
+        True once two activations have been observed (escalate-to-kill).
+    """
+    return interrupt_activations >= 2
+
+
+struct _Slot(Movable):
+    """One in-flight child's full driving state within the Supervisor."""
+
+    var active: Bool
+    var generation: Int
+    var handle: UInt64
+    var tag: Int
+    var timeout_ms: Int
+    var grace_ms: Int
+    var start_ms: Int
+    var native: _NativeBuffers
+    var out_capture: BoundedCapture
+    var err_capture: BoundedCapture
+    var stdout_open: Bool
+    var stderr_open: Bool
+    var setup_outcome: UInt32
+    var leader_waitable: Bool
+    var draining: Bool
+    var drain_deadline: Int
+    var group_swept: Bool
+    var killing: Bool
+    var escalated: Bool
+    var timed_out: Bool
+    var kill_time: Int
+    var has_kill_cause: Bool
+    var kill_cause_value: Int
+
+    def __init__(
+        out self,
+        var spec: ProcessSpec,
+        tag: Int,
+        generation: Int,
+        head_cap: Int,
+        tail_cap: Int,
+    ) raises:
+        """Open one native child and initialize its lifecycle state.
+
+        The open is non-blocking: it forks and returns immediately with the
+        child RESOLVING through its setup fd. A failure to open raises before
+        the slot is published, so no half-opened slot is ever admitted.
+        """
+        self.native = _NativeBuffers(spec)
+        self.start_ms = _monotonic_ms(self.native)
+        self.handle = _process_open(self.native)
+        self.out_capture = BoundedCapture(head_cap, tail_cap)
+        self.err_capture = BoundedCapture(head_cap, tail_cap)
+        self.active = True
+        self.generation = generation
+        self.tag = tag
+        self.timeout_ms = spec.timeout_ms
+        self.grace_ms = spec.grace_ms
+        self.stdout_open = True
+        self.stderr_open = True
+        self.setup_outcome = _SETUP_WAITING
+        self.leader_waitable = False
+        self.draining = False
+        self.drain_deadline = 0
+        self.group_swept = False
+        self.killing = False
+        self.escalated = False
+        self.timed_out = False
+        self.kill_time = 0
+        self.has_kill_cause = False
+        self.kill_cause_value = 0
+
+
+struct Supervisor(Movable):
+    """Capacity-N supervision over the native exec adapter.
+
+    A Supervisor drives up to `capacity` live children at once, each through the
+    same per-slot lifecycle the capacity-1 run uses: RESOLVING (setup fd in the
+    poll set) -> RUNNING -> a per-slot bounded post-death DRAINING window ->
+    finalized only when its leader is reaped, its group is swept, and every
+    channel (the setup channel included) is closed. EOF alone never finalizes a
+    slot and a missing EOF never wedges one.
+
+    `spawn` is non-blocking and returns an opaque `SlotId`; `wait_any` runs one
+    globally budgeted, fair sweep across every live slot and returns the next
+    finalized slot's `Completion` (its fields extracted before the slot is
+    recycled); `kill_all` tears every live group down through the two-pass
+    protocol; `in_flight` reports how many slots are live.
+    """
+
+    var capacity: Int
+    var head_cap: Int
+    var tail_cap: Int
+    var slots: List[_Slot]
+    var cursor: Int
+    var next_generation: Int
+    var scratch: _NativeBuffers
+    var poll_handles: _U64Ptr
+    var poll_results: _BytePtr
+
+    def __init__(
+        out self, capacity: Int, capture_bound_bytes: Int = _DEFAULT_CAP_BYTES
+    ) raises:
+        """Allocate the shared poll-set buffers for up to `capacity` children.
+
+        Args:
+            capacity: The maximum number of simultaneously live children, in
+                `1 ..= 64`.
+            capture_bound_bytes: The positive per-stream head+tail capture bound
+                each child's captures honor.
+
+        Raises:
+            Error: When `capacity` or the capture bound is out of range.
+        """
+        if capacity < 1 or capacity > _COMPILE_CAP:
+            raise Error(
+                "exec: supervisor capacity must be in 1..="
+                + String(_COMPILE_CAP)
+                + ", got "
+                + String(capacity)
+            )
+        if capture_bound_bytes <= 0:
+            raise Error("exec: capture bound must be positive")
+        self.capacity = capacity
+        self.head_cap = capture_bound_bytes // 2
+        self.tail_cap = capture_bound_bytes - self.head_cap
+        self.slots = List[_Slot]()
+        self.cursor = 0
+        self.next_generation = 1
+        var dummy = ProcessSpec.command(["mtest-supervisor-scratch"], 0)
+        self.scratch = _NativeBuffers(dummy)
+        # SAFETY: these two records are sized to the fixed capacity and owned
+        # solely by this Supervisor; `poll_handles` holds `capacity` tokens and
+        # `poll_results` `capacity` 8-byte poll-result records. Both are freed in
+        # `__del__` and C retains neither across a `poll_set` call.
+        self.poll_handles = alloc[UInt64](capacity)
+        self.poll_results = alloc[UInt8](capacity * 8)
+        memset_zero(self.poll_handles.bitcast[UInt8](), capacity * 8)
+        memset_zero(self.poll_results, capacity * 8)
+
+    def __del__(deinit self):
+        """Best-effort teardown of any slot left in flight, then free buffers.
+        """
+        # SAFETY: an abandoned live slot is torn down through the native abort,
+        # which consumes its handle; failures cannot be raised from a destructor,
+        # so callers use `kill_all`/`wait_any` for a reported teardown.
+        for i in range(len(self.slots)):
+            if self.slots[i].active:
+                _ = _abort_process(self.slots[i].handle, self.slots[i].native)
+                self.slots[i].active = False
+        # SAFETY: this Supervisor uniquely owns both poll-set records and frees
+        # each exactly once; C retained neither.
+        self.poll_handles.free()
+        self.poll_results.free()
+
+    def in_flight(self) -> Int:
+        """How many slots currently hold a live, unfinalized child."""
+        var n = 0
+        for i in range(len(self.slots)):
+            if self.slots[i].active:
+                n += 1
+        return n
+
+    def slot_is_live(self, slot: SlotId) -> Bool:
+        """Whether `slot` still names a live child (rejects a recycled token).
+
+        Args:
+            slot: A `SlotId` returned by `spawn`.
+
+        Returns:
+            True only when the slot is still active and its generation matches;
+            a token whose slot has been recycled is rejected.
+        """
+        if slot.index < 0 or slot.index >= len(self.slots):
+            return False
+        return (
+            self.slots[slot.index].active
+            and self.slots[slot.index].generation == slot.generation
+        )
+
+    def spawn(mut self, var spec: ProcessSpec, tag: Int) raises -> SlotId:
+        """Open one child non-blocking and admit it to a slot.
+
+        Args:
+            spec: The command, optional cwd, and deadline. Consumed.
+            tag: The caller's opaque identity, returned in this run's
+                `Completion` so correlation never goes through a recycled index.
+
+        Returns:
+            An opaque `SlotId` naming the admitted slot and its generation.
+
+        Raises:
+            Error: An empty argv, a full Supervisor, or a native open failure.
+                A per-child spawn failure is not this error: it resolves through
+                the slot's eventual `Completion` as a `SpawnFailed` termination.
+        """
+        if len(spec.argv) == 0:
+            raise Error("exec: spawn got an empty argv")
+        var idx = -1
+        for i in range(len(self.slots)):
+            if not self.slots[i].active:
+                idx = i
+                break
+        if idx == -1 and len(self.slots) >= self.capacity:
+            raise Error("exec: supervisor is at capacity")
+        var generation = self.next_generation
+        self.next_generation += 1
+        if idx == -1:
+            self.slots.append(
+                _Slot(spec^, tag, generation, self.head_cap, self.tail_cap)
+            )
+            idx = len(self.slots) - 1
+        else:
+            self.slots[idx] = _Slot(
+                spec^, tag, generation, self.head_cap, self.tail_cap
+            )
+        return SlotId(idx, generation)
+
+    def wait_any(mut self, slice_ms: Int) raises -> Optional[Completion]:
+        """Run one fair sweep and return the next finalized slot's `Completion`.
+
+        The sweep, in fixed order: evaluate every live slot's deadline against
+        one monotonic timestamp FIRST; THEN read `interrupt_count()` once and
+        apply interrupt kills (and a second-activation SIGKILL escalation) to the
+        still-unlatched slots; escalate per-slot graces; observe leaders and
+        drain the setup channel; block once in `poll_set` across every live
+        channel; drain ready channels under a global byte and time budget with a
+        rotating cursor; then finalize the first slot whose terminal predicate
+        holds. A machinery fault tears the Supervisor down (single live slot via
+        the native abort; multiple via the two-pass protocol) and re-raises the
+        primary error with any cleanup failure appended.
+
+        Args:
+            slice_ms: The maximum time the one blocking `poll_set` may wait.
+
+        Returns:
+            The next finalized slot's `Completion`, or `None` when no slot
+            finalized this sweep.
+
+        Raises:
+            Error: A runner-machinery failure, or the descendant-retained-pipe
+                honesty error for a slot whose pipe outlived the drain window.
+        """
+        if self.in_flight() == 0:
+            return None
+        try:
+            return self._sweep(slice_ms)
+        except err:
+            raise self._cleanup_after_fault(String(err))
+
+    def kill_all(mut self) raises:
+        """Tear every live group down through the two-pass protocol.
+
+        Pass one SIGTERMs every live group; a single shared grace window then
+        lets streams drain opportunistically; pass two SIGKILLs every survivor
+        and reaps and closes every slot regardless of individual failures.
+
+        Raises:
+            Error: When cleanup could not complete for some slot; the message
+                aggregates each slot's failure.
+        """
+        var live = List[Int]()
+        for i in range(len(self.slots)):
+            if self.slots[i].active:
+                live.append(i)
+        if len(live) == 0:
+            return
+        var notes = self._two_pass_cleanup(live)
+        if notes != "":
+            raise Error("exec: supervisor kill_all cleanup incomplete" + notes)
+
+    def _now(mut self) raises -> Int:
+        """Read the shared monotonic clock through the scratch record."""
+        return _monotonic_ms(self.scratch)
+
+    def _initiate_kill(mut self, i: Int, cause_value: Int, now: Int) raises:
+        """SIGTERM one slot's group and latch its kill cause (once)."""
+        _ = _group(self.slots[i].handle, _GROUP_TERM, self.slots[i].native)
+        self.slots[i].killing = True
+        self.slots[i].timed_out = True
+        self.slots[i].kill_time = now
+        if not self.slots[i].has_kill_cause:
+            self.slots[i].has_kill_cause = True
+            self.slots[i].kill_cause_value = cause_value
+
+    def _clamp_timeout(self, slice_ms: Int, now: Int) -> Int:
+        """Clamp the blocking wait to the nearest deadline or drain window."""
+        var timeout = slice_ms
+        for i in range(len(self.slots)):
+            if not self.slots[i].active:
+                continue
+            if self.slots[i].draining:
+                if (
+                    not self.slots[i].stdout_open
+                    and not self.slots[i].stderr_open
+                ):
+                    return 0
+                var remaining = self.slots[i].drain_deadline - now
+                if remaining < timeout:
+                    timeout = remaining
+            elif (
+                self.slots[i].timeout_ms > 0
+                and not self.slots[i].killing
+                and not self.slots[i].leader_waitable
+            ):
+                var remaining = self.slots[i].timeout_ms - (
+                    now - self.slots[i].start_ms
+                )
+                if remaining < timeout:
+                    timeout = remaining
+        if timeout < 0:
+            timeout = 0
+        return timeout
+
+    def _poll_set(mut self, timeout_ms: Int) raises:
+        """Block once across every live slot's channels (the shared multiplex).
+
+        This is the one place a sweep sleeps, so a draining slot never blocks a
+        live sibling; per-slot readiness is re-read non-blocking during the
+        drain phase.
+        """
+        var count = 0
+        for i in range(len(self.slots)):
+            if self.slots[i].active:
+                # SAFETY: `poll_handles` owns `capacity` slots and `count` never
+                # exceeds the number of active slots, itself bounded by capacity.
+                self.poll_handles[count] = self.slots[i].handle
+                count += 1
+        if count == 0:
+            return
+        # SAFETY: `poll_handles`/`poll_results` are the capacity-sized owned
+        # records, `count` is bounded by capacity, and the scratch error record
+        # is complete and aligned; C validates the count and retains no pointer.
+        var status = _native_poll_set(
+            self.poll_handles,
+            UInt64(count),
+            Int32(timeout_ms),
+            self.poll_results,
+            self.scratch.error.bitcast[UInt8](),
+        )
+        if status != 0:
+            raise Error(
+                _native_error("exec: poll set failed", self.scratch.error)
+            )
+
+    def _drain_sweep(mut self) raises:
+        """Fair, globally budgeted drain with a cursor persisted across sweeps.
+
+        Visits live slots round-robin from the persisted cursor, reading one
+        `_BUFSIZE` quantum per ready channel per visit and charging it against a
+        shared byte budget; a monotonic-time budget also ends the sweep early.
+        Work not reached this sweep resumes at the cursor next sweep.
+        """
+        var n = len(self.slots)
+        if n == 0:
+            return
+        var bytes_left = _SWEEP_BYTE_BUDGET
+        var start_ms = self._now()
+        var stopped_at = self.cursor % n
+        var resumed = False
+        for step in range(n):
+            var i = (self.cursor + step) % n
+            if not self.slots[i].active:
+                continue
+            if (
+                bytes_left <= 0
+                or self._now() - start_ms >= _SWEEP_TIME_BUDGET_MS
+            ):
+                stopped_at = i
+                resumed = True
+                break
+            var readiness = _poll(self.slots[i].handle, 0, self.slots[i].native)
+            if self.slots[i].stdout_open and (readiness & _READY_STDOUT) != 0:
+                var state = _read_quantum(
+                    self.slots[i].handle,
+                    _CHANNEL_STDOUT,
+                    self.slots[i].out_capture,
+                    self.slots[i].native,
+                )
+                if state == _READ_EOF:
+                    self.slots[i].stdout_open = False
+                elif state == _READ_BYTES:
+                    bytes_left -= Int(self.slots[i].native.read_result[1])
+            if self.slots[i].stderr_open and (readiness & _READY_STDERR) != 0:
+                var state = _read_quantum(
+                    self.slots[i].handle,
+                    _CHANNEL_STDERR,
+                    self.slots[i].err_capture,
+                    self.slots[i].native,
+                )
+                if state == _READ_EOF:
+                    self.slots[i].stderr_open = False
+                elif state == _READ_BYTES:
+                    bytes_left -= Int(self.slots[i].native.read_result[1])
+        if resumed:
+            self.cursor = stopped_at
+        else:
+            self.cursor = (self.cursor + 1) % n
+
+    def _sweep(mut self, slice_ms: Int) raises -> Optional[Completion]:
+        """One fair sweep; see `wait_any` for the fixed observation order."""
+        var now = self._now()
+        var n = len(self.slots)
+
+        # (1) Deadlines observed FIRST against one sweep timestamp.
+        for i in range(n):
+            if not self.slots[i].active:
+                continue
+            if self.slots[i].leader_waitable or self.slots[i].killing:
+                continue
+            if (
+                self.slots[i].timeout_ms > 0
+                and now - self.slots[i].start_ms >= self.slots[i].timeout_ms
+            ):
+                self._initiate_kill(i, _KILL_DEADLINE, now)
+
+        # (2) THEN the interrupt state, read once and applied to the rest.
+        var activations = interrupt_count()
+        if activations >= 1:
+            for i in range(n):
+                if not self.slots[i].active:
+                    continue
+                if self.slots[i].leader_waitable or self.slots[i].killing:
+                    continue
+                self._initiate_kill(i, _KILL_INTERRUPT, now)
+        if activations >= 2:
+            for i in range(n):
+                if not self.slots[i].active or self.slots[i].leader_waitable:
+                    continue
+                _ = _group(
+                    self.slots[i].handle, _GROUP_KILL, self.slots[i].native
+                )
+                self.slots[i].escalated = True
+
+        # (3) Per-slot SIGTERM->SIGKILL grace escalation.
+        for i in range(n):
+            if not self.slots[i].active or self.slots[i].leader_waitable:
+                continue
+            if self.slots[i].killing and not self.slots[i].escalated:
+                if now - self.slots[i].kill_time >= self.slots[i].grace_ms:
+                    _ = _group(
+                        self.slots[i].handle, _GROUP_KILL, self.slots[i].native
+                    )
+                    self.slots[i].escalated = True
+
+        # (4) Observe leaders, drain setup, and transition finished leaders.
+        for i in range(n):
+            if not self.slots[i].active or self.slots[i].draining:
+                continue
+            if not self.slots[i].leader_waitable:
+                if (
+                    _observe(self.slots[i].handle, self.slots[i].native)
+                    == _LEADER_WAITABLE
+                ):
+                    self.slots[i].leader_waitable = True
+            if self.slots[i].setup_outcome == _SETUP_WAITING:
+                self.slots[i].setup_outcome = _setup_drain(
+                    self.slots[i].handle, self.slots[i].native
+                )
+            if (
+                self.slots[i].leader_waitable
+                and self.slots[i].setup_outcome != _SETUP_WAITING
+            ):
+                # Keep the observed leader waitable while residual group members
+                # are killed and inherited pipe writers are drained.
+                _ = _group(
+                    self.slots[i].handle, _GROUP_KILL, self.slots[i].native
+                )
+                self.slots[i].group_swept = True
+                self.slots[i].draining = True
+                self.slots[i].drain_deadline = now + _POST_LEADER_MS
+
+        # (5) The one blocking multiplex across every live channel.
+        self._poll_set(self._clamp_timeout(slice_ms, now))
+
+        # (6) Fair, globally budgeted drain.
+        self._drain_sweep()
+
+        # (7) Finalize the first slot whose terminal predicate holds.
+        var final_now = self._now()
+        for i in range(n):
+            if not self.slots[i].active or not self.slots[i].draining:
+                continue
+            var both_closed = (
+                not self.slots[i].stdout_open and not self.slots[i].stderr_open
+            )
+            if both_closed or final_now >= self.slots[i].drain_deadline:
+                return Optional(self._finalize(i))
+        return None
+
+    def _finalize(mut self, i: Int) raises -> Completion:
+        """Force-close, reap, classify, and recycle one terminal slot.
+
+        The terminal predicate is `reaped && group_swept && all channels
+        closed`. Any channel still open at window expiry is force-closed and
+        surfaces the descendant-retained-pipe honesty error rather than
+        laundering the leader's exit into a clean pass.
+        """
+        var abnormal = String("")
+        if self.slots[i].setup_outcome == _SETUP_CORRUPT:
+            abnormal = "exec: corrupt child setup record"
+        elif (
+            self.slots[i].setup_outcome != _SETUP_EXEC_SUCCEEDED
+            and self.slots[i].setup_outcome != _SETUP_SPAWN_FAILED
+        ):
+            abnormal = "exec: invalid child setup outcome"
+
+        if self.slots[i].stdout_open:
+            _close_channel(
+                self.slots[i].handle, _CHANNEL_STDOUT, self.slots[i].native
+            )
+        if self.slots[i].stderr_open:
+            _close_channel(
+                self.slots[i].handle, _CHANNEL_STDERR, self.slots[i].native
+            )
+        if (
+            self.slots[i].stdout_open or self.slots[i].stderr_open
+        ) and abnormal == "":
+            abnormal = (
+                "exec: descendant retained a capture pipe past the cleanup"
+                " deadline"
+            )
+
+        var final = _reap(self.slots[i].handle, self.slots[i].native)
+        var duration_ms = self._now() - self.slots[i].start_ms
+
+        if abnormal != "":
+            raise Error(abnormal)
+
+        var termination: Termination
+        if self.slots[i].timed_out:
+            termination = Termination.timed_out(
+                final.kind, final.value, self.slots[i].escalated
+            )
+        elif self.slots[i].setup_outcome == _SETUP_SPAWN_FAILED:
+            # SAFETY: a validated setup frame fixes stage at byte 16 and errno at
+            # byte 20. SpawnFailed carries the child-side setup/exec errno.
+            var error_number = Int(
+                self.slots[i].native.setup_state.bitcast[Int32]()[5]
+            )
+            termination = Termination.spawn_failed(error_number)
+        else:
+            termination = final
+
+        var stdout_truncated = self.slots[i].out_capture.was_truncated()
+        var stderr_truncated = self.slots[i].err_capture.was_truncated()
+        var stdout_bytes = self.slots[i].out_capture.finish()
+        var stderr_bytes = self.slots[i].err_capture.finish()
+        if self.slots[i].setup_outcome == _SETUP_SPAWN_FAILED:
+            stdout_bytes = List[UInt8]()
+            stderr_bytes = List[UInt8]()
+            stdout_truncated = False
+            stderr_truncated = False
+
+        _process_close(self.slots[i].handle, self.slots[i].native)
+
+        var kill_cause = Optional[KillCause](None)
+        if self.slots[i].has_kill_cause:
+            kill_cause = Optional(KillCause(self.slots[i].kill_cause_value))
+        var tag = self.slots[i].tag
+        self.slots[i].active = False
+        return Completion(
+            tag,
+            ProcessResult(
+                stdout_bytes^,
+                stderr_bytes^,
+                stdout_truncated,
+                stderr_truncated,
+                termination,
+                duration_ms,
+            ),
+            kill_cause^,
+        )
+
+    def _cleanup_after_fault(mut self, primary: String) -> Error:
+        """Tear the Supervisor down after a machinery fault; preserve `primary`.
+
+        A single live slot is aborted through the native abort (the capacity-1
+        cleanup contract, message-compatible with the direct-supervision path);
+        multiple live slots go through the shared-grace two-pass protocol.
+        """
+        var live = List[Int]()
+        for i in range(len(self.slots)):
+            if self.slots[i].active:
+                live.append(i)
+        var suffix = String("")
+        if len(live) == 1:
+            var i = live[0]
+            suffix = _abort_process(self.slots[i].handle, self.slots[i].native)
+            self.slots[i].active = False
+        elif len(live) > 1:
+            suffix = self._two_pass_cleanup(live)
+        return Error(primary + suffix)
+
+    def _two_pass_cleanup(mut self, live: List[Int]) -> String:
+        """SIGTERM all -> one shared grace -> SIGKILL all -> reap/close all.
+
+        Never a per-slot TERM->grace->KILL, which would stack grace windows.
+        Individual failures are aggregated and the groups are torn down
+        regardless, so no process group survives.
+        """
+        var notes = String("")
+        # Pass one: SIGTERM every live group.
+        for k in range(len(live)):
+            var i = live[k]
+            try:
+                _ = _group(
+                    self.slots[i].handle, _GROUP_TERM, self.slots[i].native
+                )
+            except term_error:
+                notes += "; " + String(term_error)
+
+        # One shared grace window (never a per-slot grace): a bounded run of
+        # short opportunistic waits in poll_set, draining survivors' streams.
+        for _ in range(_GRACE_MS // _POST_LEADER_SLICE_MS):
+            try:
+                self._poll_set(_POST_LEADER_SLICE_MS)
+            except:
+                pass
+
+        # Pass two: SIGKILL every survivor, then reap and close every slot.
+        for k in range(len(live)):
+            var i = live[k]
+            try:
+                _ = _group(
+                    self.slots[i].handle, _GROUP_KILL, self.slots[i].native
+                )
+            except kill_error:
+                notes += "; " + String(kill_error)
+        for k in range(len(live)):
+            var i = live[k]
+            # Observe the now-killed leader waitable before reaping it; a fresh
+            # slot may not have been observed on the sweep the fault interrupted.
+            var observed = self.slots[i].leader_waitable
+            for _ in range(200):
+                if observed:
+                    break
+                try:
+                    observed = (
+                        _observe(self.slots[i].handle, self.slots[i].native)
+                        == _LEADER_WAITABLE
+                    )
+                except observe_error:
+                    notes += "; " + String(observe_error)
+                    break
+                if not observed:
+                    try:
+                        self._poll_set(_POST_LEADER_SLICE_MS)
+                    except:
+                        pass
+            try:
+                _close_channel(
+                    self.slots[i].handle, _CHANNEL_STDOUT, self.slots[i].native
+                )
+            except:
+                pass
+            try:
+                _close_channel(
+                    self.slots[i].handle, _CHANNEL_STDERR, self.slots[i].native
+                )
+            except:
+                pass
+            if observed:
+                try:
+                    _ = _reap(self.slots[i].handle, self.slots[i].native)
+                except reap_error:
+                    notes += "; " + String(reap_error)
+            try:
+                _process_close(self.slots[i].handle, self.slots[i].native)
+            except close_error:
+                notes += "; " + String(close_error)
+            self.slots[i].active = False
+        return notes^
