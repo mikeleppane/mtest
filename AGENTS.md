@@ -338,16 +338,14 @@ trap and its correct move.
   parent's read blocked forever. The child after `fork` may call only
   async-signal-safe functions before `exec`. `/bin/sh -c` is not a
   substitute. This machinery now ships in the native C adapter.
-- Native adapter ABI v2 admits a pool; supervision still drives one child at a
-  time (for now). The adapter keeps a fixed slot table
-  (`MTEST_EXEC_SLOT_CAPACITY`, 64): `process_open` claims a FREE slot with a
-  per-slot compare-exchange and only fails `EBUSY` when every slot is ACTIVE
-  (capacity exhausted, `error.detail == 0`) or the runtime is unusable, so a
-  second `process_open` now SUCCEEDS into another slot. `runtime_close` drains
-  every live handle. The higher-level SUPERVISION contract is still capacity-1
-  (the sequential driver runs one child per step); running the pool
-  concurrently is a later, gated change to the Mojo side, never a workaround.
-  Any adapter change is a deliberate gated edit to `native/`.
+- Native adapter ABI v2 admits a pool: a fixed slot table
+  (`MTEST_EXEC_SLOT_CAPACITY`, 64) where `process_open` claims a free slot and
+  `EBUSY` means only capacity exhausted or an unusable runtime — so a second
+  `process_open` now SUCCEEDS. Supervision still drives one child at a time: the
+  higher-level contract stays capacity-1 (the sequential driver runs one child
+  per step). Running the pool concurrently is a later, gated change to the Mojo
+  side, never a workaround; any adapter change is a deliberate gated edit to
+  `native/`.
 - Signal handling and the supervision syscalls live in the native C adapter,
   not Mojo FFI. `src/mtest/exec/signals.mojo` calls the `mtest_exec_*` ABI;
   the interrupt latch surfaces as `interrupt_requested() -> Bool`. Never
