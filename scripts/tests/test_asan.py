@@ -21,6 +21,7 @@ class AsanCheckTests(unittest.TestCase):
             tuple(path.relative_to(asan_check.ROOT).as_posix() for path in asan_check.TESTS),
             (
                 "tests/integration/test_exec_capture.mojo",
+                "tests/integration/test_exec_env.mojo",
                 "tests/integration/test_exec_flood.mojo",
                 "tests/integration/test_exec_timeout.mojo",
                 "tests/integration/test_exec_interrupt.mojo",

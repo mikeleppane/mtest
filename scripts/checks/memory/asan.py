@@ -21,6 +21,7 @@ NATIVE_PRODUCTION_OBJECT = OUT / "mtest_exec_native.o"
 NATIVE_OBJECT = OUT / "mtest_exec_native_test.o"
 TESTS = (
     ROOT / "tests" / "integration" / "test_exec_capture.mojo",
+    ROOT / "tests" / "integration" / "test_exec_env.mojo",
     ROOT / "tests" / "integration" / "test_exec_flood.mojo",
     ROOT / "tests" / "integration" / "test_exec_timeout.mojo",
     ROOT / "tests" / "integration" / "test_exec_interrupt.mojo",

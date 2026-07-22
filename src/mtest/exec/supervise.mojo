@@ -89,6 +89,7 @@ struct _NativeBuffers(Movable):
 
     var owned_strings: List[_BytePtr]
     var argv_records: _U64Ptr
+    var env_records: _U64Ptr
     var spec_record: _U64Ptr
     var error: _U64Ptr
     var process_ref: _U64Ptr
@@ -114,6 +115,12 @@ struct _NativeBuffers(Movable):
         # complete fixed layouts asserted by the C header; every allocation has
         # this object as its sole owner and is freed in `__del__`.
         self.argv_records = alloc[UInt64](len(spec.argv) * 2)
+        # SAFETY: this object solely owns the env-extra records array, one 16-byte
+        # {data,length} record per override entry, freed in `__del__`. A nonzero
+        # count writes every slot below before C reads it; a zero count yields an
+        # untouched zero-length span the NULL/0 spec never wires in, so this
+        # allocation needs no zeroing.
+        self.env_records = alloc[UInt64](len(spec.env_extra) * 2)
         self.spec_record = alloc[UInt64](7)
         self.error = alloc[UInt64](4)
         self.process_ref = alloc[UInt64](2)
@@ -160,12 +167,29 @@ struct _NativeBuffers(Movable):
         # fixed-width fields; every slot was zeroed first, so reserved=0.
         self.spec_record.bitcast[_U64Ptr]()[0] = self.argv_records
         self.spec_record[1] = UInt64(len(spec.argv))
-        # SAFETY: the two ABI-v2 spec tail slots are the env-extra pointer at
-        # u64 index 5 (byte 40) and its count at index 6 (byte 48). This commit
-        # writes NULL/0 explicitly -- child environment overrides land later, so
-        # a zero count reproduces the v1 environment snapshot byte for byte.
-        self.spec_record[5] = UInt64(0)
-        self.spec_record[6] = UInt64(0)
+        # The two ABI-v2 spec tail slots are the env-extra records pointer at u64
+        # index 5 (byte 40) and its count at index 6 (byte 48). A zero count keeps
+        # both slots NULL/0, reproducing the v1 environment snapshot byte for byte;
+        # a nonzero count hands C the raw override records, which it validates and
+        # merges replace-not-append before fork.
+        if len(spec.env_extra) == 0:
+            self.spec_record[5] = UInt64(0)
+            self.spec_record[6] = UInt64(0)
+        else:
+            for i in range(len(spec.env_extra)):
+                var copied = _copy_c_string(spec.env_extra[i])
+                self.owned_strings.append(copied)
+                # SAFETY: `owned_strings` owns this initialized allocation until
+                # the native open has copied exactly the recorded number of bytes.
+                self.env_records.bitcast[_BytePtr]()[i * 2] = copied
+                self.env_records[i * 2 + 1] = UInt64(
+                    spec.env_extra[i].byte_length()
+                )
+            # SAFETY: the env-extra spec field is a non-retained pointer to the
+            # complete 16-byte records above, which outlive the synchronous
+            # `process_open`; C copies each entry and retains no Mojo pointer.
+            self.spec_record.bitcast[_U64Ptr]()[5] = self.env_records
+            self.spec_record[6] = UInt64(len(spec.env_extra))
         if spec.cwd:
             var copied = _copy_c_string(spec.cwd.value())
             self.owned_strings.append(copied)
@@ -188,6 +212,7 @@ struct _NativeBuffers(Movable):
         # SAFETY: C retained none of these aligned ABI-record pointers; this
         # object uniquely owns each allocation and frees each exactly once.
         self.argv_records.free()
+        self.env_records.free()
         self.spec_record.free()
         self.error.free()
         self.process_ref.free()

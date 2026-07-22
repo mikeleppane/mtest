@@ -89,6 +89,7 @@ INTEGRATION_SUITES = {
     "test_discover_walk.mojo",
     "test_exec_capture.mojo",
     "test_exec_decode.mojo",
+    "test_exec_env.mojo",
     "test_exec_etxtbsy.mojo",
     "test_exec_fdhygiene.mojo",
     "test_exec_flood.mojo",
@@ -122,6 +123,7 @@ CLASSIFIED_PATHS = (
     "tests/integration/test_discover_walk.mojo",
     "tests/integration/test_exec_capture.mojo",
     "tests/integration/test_exec_decode.mojo",
+    "tests/integration/test_exec_env.mojo",
     "tests/integration/test_exec_etxtbsy.mojo",
     "tests/integration/test_exec_fdhygiene.mojo",
     "tests/integration/test_exec_flood.mojo",
@@ -199,7 +201,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 973
+CLASSIFIED_TEST_COUNT = 980
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",
@@ -211,12 +213,15 @@ EXEC_FIXTURES = {
     "argv_echoer.py",
     "close_streams_then_hang.py",
     "dual_flooder.py",
+    "env_echo.py",
     "escaped_pipe_holder.py",
     "etxtbsy_target.sh",
     "exit_nonzero.py",
     "flooding_grandchild.py",
     "grandchild_exit0.py",
     "grandchild_spawner.py",
+    "path_probe.sh",
+    "path_resolver.py",
     "self_signaler.py",
     "sigterm_grace_exit.py",
     "sigterm_ignorer.py",

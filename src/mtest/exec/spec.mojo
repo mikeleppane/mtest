@@ -4,8 +4,8 @@
 shell, so `argv[0]` is the program and the rest are literal arguments), an
 optional working directory, a deadline in milliseconds, and the
 SIGTERM->SIGKILL grace the supervisor honors when that deadline (or an
-interrupt) fires. It also carries a reserved env-extension field, present so
-the shape is stable but not read: child environment mutation is out of scope.
+interrupt) fires. It also carries an optional list of `KEY=VALUE` environment
+overrides the child receives on top of the inherited environment.
 
 The grace is per-spawn rather than one global constant because the right answer
 depends on what is being killed. A test binary owes nothing on the way out, so
@@ -40,7 +40,17 @@ struct ProcessSpec(Copyable, Movable):
     var grace_ms: Int
     """Milliseconds between the process-group SIGTERM and the SIGKILL."""
     var env_extra: List[String]
-    """Reserved for a future child-environment extension; not read today."""
+    """`KEY=VALUE` environment overrides applied on top of the inherited
+    environment.
+
+    Each entry must have a `=` with a nonempty key and no NUL byte, and no key
+    may repeat across the list. The adapter merges them replace-not-append: an
+    override whose key is already inherited replaces every inherited occurrence,
+    leaving no duplicate, and PATH-based resolution reads the merged environment
+    so a `PATH=` override governs it. An empty list leaves the inherited
+    environment untouched. Validation and the merge live in the C adapter; this
+    field carries the raw entries across.
+    """
 
     @staticmethod
     def command(
