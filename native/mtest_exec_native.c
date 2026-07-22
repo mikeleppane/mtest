@@ -72,12 +72,27 @@ enum mtest_runtime_state {
     MTEST_RUNTIME_RESTORE_REQUIRED = 4
 };
 
-/* SAFETY: the signal handler accesses only `mtest_interrupt_flag`. Runtime and
-   process state are ordinary-thread state guarded by the one lock-free atomic
-   state machine; ABI v1 rejects a second runtime or active child. */
+/* Fixed-size process registry. Each slot pairs a record with its own lock-free
+   lifecycle latch: a slot is claimed by a FREE->ACTIVE compare-exchange and
+   released back to FREE once its child is fully torn down. The capacity is
+   pinned to one, so exactly one live child is admitted at a time; the loops and
+   the token-validated handle lookup are written to hold for any capacity. */
+#define MTEST_EXEC_SLOT_CAPACITY 1u
+
+enum mtest_slot_lifecycle {
+    MTEST_SLOT_FREE = 0,
+    MTEST_SLOT_ACTIVE = 1
+};
+
+/* SAFETY: the signal handler accesses only `mtest_interrupt_flag`. The runtime
+   state machine and the per-slot lifecycle latches are lock-free atomics; every
+   record field is ordinary-thread state read only after a passing lifecycle and
+   token check. With the table pinned to one slot, a second runtime or a second
+   live child is still rejected exactly as before. */
 static volatile sig_atomic_t mtest_interrupt_flag;
 static _Atomic int mtest_runtime_state;
-static struct mtest_exec_process mtest_process;
+static struct mtest_exec_process mtest_process[MTEST_EXEC_SLOT_CAPACITY];
+static _Atomic int mtest_slot_lifecycle[MTEST_EXEC_SLOT_CAPACITY];
 static uint64_t mtest_next_handle = 1;
 static struct sigaction mtest_old_int;
 static struct sigaction mtest_old_term;
@@ -307,8 +322,21 @@ static void mtest_wait_before_monotonic_if_requested(void) {
         return;
     }
     mtest_monotonic_wait_seen += 1;
-    if (mtest_monotonic_wait_seen != mtest_monotonic_wait_occurrence ||
-        mtest_process.handle == 0 || mtest_process.leader <= 0) {
+    if (mtest_monotonic_wait_seen != mtest_monotonic_wait_occurrence) {
+        return;
+    }
+    /* SAFETY: locate the live child through the slot lifecycle before reading
+       its leader; a FREE slot's record is never consulted. */
+    struct mtest_exec_process *process = NULL;
+    for (size_t index = 0; index < MTEST_EXEC_SLOT_CAPACITY; ++index) {
+        if (atomic_load(&mtest_slot_lifecycle[index]) == MTEST_SLOT_ACTIVE &&
+            mtest_process[index].handle != 0 &&
+            mtest_process[index].leader > 0) {
+            process = &mtest_process[index];
+            break;
+        }
+    }
+    if (process == NULL) {
         return;
     }
     const struct timespec delay = {0, 1000000L};
@@ -321,7 +349,7 @@ static void mtest_wait_before_monotonic_if_requested(void) {
         do {
             wait_status = waitid(
                 P_PID,
-                (id_t)mtest_process.leader,
+                (id_t)process->leader,
                 &information,
                 WEXITED | WNOHANG | WNOWAIT
             );
@@ -329,7 +357,7 @@ static void mtest_wait_before_monotonic_if_requested(void) {
         if (wait_status != 0) {
             return;
         }
-        if (information.si_pid == mtest_process.leader) {
+        if (information.si_pid == process->leader) {
             mtest_monotonic_wait_fired = 1;
             return;
         }
@@ -801,6 +829,49 @@ static struct mtest_exec_plan *mtest_build_plan(
     return plan;
 }
 
+static struct mtest_exec_process *mtest_claim_slot(void) {
+    /* SAFETY: scan for a FREE slot and win it with a FREE->ACTIVE
+       compare-exchange. Only the thread that wins the exchange owns the record,
+       so no two callers ever initialize the same slot. At capacity one a second
+       claim finds no FREE slot and returns NULL, which the caller maps to the
+       same EBUSY the runtime gate already reports. */
+    for (size_t index = 0; index < MTEST_EXEC_SLOT_CAPACITY; ++index) {
+        int expected = MTEST_SLOT_FREE;
+        if (atomic_compare_exchange_strong(
+                &mtest_slot_lifecycle[index], &expected, MTEST_SLOT_ACTIVE
+            )) {
+            return &mtest_process[index];
+        }
+    }
+    return NULL;
+}
+
+static void mtest_release_slot(struct mtest_exec_process *process) {
+    /* SAFETY: `process` points into the slot table, so the difference is its
+       slot index. Clear the record before publishing the slot as FREE, so no
+       later claimer or concurrent lookup can observe a live token over reused
+       storage; a lookup that races the store still rejects a FREE slot. */
+    size_t index = (size_t)(process - mtest_process);
+    memset(process, 0, sizeof(*process));
+    atomic_store(&mtest_slot_lifecycle[index], MTEST_SLOT_FREE);
+}
+
+static uint64_t mtest_first_live_handle(void) {
+    /* SAFETY: a slot's published handle is meaningful only while the slot is
+       ACTIVE; a FREE slot's record is never read. Returns the first live token,
+       or zero when a slot is claimed but has not yet published one (an open
+       still in flight, or one wedged after a failed hand-off). */
+    for (size_t index = 0; index < MTEST_EXEC_SLOT_CAPACITY; ++index) {
+        if (atomic_load(&mtest_slot_lifecycle[index]) == MTEST_SLOT_ACTIVE) {
+            uint64_t handle = mtest_process[index].handle;
+            if (handle != 0) {
+                return handle;
+            }
+        }
+    }
+    return 0;
+}
+
 uint32_t mtest_exec_native_abi_version(void) {
     return MTEST_EXEC_NATIVE_ABI_VERSION;
 }
@@ -1060,11 +1131,12 @@ retry_runtime_ownership:
             &mtest_runtime_state, &expected, MTEST_RUNTIME_OPENING
         )) {
         if (expected == MTEST_RUNTIME_CHILD_ACTIVE) {
-            /* SAFETY: CHILD_ACTIVE means the static process record still owns
-               the sole live handle. Runtime close is the cross-ABI retry token:
-               abort either consumes that record, or leaves it pinned for this
-               same ExecRuntime owner to retry on a later close. */
-            uint64_t handle = mtest_process.handle;
+            /* SAFETY: CHILD_ACTIVE means a claimed slot still owns a live
+               handle. Runtime close is the cross-ABI retry token: abort either
+               consumes that slot, or leaves it pinned for this same ExecRuntime
+               owner to retry on a later close. A slot claimed but not yet
+               publishing a handle reports EBUSY without a token to abort. */
+            uint64_t handle = mtest_first_live_handle();
             if (handle == 0) {
                 mtest_set_error(error, MTEST_EXEC_OP_NONE, EBUSY, 1u, 0);
                 return -1;
@@ -1460,15 +1532,24 @@ static void mtest_child_exec(
 }
 
 static struct mtest_exec_process *mtest_process_from_handle(uint64_t handle) {
-    /* SAFETY: ABI handles are generation tokens, never addresses. Validate the
-       exclusive-child state and exact live token before returning the one
-       static process record; stale/arbitrary integers are never dereferenced. */
-    if (atomic_load(&mtest_runtime_state) != MTEST_RUNTIME_CHILD_ACTIVE ||
-        handle == 0 || handle != mtest_process.handle) {
+    /* SAFETY: ABI handles are generation tokens, never addresses. A zero handle
+       is never live. Otherwise scan the slot table and consult each slot's
+       lifecycle latch before touching its record, returning the record only
+       when the slot is ACTIVE and its published token matches exactly. A FREE
+       slot's fields are never read, so a stale or arbitrary integer is never
+       dereferenced. */
+    if (handle == 0) {
         errno = EINVAL;
         return NULL;
     }
-    return &mtest_process;
+    for (size_t index = 0; index < MTEST_EXEC_SLOT_CAPACITY; ++index) {
+        if (atomic_load(&mtest_slot_lifecycle[index]) == MTEST_SLOT_ACTIVE &&
+            mtest_process[index].handle == handle) {
+            return &mtest_process[index];
+        }
+    }
+    errno = EINVAL;
+    return NULL;
 }
 
 static void mtest_cleanup_pipes(int stdout_pipe[2], int stderr_pipe[2], int setup_pipe[2]) {
@@ -1531,7 +1612,16 @@ int32_t mtest_exec_process_open(
         atomic_store(&mtest_runtime_state, MTEST_RUNTIME_OPEN);
         return -1;
     }
-    struct mtest_exec_process *process = &mtest_process;
+    struct mtest_exec_process *process = mtest_claim_slot();
+    if (process == NULL) {
+        /* The runtime gate above admits one child at a time, so at capacity one
+           the sole slot is always FREE here; a larger table can nonetheless
+           exhaust its slots, which is the same busy condition. */
+        mtest_free_plan(plan);
+        atomic_store(&mtest_runtime_state, MTEST_RUNTIME_OPEN);
+        mtest_set_error(error, MTEST_EXEC_OP_NONE, EBUSY, 0, 0);
+        return -1;
+    }
     memset(process, 0, sizeof(*process));
     process->stdout_fd = -1;
     process->stderr_fd = -1;
@@ -1542,6 +1632,7 @@ int32_t mtest_exec_process_open(
         mtest_prepare_pipe(setup_pipe, MTEST_EXEC_OP_PIPE_SETUP, error) != 0) {
         mtest_cleanup_pipes(stdout_pipe, stderr_pipe, setup_pipe);
         mtest_free_plan(plan);
+        mtest_release_slot(process);
         atomic_store(&mtest_runtime_state, MTEST_RUNTIME_OPEN);
         return -1;
     }
@@ -1558,6 +1649,7 @@ int32_t mtest_exec_process_open(
         int saved_errno = errno;
         mtest_cleanup_pipes(stdout_pipe, stderr_pipe, setup_pipe);
         mtest_free_plan(plan);
+        mtest_release_slot(process);
         atomic_store(&mtest_runtime_state, MTEST_RUNTIME_OPEN);
         mtest_set_error(error, MTEST_EXEC_OP_FORK, saved_errno, 0, 0);
         return -1;
@@ -1602,6 +1694,7 @@ int32_t mtest_exec_process_open(
                    EINTR; the test seam reaches this terminal invariant. */
                 return -1;
             }
+            mtest_release_slot(process);
             atomic_store(&mtest_runtime_state, MTEST_RUNTIME_OPEN);
             return -1;
         }
@@ -2205,9 +2298,10 @@ static int mtest_process_all_channels_closed(
 
 static void mtest_free_process(struct mtest_exec_process *process) {
     /* SAFETY: callers reach this only after the leader is reaped, its owned
-       process group is gone, and all three read channels are closed. Clearing
-       the sole static record invalidates the token before runtime reuse. */
-    memset(process, 0, sizeof(*process));
+       process group is gone, and all three read channels are closed. Releasing
+       the slot clears the record and invalidates its token before the runtime
+       returns to OPEN for reuse. */
+    mtest_release_slot(process);
     atomic_store(&mtest_runtime_state, MTEST_RUNTIME_OPEN);
 }
 
