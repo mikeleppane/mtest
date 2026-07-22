@@ -213,3 +213,76 @@ audited boundaries — the platform module and `exec`/`native` — rather than
 claiming all FFI lives in `exec`. Done in three slices (pid, rename, stream),
 each green on `ci`, `safety-check`, `postfork-check` and `native-check`, with
 the dead-pipe and artifact-preservation e2e scenarios passing.
+
+## Typed event payloads
+
+`55e073e` `54b6a4d`, fixes `94de8bc` `9bffc72`
+
+`model/events.mojo` was one all-fields `Event` struct plus a `_blank(kind)`
+that initialized every unrelated payload, tagged by `EventKind`. A reporter
+could read a field meaningless for the current kind and the compiler could not
+object. The event set becomes type-safe: one payload struct per kind, held in a
+closed `Variant`, with the outer `Event` type name, the factory method names
+and signatures, and every serialized NDJSON byte unchanged. The tag is derived
+from each payload's `KIND` constant rather than passed in, so kind and payload
+cannot disagree; a field meaningless for a kind is simply not on that kind's
+payload.
+
+This landed before the worker-pool phase deliberately, so that `Progress` and
+the new per-kind fields it adds are built on the typed representation rather
+than migrated onto it afterward.
+
+The spike proved `Variant` reproduces the exact bytes on the pinned compiler
+before the full migration — a byte-pinned test written RED then green on two
+kinds. The byte-identity of the whole set rests on the serializer bodies being
+character-identical modulo the payload accessor, against fixtures that were not
+touched: an adversarial review confirmed the fixtures are absent from the diff
+and the emitting code is unchanged, so the bytes cannot have moved. The review
+also confirmed the recording reporter's accessors return, for a non-matching
+kind, exactly the value the old `_blank` default exposed — so the integration
+drivers that read events back are unaffected.
+
+The throwaway spike test (which exercised fake structs, not the production
+serializer) was deleted once the real per-kind byte guard existed; keeping a
+test of fake structs alongside the real one is duplication, not coverage.
+
+## One production build authority
+
+`9efdbe4`
+
+The checkout build (precompile + native + link, via `mojo_package.sh`,
+`native.py`, and the `build-bin` pixi task) and the published `recipe/build.sh`
+were two independent authorities that hardcoded the same strict C flags
+separately — a drift risk between the tested artifact and the shipped one, and
+a publish-phase blocker.
+
+The recipe runs in rattler-build's isolated env, whose build requirements are
+only `mojo` and `clang` — no Python. So the shared entrypoint had to be bash.
+`scripts/build/production_build.sh` (bash, source-relative, runnable with
+bash+mojo+clang) is now the one definition of the production build, invoked by
+both the pixi tasks and `recipe/build.sh`. The strict flags live once in
+`scripts/build/native_strict_flags.txt`, read by both that entrypoint and
+`native_abi.py`'s symbol verification, so the two authorities cannot drift. The
+test-only native variant and the symbol-set checks stay in the CI wrapper,
+where the published build does not need them.
+
+Proof that the artifact is unchanged: the production native object is
+byte-identical before and after (same sha256), and `build/mtest`'s dynamic
+section is identical; `package-check` passes with the isolated recipe env
+logged running the shared entrypoint.
+
+## Surface hygiene
+
+`affe722` `3399569` `69b0195` `2c213ed`
+
+Opportunistic trims once the owning packages were already in hand:
+`report/__init__.mojo` stopped re-exporting ~26 pure-half JUnit renderer
+internals that `src/` never imported from the root (tests now import them by
+submodule path, the existing style); the cross-module
+`_signal_name_for_target` lost its private-looking underscore since two sibling
+modules import it, making it honest package-internal API; and `escape.mojo`'s
+GH-Actions fencing protocol split into its own `fencing.mojo`, the two concern
+sets sharing no private helpers. `config/lossy_utf8.mojo` was left in place with
+a docstring note explaining it is a layer-0-natural text utility parked in
+`config` for graph position — twelve importers made moving it more than
+opportunistic, and the note removes the puzzle without the churn.
