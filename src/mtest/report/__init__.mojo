@@ -35,7 +35,7 @@ from mtest.report.coordinator import (
 )
 from mtest.report.console import ConsoleReporter
 from mtest.report.recording import RecordingReporter
-from mtest.report.escape import resume_delimiter
+from mtest.report.fencing import resume_delimiter
 from mtest.report.json_stream_reporter import (
     JsonStreamReporter,
     close_json_fd,

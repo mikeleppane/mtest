@@ -15,16 +15,18 @@ from std.testing import (
 )
 
 from mtest.report.escape import (
-    contains_resume_delimiter,
-    fence_region,
     gh_escape_message,
     gh_escape_property,
     json_escape_string,
+    xml_escape_attribute,
+    xml_escape_text,
+)
+from mtest.report.fencing import (
+    contains_resume_delimiter,
+    fence_region,
     resume_delimiter,
     select_collision_free_token,
     stop_commands_opener,
-    xml_escape_attribute,
-    xml_escape_text,
 )
 
 # --- JSON string escaping ---------------------------------------------------

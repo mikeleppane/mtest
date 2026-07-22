@@ -46,7 +46,7 @@ from mtest.model import (
     slow_step_label,
 )
 
-from mtest.report.escape import fence_region, select_collision_free_token
+from mtest.report.fencing import fence_region, select_collision_free_token
 from mtest.report.reporter import Reporter
 from mtest.report.signals import signal_name_for_target
 
