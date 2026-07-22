@@ -21,7 +21,15 @@ Three decisions live here and nowhere else:
   `--num-threads K`; a run takes no tokens. At `workers == 1` the budget is
   never consulted: the sequential path adds no `--num-threads` flag at all, so
   its build argv stays byte-identical to a single-worker run.
+
+The `--serial` partition also lives here as pure list arithmetic: which run
+files are pinned to the one-at-a-time serial pass and which stay in the parallel
+batch, and which `--serial` globs matched no discovered file (stale). Both fold a
+file list against the glob patterns via `fnmatch` and return, touching nothing
+else, so they pin against any file set without a real run.
 """
+
+from mtest.discover import fnmatch
 
 
 @fieldwise_init
@@ -106,6 +114,79 @@ def resolve_workers(requested: Int, cores: Int, cap: Int) -> WorkerPlan:
         resolved = cap
         clamped = True
     return WorkerPlan(resolved, requested, cap, clamped)
+
+
+@fieldwise_init
+struct SerialPartition(Movable):
+    """A run-file list split by `--serial` pinning.
+
+    Owns its two lists; copies are explicit.
+    """
+
+    var parallel: List[String]
+    """Files matching no serial glob — the parallel batch, in input order."""
+    var serial: List[String]
+    """Files matching at least one serial glob — the serial pass, in input
+    order."""
+
+
+def partition_serial(
+    files: List[String], globs: List[String]
+) -> SerialPartition:
+    """Split `files` into the parallel batch and the serial pass.
+
+    A file matching at least one `--serial` glob (whole-path `fnmatch`, the same
+    match `--exclude` uses) is pinned to the serial pass; every other file stays
+    in the parallel batch. Each output preserves the input order as a stable
+    sub-sequence, so the two batches together dispatch exactly the input files in
+    their original relative order. Empty `globs` leaves every file parallel.
+
+    Args:
+        files: The run files actually dispatched to the pool, in order.
+        globs: The `--serial` glob patterns; empty means no pinning.
+
+    Returns:
+        The parallel and serial sub-lists.
+    """
+    var parallel = List[String]()
+    var serial = List[String]()
+    for f in files:
+        var pinned = False
+        for g in globs:
+            if fnmatch(f, g):
+                pinned = True
+                break
+        if pinned:
+            serial.append(f)
+        else:
+            parallel.append(f)
+    return SerialPartition(parallel^, serial^)
+
+
+def stale_serials(files: List[String], globs: List[String]) -> List[String]:
+    """The `--serial` globs that matched no file in `files`, in glob order.
+
+    A stale serial glob is reported with a loud warning exactly as a stale
+    `--exclude` is: it names a pattern the run universe never satisfies, so the
+    caller almost certainly mistyped it. Pure in both arguments.
+
+    Args:
+        files: The discovered run universe to test each glob against.
+        globs: The `--serial` glob patterns.
+
+    Returns:
+        The subset of `globs` that matched nothing, in their original order.
+    """
+    var stale = List[String]()
+    for g in globs:
+        var matched = False
+        for f in files:
+            if fnmatch(f, g):
+                matched = True
+                break
+        if not matched:
+            stale.append(g)
+    return stale^
 
 
 def build_tokens(workers: Int, cores: Int) -> Int:

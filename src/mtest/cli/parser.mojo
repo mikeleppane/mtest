@@ -406,6 +406,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
 
     var paths = List[String]()
     var excludes = List[String]()
+    var serials = List[String]()
     var gates = List[String]()
     var precompiles = List[Precompile]()
     var build_args = List[String]()
@@ -529,6 +530,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
 
         if s.id == FlagId.EXCLUDE:
             excludes.append(value)
+        elif s.id == FlagId.SERIAL:
+            serials.append(value)
         elif s.id == FlagId.INCLUDE:
             _check_build_arg(value)
             include_paths.append(value)
@@ -654,6 +657,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var cfg = RunnerConfig(
         paths=paths^,
         excludes=excludes^,
+        serial_globs=serials^,
         gates=gates^,
         precompiles=precompiles^,
         build_args=build_args^,

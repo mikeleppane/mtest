@@ -145,11 +145,10 @@ def s_usage_refusals(context: ScenarioContext) -> str:
     remaining usage refusal this build enforces is a RUN-ONLY flag combined with
     collect mode: a listing is not a run, so every served run-only flag
     (--maxfail, -x/--exitfirst, --gate, -s/--show-output) is refused with exit 4,
-    while --timeout is NOT refused (it bounds the probes). Separately,
-    --serial is part of the v1 contract but not served by this build, so it
-    fires the standard availability refusal (exit 4, the flag named on
-    stderr) regardless of subcommand. (--json is now SERVED — its destination
-    taxonomy is proven by s_json_destination_taxonomy, not here.)"""
+    while --timeout is NOT refused (it bounds the probes). Every flag in the v1
+    contract is served now, so there is no availability refusal left to probe.
+    (--json is now SERVED — its destination taxonomy is proven by
+    s_json_destination_taxonomy, not here.)"""
     run = context.runner.run_mtest(
         ["collect", "--maxfail", "1", "e2e/matrix"], timeout=SHORT_TIMEOUT
     )
@@ -198,26 +197,9 @@ def s_usage_refusals(context: ScenarioContext) -> str:
         f"a usage error must print no listing to stdout, got:\n{show.stdout!r}",
     )
 
-    serial = context.runner.run_mtest(
-        ["--serial", "foo*", "e2e/matrix"], timeout=SHORT_TIMEOUT
-    )
-    expect_exit(serial, 4)
-    expect(
-        "--serial" in serial.stderr,
-        f"--serial did not name itself on stderr:\n{serial.stderr}",
-    )
-    expect(
-        "not available in this build" in serial.stderr,
-        f"--serial did not fire the availability refusal:\n{serial.stderr}",
-    )
-    expect(
-        serial.stdout == "",
-        f"a usage error must print no listing to stdout, got:\n{serial.stdout!r}",
-    )
-
     return (
         "run-only flags (--maxfail, --gate, -s) + collect -> exit 4 on "
-        "stderr, no listing; --serial -> exit 4 availability refusal"
+        "stderr, no listing"
     )
 
 

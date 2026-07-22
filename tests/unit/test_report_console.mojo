@@ -409,6 +409,53 @@ def test_non_slow_file_has_no_slow_token() raises:
     assert_false("SLOW" in out)
 
 
+def _feed_serial(mut c: ConsoleReporter, outcome: Outcome, serial: Bool):
+    """One terminal FileFinished carrying the given outcome and serial flag."""
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_crawl.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_crawl.mojo",
+            outcome,
+            1.0,
+            _argv("tests/test_crawl.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.PARSED,
+            passed_tests=1 if outcome == Outcome.PASS else 0,
+            failed_tests=1 if outcome == Outcome.FAIL else 0,
+            serial=serial,
+        )
+    )
+
+
+def test_serial_file_carries_the_serial_token_on_the_verdict_line() raises:
+    var c = _console()
+    _feed_serial(c, Outcome.PASS, True)
+    var out = c.output()
+    assert_true("SERIAL" in out)
+
+
+def test_serial_file_still_reports_its_real_verdict() raises:
+    # SERIAL rides alongside the verdict; it never replaces or perturbs it. A
+    # serial FAIL is still reported FAIL.
+    var c = _console()
+    _feed_serial(c, Outcome.FAIL, True)
+    var out = c.output()
+    assert_true("FAIL" in out)
+    assert_true("SERIAL" in out)
+
+
+def test_non_serial_file_has_no_serial_token() raises:
+    # The honesty property: `serial=False` (a worker-run verdict) must never
+    # render SERIAL.
+    var c = _console()
+    _feed_serial(c, Outcome.PASS, False)
+    var out = c.output()
+    assert_false("SERIAL" in out)
+
+
 def test_verbose_slow_build_names_the_build_step() raises:
     var c = _console(verbosity=Verbosity.VERBOSE)
     _feed_slow(c, Outcome.PASS, True, 1.2, 65.0)

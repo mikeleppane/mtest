@@ -524,6 +524,7 @@ def _finalize_attempt(
     var att: _AttemptResult,
     attempts_used: Int,
     flaky: Bool,
+    serial: Bool = False,
 ) -> FileResult:
     """Build the file's terminal `FileResult` from its last attempt.
 
@@ -538,6 +539,8 @@ def _finalize_attempt(
         att: The last attempt, consumed for its streams and classification.
         attempts_used: How many attempts the file spent.
         flaky: Whether this attempt passed only after a crash-class attempt.
+        serial: Whether the file ran one-at-a-time on the serial pass rather
+            than a worker; rides the verdict as an informal annotation.
 
     Returns:
         The file's terminal `FileResult`.
@@ -563,6 +566,7 @@ def _finalize_attempt(
             timeout_seconds=bto,
             attempts_used=attempts_used,
             slow=is_slow(att.bdur, 0.0),
+            serial=serial,
         )
         return FileResult.ran_with(ev^, bout)
 
@@ -625,6 +629,7 @@ def _finalize_attempt(
         slow=is_slow(att.bdur, att.rdur),
         stdout_truncated=att.run_stdout_truncated,
         stderr_truncated=att.run_stderr_truncated,
+        serial=serial,
     )
     var fr = FileResult.classified(
         pre^,

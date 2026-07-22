@@ -28,6 +28,10 @@ struct RunnerConfig(Copyable, Movable):
     var excludes: List[String]
     """Repeatable `--exclude` glob patterns."""
 
+    var serial_globs: List[String]
+    """Repeatable `--serial` glob patterns pinning files to one-at-a-time
+    execution."""
+
     var gates: List[String]
     """Repeatable `--gate` file paths."""
 
@@ -156,6 +160,7 @@ struct RunnerConfig(Copyable, Movable):
         return RunnerConfig(
             paths=[],
             excludes=[],
+            serial_globs=[],
             gates=[],
             precompiles=[],
             build_args=[],

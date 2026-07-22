@@ -379,7 +379,8 @@
         "parallel-interrupt",
         "collect-parallel",
         "parallel-auto-smoke",
-        "parallel-json-workers"
+        "parallel-json-workers",
+        "parallel-serial-noverlap"
       ],
       "disposition": "PARSED",
       "per_test": {
@@ -387,7 +388,7 @@
         "failed": 0,
         "skipped": 0
       },
-      "rationale": "An all-pass file that stamps its run-phase window when a run log is armed; run at -n 2 alongside its sibling it proves run windows overlap, and it is one of the concurrently scheduled files whose worker-count-invariant projection the parallel scenarios assert."
+      "rationale": "An all-pass file that stamps its run-phase window when a run log is armed; run at -n 2 alongside its sibling it proves run windows overlap, and it is one of the concurrently scheduled files whose worker-count-invariant projection the parallel scenarios assert. In the serial no-overlap scenario it is the lone parallel file, so the serial pass's windows must all fall after its run window."
     },
     "e2e/parallel/test_window_b.mojo": {
       "verdict": "PASS",
@@ -427,6 +428,32 @@
         "skipped": 0
       },
       "rationale": "A third all-pass file: at -n 2 it stays unscheduled behind its two run-blocked siblings, so the interrupt scenario finds it NOT-RUN, and it rounds out the tree the capacity-one and collect equalities enumerate."
+    },
+    "e2e/serial/test_a_retry.mojo": {
+      "verdict": "CRASH",
+      "exit_class": 1,
+      "in_default_suite": false,
+      "reached_only_by": [
+        "parallel-serial-noverlap"
+      ],
+      "disposition": "NO_REPORT",
+      "rationale": "The serial-retry fixture: keyed by a per-file marker under build/e2e-scratch/ (owned/reset by the harness), it CRASHES by SIGSEGV on its first run (no marker) then PASSES on a re-run (marker present), stamping a distinct run-window per attempt. The listed verdict is the fresh-marker first-run state: with an empty scratch and --retries 0 it dies by signal and mtest reports CRASH (exit 1). The no-overlap scenario resets the marker and runs it on the serial pass with --retries 1 -> FLAKY (exit 0), and asserts its two attempt windows are disjoint and fall before the next serial file's window. Reached only by the serial no-overlap scenario; never in the default suite."
+    },
+    "e2e/serial/test_b_next.mojo": {
+      "verdict": "PASS",
+      "exit_class": 0,
+      "in_default_suite": false,
+      "reached_only_by": [
+        "parallel-serial-noverlap",
+        "parallel-serial-stale-glob"
+      ],
+      "disposition": "PARSED",
+      "per_test": {
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0
+      },
+      "rationale": "An all-pass serial fixture that stamps its run window when a run log is armed; on the serial pass it runs after test_a_retry, so the no-overlap scenario proves its window is disjoint from and after that file's retry window. It also carries the stale-serial scenario, which runs it under a --serial glob matching nothing and asserts the loud stale-serial warning."
     }
   },
   "non_discovered": {

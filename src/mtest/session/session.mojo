@@ -54,6 +54,7 @@ from mtest.session.attribution_run import _run_crash_attribution
 from mtest.session.file_result import _CrashFile, _failing_count
 from mtest.session.pipeline import PipelineHalt, RunPipeline
 from mtest.session.pool import _run_pool_batch, resolve_worker_plan
+from mtest.session.pool_plan import partition_serial, stale_serials
 from mtest.session.precompile import _run_precompile
 from mtest.session.selection import _run_selection
 from mtest.session.shard import partition
@@ -218,6 +219,13 @@ def run_session[
         summary.counts[Outcome.EXCLUDED.code] += 1
     for pat in disc.stale_excludes:
         reporter.handle(Event.warning("stale-exclusion", pat))
+    # A `--serial` glob matching no discovered run file is stale for the same
+    # reason a `--exclude` glob is: the pattern names nothing, so the caller
+    # almost certainly mistyped it. This is about the glob, not the worker count,
+    # so it fires on every run — even the sequential one, where serial pinning
+    # has no execution effect.
+    for pat in stale_serials(disc.run_files, config.serial_globs):
+        reporter.handle(Event.warning("stale-serial", pat))
 
     var run_outcomes = List[Outcome]()
     var test_totals = TestCounts.zeros()
@@ -443,11 +451,19 @@ def run_session[
         # honoring `-x`/`--maxfail` (in-flight files finish, the rest NOT-RUN)
         # and folding an interrupt back for exit 2. Selection is not pooled
         # here, so this branch is the non-selection run set only.
+        #
+        # Serial pinning splits the dispatched run files: files matching a
+        # `--serial` glob run OUTSIDE the pool, one whole pipeline at a time,
+        # AFTER the parallel batch (serial-last). The partition happens here, on
+        # the files actually dispatched (post-shard, post-selection), so nothing
+        # discover counts or shards is disturbed; each sub-list keeps the
+        # dispatched order.
+        var split = partition_serial(disc.run_files, config.serial_globs)
         var rb = _run_pool_batch(
             runtime,
             config,
             root,
-            disc.run_files,
+            split.parallel,
             includes,
             reporter,
             summary,
@@ -469,6 +485,45 @@ def run_session[
         if rb.drift:
             drift = True
         crash_files.extend(rb.crash_files.copy())
+
+        # The serial pass runs at capacity one AFTER the parallel batch drains.
+        # Capacity one is the whole-pipeline drain: a single Supervisor slot
+        # cannot admit the next file's build until the current file's verdict
+        # frees it, and a file holds its slot through build → run → any retries,
+        # so no two serial files (nor a serial and a parallel file) ever overlap.
+        # `-x`/`--maxfail` and interrupts span BOTH batches, mirroring how a
+        # failing gate gates the run batch: if the parallel batch already halted
+        # on its limit, aborted on an interrupt, or hit a machinery fault, the
+        # serial files land NOT-RUN rather than starting fresh work.
+        var stop_serial = rb.interrupted or rb.internal_error or rb.halted
+        if len(split.serial) > 0 and not stop_serial:
+            var sb = _run_pool_batch(
+                runtime,
+                config,
+                root,
+                split.serial,
+                includes,
+                reporter,
+                summary,
+                1,
+                cores,
+                False,
+                console_fd,
+                serial=True,
+            )
+            run_outcomes.extend(sb.run_outcomes.copy())
+            test_totals.passed += sb.test_totals.passed
+            test_totals.failed += sb.test_totals.failed
+            test_totals.skipped += sb.test_totals.skipped
+            test_totals.deselected += sb.test_totals.deselected
+            ran_files += sb.ran_files
+            if sb.interrupted:
+                interrupted = True
+            if sb.internal_error:
+                internal_error = True
+            if sb.drift:
+                drift = True
+            crash_files.extend(sb.crash_files.copy())
     elif proceed_runs:
         # The plain run path settles each file build-then-run through `_run_one`
         # and routes its `-x`/`--maxfail` stop policy through the same

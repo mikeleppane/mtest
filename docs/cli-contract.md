@@ -443,6 +443,13 @@ names *which* step (build or run) crossed the threshold and its duration, so a
 comptime-stalled compile is visible at 60 s rather than only at the 600 s
 compile deadline.
 
+**The `SERIAL` annotation.** A file pinned by `--serial` (§18) and run
+one-at-a-time on the serial pass carries an informal `SERIAL` marker on its
+result line. Like `SLOW` it is an annotation, never an outcome: it does not
+appear in the outcome vocabulary (§10.1), never changes a verdict or the exit
+code, and is not part of the §17 determinism guarantee. The machine stream
+carries the same fact as the FileFinished `serial` field (§15.4).
+
 **Slowest files — `--durations N`** (`N` a non-negative integer). After the
 summary band, print the `N` slowest **files** by run-only wall-clock (the process time for the run step
 alone; build time is not counted). The header states the *actual* number of
@@ -764,13 +771,19 @@ this shard does not own is not this shard's to reject. Sharded-out files are
 **counted, not listed** (§10.2), and a shard that owns no run files falls under
 the empty-collection exit code (§9).
 
-**`--serial GLOB` (not yet served, repeatable).** Pins every file matching
-`GLOB` to run outside the parallel pool, one at a time, for suites with a
-shared resource (a port, a device) that cannot tolerate concurrent access.
-Each occurrence adds one glob pattern; `--serial` is a **run-only** flag (§4).
-It is part of the frozen v1 contract, recognized by the parser, but refused
-before any test runs (§24) — it ships with the worker pool, since serial
-pinning is only meaningful once tests would otherwise run in parallel.
+**`--serial GLOB` (repeatable).** Pins every file matching `GLOB` to run outside
+the parallel pool, one at a time, for suites with a shared resource (a port, a
+device) that cannot tolerate concurrent access. Each occurrence adds one glob
+pattern; `--serial` is a **run-only** flag (§4). Matching uses the same
+whole-path glob as `--exclude` (§12). Serial files run **after** the parallel
+files (serial-last), one whole pipeline at a time: a serial file's build, run,
+and any retries all complete — and every parallel slot has drained — before the
+next serial file is admitted, so no two serial files (nor a serial and a parallel
+file) ever overlap. A `--serial` pattern that matches no discovered file is
+reported as a **stale** pattern with a loud warning, exactly as a stale
+`--exclude` is. At one worker (`-n 1` or the default) the run is already
+sequential, so `--serial` changes nothing but the stale-pattern check. A serial
+file's result line carries an informal `SERIAL` marker (§15.1).
 
 ---
 
@@ -916,8 +929,8 @@ above — it only reports which of those surfaces are wired up yet.
 **Served** (parsed into real behavior): positional `PATHS`, `-k`, `--exclude`,
 `-I`, `--build-arg` (and post-`--` passthrough), `--precompile`, `--mojo`,
 `-x`/`--exitfirst`, `--maxfail`, `--timeout`, `--compile-timeout`, `--retries`,
-`--shard`, `-n`/`--workers`, `--gate`, `-s`/`--show-output`, `--durations`,
-`-q`/`-v`, `--color`,
+`--shard`, `-n`/`--workers`, `--serial`, `--gate`, `-s`/`--show-output`,
+`--durations`, `-q`/`-v`, `--color`,
 `-h`/`--help`, `--version`, and the `run`, `collect`, `version`, and `help`
 subcommands (`--collect-only` too, as an alias that behaves as `collect`).
 `--shard` applies under both `run` and `collect`. `--json` (the machine event
@@ -925,22 +938,8 @@ stream, §15.4), `--junit-xml` (the JUnit report, §15.2), and `--gh-annotations
 (the CI annotation tail, §15.3) are served too — see §24.2 for how they are now
 reached.
 
-**Still refused**: `--serial`. It is recognized by the parser — it knows the
-spelling and its arity — but is **refused before any test runs**, with a usage
-error that names the flag, states that it is part of the v1 contract, names the
-capability that brings it (`--serial` arrives with serial execution pinning),
-and lists what this build does serve.
-
-**A transitional exit-4 subcase.** That refusal is a usage error and exits 4,
-but it is a distinct, *temporary* subcase of §9's exit code 4 — it is not one
-of the causes the frozen table enumerates (unknown flag, bad value,
-nonexistent path, unknown node id, forbidden build argument). It exists solely
-because this build has not yet wired up every v1 surface; a flag that this
-build does not serve is treated as a usage error rather than silently
-accepted or silently ignored. As each surface above lights up, its refusal
-disappears — once every flag and subcommand in the frozen contract is served,
-this subcase no longer applies and exit 4 reverts to exactly its frozen
-causes.
+Every flag and subcommand in the frozen contract above is now served: nothing is
+refused for being unavailable, so exit 4 covers exactly its frozen §9 causes.
 
 ### 24.2 Exit codes reachable in this build
 
@@ -966,8 +965,7 @@ today.
   or unwritable file) and the run was fatally aborted.
 - **4** — reachable for every frozen cause in §9 — now including a syntactically
   invalid `--json` destination (an empty value or a nonexistent parent
-  directory), detected pre-run — plus the transitional not-yet-available-flag
-  refusal subcase in §24.1 above.
+  directory), detected pre-run.
 
 **`--json` reachability.** `--json PATH|-` is served (§15.4): it is parsed into a
 live event-stream reporter composed beside the console. Its destination is

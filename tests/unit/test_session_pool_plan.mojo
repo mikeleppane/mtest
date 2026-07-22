@@ -10,8 +10,10 @@ from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.session.pool_plan import (
     build_tokens,
+    partition_serial,
     resolve_auto_workers,
     resolve_workers,
+    stale_serials,
 )
 
 
@@ -88,3 +90,58 @@ def test_tokens_never_below_one_and_bound_oversubscription() raises:
 
 def test_tokens_are_one_when_cores_unknown() raises:
     assert_equal(build_tokens(4, 0), 1)
+
+
+def test_partition_no_globs_leaves_everything_parallel() raises:
+    var files: List[String] = ["a/x.mojo", "b/y.mojo"]
+    var globs = List[String]()
+    var split = partition_serial(files, globs)
+    assert_equal(len(split.serial), 0)
+    assert_equal(len(split.parallel), 2)
+    assert_equal(split.parallel[0], "a/x.mojo")
+    assert_equal(split.parallel[1], "b/y.mojo")
+
+
+def test_partition_pins_matching_and_preserves_order() raises:
+    # A glob whose whole-path match hits two of three files pins exactly those,
+    # and each sub-list keeps the input order as a stable sub-sequence.
+    var files: List[String] = [
+        "e2e/p/test_a.mojo",
+        "e2e/p/test_b.mojo",
+        "e2e/p/test_c.mojo",
+    ]
+    var globs: List[String] = ["*test_[ac]*"]
+    var split = partition_serial(files, globs)
+    assert_equal(len(split.serial), 2)
+    assert_equal(split.serial[0], "e2e/p/test_a.mojo")
+    assert_equal(split.serial[1], "e2e/p/test_c.mojo")
+    assert_equal(len(split.parallel), 1)
+    assert_equal(split.parallel[0], "e2e/p/test_b.mojo")
+
+
+def test_partition_file_matching_any_of_several_globs_goes_serial() raises:
+    # Matching AT LEAST ONE glob is enough to pin a file; the two globs together
+    # select two files, each from a different pattern.
+    var files: List[String] = ["x/one.mojo", "y/two.mojo", "z/three.mojo"]
+    var globs: List[String] = ["*one*", "*three*"]
+    var split = partition_serial(files, globs)
+    assert_equal(len(split.serial), 2)
+    assert_equal(split.serial[0], "x/one.mojo")
+    assert_equal(split.serial[1], "z/three.mojo")
+    assert_equal(len(split.parallel), 1)
+    assert_equal(split.parallel[0], "y/two.mojo")
+
+
+def test_stale_serials_reports_globs_matching_nothing() raises:
+    var files: List[String] = ["a/x.mojo", "b/y.mojo"]
+    var globs: List[String] = ["*x*", "*nope*"]
+    var stale = stale_serials(files, globs)
+    assert_equal(len(stale), 1)
+    assert_equal(stale[0], "*nope*")
+
+
+def test_stale_serials_empty_when_all_match() raises:
+    var files: List[String] = ["a/x.mojo", "b/y.mojo"]
+    var globs: List[String] = ["*x*", "*y*"]
+    var stale = stale_serials(files, globs)
+    assert_equal(len(stale), 0)

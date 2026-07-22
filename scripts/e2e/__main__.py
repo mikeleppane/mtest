@@ -158,6 +158,8 @@ SCENARIOS: ScenarioRegistry = (
     ("parallel-j-rejected", parallel.s_parallel_j_rejected),
     ("parallel-junit-canonical-eq", parallel.s_parallel_junit_canonical_eq),
     ("parallel-progress-tty", parallel.s_parallel_progress_tty),
+    ("parallel-serial-noverlap", parallel.s_parallel_serial_noverlap),
+    ("parallel-serial-stale-glob", parallel.s_parallel_serial_stale_glob),
 )
 
 

@@ -28,6 +28,7 @@ from scripts.e2e.assertions import (
 from scripts.e2e.runner import (
     FAKE_WINDOW_MOJO,
     LOGGING_MOJO,
+    REPO_ROOT,
     ScenarioContext,
     ScenarioError,
 )
@@ -548,3 +549,148 @@ def s_parallel_junit_canonical_eq(context: ScenarioContext) -> str:
         )
         junit_canonicalize.assert_equal_runs(many, one)
     return "-n 4 JUnit canonicalizes equal to -n 1 over the varied suite"
+
+
+def _disjoint(a: tuple[float, float], b: tuple[float, float]) -> bool:
+    """Whether two half-open wall-clock windows never overlap."""
+    return a[1] <= b[0] or b[1] <= a[0]
+
+
+def s_parallel_serial_noverlap(context: ScenarioContext) -> str:
+    """At `-n 2`, `--serial` files run one-at-a-time AFTER the parallel batch.
+
+    One unpinned file (`test_window_a`) runs in the parallel batch; two pinned
+    files run on the serial pass. The build shim (`--mojo`) stamps each build's
+    window and the fixtures stamp their own run windows, both floored so every
+    window is observably wide. The proof is by interval, never by raw timing:
+
+    * every serial file's build window is disjoint from every other build window
+      and starts AFTER the lone parallel file's build (serial-last at build
+      time);
+    * every serial run window is disjoint from every other run window and starts
+      AFTER the parallel file's run window (serial-last at run time);
+    * `test_a_retry` CRASHES then PASSES under `--retries 1`, so it stamps TWO
+      attempt windows — the retry attempt's window is disjoint from and precedes
+      the next serial file's window, proving the file's whole pipeline (including
+      the retry) drained inside its single serial slot before the next file was
+      admitted.
+    """
+    build_log = _log_path("mtest_serial_build_")
+    run_log = _log_path("mtest_serial_run_")
+    scratch = os.path.join(REPO_ROOT, "build", "e2e-scratch")
+    marker = os.path.join(scratch, "serial_retry_marker")
+    os.makedirs(scratch, exist_ok=True)
+    if os.path.exists(marker):
+        os.remove(marker)
+    try:
+        run = context.runner.run_mtest(
+            [
+                "e2e/parallel/test_window_a.mojo",
+                "e2e/serial/test_a_retry.mojo",
+                "e2e/serial/test_b_next.mojo",
+                "-n",
+                "2",
+                "--serial",
+                "e2e/serial/*",
+                "--retries",
+                "1",
+                "--mojo",
+                FAKE_WINDOW_MOJO,
+                "--gh-annotations",
+                "off",
+            ],
+            timeout=240.0,
+            env_overrides={
+                "MTEST_WINDOW_LOG": build_log,
+                "MTEST_WINDOW_RUN_LOG": run_log,
+                "MTEST_WINDOW_BUILD_FLOOR": "0.6",
+                "MTEST_WINDOW_RUN_FLOOR": "0.6",
+            },
+        )
+    finally:
+        if os.path.exists(marker):
+            os.remove(marker)
+
+    # FLAKY (a pass after a crash-class retry) is exit 0.
+    expect_exit(run, 0)
+
+    builds = _intervals(_log_lines(build_log), "build")
+    runs = _intervals(_log_lines(run_log), "run")
+
+    # --- build windows (all in the shim's clock) ---
+    par_build = "e2e/parallel/test_window_a.mojo"
+    serial_builds = [
+        "e2e/serial/test_a_retry.mojo",
+        "e2e/serial/test_b_next.mojo",
+    ]
+    for name in [par_build, *serial_builds]:
+        expect(name in builds, f"no build window for {name}: {builds}")
+    for name in serial_builds:
+        expect(
+            builds[par_build][1] <= builds[name][0],
+            f"serial build {name} started before the parallel build drained: "
+            f"parallel={builds[par_build]} serial={builds[name]}",
+        )
+    expect(
+        _disjoint(builds[serial_builds[0]], builds[serial_builds[1]]),
+        f"the two serial build windows overlap: "
+        f"{builds[serial_builds[0]]} vs {builds[serial_builds[1]]}",
+    )
+
+    # --- run windows (all in the fixtures' clock) ---
+    for name in ("a", "aretry1", "aretry2", "bnext"):
+        expect(name in runs, f"no run window named {name!r}: {runs}")
+    serial_runs = ["aretry1", "aretry2", "bnext"]
+    for name in serial_runs:
+        expect(
+            runs["a"][1] <= runs[name][0],
+            f"serial run {name} started before the parallel run drained: "
+            f"parallel={runs['a']} serial={runs[name]}",
+        )
+    for i in range(len(serial_runs)):
+        for j in range(i + 1, len(serial_runs)):
+            expect(
+                _disjoint(runs[serial_runs[i]], runs[serial_runs[j]]),
+                f"serial run windows overlap: {serial_runs[i]}={runs[serial_runs[i]]} "
+                f"{serial_runs[j]}={runs[serial_runs[j]]}",
+            )
+    # The forced retry: the retry attempt's window precedes the next serial file.
+    expect(
+        runs["aretry2"][1] <= runs["bnext"][0],
+        f"the retry attempt did not drain before the next serial file: "
+        f"aretry2={runs['aretry2']} bnext={runs['bnext']}",
+    )
+    return (
+        "-n 2: serial builds AND runs are disjoint and serial-last; the forced "
+        "retry drains inside its slot before the next serial file"
+    )
+
+
+def s_parallel_serial_stale_glob(context: ScenarioContext) -> str:
+    """A `--serial` glob matching no discovered file is a loud stale warning.
+
+    Mirrors the stale-`--exclude` warning: the pattern names nothing, so mtest
+    reports it as stale and runs everything in the parallel batch unchanged.
+    """
+    run = context.runner.run_mtest(
+        [
+            "e2e/serial/test_b_next.mojo",
+            "-n",
+            "2",
+            "--serial",
+            "e2e/nowhere/*does-not-match*",
+            "--gh-annotations",
+            "off",
+        ],
+        timeout=120.0,
+    )
+    expect_exit(run, 0)
+    expect(
+        "stale-serial" in run.stdout,
+        f"no stale-serial warning for an unmatched --serial glob:\n{run.stdout}",
+    )
+    expect(
+        "matched no files" in run.stdout,
+        f"the stale-serial warning did not explain itself:\n{run.stdout}",
+    )
+    return "an unmatched --serial glob -> loud stale-serial warning, exit 0"

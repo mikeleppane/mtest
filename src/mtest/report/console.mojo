@@ -1063,6 +1063,12 @@ struct ConsoleReporter(Reporter):
                 + e.warning_pattern
                 + "' matched nothing"
             )
+        elif e.warning_kind == "stale-serial":
+            sentence = (
+                String("serial pattern '")
+                + e.warning_pattern
+                + "' matched no files"
+            )
         else:
             sentence = e.warning_pattern.copy()
         self._last_warning_detail = e.warning_pattern.copy()
@@ -1251,6 +1257,11 @@ struct ConsoleReporter(Reporter):
                 # and never replaces it — a SLOW file still reports its real
                 # verdict, counts, and exit code.
                 line += "  SLOW"
+            if e.serial:
+                # Like SLOW, an INFORMAL annotation and never an outcome: it
+                # marks a file that ran one-at-a-time on the serial pass, but
+                # never changes the verdict, counts, or exit code.
+                line += "  SERIAL"
             var color = _YELLOW if no_tests else _color_for(e.outcome)
             self._head += self._paint(color, line) + "\n"
             var note = _disposition_note(e)

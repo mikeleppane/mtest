@@ -135,6 +135,10 @@ struct PoolBatchResult(Movable):
     """Whether any verdict drifted off the pinned grammar (exit 3)."""
     var aborted: Bool
     """Whether a failing or drifting gate aborted the whole run."""
+    var halted: Bool
+    """Whether a run batch's `-x`/`--maxfail` limit latched, leaving the rest
+    NOT-RUN. A later batch (the serial pass) reads this to honor the same stop
+    and never starts serial work after the parallel batch already halted."""
     var crash_files: List[_CrashFile]
     """The files that ended CRASH, for the sequential attribution post-pass."""
 
@@ -348,6 +352,7 @@ def _run_pool_batch[
     cores: Int,
     is_gate: Bool,
     console_fd: Int,
+    serial: Bool = False,
 ) raises -> PoolBatchResult:
     """Drive one batch of files' build-run pipelines at capacity `workers`.
 
@@ -375,6 +380,9 @@ def _run_pool_batch[
         is_gate: Whether this batch is the gates, which abort the run on a
             failing or drifting verdict.
         console_fd: The borrowed console descriptor for incremental flushes.
+        serial: Whether this is the serial pass, run at one worker after the
+            parallel batch. Each file's terminal verdict then carries the
+            informal `serial` annotation.
 
     Returns:
         What the batch folds back into `run_session`.
@@ -390,6 +398,7 @@ def _run_pool_batch[
         List[Outcome](),
         TestCounts.zeros(),
         0,
+        False,
         False,
         False,
         False,
@@ -638,7 +647,12 @@ def _run_pool_batch[
                             state[i].out_bin,
                         )
                         var fr = _finalize_attempt(
-                            config, state[i].rel, att^, state[i].attempt, False
+                            config,
+                            state[i].rel,
+                            att^,
+                            state[i].attempt,
+                            False,
+                            serial,
                         )
                         gate_kill = _settle(
                             state,
@@ -735,7 +749,12 @@ def _run_pool_batch[
                         res.stderr_truncated,
                     )
                     var fr = _finalize_attempt(
-                        config, state[i].rel, att^, state[i].attempt, flaky
+                        config,
+                        state[i].rel,
+                        att^,
+                        state[i].attempt,
+                        flaky,
+                        serial,
                     )
                     gate_kill = _settle(
                         state,
@@ -789,6 +808,12 @@ def _run_pool_batch[
     # not survive into the framed sections and summary band, which the session's
     # single closing flush emits after every batch has returned.
     _ = _flush_console_with_progress(reporter, console_fd, counter_shown, True)
+
+    # A run batch that latched its `-x`/`--maxfail` limit records it so a later
+    # serial pass honors the same stop rather than starting fresh work. The gate
+    # batch aborts through `aborted`, so its halt is not reported here.
+    if not is_gate:
+        result.halted = pipeline.halt() == PipelineHalt.LIMIT_REACHED
 
     return result^
 

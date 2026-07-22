@@ -66,9 +66,8 @@ def frozen_inventory() -> List[InvRow]:
         # `-n`/`--workers N|auto`: served, last-wins.
         InvRow("-n", 1, False, True),
         InvRow("--workers", 1, False, True),
-        # In the v1 contract but not served by this build.
-        # `--serial GLOB`: repeatable.
-        InvRow("--serial", 1, True, False),
+        # `--serial GLOB`: repeatable, now served.
+        InvRow("--serial", 1, True, True),
         # `--gh-annotations off|on|auto`: now served.
         InvRow("--gh-annotations", 1, False, True),
         # `--json PATH|-`: now served.
@@ -127,19 +126,8 @@ def test_spec_spellings_are_unique() raises:
             )
 
 
-# --- refusal message shape for every unserved spelling ---
-
-
-def _assert_refused(spelling: String) raises:
-    var argv: List[String] = [spelling]
-    with assert_raises(contains="v1 contract"):
-        _ = parse_args(argv)
-    var argv2: List[String] = [spelling]
-    with assert_raises(contains="not available in this build"):
-        _ = parse_args(argv2)
-    var argv3: List[String] = [spelling]
-    with assert_raises(contains=spelling):
-        _ = parse_args(argv3)
+# Every spelling in the v1 contract is served now, so there is no refusal-message
+# shape left to pin — the last unserved flag, `--serial`, was flipped to served.
 
 
 def test_workers_short_parses_count() raises:
@@ -445,8 +433,36 @@ def test_shard_bad_value_is_usage_error() raises:
         _ = parse_args(argv)
 
 
-def test_refuse_serial() raises:
-    _assert_refused("--serial")
+def test_serial_is_served_and_accumulates_one_glob() raises:
+    # `--serial` is now served: a glob reaches the config rather than raising the
+    # availability refusal. (Before the flip this argv raised "'--serial' is part
+    # of the mtest v1 contract but is not available in this build".)
+    var argv: List[String] = ["--serial", "*a*"]
+    var r = parse_args(argv)
+    assert_equal(len(r.config.serial_globs), 1)
+    assert_equal(r.config.serial_globs[0], "*a*")
+
+
+def test_serial_is_repeatable_and_accumulates_both_globs() raises:
+    # Repeatable like `--exclude`: each occurrence adds one glob, in order.
+    var argv: List[String] = ["--serial", "*a*", "--serial", "*b*"]
+    var r = parse_args(argv)
+    assert_equal(len(r.config.serial_globs), 2)
+    assert_equal(r.config.serial_globs[0], "*a*")
+    assert_equal(r.config.serial_globs[1], "*b*")
+
+
+def test_serial_default_is_empty() raises:
+    var argv: List[String] = ["tests/"]
+    var r = parse_args(argv)
+    assert_equal(len(r.config.serial_globs), 0)
+
+
+def test_serial_inline_value_parses() raises:
+    var argv: List[String] = ["--serial=*x*"]
+    var r = parse_args(argv)
+    assert_equal(len(r.config.serial_globs), 1)
+    assert_equal(r.config.serial_globs[0], "*x*")
 
 
 def test_json_dash_is_served_and_sets_stdout_destination() raises:
