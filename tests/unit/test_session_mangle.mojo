@@ -11,7 +11,7 @@ closes that hole, reached through the same private-helper seam
 """
 from std.testing import assert_equal, assert_true
 
-from mtest.session.session import _mangle
+from mtest.session.scratch import _mangle
 
 
 def test_mangle_normal_path_is_sensible() raises:

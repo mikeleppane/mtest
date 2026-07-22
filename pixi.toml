@@ -57,12 +57,16 @@ build = "bash scripts/build/mojo_package.sh"
 # the test-only fault/sanitizer controls are absent from this artifact.
 build-native = "python -m scripts.build.native"
 
-# Link the runnable binary at build/mtest from src/main.mojo. Depends on `build`
-# so the package is precompiled to build/mtest.mojopkg FIRST — `-I build`
-# resolves `from mtest... import` against that artifact (the same include the
-# test runner uses), so main compiles against a binary dependency, not the whole
-# source tree. This is the first artifact a human can actually run.
-build-bin = { cmd = "mojo build -I build src/main.mojo -o build/mtest -Xlinker build/native/mtest_exec_native.o", depends-on = [
+# Link the runnable binary at build/mtest from src/main.mojo via the shared
+# production-build authority's link stage (scripts/build/production_build.sh) —
+# the same definition the packaged recipe build uses, so the checkout and the
+# published link line cannot drift. Depends on `build` so the package is
+# precompiled to build/mtest.mojopkg FIRST — `-I build` resolves `from mtest...
+# import` against that artifact (the same include the test runner uses), so main
+# compiles against a binary dependency, not the whole source tree — and on
+# `build-native` so the production object it links exists. This is the first
+# artifact a human can actually run.
+build-bin = { cmd = "bash scripts/build/production_build.sh link", depends-on = [
     "build",
     "build-native",
 ] }

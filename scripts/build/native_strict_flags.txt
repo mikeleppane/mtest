@@ -1,0 +1,23 @@
+# Strict production C flags for the native exec adapter -- the SINGLE SOURCE of
+# truth for the shipped object's compilation, read by both the checkout build
+# and the packaged recipe build so the two authorities cannot drift.
+#
+# Consumed by:
+#   - scripts/checks/native_abi.py (STRICT_FLAGS), the Python symbol-verification
+#     and every check that compiles a variant against these exact flags; and
+#   - scripts/build/production_build.sh, the bash production-build entrypoint the
+#     recipe env (bash + mojo + clang, no Python) runs.
+#
+# Format: one flag per line; leading/trailing whitespace is trimmed; blank lines
+# and lines beginning with '#' are ignored. The per-variant selector
+# -DMTEST_EXEC_TESTING={0,1} is added by each caller and is NOT listed here,
+# because it distinguishes the production object from the test-only variant.
+-std=c17
+-O2
+-DNDEBUG
+-Wall
+-Wextra
+-Werror
+-Wpedantic
+-fPIC
+-fvisibility=hidden

@@ -10,12 +10,8 @@ belong to main.
 The public surface is re-exported here, so callers write
 `from mtest.session import run_session, run_verdict, build_verdict`.
 """
-from mtest.session.session import (
-    CollectResult,
-    annotation_lines,
-    run_collect,
-    run_session,
-)
+from mtest.session.session import run_session
+from mtest.session.collect import CollectResult, run_collect
 from mtest.session.verdict import run_verdict, build_verdict
 from mtest.session.classify import (
     Classification,
@@ -29,6 +25,13 @@ from mtest.session.retry_class import (
     RetryClass,
     has_crash_signature,
     retry_classify,
+)
+from mtest.session.pipeline import (
+    FileStage,
+    PipelineHalt,
+    RunPipeline,
+    StepKind,
+    StepRequest,
 )
 from mtest.session.attribution import (
     ATTRIBUTION_FILE_BUDGET_SECONDS,

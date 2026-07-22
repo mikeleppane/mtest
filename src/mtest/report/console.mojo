@@ -26,20 +26,29 @@ from mtest.config import (
     shell_quote,
 )
 from mtest.model import (
+    AttemptFinishedPayload,
     AttributionDisposition,
+    CrashAttributionPayload,
     Event,
     EventKind,
+    FileFinishedPayload,
+    InternalErrorPayload,
     Outcome,
     ParseDisposition,
+    PrecompileFailedPayload,
+    SessionFinishedPayload,
+    SessionStartedPayload,
     Summary,
     TestCounts,
+    TestReportedPayload,
     TestResult,
+    WarningPayload,
     slow_step_label,
 )
 
-from mtest.report.escape import fence_region, select_collision_free_token
+from mtest.report.fencing import fence_region, select_collision_free_token
 from mtest.report.reporter import Reporter
-from mtest.report.signals import _signal_name_for_target
+from mtest.report.signals import signal_name_for_target
 
 comptime _HEX: StaticString = "0123456789abcdef"
 """Lowercase hex alphabet for rendering a fence token's random bytes."""
@@ -217,7 +226,7 @@ def _term_phrase(kind: Int, value: Int, escalated: Bool) -> String:
     nonzero EXITED is a compiler ICE that exited under its own control.
     """
     if kind == 1:
-        var name = _signal_name_for_target(value)
+        var name = signal_name_for_target(value)
         if name != "":
             return String("signal ") + String(value) + " — " + name
         return String("signal ") + String(value)
@@ -244,7 +253,7 @@ def _precompile_ending_phrase(
     3 SPAWN_FAILED), so this layer imports nothing above it.
     """
     if term_kind == 1:
-        var name = _signal_name_for_target(term_value)
+        var name = signal_name_for_target(term_value)
         var base = String("died by signal ") + String(term_value)
         if name != "":
             return base + " (" + name + ")"
@@ -276,7 +285,7 @@ def _errno_name(errno: Int) -> String:
     return String("")
 
 
-def _outcome_detail(e: Event) -> String:
+def _outcome_detail(e: FileFinishedPayload) -> String:
     """The per-outcome detail suffix the console renders from event data.
 
     `FAIL` carries the exit code (`"exit <n>"`). `CRASH` carries the terminating
@@ -300,7 +309,7 @@ def _outcome_detail(e: Event) -> String:
         return String("exit ") + String(e.exit_status)
     if e.outcome == Outcome.CRASH:
         var base = String("signal ") + String(e.signal_number)
-        var name = _signal_name_for_target(e.signal_number)
+        var name = signal_name_for_target(e.signal_number)
         if name.byte_length() > 0:
             return base + " — " + name
         return base
@@ -312,7 +321,7 @@ def _outcome_detail(e: Event) -> String:
     return String("")
 
 
-def _is_no_tests(e: Event) -> Bool:
+def _is_no_tests(e: FileFinishedPayload) -> Bool:
     """Whether a `FileFinished` is a NO-TESTS pass.
 
     A parsed report with zero passed, failed and skipped rows on a PASS file is
@@ -327,7 +336,7 @@ def _is_no_tests(e: Event) -> Bool:
     )
 
 
-def _disposition_note(e: Event) -> String:
+def _disposition_note(e: FileFinishedPayload) -> String:
     """A verdict-line note naming a non-plain disposition, or `""`.
 
     A CAPTURE_OVERFLOW FAIL and a MALFORMED_SUITE each get a distinct sentence
@@ -354,7 +363,7 @@ def _disposition_note(e: Event) -> String:
     return String("")
 
 
-def _slow_note(e: Event) -> String:
+def _slow_note(e: FileFinishedPayload) -> String:
     """The `-v` clause naming which steps were slow and their durations.
 
     `slow_step_label` decides which of the two typed duration fields crossed the
@@ -749,39 +758,39 @@ struct ConsoleReporter(Reporter):
         """
         var k = e.kind
         if k == EventKind.SESSION_STARTED:
-            self._on_session_started(e)
+            self._on_session_started(e.data[SessionStartedPayload])
         elif k == EventKind.WARNING:
-            self._on_warning(e)
+            self._on_warning(e.data[WarningPayload])
         elif k == EventKind.PRECOMPILE_FAILED:
-            self._on_precompile_failed(e)
+            self._on_precompile_failed(e.data[PrecompileFailedPayload])
         elif k == EventKind.FILE_STARTED:
             # A new file's per-test accumulation begins; drop any stale state.
             self._file_tests = List[TestResult]()
             self._last_warning_detail = String("")
         elif k == EventKind.FILE_FINISHED:
-            self._on_file_finished(e)
+            self._on_file_finished(e.data[FileFinishedPayload])
         elif k == EventKind.INTERNAL_ERROR:
-            self._on_internal_error(e)
+            self._on_internal_error(e.data[InternalErrorPayload])
         elif k == EventKind.SESSION_FINISHED:
-            self._on_session_finished(e)
+            self._on_session_finished(e.data[SessionFinishedPayload])
         elif k == EventKind.TEST_REPORTED:
             # Accumulate the retrospective per-test result; FILE_FINISHED renders
             # the per-test story from it. Emits nothing on its own.
-            self._file_tests.append(e.test.copy())
+            self._file_tests.append(e.data[TestReportedPayload].test.copy())
         elif k == EventKind.COLLECTION_KNOWN:
             # The collection line arrives in a later surface; nothing here yet.
             pass
         elif k == EventKind.ATTEMPT_FINISHED:
-            self._on_attempt_finished(e)
+            self._on_attempt_finished(e.data[AttemptFinishedPayload])
         elif k == EventKind.CRASH_ATTRIBUTION:
-            self._on_crash_attribution(e)
+            self._on_crash_attribution(e.data[CrashAttributionPayload])
 
     def _reset_file(mut self):
         """Clear the per-file accumulation after a file is fully rendered."""
         self._file_tests = List[TestResult]()
         self._last_warning_detail = String("")
 
-    def _on_internal_error(mut self, e: Event):
+    def _on_internal_error(mut self, e: InternalErrorPayload):
         """Render a red-bold banner naming the step, program, and errno.
 
         A spawn failure, meaning a nonzero errno, names the cause. Errno 0 is a
@@ -803,7 +812,7 @@ struct ConsoleReporter(Reporter):
             banner += ")"
         self._head += self._paint(_RED_BOLD, banner) + "\n"
 
-    def _on_session_started(mut self, e: Event):
+    def _on_session_started(mut self, e: SessionStartedPayload):
         """Render the header: version and toolchain, then root and file counts.
 
         Also latches the run root and toolchain, which are needed even under
@@ -827,7 +836,7 @@ struct ConsoleReporter(Reporter):
             + "\n\n"
         )
 
-    def _on_warning(mut self, e: Event):
+    def _on_warning(mut self, e: WarningPayload):
         """Render a yellow warning line, composing the sentence per kind.
 
         Latches the detail so a DRIFT file's banner can fold in the offending
@@ -846,7 +855,7 @@ struct ConsoleReporter(Reporter):
         var line = String("WARNING  ") + e.warning_kind + ": " + sentence
         self._head += self._paint(_YELLOW, line) + "\n"
 
-    def _on_attempt_finished(mut self, e: Event):
+    def _on_attempt_finished(mut self, e: AttemptFinishedPayload):
         """Render a "TRY" line for one non-final crash-class retry attempt.
 
         Reads the attempt's identity from the plain decomposed fields the event
@@ -875,7 +884,7 @@ struct ConsoleReporter(Reporter):
             line += "  [excerpt]"
         self._head += self._paint(_YELLOW, line) + "\n"
 
-    def _on_crash_attribution(mut self, e: Event):
+    def _on_crash_attribution(mut self, e: CrashAttributionPayload):
         """Render one crashed file's bounded-isolation attribution result.
 
         Composed from the event's typed fields only — the disposition, the
@@ -936,7 +945,7 @@ struct ConsoleReporter(Reporter):
         )
         self._head += self._paint(_YELLOW, line) + "\n"
 
-    def _on_precompile_failed(mut self, e: Event):
+    def _on_precompile_failed(mut self, e: PrecompileFailedPayload):
         """Render the precompile-failure banner, compiler output verbatim.
 
         Uses the frozen outcome-vocabulary label PRECOMPILE-ERROR and names each
@@ -974,7 +983,7 @@ struct ConsoleReporter(Reporter):
         self._head += _ensure_trailing_newline(self._fence(e.compiler_output))
         self._head += "\n"
 
-    def _on_file_finished(mut self, e: Event):
+    def _on_file_finished(mut self, e: FileFinishedPayload):
         """Render an excluded line, verdict line, sections, or a banner."""
         if e.duration_seconds > 0.0:
             # RUN-ONLY signal: a file that never reached the run step (an
@@ -1063,7 +1072,7 @@ struct ConsoleReporter(Reporter):
             out += "  [" + t.timing + "]"
         return out + "\n"
 
-    def _render_drift(mut self, e: Event):
+    def _render_drift(mut self, e: FileFinishedPayload):
         """A DRIFT banner naming the pin, snapshots, and offending line."""
         var banner = (
             String("DRIFT  ")
@@ -1096,7 +1105,7 @@ struct ConsoleReporter(Reporter):
         repro += shell_quote(target)
         return repro
 
-    def _compile_timeout_repro(self, e: Event) -> String:
+    def _compile_timeout_repro(self, e: FileFinishedPayload) -> String:
         """A `reproduce:` line naming the deadline that fired.
 
         The COMPILE-ERROR banner reproduces with the raw `mojo build` argv, but
@@ -1112,7 +1121,7 @@ struct ConsoleReporter(Reporter):
         repro += shell_quote(e.path)
         return repro
 
-    def _render_compile_timeout(self, e: Event) -> String:
+    def _render_compile_timeout(self, e: FileFinishedPayload) -> String:
         """The framed COMPILE-TIMEOUT banner, rendered from typed fields only.
 
         Names the deadline, shows whatever the compiler managed to say verbatim,
@@ -1163,7 +1172,7 @@ struct ConsoleReporter(Reporter):
         out += self._compile_timeout_repro(e) + "\n\n"
         return out
 
-    def _render_section(self, e: Event) -> String:
+    def _render_section(self, e: FileFinishedPayload) -> String:
         """The file's sections for one FILE_FINISHED event.
 
         A compile timeout or a compile error renders its own single block and
@@ -1209,7 +1218,9 @@ struct ConsoleReporter(Reporter):
         out += self._repro_line(node) + "\n\n"
         return out
 
-    def _render_file_scope(self, e: Event, has_pertest: Bool) -> String:
+    def _render_file_scope(
+        self, e: FileFinishedPayload, has_pertest: Bool
+    ) -> String:
         """The once-per-file captured-output block, under a scope label.
 
         TestSuite does not attribute captured output per test, so the block is
@@ -1240,7 +1251,7 @@ struct ConsoleReporter(Reporter):
         out += "\n"
         return out
 
-    def _on_session_finished(mut self, e: Event):
+    def _on_session_finished(mut self, e: SessionFinishedPayload):
         """Render the summary band, colored by the worst outcome present.
 
         The arithmetic: `passed`, `failed` and `skipped` are per-test totals

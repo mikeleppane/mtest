@@ -5,7 +5,7 @@ from std.testing import assert_equal
 
 from mtest.report.signals import (
     _signal_name_for_platform,
-    _signal_name_for_target,
+    signal_name_for_target,
 )
 
 
@@ -72,6 +72,6 @@ def test_unknown_signal_falls_back_to_the_bare_number_on_both_platforms() raises
 
 def test_target_entry_selects_the_compilation_platform() raises:
     assert_equal(
-        _signal_name_for_target(7),
+        signal_name_for_target(7),
         _signal_name_for_platform(7, CompilationTarget.is_macos()),
     )

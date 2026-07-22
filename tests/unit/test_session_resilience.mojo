@@ -9,18 +9,17 @@ that consumes it.
 from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.exec import ProcessResult, Termination
-from mtest.model import Outcome, ParseDisposition
+from mtest.model import FileFinishedPayload, Outcome, ParseDisposition
 from mtest.session.retry_class import RetryClass
-from mtest.session.session import (
-    _compile_crash_residual,
-    _flaky_eligible,
+from mtest.session.scratch import (
     _invocation_nonce,
-    _probe_terminal,
     _quarantine_dir,
     _retry_out_bin,
-    _run_terminal_file,
-    _select_names,
 )
+from mtest.session.attempt import _compile_crash_residual, _flaky_eligible
+from mtest.session.build import _probe_terminal
+from mtest.session.names import _select_names
+from mtest.session.selection import _run_terminal_file
 
 
 # ---- Fix 1: a crash-then-DRIFT final attempt is NOT flaky ----------------------
@@ -51,8 +50,8 @@ def test_flaky_eligible_rejects_real_failures() raises:
 #
 # The interrupt-linearization that a late (mid-attribution) interrupt dominates
 # the resolved exit code is fixed at the two-phase terminal protocol's Phase-1
-# entry and resolved by `_resolve_terminal_code`; its dedicated pins live in
-# `test_session_terminal.mojo`.
+# entry, which reports it as a fact to `resolve_exit_code`; the precedence's
+# dedicated pins live in `test_model_exit_code.mojo`.
 
 
 # ---- Fix 7: the residual warning does not claim "killed" for a self-exited ICE -
@@ -194,9 +193,13 @@ def test_run_terminal_file_propagates_truncation_from_process_result() raises:
         0,
         signal_number=11,
     )
-    assert_true(fr.event.stdout_truncated, "stdout truncation must propagate")
+    assert_true(
+        fr.event.data[FileFinishedPayload].stdout_truncated,
+        "stdout truncation must propagate",
+    )
     assert_false(
-        fr.event.stderr_truncated, "an untruncated stream must stay False"
+        fr.event.data[FileFinishedPayload].stderr_truncated,
+        "an untruncated stream must stay False",
     )
 
 
@@ -221,6 +224,10 @@ def test_probe_terminal_propagates_truncation_from_probe_result() raises:
         stderr_truncated=True,
     )
     assert_false(
-        fr.event.stdout_truncated, "an untruncated stream must stay False"
+        fr.event.data[FileFinishedPayload].stdout_truncated,
+        "an untruncated stream must stay False",
     )
-    assert_true(fr.event.stderr_truncated, "stderr truncation must propagate")
+    assert_true(
+        fr.event.data[FileFinishedPayload].stderr_truncated,
+        "stderr truncation must propagate",
+    )

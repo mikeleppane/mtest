@@ -3,10 +3,12 @@
 These events are the whole vocabulary of the seam between the session and the
 reporters: the session emits them and nothing else, and each reporter consumes
 them through a single `handle(mut self, e: Event)` method. To keep that
-single-method composition, the set is one closed `Event` type tagged by an
-`EventKind` discriminant that carries the payload fields of every variant at
-once, rather than one struct per event. A factory method builds each kind and
-leaves the fields that kind does not use at their defaults.
+single-method composition while making an invalid kind/payload pairing
+impossible to build, the set is one closed `Event` type carrying a `Variant`
+over one payload struct per kind. Each payload holds only the fields its kind
+uses, so there is no `path` to read on a `WARNING`, and the outer `kind` tag is
+derived from the payload's own `KIND`, never passed in, so the two can never
+disagree. A factory method builds each kind.
 
 The payloads are data only; there is no formatting, I/O, or printing here. The
 console reporter renders everything from these fields, so the fields carry
@@ -20,6 +22,8 @@ every one of these without parsing English.
 Usage errors are deliberately outside this set: they happen before any session
 exists and the CLI prints them, so there is no usage-error event.
 """
+from std.utils import Variant
+
 from mtest.model.attribution import AttributionDisposition
 from mtest.model.node_id import NodeId
 from mtest.model.outcome import Outcome
@@ -101,21 +105,23 @@ struct Summary(Copyable, Movable):
         return t
 
 
-@fieldwise_init
-struct Event(Copyable, Movable):
-    """One event on the session-to-reporter seam.
+trait EventPayload(Copyable, Movable):
+    """A single event kind's payload arm.
 
-    A single closed type tagged by `kind`, carrying the payload fields of every
-    variant; a given kind populates only its own fields and leaves the rest at
-    their defaults. Build events through the factory methods rather than the
-    fieldwise constructor. Owns its string and summary payloads, so copies are
-    explicit.
+    Each conforming struct holds only its own kind's fields and names its kind
+    once, as `KIND`, so `Event` derives the outer tag from the payload rather
+    than accepting a separate, forgeable discriminant.
     """
 
-    var kind: EventKind
-    """Which variant this event is."""
+    comptime KIND: EventKind
 
-    # SessionStarted.
+
+@fieldwise_init
+struct SessionStartedPayload(EventPayload):
+    """The `SESSION_STARTED` payload: the run began."""
+
+    comptime KIND = EventKind.SESSION_STARTED
+
     var root: String
     """The discovery root the run started from."""
     var toolchain: String
@@ -125,20 +131,31 @@ struct Event(Copyable, Movable):
     var excluded_count: Int
     """How many discovered files were excluded."""
     var shard_label: String
-    """The shard identity for a sharded run (e.g. "2/5"), empty when unsharded
-    (SessionStarted)."""
+    """The shard identity for a sharded run (e.g. "2/5"), empty when
+    unsharded."""
     var sharded_out_count: Int
-    """How many selected files this shard handed off to other shards
-    (SessionStarted)."""
+    """How many selected files this shard handed off to other shards."""
 
-    # Warning.
+
+@fieldwise_init
+struct WarningPayload(EventPayload):
+    """The `WARNING` payload: a loud non-file notice."""
+
+    comptime KIND = EventKind.WARNING
+
     var warning_kind: String
     """A short tag for the warning class (e.g. a stale exclusion)."""
     var warning_pattern: String
     """The offending pattern the warning concerns; the reporter composes the
     sentence from the kind and this datum."""
 
-    # PrecompileFailed.
+
+@fieldwise_init
+struct PrecompileFailedPayload(EventPayload):
+    """The `PRECOMPILE_FAILED` payload: a session-level build step failed."""
+
+    comptime KIND = EventKind.PRECOMPILE_FAILED
+
     var step: String
     """The name of the session-level step that failed."""
     var compiler_output: String
@@ -151,24 +168,53 @@ struct Event(Copyable, Movable):
     var ending_known: Bool
     """Whether the step's final termination identity rides with this event.
 
-    A PrecompileFailed carries how the step's last attempt ended in the shared
+    Carries how the step's last attempt ended in the
     `term_kind`/`term_value`/`escalated`/`timeout_seconds`/`attempts_used`
     fields. This flag says those fields were populated, so a reporter never
     renders an unset termination as "exited 0"."""
+    var term_kind: Int
+    """The decomposed exec-layer termination kind of the step's last attempt."""
+    var term_value: Int
+    """The value paired with `term_kind` (e.g. a signal number or exit
+    status)."""
+    var escalated: Bool
+    """Whether the deadline kill escalated SIGTERM to SIGKILL."""
+    var timeout_seconds: Int
+    """The deadline mtest enforced on a TIMED_OUT step, in seconds."""
+    var attempts_used: Int
+    """How many attempts the retry budget spent."""
 
-    # FileStarted / FileFinished.
+
+@fieldwise_init
+struct FileStartedPayload(EventPayload):
+    """The `FILE_STARTED` payload: a file's run is starting."""
+
+    comptime KIND = EventKind.FILE_STARTED
+
     var path: String
-    """The path of the file this event concerns."""
+    """The path of the file about to run."""
+
+
+@fieldwise_init
+struct FileFinishedPayload(EventPayload):
+    """The `FILE_FINISHED` payload: a file's run finished.
+
+    The per-outcome specifics ride as data rather than as rendered text, and
+    each one is meaningful only for its own outcome.
+    """
+
+    comptime KIND = EventKind.FILE_FINISHED
+
+    var path: String
+    """The path of the file that ran."""
     var outcome: Outcome
-    """The file's outcome (FileFinished)."""
+    """The file's outcome."""
     var duration_seconds: Float64
-    """Wall time the file's run took, in seconds (FileFinished)."""
+    """Wall time the file's run took, in seconds."""
     var build_argv: List[String]
-    """The build command as argv, for the reporter to shell-join
-    (FileFinished)."""
+    """The build command as argv, for the reporter to shell-join."""
     var build_duration_seconds: Float64
-    """Wall time the build took, in seconds, for verbose output
-    (FileFinished)."""
+    """Wall time the build took, in seconds, for verbose output."""
     var captured_stdout: List[UInt8]
     """The file run's raw captured stdout bytes, decoded verbatim by the
     reporter."""
@@ -186,46 +232,123 @@ struct Event(Copyable, Movable):
     """The glob that excluded the file, for an EXCLUDED line (empty
     otherwise)."""
     var parse_disposition: ParseDisposition
-    """Why the report parse landed where it did (FileFinished)."""
+    """Why the report parse landed where it did."""
     var passed_tests: Int
-    """How many tests in this file passed, at test granularity
-    (FileFinished)."""
+    """How many tests in this file passed, at test granularity."""
     var failed_tests: Int
-    """How many tests in this file failed, at test granularity
-    (FileFinished)."""
+    """How many tests in this file failed, at test granularity."""
     var skipped_tests: Int
-    """How many tests in this file were skipped, at test granularity
-    (FileFinished)."""
+    """How many tests in this file were skipped, at test granularity."""
     var deselected_tests: Int
-    """How many tests in this file were deselected, at test granularity
-    (FileFinished)."""
+    """How many tests in this file were deselected, at test granularity."""
     var attempts_used: Int
     """How many attempts the file's run took to reach its outcome; 1 when it
-    ran once with no retry (FileFinished)."""
+    ran once with no retry."""
     var flaky: Bool
-    """Whether the file passed only after one or more failing attempts
-    (FileFinished)."""
+    """Whether the file passed only after one or more failing attempts."""
     var slow: Bool
-    """Whether the file's wall time crossed the slow threshold
-    (FileFinished)."""
+    """Whether the file's wall time crossed the slow threshold."""
+    var escalated: Bool
+    """The run termination's latched SIGKILL escalation, so a TIMEOUT verdict
+    can say whether the child went down on SIGTERM or had to be killed."""
+    var stdout_truncated: Bool
+    """Whether the file-scope process result's stdout was truncated by the
+    capture bound, propagated by the session."""
+    var stderr_truncated: Bool
+    """Whether the file-scope process result's stderr was truncated by the
+    capture bound, propagated by the session."""
 
-    # AttemptFinished. `path` names the file, `step` names the attempted step
-    # ("build" | "run" | "precompile"), `duration_seconds` the attempt's wall
-    # time, and `captured_stdout`/`captured_stderr` the bounded excerpts (the
-    # caller bounds them before constructing the event).
+
+@fieldwise_init
+struct SessionFinishedPayload(EventPayload):
+    """The `SESSION_FINISHED` payload: the run ended."""
+
+    comptime KIND = EventKind.SESSION_FINISHED
+
+    var summary: Summary
+    """The per-outcome tally, including excluded and not-run."""
+    var wall_time_seconds: Float64
+    """Total wall time of the whole session, in seconds."""
+    var exit_code: Int
+    """The process exit code the session resolved."""
+    var test_counts: TestCounts
+    """The authoritative per-test totals for the whole run."""
+    var flaky_files: Int
+    """How many files passed only after a retry, run-wide."""
+
+
+@fieldwise_init
+struct InternalErrorPayload(EventPayload):
+    """The `INTERNAL_ERROR` payload: a spawn or machinery failure."""
+
+    comptime KIND = EventKind.INTERNAL_ERROR
+
+    var step: String
+    """The step that failed: `"build"`, `"run"`, or `"precompile"`."""
+    var program: String
+    """The executable a failed spawn tried to run."""
+    var errno: Int
+    """The spawn errno (0 when the cause is a machinery raise rather than a
+    spawn failure)."""
+
+
+@fieldwise_init
+struct TestReportedPayload(EventPayload):
+    """The `TEST_REPORTED` payload: one test's result.
+
+    `path` mirrors `test.node.path`, so the accessors work without inspecting
+    `test`.
+    """
+
+    comptime KIND = EventKind.TEST_REPORTED
+
+    var path: String
+    """The path of the file this test belongs to (mirrors `test.node.path`)."""
+    var test: TestResult
+    """The per-test result this event reports."""
+
+
+@fieldwise_init
+struct CollectionKnownPayload(EventPayload):
+    """The `COLLECTION_KNOWN` payload: run-wide selected/deselected totals."""
+
+    comptime KIND = EventKind.COLLECTION_KNOWN
+
+    var selected_test_total: Int
+    """How many tests, across the whole run, are selected."""
+    var deselected_test_total: Int
+    """How many tests, across the whole run, are deselected."""
+
+
+@fieldwise_init
+struct AttemptFinishedPayload(EventPayload):
+    """The `ATTEMPT_FINISHED` payload: one non-final retry attempt's record.
+
+    Carries everything a reporter needs to render the attempt now and to
+    serialize it later without re-parsing bytes. The termination identity rides
+    as plain Int fields, decomposed from an `exec.Termination`, so this layer
+    imports nothing above it.
+    """
+
+    comptime KIND = EventKind.ATTEMPT_FINISHED
+
+    var path: String
+    """The file this attempt belongs to."""
+    var step: String
+    """The attempted step: `"build"`, `"run"`, or `"precompile"`."""
     var attempt_index: Int
     """Which attempt this was, 1-based (the k-th of the planned attempts)."""
     var attempts_planned: Int
     """How many attempts were planned in total (the retry budget, N+1)."""
     var term_kind: Int
-    """The termination kind as a plain discriminant (the attempt's raw
-    termination identity, decomposed from an exec.Termination)."""
+    """This attempt's raw termination kind, decomposed from an
+    `exec.Termination`."""
     var term_value: Int
     """The termination value paired with `term_kind` (e.g. the signal number or
     exit status of this attempt)."""
     var term_final_kind: Int
-    """The latched final termination kind after any escalation, meaningful
-    only when `term_kind` is TIMED_OUT.
+    """The latched final termination kind after any escalation, meaningful only
+    when `term_kind` is TIMED_OUT.
 
     Every other termination hard-codes EXITED here as a placeholder, so a
     SIGNALED attempt reads as "exited 0" if this field is consulted on its own.
@@ -243,135 +366,85 @@ struct Event(Copyable, Movable):
     var classification: String
     """A short classification label for the attempt (e.g. "signal",
     "compile-timeout", "compile-crash")."""
+    var duration_seconds: Float64
+    """The attempt's wall time, in seconds."""
+    var captured_stdout: List[UInt8]
+    """A bounded stdout excerpt; the caller bounds the bytes before constructing
+    the event."""
+    var captured_stderr: List[UInt8]
+    """A bounded stderr excerpt, bounded by the caller."""
     var stdout_truncated: Bool
-    """Whether the captured stdout was truncated by the capture bound, so the
-    reporter can print a loud "excerpt"/truncation marker (AttemptFinished: the
-    retry excerpt's own bound; FileFinished: the file-scope process result's
-    stdout truncation, propagated by the session)."""
+    """Whether that stdout excerpt hit its bound."""
     var stderr_truncated: Bool
-    """Whether the captured stderr was truncated by the capture bound
-    (AttemptFinished: the retry excerpt's own bound; FileFinished: the
-    file-scope process result's stderr truncation, propagated by the
-    session)."""
+    """Whether that stderr excerpt hit its bound."""
     var attempt_argv: List[String]
-    """The argv this attempt ran, for the reproduce/diagnostic line
-    (AttemptFinished)."""
+    """The argv this attempt ran, for the reproduce/diagnostic line."""
 
-    # CrashAttribution. `path` names the crashing file.
+
+@fieldwise_init
+struct CrashAttributionPayload(EventPayload):
+    """The `CRASH_ATTRIBUTION` payload: one crash file's attribution result."""
+
+    comptime KIND = EventKind.CRASH_ATTRIBUTION
+
+    var path: String
+    """The crashing file the pass investigated."""
     var attribution_disposition: AttributionDisposition
-    """Why the bounded crash-isolation pass stopped (CrashAttribution)."""
+    """Why the bounded crash-isolation pass stopped."""
     var culprit_test: String
-    """The attributed culprit test name, empty when none was attributed
-    (CrashAttribution)."""
+    """The attributed culprit test name, empty when none was attributed."""
     var isolation_reruns: Int
-    """How many isolation reruns the attribution pass performed
-    (CrashAttribution)."""
+    """How many isolation reruns the attribution pass performed."""
     var attribution_seconds: Float64
-    """The wall time the attribution pass took, in seconds
-    (CrashAttribution)."""
+    """The wall time the attribution pass took, in seconds."""
 
-    # TestReported.
-    var test: TestResult
-    """The per-test result this event reports (TestReported)."""
 
-    # CollectionKnown.
-    var selected_test_total: Int
-    """How many tests, across the whole run, are selected (CollectionKnown)."""
-    var deselected_test_total: Int
-    """How many tests, across the whole run, are deselected
-    (CollectionKnown)."""
+comptime EventData = Variant[
+    SessionStartedPayload,
+    WarningPayload,
+    PrecompileFailedPayload,
+    FileStartedPayload,
+    FileFinishedPayload,
+    SessionFinishedPayload,
+    InternalErrorPayload,
+    TestReportedPayload,
+    CollectionKnownPayload,
+    AttemptFinishedPayload,
+    CrashAttributionPayload,
+]
+"""The closed set of event payloads, one arm per `EventKind`."""
 
-    # InternalError.
-    var program: String
-    """The executable a failed spawn tried to run (InternalError)."""
-    var errno: Int
-    """The spawn errno for an InternalError (0 when the cause is a machinery
-    raise rather than a spawn failure)."""
 
-    # SessionFinished.
-    var summary: Summary
-    """The per-outcome tally, including excluded and not-run
-    (SessionFinished)."""
-    var wall_time_seconds: Float64
-    """Total wall time of the whole session, in seconds (SessionFinished)."""
-    var exit_code: Int
-    """The process exit code the session resolved (SessionFinished)."""
-    var test_counts: TestCounts
-    """The authoritative per-test totals for the whole run (SessionFinished)."""
-    var flaky_files: Int
-    """How many files passed only after a retry, run-wide (SessionFinished)."""
+struct Event(Copyable, Movable):
+    """One event on the session-to-reporter seam.
 
-    @staticmethod
-    def _blank(kind: EventKind) -> Event:
-        """An event of `kind` with every payload field at its default.
+    A single closed type carrying a `Variant` over one payload struct per kind.
+    The `kind` tag is derived from the payload's `KIND`, never passed in, so a
+    kind and its payload can never disagree, and a payload holds only its own
+    kind's fields, so a field meaningless for the current kind is not
+    representable. Build events through the factory methods; read a payload back
+    through the typed arm, e.g. `e.data[FileFinishedPayload].outcome` under an
+    `e.kind == EventKind.FILE_FINISHED` guard. Owns its payload, so copies are
+    explicit.
+    """
+
+    var kind: EventKind
+    """Which variant this event is; equals the active payload's `KIND`.
+
+    Derived from the active payload arm at construction time; do not reassign
+    it directly, as that would desync the tag from `data`."""
+    var data: EventData
+    """The typed payload for `kind`."""
+
+    def __init__[P: EventPayload](out self, var payload: P):
+        """Wrap one typed payload, deriving the tag from its `KIND`.
 
         Args:
-            kind: Which variant the returned event is tagged as.
-
-        Returns:
-            The event, for a factory method to fill in its own fields.
+            payload: The kind's payload arm. Consumed. Its `KIND` becomes the
+                event's `kind`, so the tag can never disagree with the payload.
         """
-        return Event(
-            kind=kind,
-            root="",
-            toolchain="",
-            selected_count=0,
-            excluded_count=0,
-            shard_label="",
-            sharded_out_count=0,
-            warning_kind="",
-            warning_pattern="",
-            step="",
-            compiler_output="",
-            casualty_count=0,
-            casualties=List[String](),
-            ending_known=False,
-            path="",
-            outcome=Outcome.NOT_RUN,
-            duration_seconds=0.0,
-            build_argv=List[String](),
-            build_duration_seconds=0.0,
-            captured_stdout=List[UInt8](),
-            captured_stderr=List[UInt8](),
-            signal_number=0,
-            exit_status=0,
-            timeout_seconds=0,
-            exclusion_pattern="",
-            parse_disposition=ParseDisposition.NO_REPORT,
-            passed_tests=0,
-            failed_tests=0,
-            skipped_tests=0,
-            deselected_tests=0,
-            attempts_used=1,
-            flaky=False,
-            slow=False,
-            attempt_index=0,
-            attempts_planned=0,
-            term_kind=0,
-            term_value=0,
-            term_final_kind=0,
-            term_final_value=0,
-            escalated=False,
-            retry_eligible=False,
-            classification="",
-            stdout_truncated=False,
-            stderr_truncated=False,
-            attempt_argv=List[String](),
-            attribution_disposition=AttributionDisposition.NO_REPRODUCTION,
-            culprit_test="",
-            isolation_reruns=0,
-            attribution_seconds=0.0,
-            test=TestResult(NodeId("", ""), Outcome.NOT_RUN),
-            selected_test_total=0,
-            deselected_test_total=0,
-            program="",
-            errno=0,
-            summary=Summary.zeros(),
-            wall_time_seconds=0.0,
-            exit_code=0,
-            test_counts=TestCounts.zeros(),
-            flaky_files=0,
-        )
+        self.kind = P.KIND
+        self.data = EventData(payload^)
 
     @staticmethod
     def session_started(
@@ -397,14 +470,16 @@ struct Event(Copyable, Movable):
         Returns:
             A SESSION_STARTED event.
         """
-        var e = Event._blank(EventKind.SESSION_STARTED)
-        e.root = root
-        e.toolchain = toolchain
-        e.selected_count = selected_count
-        e.excluded_count = excluded_count
-        e.shard_label = shard_label
-        e.sharded_out_count = sharded_out_count
-        return e^
+        return Event(
+            SessionStartedPayload(
+                root,
+                toolchain,
+                selected_count,
+                excluded_count,
+                shard_label,
+                sharded_out_count,
+            )
+        )
 
     @staticmethod
     def warning(warning_kind: String, warning_pattern: String) -> Event:
@@ -420,10 +495,7 @@ struct Event(Copyable, Movable):
         Returns:
             A WARNING event.
         """
-        var e = Event._blank(EventKind.WARNING)
-        e.warning_kind = warning_kind
-        e.warning_pattern = warning_pattern
-        return e^
+        return Event(WarningPayload(warning_kind, warning_pattern))
 
     @staticmethod
     def precompile_failed(
@@ -466,18 +538,21 @@ struct Event(Copyable, Movable):
         Returns:
             A PRECOMPILE_FAILED event.
         """
-        var e = Event._blank(EventKind.PRECOMPILE_FAILED)
-        e.step = step
-        e.compiler_output = compiler_output
-        e.casualties = casualties.copy()
-        e.casualty_count = len(casualties) if casualties else casualty_count
-        e.ending_known = ending_known
-        e.term_kind = term_kind
-        e.term_value = term_value
-        e.escalated = escalated
-        e.timeout_seconds = timeout_seconds
-        e.attempts_used = attempts_used
-        return e^
+        var resolved_count = len(casualties) if casualties else casualty_count
+        return Event(
+            PrecompileFailedPayload(
+                step,
+                compiler_output,
+                resolved_count,
+                casualties.copy(),
+                ending_known,
+                term_kind,
+                term_value,
+                escalated,
+                timeout_seconds,
+                attempts_used,
+            )
+        )
 
     @staticmethod
     def file_started(path: String) -> Event:
@@ -489,9 +564,7 @@ struct Event(Copyable, Movable):
         Returns:
             A FILE_STARTED event.
         """
-        var e = Event._blank(EventKind.FILE_STARTED)
-        e.path = path
-        return e^
+        return Event(FileStartedPayload(path))
 
     @staticmethod
     def file_finished(
@@ -556,30 +629,32 @@ struct Event(Copyable, Movable):
         Returns:
             A FILE_FINISHED event.
         """
-        var e = Event._blank(EventKind.FILE_FINISHED)
-        e.path = path
-        e.outcome = outcome
-        e.duration_seconds = duration_seconds
-        e.build_argv = build_argv^
-        e.build_duration_seconds = build_duration_seconds
-        e.captured_stdout = captured_stdout^
-        e.captured_stderr = captured_stderr^
-        e.signal_number = signal_number
-        e.exit_status = exit_status
-        e.timeout_seconds = timeout_seconds
-        e.exclusion_pattern = exclusion_pattern
-        e.parse_disposition = parse_disposition
-        e.passed_tests = passed_tests
-        e.failed_tests = failed_tests
-        e.skipped_tests = skipped_tests
-        e.deselected_tests = deselected_tests
-        e.attempts_used = attempts_used
-        e.flaky = flaky
-        e.slow = slow
-        e.escalated = escalated
-        e.stdout_truncated = stdout_truncated
-        e.stderr_truncated = stderr_truncated
-        return e^
+        return Event(
+            FileFinishedPayload(
+                path,
+                outcome,
+                duration_seconds,
+                build_argv^,
+                build_duration_seconds,
+                captured_stdout^,
+                captured_stderr^,
+                signal_number,
+                exit_status,
+                timeout_seconds,
+                exclusion_pattern,
+                parse_disposition,
+                passed_tests,
+                failed_tests,
+                skipped_tests,
+                deselected_tests,
+                attempts_used,
+                flaky,
+                slow,
+                escalated,
+                stdout_truncated,
+                stderr_truncated,
+            )
+        )
 
     @staticmethod
     def internal_error(step: String, program: String, errno: Int) -> Event:
@@ -596,11 +671,7 @@ struct Event(Copyable, Movable):
         Returns:
             An INTERNAL_ERROR event.
         """
-        var e = Event._blank(EventKind.INTERNAL_ERROR)
-        e.step = step
-        e.program = program
-        e.errno = errno
-        return e^
+        return Event(InternalErrorPayload(step, program, errno))
 
     @staticmethod
     def session_finished(
@@ -623,13 +694,11 @@ struct Event(Copyable, Movable):
         Returns:
             A SESSION_FINISHED event.
         """
-        var e = Event._blank(EventKind.SESSION_FINISHED)
-        e.summary = summary^
-        e.wall_time_seconds = wall_time_seconds
-        e.exit_code = exit_code
-        e.test_counts = test_counts
-        e.flaky_files = flaky_files
-        return e^
+        return Event(
+            SessionFinishedPayload(
+                summary^, wall_time_seconds, exit_code, test_counts, flaky_files
+            )
+        )
 
     @staticmethod
     def test_reported(var test: TestResult) -> Event:
@@ -637,7 +706,7 @@ struct Event(Copyable, Movable):
 
         Conceptually sits between `FileStarted` and `FileFinished`, once a
         child's report parses. The event's `path` mirrors `test.node.path`, so
-        the `path_at` accessors work without inspecting `test`.
+        the `path` accessors work without inspecting `test`.
 
         Args:
             test: The per-test result to report. Consumed.
@@ -645,10 +714,8 @@ struct Event(Copyable, Movable):
         Returns:
             A TEST_REPORTED event.
         """
-        var e = Event._blank(EventKind.TEST_REPORTED)
-        e.path = test.node.path
-        e.test = test^
-        return e^
+        var path = test.node.path.copy()
+        return Event(TestReportedPayload(path^, test^))
 
     @staticmethod
     def collection_known(
@@ -663,10 +730,9 @@ struct Event(Copyable, Movable):
         Returns:
             A COLLECTION_KNOWN event.
         """
-        var e = Event._blank(EventKind.COLLECTION_KNOWN)
-        e.selected_test_total = selected_test_total
-        e.deselected_test_total = deselected_test_total
-        return e^
+        return Event(
+            CollectionKnownPayload(selected_test_total, deselected_test_total)
+        )
 
     @staticmethod
     def attempt_finished(
@@ -724,25 +790,27 @@ struct Event(Copyable, Movable):
         Returns:
             An ATTEMPT_FINISHED event.
         """
-        var e = Event._blank(EventKind.ATTEMPT_FINISHED)
-        e.path = path
-        e.step = step
-        e.attempt_index = attempt_index
-        e.attempts_planned = attempts_planned
-        e.term_kind = term_kind
-        e.term_value = term_value
-        e.term_final_kind = term_final_kind
-        e.term_final_value = term_final_value
-        e.escalated = escalated
-        e.retry_eligible = retry_eligible
-        e.classification = classification
-        e.duration_seconds = duration_seconds
-        e.captured_stdout = captured_stdout^
-        e.captured_stderr = captured_stderr^
-        e.stdout_truncated = stdout_truncated
-        e.stderr_truncated = stderr_truncated
-        e.attempt_argv = attempt_argv^
-        return e^
+        return Event(
+            AttemptFinishedPayload(
+                path,
+                step,
+                attempt_index,
+                attempts_planned,
+                term_kind,
+                term_value,
+                term_final_kind,
+                term_final_value,
+                escalated,
+                retry_eligible,
+                classification,
+                duration_seconds,
+                captured_stdout^,
+                captured_stderr^,
+                stdout_truncated,
+                stderr_truncated,
+                attempt_argv^,
+            )
+        )
 
     @staticmethod
     def crash_attribution(
@@ -765,10 +833,12 @@ struct Event(Copyable, Movable):
         Returns:
             A CRASH_ATTRIBUTION event.
         """
-        var e = Event._blank(EventKind.CRASH_ATTRIBUTION)
-        e.path = path
-        e.attribution_disposition = disposition
-        e.culprit_test = culprit_test
-        e.isolation_reruns = isolation_reruns
-        e.attribution_seconds = attribution_seconds
-        return e^
+        return Event(
+            CrashAttributionPayload(
+                path,
+                disposition,
+                culprit_test,
+                isolation_reruns,
+                attribution_seconds,
+            )
+        )

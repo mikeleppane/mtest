@@ -20,6 +20,8 @@ use `close()` on every ordinary path.
 from std.ffi import external_call
 from std.memory import alloc, memset_zero
 
+from mtest.platform import process_id
+
 
 comptime _ERROR_BYTES = 32
 """Size of ABI-v1 `struct mtest_exec_error` (alignment 8)."""
@@ -193,7 +195,12 @@ def _reset_interrupt():
 
 def _raise_self(signo: Int):
     """Deliver `signo` to this process for interrupt integration tests."""
-    # SAFETY: `getpid` has no arguments and returns the current pid; `kill` takes
-    # that live pid plus the test's valid signal number and retains no pointer.
-    var pid = external_call["getpid", Int32]()
-    _ = external_call["kill", Int32](pid, Int32(signo))
+    # SAFETY: libc `kill` has the exact ABI `int kill(pid_t, int)`, with `pid_t`
+    # a 32-bit signed integer on both supported targets. Neither argument is a
+    # pointer, so nothing is aliased, borrowed, or freed here: the target is this
+    # live process's own id from the platform boundary, and the signal number is
+    # supplied by the calling test. The call retains nothing past its return and
+    # leaves no partial state to clean up on either the success or the error
+    # path; the status is discarded because delivery to self cannot fail for the
+    # signals the interrupt tests use.
+    _ = external_call["kill", Int32](Int32(process_id()), Int32(signo))

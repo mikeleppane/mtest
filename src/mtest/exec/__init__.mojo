@@ -19,4 +19,3 @@ from mtest.exec.signals import (
     interrupt_requested,
 )
 from mtest.exec.tty import stderr_isatty, stdout_isatty
-from mtest.exec.fs import rename_path

@@ -53,7 +53,7 @@ def _signal_name_for_platform(signo: Int, is_macos: Bool) -> String:
     return String("")
 
 
-def _signal_name_for_target(signo: Int) -> String:
+def signal_name_for_target(signo: Int) -> String:
     """The common signal name and description for the compilation target.
 
     Args:

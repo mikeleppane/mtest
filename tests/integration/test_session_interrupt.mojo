@@ -10,8 +10,12 @@ from std.testing import assert_equal, assert_true
 
 from mtest.exec import ExecRuntime, interrupt_requested
 from mtest.exec.signals import _raise_self, _reset_interrupt
-from mtest.model import EventKind, Outcome
-from mtest.report import CompositeReporter, RecordingReporter
+from mtest.model import EventKind, Outcome, SessionFinishedPayload
+from mtest.report import (
+    CompositeReporter,
+    RecordingCoordinator,
+    RecordingReporter,
+)
 from mtest.session import run_session
 
 from session_fixtures import SRC_PASS, base_config, temp_root, write_file
@@ -32,19 +36,25 @@ def test_interrupt_before_files_is_exit_2_all_not_run() raises:
     _raise_self(_SIGINT)
     assert_true(interrupt_requested(), "flag must be set before the session")
 
-    var comp = CompositeReporter(Tuple(RecordingReporter()))
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
     var code = run_session(runtime, base_config(), root, comp)
     _reset_interrupt()
     runtime.close()
 
     assert_equal(code, 2, "an interrupt resolves to exit 2, never a TIMEOUT")
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     # No file is started: only the session frame.
     assert_equal(rec.count(), 2)
     assert_true(rec.kind_at(0) == EventKind.SESSION_STARTED)
     var last = rec.event_at(1)
     assert_true(last.kind == EventKind.SESSION_FINISHED)
-    assert_equal(last.exit_code, 2)
+    assert_equal(last.data[SessionFinishedPayload].exit_code, 2)
     # Both discovered files are accounted for as NOT_RUN, none as TIMEOUT.
-    assert_equal(last.summary.count_of(Outcome.NOT_RUN), 2)
-    assert_equal(last.summary.count_of(Outcome.TIMEOUT), 0)
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.NOT_RUN), 2
+    )
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.TIMEOUT), 0
+    )

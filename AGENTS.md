@@ -55,13 +55,19 @@ actors under `tests/fixtures/exec/`.
 Every layer may import only from layers above it, never sideways or downward:
 
 ```text
-Layer 0  model     outcomes, node ids, events, exit codes   (no internal imports)
+Layer 0  model     outcomes, node ids, events, exit-code resolution        (no internal imports)
+Layer 0  platform  the narrow platform-I/O boundary                        (no internal imports)
 Layer 1  config    RunnerConfig
-Layer 2  discover | protocol (report/collect parsing) | report (event consumers)
+Layer 2  discover | protocol (report/collect parsing) | report
+         select (operand and name selection) | cache (build reuse)
 Layer 3  exec      the POSIX process adapter, timeouts
 Layer 4  session   orchestration: discover -> build -> run -> parse -> events
-Layer 5  cli       hand-rolled argument parsing -> RunnerConfig; main
+Layer 5  cli       hand-rolled argument parsing -> RunnerConfig
 ```
+
+`main` sits above every layer as the composition root, not inside `cli`: it is
+the only `exit()` caller, wiring the reporters and the session together, and
+owning argv/env/exit and nothing else.
 
 `exec` is the **deepest module**: a small process-control interface hiding pipes,
 concurrent draining, FFI, platform differences, and cleanup invariants. Its
@@ -73,14 +79,77 @@ heterogeneous trait-object list, because 1.0.0b2 polymorphism is static. The
 first console reporter must already flow through this composition: the seam is
 proven the first time it exists.
 
+Above that sits a second named seam: the **`ReportCoordinator` trait**, which is
+how `session` and `main` reach the report layer. Reporters share one event
+method, but a few lifecycle interactions belong to specific reporters — machine
+stream health, JUnit `[not-run]` synthesis and finalize, the annotation tail,
+the console's rendered output and fence token. Those are **named methods on the
+coordinator**, never a concrete reporter type or a position in a composition
+tuple, so `session` imports no concrete reporter. Two coordinators conform:
+`StandardReportCoordinator` (the production set) and `RecordingCoordinator`
+(the session's own drivers, whose console slot is a comptime reporter pack).
+Adding a reporter stays a local change inside a coordinator.
+
+Inside `session` sits a third named seam: the **run-file pipeline kernel**
+(`RunPipeline`, `src/mtest/session/pipeline.mojo`). It holds each run file's
+stage between discovery and verdict — needs build, needs probe, collected, needs
+run, needs rebuild, needs reprobe, finished — together with the stale-name
+recover-once budget, the `--retries` crash-class ceiling, and the
+`-x`/`--maxfail` stop policy, and answers one question: which step the run wants
+performed now. It spawns nothing, emits no event, and owns no captured bytes.
+The driver in `session/selection.mojo` executes exactly that step against `exec`
+and folds the completion back. **The kernel decides what step comes next; the
+driver executes it.**
+
+**The sequential driver is the first of two.** It services one step at a time
+through `run_supervised`, which is all the single-child native exec ABI permits
+(see the ABI-v1 Lesson below). The second driver is the worker pool that
+`-n`/`--workers` and `--serial` name: both are part of the frozen v1 CLI
+contract, and this build refuses them explicitly, saying they arrive with
+parallel workers. That driver replaces **only the driver** — spawn and
+wait-for-any in place of run-one-and-block — and it additionally requires the
+versioned multi-child native adapter, which is a deliberate, gated change to
+`native/`. Admission, retry, maxfail, serial, and accounting policy stay in the
+kernel, in `session`, and never move into `exec` or `native`. Nothing in the
+kernel is reserved for that phase: every stage, every step kind, and every halt
+reason is reached by the sequential driver **today**, and
+`tests/unit/test_session_pipeline.mojo` pins each one against a mutation of the
+guard that produces it. A field only a pool would set does not belong here.
+
 ## Mojo, not Python
 
-`src/` is **pure Mojo**. The approved native boundary is confined to `native/`:
-a private C17 POSIX adapter that supplies header-derived signal/process ABI,
-compiled to an object and statically linked into Mojo consumers. It may not
-contain product policy, reporting, parsing, or orchestration. Python lives only
-under `scripts/` (build/test harnesses) and `tests/fixtures/exec/` (test-only
-subprocess actors), and is never a runtime dependency. Follow the
+`src/` is **pure Mojo**, and all of its platform and foreign ABI knowledge is
+centralized in exactly **two audited boundaries** — no layer above `exec`
+carries a raw platform call:
+
+- **`src/mtest/platform`** — the narrow platform-I/O boundary at Layer 0. It
+  holds the small, self-contained per-call libc operations a Mojo caller needs
+  directly (`getpid`, `rename`, and the streaming `write`/`creat`/`close` plus
+  the `errno` read that classifies their failures), each an in-Mojo
+  `external_call` carrying its own local `# SAFETY:` proof, or a delegation to a
+  safe standard-library wrapper where one expresses the exact semantics (the
+  `isatty` probe goes through `std.io.FileDescriptor`, declaring no raw symbol).
+  Where the stdlib can express an operation, the safe call wins and no foreign
+  declaration is written at all. `report`, `session`, and every other layer
+  above Layer 0 reach a platform operation only through this module.
+- **`native/` and the `mtest_exec_*` ABI** — a private C17 POSIX adapter that
+  supplies header-derived signal/process ABI (fork/exec, pipe supervision,
+  signal handling), compiled to an object and statically linked into Mojo
+  consumers. It may not contain product policy, reporting, parsing, or
+  orchestration. `exec` is its sole consumer, calling the exported
+  `mtest_exec_*` symbols via `external_call`; those calls, and the residual
+  test-only `kill(2)` in the exec signal helper, are the only raw foreign
+  declarations that legitimately live in `exec`.
+
+Both boundaries are audited; neither absorbs the other. The C adapter exists for
+the machinery that must be async-signal-safe after a fork, which cannot be
+written in Mojo; the platform module holds the per-call operations that can. A
+new foreign call belongs in the platform module, unless it is native-adapter
+machinery, in which case it belongs in `native/` and is reached through the
+`mtest_exec_*` ABI — never in `report`, `session`, or any layer above `exec`.
+Python lives only under `scripts/` (build/test harnesses) and
+`tests/fixtures/exec/` (test-only subprocess actors), and is never a runtime
+dependency. Follow the
 global `mojo-syntax` skill for all syntax — training data is stale, and this
 toolchain has removed or renamed much of what a model will reach for by default
 (`def` not `fn`, `comptime` not `alias`/`@parameter`, `var` not `let`,
@@ -285,9 +354,11 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `notes` | `notes/` |
 | `readme` | `README.md` |
 | `model` | `src/mtest/model` (outcomes, node ids, events, exit codes) |
+| `platform` | `src/mtest/platform` (the narrow platform-I/O boundary) |
 | `config` | `src/mtest/config` (RunnerConfig) |
 | `discover` | `src/mtest/discover` (file walking) |
 | `protocol` | `src/mtest/protocol` (report/collect parsing) |
+| `select` | `src/mtest/select` (operand and name selection) |
 | `exec` | `src/mtest/exec` (the POSIX process adapter) |
 | `session` | `src/mtest/session` (orchestration) |
 | `report` | `src/mtest/report` (event consumers, reporters) |
@@ -429,10 +500,19 @@ Accumulated the hard way; append as later phases teach more.
   `Copyable`-bounded trait, even when every `Rs` element does, because
   `Tuple[*Self.Rs]` is not synthesizably `Copyable` (symptom: "cannot
   synthesize copy constructor because field '...' has non-copyable type
-  'Tuple[*Rs.values]'") — use such a composite as the top-level type a consumer
-  is generic over, never nested inside another struct. Correct move: adding a
-  reporter means adding a tuple element at the call site — dispatch stays fully
-  static.
+  'Tuple[*Rs.values]'"). `Movable`, by contrast, DOES synthesize: declaring
+  `struct CompositeReporter[*Rs: Reporter](Movable)` lets a composite be moved
+  into another struct's field, which is how a report coordinator owns its pack.
+  Without that explicit conformance the move fails with "cannot transfer value
+  into destination, because 'CompositeReporter[...]' doesn't conform to
+  'Movable'" — the trap is reading the copy restriction as a blanket ban on
+  nesting. Correct move: adding a reporter means adding a tuple element at the
+  call site — dispatch stays fully static. Separately probed and recorded so it
+  need not be re-probed: the pinned compiler ACCEPTS a movable-only reporter
+  pack — dropping `Copyable` from `trait Reporter`'s bounds builds the package
+  and the whole classified inventory clean. That relaxation is therefore
+  available whenever a reporter must own a non-copyable resource such as a file
+  descriptor; the bound is kept today only because nothing owns one yet.
 - **`fn` is fully removed in 1.0.0b2** — the compiler rejects it outright
   (`'fn' has been removed; use 'def' instead`), including as a function-VALUE
   type: write `def(...) -> ...`, never `fn(...) -> ...`.
@@ -683,22 +763,29 @@ Accumulated the hard way; append as later phases teach more.
   yourself — the same reuse-the-stdlib's-declaration discipline that already
   governs `write` (see the FFI-spike Lesson above).
 - **Reaching a CONCRETE reporter through a generic `CompositeReporter[*Rs]`
-  pack (for an out-of-trait call like `status()`/`finalize()`/
-  `note_not_run()`) uses a comptime index plus a typed `Pointer(to=element)`
-  binding, never a bare `rebind`.** `src/mtest/session/session.mojo`'s
-  `_stream_failed`, `_junit_note_not_run`, `_junit_finalize`, and
-  `annotation_lines` each take a defaulted comptime index (`stream_index`/
-  `junit_index`/`ann_index`, default `-1`), reach `ref element =
-  reporter.reporters[i]`, and bind `Pointer[ConcreteType, origin_of(element)]
-  = Pointer(to=element)` — a COMPILE-TIME type assertion: an index naming the
-  wrong tuple element fails to COMPILE rather than reinterpreting the wrong
-  concrete type as UB. Symptom/trap: the prior code `rebind`-ed through the
-  pointer instead, which would have silently accepted a mis-index (latent
-  UB) had the composition order ever drifted from the index. Correct move:
-  the typed-Pointer binding, with the index defaulted so bare-composite call
-  sites (test drivers passing a recording-only composite) are unaffected — a
-  comptime `if index >= 0` elides the whole reach when no such reporter is
-  composed.
+  pack takes a comptime index plus a typed reference binding to the tuple
+  element, never a bare `rebind`, so an index naming the wrong element fails
+  to COMPILE instead of reinterpreting the wrong concrete type as UB.**
+  `RecordingCoordinator` (`src/mtest/report/coordinator.mojo`) holds exactly
+  this pack in its `composite` field, and a test driver that composes one
+  reaches its own recorder back out through `comp.composite.reporters[i]` at a
+  comptime index (see `tests/integration/test_session_maxfail.mojo`,
+  `tests/unit/test_report_coordinator.mojo`) — the compiler already knows the
+  exact type living at that tuple position, so a `rebind` through the pack
+  instead would silently accept a mis-index (latent UB) had the composition
+  order ever drifted from the index. Correct move: this comptime-index reach
+  stays legitimate only for a driver pulling its own recorder out of a pack it
+  composed, never for session-level reporter lifecycle. Machine-stream health,
+  JUnit `[not-run]` synthesis and finalize, and the annotation tail no longer
+  reach into a pack by index at all — they go through the `ReportCoordinator`
+  trait's named methods (`stream_failed`, `note_not_run`, `finalize_junit`,
+  `annotation_tail`) on whichever of `StandardReportCoordinator` or
+  `RecordingCoordinator` the caller was handed
+  (`src/mtest/report/coordinator.mojo`). Adding a reporter to the production
+  set means adding a field and a fan-out line inside
+  `StandardReportCoordinator`; the tuple-element-at-the-call-site pattern
+  still describes `CompositeReporter` itself, wherever a driver composes one
+  inside `RecordingCoordinator`.
 - **A tool that COMMITS captured program output containing filesystem paths
   must sanitize the ephemeral run root to a stable placeholder before
   writing.** `scripts/maintenance/pty_capture.py` captures the real `build/mtest`

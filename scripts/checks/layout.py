@@ -29,7 +29,9 @@ BUILD_SOURCE_PATHS = (
     Path("scripts/build/__init__.py"),
     Path("scripts/build/mojo_package.sh"),
     Path("scripts/build/native.py"),
+    Path("scripts/build/native_strict_flags.txt"),
     Path("scripts/build/package_consumption.py"),
+    Path("scripts/build/production_build.sh"),
 )
 UNIT_SUITES = {
     "test_cache_registry.mojo",
@@ -58,6 +60,7 @@ UNIT_SUITES = {
     "test_report_annotations.mojo",
     "test_report_composite.mojo",
     "test_report_console.mojo",
+    "test_report_coordinator.mojo",
     "test_report_escape.mojo",
     "test_report_json_reporter.mojo",
     "test_report_json_stream.mojo",
@@ -73,11 +76,11 @@ UNIT_SUITES = {
     "test_session_classify.mojo",
     "test_session_detail.mojo",
     "test_session_mangle.mojo",
+    "test_session_pipeline.mojo",
     "test_session_precompile_paths.mojo",
     "test_session_resilience.mojo",
     "test_session_retry_class.mojo",
     "test_session_shard.mojo",
-    "test_session_terminal.mojo",
     "test_session_verdict.mojo",
 }
 INTEGRATION_SUITES = {
@@ -169,6 +172,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_report_annotations.mojo",
     "tests/unit/test_report_composite.mojo",
     "tests/unit/test_report_console.mojo",
+    "tests/unit/test_report_coordinator.mojo",
     "tests/unit/test_report_escape.mojo",
     "tests/unit/test_report_json_reporter.mojo",
     "tests/unit/test_report_json_stream.mojo",
@@ -184,14 +188,14 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_classify.mojo",
     "tests/unit/test_session_detail.mojo",
     "tests/unit/test_session_mangle.mojo",
+    "tests/unit/test_session_pipeline.mojo",
     "tests/unit/test_session_precompile_paths.mojo",
     "tests/unit/test_session_resilience.mojo",
     "tests/unit/test_session_retry_class.mojo",
     "tests/unit/test_session_shard.mojo",
-    "tests/unit/test_session_terminal.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 913
+CLASSIFIED_TEST_COUNT = 949
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",

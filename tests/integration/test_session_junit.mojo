@@ -1,21 +1,23 @@
 """The `--junit-xml` finalize wiring and the two-phase terminal protocol (L4).
 
-Drives `run_session` with a real `JunitReporter` composed at a fixed comptime
-index (mirroring `main`'s `(console, stream, junit)`, here `(recorder, junit)`
-at `run_session[-1, 1]`). Pins: a real run PUBLISHES the report at PATH and
-dispatches EXACTLY ONE `SessionFinished`; a finalization failure (an undirectory
-target) escalates a resolved 0/1 to exit 3 by the terminal-write precedence,
-with the SAME code carried on the single dispatched terminal — the two phases
-agree, and a prior report survives.
+Drives `run_session` with a real `JunitReporter` behind the report coordinator's
+JUnit channel, a recorder standing in for the console. Pins: a real run PUBLISHES
+the report at PATH and dispatches EXACTLY ONE `SessionFinished`; a finalization
+failure (an undirectory target) escalates a resolved 0/1 to exit 3 by the
+terminal-write precedence, with the SAME code carried on the single dispatched
+terminal — the two phases agree, and a prior report survives.
 """
 from std.os import makedirs
 from std.os.path import exists
 from std.testing import assert_equal, assert_true
 
-from mtest.model import EventKind
+from mtest.model import EventKind, SessionFinishedPayload
 from mtest.report import (
+    AnnotationsReporter,
     CompositeReporter,
+    JsonStreamReporter,
     JunitReporter,
+    RecordingCoordinator,
     RecordingReporter,
     open_junit_artifact,
     open_junit_spool,
@@ -39,7 +41,7 @@ def _one_session_finished(ref rec: RecordingReporter, want_code: Int) raises:
         if rec.kind_at(i) == EventKind.SESSION_FINISHED:
             finishes += 1
             assert_equal(
-                rec.event_at(i).exit_code,
+                rec.event_at(i).data[SessionFinishedPayload].exit_code,
                 want_code,
                 "the dispatched terminal carries the resolved code",
             )
@@ -62,10 +64,13 @@ def test_junit_report_published_and_one_terminal_dispatched() raises:
     var junit = JunitReporter(
         art.spool_dir, True, art.target_path, art.temp_path
     )
-    var comp = CompositeReporter(Tuple(RecordingReporter(), junit^))
-
-    # stream_index = -1 (no stream), junit_index = 1.
-    var code = run_session[-1, 1](config, root, comp)
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter())),
+        JsonStreamReporter.inert(),
+        junit^,
+        AnnotationsReporter.inert(),
+    )
+    var code = run_session(config, root, comp)
     assert_equal(code, 1, "a failing suite resolves to exit 1")
 
     # The report was published at the target by Phase 1.
@@ -78,7 +83,7 @@ def test_junit_report_published_and_one_terminal_dispatched() raises:
     )
     assert_true("test_fail" in body, "the failing file's suite is present")
 
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     _one_session_finished(rec, 1)
 
 
@@ -98,11 +103,15 @@ def test_junit_finalization_failure_escalates_to_exit_3() raises:
     var junit = JunitReporter(
         art.spool_dir, True, art.target_path, art.temp_path
     )
-    var comp = CompositeReporter(Tuple(RecordingReporter(), junit^))
-
-    var code = run_session[-1, 1](config, root, comp)
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter())),
+        JsonStreamReporter.inert(),
+        junit^,
+        AnnotationsReporter.inert(),
+    )
+    var code = run_session(config, root, comp)
     assert_equal(code, 3, "a failed finalization escalates a clean run to 3")
     assert_true(exists(target), "the undirectory target survives")
 
-    ref rec = comp.reporters[0]
+    ref rec = comp.composite.reporters[0]
     _one_session_finished(rec, 3)

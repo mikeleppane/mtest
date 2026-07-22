@@ -13,14 +13,8 @@ from std.os.path import exists
 from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.model import Event, Summary
-from mtest.report import (
-    JsonStreamReporter,
-    close_json_fd,
-    escalate_on_close_failure,
-    open_json_fd,
-    serialize_event,
-    stream_header,
-)
+from mtest.report import JsonStreamReporter, close_json_fd, open_json_fd
+from mtest.report.json_stream import serialize_event, stream_header
 
 
 def _scratch(name: String) -> String:
@@ -140,20 +134,3 @@ def test_close_json_fd_reports_failure_on_a_dead_descriptor() raises:
     assert_true(
         close_json_fd(fd), "closing an already-closed fd reports failure"
     )
-
-
-def test_escalate_on_close_failure_precedence() raises:
-    # No close failure: the resolved code is untouched, whatever it is.
-    assert_equal(escalate_on_close_failure(0, False), 0)
-    assert_equal(escalate_on_close_failure(1, False), 1)
-    assert_equal(escalate_on_close_failure(2, False), 2)
-    assert_equal(escalate_on_close_failure(5, False), 5)
-    assert_equal(escalate_on_close_failure(3, False), 3)
-    # A close failure escalates a resolved 0/1/5 to 3 (the machine report was
-    # not durably committed), a resolved 2 STANDS (interrupt dominates), and a
-    # resolved 3 stays 3.
-    assert_equal(escalate_on_close_failure(0, True), 3)
-    assert_equal(escalate_on_close_failure(1, True), 3)
-    assert_equal(escalate_on_close_failure(5, True), 3)
-    assert_equal(escalate_on_close_failure(2, True), 2)
-    assert_equal(escalate_on_close_failure(3, True), 3)
