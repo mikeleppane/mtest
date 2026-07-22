@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1119 656" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="13">
+<rect width="1119" height="656" rx="8" fill="#0d1117" stroke="#30363d"/>
+<text x="18" y="31" xml:space="preserve"><tspan fill="#8b949e">$ </tspan><tspan fill="#c9d1d9">mtest e2e/matrix e2e/suite/test_failing.mojo</tspan></text>
+<text x="18" y="51" xml:space="preserve"><tspan fill="#c9d1d9">mtest 0.4.0 (mojo)</tspan></text>
+<text x="18" y="71" xml:space="preserve"><tspan fill="#c9d1d9">root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0</tspan></text>
+<text x="18" y="111" xml:space="preserve"><tspan fill="#3fb950">PASS           e2e/matrix/test_alpha.mojo      0.02s</tspan></text>
+<text x="18" y="131" xml:space="preserve"><tspan fill="#3fb950">PASS           e2e/matrix/test_beta.mojo       0.02s</tspan></text>
+<text x="18" y="151" xml:space="preserve"><tspan fill="#ff7b72">FAIL           e2e/suite/test_failing.mojo     0.02s</tspan></text>
+<text x="18" y="191" xml:space="preserve"><tspan fill="#c9d1d9">--- FAIL e2e/suite/test_failing.mojo::test_second_fails ---</tspan></text>
+<text x="18" y="211" xml:space="preserve"><tspan fill="#c9d1d9">At e2e/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:</tspan></text>
+<text x="18" y="231" xml:space="preserve"><tspan fill="#c9d1d9">   left: 1</tspan></text>
+<text x="18" y="251" xml:space="preserve"><tspan fill="#c9d1d9">  right: 2</tspan></text>
+<text x="18" y="271" xml:space="preserve"><tspan fill="#c9d1d9">reproduce: mtest e2e/suite/test_failing.mojo::test_second_fails</tspan></text>
+<text x="18" y="311" xml:space="preserve"><tspan fill="#c9d1d9">--- FAIL e2e/suite/test_failing.mojo (exit 1) — captured output (file-scoped; TestSuite does not attribute output to individual tests) ---</tspan></text>
+<text x="18" y="331" xml:space="preserve"><tspan fill="#c9d1d9">Unhandled exception caught during execution: </tspan></text>
+<text x="18" y="351" xml:space="preserve"><tspan fill="#c9d1d9">Running 3 tests for /home/mikko/dev/mtest/e2e/suite/test_failing.mojo </tspan></text>
+<text x="18" y="371" xml:space="preserve"><tspan fill="#c9d1d9">    PASS [ 0.001 ] test_first_passes</tspan></text>
+<text x="18" y="391" xml:space="preserve"><tspan fill="#c9d1d9">    FAIL [ 0.025 ] test_second_fails</tspan></text>
+<text x="18" y="411" xml:space="preserve"><tspan fill="#c9d1d9">      At /home/mikko/dev/mtest/e2e/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:</tspan></text>
+<text x="18" y="431" xml:space="preserve"><tspan fill="#c9d1d9">         left: 1</tspan></text>
+<text x="18" y="451" xml:space="preserve"><tspan fill="#c9d1d9">        right: 2</tspan></text>
+<text x="18" y="471" xml:space="preserve"><tspan fill="#c9d1d9">    PASS [ 0.001 ] test_third_passes</tspan></text>
+<text x="18" y="491" xml:space="preserve"><tspan fill="#c9d1d9">--------</tspan></text>
+<text x="18" y="511" xml:space="preserve"><tspan fill="#c9d1d9">Summary [ 0.025 ] 3 tests run: 2 passed , 1 failed , 0 skipped </tspan></text>
+<text x="18" y="531" xml:space="preserve"><tspan fill="#c9d1d9">Test suite' /home/mikko/dev/mtest/e2e/suite/test_failing.mojo 'failed! </tspan></text>
+<text x="18" y="571" xml:space="preserve"><tspan fill="#c9d1d9">--- captured stderr ---</tspan></text>
+<text x="18" y="631" xml:space="preserve"><tspan fill="#ff7b72">===== 7 passed, 1 failed, 0 skipped (0 excluded, 0 not run) in 1.2s =====</tspan></text>
+</svg>
