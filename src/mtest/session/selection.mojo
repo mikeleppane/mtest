@@ -170,6 +170,15 @@ struct _Collected(Copyable, Movable):
     var terminal_result: FileResult
     var universe: List[String]
     var selected: List[String]
+    var orig_selected: List[String]
+    """The run's original pre-recovery selection, fixed at the first probe and
+    never overwritten by a stale-name recovery re-probe. The run executes the
+    (possibly re-probed) `selected`, but a crash is attributed against this
+    original set: a recovery re-probe can re-select to EMPTY under a `-k` filter
+    that no longer matches the fresh universe, and empty means "no selection",
+    which attribution widens to the whole universe — falsely accusing a
+    deselected test. Attributing against the original keeps a deselected test
+    out of the isolation set exactly as it was before recovery ran."""
     var deselected: List[String]
     var intent: FileIntent
     var binary: String
@@ -197,6 +206,7 @@ def _blank_collected(rel: String) -> _Collected:
         rel,
         False,
         _blank_file_result(),
+        List[String](),
         List[String](),
         List[String](),
         List[String](),
@@ -923,7 +933,7 @@ def _run_selection[
                             _CrashFile(
                                 collected[i].rel,
                                 collected[i].binary,
-                                collected[i].selected.copy(),
+                                collected[i].orig_selected.copy(),
                             )
                         )
                     pipeline.record_verdict(
@@ -948,6 +958,12 @@ def _run_selection[
                 config.keyword,
             )
             collected[i].selected = sr.selected.copy()
+            if not step.recovering:
+                # Pin the original selection once, at the first probe. A
+                # recovery re-probe re-selects `selected` (which the run then
+                # executes, exactly as before), but must NOT move the set a
+                # crash is attributed against — see `_Collected.orig_selected`.
+                collected[i].orig_selected = sr.selected.copy()
             collected[i].deselected = sr.deselected.copy()
             pipeline.record_probe_qualified(i, len(sr.selected) == 0)
             continue
@@ -981,7 +997,7 @@ def _run_selection[
                     _CrashFile(
                         collected[i].rel,
                         collected[i].binary,
-                        collected[i].selected.copy(),
+                        collected[i].orig_selected.copy(),
                     )
                 )
             pipeline.record_verdict(
@@ -1125,7 +1141,7 @@ def _run_selection[
                 _CrashFile(
                     collected[i].rel,
                     collected[i].binary,
-                    collected[i].selected.copy(),
+                    collected[i].orig_selected.copy(),
                 )
             )
         pipeline.record_verdict(

@@ -179,6 +179,44 @@ comptime SRC_CHAMELEON_PROBE_CRASH = (
 )
 
 
+# A chameleon whose stale-name RECOVERY re-probe RENAMES the universe, so the
+# re-selection under `-k old` collapses to EMPTY, and the recovery run then dies
+# by signal. The first --skip-all lists test_old + test_alpha and drops a marker;
+# `-k old` selects test_old, so mtest runs `--only test_old`, which the suite
+# refuses (it registers only test_new under a selection) -> recover-once. The
+# rebuild's re-probe sees the marker and now lists ONLY test_new, so re-selecting
+# `-k old` yields nothing; the recovery run executes a bare `--only` and aborts.
+# The crash MUST be attributed against the ORIGINAL selection [test_old], which
+# does not intersect the renamed universe [test_new] -> NO_REPRODUCTION, no
+# culprit. Attributing against the empty re-selection instead would widen to the
+# whole universe and falsely name test_new — a test the run deselected.
+comptime SRC_CHAMELEON_RENAME_CRASH = (
+    "from std.sys import argv\nfrom std.ffi import external_call\nfrom"
+    " std.os.path import exists\nfrom std.testing import TestSuite,"
+    " assert_true\n\n\ndef test_old() raises:\n    assert_true(True)\n\n\ndef"
+    " test_alpha() raises:\n    assert_true(True)\n\n\ndef test_new() raises:\n"
+    "    assert_true(True)\n\n\ndef main() raises:\n    var probing = False\n  "
+    "  var old_named = False\n    for a in argv():\n        if a =="
+    ' "--skip-all":\n            probing = True\n        if a == "test_old":\n '
+    '           old_named = True\n    var renamed = exists("rename_marker")\n  '
+    "  if probing:\n        if not renamed:\n            # Write the marker"
+    " BEFORE building the suite: TestSuite is\n            # explicit-destroy,"
+    " so a raising `open` between its\n            # construction and `run()`"
+    " would abandon it (a compile error).\n            with"
+    ' open("rename_marker", "w") as f:\n                f.write("1")\n         '
+    "   var s = TestSuite()\n            s.test[test_old]()\n           "
+    " s.test[test_alpha]()\n            s^.run()\n        else:\n           "
+    " var s = TestSuite()\n            s.test[test_new]()\n           "
+    " s^.run()\n        return\n    if old_named:\n        # A selection run"
+    " naming test_old: register a set WITHOUT it so the\n        # stdlib"
+    " refuses the name it just listed -> the stale-name path.\n        var s ="
+    " TestSuite()\n        s.test[test_new]()\n        s^.run()\n       "
+    " return\n    # A bare --only (empty re-selection) or an isolation --only"
+    " test_new:\n    # die by signal so the run, and any isolation rerun, is a"
+    ' CRASH.\n    _ = external_call["abort", Int32]()\n'
+)
+
+
 # A real one-test suite that, under --skip-all, prints a complete exact-path
 # all-SKIP report (in the retained HEAD) and THEN floods stdout far past the
 # capture bound, so the genuine report is lost to truncation and only junk

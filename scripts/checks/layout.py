@@ -195,7 +195,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 948
+CLASSIFIED_TEST_COUNT = 949
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",

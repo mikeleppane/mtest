@@ -19,7 +19,9 @@ from mtest.model import (
     EventKind,
     Outcome,
     ParseDisposition,
+    AttributionDisposition,
     CollectionKnownPayload,
+    CrashAttributionPayload,
     FileFinishedPayload,
     SessionFinishedPayload,
     WarningPayload,
@@ -34,6 +36,7 @@ from mtest.session import run_session
 from session_fixtures import (
     SRC_CHAMELEON,
     SRC_CHAMELEON_PROBE_CRASH,
+    SRC_CHAMELEON_RENAME_CRASH,
     SRC_FAIL,
     SRC_FAIL_PHRASE,
     SRC_MATRIX,
@@ -68,6 +71,15 @@ def _collection_known(rec: RecordingReporter) raises -> CollectionKnownPayload:
         if rec.kind_at(i) == EventKind.COLLECTION_KNOWN:
             return rec.event_at(i).data[CollectionKnownPayload].copy()
     raise Error("no COLLECTION_KNOWN event")
+
+
+def _crash_attribution(
+    rec: RecordingReporter,
+) raises -> CrashAttributionPayload:
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.CRASH_ATTRIBUTION:
+            return rec.event_at(i).data[CrashAttributionPayload].copy()
+    raise Error("no CRASH_ATTRIBUTION event")
 
 
 def test_keyword_subset_runs_only_selected_and_counts_deselected() raises:
@@ -252,6 +264,68 @@ def test_recovery_probe_crash_still_reaches_crash_attribution() raises:
     assert_true(
         saw_attribution,
         "a recovery-probe CRASH must reach the crash-attribution pass",
+    )
+
+
+def test_recovery_crash_is_attributed_against_original_selection() raises:
+    # The stale-name recovery re-probe RENAMES the universe: `-k old` first
+    # selects test_old, the run is refused, and the rebuilt re-probe now lists
+    # only test_new, so re-selecting `-k old` collapses to EMPTY. The recovery
+    # run then executes a bare `--only` and dies by signal.
+    #
+    # A crash must be attributed against the run's ORIGINAL pre-recovery
+    # selection [test_old], NOT the empty re-selection. [test_old] does not
+    # intersect the renamed universe [test_new], so attribution finds no
+    # candidate -> NO_REPRODUCTION, empty culprit, zero isolation reruns. Were
+    # the crash record to store the empty re-selection instead, "empty" would
+    # widen to the whole universe [test_new] and falsely name test_new -- a test
+    # the run deselected and never invoked.
+    var root = temp_root()
+    write_file(root, "tests/test_rename_crash.mojo", SRC_CHAMELEON_RENAME_CRASH)
+    var cfg = base_config()
+    cfg.paths.append("tests/test_rename_crash.mojo")
+    cfg.keyword = "old"
+
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    _ = run_session(cfg, root, comp)
+
+    ref rec = comp.composite.reporters[0]
+    # The recovery run really crashed -- otherwise this proves nothing.
+    var finished = _finished(rec)
+    assert_true(
+        finished.outcome == Outcome.CRASH,
+        "the recovery run under the renamed universe dies by signal",
+    )
+    # Recovery really fired: the loud stale-name warning was emitted.
+    var saw_stale = False
+    for i in range(rec.count()):
+        if (
+            rec.kind_at(i) == EventKind.WARNING
+            and rec.event_at(i).data[WarningPayload].warning_kind
+            == "stale-name"
+        ):
+            saw_stale = True
+    assert_true(saw_stale, "the run must have gone through recover-once")
+    # The load-bearing assertion: attribution used the ORIGINAL selection.
+    var attr = _crash_attribution(rec)
+    assert_true(
+        attr.attribution_disposition == AttributionDisposition.NO_REPRODUCTION,
+        (
+            "attributing against the original [test_old] finds no candidate in"
+            " the renamed universe: NO_REPRODUCTION, never a false ATTRIBUTED"
+        ),
+    )
+    assert_equal(
+        attr.culprit_test,
+        "",
+        "no culprit may be named -- test_new was deselected by `-k old`",
+    )
+    assert_equal(
+        attr.isolation_reruns,
+        0,
+        "an empty candidate set performs zero isolation reruns",
     )
 
 
