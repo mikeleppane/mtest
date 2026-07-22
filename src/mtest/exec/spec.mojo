@@ -79,6 +79,7 @@ struct ProcessSpec(Copyable, Movable):
         cwd: String,
         timeout_ms: Int = 0,
         grace_ms: Int = DEFAULT_GRACE_MS,
+        var env_extra: List[String] = List[String](),
     ) -> Self:
         """A spec for `argv` run inside `cwd` with the given deadline.
 
@@ -89,9 +90,14 @@ struct ProcessSpec(Copyable, Movable):
             timeout_ms: The deadline in milliseconds; 0 disables it.
             grace_ms: The SIGTERM->SIGKILL grace; defaults to the run path's
                 300 ms.
+            env_extra: `KEY=VALUE` overrides the child receives on top of the
+                inherited environment (see the field of the same name).
+                Consumed; the returned spec owns it. Defaults to an empty list,
+                so a caller that says nothing leaves the child's environment
+                exactly inherited — byte-identical to the no-override spec.
 
         Returns:
-            A spec whose child chdirs into `cwd` before exec, with a freshly
-            allocated empty `env_extra` list.
+            A spec whose child chdirs into `cwd` before exec, carrying the given
+            `env_extra` overrides (empty by default).
         """
-        return Self(argv^, Optional(cwd), timeout_ms, grace_ms, List[String]())
+        return Self(argv^, Optional(cwd), timeout_ms, grace_ms, env_extra^)

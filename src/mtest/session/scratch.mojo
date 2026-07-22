@@ -1,14 +1,14 @@
 """Disposable scratch paths and the module-cache quarantine, for `session`.
 
 Layer 4 plumbing beneath the orchestration itself: the binary-name mangling, the
-per-invocation and per-attempt directory naming, the recursive delete, and the
-`MODULAR_CACHE_DIR` restore that the build, attempt, and precompile paths share.
-Every entity here is pure path arithmetic, a filesystem operation, or an
-environment restore — none of it knows about outcomes, events, or verdicts, so
-it sits below every other module in `session` and reaches only for the platform
-boundary at Layer 0.
+per-invocation and per-attempt directory naming, the quarantine-cache directory
+naming, and the recursive delete that the build, attempt, and precompile paths
+share. Every entity here is pure path arithmetic or a filesystem operation —
+none of it knows about outcomes, events, or verdicts, so it sits below every
+other module in `session` and reaches only for the platform boundary at
+Layer 0.
 """
-from std.os import listdir, makedirs, remove, rmdir, setenv, unsetenv
+from std.os import listdir, makedirs, remove, rmdir
 from std.os.path import basename, dirname, exists, isdir, islink, join
 
 from mtest.platform import process_id
@@ -47,14 +47,6 @@ def _ensure_dir(path: String) raises:
     """Create `path` and any missing parents; a no-op if it already exists."""
     if not exists(path):
         makedirs(path)
-
-
-def _restore_cache_env(had_prev: Bool, prev_cache: String) raises:
-    """Restore `MODULAR_CACHE_DIR` to its pre-quarantine value (or unset it)."""
-    if had_prev:
-        _ = setenv("MODULAR_CACHE_DIR", prev_cache, True)
-    else:
-        _ = unsetenv("MODULAR_CACHE_DIR")
 
 
 def _rmtree(path: String) raises:
