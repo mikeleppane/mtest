@@ -13,13 +13,8 @@ from std.os.path import exists
 from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.model import Event, Summary
-from mtest.report import (
-    JsonStreamReporter,
-    close_json_fd,
-    open_json_fd,
-    serialize_event,
-    stream_header,
-)
+from mtest.report import JsonStreamReporter, close_json_fd, open_json_fd
+from mtest.report.json_stream import serialize_event, stream_header
 
 
 def _scratch(name: String) -> String:

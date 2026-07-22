@@ -35,45 +35,15 @@ from mtest.report.coordinator import (
 )
 from mtest.report.console import ConsoleReporter
 from mtest.report.recording import RecordingReporter
-from mtest.report.escape import (
-    contains_resume_delimiter,
-    fence_region,
-    gh_escape_message,
-    gh_escape_property,
-    json_escape_string,
-    resume_delimiter,
-    select_collision_free_token,
-    stop_commands_opener,
-    xml_escape_attribute,
-    xml_escape_text,
-)
-from mtest.report.json_stream import serialize_event, stream_header
+from mtest.report.escape import resume_delimiter
 from mtest.report.json_stream_reporter import (
     JsonStreamReporter,
-    StreamStatus,
     close_json_fd,
     open_json_fd,
 )
-from mtest.report.junit import (
-    JunitCase,
-    JunitPrimary,
-    JunitRerun,
-    JunitSuite,
-    RenderedSuite,
-    assemble,
-    bounded_text_from_bytes,
-    dotted_classname,
-    format_seconds,
-    node_sort_key,
-    render_suite,
-)
 from mtest.report.junit_reporter import (
-    JunitArtifact,
-    JunitFinalizeResult,
     JunitReporter,
-    JunitStatus,
     open_junit_artifact,
     open_junit_spool,
 )
-from mtest.report.annotations import render_annotations
 from mtest.report.annotations_reporter import AnnotationsReporter
