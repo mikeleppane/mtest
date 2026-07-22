@@ -224,9 +224,17 @@ could read a field meaningless for the current kind and the compiler could not
 object. The event set becomes type-safe: one payload struct per kind, held in a
 closed `Variant`, with the outer `Event` type name, the factory method names
 and signatures, and every serialized NDJSON byte unchanged. The tag is derived
-from each payload's `KIND` constant rather than passed in, so kind and payload
-cannot disagree; a field meaningless for a kind is simply not on that kind's
-payload.
+from each payload's `KIND` constant rather than passed in, so a kind and its
+payload cannot disagree at construction, and a field meaningless for a kind is
+simply not on that kind's payload. The factory methods are the only
+construction path used anywhere, so through that API an invalid kind/payload
+pairing is unrepresentable. The outer `Event` still exposes `kind` and `data`
+as mutable fields, so a later `e.kind = ...` reassignment could in principle
+desync the two — nothing does this today, a guard comment on the field says it
+must not, and a mismatched read would trap rather than emit wrong bytes. The
+type does not yet enforce the invariant it is built to express; deriving `kind`
+from the active arm would, at the cost of touching every reader, and is left
+for the phase that needs a reporter to hold a non-factory-built event.
 
 This landed before the worker-pool phase deliberately, so that `Progress` and
 the new per-kind fields it adds are built on the typed representation rather
@@ -286,3 +294,73 @@ sets sharing no private helpers. `config/lossy_utf8.mojo` was left in place with
 a docstring note explaining it is a layer-0-natural text utility parked in
 `config` for graph position — twelve importers made moving it more than
 opportunistic, and the note removes the puzzle without the churn.
+
+## Final dual adversarial review — triage
+
+Two independent read-only reviews of the full branch diff
+(`f8db432..HEAD`): Codex gpt-5.6-sol at xhigh and Claude Opus 4.8 at xhigh,
+each briefed to refute behavior-preservation in both directions (broken seams
+and needless new structure). Both found zero Critical and no exit-code change
+on any path. Every finding is triaged below.
+
+- **False crash attribution on the stale-name recovery path — FIXED
+  (`8c83a28`).** The pipeline-kernel cutover made a recovery re-probe overwrite
+  the file's stored selection, so a run whose `-k` re-selection collapsed to
+  empty after a rebuild-and-crash was attributed against the whole re-probed
+  universe instead of the original selection — a false `ATTRIBUTED` naming a
+  deselected test where the base reported `NO_REPRODUCTION`. Console and NDJSON
+  bytes differed; exit code (1) did not. The fix pins the original selection in
+  a dedicated field at the first probe and attributes against it, while the
+  recovery run still executes the re-selection exactly as before. A new
+  fixture-driven test reproduces it and was mutation-proven RED before the fix,
+  GREEN after. This is the second distinct defect the reviews found in the
+  recovery/attribution seam the kernel cutover disturbed (the first was the
+  dropped crash-attribution append, `8a7b856`); both are report-content bugs,
+  not exit-code bugs, and both are now guarded by tests.
+
+- **Failure-path error prefixes now name their new module — KEPT
+  (rejected-revert).** Moving code between modules moved the error prefixes with
+  it: `exec: could not open --json` -> `report:` (the raise lives in the report
+  layer), `exec: rename failed` -> `platform:` and the junit rename's inner
+  detail -> `platform: rename failed` (the syscall lives in the platform
+  module). The junit detail also reaches the NDJSON `warning_pattern` field, so
+  this is a machine-surface change, not only stderr. Kept deliberately: the
+  repo's error doctrine requires a prefix to name the module the error comes
+  from, so the new prefixes are correct and the old ones would now misattribute.
+  Product output — exit codes, reports, transcripts, NDJSON success records,
+  JUnit XML — is byte-identical; only these failure-path diagnostic strings
+  moved, and nothing in the suite, e2e, or fixtures asserts on them. The
+  "behavior-preserving" claim is therefore qualified precisely: it holds for the
+  product's output on every path; it does not hold, by intent, for the module
+  attribution in a few internal-error diagnostic strings. The sibling
+  `escape:` -> `fencing:` change from the escape/fencing split is the same
+  decision.
+
+- **Typed-event invariant is enforced by construction, not by the type —
+  DOCUMENTED.** Recorded above in the typed-events section: invalid kind/payload
+  pairings are unrepresentable through the factory API (the only construction
+  path), the residual mutable-field footgun is commented and unreached, and
+  genuine enforcement (deriving the tag) is deferred to the phase that needs it.
+
+- **Three working notes committed by a broad stage — FIXED (`ef955d4`).** An
+  unrelated commit swept in three user-owned untracked notes; they are untracked
+  again and stay on disk. The commit that mixed them in keeps its history entry;
+  the merged result carries only intended content.
+
+- **`production_build.sh native` stage selector has no caller — KEPT
+  (rejected).** The build entrypoint offers `precompile|native|link|all`; the
+  automated callers use `precompile`, `link`, and `all`, and `stage_native`
+  runs inside `all`, so the standalone `native` arm has no current caller. Kept:
+  it completes a small, documented, symmetric stage interface whose other two
+  single-stage arms are used standalone, it aids isolated native-build
+  debugging, and it is build tooling that constrains no product design. Removing
+  only the middle arm would make the interface lopsided.
+
+- **Three session-split commit subjects exceed 72 characters — ACCEPTED
+  (fix-forward).** Cosmetic history-convention overage in three mid-branch move
+  commits. Left as-is rather than rewriting already-pushed history, which would
+  force-push the PR branch and invalidate the recorded per-commit review points
+  for no product benefit.
+
+Both reviews are triaged to zero open findings. The full floor is green on the
+final tip (`pixi run ci`: 59/59 e2e, transcripts byte-identical).
