@@ -45,7 +45,6 @@ UNIT_SUITES = {
     "test_discover_normalize.mojo",
     "test_exec_spec.mojo",
     "test_exec_tty.mojo",
-    "test_model_event_variant_spike.mojo",
     "test_model_events.mojo",
     "test_model_exit_code.mojo",
     "test_model_node_id.mojo",
@@ -158,7 +157,6 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_discover_normalize.mojo",
     "tests/unit/test_exec_spec.mojo",
     "tests/unit/test_exec_tty.mojo",
-    "tests/unit/test_model_event_variant_spike.mojo",
     "tests/unit/test_model_events.mojo",
     "tests/unit/test_model_exit_code.mojo",
     "tests/unit/test_model_node_id.mojo",
@@ -195,7 +193,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 951
+CLASSIFIED_TEST_COUNT = 948
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",
