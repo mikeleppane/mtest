@@ -17,6 +17,12 @@ HEADER = NATIVE / "mtest_exec_native.h"
 TEST_HEADER = NATIVE / "mtest_exec_native_test.h"
 SOURCE_FILES = (SOURCE, HEADER, TEST_HEADER)
 
+# The strict production C flags are single-sourced in this file so the Python
+# checks here and the bash production-build entrypoint
+# (scripts/build/production_build.sh, which the recipe env runs without Python)
+# read one identical inventory and cannot drift.
+STRICT_FLAGS_FILE = ROOT / "scripts" / "build" / "native_strict_flags.txt"
+
 PRODUCTION_SYMBOLS = {
     "mtest_exec_interrupt_requested",
     "mtest_exec_monotonic_ms",
@@ -55,17 +61,25 @@ TEST_ONLY_SYMBOLS = {
     "mtest_exec_test_reset_interrupt",
 }
 
-STRICT_FLAGS = (
-    "-std=c17",
-    "-O2",
-    "-DNDEBUG",
-    "-Wall",
-    "-Wextra",
-    "-Werror",
-    "-Wpedantic",
-    "-fPIC",
-    "-fvisibility=hidden",
-)
+def _load_strict_flags(path: Path) -> tuple[str, ...]:
+    """Return the shared strict production flag inventory read from `path`.
+
+    The file lists one flag per line; blank lines and lines beginning with '#'
+    are ignored so the same inventory can carry documentation for both readers.
+    """
+    flags = tuple(
+        stripped
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if (stripped := line.strip()) and not stripped.startswith("#")
+    )
+    if not flags:
+        raise SystemExit(
+            f"native-abi-check: strict flag inventory is empty: {path}"
+        )
+    return flags
+
+
+STRICT_FLAGS = _load_strict_flags(STRICT_FLAGS_FILE)
 
 
 def run(command: list[str]) -> subprocess.CompletedProcess[str]:

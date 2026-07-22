@@ -29,7 +29,9 @@ BUILD_SOURCE_PATHS = (
     Path("scripts/build/__init__.py"),
     Path("scripts/build/mojo_package.sh"),
     Path("scripts/build/native.py"),
+    Path("scripts/build/native_strict_flags.txt"),
     Path("scripts/build/package_consumption.py"),
+    Path("scripts/build/production_build.sh"),
 )
 UNIT_SUITES = {
     "test_cache_registry.mojo",
