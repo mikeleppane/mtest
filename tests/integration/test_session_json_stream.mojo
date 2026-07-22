@@ -14,7 +14,7 @@ and latches before the session schedules anything.
 """
 from std.testing import assert_equal, assert_true
 
-from mtest.model import EventKind
+from mtest.model import EventKind, SessionFinishedPayload
 from mtest.report import (
     AnnotationsReporter,
     CompositeReporter,
@@ -67,7 +67,7 @@ def test_dead_stream_forces_fatal_abort_exit_3_with_terminal_dispatch() raises:
         if rec.kind_at(i) == EventKind.SESSION_FINISHED:
             finishes += 1
             assert_equal(
-                rec.event_at(i).exit_code,
+                rec.event_at(i).data[SessionFinishedPayload].exit_code,
                 3,
                 "the dispatched terminal carries the fatal exit code",
             )

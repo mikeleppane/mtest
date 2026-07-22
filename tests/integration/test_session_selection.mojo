@@ -14,7 +14,16 @@ from std.testing import (
     assert_raises,
 )
 
-from mtest.model import Event, EventKind, Outcome, ParseDisposition
+from mtest.model import (
+    Event,
+    EventKind,
+    Outcome,
+    ParseDisposition,
+    CollectionKnownPayload,
+    FileFinishedPayload,
+    SessionFinishedPayload,
+    WarningPayload,
+)
 from mtest.report import (
     CompositeReporter,
     RecordingCoordinator,
@@ -37,13 +46,13 @@ from session_fixtures import (
 )
 
 
-def _finished(rec: RecordingReporter) raises -> Event:
+def _finished(rec: RecordingReporter) raises -> FileFinishedPayload:
     var found = -1
     for i in range(rec.count()):
         if rec.kind_at(i) == EventKind.FILE_FINISHED:
             found = i
     assert_true(found >= 0, "no FILE_FINISHED event")
-    return rec.event_at(found)
+    return rec.event_at(found).data[FileFinishedPayload].copy()
 
 
 def _count_kind(rec: RecordingReporter, kind: EventKind) raises -> Int:
@@ -54,10 +63,10 @@ def _count_kind(rec: RecordingReporter, kind: EventKind) raises -> Int:
     return n
 
 
-def _collection_known(rec: RecordingReporter) raises -> Event:
+def _collection_known(rec: RecordingReporter) raises -> CollectionKnownPayload:
     for i in range(rec.count()):
         if rec.kind_at(i) == EventKind.COLLECTION_KNOWN:
-            return rec.event_at(i)
+            return rec.event_at(i).data[CollectionKnownPayload].copy()
     raise Error("no COLLECTION_KNOWN event")
 
 
@@ -89,8 +98,8 @@ def test_keyword_subset_runs_only_selected_and_counts_deselected() raises:
     # The session's authoritative per-test totals carry the deselected count.
     var last = rec.event_at(rec.count() - 1)
     assert_true(last.kind == EventKind.SESSION_FINISHED)
-    assert_equal(last.test_counts.passed, 2)
-    assert_equal(last.test_counts.deselected, 1)
+    assert_equal(last.data[SessionFinishedPayload].test_counts.passed, 2)
+    assert_equal(last.data[SessionFinishedPayload].test_counts.deselected, 1)
 
 
 def test_node_id_selects_a_single_test() raises:
@@ -142,7 +151,7 @@ def test_empty_final_selection_exits_5() raises:
     # No per-test row was reported; all three tests were deselected.
     assert_equal(_count_kind(rec, EventKind.TEST_REPORTED), 0)
     var last = rec.event_at(rec.count() - 1)
-    assert_equal(last.test_counts.deselected, 3)
+    assert_equal(last.data[SessionFinishedPayload].test_counts.deselected, 3)
 
 
 def test_selected_failing_test_reports_fail() raises:
@@ -190,7 +199,8 @@ def test_chameleon_recollects_once_then_malformed_suite() raises:
     for i in range(rec.count()):
         if (
             rec.kind_at(i) == EventKind.WARNING
-            and rec.event_at(i).warning_kind == "stale-name"
+            and rec.event_at(i).data[WarningPayload].warning_kind
+            == "stale-name"
         ):
             saw_stale = True
     assert_true(saw_stale, "the recover-once flow must warn loudly")
@@ -224,7 +234,8 @@ def test_recovery_probe_crash_still_reaches_crash_attribution() raises:
     for i in range(rec.count()):
         if (
             rec.kind_at(i) == EventKind.WARNING
-            and rec.event_at(i).warning_kind == "stale-name"
+            and rec.event_at(i).data[WarningPayload].warning_kind
+            == "stale-name"
         ):
             saw_stale = True
     assert_true(saw_stale, "the run must have gone through recover-once")
@@ -234,7 +245,8 @@ def test_recovery_probe_crash_still_reaches_crash_attribution() raises:
     for i in range(rec.count()):
         if (
             rec.kind_at(i) == EventKind.WARNING
-            and rec.event_at(i).warning_kind == "crash-attribution-start"
+            and rec.event_at(i).data[WarningPayload].warning_kind
+            == "crash-attribution-start"
         ):
             saw_attribution = True
     assert_true(
@@ -269,7 +281,7 @@ def test_selected_off_grammar_run_is_drift_exit_3() raises:
     for i in range(rec.count()):
         if (
             rec.kind_at(i) == EventKind.WARNING
-            and rec.event_at(i).warning_kind == "drift"
+            and rec.event_at(i).data[WarningPayload].warning_kind == "drift"
         ):
             saw_drift = True
     assert_true(saw_drift, "a drifting selected run must warn loudly")
@@ -301,7 +313,8 @@ def test_selected_overflow_run_is_capture_overflow_exit_1() raises:
     for i in range(rec.count()):
         if (
             rec.kind_at(i) == EventKind.WARNING
-            and rec.event_at(i).warning_kind == "capture-overflow"
+            and rec.event_at(i).data[WarningPayload].warning_kind
+            == "capture-overflow"
         ):
             saw_overflow = True
     assert_true(saw_overflow, "an overflowing run must warn with the hint")
@@ -338,7 +351,8 @@ def test_valid_fail_printing_stale_phrase_is_not_stale_name() raises:
     for i in range(rec.count()):
         if (
             rec.kind_at(i) == EventKind.WARNING
-            and rec.event_at(i).warning_kind == "stale-name"
+            and rec.event_at(i).data[WarningPayload].warning_kind
+            == "stale-name"
         ):
             saw_stale = True
     assert_false(saw_stale, "a valid FAIL must not trip stale-name recovery")

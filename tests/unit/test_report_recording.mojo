@@ -15,6 +15,9 @@ from mtest.model import (
     NodeId,
     TestResult,
     ParseDisposition,
+    FileFinishedPayload,
+    WarningPayload,
+    PrecompileFailedPayload,
 )
 from mtest.report import RecordingReporter
 
@@ -72,9 +75,10 @@ def test_records_key_file_fields() raises:
     assert_true(r.outcome_at(0) == Outcome.CRASH)
     # The full event is recoverable for richer assertions.
     var e = r.event_at(0)
-    assert_equal(e.signal_number, 4)
-    assert_equal(len(e.captured_stdout), 2)
-    assert_equal(e.captured_stdout[0], UInt8(ord("b")))
+    ref p = e.data[FileFinishedPayload]
+    assert_equal(p.signal_number, 4)
+    assert_equal(len(p.captured_stdout), 2)
+    assert_equal(p.captured_stdout[0], UInt8(ord("b")))
 
 
 def test_records_warning_and_precompile_payloads() raises:
@@ -83,9 +87,12 @@ def test_records_warning_and_precompile_payloads() raises:
     r.handle(
         Event.precompile_failed("precompile src/mtest", "error: boom\n", 7)
     )
-    assert_equal(r.event_at(0).warning_pattern, "old_*")
-    assert_equal(r.event_at(1).step, "precompile src/mtest")
-    assert_equal(r.event_at(1).casualty_count, 7)
+    var w = r.event_at(0)
+    assert_equal(w.data[WarningPayload].warning_pattern, "old_*")
+    var pce = r.event_at(1)
+    ref pc = pce.data[PrecompileFailedPayload]
+    assert_equal(pc.step, "precompile src/mtest")
+    assert_equal(pc.casualty_count, 7)
 
 
 def test_records_test_reported_and_collection_known() raises:

@@ -51,7 +51,15 @@ line only when the invocation root is the repository root — `mtest` run from
 the repo root, the ordinary case. Run from a subdirectory the path still
 renders, but GitHub anchors it under that subdirectory.
 """
-from mtest.model.events import Event, EventKind
+from mtest.model.events import (
+    AttemptFinishedPayload,
+    Event,
+    EventKind,
+    FileFinishedPayload,
+    PrecompileFailedPayload,
+    SessionFinishedPayload,
+    TestReportedPayload,
+)
 from mtest.model.outcome import Outcome
 from mtest.model.parse_disposition import ParseDisposition
 from mtest.model.test_result import TestResult
@@ -224,7 +232,7 @@ def _is_file_level_crash_class(o: Outcome) -> Bool:
     )
 
 
-def _outcome_words(e: Event) -> String:
+def _outcome_words(e: FileFinishedPayload) -> String:
     """The crash-class outcome named in words, from typed event fields only.
 
     Total over the outcomes `_is_file_level_crash_class` accepts; any other
@@ -260,7 +268,7 @@ def _outcome_words(e: Event) -> String:
     return String("failed")
 
 
-def _file_level_row(e: Event) -> _AnnotationRow:
+def _file_level_row(e: FileFinishedPayload) -> _AnnotationRow:
     """The crash-class file-level row for one abnormal `FileFinished`."""
     return _AnnotationRow(
         sort_key=e.path + "::[file]",
@@ -298,7 +306,7 @@ def _flaky_row(
 # --- Precompile failure: no `file=` property --------------------------------
 
 
-def _precompile_ending_words(e: Event) -> String:
+def _precompile_ending_words(e: PrecompileFailedPayload) -> String:
     """How the step's final attempt ended, in words, or `""` if unknown.
 
     Reads the decomposed exec-layer termination kinds the event carries: 0
@@ -324,7 +332,7 @@ def _precompile_ending_words(e: Event) -> String:
     return "exited " + String(e.term_value)
 
 
-def _precompile_row(e: Event) -> _AnnotationRow:
+def _precompile_row(e: PrecompileFailedPayload) -> _AnnotationRow:
     """The precompile-failure row, with no `file=` property.
 
     The failure is a step-level fact, not a file-level one.
@@ -370,7 +378,7 @@ def _fmt_one_decimal(x: Float64) -> String:
     return String(whole) + "." + String(frac)
 
 
-def _notice_message(e: Event) -> String:
+def _notice_message(e: SessionFinishedPayload) -> String:
     """The one-line run summary for the `::notice`.
 
     Carries the same facts as `console.mojo`'s summary band, composed
@@ -591,27 +599,35 @@ struct AnnotationAccumulator(Copyable, Movable):
         if e.kind == EventKind.FILE_STARTED:
             self._pending_attempts_planned = -1
         elif e.kind == EventKind.ATTEMPT_FINISHED:
-            self._pending_attempts_planned = e.attempts_planned
+            self._pending_attempts_planned = e.data[
+                AttemptFinishedPayload
+            ].attempts_planned
         elif e.kind == EventKind.TEST_REPORTED:
-            if e.test.outcome == Outcome.FAIL:
-                self._error_rows.append(_test_fail_row(e.test))
+            ref tr = e.data[TestReportedPayload]
+            if tr.test.outcome == Outcome.FAIL:
+                self._error_rows.append(_test_fail_row(tr.test))
         elif e.kind == EventKind.FILE_FINISHED:
-            if _is_file_level_crash_class(e.outcome):
-                self._error_rows.append(_file_level_row(e))
-            if e.flaky:
+            ref f = e.data[FileFinishedPayload]
+            if _is_file_level_crash_class(f.outcome):
+                self._error_rows.append(_file_level_row(f))
+            if f.flaky:
                 var planned = (
                     self._pending_attempts_planned if self._pending_attempts_planned
-                    > 0 else e.attempts_used
+                    > 0 else f.attempts_used
                 )
                 self._warning_rows.append(
-                    _flaky_row(e.path, e.attempts_used, planned)
+                    _flaky_row(f.path, f.attempts_used, planned)
                 )
             self._pending_attempts_planned = -1
         elif e.kind == EventKind.PRECOMPILE_FAILED:
-            self._error_rows.append(_precompile_row(e))
+            self._error_rows.append(
+                _precompile_row(e.data[PrecompileFailedPayload])
+            )
         elif e.kind == EventKind.SESSION_FINISHED:
             self._has_notice = True
-            self._notice_message = _notice_message(e)
+            self._notice_message = _notice_message(
+                e.data[SessionFinishedPayload]
+            )
 
     def render(self) -> List[String]:
         """The accumulated annotation lines, grouped by command kind.

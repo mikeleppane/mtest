@@ -16,7 +16,14 @@ from mtest.config import (
     Verbosity,
     shell_join,
 )
-from mtest.model import EventKind, Outcome
+from mtest.model import (
+    EventKind,
+    FileFinishedPayload,
+    InternalErrorPayload,
+    Outcome,
+    PrecompileFailedPayload,
+    SessionFinishedPayload,
+)
 from mtest.report import (
     CompositeReporter,
     ConsoleReporter,
@@ -55,14 +62,25 @@ def test_failed_precompile_fans_out_all_as_not_run() raises:
     assert_equal(rec.count(), 3)
     assert_true(rec.kind_at(0) == EventKind.SESSION_STARTED)
     assert_true(rec.kind_at(1) == EventKind.PRECOMPILE_FAILED)
-    var pf = rec.event_at(1)
+    var pfe = rec.event_at(1)
+    ref pf = pfe.data[PrecompileFailedPayload]
     assert_equal(pf.step, "badpkg")
     assert_equal(pf.casualty_count, 2)  # both run files are casualties
     assert_true(pf.compiler_output.byte_length() > 0)
     assert_true(rec.kind_at(2) == EventKind.SESSION_FINISHED)
     # Every discovered file is accounted for as NOT_RUN.
-    assert_equal(rec.event_at(2).summary.count_of(Outcome.NOT_RUN), 2)
-    assert_equal(rec.event_at(2).summary.count_of(Outcome.PASS), 0)
+    assert_equal(
+        rec.event_at(2)
+        .data[SessionFinishedPayload]
+        .summary.count_of(Outcome.NOT_RUN),
+        2,
+    )
+    assert_equal(
+        rec.event_at(2)
+        .data[SessionFinishedPayload]
+        .summary.count_of(Outcome.PASS),
+        0,
+    )
 
 
 def test_successful_precompile_widens_include_path() raises:
@@ -87,7 +105,8 @@ def test_successful_precompile_widens_include_path() raises:
     assert_equal(rec.count(), 5)
     assert_true(rec.kind_at(1) == EventKind.FILE_STARTED)
     # The out directory (build) was added to the include set of the file build.
-    var finished = rec.event_at(3)
+    var fe = rec.event_at(3)
+    ref finished = fe.data[FileFinishedPayload]
     assert_true(finished.outcome == Outcome.PASS)
     var joined = shell_join(finished.build_argv)
     assert_true("-I build" in joined, joined)
@@ -148,12 +167,13 @@ def test_promotion_failure_never_reports_a_compiler_ending() raises:
     ref rec = comp.composite.reporters[0]
     assert_true(rec.kind_at(1) == EventKind.PRECOMPILE_FAILED)
     var pf = rec.event_at(1)
+    ref pfp = pf.data[PrecompileFailedPayload]
     assert_false(
-        pf.ending_known,
+        pfp.ending_known,
         "a failed promotion claimed a compiler ending it never had",
     )
     assert_true(
-        "could not be promoted" in pf.compiler_output,
+        "could not be promoted" in pfp.compiler_output,
         "the banner never explained that the rename is what lost",
     )
 
@@ -196,7 +216,8 @@ def test_precompile_spawn_failure_names_the_real_errno() raises:
     # start + internal_error + finish = 3; no file is ever started.
     assert_equal(rec.count(), 3)
     assert_true(rec.kind_at(1) == EventKind.INTERNAL_ERROR)
-    var ie = rec.event_at(1)
+    var iev = rec.event_at(1)
+    ref ie = iev.data[InternalErrorPayload]
     assert_equal(ie.step, "precompile")
     assert_equal(ie.program, "/no/such/mojo/compiler")
     assert_equal(ie.errno, 2)  # ENOENT — the real spawn cause, not 0

@@ -9,7 +9,7 @@ shared report-layer signal helper.
 """
 from std.testing import assert_equal, assert_true
 
-from mtest.model import Event, Outcome
+from mtest.model import Event, FileFinishedPayload, Outcome
 from mtest.report.console import _outcome_detail
 from mtest.report.signals import _signal_name_for_target
 
@@ -26,7 +26,7 @@ def _crash_detail(signo: Int) -> String:
         List[UInt8](),
         signal_number=signo,
     )
-    return _outcome_detail(e)
+    return _outcome_detail(e.data[FileFinishedPayload])
 
 
 def test_signal_name_names_a_known_signal_in_words() raises:

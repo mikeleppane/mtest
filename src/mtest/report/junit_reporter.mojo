@@ -36,7 +36,15 @@ from std.os import getenv, mkdir, remove
 from std.os.path import basename, dirname
 from std.time import perf_counter_ns
 
-from mtest.model.events import Event, EventKind
+from mtest.model.events import (
+    AttemptFinishedPayload,
+    Event,
+    EventKind,
+    FileFinishedPayload,
+    FileStartedPayload,
+    PrecompileFailedPayload,
+    TestReportedPayload,
+)
 from mtest.model.outcome import Outcome
 from mtest.model.test_result import TestResult
 from mtest.platform import process_id, rename_path
@@ -319,7 +327,7 @@ def _attempt_diag(a: _AttemptRec) -> _Diag:
     )
 
 
-def _outcome_diag(e: Event, stderr_text: String) -> _Diag:
+def _outcome_diag(e: FileFinishedPayload, stderr_text: String) -> _Diag:
     """The derived descriptor for a file's final failing outcome."""
     var o = e.outcome
     if o == Outcome.FAIL:
@@ -590,29 +598,31 @@ struct JunitReporter(Reporter):
         if not self._active or self._failed:
             return
         if e.kind == EventKind.FILE_STARTED:
-            self._reset_accum(e.path)
+            self._reset_accum(e.data[FileStartedPayload].path)
             return
         if e.kind == EventKind.TEST_REPORTED:
-            var idx = self._ensure_accum(e.path)
-            self._accums[idx].tests.append(e.test.copy())
+            ref tr = e.data[TestReportedPayload]
+            var idx = self._ensure_accum(tr.path)
+            self._accums[idx].tests.append(tr.test.copy())
             return
         if e.kind == EventKind.ATTEMPT_FINISHED:
-            var idx = self._ensure_accum(e.path)
+            ref a = e.data[AttemptFinishedPayload]
+            var idx = self._ensure_accum(a.path)
             self._accums[idx].attempts.append(
                 _AttemptRec(
-                    e.term_kind,
-                    e.term_value,
-                    e.escalated,
-                    bounded_text_from_bytes(e.captured_stdout),
-                    bounded_text_from_bytes(e.captured_stderr),
+                    a.term_kind,
+                    a.term_value,
+                    a.escalated,
+                    bounded_text_from_bytes(a.captured_stdout),
+                    bounded_text_from_bytes(a.captured_stderr),
                 )
             )
             return
         if e.kind == EventKind.FILE_FINISHED:
-            self._finish_file(e)
+            self._finish_file(e.data[FileFinishedPayload])
             return
         if e.kind == EventKind.PRECOMPILE_FAILED:
-            self._finish_precompile(e)
+            self._finish_precompile(e.data[PrecompileFailedPayload])
             return
 
     def status(self) -> JunitStatus:
@@ -695,7 +705,7 @@ struct JunitReporter(Reporter):
         if idx >= 0:
             _ = self._accums.pop(idx)
 
-    def _finish_file(mut self, e: Event):
+    def _finish_file(mut self, e: FileFinishedPayload):
         """Render and spool the suite for one finished file (or drop it)."""
         # Selection-induced absences carry no suite at all.
         if e.outcome == Outcome.EXCLUDED or e.outcome == Outcome.DESELECTED:
@@ -706,7 +716,9 @@ struct JunitReporter(Reporter):
         self._drop_accum(e.path)
         self._spool(render_suite(suite), "suite " + e.path)
 
-    def _suite_for_file(self, e: Event, accum_idx: Int) -> JunitSuite:
+    def _suite_for_file(
+        self, e: FileFinishedPayload, accum_idx: Int
+    ) -> JunitSuite:
         """Build the typed suite for a finished file from its accumulator."""
         var cn = dotted_classname(e.path)
         var cases = List[JunitCase]()
@@ -788,7 +800,7 @@ struct JunitReporter(Reporter):
         return JunitCase("[attempts]", cn, False, _blank_primary(), reruns^)
 
     def _attempts_filelevel(
-        self, cn: String, accum_idx: Int, e: Event
+        self, cn: String, accum_idx: Int, e: FileFinishedPayload
     ) -> JunitCase:
         """The `[attempts]` row for a rerun-exhausted file-level failure.
 
@@ -820,7 +832,7 @@ struct JunitReporter(Reporter):
             "[attempts]", cn, True, _primary_from(first_d), reruns^
         )
 
-    def _finish_precompile(mut self, e: Event):
+    def _finish_precompile(mut self, e: PrecompileFailedPayload):
         """Emit the precompile suite plus one not-run suite per named casualty.
 
         The `mtest::precompile` suite carries a `[precompile]` error, and each

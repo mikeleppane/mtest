@@ -11,7 +11,7 @@ from std.os import makedirs
 from std.os.path import exists
 from std.testing import assert_equal, assert_true
 
-from mtest.model import EventKind
+from mtest.model import EventKind, SessionFinishedPayload
 from mtest.report import (
     AnnotationsReporter,
     CompositeReporter,
@@ -41,7 +41,7 @@ def _one_session_finished(ref rec: RecordingReporter, want_code: Int) raises:
         if rec.kind_at(i) == EventKind.SESSION_FINISHED:
             finishes += 1
             assert_equal(
-                rec.event_at(i).exit_code,
+                rec.event_at(i).data[SessionFinishedPayload].exit_code,
                 want_code,
                 "the dispatched terminal carries the resolved code",
             )

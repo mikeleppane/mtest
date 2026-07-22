@@ -9,7 +9,15 @@ resolved exit code. Both recorders must observe the identical stream.
 """
 from std.testing import assert_equal, assert_true
 
-from mtest.model import EventKind, Outcome, ParseDisposition
+from mtest.model import (
+    EventKind,
+    Outcome,
+    ParseDisposition,
+    SessionStartedPayload,
+    SessionFinishedPayload,
+    FileFinishedPayload,
+    WarningPayload,
+)
 from mtest.report import (
     CompositeReporter,
     RecordingCoordinator,
@@ -49,16 +57,20 @@ def test_flow_pass_fail_excluded_warning_exit1() raises:
     assert_equal(rec.count(), 10)
 
     assert_true(rec.kind_at(0) == EventKind.SESSION_STARTED)
-    assert_equal(rec.event_at(0).selected_count, 2)
-    assert_equal(rec.event_at(0).excluded_count, 1)
+    assert_equal(rec.event_at(0).data[SessionStartedPayload].selected_count, 2)
+    assert_equal(rec.event_at(0).data[SessionStartedPayload].excluded_count, 1)
 
     assert_true(rec.kind_at(1) == EventKind.FILE_FINISHED)
     assert_true(rec.outcome_at(1) == Outcome.EXCLUDED)
     assert_equal(rec.path_at(1), "tests/test_skipme.mojo")
-    assert_equal(rec.event_at(1).exclusion_pattern, "*skipme*")
+    assert_equal(
+        rec.event_at(1).data[FileFinishedPayload].exclusion_pattern, "*skipme*"
+    )
 
     assert_true(rec.kind_at(2) == EventKind.WARNING)
-    assert_equal(rec.event_at(2).warning_kind, "stale-exclusion")
+    assert_equal(
+        rec.event_at(2).data[WarningPayload].warning_kind, "stale-exclusion"
+    )
 
     # Run files, sorted: test_a_pass then test_b_fail. Each emits its per-test
     # TestReported row BETWEEN its file_started and file_finished.
@@ -72,7 +84,7 @@ def test_flow_pass_fail_excluded_warning_exit1() raises:
     assert_equal(rec.path_at(5), "tests/test_a_pass.mojo")
     # The verdict now rests on the PARSED report, not the exit status alone.
     assert_true(rec.parse_disposition_at(5) == ParseDisposition.PARSED)
-    assert_equal(rec.event_at(5).passed_tests, 1)
+    assert_equal(rec.event_at(5).data[FileFinishedPayload].passed_tests, 1)
 
     assert_true(rec.kind_at(6) == EventKind.FILE_STARTED)
     assert_equal(rec.path_at(6), "tests/test_b_fail.mojo")
@@ -80,22 +92,30 @@ def test_flow_pass_fail_excluded_warning_exit1() raises:
     assert_true(rec.test_at(7).outcome == Outcome.FAIL)
     assert_true(rec.kind_at(8) == EventKind.FILE_FINISHED)
     assert_true(rec.outcome_at(8) == Outcome.FAIL)
-    assert_equal(rec.event_at(8).exit_status, 1)
-    assert_equal(rec.event_at(8).failed_tests, 1)
+    assert_equal(rec.event_at(8).data[FileFinishedPayload].exit_status, 1)
+    assert_equal(rec.event_at(8).data[FileFinishedPayload].failed_tests, 1)
 
     var last = rec.event_at(9)
     assert_true(last.kind == EventKind.SESSION_FINISHED)
-    assert_equal(last.exit_code, 1)
-    assert_equal(last.summary.count_of(Outcome.PASS), 1)
-    assert_equal(last.summary.count_of(Outcome.FAIL), 1)
-    assert_equal(last.summary.count_of(Outcome.EXCLUDED), 1)
-    assert_equal(last.summary.count_of(Outcome.NOT_RUN), 0)
+    assert_equal(last.data[SessionFinishedPayload].exit_code, 1)
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.PASS), 1
+    )
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.FAIL), 1
+    )
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.EXCLUDED), 1
+    )
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.NOT_RUN), 0
+    )
     # The authoritative per-test totals ride on SessionFinished.
-    assert_equal(last.test_counts.passed, 1)
-    assert_equal(last.test_counts.failed, 1)
+    assert_equal(last.data[SessionFinishedPayload].test_counts.passed, 1)
+    assert_equal(last.data[SessionFinishedPayload].test_counts.failed, 1)
 
     # The build command is faithful (the reproduce line), carried as argv.
-    var argv = rec.event_at(5).build_argv.copy()
+    var argv = rec.event_at(5).data[FileFinishedPayload].build_argv.copy()
     assert_true("build" in argv)
     assert_true("tests/test_a_pass.mojo" in argv)
 

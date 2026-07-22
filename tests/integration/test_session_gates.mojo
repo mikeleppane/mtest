@@ -7,7 +7,7 @@ the summary tally over a real build+run of tiny fixtures.
 """
 from std.testing import assert_equal, assert_false, assert_true
 
-from mtest.model import EventKind, Outcome
+from mtest.model import EventKind, Outcome, SessionFinishedPayload
 from mtest.report import (
     CompositeReporter,
     RecordingCoordinator,
@@ -52,9 +52,13 @@ def test_failing_gate_aborts_and_fans_out_not_run() raises:
     assert_true(rec.kind_at(4) == EventKind.SESSION_FINISHED)
 
     var last = rec.event_at(4)
-    assert_equal(last.summary.count_of(Outcome.FAIL), 1)
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.FAIL), 1
+    )
     # The run file that never ran is accounted for as NOT_RUN.
-    assert_equal(last.summary.count_of(Outcome.NOT_RUN), 1)
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.NOT_RUN), 1
+    )
 
 
 def test_drifting_gate_aborts_and_fans_out_not_run() raises:
@@ -86,7 +90,9 @@ def test_drifting_gate_aborts_and_fans_out_not_run() raises:
     assert_false(started_run, "a drifting gate aborts before the run files")
     # Both the drift gate and the never-run file are accounted NOT_RUN.
     var last = rec.event_at(rec.count() - 1)
-    assert_equal(last.summary.count_of(Outcome.NOT_RUN), 2)
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.NOT_RUN), 2
+    )
 
 
 def test_passing_gate_lets_run_files_proceed() raises:
@@ -110,6 +116,10 @@ def test_passing_gate_lets_run_files_proceed() raises:
     assert_equal(rec.path_at(1), "tests/test_gate.mojo")
     assert_equal(rec.path_at(4), "tests/test_run.mojo")
     var last = rec.event_at(7)
-    assert_equal(last.summary.count_of(Outcome.PASS), 2)
-    assert_equal(last.summary.count_of(Outcome.NOT_RUN), 0)
-    assert_equal(last.test_counts.passed, 2)
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.PASS), 2
+    )
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.NOT_RUN), 0
+    )
+    assert_equal(last.data[SessionFinishedPayload].test_counts.passed, 2)

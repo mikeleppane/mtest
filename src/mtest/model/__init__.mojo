@@ -15,7 +15,23 @@ from mtest.model.test_result import TestResult
 from mtest.model.parse_disposition import ParseDisposition
 from mtest.model.attribution import AttributionDisposition
 from mtest.model.test_counts import TestCounts
-from mtest.model.events import EventKind, Summary, Event
+from mtest.model.events import (
+    EventKind,
+    Summary,
+    Event,
+    EventPayload,
+    SessionStartedPayload,
+    WarningPayload,
+    PrecompileFailedPayload,
+    FileStartedPayload,
+    FileFinishedPayload,
+    SessionFinishedPayload,
+    InternalErrorPayload,
+    TestReportedPayload,
+    CollectionKnownPayload,
+    AttemptFinishedPayload,
+    CrashAttributionPayload,
+)
 from mtest.model.exit_code import (
     TerminalFacts,
     exit_code_for,

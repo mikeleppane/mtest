@@ -11,7 +11,15 @@ closed zero-test ceiling, PASS-from-a-parsed-report, never PASS-from-exit-status
 """
 from std.testing import assert_equal, assert_true
 
-from mtest.model import Event, EventKind, Outcome, ParseDisposition
+from mtest.model import (
+    Event,
+    EventKind,
+    Outcome,
+    ParseDisposition,
+    FileFinishedPayload,
+    SessionFinishedPayload,
+    WarningPayload,
+)
 from mtest.report import (
     CompositeReporter,
     RecordingCoordinator,
@@ -31,8 +39,8 @@ from session_fixtures import (
 )
 
 
-def _finished(rec: RecordingReporter) raises -> Event:
-    """The single FILE_FINISHED event in the stream (fails if not exactly one).
+def _finished(rec: RecordingReporter) raises -> FileFinishedPayload:
+    """The single FILE_FINISHED payload in the stream (fails if not exactly one).
     """
     var found = -1
     for i in range(rec.count()):
@@ -40,7 +48,7 @@ def _finished(rec: RecordingReporter) raises -> Event:
             assert_true(found < 0, "more than one FILE_FINISHED")
             found = i
     assert_true(found >= 0, "no FILE_FINISHED event")
-    return rec.event_at(found)
+    return rec.event_at(found).data[FileFinishedPayload].copy()
 
 
 def test_silent_binary_is_malformed_suite() raises:
@@ -109,14 +117,16 @@ def test_liar_off_grammar_routes_to_exit_3_drift() raises:
     for i in range(rec.count()):
         if (
             rec.kind_at(i) == EventKind.WARNING
-            and rec.event_at(i).warning_kind == "drift"
+            and rec.event_at(i).data[WarningPayload].warning_kind == "drift"
         ):
             saw_drift_warning = True
     assert_true(saw_drift_warning, "drift must emit a drift warning")
     var last = rec.event_at(rec.count() - 1)
     assert_true(last.kind == EventKind.SESSION_FINISHED)
-    assert_equal(last.exit_code, 3)
-    assert_equal(last.summary.count_of(Outcome.NOT_RUN), 1)
+    assert_equal(last.data[SessionFinishedPayload].exit_code, 3)
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.NOT_RUN), 1
+    )
 
 
 def test_zero_test_report_is_pass_that_ran_zero_tests() raises:

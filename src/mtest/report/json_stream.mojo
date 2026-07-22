@@ -34,7 +34,22 @@ second escaper and no second lossy path here.
 """
 from mtest.config.lossy_utf8 import lossy_utf8
 from mtest.model.attribution import AttributionDisposition
-from mtest.model.events import Event, EventKind
+from mtest.model.events import (
+    AttemptFinishedPayload,
+    CollectionKnownPayload,
+    CrashAttributionPayload,
+    Event,
+    EventKind,
+    FileFinishedPayload,
+    FileStartedPayload,
+    InternalErrorPayload,
+    PrecompileFailedPayload,
+    SessionFinishedPayload,
+    SessionStartedPayload,
+    Summary,
+    TestReportedPayload,
+    WarningPayload,
+)
 from mtest.model.outcome import Outcome
 from mtest.model.parse_disposition import ParseDisposition
 from mtest.report.escape import json_escape_string
@@ -321,27 +336,27 @@ def serialize_event(e: Event) -> String:
         vocabulary stays closed.
     """
     if e.kind == EventKind.SESSION_STARTED:
-        return _session_started(e)
+        return _session_started(e.data[SessionStartedPayload])
     if e.kind == EventKind.WARNING:
-        return _warning(e)
+        return _warning(e.data[WarningPayload])
     if e.kind == EventKind.PRECOMPILE_FAILED:
-        return _precompile_failed(e)
+        return _precompile_failed(e.data[PrecompileFailedPayload])
     if e.kind == EventKind.FILE_STARTED:
-        return _file_started(e)
+        return _file_started(e.data[FileStartedPayload])
     if e.kind == EventKind.FILE_FINISHED:
-        return _file_finished(e)
+        return _file_finished(e.data[FileFinishedPayload])
     if e.kind == EventKind.ATTEMPT_FINISHED:
-        return _attempt_finished(e)
+        return _attempt_finished(e.data[AttemptFinishedPayload])
     if e.kind == EventKind.CRASH_ATTRIBUTION:
-        return _crash_attribution(e)
+        return _crash_attribution(e.data[CrashAttributionPayload])
     if e.kind == EventKind.COLLECTION_KNOWN:
-        return _collection_known(e)
+        return _collection_known(e.data[CollectionKnownPayload])
     if e.kind == EventKind.INTERNAL_ERROR:
-        return _internal_error(e)
+        return _internal_error(e.data[InternalErrorPayload])
     if e.kind == EventKind.TEST_REPORTED:
-        return _test_reported(e)
+        return _test_reported(e.data[TestReportedPayload])
     if e.kind == EventKind.SESSION_FINISHED:
-        return _session_finished(e)
+        return _session_finished(e.data[SessionFinishedPayload])
     # Unreachable: the EventKind vocabulary is closed and every kind is handled
     # above. Returning an empty (invalid) line rather than mislabeling an
     # unhandled kind as a session_finished record means a future kind added
@@ -353,123 +368,123 @@ def serialize_event(e: Event) -> String:
 # --- Per-kind serializers ---------------------------------------------------
 
 
-def _session_started(e: Event) -> String:
+def _session_started(p: SessionStartedPayload) -> String:
     var s = String('{"event":"session_started"')
-    s += ',"root":"' + _cap_runner_string(e.root) + '"'
-    s += ',"toolchain":"' + _cap_runner_string(e.toolchain) + '"'
-    s += ',"selected_count":' + String(e.selected_count)
-    s += ',"excluded_count":' + String(e.excluded_count)
-    s += ',"shard_label":"' + _cap_runner_string(e.shard_label) + '"'
-    s += ',"sharded_out_count":' + String(e.sharded_out_count)
+    s += ',"root":"' + _cap_runner_string(p.root) + '"'
+    s += ',"toolchain":"' + _cap_runner_string(p.toolchain) + '"'
+    s += ',"selected_count":' + String(p.selected_count)
+    s += ',"excluded_count":' + String(p.excluded_count)
+    s += ',"shard_label":"' + _cap_runner_string(p.shard_label) + '"'
+    s += ',"sharded_out_count":' + String(p.sharded_out_count)
     s += "}"
     return s^
 
 
-def _warning(e: Event) -> String:
+def _warning(p: WarningPayload) -> String:
     var s = String('{"event":"warning"')
-    s += ',"warning_kind":"' + _cap_runner_string(e.warning_kind) + '"'
-    s += ',"warning_pattern":"' + _cap_runner_string(e.warning_pattern) + '"'
+    s += ',"warning_kind":"' + _cap_runner_string(p.warning_kind) + '"'
+    s += ',"warning_pattern":"' + _cap_runner_string(p.warning_pattern) + '"'
     s += "}"
     return s^
 
 
-def _precompile_failed(e: Event) -> String:
-    var out = _excerpt_string(e.compiler_output, _TEXT_HEAD, _TEXT_TAIL)
-    var cas = _string_array(e.casualties)
+def _precompile_failed(p: PrecompileFailedPayload) -> String:
+    var out = _excerpt_string(p.compiler_output, _TEXT_HEAD, _TEXT_TAIL)
+    var cas = _string_array(p.casualties)
     var s = String('{"event":"precompile_failed"')
-    s += ',"step":"' + _cap_runner_string(e.step) + '"'
+    s += ',"step":"' + _cap_runner_string(p.step) + '"'
     s += ',"compiler_output":"' + out.escaped + '"'
     s += ',"compiler_output_omitted_bytes":' + String(out.omitted)
-    s += ',"casualty_count":' + String(e.casualty_count)
+    s += ',"casualty_count":' + String(p.casualty_count)
     s += ',"casualties":' + cas.text
     s += ',"casualties_omitted":' + String(cas.omitted)
     s += ',"casualties_omitted_bytes":' + String(cas.omitted_bytes)
-    s += ',"ending_known":' + _b(e.ending_known)
-    s += ',"term_kind":' + String(e.term_kind)
-    s += ',"term_value":' + String(e.term_value)
-    s += ',"escalated":' + _b(e.escalated)
-    s += ',"timeout_us":' + String(_timeout_us(e.timeout_seconds))
-    s += ',"attempts_used":' + String(e.attempts_used)
+    s += ',"ending_known":' + _b(p.ending_known)
+    s += ',"term_kind":' + String(p.term_kind)
+    s += ',"term_value":' + String(p.term_value)
+    s += ',"escalated":' + _b(p.escalated)
+    s += ',"timeout_us":' + String(_timeout_us(p.timeout_seconds))
+    s += ',"attempts_used":' + String(p.attempts_used)
     s += "}"
     return s^
 
 
-def _file_started(e: Event) -> String:
+def _file_started(p: FileStartedPayload) -> String:
     var s = String('{"event":"file_started"')
-    s += ',"path":"' + _cap_runner_string(e.path) + '"'
+    s += ',"path":"' + _cap_runner_string(p.path) + '"'
     s += "}"
     return s^
 
 
-def _file_finished(e: Event) -> String:
-    var argv = _string_array(e.build_argv)
-    var out = _excerpt_bytes(e.captured_stdout, _STREAM_HEAD, _STREAM_TAIL)
-    var err = _excerpt_bytes(e.captured_stderr, _STREAM_HEAD, _STREAM_TAIL)
+def _file_finished(p: FileFinishedPayload) -> String:
+    var argv = _string_array(p.build_argv)
+    var out = _excerpt_bytes(p.captured_stdout, _STREAM_HEAD, _STREAM_TAIL)
+    var err = _excerpt_bytes(p.captured_stderr, _STREAM_HEAD, _STREAM_TAIL)
     var s = String('{"event":"file_finished"')
-    s += ',"path":"' + _cap_runner_string(e.path) + '"'
-    s += ',"outcome":"' + String(_outcome_token(e.outcome)) + '"'
-    s += ',"duration_us":' + String(_seconds_to_us(e.duration_seconds))
+    s += ',"path":"' + _cap_runner_string(p.path) + '"'
+    s += ',"outcome":"' + String(_outcome_token(p.outcome)) + '"'
+    s += ',"duration_us":' + String(_seconds_to_us(p.duration_seconds))
     s += ',"build_argv":' + argv.text
     s += ',"build_argv_omitted":' + String(argv.omitted)
     s += ',"build_argv_omitted_bytes":' + String(argv.omitted_bytes)
     s += ',"build_duration_us":' + String(
-        _seconds_to_us(e.build_duration_seconds)
+        _seconds_to_us(p.build_duration_seconds)
     )
     s += ',"captured_stdout":"' + out.escaped + '"'
-    s += ',"stdout_capture_bytes":' + String(len(e.captured_stdout))
+    s += ',"stdout_capture_bytes":' + String(len(p.captured_stdout))
     s += ',"stdout_stream_omitted_bytes":' + String(out.omitted)
     s += ',"captured_stderr":"' + err.escaped + '"'
-    s += ',"stderr_capture_bytes":' + String(len(e.captured_stderr))
+    s += ',"stderr_capture_bytes":' + String(len(p.captured_stderr))
     s += ',"stderr_stream_omitted_bytes":' + String(err.omitted)
-    s += ',"stdout_truncated":' + _b(e.stdout_truncated)
-    s += ',"stderr_truncated":' + _b(e.stderr_truncated)
-    s += ',"signal_number":' + String(e.signal_number)
-    s += ',"exit_status":' + String(e.exit_status)
-    s += ',"timeout_us":' + String(_timeout_us(e.timeout_seconds))
+    s += ',"stdout_truncated":' + _b(p.stdout_truncated)
+    s += ',"stderr_truncated":' + _b(p.stderr_truncated)
+    s += ',"signal_number":' + String(p.signal_number)
+    s += ',"exit_status":' + String(p.exit_status)
+    s += ',"timeout_us":' + String(_timeout_us(p.timeout_seconds))
     s += (
-        ',"exclusion_pattern":"' + _cap_runner_string(e.exclusion_pattern) + '"'
+        ',"exclusion_pattern":"' + _cap_runner_string(p.exclusion_pattern) + '"'
     )
     s += (
         ',"parse_disposition":"'
-        + String(_parse_disposition_token(e.parse_disposition))
+        + String(_parse_disposition_token(p.parse_disposition))
         + '"'
     )
-    s += ',"passed_tests":' + String(e.passed_tests)
-    s += ',"failed_tests":' + String(e.failed_tests)
-    s += ',"skipped_tests":' + String(e.skipped_tests)
-    s += ',"deselected_tests":' + String(e.deselected_tests)
-    s += ',"attempts_used":' + String(e.attempts_used)
-    s += ',"flaky":' + _b(e.flaky)
-    s += ',"slow":' + _b(e.slow)
-    s += ',"escalated":' + _b(e.escalated)
+    s += ',"passed_tests":' + String(p.passed_tests)
+    s += ',"failed_tests":' + String(p.failed_tests)
+    s += ',"skipped_tests":' + String(p.skipped_tests)
+    s += ',"deselected_tests":' + String(p.deselected_tests)
+    s += ',"attempts_used":' + String(p.attempts_used)
+    s += ',"flaky":' + _b(p.flaky)
+    s += ',"slow":' + _b(p.slow)
+    s += ',"escalated":' + _b(p.escalated)
     s += "}"
     return s^
 
 
-def _attempt_finished(e: Event) -> String:
+def _attempt_finished(p: AttemptFinishedPayload) -> String:
     # Attempt excerpts are already bounded at construction (the session clamps
     # each non-final attempt's streams to a head+tail window before building the
     # event), so they serialize whole; their `*_truncated` markers still ride.
-    var out = json_escape_string(lossy_utf8(e.captured_stdout))
-    var err = json_escape_string(lossy_utf8(e.captured_stderr))
-    var argv = _string_array(e.attempt_argv)
+    var out = json_escape_string(lossy_utf8(p.captured_stdout))
+    var err = json_escape_string(lossy_utf8(p.captured_stderr))
+    var argv = _string_array(p.attempt_argv)
     var s = String('{"event":"attempt_finished"')
-    s += ',"path":"' + _cap_runner_string(e.path) + '"'
-    s += ',"step":"' + _cap_runner_string(e.step) + '"'
-    s += ',"attempt_index":' + String(e.attempt_index)
-    s += ',"attempts_planned":' + String(e.attempts_planned)
-    s += ',"term_kind":' + String(e.term_kind)
-    s += ',"term_value":' + String(e.term_value)
-    s += ',"term_final_kind":' + String(e.term_final_kind)
-    s += ',"term_final_value":' + String(e.term_final_value)
-    s += ',"escalated":' + _b(e.escalated)
-    s += ',"retry_eligible":' + _b(e.retry_eligible)
-    s += ',"classification":"' + _cap_runner_string(e.classification) + '"'
-    s += ',"duration_us":' + String(_seconds_to_us(e.duration_seconds))
+    s += ',"path":"' + _cap_runner_string(p.path) + '"'
+    s += ',"step":"' + _cap_runner_string(p.step) + '"'
+    s += ',"attempt_index":' + String(p.attempt_index)
+    s += ',"attempts_planned":' + String(p.attempts_planned)
+    s += ',"term_kind":' + String(p.term_kind)
+    s += ',"term_value":' + String(p.term_value)
+    s += ',"term_final_kind":' + String(p.term_final_kind)
+    s += ',"term_final_value":' + String(p.term_final_value)
+    s += ',"escalated":' + _b(p.escalated)
+    s += ',"retry_eligible":' + _b(p.retry_eligible)
+    s += ',"classification":"' + _cap_runner_string(p.classification) + '"'
+    s += ',"duration_us":' + String(_seconds_to_us(p.duration_seconds))
     s += ',"captured_stdout":"' + out + '"'
     s += ',"captured_stderr":"' + err + '"'
-    s += ',"stdout_truncated":' + _b(e.stdout_truncated)
-    s += ',"stderr_truncated":' + _b(e.stderr_truncated)
+    s += ',"stdout_truncated":' + _b(p.stdout_truncated)
+    s += ',"stderr_truncated":' + _b(p.stderr_truncated)
     s += ',"attempt_argv":' + argv.text
     s += ',"attempt_argv_omitted":' + String(argv.omitted)
     s += ',"attempt_argv_omitted_bytes":' + String(argv.omitted_bytes)
@@ -477,52 +492,52 @@ def _attempt_finished(e: Event) -> String:
     return s^
 
 
-def _crash_attribution(e: Event) -> String:
+def _crash_attribution(p: CrashAttributionPayload) -> String:
     var s = String('{"event":"crash_attribution"')
-    s += ',"path":"' + _cap_runner_string(e.path) + '"'
+    s += ',"path":"' + _cap_runner_string(p.path) + '"'
     s += (
         ',"attribution_disposition":"'
-        + String(_attribution_disposition_token(e.attribution_disposition))
+        + String(_attribution_disposition_token(p.attribution_disposition))
         + '"'
     )
-    s += ',"culprit_test":"' + _cap_runner_string(e.culprit_test) + '"'
-    s += ',"isolation_reruns":' + String(e.isolation_reruns)
-    s += ',"attribution_us":' + String(_seconds_to_us(e.attribution_seconds))
+    s += ',"culprit_test":"' + _cap_runner_string(p.culprit_test) + '"'
+    s += ',"isolation_reruns":' + String(p.isolation_reruns)
+    s += ',"attribution_us":' + String(_seconds_to_us(p.attribution_seconds))
     s += "}"
     return s^
 
 
-def _collection_known(e: Event) -> String:
+def _collection_known(p: CollectionKnownPayload) -> String:
     var s = String('{"event":"collection_known"')
-    s += ',"selected_test_total":' + String(e.selected_test_total)
-    s += ',"deselected_test_total":' + String(e.deselected_test_total)
+    s += ',"selected_test_total":' + String(p.selected_test_total)
+    s += ',"deselected_test_total":' + String(p.deselected_test_total)
     s += "}"
     return s^
 
 
-def _internal_error(e: Event) -> String:
+def _internal_error(p: InternalErrorPayload) -> String:
     var s = String('{"event":"internal_error"')
-    s += ',"step":"' + _cap_runner_string(e.step) + '"'
-    s += ',"program":"' + _cap_runner_string(e.program) + '"'
-    s += ',"errno":' + String(e.errno)
+    s += ',"step":"' + _cap_runner_string(p.step) + '"'
+    s += ',"program":"' + _cap_runner_string(p.program) + '"'
+    s += ',"errno":' + String(p.errno)
     s += "}"
     return s^
 
 
-def _test_reported(e: Event) -> String:
-    var detail = _excerpt_string(e.test.detail, _TEXT_HEAD, _TEXT_TAIL)
+def _test_reported(p: TestReportedPayload) -> String:
+    var detail = _excerpt_string(p.test.detail, _TEXT_HEAD, _TEXT_TAIL)
     var s = String('{"event":"test_reported"')
-    s += ',"path":"' + _cap_runner_string(e.test.node.path) + '"'
-    s += ',"name":"' + _cap_runner_string(e.test.node.name) + '"'
-    s += ',"outcome":"' + String(_outcome_token(e.test.outcome)) + '"'
+    s += ',"path":"' + _cap_runner_string(p.test.node.path) + '"'
+    s += ',"name":"' + _cap_runner_string(p.test.node.name) + '"'
+    s += ',"outcome":"' + String(_outcome_token(p.test.outcome)) + '"'
     s += ',"detail":"' + detail.escaped + '"'
     s += ',"detail_omitted_bytes":' + String(detail.omitted)
-    s += ',"timing":"' + _cap_runner_string(e.test.timing) + '"'
+    s += ',"timing":"' + _cap_runner_string(p.test.timing) + '"'
     s += "}"
     return s^
 
 
-def _summary_object(e: Event) -> String:
+def _summary_object(summary: Summary) -> String:
     var s = String("{")
     for code in range(Outcome.COUNT):
         if code > 0:
@@ -531,22 +546,22 @@ def _summary_object(e: Event) -> String:
             '"'
             + String(_outcome_token(Outcome(code)))
             + '":'
-            + String(e.summary.counts[code])
+            + String(summary.counts[code])
         )
     s += "}"
     return s^
 
 
-def _session_finished(e: Event) -> String:
+def _session_finished(p: SessionFinishedPayload) -> String:
     var s = String('{"event":"session_finished"')
-    s += ',"summary":' + _summary_object(e)
-    s += ',"wall_time_us":' + String(_seconds_to_us(e.wall_time_seconds))
-    s += ',"exit_code":' + String(e.exit_code)
-    s += ',"test_counts":{"passed":' + String(e.test_counts.passed)
-    s += ',"failed":' + String(e.test_counts.failed)
-    s += ',"skipped":' + String(e.test_counts.skipped)
-    s += ',"deselected":' + String(e.test_counts.deselected)
+    s += ',"summary":' + _summary_object(p.summary)
+    s += ',"wall_time_us":' + String(_seconds_to_us(p.wall_time_seconds))
+    s += ',"exit_code":' + String(p.exit_code)
+    s += ',"test_counts":{"passed":' + String(p.test_counts.passed)
+    s += ',"failed":' + String(p.test_counts.failed)
+    s += ',"skipped":' + String(p.test_counts.skipped)
+    s += ',"deselected":' + String(p.test_counts.deselected)
     s += "}"
-    s += ',"flaky_files":' + String(e.flaky_files)
+    s += ',"flaky_files":' + String(p.flaky_files)
     s += "}"
     return s^

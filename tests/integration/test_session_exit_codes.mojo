@@ -7,7 +7,12 @@ scheduling and every remaining run file becomes NOT_RUN.
 """
 from std.testing import assert_equal, assert_true
 
-from mtest.model import EventKind, Outcome
+from mtest.model import (
+    EventKind,
+    Outcome,
+    SessionStartedPayload,
+    SessionFinishedPayload,
+)
 from mtest.report import (
     CompositeReporter,
     RecordingCoordinator,
@@ -38,8 +43,10 @@ def test_all_pass_is_exit_0() raises:
     var last = comp.composite.reporters[0].event_at(
         comp.composite.reporters[0].count() - 1
     )
-    assert_equal(last.exit_code, 0)
-    assert_equal(last.summary.count_of(Outcome.PASS), 2)
+    assert_equal(last.data[SessionFinishedPayload].exit_code, 0)
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.PASS), 2
+    )
 
 
 def test_nothing_runnable_is_exit_5() raises:
@@ -56,9 +63,9 @@ def test_nothing_runnable_is_exit_5() raises:
     # Only the session frame: start + finish.
     assert_equal(rec.count(), 2)
     assert_true(rec.kind_at(0) == EventKind.SESSION_STARTED)
-    assert_equal(rec.event_at(0).selected_count, 0)
+    assert_equal(rec.event_at(0).data[SessionStartedPayload].selected_count, 0)
     assert_true(rec.kind_at(1) == EventKind.SESSION_FINISHED)
-    assert_equal(rec.event_at(1).exit_code, 5)
+    assert_equal(rec.event_at(1).data[SessionFinishedPayload].exit_code, 5)
 
 
 def test_exitfirst_stops_and_fans_out_not_run() raises:
@@ -83,8 +90,12 @@ def test_exitfirst_stops_and_fans_out_not_run() raises:
     assert_true(rec.outcome_at(3) == Outcome.FAIL)
     assert_equal(rec.path_at(3), "tests/test_a_fail.mojo")
     var last = rec.event_at(4)
-    assert_equal(last.summary.count_of(Outcome.FAIL), 1)
-    assert_equal(last.summary.count_of(Outcome.NOT_RUN), 1)
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.FAIL), 1
+    )
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.NOT_RUN), 1
+    )
 
 
 def test_spawn_failure_is_exit_3() raises:
@@ -106,7 +117,14 @@ def test_spawn_failure_is_exit_3() raises:
     ref rec = comp.composite.reporters[0]
     var last = rec.event_at(rec.count() - 1)
     assert_true(last.kind == EventKind.SESSION_FINISHED)
-    assert_equal(last.exit_code, 3)
+    assert_equal(last.data[SessionFinishedPayload].exit_code, 3)
     # No verdict was recorded; the file is accounted for as NOT_RUN.
-    assert_equal(last.summary.count_of(Outcome.NOT_RUN), 1)
-    assert_equal(last.summary.count_of(Outcome.COMPILE_ERROR), 0)
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.NOT_RUN), 1
+    )
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(
+            Outcome.COMPILE_ERROR
+        ),
+        0,
+    )

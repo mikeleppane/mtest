@@ -10,7 +10,7 @@ disables the limit (the `--timeout 0` convention).
 """
 from std.testing import assert_equal, assert_true
 
-from mtest.model import EventKind, Outcome
+from mtest.model import EventKind, Outcome, SessionFinishedPayload
 from mtest.report import (
     CompositeReporter,
     RecordingCoordinator,
@@ -48,8 +48,12 @@ def test_maxfail_one_stops_after_first_failing_file() raises:
     assert_equal(code, 1)
     ref rec = comp.composite.reporters[0]
     var last = rec.event_at(rec.count() - 1)
-    assert_equal(last.summary.count_of(Outcome.FAIL), 1)
-    assert_equal(last.summary.count_of(Outcome.NOT_RUN), 2)
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.FAIL), 1
+    )
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.NOT_RUN), 2
+    )
 
 
 def test_maxfail_two_stops_after_second_failing_file() raises:
@@ -69,8 +73,12 @@ def test_maxfail_two_stops_after_second_failing_file() raises:
     assert_equal(code, 1)
     ref rec = comp.composite.reporters[0]
     var last = rec.event_at(rec.count() - 1)
-    assert_equal(last.summary.count_of(Outcome.FAIL), 2)
-    assert_equal(last.summary.count_of(Outcome.NOT_RUN), 1)
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.FAIL), 2
+    )
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.NOT_RUN), 1
+    )
 
 
 def test_maxfail_three_runs_every_file_when_exactly_reached() raises:
@@ -90,8 +98,12 @@ def test_maxfail_three_runs_every_file_when_exactly_reached() raises:
     assert_equal(code, 1)
     ref rec = comp.composite.reporters[0]
     var last = rec.event_at(rec.count() - 1)
-    assert_equal(last.summary.count_of(Outcome.FAIL), 3)
-    assert_equal(last.summary.count_of(Outcome.NOT_RUN), 0)
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.FAIL), 3
+    )
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.NOT_RUN), 0
+    )
 
 
 def test_maxfail_zero_is_no_limit() raises:
@@ -111,8 +123,12 @@ def test_maxfail_zero_is_no_limit() raises:
     assert_equal(code, 1)
     ref rec = comp.composite.reporters[0]
     var last = rec.event_at(rec.count() - 1)
-    assert_equal(last.summary.count_of(Outcome.FAIL), 3)
-    assert_equal(last.summary.count_of(Outcome.NOT_RUN), 0)
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.FAIL), 3
+    )
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.NOT_RUN), 0
+    )
 
 
 def test_maxfail_overshoot_counts_the_whole_file() raises:
@@ -137,8 +153,10 @@ def test_maxfail_overshoot_counts_the_whole_file() raises:
     # The per-test tally proves the overshooting file ran to completion: all
     # three of its FAIL rows were counted, not just the one that tripped the
     # limit.
-    assert_equal(last.test_counts.failed, 3)
-    assert_equal(last.summary.count_of(Outcome.NOT_RUN), 1)
+    assert_equal(last.data[SessionFinishedPayload].test_counts.failed, 3)
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.NOT_RUN), 1
+    )
 
 
 def test_maxfail_one_counts_a_file_level_abnormal_as_one() raises:
@@ -159,8 +177,12 @@ def test_maxfail_one_counts_a_file_level_abnormal_as_one() raises:
     assert_equal(code, 1)
     ref rec = comp.composite.reporters[0]
     var last = rec.event_at(rec.count() - 1)
-    assert_equal(last.summary.count_of(Outcome.CRASH), 1)
-    assert_equal(last.summary.count_of(Outcome.NOT_RUN), 1)
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.CRASH), 1
+    )
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.NOT_RUN), 1
+    )
 
 
 def test_maxfail_composes_with_exitfirst_first_trigger_wins() raises:
@@ -183,8 +205,12 @@ def test_maxfail_composes_with_exitfirst_first_trigger_wins() raises:
     assert_equal(code, 1)
     ref rec = comp.composite.reporters[0]
     var last = rec.event_at(rec.count() - 1)
-    assert_equal(last.summary.count_of(Outcome.FAIL), 1)
-    assert_equal(last.summary.count_of(Outcome.NOT_RUN), 1)
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.FAIL), 1
+    )
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.NOT_RUN), 1
+    )
 
 
 def test_maxfail_stops_scheduling_in_the_selection_path() raises:
@@ -208,8 +234,12 @@ def test_maxfail_stops_scheduling_in_the_selection_path() raises:
     assert_equal(code, 1)
     ref rec = comp.composite.reporters[0]
     var last = rec.event_at(rec.count() - 1)
-    assert_equal(last.summary.count_of(Outcome.FAIL), 1)
-    assert_equal(last.summary.count_of(Outcome.NOT_RUN), 1)
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.FAIL), 1
+    )
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.NOT_RUN), 1
+    )
 
 
 def test_maxfail_stops_scheduling_after_a_terminal_file_under_selection() raises:
@@ -235,10 +265,17 @@ def test_maxfail_stops_scheduling_after_a_terminal_file_under_selection() raises
     assert_equal(code, 1)
     ref rec = comp.composite.reporters[0]
     var last = rec.event_at(rec.count() - 1)
-    assert_equal(last.summary.count_of(Outcome.COMPILE_ERROR), 1)
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(
+            Outcome.COMPILE_ERROR
+        ),
+        1,
+    )
     # test_b_pass must be NOT-RUN, exactly as the non-selection path would
     # have skipped it past --maxfail — not started, not built into a verdict.
-    assert_equal(last.summary.count_of(Outcome.NOT_RUN), 1)
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.NOT_RUN), 1
+    )
     for i in range(rec.count()):
         if rec.kind_at(i) == EventKind.FILE_STARTED:
             assert_true(
