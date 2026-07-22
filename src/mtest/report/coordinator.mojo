@@ -91,6 +91,25 @@ trait ReportCoordinator:
         """
         ...
 
+    def drain_console(mut self, closing: Bool) -> String:
+        """The console bytes not yet drained, for an incremental flush.
+
+        Lets a driver flush the console as the run progresses rather than in one
+        terminal write, while `concat(every drain)` still reproduces
+        `console_output()` byte-for-byte. Each non-closing drain returns the
+        header appended since the last drain; the closing drain returns the
+        remaining header, the framed sections, and the summary band, sealing the
+        buffer. Empty when no console reporter is composed.
+
+        Args:
+            closing: Whether this is the terminal drain, which additionally
+                emits the sections and summary tail.
+
+        Returns:
+            The undrained rendered bytes, or an empty string.
+        """
+        ...
+
     def fence_token(self) -> String:
         """The console's captured-output fence token, if it fenced any region.
 
@@ -177,6 +196,10 @@ struct StandardReportCoordinator(ReportCoordinator):
     def console_output(self) -> String:
         """The console's rendered buffer."""
         return self.console.output()
+
+    def drain_console(mut self, closing: Bool) -> String:
+        """The console bytes not yet drained; delegates to the console."""
+        return self.console.drain(closing)
 
     def fence_token(self) -> String:
         """The console's fence token, or an empty string."""
@@ -274,6 +297,10 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
         return self.annotations.render()
 
     def console_output(self) -> String:
+        """Empty: no console reporter stands behind the pack."""
+        return String("")
+
+    def drain_console(mut self, closing: Bool) -> String:
         """Empty: no console reporter stands behind the pack."""
         return String("")
 

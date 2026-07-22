@@ -122,6 +122,37 @@ def test_standard_coordinator_console_bytes_match_the_composite() raises:
     )
 
 
+def test_standard_coordinator_incremental_drain_reconstructs_output() raises:
+    # The chunk-queue invariant: draining the console incrementally after each
+    # dispatch, then one closing drain for the tail, must concatenate to the
+    # exact bytes `console_output()` renders in a single shot. This is what lets
+    # a driver flush the console as the run progresses without moving a single
+    # output byte. The fixture ends on a COMPILE-ERROR file, so `_sections` is
+    # non-empty and the closing drain exercises the sections-and-summary tail.
+    var coord = StandardReportCoordinator(
+        _console(),
+        JsonStreamReporter.inert(),
+        JunitReporter.inert(),
+        AnnotationsReporter.inert(),
+    )
+    var events = _stream()
+    var drained = String("")
+    for ref e in events:
+        coord.handle(e)
+        drained += coord.drain_console(closing=False)
+    drained += coord.drain_console(closing=True)
+
+    assert_equal(
+        drained,
+        coord.console_output(),
+        "incremental drains plus the closing tail diverged from console_output",
+    )
+    assert_true(
+        coord.console_output().byte_length() > 0,
+        "an equality guard over two empty strings proves nothing",
+    )
+
+
 def test_standard_coordinator_annotation_tail_matches_the_composite() raises:
     var coord = StandardReportCoordinator(
         _console(),

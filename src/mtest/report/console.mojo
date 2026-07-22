@@ -580,6 +580,14 @@ struct ConsoleReporter(Reporter):
     `verbosity`, so an explicit `--durations` survives `-q`."""
     var _head: String
     """The streamed header, warnings, banners, and verdict/excluded lines."""
+    var _head_flushed: Int
+    """How many bytes of `_head` a drain has already handed back, so an
+    incremental flush emits only the header bytes appended since. `_head` is the
+    only buffer safe to drain mid-run: `output()` always joins
+    head-then-sections-then-summary, so newly appended `_head` merely extends a
+    stable prefix of the final bytes, whereas `_sections`/`_summary` would sort
+    ahead of header lines not yet written. Sections and summary are therefore
+    emitted only by the closing drain."""
     var _sections: String
     """The framed failure/crash/compile sections, in file order."""
     var _summary: String
@@ -661,6 +669,7 @@ struct ConsoleReporter(Reporter):
         self.mtest_build_flags = mtest_build_flags^
         self.durations = durations
         self._head = String("")
+        self._head_flushed = 0
         self._sections = String("")
         self._summary = String("")
         self._run_root = String("")
@@ -749,6 +758,51 @@ struct ConsoleReporter(Reporter):
             out += "\n" + self._sections
         out += self._summary
         return out
+
+    def drain(mut self, closing: Bool) -> String:
+        """The rendered bytes not yet handed back, advancing the read cursor.
+
+        A driver flushes the console as the run progresses instead of in one
+        terminal write, but `output()` always joins the buffers
+        head-then-sections-then-summary regardless of arrival order, so the only
+        content safe to emit before the run ends is newly appended `_head`: it
+        extends a stable prefix of the final bytes. Each non-closing drain
+        returns the `_head` bytes appended since the previous drain; the closing
+        drain returns any remaining `_head` and then the framed sections and the
+        summary band, in `output()` order. So `concat(every drain)` reproduces
+        `output()` byte-for-byte, the invariant the mutation test pins.
+
+        A drain boundary always falls between whole event renders — a driver
+        drains only between dispatches — so a stop-commands fence, always
+        appended as one contiguous region, is never split across two drains.
+
+        Args:
+            closing: Whether this is the terminal drain. False returns only the
+                newly appended header; True also appends the sections and
+                summary tail, sealing the buffer against `output()`.
+
+        Returns:
+            The undrained bytes, newline-terminated within each appended render.
+            Empty when nothing new is pending.
+        """
+        var bytes = self._head.as_bytes()
+        var n = self._head.byte_length()
+        var pending = List[UInt8]()
+        for i in range(self._head_flushed, n):
+            pending.append(bytes[i])
+        self._head_flushed = n
+        # SAFETY: `pending` is the byte suffix of `_head` between the previous
+        # drain cursor and its current length. `_head` is valid UTF-8 assembled
+        # by appending whole `String`s, and the cursor only ever advances to a
+        # full `byte_length()` — an append boundary — so the suffix begins on a
+        # codepoint boundary and is itself well-formed UTF-8. `pending` stays
+        # live until `String` copies the Span.
+        var out = String(StringSlice(unsafe_from_utf8=Span(pending)))
+        if closing:
+            if self._sections.byte_length() > 0:
+                out += "\n" + self._sections
+            out += self._summary
+        return out^
 
     def handle(mut self, e: Event):
         """Render one event into the buffer; total over the event set.

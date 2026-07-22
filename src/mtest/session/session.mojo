@@ -30,6 +30,7 @@ selection, probe, and gate paths route non-valid reports through the same
 `resolve_report`/`classify` machinery as the default path, so a forged or
 off-grammar report resolves identically either way.
 """
+from std.io import FileDescriptor
 from std.time import perf_counter_ns
 
 from mtest.cache import BuildRegistry
@@ -56,6 +57,34 @@ from mtest.session.selection import _run_selection
 from mtest.session.shard import partition
 
 
+def _flush_console[
+    C: ReportCoordinator
+](mut reporter: C, console_fd: Int, closing: Bool):
+    """Drain the coordinator's pending console bytes to the borrowed handle.
+
+    The driver owns no console destination of its own: `main` resolves it and
+    lends the descriptor, keeping close and teardown. A negative handle (a
+    library caller that lent none, or a recording driver) or an empty drain
+    writes nothing. The write is best-effort, exactly as the single terminal
+    console flush was — a dead destination is not a new exit cause, so a failed
+    incremental write is not distinguished here either.
+
+    Args:
+        reporter: The coordinator to drain. A recording coordinator drains
+            empty, so this is a no-op for the session's own test drivers.
+        console_fd: The borrowed console descriptor, or negative when none was
+            lent.
+        closing: Whether this is the terminal drain, which also emits the
+            framed sections and the summary band.
+    """
+    if console_fd < 0:
+        return
+    var chunk = reporter.drain_console(closing)
+    if chunk.byte_length() == 0:
+        return
+    print(chunk, end="", file=FileDescriptor(console_fd), flush=True)
+
+
 def run_session[
     C: ReportCoordinator
 ](
@@ -63,6 +92,7 @@ def run_session[
     config: RunnerConfig,
     root: String,
     mut reporter: C,
+    console_fd: Int = -1,
 ) raises -> Int:
     """Orchestrate a whole run and return the resolved process exit code.
 
@@ -91,6 +121,13 @@ def run_session[
         config: Every knob the run reads.
         root: The invocation root; built binaries and paths are relative to it.
         reporter: The coordinator the session fans every event to.
+        console_fd: A borrowed console descriptor the session flushes rendered
+            bytes to as the run progresses, then seals with a closing drain
+            before returning. `main` lends the resolved destination and keeps
+            close and teardown; a negative value (the default, and every
+            recording driver) flushes nothing, leaving the buffer for the
+            caller to read. The write is best-effort and carries no new exit
+            cause, exactly as the single terminal flush did.
 
     Returns:
         The resolved exit code: 2 on an interrupt; 3 on an internal error, a
@@ -378,6 +415,12 @@ def run_session[
                 for pe in fr.pre_events:
                     reporter.handle(pe)
                 reporter.handle(fr.event)
+                # Flush this file's rendered verdict as soon as it lands. The
+                # plain-run branch runs only when selection is inactive, so no
+                # raise can follow before the run returns; a leaked partial
+                # flush ahead of a usage-error raise is therefore impossible on
+                # this path.
+                _flush_console(reporter, console_fd, closing=False)
                 test_totals.passed += fr.test_counts.passed
                 test_totals.failed += fr.test_counts.failed
                 test_totals.skipped += fr.test_counts.skipped
@@ -406,6 +449,14 @@ def run_session[
                 )
                 internal_error = True
                 break
+
+    # Flush every header rendered so far that no incremental flush above
+    # already emitted: the precompile banner, the gate verdicts, and the
+    # selection sub-session's per-file lines. Reached only once the run pass has
+    # returned normally, so it never fires ahead of a selection usage-error
+    # raise — matching the old terminal flush, which `main` performed only on a
+    # normal return.
+    _flush_console(reporter, console_fd, closing=False)
 
     # Every selected file that did not produce a tallied verdict is NOT_RUN — a
     # gate casualty, an -x/--maxfail/gate-abort/interrupt skip, a precompile
@@ -505,6 +556,13 @@ def run_session[
             flaky_files=flaky_files,
         )
     )
+
+    # Seal the console: emit any remaining header, then the framed sections and
+    # the summary band, in `output()` order. This is the last console write the
+    # driver makes; `main` renders the fence-restoration epilogue and the
+    # annotation tail after this returns, so both still land AFTER the final
+    # console bytes exactly as before.
+    _flush_console(reporter, console_fd, closing=True)
 
     # The dispatch just above is ITSELF a stream write, and can latch a NEW
     # failure during that very write (a `--json -` consumer that closes its
