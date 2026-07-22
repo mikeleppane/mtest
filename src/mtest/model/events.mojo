@@ -429,7 +429,10 @@ struct Event(Copyable, Movable):
     """
 
     var kind: EventKind
-    """Which variant this event is; equals the active payload's `KIND`."""
+    """Which variant this event is; equals the active payload's `KIND`.
+
+    Derived from the active payload arm at construction time; do not reassign
+    it directly, as that would desync the tag from `data`."""
     var data: EventData
     """The typed payload for `kind`."""
 
