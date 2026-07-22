@@ -29,6 +29,7 @@ from scripts.e2e.scenarios import (
     core,
     json_reporter,
     junit_reporter,
+    parallel,
     resilience,
     selection,
 )
@@ -146,6 +147,16 @@ SCENARIOS: ScenarioRegistry = (
     ("annotations-caps", annotations.s_annotations_caps),
     ("annotations-conflict", annotations.s_annotations_conflict),
     ("annotations-fencing", annotations.s_annotations_fencing),
+    ("parallel-projection-eq", parallel.s_parallel_projection_eq),
+    ("parallel-capacity-one", parallel.s_parallel_capacity_one),
+    ("parallel-window-overlap", parallel.s_parallel_window_overlap),
+    ("parallel-interrupt", parallel.s_parallel_interrupt),
+    ("parallel-shard-disjoint", parallel.s_parallel_shard_disjoint),
+    ("collect-parallel", parallel.s_collect_parallel),
+    ("parallel-auto-smoke", parallel.s_parallel_auto_smoke),
+    ("parallel-json-workers", parallel.s_parallel_json_workers),
+    ("parallel-j-rejected", parallel.s_parallel_j_rejected),
+    ("parallel-junit-canonical-eq", parallel.s_parallel_junit_canonical_eq),
 )
 
 

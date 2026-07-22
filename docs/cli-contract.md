@@ -77,7 +77,7 @@ single **invocation root**. In v1 the root is the **current working directory**.
 | `--precompile SRC[:OUT]` | ✓ | ✓ |
 | `--mojo PATH` | ✓ | ✓ |
 | `-x`, `--maxfail N` | ✓ | — |
-| `-n, --workers N` | ✓ | ✓ |
+| `-n, --workers N\|auto` | ✓ | ✓ |
 | `--shard M/N` | ✓ | ✓ |
 | `--serial GLOB` | ✓ | — |
 | `--timeout`, `--compile-timeout` | ✓ | ✓ (compile only) |
@@ -227,15 +227,20 @@ as a casualty, and exits 1.
 
 The runner owns its output artifacts and its source list. Build arguments that
 would take that control away are rejected as usage errors (exit 4): output
-selection (`-o`), emit-type selection (`--emit`), and any **extra source
-operand** (a positional path handed to `mojo build`). This applies to
-`--build-arg`, to `-I` misuse, and to post-`--` arguments alike.
+selection (`-o`), emit-type selection (`--emit`), build parallelism (`-j`,
+`--num-threads`, §18), and any **extra source operand** (a positional path
+handed to `mojo build`). This applies to `--build-arg`, to `-I` misuse, and to
+post-`--` arguments alike.
 
-This build does not manage a build thread budget — there is no worker pool yet
-(§24), so a build spends whatever `mojo build` chooses by default. A build
-thread-count argument (`-j`, `--num-threads`) is therefore **not** a forbidden
-argument today; it is forwarded like any other `--build-arg`. Ownership of the
-build's parallelism arrives with the worker pool.
+The runner owns the build thread budget: the worker pool spawns each build as
+`mojo build --num-threads K` for a `K` drawn from a cores-wide token budget
+(§18), so a user-supplied build thread-count argument (`-j`, `--num-threads`) is
+a forbidden build argument (exit 4), rejected like `-o` and `--emit` — it would
+fight the runner for the machine's cores. The rejection names `-n`/`--workers`
+as the supported way to set parallelism. The one place `--num-threads` appears
+is the runner's own build spawn; a COMPILE-TIMEOUT reproduce line prints that
+effective `--num-threads K` with the deadline, so the reproduce stays faithful —
+that is the runner's flag, not a forwarded user argument.
 
 ---
 
@@ -702,11 +707,20 @@ fields.
 
 ## 18. Concurrency
 
-`-n, --workers N|auto` sets the worker count. `auto` sizing is runner-chosen and
-may tune across minor versions. Because `mojo build` is itself multi-threaded,
-`auto` is conservative (stacked cold compiles starve each other). The worker
-pool is a later concurrency milestone: **`-n`/`--workers` is not served in this
-build** (§24), which runs files sequentially.
+`-n, --workers N|auto` sets the worker count; files run concurrently across the
+pool while each file's own steps (build → run → retries) stay strictly ordered.
+**The default is one worker** — with no flag, files run sequentially and the
+build argv is byte-identical to a single-worker build. `auto` sizing is
+runner-chosen and may tune across minor versions: it is a stable *intent*
+(conservative, since `mojo build` is itself multi-threaded and stacked cold
+compiles starve each other), not a stable number. Concurrent builds share a
+cores-wide thread budget: each build spawns `mojo build --num-threads K` for
+`K = max(1, cores // min(workers, cores))`, so the builds' threads never
+oversubscribe the machine (a user `-j`/`--num-threads` is forbidden, §8.4); a
+run takes no build thread. The resolved worker count is capped by the
+environment's effective file-descriptor ceiling: a request above it is **clamped
+with a loud warning** that names the cap, and the resolved count — never the
+request — is what the run uses and what the machine stream reports (§15.4).
 
 `--timeout SECS` (default 300, `0` disables) bounds a single file's **run**;
 exceeding it yields TIMEOUT. `--compile-timeout SECS` (default 600, `0`
@@ -895,7 +909,8 @@ above — it only reports which of those surfaces are wired up yet.
 **Served** (parsed into real behavior): positional `PATHS`, `-k`, `--exclude`,
 `-I`, `--build-arg` (and post-`--` passthrough), `--precompile`, `--mojo`,
 `-x`/`--exitfirst`, `--maxfail`, `--timeout`, `--compile-timeout`, `--retries`,
-`--shard`, `--gate`, `-s`/`--show-output`, `--durations`, `-q`/`-v`, `--color`,
+`--shard`, `-n`/`--workers`, `--gate`, `-s`/`--show-output`, `--durations`,
+`-q`/`-v`, `--color`,
 `-h`/`--help`, `--version`, and the `run`, `collect`, `version`, and `help`
 subcommands (`--collect-only` too, as an alias that behaves as `collect`).
 `--shard` applies under both `run` and `collect`. `--json` (the machine event
@@ -903,12 +918,11 @@ stream, §15.4), `--junit-xml` (the JUnit report, §15.2), and `--gh-annotations
 (the CI annotation tail, §15.3) are served too — see §24.2 for how they are now
 reached.
 
-**Still refused**: `-n`/`--workers`, `--serial`. Each is recognized by the
-parser — it knows the spelling and its arity — but is **refused before any test
-runs**, with a usage error that names the flag, states that it is part of the v1
-contract, names the capability that brings it (`-n`/`--workers` arrive with
-parallel workers; `--serial` arrives with serial execution pinning), and lists
-what this build does serve.
+**Still refused**: `--serial`. It is recognized by the parser — it knows the
+spelling and its arity — but is **refused before any test runs**, with a usage
+error that names the flag, states that it is part of the v1 contract, names the
+capability that brings it (`--serial` arrives with serial execution pinning),
+and lists what this build does serve.
 
 **A transitional exit-4 subcase.** That refusal is a usage error and exits 4,
 but it is a distinct, *temporary* subcase of §9's exit code 4 — it is not one
@@ -931,11 +945,12 @@ today.
   MALFORMED-SUITE, and PRECOMPILE-ERROR. FLAKY (a pass produced only after a
   crash-class retry) is also emitted now, and, being a pass, does **not** raise
   the exit code — a FLAKY-only session exits 0.
-- **2** — reachable: an interrupt (SIGINT/SIGTERM) is implemented with
-  sequential-session semantics — a partial summary is printed, the files
-  that had not yet started are reported NOT-RUN, and the active child's
-  process group is cleaned up. The parallel-workers interrupt story arrives
-  with parallel workers.
+- **2** — reachable for both the sequential and the parallel path. An interrupt
+  (SIGINT/SIGTERM) prints a partial summary, reports the files that had not yet
+  started as NOT-RUN, and cleans up every in-flight child's process group with a
+  two-pass terminate-then-kill sweep; a second interrupt escalates to an
+  immediate hard kill of every group, leaving no survivor. The exit is 2
+  regardless of any failing outcome already accounted.
 - **3** — reachable via a spawn failure (the runner could not spawn `mojo` or
   a built binary), via protocol drift (a report present but off-grammar,
   §6) in both `run` and `collect`, and via a runtime `--json`
@@ -997,8 +1012,9 @@ node-id grammar, and all converge to the contract as the runner matures.
   repeatable flags (`--exclude`, `--gate`, `--build-arg`, `-I`, `--precompile`,
   `--serial`); every other flag is single-valued. The frozen intent is
   at-most-one — e.g. §5 says "at most one `-k` is accepted in v1". This build
-  does not yet reject a repeated single-valued flag (`-k`, `--maxfail`,
-  `--timeout`, `--color`, `--show-output`, `--durations`, `--mojo`): it silently
+  does not yet reject a repeated single-valued flag (`-k`, `-n`/`--workers`,
+  `--maxfail`, `--timeout`, `--color`, `--show-output`, `--durations`,
+  `--mojo`): it silently
   uses the **last** occurrence (so `-k a -k b` filters by `b`, not `a or b`).
   Until the at-most-one check is enforced (a usage error, exit 4), do not rely on
   repeating these flags. The mutually-exclusive `-q`/`-v` pair is already

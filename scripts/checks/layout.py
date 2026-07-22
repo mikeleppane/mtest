@@ -205,7 +205,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 1012
+CLASSIFIED_TEST_COUNT = 1022
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",
@@ -256,6 +256,7 @@ E2E_HARNESS_PATHS = {
     Path("scripts/e2e/scenarios/core.py"),
     Path("scripts/e2e/scenarios/json_reporter.py"),
     Path("scripts/e2e/scenarios/junit_reporter.py"),
+    Path("scripts/e2e/scenarios/parallel.py"),
     Path("scripts/e2e/scenarios/resilience.py"),
     Path("scripts/e2e/scenarios/selection.py"),
 }
@@ -320,6 +321,16 @@ E2E_SCENARIO_NAMES = (
     "annotations-caps",
     "annotations-conflict",
     "annotations-fencing",
+    "parallel-projection-eq",
+    "parallel-capacity-one",
+    "parallel-window-overlap",
+    "parallel-interrupt",
+    "parallel-shard-disjoint",
+    "collect-parallel",
+    "parallel-auto-smoke",
+    "parallel-json-workers",
+    "parallel-j-rejected",
+    "parallel-junit-canonical-eq",
 )
 
 LIVE_COMMAND_FIXED_PATHS = (
@@ -661,7 +672,7 @@ def check_e2e_layout() -> None:
         path.relative_to(REPO_ROOT).as_posix()
         for path in e2e_root.rglob("test_*.mojo")
     }
-    if rows != discovered or len(rows) != 31:
+    if rows != discovered or len(rows) != 34:
         raise AssertionError(
             "e2e manifest/discovery mismatch: "
             f"missing={sorted(discovered - rows)}, stale={sorted(rows - discovered)}"
@@ -672,9 +683,9 @@ def check_e2e_layout() -> None:
             "E2E scenario membership/order mismatch: "
             f"expected={list(E2E_SCENARIO_NAMES)}, actual={list(scenario_names)}"
         )
-    if len(scenario_names) != 59 or len(set(scenario_names)) != len(scenario_names):
+    if len(scenario_names) != 69 or len(set(scenario_names)) != len(scenario_names):
         raise AssertionError(
-            "E2E scenarios must contain 59 unique names in the pinned order"
+            "E2E scenarios must contain 69 unique names in the pinned order"
         )
     referenced = {
         *rows,

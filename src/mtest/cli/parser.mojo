@@ -118,6 +118,40 @@ def _parse_retries(value: String) raises -> Int:
     return atol(value)
 
 
+def _parse_workers(value: String) raises -> Int:
+    """Parse a `-n`/`--workers` value into a worker count.
+
+    Args:
+        value: The flag's value: the literal `auto`, or a positive decimal
+            integer. `auto` selects a runner-chosen count; a `1` is the
+            sequential default and every `N >= 2` is an explicit count.
+
+    Returns:
+        `0` for `auto` (the sentinel the resolver reads as runner-chosen), or
+        the requested positive integer count.
+
+    Raises:
+        A usage error (exit 4) when the value is neither `auto` nor a positive
+        integer — `0`, a negative, or any non-digit spelling.
+    """
+    if value == "auto":
+        return 0
+    if not _all_digits(value):
+        raise _err(
+            "'-n'/'--workers' wants a positive integer or 'auto', got '"
+            + value
+            + "'"
+        )
+    var n = atol(value)
+    if n < 1:
+        raise _err(
+            "'-n'/'--workers' wants a positive integer or 'auto', got '"
+            + value
+            + "'"
+        )
+    return n
+
+
 def _parse_compile_timeout(value: String) raises -> Int:
     """Parse `--compile-timeout`: a non-negative integer, `0` disables."""
     if not _all_digits(value):
@@ -276,10 +310,11 @@ def _err_shard(value: String) -> Error:
 def _check_build_arg(tok: String) raises:
     """Reject a build argument that would seize control mtest owns.
 
-    Forbids output selection (`-o`), emit-type selection (`--emit`), and any
-    extra Mojo source operand — a bare `*.mojo` or `*.🔥` positional that would
-    reach `mojo build`. A bare value that is not a source file, such as a
-    forwarded flag's value, passes.
+    Forbids output selection (`-o`), emit-type selection (`--emit`), build
+    parallelism (`-j`, `--num-threads` — the runner owns the build thread
+    budget), and any extra Mojo source operand — a bare `*.mojo` or `*.🔥`
+    positional that would reach `mojo build`. A bare value that is not a source
+    file, such as a forwarded flag's value, passes.
     """
     if tok == "-o" or tok.startswith("-o="):
         raise _err(
@@ -292,6 +327,18 @@ def _check_build_arg(tok: String) raises:
             "forbidden build argument '"
             + tok
             + "': mtest owns emit-type selection"
+        )
+    if (
+        tok == "-j"
+        or tok.startswith("-j=")
+        or tok == "--num-threads"
+        or tok.startswith("--num-threads=")
+    ):
+        raise _err(
+            "forbidden build argument '"
+            + tok
+            + "': mtest owns build parallelism (set the worker count with"
+            " -n/--workers)"
         )
     if not tok.startswith("-") and (
         tok.endswith(".mojo") or tok.endswith(".🔥")
@@ -379,6 +426,9 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var shard_n = 0
     var retries = 0
     var saw_retries = False
+    # One worker is the sequential default: no flag runs files in order and
+    # leaves the build argv byte-identical to a single-worker build.
+    var workers = 1
     var json_dest = String("")
     var saw_json = False
     var junit_dest = String("")
@@ -516,6 +566,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         elif s.id == FlagId.RETRIES:
             retries = _parse_retries(value)
             saw_retries = True
+        elif s.id == FlagId.WORKERS:
+            workers = _parse_workers(value)
         elif s.id == FlagId.JSON:
             json_dest = _validate_json_dest(value)
             saw_json = True
@@ -620,7 +672,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         shard_m=shard_m,
         shard_n=shard_n,
         retries=retries,
-        workers=1,
+        workers=workers,
         compile_timeout_secs=compile_timeout_secs,
         json_dest=json_dest^,
         gh_annotations=gh_annotations,

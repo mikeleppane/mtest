@@ -63,9 +63,10 @@ def frozen_inventory() -> List[InvRow]:
         InvRow("--retries", 1, False, True),
         # `--compile-timeout SECS`: non-negative int; 0 disables.
         InvRow("--compile-timeout", 1, False, True),
+        # `-n`/`--workers N|auto`: served, last-wins.
+        InvRow("-n", 1, False, True),
+        InvRow("--workers", 1, False, True),
         # In the v1 contract but not served by this build.
-        InvRow("-n", 1, False, False),
-        InvRow("--workers", 1, False, False),
         # `--serial GLOB`: repeatable.
         InvRow("--serial", 1, True, False),
         # `--gh-annotations off|on|auto`: now served.
@@ -141,12 +142,81 @@ def _assert_refused(spelling: String) raises:
         _ = parse_args(argv3)
 
 
-def test_refuse_workers_short() raises:
-    _assert_refused("-n")
+def test_workers_short_parses_count() raises:
+    # `-n N` is served: the count reaches the config.
+    var argv: List[String] = ["-n", "2"]
+    var r = parse_args(argv)
+    assert_equal(r.config.workers, 2)
 
 
-def test_refuse_workers_long() raises:
-    _assert_refused("--workers")
+def test_workers_long_auto_is_sentinel_zero() raises:
+    # `--workers auto` is the runner-chosen sentinel: it lands as 0.
+    var argv: List[String] = ["--workers", "auto"]
+    var r = parse_args(argv)
+    assert_equal(r.config.workers, 0)
+
+
+def test_workers_one_equals_no_flag_default() raises:
+    # `-n 1` is the sequential default: identical to no flag at the parse layer.
+    var explicit: List[String] = ["-n", "1"]
+    assert_equal(parse_args(explicit).config.workers, 1)
+    var absent: List[String] = ["tests/"]
+    assert_equal(parse_args(absent).config.workers, 1)
+
+
+def test_workers_last_wins() raises:
+    var argv: List[String] = ["-n", "3", "--workers", "5"]
+    var r = parse_args(argv)
+    assert_equal(r.config.workers, 5)
+
+
+def test_workers_zero_is_usage_error() raises:
+    var argv: List[String] = ["-n", "0"]
+    with assert_raises(contains="-n"):
+        _ = parse_args(argv)
+
+
+def test_workers_non_digit_is_usage_error() raises:
+    var argv: List[String] = ["-n", "xyz"]
+    with assert_raises(contains="'-n'/'--workers'"):
+        _ = parse_args(argv)
+
+
+def test_workers_negative_is_usage_error() raises:
+    var argv: List[String] = ["-n", "-1"]
+    with assert_raises(contains="positive integer or 'auto'"):
+        _ = parse_args(argv)
+
+
+def test_workers_empty_is_usage_error() raises:
+    var argv: List[String] = ["-n", ""]
+    with assert_raises(contains="'-n'/'--workers'"):
+        _ = parse_args(argv)
+
+
+def test_build_arg_j_short_is_forbidden() raises:
+    var argv: List[String] = ["--build-arg", "-j"]
+    with assert_raises(contains="forbidden build argument"):
+        _ = parse_args(argv)
+
+
+def test_build_arg_num_threads_is_forbidden() raises:
+    var argv: List[String] = ["--build-arg", "--num-threads"]
+    with assert_raises(contains="-n/--workers"):
+        _ = parse_args(argv)
+
+
+def test_build_arg_num_threads_equals_is_forbidden() raises:
+    var argv: List[String] = ["--build-arg=--num-threads=4"]
+    with assert_raises(contains="forbidden build argument"):
+        _ = parse_args(argv)
+
+
+def test_post_dash_dash_j_is_forbidden() raises:
+    # A bare `-j 4` after `--` reaches build-arg validation on the `-j` token.
+    var argv: List[String] = ["--", "-j", "4"]
+    with assert_raises(contains="forbidden build argument"):
+        _ = parse_args(argv)
 
 
 def test_compile_timeout_is_served_and_parses() raises:
@@ -434,7 +504,8 @@ def test_collect_subcommand_is_served() raises:
     assert_true(r.config.collect)
 
 
-def test_refuse_equals_form_still_names_flag() raises:
+def test_workers_equals_form_parses_count() raises:
+    # The `=` form is served now: `--workers=3` sets the count to 3.
     var argv: List[String] = ["--workers=3"]
-    with assert_raises(contains="--workers"):
-        _ = parse_args(argv)
+    var r = parse_args(argv)
+    assert_equal(r.config.workers, 3)
