@@ -594,8 +594,9 @@ this section summarizes it.
   appear). Line 1 is the frozen header `{"event":"stream","version":1,
   "generator":"mtest <version>"}`.
 - **Events.** The stream mirrors every session event the console reporter sees,
-  with the `progress` kind **excluded** (there is no live progress in this build,
-  §15.1). Each record mirrors the model's payload 1:1 under its own field names.
+  with the `progress` kind **excluded** by design: it is ephemeral,
+  console-only, and never serialized. Each record mirrors the model's payload
+  1:1 under its own field names.
 - **`*_us` durations.** The sole naming exception: every `*_seconds` duration is
   emitted as an integer-microsecond `*_us` field, so the stream carries no
   floating-point value.

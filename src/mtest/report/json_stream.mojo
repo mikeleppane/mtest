@@ -376,6 +376,7 @@ def _session_started(p: SessionStartedPayload) -> String:
     s += ',"excluded_count":' + String(p.excluded_count)
     s += ',"shard_label":"' + _cap_runner_string(p.shard_label) + '"'
     s += ',"sharded_out_count":' + String(p.sharded_out_count)
+    s += ',"workers":' + String(p.workers)
     s += "}"
     return s^
 
@@ -457,6 +458,7 @@ def _file_finished(p: FileFinishedPayload) -> String:
     s += ',"flaky":' + _b(p.flaky)
     s += ',"slow":' + _b(p.slow)
     s += ',"escalated":' + _b(p.escalated)
+    s += ',"serial":' + _b(p.serial)
     s += "}"
     return s^
 

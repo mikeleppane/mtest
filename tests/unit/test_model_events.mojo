@@ -31,6 +31,7 @@ from mtest.model import (
     CollectionKnownPayload,
     AttemptFinishedPayload,
     CrashAttributionPayload,
+    ProgressPayload,
 )
 
 
@@ -81,6 +82,27 @@ def test_session_started_carries_shard_fields_when_given() raises:
     ref p = e.data[SessionStartedPayload]
     assert_equal(p.shard_label, "2/5")
     assert_equal(p.sharded_out_count, 9)
+
+
+def test_session_started_threads_workers() raises:
+    # The resolved worker count defaults to a sequential run and threads through
+    # unchanged when a parallel run supplies its own.
+    var seq = Event.session_started("tests", "mojo", 1, 0)
+    assert_equal(seq.data[SessionStartedPayload].workers, 1)
+    var par = Event.session_started("tests", "mojo", 4, 0, workers=4)
+    assert_equal(par.data[SessionStartedPayload].workers, 4)
+
+
+def test_progress_payload() raises:
+    var e = Event.progress(2, 5, ["a.mojo", "b.mojo"], [0.5, 1.25])
+    assert_true(e.kind == EventKind.PROGRESS)
+    ref p = e.data[ProgressPayload]
+    assert_equal(p.completed, 2)
+    assert_equal(p.total, 5)
+    assert_equal(len(p.running_paths), 2)
+    assert_equal(p.running_paths[1], "b.mojo")
+    assert_equal(len(p.running_elapsed_seconds), 2)
+    assert_equal(p.running_elapsed_seconds[0], 0.5)
 
 
 def test_warning_payload() raises:
@@ -268,6 +290,32 @@ def test_file_finished_carries_truncation_flags_when_given() raises:
     assert_false(p.stderr_truncated)
 
 
+def test_file_finished_threads_serial() raises:
+    # The serial flag defaults False (a worker-run verdict) and threads through
+    # unchanged when the sequential path sets it.
+    var worker = Event.file_finished(
+        "tests/test_a.mojo",
+        Outcome.PASS,
+        duration_seconds=0.1,
+        build_argv=List[String](),
+        build_duration_seconds=0.0,
+        captured_stdout=List[UInt8](),
+        captured_stderr=List[UInt8](),
+    )
+    assert_false(worker.data[FileFinishedPayload].serial)
+    var seq = Event.file_finished(
+        "tests/test_a.mojo",
+        Outcome.PASS,
+        duration_seconds=0.1,
+        build_argv=List[String](),
+        build_duration_seconds=0.0,
+        captured_stdout=List[UInt8](),
+        captured_stderr=List[UInt8](),
+        serial=True,
+    )
+    assert_true(seq.data[FileFinishedPayload].serial)
+
+
 def test_attempt_finished_payload_carries_full_record() raises:
     var argv: List[String] = ["mojo", "run", "tests/test_a.mojo"]
     var e = Event.attempt_finished(
@@ -453,6 +501,7 @@ def test_event_kinds_are_distinct() raises:
         EventKind.COLLECTION_KNOWN,
         EventKind.ATTEMPT_FINISHED,
         EventKind.CRASH_ATTRIBUTION,
+        EventKind.PROGRESS,
     ]
     for i in range(len(kinds)):
         for j in range(len(kinds)):

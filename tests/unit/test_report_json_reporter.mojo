@@ -102,6 +102,27 @@ def test_write_failure_latches_and_later_handles_noop() raises:
     assert_equal(st2.errno, st.errno)
 
 
+def test_progress_event_writes_no_blank_line() raises:
+    # A Progress event is ephemeral and never serialized: the reporter must drop
+    # it BEFORE `_emit`, which would otherwise write an empty serialized line
+    # plus its unconditional newline — a blank committed line the strict
+    # consumer rejects. The stream must hold only the header and the real event.
+    var path = _scratch("progress.ndjson")
+    var fd = open_json_fd(path)
+    var rep = JsonStreamReporter(fd, "0.4.0", True)
+    rep.handle(Event.progress(0, 1, List[String](), List[Float64]()))
+    rep.handle(Event.file_started("tests/test_a.mojo"))
+    _ = close_json_fd(fd)
+    var lines = _lines(_read_file(path))
+    assert_equal(len(lines), 2, "no blank line stands in for the dropped tick")
+    assert_equal(lines[0], stream_header("0.4.0"))
+    assert_equal(
+        lines[1], serialize_event(Event.file_started("tests/test_a.mojo"))
+    )
+    for ln in lines:
+        assert_true(ln != "", "no committed line is blank")
+
+
 def test_inert_reporter_writes_nothing_and_never_latches() raises:
     var rep = JsonStreamReporter.inert()
     rep.handle(Event.file_started("x"))

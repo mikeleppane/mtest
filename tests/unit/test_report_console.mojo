@@ -214,6 +214,20 @@ def test_header_learns_facts_from_session_started() raises:
     assert_true("excluded: 1" in out)
 
 
+def test_session_started_header_byte_identical_at_single_worker() raises:
+    # The worker-count token is dormant on a sequential run: a resolved count of
+    # one renders no `workers:` token and leaves the header byte-for-byte what it
+    # was before the field existed. Only a count above one surfaces the token.
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 5, 1, workers=1))
+    var out = c.output()
+    assert_false("workers:" in out)
+    assert_true(
+        "root: tests   selected: 5 files   excluded: 1\n\n" in out,
+        "the single-worker header carries no worker token",
+    )
+
+
 def test_one_verdict_line_per_file_in_order() raises:
     var c = _console()
     _feed_mock_run(c)

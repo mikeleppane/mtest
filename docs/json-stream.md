@@ -59,6 +59,11 @@ The event names, in the order they can appear (§7):
 `attempt_finished`, `file_finished`, `crash_attribution`, `collection_known`,
 `internal_error`, `test_reported`, `session_finished`.
 
+The model's `progress` kind is **not** on this list and never appears on the
+wire: it is ephemeral and console-only, rendered live to a TTY counter and
+never serialized. The stream reporter drops it before serialization, so a
+consumer never sees a `progress` record and never a blank line in its place.
+
 ### 2.1 `session_started`
 
 | field | type | notes |
@@ -69,6 +74,7 @@ The event names, in the order they can appear (§7):
 | `excluded_count` | int | files removed by `--exclude` |
 | `shard_label` | string | e.g. `"2/5"`, or `""` when unsharded |
 | `sharded_out_count` | int | files handed to other shards |
+| `workers` | int | resolved worker count; `1` for a sequential run |
 
 ### 2.2 `warning`
 
@@ -161,6 +167,7 @@ The file's verdict.
 | `flaky` | bool | passed only after a crash-class retry |
 | `slow` | bool | a step crossed the SLOW threshold |
 | `escalated` | bool | SIGKILL escalation on a TIMEOUT |
+| `serial` | bool | ran on the sequential path rather than a worker |
 
 ### 2.7 `crash_attribution`
 

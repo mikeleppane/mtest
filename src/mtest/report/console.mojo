@@ -826,15 +826,20 @@ struct ConsoleReporter(Reporter):
         self._head += (
             String("mtest ") + self.version + " (" + e.toolchain + ")\n"
         )
-        self._head += (
+        var counts = (
             String("root: ")
             + e.root
             + "   selected: "
             + String(e.selected_count)
             + " files   excluded: "
             + String(e.excluded_count)
-            + "\n\n"
         )
+        # The worker-count token is dormant on a sequential run: a run with a
+        # single worker renders a byte-identical header, and only a resolved
+        # count above one surfaces the token.
+        if e.workers > 1:
+            counts += "   workers: " + String(e.workers)
+        self._head += counts + "\n\n"
 
     def _on_warning(mut self, e: WarningPayload):
         """Render a yellow warning line, composing the sentence per kind.
