@@ -10,6 +10,7 @@ final status.
 """
 from std.ffi import external_call
 from std.memory import UnsafePointer, alloc, memset_zero
+from std.time import sleep
 
 from mtest.exec.capture import BoundedCapture
 from mtest.exec.result import ProcessResult
@@ -1393,10 +1394,19 @@ struct Supervisor(Movable):
                     notes += "; " + String(observe_error)
                     break
                 if not observed:
-                    try:
-                        self._poll_set(_POST_LEADER_SLICE_MS)
-                    except:
-                        pass
+                    # Pace this reap wait with a blocking sleep, never poll_set.
+                    # A SIGKILLed leader is waitid-reapable within milliseconds,
+                    # but on a slow, loaded host the gap between its capture
+                    # pipes reaching EOF and the kernel publishing it as reapable
+                    # widens. poll_set returns at once once those pipes hit EOF,
+                    # so pacing on it collapses this ~2 s budget into a
+                    # microsecond busy spin that abandons a leader whose fds have
+                    # closed but which is not yet reapable, leaving it unreaped
+                    # for the close below to reject with EBUSY. A real sleep
+                    # keeps each attempt an honest slice and yields the core to
+                    # the dying leader; the surrounding count still bounds a
+                    # genuinely stuck leader so cleanup fails closed, not hung.
+                    sleep(Float64(_POST_LEADER_SLICE_MS) / 1000.0)
             try:
                 _close_channel(
                     self.slots[i].handle, _CHANNEL_STDOUT, self.slots[i].native
