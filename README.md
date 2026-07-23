@@ -414,7 +414,7 @@ mtest — a pytest-like test runner for Mojo
 
 usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]
 
-This build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo, -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v, --color, -k, --maxfail, --durations, --shard, --retries, --json, --junit-xml, --gh-annotations, collect/--collect-only, --help, --version
+This build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo, -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v, --color, -k, --maxfail, --durations, --shard, -n/--workers, --serial, --retries, --json, --junit-xml, --gh-annotations, collect/--collect-only, --help, --version
 ```
 
 | Flag | Meaning |
@@ -438,6 +438,8 @@ This build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mo
 | `-v` | verbose: add the build command, per-step timing, and the `SLOW`-step label |
 | `--color WHEN` | `auto` (default), `always`, or `never`; `NO_COLOR` disables `auto`, while an explicit `always` or `never` wins |
 | `--shard [hash:\|slice:]M/N` | run (or collect) only shard `M` of `N`; `hash:` (default, stable over the path) or `slice:` (sorted round-robin) |
+| `-n`, `--workers N\|auto` | run files across a pool of `N` worker processes; `auto` is half the logical cores (default `1`, sequential; ignored under `-k`/node-id selection) |
+| `--serial GLOB` | (repeatable) pin matching files to a final one-at-a-time pass after the parallel batch |
 | `--json PATH\|-` | write the versioned NDJSON event stream to `PATH`, or to stdout with `-` |
 | `--junit-xml PATH` | write a schema-validated JUnit XML report, renamed atomically onto `PATH` |
 | `--gh-annotations MODE` | `off\|on\|auto` (default `auto`); `--json -` requires an explicit `--gh-annotations off` |

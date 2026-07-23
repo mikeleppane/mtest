@@ -32,8 +32,9 @@ comptime MTEST_VERSION = "0.5.0"
 comptime SUPPORTED_SUMMARY = (
     "paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo,"
     " -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v,"
-    " --color, -k, --maxfail, --durations, --shard, --retries, --json,"
-    " --junit-xml, --gh-annotations, collect/--collect-only, --help, --version"
+    " --color, -k, --maxfail, --durations, --shard, -n/--workers, --serial,"
+    " --retries, --json, --junit-xml, --gh-annotations, collect/--collect-only,"
+    " --help, --version"
 )
 """A stable one-line list of what this build serves, quoted in refusals."""
 
