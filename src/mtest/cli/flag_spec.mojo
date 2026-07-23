@@ -50,6 +50,8 @@ struct FlagId:
     comptime SHARD = 24
     comptime SERIAL = 25
     comptime JSON = 26
+    comptime CONFIG = 27
+    comptime NO_CONFIG = 28
 
 
 @fieldwise_init
@@ -124,4 +126,6 @@ def flag_specs() -> List[FlagSpec]:
         FlagSpec("--junit-xml", FlagId.JUNIT_XML, 1, False, True, ""),
         FlagSpec("--gh-annotations", FlagId.GH_ANNOTATIONS, 1, False, True, ""),
         FlagSpec("--collect-only", FlagId.COLLECT_ONLY, 0, False, True, ""),
+        FlagSpec("--config", FlagId.CONFIG, 1, False, True, ""),
+        FlagSpec("--no-config", FlagId.NO_CONFIG, 0, False, True, ""),
     ]

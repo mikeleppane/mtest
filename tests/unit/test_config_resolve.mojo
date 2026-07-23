@@ -21,6 +21,7 @@ from mtest.config import (
     ShowOutput,
     Verbosity,
     resolve_config,
+    validate_resolved_config,
 )
 
 
@@ -603,3 +604,26 @@ def test_collect_projection_excludes_run_and_report_only_keys() raises:
     assert_true(resolved.config.gh_annotations == AnnotationsMode.AUTO)
     assert_true(resolved.provenance.json_dest == Provenance.MTEST_TOML)
     assert_true(resolved.provenance.gh_annotations == Provenance.DEFAULT)
+    assert_false(Bool(validate_resolved_config(resolved)))
+
+
+def test_run_cross_value_validation_is_source_neutral() raises:
+    var file = FileConfig.empty()
+    file.json_dest = "-"
+    file.saw_json = True
+    var resolved = resolve_config(
+        RunnerConfig.default(),
+        file,
+        ConfigEnvironment.empty(),
+        CliOverlay.default(),
+    )
+    var diagnostic = validate_resolved_config(resolved)
+    assert_true(Bool(diagnostic))
+    assert_equal(
+        diagnostic.value(),
+        (
+            "cli: '--json -' streams machine output to stdout, which the"
+            " '--gh-annotations' tail cannot share; drop '--json -' (use"
+            " '--json PATH'), or set '--gh-annotations off' (see mtest --help)"
+        ),
+    )

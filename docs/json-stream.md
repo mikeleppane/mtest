@@ -75,6 +75,7 @@ consumer never sees a `progress` record and never a blank line in its place.
 | `shard_label` | string | e.g. `"2/5"`, or `""` when unsharded |
 | `sharded_out_count` | int | files handed to other shards |
 | `workers` | int | resolved worker count; `1` for a sequential run |
+| `config_file` | string | lexically normalized root-relative path when inside the invocation root, normalized absolute path when outside it, or `""` when none |
 
 ### 2.2 `warning`
 
@@ -82,6 +83,9 @@ consumer never sees a `progress` record and never a blank line in its place.
 |---|---|---|
 | `warning_kind` | string | e.g. `stale-exclusion`, `compile-kill-residual` |
 | `warning_pattern` | string | the offending pattern / detail |
+
+`warning_kind` is an open vocabulary. Consumers must accept unknown strings as
+valid warnings.
 
 ### 2.3 `precompile_failed`
 

@@ -5,6 +5,7 @@ CLI` order. It carries file overrides as ordered data and never matches paths
 or applies per-file policy.
 """
 from mtest.config.file_config import FileConfig, OverrideRule
+from mtest.config.annotations_mode import AnnotationsMode
 from mtest.config.overlay import CliOverlay
 from mtest.config.provenance import ConfigProvenance, Provenance
 from mtest.config.runner_config import RunnerConfig
@@ -197,6 +198,40 @@ struct ResolvedConfig(Copyable, Movable):
     var no_color: Bool
     """The separate `NO_COLOR` render-time input."""
 
+    var config_file: String
+    """The normalized selected project-config path, or empty when absent."""
+
+    var state_warnings: List[String]
+    """Contained nonfatal state diagnostics emitted after session start."""
+
+
+def validate_resolved_config(config: ResolvedConfig) -> Optional[String]:
+    """Validate cross-key constraints over command-active resolved values.
+
+    The returned diagnostic already has the stable `cli:` framing used for
+    source-neutral usage failures. Inactive keys are deliberately ignored, so
+    a run-only reporting value in a project file cannot make collect mode fail.
+
+    Args:
+        config: The layered values and active-key projection to validate.
+
+    Returns:
+        A complete usage diagnostic when a constraint fails, otherwise none.
+    """
+    if (
+        config.active_keys.json_dest
+        and config.active_keys.gh_annotations
+        and config.config.json_dest == "-"
+        and config.config.gh_annotations != AnnotationsMode.OFF
+    ):
+        return Optional[String](
+            "cli: '--json -' streams machine output to stdout, which the"
+            " '--gh-annotations' tail cannot share; drop '--json -' (use"
+            " '--json PATH'), or set '--gh-annotations off'"
+            " (see mtest --help)"
+        )
+    return Optional[String](None)
+
 
 def resolve_config(
     defaults: RunnerConfig,
@@ -371,4 +406,6 @@ def resolve_config(
         provenance=sources^,
         active_keys=active_keys^,
         no_color=environment.no_color,
+        config_file="",
+        state_warnings=[],
     )

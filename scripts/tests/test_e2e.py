@@ -114,6 +114,12 @@ PARALLEL_SCENARIOS = (
     "parallel-serial-noverlap",
     "parallel-serial-stale-glob",
 )
+CONFIG_SCENARIOS = (
+    "config-resolution",
+    "config-diagnostics",
+    "config-state",
+    "config-overrides",
+)
 
 
 
@@ -129,7 +135,7 @@ class E2EFaultTopologyTests(unittest.TestCase):
         names = tuple(name for name, _scenario in e2e_main.SCENARIOS)
 
         self.assertEqual(names, layout.E2E_SCENARIO_NAMES)
-        self.assertEqual(len(names), 72)
+        self.assertEqual(len(names), 76)
         self.assertEqual(len(set(names)), len(names))
 
     def test_core_scenarios_have_one_feature_owner(self) -> None:
@@ -204,6 +210,16 @@ class E2EFaultTopologyTests(unittest.TestCase):
             if scenario.__module__ == parallel.__name__
         )
         self.assertEqual(owned, PARALLEL_SCENARIOS)
+
+    def test_config_scenarios_have_one_feature_owner(self) -> None:
+        from scripts.e2e.scenarios import config_file
+
+        owned = tuple(
+            name
+            for name, scenario in e2e_main.SCENARIOS
+            if scenario.__module__ == config_file.__name__
+        )
+        self.assertEqual(owned, CONFIG_SCENARIOS)
 
     def test_runner_owns_results_manifest_access_and_hard_timeouts(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-e2e-runner-") as raw_tmp:

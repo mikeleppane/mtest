@@ -26,6 +26,7 @@ from scripts.e2e.runner import (
 )
 from scripts.e2e.scenarios import (
     annotations,
+    config_file,
     core,
     json_reporter,
     junit_reporter,
@@ -102,6 +103,10 @@ SCENARIOS: ScenarioRegistry = (
     ("show-output", core.s_show_output),
     ("durations", core.s_durations),
     ("color", core.s_color),
+    ("config-resolution", config_file.s_config_resolution),
+    ("config-diagnostics", config_file.s_config_diagnostics),
+    ("config-state", config_file.s_config_state),
+    ("config-overrides", config_file.s_config_overrides),
     ("usage-refusals", selection.s_usage_refusals),
     ("selection-keyword", selection.s_selection_keyword),
     ("selection-node-id", selection.s_selection_node_id),

@@ -7,7 +7,7 @@ non-error directives. Grammar edges (passthrough, forbidden args, arity errors,
 refusals, the frozen inventory) live in sibling files to keep each module's test
 count modest.
 """
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_raises, assert_true
 
 from mtest.cli import ParseResult, parse_args, version_text, help_text
 from mtest.config import ColorWhen, ShowOutput, Verbosity
@@ -72,6 +72,26 @@ def test_run_subcommand_alone_is_defaults() raises:
     var r = parse_args(argv)
     assert_true(r.is_run())
     assert_equal(len(r.config.paths), 0)
+
+
+def test_config_controls_are_parse_result_metadata() raises:
+    var explicit: List[String] = ["run", "--config", "../mtest.toml"]
+    var explicit_result = parse_args(explicit)
+    assert_equal(explicit_result.config_path, "../mtest.toml")
+    assert_false(explicit_result.no_config)
+
+    var disabled: List[String] = ["collect", "--no-config"]
+    var disabled_result = parse_args(disabled)
+    assert_equal(disabled_result.config_path, "")
+    assert_true(disabled_result.no_config)
+
+
+def test_config_controls_are_mutually_exclusive() raises:
+    var argv: List[String] = ["--config", "other.toml", "--no-config"]
+    with assert_raises(
+        contains="cli: '--config' and '--no-config' are mutually exclusive"
+    ):
+        _ = parse_args(argv)
 
 
 def test_leading_nonsubcommand_token_is_a_path() raises:

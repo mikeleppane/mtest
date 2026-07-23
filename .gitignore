@@ -4,7 +4,7 @@
 # compiled Mojo package output
 /build/
 *.mojopkg
-# in-session build/collection cache
+# in-session build/collection cache and persistent last-run state
 .mtest-cache/
 # python bytecode
 __pycache__/

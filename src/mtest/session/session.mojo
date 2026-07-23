@@ -34,7 +34,7 @@ from std.sys import num_logical_cores
 from std.time import perf_counter_ns
 
 from mtest.cache import BuildRegistry
-from mtest.config import ResolvedConfig, RunnerConfig
+from mtest.config import ResolvedConfig, RunnerConfig, StateDelta
 from mtest.discover import discover
 from mtest.exec import ExecRuntime, interrupt_requested
 from mtest.model import (
@@ -89,6 +89,17 @@ def _flush_console[
     if chunk.byte_length() == 0:
         return
     print(chunk, end="", file=FileDescriptor(console_fd), flush=True)
+
+
+@fieldwise_init
+struct SessionResult(Copyable, Movable):
+    """The resolved session code and its live last-run verdict delta."""
+
+    var code: Int
+    """The resolved exit code."""
+
+    var state_delta: StateDelta
+    """The fresh observations folded from emitted verdict events."""
 
 
 def run_session[
@@ -152,6 +163,7 @@ def run_session[
 
     # Discovery. A discover: usage error propagates to main (exit 4).
     var disc = discover(config, root)
+    reporter.configure_state_gates(disc.gate_files)
 
     # Sharding partitions the discovered RUN files (never the gates): keep only
     # the subset this shard owns so every downstream count, casualty, run loop,
@@ -206,8 +218,11 @@ def run_session[
             shard_label=shard_label,
             sharded_out_count=sharded_out_count,
             workers=resolved_workers,
+            config_file=resolved.config_file,
         )
     )
+    for warning in resolved.state_warnings:
+        reporter.handle(Event.warning("state-malformed-line", warning))
     if worker_clamp_note != "":
         reporter.handle(Event.warning("worker-clamp", worker_clamp_note))
 
@@ -782,6 +797,34 @@ def run_session[
             )
         )
     return code
+
+
+def run_session_with_state[
+    C: ReportCoordinator
+](
+    mut runtime: ExecRuntime,
+    resolved: ResolvedConfig,
+    root: String,
+    mut reporter: C,
+    console_fd: Int = -1,
+) raises -> SessionResult:
+    """Run one layered session and return its code plus live state delta.
+
+    Args:
+        runtime: Exclusive owner of process-global exec and signal state.
+        resolved: Layered global configuration and override tables.
+        root: The invocation root.
+        reporter: The coordinator receiving the event stream.
+        console_fd: The borrowed console descriptor, or negative for none.
+
+    Returns:
+        The session's resolved code and fresh verdict observations.
+
+    Raises:
+        Error: The same pre-session usage errors as `run_session`.
+    """
+    var code = run_session(runtime, resolved, root, reporter, console_fd)
+    return SessionResult(code, reporter.state_delta())
 
 
 def run_session[

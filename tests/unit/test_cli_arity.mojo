@@ -83,6 +83,12 @@ def test_durations_missing_value() raises:
         _ = parse_args(argv)
 
 
+def test_config_missing_value() raises:
+    var argv: List[String] = ["--config"]
+    with assert_raises(contains="'--config' requires a value"):
+        _ = parse_args(argv)
+
+
 # --- equals-form cases ---
 
 
@@ -141,6 +147,20 @@ def test_maxfail_equals_form() raises:
 def test_durations_equals_form() raises:
     var argv: List[String] = ["--durations=5"]
     assert_equal(parse_args(argv).config.durations, 5)
+
+
+def test_config_equals_form() raises:
+    var argv: List[String] = ["--config=etc/mtest.toml"]
+    assert_equal(parse_args(argv).config_path, "etc/mtest.toml")
+
+
+def test_config_rejects_empty_value() raises:
+    var argv: List[String] = ["--config="]
+    with assert_raises(contains="'--config' requires a non-empty path"):
+        _ = parse_args(argv)
+    argv = ["--config", ""]
+    with assert_raises(contains="'--config' requires a non-empty path"):
+        _ = parse_args(argv)
 
 
 def test_maxfail_space_form() raises:

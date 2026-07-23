@@ -74,6 +74,33 @@ def errno_now() -> Int:
         return Int(loc[])
 
 
+def read_fd[o: Origin](fd: Int, ptr: UnsafePointer[UInt8, o], n: Int) -> Int:
+    """Read up to `n` bytes from descriptor `fd`; return the raw result.
+
+    Parameters:
+        o: The origin of the writable byte buffer `ptr` points into.
+
+    Args:
+        fd: The source descriptor.
+        ptr: The first of `n` writable bytes to initialize.
+        n: The maximum number of bytes to read.
+
+    Returns:
+        The number of bytes initialized, zero at EOF, or a negative value on
+        error with `errno` set. Allocates nothing.
+    """
+    # SAFETY: libc `read` has the ABI `ssize_t read(int, void*, size_t)`.
+    # `ptr` is a caller-owned pointer, borrowed only for this synchronous call,
+    # to `n` writable bytes whose allocation outlives the call. The opaque
+    # bitcast preserves its address and matches the stdlib declaration shape;
+    # it performs no access itself. `read` initializes at most `n` bytes,
+    # retains no pointer, and never frees the caller's storage. The descriptor
+    # and count are scalar values. The raw result tells the caller exactly how
+    # many bytes became initialized or whether errno must be inspected, so no
+    # partial state or owned resource is hidden here.
+    return external_call["read", Int](fd, ptr.bitcast[NoneType](), n)
+
+
 def write_fd[o: Origin](fd: Int, ptr: UnsafePointer[UInt8, o], n: Int) -> Int:
     """Write up to `n` bytes at `ptr` to descriptor `fd`; return the raw result.
 

@@ -16,10 +16,8 @@ platforms = ["linux-64", "osx-arm64"]
 # silently change valid syntax AND the pinned protocol — regenerate transcripts
 # and read the diff as the changelog). See AGENTS.md.
 mojo = "==1.0.0b2,<2"
-# Python is a BUILD-TIME tool only — the transcript generator and check scripts
-# live under scripts/ and use nothing but the standard library. The runner
-# itself is pure Mojo with ZERO runtime dependencies; there is no
-# [pypi-dependencies] section on purpose.
+# Python serves build/check tooling only. Product code and project-config
+# parsing are native Mojo, and the shipped package has no Python dependency.
 python = "3.12.*"
 # The POSIX adapter is a build-time C object linked into Mojo executables. Pin
 # one compiler on both supported targets so its ABI and sanitizer behavior are

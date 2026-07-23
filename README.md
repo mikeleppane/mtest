@@ -35,9 +35,11 @@ loop with one binary and four commitments:
 - **Loud over silent.** Every excluded file, retry attempt, and timeout is
   reported visibly. A run that skipped something never looks like a run that
   passed everything.
-- **CI is the customer.** Deterministic, path-sorted output, a hermetic
-  build with no third-party runtime dependencies, sharding for CI matrices,
-  and machine-readable reports are all first-class.
+- **CI is the customer.** Deterministic, path-sorted output, a hermetic build
+  with zero runtime dependencies, sharding for CI matrices, and
+  machine-readable reports are all first-class. Product logic is pure Mojo;
+  project configuration is parsed natively by the pinned, vendored
+  `mojo-toml` source.
 
 ## Features
 
@@ -80,9 +82,10 @@ mtest ships as a conda package built **from source** by
 [rattler-build](https://prefix-dev.github.io/rattler-build/) from
 [`recipe/recipe.yaml`](recipe/recipe.yaml), inside an isolated build
 environment pinned to the same toolchain this repo builds against
-(`mojo ==1.0.0b2`, `clang ==18.1.8`). The binary links against the Mojo
-runtime, so the package declares a single conda run dependency,
-`mojo-compiler ==1.0.0b2`, instead of vendoring those libraries.
+(`mojo ==1.0.0b2`, `clang ==18.1.8`). The binary links against the Mojo runtime,
+so the package declares `mojo-compiler ==1.0.0b2` as its sole conda run
+dependency. The native TOML parser is compiled into the shipped binary from
+the pinned vendored source.
 
 The package is not published to a public channel. `package-build` produces
 it into a local channel; `package-check` is a verifier that installs the
@@ -95,10 +98,10 @@ $ pixi run package-check   # verify: install into a scratch env, run the binary
 
 To use the package in an environment of your own, install `mtest` from
 `build/conda-channel` alongside the Modular and conda-forge channels, so
-the `mojo-compiler` run dependency resolves.
+the declared Mojo run dependency resolves.
 
 linux-64 is the gated platform: a CI job builds the package, installs it
-into a fresh environment carrying only the declared run dependency, and
+into a fresh environment carrying only the declared run dependencies, and
 exercises the installed binary. osx-arm64 is declared in the recipe and the
 channels solve for it, but no CI runner executes the packaged artifact there.
 
@@ -668,9 +671,9 @@ Three properties of the test setup are worth knowing up front:
   belongs upstream.
 - **A TestSuite replacement.** mtest orchestrates the standard library's
   harness and depends on its per-file protocol.
-- **Runtime dependencies.** The runner is pure Mojo plus one statically
-  linked C adapter. Python appears only in build and test tooling, never at
-  runtime.
+- **Third-party runtime dependencies.** mtest has none. Product logic is pure
+  Mojo plus one statically linked C adapter and the pinned native TOML parser
+  compiled into the shipped binary.
 
 ## License
 

@@ -50,6 +50,8 @@ def _compat_resolved_config(config: RunnerConfig) -> ResolvedConfig:
         ConfigProvenance.defaults(),
         active^,
         False,
+        "",
+        List[String](),
     )
 
 

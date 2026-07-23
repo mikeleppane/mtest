@@ -76,6 +76,8 @@ def frozen_inventory() -> List[InvRow]:
         InvRow("--junit-xml", 1, False, True),
         # Served by this build (collect mode).
         InvRow("--collect-only", 0, False, True),
+        InvRow("--config", 1, False, True),
+        InvRow("--no-config", 0, False, True),
     ]
 
 
@@ -368,22 +370,20 @@ def test_gh_annotations_inline_value_parses() raises:
     assert_true(r.config.gh_annotations == AnnotationsMode.ON)
 
 
-def test_json_dash_with_annotations_on_is_usage_error() raises:
-    # `--json -` owns stdout; annotations `on` cannot share it — exit 4, and the
-    # message names both fixes.
+def test_json_dash_with_annotations_on_reaches_resolved_validation() raises:
+    # Cross-value constraints are source-neutral and run after layering.
     var argv: List[String] = ["--json", "-", "--gh-annotations", "on"]
-    with assert_raises(contains="--gh-annotations off"):
-        _ = parse_args(argv)
-    var argv2: List[String] = ["--json", "-", "--gh-annotations", "on"]
-    with assert_raises(contains="--json PATH"):
-        _ = parse_args(argv2)
+    var result = parse_args(argv)
+    assert_equal(result.config.json_dest, "-")
+    assert_true(result.config.gh_annotations == AnnotationsMode.ON)
 
 
-def test_json_dash_with_annotations_auto_is_usage_error() raises:
-    # The DEFAULT (auto) also conflicts with `--json -`: only explicit off runs.
+def test_json_dash_with_annotations_auto_reaches_resolved_validation() raises:
+    # The default auto value also reaches the common resolved validator.
     var argv: List[String] = ["--json", "-"]
-    with assert_raises(contains="--gh-annotations off"):
-        _ = parse_args(argv)
+    var result = parse_args(argv)
+    assert_equal(result.config.json_dest, "-")
+    assert_true(result.config.gh_annotations == AnnotationsMode.AUTO)
 
 
 def test_json_dash_with_annotations_off_runs_clean() raises:

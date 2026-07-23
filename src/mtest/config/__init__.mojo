@@ -12,11 +12,8 @@ is rendered through, and the byte-to-text codec (`lossy_utf8`) that every
 captured stream is decoded with.
 
 This layer is data plus pure helpers: no argv parsing, environment or file
-reads, spawning, or printing. `toml_bridge` is the single exception to
-otherwise-pure product Mojo: it initializes Python lazily inside the
-parse-from-string call and uses only stdlib `tomllib`, immediately converting
-the result into typed Mojo data. It may import from `model`, but currently needs
-nothing there.
+reads, spawning, or printing. `toml_bridge` parses with the pinned vendored
+native TOML package and applies every mtest schema and value rule.
 
 The public surface is re-exported here so callers write
 `from mtest.config import FileConfig, RunnerConfig, parse_toml, ...`.
@@ -50,6 +47,7 @@ from mtest.config.resolve import (
     ConfigEnvironment,
     ResolvedConfig,
     resolve_config,
+    validate_resolved_config,
 )
 from mtest.config.runner_config import RunnerConfig
 from mtest.config.shell_quote import shell_join, shell_quote
@@ -58,6 +56,7 @@ from mtest.config.show_output import ShowOutput
 from mtest.config.toml_bridge import (
     ConfigDiagnostic,
     ConfigFailureKind,
+    TOML_SOURCE_MAX_BYTES,
     TomlParseResult,
     parse_toml,
 )

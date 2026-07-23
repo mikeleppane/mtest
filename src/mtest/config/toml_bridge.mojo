@@ -1,11 +1,10 @@
-"""The single lazy Python boundary for parsing `mtest.toml` text.
+"""Typed `mtest.toml` conversion over the vendored native parser.
 
-Only `_parse_toml_with_python` handles Python objects. It initializes Python,
-imports stdlib `tomllib`, and converts the complete document immediately into
-typed `FileConfig` data. Importing this Mojo module alone performs no Python
-work; Python is acquired only when a parse function is called.
+The vendored parser owns only TOML syntax and generic values. This module owns
+every accepted table, key, type, domain, and diagnostic. It is pure Mojo and
+performs no process or file I/O.
 """
-from std.python import Python, PythonObject
+from toml import TomlValue, parse
 
 from mtest.config.file_config import FileConfig, OverrideRule
 from mtest.config.precompile import Precompile
@@ -20,18 +19,23 @@ from mtest.config.value_validation import (
     parse_worker_count,
 )
 
+comptime TOML_SOURCE_MAX_BYTES = 4 * 1024 * 1024
+"""The maximum UTF-8 source size accepted by the native parser."""
+comptime _TOML_MAX_DEPTH = 64
+comptime _TOML_MAX_NODES = 1_024
+comptime _TOML_MAX_TABLE_UPDATES = 64
+comptime _TOML_MAX_SCALAR_BYTES = 1024 * 1024
+
 
 @fieldwise_init
 struct ConfigFailureKind(Equatable, ImplicitlyCopyable, Movable):
-    """One caller-visible failure class from the TOML bridge."""
+    """One caller-visible failure class from the TOML boundary."""
 
     var value: Int
     """The stable integer discriminant identifying this class."""
 
     comptime NONE = Self(0)
-    comptime INITIALIZATION = Self(1)
-    comptime TOMLLIB_IMPORT = Self(2)
-    comptime DOCUMENT = Self(3)
+    comptime DOCUMENT = Self(1)
 
     def __eq__(self, other: Self) -> Bool:
         """Whether both values name the same failure class."""
@@ -48,66 +52,39 @@ struct ConfigDiagnostic(Copyable, Movable):
 
     var kind: ConfigFailureKind
     """The failure class used to choose the runner exit domain."""
-
     var framing: String
     """The stable mtest-owned first line."""
-
     var detail: String
-    """Optional unstable Python detail, empty when absent."""
+    """Optional unstable parser detail, empty when absent."""
 
     def exit_code(self) -> Int:
-        """Return the runner exit class for this failure.
-
-        Returns:
-            `3` for interpreter or impossible-import failures, otherwise `4`
-            for invalid TOML syntax, shape, type, or value.
-        """
-        if (
-            self.kind == ConfigFailureKind.INITIALIZATION
-            or self.kind == ConfigFailureKind.TOMLLIB_IMPORT
-        ):
-            return 3
+        """Return the owned usage-error exit for selected-config failures."""
         return 4
 
     def render(self) -> String:
-        """Render contained diagnostic text with at most one detail line.
-
-        Returns:
-            A newly allocated diagnostic whose first line is mtest-owned and
-            whose optional Python detail is explicitly marked and C0-escaped.
-        """
+        """Render owned framing with at most one C0-escaped detail line."""
         if self.detail.byte_length() == 0:
             return self.framing.copy()
         return (
             self.framing
-            + "\n  detail (unstable, from the Python parser): "
+            + "\n  detail (unstable, from the TOML parser): "
             + self.detail
         )
 
     @staticmethod
-    def empty() -> ConfigDiagnostic:
-        """Build the placeholder carried by a successful parse result.
-
-        Returns:
-            A diagnostic with no failure kind or rendered text.
-        """
-        return ConfigDiagnostic(
-            kind=ConfigFailureKind.NONE,
-            framing="",
-            detail="",
-        )
+    def empty() -> Self:
+        """Build the placeholder carried by a successful parse result."""
+        return Self(ConfigFailureKind.NONE, "", "")
 
 
 @fieldwise_init
 struct TomlParseResult(Copyable, Movable):
-    """A typed file config or one contained bridge diagnostic."""
+    """A typed file config or one contained parser diagnostic."""
 
     var is_ok: Bool
     """Whether `config` contains the successfully converted document."""
-
     var config: FileConfig
     """The converted file layer, or an empty placeholder on failure."""
-
     var failure: ConfigDiagnostic
     """The failure, or an empty placeholder on success."""
 
@@ -143,8 +120,7 @@ def _safe_repr(representation: String) -> String:
             break
         shortened += String(cp)
         count += 1
-    shortened += "..."
-    return shortened
+    return shortened + "..."
 
 
 def _parse_nonnegative_bounded(value: String) -> Optional[Int]:
@@ -161,6 +137,153 @@ def _parse_worker_count_bounded(value: String) -> Optional[Int]:
         return Optional[Int](None)
 
 
+def _source_scan_kind(text: String) -> Int:
+    var whitespace_only = True
+    for byte in text.as_bytes():
+        if byte == UInt8(0):
+            return 2
+        if (
+            byte != UInt8(ord(" "))
+            and byte != UInt8(ord("\t"))
+            and byte != UInt8(ord("\n"))
+            and byte != UInt8(ord("\r"))
+        ):
+            whitespace_only = False
+    return 1 if whitespace_only else 0
+
+
+def _source_complexity_error(text: String) -> Optional[String]:
+    """Check scalar, container-depth, and node bounds without tokenizing."""
+    var bytes = text.as_bytes()
+    var index = 0
+    var depth = 0
+    var nodes = 0
+    var table_updates = 0
+    var scalar_bytes = 0
+    var quote = UInt8(0)
+    var triple = False
+    var comment = False
+    var line_has_content = False
+    while index < len(bytes):
+        var byte = bytes[index]
+        if comment:
+            if byte == UInt8(ord("\n")):
+                comment = False
+                scalar_bytes = 0
+                line_has_content = False
+            else:
+                scalar_bytes += 1
+                if scalar_bytes > _TOML_MAX_SCALAR_BYTES:
+                    return Optional[String](
+                        "TOML token exceeds "
+                        + String(_TOML_MAX_SCALAR_BYTES)
+                        + "-byte limit"
+                    )
+            index += 1
+            continue
+        if quote != UInt8(0):
+            scalar_bytes += 1
+            if scalar_bytes > _TOML_MAX_SCALAR_BYTES:
+                return Optional[String](
+                    "TOML scalar exceeds "
+                    + String(_TOML_MAX_SCALAR_BYTES)
+                    + "-byte limit"
+                )
+            if (
+                quote == UInt8(ord('"'))
+                and byte == UInt8(ord("\\"))
+                and index + 1 < len(bytes)
+            ):
+                scalar_bytes += 1
+                if scalar_bytes > _TOML_MAX_SCALAR_BYTES:
+                    return Optional[String](
+                        "TOML scalar exceeds "
+                        + String(_TOML_MAX_SCALAR_BYTES)
+                        + "-byte limit"
+                    )
+                index += 2
+                continue
+            if byte == quote:
+                if triple:
+                    if (
+                        index + 2 < len(bytes)
+                        and bytes[index + 1] == quote
+                        and bytes[index + 2] == quote
+                    ):
+                        quote = UInt8(0)
+                        triple = False
+                        scalar_bytes = 0
+                        index += 3
+                        continue
+                else:
+                    quote = UInt8(0)
+                    scalar_bytes = 0
+            index += 1
+            continue
+        if byte == UInt8(ord("#")):
+            comment = True
+            scalar_bytes = 0
+        elif byte == UInt8(ord('"')) or byte == UInt8(ord("'")):
+            quote = byte
+            scalar_bytes = 0
+            line_has_content = True
+            if (
+                index + 2 < len(bytes)
+                and bytes[index + 1] == byte
+                and bytes[index + 2] == byte
+            ):
+                triple = True
+                index += 2
+        elif byte == UInt8(ord("[")) or byte == UInt8(ord("{")):
+            if byte == UInt8(ord("[")) and depth == 0 and not line_has_content:
+                table_updates += 1
+                if table_updates > _TOML_MAX_TABLE_UPDATES:
+                    return Optional[String]("TOML table-update limit exceeded")
+            line_has_content = True
+            depth += 1
+            nodes += 1
+            if depth > _TOML_MAX_DEPTH:
+                return Optional[String]("TOML nesting limit exceeded")
+        elif byte == UInt8(ord("]")) or byte == UInt8(ord("}")):
+            line_has_content = True
+            if depth > 0:
+                depth -= 1
+        elif byte == UInt8(ord("=")):
+            nodes += 1
+            scalar_bytes = 0
+            line_has_content = True
+            if depth == 0:
+                table_updates += 1
+                if table_updates > _TOML_MAX_TABLE_UPDATES:
+                    return Optional[String]("TOML table-update limit exceeded")
+        elif byte == UInt8(ord(",")):
+            nodes += 1
+            scalar_bytes = 0
+            line_has_content = True
+        elif (
+            byte == UInt8(ord(" "))
+            or byte == UInt8(ord("\t"))
+            or byte == UInt8(ord("\n"))
+            or byte == UInt8(ord("\r"))
+        ):
+            scalar_bytes = 0
+            if byte == UInt8(ord("\n")):
+                line_has_content = False
+        else:
+            line_has_content = True
+            scalar_bytes += 1
+            if scalar_bytes > _TOML_MAX_SCALAR_BYTES:
+                return Optional[String](
+                    "TOML scalar exceeds "
+                    + String(_TOML_MAX_SCALAR_BYTES)
+                    + "-byte limit"
+                )
+        if nodes > _TOML_MAX_NODES:
+            return Optional[String]("TOML complexity limit exceeded")
+        index += 1
+    return Optional[String](None)
+
+
 def _diagnostic(
     source: String,
     kind: ConfigFailureKind,
@@ -168,33 +291,22 @@ def _diagnostic(
     detail: String = "",
 ) -> ConfigDiagnostic:
     return ConfigDiagnostic(
-        kind=kind,
-        framing=("config: " + _escape_c0(source) + ": " + _escape_c0(summary)),
-        detail=_escape_c0(detail),
+        kind,
+        "config: " + _escape_c0(source) + ": " + _escape_c0(summary),
+        _safe_repr(detail) if detail.byte_length() > 0 else String(""),
     )
 
 
 def _success(var config: FileConfig) -> TomlParseResult:
-    return TomlParseResult(
-        is_ok=True,
-        config=config^,
-        failure=ConfigDiagnostic.empty(),
-    )
+    return TomlParseResult(True, config^, ConfigDiagnostic.empty())
 
 
 def _failure(var diagnostic: ConfigDiagnostic) -> TomlParseResult:
-    return TomlParseResult(
-        is_ok=False,
-        config=FileConfig.empty(),
-        failure=diagnostic^,
-    )
+    return TomlParseResult(False, FileConfig.empty(), diagnostic^)
 
 
 def _invalid(
-    source: String,
-    location: String,
-    expected: String,
-    got: String,
+    source: String, location: String, expected: String, got: String
 ) -> TomlParseResult:
     var suffix = String("")
     if got.byte_length() > 0:
@@ -204,37 +316,6 @@ def _invalid(
             source,
             ConfigFailureKind.DOCUMENT,
             location + ": expected " + expected + suffix,
-        )
-    )
-
-
-def _invalid_string_array(
-    source: String,
-    location: String,
-    got: String,
-) -> TomlParseResult:
-    return _invalid(source, location, "array of strings", got)
-
-
-def _invalid_nonnegative(
-    source: String,
-    location: String,
-    got: String,
-) -> TomlParseResult:
-    return _invalid(source, location, "integer >= 0", got)
-
-
-def _forbidden_build_argument(
-    source: String,
-    location: String,
-    rejection: String,
-    got: String,
-) -> TomlParseResult:
-    return _failure(
-        _diagnostic(
-            source,
-            ConfigFailureKind.DOCUMENT,
-            location + ": " + _safe_repr(rejection) + "; got " + got,
         )
     )
 
@@ -261,744 +342,591 @@ def _unknown(
     )
 
 
-def _parse_toml_with_python(
-    toml_text: String,
-    source: String,
-    injected_kind: ConfigFailureKind,
-    injected_detail: String,
+def _invalid_string_array(
+    source: String, location: String, got: String
 ) -> TomlParseResult:
-    """Own the complete Python-object-to-`FileConfig` conversion.
+    return _invalid(source, location, "array of strings", got)
 
-    Python objects are local to this function and are converted before return.
-    Validation returns a typed diagnostic rather than raising, while unexpected
-    errors from an initialized Python runtime become one contained detail line.
 
-    Args:
-        toml_text: The complete TOML document text. Not mutated.
-        source: The file path or test label used in every diagnostic.
-        injected_kind: Test seam selecting initialization or document failure;
-            `NONE` performs a real parse.
-        injected_detail: Hostile detail text used only by the test seam.
+def _invalid_nonnegative(
+    source: String, location: String, got: String
+) -> TomlParseResult:
+    return _invalid(source, location, "integer >= 0", got)
 
-    Returns:
-        A typed file model on success, or one normalized diagnostic. Allocates
-        the model and any rendered diagnostic strings.
-    """
-    if injected_kind == ConfigFailureKind.INITIALIZATION:
-        return _failure(
-            _diagnostic(
-                source,
-                ConfigFailureKind.INITIALIZATION,
-                "Python runtime initialization failed",
-                injected_detail,
-            )
+
+def _forbidden_build_argument(
+    source: String, location: String, rejection: String, got: String
+) -> TomlParseResult:
+    return _failure(
+        _diagnostic(
+            source,
+            ConfigFailureKind.DOCUMENT,
+            location + ": " + _safe_repr(rejection) + "; got " + got,
         )
+    )
 
-    # Importing the intrinsic builtins module is the acquisition step. If it
-    # fails, no initialized runtime exists and callers must use exit 3.
-    var builtins: PythonObject
-    try:
-        builtins = Python.import_module("builtins")
-    except initialization_error:
-        return _failure(
-            _diagnostic(
-                source,
-                ConfigFailureKind.INITIALIZATION,
-                "Python runtime initialization failed",
-                String(initialization_error),
+
+def _keys(value: TomlValue) -> List[String]:
+    var keys = List[String]()
+    for entry in value.table_value.items():
+        keys.append(entry.key)
+    return keys^
+
+
+def _contains(value: TomlValue, key: String) -> Bool:
+    return value.table_value.__contains__(key)
+
+
+def _get(value: TomlValue, key: String) raises -> TomlValue:
+    return value.table_value[key].copy()
+
+
+def _got(value: TomlValue) -> String:
+    if value.is_string():
+        return _safe_repr("'" + value.string_value + "'")
+    if value.is_int():
+        return String(value.int_value)
+    if value.is_float():
+        return String(value.float_value)
+    if value.is_bool():
+        return "True" if value.bool_value else "False"
+    if value.is_array():
+        var out = String("[")
+        for i in range(len(value.array_value)):
+            if i > 0:
+                out += ", "
+            out += _got(value.array_value[i])
+        return _safe_repr(out + "]")
+    var out = String("{")
+    var index = 0
+    for entry in value.table_value.items():
+        if index > 0:
+            out += ", "
+        out += "'" + entry.key + "': " + _got(entry.value)
+        index += 1
+    return _safe_repr(out + "}")
+
+
+def _convert_document(
+    document: TomlValue, source: String
+) raises -> TomlParseResult:
+    if not document.is_table():
+        return _invalid(source, "document", "table", _got(document))
+    for key in _keys(document):
+        if (
+            key != "run"
+            and key != "build"
+            and key != "report"
+            and key != "override"
+        ):
+            return _failure(
+                _diagnostic(
+                    source,
+                    ConfigFailureKind.DOCUMENT,
+                    "unknown top-level table '"
+                    + _escape_c0(key)
+                    + "'; expected [run], [build], [report], or [[override]]",
+                )
             )
-        )
 
-    # `tomllib` exists throughout the declared Python >=3.11 runtime floor.
-    # Keeping this class distinct prevents an impossible packaging failure from
-    # being mislabeled as invalid user configuration.
-    var tomllib: PythonObject
-    try:
-        tomllib = Python.import_module("tomllib")
-    except import_error:
-        return _failure(
-            _diagnostic(
-                source,
-                ConfigFailureKind.TOMLLIB_IMPORT,
-                "stdlib tomllib import failed despite Python >=3.11",
-                String(import_error),
-            )
-        )
+    var config = FileConfig.empty()
 
-    if injected_kind == ConfigFailureKind.DOCUMENT:
-        return _failure(
-            _diagnostic(
-                source,
-                ConfigFailureKind.DOCUMENT,
-                "TOML parse failed",
-                injected_detail,
-            )
-        )
-
-    try:
-        var document = tomllib.loads(toml_text)
-        var dict_type = builtins.dict
-        var list_type = builtins.list
-        var str_type = builtins.str
-        var int_type = builtins.int
-        var bool_type = builtins.bool
-
-        if not Python.type(document).__is__(dict_type):
-            var got = _safe_repr(String(py=builtins.repr(document)))
-            return _invalid(source, "document", "table", got)
-
-        var top_keys = builtins.list(document.keys())
-        for i in range(len(top_keys)):
-            var key = String(py=top_keys[i])
+    if _contains(document, "run"):
+        var table = _get(document, "run")
+        if not table.is_table():
+            return _invalid(source, "[run]", "table", _got(table))
+        for key in _keys(table):
             if (
-                key != "run"
-                and key != "build"
-                and key != "report"
-                and key != "override"
+                key != "paths"
+                and key != "exclude"
+                and key != "gates"
+                and key != "serial"
+                and key != "workers"
+                and key != "timeout"
+                and key != "retries"
+                and key != "maxfail"
+                and key != "state"
             ):
-                return _failure(
-                    _diagnostic(
-                        source,
-                        ConfigFailureKind.DOCUMENT,
-                        "unknown top-level table '"
-                        + _escape_c0(key)
-                        + "'; expected [run], [build], [report], or"
-                        " [[override]]",
-                    )
-                )
-
-        var config = FileConfig.empty()
-
-        if "run" in document:
-            var run_table = document["run"]
-            if not Python.type(run_table).__is__(dict_type):
-                var got = _safe_repr(String(py=builtins.repr(run_table)))
-                return _invalid(source, "[run]", "table", got)
-
-            var run_keys = builtins.list(run_table.keys())
-            for i in range(len(run_keys)):
-                var key = String(py=run_keys[i])
-                if (
-                    key != "paths"
-                    and key != "exclude"
-                    and key != "gates"
-                    and key != "serial"
-                    and key != "workers"
-                    and key != "timeout"
-                    and key != "retries"
-                    and key != "maxfail"
-                    and key != "state"
-                ):
-                    var value = run_table[key]
-                    var got = _safe_repr(String(py=builtins.repr(value)))
-                    return _unknown(
-                        source,
-                        "[run]",
-                        key,
-                        (
-                            "paths, exclude, gates, serial, workers, timeout,"
-                            " retries, maxfail, or state"
-                        ),
-                        got,
-                    )
-
-            var run_list_keys = ["paths", "exclude", "gates", "serial"]
-            for key in run_list_keys:
-                if key not in run_table:
-                    continue
-                var value = run_table[key]
-                var location = "[run] key '" + key + "'"
-                if not Python.type(value).__is__(list_type):
-                    var got = _safe_repr(String(py=builtins.repr(value)))
-                    return _invalid_string_array(source, location, got)
-                var values = List[String]()
-                for i in range(len(value)):
-                    var item = value[i]
-                    if not Python.type(item).__is__(str_type):
-                        var got = _safe_repr(String(py=builtins.repr(value)))
-                        return _invalid_string_array(source, location, got)
-                    var spelling = String(py=item)
-                    if key == "paths" and "::" in spelling:
-                        return _failure(
-                            _diagnostic(
-                                source,
-                                ConfigFailureKind.DOCUMENT,
-                                location
-                                + ": node-id-shaped path is not allowed;"
-                                " expected filesystem path without '::'; got "
-                                + _safe_repr(String(py=builtins.repr(item))),
-                            )
-                        )
-                    values.append(spelling^)
-                if key == "paths":
-                    config.paths = values^
-                    config.saw_paths = True
-                elif key == "exclude":
-                    config.excludes = values^
-                    config.saw_excludes = True
-                elif key == "gates":
-                    config.gates = values^
-                    config.saw_gates = True
-                else:
-                    config.serial_globs = values^
-                    config.saw_serial = True
-
-            if "workers" in run_table:
-                var value = run_table["workers"]
-                var parsed_workers = Optional[Int](None)
-                if Python.type(value).__is__(int_type):
-                    parsed_workers = _parse_worker_count_bounded(
-                        String(py=builtins.str(value))
-                    )
-                elif Python.type(value).__is__(str_type):
-                    var spelling = String(py=value)
-                    if spelling == "auto":
-                        parsed_workers = _parse_worker_count_bounded(spelling)
-                if not parsed_workers:
-                    var got = _safe_repr(String(py=builtins.repr(value)))
-                    return _invalid(
-                        source,
-                        "[run] key 'workers'",
-                        "positive integer or 'auto'",
-                        got,
-                    )
-                config.workers = parsed_workers.value()
-                config.saw_workers = True
-
-            var run_numeric_keys = ["timeout", "retries", "maxfail"]
-            for key in run_numeric_keys:
-                if key not in run_table:
-                    continue
-                var value = run_table[key]
-                var parsed = Optional[Int](None)
-                if Python.type(value).__is__(int_type):
-                    parsed = _parse_nonnegative_bounded(
-                        String(py=builtins.str(value))
-                    )
-                if not parsed:
-                    var got = _safe_repr(String(py=builtins.repr(value)))
-                    return _invalid_nonnegative(
-                        source,
-                        "[run] key '" + key + "'",
-                        got,
-                    )
-                if key == "timeout":
-                    config.timeout_secs = parsed.value()
-                    config.saw_timeout = True
-                elif key == "retries":
-                    config.retries = parsed.value()
-                    config.saw_retries = True
-                else:
-                    config.maxfail = parsed.value()
-                    config.saw_maxfail = True
-
-            if "state" in run_table:
-                var value = run_table["state"]
-                if not Python.type(value).__is__(bool_type):
-                    var got = _safe_repr(String(py=builtins.repr(value)))
-                    return _invalid(
-                        source,
-                        "[run] key 'state'",
-                        "boolean",
-                        got,
-                    )
-                config.state = Bool(py=value)
-                config.saw_state = True
-
-        if "build" in document:
-            var build_table = document["build"]
-            if not Python.type(build_table).__is__(dict_type):
-                var got = _safe_repr(String(py=builtins.repr(build_table)))
-                return _invalid(source, "[build]", "table", got)
-
-            var build_keys = builtins.list(build_table.keys())
-            for i in range(len(build_keys)):
-                var key = String(py=build_keys[i])
-                if (
-                    key != "mojo"
-                    and key != "include"
-                    and key != "build-args"
-                    and key != "precompile"
-                    and key != "compile-timeout"
-                ):
-                    var value = build_table[key]
-                    var got = _safe_repr(String(py=builtins.repr(value)))
-                    return _unknown(
-                        source,
-                        "[build]",
-                        key,
-                        (
-                            "mojo, include, build-args, precompile, or"
-                            " compile-timeout"
-                        ),
-                        got,
-                    )
-
-            if "mojo" in build_table:
-                var value = build_table["mojo"]
-                if not Python.type(value).__is__(str_type):
-                    var got = _safe_repr(String(py=builtins.repr(value)))
-                    return _invalid(
-                        source,
-                        "[build] key 'mojo'",
-                        "string",
-                        got,
-                    )
-                config.mojo_path = String(py=value)
-                config.saw_mojo = True
-
-            var build_list_keys = ["include", "build-args", "precompile"]
-            for key in build_list_keys:
-                if key not in build_table:
-                    continue
-                var value = build_table[key]
-                var location = "[build] key '" + key + "'"
-                var expected = String("array of strings")
-                if key == "precompile":
-                    expected = "array of SRC[:OUT]"
-                if not Python.type(value).__is__(list_type):
-                    var got = _safe_repr(String(py=builtins.repr(value)))
-                    return _invalid(source, location, expected, got)
-                var string_values = List[String]()
-                var precompile_values = List[Precompile]()
-                for i in range(len(value)):
-                    var item = value[i]
-                    if not Python.type(item).__is__(str_type):
-                        var got = _safe_repr(String(py=builtins.repr(value)))
-                        return _invalid(source, location, expected, got)
-                    var spelling = String(py=item)
-                    if key == "precompile":
-                        var parsed = parse_precompile_value(spelling)
-                        if not parsed:
-                            var got = _safe_repr(
-                                String(py=builtins.repr(value))
-                            )
-                            return _invalid(source, location, expected, got)
-                        precompile_values.append(parsed.value().copy())
-                    else:
-                        var rejection = build_arg_rejection(spelling)
-                        if rejection:
-                            var got = _safe_repr(String(py=builtins.repr(item)))
-                            return _forbidden_build_argument(
-                                source,
-                                location,
-                                rejection.value(),
-                                got,
-                            )
-                        string_values.append(spelling^)
-                if key == "include":
-                    config.include_paths = string_values^
-                    config.saw_include = True
-                elif key == "build-args":
-                    config.build_args = string_values^
-                    config.saw_build_args = True
-                else:
-                    config.precompiles = precompile_values^
-                    config.saw_precompile = True
-
-            if "compile-timeout" in build_table:
-                var value = build_table["compile-timeout"]
-                var parsed = Optional[Int](None)
-                if Python.type(value).__is__(int_type):
-                    parsed = _parse_nonnegative_bounded(
-                        String(py=builtins.str(value))
-                    )
-                if not parsed:
-                    var got = _safe_repr(String(py=builtins.repr(value)))
-                    return _invalid_nonnegative(
-                        source,
-                        "[build] key 'compile-timeout'",
-                        got,
-                    )
-                config.compile_timeout_secs = parsed.value()
-                config.saw_compile_timeout = True
-
-        if "report" in document:
-            var report_table = document["report"]
-            if not Python.type(report_table).__is__(dict_type):
-                var got = _safe_repr(String(py=builtins.repr(report_table)))
-                return _invalid(source, "[report]", "table", got)
-
-            var report_keys = builtins.list(report_table.keys())
-            for i in range(len(report_keys)):
-                var key = String(py=report_keys[i])
-                if (
-                    key != "color"
-                    and key != "show-output"
-                    and key != "verbosity"
-                    and key != "durations"
-                    and key != "junit-xml"
-                    and key != "json"
-                    and key != "gh-annotations"
-                ):
-                    var value = report_table[key]
-                    var got = _safe_repr(String(py=builtins.repr(value)))
-                    return _unknown(
-                        source,
-                        "[report]",
-                        key,
-                        (
-                            "color, show-output, verbosity, durations,"
-                            " junit-xml, json, or gh-annotations"
-                        ),
-                        got,
-                    )
-
-            if "color" in report_table:
-                var value = report_table["color"]
-                var parsed = parse_color_value("")
-                if Python.type(value).__is__(str_type):
-                    parsed = parse_color_value(String(py=value))
-                if not parsed:
-                    var got = _safe_repr(String(py=builtins.repr(value)))
-                    return _invalid(
-                        source,
-                        "[report] key 'color'",
-                        "auto|always|never",
-                        got,
-                    )
-                config.color = parsed.value()
-                config.saw_color = True
-
-            if "show-output" in report_table:
-                var value = report_table["show-output"]
-                var parsed = parse_show_output_value("")
-                if Python.type(value).__is__(str_type):
-                    parsed = parse_show_output_value(String(py=value))
-                if not parsed:
-                    var got = _safe_repr(String(py=builtins.repr(value)))
-                    return _invalid(
-                        source,
-                        "[report] key 'show-output'",
-                        "failures|all|none",
-                        got,
-                    )
-                config.show_output = parsed.value()
-                config.saw_show_output = True
-
-            if "verbosity" in report_table:
-                var value = report_table["verbosity"]
-                var parsed = parse_verbosity_value("")
-                if Python.type(value).__is__(str_type):
-                    parsed = parse_verbosity_value(String(py=value))
-                if not parsed:
-                    var got = _safe_repr(String(py=builtins.repr(value)))
-                    return _invalid(
-                        source,
-                        "[report] key 'verbosity'",
-                        "quiet|normal|verbose",
-                        got,
-                    )
-                config.verbosity = parsed.value()
-                config.saw_verbosity = True
-
-            if "durations" in report_table:
-                var value = report_table["durations"]
-                var parsed = Optional[Int](None)
-                if Python.type(value).__is__(int_type):
-                    parsed = _parse_nonnegative_bounded(
-                        String(py=builtins.str(value))
-                    )
-                if not parsed:
-                    var got = _safe_repr(String(py=builtins.repr(value)))
-                    return _invalid_nonnegative(
-                        source,
-                        "[report] key 'durations'",
-                        got,
-                    )
-                config.durations = parsed.value()
-                config.saw_durations = True
-
-            if "junit-xml" in report_table:
-                var value = report_table["junit-xml"]
-                if not Python.type(value).__is__(str_type):
-                    var got = _safe_repr(String(py=builtins.repr(value)))
-                    return _invalid(
-                        source,
-                        "[report] key 'junit-xml'",
-                        "non-empty string",
-                        got,
-                    )
-                var destination = String(py=value)
-                if destination.byte_length() == 0:
-                    var got = _safe_repr(String(py=builtins.repr(value)))
-                    return _invalid(
-                        source,
-                        "[report] key 'junit-xml'",
-                        "non-empty string",
-                        got,
-                    )
-                config.junit_dest = destination^
-                config.saw_junit_xml = True
-
-            if "json" in report_table:
-                var value = report_table["json"]
-                if not Python.type(value).__is__(str_type):
-                    var got = _safe_repr(String(py=builtins.repr(value)))
-                    return _invalid(
-                        source,
-                        "[report] key 'json'",
-                        "non-empty string or '-'",
-                        got,
-                    )
-                var destination = String(py=value)
-                if destination.byte_length() == 0:
-                    var got = _safe_repr(String(py=builtins.repr(value)))
-                    return _invalid(
-                        source,
-                        "[report] key 'json'",
-                        "non-empty string or '-'",
-                        got,
-                    )
-                config.json_dest = destination^
-                config.saw_json = True
-
-            if "gh-annotations" in report_table:
-                var value = report_table["gh-annotations"]
-                var parsed = parse_annotations_value("")
-                if Python.type(value).__is__(str_type):
-                    parsed = parse_annotations_value(String(py=value))
-                if not parsed:
-                    var got = _safe_repr(String(py=builtins.repr(value)))
-                    return _invalid(
-                        source,
-                        "[report] key 'gh-annotations'",
-                        "off|on|auto",
-                        got,
-                    )
-                config.gh_annotations = parsed.value()
-                config.saw_gh_annotations = True
-
-        if "override" in document:
-            var override_tables = document["override"]
-            if not Python.type(override_tables).__is__(list_type):
-                var got = _safe_repr(String(py=builtins.repr(override_tables)))
-                return _invalid(
+                var value = _get(table, key)
+                return _unknown(
                     source,
-                    "[[override]]",
-                    "array of tables",
-                    got,
-                )
-            if len(override_tables) == 0:
-                return _invalid(
-                    source,
-                    "[[override]]",
-                    "at least one table",
-                    "[]",
+                    "[run]",
+                    key,
+                    (
+                        "paths, exclude, gates, serial, workers, timeout,"
+                        " retries, maxfail, or state"
+                    ),
+                    _got(value),
                 )
 
-            for index in range(len(override_tables)):
-                var table = override_tables[index]
-                var location = "[[override]] #" + String(index + 1)
-                if not Python.type(table).__is__(dict_type):
-                    var got = _safe_repr(String(py=builtins.repr(table)))
-                    return _invalid(source, location, "table", got)
-
-                var keys = builtins.list(table.keys())
-                for i in range(len(keys)):
-                    var key = String(py=keys[i])
-                    if (
-                        key != "files"
-                        and key != "timeout"
-                        and key != "compile-timeout"
-                        and key != "retries"
-                        and key != "serial"
-                    ):
-                        var value = table[key]
-                        var got = _safe_repr(String(py=builtins.repr(value)))
-                        return _unknown(
-                            source,
-                            location,
-                            key,
-                            (
-                                "files, timeout, compile-timeout, retries, or"
-                                " serial"
-                            ),
-                            got,
-                        )
-
-                if "files" not in table:
-                    return _invalid(
-                        source,
-                        location + " key 'files'",
-                        "non-empty string or non-empty array of strings",
-                        "<absent>",
-                    )
-
-                var rule = OverrideRule.empty()
-                var files_value = table["files"]
-                if Python.type(files_value).__is__(str_type):
-                    var file = String(py=files_value)
-                    if file.byte_length() == 0:
-                        var got = _safe_repr(
-                            String(py=builtins.repr(files_value))
-                        )
-                        return _invalid(
-                            source,
-                            location + " key 'files'",
-                            "non-empty string or non-empty array of strings",
-                            got,
-                        )
-                    rule.files.append(file^)
-                elif Python.type(files_value).__is__(list_type):
-                    if len(files_value) == 0:
-                        return _invalid(
-                            source,
-                            location + " key 'files'",
-                            "non-empty string or non-empty array of strings",
-                            "[]",
-                        )
-                    for i in range(len(files_value)):
-                        var item = files_value[i]
-                        if not Python.type(item).__is__(str_type):
-                            var got = _safe_repr(
-                                String(py=builtins.repr(files_value))
-                            )
-                            return _invalid(
-                                source,
-                                location + " key 'files'",
-                                (
-                                    "non-empty string or non-empty array of"
-                                    " strings"
-                                ),
-                                got,
-                            )
-                        var file = String(py=item)
-                        if file.byte_length() == 0:
-                            var got = _safe_repr(
-                                String(py=builtins.repr(files_value))
-                            )
-                            return _invalid(
-                                source,
-                                location + " key 'files'",
-                                (
-                                    "non-empty string or non-empty array of"
-                                    " strings"
-                                ),
-                                got,
-                            )
-                        rule.files.append(file^)
-                else:
-                    var got = _safe_repr(String(py=builtins.repr(files_value)))
-                    return _invalid(
-                        source,
-                        location + " key 'files'",
-                        "non-empty string or non-empty array of strings",
-                        got,
-                    )
-
-                var override_numeric_keys = [
-                    "timeout",
-                    "compile-timeout",
-                    "retries",
-                ]
-                for key in override_numeric_keys:
-                    if key not in table:
-                        continue
-                    var value = table[key]
-                    var parsed = Optional[Int](None)
-                    if Python.type(value).__is__(int_type):
-                        parsed = _parse_nonnegative_bounded(
-                            String(py=builtins.str(value))
-                        )
-                    if not parsed:
-                        var got = _safe_repr(String(py=builtins.repr(value)))
-                        return _invalid_nonnegative(
-                            source,
-                            location + " key '" + key + "'",
-                            got,
-                        )
-                    if key == "timeout":
-                        rule.timeout_secs = parsed.value()
-                        rule.saw_timeout = True
-                    elif key == "compile-timeout":
-                        rule.compile_timeout_secs = parsed.value()
-                        rule.saw_compile_timeout = True
-                    else:
-                        rule.retries = parsed.value()
-                        rule.saw_retries = True
-
-                if "serial" in table:
-                    var value = table["serial"]
-                    if not Python.type(value).__is__(bool_type):
-                        var got = _safe_repr(String(py=builtins.repr(value)))
-                        return _invalid(
-                            source,
-                            location + " key 'serial'",
-                            "boolean",
-                            got,
-                        )
-                    rule.serial = Bool(py=value)
-                    rule.saw_serial = True
-
-                if not (
-                    rule.saw_timeout
-                    or rule.saw_compile_timeout
-                    or rule.saw_retries
-                    or (rule.saw_serial and rule.serial)
-                ):
+        for key in ["paths", "exclude", "gates", "serial"]:
+            if not _contains(table, key):
+                continue
+            var value = _get(table, key)
+            var location = "[run] key '" + key + "'"
+            if not value.is_array():
+                return _invalid_string_array(source, location, _got(value))
+            var values = List[String]()
+            for item in value.array_value:
+                if not item.is_string():
+                    return _invalid_string_array(source, location, _got(value))
+                var spelling = item.string_value.copy()
+                if key == "paths" and "::" in spelling:
                     return _failure(
                         _diagnostic(
                             source,
                             ConfigFailureKind.DOCUMENT,
                             location
-                            + ": must set timeout, compile-timeout, retries,"
-                            " or serial = true",
+                            + ": node-id-shaped path is not allowed; expected"
+                            " filesystem path without '::'; got "
+                            + _got(item),
                         )
                     )
-                config.overrides.append(rule^)
+                values.append(spelling^)
+            if key == "paths":
+                config.paths = values^
+                config.saw_paths = True
+            elif key == "exclude":
+                config.excludes = values^
+                config.saw_excludes = True
+            elif key == "gates":
+                config.gates = values^
+                config.saw_gates = True
+            else:
+                config.serial_globs = values^
+                config.saw_serial = True
 
-        return _success(config^)
-    except runtime_error:
+        if _contains(table, "workers"):
+            var value = _get(table, "workers")
+            var parsed = Optional[Int](None)
+            if value.is_int():
+                parsed = _parse_worker_count_bounded(String(value.int_value))
+            elif value.is_string() and value.string_value == "auto":
+                parsed = _parse_worker_count_bounded(value.string_value)
+            if not parsed:
+                return _invalid(
+                    source,
+                    "[run] key 'workers'",
+                    "positive integer or 'auto'",
+                    _got(value),
+                )
+            config.workers = parsed.value()
+            config.saw_workers = True
+
+        for key in ["timeout", "retries", "maxfail"]:
+            if not _contains(table, key):
+                continue
+            var value = _get(table, key)
+            var parsed = Optional[Int](None)
+            if value.is_int():
+                parsed = _parse_nonnegative_bounded(String(value.int_value))
+            if not parsed:
+                return _invalid_nonnegative(
+                    source, "[run] key '" + key + "'", _got(value)
+                )
+            if key == "timeout":
+                config.timeout_secs = parsed.value()
+                config.saw_timeout = True
+            elif key == "retries":
+                config.retries = parsed.value()
+                config.saw_retries = True
+            else:
+                config.maxfail = parsed.value()
+                config.saw_maxfail = True
+
+        if _contains(table, "state"):
+            var value = _get(table, "state")
+            if not value.is_bool():
+                return _invalid(
+                    source, "[run] key 'state'", "boolean", _got(value)
+                )
+            config.state = value.bool_value
+            config.saw_state = True
+
+    if _contains(document, "build"):
+        var table = _get(document, "build")
+        if not table.is_table():
+            return _invalid(source, "[build]", "table", _got(table))
+        for key in _keys(table):
+            if (
+                key != "mojo"
+                and key != "include"
+                and key != "build-args"
+                and key != "precompile"
+                and key != "compile-timeout"
+            ):
+                var value = _get(table, key)
+                return _unknown(
+                    source,
+                    "[build]",
+                    key,
+                    "mojo, include, build-args, precompile, or compile-timeout",
+                    _got(value),
+                )
+
+        if _contains(table, "mojo"):
+            var value = _get(table, "mojo")
+            if not value.is_string():
+                return _invalid(
+                    source, "[build] key 'mojo'", "string", _got(value)
+                )
+            config.mojo_path = value.string_value.copy()
+            config.saw_mojo = True
+
+        for key in ["include", "build-args", "precompile"]:
+            if not _contains(table, key):
+                continue
+            var value = _get(table, key)
+            var location = "[build] key '" + key + "'"
+            var expected = String(
+                "array of SRC[:OUT]"
+            ) if key == "precompile" else String("array of strings")
+            if not value.is_array():
+                return _invalid(source, location, expected, _got(value))
+            var string_values = List[String]()
+            var precompile_values = List[Precompile]()
+            for item in value.array_value:
+                if not item.is_string():
+                    return _invalid(source, location, expected, _got(value))
+                var spelling = item.string_value.copy()
+                if key == "precompile":
+                    var parsed = parse_precompile_value(spelling)
+                    if not parsed:
+                        return _invalid(source, location, expected, _got(value))
+                    precompile_values.append(parsed.value().copy())
+                else:
+                    var rejection = build_arg_rejection(spelling)
+                    if rejection:
+                        return _forbidden_build_argument(
+                            source,
+                            location,
+                            rejection.value(),
+                            _got(item),
+                        )
+                    string_values.append(spelling^)
+            if key == "include":
+                config.include_paths = string_values^
+                config.saw_include = True
+            elif key == "build-args":
+                config.build_args = string_values^
+                config.saw_build_args = True
+            else:
+                config.precompiles = precompile_values^
+                config.saw_precompile = True
+
+        if _contains(table, "compile-timeout"):
+            var value = _get(table, "compile-timeout")
+            var parsed = Optional[Int](None)
+            if value.is_int():
+                parsed = _parse_nonnegative_bounded(String(value.int_value))
+            if not parsed:
+                return _invalid_nonnegative(
+                    source, "[build] key 'compile-timeout'", _got(value)
+                )
+            config.compile_timeout_secs = parsed.value()
+            config.saw_compile_timeout = True
+
+    if _contains(document, "report"):
+        var table = _get(document, "report")
+        if not table.is_table():
+            return _invalid(source, "[report]", "table", _got(table))
+        for key in _keys(table):
+            if (
+                key != "color"
+                and key != "show-output"
+                and key != "verbosity"
+                and key != "durations"
+                and key != "junit-xml"
+                and key != "json"
+                and key != "gh-annotations"
+            ):
+                var value = _get(table, key)
+                return _unknown(
+                    source,
+                    "[report]",
+                    key,
+                    (
+                        "color, show-output, verbosity, durations, junit-xml,"
+                        " json, or gh-annotations"
+                    ),
+                    _got(value),
+                )
+
+        if _contains(table, "color"):
+            var value = _get(table, "color")
+            var parsed = parse_color_value("")
+            if value.is_string():
+                parsed = parse_color_value(value.string_value)
+            if not parsed:
+                return _invalid(
+                    source,
+                    "[report] key 'color'",
+                    "auto|always|never",
+                    _got(value),
+                )
+            config.color = parsed.value()
+            config.saw_color = True
+
+        if _contains(table, "show-output"):
+            var value = _get(table, "show-output")
+            var parsed = parse_show_output_value("")
+            if value.is_string():
+                parsed = parse_show_output_value(value.string_value)
+            if not parsed:
+                return _invalid(
+                    source,
+                    "[report] key 'show-output'",
+                    "failures|all|none",
+                    _got(value),
+                )
+            config.show_output = parsed.value()
+            config.saw_show_output = True
+
+        if _contains(table, "verbosity"):
+            var value = _get(table, "verbosity")
+            var parsed = parse_verbosity_value("")
+            if value.is_string():
+                parsed = parse_verbosity_value(value.string_value)
+            if not parsed:
+                return _invalid(
+                    source,
+                    "[report] key 'verbosity'",
+                    "quiet|normal|verbose",
+                    _got(value),
+                )
+            config.verbosity = parsed.value()
+            config.saw_verbosity = True
+
+        if _contains(table, "durations"):
+            var value = _get(table, "durations")
+            var parsed = Optional[Int](None)
+            if value.is_int():
+                parsed = _parse_nonnegative_bounded(String(value.int_value))
+            if not parsed:
+                return _invalid_nonnegative(
+                    source, "[report] key 'durations'", _got(value)
+                )
+            config.durations = parsed.value()
+            config.saw_durations = True
+
+        if _contains(table, "junit-xml"):
+            var value = _get(table, "junit-xml")
+            if not value.is_string() or value.string_value.byte_length() == 0:
+                return _invalid(
+                    source,
+                    "[report] key 'junit-xml'",
+                    "non-empty string",
+                    _got(value),
+                )
+            config.junit_dest = value.string_value.copy()
+            config.saw_junit_xml = True
+
+        if _contains(table, "json"):
+            var value = _get(table, "json")
+            if not value.is_string() or value.string_value.byte_length() == 0:
+                return _invalid(
+                    source,
+                    "[report] key 'json'",
+                    "non-empty string or '-'",
+                    _got(value),
+                )
+            config.json_dest = value.string_value.copy()
+            config.saw_json = True
+
+        if _contains(table, "gh-annotations"):
+            var value = _get(table, "gh-annotations")
+            var parsed = parse_annotations_value("")
+            if value.is_string():
+                parsed = parse_annotations_value(value.string_value)
+            if not parsed:
+                return _invalid(
+                    source,
+                    "[report] key 'gh-annotations'",
+                    "off|on|auto",
+                    _got(value),
+                )
+            config.gh_annotations = parsed.value()
+            config.saw_gh_annotations = True
+
+    if _contains(document, "override"):
+        var overrides = _get(document, "override")
+        if not overrides.is_array():
+            return _invalid(
+                source, "[[override]]", "array of tables", _got(overrides)
+            )
+        if len(overrides.array_value) == 0:
+            return _invalid(source, "[[override]]", "at least one table", "[]")
+        for index in range(len(overrides.array_value)):
+            var table = overrides.array_value[index].copy()
+            var location = "[[override]] #" + String(index + 1)
+            if not table.is_table():
+                return _invalid(source, location, "table", _got(table))
+            for key in _keys(table):
+                if (
+                    key != "files"
+                    and key != "timeout"
+                    and key != "compile-timeout"
+                    and key != "retries"
+                    and key != "serial"
+                ):
+                    var value = _get(table, key)
+                    return _unknown(
+                        source,
+                        location,
+                        key,
+                        "files, timeout, compile-timeout, retries, or serial",
+                        _got(value),
+                    )
+            if not _contains(table, "files"):
+                return _invalid(
+                    source,
+                    location + " key 'files'",
+                    "non-empty string or non-empty array of strings",
+                    "<absent>",
+                )
+            var rule = OverrideRule.empty()
+            var files = _get(table, "files")
+            if files.is_string():
+                if files.string_value.byte_length() == 0:
+                    return _invalid(
+                        source,
+                        location + " key 'files'",
+                        "non-empty string or non-empty array of strings",
+                        _got(files),
+                    )
+                rule.files.append(files.string_value.copy())
+            elif files.is_array():
+                if len(files.array_value) == 0:
+                    return _invalid(
+                        source,
+                        location + " key 'files'",
+                        "non-empty string or non-empty array of strings",
+                        "[]",
+                    )
+                for item in files.array_value:
+                    if (
+                        not item.is_string()
+                        or item.string_value.byte_length() == 0
+                    ):
+                        return _invalid(
+                            source,
+                            location + " key 'files'",
+                            "non-empty string or non-empty array of strings",
+                            _got(files),
+                        )
+                    rule.files.append(item.string_value.copy())
+            else:
+                return _invalid(
+                    source,
+                    location + " key 'files'",
+                    "non-empty string or non-empty array of strings",
+                    _got(files),
+                )
+
+            for key in ["timeout", "compile-timeout", "retries"]:
+                if not _contains(table, key):
+                    continue
+                var value = _get(table, key)
+                var parsed = Optional[Int](None)
+                if value.is_int():
+                    parsed = _parse_nonnegative_bounded(String(value.int_value))
+                if not parsed:
+                    return _invalid_nonnegative(
+                        source, location + " key '" + key + "'", _got(value)
+                    )
+                if key == "timeout":
+                    rule.timeout_secs = parsed.value()
+                    rule.saw_timeout = True
+                elif key == "compile-timeout":
+                    rule.compile_timeout_secs = parsed.value()
+                    rule.saw_compile_timeout = True
+                else:
+                    rule.retries = parsed.value()
+                    rule.saw_retries = True
+
+            if _contains(table, "serial"):
+                var value = _get(table, "serial")
+                if not value.is_bool():
+                    return _invalid(
+                        source,
+                        location + " key 'serial'",
+                        "boolean",
+                        _got(value),
+                    )
+                rule.serial = value.bool_value
+                rule.saw_serial = True
+
+            if not (
+                rule.saw_timeout
+                or rule.saw_compile_timeout
+                or rule.saw_retries
+                or (rule.saw_serial and rule.serial)
+            ):
+                return _failure(
+                    _diagnostic(
+                        source,
+                        ConfigFailureKind.DOCUMENT,
+                        location
+                        + ": must set timeout, compile-timeout, retries, or"
+                        " serial = true",
+                    )
+                )
+            config.overrides.append(rule^)
+
+    return _success(config^)
+
+
+def parse_toml(toml_text: String, source: String) -> TomlParseResult:
+    """Parse and validate one complete TOML document natively.
+
+    Args:
+        toml_text: The UTF-8 TOML source. Not mutated.
+        source: The path label used in all owned diagnostics.
+
+    Returns:
+        A typed file model or an owned exit-4 syntax/schema diagnostic. No
+        parser error escapes.
+    """
+    if toml_text.byte_length() > TOML_SOURCE_MAX_BYTES:
+        return _failure(
+            _diagnostic(
+                source,
+                ConfigFailureKind.DOCUMENT,
+                "configuration file exceeds "
+                + String(TOML_SOURCE_MAX_BYTES)
+                + "-byte limit",
+            )
+        )
+    var source_kind = _source_scan_kind(toml_text)
+    if source_kind == 2:
         return _failure(
             _diagnostic(
                 source,
                 ConfigFailureKind.DOCUMENT,
                 "TOML parse failed",
-                String(runtime_error),
+                "NUL byte is not valid TOML source",
             )
         )
-
-
-def parse_toml(toml_text: String, source: String) -> TomlParseResult:
-    """Parse TOML text lazily into typed file configuration.
-
-    Args:
-        toml_text: The complete TOML document text. Not mutated.
-        source: The file path or test label used in every diagnostic.
-
-    Returns:
-        A typed file model on success, or a contained diagnostic classified
-        for exit 3 or 4. Initializes Python only when this function is called.
-    """
-    return _parse_toml_with_python(
-        toml_text,
-        source,
-        ConfigFailureKind.NONE,
-        "",
-    )
-
-
-def parse_toml_with_injected_failure(
-    toml_text: String,
-    source: String,
-    kind: ConfigFailureKind,
-    detail: String,
-) -> TomlParseResult:
-    """Inject one bridge failure for containment and exit-class tests.
-
-    `INITIALIZATION` fails before interpreter acquisition. `DOCUMENT` acquires
-    the runtime and imports `tomllib` before returning the injected parse
-    failure. Other kinds perform a real parse.
-
-    Args:
-        toml_text: The document used when no supported failure is injected.
-        source: The source label used in the normalized diagnostic.
-        kind: The failure point to inject.
-        detail: Hostile foreign detail text to contain.
-
-    Returns:
-        A normalized failure for a supported injection, otherwise a real parse
-        result. Allocates the result and diagnostic strings.
-    """
-    return _parse_toml_with_python(toml_text, source, kind, detail)
+    if source_kind == 1:
+        return _success(FileConfig.empty())
+    var complexity_error = _source_complexity_error(toml_text)
+    if complexity_error:
+        return _failure(
+            _diagnostic(
+                source,
+                ConfigFailureKind.DOCUMENT,
+                complexity_error.value(),
+            )
+        )
+    try:
+        var document = parse(toml_text)
+        return _convert_document(TomlValue(document^), source)
+    except error:
+        return _failure(
+            _diagnostic(
+                source,
+                ConfigFailureKind.DOCUMENT,
+                "TOML parse failed",
+                String(error),
+            )
+        )

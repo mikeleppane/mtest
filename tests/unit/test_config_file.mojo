@@ -2,7 +2,7 @@
 
 The corpus exercises every accepted table and key family, rejects unknown or
 mistyped input, pins presence separately from explicit empty values, and proves
-Python-originated detail text cannot forge another diagnostic line.
+native-parser detail text cannot forge another diagnostic line.
 """
 from std.testing import assert_equal, assert_false, assert_true
 
@@ -12,11 +12,11 @@ from mtest.config import (
     ConfigDiagnostic,
     ConfigFailureKind,
     FileConfig,
+    TOML_SOURCE_MAX_BYTES,
     ShowOutput,
     Verbosity,
     parse_toml,
 )
-from mtest.config.toml_bridge import parse_toml_with_injected_failure
 
 
 @fieldwise_init
@@ -40,10 +40,9 @@ def _failure(
 ) raises -> ConfigDiagnostic:
     var result = parse_toml(text, source)
     assert_false(result.is_ok)
-    assert_equal(result.failure.detail, "")
     var rendered = result.failure.render()
     assert_true(rendered.startswith("config: " + source + ": "))
-    assert_equal(len(rendered.split("\n")), 1)
+    assert_true(len(rendered.split("\n")) <= 2)
     return result.failure.copy()
 
 
@@ -318,7 +317,7 @@ def test_every_key_family_rejects_wrong_types_and_domains() raises:
         ),
         InvalidCase(
             text="[run]\nworkers = 999999999999999999999999999999999999\n",
-            expected="[run] key 'workers': expected positive integer or 'auto'",
+            expected="TOML parse failed",
         ),
         InvalidCase(
             text="[run]\ntimeout = -1\n",
@@ -326,7 +325,7 @@ def test_every_key_family_rejects_wrong_types_and_domains() raises:
         ),
         InvalidCase(
             text="[run]\ntimeout = 999999999999999999999999999999999999\n",
-            expected="[run] key 'timeout': expected integer >= 0",
+            expected="TOML parse failed",
         ),
         InvalidCase(
             text='[run]\ntimeout = "slow"\n',
@@ -553,7 +552,7 @@ def test_syntax_and_duplicate_key_errors_have_owned_framing() raises:
     assert_true(
         malformed.failure.render().startswith(
             "config: syntax.toml: TOML parse failed\n"
-            "  detail (unstable, from the Python parser): "
+            "  detail (unstable, from the TOML parser): "
         )
     )
     assert_equal(len(malformed.failure.render().split("\n")), 2)
@@ -566,10 +565,17 @@ def test_syntax_and_duplicate_key_errors_have_owned_framing() raises:
     assert_true(
         duplicate.failure.render().startswith(
             "config: duplicate.toml: TOML parse failed\n"
-            "  detail (unstable, from the Python parser): "
+            "  detail (unstable, from the TOML parser): "
         )
     )
     assert_equal(len(duplicate.failure.render().split("\n")), 2)
+
+
+def test_native_parse_is_self_contained() raises:
+    var result = parse_toml("[run]\ntimeout = 1\n", "forced-home.toml")
+    assert_true(result.is_ok, result.failure.render())
+    assert_true(result.config.saw_timeout)
+    assert_equal(result.config.timeout_secs, 1)
 
 
 def test_offending_value_controls_cannot_forge_a_line() raises:
@@ -709,7 +715,7 @@ def test_public_parse_contains_representative_hostile_input() raises:
         if len(lines) == 2:
             assert_true(
                 lines[1].startswith(
-                    "  detail (unstable, from the Python parser): "
+                    "  detail (unstable, from the TOML parser): "
                 )
             )
         for cp in rendered.codepoints():
@@ -719,66 +725,61 @@ def test_public_parse_contains_representative_hostile_input() raises:
         assert_false("\nFAIL config: forged" in rendered)
 
 
-def test_injected_failure_classes_and_detail_containment() raises:
-    var hostile = "SENTINEL\nFAIL config: forged\r\t\x1b\x00"
-    var init = parse_toml_with_injected_failure(
-        "",
-        "init.toml",
-        ConfigFailureKind.INITIALIZATION,
-        hostile,
-    )
-    assert_false(init.is_ok)
-    assert_true(init.failure.kind == ConfigFailureKind.INITIALIZATION)
-    assert_equal(init.failure.exit_code(), 3)
-    assert_true(
-        init.failure.render().startswith(
-            "config: init.toml: Python runtime initialization failed\n"
-            "  detail (unstable, from the Python parser): "
+def test_source_and_complexity_limits_fail_closed() raises:
+    var exact = String(" ")
+    for _ in range(22):
+        exact += exact.copy()
+    assert_equal(exact.byte_length(), TOML_SOURCE_MAX_BYTES)
+    var exact_result = parse_toml(exact, "exact-limit.toml")
+    assert_true(exact_result.is_ok, exact_result.failure.render())
+
+    var oversized = exact + " "
+    var oversized_result = parse_toml(oversized, "oversized.toml")
+    assert_false(oversized_result.is_ok)
+    assert_true("4194304-byte limit" in oversized_result.failure.render())
+
+    var items = String('""')
+    for _ in range(16):
+        items += "," + items.copy()
+    var many_values = "[run]\nexclude = [" + items + "]\n"
+    var complex = parse_toml(many_values, "complex.toml")
+    assert_false(complex.is_ok)
+    assert_true("complexity limit" in complex.failure.render())
+
+
+def test_adversarial_numbers_and_datetime_fail_without_raise() raises:
+    var spellings = [
+        "1__0",
+        "1_",
+        "_1",
+        "1.2.3",
+        "1e",
+        "1e+",
+        "1e999999",
+        "0x",
+        "0x_1",
+        "0xGG",
+        "0o8",
+        "0b2",
+        "01",
+        "999999999999999999999999999999999999",
+        "inf",
+        "nan",
+        "1979-05-27T07:32:00Z",
+        "07:32:00",
+    ]
+    for spelling in spellings:
+        var result = parse_toml(
+            "[run]\ntimeout = " + spelling + "\n", "number.toml"
         )
-    )
-    assert_equal(len(init.failure.render().split("\n")), 2)
-    assert_true(
-        "SENTINEL\\nFAIL config: forged\\r\\t\\x1b\\x00"
-        in init.failure.render()
-    )
-    assert_false("\nFAIL config: forged" in init.failure.render())
-
-    var runtime = parse_toml_with_injected_failure(
-        "",
-        "runtime.toml",
-        ConfigFailureKind.DOCUMENT,
-        hostile,
-    )
-    assert_false(runtime.is_ok)
-    assert_true(runtime.failure.kind == ConfigFailureKind.DOCUMENT)
-    assert_equal(runtime.failure.exit_code(), 4)
-    assert_true(
-        runtime.failure.render().startswith(
-            "config: runtime.toml: TOML parse failed\n"
-            "  detail (unstable, from the Python parser): "
-        )
-    )
-    assert_equal(len(runtime.failure.render().split("\n")), 2)
-    assert_true(
-        "SENTINEL\\nFAIL config: forged\\r\\t\\x1b\\x00"
-        in runtime.failure.render()
-    )
-    assert_false("\nFAIL config: forged" in runtime.failure.render())
+        assert_false(result.is_ok, spelling)
+        assert_equal(result.failure.exit_code(), 4)
 
 
-def test_generated_multimegabyte_document_parses_without_truncation() raises:
-    var text = String("[run]\nexclude = [")
-    var item = (
-        '"tests/generated/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.mojo"'
-    )
-    for i in range(20_000):
-        if i > 0:
-            text += ","
-        text += item
-    text += "]\n"
-
-    assert_true(text.byte_length() > 2_000_000)
-    var result = parse_toml(text, "large.toml")
-    assert_true(result.is_ok, result.failure.render())
-    assert_equal(len(result.config.excludes), 20_000)
+def test_deep_nesting_is_rejected_before_parser_recursion() raises:
+    var value = String('"x"')
+    for _ in range(65):
+        value = "[" + value + "]"
+    var result = parse_toml("[run]\npaths = " + value + "\n", "deep.toml")
+    assert_false(result.is_ok)
+    assert_true("nesting limit" in result.failure.render())

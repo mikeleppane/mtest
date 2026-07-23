@@ -62,6 +62,12 @@ def test_version_rejects_value() raises:
         _ = parse_args(argv)
 
 
+def test_no_config_rejects_value() raises:
+    var argv: List[String] = ["--no-config=true"]
+    with assert_raises(contains="takes no value"):
+        _ = parse_args(argv)
+
+
 # --- placement: a flag is recognized wherever it sits ---
 
 

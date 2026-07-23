@@ -30,6 +30,12 @@ FAKE_RETRY_CRASH_MOJO = os.path.join(
 JSON_TERMINAL_WRITE_FAULT = os.path.join(
     REPO_ROOT, "tests", "native", "e2e_json_terminal_write_fault.c"
 )
+CONFIG_OPEN_FAULT = os.path.join(
+    REPO_ROOT, "tests", "native", "e2e_config_open_fault.c"
+)
+STATE_PERSISTENCE_FAULT = os.path.join(
+    REPO_ROOT, "tests", "native", "e2e_state_persistence_fault.c"
+)
 
 # These are guards, not performance thresholds. Cold `mojo build` is slow.
 DEFAULT_TIMEOUT = 180.0

@@ -43,17 +43,16 @@ requirements:
   # `mojo-compiler` itself depends on, NOT libraries mtest vendors or that
   # mojo-compiler "owns". The native adapter is statically linked (no extra
   # NEEDED entry), so it adds no run dependency of its own. Declaring
-  # `mojo-compiler` therefore drags in the whole closure transitively; the
-  # package-check test PROVES this empirically — a fresh env carrying only this
-  # run dependency loads and runs the installed binary.
+  # `mojo-compiler` therefore drags in the whole native closure transitively.
+  # package-check proves this dependency empirically in a fresh environment
+  # carrying only the declared run dependency.
   run:
     - mojo-compiler ==1.0.0b2
 
 tests:
   # Installs the just-built package into a fresh test env carrying ONLY the
-  # declared run dependency (mojo-compiler, not the full mojo build toolchain)
-  # and executes the installed binary directly — proving the run dependency
-  # above is both necessary and sufficient for the binary to load and run.
+  # declared run dependency and executes the installed binary directly —
+  # proving the dependency above is sufficient for the binary to load and run.
   - script:
       - mtest --version
 

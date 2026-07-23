@@ -42,7 +42,7 @@ comptime SUPPORTED_SUMMARY = (
     " -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v,"
     " --color, -k, --maxfail, --durations, --shard, -n/--workers, --serial,"
     " --retries, --json, --junit-xml, --gh-annotations, collect/--collect-only,"
-    " --help, --version"
+    " --config, --no-config, --help, --version"
 )
 """A stable one-line list of what this build serves, quoted in refusals."""
 
@@ -409,6 +409,9 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var saw_show_output = False
     var saw_quiet = False
     var saw_verbose = False
+    var config_path = String("")
+    var saw_config = False
+    var no_config = False
 
     var passthrough = False
     var i = start
@@ -486,6 +489,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
                 saw_verbose = True
             elif s.id == FlagId.COLLECT_ONLY:
                 collect = True
+            elif s.id == FlagId.NO_CONFIG:
+                no_config = True
             i += 1
             continue
 
@@ -563,6 +568,14 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         elif s.id == FlagId.GH_ANNOTATIONS:
             gh_annotations = _parse_annotations(value)
             saw_annotations = True
+        elif s.id == FlagId.CONFIG:
+            if value == "":
+                raise _err("'--config' requires a non-empty path")
+            config_path = value
+            saw_config = True
+
+    if saw_config and no_config:
+        raise _err("'--config' and '--no-config' are mutually exclusive")
 
     # Collect mode is a listing, not a run: the run-only knobs that shape which
     # tests execute or when to stop scheduling are meaningless against it and are
@@ -623,18 +636,6 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     elif saw_verbose:
         verbosity = Verbosity.VERBOSE
 
-    # `--json -` owns stdout for the byte-pure event stream, so nothing else may
-    # write there. The annotation tail renders to stdout too, so the ONLY way the
-    # two combine is with annotations EXPLICITLY off. The default `auto` and an
-    # explicit `on` are BOTH usage errors here, detected at parse time; the
-    # message names both fixes so a reader can resolve it either way.
-    if json_dest == "-" and gh_annotations != AnnotationsMode.OFF:
-        raise _err(
-            "'--json -' streams machine output to stdout, which the"
-            " '--gh-annotations' tail cannot share; drop '--json -' (use"
-            " '--json PATH'), or set '--gh-annotations off'"
-        )
-
     var overlay_mojo = String("mojo")
     if mojo_flag:
         overlay_mojo = mojo_flag.value()
@@ -691,4 +692,4 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     defaults.shard_m = shard_m
     defaults.shard_n = shard_n
     var cfg = overlay.fold(defaults)
-    return ParseResult.run(cfg^, overlay^)
+    return ParseResult.run(cfg^, overlay^, config_path^, no_config)

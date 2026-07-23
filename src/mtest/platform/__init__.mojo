@@ -21,7 +21,17 @@ safe call wins and no foreign declaration is written at all — deleting an unsa
 operation beats wrapping it.
 
 The public surface is re-exported here so callers write
-`from mtest.platform import process_id, rename_path`.
+`from mtest.platform import create_unique_temp, rename_path, ...`.
 """
 from mtest.platform.fs import rename_path
 from mtest.platform.process import process_id
+from mtest.platform.regular_file import (
+    BoundedRegularFileRead,
+    read_bounded_regular_file,
+)
+from mtest.platform.temp_file import (
+    UniqueTempFile,
+    close_checked_fd,
+    create_unique_temp,
+    write_all_fd,
+)

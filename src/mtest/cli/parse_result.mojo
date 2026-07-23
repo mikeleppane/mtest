@@ -27,12 +27,23 @@ struct ParseResult(Copyable, Movable):
     var overlay: CliOverlay
     """The typed argv overlay; meaningful only when `kind == RUN`."""
 
+    var config_path: String
+    """The explicit configuration path, or empty when discovery applies."""
+
+    var no_config: Bool
+    """Whether configuration-file discovery is explicitly disabled."""
+
     comptime RUN = 0
     comptime SHOW_HELP = 1
     comptime SHOW_VERSION = 2
 
     @staticmethod
-    def run(var config: RunnerConfig, var overlay: CliOverlay) -> ParseResult:
+    def run(
+        var config: RunnerConfig,
+        var overlay: CliOverlay,
+        config_path: String = "",
+        no_config: Bool = False,
+    ) -> ParseResult:
         """A result that runs the defaults-folded `config`.
 
         Args:
@@ -40,11 +51,19 @@ struct ParseResult(Copyable, Movable):
                 owns it.
             overlay: The typed argv overlay. Consumed; the returned result owns
                 it.
+            config_path: The explicit configuration path, or empty to discover.
+            no_config: Whether to skip configuration discovery.
 
         Returns:
             A result whose `kind` is `RUN`.
         """
-        return ParseResult(kind=Self.RUN, config=config^, overlay=overlay^)
+        return ParseResult(
+            kind=Self.RUN,
+            config=config^,
+            overlay=overlay^,
+            config_path=config_path,
+            no_config=no_config,
+        )
 
     @staticmethod
     def show_help() -> ParseResult:
@@ -53,6 +72,8 @@ struct ParseResult(Copyable, Movable):
             kind=Self.SHOW_HELP,
             config=RunnerConfig.default(),
             overlay=CliOverlay.default(),
+            config_path="",
+            no_config=False,
         )
 
     @staticmethod
@@ -62,6 +83,8 @@ struct ParseResult(Copyable, Movable):
             kind=Self.SHOW_VERSION,
             config=RunnerConfig.default(),
             overlay=CliOverlay.default(),
+            config_path="",
+            no_config=False,
         )
 
     def is_run(self) -> Bool:

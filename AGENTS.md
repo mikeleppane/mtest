@@ -16,12 +16,10 @@ executing and supervising it as a subprocess, aggregating results, and
 reporting for CI.
 
 Non-goals: not an assertion library, not a property-testing framework, not a
-TestSuite replacement. No third-party runtime dependencies: product logic under
-`src/` is Mojo except for the single lazy stdlib-`tomllib` interop boundary in
-`src/mtest/config/toml_bridge.mojo`; the exec-private POSIX adapter under
-`native/` is compiled and statically linked at build time. Other Python appears
-only in build-time tooling under `scripts/` and test-only subprocess actors
-under `tests/fixtures/exec/`.
+TestSuite replacement. Zero runtime dependencies: product logic under `src/` is
+pure Mojo; the exec-private POSIX adapter under `native/` is compiled and
+statically linked at build time; Python appears only in build-time tooling under
+`scripts/` and test-only subprocess actors under `tests/fixtures/exec/`.
 
 ## Product principles
 
@@ -101,11 +99,10 @@ driver today and pinned by `tests/unit/test_session_pipeline.mojo`.
 
 ## Mojo, not Python
 
-`src/` is Mojo except for `src/mtest/config/toml_bridge.mojo`, the single lazy
-`std.python` boundary that parses TOML text with Python's stdlib `tomllib` and
-immediately converts it to typed Mojo data. All platform and foreign-ABI
-knowledge lives in exactly two audited boundaries; no layer above `exec`
-carries a raw platform call:
+`src/` is pure Mojo. Selected project configuration is parsed by the pinned,
+vendored native `mojo-toml` parser. All platform and foreign-ABI knowledge
+lives in exactly two audited boundaries; no layer above `exec` carries a raw
+platform call:
 
 - **`src/mtest/platform`** (Layer 0): the small per-call libc operations a
   Mojo caller needs directly, each an in-Mojo `external_call` with its own
@@ -121,8 +118,8 @@ carries a raw platform call:
   live in `exec`.
 
 A new foreign call belongs in `platform`, unless it is native-adapter
-machinery, in which case it belongs in `native/` behind the ABI. Outside the
-named TOML bridge, Python lives only under `scripts/` and
+machinery, in which case it belongs in `native/` behind the ABI. Python lives
+only under `scripts/` and
 `tests/fixtures/exec/`. Follow the global `mojo-syntax` skill for all syntax;
 training data is stale. Docstrings are Google-style, triple-quoted, and
 mandatory on public entities.

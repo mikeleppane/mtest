@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -33,6 +34,34 @@ BUILD_SOURCE_PATHS = (
     Path("scripts/build/package_consumption.py"),
     Path("scripts/build/production_build.sh"),
 )
+VENDORED_TOML_PATHS = {
+    Path("vendor/mojo-toml/CHECKSUMS.json"),
+    Path("vendor/mojo-toml/LICENSE"),
+    Path("vendor/mojo-toml/README.md"),
+    Path("vendor/mojo-toml/toml/__init__.mojo"),
+    Path("vendor/mojo-toml/toml/lexer.mojo"),
+    Path("vendor/mojo-toml/toml/parser.mojo"),
+}
+VENDORED_TOML_RELEASE = "346b7ad723c034f7696723f4846203d47ef86951"
+VENDORED_TOML_MAIN = "c3262adea2d314748716991f99d0276f4a0b5e79"
+VENDORED_TOML_UPSTREAM_SHA256 = {
+    "LICENSE": "f091af39a05aa9864f099a672495096e97ce62e962f03fa90324da83061dab43",
+    "src/toml/__init__.mojo": (
+        "2c95e4cac433f0639125be700472001963ac319324f397465e309cdde97764e7"
+    ),
+    "src/toml/lexer.mojo": (
+        "408f420337d6a5b2d74c5f04f44f638ae6317333b833ba3a8ff92664cf811b16"
+    ),
+    "src/toml/parser.mojo": (
+        "5b49c67071f99bdf6096c5ec4745037ca043061a7fcbdcfb20a86ee127067a4a"
+    ),
+}
+VENDORED_TOML_LOCAL_CHECKSUM_PATHS = {
+    "LICENSE",
+    "toml/__init__.mojo",
+    "toml/lexer.mojo",
+    "toml/parser.mojo",
+}
 UNIT_SUITES = {
     "test_cache_registry.mojo",
     "test_cli_arity.mojo",
@@ -47,6 +76,7 @@ UNIT_SUITES = {
     "test_config_file.mojo",
     "test_config_resolve.mojo",
     "test_config_state.mojo",
+    "test_config_toml_adversarial.mojo",
     "test_discover_fnmatch.mojo",
     "test_discover_normalize.mojo",
     "test_exec_pool_policy.mojo",
@@ -60,6 +90,7 @@ UNIT_SUITES = {
     "test_model_slow.mojo",
     "test_model_test_counts.mojo",
     "test_model_test_result.mojo",
+    "test_platform_temp_file.mojo",
     "test_protocol_corruption.mojo",
     "test_protocol_matrix.mojo",
     "test_report_annotations.mojo",
@@ -175,6 +206,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_config_file.mojo",
     "tests/unit/test_config_resolve.mojo",
     "tests/unit/test_config_state.mojo",
+    "tests/unit/test_config_toml_adversarial.mojo",
     "tests/unit/test_discover_fnmatch.mojo",
     "tests/unit/test_discover_normalize.mojo",
     "tests/unit/test_exec_pool_policy.mojo",
@@ -188,6 +220,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_model_slow.mojo",
     "tests/unit/test_model_test_counts.mojo",
     "tests/unit/test_model_test_result.mojo",
+    "tests/unit/test_platform_temp_file.mojo",
     "tests/unit/test_protocol_corruption.mojo",
     "tests/unit/test_protocol_matrix.mojo",
     "tests/unit/test_report_annotations.mojo",
@@ -219,7 +252,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 1126
+CLASSIFIED_TEST_COUNT = 1148
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",
@@ -257,7 +290,9 @@ PROTOCOL_FIXTURES = {
     "twofail.mojo",
 }
 E2E_NATIVE_FIXTURES = {
+    "e2e_config_open_fault.c",
     "e2e_json_terminal_write_fault.c",
+    "e2e_state_persistence_fault.c",
 }
 E2E_HARNESS_PATHS = {
     Path("scripts/e2e/__init__.py"),
@@ -267,6 +302,7 @@ E2E_HARNESS_PATHS = {
     Path("scripts/e2e/runner.py"),
     Path("scripts/e2e/scenarios/__init__.py"),
     Path("scripts/e2e/scenarios/annotations.py"),
+    Path("scripts/e2e/scenarios/config_file.py"),
     Path("scripts/e2e/scenarios/core.py"),
     Path("scripts/e2e/scenarios/json_reporter.py"),
     Path("scripts/e2e/scenarios/junit_reporter.py"),
@@ -302,6 +338,10 @@ E2E_SCENARIO_NAMES = (
     "show-output",
     "durations",
     "color",
+    "config-resolution",
+    "config-diagnostics",
+    "config-state",
+    "config-overrides",
     "usage-refusals",
     "selection-keyword",
     "selection-node-id",
@@ -689,7 +729,7 @@ def check_e2e_layout() -> None:
         path.relative_to(REPO_ROOT).as_posix()
         for path in e2e_root.rglob("test_*.mojo")
     }
-    if rows != discovered or len(rows) != 36:
+    if rows != discovered or len(rows) != 39:
         raise AssertionError(
             "e2e manifest/discovery mismatch: "
             f"missing={sorted(discovered - rows)}, stale={sorted(rows - discovered)}"
@@ -700,9 +740,9 @@ def check_e2e_layout() -> None:
             "E2E scenario membership/order mismatch: "
             f"expected={list(E2E_SCENARIO_NAMES)}, actual={list(scenario_names)}"
         )
-    if len(scenario_names) != 72 or len(set(scenario_names)) != len(scenario_names):
+    if len(scenario_names) != 76 or len(set(scenario_names)) != len(scenario_names):
         raise AssertionError(
-            "E2E scenarios must contain 72 unique names in the pinned order"
+            "E2E scenarios must contain 76 unique names in the pinned order"
         )
     referenced = {
         *rows,
@@ -945,6 +985,81 @@ def check_build_source_visibility(repo_root: Path = REPO_ROOT) -> None:
         raise AssertionError("scripts/build source is untracked")
 
 
+def check_vendored_toml_layout(repo_root: Path = REPO_ROOT) -> None:
+    """Pin the native TOML source and its offline production-build path."""
+    _require_nonempty("vendored TOML source", VENDORED_TOML_PATHS)
+    vendor_root = repo_root / "vendor" / "mojo-toml"
+    actual = {
+        path.relative_to(repo_root)
+        for path in vendor_root.rglob("*")
+        if path.is_file()
+    }
+    if actual != VENDORED_TOML_PATHS:
+        raise AssertionError(
+            "vendored TOML membership mismatch: "
+            f"missing={sorted(VENDORED_TOML_PATHS - actual)}, "
+            f"extra={sorted(actual - VENDORED_TOML_PATHS)}"
+        )
+
+    manifest_path = vendor_root / "CHECKSUMS.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    expected_metadata = {
+        "repository": "https://github.com/DataBooth/mojo-toml",
+        "license": "Apache-2.0",
+        "release": VENDORED_TOML_RELEASE,
+        "main": VENDORED_TOML_MAIN,
+        "release_sha256": VENDORED_TOML_UPSTREAM_SHA256,
+        "main_sha256": VENDORED_TOML_UPSTREAM_SHA256,
+    }
+    expected_keys = {*expected_metadata, "local_sha256"}
+    if set(manifest) != expected_keys:
+        raise AssertionError(
+            "vendored TOML manifest key mismatch: "
+            f"expected={sorted(expected_keys)}, got={sorted(manifest)}"
+        )
+    for key, expected in expected_metadata.items():
+        if manifest.get(key) != expected:
+            raise AssertionError(
+                f"vendored TOML provenance mismatch for {key}: "
+                f"expected={expected!r}, got={manifest.get(key)!r}"
+            )
+    local = manifest.get("local_sha256")
+    if not isinstance(local, dict) or set(local) != VENDORED_TOML_LOCAL_CHECKSUM_PATHS:
+        raise AssertionError(
+            "vendored TOML local checksum membership mismatch: "
+            f"expected={sorted(VENDORED_TOML_LOCAL_CHECKSUM_PATHS)}, "
+            f"got={sorted(local) if isinstance(local, dict) else local!r}"
+        )
+    for relative, expected in local.items():
+        actual_digest = hashlib.sha256(
+            (vendor_root / relative).read_bytes()
+        ).hexdigest()
+        if actual_digest != expected:
+            raise AssertionError(
+                f"vendored TOML local checksum mismatch for {relative}: "
+                f"expected={expected}, got={actual_digest}"
+            )
+
+    build_source = (
+        repo_root / "scripts" / "build" / "production_build.sh"
+    ).read_text(encoding="utf-8")
+    required_commands = (
+        "mojo precompile vendor/mojo-toml/toml -o build/toml.mojopkg",
+        "mojo precompile -I build src/mtest -o build/mtest.mojopkg",
+        "mojo build -I build src/main.mojo -o build/mtest",
+    )
+    if any(command not in build_source for command in required_commands):
+        raise AssertionError(
+            "production build does not compile and link the vendored TOML package"
+        )
+    if len(re.findall(r"(?m)^\s*mojo precompile\b", build_source)) != 2:
+        raise AssertionError(
+            "production build must execute exactly two package precompiles"
+        )
+    if re.search(r"\b(curl|wget|git\s+(clone|fetch|pull))\b", build_source):
+        raise AssertionError("production build fetches a dependency from the network")
+
+
 
 def _require_nonempty(name: str, values: object) -> None:
     """Reject an accidentally disabled intended inventory."""
@@ -963,6 +1078,7 @@ def main() -> int:
         check_e2e_layout()
         check_python_package_invocation()
         check_build_source_visibility()
+        check_vendored_toml_layout()
     except (AssertionError, OSError, subprocess.SubprocessError) as exc:
         print(f"layout-check: FAIL: {exc}", file=sys.stderr)
         return 1
