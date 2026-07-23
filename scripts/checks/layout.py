@@ -41,6 +41,7 @@ UNIT_SUITES = {
     "test_cli_collect.mojo",
     "test_cli_grammar.mojo",
     "test_cli_inventory.mojo",
+    "test_cli_overlay.mojo",
     "test_cli_parse.mojo",
     "test_config.mojo",
     "test_discover_fnmatch.mojo",
@@ -162,6 +163,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_cli_collect.mojo",
     "tests/unit/test_cli_grammar.mojo",
     "tests/unit/test_cli_inventory.mojo",
+    "tests/unit/test_cli_overlay.mojo",
     "tests/unit/test_cli_parse.mojo",
     "tests/unit/test_config.mojo",
     "tests/unit/test_discover_fnmatch.mojo",
@@ -207,7 +209,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 1053
+CLASSIFIED_TEST_COUNT = 1059
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",

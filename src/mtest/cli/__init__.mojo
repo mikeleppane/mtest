@@ -1,9 +1,9 @@
 """The cli layer of the mtest runner: the argument parser.
 
 This is the parser only, not `main`. It turns an argument vector into a
-`ParseResult` — a filled `RunnerConfig` to run, or a directive to print help or
-the version. A usage error is raised as a `cli:`-prefixed `Error` for `main` to
-print to stderr before exiting 4.
+`ParseResult` — a typed argv overlay plus its defaults-folded `RunnerConfig`,
+or a directive to print help or the version. A usage error is raised as a
+`cli:`-prefixed `Error` for `main` to print to stderr before exiting 4.
 
 The parser is table-driven. `flag_specs()` is the single source of truth for
 every accepted spelling: its arity, whether it repeats, whether this build

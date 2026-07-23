@@ -1,9 +1,10 @@
 """`RunnerConfig`: the typed home for every runner knob.
 
 `RunnerConfig` is data plus its contract defaults — no parsing, no environment
-or file reads, no printing. The cli layer constructs and fills one from argv;
-the session layer only reads it. An empty `paths` list means "use discovery's
-own default root", not "nothing to do"; applying that rule is discover's job.
+or file reads, no printing. The cli layer folds its typed argv overlay over a
+default config; the session layer only reads the result. An empty `paths` list
+means "use discovery's own default root", not "nothing to do"; applying that
+rule is discover's job.
 """
 from mtest.config.annotations_mode import AnnotationsMode
 from mtest.config.color_when import ColorWhen
@@ -152,10 +153,9 @@ struct RunnerConfig(Copyable, Movable):
         `shard_mode=HASH`, and `gh_annotations=AUTO`.
 
         Returns:
-            A freshly allocated config. `parse_args` does not build on this —
-            it constructs its own `RunnerConfig` from the parsed tokens — so
-            the only use is the placeholder config a help or version
-            `ParseResult` carries and callers ignore.
+            A freshly allocated config used as the lower-precedence input to
+            `parse_args`'s overlay fold and as the placeholder a help or
+            version `ParseResult` carries.
         """
         return RunnerConfig(
             paths=[],

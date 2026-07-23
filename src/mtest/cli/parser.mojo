@@ -17,12 +17,20 @@ from mtest.cli.flag_spec import FlagId, FlagSpec, flag_specs
 from mtest.cli.parse_result import ParseResult
 from mtest.config import (
     AnnotationsMode,
+    CliOverlay,
     ColorWhen,
     Precompile,
     RunnerConfig,
     ShardMode,
     ShowOutput,
     Verbosity,
+    build_arg_rejection,
+    parse_annotations_value,
+    parse_color_value,
+    parse_nonnegative_decimal,
+    parse_precompile_value,
+    parse_show_output_value,
+    parse_worker_count,
     resolve_mojo_path,
 )
 
@@ -80,43 +88,36 @@ def _refuse(spec: FlagSpec) -> Error:
 # --- value validation ---
 
 
-def _all_digits(s: String) -> Bool:
-    """Whether `s` is one or more ASCII decimal digits and nothing else."""
-    if s.byte_length() == 0:
-        return False
-    for cp in s.codepoints():
-        var v = Int(cp)
-        if v < 48 or v > 57:
-            return False
-    return True
-
-
 def _parse_timeout(value: String) raises -> Int:
     """Parse a `--timeout` value: a non-negative integer (`0` disables)."""
-    if not _all_digits(value):
+    var parsed = parse_nonnegative_decimal(value)
+    if not parsed:
         raise _err("'--timeout' wants an integer >= 0, got '" + value + "'")
-    return atol(value)
+    return parsed.value()
 
 
 def _parse_maxfail(value: String) raises -> Int:
     """Parse a `--maxfail` value: a non-negative integer (`0` disables)."""
-    if not _all_digits(value):
+    var parsed = parse_nonnegative_decimal(value)
+    if not parsed:
         raise _err("'--maxfail' wants an integer >= 0, got '" + value + "'")
-    return atol(value)
+    return parsed.value()
 
 
 def _parse_durations(value: String) raises -> Int:
     """Parse a `--durations` value: a non-negative integer (`0` disables)."""
-    if not _all_digits(value):
+    var parsed = parse_nonnegative_decimal(value)
+    if not parsed:
         raise _err("'--durations' wants an integer >= 0, got '" + value + "'")
-    return atol(value)
+    return parsed.value()
 
 
 def _parse_retries(value: String) raises -> Int:
     """Parse a `--retries` value: a non-negative integer (`0` disables)."""
-    if not _all_digits(value):
+    var parsed = parse_nonnegative_decimal(value)
+    if not parsed:
         raise _err("'--retries' wants an integer >= 0, got '" + value + "'")
-    return atol(value)
+    return parsed.value()
 
 
 def _parse_workers(value: String) raises -> Int:
@@ -135,44 +136,36 @@ def _parse_workers(value: String) raises -> Int:
         A usage error (exit 4) when the value is neither `auto` nor a positive
         integer — `0`, a negative, or any non-digit spelling.
     """
-    if value == "auto":
-        return 0
-    if not _all_digits(value):
+    var parsed = parse_worker_count(value)
+    if not parsed:
         raise _err(
             "'-n'/'--workers' wants a positive integer or 'auto', got '"
             + value
             + "'"
         )
-    var n = atol(value)
-    if n < 1:
-        raise _err(
-            "'-n'/'--workers' wants a positive integer or 'auto', got '"
-            + value
-            + "'"
-        )
-    return n
+    return parsed.value()
 
 
 def _parse_compile_timeout(value: String) raises -> Int:
     """Parse `--compile-timeout`: a non-negative integer, `0` disables."""
-    if not _all_digits(value):
+    var parsed = parse_nonnegative_decimal(value)
+    if not parsed:
         raise _err(
             "'--compile-timeout' wants an integer >= 0, got '" + value + "'"
         )
-    return atol(value)
+    return parsed.value()
 
 
 def _parse_show_output(value: String) raises -> ShowOutput:
     """Parse a `--show-output` mode: `failures`, `all`, or `none`."""
-    if value == "failures":
-        return ShowOutput.FAILURES
-    if value == "all":
-        return ShowOutput.ALL
-    if value == "none":
-        return ShowOutput.NONE
-    raise _err(
-        "'--show-output' wants one of failures|all|none, got '" + value + "'"
-    )
+    var parsed = parse_show_output_value(value)
+    if not parsed:
+        raise _err(
+            "'--show-output' wants one of failures|all|none, got '"
+            + value
+            + "'"
+        )
+    return parsed.value()
 
 
 def _validate_json_dest(value: String) raises -> String:
@@ -230,41 +223,30 @@ def _validate_junit_dest(value: String) raises -> String:
 
 def _parse_annotations(value: String) raises -> AnnotationsMode:
     """Parse a `--gh-annotations` mode: `off`, `on`, or `auto`."""
-    if value == "off":
-        return AnnotationsMode.OFF
-    if value == "on":
-        return AnnotationsMode.ON
-    if value == "auto":
-        return AnnotationsMode.AUTO
-    raise _err(
-        "'--gh-annotations' wants one of off|on|auto, got '" + value + "'"
-    )
+    var parsed = parse_annotations_value(value)
+    if not parsed:
+        raise _err(
+            "'--gh-annotations' wants one of off|on|auto, got '" + value + "'"
+        )
+    return parsed.value()
 
 
 def _parse_color(value: String) raises -> ColorWhen:
     """Parse a `--color` mode: `auto`, `always`, or `never`."""
-    if value == "auto":
-        return ColorWhen.AUTO
-    if value == "always":
-        return ColorWhen.ALWAYS
-    if value == "never":
-        return ColorWhen.NEVER
-    raise _err("'--color' wants one of auto|always|never, got '" + value + "'")
+    var parsed = parse_color_value(value)
+    if not parsed:
+        raise _err(
+            "'--color' wants one of auto|always|never, got '" + value + "'"
+        )
+    return parsed.value()
 
 
 def _parse_precompile(value: String) raises -> Precompile:
     """Parse a `--precompile SRC[:OUT]` value into its two parts."""
-    var colon = value.find(":")
-    if colon == -1:
-        if value.byte_length() == 0:
-            raise _err("'--precompile' wants SRC[:OUT], got '" + value + "'")
-        return Precompile(src=value, out=Optional[String](None))
-    var parts = value.split(":", 1)
-    var src = String(parts[0])
-    var out = String(parts[1])
-    if src.byte_length() == 0 or out.byte_length() == 0:
+    var parsed = parse_precompile_value(value)
+    if not parsed:
         raise _err("'--precompile' wants SRC[:OUT], got '" + value + "'")
-    return Precompile(src=src, out=Optional[String](out))
+    return parsed.value().copy()
 
 
 def _parse_shard(value: String) raises -> Tuple[ShardMode, Int, Int]:
@@ -292,10 +274,12 @@ def _parse_shard(value: String) raises -> Tuple[ShardMode, Int, Int]:
     var mn = rest.split("/", 1)
     var ms = String(mn[0])
     var ns = String(mn[1])
-    if not _all_digits(ms) or not _all_digits(ns):
+    var parsed_m = parse_nonnegative_decimal(ms)
+    var parsed_n = parse_nonnegative_decimal(ns)
+    if not parsed_m or not parsed_n:
         raise _err_shard(value)
-    var m = atol(ms)
-    var n = atol(ns)
+    var m = parsed_m.value()
+    var n = parsed_n.value()
     if n < 1 or m < 1 or m > n:
         raise _err_shard(value)
     return (mode, m, n)
@@ -317,36 +301,9 @@ def _check_build_arg(tok: String) raises:
     positional that would reach `mojo build`. A bare value that is not a source
     file, such as a forwarded flag's value, passes.
     """
-    if tok == "-o" or tok.startswith("-o="):
-        raise _err(
-            "forbidden build argument '"
-            + tok
-            + "': mtest owns output selection"
-        )
-    if tok == "--emit" or tok.startswith("--emit="):
-        raise _err(
-            "forbidden build argument '"
-            + tok
-            + "': mtest owns emit-type selection"
-        )
-    if (
-        tok == "-j"
-        or tok.startswith("-j=")
-        or tok == "--num-threads"
-        or tok.startswith("--num-threads=")
-    ):
-        raise _err(
-            "forbidden build argument '"
-            + tok
-            + "': mtest owns build parallelism (set the worker count with"
-            " -n/--workers)"
-        )
-    if not tok.startswith("-") and (
-        tok.endswith(".mojo") or tok.endswith(".🔥")
-    ):
-        raise _err(
-            "forbidden build argument '" + tok + "': mtest owns the source list"
-        )
+    var rejection = build_arg_rejection(tok)
+    if rejection:
+        raise _err(rejection.value())
 
 
 def _env_mojo() -> Optional[String]:
@@ -406,17 +363,28 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             start = 1
 
     var paths = List[String]()
+    var saw_paths = False
     var excludes = List[String]()
+    var saw_excludes = False
     var serials = List[String]()
+    var saw_serial = False
     var gates = List[String]()
+    var saw_gates = False
     var precompiles = List[Precompile]()
+    var saw_precompile = False
     var build_args = List[String]()
+    var saw_build_args = False
     var include_paths = List[String]()
+    var saw_include = False
     var mojo_flag = Optional[String](None)
+    var saw_mojo = False
     var timeout_secs = 300
+    var saw_timeout = False
     var compile_timeout_secs = 600
+    var saw_compile_timeout = False
     var show_output = ShowOutput.FAILURES
     var color = ColorWhen.AUTO
+    var saw_color = False
     var exitfirst = False
     var keyword = String("")
     var maxfail = 0
@@ -431,6 +399,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     # One worker is the sequential default: no flag runs files in order and
     # leaves the build argv byte-identical to a single-worker build.
     var workers = 1
+    var saw_workers = False
     var json_dest = String("")
     var saw_json = False
     var junit_dest = String("")
@@ -449,6 +418,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         if passthrough:
             _check_build_arg(tok)
             build_args.append(tok)
+            saw_build_args = True
             i += 1
             continue
 
@@ -459,6 +429,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
 
         if not tok.startswith("-") or tok == "-":
             paths.append(tok)
+            saw_paths = True
             i += 1
             continue
 
@@ -531,29 +502,39 @@ def parse_args(argv: List[String]) raises -> ParseResult:
 
         if s.id == FlagId.EXCLUDE:
             excludes.append(value)
+            saw_excludes = True
         elif s.id == FlagId.SERIAL:
             serials.append(value)
+            saw_serial = True
         elif s.id == FlagId.INCLUDE:
             _check_build_arg(value)
             include_paths.append(value)
+            saw_include = True
         elif s.id == FlagId.BUILD_ARG:
             _check_build_arg(value)
             build_args.append(value)
+            saw_build_args = True
         elif s.id == FlagId.GATE:
             gates.append(value)
+            saw_gates = True
         elif s.id == FlagId.PRECOMPILE:
             precompiles.append(_parse_precompile(value))
+            saw_precompile = True
         elif s.id == FlagId.MOJO:
             mojo_flag = value
+            saw_mojo = True
         elif s.id == FlagId.TIMEOUT:
             timeout_secs = _parse_timeout(value)
+            saw_timeout = True
         elif s.id == FlagId.COMPILE_TIMEOUT:
             compile_timeout_secs = _parse_compile_timeout(value)
+            saw_compile_timeout = True
         elif s.id == FlagId.SHOW_OUTPUT:
             show_output = _parse_show_output(value)
             saw_show_output = True
         elif s.id == FlagId.COLOR:
             color = _parse_color(value)
+            saw_color = True
         elif s.id == FlagId.SELECT:
             keyword = value
         elif s.id == FlagId.MAXFAIL:
@@ -572,6 +553,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             saw_retries = True
         elif s.id == FlagId.WORKERS:
             workers = _parse_workers(value)
+            saw_workers = True
         elif s.id == FlagId.JSON:
             json_dest = _validate_json_dest(value)
             saw_json = True
@@ -653,34 +635,60 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             " '--json PATH'), or set '--gh-annotations off'"
         )
 
-    var mojo_path = resolve_mojo_path(mojo_flag, _env_mojo())
-
-    var cfg = RunnerConfig(
+    var overlay_mojo = String("mojo")
+    if mojo_flag:
+        overlay_mojo = mojo_flag.value()
+    var overlay = CliOverlay(
         paths=paths^,
+        saw_paths=saw_paths,
         excludes=excludes^,
+        saw_excludes=saw_excludes,
         serial_globs=serials^,
+        saw_serial=saw_serial,
         gates=gates^,
-        precompiles=precompiles^,
-        build_args=build_args^,
-        include_paths=include_paths^,
-        mojo_path=mojo_path,
-        timeout_secs=timeout_secs,
-        show_output=show_output,
-        verbosity=verbosity,
-        color=color,
-        exitfirst=exitfirst,
-        keyword=keyword^,
-        maxfail=maxfail,
-        durations=durations,
-        collect=collect,
-        shard_mode=shard_mode,
-        shard_m=shard_m,
-        shard_n=shard_n,
-        retries=retries,
+        saw_gates=saw_gates,
         workers=workers,
+        saw_workers=saw_workers,
+        timeout_secs=timeout_secs,
+        saw_timeout=saw_timeout,
+        retries=retries,
+        saw_retries=saw_retries,
+        maxfail=maxfail,
+        saw_maxfail=saw_maxfail,
+        state=True,
+        saw_state=False,
+        mojo_path=overlay_mojo^,
+        saw_mojo=saw_mojo,
+        include_paths=include_paths^,
+        saw_include=saw_include,
+        build_args=build_args^,
+        saw_build_args=saw_build_args,
+        precompiles=precompiles^,
+        saw_precompile=saw_precompile,
         compile_timeout_secs=compile_timeout_secs,
-        json_dest=json_dest^,
-        gh_annotations=gh_annotations,
+        saw_compile_timeout=saw_compile_timeout,
+        color=color,
+        saw_color=saw_color,
+        show_output=show_output,
+        saw_show_output=saw_show_output,
+        verbosity=verbosity,
+        saw_verbosity=saw_quiet or saw_verbose,
+        durations=durations,
+        saw_durations=saw_durations,
         junit_dest=junit_dest^,
+        saw_junit_xml=saw_junit,
+        json_dest=json_dest^,
+        saw_json=saw_json,
+        gh_annotations=gh_annotations,
+        saw_gh_annotations=saw_annotations,
     )
-    return ParseResult.run(cfg^)
+    var defaults = RunnerConfig.default()
+    defaults.mojo_path = resolve_mojo_path(Optional[String](None), _env_mojo())
+    defaults.exitfirst = exitfirst
+    defaults.keyword = keyword^
+    defaults.collect = collect
+    defaults.shard_mode = shard_mode
+    defaults.shard_m = shard_m
+    defaults.shard_n = shard_n
+    var cfg = overlay.fold(defaults)
+    return ParseResult.run(cfg^, overlay^)

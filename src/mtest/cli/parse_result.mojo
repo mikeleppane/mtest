@@ -1,20 +1,21 @@
 """`ParseResult`: what a successful parse produces.
 
-Parsing either yields a configured run or a non-error directive to print help
+Parsing either yields a configured run with both its typed argv overlay and
+defaults-folded compatibility config, or a non-error directive to print help
 or the version. A usage error is not a `ParseResult` — it is raised. `main`
 renders help and version to stdout with exit 0 and executes the run config;
 this layer never prints or exits.
 """
-from mtest.config import RunnerConfig
+from mtest.config import CliOverlay, RunnerConfig
 
 
 @fieldwise_init
 struct ParseResult(Copyable, Movable):
-    """The outcome of a successful parse: a run config, or a help/version ask.
+    """The outcome of a successful parse: a run, or a help/version ask.
 
-    A tagged union over `kind`. When `kind == RUN` the `config` field holds the
-    parsed configuration; for the two directives it carries a default config
-    that callers should ignore.
+    A tagged union over `kind`. When `kind == RUN`, `overlay` holds argv
+    presence and values while `config` holds their defaults-folded
+    compatibility view. For directives both fields are placeholders.
     """
 
     var kind: Int
@@ -23,33 +24,44 @@ struct ParseResult(Copyable, Movable):
     var config: RunnerConfig
     """The parsed run configuration; meaningful only when `kind == RUN`."""
 
+    var overlay: CliOverlay
+    """The typed argv overlay; meaningful only when `kind == RUN`."""
+
     comptime RUN = 0
     comptime SHOW_HELP = 1
     comptime SHOW_VERSION = 2
 
     @staticmethod
-    def run(var config: RunnerConfig) -> ParseResult:
-        """A result that runs `config`.
+    def run(var config: RunnerConfig, var overlay: CliOverlay) -> ParseResult:
+        """A result that runs the defaults-folded `config`.
 
         Args:
             config: The parsed configuration. Consumed; the returned result
                 owns it.
+            overlay: The typed argv overlay. Consumed; the returned result owns
+                it.
 
         Returns:
             A result whose `kind` is `RUN`.
         """
-        return ParseResult(kind=Self.RUN, config=config^)
+        return ParseResult(kind=Self.RUN, config=config^, overlay=overlay^)
 
     @staticmethod
     def show_help() -> ParseResult:
         """A result asking `main` to print help; its config is a placeholder."""
-        return ParseResult(kind=Self.SHOW_HELP, config=RunnerConfig.default())
+        return ParseResult(
+            kind=Self.SHOW_HELP,
+            config=RunnerConfig.default(),
+            overlay=CliOverlay.default(),
+        )
 
     @staticmethod
     def show_version() -> ParseResult:
         """A result asking `main` to print the version string."""
         return ParseResult(
-            kind=Self.SHOW_VERSION, config=RunnerConfig.default()
+            kind=Self.SHOW_VERSION,
+            config=RunnerConfig.default(),
+            overlay=CliOverlay.default(),
         )
 
     def is_run(self) -> Bool:
