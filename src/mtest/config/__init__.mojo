@@ -27,6 +27,19 @@ from mtest.config.annotations_mode import (
 )
 from mtest.config.color_when import ColorWhen
 from mtest.config.file_config import FileConfig, OverrideRule
+from mtest.config.last_run_state import (
+    LastRunRecordKind,
+    LastRunRecord,
+    LastRunState,
+    LastRunDiagnosticKind,
+    LastRunDiagnostic,
+    LastRunEncodeResult,
+    LastRunParseResult,
+    StateDelta,
+    encode_last_run_state,
+    parse_last_run_state,
+    merge_last_run_state,
+)
 from mtest.config.lossy_utf8 import lossy_utf8
 from mtest.config.mojo_path import resolve_mojo_path
 from mtest.config.overlay import CliOverlay
