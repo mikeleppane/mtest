@@ -1,0 +1,784 @@
+"""Hostile-corpus tests for typed `mtest.toml` conversion.
+
+The corpus exercises every accepted table and key family, rejects unknown or
+mistyped input, pins presence separately from explicit empty values, and proves
+Python-originated detail text cannot forge another diagnostic line.
+"""
+from std.testing import assert_equal, assert_false, assert_true
+
+from mtest.config import (
+    AnnotationsMode,
+    ColorWhen,
+    ConfigDiagnostic,
+    ConfigFailureKind,
+    FileConfig,
+    ShowOutput,
+    Verbosity,
+    parse_toml,
+)
+from mtest.config.toml_bridge import parse_toml_with_injected_failure
+
+
+@fieldwise_init
+struct InvalidCase(Copyable, Movable):
+    """One invalid TOML document and its stable mtest-owned error fragment."""
+
+    var text: String
+    var expected: String
+
+
+@fieldwise_init
+struct HostileCase(Copyable, Movable):
+    """One user-controlled document and source label that must be contained."""
+
+    var text: String
+    var source: String
+
+
+def _failure(
+    text: String, source: String = "hostile.toml"
+) raises -> ConfigDiagnostic:
+    var result = parse_toml(text, source)
+    assert_false(result.is_ok)
+    assert_equal(result.failure.detail, "")
+    var rendered = result.failure.render()
+    assert_true(rendered.startswith("config: " + source + ": "))
+    assert_equal(len(rendered.split("\n")), 1)
+    return result.failure.copy()
+
+
+def test_empty_document_has_no_present_values() raises:
+    var result = parse_toml("", "empty.toml")
+    assert_true(result.is_ok)
+    var config = result.config.copy()
+
+    assert_false(config.saw_paths)
+    assert_false(config.saw_excludes)
+    assert_false(config.saw_gates)
+    assert_false(config.saw_serial)
+    assert_false(config.saw_workers)
+    assert_false(config.saw_timeout)
+    assert_false(config.saw_retries)
+    assert_false(config.saw_maxfail)
+    assert_false(config.saw_state)
+    assert_false(config.saw_mojo)
+    assert_false(config.saw_include)
+    assert_false(config.saw_build_args)
+    assert_false(config.saw_precompile)
+    assert_false(config.saw_compile_timeout)
+    assert_false(config.saw_color)
+    assert_false(config.saw_show_output)
+    assert_false(config.saw_verbosity)
+    assert_false(config.saw_durations)
+    assert_false(config.saw_junit_xml)
+    assert_false(config.saw_json)
+    assert_false(config.saw_gh_annotations)
+    assert_equal(len(config.overrides), 0)
+
+
+def test_full_document_converts_every_key_to_typed_values() raises:
+    var text = (
+        "[run]\n"
+        'paths = ["tests", "integration"]\n'
+        'exclude = ["build/*"]\n'
+        'gates = ["tests/smoke.mojo"]\n'
+        'serial = ["tests/gpu_*"]\n'
+        'workers = "auto"\n'
+        "timeout = 0\n"
+        "retries = 2\n"
+        "maxfail = 3\n"
+        "state = false\n"
+        "\n"
+        "[build]\n"
+        'mojo = "/opt/mojo"\n'
+        'include = ["vendor"]\n'
+        'build-args = ["-DDEBUG"]\n'
+        'precompile = ["src/a.mojo", "src/b.mojo:build/b.mojopkg"]\n'
+        "compile-timeout = 45\n"
+        "\n"
+        "[report]\n"
+        'color = "never"\n'
+        'show-output = "all"\n'
+        'verbosity = "verbose"\n'
+        "durations = 7\n"
+        'junit-xml = "reports/junit.xml"\n'
+        'json = "-"\n'
+        'gh-annotations = "off"\n'
+        "\n"
+        "[[override]]\n"
+        'files = "tests/gpu_*"\n'
+        "timeout = 1\n"
+        "serial = true\n"
+        "\n"
+        "[[override]]\n"
+        'files = ["tests/a.mojo", "tests/b.mojo"]\n'
+        "compile-timeout = 2\n"
+        "retries = 4\n"
+    )
+    var result = parse_toml(text, "complete.toml")
+    assert_true(result.is_ok, result.failure.render())
+    var config = result.config.copy()
+
+    assert_true(config.saw_paths)
+    assert_equal(config.paths[1], "integration")
+    assert_true(config.saw_excludes)
+    assert_equal(config.excludes[0], "build/*")
+    assert_true(config.saw_gates)
+    assert_true(config.saw_serial)
+    assert_true(config.saw_workers)
+    assert_equal(config.workers, 0)
+    assert_true(config.saw_timeout)
+    assert_equal(config.timeout_secs, 0)
+    assert_true(config.saw_retries)
+    assert_equal(config.retries, 2)
+    assert_true(config.saw_maxfail)
+    assert_equal(config.maxfail, 3)
+    assert_true(config.saw_state)
+    assert_false(config.state)
+
+    assert_true(config.saw_mojo)
+    assert_equal(config.mojo_path, "/opt/mojo")
+    assert_true(config.saw_include)
+    assert_equal(config.include_paths[0], "vendor")
+    assert_true(config.saw_build_args)
+    assert_equal(config.build_args[0], "-DDEBUG")
+    assert_true(config.saw_precompile)
+    assert_equal(config.precompiles[0].src, "src/a.mojo")
+    assert_false(config.precompiles[0].out)
+    assert_equal(config.precompiles[1].out.value(), "build/b.mojopkg")
+    assert_true(config.saw_compile_timeout)
+    assert_equal(config.compile_timeout_secs, 45)
+
+    assert_true(config.saw_color)
+    assert_true(config.color == ColorWhen.NEVER)
+    assert_true(config.saw_show_output)
+    assert_true(config.show_output == ShowOutput.ALL)
+    assert_true(config.saw_verbosity)
+    assert_true(config.verbosity == Verbosity.VERBOSE)
+    assert_true(config.saw_durations)
+    assert_equal(config.durations, 7)
+    assert_true(config.saw_junit_xml)
+    assert_equal(config.junit_dest, "reports/junit.xml")
+    assert_true(config.saw_json)
+    assert_equal(config.json_dest, "-")
+    assert_true(config.saw_gh_annotations)
+    assert_true(config.gh_annotations == AnnotationsMode.OFF)
+
+    assert_equal(len(config.overrides), 2)
+    assert_equal(config.overrides[0].files[0], "tests/gpu_*")
+    assert_true(config.overrides[0].saw_timeout)
+    assert_equal(config.overrides[0].timeout_secs, 1)
+    assert_true(config.overrides[0].saw_serial)
+    assert_true(config.overrides[0].serial)
+    assert_equal(config.overrides[1].files[0], "tests/a.mojo")
+    assert_true(config.overrides[1].saw_compile_timeout)
+    assert_equal(config.overrides[1].compile_timeout_secs, 2)
+    assert_true(config.overrides[1].saw_retries)
+    assert_equal(config.overrides[1].retries, 4)
+
+
+def test_explicit_empty_arrays_are_present_and_replaceable() raises:
+    var result = parse_toml(
+        (
+            "[run]\n"
+            "paths = []\n"
+            "exclude = []\n"
+            "gates = []\n"
+            "serial = []\n"
+            "[build]\n"
+            "include = []\n"
+            "build-args = []\n"
+            "precompile = []\n"
+        ),
+        "empty-arrays.toml",
+    )
+    assert_true(result.is_ok, result.failure.render())
+    var config = result.config.copy()
+
+    assert_true(config.saw_paths)
+    assert_equal(len(config.paths), 0)
+    assert_true(config.saw_excludes)
+    assert_equal(len(config.excludes), 0)
+    assert_true(config.saw_gates)
+    assert_equal(len(config.gates), 0)
+    assert_true(config.saw_serial)
+    assert_equal(len(config.serial_globs), 0)
+    assert_true(config.saw_include)
+    assert_equal(len(config.include_paths), 0)
+    assert_true(config.saw_build_args)
+    assert_equal(len(config.build_args), 0)
+    assert_true(config.saw_precompile)
+    assert_equal(len(config.precompiles), 0)
+
+
+def test_unknown_tables_and_keys_fail_closed() raises:
+    var cases: List[InvalidCase] = [
+        InvalidCase(
+            text="[mystery]\nvalue = 1\n",
+            expected="unknown top-level table 'mystery'",
+        ),
+        InvalidCase(
+            text="[run]\ntimout = 1\n",
+            expected="[run] key 'timout': unknown key",
+        ),
+        InvalidCase(
+            text='[build]\noutput = "x"\n',
+            expected="[build] key 'output': unknown key",
+        ),
+        InvalidCase(
+            text='[report]\nformat = "x"\n',
+            expected="[report] key 'format': unknown key",
+        ),
+        InvalidCase(
+            text='[[override]]\nfiles = "*"\npriority = 1\n',
+            expected="[[override]] #1 key 'priority': unknown key",
+        ),
+    ]
+    for invalid in cases:
+        var failure = _failure(invalid.text)
+        assert_true(invalid.expected in failure.render(), failure.render())
+
+
+def test_noneligible_run_and_directive_keys_are_rejected() raises:
+    var forbidden = [
+        "exitfirst",
+        "keyword",
+        "select",
+        "shard",
+        "lf",
+        "ff",
+        "collect",
+        "mode",
+        "config",
+        "no-config",
+        "help",
+        "version",
+    ]
+    for key in forbidden:
+        var failure = _failure("[run]\n" + key + " = true\n")
+        assert_true(
+            "[run] key '" + key + "': unknown key" in failure.render(),
+            failure.render(),
+        )
+
+
+def test_every_key_family_rejects_wrong_types_and_domains() raises:
+    var cases: List[InvalidCase] = [
+        InvalidCase(
+            text="run = 1\n",
+            expected="[run]: expected table; got 1",
+        ),
+        InvalidCase(
+            text="build = []\n",
+            expected="[build]: expected table; got []",
+        ),
+        InvalidCase(
+            text='report = "loud"\n',
+            expected="[report]: expected table; got 'loud'",
+        ),
+        InvalidCase(
+            text="[run]\npaths = 1\n",
+            expected="[run] key 'paths': expected array of strings",
+        ),
+        InvalidCase(
+            text='[run]\npaths = ["ok", 1]\n',
+            expected="[run] key 'paths': expected array of strings",
+        ),
+        InvalidCase(
+            text='[run]\nexclude = ["ok", 1]\n',
+            expected="[run] key 'exclude': expected array of strings",
+        ),
+        InvalidCase(
+            text="[run]\ngates = false\n",
+            expected="[run] key 'gates': expected array of strings",
+        ),
+        InvalidCase(
+            text='[run]\ngates = ["ok", false]\n',
+            expected="[run] key 'gates': expected array of strings",
+        ),
+        InvalidCase(
+            text="[run]\nserial = {}\n",
+            expected="[run] key 'serial': expected array of strings",
+        ),
+        InvalidCase(
+            text='[run]\nserial = ["ok", {}]\n',
+            expected="[run] key 'serial': expected array of strings",
+        ),
+        InvalidCase(
+            text='[run]\nworkers = "2"\n',
+            expected="[run] key 'workers': expected positive integer or 'auto'",
+        ),
+        InvalidCase(
+            text="[run]\nworkers = 0\n",
+            expected="[run] key 'workers': expected positive integer or 'auto'",
+        ),
+        InvalidCase(
+            text="[run]\nworkers = true\n",
+            expected="[run] key 'workers': expected positive integer or 'auto'",
+        ),
+        InvalidCase(
+            text="[run]\nworkers = 999999999999999999999999999999999999\n",
+            expected="[run] key 'workers': expected positive integer or 'auto'",
+        ),
+        InvalidCase(
+            text="[run]\ntimeout = -1\n",
+            expected="[run] key 'timeout': expected integer >= 0",
+        ),
+        InvalidCase(
+            text="[run]\ntimeout = 999999999999999999999999999999999999\n",
+            expected="[run] key 'timeout': expected integer >= 0",
+        ),
+        InvalidCase(
+            text='[run]\ntimeout = "slow"\n',
+            expected="[run] key 'timeout': expected integer >= 0",
+        ),
+        InvalidCase(
+            text="[run]\nretries = true\n",
+            expected="[run] key 'retries': expected integer >= 0",
+        ),
+        InvalidCase(
+            text="[run]\nretries = -1\n",
+            expected="[run] key 'retries': expected integer >= 0",
+        ),
+        InvalidCase(
+            text='[run]\nmaxfail = "none"\n',
+            expected="[run] key 'maxfail': expected integer >= 0",
+        ),
+        InvalidCase(
+            text="[run]\nmaxfail = -1\n",
+            expected="[run] key 'maxfail': expected integer >= 0",
+        ),
+        InvalidCase(
+            text="[run]\nstate = 1\n",
+            expected="[run] key 'state': expected boolean",
+        ),
+        InvalidCase(
+            text="[build]\nmojo = 1\n",
+            expected="[build] key 'mojo': expected string",
+        ),
+        InvalidCase(
+            text="[build]\ninclude = 1\n",
+            expected="[build] key 'include': expected array of strings",
+        ),
+        InvalidCase(
+            text='[build]\ninclude = ["ok", 1]\n',
+            expected="[build] key 'include': expected array of strings",
+        ),
+        InvalidCase(
+            text="[build]\nbuild-args = false\n",
+            expected="[build] key 'build-args': expected array of strings",
+        ),
+        InvalidCase(
+            text='[build]\nbuild-args = ["-DOK", 1]\n',
+            expected="[build] key 'build-args': expected array of strings",
+        ),
+        InvalidCase(
+            text='[build]\nprecompile = [""]\n',
+            expected="[build] key 'precompile': expected array of SRC[:OUT]",
+        ),
+        InvalidCase(
+            text='[build]\nprecompile = ["ok.mojo", 1]\n',
+            expected="[build] key 'precompile': expected array of SRC[:OUT]",
+        ),
+        InvalidCase(
+            text="[build]\ncompile-timeout = -1\n",
+            expected="[build] key 'compile-timeout': expected integer >= 0",
+        ),
+        InvalidCase(
+            text="[build]\ncompile-timeout = true\n",
+            expected="[build] key 'compile-timeout': expected integer >= 0",
+        ),
+        InvalidCase(
+            text='[build]\nbuild-args = ["-o"]\n',
+            expected="mtest owns output selection",
+        ),
+        InvalidCase(
+            text='[build]\ninclude = ["extra.mojo"]\n',
+            expected="mtest owns the source list",
+        ),
+        InvalidCase(
+            text="[report]\ncolor = true\n",
+            expected="[report] key 'color': expected auto|always|never",
+        ),
+        InvalidCase(
+            text='[report]\ncolor = "sometimes"\n',
+            expected="[report] key 'color': expected auto|always|never",
+        ),
+        InvalidCase(
+            text='[report]\nshow-output = "yes"\n',
+            expected="[report] key 'show-output': expected failures|all|none",
+        ),
+        InvalidCase(
+            text="[report]\nshow-output = true\n",
+            expected="[report] key 'show-output': expected failures|all|none",
+        ),
+        InvalidCase(
+            text='[report]\nverbosity = "debug"\n',
+            expected="[report] key 'verbosity': expected quiet|normal|verbose",
+        ),
+        InvalidCase(
+            text="[report]\nverbosity = 1\n",
+            expected="[report] key 'verbosity': expected quiet|normal|verbose",
+        ),
+        InvalidCase(
+            text="[report]\ndurations = -1\n",
+            expected="[report] key 'durations': expected integer >= 0",
+        ),
+        InvalidCase(
+            text="[report]\ndurations = true\n",
+            expected="[report] key 'durations': expected integer >= 0",
+        ),
+        InvalidCase(
+            text="[report]\njunit-xml = 1\n",
+            expected="[report] key 'junit-xml': expected non-empty string",
+        ),
+        InvalidCase(
+            text='[report]\njunit-xml = ""\n',
+            expected="[report] key 'junit-xml': expected non-empty string",
+        ),
+        InvalidCase(
+            text="[report]\njson = []\n",
+            expected="[report] key 'json': expected non-empty string or '-'",
+        ),
+        InvalidCase(
+            text='[report]\njson = ""\n',
+            expected="[report] key 'json': expected non-empty string or '-'",
+        ),
+        InvalidCase(
+            text='[report]\ngh-annotations = "sometimes"\n',
+            expected="[report] key 'gh-annotations': expected off|on|auto",
+        ),
+        InvalidCase(
+            text="[report]\ngh-annotations = false\n",
+            expected="[report] key 'gh-annotations': expected off|on|auto",
+        ),
+    ]
+    for invalid in cases:
+        var failure = _failure(invalid.text)
+        assert_true(invalid.expected in failure.render(), failure.render())
+
+
+def test_override_shapes_fail_closed() raises:
+    var cases: List[InvalidCase] = [
+        InvalidCase(
+            text="override = {}\n",
+            expected="[[override]]: expected array of tables",
+        ),
+        InvalidCase(
+            text="override = []\n",
+            expected="[[override]]: expected at least one table; got []",
+        ),
+        InvalidCase(
+            text="[[override]]\ntimeout = 1\n",
+            expected="[[override]] #1 key 'files': expected non-empty string",
+        ),
+        InvalidCase(
+            text="[[override]]\nfiles = 1\ntimeout = 1\n",
+            expected="[[override]] #1 key 'files': expected non-empty string",
+        ),
+        InvalidCase(
+            text='[[override]]\nfiles = ""\ntimeout = 1\n',
+            expected="[[override]] #1 key 'files': expected non-empty string",
+        ),
+        InvalidCase(
+            text="[[override]]\nfiles = []\ntimeout = 1\n",
+            expected="[[override]] #1 key 'files': expected non-empty string",
+        ),
+        InvalidCase(
+            text='[[override]]\nfiles = ["ok", 1]\ntimeout = 1\n',
+            expected="[[override]] #1 key 'files': expected non-empty string",
+        ),
+        InvalidCase(
+            text='[[override]]\nfiles = "*"\n',
+            expected=(
+                "must set timeout, compile-timeout, retries, or serial = true"
+            ),
+        ),
+        InvalidCase(
+            text='[[override]]\nfiles = "*"\nserial = false\n',
+            expected=(
+                "must set timeout, compile-timeout, retries, or serial = true"
+            ),
+        ),
+        InvalidCase(
+            text='[[override]]\nfiles = "*"\ntimeout = -1\n',
+            expected="[[override]] #1 key 'timeout': expected integer >= 0",
+        ),
+        InvalidCase(
+            text='[[override]]\nfiles = "*"\ntimeout = "slow"\n',
+            expected="[[override]] #1 key 'timeout': expected integer >= 0",
+        ),
+        InvalidCase(
+            text='[[override]]\nfiles = "*"\ncompile-timeout = "slow"\n',
+            expected=(
+                "[[override]] #1 key 'compile-timeout': expected integer >= 0"
+            ),
+        ),
+        InvalidCase(
+            text='[[override]]\nfiles = "*"\ncompile-timeout = -1\n',
+            expected=(
+                "[[override]] #1 key 'compile-timeout': expected integer >= 0"
+            ),
+        ),
+        InvalidCase(
+            text='[[override]]\nfiles = "*"\nretries = true\n',
+            expected="[[override]] #1 key 'retries': expected integer >= 0",
+        ),
+        InvalidCase(
+            text='[[override]]\nfiles = "*"\nretries = -1\n',
+            expected="[[override]] #1 key 'retries': expected integer >= 0",
+        ),
+        InvalidCase(
+            text='[[override]]\nfiles = "*"\nserial = 1\n',
+            expected="[[override]] #1 key 'serial': expected boolean",
+        ),
+    ]
+    for invalid in cases:
+        var failure = _failure(invalid.text)
+        assert_true(invalid.expected in failure.render(), failure.render())
+
+
+def test_node_id_shaped_config_path_is_rejected() raises:
+    var failure = _failure('[run]\npaths = ["tests/a.mojo::test_a"]\n')
+    assert_true(
+        "[run] key 'paths': node-id-shaped path is not allowed"
+        in failure.render()
+    )
+    assert_true("tests/a.mojo::test_a" in failure.render())
+
+
+def test_syntax_and_duplicate_key_errors_have_owned_framing() raises:
+    var malformed = parse_toml("[run\n", "syntax.toml")
+    assert_false(malformed.is_ok)
+    assert_true(
+        malformed.failure.render().startswith(
+            "config: syntax.toml: TOML parse failed\n"
+            "  detail (unstable, from the Python parser): "
+        )
+    )
+    assert_equal(len(malformed.failure.render().split("\n")), 2)
+    assert_equal(malformed.failure.exit_code(), 4)
+
+    var duplicate = parse_toml(
+        "[run]\ntimeout = 1\ntimeout = 2\n", "duplicate.toml"
+    )
+    assert_false(duplicate.is_ok)
+    assert_true(
+        duplicate.failure.render().startswith(
+            "config: duplicate.toml: TOML parse failed\n"
+            "  detail (unstable, from the Python parser): "
+        )
+    )
+    assert_equal(len(duplicate.failure.render().split("\n")), 2)
+
+
+def test_offending_value_controls_cannot_forge_a_line() raises:
+    var failure = _failure(
+        '[run]\ntimeout = "SENTINEL\\nFAIL config: forged"\n'
+    )
+    var rendered = failure.render()
+    assert_equal(len(rendered.split("\n")), 1)
+    assert_true("SENTINEL\\nFAIL config: forged" in rendered)
+    assert_false("\nFAIL config: forged" in rendered)
+
+    var hostile_build_values = [
+        (
+            "[build]\n"
+            'include = ["SENTINEL\\nFAIL config: forged\\u001b\\u0001.mojo"]\n'
+        ),
+        (
+            "[build]\n"
+            'build-args = ["-o=SENTINEL\\nFAIL config: forged'
+            '\\u001b\\u0002"]\n'
+        ),
+    ]
+    for text in hostile_build_values:
+        var hostile = _failure(text).render()
+        assert_equal(len(hostile.split("\n")), 1)
+        assert_true("SENTINEL\\nFAIL config: forged" in hostile)
+        assert_true("\\x1b" in hostile)
+        assert_false("\nFAIL config: forged" in hostile)
+        assert_false("\x1b" in hostile)
+        assert_false("\x01" in hostile)
+        assert_false("\x02" in hostile)
+
+
+def test_public_parse_contains_representative_hostile_input() raises:
+    var cases: List[HostileCase] = [
+        HostileCase(
+            text="[run]\ntimeout = 999999999999999999999999999999999999\n",
+            source="oversized.toml",
+        ),
+        HostileCase(
+            text="[run]\nretries = -1\n",
+            source="negative.toml",
+        ),
+        HostileCase(
+            text="[run]\nmaxfail = true\n",
+            source="bool-int.toml",
+        ),
+        HostileCase(
+            text="[run]\nworkers = 1.5\n",
+            source="float.toml",
+        ),
+        HostileCase(
+            text='[run]\npaths = ["ok", ["nested"]]\n',
+            source="nested-run-array.toml",
+        ),
+        HostileCase(
+            text="[[run.paths]]\nvalue = 1\n",
+            source="table-run-array.toml",
+        ),
+        HostileCase(
+            text="[run.nested]\nvalue = 1\n",
+            source="unknown-run-table.toml",
+        ),
+        HostileCase(
+            text="[build]\ncompile-timeout = true\n",
+            source="build-bool-int.toml",
+        ),
+        HostileCase(
+            text="[build]\nmojo = 1979-05-27T07:32:00Z\n",
+            source="datetime.toml",
+        ),
+        HostileCase(
+            text='[build]\ninclude = ["ok", { nested = true }]\n',
+            source="nested-build-array.toml",
+        ),
+        HostileCase(
+            text=(
+                "[build]\n"
+                'build-args = ["-o=SENTINEL\\nFAIL config: forged'
+                '\\u001b\\u0003"]\n'
+            ),
+            source="hostile-build-value.toml",
+        ),
+        HostileCase(
+            text="[report]\ndurations = -1\n",
+            source="report-negative.toml",
+        ),
+        HostileCase(
+            text="[report]\ncolor = 1.5\n",
+            source="report-float.toml",
+        ),
+        HostileCase(
+            text="[report]\nverbosity = [{ nested = true }]\n",
+            source="report-table-array.toml",
+        ),
+        HostileCase(
+            text="[report]\nunknown = 1\n",
+            source="unknown-report-key.toml",
+        ),
+        HostileCase(
+            text="override = []\n",
+            source="empty-overrides.toml",
+        ),
+        HostileCase(
+            text="[[override]]\nfiles = []\ntimeout = 1\n",
+            source="empty-override-files.toml",
+        ),
+        HostileCase(
+            text='[[override]]\nfiles = ["ok", ["nested"]]\ntimeout = 1\n',
+            source="nested-override-files.toml",
+        ),
+        HostileCase(
+            text=(
+                '[[override]]\nfiles = "*"\n'
+                "timeout = 999999999999999999999999999999999999\n"
+            ),
+            source="oversized-override.toml",
+        ),
+        HostileCase(
+            text="[run\n",
+            source="malformed\nFAIL config: forged\x1b.toml",
+        ),
+        HostileCase(
+            text="[run]\ntimeout = 1\ntimeout = 2\n",
+            source="duplicate.toml",
+        ),
+    ]
+    for hostile in cases:
+        var result = parse_toml(hostile.text, hostile.source)
+        assert_false(result.is_ok)
+        assert_true(result.failure.kind == ConfigFailureKind.DOCUMENT)
+        assert_equal(result.failure.exit_code(), 4)
+        var rendered = result.failure.render()
+        var lines = rendered.split("\n")
+        assert_true(len(lines) >= 1)
+        assert_true(len(lines) <= 2)
+        if len(lines) == 2:
+            assert_true(
+                lines[1].startswith(
+                    "  detail (unstable, from the Python parser): "
+                )
+            )
+        for cp in rendered.codepoints():
+            var value = Int(cp)
+            if value >= 0 and value < 32:
+                assert_equal(value, 10)
+        assert_false("\nFAIL config: forged" in rendered)
+
+
+def test_injected_failure_classes_and_detail_containment() raises:
+    var hostile = "SENTINEL\nFAIL config: forged\r\t\x1b\x00"
+    var init = parse_toml_with_injected_failure(
+        "",
+        "init.toml",
+        ConfigFailureKind.INITIALIZATION,
+        hostile,
+    )
+    assert_false(init.is_ok)
+    assert_true(init.failure.kind == ConfigFailureKind.INITIALIZATION)
+    assert_equal(init.failure.exit_code(), 3)
+    assert_true(
+        init.failure.render().startswith(
+            "config: init.toml: Python runtime initialization failed\n"
+            "  detail (unstable, from the Python parser): "
+        )
+    )
+    assert_equal(len(init.failure.render().split("\n")), 2)
+    assert_true(
+        "SENTINEL\\nFAIL config: forged\\r\\t\\x1b\\x00"
+        in init.failure.render()
+    )
+    assert_false("\nFAIL config: forged" in init.failure.render())
+
+    var runtime = parse_toml_with_injected_failure(
+        "",
+        "runtime.toml",
+        ConfigFailureKind.DOCUMENT,
+        hostile,
+    )
+    assert_false(runtime.is_ok)
+    assert_true(runtime.failure.kind == ConfigFailureKind.DOCUMENT)
+    assert_equal(runtime.failure.exit_code(), 4)
+    assert_true(
+        runtime.failure.render().startswith(
+            "config: runtime.toml: TOML parse failed\n"
+            "  detail (unstable, from the Python parser): "
+        )
+    )
+    assert_equal(len(runtime.failure.render().split("\n")), 2)
+    assert_true(
+        "SENTINEL\\nFAIL config: forged\\r\\t\\x1b\\x00"
+        in runtime.failure.render()
+    )
+    assert_false("\nFAIL config: forged" in runtime.failure.render())
+
+
+def test_generated_multimegabyte_document_parses_without_truncation() raises:
+    var text = String("[run]\nexclude = [")
+    var item = (
+        '"tests/generated/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.mojo"'
+    )
+    for i in range(20_000):
+        if i > 0:
+            text += ","
+        text += item
+    text += "]\n"
+
+    assert_true(text.byte_length() > 2_000_000)
+    var result = parse_toml(text, "large.toml")
+    assert_true(result.is_ok, result.failure.render())
+    assert_equal(len(result.config.excludes), 20_000)

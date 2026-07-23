@@ -8,6 +8,7 @@ from mtest.config.annotations_mode import AnnotationsMode
 from mtest.config.color_when import ColorWhen
 from mtest.config.precompile import Precompile
 from mtest.config.show_output import ShowOutput
+from mtest.config.verbosity import Verbosity
 
 
 def parse_nonnegative_decimal(value: String) raises -> Optional[Int]:
@@ -103,6 +104,24 @@ def parse_color_value(value: String) -> Optional[ColorWhen]:
     if value == "never":
         return Optional[ColorWhen](ColorWhen.NEVER)
     return Optional[ColorWhen](None)
+
+
+def parse_verbosity_value(value: String) -> Optional[Verbosity]:
+    """Parse one file-config verbosity level.
+
+    Args:
+        value: The candidate `quiet`, `normal`, or `verbose` spelling.
+
+    Returns:
+        The typed level, or `None` when invalid.
+    """
+    if value == "quiet":
+        return Optional[Verbosity](Verbosity.QUIET)
+    if value == "normal":
+        return Optional[Verbosity](Verbosity.NORMAL)
+    if value == "verbose":
+        return Optional[Verbosity](Verbosity.VERBOSE)
+    return Optional[Verbosity](None)
 
 
 def parse_precompile_value(value: String) -> Optional[Precompile]:
