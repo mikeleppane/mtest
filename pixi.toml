@@ -1,6 +1,6 @@
 [workspace]
 name = "mtest"
-version = "0.4.0"
+version = "0.5.0"
 description = "A pytest-like test runner for Mojo that orchestrates the stdlib's per-file TestSuite"
 channels = ["https://conda.modular.com/max/", "conda-forge"]
 # Linux and macOS are gate targets and share the POSIX process surface the

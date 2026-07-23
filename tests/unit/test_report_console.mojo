@@ -60,7 +60,7 @@ def _console(
 ) -> ConsoleReporter:
     """A console reporter with the mock's version and the given config."""
     return ConsoleReporter(
-        "0.4.0",
+        "0.5.0",
         color,
         is_tty=is_tty,
         no_color=no_color,
@@ -208,7 +208,7 @@ def test_header_learns_facts_from_session_started() raises:
     var c = _console()
     c.handle(Event.session_started("tests", "mojo 1.0.0b2", 5, 1))
     var out = c.output()
-    assert_true("mtest 0.4.0 (mojo 1.0.0b2)" in out)
+    assert_true("mtest 0.5.0 (mojo 1.0.0b2)" in out)
     assert_true("root: tests" in out)
     assert_true("selected: 5 files" in out)
     assert_true("excluded: 1" in out)
@@ -835,7 +835,7 @@ def _fence_opener_token(rendered: String) raises -> String:
 def _gh_console(gh_actions: Bool) -> ConsoleReporter:
     """A console reporter under `show-output all`, optionally under Actions."""
     return ConsoleReporter(
-        "0.4.0",
+        "0.5.0",
         ColorWhen.NEVER,
         is_tty=False,
         no_color=False,
@@ -1194,7 +1194,7 @@ def test_quiet_suppresses_header_and_pass_lines() raises:
     var c = _console(verbosity=Verbosity.QUIET)
     _feed_mock_run(c)
     var out = c.output()
-    assert_false("mtest 0.4.0" in out)
+    assert_false("mtest 0.5.0" in out)
     assert_false("PASS      tests/test_alpha.mojo" in out)
     # Non-pass verdicts and the summary still appear.
     assert_true("FAIL" in out)

@@ -47,25 +47,25 @@ def test_created_destination_is_readable_with_header_first() raises:
         remove(path)
     assert_false(exists(path))
     var fd = open_json_fd(path)
-    var rep = JsonStreamReporter(fd, "0.4.0", True)
+    var rep = JsonStreamReporter(fd, "0.5.0", True)
     _ = close_json_fd(fd)
     var content = _read_file(path)
     var lines = _lines(content)
     assert_equal(len(lines), 1)
-    assert_equal(lines[0], stream_header("0.4.0"))
+    assert_equal(lines[0], stream_header("0.5.0"))
     remove(path)
 
 
 def test_events_are_written_as_ndjson_lines() raises:
     var path = _scratch("events.ndjson")
     var fd = open_json_fd(path)
-    var rep = JsonStreamReporter(fd, "0.4.0", True)
+    var rep = JsonStreamReporter(fd, "0.5.0", True)
     rep.handle(Event.file_started("tests/test_a.mojo"))
     rep.handle(Event.session_finished(Summary.zeros(), 0.0, 0))
     _ = close_json_fd(fd)
     var lines = _lines(_read_file(path))
     assert_equal(len(lines), 3)
-    assert_equal(lines[0], stream_header("0.4.0"))
+    assert_equal(lines[0], stream_header("0.5.0"))
     assert_equal(
         lines[1], serialize_event(Event.file_started("tests/test_a.mojo"))
     )
@@ -78,7 +78,7 @@ def test_events_are_written_as_ndjson_lines() raises:
 def test_active_reporter_status_starts_clean() raises:
     var path = _scratch("clean.ndjson")
     var fd = open_json_fd(path)
-    var rep = JsonStreamReporter(fd, "0.4.0", True)
+    var rep = JsonStreamReporter(fd, "0.5.0", True)
     var st = rep.status()
     _ = close_json_fd(fd)
     assert_false(st.failed)
@@ -90,7 +90,7 @@ def test_write_failure_latches_and_later_handles_noop() raises:
     var path = _scratch("latch.ndjson")
     var fd = open_json_fd(path)
     _ = close_json_fd(fd)
-    var rep = JsonStreamReporter(fd, "0.4.0", True)
+    var rep = JsonStreamReporter(fd, "0.5.0", True)
     var st = rep.status()
     assert_true(st.failed)
     assert_true(st.errno != 0)
@@ -109,13 +109,13 @@ def test_progress_event_writes_no_blank_line() raises:
     # consumer rejects. The stream must hold only the header and the real event.
     var path = _scratch("progress.ndjson")
     var fd = open_json_fd(path)
-    var rep = JsonStreamReporter(fd, "0.4.0", True)
+    var rep = JsonStreamReporter(fd, "0.5.0", True)
     rep.handle(Event.progress(0, 1, List[String](), List[Float64]()))
     rep.handle(Event.file_started("tests/test_a.mojo"))
     _ = close_json_fd(fd)
     var lines = _lines(_read_file(path))
     assert_equal(len(lines), 2, "no blank line stands in for the dropped tick")
-    assert_equal(lines[0], stream_header("0.4.0"))
+    assert_equal(lines[0], stream_header("0.5.0"))
     assert_equal(
         lines[1], serialize_event(Event.file_started("tests/test_a.mojo"))
     )
@@ -137,13 +137,13 @@ def test_open_json_fd_truncates_a_preexisting_destination() raises:
     with open(path, "w") as stale:
         stale.write("STALE-TAIL-" * 512)
     var fd = open_json_fd(path)
-    var rep = JsonStreamReporter(fd, "0.4.0", True)
+    var rep = JsonStreamReporter(fd, "0.5.0", True)
     _ = close_json_fd(fd)
     var lines = _lines(_read_file(path))
     assert_equal(
         len(lines), 1, "the truncated file holds only the fresh header"
     )
-    assert_equal(lines[0], stream_header("0.4.0"))
+    assert_equal(lines[0], stream_header("0.5.0"))
 
 
 def test_close_json_fd_reports_failure_on_a_dead_descriptor() raises:

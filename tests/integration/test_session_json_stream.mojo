@@ -40,7 +40,7 @@ def test_dead_stream_forces_fatal_abort_exit_3_with_terminal_dispatch() raises:
     # fd (EBADF) at construction and latches immediately.
     var dead_fd = open_json_fd(root + "/stream.ndjson")
     _ = close_json_fd(dead_fd)
-    var stream = JsonStreamReporter(dead_fd, "0.4.0", True)
+    var stream = JsonStreamReporter(dead_fd, "0.5.0", True)
     assert_true(stream.status().failed, "precondition: the stream is latched")
 
     # A recorder stands in for the console; the real machine stream answers the

@@ -26,7 +26,7 @@ from mtest.config import (
     resolve_mojo_path,
 )
 
-comptime MTEST_VERSION = "0.4.0"
+comptime MTEST_VERSION = "0.5.0"
 """The single source of the version string; `main` reuses this exact value."""
 
 comptime SUPPORTED_SUMMARY = (

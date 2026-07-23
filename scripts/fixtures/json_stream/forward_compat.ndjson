@@ -1,4 +1,4 @@
-{"event":"stream","version":1,"generator":"mtest 0.4.0","future_field":"ignored by a v1 consumer"}
+{"event":"stream","version":1,"generator":"mtest 0.5.0","future_field":"ignored by a v1 consumer"}
 {"event":"session_started","root":"/repo","toolchain":"mojo","selected_count":1,"excluded_count":0,"shard_label":"","sharded_out_count":0,"workers":4,"vnext_flag":true}
 {"event":"quantum_flux","some_new_field":42,"nested":{"a":1,"b":[1,2,3]}}
 {"event":"file_started","path":"tests/test_a.mojo"}
