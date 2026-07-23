@@ -144,8 +144,9 @@ struct StepRequest(ImplicitlyCopyable, Movable):
     """Which run file, as an index into the driver's collected list. `-1` for
     `ANNOUNCE_COLLECTION` and `NOTHING`, which concern no single file."""
     var attempt: Int
-    """The 1-based crash-class attempt number for `RUN_SELECTION`; `0`
-    otherwise. It rides the file's `AttemptFinished` and `FileFinished`."""
+    """The 1-based crash-class attempt number for `RUN_SELECTION` and stale
+    recovery build/probe steps; `0` otherwise. It rides the file's
+    `AttemptFinished` and `FileFinished`."""
     var recovering: Bool
     """Whether a `BUILD_FILE` or `PROBE_FILE` step is the stale-name recovery
     pass rather than the collection pass. A recovery step's result belongs to
@@ -177,6 +178,8 @@ struct _PipelineFile(Copyable, Movable):
     """Whether the stale-name recover-once budget has been spent."""
     var attempt: Int
     """The 1-based crash-class attempt this file's next run would be."""
+    var attempts_planned: Int
+    """The file's effective crash-class attempt ceiling."""
     var in_flight: Bool
     """Whether this file has been dispatched to the driver and is awaiting its
     completion. The scheduler skips an in-flight file, so no file is ever handed
@@ -199,8 +202,6 @@ struct RunPipeline(Movable):
     """Whether the collection barrier has been passed."""
     var _halt: PipelineHalt
     """Why the pipeline stopped, or `RUNNING`."""
-    var _attempts_planned: Int
-    """`--retries` + 1: the crash-class attempt ceiling for one run."""
     var _exitfirst: Bool
     """Whether `-x`/`--exitfirst` stops scheduling on the first failure."""
     var _maxfail: Int
@@ -230,14 +231,38 @@ struct RunPipeline(Movable):
         for _ in range(file_count):
             self._files.append(
                 _PipelineFile(
-                    FileStage.NEEDS_BUILD, False, False, False, 1, False
+                    FileStage.NEEDS_BUILD,
+                    False,
+                    False,
+                    False,
+                    1,
+                    retries + 1,
+                    False,
                 )
             )
         self._announced = False
         self._halt = PipelineHalt.RUNNING
-        self._attempts_planned = retries + 1
         self._exitfirst = exitfirst
         self._maxfail = maxfail
+
+    @staticmethod
+    def from_retry_budgets(
+        retries: List[Int], exitfirst: Bool, maxfail: Int
+    ) -> RunPipeline:
+        """Admit files with independently effective retry ceilings.
+
+        Args:
+            retries: One crash-class retry budget per file, in admission order.
+            exitfirst: Whether `-x`/`--exitfirst` is set.
+            maxfail: The `--maxfail` ceiling, or `0` when unset.
+
+        Returns:
+            A pipeline whose per-file attempt ceilings are `retries[i] + 1`.
+        """
+        var pipeline = RunPipeline(len(retries), 0, exitfirst, maxfail)
+        for i in range(len(retries)):
+            pipeline._files[i].attempts_planned = retries[i] + 1
+        return pipeline^
 
     def halt(self) -> PipelineHalt:
         """Why the pipeline stopped, or `RUNNING`.
@@ -307,9 +332,9 @@ struct RunPipeline(Movable):
             if f.stage == FileStage.NEEDS_RUN:
                 return StepRequest(StepKind.RUN_SELECTION, i, f.attempt, False)
             if f.stage == FileStage.NEEDS_REBUILD:
-                return StepRequest(StepKind.BUILD_FILE, i, 0, True)
+                return StepRequest(StepKind.BUILD_FILE, i, f.attempt, True)
             if f.stage == FileStage.NEEDS_REPROBE:
-                return StepRequest(StepKind.PROBE_FILE, i, 0, True)
+                return StepRequest(StepKind.PROBE_FILE, i, f.attempt, True)
         return StepRequest.nothing()
 
     def mark_in_flight(mut self, index: Int):
@@ -428,7 +453,7 @@ struct RunPipeline(Movable):
             settle the file on this attempt.
         """
         self._files[index].in_flight = False
-        if self._files[index].attempt >= self._attempts_planned:
+        if self._files[index].attempt >= self._files[index].attempts_planned:
             return False
         self._files[index].attempt += 1
         self._files[index].stage = FileStage.NEEDS_RUN

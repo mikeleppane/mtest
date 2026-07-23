@@ -13,7 +13,7 @@ resolved by the model's ranking over the same facts a run reports.
 from std.builtin.sort import sort
 
 from mtest.cache import BuildRegistry
-from mtest.config import RunnerConfig
+from mtest.config import ResolvedConfig, RunnerConfig
 from mtest.discover import discover
 from mtest.exec import ExecRuntime, interrupt_requested
 from mtest.model import (
@@ -31,6 +31,10 @@ from mtest.session.build import (
     _probe_file,
 )
 from mtest.session.file_result import FileResult
+from mtest.session.effective_settings import (
+    _compat_resolved_config,
+    effective_file_settings,
+)
 from mtest.session.precompile import _run_precompile
 from mtest.session.shard import partition
 
@@ -72,7 +76,7 @@ def _collect_phrase(fr: FileResult) -> String:
 
 
 def run_collect(
-    mut runtime: ExecRuntime, config: RunnerConfig, root: String
+    mut runtime: ExecRuntime, resolved: ResolvedConfig, root: String
 ) raises -> CollectResult:
     """Probe every discovered run file for its node ids and build the listing.
 
@@ -92,7 +96,7 @@ def run_collect(
 
     Args:
         runtime: The exec runtime supervising every build and probe spawn.
-        config: The resolved runner configuration.
+        resolved: Layered global configuration and per-file override tables.
         root: The invocation root the children run in.
 
     Returns:
@@ -105,6 +109,7 @@ def run_collect(
             to exit 4. Every build and probe failure is caught here and folded
             into the result.
     """
+    var config = resolved.config.copy()
     var disc = discover(config, root)  # a discover: usage error propagates.
 
     # Collect honors the same shard partition as a run: the listing is exactly
@@ -180,10 +185,11 @@ def run_collect(
                 interrupted = True
                 break
             var rel = disc.run_files[ri]
+            var settings = effective_file_settings(resolved, rel)
             var bo: _BuildOutcome
             try:
                 bo = _build_for_selection(
-                    runtime, config, root, rel, includes, reg
+                    runtime, config, settings, root, rel, includes, reg
                 )
             except:
                 diags.append(
@@ -212,7 +218,7 @@ def run_collect(
             try:
                 po = _probe_file(
                     runtime,
-                    config,
+                    settings,
                     root,
                     rel,
                     bo.binary,
@@ -277,6 +283,23 @@ def run_collect(
     return CollectResult(node_ids^, diags^, code)
 
 
+def run_collect(
+    mut runtime: ExecRuntime, config: RunnerConfig, root: String
+) raises -> CollectResult:
+    """Collect from the compatibility config with no per-file overrides.
+
+    Args:
+        runtime: The exec runtime supervising every build and probe spawn.
+        config: The legacy resolved runner configuration.
+        root: The invocation root the children run in.
+
+    Returns:
+        The collect result from the layered primary overload.
+    """
+    var resolved = _compat_resolved_config(config)
+    return run_collect(runtime, resolved, root)
+
+
 def run_collect(config: RunnerConfig, root: String) raises -> CollectResult:
     """Collect with a locally owned runtime, for direct library callers.
 
@@ -296,6 +319,35 @@ def run_collect(config: RunnerConfig, root: String) raises -> CollectResult:
     try:
         runtime.open()
         var result = run_collect(runtime, config, root)
+        runtime.close()
+        return result^
+    except error:
+        var primary = String(error)
+        try:
+            runtime.close()
+        except cleanup_error:
+            raise Error(primary + "; " + String(cleanup_error))
+        raise Error(primary)
+
+
+def run_collect(resolved: ResolvedConfig, root: String) raises -> CollectResult:
+    """Collect from layered configuration with a locally owned runtime.
+
+    Args:
+        resolved: Layered global configuration and per-file override tables.
+        root: The invocation root the children run in.
+
+    Returns:
+        The collect result from the primary overload.
+
+    Raises:
+        Error: If the runtime cannot be opened or closed, or if the primary
+            overload raises.
+    """
+    var runtime = ExecRuntime()
+    try:
+        runtime.open()
+        var result = run_collect(runtime, resolved, root)
         runtime.close()
         return result^
     except error:

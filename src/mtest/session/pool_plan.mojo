@@ -32,7 +32,9 @@ file list against the glob patterns via `fnmatch` and return, touching nothing
 else, so they pin against any file set without a real run.
 """
 
+from mtest.config import ResolvedConfig
 from mtest.discover import fnmatch
+from mtest.session.effective_settings import effective_file_settings
 
 
 @fieldwise_init
@@ -163,6 +165,29 @@ def partition_serial(
                 pinned = True
                 break
         if pinned:
+            serial.append(f)
+        else:
+            parallel.append(f)
+    return SerialPartition(parallel^, serial^)
+
+
+def partition_effective_serial(
+    files: List[String], resolved: ResolvedConfig
+) -> SerialPartition:
+    """Split dispatched files by their fully effective serial setting.
+
+    Args:
+        files: The run files actually dispatched, in order.
+        resolved: Layered global serial globs and ordered per-file tables.
+
+    Returns:
+        Stable parallel and serial sub-lists, with every global or override
+        serial match pinned to the serial pass.
+    """
+    var parallel = List[String]()
+    var serial = List[String]()
+    for f in files:
+        if effective_file_settings(resolved, f).serial:
             serial.append(f)
         else:
             parallel.append(f)

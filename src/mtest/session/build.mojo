@@ -29,6 +29,7 @@ from mtest.protocol import (
     collection_names,
 )
 from mtest.session.classify import resolve_report
+from mtest.session.effective_settings import EffectiveFileSettings
 from mtest.session.file_result import FileResult
 from mtest.session.scratch import _ensure_dir, _mangle
 from mtest.session.verdict import build_verdict
@@ -73,10 +74,12 @@ def _blank_file_result() -> FileResult:
 def _build_for_selection(
     mut runtime: ExecRuntime,
     config: RunnerConfig,
+    settings: EffectiveFileSettings,
     root: String,
     rel: String,
     include_paths: List[String],
     mut reg: BuildRegistry,
+    attempts_used: Int = 1,
 ) raises -> _BuildOutcome:
     """Build `rel` into the registry once, or produce a terminal result.
 
@@ -89,10 +92,12 @@ def _build_for_selection(
     Args:
         runtime: The exec runtime supervising the build spawn.
         config: The resolved runner configuration.
+        settings: The file's effective build deadline and other policy.
         root: The invocation root the compiler runs in.
         rel: The root-relative path of the file to build.
         include_paths: Directories passed to the compiler as `-I`.
         reg: The build registry that records the build or compile error.
+        attempts_used: The current file attempt, for a terminal recovery build.
 
     Returns:
         The build outcome, terminal or ready-to-probe.
@@ -125,7 +130,7 @@ def _build_for_selection(
             ProcessSpec.command_in(
                 build_argv.copy(),
                 root,
-                config.compile_timeout_secs * 1000,
+                settings.compile_timeout_secs * 1000,
                 _COMPILE_GRACE_MS,
             ),
         )
@@ -165,7 +170,7 @@ def _build_for_selection(
         # build. Either way the file is terminal here and never probed or run.
         var bto = 0
         if bsignal == Outcome.COMPILE_TIMEOUT:
-            bto = config.compile_timeout_secs
+            bto = settings.compile_timeout_secs
         reg.record_compile_error(rel, lossy_utf8(bres.stderr_bytes))
         var ev = Event.file_finished(
             rel,
@@ -176,6 +181,7 @@ def _build_for_selection(
             List[UInt8](),
             bres.stderr_bytes.copy(),
             timeout_seconds=bto,
+            attempts_used=attempts_used,
             slow=is_slow(bdur, 0.0),
         )
         return _BuildOutcome(
@@ -226,6 +232,7 @@ def _probe_terminal(
     is_drift: Bool,
     signal_number: Int = 0,
     timeout_seconds: Int = 0,
+    attempts_used: Int = 1,
     escalated: Bool = False,
     stdout_truncated: Bool = False,
     stderr_truncated: Bool = False,
@@ -248,6 +255,7 @@ def _probe_terminal(
             suppresses the exit-outcome contribution.
         signal_number: The signal that killed the probe, for a crash.
         timeout_seconds: The deadline enforced, for a timeout.
+        attempts_used: The current file attempt, for a terminal recovery probe.
         escalated: The probe termination's latched SIGKILL escalation, passed by
             the timeout caller so a probe killed at the deadline reads like
             every other timeout verdict.
@@ -272,6 +280,7 @@ def _probe_terminal(
         stderr_bytes^,
         signal_number=signal_number,
         timeout_seconds=timeout_seconds,
+        attempts_used=attempts_used,
         parse_disposition=disposition,
         escalated=escalated,
         slow=is_slow(bdur, 0.0),
@@ -288,7 +297,7 @@ def _probe_terminal(
 
 def _probe_file(
     mut runtime: ExecRuntime,
-    config: RunnerConfig,
+    settings: EffectiveFileSettings,
     root: String,
     rel: String,
     binary: String,
@@ -296,6 +305,7 @@ def _probe_file(
     build_argv: List[String],
     bdur: Float64,
     mut reg: BuildRegistry,
+    attempts_used: Int = 1,
 ) raises -> _ProbeOutcome:
     """Run the `--skip-all` probe and route its result.
 
@@ -317,7 +327,7 @@ def _probe_file(
 
     Args:
         runtime: The exec runtime supervising the probe spawn.
-        config: The resolved runner configuration, for the run deadline.
+        settings: The file's effective probe deadline and other policy.
         root: The invocation root the probe runs in.
         rel: The root-relative path of the probed file.
         binary: The already-built binary to probe.
@@ -325,6 +335,7 @@ def _probe_file(
         build_argv: The build command, for a terminal verdict's reproduce line.
         bdur: The build wall time in seconds.
         reg: The build registry that records the collected universe.
+        attempts_used: The current file attempt, for a terminal recovery probe.
 
     Returns:
         The probe outcome: a qualifying universe, or a terminal result.
@@ -336,7 +347,8 @@ def _probe_file(
     argv.append(binary)
     argv.append("--skip-all")
     var pres = run_supervised(
-        runtime, ProcessSpec.command_in(argv^, root, config.timeout_secs * 1000)
+        runtime,
+        ProcessSpec.command_in(argv^, root, settings.timeout_secs * 1000),
     )
     var pterm = pres.termination
     if pterm.is_spawn_failed():
@@ -375,6 +387,7 @@ def _probe_file(
                 pres.stderr_bytes.copy(),
                 False,
                 signal_number=pterm.value,
+                attempts_used=attempts_used,
                 stdout_truncated=pres.stdout_truncated,
                 stderr_truncated=pres.stderr_truncated,
             ),
@@ -397,7 +410,8 @@ def _probe_file(
                 pres.stdout_bytes.copy(),
                 pres.stderr_bytes.copy(),
                 False,
-                timeout_seconds=config.timeout_secs,
+                timeout_seconds=settings.timeout_secs,
+                attempts_used=attempts_used,
                 escalated=pterm.escalated,
                 stdout_truncated=pres.stdout_truncated,
                 stderr_truncated=pres.stderr_truncated,
@@ -434,6 +448,7 @@ def _probe_file(
                 pres.stdout_bytes.copy(),
                 pres.stderr_bytes.copy(),
                 False,
+                attempts_used=attempts_used,
                 stdout_truncated=pres.stdout_truncated,
                 stderr_truncated=pres.stderr_truncated,
             ),
@@ -473,6 +488,7 @@ def _probe_file(
                 pres.stdout_bytes.copy(),
                 pres.stderr_bytes.copy(),
                 True,
+                attempts_used=attempts_used,
                 stdout_truncated=pres.stdout_truncated,
                 stderr_truncated=pres.stderr_truncated,
             ),
@@ -499,6 +515,7 @@ def _probe_file(
             pres.stdout_bytes.copy(),
             pres.stderr_bytes.copy(),
             False,
+            attempts_used=attempts_used,
             stdout_truncated=pres.stdout_truncated,
             stderr_truncated=pres.stderr_truncated,
         ),

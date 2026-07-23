@@ -29,7 +29,7 @@ below `session`, which folds its summary into the run accounting.
 from std.os.path import isdir
 
 from mtest.cache import BuildRegistry
-from mtest.config import RunnerConfig, lossy_utf8
+from mtest.config import ResolvedConfig, lossy_utf8
 from mtest.discover import normalize_operand, normalize_root
 from mtest.discover.result import DiscoveryResult
 from mtest.exec import (
@@ -61,6 +61,10 @@ from mtest.session.build import (
     _probe_file,
 )
 from mtest.session.classify import classify, resolve_report
+from mtest.session.effective_settings import (
+    EffectiveFileSettings,
+    effective_file_settings,
+)
 from mtest.session.file_result import (
     FileResult,
     _CrashFile,
@@ -166,6 +170,7 @@ struct _Collected(Copyable, Movable):
     """
 
     var rel: String
+    var settings: EffectiveFileSettings
     var terminal: Bool
     var terminal_result: FileResult
     var universe: List[String]
@@ -193,17 +198,21 @@ struct _Collected(Copyable, Movable):
     to FLAKY."""
 
 
-def _blank_collected(rel: String) -> _Collected:
+def _blank_collected(
+    rel: String, settings: EffectiveFileSettings
+) -> _Collected:
     """An admitted-but-untouched run file, before its build step runs.
 
     Args:
         rel: The root-relative path of the discovered file.
+        settings: The file's effective deadlines and retry/serial policy.
 
     Returns:
         The file's initial payload. Allocates its empty lists.
     """
     return _Collected(
         rel,
+        settings,
         False,
         _blank_file_result(),
         List[String](),
@@ -255,7 +264,7 @@ def _selected_view(
 
 
 def _reconcile_and_classify(
-    config: RunnerConfig,
+    settings: EffectiveFileSettings,
     rel: String,
     term: ProcessResult,
     universe: List[String],
@@ -277,7 +286,7 @@ def _reconcile_and_classify(
     the verdict through the classifier.
 
     Args:
-        config: The resolved runner configuration, for the run deadline.
+        settings: The file's effective deadlines and retry/serial policy.
         rel: The root-relative path of the file.
         term: The completed run's process result.
         universe: The test names collected by the probe.
@@ -325,7 +334,7 @@ def _reconcile_and_classify(
             rdur,
             term,
             len(deselected),
-            timeout_seconds=config.timeout_secs,
+            timeout_seconds=settings.timeout_secs,
             attempts_used=attempts_used,
             escalated=rterm.escalated,
         )
@@ -709,7 +718,7 @@ def _run_selection[
     C: ReportCoordinator
 ](
     mut runtime: ExecRuntime,
-    config: RunnerConfig,
+    resolved: ResolvedConfig,
     root: String,
     disc: DiscoveryResult,
     include_paths: List[String],
@@ -734,7 +743,7 @@ def _run_selection[
 
     Args:
         runtime: The exec runtime supervising every build, probe, and run.
-        config: The resolved runner configuration.
+        resolved: Layered global configuration and per-file override tables.
         root: The invocation root the children run in.
         disc: The discovery result, supplying the run files and exclusions.
         include_paths: Directories passed to the compiler as `-I`.
@@ -750,6 +759,7 @@ def _run_selection[
         Error: If selection names an unknown test, a `select:` usage error
             which main maps to exit 4.
     """
+    var config = resolved.config.copy()
     var nroot = normalize_root(root)
 
     # --exclude beats a node id: a node-id file that was excluded is dropped
@@ -775,13 +785,15 @@ def _run_selection[
                 break
 
     var collected = List[_Collected]()
+    var retry_budgets = List[Int]()
     for ri in range(len(disc.run_files)):
-        collected.append(_blank_collected(disc.run_files[ri]))
+        var settings = effective_file_settings(resolved, disc.run_files[ri])
+        retry_budgets.append(settings.retries)
+        collected.append(_blank_collected(disc.run_files[ri], settings))
 
-    var pipeline = RunPipeline(
-        len(disc.run_files), config.retries, config.exitfirst, config.maxfail
+    var pipeline = RunPipeline.from_retry_budgets(
+        retry_budgets^, config.exitfirst, config.maxfail
     )
-    var attempts_planned = config.retries + 1
 
     var announced = False
     var run_outcomes = List[Outcome]()
@@ -821,7 +833,14 @@ def _run_selection[
             var bo: _BuildOutcome
             try:
                 bo = _build_for_selection(
-                    runtime, config, root, collected[i].rel, include_paths, reg
+                    runtime,
+                    config,
+                    collected[i].settings,
+                    root,
+                    collected[i].rel,
+                    include_paths,
+                    reg,
+                    attempts_used=step.attempt if step.recovering else 1,
                 )
             except:
                 reporter.handle(
@@ -883,7 +902,7 @@ def _run_selection[
             try:
                 po = _probe_file(
                     runtime,
-                    config,
+                    collected[i].settings,
                     root,
                     collected[i].rel,
                     collected[i].binary,
@@ -891,6 +910,7 @@ def _run_selection[
                     collected[i].build_argv,
                     collected[i].bdur,
                     reg,
+                    attempts_used=step.attempt if step.recovering else 1,
                 )
             except:
                 reporter.handle(
@@ -932,6 +952,7 @@ def _run_selection[
                         crash_files.append(
                             _CrashFile(
                                 collected[i].rel,
+                                collected[i].settings,
                                 collected[i].binary,
                                 collected[i].orig_selected.copy(),
                             )
@@ -996,6 +1017,7 @@ def _run_selection[
                 crash_files.append(
                     _CrashFile(
                         collected[i].rel,
+                        collected[i].settings,
                         collected[i].binary,
                         collected[i].orig_selected.copy(),
                     )
@@ -1034,7 +1056,9 @@ def _run_selection[
             rres = run_supervised(
                 runtime,
                 ProcessSpec.command_in(
-                    run_argv^, root, config.timeout_secs * 1000
+                    run_argv^,
+                    root,
+                    collected[i].settings.timeout_secs * 1000,
                 ),
             )
         except:
@@ -1103,12 +1127,12 @@ def _run_selection[
                         rc,
                         att,
                         step.attempt,
-                        attempts_planned,
+                        collected[i].settings.retries + 1,
                     )
                 )
                 continue
             fr = _reconcile_and_classify(
-                config,
+                collected[i].settings,
                 collected[i].rel,
                 rres,
                 collected[i].universe,
@@ -1140,6 +1164,7 @@ def _run_selection[
             crash_files.append(
                 _CrashFile(
                     collected[i].rel,
+                    collected[i].settings,
                     collected[i].binary,
                     collected[i].orig_selected.copy(),
                 )
