@@ -33,8 +33,19 @@ this same value, so a caller can widen the grace for a child that needs longer
 to die cleanly. This constant is the grace for the machinery-error abort path,
 where there is no spec in hand and nothing mid-flight worth waiting on.
 """
-comptime _POST_LEADER_MS = 300
-"""Bound for group sweep and nonblocking drain after leader observation."""
+comptime _POST_LEADER_MS = 2000
+"""Bound for group sweep and nonblocking drain after leader observation.
+
+This is the wall-clock window a swept group is given for its descendants' write
+ends to close before a still-open channel is declared a retained-pipe honesty
+error. A clean teardown finalizes the moment both channels close, well inside
+the window, so this bound only governs a genuinely leaked pipe (one whose holder
+escaped the process group and `killpg` cannot reach). It is deliberately
+generous: on a slow, contended host — a 2-core CI runner under Valgrind — a
+flooding grandchild that IS in the group still dies and drains within the window,
+where a tighter bound fired the honesty error prematurely on a pipe that was
+about to close. It stays far below the suites' 5000 ms wall-clock assertions, and
+matches the reap-wait budget below."""
 comptime _POST_LEADER_SLICE_MS = 10
 """Short poll slice while waiting for swept pipes to reach EOF."""
 comptime _BUFSIZE = 65536
