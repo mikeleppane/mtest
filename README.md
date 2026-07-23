@@ -154,7 +154,7 @@ A file without that `main()` does not build as a standalone program.
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/suite/test_passing.mojo'
-mtest 0.4.0 (mojo)
+mtest 0.5.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 PASS           e2e/suite/test_passing.mojo  0.07s
@@ -174,7 +174,7 @@ against. One directory exercises most of the outcome model at once:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/suite'
-mtest 0.4.0 (mojo)
+mtest 0.5.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 7 files   excluded: 0
 
 PASS           e2e/suite/nested/test_nested.mojo  0.07s
@@ -220,7 +220,7 @@ zero tests ran. A session that collects nothing but NO-TESTS files exits `5`.
 
 ```console
 $ pixi run bash -c 'build/mtest -k one e2e/matrix'
-mtest 0.4.0 (mojo)
+mtest 0.5.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
 
 PASS           e2e/matrix/test_alpha.mojo 0.02s
@@ -233,7 +233,7 @@ A node-id operand selects exactly one test:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/matrix/test_alpha.mojo::test_alpha_two'
-mtest 0.4.0 (mojo)
+mtest 0.5.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 PASS           e2e/matrix/test_alpha.mojo 0.03s
@@ -285,7 +285,7 @@ attribution pass:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/attribution/test_deterministic_crasher.mojo'
-mtest 0.4.0 (mojo)
+mtest 0.5.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 CRASH          e2e/attribution/test_deterministic_crasher.mojo  1.12s  (signal 4 — SIGILL, illegal instruction)
@@ -314,7 +314,7 @@ force-killed, and the verdict line says so in words:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/stubborn/test_stubborn.mojo --timeout 1 --retries 0'
-mtest 0.4.0 (mojo)
+mtest 0.5.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 TIMEOUT        e2e/stubborn/test_stubborn.mojo 1.31s  (timed out after 1s, escalated to SIGKILL)
@@ -366,8 +366,8 @@ The three reporters compose with the console and with each other.
 ```console
 $ pixi run bash -c 'build/mtest --json - --gh-annotations off e2e/matrix' 1>/tmp/stream.ndjson
 $ head -n 4 /tmp/stream.ndjson
-{"event":"stream","version":1,"generator":"mtest 0.4.0"}
-{"event":"session_started","root":"/home/mikko/dev/mtest","toolchain":"mojo","selected_count":2,"excluded_count":0,"shard_label":"","sharded_out_count":0}
+{"event":"stream","version":1,"generator":"mtest 0.5.0"}
+{"event":"session_started","root":"/home/mikko/dev/mtest","toolchain":"mojo","selected_count":2,"excluded_count":0,"shard_label":"","sharded_out_count":0,"workers":1}
 {"event":"file_started","path":"e2e/matrix/test_alpha.mojo"}
 {"event":"test_reported","path":"e2e/matrix/test_alpha.mojo","name":"test_alpha_one","outcome":"pass","detail":"","detail_omitted_bytes":0,"timing":"0.001"}
 ```
@@ -445,15 +445,39 @@ This build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mo
 | `-h`, `--help` | print the usage text and exit `0` |
 | `--version` | print the version and exit `0` |
 
-`-n`/`--workers` and `--serial` are part of the frozen v1 contract, are
-recognized by the parser, and are refused before any test runs:
+`-n`/`--workers N` runs discovered files across a pool of `N` worker
+processes; `-n auto` sizes the pool to half the machine's logical cores. The
+header reports the resolved count, and completion order reflects the
+parallelism:
 
 ```console
-$ pixi run bash -c 'build/mtest -n 2 e2e/suite'
-cli: '-n' is part of the mtest v1 contract but is not available in this build (it arrives with parallel workers); this build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo, -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v, --color, -k, --maxfail, --durations, --shard, --retries, --json, --junit-xml, --gh-annotations, collect/--collect-only, --help, --version (see mtest --help)
-$ echo $?
-4
+$ pixi run bash -c 'build/mtest -n 2 e2e/matrix'
+mtest 0.5.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0   workers: 2
+
+PASS           e2e/matrix/test_beta.mojo       0.02s
+PASS           e2e/matrix/test_alpha.mojo      0.02s
+
+===== 5 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 1.1s =====
 ```
+
+`--serial GLOB` pins matching files to a final one-at-a-time pass that runs
+after the parallel batch drains — for a file that cannot safely share the
+machine with its peers. Pinned files carry a `SERIAL` tag:
+
+```console
+$ pixi run bash -c "build/mtest -n 2 --serial 'e2e/matrix/test_alpha.mojo' e2e/matrix"
+mtest 0.5.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0   workers: 2
+
+PASS           e2e/matrix/test_beta.mojo       0.02s
+PASS           e2e/matrix/test_alpha.mojo      0.03s  SERIAL
+
+===== 5 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 1.5s =====
+```
+
+The default is `-n 1`: a single worker on the sequential path, byte-for-byte
+the same run and output as before the pool existed.
 
 ### Exit codes
 
@@ -484,11 +508,11 @@ flowchart TD
     main["main: composition root, the only exit() caller"]
     cli["cli: hand-rolled argument parsing"]
     session["session: orchestration and the run-file pipeline kernel"]
-    exec["exec: subprocess supervision, timeouts, process groups"]
+    exec["exec: capacity-N supervision — pool, timeouts, process groups"]
     mid["discover · select · protocol · cache · report"]
     config["config: RunnerConfig"]
     leaves["model · platform: outcomes, events, exit codes · the audited libc boundary"]
-    native["native/: private C17 POSIX adapter (mtest_exec_* ABI)"]
+    native["native/: private C17 POSIX adapter (mtest_exec_* ABI v2)"]
 
     main --> cli --> session --> exec --> mid --> config --> leaves
     exec --> native
@@ -512,13 +536,18 @@ Arrows show the layering: each module may import only from layers below it.
   (build, probe, run, retry, stop)? A driver executes that step against
   `exec` and folds the completion back. Retry policy, `--maxfail`
   accounting, and stale-state recovery all live in the kernel, where they
-  are unit-tested without spawning a process.
+  are unit-tested without spawning a process. The parallel scheduler
+  dispatches that same kernel across the worker pool — gate files first,
+  then the parallel batch, then any `--serial` pass — while the kernel
+  itself stays process-free.
 - Reporters consume the typed event stream behind a coordinator seam;
   `session` never imports a concrete reporter. The JUnit and annotation
   reporters are fed by the same events the console renders.
-- `exec` supervises one child at a time: byte-exact stdout/stderr capture,
-  a poll-based drain that never deadlocks, deadline kills that always
-  target the whole process group, and exit-versus-signal discrimination.
+- `exec` supervises a pool of up to N children at once through a Supervisor
+  over the native ABI: byte-exact stdout/stderr capture, a poll-based drain
+  that never deadlocks, deadline kills that always target the whole process
+  group, and exit-versus-signal discrimination. At `-n 1` it drives a single
+  child, the same path as before the pool.
 
 ## Extending mtest
 
@@ -537,9 +566,13 @@ and includes a worked consumer skeleton in about twenty lines.
 
 Facts about this build worth knowing before you rely on it:
 
-- **Execution is sequential.** There is no worker pool: every build, run,
-  retry, and attribution rerun goes through a single supervised child at a
-  time. `-n`/`--workers` and `--serial` are refused with exit `4`.
+- **The pool is descriptor-bounded, and capture is per-worker.** `-n auto`
+  takes half the logical cores (`max(1, cores // 2)`, a measured politeness
+  bound that leaves headroom for other work, not a compile-starvation limit);
+  an explicit `-n N` above the environment's file-descriptor ceiling is
+  loudly clamped down to what the machine can honor. Each worker buffers up
+  to 16 MiB of captured output (8 MiB per stream), so peak capture memory
+  scales with the resolved worker count.
 - **Captured output is file-scoped.** `TestSuite` does not attribute a
   file's stdout/stderr to individual tests, so mtest cannot either. Parsed
   FAIL assertion details are per-test; the raw captured block is per-file.

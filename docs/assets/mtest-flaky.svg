@@ -1,9 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 978 196" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="13">
 <rect width="978" height="196" rx="8" fill="#0d1117" stroke="#30363d"/>
 <text x="18" y="31" xml:space="preserve"><tspan fill="#8b949e">$ </tspan><tspan fill="#c9d1d9">mtest e2e/flaky/test_flaky.mojo --retries 1</tspan></text>
-<text x="18" y="51" xml:space="preserve"><tspan fill="#c9d1d9">mtest 0.4.0 (mojo)</tspan></text>
+<text x="18" y="51" xml:space="preserve"><tspan fill="#c9d1d9">mtest 0.5.0 (mojo)</tspan></text>
 <text x="18" y="71" xml:space="preserve"><tspan fill="#c9d1d9">root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0</tspan></text>
-<text x="18" y="111" xml:space="preserve"><tspan fill="#d29922">TRY            e2e/flaky/test_flaky.mojo       attempt 1/2  run signal  (signal 11 — SIGSEGV, segmentation fault)  1.12s</tspan></text>
-<text x="18" y="131" xml:space="preserve"><tspan fill="#c9d1d9">FLAKY          e2e/flaky/test_flaky.mojo       0.02s</tspan></text>
-<text x="18" y="171" xml:space="preserve"><tspan fill="#3fb950">===== 1 passed, 0 failed, 0 skipped, 1 flaky (0 excluded, 0 not run) in 1.5s =====</tspan></text>
+<text x="18" y="111" xml:space="preserve"><tspan fill="#d29922">TRY            e2e/flaky/test_flaky.mojo       attempt 1/2  run signal  (signal 11 — SIGSEGV, segmentation fault)  1.11s</tspan></text>
+<text x="18" y="131" xml:space="preserve"><tspan fill="#c9d1d9">FLAKY          e2e/flaky/test_flaky.mojo       0.03s</tspan></text>
+<text x="18" y="171" xml:space="preserve"><tspan fill="#3fb950">===== 1 passed, 0 failed, 0 skipped, 1 flaky (0 excluded, 0 not run) in 1.6s =====</tspan></text>
 </svg>
