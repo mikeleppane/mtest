@@ -349,8 +349,90 @@ Generalized past the specific line numbers they came from.
 
 ## Whole-branch review triage
 
-This section is reserved for the final whole-branch dual review, which runs after
-the conditional AGENTS commit that follows this one. It will hold the triage of
-the two reviews' findings and the rulings on each, in the same form as the Phase
-4 dual-review record. It is intentionally left as a stub here; no findings are
-recorded yet.
+The final review ran two independent legs over the whole branch diff (the pool
+work, base to the last docs commit): a capable-model reader and an external
+`codex exec` leg, each prompted adversarially and told to verify every claim
+against the code before reporting. The two legs disagreed sharply, and the
+disagreement was the most useful thing the review produced.
+
+The in-house leg returned one finding and declared the earlier kill_all fix
+"completely fixed." The external leg returned nine, and it was right where the
+first was wrong: the celebrated grace-window fix had corrected the reap-wait
+busy-spin but left an **identical** `_poll_set`-counted busy-spin twenty lines
+above it, in the two-pass cleanup's TERM grace. Every controller finding was
+re-verified against the source (and one reproduced with a real command) before
+any code changed; one reported finding was rejected on inspection.
+
+**Six defects confirmed and fixed** (commits `fix(exec)` grace window,
+`fix(session)` pool handling, `fix(cli)` help summary):
+
+- **The grace-window busy-spin twin.** `_two_pass_cleanup`'s shared
+  TERM→grace→KILL window counted `poll_set` slices instead of spending real
+  wall-clock. `poll_set` returns at once when a survivor's stream is readable or
+  at EOF, so the grace collapsed to microseconds and a child was SIGKILLed
+  before its SIGTERM handler could run — the exact trap the reap-wait loop below
+  it already documented and fixed. Ruling: fix, by pacing the window on the
+  monotonic clock with sleep-filled slices, mirroring the reap-wait's remedy.
+- **No second-interrupt escalation in cleanup.** The same grace window never
+  reread `interrupt_count()`, so a second interrupt during teardown did not
+  shortcut to the immediate hard kill §24.2 promises. Ruling: fix, by breaking
+  to the SIGKILL pass when the count rises.
+- **A pooled slot open failure misclassified as a usage error.** A slot's
+  native open failure (e.g. EMFILE) raises out of `Supervisor.spawn`, distinct
+  from a per-child `SpawnFailed` completion; the dispatch loop discarded the
+  result, so the raise escaped to the session's usage-error catch and exited 4.
+  Ruling: fix, resolve it to an internal-error event and exit 3 — a machinery
+  fault. (Low probability in practice: the descriptor-ceiling clamp normally
+  prevents EMFILE, which is why it survived to the review.)
+- **The pool ignored a dead machine stream mid-batch.** It never checked
+  `reporter.stream_failed()` while dispatching, so a closed `--json` consumer
+  let it build and run every remaining file into a broken pipe, where the
+  sequential path stops at once. Ruling: fix, stop scheduling at the boundary.
+- **A gate abort masked a cleanup fault.** The gate-abort cleanup swallowed a
+  `kill_all` machinery failure with a bare `except`, letting the gate's exit 1
+  mask it. Ruling: fix, escalate to internal-error exit 3, which outranks the
+  outcome. The interrupt paths keep swallowing, since their exit 2 dominates.
+- **`--maxfail` reset across the batch boundary.** Each batch built its own
+  pipeline over batch-local outcomes, so the failing count restarted at the
+  parallel→serial boundary and a run could execute ~2N-1 failures instead of N.
+  This was the commit-14 audit decision (b), reversed here: the earlier "mirrors
+  the gate→run precedent" reasoning was wrong, because the gate batch runs with
+  `--maxfail` disabled and never tested count-carrying. Ruling: fix, the serial
+  batch continues the run-wide tally (its pipeline `maxfail` is lowered by the
+  parallel batch's failing count); a regression test pins it.
+- **Selection lied about parallelism.** `-k`/node-id selection runs the
+  sequential selection sub-session the pool never drives, yet the header still
+  printed `workers: N` and `--serial` was silently dropped. Ruling: fix,
+  resolve selection to one worker so the header is honest and `--serial` is a
+  consistent no-op; a regression test pins it. (Pooling the selection
+  sub-session itself was considered and rejected as out of scope — it is a
+  700-line driver with its own probe/recover logic.)
+
+**One minor fixed:** the `--help` served-flags summary omitted the served
+`-n`/`--workers`/`--serial`; added to the summary, the README's authoritative
+served line, and the flag table.
+
+**One finding rejected.** The external leg claimed capture finalization triples
+per-slot memory and blows the documented `N × 16 MiB` ceiling. Verified false in
+severity: `finish()` copies, so one finalizing slot transiently holds roughly
+twice its bound — but finalization is serialized (`wait_any` returns one
+completion at a time), so the "all slots at once" peak it extrapolated is
+unreachable. The steady-state bound holds; no change.
+
+**One minor deferred.** An empty `wait_any` sweep skips the live progress-counter
+refresh, so a TTY shows no counter until the first file finishes during a long
+initial build. Cosmetic, TTY-only, no correctness weight; not worth further
+churn in the pool hot loop. Recorded for a possible follow-up.
+
+Every fix was validated through the full local gate stack (`ci`, ASan, Valgrind)
+before push and then confirmed on the hosted matrix, including the
+timing-sensitive concurrency suites on the slow 2-core runner and the
+memory-safety cells for the grace-window change.
+
+The durable lesson: a green CI is not a proof of correctness on the edges. Every
+one of these defects lived in a path the behavioral suite never exercises —
+EMFILE, EPIPE, a second interrupt mid-grace, a SIGTERM-resistant child,
+selection combined with the pool, `--maxfail` combined with `--serial`. The
+adversarial cross-check between two independent reviewers, each forced to verify
+against the source, is what surfaced them; a single reviewer — even a capable
+one — missed the most important defect entirely and pronounced the code sound.
