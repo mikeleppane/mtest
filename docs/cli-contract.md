@@ -726,8 +726,9 @@ pool while each file's own steps (build → run → retries) stay strictly order
 **The default is one worker** — with no flag, files run sequentially and the
 build argv is byte-identical to a single-worker build. `auto` sizing is
 runner-chosen and may tune across minor versions: it is a stable *intent*
-(conservative, since `mojo build` is itself multi-threaded and stacked cold
-compiles starve each other), not a stable number. Concurrent builds share a
+(benchmark-informed — half the logical cores — taking half rather than the whole
+machine to leave headroom for other work and bound capture memory, not because
+extra workers starve each other on build threads), not a stable number. Concurrent builds share a
 cores-wide thread budget: each build spawns `mojo build --num-threads K` for
 `K = max(1, cores // min(workers, cores))`, so the builds' threads never
 oversubscribe the machine (a user `-j`/`--num-threads` is forbidden, §8.4); a
@@ -735,6 +736,20 @@ run takes no build thread. The resolved worker count is capped by the
 environment's effective file-descriptor ceiling: a request above it is **clamped
 with a loud warning** that names the cap, and the resolved count — never the
 request — is what the run uses and what the machine stream reports (§15.4).
+
+**Sizing `-n`.** The `auto` count is benchmark-informed: a worker-sizing
+benchmark measured scaling that keeps paying well past a handful of workers, so
+`auto` is `max(1, cores // 2)` — half the logical cores. Half rather than all of
+them is deliberate politeness, not a scaling limit: it leaves cores for other
+work and keeps the peak output-capture memory in check. That memory is the other
+reason to size `-n` with care — each in-flight worker holds up to **16 MiB** of
+output-capture buffers at peak (8 MiB for stdout and 8 MiB for stderr per child),
+so `N` workers can hold up to `N × 16 MiB` at once, and `auto` at half the cores
+bounds that at `cores // 2 × 16 MiB`. It is a worst case, reached only when
+children actually emit that much output; the capture is bounded and keeps the
+head and tail while dropping the middle (§14), never growing without limit. A
+memory-constrained environment should lower `-n` accordingly. `auto` remains an
+*intent*, not a promised number (it may tune across minor versions).
 
 `--timeout SECS` (default 300, `0` disables) bounds a single file's **run**;
 exceeding it yields TIMEOUT. `--compile-timeout SECS` (default 600, `0`

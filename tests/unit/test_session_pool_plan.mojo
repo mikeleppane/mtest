@@ -25,10 +25,15 @@ def test_auto_is_half_the_cores_floored_at_one() raises:
     assert_equal(resolve_auto_workers(6), 3)
 
 
-def test_auto_is_capped_at_four() raises:
+def test_auto_scales_with_half_the_cores_uncapped() raises:
+    # The sizing benchmark measured scaling that keeps paying past a handful of
+    # workers, so `auto` is uncapped half-the-cores: it tracks `cores // 2` all
+    # the way up rather than flattening at a small ceiling.
     assert_equal(resolve_auto_workers(8), 4)
-    assert_equal(resolve_auto_workers(16), 4)
-    assert_equal(resolve_auto_workers(128), 4)
+    assert_equal(resolve_auto_workers(16), 8)
+    assert_equal(resolve_auto_workers(32), 16)
+    assert_equal(resolve_auto_workers(64), 32)
+    assert_equal(resolve_auto_workers(128), 64)
 
 
 def test_auto_never_below_one_even_at_zero_cores() raises:

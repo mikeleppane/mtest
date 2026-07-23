@@ -8,9 +8,12 @@ core count without a real machine to stand on.
 
 Three decisions live here and nowhere else:
 
-- The provisional `auto` worker count: `min(4, max(1, cores // 2))`. It is
-  provisional because the sizing benchmark refines it later; until then it is a
-  conservative half-the-cores capped at four.
+- The `auto` worker count: `max(1, cores // 2)` — half the logical cores, never
+  below one. The sizing benchmark measured scaling that keeps paying well past a
+  handful of workers, so there is no small ceiling; taking half rather than the
+  whole machine is a politeness bound — it leaves cores for other work and holds
+  the peak output-capture memory to `cores // 2 * 16 MiB` — not a compile-
+  starvation limit.
 - The clamp: the resolved count is the requested-or-auto count capped by the
   effective descriptor ceiling the exec layer reports. A clamp is loud — it
   names the ceiling — because a run that asked for more parallelism than the
@@ -72,19 +75,22 @@ struct WorkerPlan(Copyable, Movable):
 
 
 def resolve_auto_workers(cores: Int) -> Int:
-    """The provisional `auto` worker count for a machine with `cores` cores.
+    """The `auto` worker count for a machine with `cores` cores.
 
-    `min(4, max(1, cores // 2))`: half the logical cores, never below one and
-    never above four. Provisional — the sizing benchmark refines the ceiling
-    later — and pure in `cores`, so it pins against any core count.
+    `max(1, cores // 2)`: half the logical cores, never below one. The sizing
+    benchmark measured scaling that keeps paying past a handful of workers, so
+    the count is not capped at a small ceiling; taking half rather than all the
+    cores is a politeness bound — it leaves headroom for other work and holds the
+    peak output-capture memory to `cores // 2 * 16 MiB` — not a starvation limit.
+    Pure in `cores`, so it pins against any core count.
 
     Args:
         cores: The machine's logical core count.
 
     Returns:
-        The auto worker count, in `1 ..= 4`.
+        The auto worker count, at least one.
     """
-    return min(4, max(1, cores // 2))
+    return max(1, cores // 2)
 
 
 def resolve_workers(requested: Int, cores: Int, cap: Int) -> WorkerPlan:
