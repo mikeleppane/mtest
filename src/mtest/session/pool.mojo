@@ -353,6 +353,7 @@ def _run_pool_batch[
     is_gate: Bool,
     console_fd: Int,
     serial: Bool = False,
+    initial_failing: Int = 0,
 ) raises -> PoolBatchResult:
     """Drive one batch of files' build-run pipelines at capacity `workers`.
 
@@ -383,6 +384,10 @@ def _run_pool_batch[
         serial: Whether this is the serial pass, run at one worker after the
             parallel batch. Each file's terminal verdict then carries the
             informal `serial` annotation.
+        initial_failing: The failing-entry count earlier batches already
+            charged against `--maxfail`, so the serial pass continues the
+            run-wide tally instead of restarting it. Zero for the gate and
+            parallel batches.
 
     Returns:
         What the batch folds back into `run_session`.
@@ -422,11 +427,22 @@ def _run_pool_batch[
     # The kernel serves as the stop-policy oracle: gates are always exit-first,
     # the run batch honors the config's `-x`/`--maxfail`. `record_verdict`'s 8a
     # guard keeps a straggling limit verdict from downgrading a latched halt.
+    # A later batch (the serial pass) continues the run-wide `--maxfail` tally
+    # rather than restarting it: subtract the failing entries earlier batches
+    # already counted so the ceiling is global, not per-batch. Because
+    # `record_verdict` halts when this batch's local failing count reaches the
+    # pipeline's `maxfail`, a `maxfail` lowered by `initial_failing` halts at
+    # exactly the global total. `initial_failing` is 0 for the gate and parallel
+    # batches, which start the count fresh; the serial batch only runs when the
+    # parallel batch did NOT halt, so the lowered ceiling stays >= 1.
+    var batch_maxfail = 0 if is_gate else config.maxfail
+    if batch_maxfail > 0 and initial_failing > 0:
+        batch_maxfail = max(1, batch_maxfail - initial_failing)
     var pipeline = RunPipeline(
         n,
         config.retries,
         True if is_gate else config.exitfirst,
-        0 if is_gate else config.maxfail,
+        batch_maxfail,
     )
 
     var supervisor = Supervisor(workers)
@@ -443,6 +459,9 @@ def _run_pool_batch[
     var last_completed = -1
     var last_running_sig = String("")
     var last_progress_ns = 0
+    # Set when a slot's native open (not a per-child exec) raises mid-dispatch;
+    # a machinery fault the batch resolves to exit 3, like a `wait_any` fault.
+    var machinery_fault = False
 
     while True:
         # Scheduling boundary: a pending interrupt tears the batch down at once,
@@ -455,6 +474,14 @@ def _run_pool_batch[
             except:
                 pass
             break
+
+        # A dead machine stream (a closed `--json` consumer) is fatal: stop
+        # dispatching new files at once, exactly as the sequential path breaks
+        # its loop, so the pool never builds and runs the rest of the batch into
+        # a broken pipe. In-flight files drain; the remainder lands NOT-RUN, and
+        # the session resolves the dead stream to exit 3.
+        if not stop_scheduling and reporter.stream_failed():
+            stop_scheduling = True
 
         # Fill open slots: a ready run first (free), else the earliest pending
         # build the token budget admits.
@@ -481,12 +508,16 @@ def _run_pool_batch[
                 if as_run:
                     var run_argv = List[String]()
                     run_argv.append(state[picked].out_bin)
-                    _ = supervisor.spawn(
-                        ProcessSpec.command_in(
-                            run_argv^, root, config.timeout_secs * 1000
-                        ),
-                        picked,
-                    )
+                    try:
+                        _ = supervisor.spawn(
+                            ProcessSpec.command_in(
+                                run_argv^, root, config.timeout_secs * 1000
+                            ),
+                            picked,
+                        )
+                    except:
+                        machinery_fault = True
+                        break
                     state[picked].phase = _RUNNING
                     state[picked].dispatch_ns = Int(perf_counter_ns())
                 else:
@@ -513,22 +544,41 @@ def _run_pool_batch[
                         env_extra.append(
                             "MODULAR_CACHE_DIR=" + state[picked].quarantine_dir
                         )
-                    _ = supervisor.spawn(
-                        ProcessSpec.command_in(
-                            spawn_argv^,
-                            root,
-                            config.compile_timeout_secs * 1000,
-                            _COMPILE_GRACE_MS,
-                            env_extra^,
-                        ),
-                        picked,
-                    )
+                    try:
+                        _ = supervisor.spawn(
+                            ProcessSpec.command_in(
+                                spawn_argv^,
+                                root,
+                                config.compile_timeout_secs * 1000,
+                                _COMPILE_GRACE_MS,
+                                env_extra^,
+                            ),
+                            picked,
+                        )
+                    except:
+                        machinery_fault = True
+                        break
                     state[picked].phase = _BUILDING
                     state[picked].dispatch_ns = Int(perf_counter_ns())
                     tokens_in_use += k
                     if not state[picked].started_emitted:
                         reporter.handle(Event.file_started(state[picked].rel))
                         state[picked].started_emitted = True
+
+        # A slot's native open failure (e.g. the descriptor ceiling) raised out
+        # of `spawn`. It is a machinery fault, NOT a per-child spawn failure, so
+        # resolve it to exit 3 and abandon the rest — never let it escape to the
+        # session's usage-error (exit 4) catch. `errno` 0 marks a machinery raise
+        # rather than a child spawn errno.
+        if machinery_fault:
+            reporter.handle(Event.internal_error("build", config.mojo_path, 0))
+            result.internal_error = True
+            pipeline.halt_internal_error()
+            try:
+                supervisor.kill_all()
+            except:
+                pass
+            break
 
         if supervisor.in_flight() == 0:
             break
@@ -800,7 +850,13 @@ def _run_pool_batch[
             try:
                 supervisor.kill_all()
             except:
-                pass
+                # A gate abort resolves to exit 1 through its failing outcome.
+                # But a cleanup that cannot honestly tear the groups down is a
+                # machinery fault, which outranks that outcome: escalate to
+                # exit 3 rather than let the gate's exit 1 mask it. (The
+                # interrupt paths above already resolve to exit 2, which
+                # dominates, so they need no escalation.)
+                result.internal_error = True
             break
 
     # Batch terminal: erase any counter still on the terminal and flush the last

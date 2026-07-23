@@ -171,10 +171,17 @@ def run_session[
     # cap, clamping loudly. A hard environment fault (a descriptor ceiling too
     # small for a single child) is folded as an internal error below, resolving
     # to exit 3 the same as any other machinery failure.
+    # Selection (`-k` or a node id) runs through the sequential selection
+    # sub-session, which the pool does not drive, so a worker request cannot be
+    # honored there. Resolve to one worker under selection so the header reports
+    # the truthful sequential mode instead of a parallelism the run never uses,
+    # and `--serial` stays a consistent no-op (the selection run is already
+    # one file at a time).
+    var sel_active = selection_active(config.paths, config.keyword)
     var resolved_workers = 1
     var worker_clamp_note = String("")
     var worker_env_error = False
-    if config.workers != 1:
+    if config.workers != 1 and not sel_active:
         try:
             var wp = resolve_worker_plan(config)
             resolved_workers = wp.resolved
@@ -424,7 +431,7 @@ def run_session[
     # to gate malformed syntax a second time — see
     # `test_malformed_node_id_raises_even_when_a_gate_fails` in
     # tests/integration/test_session_selection.mojo for the pinned regression.
-    var sel_active = selection_active(config.paths, config.keyword)
+    # `sel_active` is resolved once up top (it also forces one worker).
 
     # Run files. Under selection, the run set is probed then run through the
     # selection sub-session; otherwise the plain build-then-run loop applies.
@@ -491,10 +498,13 @@ def run_session[
         # cannot admit the next file's build until the current file's verdict
         # frees it, and a file holds its slot through build → run → any retries,
         # so no two serial files (nor a serial and a parallel file) ever overlap.
-        # `-x`/`--maxfail` and interrupts span BOTH batches, mirroring how a
-        # failing gate gates the run batch: if the parallel batch already halted
-        # on its limit, aborted on an interrupt, or hit a machinery fault, the
-        # serial files land NOT-RUN rather than starting fresh work.
+        # `-x`/`--maxfail` and interrupts span BOTH batches. If the parallel
+        # batch already halted on its limit, aborted on an interrupt, or hit a
+        # machinery fault, the serial files land NOT-RUN rather than starting
+        # fresh work (`stop_serial`). Otherwise the serial pass CONTINUES the
+        # run-wide `--maxfail` tally: it is seeded with the parallel batch's
+        # failing count so the ceiling counts failures across both batches
+        # instead of resetting to zero at the boundary.
         var stop_serial = rb.interrupted or rb.internal_error or rb.halted
         if len(split.serial) > 0 and not stop_serial:
             var sb = _run_pool_batch(
@@ -510,6 +520,7 @@ def run_session[
                 False,
                 console_fd,
                 serial=True,
+                initial_failing=_failing_count(rb.run_outcomes),
             )
             run_outcomes.extend(sb.run_outcomes.copy())
             test_totals.passed += sb.test_totals.passed

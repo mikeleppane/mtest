@@ -154,6 +154,37 @@ def test_pool_maxfail_stops_scheduling_the_remainder() raises:
     )
 
 
+def test_maxfail_count_spans_the_parallel_and_serial_batches() raises:
+    # The run-wide `--maxfail` tally must NOT reset at the parallel->serial
+    # boundary. One parallel failure plus one serial failure reaches
+    # `--maxfail 2`, so the second serial file lands NOT-RUN. Before the fix the
+    # serial batch started a fresh count and ran both serial files.
+    var root = temp_root()
+    write_file(root, "tests/test_par_fail.mojo", SRC_FAIL)
+    write_file(root, "tests/test_par_pass.mojo", SRC_PASS)
+    write_file(root, "tests/test_serial_1.mojo", SRC_FAIL)
+    write_file(root, "tests/test_serial_2.mojo", SRC_FAIL)
+
+    var config = base_config()
+    config.workers = 2
+    config.maxfail = 2
+    config.serial_globs.append("*serial*")
+
+    var comp = _recorder()
+    var code = run_session(config, root, comp)
+
+    assert_equal(code, 1)
+    ref rec = comp.composite.reporters[0]
+    var last = rec.event_at(rec.count() - 1)
+    # 1 parallel FAIL + 1 serial FAIL == --maxfail 2, so the last serial file is
+    # NOT-RUN. A per-batch reset would have run both serial files (0 NOT-RUN).
+    assert_equal(
+        last.data[SessionFinishedPayload].summary.count_of(Outcome.NOT_RUN),
+        1,
+        "the --maxfail tally must span the parallel and serial batches",
+    )
+
+
 def test_pool_failing_gate_aborts_the_run() raises:
     var root = temp_root()
     write_file(root, "tests/test_gate.mojo", SRC_FAIL)
