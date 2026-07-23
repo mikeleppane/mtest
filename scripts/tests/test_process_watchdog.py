@@ -205,7 +205,7 @@ def test_in_process_signal_is_structured_as_signaled() -> None:
 
 def test_invalid_run_command_timeouts_never_spawn_payloads() -> None:
     """Non-finite and over-ceiling direct calls fail before creating a child."""
-    for timeout_seconds in (math.nan, math.inf, -math.inf, 301.0):
+    for timeout_seconds in (math.nan, math.inf, -math.inf, 901.0):
         with tempfile.TemporaryDirectory(prefix="mtest-watchdog-") as raw_tmp:
             marker = Path(raw_tmp) / "payload-started"
             sentinel = Path(raw_tmp) / "deadline-sentinel"
@@ -234,8 +234,8 @@ def test_invalid_run_command_timeouts_never_spawn_payloads() -> None:
 
 
 def test_parser_rejects_invalid_timeouts_before_payload_start() -> None:
-    """CLI timeout values reject NaN, infinities, and values above 300 seconds."""
-    for timeout_seconds in ("nan", "inf", "-inf", "301"):
+    """CLI timeout values reject NaN, infinities, and values above 900 seconds."""
+    for timeout_seconds in ("nan", "inf", "-inf", "901"):
         with tempfile.TemporaryDirectory(prefix="mtest-watchdog-") as raw_tmp:
             marker = Path(raw_tmp) / "payload-started"
             result = _run(
