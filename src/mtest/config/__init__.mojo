@@ -2,12 +2,14 @@
 
 Centered on `RunnerConfig`, the typed home for every knob the session reads,
 `CliOverlay`, the presence-aware values supplied by argv, and `FileConfig`, the
-typed presence-aware `mtest.toml` layer. Alongside them live the closed
-vocabularies that name a config choice (`ShowOutput`, `Verbosity`, `ColorWhen`,
-`ShardMode`, `AnnotationsMode`), source-neutral single-value validators, the
-mojo-path resolution helper, the shell-quoting helpers (`shell_quote`,
-`shell_join`) that every reproduce line is rendered through, and the
-byte-to-text codec (`lossy_utf8`) that every captured stream is decoded with.
+typed presence-aware `mtest.toml` layer. `ResolvedConfig` carries layered
+values, per-key provenance, ordered overrides, and command-active key metadata.
+Alongside them live the closed vocabularies that name a config choice
+(`ShowOutput`, `Verbosity`, `ColorWhen`, `ShardMode`, `AnnotationsMode`),
+source-neutral single-value validators, the mojo-path resolution helper, the
+shell-quoting helpers (`shell_quote`, `shell_join`) that every reproduce line
+is rendered through, and the byte-to-text codec (`lossy_utf8`) that every
+captured stream is decoded with.
 
 This layer is data plus pure helpers: no argv parsing, environment or file
 reads, spawning, or printing. `toml_bridge` is the single exception to
@@ -29,6 +31,13 @@ from mtest.config.lossy_utf8 import lossy_utf8
 from mtest.config.mojo_path import resolve_mojo_path
 from mtest.config.overlay import CliOverlay
 from mtest.config.precompile import Precompile
+from mtest.config.provenance import ConfigProvenance, Provenance
+from mtest.config.resolve import (
+    ActiveConfigKeys,
+    ConfigEnvironment,
+    ResolvedConfig,
+    resolve_config,
+)
 from mtest.config.runner_config import RunnerConfig
 from mtest.config.shell_quote import shell_join, shell_quote
 from mtest.config.shard_mode import ShardMode
