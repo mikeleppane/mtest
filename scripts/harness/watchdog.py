@@ -15,7 +15,12 @@ from collections.abc import Sequence
 from pathlib import Path
 
 
-DEFAULT_TIMEOUT_SECONDS = 300.0
+# The per-step wall-clock ceiling. It bounds a single classified build or run so
+# a hang is terminated rather than stalling CI. The integration aggregate compiles
+# and runs many worker-pool files in one binary; on a slow, contended CI host that
+# legitimate run needs well over five minutes, so the ceiling sits at fifteen to
+# leave headroom above the real workload while still catching a genuine hang.
+DEFAULT_TIMEOUT_SECONDS = 900.0
 TERMINATION_GRACE_SECONDS = 5.0
 TIMEOUT_EXIT_CODE = 124
 _FORWARDED_SIGNALS = (signal.SIGINT, signal.SIGTERM)

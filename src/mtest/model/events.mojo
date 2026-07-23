@@ -54,6 +54,7 @@ struct EventKind(Equatable, ImplicitlyCopyable, Movable):
     comptime COLLECTION_KNOWN = Self(8)
     comptime ATTEMPT_FINISHED = Self(9)
     comptime CRASH_ATTRIBUTION = Self(10)
+    comptime PROGRESS = Self(11)
 
     def __eq__(self, other: Self) -> Bool:
         """Two kinds are equal iff their discriminants match."""
@@ -135,6 +136,8 @@ struct SessionStartedPayload(EventPayload):
     unsharded."""
     var sharded_out_count: Int
     """How many selected files this shard handed off to other shards."""
+    var workers: Int
+    """The resolved worker count for the run; 1 for a sequential run."""
 
 
 @fieldwise_init
@@ -257,6 +260,9 @@ struct FileFinishedPayload(EventPayload):
     var stderr_truncated: Bool
     """Whether the file-scope process result's stderr was truncated by the
     capture bound, propagated by the session."""
+    var serial: Bool
+    """Whether the file ran on the sequential path rather than a worker; True
+    for a serial run."""
 
 
 @fieldwise_init
@@ -399,6 +405,30 @@ struct CrashAttributionPayload(EventPayload):
     """The wall time the attribution pass took, in seconds."""
 
 
+@fieldwise_init
+struct ProgressPayload(EventPayload):
+    """The `PROGRESS` payload: a live in-flight tick.
+
+    Console-only, ephemeral, and never serialized to any machine stream. It
+    carries the transient counters a TTY progress line renders and is dropped
+    the moment it is consumed, so no reporter latches it and the NDJSON stream
+    excludes it by design.
+    """
+
+    comptime KIND = EventKind.PROGRESS
+
+    var completed: Int
+    """How many files have finished so far."""
+    var total: Int
+    """How many files the run will process in total."""
+    var running_paths: List[String]
+    """The paths currently in flight, index-aligned with
+    `running_elapsed_seconds`."""
+    var running_elapsed_seconds: List[Float64]
+    """The elapsed wall time of each in-flight file, in seconds, index-aligned
+    with `running_paths`."""
+
+
 comptime EventData = Variant[
     SessionStartedPayload,
     WarningPayload,
@@ -411,6 +441,7 @@ comptime EventData = Variant[
     CollectionKnownPayload,
     AttemptFinishedPayload,
     CrashAttributionPayload,
+    ProgressPayload,
 ]
 """The closed set of event payloads, one arm per `EventKind`."""
 
@@ -454,6 +485,7 @@ struct Event(Copyable, Movable):
         excluded_count: Int,
         shard_label: String = "",
         sharded_out_count: Int = 0,
+        workers: Int = 1,
     ) -> Event:
         """The run began.
 
@@ -466,6 +498,8 @@ struct Event(Copyable, Movable):
                 Empty for an unsharded run.
             sharded_out_count: How many selected files this shard handed off to
                 other shards.
+            workers: The resolved worker count for the run; 1 for a sequential
+                run.
 
         Returns:
             A SESSION_STARTED event.
@@ -478,6 +512,7 @@ struct Event(Copyable, Movable):
                 excluded_count,
                 shard_label,
                 sharded_out_count,
+                workers,
             )
         )
 
@@ -590,6 +625,7 @@ struct Event(Copyable, Movable):
         escalated: Bool = False,
         stdout_truncated: Bool = False,
         stderr_truncated: Bool = False,
+        serial: Bool = False,
     ) -> Event:
         """A file's run finished, carrying the data the reporter renders from.
 
@@ -625,6 +661,8 @@ struct Event(Copyable, Movable):
                 or had to be killed. Available even with no retry in play.
             stdout_truncated: Whether stdout overflowed the capture bound.
             stderr_truncated: Whether stderr overflowed the capture bound.
+            serial: Whether the file ran on the sequential path rather than a
+                worker; True for a serial run.
 
         Returns:
             A FILE_FINISHED event.
@@ -653,6 +691,7 @@ struct Event(Copyable, Movable):
                 escalated,
                 stdout_truncated,
                 stderr_truncated,
+                serial,
             )
         )
 
@@ -840,5 +879,38 @@ struct Event(Copyable, Movable):
                 culprit_test,
                 isolation_reruns,
                 attribution_seconds,
+            )
+        )
+
+    @staticmethod
+    def progress(
+        completed: Int,
+        total: Int,
+        var running_paths: List[String],
+        var running_elapsed_seconds: List[Float64],
+    ) -> Event:
+        """A live in-flight progress tick for the console counter.
+
+        Console-only and ephemeral: the machine stream never serializes this
+        kind, so it carries the transient counters a TTY line renders and
+        nothing a consumer would need to recover after the fact.
+
+        Args:
+            completed: How many files have finished so far.
+            total: How many files the run will process in total.
+            running_paths: The paths currently in flight, index-aligned with
+                `running_elapsed_seconds`. Consumed.
+            running_elapsed_seconds: The elapsed wall time of each in-flight
+                file, in seconds, index-aligned with `running_paths`. Consumed.
+
+        Returns:
+            A PROGRESS event.
+        """
+        return Event(
+            ProgressPayload(
+                completed,
+                total,
+                running_paths^,
+                running_elapsed_seconds^,
             )
         )

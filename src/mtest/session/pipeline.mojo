@@ -177,6 +177,12 @@ struct _PipelineFile(Copyable, Movable):
     """Whether the stale-name recover-once budget has been spent."""
     var attempt: Int
     """The 1-based crash-class attempt this file's next run would be."""
+    var in_flight: Bool
+    """Whether this file has been dispatched to the driver and is awaiting its
+    completion. The scheduler skips an in-flight file, so no file is ever handed
+    out twice; folding the file's completion clears it. Always False on the
+    capacity-one sequential path, which records each completion before it asks
+    for the next step."""
 
 
 struct RunPipeline(Movable):
@@ -223,7 +229,9 @@ struct RunPipeline(Movable):
         self._files = List[_PipelineFile]()
         for _ in range(file_count):
             self._files.append(
-                _PipelineFile(FileStage.NEEDS_BUILD, False, False, False, 1)
+                _PipelineFile(
+                    FileStage.NEEDS_BUILD, False, False, False, 1, False
+                )
             )
         self._announced = False
         self._halt = PipelineHalt.RUNNING
@@ -253,10 +261,13 @@ struct RunPipeline(Movable):
     def next_step(self) -> StepRequest:
         """The step the run wants performed now.
 
-        Scans in discovery order, so exactly one file is in flight and the
-        order matches a sequential run: each file is built and probed before
-        the next is, the collection totals are announced once every file has
-        left the front half, and only then does any file run.
+        Scans in discovery order, so on the sequential path exactly one file is
+        in flight and the order matches a sequential run: each file is built and
+        probed before the next is, the collection totals are announced once
+        every file has left the front half, and only then does any file run. A
+        file the driver has marked in flight is skipped, so a driver that fills
+        more than one slot — the parallel pool — never receives the same file
+        twice.
 
         Returns:
             The next step, or a `NOTHING` request when the run has halted or
@@ -265,8 +276,11 @@ struct RunPipeline(Movable):
         if self._halt != PipelineHalt.RUNNING:
             return StepRequest.nothing()
 
-        # Front half: build then probe every file, in discovery order.
+        # Front half: build then probe every file, in discovery order. A file
+        # already dispatched is skipped so it is never handed out twice.
         for i in range(len(self._files)):
+            if self._files[i].in_flight:
+                continue
             var stage = self._files[i].stage
             if stage == FileStage.NEEDS_BUILD:
                 return StepRequest(StepKind.BUILD_FILE, i, 0, False)
@@ -278,9 +292,12 @@ struct RunPipeline(Movable):
         if not self._announced:
             return StepRequest(StepKind.ANNOUNCE_COLLECTION, -1, 0, False)
 
-        # Back half: settle each file in discovery order.
+        # Back half: settle each file in discovery order. A file already
+        # dispatched is skipped so it is never handed out twice.
         for i in range(len(self._files)):
             ref f = self._files[i]
+            if f.in_flight:
+                continue
             if f.stage == FileStage.COLLECTED:
                 if f.terminal:
                     return StepRequest(StepKind.REPLAY_TERMINAL, i, 0, False)
@@ -295,12 +312,33 @@ struct RunPipeline(Movable):
                 return StepRequest(StepKind.PROBE_FILE, i, 0, True)
         return StepRequest.nothing()
 
+    def mark_in_flight(mut self, index: Int):
+        """Reserve one file as dispatched, so the scheduler skips it.
+
+        The driver calls this once it has handed a file's step off for execution
+        but before the completion is folded back. `next_step` then never
+        re-offers that file, so a driver that fills more than one slot — the
+        parallel pool — cannot dispatch the same file twice. Folding the file's
+        completion (any `record_*`/`admit_*` call) releases the reservation. The
+        capacity-one sequential driver never calls this: it records each
+        completion before it asks for the next step, so no file is ever in
+        flight when `next_step` runs.
+
+        Args:
+            index: The dispatched file's index. A negative index — the
+                `ANNOUNCE_COLLECTION`/`NOTHING` sentinel — reserves nothing.
+        """
+        if index < 0:
+            return
+        self._files[index].in_flight = True
+
     def record_build_ready(mut self, index: Int):
         """Fold a successful build: the file is ready to be probed.
 
         Args:
             index: The built file's index.
         """
+        self._files[index].in_flight = False
         if self._files[index].stage == FileStage.NEEDS_REBUILD:
             self._files[index].stage = FileStage.NEEDS_REPROBE
         else:
@@ -312,6 +350,7 @@ struct RunPipeline(Movable):
         Args:
             index: The file's index.
         """
+        self._files[index].in_flight = False
         if self._files[index].stage == FileStage.NEEDS_REBUILD:
             self._files[index].stage = FileStage.FINISHED
         else:
@@ -328,6 +367,7 @@ struct RunPipeline(Movable):
                 recovery re-probe runs whatever it reselected, exactly as the
                 recovery loop it replaces did.
         """
+        self._files[index].in_flight = False
         if self._files[index].stage == FileStage.NEEDS_REPROBE:
             self._files[index].stage = FileStage.NEEDS_RUN
             return
@@ -342,6 +382,7 @@ struct RunPipeline(Movable):
         Args:
             index: The probed file's index.
         """
+        self._files[index].in_flight = False
         if self._files[index].stage == FileStage.NEEDS_REPROBE:
             self._files[index].stage = FileStage.FINISHED
         else:
@@ -368,6 +409,7 @@ struct RunPipeline(Movable):
             `NEEDS_REBUILD`; False when it was already spent and the driver
             must settle the file itself.
         """
+        self._files[index].in_flight = False
         if self._files[index].rebuilt_once:
             return False
         self._files[index].rebuilt_once = True
@@ -385,6 +427,7 @@ struct RunPipeline(Movable):
             advanced; False when the budget is exhausted and the driver must
             settle the file on this attempt.
         """
+        self._files[index].in_flight = False
         if self._files[index].attempt >= self._attempts_planned:
             return False
         self._files[index].attempt += 1
@@ -405,7 +448,16 @@ struct RunPipeline(Movable):
                 against. The driver supplies it, so the count stays the one the
                 accounting already keeps.
         """
+        self._files[index].in_flight = False
         self._files[index].stage = FileStage.FINISHED
+        # Never downgrade a stronger halt. An interrupt or an internal error
+        # already latched outranks the `-x`/`--maxfail` limit, and a completion
+        # folded after one of those latched — a straggling verdict the pool
+        # drains once capacity exceeds one — must not overwrite it. Unreachable
+        # on the capacity-one sequential path, which stops scheduling the moment
+        # any halt latches.
+        if self._halt != PipelineHalt.RUNNING:
+            return
         if self._exitfirst and outcome_is_failing:
             self._halt = PipelineHalt.LIMIT_REACHED
             return
@@ -422,6 +474,7 @@ struct RunPipeline(Movable):
         Args:
             index: The settled file's index.
         """
+        self._files[index].in_flight = False
         self._files[index].stage = FileStage.FINISHED
 
     def halt_interrupted(mut self):

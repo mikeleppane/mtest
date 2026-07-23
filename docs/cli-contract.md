@@ -77,7 +77,7 @@ single **invocation root**. In v1 the root is the **current working directory**.
 | `--precompile SRC[:OUT]` | ✓ | ✓ |
 | `--mojo PATH` | ✓ | ✓ |
 | `-x`, `--maxfail N` | ✓ | — |
-| `-n, --workers N` | ✓ | ✓ |
+| `-n, --workers N\|auto` | ✓ | ✓ |
 | `--shard M/N` | ✓ | ✓ |
 | `--serial GLOB` | ✓ | — |
 | `--timeout`, `--compile-timeout` | ✓ | ✓ (compile only) |
@@ -227,15 +227,20 @@ as a casualty, and exits 1.
 
 The runner owns its output artifacts and its source list. Build arguments that
 would take that control away are rejected as usage errors (exit 4): output
-selection (`-o`), emit-type selection (`--emit`), and any **extra source
-operand** (a positional path handed to `mojo build`). This applies to
-`--build-arg`, to `-I` misuse, and to post-`--` arguments alike.
+selection (`-o`), emit-type selection (`--emit`), build parallelism (`-j`,
+`--num-threads`, §18), and any **extra source operand** (a positional path
+handed to `mojo build`). This applies to `--build-arg`, to `-I` misuse, and to
+post-`--` arguments alike.
 
-This build does not manage a build thread budget — there is no worker pool yet
-(§24), so a build spends whatever `mojo build` chooses by default. A build
-thread-count argument (`-j`, `--num-threads`) is therefore **not** a forbidden
-argument today; it is forwarded like any other `--build-arg`. Ownership of the
-build's parallelism arrives with the worker pool.
+The runner owns the build thread budget: the worker pool spawns each build as
+`mojo build --num-threads K` for a `K` drawn from a cores-wide token budget
+(§18), so a user-supplied build thread-count argument (`-j`, `--num-threads`) is
+a forbidden build argument (exit 4), rejected like `-o` and `--emit` — it would
+fight the runner for the machine's cores. The rejection names `-n`/`--workers`
+as the supported way to set parallelism. The one place `--num-threads` appears
+is the runner's own build spawn; a COMPILE-TIMEOUT reproduce line prints that
+effective `--num-threads K` with the deadline, so the reproduce stays faithful —
+that is the runner's flag, not a forwarded user argument.
 
 ---
 
@@ -373,7 +378,8 @@ rebuilt.
   crash signature), a spawn failure, and an interrupt.
 - Each attempt uses a fresh output path; after a **compile** kill the rebuild
   runs against a quarantined per-attempt module cache, since a killed compile
-  can corrupt the shared one. Each attempt is bounded by the same `--timeout` /
+  could in principle leave the shared cache in a state the quarantine probe could
+  not rule out. Each attempt is bounded by the same `--timeout` /
   `--compile-timeout` budget as the first.
 - Every attempt's diagnostics are retained in the report. The **last** attempt's
   outcome is authoritative. A test that passes only after a retry is reported
@@ -416,12 +422,19 @@ run's stdout carries only stream lines. `--color auto` decides against that
 **resolved** destination: stdout's terminal-ness normally, stderr's when the
 console is relocated there.
 
-There is **no live progress counter** in this build (a running `k/n` line, which
-arrives with the worker pool); a file's result prints when the file finishes, and
-the summary band, the slowest-files list, and the failure detail (per-attempt
-`TRY` lines from `--retries`, verdict blocks) all print at completion. The
-deterministic surfaces (§17) — the summary band and the sort *order* of any list
-— never depend on completion order.
+A **live progress counter** — a running `completed/total` line naming the files
+currently in flight — is drawn during a parallel run (`-n`/`--workers` > 1). It is
+a **terminal-only** affordance: it renders solely when the resolved console
+destination (§15.1, stdout or the relocated stderr under `--json -`) is a TTY, is
+**erased before** each finished file's result block prints and redrawn beneath it,
+is throttled (at most a few updates per second), and is **suppressed under `-q`**.
+It is **informal** (§20): it writes no bytes to a non-terminal (piped or
+redirected) destination, never appears in the `--json` stream (§15.4, the
+`progress` kind is excluded by design), is never part of the §17 determinism
+guarantee, and a sequential run (the default, one worker) shows no counter at all.
+A file's result still prints when the file finishes; the summary band, the
+slowest-files list, and the failure detail all print at completion, and the
+deterministic surfaces (§17) never depend on completion order.
 
 **The `SLOW` annotation.** A build or run step whose wall time reaches **60 s**
 is flagged `SLOW`. It is an **informal** annotation, never an outcome: it does
@@ -430,6 +443,13 @@ exit code, and is not part of the §17 determinism guarantee. Under `-v` the not
 names *which* step (build or run) crossed the threshold and its duration, so a
 comptime-stalled compile is visible at 60 s rather than only at the 600 s
 compile deadline.
+
+**The `SERIAL` annotation.** A file pinned by `--serial` (§18) and run
+one-at-a-time on the serial pass carries an informal `SERIAL` marker on its
+result line. Like `SLOW` it is an annotation, never an outcome: it does not
+appear in the outcome vocabulary (§10.1), never changes a verdict or the exit
+code, and is not part of the §17 determinism guarantee. The machine stream
+carries the same fact as the FileFinished `serial` field (§15.4).
 
 **Slowest files — `--durations N`** (`N` a non-negative integer). After the
 summary band, print the `N` slowest **files** by run-only wall-clock (the process time for the run step
@@ -594,8 +614,9 @@ this section summarizes it.
   appear). Line 1 is the frozen header `{"event":"stream","version":1,
   "generator":"mtest <version>"}`.
 - **Events.** The stream mirrors every session event the console reporter sees,
-  with the `progress` kind **excluded** (there is no live progress in this build,
-  §15.1). Each record mirrors the model's payload 1:1 under its own field names.
+  with the `progress` kind **excluded** by design: it is ephemeral,
+  console-only, and never serialized. Each record mirrors the model's payload
+  1:1 under its own field names.
 - **`*_us` durations.** The sole naming exception: every `*_seconds` duration is
   emitted as an integer-microsecond `*_us` field, so the stream carries no
   floating-point value.
@@ -701,11 +722,35 @@ fields.
 
 ## 18. Concurrency
 
-`-n, --workers N|auto` sets the worker count. `auto` sizing is runner-chosen and
-may tune across minor versions. Because `mojo build` is itself multi-threaded,
-`auto` is conservative (stacked cold compiles starve each other). The worker
-pool is a later concurrency milestone: **`-n`/`--workers` is not served in this
-build** (§24), which runs files sequentially.
+`-n, --workers N|auto` sets the worker count; files run concurrently across the
+pool while each file's own steps (build → run → retries) stay strictly ordered.
+**The default is one worker** — with no flag, files run sequentially and the
+build argv is byte-identical to a single-worker build. `auto` sizing is
+runner-chosen and may tune across minor versions: it is a stable *intent*
+(benchmark-informed — half the logical cores — taking half rather than the whole
+machine to leave headroom for other work and bound capture memory, not because
+extra workers starve each other on build threads), not a stable number. Concurrent builds share a
+cores-wide thread budget: each build spawns `mojo build --num-threads K` for
+`K = max(1, cores // min(workers, cores))`, so the builds' threads never
+oversubscribe the machine (a user `-j`/`--num-threads` is forbidden, §8.4); a
+run takes no build thread. The resolved worker count is capped by the
+environment's effective file-descriptor ceiling: a request above it is **clamped
+with a loud warning** that names the cap, and the resolved count — never the
+request — is what the run uses and what the machine stream reports (§15.4).
+
+**Sizing `-n`.** The `auto` count is benchmark-informed: a worker-sizing
+benchmark measured scaling that keeps paying well past a handful of workers, so
+`auto` is `max(1, cores // 2)` — half the logical cores. Half rather than all of
+them is deliberate politeness, not a scaling limit: it leaves cores for other
+work and keeps the peak output-capture memory in check. That memory is the other
+reason to size `-n` with care — each in-flight worker holds up to **16 MiB** of
+output-capture buffers at peak (8 MiB for stdout and 8 MiB for stderr per child),
+so `N` workers can hold up to `N × 16 MiB` at once, and `auto` at half the cores
+bounds that at `cores // 2 × 16 MiB`. It is a worst case, reached only when
+children actually emit that much output; the capture is bounded and keeps the
+head and tail while dropping the middle (§14), never growing without limit. A
+memory-constrained environment should lower `-n` accordingly. `auto` remains an
+*intent*, not a promised number (it may tune across minor versions).
 
 `--timeout SECS` (default 300, `0` disables) bounds a single file's **run**;
 exceeding it yields TIMEOUT. `--compile-timeout SECS` (default 600, `0`
@@ -742,13 +787,19 @@ this shard does not own is not this shard's to reject. Sharded-out files are
 **counted, not listed** (§10.2), and a shard that owns no run files falls under
 the empty-collection exit code (§9).
 
-**`--serial GLOB` (not yet served, repeatable).** Pins every file matching
-`GLOB` to run outside the parallel pool, one at a time, for suites with a
-shared resource (a port, a device) that cannot tolerate concurrent access.
-Each occurrence adds one glob pattern; `--serial` is a **run-only** flag (§4).
-It is part of the frozen v1 contract, recognized by the parser, but refused
-before any test runs (§24) — it ships with the worker pool, since serial
-pinning is only meaningful once tests would otherwise run in parallel.
+**`--serial GLOB` (repeatable).** Pins every file matching `GLOB` to run outside
+the parallel pool, one at a time, for suites with a shared resource (a port, a
+device) that cannot tolerate concurrent access. Each occurrence adds one glob
+pattern; `--serial` is a **run-only** flag (§4). Matching uses the same
+whole-path glob as `--exclude` (§12). Serial files run **after** the parallel
+files (serial-last), one whole pipeline at a time: a serial file's build, run,
+and any retries all complete — and every parallel slot has drained — before the
+next serial file is admitted, so no two serial files (nor a serial and a parallel
+file) ever overlap. A `--serial` pattern that matches no discovered file is
+reported as a **stale** pattern with a loud warning, exactly as a stale
+`--exclude` is. At one worker (`-n 1` or the default) the run is already
+sequential, so `--serial` changes nothing but the stale-pattern check. A serial
+file's result line carries an informal `SERIAL` marker (§15.1).
 
 ---
 
@@ -894,7 +945,8 @@ above — it only reports which of those surfaces are wired up yet.
 **Served** (parsed into real behavior): positional `PATHS`, `-k`, `--exclude`,
 `-I`, `--build-arg` (and post-`--` passthrough), `--precompile`, `--mojo`,
 `-x`/`--exitfirst`, `--maxfail`, `--timeout`, `--compile-timeout`, `--retries`,
-`--shard`, `--gate`, `-s`/`--show-output`, `--durations`, `-q`/`-v`, `--color`,
+`--shard`, `-n`/`--workers`, `--serial`, `--gate`, `-s`/`--show-output`,
+`--durations`, `-q`/`-v`, `--color`,
 `-h`/`--help`, `--version`, and the `run`, `collect`, `version`, and `help`
 subcommands (`--collect-only` too, as an alias that behaves as `collect`).
 `--shard` applies under both `run` and `collect`. `--json` (the machine event
@@ -902,23 +954,8 @@ stream, §15.4), `--junit-xml` (the JUnit report, §15.2), and `--gh-annotations
 (the CI annotation tail, §15.3) are served too — see §24.2 for how they are now
 reached.
 
-**Still refused**: `-n`/`--workers`, `--serial`. Each is recognized by the
-parser — it knows the spelling and its arity — but is **refused before any test
-runs**, with a usage error that names the flag, states that it is part of the v1
-contract, names the capability that brings it (`-n`/`--workers` arrive with
-parallel workers; `--serial` arrives with serial execution pinning), and lists
-what this build does serve.
-
-**A transitional exit-4 subcase.** That refusal is a usage error and exits 4,
-but it is a distinct, *temporary* subcase of §9's exit code 4 — it is not one
-of the causes the frozen table enumerates (unknown flag, bad value,
-nonexistent path, unknown node id, forbidden build argument). It exists solely
-because this build has not yet wired up every v1 surface; a flag that this
-build does not serve is treated as a usage error rather than silently
-accepted or silently ignored. As each surface above lights up, its refusal
-disappears — once every flag and subcommand in the frozen contract is served,
-this subcase no longer applies and exit 4 reverts to exactly its frozen
-causes.
+Every flag and subcommand in the frozen contract above is now served: nothing is
+refused for being unavailable, so exit 4 covers exactly its frozen §9 causes.
 
 ### 24.2 Exit codes reachable in this build
 
@@ -930,11 +967,12 @@ today.
   MALFORMED-SUITE, and PRECOMPILE-ERROR. FLAKY (a pass produced only after a
   crash-class retry) is also emitted now, and, being a pass, does **not** raise
   the exit code — a FLAKY-only session exits 0.
-- **2** — reachable: an interrupt (SIGINT/SIGTERM) is implemented with
-  sequential-session semantics — a partial summary is printed, the files
-  that had not yet started are reported NOT-RUN, and the active child's
-  process group is cleaned up. The parallel-workers interrupt story arrives
-  with parallel workers.
+- **2** — reachable for both the sequential and the parallel path. An interrupt
+  (SIGINT/SIGTERM) prints a partial summary, reports the files that had not yet
+  started as NOT-RUN, and cleans up every in-flight child's process group with a
+  two-pass terminate-then-kill sweep; a second interrupt escalates to an
+  immediate hard kill of every group, leaving no survivor. The exit is 2
+  regardless of any failing outcome already accounted.
 - **3** — reachable via a spawn failure (the runner could not spawn `mojo` or
   a built binary), via protocol drift (a report present but off-grammar,
   §6) in both `run` and `collect`, and via a runtime `--json`
@@ -943,8 +981,7 @@ today.
   or unwritable file) and the run was fatally aborted.
 - **4** — reachable for every frozen cause in §9 — now including a syntactically
   invalid `--json` destination (an empty value or a nonexistent parent
-  directory), detected pre-run — plus the transitional not-yet-available-flag
-  refusal subcase in §24.1 above.
+  directory), detected pre-run.
 
 **`--json` reachability.** `--json PATH|-` is served (§15.4): it is parsed into a
 live event-stream reporter composed beside the console. Its destination is
@@ -996,8 +1033,9 @@ node-id grammar, and all converge to the contract as the runner matures.
   repeatable flags (`--exclude`, `--gate`, `--build-arg`, `-I`, `--precompile`,
   `--serial`); every other flag is single-valued. The frozen intent is
   at-most-one — e.g. §5 says "at most one `-k` is accepted in v1". This build
-  does not yet reject a repeated single-valued flag (`-k`, `--maxfail`,
-  `--timeout`, `--color`, `--show-output`, `--durations`, `--mojo`): it silently
+  does not yet reject a repeated single-valued flag (`-k`, `-n`/`--workers`,
+  `--maxfail`, `--timeout`, `--color`, `--show-output`, `--durations`,
+  `--mojo`): it silently
   uses the **last** occurrence (so `-k a -k b` filters by `b`, not `a or b`).
   Until the at-most-one check is enforced (a usage error, exit 4), do not rely on
   repeating these flags. The mutually-exclusive `-q`/`-v` pair is already

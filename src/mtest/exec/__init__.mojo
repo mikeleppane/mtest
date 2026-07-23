@@ -13,9 +13,20 @@ from mtest.exec.spec import ProcessSpec
 from mtest.exec.termination import Termination
 from mtest.exec.result import ProcessResult
 from mtest.exec.paths import canonicalize
-from mtest.exec.supervise import run_supervised
+from mtest.exec.supervise import (
+    run_supervised,
+    Supervisor,
+    SlotId,
+    Completion,
+    KillCause,
+    effective_cap,
+    query_effective_cap,
+    decide_kill,
+    escalate_on_interrupt,
+)
 from mtest.exec.signals import (
     ExecRuntime,
     interrupt_requested,
+    interrupt_count,
 )
 from mtest.exec.tty import stderr_isatty, stdout_isatty

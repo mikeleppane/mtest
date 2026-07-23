@@ -12,7 +12,6 @@ warning so a session-level step's attempt line carries the same identity a file
 build's does, and it sits below `session` and `collect`, which both run the
 configured steps before their own work.
 """
-from std.os import getenv, setenv
 from std.os.path import basename, dirname
 
 from mtest.config import RunnerConfig, lossy_utf8
@@ -41,7 +40,6 @@ from mtest.session.scratch import (
     _mangle,
     _precompile_temp_path,
     _quarantine_dir,
-    _restore_cache_env,
 )
 
 
@@ -315,14 +313,13 @@ def _run_precompile(
             argv.append(a)
 
         # NARROW quarantine: only a post-compile-kill retry redirects the module
-        # cache, exactly as the file build path does. The session is
-        # single-threaded, so mutating our own environment around the spawn is
-        # safe; it is restored immediately after.
-        var quarantined = quarantine_dir != ""
-        var prev_cache = getenv("MODULAR_CACHE_DIR", "")
-        var had_prev = prev_cache != ""
-        if quarantined:
-            _ = setenv("MODULAR_CACHE_DIR", quarantine_dir, True)
+        # cache, exactly as the file build path does. The override rides the
+        # CHILD's environment via `env_extra`, so the parent's environment is
+        # never touched and two quarantined spawns can never clobber each other's
+        # cache directory.
+        var env_extra = List[String]()
+        if quarantine_dir != "":
+            env_extra.append("MODULAR_CACHE_DIR=" + quarantine_dir)
 
         var res: ProcessResult
         try:
@@ -333,16 +330,13 @@ def _run_precompile(
                     root,
                     config.compile_timeout_secs * 1000,
                     _COMPILE_GRACE_MS,
+                    env_extra^,
                 ),
             )
         except e:
-            if quarantined:
-                _restore_cache_env(had_prev, prev_cache)
             _discard_path(root + "/" + tmp_dir)
             _cleanup_quarantine(root, quarantine_dirs)
             raise e^
-        if quarantined:
-            _restore_cache_env(had_prev, prev_cache)
 
         var dur = Float64(res.duration_ms) / 1000.0
         # An interrupt during the step group-kills it (a TimedOut bail-out). It

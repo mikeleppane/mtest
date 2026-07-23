@@ -23,6 +23,7 @@ TOOLCHAIN_FIXTURES = os.path.join(REPO_ROOT, "scripts", "fixtures", "toolchain")
 LOGGING_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "logging_mojo.py")
 FAKE_SLOW_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_slow_mojo.py")
 FAKE_CRASH_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_crash_mojo.py")
+FAKE_WINDOW_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_window_mojo.py")
 FAKE_RETRY_CRASH_MOJO = os.path.join(
     TOOLCHAIN_FIXTURES, "fake_retry_crash_mojo.py"
 )

@@ -22,7 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PARSER_PATH = REPO_ROOT / "src" / "mtest" / "cli" / "parser.mojo"
 PIXI_PATH = REPO_ROOT / "pixi.toml"
 RECIPE_PATH = REPO_ROOT / "recipe" / "recipe.yaml"
-EXPECTED_VERSION = "0.4.0"
+EXPECTED_VERSION = "0.5.0"
 
 MTEST_VERSION_RE = re.compile(r'comptime MTEST_VERSION = "([^"]*)"')
 PIXI_VERSION_RE = re.compile(r'(?m)^version = "([^"]*)"')

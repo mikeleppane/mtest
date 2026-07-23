@@ -38,7 +38,7 @@ one report module — the layer that already carried it — and not every module
 that merely wants a process id. This module keeps only the policy: the retrying
 write-all loop, the failure latch, the error messages, and the `EINTR` rules.
 """
-from mtest.model import Event
+from mtest.model import Event, EventKind
 from mtest.platform.stream import (
     close_fd,
     create_truncate_fd,
@@ -178,12 +178,17 @@ struct JsonStreamReporter(Reporter):
         """Serialize `e` and write its NDJSON line.
 
         A no-op when inert or already latched: the reporter never writes again
-        after a failure.
+        after a failure. A `PROGRESS` event is dropped before serialization: it
+        is ephemeral and console-only, and `serialize_event` returns an empty
+        string for it, which `_emit` would otherwise write as a blank committed
+        line the strict consumer rejects.
 
         Args:
             e: The event to serialize and write.
         """
         if not self._active or self._failed:
+            return
+        if e.kind == EventKind.PROGRESS:
             return
         self._emit(serialize_event(e), "event")
 

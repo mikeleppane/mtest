@@ -442,16 +442,19 @@ class Runner:
 # --------------------------------------------------------------------------- #
 def build_matrix() -> list[Check]:
     I = ["-I", "build"]  # noqa: E741
-    # Still refused (§24.1): exactly -n/--workers and --serial. Every other v1
-    # flag this build knows the spelling of is served now.
-    refused = [("--workers", "4", "parallel workers"), ("-n", "4", "parallel workers"),
-               ("--serial", "*.mojo", "serial")]
+    # Nothing is refused in this build (§24.1): every v1 flag spelling this build
+    # knows is served now. The refused machinery stays (driving zero checks) so
+    # the served/refused loop below still compiles.
+    refused: list[tuple[str, str, str]] = []
     # Newly served (§24.1): --retries, --compile-timeout, --shard, --junit-xml,
     # --gh-annotations, and --json are all wired up — the parser accepts them and
     # they run, so none of them may exit 4 with the not-available refusal. Assert
     # the flip so the validator stops asserting a falsehood, without duplicating
     # the e2e's behavior coverage.
     served = [
+        ("-n", "2", "§18,§24.1"),
+        ("--workers", "2", "§18,§24.1"),
+        ("--serial", "*.mojo", "§18,§24.1"),
         ("--retries", "2", "§13,§24.1"),
         ("--compile-timeout", "600", "§18,§24.1"),
         ("--junit-xml", "r.xml", "§15.2,§24.1"),
@@ -463,7 +466,7 @@ def build_matrix() -> list[Check]:
     ]
     checks = [
         # Version identity (§19) — discriminating, not a bare "mtest".
-        Check("help: version prints the version", "§19", ["version"], 0, out_has=["mtest 0.4.0"]),
+        Check("help: version prints the version", "§19", ["version"], 0, out_has=["mtest 0.5.0"]),
         # Outcomes + FROZEN exit codes (§9,§10). CRASH must stay distinct from FAIL (§10).
         Check("outcome: passing tests/ -> 0, exact count", "§9,§10", I + ["tests"], 0,
               any_has=["4 passed", "NO-TESTS"]),

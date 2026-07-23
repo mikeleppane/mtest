@@ -182,8 +182,15 @@ struct ExecRuntime(Movable):
 def interrupt_requested() -> Bool:
     """Whether SIGINT or SIGTERM has latched since the latest runtime open."""
     # SAFETY: the ABI takes no pointers and returns exactly 0 or 1. The native
-    # handler communicates only through its `volatile sig_atomic_t` cell.
+    # handler communicates only through its lock-free atomic activation cell.
     return external_call["mtest_exec_interrupt_requested", Int32]() != 0
+
+
+def interrupt_count() -> Int:
+    """Observed interrupt activations, saturating at 2 (0, 1, or escalate-2)."""
+    # SAFETY: the ABI takes no pointers and returns exactly 0, 1, or 2 from the
+    # native saturating atomic activation counter; it retains nothing.
+    return Int(external_call["mtest_exec_interrupt_count", Int32]())
 
 
 def _reset_interrupt():

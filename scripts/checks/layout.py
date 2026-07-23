@@ -45,6 +45,7 @@ UNIT_SUITES = {
     "test_config.mojo",
     "test_discover_fnmatch.mojo",
     "test_discover_normalize.mojo",
+    "test_exec_pool_policy.mojo",
     "test_exec_spec.mojo",
     "test_exec_tty.mojo",
     "test_model_events.mojo",
@@ -77,6 +78,8 @@ UNIT_SUITES = {
     "test_session_detail.mojo",
     "test_session_mangle.mojo",
     "test_session_pipeline.mojo",
+    "test_session_pool_plan.mojo",
+    "test_session_pool_progress.mojo",
     "test_session_precompile_paths.mojo",
     "test_session_resilience.mojo",
     "test_session_retry_class.mojo",
@@ -88,11 +91,13 @@ INTEGRATION_SUITES = {
     "test_discover_walk.mojo",
     "test_exec_capture.mojo",
     "test_exec_decode.mojo",
+    "test_exec_env.mojo",
     "test_exec_etxtbsy.mojo",
     "test_exec_fdhygiene.mojo",
     "test_exec_flood.mojo",
     "test_exec_interrupt.mojo",
     "test_exec_paths.mojo",
+    "test_exec_pool.mojo",
     "test_exec_prestart.mojo",
     "test_exec_reap.mojo",
     "test_exec_sweep.mojo",
@@ -112,6 +117,7 @@ INTEGRATION_SUITES = {
     "test_session_outcomes.mojo",
     "test_session_precompile.mojo",
     "test_session_rmtree.mojo",
+    "test_session_schedule.mojo",
     "test_session_selection.mojo",
     "test_transcripts_smoke.mojo",
 }
@@ -120,11 +126,13 @@ CLASSIFIED_PATHS = (
     "tests/integration/test_discover_walk.mojo",
     "tests/integration/test_exec_capture.mojo",
     "tests/integration/test_exec_decode.mojo",
+    "tests/integration/test_exec_env.mojo",
     "tests/integration/test_exec_etxtbsy.mojo",
     "tests/integration/test_exec_fdhygiene.mojo",
     "tests/integration/test_exec_flood.mojo",
     "tests/integration/test_exec_interrupt.mojo",
     "tests/integration/test_exec_paths.mojo",
+    "tests/integration/test_exec_pool.mojo",
     "tests/integration/test_exec_prestart.mojo",
     "tests/integration/test_exec_reap.mojo",
     "tests/integration/test_exec_sweep.mojo",
@@ -144,6 +152,7 @@ CLASSIFIED_PATHS = (
     "tests/integration/test_session_outcomes.mojo",
     "tests/integration/test_session_precompile.mojo",
     "tests/integration/test_session_rmtree.mojo",
+    "tests/integration/test_session_schedule.mojo",
     "tests/integration/test_session_selection.mojo",
     "tests/integration/test_transcripts_smoke.mojo",
     "tests/unit/test_cache_registry.mojo",
@@ -157,6 +166,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_config.mojo",
     "tests/unit/test_discover_fnmatch.mojo",
     "tests/unit/test_discover_normalize.mojo",
+    "tests/unit/test_exec_pool_policy.mojo",
     "tests/unit/test_exec_spec.mojo",
     "tests/unit/test_exec_tty.mojo",
     "tests/unit/test_model_events.mojo",
@@ -189,13 +199,15 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_detail.mojo",
     "tests/unit/test_session_mangle.mojo",
     "tests/unit/test_session_pipeline.mojo",
+    "tests/unit/test_session_pool_plan.mojo",
+    "tests/unit/test_session_pool_progress.mojo",
     "tests/unit/test_session_precompile_paths.mojo",
     "tests/unit/test_session_resilience.mojo",
     "tests/unit/test_session_retry_class.mojo",
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 949
+CLASSIFIED_TEST_COUNT = 1053
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",
@@ -207,12 +219,15 @@ EXEC_FIXTURES = {
     "argv_echoer.py",
     "close_streams_then_hang.py",
     "dual_flooder.py",
+    "env_echo.py",
     "escaped_pipe_holder.py",
     "etxtbsy_target.sh",
     "exit_nonzero.py",
     "flooding_grandchild.py",
     "grandchild_exit0.py",
     "grandchild_spawner.py",
+    "path_probe.sh",
+    "path_resolver.py",
     "self_signaler.py",
     "sigterm_grace_exit.py",
     "sigterm_ignorer.py",
@@ -243,6 +258,7 @@ E2E_HARNESS_PATHS = {
     Path("scripts/e2e/scenarios/core.py"),
     Path("scripts/e2e/scenarios/json_reporter.py"),
     Path("scripts/e2e/scenarios/junit_reporter.py"),
+    Path("scripts/e2e/scenarios/parallel.py"),
     Path("scripts/e2e/scenarios/resilience.py"),
     Path("scripts/e2e/scenarios/selection.py"),
 }
@@ -307,6 +323,19 @@ E2E_SCENARIO_NAMES = (
     "annotations-caps",
     "annotations-conflict",
     "annotations-fencing",
+    "parallel-projection-eq",
+    "parallel-capacity-one",
+    "parallel-window-overlap",
+    "parallel-interrupt",
+    "parallel-shard-disjoint",
+    "collect-parallel",
+    "parallel-auto-smoke",
+    "parallel-json-workers",
+    "parallel-j-rejected",
+    "parallel-junit-canonical-eq",
+    "parallel-progress-tty",
+    "parallel-serial-noverlap",
+    "parallel-serial-stale-glob",
 )
 
 LIVE_COMMAND_FIXED_PATHS = (
@@ -648,7 +677,7 @@ def check_e2e_layout() -> None:
         path.relative_to(REPO_ROOT).as_posix()
         for path in e2e_root.rglob("test_*.mojo")
     }
-    if rows != discovered or len(rows) != 31:
+    if rows != discovered or len(rows) != 36:
         raise AssertionError(
             "e2e manifest/discovery mismatch: "
             f"missing={sorted(discovered - rows)}, stale={sorted(rows - discovered)}"
@@ -659,9 +688,9 @@ def check_e2e_layout() -> None:
             "E2E scenario membership/order mismatch: "
             f"expected={list(E2E_SCENARIO_NAMES)}, actual={list(scenario_names)}"
         )
-    if len(scenario_names) != 59 or len(set(scenario_names)) != len(scenario_names):
+    if len(scenario_names) != 72 or len(set(scenario_names)) != len(scenario_names):
         raise AssertionError(
-            "E2E scenarios must contain 59 unique names in the pinned order"
+            "E2E scenarios must contain 72 unique names in the pinned order"
         )
     referenced = {
         *rows,

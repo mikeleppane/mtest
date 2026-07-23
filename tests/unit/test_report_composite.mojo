@@ -74,7 +74,7 @@ def test_heterogeneous_composite_fans_to_recorder_and_console() raises:
         Tuple(
             RecordingReporter(),
             ConsoleReporter(
-                "0.4.0",
+                "0.5.0",
                 ColorWhen.NEVER,
                 is_tty=False,
                 no_color=False,
@@ -98,7 +98,7 @@ def test_heterogeneous_composite_fans_to_recorder_and_console() raises:
     # (SessionStarted), a verdict token (FileFinished), and the summary band
     # (SessionFinished).
     var rendered = comp.reporters[1].output()
-    assert_true("mtest 0.4.0 (mojo 1.0.0b2)" in rendered)
+    assert_true("mtest 0.5.0 (mojo 1.0.0b2)" in rendered)
     assert_true("PASS" in rendered)
     assert_true("tests/test_alpha.mojo" in rendered)
     assert_true("1 passed" in rendered)

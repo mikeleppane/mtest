@@ -1,6 +1,6 @@
 [workspace]
 name = "mtest"
-version = "0.4.0"
+version = "0.5.0"
 description = "A pytest-like test runner for Mojo that orchestrates the stdlib's per-file TestSuite"
 channels = ["https://conda.modular.com/max/", "conda-forge"]
 # Linux and macOS are gate targets and share the POSIX process surface the
@@ -172,6 +172,15 @@ transcripts-check = "python -m scripts.checks.protocol_snapshots"
 # Pixi forwards arguments after `--`, for example:
 # `pixi run contract-check -- --strict`.
 contract-check = "python -m scripts.qa.contract"
+
+# Measure how the parallel scheduler scales with the worker count, to keep the
+# `auto` sizing honest against a real machine. Drives the built binary over a
+# synthetic medium-weight tree across workers x tokens x cold/warm and prints the
+# median wall-clock plus speedup-vs-`-n 1`. A MAINTENANCE task, deliberately NOT
+# in `pixi run ci`: it takes minutes and its numbers are machine-specific, so it
+# is never a gate. Run under `pixi run` so the spawned `mojo build` children
+# resolve `mojo`; build the binary first (`pixi run build-bin`).
+bench-workers = "python -m scripts.maintenance.bench_workers"
 
 # The conventional exhaustive test gate: generates one explicit entrypoint for every
 # unit/integration test function, builds it once, and executes that aggregate

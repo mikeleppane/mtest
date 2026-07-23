@@ -60,7 +60,7 @@ def _console(
 ) -> ConsoleReporter:
     """A console reporter with the mock's version and the given config."""
     return ConsoleReporter(
-        "0.4.0",
+        "0.5.0",
         color,
         is_tty=is_tty,
         no_color=no_color,
@@ -208,10 +208,24 @@ def test_header_learns_facts_from_session_started() raises:
     var c = _console()
     c.handle(Event.session_started("tests", "mojo 1.0.0b2", 5, 1))
     var out = c.output()
-    assert_true("mtest 0.4.0 (mojo 1.0.0b2)" in out)
+    assert_true("mtest 0.5.0 (mojo 1.0.0b2)" in out)
     assert_true("root: tests" in out)
     assert_true("selected: 5 files" in out)
     assert_true("excluded: 1" in out)
+
+
+def test_session_started_header_byte_identical_at_single_worker() raises:
+    # The worker-count token is dormant on a sequential run: a resolved count of
+    # one renders no `workers:` token and leaves the header byte-for-byte what it
+    # was before the field existed. Only a count above one surfaces the token.
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 5, 1, workers=1))
+    var out = c.output()
+    assert_false("workers:" in out)
+    assert_true(
+        "root: tests   selected: 5 files   excluded: 1\n\n" in out,
+        "the single-worker header carries no worker token",
+    )
 
 
 def test_one_verdict_line_per_file_in_order() raises:
@@ -393,6 +407,53 @@ def test_non_slow_file_has_no_slow_token() raises:
     _feed_slow(c, Outcome.PASS, False, 1.5, 1.0)
     var out = c.output()
     assert_false("SLOW" in out)
+
+
+def _feed_serial(mut c: ConsoleReporter, outcome: Outcome, serial: Bool):
+    """One terminal FileFinished carrying the given outcome and serial flag."""
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_crawl.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_crawl.mojo",
+            outcome,
+            1.0,
+            _argv("tests/test_crawl.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.PARSED,
+            passed_tests=1 if outcome == Outcome.PASS else 0,
+            failed_tests=1 if outcome == Outcome.FAIL else 0,
+            serial=serial,
+        )
+    )
+
+
+def test_serial_file_carries_the_serial_token_on_the_verdict_line() raises:
+    var c = _console()
+    _feed_serial(c, Outcome.PASS, True)
+    var out = c.output()
+    assert_true("SERIAL" in out)
+
+
+def test_serial_file_still_reports_its_real_verdict() raises:
+    # SERIAL rides alongside the verdict; it never replaces or perturbs it. A
+    # serial FAIL is still reported FAIL.
+    var c = _console()
+    _feed_serial(c, Outcome.FAIL, True)
+    var out = c.output()
+    assert_true("FAIL" in out)
+    assert_true("SERIAL" in out)
+
+
+def test_non_serial_file_has_no_serial_token() raises:
+    # The honesty property: `serial=False` (a worker-run verdict) must never
+    # render SERIAL.
+    var c = _console()
+    _feed_serial(c, Outcome.PASS, False)
+    var out = c.output()
+    assert_false("SERIAL" in out)
 
 
 def test_verbose_slow_build_names_the_build_step() raises:
@@ -774,7 +835,7 @@ def _fence_opener_token(rendered: String) raises -> String:
 def _gh_console(gh_actions: Bool) -> ConsoleReporter:
     """A console reporter under `show-output all`, optionally under Actions."""
     return ConsoleReporter(
-        "0.4.0",
+        "0.5.0",
         ColorWhen.NEVER,
         is_tty=False,
         no_color=False,
@@ -1133,7 +1194,7 @@ def test_quiet_suppresses_header_and_pass_lines() raises:
     var c = _console(verbosity=Verbosity.QUIET)
     _feed_mock_run(c)
     var out = c.output()
-    assert_false("mtest 0.4.0" in out)
+    assert_false("mtest 0.5.0" in out)
     assert_false("PASS      tests/test_alpha.mojo" in out)
     # Non-pass verdicts and the summary still appear.
     assert_true("FAIL" in out)
@@ -1748,3 +1809,104 @@ def test_durations_zero_files_run_renders_nothing() raises:
     )
     var out = c.output()
     assert_false("slowest" in out)
+
+
+def _progress(
+    completed: Int, total: Int, paths: List[String], elapsed: List[Float64]
+) -> Event:
+    """A PROGRESS event with the given counts and index-aligned in-flight data.
+    """
+    return Event.progress(completed, total, paths.copy(), elapsed.copy())
+
+
+def test_progress_on_tty_renders_a_single_counter_line() raises:
+    # On a terminal the live counter names the completed/total and the in-flight
+    # files by basename, on ONE physical line (no newline, within the width cap).
+    var c = _console(is_tty=True)
+    c.handle(
+        _progress(
+            3,
+            8,
+            ["tests/parallel/test_foo.mojo", "tests/parallel/test_bar.mojo"],
+            [0.4, 0.2],
+        )
+    )
+    var line = c.progress_line()
+    assert_true(line.byte_length() > 0)
+    assert_true("3/8" in line)
+    assert_true("test_foo.mojo" in line)
+    # A basename, never the full path — the counter must not carry the dir.
+    assert_false("tests/parallel/test_foo.mojo" in line)
+    # One physical line: no embedded newline and within the codepoint cap.
+    assert_false("\n" in line)
+    assert_true(line.count_codepoints() <= 72)
+
+
+def test_progress_off_tty_is_empty() raises:
+    # A piped destination is not a terminal: no counter byte is ever rendered.
+    var c = _console(is_tty=False)
+    c.handle(_progress(1, 4, ["tests/test_a.mojo"], [0.1]))
+    assert_equal(c.progress_line(), String(""))
+
+
+def test_progress_under_quiet_is_empty_even_on_tty() raises:
+    # `-q` suppresses the counter outright, exactly as it suppresses the header.
+    var c = _console(is_tty=True, verbosity=Verbosity.QUIET)
+    c.handle(
+        _progress(2, 5, ["tests/test_a.mojo", "tests/test_b.mojo"], [1.0, 0.5])
+    )
+    assert_equal(c.progress_line(), String(""))
+
+
+def test_progress_color_off_on_tty_shows_but_carries_no_ansi() raises:
+    # `--color never` on a real terminal still SHOWS the counter, just uncolored:
+    # non-empty text with no ANSI escape byte at all.
+    var c = _console(color=ColorWhen.NEVER, is_tty=True)
+    c.handle(_progress(1, 3, ["tests/test_a.mojo"], [0.3]))
+    var line = c.progress_line()
+    assert_true(line.byte_length() > 0)
+    assert_true("1/3" in line)
+    assert_false("\x1b" in line)
+
+
+def test_progress_color_on_tty_paints_the_counter() raises:
+    # AUTO color on a terminal paints the counter; an escape byte is present.
+    var c = _console(color=ColorWhen.AUTO, is_tty=True)
+    c.handle(_progress(0, 2, ["tests/test_a.mojo"], [0.0]))
+    var line = c.progress_line()
+    assert_true(line.byte_length() > 0)
+    assert_true("\x1b" in line)
+
+
+def test_progress_caps_running_names_with_overflow_marker() raises:
+    # More than three in-flight files: at most three basenames are named, and an
+    # ` +N more` marker accounts the rest — the line must not enumerate them all.
+    var c = _console(is_tty=True)
+    c.handle(
+        _progress(
+            0,
+            6,
+            [
+                "tests/test_a.mojo",
+                "tests/test_b.mojo",
+                "tests/test_c.mojo",
+                "tests/test_d.mojo",
+                "tests/test_e.mojo",
+            ],
+            [0.5, 0.4, 0.3, 0.2, 0.1],
+        )
+    )
+    var line = c.progress_line()
+    assert_true("+2 more" in line)
+    assert_false("test_d.mojo" in line)
+    assert_false("test_e.mojo" in line)
+
+
+def test_progress_empty_running_set_still_reports_counts() raises:
+    # A tick with no in-flight files (the final fold, all done) still renders the
+    # completed/total counts so the counter is coherent up to the batch's end.
+    var c = _console(is_tty=True)
+    c.handle(_progress(8, 8, List[String](), List[Float64]()))
+    var line = c.progress_line()
+    assert_true(line.byte_length() > 0)
+    assert_true("8/8" in line)

@@ -117,19 +117,9 @@ def flag_specs() -> List[FlagSpec]:
         FlagSpec(
             "--compile-timeout", FlagId.COMPILE_TIMEOUT, 1, False, True, ""
         ),
-        # Part of the v1 contract but not served by this build.
-        FlagSpec("-n", FlagId.WORKERS, 1, False, False, "parallel workers"),
-        FlagSpec(
-            "--workers", FlagId.WORKERS, 1, False, False, "parallel workers"
-        ),
-        FlagSpec(
-            "--serial",
-            FlagId.SERIAL,
-            1,
-            True,
-            False,
-            "serial execution pinning",
-        ),
+        FlagSpec("-n", FlagId.WORKERS, 1, False, True, ""),
+        FlagSpec("--workers", FlagId.WORKERS, 1, False, True, ""),
+        FlagSpec("--serial", FlagId.SERIAL, 1, True, True, ""),
         FlagSpec("--json", FlagId.JSON, 1, False, True, ""),
         FlagSpec("--junit-xml", FlagId.JUNIT_XML, 1, False, True, ""),
         FlagSpec("--gh-annotations", FlagId.GH_ANNOTATIONS, 1, False, True, ""),

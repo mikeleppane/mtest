@@ -86,7 +86,10 @@ def _kill_group(proc: subprocess.Popen[str]) -> None:
 
 
 def _mtest_argv(mtest_path: str, native_object: str) -> list[str]:
-    """Build the self-host command with every dogfood probe named explicitly."""
+    """Build the self-host command with every dogfood probe named explicitly.
+
+    Runs at ``-n 2`` with ``tests/dogfood/exec_probe.mojo`` pinned serial.
+    """
     return [
         mtest_path,
         "-I",
@@ -95,6 +98,10 @@ def _mtest_argv(mtest_path: str, native_object: str) -> list[str]:
         "tests/support",
         "--build-arg=-Xlinker",
         f"--build-arg={native_object}",
+        "-n",
+        "2",
+        "--serial",
+        "tests/dogfood/exec_probe.mojo",
         *DOGFOOD_TEST_FILES,
     ]
 

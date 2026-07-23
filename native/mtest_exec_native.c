@@ -19,6 +19,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 
@@ -72,12 +73,34 @@ enum mtest_runtime_state {
     MTEST_RUNTIME_RESTORE_REQUIRED = 4
 };
 
-/* SAFETY: the signal handler accesses only `mtest_interrupt_flag`. Runtime and
-   process state are ordinary-thread state guarded by the one lock-free atomic
-   state machine; ABI v1 rejects a second runtime or active child. */
-static volatile sig_atomic_t mtest_interrupt_flag;
+/* Fixed-size process registry. Each slot pairs a record with its own lock-free
+   lifecycle latch: a slot is claimed by a FREE->ACTIVE compare-exchange and
+   released back to FREE once its child is fully torn down. Up to this many live
+   children are admitted at once; a claim that finds every slot ACTIVE is the
+   capacity-exhausted EBUSY. The loops and the token-validated handle lookup
+   hold for any capacity. */
+#define MTEST_EXEC_SLOT_CAPACITY 64u
+
+enum mtest_slot_lifecycle {
+    MTEST_SLOT_FREE = 0,
+    MTEST_SLOT_ACTIVE = 1
+};
+
+/* SAFETY: the signal handler accesses only `mtest_interrupt_state`, a lock-free
+   atomic int it advances with a saturating strong compare-exchange (see
+   mtest_on_interrupt). The runtime state machine and the per-slot lifecycle
+   latches are lock-free atomics; every record field is ordinary-thread state
+   read only after a passing lifecycle and token check. A second runtime and a
+   capacity-exhausted claim are both still rejected. */
+static _Atomic int mtest_interrupt_state;
+static void mtest_on_interrupt(int signal_number);
+#if MTEST_EXEC_TESTING
+/* Armed one-shot handler-reentry mode; see mtest_interrupt_reentry_if_armed. */
+static _Atomic int mtest_interrupt_reentry_armed;
+#endif
 static _Atomic int mtest_runtime_state;
-static struct mtest_exec_process mtest_process;
+static struct mtest_exec_process mtest_process[MTEST_EXEC_SLOT_CAPACITY];
+static _Atomic int mtest_slot_lifecycle[MTEST_EXEC_SLOT_CAPACITY];
 static uint64_t mtest_next_handle = 1;
 static struct sigaction mtest_old_int;
 static struct sigaction mtest_old_term;
@@ -112,7 +135,20 @@ struct mtest_fault_state {
     int64_t secondary_result_value;
 };
 
-static struct mtest_fault_state mtest_faults[MTEST_EXEC_OP_WAITPID + 1];
+static struct mtest_fault_state mtest_faults[MTEST_EXEC_OP_FD_LIMIT + 1];
+
+/* A single fault scoped to one handle's operation, so a multi-slot test can
+   fail exactly one slot's operation deterministically. It composes with the
+   global fault table: handle-scoped operations consult both. */
+struct mtest_handle_fault_state {
+    uint64_t handle;
+    uint32_t operation;
+    uint32_t occurrence;
+    uint32_t seen;
+    int32_t error_number;
+};
+static struct mtest_handle_fault_state mtest_handle_fault;
+
 static uint32_t mtest_interrupt_delivery_operation;
 static int mtest_interrupt_delivery_signal;
 static uint32_t mtest_group_signal_eperm_operation;
@@ -137,7 +173,7 @@ int32_t mtest_exec_test_constant(uint32_t constant_id) {
 }
 
 static int mtest_fail_if_requested(uint32_t operation) {
-    if (operation == MTEST_EXEC_OP_NONE || operation > MTEST_EXEC_OP_WAITPID) {
+    if (operation == MTEST_EXEC_OP_NONE || operation > MTEST_EXEC_OP_FD_LIMIT) {
         return 0;
     }
     struct mtest_fault_state *fault = &mtest_faults[operation];
@@ -156,8 +192,22 @@ static int mtest_fail_if_requested(uint32_t operation) {
     return 0;
 }
 
+static int mtest_fail_if_requested_handle(uint32_t operation, uint64_t handle) {
+    if (mtest_handle_fault.handle == 0 ||
+        mtest_handle_fault.handle != handle ||
+        mtest_handle_fault.operation != operation) {
+        return 0;
+    }
+    mtest_handle_fault.seen += 1;
+    if (mtest_handle_fault.seen == mtest_handle_fault.occurrence) {
+        errno = mtest_handle_fault.error_number;
+        return 1;
+    }
+    return 0;
+}
+
 static int64_t mtest_fault_result(uint32_t operation) {
-    if (operation <= MTEST_EXEC_OP_WAITPID) {
+    if (operation <= MTEST_EXEC_OP_FD_LIMIT) {
         const struct mtest_fault_state *fault = &mtest_faults[operation];
         if (fault->operation == operation &&
             fault->seen == fault->occurrence) {
@@ -173,6 +223,7 @@ static int64_t mtest_fault_result(uint32_t operation) {
 
 void mtest_exec_test_fault_reset(void) {
     memset(mtest_faults, 0, sizeof(mtest_faults));
+    memset(&mtest_handle_fault, 0, sizeof(mtest_handle_fault));
     mtest_interrupt_delivery_operation = MTEST_EXEC_OP_NONE;
     mtest_interrupt_delivery_signal = 0;
     mtest_group_signal_eperm_operation = MTEST_EXEC_OP_NONE;
@@ -190,7 +241,7 @@ int32_t mtest_exec_test_fault_configure(
     int32_t error_number,
     int64_t result_value
 ) {
-    if (operation == MTEST_EXEC_OP_NONE || operation > MTEST_EXEC_OP_WAITPID ||
+    if (operation == MTEST_EXEC_OP_NONE || operation > MTEST_EXEC_OP_FD_LIMIT ||
         occurrence == 0 || error_number < 0 || result_value < 0) {
         return -1;
     }
@@ -226,7 +277,7 @@ int32_t mtest_exec_test_fault_configure_secondary(
     int32_t error_number,
     int64_t result_value
 ) {
-    if (operation == MTEST_EXEC_OP_NONE || operation > MTEST_EXEC_OP_WAITPID ||
+    if (operation == MTEST_EXEC_OP_NONE || operation > MTEST_EXEC_OP_FD_LIMIT ||
         occurrence == 0 || error_number < 0 || result_value < 0) {
         return -1;
     }
@@ -255,7 +306,7 @@ int32_t mtest_exec_test_fault_configure_secondary(
 }
 
 uint32_t mtest_exec_test_fault_seen(uint32_t operation) {
-    if (operation > MTEST_EXEC_OP_WAITPID) {
+    if (operation > MTEST_EXEC_OP_FD_LIMIT) {
         return 0;
     }
     const struct mtest_fault_state *fault = &mtest_faults[operation];
@@ -307,8 +358,21 @@ static void mtest_wait_before_monotonic_if_requested(void) {
         return;
     }
     mtest_monotonic_wait_seen += 1;
-    if (mtest_monotonic_wait_seen != mtest_monotonic_wait_occurrence ||
-        mtest_process.handle == 0 || mtest_process.leader <= 0) {
+    if (mtest_monotonic_wait_seen != mtest_monotonic_wait_occurrence) {
+        return;
+    }
+    /* SAFETY: locate the live child through the slot lifecycle before reading
+       its leader; a FREE slot's record is never consulted. */
+    struct mtest_exec_process *process = NULL;
+    for (size_t index = 0; index < MTEST_EXEC_SLOT_CAPACITY; ++index) {
+        if (atomic_load(&mtest_slot_lifecycle[index]) == MTEST_SLOT_ACTIVE &&
+            mtest_process[index].handle != 0 &&
+            mtest_process[index].leader > 0) {
+            process = &mtest_process[index];
+            break;
+        }
+    }
+    if (process == NULL) {
         return;
     }
     const struct timespec delay = {0, 1000000L};
@@ -321,7 +385,7 @@ static void mtest_wait_before_monotonic_if_requested(void) {
         do {
             wait_status = waitid(
                 P_PID,
-                (id_t)mtest_process.leader,
+                (id_t)process->leader,
                 &information,
                 WEXITED | WNOHANG | WNOWAIT
             );
@@ -329,7 +393,7 @@ static void mtest_wait_before_monotonic_if_requested(void) {
         if (wait_status != 0) {
             return;
         }
-        if (information.si_pid == mtest_process.leader) {
+        if (information.si_pid == process->leader) {
             mtest_monotonic_wait_fired = 1;
             return;
         }
@@ -340,7 +404,65 @@ static void mtest_wait_before_monotonic_if_requested(void) {
 }
 
 void mtest_exec_test_reset_interrupt(void) {
-    mtest_interrupt_flag = 0;
+    atomic_store(&mtest_interrupt_state, 0);
+    atomic_store(&mtest_interrupt_reentry_armed, 0);
+}
+
+void mtest_exec_test_arm_interrupt_reentry(void) {
+    /* Arm mode 1: the next handler activation re-enters the handler once via a
+       direct recursive call, mid-transition. */
+    atomic_store(&mtest_interrupt_reentry_armed, 1);
+}
+
+void mtest_exec_test_invoke_interrupt(void) {
+    mtest_on_interrupt(SIGINT);
+}
+
+uint32_t mtest_exec_test_nested_interrupt_count(void) {
+    /* Install the handler unmasked (SA_NODEFER) so a signal raised from inside
+       the handler nests synchronously, then arm mode 2 (a real raise) and
+       deliver once. Restores the prior disposition before returning the count.
+       Where the platform honors SA_NODEFER this is genuine back-to-back OS
+       reentry, not a queued masked signal. */
+    struct sigaction nodefer;
+    struct sigaction saved;
+    memset(&nodefer, 0, sizeof(nodefer));
+    nodefer.sa_handler = mtest_on_interrupt;
+    nodefer.sa_flags = SA_NODEFER;
+    if (sigemptyset(&nodefer.sa_mask) != 0) {
+        return 0;
+    }
+    atomic_store(&mtest_interrupt_state, 0);
+    if (sigaction(SIGINT, &nodefer, &saved) != 0) {
+        return 0;
+    }
+    atomic_store(&mtest_interrupt_reentry_armed, 2);
+    (void)raise(SIGINT);
+    (void)sigaction(SIGINT, &saved, NULL);
+    return (uint32_t)atomic_load(&mtest_interrupt_state);
+}
+
+int32_t mtest_exec_test_fault_configure_handle(
+    uint64_t handle,
+    uint32_t operation,
+    uint32_t occurrence,
+    int32_t error_number
+) {
+    if (handle == 0 || operation == MTEST_EXEC_OP_NONE ||
+        operation > MTEST_EXEC_OP_FD_LIMIT || occurrence == 0 ||
+        error_number <= 0) {
+        return -1;
+    }
+    mtest_handle_fault.handle = handle;
+    mtest_handle_fault.operation = operation;
+    mtest_handle_fault.occurrence = occurrence;
+    mtest_handle_fault.seen = 0;
+    mtest_handle_fault.error_number = error_number;
+    return 0;
+}
+
+uint32_t mtest_exec_test_fault_handle_seen(void) {
+    return mtest_handle_fault.seen;
 }
 
 int32_t mtest_exec_test_deliver_interrupt_after(
@@ -363,19 +485,69 @@ static int mtest_fail_if_requested(uint32_t operation) {
     return 0;
 }
 
+static int mtest_fail_if_requested_handle(uint32_t operation, uint64_t handle) {
+    (void)operation;
+    (void)handle;
+    return 0;
+}
+
 static int64_t mtest_fault_result(uint32_t operation) {
     (void)operation;
     return 0;
 }
 #endif
 
+#if MTEST_EXEC_TESTING
+/* One-shot handler-reentry hook, compiled out of production entirely. When
+   armed it makes the FIRST activation of the interrupt handler re-enter the
+   handler once from inside itself, mid-transition (mode 1, a direct recursive
+   call; mode 2, a real raise(2) so an unmasked install nests synchronously).
+   This is genuine nesting, used to prove the saturating strong-CAS loop loses
+   no transition -- unlike raising a masked signal, which only queues. */
+__attribute__((no_sanitize("address")))
+static void mtest_interrupt_reentry_if_armed(void) {
+    int mode = atomic_exchange_explicit(
+        &mtest_interrupt_reentry_armed, 0, memory_order_relaxed
+    );
+    if (mode == 1) {
+        mtest_on_interrupt(SIGINT);
+    } else if (mode == 2) {
+        (void)raise(SIGINT);
+    }
+}
+#endif
+
 __attribute__((no_sanitize("address")))
 static void mtest_on_interrupt(int signal_number) {
     (void)signal_number;
-    /* SAFETY: POSIX permits a signal handler to assign a process-global
-       volatile sig_atomic_t. ASan instrumentation is excluded only here
-       because its reporting path is not async-signal-safe. */
-    mtest_interrupt_flag = 1;
+    /* SAFETY: a signal handler may advance a lock-free atomic int. ASan
+       instrumentation is excluded here because its reporting path is not
+       async-signal-safe. The activation state saturates 0->1->2 through a
+       STRONG compare-exchange: weak CAS is FORBIDDEN because its spurious
+       failures would unbound this loop.
+       TERMINATION: a strong CAS fails only on a real concurrent change; the
+       value is monotone non-decreasing with a ceiling of 2, so each failed
+       attempt reloads a strictly larger `current`. The loop therefore runs at
+       most twice before a CAS succeeds or `current` has already reached 2 --
+       no overflow, no unbounded spin. The count records OBSERVED activations
+       (standard signals coalesce); a second observed activation escalates. */
+    int current = atomic_load_explicit(
+        &mtest_interrupt_state, memory_order_relaxed
+    );
+    while (current < 2) {
+#if MTEST_EXEC_TESTING
+        mtest_interrupt_reentry_if_armed();
+#endif
+        if (atomic_compare_exchange_strong_explicit(
+                &mtest_interrupt_state,
+                &current,
+                current + 1,
+                memory_order_relaxed,
+                memory_order_relaxed
+            )) {
+            break;
+        }
+    }
 }
 
 static void mtest_clear_error(struct mtest_exec_error *error) {
@@ -575,10 +747,105 @@ static int mtest_copy_argv(
     return 0;
 }
 
-static int mtest_copy_environment(struct mtest_exec_plan *plan) {
+static size_t mtest_env_key_length(const uint8_t *data, size_t length) {
+    /* Length of the key: bytes before the first '=' (or the whole span when no
+       '=' is present, e.g. a malformed inherited entry). */
+    for (size_t index = 0; index < length; ++index) {
+        if (data[index] == '=') {
+            return index;
+        }
+    }
+    return length;
+}
+
+static int mtest_validate_env_extra(
+    const struct mtest_exec_process_spec *spec,
+    struct mtest_exec_error *error
+) {
+    /* Validate the caller's environment overrides BEFORE any resource is
+       acquired: every entry must contain '=', carry a nonempty key, and hold no
+       embedded NUL; no two extras may share a key. A zero count is the v1
+       snapshot and needs no extras array. */
+    if (spec->env_extra_count == 0) {
+        return 0;
+    }
+    if (spec->env_extra == NULL) {
+        mtest_set_error(error, MTEST_EXEC_OP_ENV_SNAPSHOT, EINVAL, 0, 0);
+        return -1;
+    }
+    for (uint64_t index = 0; index < spec->env_extra_count; ++index) {
+        const struct mtest_exec_bytes *entry = &spec->env_extra[index];
+        if (entry->length == 0 || entry->data == NULL) {
+            mtest_set_error(
+                error, MTEST_EXEC_OP_ENV_SNAPSHOT, EINVAL, index, 0
+            );
+            return -1;
+        }
+        size_t separator = (size_t)entry->length;
+        for (size_t byte = 0; byte < entry->length; ++byte) {
+            if (entry->data[byte] == '\0') {
+                mtest_set_error(
+                    error, MTEST_EXEC_OP_ENV_SNAPSHOT, EINVAL, index, 0
+                );
+                return -1;
+            }
+            if (entry->data[byte] == '=' && separator == (size_t)entry->length) {
+                separator = byte;
+            }
+        }
+        if (separator == (size_t)entry->length || separator == 0) {
+            /* No '=' at all, or an empty key ("=value"). */
+            mtest_set_error(
+                error, MTEST_EXEC_OP_ENV_SNAPSHOT, EINVAL, index, 0
+            );
+            return -1;
+        }
+        for (uint64_t prior = 0; prior < index; ++prior) {
+            const struct mtest_exec_bytes *other = &spec->env_extra[prior];
+            size_t other_key = mtest_env_key_length(other->data, other->length);
+            if (other_key == separator &&
+                memcmp(entry->data, other->data, separator) == 0) {
+                mtest_set_error(
+                    error, MTEST_EXEC_OP_ENV_SNAPSHOT, EINVAL, index, 0
+                );
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int mtest_env_extra_overrides(
+    const struct mtest_exec_process_spec *spec,
+    const char *inherited
+) {
+    /* Whether some override shares the inherited entry's key. Validated extras
+       all carry a '='; the inherited key runs up to its own first '='. */
+    size_t inherited_key = strcspn(inherited, "=");
+    for (uint64_t index = 0; index < spec->env_extra_count; ++index) {
+        const struct mtest_exec_bytes *entry = &spec->env_extra[index];
+        size_t entry_key = mtest_env_key_length(entry->data, entry->length);
+        if (entry_key == inherited_key &&
+            memcmp(entry->data, inherited, entry_key) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int mtest_copy_environment(
+    const struct mtest_exec_process_spec *spec,
+    struct mtest_exec_plan *plan
+) {
     /* SAFETY: runtime ownership requires no concurrent environment mutation.
        Each observed NUL-terminated entry is copied into plan-owned storage
-       before fork, and the child only reads its copy until execve. */
+       before fork, and the child only reads its copy until execve. The merge is
+       replace-not-append: an inherited entry whose key an override shares is
+       dropped so no duplicate key can survive, then every validated override is
+       appended. A zero override count reproduces the v1 snapshot byte for byte,
+       including PATH, so PATH-based resolution is unchanged unless an override
+       sets PATH, which then governs it because resolution reads this merged
+       environment. */
     size_t count = 0;
     while (environ[count] != NULL) {
         if (count == SIZE_MAX / sizeof(char *) - 1) {
@@ -587,23 +854,44 @@ static int mtest_copy_environment(struct mtest_exec_plan *plan) {
         }
         count += 1;
     }
+    if ((size_t)spec->env_extra_count >
+        SIZE_MAX / sizeof(char *) - 1 - count) {
+        errno = EOVERFLOW;
+        return -1;
+    }
     plan->environment = mtest_allocate(
         MTEST_EXEC_OP_ENV_SNAPSHOT,
-        (count + 1) * sizeof(char *)
+        (count + (size_t)spec->env_extra_count + 1) * sizeof(char *)
     );
     if (plan->environment == NULL) {
         return -1;
     }
+    size_t out = 0;
     for (size_t index = 0; index < count; ++index) {
+        if (spec->env_extra_count != 0 &&
+            mtest_env_extra_overrides(spec, environ[index])) {
+            continue;
+        }
         size_t length = strlen(environ[index]);
-        plan->environment[index] = mtest_copy_bytes(
+        plan->environment[out] = mtest_copy_bytes(
             MTEST_EXEC_OP_ENV_SNAPSHOT,
             (const uint8_t *)environ[index],
             length
         );
-        if (plan->environment[index] == NULL) {
+        if (plan->environment[out] == NULL) {
             return -1;
         }
+        out += 1;
+    }
+    for (uint64_t index = 0; index < spec->env_extra_count; ++index) {
+        const struct mtest_exec_bytes *entry = &spec->env_extra[index];
+        plan->environment[out] = mtest_copy_bytes(
+            MTEST_EXEC_OP_ENV_SNAPSHOT, entry->data, entry->length
+        );
+        if (plan->environment[out] == NULL) {
+            return -1;
+        }
+        out += 1;
     }
     return 0;
 }
@@ -762,6 +1050,9 @@ static struct mtest_exec_plan *mtest_build_plan(
         mtest_set_error(error, MTEST_EXEC_OP_PLAN_ALLOC, EINVAL, 0, 0);
         return NULL;
     }
+    if (mtest_validate_env_extra(spec, error) != 0) {
+        return NULL;
+    }
     struct mtest_exec_plan *plan = mtest_allocate(
         MTEST_EXEC_OP_PLAN_ALLOC, sizeof(*plan)
     );
@@ -785,7 +1076,7 @@ static struct mtest_exec_plan *mtest_build_plan(
             return NULL;
         }
     }
-    if (mtest_copy_environment(plan) != 0) {
+    if (mtest_copy_environment(spec, plan) != 0) {
         mtest_set_error(error, MTEST_EXEC_OP_ENV_SNAPSHOT, errno, 0, 0);
         mtest_free_plan(plan);
         return NULL;
@@ -799,6 +1090,73 @@ static struct mtest_exec_plan *mtest_build_plan(
         return NULL;
     }
     return plan;
+}
+
+static struct mtest_exec_process *mtest_claim_slot(void) {
+    /* SAFETY: scan for a FREE slot and win it with a FREE->ACTIVE
+       compare-exchange. Only the thread that wins the exchange owns the record,
+       so no two callers ever initialize the same slot. When every slot is
+       already ACTIVE the scan finds none and returns NULL, which the caller
+       maps to the capacity-exhausted EBUSY. */
+    for (size_t index = 0; index < MTEST_EXEC_SLOT_CAPACITY; ++index) {
+        int expected = MTEST_SLOT_FREE;
+        if (atomic_compare_exchange_strong(
+                &mtest_slot_lifecycle[index], &expected, MTEST_SLOT_ACTIVE
+            )) {
+            return &mtest_process[index];
+        }
+    }
+    return NULL;
+}
+
+static void mtest_release_slot(struct mtest_exec_process *process) {
+    /* SAFETY: `process` points into the slot table, so the difference is its
+       slot index. Clear the record before publishing the slot as FREE, so no
+       later claimer or concurrent lookup can observe a live token over reused
+       storage; a lookup that races the store still rejects a FREE slot. */
+    size_t index = (size_t)(process - mtest_process);
+    memset(process, 0, sizeof(*process));
+    atomic_store(&mtest_slot_lifecycle[index], MTEST_SLOT_FREE);
+}
+
+static uint64_t mtest_first_live_handle(void) {
+    /* SAFETY: a slot's published handle is meaningful only while the slot is
+       ACTIVE; a FREE slot's record is never read. Returns the first live token,
+       or zero when a slot is claimed but has not yet published one (an open
+       still in flight, or one wedged after a failed hand-off). */
+    for (size_t index = 0; index < MTEST_EXEC_SLOT_CAPACITY; ++index) {
+        if (atomic_load(&mtest_slot_lifecycle[index]) == MTEST_SLOT_ACTIVE) {
+            uint64_t handle = mtest_process[index].handle;
+            if (handle != 0) {
+                return handle;
+            }
+        }
+    }
+    return 0;
+}
+
+static int mtest_any_slot_active(void) {
+    /* SAFETY: read-only scan of the lifecycle latches. A slot is counted while
+       ACTIVE regardless of whether it has published a handle yet, so a claim in
+       flight or a slot wedged after a failed hand-off keeps the runtime busy. */
+    for (size_t index = 0; index < MTEST_EXEC_SLOT_CAPACITY; ++index) {
+        if (atomic_load(&mtest_slot_lifecycle[index]) == MTEST_SLOT_ACTIVE) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void mtest_runtime_settle(void) {
+    /* Return the runtime to OPEN only when no slot remains live; otherwise
+       other children keep it CHILD_ACTIVE. Used by every open-failure unwind
+       and by the free path so releasing one of several live children never
+       clears the busy state the others still require. */
+    if (mtest_any_slot_active()) {
+        atomic_store(&mtest_runtime_state, MTEST_RUNTIME_CHILD_ACTIVE);
+    } else {
+        atomic_store(&mtest_runtime_state, MTEST_RUNTIME_OPEN);
+    }
 }
 
 uint32_t mtest_exec_native_abi_version(void) {
@@ -822,13 +1180,20 @@ int32_t mtest_exec_runtime_open(struct mtest_exec_error *error) {
     /* SAFETY: the successful atomic transition gives this thread exclusive
        process-global runtime ownership. Clear before installing either mtest
        handler, so no handler-written interrupt can be erased during open. */
-    mtest_interrupt_flag = 0;
+    atomic_store(&mtest_interrupt_state, 0);
     memset(&action, 0, sizeof(action));
     action.sa_handler = mtest_on_interrupt;
     action.sa_flags = SA_RESTART;
     memset(&child_action, 0, sizeof(child_action));
     child_action.sa_handler = SIG_DFL;
+    /* Block SIGINT and SIGTERM while the mtest handler runs. This is
+       DEFENSE-IN-DEPTH ONLY and NOT load-bearing: the activation state is a
+       lock-free saturating atomic that is correct under reentry regardless of
+       masking (see mtest_on_interrupt). The mask merely narrows the reentry
+       window in production. */
     if (sigemptyset(&action.sa_mask) != 0 ||
+        sigaddset(&action.sa_mask, SIGINT) != 0 ||
+        sigaddset(&action.sa_mask, SIGTERM) != 0 ||
         sigemptyset(&child_action.sa_mask) != 0) {
         saved_errno = errno;
         atomic_store(&mtest_runtime_state, MTEST_RUNTIME_CLOSED);
@@ -1060,11 +1425,14 @@ retry_runtime_ownership:
             &mtest_runtime_state, &expected, MTEST_RUNTIME_OPENING
         )) {
         if (expected == MTEST_RUNTIME_CHILD_ACTIVE) {
-            /* SAFETY: CHILD_ACTIVE means the static process record still owns
-               the sole live handle. Runtime close is the cross-ABI retry token:
-               abort either consumes that record, or leaves it pinned for this
-               same ExecRuntime owner to retry on a later close. */
-            uint64_t handle = mtest_process.handle;
+            /* SAFETY: CHILD_ACTIVE means at least one slot still owns a live
+               handle. Runtime close is the cross-ABI retry token: it aborts one
+               live handle per pass and loops, draining every live child; each
+               abort either consumes its slot or leaves it pinned for this same
+               ExecRuntime owner to retry on a later close. A slot claimed but
+               not yet publishing a handle reports EBUSY without a token to
+               abort, keeping the runtime non-reusable until it settles. */
+            uint64_t handle = mtest_first_live_handle();
             if (handle == 0) {
                 mtest_set_error(error, MTEST_EXEC_OP_NONE, EBUSY, 1u, 0);
                 return -1;
@@ -1156,8 +1524,43 @@ restore_handlers:
     return 0;
 }
 
+static int mtest_interrupt_seen(void) {
+    return atomic_load_explicit(
+        &mtest_interrupt_state, memory_order_relaxed
+    ) != 0;
+}
+
 int32_t mtest_exec_interrupt_requested(void) {
-    return mtest_interrupt_flag != 0 ? 1 : 0;
+    return mtest_interrupt_seen() ? 1 : 0;
+}
+
+int32_t mtest_exec_interrupt_count(void) {
+    return (int32_t)atomic_load_explicit(
+        &mtest_interrupt_state, memory_order_relaxed
+    );
+}
+
+int32_t mtest_exec_fd_limit(
+    uint64_t *soft_limit,
+    struct mtest_exec_error *error
+) {
+    mtest_clear_error(error);
+    if (soft_limit == NULL) {
+        mtest_set_error(error, MTEST_EXEC_OP_FD_LIMIT, EINVAL, 0, 0);
+        return -1;
+    }
+    struct rlimit limit;
+    if (mtest_fail_if_requested(MTEST_EXEC_OP_FD_LIMIT) ||
+        getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+        mtest_set_error(error, MTEST_EXEC_OP_FD_LIMIT, errno, 0, 0);
+        return -1;
+    }
+    /* RLIM_INFINITY becomes the documented UINT64_MAX sentinel so the Mojo
+       effective-cap derivation can map it onto its compile-time ceiling. */
+    *soft_limit = limit.rlim_cur == RLIM_INFINITY
+        ? MTEST_EXEC_FD_LIMIT_UNBOUNDED
+        : (uint64_t)limit.rlim_cur;
+    return 0;
 }
 
 int32_t mtest_exec_monotonic_ms(
@@ -1460,15 +1863,24 @@ static void mtest_child_exec(
 }
 
 static struct mtest_exec_process *mtest_process_from_handle(uint64_t handle) {
-    /* SAFETY: ABI handles are generation tokens, never addresses. Validate the
-       exclusive-child state and exact live token before returning the one
-       static process record; stale/arbitrary integers are never dereferenced. */
-    if (atomic_load(&mtest_runtime_state) != MTEST_RUNTIME_CHILD_ACTIVE ||
-        handle == 0 || handle != mtest_process.handle) {
+    /* SAFETY: ABI handles are generation tokens, never addresses. A zero handle
+       is never live. Otherwise scan the slot table and consult each slot's
+       lifecycle latch before touching its record, returning the record only
+       when the slot is ACTIVE and its published token matches exactly. A FREE
+       slot's fields are never read, so a stale or arbitrary integer is never
+       dereferenced. */
+    if (handle == 0) {
         errno = EINVAL;
         return NULL;
     }
-    return &mtest_process;
+    for (size_t index = 0; index < MTEST_EXEC_SLOT_CAPACITY; ++index) {
+        if (atomic_load(&mtest_slot_lifecycle[index]) == MTEST_SLOT_ACTIVE &&
+            mtest_process[index].handle == handle) {
+            return &mtest_process[index];
+        }
+    }
+    errno = EINVAL;
+    return NULL;
 }
 
 static void mtest_cleanup_pipes(int stdout_pipe[2], int stderr_pipe[2], int setup_pipe[2]) {
@@ -1519,19 +1931,30 @@ int32_t mtest_exec_process_open(
     int expected = MTEST_RUNTIME_OPEN;
     if (!atomic_compare_exchange_strong(
             &mtest_runtime_state, &expected, MTEST_RUNTIME_CHILD_ACTIVE
-        )) {
-        int error_number = expected == MTEST_RUNTIME_CHILD_ACTIVE
-            ? EBUSY
-            : EINVAL;
-        mtest_set_error(error, MTEST_EXEC_OP_NONE, error_number, 0, 0);
+        ) && expected != MTEST_RUNTIME_CHILD_ACTIVE) {
+        /* OPEN admits the first child (CAS to CHILD_ACTIVE); an already
+           CHILD_ACTIVE runtime admits further children up to capacity, so it is
+           not an error here. Any other state -- CLOSED, an OPENING/closing
+           mid-transition, or a RESTORE_REQUIRED partial teardown -- refuses a
+           new child. */
+        mtest_set_error(error, MTEST_EXEC_OP_NONE, EINVAL, 0, 0);
         return -1;
     }
     struct mtest_exec_plan *plan = mtest_build_plan(spec, error);
     if (plan == NULL) {
-        atomic_store(&mtest_runtime_state, MTEST_RUNTIME_OPEN);
+        mtest_runtime_settle();
         return -1;
     }
-    struct mtest_exec_process *process = &mtest_process;
+    struct mtest_exec_process *process = mtest_claim_slot();
+    if (process == NULL) {
+        /* Every slot is ACTIVE: the table is at capacity. detail 0 marks this
+           genuine slot-exhaustion EBUSY, distinct from the runtime-exclusivity
+           EBUSY (detail 1) the close/abort retry path reports. */
+        mtest_free_plan(plan);
+        mtest_runtime_settle();
+        mtest_set_error(error, MTEST_EXEC_OP_NONE, EBUSY, 0, 0);
+        return -1;
+    }
     memset(process, 0, sizeof(*process));
     process->stdout_fd = -1;
     process->stderr_fd = -1;
@@ -1542,7 +1965,8 @@ int32_t mtest_exec_process_open(
         mtest_prepare_pipe(setup_pipe, MTEST_EXEC_OP_PIPE_SETUP, error) != 0) {
         mtest_cleanup_pipes(stdout_pipe, stderr_pipe, setup_pipe);
         mtest_free_plan(plan);
-        atomic_store(&mtest_runtime_state, MTEST_RUNTIME_OPEN);
+        mtest_release_slot(process);
+        mtest_runtime_settle();
         return -1;
     }
     /* SAFETY: all plan strings, pointer arrays, pipe records, and retry state
@@ -1558,7 +1982,8 @@ int32_t mtest_exec_process_open(
         int saved_errno = errno;
         mtest_cleanup_pipes(stdout_pipe, stderr_pipe, setup_pipe);
         mtest_free_plan(plan);
-        atomic_store(&mtest_runtime_state, MTEST_RUNTIME_OPEN);
+        mtest_release_slot(process);
+        mtest_runtime_settle();
         mtest_set_error(error, MTEST_EXEC_OP_FORK, saved_errno, 0, 0);
         return -1;
     }
@@ -1602,7 +2027,8 @@ int32_t mtest_exec_process_open(
                    EINTR; the test seam reaches this terminal invariant. */
                 return -1;
             }
-            atomic_store(&mtest_runtime_state, MTEST_RUNTIME_OPEN);
+            mtest_release_slot(process);
+            mtest_runtime_settle();
             return -1;
         }
     }
@@ -1672,9 +2098,9 @@ int32_t mtest_exec_process_poll(
         } else {
             poll_result = poll(fds, count, timeout_ms);
         }
-    } while (poll_result < 0 && errno == EINTR && !mtest_interrupt_flag);
+    } while (poll_result < 0 && errno == EINTR && !mtest_interrupt_seen());
     if (poll_result < 0) {
-        if (errno == EINTR && mtest_interrupt_flag) {
+        if (errno == EINTR && mtest_interrupt_seen()) {
             return 0;
         }
         mtest_set_error(error, MTEST_EXEC_OP_POLL, errno, 0, 0);
@@ -1689,6 +2115,104 @@ int32_t mtest_exec_process_poll(
         }
         if ((fds[index].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
             result->readiness |= readiness[index];
+        }
+    }
+    return 0;
+}
+
+int32_t mtest_exec_poll_set(
+    const uint64_t *handles,
+    uint64_t count,
+    int32_t timeout_ms,
+    struct mtest_exec_poll_result *results,
+    struct mtest_exec_error *error
+) {
+    mtest_clear_error(error);
+    /* PHASE ONE -- scalar/structural, WITHOUT dereferencing either array. A
+       violation returns with `results` UNTOUCHED: zeroing an over-capacity or
+       NULL buffer would be the very overrun this phase exists to prevent. */
+    if (count == 0 || count > MTEST_EXEC_SLOT_CAPACITY || handles == NULL ||
+        results == NULL || timeout_ms < -1) {
+        mtest_set_error(error, MTEST_EXEC_OP_POLL_SET, EINVAL, count, timeout_ms);
+        return -1;
+    }
+    /* PHASE TWO -- the count is now a validated bound, so zero exactly the
+       promised span before any per-handle check can return. */
+    for (uint64_t index = 0; index < count; ++index) {
+        results[index].readiness = 0;
+        results[index].reserved = 0;
+    }
+    for (uint64_t index = 0; index < count; ++index) {
+        for (uint64_t prior = 0; prior < index; ++prior) {
+            if (handles[prior] == handles[index]) {
+                mtest_set_error(
+                    error, MTEST_EXEC_OP_POLL_SET, EINVAL, index, 0
+                );
+                return -1;
+            }
+        }
+    }
+    struct pollfd fds[MTEST_EXEC_SLOT_CAPACITY * 3];
+    uint32_t bits[MTEST_EXEC_SLOT_CAPACITY * 3];
+    uint64_t owners[MTEST_EXEC_SLOT_CAPACITY * 3];
+    nfds_t nfds = 0;
+    for (uint64_t index = 0; index < count; ++index) {
+        struct mtest_exec_process *process =
+            mtest_process_from_handle(handles[index]);
+        if (process == NULL) {
+            /* Stale or invalid handle: report its index. The zeroed span is
+               guaranteed on this path. */
+            mtest_set_error(error, MTEST_EXEC_OP_POLL_SET, errno, index, 0);
+            return -1;
+        }
+        const int channel_fds[3] = {
+            process->stdout_fd, process->stderr_fd, process->setup_fd
+        };
+        const uint32_t channel_bits[3] = {
+            MTEST_EXEC_READY_STDOUT,
+            MTEST_EXEC_READY_STDERR,
+            MTEST_EXEC_READY_SETUP
+        };
+        for (size_t channel = 0; channel < 3; ++channel) {
+            if (channel_fds[channel] < 0) {
+                continue;
+            }
+            fds[nfds].fd = channel_fds[channel];
+            fds[nfds].events = POLLIN;
+            fds[nfds].revents = 0;
+            bits[nfds] = channel_bits[channel];
+            owners[nfds] = index;
+            nfds += 1;
+        }
+    }
+    int poll_result;
+    do {
+        if (mtest_fail_if_requested(MTEST_EXEC_OP_POLL_SET)) {
+            poll_result = -1;
+        } else {
+            poll_result = poll(fds, nfds, timeout_ms);
+        }
+    } while (poll_result < 0 && errno == EINTR && !mtest_interrupt_seen());
+    if (poll_result < 0) {
+        if (errno == EINTR && mtest_interrupt_seen()) {
+            return 0;
+        }
+        mtest_set_error(error, MTEST_EXEC_OP_POLL_SET, errno, 0, 0);
+        return -1;
+    }
+    for (nfds_t index = 0; index < nfds; ++index) {
+        if ((fds[index].revents & POLLNVAL) != 0) {
+            mtest_set_error(
+                error,
+                MTEST_EXEC_OP_POLL_SET,
+                EBADF,
+                fds[index].revents,
+                fds[index].fd
+            );
+            return -1;
+        }
+        if ((fds[index].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+            results[owners[index]].readiness |= bits[index];
         }
     }
     return 0;
@@ -1758,7 +2282,7 @@ int32_t mtest_exec_process_read(
         } else {
             count = read(*fd, buffer, (size_t)capacity);
         }
-    } while (count < 0 && errno == EINTR && !mtest_interrupt_flag);
+    } while (count < 0 && errno == EINTR && !mtest_interrupt_seen());
     if (count > 0) {
         result->state = MTEST_EXEC_READ_BYTES;
         result->count = (uint64_t)count;
@@ -1776,7 +2300,7 @@ int32_t mtest_exec_process_read(
         return 0;
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK ||
-        (errno == EINTR && mtest_interrupt_flag)) {
+        (errno == EINTR && mtest_interrupt_seen())) {
         result->state = MTEST_EXEC_READ_WOULD_BLOCK;
         return 0;
     }
@@ -1841,7 +2365,7 @@ int32_t mtest_exec_process_setup_drain(
             } else {
                 count = read(process->setup_fd, destination, capacity);
             }
-        } while (count < 0 && errno == EINTR && !mtest_interrupt_flag);
+        } while (count < 0 && errno == EINTR && !mtest_interrupt_seen());
         if (count > 0) {
             if (state->length == sizeof(state->raw)) {
                 state->outcome = MTEST_EXEC_SETUP_CORRUPT;
@@ -1851,7 +2375,7 @@ int32_t mtest_exec_process_setup_drain(
             continue;
         }
         if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK ||
-                         (errno == EINTR && mtest_interrupt_flag))) {
+                         (errno == EINTR && mtest_interrupt_seen()))) {
             return 0;
         }
         if (count < 0) {
@@ -2011,7 +2535,8 @@ static int mtest_process_group_checked(
        occurrence-N named group fault may therefore fire during such a retry;
        production builds have no fault table or transient test seam. */
     for (;;) {
-        int fault_injected = mtest_fail_if_requested(operation);
+        int fault_injected = mtest_fail_if_requested(operation) ||
+            mtest_fail_if_requested_handle(operation, process->handle);
         int group_status = fault_injected
             ? -1
             : mtest_signal_process_group(
@@ -2205,10 +2730,12 @@ static int mtest_process_all_channels_closed(
 
 static void mtest_free_process(struct mtest_exec_process *process) {
     /* SAFETY: callers reach this only after the leader is reaped, its owned
-       process group is gone, and all three read channels are closed. Clearing
-       the sole static record invalidates the token before runtime reuse. */
-    memset(process, 0, sizeof(*process));
-    atomic_store(&mtest_runtime_state, MTEST_RUNTIME_OPEN);
+       process group is gone, and all three read channels are closed. Releasing
+       the slot clears the record and invalidates its token before the runtime
+       settles: it returns to OPEN only when this was the last live child, and
+       otherwise stays CHILD_ACTIVE for the children that remain. */
+    mtest_release_slot(process);
+    mtest_runtime_settle();
 }
 
 int32_t mtest_exec_process_close(

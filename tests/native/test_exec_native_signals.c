@@ -191,8 +191,27 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if (mtest_exec_runtime_open(&error) != 0 ||
-        mtest_exec_interrupt_requested() != 0 ||
+    if (mtest_exec_runtime_open(&error) != 0) {
+        fprintf(stderr, "runtime open for the mask probe failed\n");
+        return 1;
+    }
+    /* Defense-in-depth (not load-bearing): while the mtest interrupt handler is
+       installed, SIGINT and SIGTERM are blocked in its own mask so it never
+       re-enters itself in production. The saturating atomic is correct with or
+       without this; the mask only narrows the reentry window. */
+    struct sigaction installed_int;
+    struct sigaction installed_term;
+    if (sigaction(SIGINT, NULL, &installed_int) != 0 ||
+        sigaction(SIGTERM, NULL, &installed_term) != 0 ||
+        sigismember(&installed_int.sa_mask, SIGINT) != 1 ||
+        sigismember(&installed_int.sa_mask, SIGTERM) != 1 ||
+        sigismember(&installed_term.sa_mask, SIGINT) != 1 ||
+        sigismember(&installed_term.sa_mask, SIGTERM) != 1) {
+        fprintf(stderr, "installed handler mask omits SIGINT/SIGTERM\n");
+        (void)mtest_exec_runtime_close(&error);
+        return 1;
+    }
+    if (mtest_exec_interrupt_requested() != 0 ||
         mtest_exec_runtime_close(&error) != 0 ||
         !matches_custom(SIGINT) || !matches_custom(SIGTERM) ||
         !matches_custom(SIGCHLD)) {

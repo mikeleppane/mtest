@@ -221,6 +221,17 @@ def test_interrupt_dominates_every_other_fact() raises:
     assert_equal(_resolved(True, True, True, True, 1, True), 2)
 
 
+def test_interrupt_dominates_each_raw_outcome_multiset_code() raises:
+    # The parallel scheduler feeds resolve_exit_code a RAW outcome-multiset code
+    # — 0, 1, or 5 from `exit_code_for` over the run outcomes — together with
+    # interrupted=True, never a pre-resolved code and never the kernel's halt
+    # latch. Each raw code is dominated to exit 2, which is precisely why the
+    # pool may fold a straggling limit verdict without the exit ever catching it.
+    assert_equal(_resolved(True, False, False, False, 0, False), 2)
+    assert_equal(_resolved(True, False, False, False, 1, False), 2)
+    assert_equal(_resolved(True, False, False, False, 5, False), 2)
+
+
 def test_internal_error_is_three() raises:
     assert_equal(_resolved(False, True, False, False, 0, False), 3)
 

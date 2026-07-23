@@ -14,8 +14,6 @@ it for the gate files and the plain run set. The precompile step reuses its
 attempt-event and residual-warning shapes so a session-level step's attempt line
 carries the same identity a file build's does.
 """
-from std.os import getenv, setenv
-
 from mtest.config import RunnerConfig, lossy_utf8
 from mtest.exec import (
     ExecRuntime,
@@ -52,7 +50,6 @@ from mtest.session.scratch import (
     _invocation_nonce,
     _mangle,
     _quarantine_dir,
-    _restore_cache_env,
     _retry_out_bin,
 )
 from mtest.session.verdict import build_verdict
@@ -297,10 +294,11 @@ def _single_attempt(
     successful build's facts and only re-runs `out_bin`, since a run-side retry
     never rebuilds. A cache quarantine applies only when `quarantine_dir` is
     non-empty, which happens on a post-compile-kill rebuild: `MODULAR_CACHE_DIR`
-    is pointed at that fresh directory around the build spawn and restored
-    immediately after. The session is single-threaded, so mutating mtest's own
-    environment is safe. The build and run termination, spawn-failure, and
-    in-flight-interrupt short-circuits match the non-retry path exactly.
+    is set in the build child's own environment (via `spec.env_extra`), so
+    mtest's own environment is never touched and concurrent builds cannot
+    clobber each other's cache directory. The build and run termination,
+    spawn-failure, and in-flight-interrupt short-circuits match the non-retry
+    path exactly.
 
     Args:
         runtime: The exec runtime supervising the build and run spawns.
@@ -322,11 +320,9 @@ def _single_attempt(
         The raw attempt facts, including its control signal.
 
     Raises:
-        Error: If restoring `MODULAR_CACHE_DIR` after a quarantined build
-            fails, or if canonicalizing the source path fails. Both `exec`
-            supervisor calls are caught here and converted into internal-error
-            attempts instead. The caller catches what does escape and resolves
-            exit 3.
+        Error: If canonicalizing the source path fails. Both `exec` supervisor
+            calls are caught here and converted into internal-error attempts
+            instead. The caller catches what does escape and resolves exit 3.
     """
     var build_argv = prior_build_argv.copy()
     var bterm = prior_bterm
@@ -349,11 +345,12 @@ def _single_attempt(
         # NARROW quarantine: only a post-compile-kill rebuild redirects the
         # module cache. The spike observed NO cache corruption from a killed
         # compile (the cache commits atomically), so this is defense-in-depth.
-        var quarantined = quarantine_dir != ""
-        var prev_cache = getenv("MODULAR_CACHE_DIR", "")
-        var had_prev = prev_cache != ""
-        if quarantined:
-            _ = setenv("MODULAR_CACHE_DIR", quarantine_dir, True)
+        # The override rides the CHILD's environment via `env_extra`, so the
+        # parent's environment is never touched and concurrent quarantined
+        # builds cannot clobber each other's cache directory.
+        var env_extra = List[String]()
+        if quarantine_dir != "":
+            env_extra.append("MODULAR_CACHE_DIR=" + quarantine_dir)
 
         # Build under `--compile-timeout` (0 disables), inside the invocation
         # root, with the COMPILE-specific grace. A build machinery raise is a
@@ -367,16 +364,13 @@ def _single_attempt(
                     root,
                     config.compile_timeout_secs * 1000,
                     _COMPILE_GRACE_MS,
+                    env_extra^,
                 ),
             )
         except:
-            if quarantined:
-                _restore_cache_env(had_prev, prev_cache)
             return _AttemptResult._internal(
                 Event.internal_error("build", config.mojo_path, 0)
             )
-        if quarantined:
-            _restore_cache_env(had_prev, prev_cache)
 
         bdur = Float64(bres.duration_ms) / 1000.0
         # An interrupt during the build group-kills it (a TimedOut bail-out).
@@ -530,6 +524,7 @@ def _finalize_attempt(
     var att: _AttemptResult,
     attempts_used: Int,
     flaky: Bool,
+    serial: Bool = False,
 ) -> FileResult:
     """Build the file's terminal `FileResult` from its last attempt.
 
@@ -544,6 +539,8 @@ def _finalize_attempt(
         att: The last attempt, consumed for its streams and classification.
         attempts_used: How many attempts the file spent.
         flaky: Whether this attempt passed only after a crash-class attempt.
+        serial: Whether the file ran one-at-a-time on the serial pass rather
+            than a worker; rides the verdict as an informal annotation.
 
     Returns:
         The file's terminal `FileResult`.
@@ -569,6 +566,7 @@ def _finalize_attempt(
             timeout_seconds=bto,
             attempts_used=attempts_used,
             slow=is_slow(att.bdur, 0.0),
+            serial=serial,
         )
         return FileResult.ran_with(ev^, bout)
 
@@ -631,6 +629,7 @@ def _finalize_attempt(
         slow=is_slow(att.bdur, att.rdur),
         stdout_truncated=att.run_stdout_truncated,
         stderr_truncated=att.run_stderr_truncated,
+        serial=serial,
     )
     var fr = FileResult.classified(
         pre^,
@@ -743,10 +742,10 @@ def _run_one(
 
     Raises:
         Error: If a build or quarantine directory cannot be made, or if an
-            attempt's cache-environment restore or source canonicalization
-            fails. Both `exec` supervisor calls are caught inside
-            `_single_attempt` and become internal-error attempts rather than
-            raises. The caller catches what does escape and resolves exit 3.
+            attempt's source canonicalization fails. Both `exec` supervisor
+            calls are caught inside `_single_attempt` and become internal-error
+            attempts rather than raises. The caller catches what does escape and
+            resolves exit 3.
     """
     _ensure_dir(root + "/build/bin")
     var mangled = _mangle(rel)

@@ -373,7 +373,9 @@ def main():
 
     var code = 0
     try:
-        code = run_session(resources.runtime, config, root, comp)
+        code = run_session(
+            resources.runtime, config, root, comp, console_fd=console_fd
+        )
     except e:
         # The only raise the session propagates is a discover: usage error;
         # like a cli usage error it exits 4 to stderr. The session raised before
@@ -383,16 +385,11 @@ def main():
         _eprintln(String(e))
         exit(resources.close_into(EXIT_USAGE_ERROR, rank_delivery=False))
 
-    # Flush the console's fully rendered buffer verbatim (it already ends in a
-    # newline) to its RESOLVED destination — stdout normally, stderr under
-    # `--json -` so stdout carries only the byte-pure stream. Even on an
-    # interrupt or partial-summary path.
-    print(
-        comp.console_output(),
-        end="",
-        file=FileDescriptor(console_fd),
-        flush=True,
-    )
+    # The session has already flushed the console's fully rendered buffer to its
+    # RESOLVED destination — stdout normally, stderr under `--json -` so stdout
+    # carries only the byte-pure stream — draining it as the run progressed and
+    # sealing it with a closing flush before returning. `main` lent the
+    # descriptor and keeps its close; here it only appends the epilogue below.
 
     # The ALWAYS-RUNS restoration epilogue, then the annotation tail — both to the
     # console's resolved descriptor, right after the summary band. When the

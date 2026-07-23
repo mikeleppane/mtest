@@ -24,6 +24,7 @@ from mtest.model import (
     CrashAttributionPayload,
     FileFinishedPayload,
     SessionFinishedPayload,
+    SessionStartedPayload,
     WarningPayload,
 )
 from mtest.report import (
@@ -112,6 +113,39 @@ def test_keyword_subset_runs_only_selected_and_counts_deselected() raises:
     assert_true(last.kind == EventKind.SESSION_FINISHED)
     assert_equal(last.data[SessionFinishedPayload].test_counts.passed, 2)
     assert_equal(last.data[SessionFinishedPayload].test_counts.deselected, 1)
+
+
+def test_selection_forces_one_worker_and_an_honest_header() raises:
+    # Selection (`-k`/a node id) runs the sequential selection sub-session, which
+    # the pool never drives. A worker request cannot be honored there, so the
+    # header must report ONE worker, never the requested count — it must not
+    # claim a parallelism the run does not use.
+    var root = temp_root()
+    write_file(root, "tests/test_matrix.mojo", SRC_MATRIX)
+    var cfg = base_config()
+    cfg.paths.append("tests/test_matrix.mojo")
+    cfg.keyword = "add"
+    cfg.workers = 4
+
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    var code = run_session(cfg, root, comp)
+
+    assert_equal(code, 0)
+    ref rec = comp.composite.reporters[0]
+    var workers_reported = -1
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.SESSION_STARTED:
+            workers_reported = (
+                rec.event_at(i).data[SessionStartedPayload].workers
+            )
+            break
+    assert_equal(
+        workers_reported,
+        1,
+        "selection must report a sequential (one-worker) header",
+    )
 
 
 def test_node_id_selects_a_single_test() raises:

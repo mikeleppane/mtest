@@ -4,8 +4,8 @@
 shell, so `argv[0]` is the program and the rest are literal arguments), an
 optional working directory, a deadline in milliseconds, and the
 SIGTERM->SIGKILL grace the supervisor honors when that deadline (or an
-interrupt) fires. It also carries a reserved env-extension field, present so
-the shape is stable but not read: child environment mutation is out of scope.
+interrupt) fires. It also carries an optional list of `KEY=VALUE` environment
+overrides the child receives on top of the inherited environment.
 
 The grace is per-spawn rather than one global constant because the right answer
 depends on what is being killed. A test binary owes nothing on the way out, so
@@ -40,7 +40,17 @@ struct ProcessSpec(Copyable, Movable):
     var grace_ms: Int
     """Milliseconds between the process-group SIGTERM and the SIGKILL."""
     var env_extra: List[String]
-    """Reserved for a future child-environment extension; not read today."""
+    """`KEY=VALUE` environment overrides applied on top of the inherited
+    environment.
+
+    Each entry must have a `=` with a nonempty key and no NUL byte, and no key
+    may repeat across the list. The adapter merges them replace-not-append: an
+    override whose key is already inherited replaces every inherited occurrence,
+    leaving no duplicate, and PATH-based resolution reads the merged environment
+    so a `PATH=` override governs it. An empty list leaves the inherited
+    environment untouched. Validation and the merge live in the C adapter; this
+    field carries the raw entries across.
+    """
 
     @staticmethod
     def command(
@@ -69,6 +79,7 @@ struct ProcessSpec(Copyable, Movable):
         cwd: String,
         timeout_ms: Int = 0,
         grace_ms: Int = DEFAULT_GRACE_MS,
+        var env_extra: List[String] = List[String](),
     ) -> Self:
         """A spec for `argv` run inside `cwd` with the given deadline.
 
@@ -79,9 +90,14 @@ struct ProcessSpec(Copyable, Movable):
             timeout_ms: The deadline in milliseconds; 0 disables it.
             grace_ms: The SIGTERM->SIGKILL grace; defaults to the run path's
                 300 ms.
+            env_extra: `KEY=VALUE` overrides the child receives on top of the
+                inherited environment (see the field of the same name).
+                Consumed; the returned spec owns it. Defaults to an empty list,
+                so a caller that says nothing leaves the child's environment
+                exactly inherited — byte-identical to the no-override spec.
 
         Returns:
-            A spec whose child chdirs into `cwd` before exec, with a freshly
-            allocated empty `env_extra` list.
+            A spec whose child chdirs into `cwd` before exec, carrying the given
+            `env_extra` overrides (empty by default).
         """
-        return Self(argv^, Optional(cwd), timeout_ms, grace_ms, List[String]())
+        return Self(argv^, Optional(cwd), timeout_ms, grace_ms, env_extra^)

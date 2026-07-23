@@ -21,12 +21,15 @@ class AsanCheckTests(unittest.TestCase):
             tuple(path.relative_to(asan_check.ROOT).as_posix() for path in asan_check.TESTS),
             (
                 "tests/integration/test_exec_capture.mojo",
+                "tests/integration/test_exec_env.mojo",
                 "tests/integration/test_exec_flood.mojo",
                 "tests/integration/test_exec_timeout.mojo",
                 "tests/integration/test_exec_interrupt.mojo",
                 "tests/integration/test_exec_etxtbsy.mojo",
                 "tests/integration/test_exec_reap.mojo",
                 "tests/integration/test_exec_fdhygiene.mojo",
+                "tests/integration/test_exec_pool.mojo",
+                "tests/integration/test_session_schedule.mojo",
             ),
         )
         self.assertGreater(len(asan_check.TESTS), 0)

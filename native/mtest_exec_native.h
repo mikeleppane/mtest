@@ -10,8 +10,12 @@
 #define MTEST_EXEC_EXPORT
 #endif
 
-#define MTEST_EXEC_NATIVE_ABI_VERSION 1u
+#define MTEST_EXEC_NATIVE_ABI_VERSION 2u
 #define MTEST_EXEC_PROCESS_HAS_CWD 1u
+
+/* Sentinel returned by mtest_exec_fd_limit when RLIMIT_NOFILE is unbounded
+   (RLIM_INFINITY). Callers map it to their own compile-time ceiling. */
+#define MTEST_EXEC_FD_LIMIT_UNBOUNDED UINT64_MAX
 
 enum mtest_exec_channel {
     MTEST_EXEC_CHANNEL_STDOUT = 1,
@@ -107,7 +111,9 @@ enum mtest_exec_operation {
     MTEST_EXEC_OP_GROUP_TERM = 32,
     MTEST_EXEC_OP_GROUP_KILL = 33,
     MTEST_EXEC_OP_WAITID = 34,
-    MTEST_EXEC_OP_WAITPID = 35
+    MTEST_EXEC_OP_WAITPID = 35,
+    MTEST_EXEC_OP_POLL_SET = 36,
+    MTEST_EXEC_OP_FD_LIMIT = 37
 };
 
 #if MTEST_EXEC_TESTING
@@ -129,6 +135,8 @@ struct mtest_exec_process_spec {
     struct mtest_exec_bytes cwd;
     uint32_t flags;
     uint32_t reserved;
+    const struct mtest_exec_bytes *env_extra;
+    uint64_t env_extra_count;
 };
 
 struct mtest_exec_error {
@@ -182,21 +190,23 @@ struct mtest_exec_reap_result {
     uint32_t reserved;
 };
 
-/* SAFETY: ABI v1 crosses from Mojo as fixed-width byte records. Every size,
+/* SAFETY: ABI v2 crosses from Mojo as fixed-width byte records. Every size,
    alignment, and offset below is asserted from the platform C compiler's own
    layout; reserved fields must be zero and C never retains a caller record. */
-_Static_assert(sizeof(void *) == 8, "ABI v1 requires LP64 pointers");
+_Static_assert(sizeof(void *) == 8, "ABI v2 requires LP64 pointers");
 _Static_assert(sizeof(struct mtest_exec_bytes) == 16, "bytes size");
 _Static_assert(_Alignof(struct mtest_exec_bytes) == 8, "bytes alignment");
 _Static_assert(offsetof(struct mtest_exec_bytes, data) == 0, "bytes.data");
 _Static_assert(offsetof(struct mtest_exec_bytes, length) == 8, "bytes.length");
-_Static_assert(sizeof(struct mtest_exec_process_spec) == 40, "spec size");
+_Static_assert(sizeof(struct mtest_exec_process_spec) == 56, "spec size");
 _Static_assert(_Alignof(struct mtest_exec_process_spec) == 8, "spec alignment");
 _Static_assert(offsetof(struct mtest_exec_process_spec, argv) == 0, "spec.argv");
 _Static_assert(offsetof(struct mtest_exec_process_spec, argc) == 8, "spec.argc");
 _Static_assert(offsetof(struct mtest_exec_process_spec, cwd) == 16, "spec.cwd");
 _Static_assert(offsetof(struct mtest_exec_process_spec, flags) == 32, "spec.flags");
 _Static_assert(offsetof(struct mtest_exec_process_spec, reserved) == 36, "spec.reserved");
+_Static_assert(offsetof(struct mtest_exec_process_spec, env_extra) == 40, "spec.env_extra");
+_Static_assert(offsetof(struct mtest_exec_process_spec, env_extra_count) == 48, "spec.env_extra_count");
 _Static_assert(sizeof(struct mtest_exec_error) == 32, "error size");
 _Static_assert(_Alignof(struct mtest_exec_error) == 8, "error alignment");
 _Static_assert(offsetof(struct mtest_exec_error, operation) == 0, "error operation");
@@ -249,6 +259,37 @@ MTEST_EXEC_EXPORT uint32_t mtest_exec_native_abi_version(void);
 MTEST_EXEC_EXPORT int32_t mtest_exec_runtime_open(struct mtest_exec_error *error);
 MTEST_EXEC_EXPORT int32_t mtest_exec_runtime_close(struct mtest_exec_error *error);
 MTEST_EXEC_EXPORT int32_t mtest_exec_interrupt_requested(void);
+/* Observed handler-activation count, saturating at 2: 0 (none), 1 (interrupt
+   requested), 2 (a second observed activation, i.e. escalate-to-kill). Standard
+   signals coalesce, so this counts OBSERVED activations, not raw signals. */
+MTEST_EXEC_EXPORT int32_t mtest_exec_interrupt_count(void);
+/* Wait for readiness across every live channel of a SET of named handles in one
+   poll(2). `results[i]` corresponds one-to-one to `handles[i]`; readiness bits
+   reuse enum mtest_exec_readiness (STDOUT|STDERR|SETUP). `timeout_ms` follows
+   poll(2): -1 blocks, 0 returns immediately, >0 bounds the wait.
+
+   Hostile-caller validation runs in TWO PHASES:
+     PHASE ONE (scalar/structural, NO array dereference): count == 0 -> EINVAL;
+       count > capacity -> EINVAL; NULL handles or NULL results (count > 0) ->
+       EINVAL; timeout_ms < -1 -> EINVAL. A phase-one violation returns with
+       `results` UNTOUCHED (zeroing an over-capacity or NULL buffer would itself
+       be the overrun this phase exists to prevent).
+     PHASE TWO (only after phase one passes): zero exactly results[0..count);
+       then reject a duplicate handle in the set (EINVAL) and a stale/invalid
+       handle (EINVAL, error.detail = the offending index); then poll. The
+       zeroing is guaranteed on these later error paths. */
+MTEST_EXEC_EXPORT int32_t mtest_exec_poll_set(
+    const uint64_t *handles,
+    uint64_t count,
+    int32_t timeout_ms,
+    struct mtest_exec_poll_result *results,
+    struct mtest_exec_error *error
+);
+/* Report the RLIMIT_NOFILE soft limit into *soft_limit. RLIM_INFINITY is
+   reported as MTEST_EXEC_FD_LIMIT_UNBOUNDED (UINT64_MAX). */
+MTEST_EXEC_EXPORT int32_t mtest_exec_fd_limit(
+    uint64_t *soft_limit, struct mtest_exec_error *error
+);
 MTEST_EXEC_EXPORT int32_t mtest_exec_monotonic_ms(int64_t *milliseconds, struct mtest_exec_error *error);
 MTEST_EXEC_EXPORT int32_t mtest_exec_process_open(const struct mtest_exec_process_spec *spec, struct mtest_exec_process_ref *process, struct mtest_exec_error *error);
 MTEST_EXEC_EXPORT int32_t mtest_exec_process_poll(uint64_t handle, int32_t timeout_ms, struct mtest_exec_poll_result *result, struct mtest_exec_error *error);

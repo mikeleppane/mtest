@@ -99,6 +99,21 @@ ANNOTATION_SCENARIOS = (
     "annotations-conflict",
     "annotations-fencing",
 )
+PARALLEL_SCENARIOS = (
+    "parallel-projection-eq",
+    "parallel-capacity-one",
+    "parallel-window-overlap",
+    "parallel-interrupt",
+    "parallel-shard-disjoint",
+    "collect-parallel",
+    "parallel-auto-smoke",
+    "parallel-json-workers",
+    "parallel-j-rejected",
+    "parallel-junit-canonical-eq",
+    "parallel-progress-tty",
+    "parallel-serial-noverlap",
+    "parallel-serial-stale-glob",
+)
 
 
 
@@ -114,7 +129,7 @@ class E2EFaultTopologyTests(unittest.TestCase):
         names = tuple(name for name, _scenario in e2e_main.SCENARIOS)
 
         self.assertEqual(names, layout.E2E_SCENARIO_NAMES)
-        self.assertEqual(len(names), 59)
+        self.assertEqual(len(names), 72)
         self.assertEqual(len(set(names)), len(names))
 
     def test_core_scenarios_have_one_feature_owner(self) -> None:
@@ -179,6 +194,16 @@ class E2EFaultTopologyTests(unittest.TestCase):
             if scenario.__module__ == annotations.__name__
         )
         self.assertEqual(owned, ANNOTATION_SCENARIOS)
+
+    def test_parallel_scenarios_have_one_feature_owner(self) -> None:
+        from scripts.e2e.scenarios import parallel
+
+        owned = tuple(
+            name
+            for name, scenario in e2e_main.SCENARIOS
+            if scenario.__module__ == parallel.__name__
+        )
+        self.assertEqual(owned, PARALLEL_SCENARIOS)
 
     def test_runner_owns_results_manifest_access_and_hard_timeouts(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-e2e-runner-") as raw_tmp:

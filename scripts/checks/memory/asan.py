@@ -21,12 +21,15 @@ NATIVE_PRODUCTION_OBJECT = OUT / "mtest_exec_native.o"
 NATIVE_OBJECT = OUT / "mtest_exec_native_test.o"
 TESTS = (
     ROOT / "tests" / "integration" / "test_exec_capture.mojo",
+    ROOT / "tests" / "integration" / "test_exec_env.mojo",
     ROOT / "tests" / "integration" / "test_exec_flood.mojo",
     ROOT / "tests" / "integration" / "test_exec_timeout.mojo",
     ROOT / "tests" / "integration" / "test_exec_interrupt.mojo",
     ROOT / "tests" / "integration" / "test_exec_etxtbsy.mojo",
     ROOT / "tests" / "integration" / "test_exec_reap.mojo",
     ROOT / "tests" / "integration" / "test_exec_fdhygiene.mojo",
+    ROOT / "tests" / "integration" / "test_exec_pool.mojo",
+    ROOT / "tests" / "integration" / "test_session_schedule.mojo",
 )
 ASAN_OPTIONS = "detect_leaks=1:halt_on_error=1:abort_on_error=1"
 CONTROL_CASES = {

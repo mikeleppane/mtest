@@ -30,6 +30,8 @@ selection, probe, and gate paths route non-valid reports through the same
 `resolve_report`/`classify` machinery as the default path, so a forged or
 off-grammar report resolves identically either way.
 """
+from std.io import FileDescriptor
+from std.sys import num_logical_cores
 from std.time import perf_counter_ns
 
 from mtest.cache import BuildRegistry
@@ -50,9 +52,40 @@ from mtest.select import NamedTarget, parse_operands, selection_active
 from mtest.session.attempt import _run_one
 from mtest.session.attribution_run import _run_crash_attribution
 from mtest.session.file_result import _CrashFile, _failing_count
+from mtest.session.pipeline import PipelineHalt, RunPipeline
+from mtest.session.pool import _run_pool_batch, resolve_worker_plan
+from mtest.session.pool_plan import partition_serial, stale_serials
 from mtest.session.precompile import _run_precompile
 from mtest.session.selection import _run_selection
 from mtest.session.shard import partition
+
+
+def _flush_console[
+    C: ReportCoordinator
+](mut reporter: C, console_fd: Int, closing: Bool):
+    """Drain the coordinator's pending console bytes to the borrowed handle.
+
+    The driver owns no console destination of its own: `main` resolves it and
+    lends the descriptor, keeping close and teardown. A negative handle (a
+    library caller that lent none, or a recording driver) or an empty drain
+    writes nothing. The write is best-effort, exactly as the single terminal
+    console flush was — a dead destination is not a new exit cause, so a failed
+    incremental write is not distinguished here either.
+
+    Args:
+        reporter: The coordinator to drain. A recording coordinator drains
+            empty, so this is a no-op for the session's own test drivers.
+        console_fd: The borrowed console descriptor, or negative when none was
+            lent.
+        closing: Whether this is the terminal drain, which also emits the
+            framed sections and the summary band.
+    """
+    if console_fd < 0:
+        return
+    var chunk = reporter.drain_console(closing)
+    if chunk.byte_length() == 0:
+        return
+    print(chunk, end="", file=FileDescriptor(console_fd), flush=True)
 
 
 def run_session[
@@ -62,6 +95,7 @@ def run_session[
     config: RunnerConfig,
     root: String,
     mut reporter: C,
+    console_fd: Int = -1,
 ) raises -> Int:
     """Orchestrate a whole run and return the resolved process exit code.
 
@@ -90,6 +124,13 @@ def run_session[
         config: Every knob the run reads.
         root: The invocation root; built binaries and paths are relative to it.
         reporter: The coordinator the session fans every event to.
+        console_fd: A borrowed console descriptor the session flushes rendered
+            bytes to as the run progresses, then seals with a closing drain
+            before returning. `main` lends the resolved destination and keeps
+            close and teardown; a negative value (the default, and every
+            recording driver) flushes nothing, leaving the buffer for the
+            caller to read. The write is best-effort and carries no new exit
+            cause, exactly as the single terminal flush did.
 
     Returns:
         The resolved exit code: 2 on an interrupt; 3 on an internal error, a
@@ -124,6 +165,32 @@ def run_session[
         sharded_out_count = before - len(disc.run_files)
         shard_label = String(config.shard_m) + "/" + String(config.shard_n)
 
+    # Resolve the worker count before announcing the run: `1` (the default)
+    # stays the sequential path and never queries the descriptor cap; any other
+    # value resolves the pool's capacity against the cores and the effective
+    # cap, clamping loudly. A hard environment fault (a descriptor ceiling too
+    # small for a single child) is folded as an internal error below, resolving
+    # to exit 3 the same as any other machinery failure.
+    # Selection (`-k` or a node id) runs through the sequential selection
+    # sub-session, which the pool does not drive, so a worker request cannot be
+    # honored there. Resolve to one worker under selection so the header reports
+    # the truthful sequential mode instead of a parallelism the run never uses,
+    # and `--serial` stays a consistent no-op (the selection run is already
+    # one file at a time).
+    var sel_active = selection_active(config.paths, config.keyword)
+    var resolved_workers = 1
+    var worker_clamp_note = String("")
+    var worker_env_error = False
+    if config.workers != 1 and not sel_active:
+        try:
+            var wp = resolve_worker_plan(config)
+            resolved_workers = wp.resolved
+            if wp.clamped:
+                worker_clamp_note = wp.limiting_note()
+        except:
+            worker_env_error = True
+    var cores = num_logical_cores()
+
     var selected = len(disc.gate_files) + len(disc.run_files)
     var excluded = len(disc.excluded)
     reporter.handle(
@@ -134,8 +201,11 @@ def run_session[
             excluded,
             shard_label=shard_label,
             sharded_out_count=sharded_out_count,
+            workers=resolved_workers,
         )
     )
+    if worker_clamp_note != "":
+        reporter.handle(Event.warning("worker-clamp", worker_clamp_note))
 
     var summary = Summary.zeros()
 
@@ -156,12 +226,21 @@ def run_session[
         summary.counts[Outcome.EXCLUDED.code] += 1
     for pat in disc.stale_excludes:
         reporter.handle(Event.warning("stale-exclusion", pat))
+    # A `--serial` glob matching no discovered run file is stale for the same
+    # reason a `--exclude` glob is: the pattern names nothing, so the caller
+    # almost certainly mistyped it. This is about the glob, not the worker count,
+    # so it fires on every run — even the sequential one, where serial pinning
+    # has no execution effect.
+    for pat in stale_serials(disc.run_files, config.serial_globs):
+        reporter.handle(Event.warning("stale-serial", pat))
 
     var run_outcomes = List[Outcome]()
     var test_totals = TestCounts.zeros()
     var ran_files = 0
     var interrupted = False
-    var internal_error = False
+    # A descriptor-ceiling fault while resolving the worker plan is a machinery
+    # fault: resolve it as an internal error (exit 3), the same as any other.
+    var internal_error = worker_env_error
     var precompile_failed = False
     var drift = False
     # A latched machine-stream write failure (a dead `--json -` pipe, a full or
@@ -243,8 +322,44 @@ def run_session[
         interrupted or internal_error or precompile_failed or stream_dead
     )
 
-    # Gates first: a failing gate aborts the whole session immediately.
-    if proceed:
+    # Gates first: a failing gate aborts the whole session immediately. The stop
+    # policy runs through the same `RunPipeline` kernel the selection and plain
+    # run paths use — a gate is always exit-first, so a failing gate latches
+    # `LIMIT_REACHED` and aborts scheduling, exactly as before.
+    var gate_pipeline = RunPipeline(
+        len(disc.gate_files), config.retries, True, 0
+    )
+    # The parallel pool runs the gates as their own batch, aborting the run on
+    # the first failing or drifting gate exactly as the sequential loop does.
+    if proceed and resolved_workers > 1:
+        var gb = _run_pool_batch(
+            runtime,
+            config,
+            root,
+            disc.gate_files,
+            includes,
+            reporter,
+            summary,
+            resolved_workers,
+            cores,
+            True,
+            console_fd,
+        )
+        run_outcomes.extend(gb.run_outcomes.copy())
+        test_totals.passed += gb.test_totals.passed
+        test_totals.failed += gb.test_totals.failed
+        test_totals.skipped += gb.test_totals.skipped
+        test_totals.deselected += gb.test_totals.deselected
+        ran_files += gb.ran_files
+        if gb.interrupted:
+            interrupted = True
+        if gb.internal_error:
+            internal_error = True
+        if gb.drift:
+            drift = True
+        if gb.aborted:
+            gate_abort = True
+    if proceed and resolved_workers <= 1:
         for gi in range(len(disc.gate_files)):
             if interrupt_requested():
                 interrupted = True
@@ -282,7 +397,10 @@ def run_session[
                 summary.counts[fr.outcome.code] += 1
                 run_outcomes.extend(fr.exit_outcomes.copy())
                 ran_files += 1
-                if fr.outcome.is_failing():
+                gate_pipeline.record_verdict(
+                    gi, fr.outcome.is_failing(), _failing_count(run_outcomes)
+                )
+                if gate_pipeline.halt() != PipelineHalt.RUNNING:
                     gate_abort = True
                     break
             except:
@@ -313,7 +431,7 @@ def run_session[
     # to gate malformed syntax a second time — see
     # `test_malformed_node_id_raises_even_when_a_gate_fails` in
     # tests/integration/test_session_selection.mojo for the pinned regression.
-    var sel_active = selection_active(config.paths, config.keyword)
+    # `sel_active` is resolved once up top (it also forces one worker).
 
     # Run files. Under selection, the run set is probed then run through the
     # selection sub-session; otherwise the plain build-then-run loop applies.
@@ -335,7 +453,99 @@ def run_session[
         if sel.drift:
             drift = True
         crash_files.extend(sel.crash_files.copy())
+    elif proceed_runs and resolved_workers > 1:
+        # The parallel pool drives the run files at capacity `resolved_workers`,
+        # honoring `-x`/`--maxfail` (in-flight files finish, the rest NOT-RUN)
+        # and folding an interrupt back for exit 2. Selection is not pooled
+        # here, so this branch is the non-selection run set only.
+        #
+        # Serial pinning splits the dispatched run files: files matching a
+        # `--serial` glob run OUTSIDE the pool, one whole pipeline at a time,
+        # AFTER the parallel batch (serial-last). The partition happens here, on
+        # the files actually dispatched (post-shard, post-selection), so nothing
+        # discover counts or shards is disturbed; each sub-list keeps the
+        # dispatched order.
+        var split = partition_serial(disc.run_files, config.serial_globs)
+        var rb = _run_pool_batch(
+            runtime,
+            config,
+            root,
+            split.parallel,
+            includes,
+            reporter,
+            summary,
+            resolved_workers,
+            cores,
+            False,
+            console_fd,
+        )
+        run_outcomes.extend(rb.run_outcomes.copy())
+        test_totals.passed += rb.test_totals.passed
+        test_totals.failed += rb.test_totals.failed
+        test_totals.skipped += rb.test_totals.skipped
+        test_totals.deselected += rb.test_totals.deselected
+        ran_files += rb.ran_files
+        if rb.interrupted:
+            interrupted = True
+        if rb.internal_error:
+            internal_error = True
+        if rb.drift:
+            drift = True
+        crash_files.extend(rb.crash_files.copy())
+
+        # The serial pass runs at capacity one AFTER the parallel batch drains.
+        # Capacity one is the whole-pipeline drain: a single Supervisor slot
+        # cannot admit the next file's build until the current file's verdict
+        # frees it, and a file holds its slot through build → run → any retries,
+        # so no two serial files (nor a serial and a parallel file) ever overlap.
+        # `-x`/`--maxfail` and interrupts span BOTH batches. If the parallel
+        # batch already halted on its limit, aborted on an interrupt, or hit a
+        # machinery fault, the serial files land NOT-RUN rather than starting
+        # fresh work (`stop_serial`). Otherwise the serial pass CONTINUES the
+        # run-wide `--maxfail` tally: it is seeded with the parallel batch's
+        # failing count so the ceiling counts failures across both batches
+        # instead of resetting to zero at the boundary.
+        var stop_serial = rb.interrupted or rb.internal_error or rb.halted
+        if len(split.serial) > 0 and not stop_serial:
+            var sb = _run_pool_batch(
+                runtime,
+                config,
+                root,
+                split.serial,
+                includes,
+                reporter,
+                summary,
+                1,
+                cores,
+                False,
+                console_fd,
+                serial=True,
+                initial_failing=_failing_count(rb.run_outcomes),
+            )
+            run_outcomes.extend(sb.run_outcomes.copy())
+            test_totals.passed += sb.test_totals.passed
+            test_totals.failed += sb.test_totals.failed
+            test_totals.skipped += sb.test_totals.skipped
+            test_totals.deselected += sb.test_totals.deselected
+            ran_files += sb.ran_files
+            if sb.interrupted:
+                interrupted = True
+            if sb.internal_error:
+                internal_error = True
+            if sb.drift:
+                drift = True
+            crash_files.extend(sb.crash_files.copy())
     elif proceed_runs:
+        # The plain run path settles each file build-then-run through `_run_one`
+        # and routes its `-x`/`--maxfail` stop policy through the same
+        # `RunPipeline` kernel the selection and gate paths use, rather than
+        # re-deciding the limits inline.
+        var run_pipeline = RunPipeline(
+            len(disc.run_files),
+            config.retries,
+            config.exitfirst,
+            config.maxfail,
+        )
         for ri in range(len(disc.run_files)):
             if interrupt_requested():
                 interrupted = True
@@ -358,6 +568,12 @@ def run_session[
                 for pe in fr.pre_events:
                     reporter.handle(pe)
                 reporter.handle(fr.event)
+                # Flush this file's rendered verdict as soon as it lands. The
+                # plain-run branch runs only when selection is inactive, so no
+                # raise can follow before the run returns; a leaked partial
+                # flush ahead of a usage-error raise is therefore impossible on
+                # this path.
+                _flush_console(reporter, console_fd, closing=False)
                 test_totals.passed += fr.test_counts.passed
                 test_totals.failed += fr.test_counts.failed
                 test_totals.skipped += fr.test_counts.skipped
@@ -375,12 +591,10 @@ def run_session[
                             disc.run_files[ri], fr.binary_path, List[String]()
                         )
                     )
-                if config.exitfirst and fr.outcome.is_failing():
-                    break
-                if (
-                    config.maxfail > 0
-                    and _failing_count(run_outcomes) >= config.maxfail
-                ):
+                run_pipeline.record_verdict(
+                    ri, fr.outcome.is_failing(), _failing_count(run_outcomes)
+                )
+                if run_pipeline.halt() != PipelineHalt.RUNNING:
                     break
             except:
                 reporter.handle(
@@ -388,6 +602,14 @@ def run_session[
                 )
                 internal_error = True
                 break
+
+    # Flush every header rendered so far that no incremental flush above
+    # already emitted: the precompile banner, the gate verdicts, and the
+    # selection sub-session's per-file lines. Reached only once the run pass has
+    # returned normally, so it never fires ahead of a selection usage-error
+    # raise — matching the old terminal flush, which `main` performed only on a
+    # normal return.
+    _flush_console(reporter, console_fd, closing=False)
 
     # Every selected file that did not produce a tallied verdict is NOT_RUN — a
     # gate casualty, an -x/--maxfail/gate-abort/interrupt skip, a precompile
@@ -487,6 +709,13 @@ def run_session[
             flaky_files=flaky_files,
         )
     )
+
+    # Seal the console: emit any remaining header, then the framed sections and
+    # the summary band, in `output()` order. This is the last console write the
+    # driver makes; `main` renders the fence-restoration epilogue and the
+    # annotation tail after this returns, so both still land AFTER the final
+    # console bytes exactly as before.
+    _flush_console(reporter, console_fd, closing=True)
 
     # The dispatch just above is ITSELF a stream write, and can latch a NEW
     # failure during that very write (a `--json -` consumer that closes its

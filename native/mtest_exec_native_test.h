@@ -36,6 +36,27 @@ MTEST_EXEC_EXPORT int32_t mtest_exec_test_deliver_interrupt_after(
     uint32_t operation,
     int32_t signal_number
 );
+/* Arm a one-shot reentry: the next entry into the interrupt handler re-enters
+   the handler once, from inside itself, mid-transition. Genuine nesting, not a
+   queued masked signal. */
+MTEST_EXEC_EXPORT void mtest_exec_test_arm_interrupt_reentry(void);
+/* Invoke the interrupt handler directly once (as the OS would on delivery). */
+MTEST_EXEC_EXPORT void mtest_exec_test_invoke_interrupt(void);
+/* Real back-to-back delivery: install the handler unmasked (SA_NODEFER), raise
+   the signal so it nests synchronously inside itself, restore, and return the
+   saturating count. Proves no transition is lost under genuine OS reentry. */
+MTEST_EXEC_EXPORT uint32_t mtest_exec_test_nested_interrupt_count(void);
+/* Configure a fault scoped to one handle's operation, so a multi-slot test can
+   fail exactly one slot's operation. Composes with the global fault table:
+   both are consulted, the handle-scoped record fires only for its handle. */
+MTEST_EXEC_EXPORT int32_t mtest_exec_test_fault_configure_handle(
+    uint64_t handle,
+    uint32_t operation,
+    uint32_t occurrence,
+    int32_t error_number
+);
+/* Observed activations of the handle-scoped fault since it was configured. */
+MTEST_EXEC_EXPORT uint32_t mtest_exec_test_fault_handle_seen(void);
 MTEST_EXEC_EXPORT void mtest_exec_test_asan_oob(void);
 MTEST_EXEC_EXPORT void mtest_exec_test_asan_uaf(void);
 MTEST_EXEC_EXPORT void mtest_exec_test_asan_leak(void);

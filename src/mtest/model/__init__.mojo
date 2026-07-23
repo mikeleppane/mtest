@@ -31,6 +31,7 @@ from mtest.model.events import (
     CollectionKnownPayload,
     AttemptFinishedPayload,
     CrashAttributionPayload,
+    ProgressPayload,
 )
 from mtest.model.exit_code import (
     TerminalFacts,

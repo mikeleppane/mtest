@@ -103,7 +103,7 @@ def test_session_started_exact() raises:
         serialize_event(e),
         '{"event":"session_started","root":"root/dir","toolchain":"mojo'
         + ' 1.0","selected_count":3,"excluded_count":1,"shard_label":"2/5",'
-        + '"sharded_out_count":4}',
+        + '"sharded_out_count":4,"workers":1}',
     )
 
 
@@ -178,8 +178,35 @@ def test_file_finished_exact() raises:
         + '"exit_status":0,"timeout_us":0,"exclusion_pattern":"",'
         + '"parse_disposition":"parsed","passed_tests":2,"failed_tests":0,'
         + '"skipped_tests":1,"deselected_tests":0,"attempts_used":1,'
-        + '"flaky":false,"slow":false,"escalated":false}',
+        + '"flaky":false,"slow":false,"escalated":false,"serial":false}',
     )
+
+
+def test_session_started_serializes_workers_once() raises:
+    # The resolved worker count rides the record exactly once, as a bare int.
+    var line = serialize_event(
+        Event.session_started("root", "mojo", 3, 0, workers=8)
+    )
+    assert_equal(len(line.split('"workers":')), 2)
+    assert_true('"workers":8' in line)
+
+
+def test_file_finished_serializes_serial_once() raises:
+    # The serial flag rides the verdict exactly once, as a bare bool.
+    var line = serialize_event(
+        Event.file_finished(
+            "t/a.mojo",
+            Outcome.PASS,
+            0.1,
+            List[String](),
+            0.0,
+            List[UInt8](),
+            List[UInt8](),
+            serial=True,
+        )
+    )
+    assert_equal(len(line.split('"serial":')), 2)
+    assert_true('"serial":true' in line)
 
 
 def test_attempt_finished_exact() raises:

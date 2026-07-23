@@ -24,9 +24,12 @@ SOURCE_FILES = (SOURCE, HEADER, TEST_HEADER)
 STRICT_FLAGS_FILE = ROOT / "scripts" / "build" / "native_strict_flags.txt"
 
 PRODUCTION_SYMBOLS = {
+    "mtest_exec_fd_limit",
+    "mtest_exec_interrupt_count",
     "mtest_exec_interrupt_requested",
     "mtest_exec_monotonic_ms",
     "mtest_exec_native_abi_version",
+    "mtest_exec_poll_set",
     "mtest_exec_process_abort",
     "mtest_exec_process_channel_close",
     "mtest_exec_process_close",
@@ -42,18 +45,23 @@ PRODUCTION_SYMBOLS = {
 }
 
 TEST_ONLY_SYMBOLS = {
+    "mtest_exec_test_arm_interrupt_reentry",
     "mtest_exec_test_asan_leak",
     "mtest_exec_test_asan_oob",
     "mtest_exec_test_asan_uaf",
     "mtest_exec_test_constant",
     "mtest_exec_test_fault_configure",
+    "mtest_exec_test_fault_configure_handle",
     "mtest_exec_test_fault_configure_secondary",
+    "mtest_exec_test_fault_handle_seen",
     "mtest_exec_test_fault_reset",
     "mtest_exec_test_fault_seen",
     "mtest_exec_test_group_signal_eperm_configure",
     "mtest_exec_test_group_signal_eperm_seen",
+    "mtest_exec_test_invoke_interrupt",
     "mtest_exec_test_monotonic_wait_configure",
     "mtest_exec_test_monotonic_wait_fired",
+    "mtest_exec_test_nested_interrupt_count",
     "mtest_exec_test_deliver_interrupt_after",
     "mtest_exec_test_memcheck_fd_leak",
     "mtest_exec_test_memcheck_invalid",
@@ -183,7 +191,7 @@ def main() -> int:
         )
 
     print(
-        "native-abi-check: OK -- ABI v1 layouts and "
+        "native-abi-check: OK -- ABI v2 layouts and "
         f"{len(PRODUCTION_SYMBOLS)}/{len(expected_testing)} symbols exact"
     )
     return 0

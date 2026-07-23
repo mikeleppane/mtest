@@ -91,6 +91,36 @@ trait ReportCoordinator:
         """
         ...
 
+    def drain_console(mut self, closing: Bool) -> String:
+        """The console bytes not yet drained, for an incremental flush.
+
+        Lets a driver flush the console as the run progresses rather than in one
+        terminal write, while `concat(every drain)` still reproduces
+        `console_output()` byte-for-byte. Each non-closing drain returns the
+        header appended since the last drain; the closing drain returns the
+        remaining header, the framed sections, and the summary band, sealing the
+        buffer. Empty when no console reporter is composed.
+
+        Args:
+            closing: Whether this is the terminal drain, which additionally
+                emits the sections and summary tail.
+
+        Returns:
+            The undrained rendered bytes, or an empty string.
+        """
+        ...
+
+    def progress_overlay(self) -> String:
+        """The console's live progress counter, for the driver's TTY overlay.
+
+        Returns:
+            The ephemeral counter line the driver erases and redraws around each
+            committed console flush, or an empty string when no counter is shown
+            (off a terminal, under `-q`, or when no console reporter is
+            composed). Never part of the committed `drain_console` bytes.
+        """
+        ...
+
     def fence_token(self) -> String:
         """The console's captured-output fence token, if it fenced any region.
 
@@ -177,6 +207,14 @@ struct StandardReportCoordinator(ReportCoordinator):
     def console_output(self) -> String:
         """The console's rendered buffer."""
         return self.console.output()
+
+    def drain_console(mut self, closing: Bool) -> String:
+        """The console bytes not yet drained; delegates to the console."""
+        return self.console.drain(closing)
+
+    def progress_overlay(self) -> String:
+        """The console's live progress counter; delegates to the console."""
+        return self.console.progress_line()
 
     def fence_token(self) -> String:
         """The console's fence token, or an empty string."""
@@ -275,6 +313,14 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
 
     def console_output(self) -> String:
         """Empty: no console reporter stands behind the pack."""
+        return String("")
+
+    def drain_console(mut self, closing: Bool) -> String:
+        """Empty: no console reporter stands behind the pack."""
+        return String("")
+
+    def progress_overlay(self) -> String:
+        """Empty: a recording stream has no TTY progress overlay."""
         return String("")
 
     def fence_token(self) -> String:

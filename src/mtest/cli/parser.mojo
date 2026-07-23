@@ -26,14 +26,15 @@ from mtest.config import (
     resolve_mojo_path,
 )
 
-comptime MTEST_VERSION = "0.4.0"
+comptime MTEST_VERSION = "0.5.0"
 """The single source of the version string; `main` reuses this exact value."""
 
 comptime SUPPORTED_SUMMARY = (
     "paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo,"
     " -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v,"
-    " --color, -k, --maxfail, --durations, --shard, --retries, --json,"
-    " --junit-xml, --gh-annotations, collect/--collect-only, --help, --version"
+    " --color, -k, --maxfail, --durations, --shard, -n/--workers, --serial,"
+    " --retries, --json, --junit-xml, --gh-annotations, collect/--collect-only,"
+    " --help, --version"
 )
 """A stable one-line list of what this build serves, quoted in refusals."""
 
@@ -116,6 +117,40 @@ def _parse_retries(value: String) raises -> Int:
     if not _all_digits(value):
         raise _err("'--retries' wants an integer >= 0, got '" + value + "'")
     return atol(value)
+
+
+def _parse_workers(value: String) raises -> Int:
+    """Parse a `-n`/`--workers` value into a worker count.
+
+    Args:
+        value: The flag's value: the literal `auto`, or a positive decimal
+            integer. `auto` selects a runner-chosen count; a `1` is the
+            sequential default and every `N >= 2` is an explicit count.
+
+    Returns:
+        `0` for `auto` (the sentinel the resolver reads as runner-chosen), or
+        the requested positive integer count.
+
+    Raises:
+        A usage error (exit 4) when the value is neither `auto` nor a positive
+        integer — `0`, a negative, or any non-digit spelling.
+    """
+    if value == "auto":
+        return 0
+    if not _all_digits(value):
+        raise _err(
+            "'-n'/'--workers' wants a positive integer or 'auto', got '"
+            + value
+            + "'"
+        )
+    var n = atol(value)
+    if n < 1:
+        raise _err(
+            "'-n'/'--workers' wants a positive integer or 'auto', got '"
+            + value
+            + "'"
+        )
+    return n
 
 
 def _parse_compile_timeout(value: String) raises -> Int:
@@ -276,10 +311,11 @@ def _err_shard(value: String) -> Error:
 def _check_build_arg(tok: String) raises:
     """Reject a build argument that would seize control mtest owns.
 
-    Forbids output selection (`-o`), emit-type selection (`--emit`), and any
-    extra Mojo source operand — a bare `*.mojo` or `*.🔥` positional that would
-    reach `mojo build`. A bare value that is not a source file, such as a
-    forwarded flag's value, passes.
+    Forbids output selection (`-o`), emit-type selection (`--emit`), build
+    parallelism (`-j`, `--num-threads` — the runner owns the build thread
+    budget), and any extra Mojo source operand — a bare `*.mojo` or `*.🔥`
+    positional that would reach `mojo build`. A bare value that is not a source
+    file, such as a forwarded flag's value, passes.
     """
     if tok == "-o" or tok.startswith("-o="):
         raise _err(
@@ -292,6 +328,18 @@ def _check_build_arg(tok: String) raises:
             "forbidden build argument '"
             + tok
             + "': mtest owns emit-type selection"
+        )
+    if (
+        tok == "-j"
+        or tok.startswith("-j=")
+        or tok == "--num-threads"
+        or tok.startswith("--num-threads=")
+    ):
+        raise _err(
+            "forbidden build argument '"
+            + tok
+            + "': mtest owns build parallelism (set the worker count with"
+            " -n/--workers)"
         )
     if not tok.startswith("-") and (
         tok.endswith(".mojo") or tok.endswith(".🔥")
@@ -359,6 +407,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
 
     var paths = List[String]()
     var excludes = List[String]()
+    var serials = List[String]()
     var gates = List[String]()
     var precompiles = List[Precompile]()
     var build_args = List[String]()
@@ -379,6 +428,9 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var shard_n = 0
     var retries = 0
     var saw_retries = False
+    # One worker is the sequential default: no flag runs files in order and
+    # leaves the build argv byte-identical to a single-worker build.
+    var workers = 1
     var json_dest = String("")
     var saw_json = False
     var junit_dest = String("")
@@ -479,6 +531,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
 
         if s.id == FlagId.EXCLUDE:
             excludes.append(value)
+        elif s.id == FlagId.SERIAL:
+            serials.append(value)
         elif s.id == FlagId.INCLUDE:
             _check_build_arg(value)
             include_paths.append(value)
@@ -516,6 +570,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         elif s.id == FlagId.RETRIES:
             retries = _parse_retries(value)
             saw_retries = True
+        elif s.id == FlagId.WORKERS:
+            workers = _parse_workers(value)
         elif s.id == FlagId.JSON:
             json_dest = _validate_json_dest(value)
             saw_json = True
@@ -602,6 +658,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var cfg = RunnerConfig(
         paths=paths^,
         excludes=excludes^,
+        serial_globs=serials^,
         gates=gates^,
         precompiles=precompiles^,
         build_args=build_args^,
@@ -620,6 +677,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         shard_m=shard_m,
         shard_n=shard_n,
         retries=retries,
+        workers=workers,
         compile_timeout_secs=compile_timeout_secs,
         json_dest=json_dest^,
         gh_annotations=gh_annotations,
