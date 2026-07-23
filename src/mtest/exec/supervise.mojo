@@ -1360,13 +1360,39 @@ struct Supervisor(Movable):
             except term_error:
                 notes += "; " + String(term_error)
 
-        # One shared grace window (never a per-slot grace): a bounded run of
-        # short opportunistic waits in poll_set, draining survivors' streams.
-        for _ in range(_GRACE_MS // _POST_LEADER_SLICE_MS):
-            try:
-                self._poll_set(_POST_LEADER_SLICE_MS)
-            except:
-                pass
+        # One shared grace window (never a per-slot grace): spend up to
+        # `_GRACE_MS` of real wall-clock giving the SIGTERM'd groups time to
+        # exit their own handlers, draining survivors' streams each slice so a
+        # full pipe never blocks a child mid-handler. Pace on the monotonic
+        # clock, NEVER a `poll_set` call count: `poll_set` returns at once when
+        # a stream is readable or at EOF, so counting its calls collapses the
+        # grace into a microsecond busy spin (the same trap the reap wait below
+        # documents) and SIGKILLs a child before its SIGTERM handler runs. A
+        # second interrupt during the window shortcuts straight to the SIGKILL
+        # pass — the immediate hard-kill escalation the contract promises.
+        # A clock or interrupt read that fails abandons the grace and falls
+        # through to the SIGKILL pass — killing is the safe fallback, and this
+        # cleanup path cannot itself raise.
+        try:
+            var grace_start = self._now()
+            var grace_interrupts = interrupt_count()
+            while self._now() - grace_start < _GRACE_MS:
+                if interrupt_count() > grace_interrupts:
+                    break
+                var slice_start = self._now()
+                try:
+                    self._poll_set(_POST_LEADER_SLICE_MS)
+                except:
+                    pass
+                # `poll_set` can return before its slice elapses (stream
+                # activity or EOF); sleep the remainder so the window spends
+                # honest wall-clock instead of spinning to SIGKILL in
+                # microseconds.
+                var slice_ms = self._now() - slice_start
+                if slice_ms < _POST_LEADER_SLICE_MS:
+                    sleep(Float64(_POST_LEADER_SLICE_MS - slice_ms) / 1000.0)
+        except:
+            pass
 
         # Pass two: SIGKILL every survivor, then reap and close every slot.
         for k in range(len(live)):
