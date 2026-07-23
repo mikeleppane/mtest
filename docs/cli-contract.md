@@ -378,7 +378,8 @@ rebuilt.
   crash signature), a spawn failure, and an interrupt.
 - Each attempt uses a fresh output path; after a **compile** kill the rebuild
   runs against a quarantined per-attempt module cache, since a killed compile
-  can corrupt the shared one. Each attempt is bounded by the same `--timeout` /
+  could in principle leave the shared cache in a state the quarantine probe could
+  not rule out. Each attempt is bounded by the same `--timeout` /
   `--compile-timeout` budget as the first.
 - Every attempt's diagnostics are retained in the report. The **last** attempt's
   outcome is authoritative. A test that passes only after a retry is reported
