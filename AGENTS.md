@@ -338,26 +338,25 @@ trap and its correct move.
   parent's read blocked forever. The child after `fork` may call only
   async-signal-safe functions before `exec`. `/bin/sh -c` is not a
   substitute. This machinery now ships in the native C adapter.
-- Native adapter ABI v2 admits a pool: a fixed slot table
+- Native adapter ABI v2 runs a pool: a fixed slot table
   (`MTEST_EXEC_SLOT_CAPACITY`, 64) where `process_open` claims a free slot and
-  `EBUSY` means only capacity exhausted or an unusable runtime — so a second
-  `process_open` now SUCCEEDS. Supervision still drives one child at a time: the
-  higher-level contract stays capacity-1 (the sequential driver runs one child
-  per step). Running the pool concurrently is a later, gated change to the Mojo
-  side, never a workaround; any adapter change is a deliberate gated edit to
-  `native/`.
+  `EBUSY` means only capacity exhausted or an unusable runtime. The Supervisor
+  drives up to N children at once — `-n`/`--workers` size the pool, `--serial`
+  pins files to a final one-at-a-time pass — while `-n 1` stays byte-identical
+  to the old sequential driver (one child per step, no `--num-threads` flag).
+  Any adapter change is a deliberate gated edit to `native/`, never a
+  workaround.
 - Signal handling and the supervision syscalls live in the native C adapter,
   not Mojo FFI. `src/mtest/exec/signals.mojo` calls the `mtest_exec_*` ABI;
   the interrupt latch surfaces as `interrupt_requested() -> Bool`. Never
   reintroduce Mojo-side syscalls, sigaction layouts, or fixed mmap pages
   (historical hazards: `std.ffi._Global` crashes the compiler; a Mojo `def`
   used as a C callback needs one deref to recover the code pointer).
-- The post-kill cache quarantine mutates the PARENT's environment
-  (`MODULAR_CACHE_DIR`) right before spawn and restores it after; the native
-  adapter snapshots live `environ` at spawn. Safe ONLY while the session is
-  single-threaded; a concurrent pool must route per-child env through
-  `ProcessSpec.env_extra` (reserved, still unread) or two children will race
-  the shared parent env.
+- The cache quarantine is per-child, never a parent-env mutation: the
+  quarantined `MODULAR_CACHE_DIR` rides `ProcessSpec.env_extra`, appended to
+  the child's environment only, so concurrent workers never race a shared
+  parent `environ`. Never reintroduce a setenv/unsetenv-around-spawn pattern —
+  it was safe only single-threaded, and the pool retired it.
 - Dynamic-loader fault injection (`LD_PRELOAD`/`DYLD_INSERT_LIBRARIES`)
   inherits into every spawned process, including `mojo build` children. A
   test-only interposer clears its loader variable in a constructor after
