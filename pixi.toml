@@ -69,6 +69,13 @@ build-bin = { cmd = "bash scripts/build/production_build.sh link", depends-on = 
     "build-native",
 ] }
 
+# Keep README's committed CLI reference byte-identical to the real binary.
+# The checker owns a build-bin dependency so standalone use cannot read a stale
+# or missing executable.
+readme-help-check = { cmd = "python -m scripts.checks.readme_help", depends-on = [
+    "build-bin",
+] }
+
 # Build recipe/recipe.yaml into a LOCAL conda channel: rattler-build solves an
 # isolated build env (mojo ==1.0.0b2 + the C toolchain, from the modular +
 # conda-forge channels), builds mtest FROM SOURCE inside that sandbox (mirroring
@@ -194,7 +201,7 @@ test-file = "python -m scripts.harness.classified"
 # Fast self-tests for repository harness behavior. Uses disposable test inputs
 # and a fake compiler to prove deterministic aggregate generation, one-build
 # execution, timeout handling, and exact hosted-CI topology.
-harness-check = "python -m scripts.tests.test_aggregate && python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_format && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_classified && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_contract && python -m scripts.tests.test_pty_capture && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_ci_topology && python -m scripts.checks.ci_topology"
+harness-check = "python -m scripts.tests.test_aggregate && python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_format && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_classified && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_contract && python -m scripts.tests.test_pty_capture && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_ci_topology && python -m scripts.checks.ci_topology"
 
 # DOGFOOD gate: run three focused executable probes through the built mtest
 # binary. This exercises mtest's real discover/build/run/parse/report path and
@@ -230,6 +237,7 @@ depends-on = [
     "native-check",
     "junit-check",
     "build",
+    "readme-help-check",
     "junit-render-check",
     "transcripts-check",
 ]

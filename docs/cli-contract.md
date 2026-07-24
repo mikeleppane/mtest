@@ -841,6 +841,9 @@ file's result line carries an informal `SERIAL` marker (§15.1).
 
 - `mtest --help`, `mtest -h`, and `mtest help` print usage to **stdout** and exit
   **0**.
+- The grouped option help is generated from the parser's flag inventory. Every
+  option or combined alias row is value-labelled, aligned to one help-text
+  column, rendered on one physical line, and no help line exceeds 78 columns.
 - `mtest version` and `mtest --version` print the version to **stdout** and exit
   **0**.
 - A usage **error** prints to **stderr** and exits **4**.

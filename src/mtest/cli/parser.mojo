@@ -11,7 +11,12 @@ version to stdout with exit 0, and prints a usage error to stderr with exit 4.
 from std.os import getenv
 from std.os.path import dirname, isdir
 
-from mtest.cli.flag_spec import FlagId, FlagSpec, flag_specs
+from mtest.cli.flag_spec import (
+    FlagId,
+    FlagSpec,
+    flag_group_name,
+    flag_specs,
+)
 from mtest.cli.parse_result import ParseResult
 from mtest.config import (
     AnnotationsMode,
@@ -35,15 +40,7 @@ from mtest.config import (
 comptime MTEST_VERSION = "0.5.0"
 """The single source of the version string; `main` reuses this exact value."""
 
-comptime SUPPORTED_SUMMARY = (
-    "paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo,"
-    " -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v,"
-    " --color, -k, --maxfail, --durations, --shard, -n/--workers, --serial,"
-    " --retries, --json, --junit-xml, --gh-annotations, collect/--collect-only,"
-    " config show, doctor, --config, --no-config, --lf/--last-failed,"
-    " --ff/--failed-first, --help, --version"
-)
-"""A stable one-line list of what this build serves, quoted in refusals."""
+comptime _HELP_COLUMN = 30
 
 
 def version_text() -> String:
@@ -51,9 +48,21 @@ def version_text() -> String:
     return "mtest " + MTEST_VERSION
 
 
+def _help_row(label: String, detail: String) -> String:
+    """Render one aligned, single-line help row."""
+    var row = "  " + label
+    for _ in range(_HELP_COLUMN - row.count_codepoints()):
+        row += " "
+    return row + detail + "\n"
+
+
 def help_text() -> String:
-    """The usage text `main` prints for `--help` / `-h` / `help`."""
-    return String(
+    """Build grouped usage text from the flag-spec table.
+
+    Returns:
+        The freshly allocated text printed for `--help`, `-h`, and `help`.
+    """
+    var rendered = String(
         "mtest — a pytest-like test runner for Mojo\n\n",
         "usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]\n",
         "       mtest config show [PATHS...] [flags] [-- BUILD-ARGS...]\n",
@@ -61,10 +70,42 @@ def help_text() -> String:
             "       mtest doctor [--config PATH | --no-config]"
             " [--color WHEN] [-q | -v]\n\n"
         ),
-        "This build serves: ",
-        SUPPORTED_SUMMARY,
-        "\n",
+        "Subcommands:\n",
     )
+    rendered += _help_row(
+        "run [PATHS...] [flags]", "Run tests (the default subcommand)."
+    )
+    rendered += _help_row(
+        "collect [PATHS...] [flags]", "List node ids without running tests."
+    )
+    rendered += _help_row(
+        "config show [PATHS...]",
+        "Show resolved configuration.",
+    )
+    rendered += _help_row(
+        "doctor [flags]", "Diagnose the environment without running tests."
+    )
+    rendered += _help_row("help", "Show this help and exit.")
+    rendered += _help_row("version", "Show the version and exit.")
+
+    var current_group = -1
+    var specs = flag_specs()
+    var index = 0
+    while index < len(specs):
+        var spec = specs[index].copy()
+        if spec.group != current_group:
+            rendered += "\n" + flag_group_name(spec.group) + ":\n"
+            current_group = spec.group
+        var label = spec.spelling.copy()
+        var next_index = index + 1
+        while next_index < len(specs) and specs[next_index].id == spec.id:
+            label += ", " + specs[next_index].spelling
+            next_index += 1
+        if spec.value_name != "":
+            label += " " + spec.value_name
+        rendered += _help_row(label^, spec.help)
+        index = next_index
+    return rendered^
 
 
 # --- error builders (every message is `cli:`-prefixed and points at help) ---
@@ -73,20 +114,6 @@ def help_text() -> String:
 def _err(body: String) -> Error:
     """A `cli:`-prefixed usage error ending in the `(see mtest --help)` tail."""
     return Error("cli: " + body + " (see mtest --help)")
-
-
-def _refuse(spec: FlagSpec) -> Error:
-    """The refusal for a flag in the contract but not served by this build."""
-    return Error(
-        "cli: '"
-        + spec.spelling
-        + "' is part of the mtest v1 contract but is not available in this"
-        + " build (it arrives with "
-        + spec.arrives_with
-        + "); this build serves: "
-        + SUPPORTED_SUMMARY
-        + " (see mtest --help)"
-    )
 
 
 # --- value validation ---
@@ -353,7 +380,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             missing or malformed value, a forbidden build argument, a bundled
             short-flag group, `-q` and `-v` together, a run-only flag combined
             with collect mode, `--json -` alongside an annotation tail that is
-            not explicitly off, or a flag this build does not yet serve.
+            not explicitly off.
     """
     var start = 0
     var collect = False
@@ -489,8 +516,6 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         if not spec:
             raise _err("unknown flag '" + name + "'")
         var s = spec.value().copy()
-        if not s.available:
-            raise _refuse(s)
 
         if s.arity == 0:
             if has_inline:

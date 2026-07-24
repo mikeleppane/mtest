@@ -1,10 +1,10 @@
 """Tests for the cli parser: successful parses into a `RunnerConfig` and the
 help/version directives.
 
-Every available flag is exercised for the value it lands in the config, both
+Every flag is exercised for the value it lands in the config, both
 short and long spellings where they exist, plus the subcommands and the two
 non-error directives. Grammar edges (passthrough, forbidden args, arity errors,
-refusals, the frozen inventory) live in sibling files to keep each module's test
+and the frozen inventory) live in sibling files to keep each module's test
 count modest.
 """
 from std.testing import assert_equal, assert_false, assert_raises, assert_true

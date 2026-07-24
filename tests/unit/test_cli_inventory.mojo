@@ -1,19 +1,22 @@
-"""The independent frozen-inventory cross-check and the refusal messages.
+"""The independent frozen-inventory and generated-help cross-checks.
 
 `frozen_inventory()` is a HAND-WRITTEN transcription of the command-line
 contract's flag table — authored by reading the contract, never generated from
 the parser's own `flag_specs()`. The cross-check asserts the parser's table is a
-row-for-row bijection with this frozen list, so a drifted arity, a flipped
-availability bit, or a dropped spelling fails loudly and the spec table can
-never be its own oracle.
-
-The remaining tests pin every refused spelling's message shape: it names the
-token, states it is part of the mtest v1 contract, and says it is not available
-in this build.
+row-for-row bijection with this frozen list, so a drifted arity or dropped
+spelling fails loudly and the spec table can never be its own oracle. The help
+tests independently require complete metadata and one aligned, bounded line per
+spelling.
 """
 from std.testing import assert_equal, assert_raises, assert_true
 
-from mtest.cli import flag_specs, parse_args
+from mtest.cli import (
+    FlagGroup,
+    flag_group_name,
+    flag_specs,
+    help_text,
+    parse_args,
+)
 from mtest.config import AnnotationsMode, ShardMode
 
 
@@ -24,64 +27,354 @@ struct InvRow(Copyable, Movable):
     var spelling: String
     var arity: Int
     var repeatable: Bool
-    var available: Bool
+    var value_name: String
+    var group: Int
+    var help: String
+    var help_label: String
 
 
 def frozen_inventory() -> List[InvRow]:
     """Every flag spelling in the v1 contract, transcribed by hand.
 
-    Availability reflects what THIS build serves; arity and repeatability are
-    contract facts independent of availability. Authored from the contract, not
-    from `flag_specs()`.
+    Every field is a contract fact authored independently from `flag_specs()`.
+    `help_label` is the complete label for the physical help row, so aliases
+    intentionally share one expected label.
     """
     return [
-        # Served by this build.
-        InvRow("--exclude", 1, True, True),
-        InvRow("-I", 1, True, True),
-        InvRow("--build-arg", 1, True, True),
-        InvRow("--gate", 1, True, True),
-        InvRow("--precompile", 1, True, True),
-        InvRow("--mojo", 1, False, True),
-        InvRow("-x", 0, False, True),
-        InvRow("--exitfirst", 0, False, True),
-        InvRow("--timeout", 1, False, True),
-        InvRow("-s", 0, False, True),
-        InvRow("--show-output", 1, False, True),
-        InvRow("-q", 0, False, True),
-        InvRow("-v", 0, False, True),
-        InvRow("--color", 1, False, True),
-        InvRow("-h", 0, False, True),
-        InvRow("--help", 0, False, True),
-        InvRow("--version", 0, False, True),
-        InvRow("-k", 1, False, True),
-        InvRow("--maxfail", 1, False, True),
+        InvRow(
+            "--exclude",
+            1,
+            True,
+            "GLOB",
+            FlagGroup.SELECTION,
+            "Exclude matching files (repeatable).",
+            "--exclude GLOB",
+        ),
+        InvRow(
+            "-I",
+            1,
+            True,
+            "PATH",
+            FlagGroup.BUILDING,
+            "Add a Mojo include path (repeatable).",
+            "-I PATH",
+        ),
+        InvRow(
+            "--build-arg",
+            1,
+            True,
+            "ARG",
+            FlagGroup.BUILDING,
+            "Forward one argument to mojo build (repeatable).",
+            "--build-arg ARG",
+        ),
+        InvRow(
+            "--gate",
+            1,
+            True,
+            "PATH",
+            FlagGroup.SELECTION,
+            "Run PATH before ordinary files (repeatable).",
+            "--gate PATH",
+        ),
+        InvRow(
+            "--precompile",
+            1,
+            True,
+            "SRC[:OUT]",
+            FlagGroup.BUILDING,
+            "Precompile package before builds (repeatable).",
+            "--precompile SRC[:OUT]",
+        ),
+        InvRow(
+            "--mojo",
+            1,
+            False,
+            "PATH",
+            FlagGroup.BUILDING,
+            "Use this Mojo executable.",
+            "--mojo PATH",
+        ),
+        InvRow(
+            "-x",
+            0,
+            False,
+            "",
+            FlagGroup.EXECUTION,
+            "Stop after the first failing file.",
+            "-x, --exitfirst",
+        ),
+        InvRow(
+            "--exitfirst",
+            0,
+            False,
+            "",
+            FlagGroup.EXECUTION,
+            "Stop after the first failing file.",
+            "-x, --exitfirst",
+        ),
+        InvRow(
+            "--timeout",
+            1,
+            False,
+            "SECS",
+            FlagGroup.EXECUTION,
+            "Set per-file run timeout (0 disables).",
+            "--timeout SECS",
+        ),
+        InvRow(
+            "-s",
+            0,
+            False,
+            "",
+            FlagGroup.REPORTING,
+            "Show captured output for all files.",
+            "-s",
+        ),
+        InvRow(
+            "--show-output",
+            1,
+            False,
+            "MODE",
+            FlagGroup.REPORTING,
+            "Choose failures|all|none captured output.",
+            "--show-output MODE",
+        ),
+        InvRow(
+            "-q",
+            0,
+            False,
+            "",
+            FlagGroup.REPORTING,
+            "Suppress passing file rows.",
+            "-q",
+        ),
+        InvRow(
+            "-v",
+            0,
+            False,
+            "",
+            FlagGroup.REPORTING,
+            "Show build commands and step timings.",
+            "-v",
+        ),
+        InvRow(
+            "--color",
+            1,
+            False,
+            "WHEN",
+            FlagGroup.REPORTING,
+            "Choose auto|always|never color output.",
+            "--color WHEN",
+        ),
+        InvRow(
+            "-h",
+            0,
+            False,
+            "",
+            FlagGroup.GENERAL,
+            "Show this help and exit.",
+            "-h, --help",
+        ),
+        InvRow(
+            "--help",
+            0,
+            False,
+            "",
+            FlagGroup.GENERAL,
+            "Show this help and exit.",
+            "-h, --help",
+        ),
+        InvRow(
+            "--version",
+            0,
+            False,
+            "",
+            FlagGroup.GENERAL,
+            "Show the version and exit.",
+            "--version",
+        ),
+        InvRow(
+            "-k",
+            1,
+            False,
+            "STR",
+            FlagGroup.SELECTION,
+            "Select node ids containing STR.",
+            "-k STR",
+        ),
+        InvRow(
+            "--maxfail",
+            1,
+            False,
+            "N",
+            FlagGroup.EXECUTION,
+            "Stop after N failed tests (0 disables).",
+            "--maxfail N",
+        ),
         # `--durations N`: non-negative int; 0 disables.
-        InvRow("--durations", 1, False, True),
+        InvRow(
+            "--durations",
+            1,
+            False,
+            "N",
+            FlagGroup.REPORTING,
+            "Show N slowest file durations (0 disables).",
+            "--durations N",
+        ),
         # `--shard [hash:|slice:]M/N`: 1<=M<=N, last-wins.
-        InvRow("--shard", 1, False, True),
+        InvRow(
+            "--shard",
+            1,
+            False,
+            "[hash:|slice:]M/N",
+            FlagGroup.SELECTION,
+            "Run only the selected shard.",
+            "--shard [hash:|slice:]M/N",
+        ),
         # `--retries N`: non-negative int; 0 disables.
-        InvRow("--retries", 1, False, True),
+        InvRow(
+            "--retries",
+            1,
+            False,
+            "N",
+            FlagGroup.EXECUTION,
+            "Retry crash-class outcomes N times.",
+            "--retries N",
+        ),
         # `--compile-timeout SECS`: non-negative int; 0 disables.
-        InvRow("--compile-timeout", 1, False, True),
+        InvRow(
+            "--compile-timeout",
+            1,
+            False,
+            "SECS",
+            FlagGroup.BUILDING,
+            "Set per-file build timeout (0 disables).",
+            "--compile-timeout SECS",
+        ),
         # `-n`/`--workers N|auto`: served, last-wins.
-        InvRow("-n", 1, False, True),
-        InvRow("--workers", 1, False, True),
+        InvRow(
+            "-n",
+            1,
+            False,
+            "N|auto",
+            FlagGroup.EXECUTION,
+            "Set worker count (default: 1).",
+            "-n, --workers N|auto",
+        ),
+        InvRow(
+            "--workers",
+            1,
+            False,
+            "N|auto",
+            FlagGroup.EXECUTION,
+            "Set worker count (default: 1).",
+            "-n, --workers N|auto",
+        ),
         # `--serial GLOB`: repeatable, now served.
-        InvRow("--serial", 1, True, True),
+        InvRow(
+            "--serial",
+            1,
+            True,
+            "GLOB",
+            FlagGroup.EXECUTION,
+            "Run matching files serially (repeatable).",
+            "--serial GLOB",
+        ),
         # `--gh-annotations off|on|auto`: now served.
-        InvRow("--gh-annotations", 1, False, True),
+        InvRow(
+            "--gh-annotations",
+            1,
+            False,
+            "MODE",
+            FlagGroup.REPORTING,
+            "Choose off|on|auto GitHub annotations.",
+            "--gh-annotations MODE",
+        ),
         # `--json PATH|-`: now served.
-        InvRow("--json", 1, False, True),
+        InvRow(
+            "--json",
+            1,
+            False,
+            "PATH|-",
+            FlagGroup.REPORTING,
+            "Write NDJSON events to PATH or stdout.",
+            "--json PATH|-",
+        ),
         # `--junit-xml PATH`: now served.
-        InvRow("--junit-xml", 1, False, True),
+        InvRow(
+            "--junit-xml",
+            1,
+            False,
+            "PATH",
+            FlagGroup.REPORTING,
+            "Write a JUnit XML report.",
+            "--junit-xml PATH",
+        ),
         # Served by this build (collect mode).
-        InvRow("--collect-only", 0, False, True),
-        InvRow("--config", 1, False, True),
-        InvRow("--no-config", 0, False, True),
-        InvRow("--lf", 0, False, True),
-        InvRow("--last-failed", 0, False, True),
-        InvRow("--ff", 0, False, True),
-        InvRow("--failed-first", 0, False, True),
+        InvRow(
+            "--collect-only",
+            0,
+            False,
+            "",
+            FlagGroup.GENERAL,
+            "List node ids without running tests.",
+            "--collect-only",
+        ),
+        InvRow(
+            "--config",
+            1,
+            False,
+            "PATH",
+            FlagGroup.SESSION_STATE,
+            "Use this project configuration file.",
+            "--config PATH",
+        ),
+        InvRow(
+            "--no-config",
+            0,
+            False,
+            "",
+            FlagGroup.SESSION_STATE,
+            "Disable project configuration discovery.",
+            "--no-config",
+        ),
+        InvRow(
+            "--lf",
+            0,
+            False,
+            "",
+            FlagGroup.SESSION_STATE,
+            "Run only entries from the last-failed state.",
+            "--lf, --last-failed",
+        ),
+        InvRow(
+            "--last-failed",
+            0,
+            False,
+            "",
+            FlagGroup.SESSION_STATE,
+            "Run only entries from the last-failed state.",
+            "--lf, --last-failed",
+        ),
+        InvRow(
+            "--ff",
+            0,
+            False,
+            "",
+            FlagGroup.SESSION_STATE,
+            "Run last-failed entries before the rest.",
+            "--ff, --failed-first",
+        ),
+        InvRow(
+            "--failed-first",
+            0,
+            False,
+            "",
+            FlagGroup.SESSION_STATE,
+            "Run last-failed entries before the rest.",
+            "--ff, --failed-first",
+        ),
     ]
 
 
@@ -105,9 +398,19 @@ def test_every_spec_row_is_in_the_frozen_inventory() raises:
                     "repeatable drift: " + spec.spelling,
                 )
                 assert_equal(
-                    spec.available,
-                    row.available,
-                    "availability drift: " + spec.spelling,
+                    spec.value_name,
+                    row.value_name,
+                    "value name drift: " + spec.spelling,
+                )
+                assert_equal(
+                    spec.group,
+                    row.group,
+                    "help group drift: " + spec.spelling,
+                )
+                assert_equal(
+                    spec.help,
+                    row.help,
+                    "help description drift: " + spec.spelling,
                 )
         assert_true(found, "spec not in inventory: " + spec.spelling)
 
@@ -132,8 +435,106 @@ def test_spec_spellings_are_unique() raises:
             )
 
 
-# Every spelling in the v1 contract is served now, so there is no refusal-message
-# shape left to pin — the last unserved flag, `--serial`, was flipped to served.
+def test_every_spec_row_owns_complete_help_metadata() raises:
+    for spec in flag_specs():
+        assert_true(
+            spec.help.byte_length() > 0,
+            "missing help text: " + spec.spelling,
+        )
+        assert_true(
+            "\n" not in spec.help and "\r" not in spec.help,
+            "multiline help text: " + spec.spelling,
+        )
+        assert_true(
+            spec.group >= FlagGroup.SELECTION
+            and spec.group <= FlagGroup.GENERAL,
+            "unknown help group: " + spec.spelling,
+        )
+        if spec.arity == 1:
+            assert_true(
+                spec.value_name.byte_length() > 0,
+                "missing value name: " + spec.spelling,
+            )
+        else:
+            assert_equal(
+                spec.value_name,
+                "",
+                "valueless flag has a value name: " + spec.spelling,
+            )
+
+
+def test_help_renders_every_option_once_with_values_and_aligned_help() raises:
+    var rendered = help_text()
+    var option_rows = 0
+    for line_slice in rendered.split("\n"):
+        if String(line_slice).startswith("  -"):
+            option_rows += 1
+    # Five two-spelling aliases collapse 36 spellings into 31 physical rows.
+    assert_equal(option_rows, 31)
+    for row in frozen_inventory():
+        var expected_line = "  " + row.help_label
+        for _ in range(30 - expected_line.count_codepoints()):
+            expected_line += " "
+        expected_line += row.help
+        var matches = 0
+        for line_slice in rendered.split("\n"):
+            var line = String(line_slice)
+            if line == expected_line:
+                matches += 1
+        assert_equal(
+            matches,
+            1,
+            "help row coverage drift: " + row.spelling,
+        )
+
+
+def test_help_has_grouped_sections_and_clear_subcommands() raises:
+    var rendered = help_text()
+    assert_true("Subcommands:\n" in rendered)
+    assert_true("  run [PATHS...] [flags]" in rendered)
+    assert_true("  collect [PATHS...] [flags]" in rendered)
+    assert_true("  config show [PATHS...]" in rendered)
+    assert_true("  doctor [flags]" in rendered)
+    var previous_group_position = -1
+    for group in [
+        "Selection",
+        "Execution",
+        "Building",
+        "Reporting",
+        "Session state",
+        "General",
+    ]:
+        var heading = group + ":"
+        var matches = 0
+        for line_slice in rendered.split("\n"):
+            if String(line_slice) == heading:
+                matches += 1
+        assert_equal(matches, 1, "group heading count drift: " + group)
+        var position = rendered.find("\n" + heading + "\n")
+        assert_true(
+            position > previous_group_position,
+            "group order drift: " + group,
+        )
+        previous_group_position = position
+
+
+def test_help_group_identities_have_exact_names_and_invalid_is_safe() raises:
+    assert_equal(flag_group_name(FlagGroup.SELECTION), "Selection")
+    assert_equal(flag_group_name(FlagGroup.EXECUTION), "Execution")
+    assert_equal(flag_group_name(FlagGroup.BUILDING), "Building")
+    assert_equal(flag_group_name(FlagGroup.REPORTING), "Reporting")
+    assert_equal(flag_group_name(FlagGroup.SESSION_STATE), "Session state")
+    assert_equal(flag_group_name(FlagGroup.GENERAL), "General")
+    assert_equal(flag_group_name(-1), "Invalid")
+
+
+def test_help_lines_never_exceed_78_columns() raises:
+    for line_slice in help_text().split("\n"):
+        var line = String(line_slice)
+        assert_true(
+            line.count_codepoints() <= 78,
+            "overlong help line: " + line,
+        )
 
 
 def test_workers_short_parses_count() raises:
@@ -476,9 +877,7 @@ def test_shard_bad_value_is_usage_error() raises:
 
 
 def test_serial_is_served_and_accumulates_one_glob() raises:
-    # `--serial` is now served: a glob reaches the config rather than raising the
-    # availability refusal. (Before the flip this argv raised "'--serial' is part
-    # of the mtest v1 contract but is not available in this build".)
+    # `--serial` reaches the config and preserves its glob byte-for-byte.
     var argv: List[String] = ["--serial", "*a*"]
     var r = parse_args(argv)
     assert_equal(len(r.config.serial_globs), 1)

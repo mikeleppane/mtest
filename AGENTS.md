@@ -187,6 +187,7 @@ pixi run postfork-check    # audit production/testing post-fork call graphs
 pixi run native-check      # verify native ABI/layout/exports and lifecycle
 pixi run junit-check       # validate the committed JUnit oracle and checker
 pixi run build             # the package-compiles gate
+pixi run readme-help-check # compare README help with the real binary
 pixi run junit-render-check  # validate bytes emitted by the real JUnit reporter
 pixi run transcripts-check # regenerate to a temp dir and diff byte-for-byte
 pixi run test              # compile the classified inventory into one direct-run binary
@@ -196,7 +197,8 @@ pixi run e2e               # exact CLI exits and output against e2e/manifest.jso
 
 `pixi run ci-preflight` chains `version-check -> fmt-check -> harness-check ->
 safety-check -> postfork-check -> native-check -> junit-check -> build ->
-junit-render-check -> transcripts-check` in that exact fail-fast order; the
+readme-help-check -> junit-render-check -> transcripts-check` in that exact
+fail-fast order; the
 canonical local `pixi run ci` is serial: `ci-preflight ->
 test -> dogfood-check -> e2e`. Hosted CI runs the same logical floor as two
 platform-local chains: Linux preflight releases fail-fast `test`,

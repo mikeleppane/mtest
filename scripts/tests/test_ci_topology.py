@@ -35,6 +35,17 @@ class CiTopologyTests(unittest.TestCase):
             tasks.get("ci", {}).get("depends-on"),
             ["ci-preflight", "test", "dogfood-check", "e2e"],
         )
+        self.assertEqual(
+            tasks.get("readme-help-check"),
+            {
+                "cmd": "python -m scripts.checks.readme_help",
+                "depends-on": ["build-bin"],
+            },
+        )
+        self.assertEqual(
+            tasks.get("ci-preflight", {}).get("depends-on"),
+            ci_topology.CI_PREFLIGHT_TASKS,
+        )
 
     def test_contributor_workflow_is_documented_without_legacy_aliases(self) -> None:
         readme = (ci_topology.REPO_ROOT / "README.md").read_text(encoding="utf-8")
@@ -90,6 +101,34 @@ class CiTopologyTests(unittest.TestCase):
             repo = Path(raw_tmp)
             (repo / "pixi.toml").write_text(mutated, encoding="utf-8")
             with self.assertRaisesRegex(AssertionError, "membership/order"):
+                ci_topology.check_ci_task_graph(repo)
+
+    def test_readme_help_gate_removal_is_rejected(self) -> None:
+        source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
+        mutated = source.replace(
+            '    "readme-help-check",\n',
+            "",
+            1,
+        )
+        self.assertNotEqual(mutated, source)
+        with tempfile.TemporaryDirectory(prefix="mtest-ci-topology-") as raw_tmp:
+            repo = Path(raw_tmp)
+            (repo / "pixi.toml").write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "membership/order"):
+                ci_topology.check_ci_task_graph(repo)
+
+    def test_readme_help_gate_command_mutation_is_rejected(self) -> None:
+        source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
+        mutated = source.replace(
+            'cmd = "python -m scripts.checks.readme_help"',
+            'cmd = "python -m scripts.checks.layout"',
+            1,
+        )
+        self.assertNotEqual(mutated, source)
+        with tempfile.TemporaryDirectory(prefix="mtest-ci-topology-") as raw_tmp:
+            repo = Path(raw_tmp)
+            (repo / "pixi.toml").write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "readme-help-check"):
                 ci_topology.check_ci_task_graph(repo)
 
     def test_harness_owner_removal_is_rejected(self) -> None:

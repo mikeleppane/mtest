@@ -419,7 +419,56 @@ usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]
        mtest config show [PATHS...] [flags] [-- BUILD-ARGS...]
        mtest doctor [--config PATH | --no-config] [--color WHEN] [-q | -v]
 
-This build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo, -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v, --color, -k, --maxfail, --durations, --shard, -n/--workers, --serial, --retries, --json, --junit-xml, --gh-annotations, collect/--collect-only, config show, doctor, --config, --no-config, --lf/--last-failed, --ff/--failed-first, --help, --version
+Subcommands:
+  run [PATHS...] [flags]      Run tests (the default subcommand).
+  collect [PATHS...] [flags]  List node ids without running tests.
+  config show [PATHS...]      Show resolved configuration.
+  doctor [flags]              Diagnose the environment without running tests.
+  help                        Show this help and exit.
+  version                     Show the version and exit.
+
+Selection:
+  --exclude GLOB              Exclude matching files (repeatable).
+  -k STR                      Select node ids containing STR.
+  --gate PATH                 Run PATH before ordinary files (repeatable).
+  --shard [hash:|slice:]M/N   Run only the selected shard.
+
+Execution:
+  -x, --exitfirst             Stop after the first failing file.
+  --maxfail N                 Stop after N failed tests (0 disables).
+  --timeout SECS              Set per-file run timeout (0 disables).
+  --retries N                 Retry crash-class outcomes N times.
+  -n, --workers N|auto        Set worker count (default: 1).
+  --serial GLOB               Run matching files serially (repeatable).
+
+Building:
+  -I PATH                     Add a Mojo include path (repeatable).
+  --build-arg ARG             Forward one argument to mojo build (repeatable).
+  --precompile SRC[:OUT]      Precompile package before builds (repeatable).
+  --mojo PATH                 Use this Mojo executable.
+  --compile-timeout SECS      Set per-file build timeout (0 disables).
+
+Reporting:
+  -s                          Show captured output for all files.
+  --show-output MODE          Choose failures|all|none captured output.
+  --durations N               Show N slowest file durations (0 disables).
+  -q                          Suppress passing file rows.
+  -v                          Show build commands and step timings.
+  --color WHEN                Choose auto|always|never color output.
+  --json PATH|-               Write NDJSON events to PATH or stdout.
+  --junit-xml PATH            Write a JUnit XML report.
+  --gh-annotations MODE       Choose off|on|auto GitHub annotations.
+
+Session state:
+  --config PATH               Use this project configuration file.
+  --no-config                 Disable project configuration discovery.
+  --lf, --last-failed         Run only entries from the last-failed state.
+  --ff, --failed-first        Run last-failed entries before the rest.
+
+General:
+  --collect-only              List node ids without running tests.
+  -h, --help                  Show this help and exit.
+  --version                   Show the version and exit.
 ```
 
 | Flag | Meaning |
