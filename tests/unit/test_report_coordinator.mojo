@@ -36,7 +36,7 @@ from mtest.report import (
 def _console() -> ConsoleReporter:
     """A console reporter with every rendering knob fixed, for byte equality."""
     return ConsoleReporter(
-        "0.5.0",
+        "0.6.0",
         ColorWhen.NEVER,
         is_tty=False,
         no_color=False,

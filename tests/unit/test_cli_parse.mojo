@@ -243,7 +243,7 @@ def test_color_modes() raises:
 
 
 def test_version_text_uses_version_constant() raises:
-    assert_equal(version_text(), "mtest 0.5.0")
+    assert_equal(version_text(), "mtest 0.6.0")
 
 
 def test_help_text_mentions_usage() raises:

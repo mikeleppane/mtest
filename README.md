@@ -167,7 +167,7 @@ A file without that `main()` does not build as a standalone program.
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/suite/test_passing.mojo'
-mtest 0.5.0 (mojo)
+mtest 0.6.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 PASS           e2e/suite/test_passing.mojo  0.07s
@@ -187,7 +187,7 @@ against. One directory exercises most of the outcome model at once:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/suite'
-mtest 0.5.0 (mojo)
+mtest 0.6.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 7 files   excluded: 0
 
 PASS           e2e/suite/nested/test_nested.mojo  0.07s
@@ -233,7 +233,7 @@ zero tests ran. A session that collects nothing but NO-TESTS files exits `5`.
 
 ```console
 $ pixi run bash -c 'build/mtest -k one e2e/matrix'
-mtest 0.5.0 (mojo)
+mtest 0.6.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
 
 PASS           e2e/matrix/test_alpha.mojo 0.02s
@@ -246,7 +246,7 @@ A node-id operand selects exactly one test:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/matrix/test_alpha.mojo::test_alpha_two'
-mtest 0.5.0 (mojo)
+mtest 0.6.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 PASS           e2e/matrix/test_alpha.mojo 0.03s
@@ -298,7 +298,7 @@ attribution pass:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/attribution/test_deterministic_crasher.mojo'
-mtest 0.5.0 (mojo)
+mtest 0.6.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 CRASH          e2e/attribution/test_deterministic_crasher.mojo  1.12s  (signal 4 — SIGILL, illegal instruction)
@@ -327,7 +327,7 @@ force-killed, and the verdict line says so in words:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/stubborn/test_stubborn.mojo --timeout 1 --retries 0'
-mtest 0.5.0 (mojo)
+mtest 0.6.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 TIMEOUT        e2e/stubborn/test_stubborn.mojo 1.31s  (timed out after 1s, escalated to SIGKILL)
@@ -379,7 +379,7 @@ The three reporters compose with the console and with each other.
 ```console
 $ pixi run bash -c 'build/mtest --json - --gh-annotations off e2e/matrix' 1>/tmp/stream.ndjson
 $ head -n 4 /tmp/stream.ndjson
-{"event":"stream","version":1,"generator":"mtest 0.5.0"}
+{"event":"stream","version":1,"generator":"mtest 0.6.0"}
 {"event":"session_started","root":"/home/mikko/dev/mtest","toolchain":"mojo","selected_count":2,"excluded_count":0,"shard_label":"","sharded_out_count":0,"workers":1}
 {"event":"file_started","path":"e2e/matrix/test_alpha.mojo"}
 {"event":"test_reported","path":"e2e/matrix/test_alpha.mojo","name":"test_alpha_one","outcome":"pass","detail":"","detail_omitted_bytes":0,"timing":"0.001"}
@@ -453,7 +453,7 @@ serial = true
 
 ```console
 $ pixi run bash -c 'build/mtest'
-mtest 0.5.0 (mojo)
+mtest 0.6.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0   workers: 16
 
 PASS           e2e/matrix/test_alpha.mojo      0.02s
@@ -589,7 +589,7 @@ the edit-run loop costs one test instead of the suite:
 
 ```console
 $ pixi run bash -c 'build/mtest --lf e2e/matrix e2e/suite/test_failing.mojo'
-mtest 0.5.0 (mojo)
+mtest 0.6.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0
 
 FAIL           e2e/suite/test_failing.mojo     0.02s
@@ -612,7 +612,7 @@ files to the front, so a rerun fails fast without giving up coverage:
 
 ```console
 $ pixi run bash -c 'build/mtest --ff --show-output none e2e/matrix e2e/suite/test_failing.mojo'
-mtest 0.5.0 (mojo)
+mtest 0.6.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0
 
 FAIL           e2e/suite/test_failing.mojo     0.02s
@@ -631,7 +631,7 @@ selection rather than exiting `5`:
 
 ```console
 $ pixi run bash -c 'build/mtest --lf e2e/matrix'
-mtest 0.5.0 (mojo)
+mtest 0.6.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
 
 lf: previously-failing e2e/suite/test_failing.mojo::test_second_fails no longer exists — dropped
@@ -663,7 +663,7 @@ missing line would be the one you needed:
 
 ```console
 $ pixi run bash -c 'build/mtest doctor'
-PASS version: mtest 0.5.0
+PASS version: mtest 0.6.0
 PASS platform: Linux x86_64 supported
 PASS root: /home/mikko/dev/mtest
 PASS exec: runtime acquired
@@ -683,7 +683,7 @@ capability they were missing, and the rest still run.
 
 ```console
 $ pixi run bash -c 'MTEST_MOJO=/opt/nonexistent/mojo build/mtest doctor --no-config'
-PASS version: mtest 0.5.0
+PASS version: mtest 0.6.0
 PASS platform: Linux x86_64 supported
 PASS root: /home/mikko/dev/mtest
 PASS exec: runtime acquired
@@ -812,7 +812,7 @@ parallelism:
 
 ```console
 $ pixi run bash -c 'build/mtest -n 2 e2e/matrix'
-mtest 0.5.0 (mojo)
+mtest 0.6.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0   workers: 2
 
 PASS           e2e/matrix/test_beta.mojo       0.02s
@@ -827,7 +827,7 @@ machine with its peers. Pinned files carry a `SERIAL` tag:
 
 ```console
 $ pixi run bash -c "build/mtest -n 2 --serial 'e2e/matrix/test_alpha.mojo' e2e/matrix"
-mtest 0.5.0 (mojo)
+mtest 0.6.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0   workers: 2
 
 PASS           e2e/matrix/test_beta.mojo       0.02s
