@@ -13,7 +13,8 @@ captured stream is decoded with.
 
 This layer is data plus pure helpers: no argv parsing, environment or file
 reads, spawning, or printing. `toml_bridge` parses with the pinned vendored
-native TOML package and applies every mtest schema and value rule.
+native TOML package and applies every mtest schema and value rule. `show`
+renders a resolved value as human-facing, copy-pasteable TOML.
 
 The public surface is re-exported here so callers write
 `from mtest.config import FileConfig, RunnerConfig, parse_toml, ...`.
@@ -50,6 +51,7 @@ from mtest.config.resolve import (
     validate_resolved_config,
 )
 from mtest.config.runner_config import RunnerConfig
+from mtest.config.show import render_config_show
 from mtest.config.shell_quote import shell_join, shell_quote
 from mtest.config.shard_mode import ShardMode
 from mtest.config.show_output import ShowOutput

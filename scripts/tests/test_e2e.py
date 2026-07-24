@@ -121,6 +121,7 @@ CONFIG_SCENARIOS = (
     "failure-reselection",
     "config-overrides",
 )
+CONFIG_SHOW_SCENARIOS = ("config-show",)
 
 
 
@@ -136,7 +137,7 @@ class E2EFaultTopologyTests(unittest.TestCase):
         names = tuple(name for name, _scenario in e2e_main.SCENARIOS)
 
         self.assertEqual(names, layout.E2E_SCENARIO_NAMES)
-        self.assertEqual(len(names), 77)
+        self.assertEqual(len(names), 78)
         self.assertEqual(len(set(names)), len(names))
 
     def test_core_scenarios_have_one_feature_owner(self) -> None:
@@ -221,6 +222,16 @@ class E2EFaultTopologyTests(unittest.TestCase):
             if scenario.__module__ == config_file.__name__
         )
         self.assertEqual(owned, CONFIG_SCENARIOS)
+
+    def test_config_show_scenarios_have_one_feature_owner(self) -> None:
+        from scripts.e2e.scenarios import config_show
+
+        owned = tuple(
+            name
+            for name, scenario in e2e_main.SCENARIOS
+            if scenario.__module__ == config_show.__name__
+        )
+        self.assertEqual(owned, CONFIG_SHOW_SCENARIOS)
 
     def test_runner_owns_results_manifest_access_and_hard_timeouts(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-e2e-runner-") as raw_tmp:

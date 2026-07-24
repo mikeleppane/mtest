@@ -24,12 +24,14 @@ means `mtest`.
 ```text
 mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]   # run is the default subcommand
 mtest collect [PATHS...] [flags]                    # list node ids, one per line
+mtest config show [PATHS...] [flags]                # render resolved configuration
 mtest version
 mtest --help | mtest help
 ```
 
 `run` is the default: `mtest tests/` means `mtest run tests/`. A leading token
 that is not a known subcommand is treated as a path or flag for `run`.
+`config show` is the sole two-token subcommand.
 
 ---
 
@@ -108,6 +110,11 @@ presence under either `collect` spelling. `--timeout` is the one exception:
 unlike the other run-only flags above, it is applicable in `collect` mode too,
 because it also bounds each file's `--skip-all` collection probe (§5, §6) — a
 probe is a real process spawn with the same hang risk as a run.
+
+`config show` accepts the full `run` grammar, including selection and
+per-invocation flags. It resolves the same default, project-file, environment,
+and CLI layers as `run`, then renders and exits without discovery, builds,
+execution, reporter setup, or state parsing or writes.
 
 ---
 
@@ -967,8 +974,9 @@ above — it only reports which of those surfaces are wired up yet.
 `--shard`, `--lf`/`--last-failed`, `--ff`/`--failed-first`,
 `-n`/`--workers`, `--serial`, `--gate`, `-s`/`--show-output`,
 `--durations`, `-q`/`-v`, `--color`,
-`-h`/`--help`, `--version`, and the `run`, `collect`, `version`, and `help`
-subcommands (`--collect-only` too, as an alias that behaves as `collect`).
+`-h`/`--help`, `--version`, and the `run`, `collect`, `config show`, `version`,
+and `help` subcommands (`--collect-only` too, as an alias that behaves as
+`collect`).
 `--shard` applies under both `run` and `collect`. `--json` (the machine event
 stream, §15.4), `--junit-xml` (the JUnit report, §15.2), and `--gh-annotations`
 (the CI annotation tail, §15.3) are served too — see §24.2 for how they are now
@@ -1213,3 +1221,37 @@ Gates are never filtered or reordered by either mode: they always run first.
 `--lf` and `--ff` together are a usage error. Either mode combined with
 `--shard` is also a usage error. Either mode under `collect` or
 `--collect-only` is refused as run-only based on CLI presence.
+
+---
+
+## 27. Resolved configuration display
+
+`mtest config show` accepts the full `run` grammar and applies the ordinary
+resolution order: built-in defaults, `mtest.toml`, non-empty `MTEST_MOJO`, then
+CLI. It performs resolution only. It does not discover, build, execute, set up
+reporters, read or parse last-run state, or write state. `--config` and
+`--no-config` keep their ordinary meanings; a missing, unreadable, malformed,
+or invalid selected config produces the same exit 4 and byte-identical stderr
+diagnostic as `run`.
+
+The human-facing output is valid, copy-pasteable TOML in fixed `[run]`,
+`[build]`, `[report]`, then ordered `[[override]]` table order. Every set
+configuration key carries one trailing source label: `default`, `mtest.toml`,
+`env MTEST_MOJO`, or `cli`. Unset optional destinations are comments.
+`workers = "auto"` represents the automatic worker sentinel. Strings and
+arrays are TOML basic strings, precompile entries use canonical `SRC` or
+`SRC:OUT` form, and enum values use their accepted lowercase spellings.
+`NO_COLOR` adds an environment qualifier only when the resolved color remains
+`auto`.
+
+Trailers identify the selected config file, report only whether
+`.mtest-cache/lastrun` is present, and explain that selection flags are
+per-invocation and therefore omitted. Plain path operands remain
+config-eligible and render in `[run] paths` with CLI provenance. Node ids,
+`-k`, `--shard`, `--lf`, and other run-only non-configuration flags are
+accepted but never rendered. The state presence probe never reads the file, so
+malformed state contents have no effect. With no selected config, the command
+does not initialize the native TOML parser.
+
+The `config show` text is informal human output. A machine-readable
+configuration-display format is reserved.

@@ -75,6 +75,7 @@ UNIT_SUITES = {
     "test_config.mojo",
     "test_config_file.mojo",
     "test_config_resolve.mojo",
+    "test_config_show.mojo",
     "test_config_state.mojo",
     "test_config_toml_adversarial.mojo",
     "test_discover_fnmatch.mojo",
@@ -206,6 +207,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_config.mojo",
     "tests/unit/test_config_file.mojo",
     "tests/unit/test_config_resolve.mojo",
+    "tests/unit/test_config_show.mojo",
     "tests/unit/test_config_state.mojo",
     "tests/unit/test_config_toml_adversarial.mojo",
     "tests/unit/test_discover_fnmatch.mojo",
@@ -254,7 +256,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 1165
+CLASSIFIED_TEST_COUNT = 1174
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",
@@ -305,6 +307,7 @@ E2E_HARNESS_PATHS = {
     Path("scripts/e2e/scenarios/__init__.py"),
     Path("scripts/e2e/scenarios/annotations.py"),
     Path("scripts/e2e/scenarios/config_file.py"),
+    Path("scripts/e2e/scenarios/config_show.py"),
     Path("scripts/e2e/scenarios/core.py"),
     Path("scripts/e2e/scenarios/json_reporter.py"),
     Path("scripts/e2e/scenarios/junit_reporter.py"),
@@ -345,6 +348,7 @@ E2E_SCENARIO_NAMES = (
     "config-state",
     "failure-reselection",
     "config-overrides",
+    "config-show",
     "usage-refusals",
     "selection-keyword",
     "selection-node-id",
@@ -743,9 +747,9 @@ def check_e2e_layout() -> None:
             "E2E scenario membership/order mismatch: "
             f"expected={list(E2E_SCENARIO_NAMES)}, actual={list(scenario_names)}"
         )
-    if len(scenario_names) != 77 or len(set(scenario_names)) != len(scenario_names):
+    if len(scenario_names) != 78 or len(set(scenario_names)) != len(scenario_names):
         raise AssertionError(
-            "E2E scenarios must contain 77 unique names in the pinned order"
+            "E2E scenarios must contain 78 unique names in the pinned order"
         )
     referenced = {
         *rows,

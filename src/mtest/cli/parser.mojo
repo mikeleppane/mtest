@@ -1,10 +1,11 @@
 """The hand-rolled full-contract argument parser.
 
-`parse_args` turns an argument vector into a `ParseResult` — a configured run
-or a help/version directive — or raises a `cli:`-prefixed usage error. It parses
-the whole v1 grammar: flags this build does not yet serve are still recognized,
-then refused with a message naming the milestone that brings them, so later work
-only flips an availability bit rather than teaching the parser a new token.
+`parse_args` turns an argument vector into a `ParseResult` — a configured run,
+a resolved-config display request, or a help/version directive — or raises a
+`cli:`-prefixed usage error. It parses the whole v1 grammar: flags this build
+does not yet serve are still recognized, then refused with a message naming the
+milestone that brings them, so later work only flips an availability bit rather
+than teaching the parser a new token.
 
 Every raise names the offending token, states the expected form, and points at
 `mtest --help`. This layer never prints and never exits; `main` prints help and
@@ -42,8 +43,8 @@ comptime SUPPORTED_SUMMARY = (
     " -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v,"
     " --color, -k, --maxfail, --durations, --shard, -n/--workers, --serial,"
     " --retries, --json, --junit-xml, --gh-annotations, collect/--collect-only,"
-    " --config, --no-config, --lf/--last-failed, --ff/--failed-first, --help,"
-    " --version"
+    " config show, --config, --no-config, --lf/--last-failed,"
+    " --ff/--failed-first, --help, --version"
 )
 """A stable one-line list of what this build serves, quoted in refusals."""
 
@@ -57,7 +58,8 @@ def help_text() -> String:
     """The usage text `main` prints for `--help` / `-h` / `help`."""
     return String(
         "mtest — a pytest-like test runner for Mojo\n\n",
-        "usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]\n\n",
+        "usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]\n",
+        "       mtest config show [PATHS...] [flags] [-- BUILD-ARGS...]\n\n",
         "This build serves: ",
         SUPPORTED_SUMMARY,
         "\n",
@@ -169,17 +171,18 @@ def _parse_show_output(value: String) raises -> ShowOutput:
     return parsed.value()
 
 
-def _validate_json_dest(value: String) raises -> String:
+def _validate_json_dest(value: String, validate_parent: Bool) raises -> String:
     """Syntactically validate a `--json` destination; return it unchanged.
 
     `-` names the stdout stream and is always valid. Any other value is a
-    filesystem path: it must be non-empty and its parent directory (when it
-    names one) must already exist.
+    filesystem path and must be non-empty. When `validate_parent` is True, its
+    parent directory (when it names one) must already exist.
 
-    This is the parse-time check only. An empty value or a missing parent is a
-    usage error (exit 4) raised before any build or run; a runtime open failure
-    such as a permissions problem or descriptor exhaustion is the session's to
-    detect, under a different exit code.
+    This is the parse-time check only. An empty value is always a usage error
+    (exit 4); a missing parent is also a usage error for a run, but resolution-
+    only config display skips that filesystem check. A runtime open failure,
+    such as a permissions problem or descriptor exhaustion, is the session's
+    to detect under a different exit code.
     """
     if value == "-":
         return value
@@ -187,38 +190,41 @@ def _validate_json_dest(value: String) raises -> String:
         raise _err(
             "'--json' wants a destination PATH or '-', got an empty value"
         )
-    var parent = String(dirname(value))
-    if parent != "" and not isdir(parent):
-        raise _err(
-            "'--json' destination parent directory does not exist: '"
-            + parent
-            + "'"
-        )
+    if validate_parent:
+        var parent = String(dirname(value))
+        if parent != "" and not isdir(parent):
+            raise _err(
+                "'--json' destination parent directory does not exist: '"
+                + parent
+                + "'"
+            )
     return value
 
 
-def _validate_junit_dest(value: String) raises -> String:
+def _validate_junit_dest(value: String, validate_parent: Bool) raises -> String:
     """Syntactically validate a `--junit-xml` destination; return it unchanged.
 
     The value is always a filesystem path. There is no `-` stdout form, because
     a JUnit document is assembled and renamed atomically rather than streamed
-    live. It must be non-empty and its parent directory (when it names one) must
-    already exist.
+    live. It must be non-empty. When `validate_parent` is True, its parent
+    directory (when it names one) must already exist.
 
-    This is the parse-time check only. An empty value or a missing parent is a
-    usage error (exit 4) raised before any build or run; a runtime creation
+    This is the parse-time check only. An empty value is always a usage error
+    (exit 4); a missing parent is also a usage error for a run, but resolution-
+    only config display skips that filesystem check. A runtime creation
     failure, including the target directory being removed after this check, is
-    the session's to detect, under a different exit code.
+    the session's to detect under a different exit code.
     """
     if value.byte_length() == 0:
         raise _err("'--junit-xml' wants a destination PATH, got an empty value")
-    var parent = String(dirname(value))
-    if parent != "" and not isdir(parent):
-        raise _err(
-            "'--junit-xml' destination parent directory does not exist: '"
-            + parent
-            + "'"
-        )
+    if validate_parent:
+        var parent = String(dirname(value))
+        if parent != "" and not isdir(parent):
+            raise _err(
+                "'--junit-xml' destination parent directory does not exist: '"
+                + parent
+                + "'"
+            )
     return value
 
 
@@ -324,21 +330,22 @@ def _lookup(name: String) -> Optional[FlagSpec]:
 
 
 def parse_args(argv: List[String]) raises -> ParseResult:
-    """Parse `argv` into a run config or a help/version directive.
+    """Parse `argv` into a run, config-display, help, or version result.
 
     A leading `help` or `version` token returns that directive immediately. A
     leading `run` or `collect` token is consumed as a subcommand, with `collect`
-    equivalent to `--collect-only`. Any other first token is left to the
-    general token loop, which reads it as a flag when it starts with `-` (a
-    bare `-` excepted) and as a path operand otherwise, so an argument vector
-    may open with a flag. Everything after a bare `--` is forwarded as a build
-    argument.
+    equivalent to `--collect-only`. A leading `config show` pair requests
+    resolution-only display while reusing the run grammar. Any other first
+    token is left to the general token loop, which reads it as a flag when it
+    starts with `-` (a bare `-` excepted) and as a path operand otherwise, so
+    an argument vector may open with a flag. Everything after a bare `--` is
+    forwarded as a build argument.
 
     Args:
         argv: The argument tokens, excluding the program name.
 
     Returns:
-        A `ParseResult`: a configured run, or a help/version directive.
+        A configured run, config-display request, or help/version directive.
 
     Raises:
         Error: A `cli:`-prefixed usage error, raised for an unknown flag, a
@@ -349,6 +356,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     """
     var start = 0
     var collect = False
+    var config_show = False
     if len(argv) > 0:
         var head = argv[0]
         if head == "version":
@@ -362,6 +370,13 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             start = 1
         if head == "run":
             start = 1
+        if head == "config":
+            if len(argv) < 2 or argv[1] != "show":
+                raise _err(
+                    "'config' requires the two-token subcommand 'config show'"
+                )
+            config_show = True
+            start = 2
 
     var paths = List[String]()
     var saw_paths = False
@@ -567,10 +582,10 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             workers = _parse_workers(value)
             saw_workers = True
         elif s.id == FlagId.JSON:
-            json_dest = _validate_json_dest(value)
+            json_dest = _validate_json_dest(value, not config_show)
             saw_json = True
         elif s.id == FlagId.JUNIT_XML:
-            junit_dest = _validate_junit_dest(value)
+            junit_dest = _validate_junit_dest(value, not config_show)
             saw_junit = True
         elif s.id == FlagId.GH_ANNOTATIONS:
             gh_annotations = _parse_annotations(value)
@@ -716,4 +731,6 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     defaults.shard_m = shard_m
     defaults.shard_n = shard_n
     var cfg = overlay.fold(defaults)
+    if config_show:
+        return ParseResult.config_show(cfg^, overlay^, config_path^, no_config)
     return ParseResult.run(cfg^, overlay^, config_path^, no_config)
