@@ -71,6 +71,10 @@ from mtest.session.file_result import (
     _failing_count,
     _prepend_events,
 )
+from mtest.select.failure_selection import (
+    CollectedNames,
+    resolve_last_failed,
+)
 from mtest.session.names import _same_set, _str_in
 from mtest.session.pipeline import (
     FileStage,
@@ -808,6 +812,95 @@ def _run_selection[
             break
 
         if step.kind == StepKind.ANNOUNCE_COLLECTION:
+            if config.last_failed:
+                if resolved.state and len(resolved.last_run_state.records) > 0:
+                    var collected_names = List[CollectedNames]()
+                    for item in collected:
+                        collected_names.append(
+                            CollectedNames(
+                                item.rel,
+                                item.universe.copy(),
+                                item.selected.copy(),
+                            )
+                        )
+                    var soft = resolve_last_failed(
+                        disc.run_files,
+                        collected_names,
+                        resolved.last_run_state,
+                    )
+                    for identifier in soft.stale_ids:
+                        reporter.handle(
+                            Event.warning(
+                                "lf-stale",
+                                (
+                                    "lf: previously-failing "
+                                    + identifier
+                                    + " no longer exists — dropped"
+                                ),
+                            )
+                        )
+                    var has_final_match = False
+                    if soft.matched:
+                        for ci in range(len(collected)):
+                            var found = False
+                            for chosen in soft.files:
+                                if chosen.path != collected[ci].rel:
+                                    continue
+                                found = True
+                                if collected[ci].terminal:
+                                    has_final_match = True
+                                    break
+                                if chosen.whole_file:
+                                    collected[ci].selected = collected[
+                                        ci
+                                    ].orig_selected.copy()
+                                else:
+                                    collected[ci].selected = chosen.names.copy()
+                                if len(collected[ci].selected) > 0:
+                                    has_final_match = True
+                                break
+                            if collected[ci].terminal:
+                                continue
+                            if not found:
+                                collected[ci].selected = []
+                            var deselected = List[String]()
+                            for name in collected[ci].universe:
+                                if not _str_in(collected[ci].selected, name):
+                                    deselected.append(name)
+                            collected[ci].deselected = deselected^
+                            pipeline.replace_selection_empty(
+                                ci, len(collected[ci].selected) == 0
+                            )
+                    if not soft.matched or not has_final_match:
+                        reporter.handle(
+                            Event.warning(
+                                "lf-empty",
+                                (
+                                    "lf: no previously-failing tests match this"
+                                    " selection — running the full selection"
+                                ),
+                            )
+                        )
+                        for ci in range(len(collected)):
+                            if collected[ci].terminal:
+                                continue
+                            collected[ci].selected = collected[
+                                ci
+                            ].orig_selected.copy()
+                            var deselected = List[String]()
+                            for name in collected[ci].universe:
+                                if not _str_in(collected[ci].selected, name):
+                                    deselected.append(name)
+                            collected[ci].deselected = deselected^
+                            pipeline.replace_selection_empty(
+                                ci, len(collected[ci].selected) == 0
+                            )
+                    else:
+                        for ci in range(len(collected)):
+                            if not collected[ci].terminal:
+                                collected[ci].orig_selected = collected[
+                                    ci
+                                ].selected.copy()
             # Collection is known: emit the run-wide totals before any body
             # runs. A file that never became runnable contributes neither.
             var sel_total = 0
@@ -978,15 +1071,33 @@ def _run_selection[
                 collected[i].intent,
                 config.keyword,
             )
-            collected[i].selected = sr.selected.copy()
             if not step.recovering:
-                # Pin the original selection once, at the first probe. A
-                # recovery re-probe re-selects `selected` (which the run then
-                # executes, exactly as before), but must NOT move the set a
-                # crash is attributed against — see `_Collected.orig_selected`.
+                collected[i].selected = sr.selected.copy()
+                # Pin the ordinary CLI selection once. The persisted soft
+                # filter intersects this set later and never enters
+                # `select_from`, so user-supplied unknown names remain usage
+                # errors while stale state never becomes one.
                 collected[i].orig_selected = sr.selected.copy()
-            collected[i].deselected = sr.deselected.copy()
-            pipeline.record_probe_qualified(i, len(sr.selected) == 0)
+                collected[i].deselected = sr.deselected.copy()
+            elif config.last_failed:
+                # A stale-name rebuild may change the fresh universe, but it
+                # cannot widen the effective post-`--lf` selection. Preserve
+                # source order from the fresh ordinary selection while
+                # intersecting it with the names the original run admitted.
+                var recovered = List[String]()
+                for name in sr.selected:
+                    if _str_in(collected[i].orig_selected, name):
+                        recovered.append(name)
+                collected[i].selected = recovered^
+                var deselected = List[String]()
+                for name in collected[i].universe:
+                    if not _str_in(collected[i].selected, name):
+                        deselected.append(name)
+                collected[i].deselected = deselected^
+            else:
+                collected[i].selected = sr.selected.copy()
+                collected[i].deselected = sr.deselected.copy()
+            pipeline.record_probe_qualified(i, len(collected[i].selected) == 0)
             continue
 
         # --- the run pass: replay, skip, or run one file --------------------

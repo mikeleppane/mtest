@@ -88,6 +88,7 @@ single **invocation root**. In v1 the root is the **current working directory**.
 | `-x`, `--maxfail N` | ✓ | — |
 | `-n, --workers N\|auto` | ✓ | ✓ |
 | `--shard M/N` | ✓ | ✓ |
+| `--lf`, `--last-failed`, `--ff`, `--failed-first` | ✓ | — |
 | `--serial GLOB` | ✓ | — |
 | `--timeout`, `--compile-timeout` | ✓ | ✓ (compile only) |
 | `--retries N` | ✓ | — |
@@ -101,11 +102,12 @@ single **invocation root**. In v1 the root is the **current working directory**.
 
 `collect` compiles files to enumerate their tests, so it honors the build and
 selection flags; it does not schedule test execution, so run-time flags
-(`-x`, `--maxfail`, `--retries`, `--durations`, `--serial`, reporters) do not
-apply. `--timeout` is the one exception: unlike the other run-only flags above,
-it is applicable in `collect` mode too, because it also bounds each file's
-`--skip-all` collection probe (§5, §6) — a probe is a real process spawn with
-the same hang risk as a run.
+(`-x`, `--maxfail`, `--retries`, `--durations`, `--serial`, `--lf`, `--ff`,
+reporters) do not apply. The failure-selection flags are refused based on CLI
+presence under either `collect` spelling. `--timeout` is the one exception:
+unlike the other run-only flags above, it is applicable in `collect` mode too,
+because it also bounds each file's `--skip-all` collection probe (§5, §6) — a
+probe is a real process spawn with the same hang risk as a run.
 
 ---
 
@@ -850,8 +852,7 @@ The following are out of scope for v1 and reserved for a later major version
 (vNext); each is either unrecognized by the parser, or recognized-but-refused
 as noted:
 
-`--root`; `--lf`/`--ff` (last/failed-first); boolean `-k` expressions;
-`--pattern`; a **per-test** granularity for
+`--root`; boolean `-k` expressions; `--pattern`; a **per-test** granularity for
 `--durations` (the slowest individual *tests*, not just files — blocked on the
 same upstream per-test timing gap that blocks per-test attribution elsewhere;
 the file-level `--durations N` is itself served now, §15.1); markers /
@@ -963,7 +964,8 @@ above — it only reports which of those surfaces are wired up yet.
 `--config`, `--no-config`, `-I`, `--build-arg` (and post-`--` passthrough),
 `--precompile`, `--mojo`,
 `-x`/`--exitfirst`, `--maxfail`, `--timeout`, `--compile-timeout`, `--retries`,
-`--shard`, `-n`/`--workers`, `--serial`, `--gate`, `-s`/`--show-output`,
+`--shard`, `--lf`/`--last-failed`, `--ff`/`--failed-first`,
+`-n`/`--workers`, `--serial`, `--gate`, `-s`/`--show-output`,
 `--durations`, `-q`/`-v`, `--color`,
 `-h`/`--help`, `--version`, and the `run`, `collect`, `version`, and `help`
 subcommands (`--collect-only` too, as an alias that behaves as `collect`).
@@ -1140,7 +1142,7 @@ configured paths, or `--no-config` to suppress the whole file.
 
 ---
 
-## 26. Last-run state file
+## 26. Last-run state and failure re-selection
 
 When `[run] state` is true (the default), an unsharded run reads
 `.mtest-cache/lastrun` and merges fresh verdict observations into its preserved
@@ -1169,3 +1171,45 @@ runs. The writer creates a PID-qualified temp beside the target, closes it, and
 atomically renames it onto `lastrun`. A create, write, close, or rename failure
 prints one state diagnostic to stderr, preserves the prior file, and never
 changes the session exit or emits a post-terminal event.
+
+`--lf`/`--last-failed` and `--ff`/`--failed-first` are CLI-only run modes; they
+are not project-config keys. Both consume state only when `[run] state` is true.
+With `state = false`, no state read occurs and either mode prints exactly
+`lf: state disabled by mtest.toml — running the full selection` before running
+the ordinary selection.
+
+Under `--lf`, persisted records are a soft filter applied after ordinary
+discovery and per-file name collection. A `file` record selects the discovered
+file while retaining any ordinary `-k` or node-id subset. A `test` record
+selects its test only when the file and collected name still exist. Persisted
+ids never enter the qualified CLI-selection lookup, so stale state never causes
+exit 4. Each missing file or missing test is dropped nonfatally with one line:
+`lf: previously-failing <id> no longer exists — dropped`. The identifier is
+escaped so hostile state bytes cannot create another physical line.
+
+Missing, empty, malformed/unknown-version, all-stale, or empty-intersection
+state prints exactly
+`lf: no previously-failing tests match this selection — running the full selection`
+and runs the ordinary full selection instead of exiting 5. Codec diagnostics
+for malformed input remain separate `state-malformed-line` warnings.
+
+Known state-disabled or empty-state fallback is emitted immediately after the
+session starts, before a gate can fail. Collection-dependent stale and
+empty-intersection diagnostics remain at the post-gate collection barrier.
+
+`--lf` narrows to surviving remembered failures and preserves discovery order;
+it does not reorder that subset. A stale-name recovery intersects its fresh
+ordinary selection with the effective `--lf` subset and never widens it.
+`--ff` never narrows or validates persisted test names: file and test records
+both mark their discovered file at file granularity. It moves those
+remembered-failing files before the rest while preserving discovery order
+inside each half. In pooled execution this stable partition is applied
+independently to the parallel and serial bands, so serial membership never
+changes. Gate records are live state but gates themselves remain untouched.
+With `-k` or node-id operands, the truthful one-worker selection path uses one
+post-gate band; `-n 2` still reports one worker and `--serial` is a no-op there.
+
+Gates are never filtered or reordered by either mode: they always run first.
+`--lf` and `--ff` together are a usage error. Either mode combined with
+`--shard` is also a usage error. Either mode under `collect` or
+`--collect-only` is refused as run-only based on CLI presence.

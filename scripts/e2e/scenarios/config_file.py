@@ -1113,6 +1113,444 @@ def s_config_state(context: ScenarioContext) -> str:
     return "live delta + 0/1 writes; 2/3/4/5/collect/shard disabled; atomic"
 
 
+def _file_started_paths(stream_path: Path) -> list[str]:
+    return [
+        str(row["path"])
+        for row in (
+            json.loads(line)
+            for line in stream_path.read_text(encoding="utf-8").splitlines()
+        )
+        if row.get("event") == "file_started"
+    ]
+
+
+def s_failure_reselection(context: ScenarioContext) -> str:
+    """Last-failed filtering, failed-first bands, gates, and fallbacks."""
+    _clean_project_runtime()
+    runner = _project_runner(context)
+    poison = PROJECT / "tests" / "test_poison_temp.mojo"
+    truncate_a = PROJECT / "tests" / "test_a_truncate_temp.mojo"
+    truncate_b = PROJECT / "tests" / "test_b_truncate_temp.mojo"
+    try:
+        red = runner.run_mtest([])
+        expect_exit(red, 1)
+        MARKER_PATH.write_text("pass\n", encoding="utf-8")
+        poison.write_text(
+            '"""Transient poison: proves --lf narrows the ordinary set."""\n'
+            "from std.testing import assert_true, TestSuite\n\n"
+            "def test_must_not_run() raises:\n"
+            "    assert_true(False)\n\n"
+            "def main() raises:\n"
+            "    TestSuite.discover_tests[__functions_in_module()]().run()\n",
+            encoding="utf-8",
+        )
+        narrowed = runner.run_mtest(["tests", "--lf"])
+        expect_exit(narrowed, 0)
+        expect(
+            "test_poison_temp.mojo" not in narrowed.combined,
+            f"--lf ran the non-remembered poison:\n{narrowed.combined}",
+        )
+        poison.unlink()
+
+        _write_state(
+            STATE_HEADER
+            + "file\ttests/gone.mojo\n"
+            + "test\ttests/test_other.mojo::test_gone\n"
+            + "test\ttests/test_other.mojo::test_other_passes\n"
+        )
+        with tempfile.TemporaryDirectory(prefix="mtest-lf-warnings-") as raw:
+            stream = Path(raw, "warnings.ndjson")
+            stale = runner.run_mtest(
+                [
+                    "tests/test_other.mojo",
+                    "--lf",
+                    "--json",
+                    os.fspath(stream),
+                    "--gh-annotations",
+                    "off",
+                ]
+            )
+            expect_exit(stale, 0)
+            for identifier in (
+                "tests/gone.mojo",
+                "tests/test_other.mojo::test_gone",
+            ):
+                line = (
+                    f"lf: previously-failing {identifier} "
+                    "no longer exists — dropped"
+                )
+                expect(
+                    stale.combined.count(line) == 1,
+                    f"stale identifier was not one exact line: {identifier}\n"
+                    f"{stale.combined}",
+                )
+            warning_kinds = {
+                row.get("warning_kind")
+                for row in (
+                    json.loads(line)
+                    for line in stream.read_text(encoding="utf-8").splitlines()
+                )
+                if row.get("event") == "warning"
+            }
+            expect(
+                "lf-stale" in warning_kinds,
+                f"JSON stream missed lf-stale: {warning_kinds}",
+            )
+
+        fallback = (
+            "lf: no previously-failing tests match this selection — "
+            "running the full selection"
+        )
+        STATE_PATH.unlink()
+        missing_state = runner.run_mtest(
+            ["tests/test_other.mojo", "--lf"]
+        )
+        expect_exit(missing_state, 0)
+        expect(
+            missing_state.combined.count(fallback) == 1,
+            f"missing state did not fall back once:\n{missing_state.combined}",
+        )
+
+        _write_state(
+            STATE_HEADER
+            + "file\ttests/all-gone.mojo\n"
+            + "test\ttests/test_other.mojo::test_all_gone\n"
+        )
+        all_stale = runner.run_mtest(["tests/test_other.mojo", "--lf"])
+        expect_exit(all_stale, 0)
+        expect(
+            all_stale.combined.count("no longer exists — dropped") == 2
+            and all_stale.combined.count(fallback) == 1,
+            f"all-stale-only state did not drop and fall back:\n"
+            f"{all_stale.combined}",
+        )
+
+        _write_state(STATE_HEADER)
+        with tempfile.TemporaryDirectory(prefix="mtest-lf-empty-") as raw:
+            stream = Path(raw, "empty.ndjson")
+            empty = runner.run_mtest(
+                [
+                    "tests/test_other.mojo",
+                    "--lf",
+                    "--json",
+                    os.fspath(stream),
+                    "--gh-annotations",
+                    "off",
+                ]
+            )
+            expect_exit(empty, 0)
+            expect(
+                empty.combined.count(fallback) == 1,
+                f"empty state did not fall back once:\n{empty.combined}",
+            )
+            rows = [
+                json.loads(line)
+                for line in stream.read_text(encoding="utf-8").splitlines()
+            ]
+            expect(
+                any(
+                    row.get("event") == "warning"
+                    and row.get("warning_kind") == "lf-empty"
+                    for row in rows
+                ),
+                f"JSON stream missed lf-empty: {rows}",
+            )
+        _write_state(STATE_HEADER)
+        ff_empty = runner.run_mtest(["tests/test_other.mojo", "--ff"])
+        expect_exit(ff_empty, 0)
+        expect(
+            ff_empty.combined.count(fallback) == 1,
+            f"empty state did not fall back under --ff:\n{ff_empty.combined}",
+        )
+
+        _write_state("unknown-state\n")
+        malformed = runner.run_mtest(["tests/test_other.mojo", "--lf"])
+        expect_exit(malformed, 0)
+        expect(
+            fallback in malformed.combined
+            and "state-malformed-line" in malformed.combined,
+            f"malformed state did not warn and fall back:\n{malformed.combined}",
+        )
+
+        _write_state(
+            STATE_HEADER
+            + "test\ttests/test_other.mojo::test_other_passes\n"
+        )
+        disabled = runner.run_mtest(
+            [
+                "--config",
+                "configs/inside.toml",
+                "tests/test_other.mojo",
+                "--lf",
+            ]
+        )
+        expect_exit(disabled, 0)
+        disabled_line = (
+            "lf: state disabled by mtest.toml — running the full selection"
+        )
+        expect(
+            disabled.combined.count(disabled_line) == 1,
+            f"state=false fallback did not name state:\n{disabled.combined}",
+        )
+        disabled_ff = runner.run_mtest(
+            [
+                "--config",
+                "configs/inside.toml",
+                "tests/test_other.mojo",
+                "--ff",
+            ]
+        )
+        expect_exit(disabled_ff, 0)
+        expect(
+            disabled_ff.combined.count(disabled_line) == 1,
+            f"state=false fallback did not cover --ff:\n{disabled_ff.combined}",
+        )
+
+        _write_state(STATE_HEADER + "file\ttests/test_stateful.mojo\n")
+        with tempfile.TemporaryDirectory(prefix="mtest-ff-order-") as raw:
+            stream = Path(raw, "order.ndjson")
+            ordered = runner.run_mtest(
+                [
+                    "tests",
+                    "--ff",
+                    "-n",
+                    "2",
+                    "--json",
+                    os.fspath(stream),
+                    "--gh-annotations",
+                    "off",
+                ]
+            )
+            expect_exit(ordered, 0)
+            starts = _file_started_paths(stream)
+            expect(
+                starts[:2]
+                == [
+                    "tests/test_stateful.mojo",
+                    "tests/test_other.mojo",
+                ],
+                f"--ff did not admit remembered parallel file first: {starts}",
+            )
+
+        with tempfile.TemporaryDirectory(prefix="mtest-ff-bands-") as raw:
+            stream = Path(raw, "bands.ndjson")
+            bands = runner.run_mtest(
+                [
+                    "tests",
+                    "--ff",
+                    "-n",
+                    "2",
+                    "--serial",
+                    "*stateful*",
+                    "--json",
+                    os.fspath(stream),
+                    "--gh-annotations",
+                    "off",
+                ]
+            )
+            expect_exit(bands, 0)
+            starts = _file_started_paths(stream)
+            expect(
+                starts.index("tests/test_other.mojo")
+                < starts.index("tests/test_stateful.mojo"),
+                f"--ff moved a serial file into the parallel band: {starts}",
+            )
+
+        MARKER_PATH.unlink()
+        _write_state(STATE_HEADER + "file\ttests/test_stateful.mojo\n")
+        lf_keyword = runner.run_mtest(["tests", "-k", "other", "--lf"])
+        expect_exit(lf_keyword, 0)
+        expect(
+            fallback in lf_keyword.combined,
+            "--lf did not fall back to the ordinary -k selection on an "
+            f"empty intersection:\n{lf_keyword.combined}",
+        )
+
+        _write_state(STATE_HEADER + "file\ttests/test_other.mojo\n")
+        gate_lf = runner.run_mtest(
+            [
+                "tests/test_other.mojo",
+                "--gate",
+                "tests/test_stateful.mojo",
+                "--lf",
+            ]
+        )
+        expect_exit(gate_lf, 1)
+        gate_ff = runner.run_mtest(
+            [
+                "tests/test_other.mojo",
+                "--gate",
+                "tests/test_stateful.mojo",
+                "--ff",
+            ]
+        )
+        expect_exit(gate_ff, 1)
+
+        _write_state(STATE_HEADER)
+        gate_empty = runner.run_mtest(
+            [
+                "tests/test_other.mojo",
+                "--gate",
+                "tests/test_stateful.mojo",
+                "--lf",
+            ]
+        )
+        expect_exit(gate_empty, 1)
+        expect(
+            gate_empty.combined.count(fallback) == 1,
+            f"a failing gate suppressed the known-empty fallback:\n"
+            f"{gate_empty.combined}",
+        )
+
+        gate_disabled = runner.run_mtest(
+            [
+                "--config",
+                "configs/inside.toml",
+                "tests/test_other.mojo",
+                "--gate",
+                "tests/test_stateful.mojo",
+                "--lf",
+            ]
+        )
+        expect_exit(gate_disabled, 1)
+        expect(
+            gate_disabled.combined.count(disabled_line) == 1,
+            f"a failing gate suppressed the state-disabled fallback:\n"
+            f"{gate_disabled.combined}",
+        )
+
+        _write_state(STATE_HEADER + "file\ttests/test_stateful.mojo\n")
+        remembered_gate = runner.run_mtest(
+            [
+                "tests/test_other.mojo",
+                "--gate",
+                "tests/test_stateful.mojo",
+                "--ff",
+            ]
+        )
+        expect_exit(remembered_gate, 1)
+        expect(
+            "lf: previously-failing" not in remembered_gate.combined
+            and fallback not in remembered_gate.combined,
+            f"--ff treated a remembered gate as stale or empty:\n"
+            f"{remembered_gate.combined}",
+        )
+
+        failing_source = (
+            '"""Transient truncation-preservation actor."""\n'
+            "from std.testing import assert_true, TestSuite\n\n"
+            "def test_fails() raises:\n"
+            "    assert_true(False)\n\n"
+            "def main() raises:\n"
+            "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
+        )
+        truncate_a.write_text(failing_source, encoding="utf-8")
+        truncate_b.write_text(failing_source, encoding="utf-8")
+        _write_state(
+            STATE_HEADER
+            + "file\ttests/test_a_truncate_temp.mojo\n"
+            + "file\ttests/test_b_truncate_temp.mojo\n"
+        )
+        truncated = runner.run_mtest(
+            [
+                "--no-config",
+                "tests/test_a_truncate_temp.mojo",
+                "tests/test_b_truncate_temp.mojo",
+                "--lf",
+                "-x",
+                "--color",
+                "never",
+            ]
+        )
+        expect_exit(truncated, 1)
+        truncated_state = _read_state()
+        expect(
+            "file\ttests/test_b_truncate_temp.mojo\n" in truncated_state,
+            f"--lf -x discarded the unverdicted B record:\n{truncated_state}",
+        )
+        expect(
+            "test\ttests/test_a_truncate_temp.mojo::test_fails\n"
+            in truncated_state,
+            f"--lf -x did not replace A with its fresh failure:\n{truncated_state}",
+        )
+        truncate_a.unlink()
+        truncate_b.unlink()
+
+        MARKER_PATH.write_text("pass\n", encoding="utf-8")
+        _write_state(STATE_HEADER + "file\ttests/test_stateful.mojo\n")
+        with tempfile.TemporaryDirectory(prefix="mtest-ff-select-") as raw:
+            stream = Path(raw, "selection.ndjson")
+            composed = runner.run_mtest(
+                [
+                    "tests",
+                    "-k",
+                    "other",
+                    "--ff",
+                    "-n",
+                    "2",
+                    "--serial",
+                    "*other*",
+                    "--json",
+                    os.fspath(stream),
+                    "--gh-annotations",
+                    "off",
+                ]
+            )
+            expect_exit(composed, 0)
+            started = _started_record(stream)
+            expect(
+                started.get("workers") == 1,
+                f"selection-active --ff claimed pooled workers: {started}",
+            )
+            expect(
+                _file_started_paths(stream)
+                == [
+                    "tests/test_stateful.mojo",
+                    "tests/test_other.mojo",
+                    "tests/test_zero.mojo",
+                ],
+                "-k composition did not use one failed-first sequential band: "
+                f"{_file_started_paths(stream)}",
+            )
+
+        with tempfile.TemporaryDirectory(prefix="mtest-lf-no-config-") as raw:
+            scratch = Path(raw)
+            (scratch / ".mtest-cache").mkdir()
+            (scratch / ".mtest-cache" / "lastrun").write_text(
+                STATE_HEADER + "test\ttest_scratch.mojo::test_passes\n",
+                encoding="utf-8",
+            )
+            (scratch / "test_scratch.mojo").write_text(
+                '"""Config-free --lf laziness actor."""\n'
+                "from std.testing import assert_true, TestSuite\n\n"
+                "def test_passes() raises:\n"
+                "    assert_true(True)\n\n"
+                "def main() raises:\n"
+                "    TestSuite.discover_tests[__functions_in_module()]().run()\n",
+                encoding="utf-8",
+            )
+            scratch_runner = E2ERunner(
+                repo_root=scratch,
+                mtest=context.runner.mtest,
+                default_timeout=context.runner.default_timeout,
+                short_timeout=context.runner.short_timeout,
+            )
+            lazy = scratch_runner.run_mtest(
+                ["--lf"], env_overrides={"PYTHONHOME": "/nonexistent"}
+            )
+            expect_exit(lazy, 0)
+            expect(
+                not (scratch / "mtest.toml").exists(),
+                "the config-free --lf fixture grew a config file",
+            )
+    finally:
+        poison.unlink(missing_ok=True)
+        truncate_a.unlink(missing_ok=True)
+        truncate_b.unlink(missing_ok=True)
+        _clean_project_runtime()
+    return "lf filter/fallback/stale + ff bands + gates + selection + laziness"
+
+
 def _log_path(prefix: str) -> str:
     handle, path = tempfile.mkstemp(prefix=prefix, suffix=".tsv")
     os.close(handle)

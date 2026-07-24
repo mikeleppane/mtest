@@ -13,6 +13,7 @@ is a run-file scheduling policy, while all gates must remain before run files.
 from mtest.config import (
     ActiveConfigKeys,
     ConfigProvenance,
+    LastRunState,
     Provenance,
     ResolvedConfig,
     RunnerConfig,
@@ -52,6 +53,7 @@ def _compat_resolved_config(config: RunnerConfig) -> ResolvedConfig:
         False,
         "",
         List[String](),
+        LastRunState.empty(),
     )
 
 

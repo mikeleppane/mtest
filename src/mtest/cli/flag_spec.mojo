@@ -52,6 +52,8 @@ struct FlagId:
     comptime JSON = 26
     comptime CONFIG = 27
     comptime NO_CONFIG = 28
+    comptime LAST_FAILED = 29
+    comptime FAILED_FIRST = 30
 
 
 @fieldwise_init
@@ -128,4 +130,8 @@ def flag_specs() -> List[FlagSpec]:
         FlagSpec("--collect-only", FlagId.COLLECT_ONLY, 0, False, True, ""),
         FlagSpec("--config", FlagId.CONFIG, 1, False, True, ""),
         FlagSpec("--no-config", FlagId.NO_CONFIG, 0, False, True, ""),
+        FlagSpec("--lf", FlagId.LAST_FAILED, 0, False, True, ""),
+        FlagSpec("--last-failed", FlagId.LAST_FAILED, 0, False, True, ""),
+        FlagSpec("--ff", FlagId.FAILED_FIRST, 0, False, True, ""),
+        FlagSpec("--failed-first", FlagId.FAILED_FIRST, 0, False, True, ""),
     ]

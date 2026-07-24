@@ -8,6 +8,7 @@ from mtest.config.file_config import FileConfig, OverrideRule
 from mtest.config.annotations_mode import AnnotationsMode
 from mtest.config.overlay import CliOverlay
 from mtest.config.provenance import ConfigProvenance, Provenance
+from mtest.config.last_run_state import LastRunState
 from mtest.config.runner_config import RunnerConfig
 
 
@@ -203,6 +204,9 @@ struct ResolvedConfig(Copyable, Movable):
 
     var state_warnings: List[String]
     """Contained nonfatal state diagnostics emitted after session start."""
+
+    var last_run_state: LastRunState
+    """The parsed prior failures supplied by main, empty before state loading."""
 
 
 def validate_resolved_config(config: ResolvedConfig) -> Optional[String]:
@@ -408,4 +412,5 @@ def resolve_config(
         no_color=environment.no_color,
         config_file="",
         state_warnings=[],
+        last_run_state=LastRunState.empty(),
     )

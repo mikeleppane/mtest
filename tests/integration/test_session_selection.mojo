@@ -14,6 +14,16 @@ from std.testing import (
     assert_raises,
 )
 
+from mtest.config import (
+    CliOverlay,
+    ConfigEnvironment,
+    FileConfig,
+    LastRunRecord,
+    LastRunState,
+    ResolvedConfig,
+    RunnerConfig,
+    resolve_config,
+)
 from mtest.model import (
     Event,
     EventKind,
@@ -27,6 +37,7 @@ from mtest.model import (
     SessionFinishedPayload,
     SessionStartedPayload,
     WarningPayload,
+    NodeId,
 )
 from mtest.report import (
     CompositeReporter,
@@ -122,6 +133,19 @@ def _finished(rec: RecordingReporter) raises -> FileFinishedPayload:
             found = i
     assert_true(found >= 0, "no FILE_FINISHED event")
     return rec.event_at(found).data[FileFinishedPayload].copy()
+
+
+def _resolved_state(
+    config: RunnerConfig, state: LastRunState
+) -> ResolvedConfig:
+    var resolved = resolve_config(
+        config,
+        FileConfig.empty(),
+        ConfigEnvironment.empty(),
+        CliOverlay.default(),
+    )
+    resolved.last_run_state = state.copy()
+    return resolved^
 
 
 def _count_kind(rec: RecordingReporter, kind: EventKind) raises -> Int:
@@ -404,6 +428,33 @@ def test_recovery_probe_crash_still_reaches_crash_attribution() raises:
     assert_true(
         saw_attribution,
         "a recovery-probe CRASH must reach the crash-attribution pass",
+    )
+
+
+def test_last_failed_recovery_keeps_the_soft_selection() raises:
+    var root = temp_root()
+    write_file(root, "tests/test_lf_recovery.mojo", SRC_CHAMELEON)
+    var cfg = base_config()
+    cfg.paths.append("tests/test_lf_recovery.mojo")
+    cfg.last_failed = True
+    var state = LastRunState(
+        [
+            LastRunRecord.test(
+                NodeId("tests/test_lf_recovery.mojo", "test_ghost")
+            )
+        ]
+    )
+    var resolved = _resolved_state(cfg, state)
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    _ = run_session(resolved, root, comp)
+
+    var finished = _finished(comp.composite.reporters[0])
+    assert_equal(
+        finished.deselected_tests,
+        1,
+        "stale recovery must retain only the effective --lf test",
     )
 
 

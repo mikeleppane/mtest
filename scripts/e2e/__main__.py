@@ -106,6 +106,7 @@ SCENARIOS: ScenarioRegistry = (
     ("config-resolution", config_file.s_config_resolution),
     ("config-diagnostics", config_file.s_config_diagnostics),
     ("config-state", config_file.s_config_state),
+    ("failure-reselection", config_file.s_failure_reselection),
     ("config-overrides", config_file.s_config_overrides),
     ("usage-refusals", selection.s_usage_refusals),
     ("selection-keyword", selection.s_selection_keyword),

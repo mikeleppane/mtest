@@ -306,6 +306,8 @@ def _resolution_defaults(parsed: RunnerConfig) -> RunnerConfig:
     defaults.exitfirst = parsed.exitfirst
     defaults.keyword = parsed.keyword.copy()
     defaults.collect = parsed.collect
+    defaults.last_failed = parsed.last_failed
+    defaults.failed_first = parsed.failed_first
     defaults.shard_mode = parsed.shard_mode
     defaults.shard_m = parsed.shard_m
     defaults.shard_n = parsed.shard_n
@@ -558,6 +560,7 @@ def main():
         var state_load = _load_state(root)
         previous_state = state_load.state.copy()
         resolved.state_warnings = state_load.warnings.copy()
+        resolved.last_run_state = previous_state.copy()
 
     var runtime = ExecRuntime()
     try:

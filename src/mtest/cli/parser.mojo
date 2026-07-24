@@ -42,7 +42,8 @@ comptime SUPPORTED_SUMMARY = (
     " -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v,"
     " --color, -k, --maxfail, --durations, --shard, -n/--workers, --serial,"
     " --retries, --json, --junit-xml, --gh-annotations, collect/--collect-only,"
-    " --config, --no-config, --help, --version"
+    " --config, --no-config, --lf/--last-failed, --ff/--failed-first, --help,"
+    " --version"
 )
 """A stable one-line list of what this build serves, quoted in refusals."""
 
@@ -412,6 +413,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var config_path = String("")
     var saw_config = False
     var no_config = False
+    var last_failed = False
+    var failed_first = False
 
     var passthrough = False
     var i = start
@@ -491,6 +494,10 @@ def parse_args(argv: List[String]) raises -> ParseResult:
                 collect = True
             elif s.id == FlagId.NO_CONFIG:
                 no_config = True
+            elif s.id == FlagId.LAST_FAILED:
+                last_failed = True
+            elif s.id == FlagId.FAILED_FIRST:
+                failed_first = True
             i += 1
             continue
 
@@ -576,12 +583,27 @@ def parse_args(argv: List[String]) raises -> ParseResult:
 
     if saw_config and no_config:
         raise _err("'--config' and '--no-config' are mutually exclusive")
+    if last_failed and failed_first:
+        raise _err(
+            "'--lf'/'--last-failed' and '--ff'/'--failed-first' are mutually"
+            " exclusive"
+        )
+    if (last_failed or failed_first) and shard_n > 0:
+        raise _err(
+            "'--lf'/'--last-failed' and '--ff'/'--failed-first' cannot be"
+            " combined with '--shard'"
+        )
 
     # Collect mode is a listing, not a run: the run-only knobs that shape which
     # tests execute or when to stop scheduling are meaningless against it and are
     # refused loudly. `--timeout` is NOT refused — it bounds the collection
     # probes exactly as it bounds a run (a hanging probe is a TIMEOUT).
     if collect:
+        if last_failed or failed_first:
+            raise _err(
+                "'--lf'/'--last-failed' and '--ff'/'--failed-first' are"
+                " run-only flags and cannot be combined with collect mode"
+            )
         if exitfirst:
             raise _err(
                 "'-x'/'--exitfirst' is a run-only flag and cannot be combined"
@@ -688,6 +710,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     defaults.exitfirst = exitfirst
     defaults.keyword = keyword^
     defaults.collect = collect
+    defaults.last_failed = last_failed
+    defaults.failed_first = failed_first
     defaults.shard_mode = shard_mode
     defaults.shard_m = shard_m
     defaults.shard_n = shard_n

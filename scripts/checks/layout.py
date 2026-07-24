@@ -105,6 +105,7 @@ UNIT_SUITES = {
     "test_report_junit_reporter.mojo",
     "test_report_recording.mojo",
     "test_report_signals.mojo",
+    "test_select_failure_selection.mojo",
     "test_select_logic.mojo",
     "test_select_operands.mojo",
     "test_session_attribution.mojo",
@@ -235,6 +236,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_report_junit_reporter.mojo",
     "tests/unit/test_report_recording.mojo",
     "tests/unit/test_report_signals.mojo",
+    "tests/unit/test_select_failure_selection.mojo",
     "tests/unit/test_select_logic.mojo",
     "tests/unit/test_select_operands.mojo",
     "tests/unit/test_session_attribution.mojo",
@@ -252,7 +254,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 1148
+CLASSIFIED_TEST_COUNT = 1165
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",
@@ -341,6 +343,7 @@ E2E_SCENARIO_NAMES = (
     "config-resolution",
     "config-diagnostics",
     "config-state",
+    "failure-reselection",
     "config-overrides",
     "usage-refusals",
     "selection-keyword",
@@ -740,9 +743,9 @@ def check_e2e_layout() -> None:
             "E2E scenario membership/order mismatch: "
             f"expected={list(E2E_SCENARIO_NAMES)}, actual={list(scenario_names)}"
         )
-    if len(scenario_names) != 76 or len(set(scenario_names)) != len(scenario_names):
+    if len(scenario_names) != 77 or len(set(scenario_names)) != len(scenario_names):
         raise AssertionError(
-            "E2E scenarios must contain 76 unique names in the pinned order"
+            "E2E scenarios must contain 77 unique names in the pinned order"
         )
     referenced = {
         *rows,

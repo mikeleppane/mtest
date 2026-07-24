@@ -419,6 +419,15 @@ struct RunPipeline(Movable):
         """
         self._announced = True
 
+    def replace_selection_empty(mut self, index: Int, selection_empty: Bool):
+        """Replace one collected file's soft-filter emptiness at the barrier.
+
+        Args:
+            index: The collected file whose final soft selection was resolved.
+            selection_empty: Whether that final selection contains no names.
+        """
+        self._files[index].deselected_only = selection_empty
+
     def admit_stale_name_recovery(mut self, index: Int) -> Bool:
         """Spend the stale-name recover-once budget, if it is still unspent.
 

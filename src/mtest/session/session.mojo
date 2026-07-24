@@ -55,6 +55,11 @@ from mtest.session.effective_settings import (
     effective_file_settings,
 )
 from mtest.session.file_result import _CrashFile, _failing_count
+from mtest.select.failure_selection import (
+    missing_file_identifiers,
+    order_failed_first,
+    remembered_file_matches,
+)
 from mtest.session.pipeline import PipelineHalt, RunPipeline
 from mtest.session.pool import _run_pool_batch, resolve_worker_plan
 from mtest.session.pool_plan import partition_effective_serial, stale_serials
@@ -194,6 +199,23 @@ def run_session[
     # and `--serial` stays a consistent no-op (the selection run is already
     # one file at a time).
     var sel_active = selection_active(config.paths, config.keyword)
+    if config.last_failed:
+        sel_active = True
+    var state_files = disc.gate_files.copy()
+    state_files.extend(disc.run_files.copy())
+    var ff_has_match = (
+        config.failed_first
+        and resolved.state
+        and remembered_file_matches(state_files, resolved.last_run_state)
+    )
+    if config.failed_first and ff_has_match and sel_active:
+        var ordered = order_failed_first(
+            disc.gate_files,
+            disc.run_files,
+            [],
+            resolved.last_run_state,
+        )
+        disc.run_files = ordered.parallel.copy()
     var resolved_workers = 1
     var worker_clamp_note = String("")
     var worker_env_error = False
@@ -223,6 +245,62 @@ def run_session[
     )
     for warning in resolved.state_warnings:
         reporter.handle(Event.warning("state-malformed-line", warning))
+    if config.last_failed:
+        if not resolved.state:
+            reporter.handle(
+                Event.warning(
+                    "lf-empty",
+                    (
+                        "lf: state disabled by mtest.toml — running the full"
+                        " selection"
+                    ),
+                )
+            )
+        elif len(resolved.last_run_state.records) == 0:
+            reporter.handle(
+                Event.warning(
+                    "lf-empty",
+                    (
+                        "lf: no previously-failing tests match this"
+                        " selection — running the full selection"
+                    ),
+                )
+            )
+    if config.failed_first:
+        if not resolved.state:
+            reporter.handle(
+                Event.warning(
+                    "lf-empty",
+                    (
+                        "lf: state disabled by mtest.toml — running the full"
+                        " selection"
+                    ),
+                )
+            )
+        else:
+            for identifier in missing_file_identifiers(
+                state_files, resolved.last_run_state
+            ):
+                reporter.handle(
+                    Event.warning(
+                        "lf-stale",
+                        (
+                            "lf: previously-failing "
+                            + identifier
+                            + " no longer exists — dropped"
+                        ),
+                    )
+                )
+            if not ff_has_match:
+                reporter.handle(
+                    Event.warning(
+                        "lf-empty",
+                        (
+                            "lf: no previously-failing tests match this"
+                            " selection — running the full selection"
+                        ),
+                    )
+                )
     if worker_clamp_note != "":
         reporter.handle(Event.warning("worker-clamp", worker_clamp_note))
 
@@ -506,6 +584,15 @@ def run_session[
         # discover counts or shards is disturbed; each sub-list keeps the
         # dispatched order.
         var split = partition_effective_serial(disc.run_files, resolved)
+        if config.failed_first and ff_has_match:
+            var ordered = order_failed_first(
+                disc.gate_files,
+                split.parallel,
+                split.serial,
+                resolved.last_run_state,
+            )
+            split.parallel = ordered.parallel.copy()
+            split.serial = ordered.serial.copy()
         var rb = _run_pool_batch(
             runtime,
             resolved,
@@ -576,6 +663,14 @@ def run_session[
                 drift = True
             crash_files.extend(sb.crash_files.copy())
     elif proceed_runs:
+        if config.failed_first and ff_has_match:
+            var ordered = order_failed_first(
+                disc.gate_files,
+                disc.run_files,
+                [],
+                resolved.last_run_state,
+            )
+            disc.run_files = ordered.parallel.copy()
         # The plain run path settles each file build-then-run through `_run_one`
         # and routes its `-x`/`--maxfail` stop policy through the same
         # `RunPipeline` kernel the selection and gate paths use, rather than

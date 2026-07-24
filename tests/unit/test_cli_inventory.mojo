@@ -78,6 +78,10 @@ def frozen_inventory() -> List[InvRow]:
         InvRow("--collect-only", 0, False, True),
         InvRow("--config", 1, False, True),
         InvRow("--no-config", 0, False, True),
+        InvRow("--lf", 0, False, True),
+        InvRow("--last-failed", 0, False, True),
+        InvRow("--ff", 0, False, True),
+        InvRow("--failed-first", 0, False, True),
     ]
 
 
@@ -137,6 +141,44 @@ def test_workers_short_parses_count() raises:
     var argv: List[String] = ["-n", "2"]
     var r = parse_args(argv)
     assert_equal(r.config.workers, 2)
+
+
+def test_failure_selection_spellings_are_served() raises:
+    var lf_short: List[String] = ["--lf"]
+    var lf_long: List[String] = ["--last-failed"]
+    var ff_short: List[String] = ["--ff"]
+    var ff_long: List[String] = ["--failed-first"]
+    assert_true(parse_args(lf_short).config.last_failed)
+    assert_true(parse_args(lf_long).config.last_failed)
+    assert_true(parse_args(ff_short).config.failed_first)
+    assert_true(parse_args(ff_long).config.failed_first)
+
+
+def test_failure_selection_modes_are_mutually_exclusive() raises:
+    var argv: List[String] = ["--last-failed", "--ff"]
+    with assert_raises(contains="mutually exclusive"):
+        _ = parse_args(argv)
+
+
+def test_last_failed_is_incompatible_with_shard() raises:
+    var argv: List[String] = ["--lf", "--shard", "1/2"]
+    with assert_raises(contains="'--shard'"):
+        _ = parse_args(argv)
+
+
+def test_failed_first_is_incompatible_with_shard() raises:
+    var argv: List[String] = ["--failed-first", "--shard", "1/2"]
+    with assert_raises(contains="'--shard'"):
+        _ = parse_args(argv)
+
+
+def test_failure_selection_modes_are_run_only() raises:
+    var lf_collect: List[String] = ["collect", "--lf"]
+    var ff_alias: List[String] = ["--collect-only", "--failed-first"]
+    with assert_raises(contains="run-only"):
+        _ = parse_args(lf_collect)
+    with assert_raises(contains="run-only"):
+        _ = parse_args(ff_alias)
 
 
 def test_workers_long_auto_is_sentinel_zero() raises:
