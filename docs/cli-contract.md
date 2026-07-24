@@ -1501,7 +1501,10 @@ Trailers identify the selected config file, report only whether
 per-invocation and therefore omitted. Plain path operands remain
 config-eligible and render in `[run] paths` with CLI provenance. Node ids,
 `-k`, `--shard`, `--lf`, and other run-only non-configuration flags are
-accepted but never rendered. The state presence probe never reads the file, so
+accepted but never rendered. When node-id operands displaced a configured path
+list, a further trailer says so, because the empty `[run] paths` they leave
+behind would otherwise read as a claim that the command line resolved paths to
+nothing. The state presence probe never reads the file, so
 malformed state contents have no effect. With no selected config, the command
 does not initialize the native TOML parser.
 

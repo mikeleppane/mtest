@@ -169,6 +169,7 @@ def render_config_show(resolved: ResolvedConfig, state_present: Bool) -> String:
     var config = resolved.config.copy()
     var sources = resolved.provenance.copy()
     var paths = _config_paths(config.paths)
+    var node_ids_omitted = len(paths) != len(config.paths)
     var rendered = String("[run]\n")
     rendered += "paths = " + _string_array(paths) + _comment(sources.paths)
     rendered += (
@@ -304,4 +305,11 @@ def render_config_show(resolved: ResolvedConfig, state_present: Bool) -> String:
     rendered += "present" if state_present else "absent"
     rendered += ")\n"
     rendered += "# selection flags are per invocation and are not rendered\n"
+    if node_ids_omitted:
+        # Without this the empty `paths` above reads as "the command line
+        # resolved paths to nothing", when in fact node-id operands replaced
+        # the configured list and are deliberately not rendered.
+        rendered += (
+            "# node-id operands replaced [run] paths and are not rendered\n"
+        )
     return rendered^

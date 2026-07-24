@@ -11,17 +11,20 @@ from mtest.config.show_output import ShowOutput
 from mtest.config.verbosity import Verbosity
 
 
-def parse_nonnegative_decimal(value: String) raises -> Optional[Int]:
+def parse_nonnegative_decimal(value: String) -> Optional[Int]:
     """Parse one non-negative ASCII decimal integer.
+
+    An out-of-range value is rejected exactly like a non-decimal one. Letting
+    the conversion raise instead sent a stdlib message — naming no flag, no
+    expected form, and no help pointer — straight past every caller's
+    diagnostic framing to the top level.
 
     Args:
         value: The candidate decimal spelling.
 
     Returns:
-        The parsed integer, or `None` for an empty or non-decimal value.
-
-    Raises:
-        Error: If a digit-only value is outside the platform `Int` range.
+        The parsed integer, or `None` for an empty, non-decimal, or
+        out-of-range value.
     """
     if value.byte_length() == 0:
         return Optional[Int](None)
@@ -29,20 +32,21 @@ def parse_nonnegative_decimal(value: String) raises -> Optional[Int]:
         var digit = Int(cp)
         if digit < 48 or digit > 57:
             return Optional[Int](None)
-    return Optional[Int](atol(value))
+    try:
+        return Optional[Int](atol(value))
+    except:
+        return Optional[Int](None)
 
 
-def parse_worker_count(value: String) raises -> Optional[Int]:
+def parse_worker_count(value: String) -> Optional[Int]:
     """Parse `auto` or a positive decimal worker count.
 
     Args:
         value: The candidate worker-count spelling.
 
     Returns:
-        `0` for `auto`, a positive count, or `None` when invalid.
-
-    Raises:
-        Error: If a digit-only value is outside the platform `Int` range.
+        `0` for `auto`, a positive count, or `None` when invalid, which
+        includes an out-of-range decimal.
     """
     if value == "auto":
         return Optional[Int](0)

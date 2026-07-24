@@ -588,9 +588,12 @@ def s_config_diagnostics(context: ScenarioContext) -> str:
         expect_exit(missing_parent, 4)
         expect(
             missing_parent.stderr.startswith(
-                "cli: '--json' destination parent directory does not exist:"
+                "config: " + os.fspath(missing_parent_config)
+                + ": [report] json destination parent directory does not "
+                "exist:"
             ),
-            "configured report destination lost source-neutral usage framing:\n"
+            "a configured report destination must be named where it was set, "
+            "not as a '--json' flag the reader never typed:\n"
             f"{missing_parent.stderr}",
         )
 
@@ -609,10 +612,12 @@ def s_config_diagnostics(context: ScenarioContext) -> str:
         expect_exit(missing_junit_parent, 4)
         expect(
             missing_junit_parent.stderr.startswith(
-                "cli: '--junit-xml' destination parent directory does not "
+                "config: " + os.fspath(missing_junit_parent_config)
+                + ": [report] junit-xml destination parent directory does not "
                 "exist:"
             ),
-            "configured JUnit destination lost source-neutral usage framing:\n"
+            "a configured JUnit destination must be named where it was set, "
+            "not as a '--junit-xml' flag the reader never typed:\n"
             f"{missing_junit_parent.stderr}",
         )
 

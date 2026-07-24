@@ -607,23 +607,41 @@ def test_collect_projection_excludes_run_and_report_only_keys() raises:
     assert_false(Bool(validate_resolved_config(resolved)))
 
 
-def test_run_cross_value_validation_is_source_neutral() raises:
+def test_run_cross_value_validation_names_each_value_where_it_was_set() raises:
+    """The remedy must be one the reader can act on.
+
+    The validator itself stays source-neutral — it reads resolved values, not
+    argv — but the diagnostic it returns is not: telling someone to "drop
+    '--json -'" is unactionable when the value lives in their project file,
+    and telling them to edit `[report] json` is wrong when they typed the flag.
+    """
     var file = FileConfig.empty()
     file.json_dest = "-"
     file.saw_json = True
-    var resolved = resolve_config(
+    var from_file = resolve_config(
         RunnerConfig.default(),
         file,
         ConfigEnvironment.empty(),
         CliOverlay.default(),
     )
-    var diagnostic = validate_resolved_config(resolved)
-    assert_true(Bool(diagnostic))
-    assert_equal(
-        diagnostic.value(),
-        (
-            "cli: '--json -' streams machine output to stdout, which the"
-            " '--gh-annotations' tail cannot share; drop '--json -' (use"
-            " '--json PATH'), or set '--gh-annotations off' (see mtest --help)"
-        ),
+    var file_diagnostic = validate_resolved_config(from_file)
+    assert_true(Bool(file_diagnostic))
+    assert_true(
+        file_diagnostic.value().startswith("config: mtest.toml: [report] json")
     )
+    assert_true("set [report] json to a path" in file_diagnostic.value())
+    assert_false("drop '--json -'" in file_diagnostic.value())
+
+    var overlay = CliOverlay.default()
+    overlay.json_dest = "-"
+    overlay.saw_json = True
+    var from_cli = resolve_config(
+        RunnerConfig.default(),
+        FileConfig.empty(),
+        ConfigEnvironment.empty(),
+        overlay,
+    )
+    var cli_diagnostic = validate_resolved_config(from_cli)
+    assert_true(Bool(cli_diagnostic))
+    assert_true(cli_diagnostic.value().startswith("cli: '--json -'"))
+    assert_true("use '--json PATH'" in cli_diagnostic.value())

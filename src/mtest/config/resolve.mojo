@@ -212,9 +212,12 @@ struct ResolvedConfig(Copyable, Movable):
 def validate_resolved_config(config: ResolvedConfig) -> Optional[String]:
     """Validate cross-key constraints over command-active resolved values.
 
-    The returned diagnostic already has the stable `cli:` framing used for
-    source-neutral usage failures. Inactive keys are deliberately ignored, so
-    a run-only reporting value in a project file cannot make collect mode fail.
+    The returned diagnostic is fully framed, naming each offending value the
+    way its own layer spells it: `cli:` and flag names for command-line
+    values, `config:` and table/key names for project-file ones, so the
+    remedy it suggests is one the reader can actually apply. Inactive keys are
+    deliberately ignored, so a run-only reporting value in a project file
+    cannot make collect mode fail.
 
     Args:
         config: The layered values and active-key projection to validate.
@@ -228,11 +231,39 @@ def validate_resolved_config(config: ResolvedConfig) -> Optional[String]:
         and config.config.json_dest == "-"
         and config.config.gh_annotations != AnnotationsMode.OFF
     ):
+        # Name each half where its own layer set it: a reader told to "drop
+        # '--json -'" cannot act on that when the value lives in the project
+        # file, and vice versa.
+        var json_from_file = config.provenance.json_dest == (
+            Provenance.MTEST_TOML
+        )
+        var annotations_from_file = config.provenance.gh_annotations == (
+            Provenance.MTEST_TOML
+        )
+        var origin = config.config_file
+        if origin == "":
+            origin = String("mtest.toml")
+        var prefix = String("cli: ")
+        if json_from_file:
+            prefix = "config: " + origin + ": "
+        var json_name = String("'--json -'")
+        if json_from_file:
+            json_name = '[report] json = "-"'
+        var json_fix = String("use '--json PATH'")
+        if json_from_file:
+            json_fix = "set [report] json to a path"
+        var annotations_fix = String("set '--gh-annotations off'")
+        if annotations_from_file:
+            annotations_fix = 'set [report] gh-annotations = "off"'
         return Optional[String](
-            "cli: '--json -' streams machine output to stdout, which the"
-            " '--gh-annotations' tail cannot share; drop '--json -' (use"
-            " '--json PATH'), or set '--gh-annotations off'"
-            " (see mtest --help)"
+            prefix
+            + json_name
+            + " streams machine output to stdout, which the"
+            " '--gh-annotations' tail cannot share; drop it ("
+            + json_fix
+            + "), or "
+            + annotations_fix
+            + " (see mtest --help)"
         )
     return Optional[String](None)
 

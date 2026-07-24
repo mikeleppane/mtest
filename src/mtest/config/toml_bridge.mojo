@@ -143,20 +143,6 @@ def _safe_repr(representation: String) -> String:
     return shortened + "..."
 
 
-def _parse_nonnegative_bounded(value: String) -> Optional[Int]:
-    try:
-        return parse_nonnegative_decimal(value)
-    except:
-        return Optional[Int](None)
-
-
-def _parse_worker_count_bounded(value: String) -> Optional[Int]:
-    try:
-        return parse_worker_count(value)
-    except:
-        return Optional[Int](None)
-
-
 def _source_scan_kind(text: String) -> Int:
     var whitespace_only = True
     for byte in text.as_bytes():
@@ -536,9 +522,9 @@ def _convert_document(
             var value = _get(table, "workers")
             var parsed = Optional[Int](None)
             if value.is_int():
-                parsed = _parse_worker_count_bounded(String(value.int_value))
+                parsed = parse_worker_count(String(value.int_value))
             elif value.is_string() and value.string_value == "auto":
-                parsed = _parse_worker_count_bounded(value.string_value)
+                parsed = parse_worker_count(value.string_value)
             if not parsed:
                 return _invalid(
                     source,
@@ -555,7 +541,7 @@ def _convert_document(
             var value = _get(table, key)
             var parsed = Optional[Int](None)
             if value.is_int():
-                parsed = _parse_nonnegative_bounded(String(value.int_value))
+                parsed = parse_nonnegative_decimal(String(value.int_value))
             if not parsed:
                 return _invalid_nonnegative(
                     source, "[run] key '" + key + "'", _got(value)
@@ -654,7 +640,7 @@ def _convert_document(
             var value = _get(table, "compile-timeout")
             var parsed = Optional[Int](None)
             if value.is_int():
-                parsed = _parse_nonnegative_bounded(String(value.int_value))
+                parsed = parse_nonnegative_decimal(String(value.int_value))
             if not parsed:
                 return _invalid_nonnegative(
                     source, "[build] key 'compile-timeout'", _got(value)
@@ -737,7 +723,7 @@ def _convert_document(
             var value = _get(table, "durations")
             var parsed = Optional[Int](None)
             if value.is_int():
-                parsed = _parse_nonnegative_bounded(String(value.int_value))
+                parsed = parse_nonnegative_decimal(String(value.int_value))
             if not parsed:
                 return _invalid_nonnegative(
                     source, "[report] key 'durations'", _got(value)
@@ -865,7 +851,7 @@ def _convert_document(
                 var value = _get(table, key)
                 var parsed = Optional[Int](None)
                 if value.is_int():
-                    parsed = _parse_nonnegative_bounded(String(value.int_value))
+                    parsed = parse_nonnegative_decimal(String(value.int_value))
                 if not parsed:
                     return _invalid_nonnegative(
                         source, location + " key '" + key + "'", _got(value)

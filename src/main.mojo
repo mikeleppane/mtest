@@ -46,6 +46,7 @@ from mtest.config import (
     ConfigEnvironment,
     FileConfig,
     LastRunState,
+    Provenance,
     ResolvedConfig,
     RunnerConfig,
     StateDelta,
@@ -196,6 +197,32 @@ def _safe_path_label(path: String) -> String:
     return shortened + "..."
 
 
+def _origin_label(
+    resolved: ResolvedConfig, source: Provenance, table: String, key: String
+) -> String:
+    """Name a resolved value the way its own layer spells it.
+
+    A diagnostic that says `cli: '--json'` for a value the project file set
+    names a remedy the reader cannot apply: there is no such flag on their
+    command line. Key off the provenance the resolver already tracked.
+
+    Args:
+        resolved: The layered configuration carrying provenance and the file.
+        source: The winning layer for this key.
+        table: The `mtest.toml` table holding the key.
+        key: The `mtest.toml` spelling of the key.
+
+    Returns:
+        A complete diagnostic prefix ending in the offending value's name.
+    """
+    var origin = resolved.config_file
+    if origin == "":
+        origin = String("mtest.toml")
+    if source == Provenance.MTEST_TOML:
+        return "config: " + origin + ": [" + table + "] " + key
+    return "cli: '--" + key + "'"
+
+
 def _resolved_destination_error(
     resolved: ResolvedConfig,
 ) -> Optional[String]:
@@ -207,18 +234,26 @@ def _resolved_destination_error(
         var parent = String(dirname(resolved.config.json_dest))
         if parent != "" and not isdir(parent):
             return Optional[String](
-                "cli: '--json' destination parent directory does not exist: '"
+                _origin_label(
+                    resolved, resolved.provenance.json_dest, "report", "json"
+                )
+                + " destination parent directory does not exist: '"
                 + _safe_path_label(parent)
-                + "'"
+                + "' (see mtest --help)"
             )
     if resolved.active_keys.junit_dest and resolved.config.junit_dest != "":
         var parent = String(dirname(resolved.config.junit_dest))
         if parent != "" and not isdir(parent):
             return Optional[String](
-                "cli: '--junit-xml' destination parent directory does not"
-                " exist: '"
+                _origin_label(
+                    resolved,
+                    resolved.provenance.junit_dest,
+                    "report",
+                    "junit-xml",
+                )
+                + " destination parent directory does not exist: '"
                 + _safe_path_label(parent)
-                + "'"
+                + "' (see mtest --help)"
             )
     return Optional[String](None)
 
@@ -575,6 +610,11 @@ def main():
     if validation:
         _eprintln(validation.value())
         exit(EXIT_USAGE_ERROR)
+    # Deliberately NOT before the config-show branch. §27.1 fixes that
+    # command's exit domain at {0, 3, 4} with 4 reserved for argv and
+    # selected-config failures, and states it resolves only; refusing an
+    # unusable report destination there would add an unsanctioned exit cause
+    # and make a resolution-only command probe the filesystem.
     if result.is_config_show():
         var state_present = exists(_state_path(root))
         print(
@@ -588,6 +628,7 @@ def main():
     if destination_error:
         _eprintln(destination_error.value())
         exit(EXIT_USAGE_ERROR)
+
     var config = resolved.config.copy()
     var state_enabled = resolved.active_keys.state and resolved.state
     var previous_state = LastRunState.empty()
