@@ -110,9 +110,10 @@ def compile_native(cc: str) -> None:
         )
 
 
-def check_cli(env: dict[str, str]) -> None:
-    """Source-build and smoke-test the real CLI with ASan instrumentation."""
-    binary = OUT / "mtest"
+def check_production_exec(env: dict[str, str]) -> None:
+    """Source-build and run the production exec boundary under ASan."""
+    source = ROOT / "tests" / "dogfood" / "exec_probe.mojo"
+    binary = OUT / "exec_probe"
     compiled = run(
         [
             "mojo",
@@ -122,22 +123,36 @@ def check_cli(env: dict[str, str]) -> None:
             "-g",
             "-I",
             "src",
-            "src/main.mojo",
+            "-I",
+            "tests/support",
+            str(source.relative_to(ROOT)),
             "-o",
             str(binary),
             "-Xlinker",
             str(NATIVE_PRODUCTION_OBJECT),
         ]
     )
-    require(compiled.returncode == 0, f"ASan CLI build failed:\n{compiled.stdout}")
+    require(
+        compiled.returncode == 0,
+        f"ASan production exec build failed:\n{compiled.stdout}",
+    )
     symbols = run([os.environ.get("NM", "nm"), "-u", str(binary)])
-    require(symbols.returncode == 0, f"nm failed for ASan CLI:\n{symbols.stdout}")
-    require("__asan_" in symbols.stdout, "ASan CLI is not instrumented")
-    executed = run([str(binary), "--help"], env=env)
-    (OUT / "mtest-help.log").write_text(executed.stdout)
-    require(executed.returncode == 0, f"ASan CLI smoke exited {executed.returncode}")
-    require("usage: mtest" in executed.stdout, "ASan CLI smoke missed help output")
-    print("asan-cli: --help: passed")
+    require(
+        symbols.returncode == 0,
+        f"nm failed for ASan production exec:\n{symbols.stdout}",
+    )
+    require("__asan_" in symbols.stdout, "ASan production exec is not instrumented")
+    executed = run([str(binary)], env=env)
+    (OUT / "production-exec.log").write_text(executed.stdout)
+    require(
+        executed.returncode == 0,
+        f"ASan production exec smoke exited {executed.returncode}",
+    )
+    require(
+        "1 tests run: 1 passed" in executed.stdout,
+        "ASan production exec smoke missed completion sentinel",
+    )
+    print("asan-production-exec: 1/1 passed")
 
 
 def check_controls(env: dict[str, str]) -> None:
@@ -234,12 +249,12 @@ def main() -> int:
     env["ASAN_OPTIONS"] = ASAN_OPTIONS
     env.pop("LSAN_OPTIONS", None)
     check_controls(env)
-    check_cli(env)
+    check_production_exec(env)
     for source in TESTS:
         compile_and_run_test(source, env)
     (OUT / "summary.log").write_text(
         "ASan/LSan controls: OOB, UAF, leak detected\n"
-        "ASan CLI smoke: passed\n"
+        "ASan production exec smoke: passed\n"
         f"Source-built exec suites: {len(TESTS)}/{len(TESTS)} passed\n"
     )
     print(f"asan-check: OK -- {len(TESTS)} source-built exec suites")
