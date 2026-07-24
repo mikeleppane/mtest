@@ -585,7 +585,10 @@ test	e2e/suite/test_failing.mojo::test_second_fails
 ```
 
 `--lf` (`--last-failed`) narrows the next run to what that state remembers, so
-the edit-run loop costs one test instead of the suite:
+you read one failure instead of scrolling past the whole suite. It narrows what
+*executes*, not what is built: the filter applies after each file has been
+compiled and probed for its test names, so the compile cost of the selection is
+unchanged. `--lf` also runs on a single worker, ignoring `-n`:
 
 ```console
 $ pixi run bash -c 'build/mtest --lf e2e/matrix e2e/suite/test_failing.mojo'

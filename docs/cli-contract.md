@@ -89,7 +89,7 @@ single **invocation root**. In v1 the root is the **current working directory**.
 | `--precompile SRC[:OUT]` | ✓ | ✓ | — |
 | `--mojo PATH` | ✓ | ✓ | — |
 | `-x`, `--maxfail N` | ✓ | — | — |
-| `-n, --workers N\|auto` | ✓ | ✓ | — |
+| `-n, --workers N\|auto` | ✓ | accepted, inert | — |
 | `--shard M/N` | ✓ | ✓ | — |
 | `--lf`, `--last-failed`, `--ff`, `--failed-first` | ✓ | — | — |
 | `--serial GLOB` | ✓ | — | — |
@@ -111,6 +111,14 @@ presence under either `collect` spelling. `--timeout` is the one exception:
 unlike the other run-only flags above, it is applicable in `collect` mode too,
 because it also bounds each file's `--skip-all` collection probe (§5, §6) — a
 probe is a real process spawn with the same hang risk as a run.
+
+`-n`/`--workers` is marked **accepted, inert** under `collect` because that is
+what this build does: the flag parses and is not refused, but collection probes
+files one at a time, so the value changes nothing. It is recorded rather than
+turned into a refusal because refusing a flag that earlier builds accepted
+would break invocations that pass a uniform flag set to both subcommands.
+Parallel collection is not reserved — it is simply not implemented yet, and
+whichever way it is resolved, this row moves with it.
 
 `config show` accepts the full `run` grammar, including selection and
 per-invocation flags. It resolves the same default, project-file, environment,
@@ -987,6 +995,13 @@ the built binary. Environment-dependent values appear as captured: the absolute
 invocation root, the wall-clock timings, and the worker count `workers = "auto"`
 resolved to on the capturing machine.
 
+They do not all share one setup. The configuration example, `config show`, and
+the invalid-configuration refusal were captured with the `mtest.toml` below in
+place; the `--lf`, soft-filter, and `doctor` transcripts were captured without
+it, which is why they carry no `slowest N files:` block and why `doctor` reports
+`config: none` in the second block. Each transcript states its own command, and
+none is a continuation of the one before it.
+
 `mtest.toml` at the invocation root:
 
 ```toml
@@ -1466,6 +1481,15 @@ independently to the parallel and serial bands, so serial membership never
 changes. Gate records are live state but gates themselves remain untouched.
 With `-k` or node-id operands, the truthful one-worker selection path uses one
 post-gate band; `-n 2` still reports one worker and `--serial` is a no-op there.
+
+`--lf` takes that same selection path, because its filter is applied at the
+post-gate collection barrier, so it too resolves to one worker whatever `-n` or
+`[run] workers` asked for, and `--serial` is a no-op under it. The header
+reports the resolved count, so a `--lf` run simply shows no worker field.
+`--ff` is unaffected and keeps the pool it was given. `--lf` also narrows only
+what runs: every discovered file is still built and probed for its names before
+the barrier the filter applies at, so it reduces executed tests and reported
+output, not compilation.
 
 Gates are never filtered or reordered by either mode: they always run first.
 `--lf` and `--ff` together are a usage error. Either mode combined with
