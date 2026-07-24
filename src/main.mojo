@@ -93,6 +93,15 @@ from mtest.session import (
 )
 
 
+comptime _STATE_MAX_BYTES = 1024 * 1024
+"""The accepted `.mtest-cache/lastrun` payload ceiling.
+
+Matches the doctor check's ceiling so the two agree on what a usable state
+file is. State is an accelerator, never a verdict input, so an oversized or
+non-regular file is ignored loudly rather than treated as a failure.
+"""
+
+
 comptime EXIT_USAGE_ERROR = 4
 """The invocation was refused before any run existed: a usage error.
 
@@ -185,11 +194,6 @@ def _safe_path_label(path: String) -> String:
         shortened += String(cp)
         count += 1
     return shortened + "..."
-
-
-def _read_text(path: String) raises -> String:
-    with open(path, "r") as source:
-        return source.read()
 
 
 def _resolved_destination_error(
@@ -339,13 +343,24 @@ def _load_state(root: String) -> StateLoad:
     var state_exists = exists(path)
     if not state_exists:
         return StateLoad(LastRunState.empty(), [])
-    var text: String
+    var opened: BoundedRegularFileRead
     try:
-        text = _read_text(path)
+        opened = read_bounded_regular_file(path, _STATE_MAX_BYTES)
     except:
         return StateLoad(
             LastRunState.empty(),
             ["state: .mtest-cache/lastrun: could not read state file"],
+        )
+    if not opened.is_regular:
+        return StateLoad(
+            LastRunState.empty(),
+            ["state: .mtest-cache/lastrun: not a regular file — ignored"],
+        )
+    var text = opened.text.copy()
+    if text.byte_length() > _STATE_MAX_BYTES:
+        return StateLoad(
+            LastRunState.empty(),
+            ["state: .mtest-cache/lastrun: exceeds the size limit — ignored"],
         )
     var parsed = parse_last_run_state(text, ".mtest-cache/lastrun")
     var warnings = List[String]()
@@ -766,11 +781,19 @@ def main():
     # seen and the resolver re-ranks — and restores the exec runtime. Covers
     # the success, interrupt, finalize-failure, and spool-failure paths alike.
     var state_text = String("")
+    var state_drops = List[String]()
     if state_enabled and config.shard_n == 0:
         var merged = merge_last_run_state(
             previous_state, session_result.state_delta
         )
-        state_text = encode_last_run_state(merged).text
+        var encoded = encode_last_run_state(merged)
+        state_text = encoded.text
+        # A record the codec refuses to write (a control-bearing identifier,
+        # for instance) is a failure silently missing from the next --lf.
+        # Reporters are closed by write time, so these go to stderr beside the
+        # persistence diagnostic rather than through the event stream.
+        for diagnostic in encoded.diagnostics:
+            state_drops.append(diagnostic.render())
 
     var final_code = resources.close_into(code, rank_delivery=True)
     if (
@@ -778,6 +801,8 @@ def main():
         and config.shard_n == 0
         and (final_code == 0 or final_code == 1)
     ):
+        for drop in state_drops:
+            _eprintln(drop)
         var state_error = _persist_state(root, state_text)
         if state_error:
             _eprintln(state_error.value())

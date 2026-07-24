@@ -1398,6 +1398,16 @@ individual failing tests. A malformed header rejects the old contents and a
 malformed record is dropped independently; both produce contained, nonfatal
 `state-malformed-line` warnings after `session_started`.
 
+The state file is read through the same guarded bounded reader the selected
+configuration uses: opened nonblocking and close-on-exec, then checked to be a
+regular file before any payload is consumed, so a FIFO, device, or directory at
+the state path can never block the run, and a payload above the 1 MiB ceiling is
+refused rather than buffered. An unusable state file — unreadable, not a regular
+file, or oversized — is ignored, the session proceeds with no previous records,
+and the fact is reported through the same contained `state-malformed-line`
+channel. State is an accelerator, never a verdict input: no state condition is
+an exit cause.
+
 Persistence happens only after reporter finalization and resource close have
 established the final exit code, and only for final code 0 or 1. Codes 2, 3, 4,
 and 5 leave prior bytes untouched, as do collect, `state = false`, and sharded

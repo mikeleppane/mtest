@@ -1108,6 +1108,35 @@ def s_config_state(context: ScenarioContext) -> str:
                 _read_state() == close_sentinel,
                 "terminal delivery failure promoted state before final code 3",
             )
+
+        # An unusable state path must never block the run. Before the guarded
+        # bounded read was wired into the run path, a FIFO here blocked the
+        # process forever: the read happens before the exec runtime exists, so
+        # no --timeout and no interrupt handler covered it.
+        STATE_PATH.unlink(missing_ok=True)
+        os.mkfifo(STATE_PATH)
+        try:
+            fifo = runner.run_mtest(
+                ["tests/test_other.mojo"], timeout=DEFAULT_TIMEOUT
+            )
+            expect_exit(fifo, 0)
+            expect(
+                "not a regular file" in fifo.combined,
+                f"a FIFO state path was not reported loudly:\n{fifo.combined}",
+            )
+        finally:
+            STATE_PATH.unlink(missing_ok=True)
+
+        _write_state(STATE_HEADER + "x" * (1024 * 1024 + 1) + "\n")
+        oversized = runner.run_mtest(
+            ["tests/test_other.mojo"], timeout=DEFAULT_TIMEOUT
+        )
+        expect_exit(oversized, 0)
+        expect(
+            "exceeds the size limit" in oversized.combined,
+            f"an oversized state file was not refused loudly:\n"
+            f"{oversized.combined}",
+        )
     finally:
         _clean_project_runtime()
     return "live delta + 0/1 writes; 2/3/4/5/collect/shard disabled; atomic"
