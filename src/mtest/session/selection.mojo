@@ -827,6 +827,7 @@ def _run_selection[
                         disc.run_files,
                         collected_names,
                         resolved.last_run_state,
+                        disc.gate_files,
                     )
                     for identifier in soft.stale_ids:
                         reporter.handle(

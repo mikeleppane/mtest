@@ -136,6 +136,7 @@ def resolve_last_failed(
     files: List[String],
     collected: List[CollectedNames],
     state: LastRunState,
+    gates: List[String] = [],
 ) -> LastFailedSelection:
     """Intersect remembered records with discovered files and collected names.
 
@@ -143,10 +144,17 @@ def resolve_last_failed(
     raising usage errors. Surviving files follow discovery order and surviving
     names follow collection order.
 
+    A record naming a gate file is live but unselectable: gates always run and
+    are never filtered or reordered, so such a record neither narrows the
+    selection nor counts as stale. Reporting it stale would claim a file that
+    just ran no longer exists.
+
     Args:
         files: The ordinary discovered run files. Not mutated.
         collected: The per-file collected names. Not mutated.
         state: The parsed persisted records. Not mutated.
+        gates: The discovered gate files, which discovery keeps out of `files`.
+            Not mutated.
 
     Returns:
         A newly allocated soft-filter result and its nonfatal drops.
@@ -154,10 +162,14 @@ def resolve_last_failed(
     var stale = List[String]()
     for record in state.records:
         if record.kind == LastRunRecordKind.FILE:
+            if _has_file(gates, record.identifier):
+                continue
             if not _has_file(files, record.identifier):
                 stale.append(_safe_identifier(record.identifier))
             continue
         var split = split_node_token(record.identifier)
+        if split.sep_count == 1 and _has_file(gates, split.file_part):
+            continue
         if split.sep_count != 1 or not _has_file(files, split.file_part):
             stale.append(_safe_identifier(record.identifier))
             continue

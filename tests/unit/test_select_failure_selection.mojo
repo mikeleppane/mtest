@@ -86,6 +86,40 @@ def test_empty_and_all_stale_state_fall_back() raises:
     assert_equal(len(stale.stale_ids), 1)
 
 
+def test_gate_records_are_live_not_stale() raises:
+    """A record naming a gate file must never be reported as gone.
+
+    Discovery keeps gate files out of the ordinary run set, so a gate record
+    looked exactly like a deleted file: a failing gate wrote the record, and
+    the next --lf run announced that the gate no longer existed on the line
+    after the gate itself passed.
+    """
+    var files: List[String] = ["tests/a.mojo"]
+    var gates: List[String] = ["tests/test_smoke.mojo"]
+    var names = [_collected("tests/a.mojo", ["test_a"])]
+    var by_file = resolve_last_failed(
+        files, names, LastRunState([_file("tests/test_smoke.mojo")]), gates
+    )
+    assert_equal(len(by_file.stale_ids), 0)
+    assert_false(by_file.matched)
+
+    var by_test = resolve_last_failed(
+        files,
+        names,
+        LastRunState([_test("tests/test_smoke.mojo", "test_smoke")]),
+        gates,
+    )
+    assert_equal(len(by_test.stale_ids), 0)
+    assert_false(by_test.matched)
+
+    # A genuinely absent file is still stale when gates are present.
+    var gone = resolve_last_failed(
+        files, names, LastRunState([_file("tests/gone.mojo")]), gates
+    )
+    assert_equal(len(gone.stale_ids), 1)
+    assert_equal(gone.stale_ids[0], "tests/gone.mojo")
+
+
 def test_live_test_outside_ordinary_selection_is_not_stale() raises:
     var files: List[String] = ["tests/a.mojo"]
     var names = [_selected("tests/a.mojo", ["test_a", "test_b"], ["test_b"])]
