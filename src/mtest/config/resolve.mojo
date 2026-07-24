@@ -270,6 +270,7 @@ def resolve_config(
 
     if file.saw_paths:
         config.paths = file.paths.copy()
+        config.paths_supplied = True
         sources.paths = Provenance.MTEST_TOML
     if file.saw_excludes:
         config.excludes = file.excludes.copy()
@@ -338,6 +339,7 @@ def resolve_config(
 
     if overlay.saw_paths:
         config.paths = overlay.paths.copy()
+        config.paths_supplied = True
         sources.paths = Provenance.CLI
     if overlay.saw_excludes:
         config.excludes = overlay.excludes.copy()

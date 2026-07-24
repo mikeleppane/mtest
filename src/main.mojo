@@ -631,7 +631,10 @@ def main():
     if config.collect:
         var collected = CollectResult(List[String](), List[String](), 0)
         try:
-            collected = run_collect(resources.runtime, config, root)
+            # The resolved config, not the flattened one: the compatibility
+            # overload carries no override tables, so a configured per-file
+            # compile-timeout would be dropped and a probe could hang past it.
+            collected = run_collect(resources.runtime, resolved, root)
         except e:
             _eprintln(String(e))
             exit(resources.close_into(EXIT_USAGE_ERROR, rank_delivery=False))

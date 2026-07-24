@@ -318,6 +318,22 @@ def s_config_resolution(context: ScenarioContext) -> str:
                 junit_path.exists() and json_path.exists(),
                 "the all-keys config did not reach both report destinations",
             )
+
+            # An explicitly empty list replaces the lower value like every
+            # other list key. Discovery once treated it as "no paths given"
+            # and silently reopened the default tree, so a project that meant
+            # to select nothing ran its whole suite.
+            empty_paths = tmp / "empty-paths.toml"
+            empty_paths.write_text(
+                "[run]\npaths = []\nstate = false\n", encoding="utf-8"
+            )
+            emptied = runner.run_mtest(["--config", os.fspath(empty_paths)])
+            expect_exit(emptied, 5)
+            expect(
+                "selected: 0 files" in emptied.stdout,
+                f"configured empty paths still selected files:\n"
+                f"{emptied.stdout}",
+            )
     finally:
         _clean_project_runtime()
     return "root/inside/outside/disabled identity + precedence + all keys"
@@ -1623,6 +1639,38 @@ def s_config_overrides(context: ScenarioContext) -> str:
         expect(
             "TIMEOUT" in timed.stdout and "1s" in timed.stdout,
             f"override timeout did not reach supervision:\n{timed.stdout}",
+        )
+
+        # collect must apply overrides too. main once passed the flattened
+        # config here, selecting the compatibility overload that carries no
+        # override tables, so the probe was bounded by the global deadline
+        # only — invisible to a test that calls the resolved overload itself.
+        # The hang must be in the fixture's main(), where --skip-all cannot
+        # skip it; a body-level hang never reaches the probe at all.
+        probe_config = tmp / "collect-timeout.toml"
+        probe_config.write_text(
+            "[run]\n"
+            'paths = ["e2e/collect/test_probe_hang.mojo"]\n'
+            "timeout = 20\n"
+            "state = false\n"
+            "[[override]]\n"
+            'files = "e2e/collect/test_probe_hang.mojo"\n'
+            "timeout = 1\n",
+            encoding="utf-8",
+        )
+        collected = context.runner.run_mtest(
+            ["collect", "--config", os.fspath(probe_config)], timeout=60.0
+        )
+        expect_exit(collected, 1)
+        expect(
+            "timed out" in collected.stderr,
+            f"override timeout did not reach the collect probe:\n"
+            f"{collected.stderr}",
+        )
+        expect(
+            collected.wall < 15.0,
+            "collect probe ran to the global deadline, so the override was "
+            f"dropped: {collected.wall:.2f}s",
         )
 
         build_log = _log_path("mtest_config_serial_build_")

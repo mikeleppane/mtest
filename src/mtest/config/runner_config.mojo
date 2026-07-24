@@ -24,7 +24,16 @@ struct RunnerConfig(Copyable, Movable):
     """
 
     var paths: List[String]
-    """Positional path operands; empty means "use the default root"."""
+    """The selected path operands; see `paths_supplied` for an empty list."""
+
+    var paths_supplied: Bool
+    """Whether any layer actually supplied `paths`, empty list included.
+
+    Discovery falls back to `tests/` (else `.`) only when NO layer supplied a
+    path list. A layer that supplied an explicitly empty list replaces the
+    lower value like every other list key, so it selects nothing rather than
+    silently reopening the default tree.
+    """
 
     var excludes: List[String]
     """Repeatable `--exclude` glob patterns."""
@@ -166,6 +175,7 @@ struct RunnerConfig(Copyable, Movable):
         """
         return RunnerConfig(
             paths=[],
+            paths_supplied=False,
             excludes=[],
             serial_globs=[],
             gates=[],
