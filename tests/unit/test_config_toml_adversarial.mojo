@@ -49,14 +49,14 @@ def test_unrecognized_characters_raise_positioned_errors() raises:
 
 def test_table_updates_hit_the_preparse_complexity_ceiling() raises:
     var source = String("")
-    for index in range(65):
+    for index in range(513):
         source += "key" + String(index) + " = 0\n"
     var result = parse_toml(source, "many-assignments.toml")
     assert_false(result.is_ok)
     assert_true("table-update limit" in result.failure.render())
 
     source = ""
-    for index in range(65):
+    for index in range(513):
         source += "[table" + String(index) + "]\n"
     result = parse_toml(source, "many-table-headers.toml")
     assert_false(result.is_ok)

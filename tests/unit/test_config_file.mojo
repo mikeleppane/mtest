@@ -46,6 +46,84 @@ def _failure(
     return result.failure.copy()
 
 
+def test_key_value_pair_must_end_at_its_line() raises:
+    """TOML 1.0 terminates a pair at the line end; the parser must too.
+
+    Without it `timeout = 1 state = false` was accepted as two settings, so a
+    missing newline silently turned a typo into a second configured value.
+    """
+    _ = _failure("[run]\ntimeout = 1 state = false\n")
+    _ = _failure("[run]\nretries = 0 maxfail = 2\n")
+
+    var ok = parse_toml("[run]\ntimeout = 1\nstate = false\n", "fine.toml")
+    assert_true(ok.is_ok)
+    assert_true(ok.config.saw_timeout)
+    assert_true(ok.config.saw_state)
+
+    var trailing = parse_toml("[run]\ntimeout = 1  # note\n", "fine.toml")
+    assert_true(trailing.is_ok)
+
+
+def test_override_serial_false_is_refused() raises:
+    """Serial membership is a union, so `false` can never exempt a file."""
+    var failure = _failure(
+        '[[override]]\nfiles = ["a"]\ntimeout = 1\nserial = false\n'
+    )
+    assert_true("serial" in failure.render())
+
+    var ok = parse_toml(
+        '[[override]]\nfiles = ["a"]\nserial = true\n', "fine.toml"
+    )
+    assert_true(ok.is_ok)
+
+
+def test_documented_schema_fits_the_parser_budgets() raises:
+    """No configuration the schema describes may trip a work budget.
+
+    The table-update budget counted every top-level header AND every
+    depth-zero assignment against a ceiling of 64, so the documented key set
+    plus eight `[[override]]` tables — each carrying the five keys §25 shows —
+    was refused outright at 70 updates. Seven tables passed and the eighth did
+    not, which is an ordinary project size, not an abusive document.
+
+    Deliberately cheap: it asserts the boundary that actually regressed rather
+    than rebuilding a document large enough to approach the node ceiling, for
+    which the vendored parser is superlinear.
+    """
+    var text = String(
+        "[run]\n"
+        'paths = ["tests"]\n'
+        'exclude = ["build/*"]\n'
+        'gates = ["tests/smoke.mojo"]\n'
+        'serial = ["tests/gpu_*"]\n'
+        "workers = 1\n"
+        "timeout = 300\n"
+        "retries = 0\n"
+        "maxfail = 0\n"
+        "state = true\n"
+        "\n[build]\n"
+        'mojo = "mojo"\n'
+        'include = ["vendor"]\n'
+        'build-args = ["-DDEBUG"]\n'
+        'precompile = ["src/a.mojo"]\n'
+        "compile-timeout = 600\n"
+        "\n[report]\n"
+        'color = "auto"\n'
+        'show-output = "failures"\n'
+        'verbosity = "normal"\n'
+        "durations = 0\n"
+        'gh-annotations = "auto"\n'
+    )
+    for index in range(8):
+        text += '\n[[override]]\nfiles = ["g' + String(index) + '"]\n'
+        text += "timeout = 60\ncompile-timeout = 900\nretries = 1\n"
+        text += "serial = true\n"
+
+    var result = parse_toml(text, "documented.toml")
+    assert_true(result.is_ok, result.failure.render())
+    assert_equal(len(result.config.overrides), 8)
+
+
 def test_empty_document_has_no_present_values() raises:
     var result = parse_toml("", "empty.toml")
     assert_true(result.is_ok)
@@ -495,9 +573,7 @@ def test_override_shapes_fail_closed() raises:
         ),
         InvalidCase(
             text='[[override]]\nfiles = "*"\nserial = false\n',
-            expected=(
-                "must set timeout, compile-timeout, retries, or serial = true"
-            ),
+            expected="[[override]] #1 key 'serial': expected true; got false",
         ),
         InvalidCase(
             text='[[override]]\nfiles = "*"\ntimeout = -1\n',

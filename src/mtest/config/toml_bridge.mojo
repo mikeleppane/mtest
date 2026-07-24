@@ -22,9 +22,29 @@ from mtest.config.value_validation import (
 comptime TOML_SOURCE_MAX_BYTES = 4 * 1024 * 1024
 """The maximum UTF-8 source size accepted by the native parser."""
 comptime _TOML_MAX_DEPTH = 64
-comptime _TOML_MAX_NODES = 1_024
-comptime _TOML_MAX_TABLE_UPDATES = 64
+"""The maximum structural nesting depth accepted before parsing."""
+comptime _TOML_MAX_NODES = 16_384
+"""The maximum structural nodes (`[`, `{`, `=`, `,`) accepted before parsing.
+
+Sized above anything the documented schema expresses: the earlier 1,024
+refused an ordinary `[run] exclude` list of about a thousand globs, which a
+generated-test project reaches without doing anything unusual. The bound
+still exists because the pre-scan is what keeps pathological input from
+reaching the parser at all, and it stays well under the adversarial corpus so
+that corpus keeps tripping it cheaply.
+"""
+comptime _TOML_MAX_TABLE_UPDATES = 512
+"""The maximum top-level table headers and assignments accepted.
+
+The pre-scan counts every top-level `[` and every depth-zero `=`, so this is
+an assignment budget, not a table-count budget. The earlier 64 refused the
+documented key set plus eight `[[override]]` tables — a configuration §25
+describes as valid. 512 clears roughly eighty such tables, far past any real
+project, while staying small enough that the adversarial corpus can prove the
+ceiling cheaply: the parser costs milliseconds per assignment.
+"""
 comptime _TOML_MAX_SCALAR_BYTES = 1024 * 1024
+"""The maximum bytes accepted in a single scalar token."""
 
 
 @fieldwise_init
@@ -238,12 +258,20 @@ def _source_complexity_error(text: String) -> Optional[String]:
             if byte == UInt8(ord("[")) and depth == 0 and not line_has_content:
                 table_updates += 1
                 if table_updates > _TOML_MAX_TABLE_UPDATES:
-                    return Optional[String]("TOML table-update limit exceeded")
+                    return Optional[String](
+                        "TOML table-update limit exceeded: at most "
+                        + String(_TOML_MAX_TABLE_UPDATES)
+                        + " top-level headers and assignments"
+                    )
             line_has_content = True
             depth += 1
             nodes += 1
             if depth > _TOML_MAX_DEPTH:
-                return Optional[String]("TOML nesting limit exceeded")
+                return Optional[String](
+                    "TOML nesting limit exceeded: at most "
+                    + String(_TOML_MAX_DEPTH)
+                    + " levels"
+                )
         elif byte == UInt8(ord("]")) or byte == UInt8(ord("}")):
             line_has_content = True
             if depth > 0:
@@ -255,7 +283,11 @@ def _source_complexity_error(text: String) -> Optional[String]:
             if depth == 0:
                 table_updates += 1
                 if table_updates > _TOML_MAX_TABLE_UPDATES:
-                    return Optional[String]("TOML table-update limit exceeded")
+                    return Optional[String](
+                        "TOML table-update limit exceeded: at most "
+                        + String(_TOML_MAX_TABLE_UPDATES)
+                        + " top-level headers and assignments"
+                    )
         elif byte == UInt8(ord(",")):
             nodes += 1
             scalar_bytes = 0
@@ -279,7 +311,11 @@ def _source_complexity_error(text: String) -> Optional[String]:
                     + "-byte limit"
                 )
         if nodes > _TOML_MAX_NODES:
-            return Optional[String]("TOML complexity limit exceeded")
+            return Optional[String](
+                "TOML complexity limit exceeded: at most "
+                + String(_TOML_MAX_NODES)
+                + " structural nodes"
+            )
         index += 1
     return Optional[String](None)
 
@@ -852,6 +888,16 @@ def _convert_document(
                         location + " key 'serial'",
                         "boolean",
                         _got(value),
+                    )
+                # Serial membership is a union across every matching table, so
+                # `false` cannot turn off a pin another table sets. Accepting
+                # it would read as a way to exempt a file that it never was.
+                if not value.bool_value:
+                    return _invalid(
+                        source,
+                        location + " key 'serial'",
+                        "true",
+                        "false",
                     )
                 rule.serial = value.bool_value
                 rule.saw_serial = True

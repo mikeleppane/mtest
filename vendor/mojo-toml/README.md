@@ -23,6 +23,8 @@ Local compatibility and hardening changes are limited to:
 - TOML 1.0 escape handling and positioned lexer failures
 - terminated, control-free strings and Unicode escape decoding
 - pre-lexer scalar, structural-node, and depth budgets
+- a required line end after a key/value pair, so `a = 1 b = 2` is refused
+  rather than accepted as two settings
 
 The production build precompiles this source locally. It does not download
 dependencies. `CHECKSUMS.json` pins the authorized commits and upstream bytes,

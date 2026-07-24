@@ -1355,6 +1355,20 @@ retries = 1
 serial = true
 ```
 
+A document must also fit the parser's work budgets, which exist so hostile
+input cannot make parsing unbounded: at most 4 MiB of source, 64 levels of
+structural nesting, 16,384 structural nodes (`[`, `{`, `=`, `,`), 512
+top-level table headers and assignments, and 1 MiB in any single scalar.
+Exceeding one is an exit-4 usage error whose diagnostic names the budget and
+its limit. The budgets are sized above anything this schema can express — an
+exclude list of a thousand globs and dozens of `[[override]]` tables are both
+well inside them — so a configuration that is valid by the rules above is
+never refused for size. They are a ceiling on abuse, not a documented capacity.
+
+Within a table, a key/value pair ends at the end of its line, as TOML 1.0
+requires: `timeout = 1 state = false` on one line is a parse error, not two
+settings.
+
 Resolution is per key: built-in defaults < `mtest.toml` < non-empty
 `MTEST_MOJO` < CLI. `MTEST_MOJO` affects only `mojo`; `NO_COLOR` is consulted
 only after the resolved color is `auto` (§15.1). A supplied list replaces the

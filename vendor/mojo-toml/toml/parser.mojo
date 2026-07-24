@@ -31,8 +31,11 @@ from .lexer import Token, TokenKind, Lexer
 
 comptime _I64_MAX = 9223372036854775807
 comptime _MAX_PARSE_DEPTH = 64
-comptime _MAX_PARSE_NODES = 1_024
-comptime _MAX_PARSE_TABLE_UPDATES = 64
+# Sized to match the caller's pre-scan budgets. The original 1_024 / 64 pair
+# refused documents the consuming schema calls valid: an exclude list of about
+# a thousand globs, or the full key set plus eight override tables.
+comptime _MAX_PARSE_NODES = 16_384
+comptime _MAX_PARSE_TABLE_UPDATES = 512
 
 
 struct KeyValuePair(Movable, Copyable):
@@ -1399,6 +1402,22 @@ struct Parser:
                 else:
                     updated_result = self.set_in_table_path(result, path_copy, parsed_key, parsed_value^)
                 result = updated_result^
+
+                # TOML 1.0 terminates a key/value pair at the line end. Without
+                # this, `a = 1 b = 2` parsed as two pairs and an invalid
+                # document was accepted, so a typo silently became a second
+                # setting instead of a refusal.
+                var after = self.current()
+                if (
+                    after.kind != TokenKind.NEWLINE()
+                    and after.kind != TokenKind.COMMENT()
+                    and after.kind != TokenKind.EOF()
+                ):
+                    raise Error(
+                        self.format_error(
+                            "Expected newline after key/value pair", after.pos
+                        )
+                    )
 
                 self.skip_newlines()
 

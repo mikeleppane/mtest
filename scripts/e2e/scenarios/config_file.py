@@ -37,7 +37,7 @@ STATE_FAILURE = (
 )
 TOML_SOURCE_MAX_BYTES = 4 * 1024 * 1024
 TOML_SCALAR_MAX_BYTES = 1024 * 1024
-TOML_TABLE_UPDATE_MAX = 64
+TOML_TABLE_UPDATE_MAX = 512
 
 
 def _project_runner(context: ScenarioContext) -> E2ERunner:
