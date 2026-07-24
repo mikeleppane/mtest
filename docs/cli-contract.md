@@ -417,10 +417,8 @@ rebuilt.
   **FLAKY** and, being a pass, exits 0 and by default passes CI
   (`--fail-on-flaky` is reserved).
 
-Retries apply to precompile, build, and run steps. In this build the full
-build-and-run retry is wired on the default (non-selection) run path; crash-class
-**run** retries also apply under selection (`-k` or a node id), but build-side
-retries under selection are not yet wired (§24.3).
+Retries apply to precompile, build, and run steps on both ordinary and
+selection (`-k` or node-id) paths.
 
 ---
 
@@ -853,15 +851,18 @@ file's result line carries an informal `SERIAL` marker (§15.1).
 ## 20. Stability tiers
 
 - **FROZEN at v1.0** — subcommands; flag names and semantics; exit codes; the
-  node-id grammar; the JUnit mapping; the annotation shapes; the `--json` event
-  stream schema (§15.4; normatively `docs/json-stream.md`) — its framing,
-  header, event and field names, and token vocabularies, frozen at stream
-  `version` 1 and growing only additively (new fields and kinds; a removal or a
-  meaning-change bumps the header version); the `collect` format; the
-  test-module contract.
+  node-id grammar; `mtest.toml` key names and semantics (§25);
+  `--lf`/`--last-failed` and `--ff`/`--failed-first` semantics (§26); the JUnit
+  mapping; the annotation shapes; the `--json` event stream schema (§15.4;
+  normatively `docs/json-stream.md`) — its framing, header, event and field
+  names, and token vocabularies, frozen at stream `version` 1 and growing only
+  additively (new fields and kinds; a removal or a meaning-change bumps the
+  header version); the `collect` format; the test-module contract.
 - **STABLE-INTENT** — default values (timeouts, `auto` worker sizing) may be
-  tuned in minor versions.
-- **INFORMAL** — console text layout and colors.
+  tuned in minor versions; the self-versioned `.mtest-cache/lastrun` format
+  (§26), whose incompatible changes require a new format version.
+- **INFORMAL** — console text layout and colors; the human-facing
+  `config show` TOML output (§27.1).
 - TestSuite invocation details are an internal seam, never public API.
 
 ---
@@ -878,12 +879,13 @@ same upstream per-test timing gap that blocks per-test attribution elsewhere;
 the file-level `--durations N` is itself served now, §15.1); markers /
 `xfail`; `--asan`; `--shuffle` (file-order randomization to surface order
 dependencies); `--fail-on-flaky`; watch mode; and a **persistent**
-build/collection cache (`--cache-dir`/`--no-cache`). Within one session the runner builds each file
-once and reuses it (`collect` and `run` share the binary), but nothing
-persists across invocations in v1: a trustworthy-verdict tool does not ship
-"fast but possibly stale", and a correct cache key (transitive source closure,
-environment inputs, target triple, schema version, concurrent-writer safety)
-is its own deliverable.
+build/collection cache (`--cache-dir`/`--no-cache`); and a machine-readable
+`config show` format (the served TOML display is informal human output,
+§27.1). Within one session the runner builds each file once and reuses it
+(`collect` and `run` share the binary), but nothing persists across invocations
+in v1: a trustworthy-verdict tool does not ship "fast but possibly stale", and
+a correct cache key (transitive source closure, environment inputs, target
+triple, schema version, concurrent-writer safety) is its own deliverable.
 
 ---
 
@@ -1018,16 +1020,14 @@ code exist today. Section 27 separately covers the reachable `config show` and
   immediate hard kill of every group, leaving no survivor. The exit is 2
   regardless of any failing outcome already accounted.
 - **3** — reachable via a spawn failure (the runner could not spawn `mojo` or
-  a built binary), via protocol drift (a report present but off-grammar,
-  §6) in both `run` and `collect`, and via a runtime `--json`
-  report-destination failure (§9): the destination could not be opened at
-  session start, or a stream write later failed (a dead `--json -` pipe, a full
-  or unwritable file) and the run was fatally aborted.
+  a built binary), via protocol drift (a report present but off-grammar, §6)
+  in both `run` and `collect`, and via runtime `--json` or `--junit-xml`
+  report-destination failures (§9).
 - **4** — reachable under `run` and `collect` for every served cause in §9 —
   including mutually exclusive config controls; a selected config that is
-  missing, unreadable, malformed, or invalid; and a syntactically invalid
-  `--json` destination (an empty value or a nonexistent parent directory), all
-  detected pre-run.
+  missing, unreadable, malformed, or invalid; a syntactically invalid `--json`
+  or `--junit-xml` destination; and the `--json -`/annotations stdout conflict,
+  all detected pre-run.
 
 **`--json` reachability.** `--json PATH|-` is served (§15.4): it is parsed into a
 live event-stream reporter composed beside the console. Its destination is
@@ -1059,10 +1059,10 @@ validation (§9). The stop-commands fencing of echoed child output is active whe
 
 ### 24.3 Selection and parsing deviations in this build
 
-A few surfaces behave more permissively, or cover less ground, today than the
-frozen contract above describes. Each is stated here so shipped behavior can be
-told from target behavior; none changes a flag semantic, exit code, or the
-node-id grammar, and all converge to the contract as the runner matures.
+Two surfaces behave more permissively, or cover less ground, today than the
+frozen contract above describes. They are stated here so shipped behavior can
+be told from target behavior; neither changes a flag semantic, exit code, or
+the node-id grammar, and both converge to the contract as the runner matures.
 
 - **`collect` does not narrow by per-test selection yet.** §4 lists `-k` as
   applicable to `collect`, and §16 says `collect` honors the selection flags.
@@ -1079,21 +1079,15 @@ node-id grammar, and all converge to the contract as the runner matures.
   repeatable flags (`--exclude`, `--gate`, `--build-arg`, `-I`, `--precompile`,
   `--serial`); every other flag is single-valued. The frozen intent is
   at-most-one — e.g. §5 says "at most one `-k` is accepted in v1". This build
-  does not yet reject a repeated single-valued flag (`-k`, `-n`/`--workers`,
-  `--maxfail`, `--timeout`, `--color`, `--show-output`, `--durations`,
-  `--mojo`): it silently
-  uses the **last** occurrence (so `-k a -k b` filters by `b`, not `a or b`).
-  Until the at-most-one check is enforced (a usage error, exit 4), do not rely on
+  does not yet reject a repeated single-valued option (`-k`, `--shard`,
+  `--maxfail`, `--timeout`, `--retries`, `-n`/`--workers`, `--mojo`,
+  `--compile-timeout`, `-s`/`--show-output`, `--durations`, `--color`,
+  `--json`, `--junit-xml`, `--gh-annotations`, `--config`): it silently uses
+  the **last** occurrence (so `-k a -k b` filters by `b`, not `a or b`). Until
+  the at-most-one check is enforced (a usage error, exit 4), do not rely on
   repeating these flags. The mutually-exclusive `-q`/`-v` pair is already
-  rejected as a usage error; the single-valued-flag check follows the same shape.
-- **`--retries` does not rebuild under selection yet.** On the default
-  (non-selection) run path, `--retries` (§13) retries the full step chain — a
-  crash-class **build** or **precompile** kill is rebuilt, and a crash-class
-  **run** is re-run. Under selection (`-k` or a node id), only crash-class
-  **run** retries are wired: a run that dies by signal or a deadline is re-run
-  against the already-built binary, but a build-side crash-class failure is not
-  retried on the selection path. The classification and FLAKY reporting are
-  otherwise identical; only the build-side retry under selection is deferred.
+  rejected as a usage error; the single-valued-flag check follows the same
+  shape.
 
 ---
 
