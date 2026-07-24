@@ -416,8 +416,10 @@ drift from that output:
 mtest — a pytest-like test runner for Mojo
 
 usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]
+       mtest config show [PATHS...] [flags] [-- BUILD-ARGS...]
+       mtest doctor [--config PATH | --no-config] [--color WHEN] [-q | -v]
 
-This build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo, -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v, --color, -k, --maxfail, --durations, --shard, -n/--workers, --serial, --retries, --json, --junit-xml, --gh-annotations, collect/--collect-only, --help, --version
+This build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo, -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v, --color, -k, --maxfail, --durations, --shard, -n/--workers, --serial, --retries, --json, --junit-xml, --gh-annotations, collect/--collect-only, config show, doctor, --config, --no-config, --lf/--last-failed, --ff/--failed-first, --help, --version
 ```
 
 | Flag | Meaning |
@@ -430,6 +432,11 @@ This build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mo
 | `--gate PATH` | (repeatable) files that must pass first; a gate failure aborts the whole session |
 | `--precompile SRC[:OUT]` | (repeatable) `mojo precompile` a package before any test build; its output directory is auto-added to `-I` |
 | `--mojo PATH` | override the `mojo` toolchain resolved from `PATH` (or `MTEST_MOJO`) |
+| `--config PATH`, `--no-config` | select one project config or disable config discovery |
+| `config show [PATHS...] [flags]` | render the fully resolved configuration without running tests |
+| `doctor [flags]` | run ten contained environment checks without starting a test session |
+| `--lf`, `--last-failed` | run only tests recorded as failed in the last completed state |
+| `--ff`, `--failed-first` | run last-failed tests first, then the remaining selection |
 | `-x`, `--exitfirst` | stop scheduling new files after the first failing file |
 | `--maxfail N` | stop scheduling once `N` tests have failed (`0`, the default, means no limit); checked between files, not mid-file |
 | `--timeout SECS` | bound a single file's run (default `300`, `0` disables); exceeding it yields TIMEOUT |
@@ -484,9 +491,11 @@ PASS           e2e/matrix/test_alpha.mojo      0.03s  SERIAL
 The default is `-n 1`: a single worker on the sequential path, byte-for-byte
 the same run and output as before the pool existed.
 
-### Exit codes
+### Run and collect exit codes
 
-Frozen, mirroring pytest:
+These codes are frozen for `run` and `collect`, mirroring pytest. `config show`
+and `doctor` have command-specific exit domains in
+[§27 of the CLI contract](docs/cli-contract.md#27-inspection-subcommands):
 
 | Code | Meaning |
 |------|---------|
@@ -497,9 +506,9 @@ Frozen, mirroring pytest:
 | `4` | CLI usage error, detected before any test runs |
 | `5` | no tests collected (empty walk, `-k` matched nothing, everything excluded) |
 
-When outcomes mix: a usage error aborts with `4` before the run; otherwise
-an interrupt dominates, then an internal error, then any failing outcome,
-then nothing-collected.
+When run/collect outcomes mix: a usage error aborts with `4` before the run;
+otherwise an interrupt dominates, then an internal error, then any failing
+outcome, then nothing-collected.
 
 The full contract, every flag, the node-id grammar, and the outcome
 vocabulary live in [docs/cli-contract.md](docs/cli-contract.md).

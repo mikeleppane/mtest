@@ -68,6 +68,7 @@ UNIT_SUITES = {
     "test_cli_arity0.mojo",
     "test_cli_build_flags.mojo",
     "test_cli_collect.mojo",
+    "test_cli_doctor.mojo",
     "test_cli_grammar.mojo",
     "test_cli_inventory.mojo",
     "test_cli_overlay.mojo",
@@ -200,6 +201,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_cli_arity0.mojo",
     "tests/unit/test_cli_build_flags.mojo",
     "tests/unit/test_cli_collect.mojo",
+    "tests/unit/test_cli_doctor.mojo",
     "tests/unit/test_cli_grammar.mojo",
     "tests/unit/test_cli_inventory.mojo",
     "tests/unit/test_cli_overlay.mojo",
@@ -256,7 +258,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 1174
+CLASSIFIED_TEST_COUNT = 1189
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",
@@ -309,6 +311,7 @@ E2E_HARNESS_PATHS = {
     Path("scripts/e2e/scenarios/config_file.py"),
     Path("scripts/e2e/scenarios/config_show.py"),
     Path("scripts/e2e/scenarios/core.py"),
+    Path("scripts/e2e/scenarios/doctor.py"),
     Path("scripts/e2e/scenarios/json_reporter.py"),
     Path("scripts/e2e/scenarios/junit_reporter.py"),
     Path("scripts/e2e/scenarios/parallel.py"),
@@ -349,6 +352,13 @@ E2E_SCENARIO_NAMES = (
     "failure-reselection",
     "config-overrides",
     "config-show",
+    "doctor-healthy",
+    "doctor-malformed-config",
+    "doctor-missing-config",
+    "doctor-missing-toolchain",
+    "doctor-unwritable-state",
+    "doctor-interrupt",
+    "doctor-config-free",
     "usage-refusals",
     "selection-keyword",
     "selection-node-id",
@@ -747,9 +757,9 @@ def check_e2e_layout() -> None:
             "E2E scenario membership/order mismatch: "
             f"expected={list(E2E_SCENARIO_NAMES)}, actual={list(scenario_names)}"
         )
-    if len(scenario_names) != 78 or len(set(scenario_names)) != len(scenario_names):
+    if len(scenario_names) != 85 or len(set(scenario_names)) != len(scenario_names):
         raise AssertionError(
-            "E2E scenarios must contain 78 unique names in the pinned order"
+            "E2E scenarios must contain 85 unique names in the pinned order"
         )
     referenced = {
         *rows,

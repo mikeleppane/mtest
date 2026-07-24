@@ -1,19 +1,21 @@
 """The `mtest` binary entry point.
 
 `main` is the only place that reads the process argv and environment, talks to
-the terminal, and calls `exit`. It parses argv and resolves project config. A
-`config show` request renders that resolution and exits before state loading or
-run resources. Otherwise main loads last-run state, constructs the exec
-runtime, resolves report destinations, composes reporters into the
-`StandardReportCoordinator` interface the session drives, runs the session,
-closes every resource, conditionally promotes the next state file, and exits
-with the session's resolved code.
+the terminal, and calls `exit`. It parses argv and resolves project config.
+`doctor` runs its contained environment checks before main acquires the
+invocation root or exec runtime. A `config show` request renders its resolution
+and exits before state loading or run resources. Otherwise main loads last-run
+state, constructs the exec runtime, resolves report destinations, composes
+reporters into the `StandardReportCoordinator` interface the session drives,
+runs the session, closes every resource, conditionally promotes the next state
+file, and exits with the session's resolved code.
 
-Four output classes bypass the event seam by design: pre-session diagnostics
+Five output classes bypass the event seam by design: pre-session diagnostics
 go straight to stderr; `config show` writes its resolution-only TOML directly
-to stdout; `--collect-only` writes its frozen node-id listing directly to
-stdout; and a post-close state-write failure goes to stderr after the terminal
-event already sealed the stream.
+to stdout; doctor writes its fixed check lines directly to stdout;
+`--collect-only` writes its frozen node-id listing directly to stdout; and a
+post-close state-write failure goes to stderr after the terminal event already
+sealed the stream.
 
 The parser owns argv syntax; config owns typed conversion, layering, and state
 bytes; the console resolves color from the inputs main supplies; the session
@@ -36,6 +38,7 @@ from mtest.cli import (
     build_flags_string,
     help_text,
     parse_args,
+    run_doctor,
     version_text,
 )
 from mtest.exec import ExecRuntime, stderr_isatty, stdout_isatty
@@ -517,6 +520,13 @@ def main():
     if result.is_version():
         print(version_text(), flush=True)
         exit(0)
+    if result.is_doctor():
+        var diagnosis = run_doctor(result, MTEST_VERSION)
+        var rendered = String("")
+        for line in diagnosis.lines:
+            rendered += line + "\n"
+        print(rendered, end="", flush=True)
+        exit(diagnosis.code)
 
     # Resolve the invocation root, then discover and layer project configuration
     # before taking process-global exec state. An absent file and `--no-config`

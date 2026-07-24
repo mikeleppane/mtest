@@ -3,11 +3,11 @@
 **Status: DRAFT.** This document specifies the v1 command-line interface of
 `mtest`. It is the public API of the tool. Until the v1.0 release it may change;
 at v1.0 the surfaces marked **FROZEN** below are frozen and any later change to
-them requires a major version bump. The exit-code meanings and precedence are
-already frozen — they mirror pytest's. The enumerated exit-4 triggers grow only
-when a newly served surface adds a pre-run usage error. Everything above
-describes the full v1 target; for what the *current build* actually implements
-today, see
+them requires a major version bump. Each subcommand's exit domain and
+precedence are already frozen. The enumerated usage-error triggers grow only
+when a newly served surface adds an argv syntax or applicability error.
+Everything above describes the full v1 target; for what the *current build*
+actually implements today, see
 [§24, Availability status (this build)](#24-availability-status-this-build).
 
 `mtest` is an orchestrator layered on top of Mojo's standard-library
@@ -25,6 +25,7 @@ means `mtest`.
 mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]   # run is the default subcommand
 mtest collect [PATHS...] [flags]                    # list node ids, one per line
 mtest config show [PATHS...] [flags]                # render resolved configuration
+mtest doctor [--config PATH | --no-config] [--color WHEN] [-q | -v]
 mtest version
 mtest --help | mtest help
 ```
@@ -77,30 +78,30 @@ single **invocation root**. In v1 the root is the **current working directory**.
 
 ## 4. Subcommands and flag applicability
 
-| Flag | `run` | `collect` |
-|------|:-----:|:---------:|
-| `PATHS...` | ✓ | ✓ |
-| `--config PATH`, `--no-config` | ✓ | ✓ |
-| `-k STR` | ✓ | ✓ |
-| `--exclude GLOB` | ✓ | ✓ |
-| `-I PATH` | ✓ | ✓ |
-| `--build-arg ARG`, `-- ARGS` | ✓ | ✓ |
-| `--precompile SRC[:OUT]` | ✓ | ✓ |
-| `--mojo PATH` | ✓ | ✓ |
-| `-x`, `--maxfail N` | ✓ | — |
-| `-n, --workers N\|auto` | ✓ | ✓ |
-| `--shard M/N` | ✓ | ✓ |
-| `--lf`, `--last-failed`, `--ff`, `--failed-first` | ✓ | — |
-| `--serial GLOB` | ✓ | — |
-| `--timeout`, `--compile-timeout` | ✓ | ✓ (compile only) |
-| `--retries N` | ✓ | — |
-| `--gate PATH` | ✓ | — |
-| `-s`, `--show-output MODE` | ✓ | — |
-| `--durations N` | ✓ | — |
-| `--junit-xml PATH`, `--gh-annotations` | ✓ | — |
-| `--json PATH\|-` | ✓ | — |
-| `-q`, `-v`, `--color WHEN` | ✓ | ✓ |
-| `--collect-only` | ✓ (→ behaves as `collect`) | n/a |
+| Flag | `run` | `collect` | `doctor` |
+|------|:-----:|:---------:|:--------:|
+| `PATHS...` | ✓ | ✓ | — |
+| `--config PATH`, `--no-config` | ✓ | ✓ | ✓ |
+| `-k STR` | ✓ | ✓ | — |
+| `--exclude GLOB` | ✓ | ✓ | — |
+| `-I PATH` | ✓ | ✓ | — |
+| `--build-arg ARG`, `-- ARGS` | ✓ | ✓ | — |
+| `--precompile SRC[:OUT]` | ✓ | ✓ | — |
+| `--mojo PATH` | ✓ | ✓ | — |
+| `-x`, `--maxfail N` | ✓ | — | — |
+| `-n, --workers N\|auto` | ✓ | ✓ | — |
+| `--shard M/N` | ✓ | ✓ | — |
+| `--lf`, `--last-failed`, `--ff`, `--failed-first` | ✓ | — | — |
+| `--serial GLOB` | ✓ | — | — |
+| `--timeout`, `--compile-timeout` | ✓ | ✓ (compile only) | — |
+| `--retries N` | ✓ | — | — |
+| `--gate PATH` | ✓ | — | — |
+| `-s`, `--show-output MODE` | ✓ | — | — |
+| `--durations N` | ✓ | — | — |
+| `--junit-xml PATH`, `--gh-annotations` | ✓ | — | — |
+| `--json PATH\|-` | ✓ | — | — |
+| `-q`, `-v`, `--color WHEN` | ✓ | ✓ | ✓ |
+| `--collect-only` | ✓ (→ behaves as `collect`) | n/a | — |
 
 `collect` compiles files to enumerate their tests, so it honors the build and
 selection flags; it does not schedule test execution, so run-time flags
@@ -115,6 +116,12 @@ probe is a real process spawn with the same hang risk as a run.
 per-invocation flags. It resolves the same default, project-file, environment,
 and CLI layers as `run`, then renders and exits without discovery, builds,
 execution, reporter setup, or state parsing or writes.
+
+`doctor` accepts only the configuration controls and ordinary human-output
+controls shown in the table. A path operand, passthrough token, or any other
+run, build, selection, state, or reporter flag is an argv applicability error
+(exit 4). Malformed values, unknown flags, `-q` with `-v`, and `--config` with
+`--no-config` retain their ordinary usage refusals.
 
 ---
 
@@ -264,10 +271,13 @@ that is the runner's flag, not a forwarded user argument.
 
 ---
 
-## 9. Exit codes
+## 9. Run and collect exit codes
 
-The meanings and precedence mirror pytest and are **FROZEN**. Exit-4's
-enumerated triggers grow only as served pre-run surfaces grow:
+Exit domains are per subcommand. This table and precedence govern `run` and
+`collect`; §27 defines the narrower domains for `config show` and `doctor`.
+The meanings and precedence within each command domain are **FROZEN**.
+Exit-4's enumerated run/collect triggers grow only as served pre-run surfaces
+grow:
 
 | Code | Meaning |
 |------|---------|
@@ -974,21 +984,24 @@ above — it only reports which of those surfaces are wired up yet.
 `--shard`, `--lf`/`--last-failed`, `--ff`/`--failed-first`,
 `-n`/`--workers`, `--serial`, `--gate`, `-s`/`--show-output`,
 `--durations`, `-q`/`-v`, `--color`,
-`-h`/`--help`, `--version`, and the `run`, `collect`, `config show`, `version`,
-and `help` subcommands (`--collect-only` too, as an alias that behaves as
-`collect`).
+`-h`/`--help`, `--version`, and the `run`, `collect`, `config show`, `doctor`,
+`version`, and `help` subcommands (`--collect-only` too, as an alias that
+behaves as `collect`).
 `--shard` applies under both `run` and `collect`. `--json` (the machine event
 stream, §15.4), `--junit-xml` (the JUnit report, §15.2), and `--gh-annotations`
 (the CI annotation tail, §15.3) are served too — see §24.2 for how they are now
 reached.
 
 Every flag and subcommand in the frozen contract above is now served: nothing is
-refused for being unavailable, so exit 4 covers exactly its frozen §9 causes.
+refused for being unavailable. For `run` and `collect`, exit 4 therefore covers
+exactly the frozen §9 causes. `Config show` and `doctor` use the applicability
+rules and command-specific exit domains in §27.
 
-### 24.2 Exit codes reachable in this build
+### 24.2 Run and collect exit codes reachable in this build
 
-Semantics are unchanged from §9; this states which paths to each code exist
-today.
+Run/collect semantics are unchanged from §9; this states which paths to each
+code exist today. Section 27 separately covers the reachable `config show` and
+`doctor` exits.
 
 - **0** — reachable: every run outcome is PASS or SKIP (exclusions allowed).
 - **1** — reachable for FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT,
@@ -1007,10 +1020,11 @@ today.
   report-destination failure (§9): the destination could not be opened at
   session start, or a stream write later failed (a dead `--json -` pipe, a full
   or unwritable file) and the run was fatally aborted.
-- **4** — reachable for every served cause in §9 — including mutually exclusive
-  config controls; a selected config that is missing, unreadable, malformed, or
-  invalid; and a syntactically invalid `--json` destination (an empty value or a
-  nonexistent parent directory), all detected pre-run.
+- **4** — reachable under `run` and `collect` for every served cause in §9 —
+  including mutually exclusive config controls; a selected config that is
+  missing, unreadable, malformed, or invalid; and a syntactically invalid
+  `--json` destination (an empty value or a nonexistent parent directory), all
+  detected pre-run.
 
 **`--json` reachability.** `--json PATH|-` is served (§15.4): it is parsed into a
 live event-stream reporter composed beside the console. Its destination is
@@ -1224,7 +1238,9 @@ Gates are never filtered or reordered by either mode: they always run first.
 
 ---
 
-## 27. Resolved configuration display
+## 27. Inspection subcommands
+
+### 27.1 Resolved configuration display
 
 `mtest config show` accepts the full `run` grammar and applies the ordinary
 resolution order: built-in defaults, `mtest.toml`, non-empty `MTEST_MOJO`, then
@@ -1255,3 +1271,79 @@ does not initialize the native TOML parser.
 
 The `config show` text is informal human output. A machine-readable
 configuration-display format is reserved.
+
+Its exit domain is `{0, 3, 4}`: 0 after successful rendering, 3 when
+invocation-root acquisition itself fails, and 4 for argv or selected-config
+usage failures.
+
+### 27.2 Environment doctor
+
+`mtest doctor` performs a read-only diagnosis and renders exactly one
+human-facing `PASS`, `WARN`, or `FAIL` physical line for each check, in this
+fixed order:
+
+1. `version` — the mtest version/build identity.
+2. `platform` — the Linux/macOS support posture in §22. Linux x86_64 is a
+   `PASS`; macOS arm64 is a `WARN` while hosted runtime evidence remains
+   pending.
+3. `root` — guarded current-working-directory acquisition.
+4. `exec` — the guarded exec-runtime acquisition performed before check 1,
+   plus its eventual restoration status.
+5. `toolchain` — the resolved Mojo path and supplying layer, checked by a
+   bounded `mojo --version` probe under the ordinary supervision substrate.
+   A pass requires the exact pinned identity
+   `Mojo 1.0.0b2 (2cf4d08a)`.
+6. `config` — the selected file, `none`, or its normalized parse/read failure.
+   `--no-config` is root-independent. An absolute explicit config remains
+   checkable without a root; discovery and relative explicit paths require the
+   root.
+7. `config-semantics` — resolved-layer validation using the same diagnostic a
+   run would issue.
+8. `state` — `.mtest-cache/` usability and an absent or parseable v1 `lastrun`,
+   including removal of any directory doctor created.
+9. `temp` — invocation-root and system-temp writability.
+10. `report-destinations` — usability of configured JUnit/JSON parent
+    directories without opening, creating, or truncating the configured files.
+    No configured destination is root-independent, as is an absolute parent;
+    relative parents require the root.
+
+Every check body is guarded independently. An unexpected error becomes that
+check's contained `FAIL` line, with control characters escaped; later checks
+still run. Dependent checks say which earlier capability is unavailable.
+Doctor closes an acquired exec runtime on every path. It never discovers,
+builds, or runs tests; opens reporters; reads or writes session results; writes
+last-run state; or overwrites a predictable path. A probe or created state
+directory that cannot be removed makes its check `FAIL`; the diagnostic names
+the affected path. A unique probe or doctor-created state directory may remain
+only when the filesystem refuses cleanup.
+
+The exec runtime is acquired before the first check, so its interrupt handlers
+cover ordinary check execution. Doctor samples the interrupt latch immediately
+before runtime restoration begins and immediately after restoration returns,
+then renders the complete ten-line block with one stdout write. Runtime close
+restores signal dispositions in sequence, so the unavoidable handoff window
+begins as soon as a disposition is restored, before close necessarily returns,
+and continues through process exit. A signal arriving in that window may
+follow the restored disposition rather than being guaranteed a doctor exit
+code; the post-close sample observes only signals that reached the latch.
+
+For exits resolved by doctor within the guarded lifecycle, the exit domain is
+exactly `{0, 1, 2, 4}`. Termination under a restored disposition during the
+disclosed handoff is outside doctor's resolved exit domain:
+
+- **0** — no check emitted `FAIL`; `WARN` is allowed.
+- **1** — at least one check emitted `FAIL`, including a missing or unreadable
+  explicit config, malformed or invalid selected config, unavailable
+  toolchain, unusable state/temp/report parent, or runtime-close failure.
+- **2** — SIGINT or SIGTERM latched during guarded doctor execution or either
+  close-adjacent sample; cleanup still runs.
+- **4** — argv syntax or doctor-flag applicability error only.
+
+Selected-config failures deliberately differ from `run` and `config show`:
+doctor reports them as check failures, continues later checks, and exits 1;
+the other commands refuse them as usage errors and exit 4.
+
+`--color`, `-q`, and `-v` are accepted for command-line consistency, but the
+fixed inventory is completeness-critical: these controls never suppress,
+duplicate, or add check lines. Doctor output is uncolored; verbosity does not
+alter its one-line details.

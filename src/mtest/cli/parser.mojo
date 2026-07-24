@@ -1,11 +1,8 @@
 """The hand-rolled full-contract argument parser.
 
 `parse_args` turns an argument vector into a `ParseResult` — a configured run,
-a resolved-config display request, or a help/version directive — or raises a
-`cli:`-prefixed usage error. It parses the whole v1 grammar: flags this build
-does not yet serve are still recognized, then refused with a message naming the
-milestone that brings them, so later work only flips an availability bit rather
-than teaching the parser a new token.
+a resolved-config display request, a doctor request, or a help/version
+directive — or raises a `cli:`-prefixed usage error.
 
 Every raise names the offending token, states the expected form, and points at
 `mtest --help`. This layer never prints and never exits; `main` prints help and
@@ -43,7 +40,7 @@ comptime SUPPORTED_SUMMARY = (
     " -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v,"
     " --color, -k, --maxfail, --durations, --shard, -n/--workers, --serial,"
     " --retries, --json, --junit-xml, --gh-annotations, collect/--collect-only,"
-    " config show, --config, --no-config, --lf/--last-failed,"
+    " config show, doctor, --config, --no-config, --lf/--last-failed,"
     " --ff/--failed-first, --help, --version"
 )
 """A stable one-line list of what this build serves, quoted in refusals."""
@@ -59,7 +56,11 @@ def help_text() -> String:
     return String(
         "mtest — a pytest-like test runner for Mojo\n\n",
         "usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]\n",
-        "       mtest config show [PATHS...] [flags] [-- BUILD-ARGS...]\n\n",
+        "       mtest config show [PATHS...] [flags] [-- BUILD-ARGS...]\n",
+        (
+            "       mtest doctor [--config PATH | --no-config]"
+            " [--color WHEN] [-q | -v]\n\n"
+        ),
         "This build serves: ",
         SUPPORTED_SUMMARY,
         "\n",
@@ -330,7 +331,7 @@ def _lookup(name: String) -> Optional[FlagSpec]:
 
 
 def parse_args(argv: List[String]) raises -> ParseResult:
-    """Parse `argv` into a run, config-display, help, or version result.
+    """Parse `argv` into a run, config-display, doctor, help, or version result.
 
     A leading `help` or `version` token returns that directive immediately. A
     leading `run` or `collect` token is consumed as a subcommand, with `collect`
@@ -357,6 +358,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var start = 0
     var collect = False
     var config_show = False
+    var doctor = False
     if len(argv) > 0:
         var head = argv[0]
         if head == "version":
@@ -369,6 +371,9 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             collect = True
             start = 1
         if head == "run":
+            start = 1
+        if head == "doctor":
+            doctor = True
             start = 1
         if head == "config":
             if len(argv) < 2 or argv[1] != "show":
@@ -430,6 +435,9 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var no_config = False
     var last_failed = False
     var failed_first = False
+    var saw_select = False
+    var saw_shard = False
+    var saw_passthrough = False
 
     var passthrough = False
     var i = start
@@ -445,6 +453,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
 
         if tok == "--":
             passthrough = True
+            saw_passthrough = True
             i += 1
             continue
 
@@ -564,6 +573,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             saw_color = True
         elif s.id == FlagId.SELECT:
             keyword = value
+            saw_select = True
         elif s.id == FlagId.MAXFAIL:
             maxfail = _parse_maxfail(value)
             saw_maxfail = True
@@ -575,6 +585,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             shard_mode = parsed[0]
             shard_m = parsed[1]
             shard_n = parsed[2]
+            saw_shard = True
         elif s.id == FlagId.RETRIES:
             retries = _parse_retries(value)
             saw_retries = True
@@ -582,10 +593,14 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             workers = _parse_workers(value)
             saw_workers = True
         elif s.id == FlagId.JSON:
-            json_dest = _validate_json_dest(value, not config_show)
+            json_dest = _validate_json_dest(
+                value, not config_show and not doctor
+            )
             saw_json = True
         elif s.id == FlagId.JUNIT_XML:
-            junit_dest = _validate_junit_dest(value, not config_show)
+            junit_dest = _validate_junit_dest(
+                value, not config_show and not doctor
+            )
             saw_junit = True
         elif s.id == FlagId.GH_ANNOTATIONS:
             gh_annotations = _parse_annotations(value)
@@ -608,6 +623,113 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             "'--lf'/'--last-failed' and '--ff'/'--failed-first' cannot be"
             " combined with '--shard'"
         )
+
+    if doctor:
+        if saw_paths:
+            raise _err("path operands cannot be combined with doctor")
+        if saw_passthrough:
+            raise _err(
+                "build-argument passthrough cannot be combined with doctor"
+            )
+        if saw_select:
+            raise _err(
+                "'-k' is a run/collect flag and cannot be combined with doctor"
+            )
+        if last_failed or failed_first:
+            raise _err(
+                "'--lf'/'--last-failed' and '--ff'/'--failed-first' are state"
+                " selection flags and cannot be combined with doctor"
+            )
+        if collect:
+            raise _err(
+                "'--collect-only' is a run/collect flag and cannot be combined"
+                " with doctor"
+            )
+        if exitfirst:
+            raise _err(
+                "'-x'/'--exitfirst' is a run flag and cannot be combined with"
+                " doctor"
+            )
+        if saw_timeout:
+            raise _err(
+                "'--timeout' is a run flag and cannot be combined with doctor"
+            )
+        if saw_maxfail:
+            raise _err(
+                "'--maxfail' is a run flag and cannot be combined with doctor"
+            )
+        if saw_durations:
+            raise _err(
+                "'--durations' is a run flag and cannot be combined with doctor"
+            )
+        if saw_retries:
+            raise _err(
+                "'--retries' is a run flag and cannot be combined with doctor"
+            )
+        if saw_workers:
+            raise _err(
+                "'-n'/'--workers' is a run flag and cannot be combined with"
+                " doctor"
+            )
+        if saw_shard:
+            raise _err(
+                "'--shard' is a run flag and cannot be combined with doctor"
+            )
+        if saw_excludes:
+            raise _err(
+                "'--exclude' is a selection flag and cannot be combined with"
+                " doctor"
+            )
+        if saw_serial:
+            raise _err(
+                "'--serial' is a run flag and cannot be combined with doctor"
+            )
+        if saw_gates:
+            raise _err(
+                "'--gate' is a run flag and cannot be combined with doctor"
+            )
+        if saw_show_output:
+            raise _err(
+                "'-s'/'--show-output' is a run flag and cannot be combined with"
+                " doctor"
+            )
+        if saw_mojo:
+            raise _err(
+                "'--mojo' is a build flag and cannot be combined with doctor"
+            )
+        if saw_include:
+            raise _err(
+                "'-I' is a build flag and cannot be combined with doctor"
+            )
+        if saw_build_args:
+            raise _err(
+                "'--build-arg' is a build flag and cannot be combined with"
+                " doctor"
+            )
+        if saw_precompile:
+            raise _err(
+                "'--precompile' is a build flag and cannot be combined with"
+                " doctor"
+            )
+        if saw_compile_timeout:
+            raise _err(
+                "'--compile-timeout' is a build flag and cannot be combined"
+                " with doctor"
+            )
+        if saw_json:
+            raise _err(
+                "'--json' is a reporter flag and cannot be combined with doctor"
+            )
+        if saw_junit:
+            raise _err(
+                "'--junit-xml' is a reporter flag and cannot be combined with"
+                " doctor"
+            )
+        if saw_annotations:
+            raise _err(
+                "'--gh-annotations' is a reporter flag and cannot be combined"
+                " with doctor"
+            )
 
     # Collect mode is a listing, not a run: the run-only knobs that shape which
     # tests execute or when to stop scheduling are meaningless against it and are
@@ -731,6 +853,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     defaults.shard_m = shard_m
     defaults.shard_n = shard_n
     var cfg = overlay.fold(defaults)
+    if doctor:
+        return ParseResult.doctor(cfg^, overlay^, config_path^, no_config)
     if config_show:
         return ParseResult.config_show(cfg^, overlay^, config_path^, no_config)
     return ParseResult.run(cfg^, overlay^, config_path^, no_config)

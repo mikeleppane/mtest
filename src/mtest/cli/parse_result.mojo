@@ -1,9 +1,10 @@
 """`ParseResult`: what a successful parse produces.
 
-Parsing either yields a configured run or `config show` request with both its
-typed argv overlay and defaults-folded compatibility config, or a non-error
-directive to print help or the version. A usage error is not a `ParseResult` —
-it is raised. `main` handles each result; this layer never prints or exits.
+Parsing either yields a configured run, `config show`, or `doctor` request with
+both its typed argv overlay and defaults-folded compatibility config, or a
+non-error directive to print help or the version. A usage error is not a
+`ParseResult` — it is raised. `main` handles each result; this layer never
+prints or exits.
 """
 from mtest.config import CliOverlay, RunnerConfig
 
@@ -12,19 +13,20 @@ from mtest.config import CliOverlay, RunnerConfig
 struct ParseResult(Copyable, Movable):
     """The outcome of a successful parse.
 
-    A tagged union over `kind`. For `RUN` and `CONFIG_SHOW`, `overlay` holds
-    argv presence and values while `config` holds their defaults-folded
-    compatibility view. Only help and version carry placeholder fields.
+    A tagged union over `kind`. For `RUN`, `CONFIG_SHOW`, and `DOCTOR`,
+    `overlay` holds argv presence and values while `config` holds their
+    defaults-folded compatibility view. Only help and version carry
+    placeholder fields.
     """
 
     var kind: Int
-    """The `RUN`, `SHOW_HELP`, `SHOW_VERSION`, or `CONFIG_SHOW` outcome."""
+    """The successful parse outcome discriminant."""
 
     var config: RunnerConfig
-    """The parsed run config; meaningful for `RUN` and `CONFIG_SHOW`."""
+    """The parsed config; meaningful for `RUN`, `CONFIG_SHOW`, and `DOCTOR`."""
 
     var overlay: CliOverlay
-    """The argv overlay; meaningful for `RUN` and `CONFIG_SHOW`."""
+    """The argv overlay; meaningful for `RUN`, `CONFIG_SHOW`, and `DOCTOR`."""
 
     var config_path: String
     """The explicit configuration path, or empty when discovery applies."""
@@ -36,6 +38,7 @@ struct ParseResult(Copyable, Movable):
     comptime SHOW_HELP = 1
     comptime SHOW_VERSION = 2
     comptime CONFIG_SHOW = 3
+    comptime DOCTOR = 4
 
     @staticmethod
     def run(
@@ -113,6 +116,32 @@ struct ParseResult(Copyable, Movable):
             no_config=no_config,
         )
 
+    @staticmethod
+    def doctor(
+        var config: RunnerConfig,
+        var overlay: CliOverlay,
+        config_path: String = "",
+        no_config: Bool = False,
+    ) -> ParseResult:
+        """A result asking `main` to run environment diagnostics.
+
+        Args:
+            config: The parsed doctor configuration. Consumed.
+            overlay: The typed argv overlay. Consumed.
+            config_path: The explicit configuration path, or empty to discover.
+            no_config: Whether to skip configuration discovery.
+
+        Returns:
+            A result whose `kind` is `DOCTOR`.
+        """
+        return ParseResult(
+            kind=Self.DOCTOR,
+            config=config^,
+            overlay=overlay^,
+            config_path=config_path,
+            no_config=no_config,
+        )
+
     def is_run(self) -> Bool:
         """Whether this result is a configured run."""
         return self.kind == Self.RUN
@@ -128,3 +157,7 @@ struct ParseResult(Copyable, Movable):
     def is_config_show(self) -> Bool:
         """Whether this result asks to render the resolved configuration."""
         return self.kind == Self.CONFIG_SHOW
+
+    def is_doctor(self) -> Bool:
+        """Whether this result asks to diagnose the local mtest environment."""
+        return self.kind == Self.DOCTOR

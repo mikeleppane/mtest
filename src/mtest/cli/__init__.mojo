@@ -1,10 +1,12 @@
-"""The cli layer of the mtest runner: the argument parser.
+"""The cli layer of the mtest runner: parsing and command-local diagnosis.
 
-This is the parser only, not `main`. It turns an argument vector into a
+The parser turns an argument vector into a
 `ParseResult` — a typed argv overlay plus its defaults-folded `RunnerConfig`,
-tagged as a run or config-display request, or a directive to print help or the
-version. A usage error is raised as a `cli:`-prefixed `Error` for `main` to
-print to stderr before exiting 4.
+tagged as a run, config-display, or doctor request, or a directive to print
+help or the version. A usage error is raised as a `cli:`-prefixed `Error` for
+`main` to print to stderr before exiting 4. The doctor runner owns its fixed,
+contained Layer-5 diagnostics and returns lines to `main`; it never enters a
+session or reporter.
 
 The parser is table-driven. `flag_specs()` is the single source of truth for
 every accepted spelling: its arity, whether it repeats, whether this build
@@ -22,6 +24,10 @@ The public surface is re-exported here so callers write
 from mtest.cli.build_flags import build_flags_string
 from mtest.cli.flag_spec import FlagId, FlagSpec, flag_specs
 from mtest.cli.parse_result import ParseResult
+from mtest.cli.doctor import (
+    DoctorReport,
+    run_doctor,
+)
 from mtest.cli.parser import (
     MTEST_VERSION,
     help_text,
