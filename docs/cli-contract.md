@@ -967,6 +967,221 @@ mtest --json report.ndjson tests/
 
 # List node ids without running anything.
 mtest collect tests/
+
+# Show what this invocation resolves to, and which layer supplied each value.
+mtest config show
+
+# Re-run only what failed last time; or run everything, remembered failures
+# first.
+mtest --lf tests/
+mtest --ff tests/
+
+# Diagnose the environment without building or running a test.
+mtest doctor
+```
+
+### 23.1 A configured project, end to end
+
+The transcripts below were executed against this repository's own trees with
+the built binary. Environment-dependent values appear as captured: the absolute
+invocation root, the wall-clock timings, and the worker count `workers = "auto"`
+resolved to on the capturing machine.
+
+`mtest.toml` at the invocation root:
+
+```toml
+[run]
+paths = ["e2e/matrix"]
+workers = "auto"
+retries = 1
+timeout = 120
+
+[build]
+include = ["build"]
+compile-timeout = 300
+
+[report]
+durations = 2
+show-output = "none"
+
+[[override]]
+files = ["e2e/matrix/test_beta.mojo"]
+timeout = 30
+serial = true
+```
+
+`[run] paths` supplies the operands, `workers = "auto"` resolves the pool, the
+`[[override]]` table pins one file serial, and `[report] durations` adds the
+slowest-files list:
+
+```text
+$ mtest
+mtest 0.5.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0   workers: 16
+
+PASS           e2e/matrix/test_alpha.mojo      0.02s
+PASS           e2e/matrix/test_beta.mojo       0.02s  SERIAL
+
+===== 5 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 0.9s =====
+
+slowest 2 files:
+  e2e/matrix/test_alpha.mojo  0.02s
+  e2e/matrix/test_beta.mojo  0.02s
+$ echo $?
+0
+```
+
+`config show` renders the resolved values with the supplying layer, and a
+command-line value overrides the file in the same rendering (`-k` is accepted
+and, being per-invocation selection, not rendered):
+
+```text
+$ mtest config show --timeout 30 -n 4 -k alpha
+[run]
+paths = ["e2e/matrix"]  # (mtest.toml)
+exclude = []  # (default)
+gates = []  # (default)
+serial = []  # (default)
+workers = 4  # (cli)
+timeout = 30  # (cli)
+retries = 1  # (mtest.toml)
+maxfail = 0  # (default)
+state = true  # (default)
+
+[build]
+mojo = "mojo"  # (default)
+include = ["build"]  # (mtest.toml)
+build-args = []  # (default)
+precompile = []  # (default)
+compile-timeout = 300  # (mtest.toml)
+
+[report]
+color = "auto"  # (default)
+show-output = "none"  # (mtest.toml)
+verbosity = "normal"  # (default)
+durations = 2  # (mtest.toml)
+# junit-xml = (unset)
+# json = (unset)
+gh-annotations = "auto"  # (default)
+
+[[override]]
+files = "e2e/matrix/test_beta.mojo"  # (mtest.toml)
+timeout = 30  # (mtest.toml)
+serial = true  # (mtest.toml)
+
+# config file: mtest.toml
+# state file: .mtest-cache/lastrun (present)
+# selection flags are per invocation and are not rendered
+$ echo $?
+0
+```
+
+An invalid configuration is refused before any build, with the file, table,
+key, and expectation named:
+
+```text
+$ mtest e2e/matrix
+config: mtest.toml: [run] key 'retries': expected integer >= 0; got 'two'
+$ echo $?
+4
+```
+
+The `--lf` iteration loop, over a selection whose one failure was recorded by
+the preceding run:
+
+```text
+$ cat .mtest-cache/lastrun
+mtest-lastrun v1
+test	e2e/suite/test_failing.mojo::test_second_fails
+
+$ mtest --lf e2e/matrix e2e/suite/test_failing.mojo
+mtest 0.5.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0
+
+FAIL           e2e/suite/test_failing.mojo     0.02s
+
+--- FAIL e2e/suite/test_failing.mojo::test_second_fails ---
+At e2e/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:
+   left: 1
+  right: 2
+reproduce: mtest e2e/suite/test_failing.mojo::test_second_fails
+
+[...file-scoped captured output omitted...]
+
+===== 0 passed, 1 failed, 0 skipped (0 excluded, 2 not run, 7 deselected) in 1.3s =====
+$ echo $?
+1
+```
+
+The soft-filter guarantee, on a selection the persisted records do not
+intersect: both diagnostics are emitted and the ordinary full selection runs
+rather than exiting 5:
+
+```text
+$ mtest --lf e2e/matrix
+mtest 0.5.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
+
+lf: previously-failing e2e/suite/test_failing.mojo::test_second_fails no longer exists — dropped
+lf: no previously-failing tests match this selection — running the full selection
+PASS           e2e/matrix/test_alpha.mojo      0.02s
+PASS           e2e/matrix/test_beta.mojo       0.03s
+
+===== 5 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 0.9s =====
+$ echo $?
+0
+```
+
+`doctor`, healthy and with one contained failure. The failing check names what
+broke; every other check still runs:
+
+```text
+$ mtest doctor
+PASS version: mtest 0.5.0
+PASS platform: Linux x86_64 supported
+PASS root: /home/mikko/dev/mtest
+PASS exec: runtime acquired
+PASS toolchain: 'mojo' from PATH default: Mojo 1.0.0b2 (2cf4d08a)
+PASS config: valid 'mtest.toml'
+PASS config-semantics: resolved values valid
+PASS state: cache and lastrun usable
+PASS temp: invocation root and system temp usable
+PASS report-destinations: none
+$ echo $?
+0
+
+$ MTEST_MOJO=/opt/nonexistent/mojo mtest doctor --no-config
+PASS version: mtest 0.5.0
+PASS platform: Linux x86_64 supported
+PASS root: /home/mikko/dev/mtest
+PASS exec: runtime acquired
+FAIL toolchain: '/opt/nonexistent/mojo' from MTEST_MOJO: could not execute
+PASS config: none
+PASS config-semantics: resolved values valid
+PASS state: cache and lastrun usable
+PASS temp: invocation root and system temp usable
+PASS report-destinations: none
+$ echo $?
+1
+```
+
+A selected-config failure is a `FAIL`ed check and exit 1 under `doctor`, where
+`run` and `config show` refuse it as a usage error and exit 4 (§27.2):
+
+```text
+$ mtest doctor --config ci/mtest.toml
+PASS version: mtest 0.5.0
+PASS platform: Linux x86_64 supported
+PASS root: /home/mikko/dev/mtest
+PASS exec: runtime acquired
+FAIL toolchain: dependency config unavailable
+FAIL config: ci/mtest.toml: configuration file does not exist
+FAIL config-semantics: dependency config unavailable
+PASS state: cache and lastrun usable
+PASS temp: invocation root and system temp usable
+FAIL report-destinations: dependency config unavailable
+$ echo $?
+1
 ```
 
 ---
