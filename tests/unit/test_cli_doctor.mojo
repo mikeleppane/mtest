@@ -10,6 +10,7 @@ from mtest.cli.doctor import (
     _doctor_exit_code,
     _doctor_platform_probe,
     _doctor_root_dependency_probe,
+    _safe_text,
     _toolchain_identity_is_pinned,
 )
 from mtest.config import ColorWhen, Verbosity
@@ -188,6 +189,36 @@ def test_doctor_close_failure_replaces_the_exec_status() raises:
         _doctor_close_failure_probe(),
         "FAIL exec: runtime close failed (operation 7, errno 5)",
     )
+
+
+def _repeated(unit: String, count: Int) -> String:
+    var out = String("")
+    for _ in range(count):
+        out += unit
+    return out^
+
+
+def test_doctor_detail_over_the_bound_is_truncated_not_dropped() raises:
+    """The bounded branch of the escaper had no coverage on any platform.
+
+    It reads a borrowed view of the escaped text while building the shortened
+    copy, which is the shape that aborted the vendored TOML integer scan on
+    arm64. Exercising it keeps that shape under test instead of latent.
+    """
+    var under = _repeated("a", 240)
+    assert_equal(_safe_text(under), under)
+    assert_false("..." in _safe_text(under))
+
+    var bounded = _safe_text(_repeated("b", 241))
+    assert_equal(bounded.count_codepoints(), 240)
+    assert_true(bounded.endswith("..."))
+    assert_equal(bounded, _repeated("b", 237) + "...")
+
+    # An escape expands one input codepoint into several, so the bound counts
+    # escaped codepoints rather than source ones.
+    var escaped = _safe_text(_repeated("\n", 200))
+    assert_equal(escaped.count_codepoints(), 240)
+    assert_true(escaped.endswith("..."))
 
 
 def test_doctor_platform_lines_cover_both_supported_targets() raises:
