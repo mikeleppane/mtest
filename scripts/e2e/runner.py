@@ -105,6 +105,30 @@ def expect_group_gone(pgid: int, what: str) -> None:
         time.sleep(BARRIER_POLL_SECONDS)
 
 
+def limit_nofile(soft: int) -> Callable[[], None]:
+    """A POSIX `preexec_fn` that lowers only the CHILD's descriptor soft limit.
+
+    `preexec_fn` runs after the fork and before the exec, so the new soft limit
+    belongs to the spawned process alone: this harness keeps its own limit, and
+    nothing else on the host is perturbed. The hard limit is carried through
+    unchanged, so the call only ever lowers a ceiling it is allowed to lower.
+
+    Args:
+        soft: The soft `RLIMIT_NOFILE` the child runs under.
+
+    Returns:
+        The callable `subprocess.Popen` invokes in the forked child.
+    """
+
+    def apply() -> None:
+        import resource
+
+        _old_soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+    return apply
+
+
 @dataclass
 class Run:
     """Complete captured result from one guarded mtest process."""
@@ -145,8 +169,29 @@ class E2ERunner:
         timeout: float | None = None,
         check_binary: bool = True,
         env_overrides: dict[str, str] | None = None,
+        fd_limit: int | None = None,
     ) -> Run:
-        """Capture one mtest run under a hard whole-process-group deadline."""
+        """Capture one mtest run under a hard whole-process-group deadline.
+
+        Args:
+            args: The mtest arguments after the binary.
+            timeout: The whole run's wall budget; the runner's default when
+                None.
+            check_binary: Whether a missing binary fails before the spawn.
+            env_overrides: Environment entries layered onto the child's env.
+            fd_limit: A soft `RLIMIT_NOFILE` imposed on the CHILD ONLY, so a
+                scenario can drive mtest's descriptor arithmetic against a real
+                kernel limit rather than a mocked one. Absent by default: the
+                run inherits this harness's own limit and behaves exactly as
+                every other scenario's does.
+
+        Returns:
+            The captured run.
+
+        Raises:
+            ScenarioError: If the binary is missing or the run outlives its
+                deadline.
+        """
         binary = os.fspath(self.mtest)
         if check_binary and not os.path.exists(binary):
             raise ScenarioError(
@@ -167,6 +212,7 @@ class E2ERunner:
             text=True,
             start_new_session=True,
             env=child_env,
+            preexec_fn=None if fd_limit is None else limit_nofile(fd_limit),
         )
         pgid = os.getpgid(proc.pid)
         try:

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import resource
 import signal
 import tempfile
 from pathlib import Path
@@ -32,6 +33,7 @@ from scripts.e2e.assertions import (
     verdict_paths_in_order,
 )
 from scripts.e2e.runner import (
+    FAKE_FD_MOJO,
     FAKE_WINDOW_MOJO,
     LOGGING_MOJO,
     REPO_ROOT,
@@ -802,3 +804,177 @@ def s_parallel_serial_stale_glob(context: ScenarioContext) -> str:
         f"the stale-serial warning did not explain itself:\n{run.stdout}",
     )
     return "an unmatched --serial glob -> loud stale-serial warning, exit 0"
+
+
+FD_CLAMP_SOFT_LIMIT = 76
+"""The child's soft `RLIMIT_NOFILE` for the live clamp.
+
+Chosen so the exec layer's own arithmetic — `min(64, (soft - 64 - 3) // 3)`,
+64 descriptors of reserved headroom and 3 per supervised child — lands on
+exactly three workers: `(76 - 64 - 3) // 3 == 3`. It is also comfortably above
+the layer's `_MIN_SOFT_FD` (70), so the run clamps rather than raising the
+hard environment fault a ceiling too small for even one child would raise."""
+
+FD_CLAMP_REQUEST = 16
+"""The worker count the clamped run asks for: far above the cap, and not a
+number the cap arithmetic could ever produce by coincidence."""
+
+FD_CLAMP_CAP = 3
+"""The cap `FD_CLAMP_SOFT_LIMIT` yields, asserted as an exact resolved count."""
+
+FD_CLAMP_FILES = (
+    "e2e/excluded/test_excluded.mojo",
+    "e2e/maxfail/test_c_pass.mojo",
+    "e2e/serial/test_b_next.mojo",
+    "e2e/suite/nested/test_nested.mojo",
+)
+"""Four all-pass files declaring exactly one test each, so the summary band's
+per-TEST totals and the per-FILE verdict count are the same number and neither
+can be mistaken for the other. More files than workers, so the clamped pool has
+to recycle a slot to finish the set."""
+
+FD_CLAMP_WARNING = (
+    f"worker-clamp: requested {FD_CLAMP_REQUEST} workers but the environment's"
+    f" file-descriptor ceiling caps concurrency at {FD_CLAMP_CAP}; running with"
+    f" {FD_CLAMP_CAP}"
+)
+"""The exact console warning, naming request, cap, and resolved count.
+
+Pinned whole rather than by fragments: three separate `in` checks for the
+request and the cap would also pass against a warning that named those numbers
+in any other roles, and this scenario exists to prove which number is which.
+Interpolated from the constants above so the sentence and the counts this
+scenario asserts elsewhere can never drift apart."""
+
+
+def s_parallel_fd_clamp(context: ScenarioContext) -> str:
+    """A real low `RLIMIT_NOFILE` clamps `-n 16` to 3 loudly and still runs all 4.
+
+    The limit is genuine: the harness lowers the soft descriptor limit of the
+    mtest CHILD ONLY, through a `preexec_fn` between the fork and the exec, so
+    the kernel — not a stub, a mock, or an environment variable — is what the
+    exec layer's `query_effective_cap` reads.
+
+    Because 76 descriptors cannot link a real Mojo binary, the compiler is
+    `fake_fd_mojo.py`, which fabricates directly executable pass actors instead
+    of calling LLVM. That keeps the ceiling where the scenario claims it is —
+    on mtest's native pool and scheduler — rather than moving the failure into
+    the toolchain, where it would prove nothing about worker sizing.
+
+    The clamp is attributed, not merely observed. A CONTROL run with the same
+    argv and no fd limit must resolve the full 16 workers and print no clamp
+    warning at all, so the only difference between the two runs is the real
+    kernel limit, and three workers cannot be credited to the request, the file
+    count, the machine's cores, or the stand-in compiler.
+    """
+    if not hasattr(resource, "RLIMIT_NOFILE"):
+        # Neither supported platform reaches this: Linux and macOS both define
+        # RLIMIT_NOFILE, so this is a statement about portability, not a
+        # tolerance that could quietly disarm the scenario on a supported host.
+        return "skipped: this platform has no RLIMIT_NOFILE to lower"
+    _soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    expect(
+        hard == resource.RLIM_INFINITY or hard >= FD_CLAMP_SOFT_LIMIT,
+        f"the host's hard RLIMIT_NOFILE is {hard}, below the {FD_CLAMP_SOFT_LIMIT} "
+        "this scenario lowers the child to — the run could not even start",
+    )
+
+    args = [
+        *FD_CLAMP_FILES,
+        "-n",
+        str(FD_CLAMP_REQUEST),
+        "--json",
+        "-",
+        "--mojo",
+        FAKE_FD_MOJO,
+        "--gh-annotations",
+        "off",
+    ]
+    run = context.runner.run_mtest(
+        args, timeout=240.0, fd_limit=FD_CLAMP_SOFT_LIMIT
+    )
+    expect_exit(run, 0)
+
+    expect(
+        FD_CLAMP_WARNING in run.stderr,
+        f"the clamped run did not print the exact worker-clamp warning "
+        f"{FD_CLAMP_WARNING!r}:\n--- stderr ---\n{run.stderr}",
+    )
+    workers = _workers_in_stream(run.stdout)
+    expect(
+        workers == FD_CLAMP_CAP,
+        f"session_started.workers was {workers}, want exactly {FD_CLAMP_CAP} "
+        f"under a soft RLIMIT_NOFILE of {FD_CLAMP_SOFT_LIMIT}",
+    )
+
+    # `--json -` owns stdout, so the human console — verdict rows included —
+    # is on stderr for this run.
+    console_passes = sorted(
+        line.split()[1]
+        for line in run.stderr.splitlines()
+        if line.startswith("PASS ") and len(line.split()) > 1
+    )
+    expect(
+        console_passes == sorted(FD_CLAMP_FILES),
+        f"the clamped console reported PASS for {console_passes}, want exactly "
+        f"{sorted(FD_CLAMP_FILES)}:\n{run.stderr}",
+    )
+    stream = stream_files(run.stdout)
+    expect(
+        stream.finished == {path: "pass" for path in FD_CLAMP_FILES},
+        f"the clamped stream finished {stream.finished}, want all four files "
+        "pass",
+    )
+
+    summ = expect_accounting(run)
+    actual = (
+        summ.passed,
+        summ.failed,
+        summ.skipped,
+        summ.crashed,
+        summ.timed_out,
+        summ.compile_error,
+        summ.malformed,
+        summ.excluded,
+        summ.not_run,
+    )
+    expect(
+        actual == (len(FD_CLAMP_FILES), 0, 0, 0, 0, 0, 0, 0, 0),
+        f"the clamped run's summary band was {actual}, want "
+        f"({len(FD_CLAMP_FILES)}, 0, 0, 0, 0, 0, 0, 0, 0):\n{run.combined}",
+    )
+    expect(
+        stream.summary.get("pass") == len(FD_CLAMP_FILES)
+        and stream.summary.get("not_run") == 0,
+        f"the machine summary disagreed with the console band: {stream.summary}",
+    )
+    expect(
+        "INTERNAL-ERROR" not in run.combined and "EMFILE" not in run.combined,
+        "a descriptor exhaustion or internal error surfaced under the clamp:\n"
+        f"{run.combined}",
+    )
+
+    # The CONTROL: same argv, no fd limit. Its full 16 workers and silent
+    # console are what make the clamp above attributable to the kernel limit.
+    control = context.runner.run_mtest(args, timeout=240.0)
+    expect_exit(control, 0)
+    control_workers = _workers_in_stream(control.stdout)
+    expect(
+        control_workers == FD_CLAMP_REQUEST,
+        f"without the fd limit the same argv resolved {control_workers} workers, "
+        f"want the full {FD_CLAMP_REQUEST} — the clamp above cannot be "
+        "attributed to RLIMIT_NOFILE unless this run is unclamped. This host's "
+        f"own soft RLIMIT_NOFILE is {_soft}; the control needs at least 115 for "
+        f"the cap to reach {FD_CLAMP_REQUEST}",
+    )
+    expect(
+        "worker-clamp" not in control.combined,
+        f"the unlimited control run printed a worker-clamp warning:\n"
+        f"{control.combined}",
+    )
+    return (
+        f"soft RLIMIT_NOFILE {FD_CLAMP_SOFT_LIMIT}: -n {FD_CLAMP_REQUEST} clamps "
+        f"loudly to {FD_CLAMP_CAP} workers, all {len(FD_CLAMP_FILES)} files PASS, "
+        f"exit 0; the same argv unlimited resolves {FD_CLAMP_REQUEST} and warns "
+        "nothing"
+    )

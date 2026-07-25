@@ -352,7 +352,8 @@
       "exit_class": 0,
       "in_default_suite": false,
       "reached_only_by": [
-        "maxfail"
+        "maxfail",
+        "parallel-fd-clamp"
       ],
       "disposition": "PARSED",
       "per_test": {
@@ -405,7 +406,8 @@
       "exit_class": 0,
       "in_default_suite": false,
       "reached_only_by": [
-        "selection"
+        "selection",
+        "mojo-executable-precedence"
       ],
       "disposition": "PARSED",
       "per_test": {
@@ -531,7 +533,8 @@
       "in_default_suite": false,
       "reached_only_by": [
         "parallel-serial-noverlap",
-        "parallel-serial-stale-glob"
+        "parallel-serial-stale-glob",
+        "parallel-fd-clamp"
       ],
       "disposition": "PARSED",
       "per_test": {

@@ -131,6 +131,7 @@ SCENARIOS: ScenarioRegistry = (
     ("selection-chameleon", selection.s_selection_chameleon),
     ("single-build", selection.s_single_build),
     ("stale-recovery-two-builds", selection.s_stale_recovery_two_builds),
+    ("mojo-executable-precedence", selection.s_mojo_executable_precedence),
     ("collect", selection.s_collect),
     ("passthrough+forbidden", core.s_passthrough_and_forbidden),
     ("out-of-root", core.s_out_of_root),
@@ -178,6 +179,7 @@ SCENARIOS: ScenarioRegistry = (
     ("parallel-progress-tty", parallel.s_parallel_progress_tty),
     ("parallel-serial-noverlap", parallel.s_parallel_serial_noverlap),
     ("parallel-serial-stale-glob", parallel.s_parallel_serial_stale_glob),
+    ("parallel-fd-clamp", parallel.s_parallel_fd_clamp),
 )
 
 

@@ -380,6 +380,7 @@ E2E_SCENARIO_NAMES = (
     "selection-chameleon",
     "single-build",
     "stale-recovery-two-builds",
+    "mojo-executable-precedence",
     "collect",
     "passthrough+forbidden",
     "out-of-root",
@@ -418,6 +419,7 @@ E2E_SCENARIO_NAMES = (
     "parallel-progress-tty",
     "parallel-serial-noverlap",
     "parallel-serial-stale-glob",
+    "parallel-fd-clamp",
 )
 
 LIVE_COMMAND_FIXED_PATHS = (
@@ -875,9 +877,9 @@ def check_e2e_layout() -> None:
             "E2E scenario membership/order mismatch: "
             f"expected={list(E2E_SCENARIO_NAMES)}, actual={list(scenario_names)}"
         )
-    if len(scenario_names) != 87 or len(set(scenario_names)) != len(scenario_names):
+    if len(scenario_names) != 89 or len(set(scenario_names)) != len(scenario_names):
         raise AssertionError(
-            "E2E scenarios must contain 87 unique names in the pinned order"
+            "E2E scenarios must contain 89 unique names in the pinned order"
         )
     referenced = {
         *rows,

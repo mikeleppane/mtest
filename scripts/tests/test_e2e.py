@@ -8,6 +8,7 @@ import inspect
 from dataclasses import FrozenInstanceError
 import os
 from pathlib import Path
+import resource
 import signal
 import stat
 import subprocess
@@ -125,6 +126,7 @@ SELECTION_SCENARIOS = (
     "selection-chameleon",
     "single-build",
     "stale-recovery-two-builds",
+    "mojo-executable-precedence",
     "collect",
 )
 RESILIENCE_SCENARIOS = (
@@ -183,6 +185,7 @@ PARALLEL_SCENARIOS = (
     "parallel-progress-tty",
     "parallel-serial-noverlap",
     "parallel-serial-stale-glob",
+    "parallel-fd-clamp",
 )
 CONFIG_SCENARIOS = (
     "config-resolution",
@@ -207,7 +210,7 @@ class E2EFaultTopologyTests(unittest.TestCase):
         names = tuple(name for name, _scenario in e2e_main.SCENARIOS)
 
         self.assertEqual(names, layout.E2E_SCENARIO_NAMES)
-        self.assertEqual(len(names), 87)
+        self.assertEqual(len(names), 89)
         self.assertEqual(len(set(names)), len(names))
 
     def test_core_scenarios_have_one_feature_owner(self) -> None:
@@ -596,6 +599,8 @@ class E2EFaultTopologyTests(unittest.TestCase):
                 Path(runner.FAKE_CRASH_MOJO),
                 Path(runner.FAKE_RETRY_CRASH_MOJO),
                 Path(runner.FAKE_STUBBORN_MOJO),
+                Path(runner.FAKE_FD_MOJO),
+                Path(runner.PATH_MOJO),
             ),
             (
                 fixture_root / "logging_mojo.py",
@@ -603,6 +608,8 @@ class E2EFaultTopologyTests(unittest.TestCase):
                 fixture_root / "fake_crash_mojo.py",
                 fixture_root / "fake_retry_crash_mojo.py",
                 fixture_root / "fake_stubborn_mojo.py",
+                fixture_root / "fake_fd_mojo.py",
+                fixture_root / "path_mojo.py",
             ),
         )
         self.assertEqual(Path(fake_retry_crash_mojo.REPO_ROOT), root)
@@ -618,9 +625,82 @@ class E2EFaultTopologyTests(unittest.TestCase):
             runner.FAKE_CRASH_MOJO,
             runner.FAKE_RETRY_CRASH_MOJO,
             runner.FAKE_STUBBORN_MOJO,
+            runner.FAKE_FD_MOJO,
+            runner.PATH_MOJO,
         ):
             with self.subTest(fixture=fixture):
                 self.assertTrue(os.access(fixture, os.X_OK))
+
+
+@unittest.skipUnless(
+    hasattr(resource, "RLIMIT_NOFILE"),
+    "this platform has no RLIMIT_NOFILE to lower",
+)
+class LimitNofileTests(unittest.TestCase):
+    """`runner.limit_nofile` must change the CHILD, not merely be accepted.
+
+    Every assertion here reads a limit the spawned process observed for itself
+    and printed back, because a `preexec_fn` that was constructed, passed, and
+    silently ignored would satisfy any check made on this side of the fork.
+    """
+
+    _REPORT_SOFT = (
+        "import resource, sys;"
+        "sys.stdout.write(str(resource.getrlimit(resource.RLIMIT_NOFILE)[0]))"
+    )
+    """A child that prints the soft `RLIMIT_NOFILE` the kernel gave it."""
+
+    def _child_soft_limit(self, preexec) -> int:
+        """The soft limit a child observes when spawned under `preexec`."""
+        completed = subprocess.run(
+            [sys.executable, "-c", self._REPORT_SOFT],
+            capture_output=True,
+            text=True,
+            check=True,
+            preexec_fn=preexec,
+        )
+        return int(completed.stdout.strip())
+
+    def test_the_child_observes_the_lowered_soft_limit(self) -> None:
+        parent_soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = 76
+        if hard != resource.RLIM_INFINITY and hard < target:
+            self.skipTest(f"the host's hard RLIMIT_NOFILE {hard} is below {target}")
+
+        self.assertEqual(self._child_soft_limit(runner.limit_nofile(target)), target)
+        # The parent is untouched: the limit is applied between the fork and the
+        # exec, so lowering a child's ceiling must not lower this process's.
+        self.assertEqual(
+            resource.getrlimit(resource.RLIMIT_NOFILE), (parent_soft, hard)
+        )
+
+    def test_an_unlimited_child_keeps_this_process_limit(self) -> None:
+        parent_soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+
+        # The control that makes the test above evidence rather than a tautology:
+        # without the preexec_fn the child inherits, so 76 can only have come
+        # from `limit_nofile`.
+        self.assertEqual(self._child_soft_limit(None), parent_soft)
+
+    def test_the_hard_limit_is_carried_through_unchanged(self) -> None:
+        _parent_soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = 76
+        if hard != resource.RLIM_INFINITY and hard < target:
+            self.skipTest(f"the host's hard RLIMIT_NOFILE {hard} is below {target}")
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import resource, sys;"
+                "sys.stdout.write(str(resource.getrlimit(resource.RLIMIT_NOFILE)))",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            preexec_fn=runner.limit_nofile(target),
+        )
+        self.assertEqual(completed.stdout.strip(), str((target, hard)))
 
 
 
