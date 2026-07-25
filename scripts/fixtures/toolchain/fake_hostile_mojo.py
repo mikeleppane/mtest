@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Strict `--mojo` stand-in that builds the hostile-console report actor.
+"""Strict `--mojo` stand-in that builds the hostile report actor.
 
 Like `fake_fd_mojo.py` this never execs the real compiler; unlike it, this
 stand-in is strict about the WHOLE argv rather than just its first word. It
 serves exactly `build <source.mojo> -o <out>` and refuses anything else, because
-the scenario it backs asserts on the exact bytes mtest prints: an unexpected
-flag, an extra operand, or a second subcommand would change what the run does
-while the scenario went on asserting about the old shape. Refusing loudly turns
-that into a visible failure instead of a silent one.
+the scenarios it backs — `hostile-console` for the terminal surface and
+`hostile-reporters` for the NDJSON and JUnit ones — assert on the exact bytes
+mtest prints and on exact byte counts: an unexpected flag, an extra operand, or
+a second subcommand would change what the run does while those scenarios went on
+asserting about the old shape. Refusing loudly turns that into a visible failure
+instead of a silent one.
 
 The build product is an executable copy of
 `tests/fixtures/exec/hostile_report_actor.py` with two substitutions: the

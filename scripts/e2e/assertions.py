@@ -5,18 +5,26 @@ scenarios share: which slow/ files an interrupt must leave NOT-RUN, and the
 marker paths plus environment that arm the live actors to announce readiness,
 their real process-group ids, and mtest's polite teardown signal. Four scenario
 modules signal a live run, and they must all mean the same thing by "armed".
+
+It also owns the hostile-actor capture arithmetic, for the same reason: the
+console scenario and the two machine-reporter scenarios all read artifacts
+produced from ONE actor invocation, and they must agree byte for byte on what
+that actor wrote and on what the runner's capture bound retained of it.
 """
 
 from __future__ import annotations
 
+import functools
+import importlib.util
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from xml.etree import ElementTree
 
 from scripts.checks.reports import json_stream as json_stream_check
-from scripts.e2e.runner import Run, ScenarioError
+from scripts.e2e.runner import REPO_ROOT, Run, ScenarioError
 
 
 SUMMARY_RE = re.compile(
@@ -350,6 +358,177 @@ def junit_not_run_files(path: str | Path) -> tuple[str, ...]:
                 names.append(suite.get("name") or "")
                 break
     return tuple(names)
+
+
+HOSTILE_ACTOR_PATH = os.path.join(
+    REPO_ROOT, "tests", "fixtures", "exec", "hostile_report_actor.py"
+)
+"""The committed hostile actor, the single source of the bytes under test.
+
+The scenarios import it rather than restating its payload: an assertion written
+against a copy of the bytes would keep passing after the actor stopped emitting
+them."""
+
+CAPTURE_BOUND_BYTES = 8 * 1024 * 1024
+"""The runner's default per-stream head+tail capture bound.
+
+Restated from `_DEFAULT_CAP_BYTES` in `src/mtest/exec/supervise.mojo`, which no
+Python can import. A drift between the two surfaces here as an exact-count
+mismatch in the hostile-reporters scenario, never as a silent pass."""
+
+CAPTURE_HEAD_BYTES = CAPTURE_BOUND_BYTES // 2
+"""The leading window the capture always keeps (`Supervisor.__init__`)."""
+
+CAPTURE_TAIL_BYTES = CAPTURE_BOUND_BYTES - CAPTURE_HEAD_BYTES
+"""The trailing window the capture always keeps, which is the region mtest
+reparses for a report once the bound is exceeded."""
+
+REPORT_WINDOW_BYTES = 65536
+"""The per-end window each machine reporter keeps of a captured stream.
+
+Restated from `_STREAM_HEAD`/`_STREAM_TAIL` in `report/json_stream.mojo` and
+`_JUNIT_HEAD`/`_JUNIT_TAIL` in `report/junit.mojo`, which agree by contract; the
+hostile-reporters scenario is where that agreement is actually exercised."""
+
+ELISION = "…"
+"""The visible marker both reporters splice between their two windows."""
+
+
+@functools.cache
+def hostile_actor() -> ModuleType:
+    """Import the committed hostile actor as a module, once per process.
+
+    Returns:
+        The actor module, with `CANONICAL` still the committed placeholder. Every
+        payload function takes the real path as an argument, so nothing here
+        depends on that global.
+
+    Raises:
+        ScenarioError: If the actor cannot be located or imported.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "e2e_hostile_report_actor", HOSTILE_ACTOR_PATH
+    )
+    if spec is None or spec.loader is None:
+        raise ScenarioError(f"cannot import the hostile actor at {HOSTILE_ACTOR_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def capture_marker(omitted: int) -> bytes:
+    """The exact truncation marker the capture splices at the bound.
+
+    Mirrors `_marker_text` in `src/mtest/exec/capture.mojo`, including its
+    surrounding newlines. Written here as an independent expectation so the
+    retained byte count can be predicted rather than read back from the artifact
+    it is supposed to be judging.
+
+    Args:
+        omitted: How many middle bytes the bound dropped.
+
+    Returns:
+        The marker's UTF-8 bytes, LF-framed on both sides.
+    """
+    return (
+        f"\n[mtest: output truncated — {omitted} bytes omitted, "
+        f"limit {CAPTURE_BOUND_BYTES} bytes]\n"
+    ).encode("utf-8")
+
+
+@dataclass(frozen=True)
+class HostileStream:
+    """One stream the hostile actor wrote, and what survives each bound.
+
+    `raw` is every byte the child put on the descriptor. The rest is derived:
+    what the runner's capture retains, and what a machine reporter keeps of that
+    retained value. Each property states one policy, so a failure names the
+    policy that broke rather than "the numbers differ".
+    """
+
+    raw: bytes
+
+    @property
+    def truncated(self) -> bool:
+        """Whether the stream overran the capture bound (`was_truncated`)."""
+        return len(self.raw) > CAPTURE_BOUND_BYTES
+
+    @property
+    def omitted(self) -> int:
+        """How many middle bytes the capture bound dropped."""
+        return max(len(self.raw) - CAPTURE_BOUND_BYTES, 0)
+
+    @property
+    def retained(self) -> bytes:
+        """The bytes the capture hands the reporters: head, marker, tail."""
+        if not self.truncated:
+            return self.raw
+        return (
+            self.raw[:CAPTURE_HEAD_BYTES]
+            + capture_marker(self.omitted)
+            + self.raw[len(self.raw) - CAPTURE_TAIL_BYTES :]
+        )
+
+    @property
+    def reporter_text(self) -> str:
+        """The bounded text both machine reporters render from `retained`.
+
+        The reporters' own head+tail window over the retained bytes, each window
+        decoded independently exactly as `_excerpt_bytes` and
+        `bounded_text_from_bytes` decode theirs.
+        """
+        data = self.retained
+        if len(data) <= 2 * REPORT_WINDOW_BYTES:
+            return data.decode("utf-8", "replace")
+        head = data[:REPORT_WINDOW_BYTES].decode("utf-8", "replace")
+        tail = data[len(data) - REPORT_WINDOW_BYTES :].decode("utf-8", "replace")
+        return head + ELISION + tail
+
+    @property
+    def reporter_omitted(self) -> int:
+        """How many retained bytes the reporters' own window dropped."""
+        return max(len(self.retained) - 2 * REPORT_WINDOW_BYTES, 0)
+
+
+@dataclass(frozen=True)
+class HostileStreams:
+    """Both streams of one hostile-actor run, plus the report it ends on."""
+
+    stdout: HostileStream
+    stderr: HostileStream
+    detail: str
+    """The child's per-test failure detail, exactly as it wrote it — the text
+    every reporter's per-test surface has to render from."""
+
+
+def hostile_streams(canonical: str, flood_lines: int) -> HostileStreams:
+    """Predict both streams of one armed hostile-actor run, byte for byte.
+
+    Reproduces `main`'s write order — flood, hostile block, report on stdout; the
+    hostile block alone on stderr — from the actor's own payload constants.
+
+    Args:
+        canonical: The absolute, symlink-resolved source path the build stand-in
+            embeds, which the report header must byte-equal.
+        flood_lines: The flood line count the run arms through the actor's
+            environment variable.
+
+    Returns:
+        The two predicted streams and the failure detail they carry.
+    """
+    actor = hostile_actor()
+    stdout_raw = (
+        actor.flood_block(flood_lines)
+        + actor.hostile_block(b"child stdout", canonical)
+        + actor.report_block(False, canonical)
+    )
+    stderr_raw = actor.hostile_block(b"child stderr", canonical)
+    detail = actor.failure_detail(canonical).decode("utf-8", "replace")
+    return HostileStreams(
+        stdout=HostileStream(stdout_raw),
+        stderr=HostileStream(stderr_raw),
+        detail=detail,
+    )
 
 
 def expect_accounting(run: Run) -> Summary:

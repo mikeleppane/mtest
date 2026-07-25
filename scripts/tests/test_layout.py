@@ -61,6 +61,31 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
             ):
                 layout.check_top_level_script_layout(repo)
 
+    def test_exec_fixture_membership_exempts_only_the_bytecode_cache(self) -> None:
+        """`__pycache__` is tolerated; nothing else unlisted is.
+
+        The harness imports an exec actor as a module to predict its payload,
+        which makes CPython write that directory. The gate must survive it
+        without becoming a gate that tolerates unlisted actors.
+        """
+        with tempfile.TemporaryDirectory(prefix="mtest-layout-exec-") as raw_tmp:
+            repo = Path(raw_tmp)
+            fixtures = repo / "tests" / "fixtures" / "exec"
+            fixtures.mkdir(parents=True)
+            for name in layout.EXEC_FIXTURES:
+                (fixtures / name).write_text("# fixture\n", encoding="utf-8")
+
+            with mock.patch.object(layout, "REPO_ROOT", repo):
+                layout.check_exec_fixture_layout()
+                (fixtures / "__pycache__").mkdir()
+                layout.check_exec_fixture_layout()
+
+                (fixtures / "unlisted_actor.py").write_text("", encoding="utf-8")
+                with self.assertRaisesRegex(
+                    AssertionError, "exec fixture membership mismatch"
+                ):
+                    layout.check_exec_fixture_layout()
+
 
 class ClassifiedMojoUniverseTests(unittest.TestCase):
     """The classified roots hold exactly the registered Mojo files, and no links."""

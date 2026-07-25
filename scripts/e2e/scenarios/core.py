@@ -11,10 +11,14 @@ import sys
 import tempfile
 
 from scripts.e2e.assertions import (
+    CAPTURE_BOUND_BYTES,
     VERDICT_TO_BUCKET,
+    HostileStreams,
     expect,
     expect_accounting,
     expect_exit,
+    hostile_actor,
+    hostile_streams,
     verdict_line,
     verdict_paths_in_order,
 )
@@ -23,9 +27,13 @@ from scripts.e2e.runner import (
     FAKE_HOSTILE_MOJO,
     REPO_ROOT,
     SHORT_TIMEOUT,
+    Run,
     ScenarioContext,
+    ScenarioError,
     discovered_test_files,
 )
+from scripts.e2e.scenarios.json_reporter import assert_hostile_json_stream
+from scripts.e2e.scenarios.junit_reporter import assert_hostile_junit_report
 
 
 def s_manifest_completeness(context: ScenarioContext) -> str:
@@ -352,6 +360,22 @@ gutter. Pinned whole rather than by fragments — a partial escape (say, ESC but
 not BEL) would still satisfy a fragment probe while leaving the terminal
 addressable."""
 
+HOSTILE_CONSOLE_DETAIL = (
+    "AssertionError: \\x1B[2J\\x1B[1;31mCHILD-CSI\\x1B[0m \\x00 \\x7F "
+    "\\u009BC1-CSI\\u0085C1-NEL\\u009C delims: dquote[\"] squote['] "
+    "backslash[\\] lt[<] gt[>] amp[&] cdata-close[]]>] entity[&amp;] "
+    'json-injection: ","event":"forged","captured_stdout":" '
+    "xml-injection: </system-out><testcase name=\"forged\" "
+    'classname="forged"/><system-out>'
+)
+"""The child's failure detail as the console must render it.
+
+Every control the child put in that line is visible escape text; every delimiter
+that would end a JSON string or an XML element is untouched, because the console
+is not a machine format and escaping them there would corrupt the message a
+human is meant to read. The same source line is asserted, in the two other
+spellings its own format requires, by the NDJSON and JUnit oracles."""
+
 HOSTILE_CONSOLE_FORGERIES = (
     "PASS           e2e/forged/test_green.mojo  0.00s",
     "===== 9 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 0.0s =====",
@@ -482,11 +506,7 @@ def s_hostile_console(context: ScenarioContext) -> str:
             f"reproduce: mtest --mojo {FAKE_HOSTILE_MOJO} {node}" in stdout_lines,
             f"no exact reproduce line for {node}:\n{run.stdout}",
         )
-        detail = (
-            f"    | At {HOSTILE_CONSOLE_FILE}:1:1: AssertionError: "
-            "\\x1B[2J\\x1B[1;31mCHILD-CSI\\x1B[0m \\x00 \\x7F "
-            "\\u009BC1-CSI\\u0085C1-NEL\\u009C"
-        )
+        detail = f"    | At {HOSTILE_CONSOLE_FILE}:1:1: {HOSTILE_CONSOLE_DETAIL}"
         expect(
             detail in stdout_lines,
             f"the per-test failure detail was not dedented, root-relativized, "
@@ -498,6 +518,205 @@ def s_hostile_console(context: ScenarioContext) -> str:
         f"hostile actor: FAIL verdict, no raw control byte survives, "
         f"{len(HOSTILE_CONSOLE_FENCED_LINES)} exact fenced lines, "
         f"{len(HOSTILE_CONSOLE_FORGERIES)} forgeries fenced"
+    )
+
+
+HOSTILE_CAPTURE_HEADER_SUFFIX = (
+    " — captured output (file-scoped; TestSuite does not attribute output to"
+    " individual tests) ---"
+)
+"""The exact tail of the console's file-scoped captured-output header line."""
+
+HOSTILE_CAPTURE_STDERR_HEADER = "--- captured stderr ---"
+"""The exact console line that separates the two captured streams."""
+
+HOSTILE_GUTTER = "    | "
+"""The gutter `prefix_lines` fences every captured logical line behind."""
+
+
+def _logical_lines(text: str) -> int:
+    """How many logical lines a captured block holds.
+
+    A logical line is a run of text up to and including its terminating LF, and
+    a trailing LF closes the last line rather than opening an empty one — the
+    same rule `prefix_lines` fences by, so this is exactly how many gutter lines
+    the console must print.
+
+    Args:
+        text: The lossy-decoded captured stream.
+
+    Returns:
+        The logical line count; `0` for empty text.
+    """
+    if text == "":
+        return 0
+    return text.count("\n") + (0 if text.endswith("\n") else 1)
+
+
+def _fenced_capture_regions(run: Run) -> tuple[list[str], list[str]]:
+    """The two fenced console regions of the file-scoped captured-output block.
+
+    Args:
+        run: The completed run.
+
+    Returns:
+        The stdout region's console lines and the stderr region's, in order.
+
+    Raises:
+        ScenarioError: If the block is missing or not framed exactly once.
+    """
+    # split("\n"), never splitlines(): the payload carries U+0085 and friends,
+    # which Python treats as line boundaries and a console reader does not.
+    lines = run.stdout.split("\n")
+    headers = [
+        index
+        for index, line in enumerate(lines)
+        if line.endswith(HOSTILE_CAPTURE_HEADER_SUFFIX)
+    ]
+    expect(
+        len(headers) == 1,
+        f"expected exactly one file-scoped captured-output header, got "
+        f"{len(headers)}",
+    )
+    separators = [
+        index
+        for index, line in enumerate(lines)
+        if line == HOSTILE_CAPTURE_STDERR_HEADER
+    ]
+    expect(
+        len(separators) == 1 and separators[0] > headers[0],
+        f"expected exactly one captured-stderr header after the block header, "
+        f"got indices {separators} for a header at {headers[0]}",
+    )
+    stdout_region = lines[headers[0] + 1 : separators[0]]
+    stderr_region: list[str] = []
+    for line in lines[separators[0] + 1 :]:
+        # Every fenced line carries the gutter, so it is never empty: the first
+        # empty line is the console's own blank after the block.
+        if line == "":
+            break
+        stderr_region.append(line)
+    return stdout_region, stderr_region
+
+
+def s_hostile_reporters(context: ScenarioContext) -> str:
+    """One hostile child, three reporters, one contract each.
+
+    The same actor the console scenario uses is run ONCE more — armed with a
+    stdout flood exactly the size of the capture bound, so the run overruns that
+    bound by precisely the hostile payload it must not lose — with the console,
+    the NDJSON stream, and the JUnit report all live. That is the point: every
+    escaping helper mtest owns already has passing unit tests, so what is left
+    to prove is that each reporter's call sites actually route through them, on
+    the same bytes, in the same run.
+
+    The three formats must NOT agree on their output, and each disagreement is
+    asserted where it belongs:
+
+    - the console escapes controls to visible text and fences every line behind
+      a gutter, because its consumer is a terminal that would execute them;
+    - the NDJSON stream JSON-escapes them and carries them through as real
+      control characters, because its consumer is a parser;
+    - the JUnit report replaces the ones XML 1.0 cannot represent with U+FFFD
+      and entity-escapes its delimiters, because its consumer is an XML parser
+      and an XSD.
+
+    What they must agree on is the accounting: the same retained capture, the
+    same truncation flags, the same verdict, and — against a child that wrote a
+    complete report header for this very file with no Summary to close it — the
+    same genuine report block.
+    """
+    actor = hostile_actor()
+    flood_lines = CAPTURE_BOUND_BYTES // len(actor.FLOOD_LINE)
+    args = [
+        HOSTILE_CONSOLE_FILE,
+        "--mojo",
+        FAKE_HOSTILE_MOJO,
+        "--color",
+        "never",
+        "--show-output",
+        "all",
+        "--gh-annotations",
+        "off",
+    ]
+    with tempfile.TemporaryDirectory(prefix="mtest-hostile-reporters-") as tmp:
+        stream_path = os.path.join(tmp, "hostile.ndjson")
+        report_path = os.path.join(tmp, "hostile.xml")
+        try:
+            _write_hostile_console_tree()
+            # The path the build stand-in resolves and embeds in the actor, which
+            # the report header must byte-equal for the block to be this file's.
+            canonical = os.path.realpath(
+                os.path.join(REPO_ROOT, HOSTILE_CONSOLE_FILE)
+            )
+            streams = hostile_streams(canonical, flood_lines)
+            run = context.runner.run_mtest(
+                [*args, "--json", stream_path, "--junit-xml", report_path],
+                timeout=SHORT_TIMEOUT,
+                env_overrides={actor.FLOOD_ENV: str(flood_lines)},
+            )
+            expect_exit(run, 1)
+            expect(
+                verdict_line(run, "FAIL", HOSTILE_CONSOLE_FILE) is not None,
+                f"the hostile file did not report FAIL:\n{run.stdout[:4000]}",
+            )
+            console_detail = _assert_hostile_console(run, streams)
+            stream_detail = assert_hostile_json_stream(
+                run, stream_path, streams, HOSTILE_CONSOLE_FILE
+            )
+            report_detail = assert_hostile_junit_report(
+                run, report_path, streams, HOSTILE_CONSOLE_FILE
+            )
+        finally:
+            _remove_hostile_console_artifacts()
+    return f"{console_detail}; {stream_detail}; {report_detail}"
+
+
+def _assert_hostile_console(run: Run, streams: HostileStreams) -> str:
+    """Judge the console rendering of the hostile run.
+
+    Args:
+        run: The completed run.
+        streams: The predicted child streams for this run.
+
+    Returns:
+        A one-line summary of what the console proved.
+
+    Raises:
+        ScenarioError: On any mismatch.
+    """
+    for name, byte in (("ESC", "\x1b"), ("NUL", "\x00")):
+        expect(
+            byte not in run.combined,
+            f"a raw {name} byte ({byte!r}) reached the console: the child can "
+            f"still address the terminal",
+        )
+    for line in HOSTILE_CONSOLE_FENCED_LINES:
+        expect(
+            f"\n{line}\n" in run.stdout,
+            f"the console did not render the fenced line {line!r}",
+        )
+    stdout_region, stderr_region = _fenced_capture_regions(run)
+    for label, region, text in (
+        ("stdout", stdout_region, streams.stdout.retained),
+        ("stderr", stderr_region, streams.stderr.retained),
+    ):
+        decoded = text.decode("utf-8", "replace")
+        expected = _logical_lines(decoded)
+        expect(
+            len(region) == expected,
+            f"the console fenced {len(region)} captured {label} lines, want "
+            f"{expected} — one per logical line of the retained capture",
+        )
+        for index, line in enumerate(region):
+            if not line.startswith(HOSTILE_GUTTER):
+                raise ScenarioError(
+                    f"captured {label} console line {index} escaped the gutter "
+                    f"and reads as mtest's own voice: {line[:200]!r}"
+                )
+    return (
+        f"console: {len(stdout_region)} + {len(stderr_region)} fenced lines, "
+        f"no raw ESC/NUL, exact escape tokens"
     )
 
 

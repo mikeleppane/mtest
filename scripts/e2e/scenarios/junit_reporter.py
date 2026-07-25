@@ -13,16 +13,243 @@ from scripts.checks.reports import json_stream as json_stream_check
 from scripts.checks.reports import junit as junit_check
 from scripts.checks.reports import junit_canonicalize
 from scripts.e2e.assertions import (
+    ELISION,
     INTERRUPT_TIMEOUT,
     SLOW_NOT_RUN_FILES,
     SLOW_TREE,
+    HostileStreams,
     arm_slow_tree,
     expect,
     expect_exit,
     expect_report,
+    hostile_actor,
     junit_not_run_files,
 )
-from scripts.e2e.runner import REPO_ROOT, SHORT_TIMEOUT, ScenarioContext
+from scripts.e2e.runner import (
+    REPO_ROOT,
+    SHORT_TIMEOUT,
+    Run,
+    ScenarioContext,
+    ScenarioError,
+)
+
+
+XML_RAW_FORBIDDEN = (
+    ("NUL", b"\x00"),
+    ("BEL", b"\x07"),
+    ("BS", b"\x08"),
+    ("VT", b"\x0b"),
+    ("FF", b"\x0c"),
+    ("ESC", b"\x1b"),
+)
+"""Control bytes XML 1.0 has no legal representation for, in any form.
+
+The reporter replaces each with U+FFFD, so a single occurrence anywhere in the
+published document — text, attribute, or raw byte — is a sanitization bypass.
+Tab, LF, and CR are absent on purpose: all three are legal `Char`s that the
+reporter deliberately passes through."""
+
+
+def xml_text_as_parsed(text: str) -> str:
+    """The documented JUnit sanitization of one untrusted text node.
+
+    Two rules compose here, and the assertion needs both:
+
+    - the reporter's own (`xml_escape_text`): `&`/`<`/`>` become entities, which
+      a parser gives back unchanged, so they are invisible at this level; Tab,
+      LF, and CR pass through literally; every other code point below `U+0020`,
+      and the noncharacters `U+FFFE`/`U+FFFF`, become `U+FFFD`, because XML 1.0
+      cannot represent them at all;
+    - the XML 1.0 parser's line-ending normalization, which folds a literal CRLF
+      or a lone CR to a single LF before any application sees it.
+
+    Args:
+        text: The text the reporter was handed, already lossy-decoded.
+
+    Returns:
+        What a conforming XML parser must hand back for that text node.
+    """
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    out: list[str] = []
+    for character in normalized:
+        if character in "\t\n":
+            out.append(character)
+        elif character < " " or character in "\ufffe\uffff":
+            out.append("\ufffd")
+        else:
+            out.append(character)
+    return "".join(out)
+
+
+def _only_child(parent: ET.Element, tag: str, what: str) -> ET.Element:
+    """The single `tag` child of `parent`, or a failure naming `what`.
+
+    Args:
+        parent: The element to search, one level deep.
+        tag: The child element name.
+        what: How to name the child in a failure.
+
+    Returns:
+        The single matching child.
+
+    Raises:
+        ScenarioError: If there is not exactly one.
+    """
+    found = [child for child in parent if child.tag == tag]
+    if len(found) != 1:
+        raise ScenarioError(
+            f"expected exactly one {what} (<{tag}>), got {len(found)}: "
+            f"{[child.tag for child in parent]}"
+        )
+    return found[0]
+
+
+def assert_hostile_junit_report(
+    run: Run, report_path: str | Path, streams: HostileStreams, rel_path: str
+) -> str:
+    """Judge the JUnit report of the one hostile-actor invocation.
+
+    The schema oracle comes first: `xmllint` against the vendored junit-10 XSD
+    decides well-formedness and structure, so an escaping bypass that produced a
+    document only a lenient reader could love fails here rather than downstream.
+    Everything after that is exact: the sanitized form of each text node is
+    computed from the actor's payload by `xml_text_as_parsed`, and the raw bytes
+    are checked for the control characters and the injected markup that
+    sanitization exists to remove.
+
+    Args:
+        run: The completed run, for diagnostics on a missing artifact.
+        report_path: Where the run was told to write the report.
+        streams: The predicted child streams for this run.
+        rel_path: The repo-relative source path under test.
+
+    Returns:
+        A one-line summary of what the report proved.
+
+    Raises:
+        ScenarioError: On any schema, arithmetic, or content mismatch.
+    """
+    actor = hostile_actor()
+    path = expect_report(run, report_path, "the hostile --junit-xml report")
+    try:
+        totals = junit_check.check_artifact(path)
+    except junit_check.CheckFailure as error:
+        raise ScenarioError(
+            f"the junit-10 oracle rejected the hostile report: {error}"
+        ) from error
+    expect(
+        (totals.tests, totals.failures, totals.errors, totals.skipped) == (1, 1, 0, 0),
+        f"the hostile report's totals are {totals}, want one failing row",
+    )
+
+    raw = path.read_bytes()
+    for name, byte in XML_RAW_FORBIDDEN:
+        expect(
+            byte not in raw,
+            f"a raw {name} byte ({byte!r}) reached the JUnit document; XML 1.0 "
+            f"cannot represent it and the reporter must have replaced it",
+        )
+    expect(
+        b"]]>" not in raw,
+        "the child's CDATA-closing sequence reached the document unescaped",
+    )
+    expect(
+        b"]]&gt;" in raw,
+        "the child's `]]>` is missing from the document entirely; the text node "
+        "it belongs to was dropped rather than escaped",
+    )
+    # The child's injected markup must appear only in its escaped spelling. A
+    # text node does not escape `"`, so the forged attribute value IS in the
+    # document as text; what may not be there is the tag that would give it
+    # meaning, and the element boundary the child tried to close early.
+    expect(
+        b'&lt;testcase name="forged"' in raw,
+        "the child's injected <testcase> markup is missing from the document "
+        "entirely; the text node carrying it was dropped rather than escaped",
+    )
+    expect(
+        raw.count(b"<testcase") == 1,
+        f"the document holds {raw.count(b'<testcase')} <testcase> elements, "
+        "want the one genuine row: the child's injected markup was written as "
+        "markup",
+    )
+    expect(
+        raw.count(b"<system-out>") == 1 and raw.count(b"</system-out>") == 1,
+        f"the document holds {raw.count(b'<system-out>')} opening and "
+        f"{raw.count(b'</system-out>')} closing <system-out> tags, want one of "
+        "each: the child closed the element early",
+    )
+
+    root = ET.parse(os.fspath(path)).getroot()
+    suite = _only_child(root, "testsuite", "testsuite for the hostile file")
+    expect(
+        suite.get("name") == rel_path,
+        f"the hostile suite is named {suite.get('name')!r}, want {rel_path!r}",
+    )
+    case = _only_child(suite, "testcase", "testcase row")
+    node = f"{rel_path}::{actor.TEST_NAME}"
+    expect(
+        case.get("name") == node,
+        f"the hostile row is named {case.get('name')!r}, want {node!r} — a row "
+        f"named for the orphan report header would mean the wrong block was "
+        f"selected",
+    )
+    failure = _only_child(case, "failure", "failure child of the hostile row")
+    expect(
+        failure.get("type") == "AssertionError",
+        f"the failure type is {failure.get('type')!r}, want 'AssertionError'",
+    )
+    _expect_xml_text(failure.text, streams.detail, "the <failure> body")
+    _expect_xml_text(
+        _only_child(suite, "system-out", "suite system-out").text,
+        streams.stdout.reporter_text,
+        "<system-out>",
+    )
+    _expect_xml_text(
+        _only_child(suite, "system-err", "suite system-err").text,
+        streams.stderr.reporter_text,
+        "<system-err>",
+    )
+    expect(
+        str(_only_child(suite, "system-out", "suite system-out").text).count(ELISION)
+        == 1,
+        "the bounded <system-out> carries no single elision marker",
+    )
+    return (
+        f"junit: xmllint/XSD accepts {len(raw)} bytes, exact sanitized "
+        f"system-out/err and <failure> body, no injected row"
+    )
+
+
+def _expect_xml_text(actual: str | None, source: str, what: str) -> None:
+    """Assert one text node equals the documented sanitization of `source`.
+
+    Args:
+        actual: The parsed text node.
+        source: The text the reporter was handed.
+        what: The node's name, for the failure message.
+
+    Raises:
+        ScenarioError: If the node is absent or differs, naming the first
+            differing offset.
+    """
+    expected = xml_text_as_parsed(source)
+    if actual == expected:
+        return
+    if actual is None:
+        raise ScenarioError(f"{what} carries no text at all")
+    for index in range(min(len(actual), len(expected))):
+        if actual[index] != expected[index]:
+            raise ScenarioError(
+                f"{what} differs from the documented sanitization at offset "
+                f"{index} (lengths {len(actual)} vs {len(expected)}):\n"
+                f"  got      {actual[max(index - 60, 0):index + 60]!r}\n"
+                f"  expected {expected[max(index - 60, 0):index + 60]!r}"
+            )
+    raise ScenarioError(
+        f"{what} has length {len(actual)}, want {len(expected)}; the shorter "
+        f"value is a prefix of the longer one"
+    )
 
 
 def s_junit_scratch_cleanup(context: ScenarioContext) -> str:

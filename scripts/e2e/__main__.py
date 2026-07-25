@@ -81,6 +81,7 @@ SCENARIOS: ScenarioRegistry = (
     ("default-suite", core.s_default_suite),
     ("hostile", core.s_hostile),
     ("hostile-console", core.s_hostile_console),
+    ("hostile-reporters", core.s_hostile_reporters),
     ("single-pass", core.s_single_pass),
     ("exitfirst", core.s_exitfirst),
     ("maxfail", core.s_maxfail),

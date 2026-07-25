@@ -341,6 +341,7 @@ E2E_SCENARIO_NAMES = (
     "default-suite",
     "hostile",
     "hostile-console",
+    "hostile-reporters",
     "single-pass",
     "exitfirst",
     "maxfail",
@@ -767,10 +768,21 @@ def check_suite_layout() -> None:
 
 
 def check_exec_fixture_layout() -> None:
-    """Exec subprocess actors live with tests, not developer harnesses."""
+    """Exec subprocess actors live with tests, not developer harnesses.
+
+    Membership is exact and fail-closed: an unlisted actor is a finding, not a
+    tolerated extra. The single exemption is `__pycache__`, which CPython writes
+    into this directory the moment anything imports an actor as a module — the
+    E2E harness does, to predict the hostile actor's payload — and which is
+    generated output rather than a fixture anyone chose to add.
+    """
     _require_nonempty("exec fixture", EXEC_FIXTURES)
     fixture_dir = REPO_ROOT / "tests" / "fixtures" / "exec"
-    actual = {path.name for path in fixture_dir.iterdir()} if fixture_dir.exists() else set()
+    actual = (
+        {path.name for path in fixture_dir.iterdir() if path.name != "__pycache__"}
+        if fixture_dir.exists()
+        else set()
+    )
     if actual != EXEC_FIXTURES:
         raise AssertionError(
             "exec fixture membership mismatch: "
@@ -883,9 +895,9 @@ def check_e2e_layout() -> None:
             "E2E scenario membership/order mismatch: "
             f"expected={list(E2E_SCENARIO_NAMES)}, actual={list(scenario_names)}"
         )
-    if len(scenario_names) != 90 or len(set(scenario_names)) != len(scenario_names):
+    if len(scenario_names) != 91 or len(set(scenario_names)) != len(scenario_names):
         raise AssertionError(
-            "E2E scenarios must contain 90 unique names in the pinned order"
+            "E2E scenarios must contain 91 unique names in the pinned order"
         )
     referenced = {
         *rows,
