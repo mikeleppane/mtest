@@ -503,3 +503,71 @@ def test_fail_detail_header_lookalike_reconciles_valid() raises:
     assert_equal(len(r.rows), 1)
     assert_true(r.rows[0].outcome == Outcome.FAIL)
     assert_true("Running 1 tests for" in r.rows[0].detail)
+
+
+def _crlf(text: String) -> String:
+    """`text` with every LF turned into a CRLF pair.
+
+    Args:
+        text: The LF-terminated report block to convert.
+
+    Returns:
+        The same block with DOS line endings.
+    """
+    var out = String("")
+    for cp in text.codepoint_slices():
+        var c = String(cp)
+        if c == "\n":
+            out += "\r\n"
+        else:
+            out += c
+    return out^
+
+
+def test_crlf_report_is_intentional_off_grammar_drift() raises:
+    # `_split_lines` splits on LF only, so a CRLF report leaves a CR as the last
+    # byte of every line and NOTHING in the grammar matches: the trailing space
+    # the header, summary, and trailer each end with is no longer terminal. The
+    # identity check runs first, so a wholly CRLF block is rejected there and
+    # reads ABSENT rather than reaching the framing checks. That is the drift
+    # being pinned — the parser is deliberately LF-only, and a CR anywhere in a
+    # structural line takes the report out of the grammar. No rows, no summary.
+    var r = parse_report(_crlf(_raw_two_row_fail()), SP)
+    assert_true(
+        r.verdict == ReportVerdict.ABSENT,
+        "verdict code " + String(r.verdict.code),
+    )
+    assert_equal(len(r.rows), 0)
+    assert_equal(r.declared_count, 0)
+    assert_equal(r.summary_passed, 0)
+    assert_equal(r.summary_failed, 0)
+    assert_equal(r.summary_skipped, 0)
+    assert_false(r.has_trailer)
+
+
+def test_crlf_after_a_matching_header_is_off_grammar() raises:
+    # The same drift once identity is out of the way: an LF header matches, so
+    # the CR is caught one step later, by the terminal-framing check. The CR on
+    # the Summary line defeats the exact ` <n> skipped ` field match, leaving no
+    # terminal Summary at all.
+    var text = (
+        "Running 2 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    PASS [ 0.012 ] test_one\r\n"
+        "    FAIL [ 0.030 ] test_two\r\n"
+        "      At /home/x/proj/tests/test_a.mojo:5:3: AssertionError: nope\r\n"
+        "--------\r\n"
+        "Summary [ 0.042 ] 2 tests run: 1 passed , 1 failed , 0 skipped \r\n"
+        "Test suite' /home/x/proj/tests/test_a.mojo 'failed! "
+    )
+    var r = parse_report(text, SP)
+    assert_true(
+        r.verdict == ReportVerdict.OFF_GRAMMAR,
+        "verdict code " + String(r.verdict.code),
+    )
+    assert_equal(r.reason, "matching header without terminal framing")
+    assert_equal(len(r.rows), 0)
+    assert_equal(r.declared_count, 0)
+    assert_equal(r.summary_passed, 0)
+    assert_equal(r.summary_failed, 0)
+    assert_equal(r.summary_skipped, 0)
+    assert_false(r.has_trailer)

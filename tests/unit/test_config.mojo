@@ -5,9 +5,20 @@ mojo-path resolution helper.
 file asserts two things exhaustively: every field of a freshly-built config
 sits at its contract default, and `resolve_mojo_path` implements the
 flag > MTEST_MOJO env > "mojo" precedence for all four presence combinations.
+
+It also holds the hostile-token quoting tables. `shell_quote` is the runner's
+only quoting implementation and every reproduce line — the console's, and the
+one `build_flags_string` composes — inherits its safe-character set, so the
+three tables here pin one shell metacharacter set end to end. The expected
+values are exact POSIX single-token strings compared as data: nothing here
+executes a shell, because doing so would turn a quoting assertion into a
+shell-behavior assertion and would run the very tokens the set neutralizes.
+The newline and tab rows record today's raw representation, in which the quoted
+token still carries a literal newline or tab and so still spans physical lines.
 """
 from std.testing import assert_equal, assert_false, assert_true
 
+from mtest.cli import build_flags_string
 from mtest.config import (
     AnnotationsMode,
     ColorWhen,
@@ -162,3 +173,123 @@ def test_shell_join_empty_list_is_empty_string() raises:
 def test_shell_join_quotes_each_token_and_space_joins() raises:
     var tokens: List[String] = ["mojo", "build", "-I", "my dir"]
     assert_equal(shell_join(tokens), "mojo build -I 'my dir'")
+
+
+def _hostile_tokens() -> List[String]:
+    """The hostile quoting corpus, in the fixed order the tables use.
+
+    Returns:
+        One token per shell hazard: word splitting, quote breakout, command
+        substitution, parameter expansion, command separation, globbing,
+        escaping, the three control characters a terminal reacts to, a
+        multi-byte scalar, and the empty token.
+    """
+    return [
+        "plain",
+        "space here",
+        "single'quote",
+        "$(touch pwned)",
+        "`cmd`",
+        "$HOME",
+        "semi;colon",
+        "star*glob",
+        "question?glob",
+        "bracket[abc]",
+        "back\\slash",
+        "line\nbreak",
+        "tab\tvalue",
+        "escape-\x1b",
+        "nul-\x00",
+        "snowman-☃",
+        "",
+    ]
+
+
+def _assert_quote(token: String, expected: String, label: String) raises:
+    """Assert `shell_quote(token)` is byte-for-byte `expected`.
+
+    The comparison is pure data. No shell is spawned, so a token carrying a
+    command substitution can never run while being checked.
+
+    Args:
+        token: The raw token one table row feeds to the quoter.
+        expected: The complete POSIX single-token string the row must produce.
+        label: The row name, surfaced when the row drifts.
+
+    Raises:
+        Error: The quoted token differed from `expected`.
+    """
+    assert_equal(shell_quote(token), expected, label)
+
+
+def test_shell_quote_neutralizes_every_hostile_token() raises:
+    _assert_quote("plain", "plain", "safe token passes through")
+    _assert_quote("space here", "'space here'", "word splitting")
+    _assert_quote("single'quote", "'single'\\''quote'", "quote breakout")
+    _assert_quote("$(touch pwned)", "'$(touch pwned)'", "command substitution")
+    _assert_quote("`cmd`", "'`cmd`'", "backtick substitution")
+    _assert_quote("$HOME", "'$HOME'", "parameter expansion")
+    _assert_quote("semi;colon", "'semi;colon'", "command separator")
+    _assert_quote("star*glob", "'star*glob'", "star glob")
+    _assert_quote("question?glob", "'question?glob'", "question glob")
+    _assert_quote("bracket[abc]", "'bracket[abc]'", "bracket glob")
+    _assert_quote("back\\slash", "'back\\slash'", "backslash escape")
+    # Single quotes are literal in POSIX sh, so the newline, tab, ESC and NUL
+    # all survive verbatim inside the quoted token today. The console gains a
+    # separate display-only neutralization later; this is the raw baseline.
+    _assert_quote("line\nbreak", "'line\nbreak'", "literal newline")
+    _assert_quote("tab\tvalue", "'tab\tvalue'", "literal tab")
+    _assert_quote("escape-\x1b", "'escape-\x1b'", "literal ESC")
+    _assert_quote("nul-\x00", "'nul-\x00'", "literal NUL")
+    _assert_quote("snowman-☃", "'snowman-☃'", "multi-byte scalar")
+    _assert_quote("", "''", "empty token")
+
+
+def test_shell_join_renders_the_whole_hostile_corpus() raises:
+    assert_equal(
+        shell_join(_hostile_tokens()),
+        (
+            "plain 'space here' 'single'\\''quote' '$(touch pwned)' '`cmd`'"
+            " '$HOME' 'semi;colon' 'star*glob' 'question?glob' 'bracket[abc]'"
+            " 'back\\slash' 'line\nbreak' 'tab\tvalue' 'escape-\x1b'"
+            " 'nul-\x00' 'snowman-☃' ''"
+        ),
+    )
+
+
+def test_shell_join_keeps_a_hostile_token_a_single_argv_word() raises:
+    # Each hostile token stays one word: the only unquoted spaces are the
+    # separators the join itself introduces.
+    var tokens: List[String] = ["mojo", "build", "$(touch pwned)", "a b", ""]
+    assert_equal(shell_join(tokens), "mojo build '$(touch pwned)' 'a b' ''")
+
+
+def test_build_flags_string_quotes_every_hostile_value() raises:
+    var c = RunnerConfig.default()
+    c.mojo_path = "$(touch pwned)"
+    c.include_paths = ["star*glob", "back\\slash"]
+    c.build_args = ["line\nbreak", "tab\tvalue", ""]
+    c.precompiles = [
+        Precompile(src="semi;colon", out=Optional[String]("`cmd`")),
+        Precompile(src="snowman-☃", out=Optional[String](None)),
+    ]
+    assert_equal(
+        build_flags_string(c),
+        (
+            "--mojo '$(touch pwned)' -I 'star*glob' -I 'back\\slash'"
+            " --build-arg 'line\nbreak' --build-arg 'tab\tvalue' --build-arg ''"
+            " --precompile 'semi;colon:`cmd`' --precompile 'snowman-☃'"
+        ),
+    )
+
+
+def test_build_flags_string_quotes_control_characters_verbatim() raises:
+    var c = RunnerConfig.default()
+    c.build_args = ["escape-\x1b", "nul-\x00", "single'quote"]
+    assert_equal(
+        build_flags_string(c),
+        (
+            "--build-arg 'escape-\x1b' --build-arg 'nul-\x00'"
+            " --build-arg 'single'\\''quote'"
+        ),
+    )

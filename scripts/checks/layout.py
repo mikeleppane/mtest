@@ -75,6 +75,7 @@ UNIT_SUITES = {
     "test_cli_parse.mojo",
     "test_config.mojo",
     "test_config_file.mojo",
+    "test_config_lossy_utf8.mojo",
     "test_config_resolve.mojo",
     "test_config_show.mojo",
     "test_config_state.mojo",
@@ -210,6 +211,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_cli_parse.mojo",
     "tests/unit/test_config.mojo",
     "tests/unit/test_config_file.mojo",
+    "tests/unit/test_config_lossy_utf8.mojo",
     "tests/unit/test_config_resolve.mojo",
     "tests/unit/test_config_show.mojo",
     "tests/unit/test_config_state.mojo",
@@ -260,7 +262,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 1213
+CLASSIFIED_TEST_COUNT = 1231
 CLASSIFIED_ROOTS = (
     Path("tests/unit"),
     Path("tests/integration"),
