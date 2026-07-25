@@ -21,7 +21,8 @@ Local compatibility and hardening changes are limited to:
 - parser depth, node, and table-update budgets
 - duplicate table, key, and inline-table rejection
 - TOML 1.0 escape handling and positioned lexer failures
-- terminated, control-free strings and Unicode escape decoding
+- terminated, control-free strings and Unicode escape decoding,
+  including refusing a NUL decoded from a `\u0000` escape
 - pre-lexer scalar, structural-node, and depth budgets
 - a required line end after a key/value pair, so `a = 1 b = 2` is refused
   rather than accepted as two settings

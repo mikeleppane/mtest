@@ -377,7 +377,18 @@ struct Lexer:
                                 + " hex digits"
                             )
                         hex_str += self.advance()
-                    value += String(chr(self.hex_to_int(hex_str)))
+                    var code_point = self.hex_to_int(hex_str)
+                    # A decoded NUL is not representable at the C boundary
+                    # this configuration ultimately reaches: a path carrying
+                    # one is silently truncated there, so the value that is
+                    # opened is not the value the document named. The raw-byte
+                    # scan already refuses a literal NUL; an escape must not
+                    # be a way around it.
+                    if code_point == 0:
+                        raise Error(
+                            "Invalid Unicode escape: NUL is not permitted"
+                        )
+                    value += String(chr(code_point))
                 else:
                     raise Error("Invalid TOML basic-string escape")
             else:

@@ -1376,7 +1376,8 @@ serial = true
 A document must also fit the parser's work budgets, which exist so hostile
 input cannot make parsing unbounded: at most 4 MiB of source, 64 levels of
 structural nesting, 16,384 structural nodes (`[`, `{`, `=`, `,`), 512
-top-level table headers and assignments, and 1 MiB in any single scalar.
+top-level table headers and assignments, and 1 MiB in any single scalar
+or comment.
 Exceeding one is an exit-4 usage error whose diagnostic names the budget and
 its limit. The budgets are sized above anything this schema can express — an
 exclude list of a thousand globs and dozens of `[[override]]` tables are both

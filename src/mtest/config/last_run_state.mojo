@@ -408,6 +408,17 @@ def _record_rejection(record: LastRunRecord) -> String:
             or split.name_part.byte_length() == 0
         ):
             return "invalid node-id shape"
+        if split.file_part.startswith("/"):
+            return "identifier is not root-relative"
+    else:
+        # §26 defines every record as root-relative, and a `file` record is a
+        # path, never a node id. Accepting an absolute path or a `::` here let
+        # a record that can never match anything survive as a live entry and
+        # be reported only as "no longer exists".
+        if record.identifier.startswith("/"):
+            return "identifier is not root-relative"
+        if "::" in record.identifier:
+            return "file record carries a node-id separator"
     return ""
 
 
