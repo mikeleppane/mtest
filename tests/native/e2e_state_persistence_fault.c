@@ -13,9 +13,9 @@
         };
 #else
 #define MTEST_PRELOAD_VARIABLE "LD_PRELOAD"
+#include <dlfcn.h>
 #endif
 
-#include <dlfcn.h>
 #include <errno.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -38,6 +38,38 @@ enum mtest_fault_mode {
     MTEST_FAULT_RENAME,
 };
 
+static enum mtest_fault_mode mtest_mode;
+static int mtest_state_fd = -1;
+static int mtest_write_phase;
+static const int mtest_eintr_count = 2048;
+
+/*
+ * Reach the real implementations. The two platforms differ, and the difference
+ * is not cosmetic: on macOS, dlsym(RTLD_NEXT, name) resolves to the interposer
+ * itself, so pointers obtained that way turn every passthrough into unbounded
+ * self-recursion. dyld does not apply interposing tuples to the image that
+ * declares them, so direct calls by name are the supported escape.
+ */
+#if defined(__APPLE__)
+
+static int mtest_pass_mkstemp(char *template) {
+    return mkstemp(template);
+}
+
+static ssize_t mtest_pass_write(int fd, const void *buffer, size_t count) {
+    return write(fd, buffer, count);
+}
+
+static int mtest_pass_close(int fd) {
+    return close(fd);
+}
+
+static int mtest_pass_rename(const char *source, const char *destination) {
+    return rename(source, destination);
+}
+
+#else
+
 typedef int (*mtest_mkstemp_fn)(char *);
 typedef ssize_t (*mtest_write_fn)(int, const void *, size_t);
 typedef int (*mtest_close_fn)(int);
@@ -47,10 +79,6 @@ static mtest_mkstemp_fn mtest_real_mkstemp;
 static mtest_write_fn mtest_real_write;
 static mtest_close_fn mtest_real_close;
 static mtest_rename_fn mtest_real_rename;
-static enum mtest_fault_mode mtest_mode;
-static int mtest_state_fd = -1;
-static int mtest_write_phase;
-static const int mtest_eintr_count = 2048;
 
 static void mtest_copy_symbol(void *target, size_t target_size, const char *name) {
     void *symbol = dlsym(RTLD_NEXT, name);
@@ -60,15 +88,51 @@ static void mtest_copy_symbol(void *target, size_t target_size, const char *name
     }
 }
 
+static int mtest_pass_mkstemp(char *template) {
+    if (mtest_real_mkstemp == NULL) {
+        errno = EIO;
+        return -1;
+    }
+    return mtest_real_mkstemp(template);
+}
+
+static ssize_t mtest_pass_write(int fd, const void *buffer, size_t count) {
+    if (mtest_real_write == NULL) {
+        errno = EIO;
+        return -1;
+    }
+    return mtest_real_write(fd, buffer, count);
+}
+
+static int mtest_pass_close(int fd) {
+    if (mtest_real_close == NULL) {
+        errno = EIO;
+        return -1;
+    }
+    return mtest_real_close(fd);
+}
+
+static int mtest_pass_rename(const char *source, const char *destination) {
+    if (mtest_real_rename == NULL) {
+        errno = EIO;
+        return -1;
+    }
+    return mtest_real_rename(source, destination);
+}
+
+#endif
+
 __attribute__((constructor)) static void mtest_initialize_faults(void) {
     const char *requested = getenv("MTEST_STATE_FAULT");
 
+#if !defined(__APPLE__)
     mtest_copy_symbol(
         &mtest_real_mkstemp, sizeof(mtest_real_mkstemp), "mkstemp"
     );
     mtest_copy_symbol(&mtest_real_write, sizeof(mtest_real_write), "write");
     mtest_copy_symbol(&mtest_real_close, sizeof(mtest_real_close), "close");
     mtest_copy_symbol(&mtest_real_rename, sizeof(mtest_real_rename), "rename");
+#endif
 
     if (requested != NULL && strcmp(requested, "short-eintr") == 0) {
         mtest_mode = MTEST_FAULT_SHORT_EINTR;
@@ -83,13 +147,8 @@ __attribute__((constructor)) static void mtest_initialize_faults(void) {
 }
 
 static int mtest_faulting_mkstemp(char *template) {
-    int fd;
+    int fd = mtest_pass_mkstemp(template);
 
-    if (mtest_real_mkstemp == NULL) {
-        errno = EIO;
-        return -1;
-    }
-    fd = mtest_real_mkstemp(template);
     if (
         fd >= 0 && template != NULL
         && strstr(template, "lastrun.tmp.") != NULL
@@ -115,11 +174,7 @@ static ssize_t mtest_faulting_write(
             size_t short_count = count > 3 ? 3 : 1;
 
             mtest_write_phase = 1;
-            if (mtest_real_write == NULL) {
-                errno = EIO;
-                return -1;
-            }
-            return mtest_real_write(fd, buffer, short_count);
+            return mtest_pass_write(fd, buffer, short_count);
         }
         if (
             mtest_mode == MTEST_FAULT_SHORT_EINTR
@@ -131,29 +186,19 @@ static ssize_t mtest_faulting_write(
             return -1;
         }
     }
-    if (mtest_real_write == NULL) {
-        errno = EIO;
-        return -1;
-    }
-    return mtest_real_write(fd, buffer, count);
+    return mtest_pass_write(fd, buffer, count);
 }
 
 static int mtest_faulting_close(int fd) {
     if (fd == mtest_state_fd) {
         mtest_state_fd = -1;
         if (mtest_mode == MTEST_FAULT_CLOSE) {
-            if (mtest_real_close != NULL) {
-                (void)mtest_real_close(fd);
-            }
+            (void)mtest_pass_close(fd);
             errno = EIO;
             return -1;
         }
     }
-    if (mtest_real_close == NULL) {
-        errno = EIO;
-        return -1;
-    }
-    return mtest_real_close(fd);
+    return mtest_pass_close(fd);
 }
 
 static int mtest_faulting_rename(
@@ -166,11 +211,7 @@ static int mtest_faulting_rename(
         errno = EIO;
         return -1;
     }
-    if (mtest_real_rename == NULL) {
-        errno = EIO;
-        return -1;
-    }
-    return mtest_real_rename(source, destination);
+    return mtest_pass_rename(source, destination);
 }
 
 #if defined(__APPLE__)
