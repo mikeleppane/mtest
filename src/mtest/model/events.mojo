@@ -56,6 +56,13 @@ struct EventKind(Equatable, ImplicitlyCopyable, Movable):
     comptime CRASH_ATTRIBUTION = Self(10)
     comptime PROGRESS = Self(11)
 
+    comptime COUNT = 12
+    """The number of distinct kinds in the vocabulary.
+
+    Every exhaustive proof over the event set — the composite fan-out, the
+    distinctness table — is anchored to this, so adding a kind without
+    extending those proofs fails loudly instead of narrowing them in silence."""
+
     def __eq__(self, other: Self) -> Bool:
         """Two kinds are equal iff their discriminants match."""
         return self.value == other.value

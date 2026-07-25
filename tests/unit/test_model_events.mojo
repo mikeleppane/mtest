@@ -513,6 +513,10 @@ def test_event_kinds_are_distinct() raises:
         EventKind.CRASH_ATTRIBUTION,
         EventKind.PROGRESS,
     ]
+    # Anchor the hand-written table to the model's own count, so a kind added
+    # without extending this list fails here rather than being tested by a
+    # table that silently stopped covering the vocabulary.
+    assert_equal(len(kinds), EventKind.COUNT)
     for i in range(len(kinds)):
         for j in range(len(kinds)):
             if i == j:

@@ -30,7 +30,12 @@ from mtest.report import RecordingReporter, ConsoleReporter, CompositeReporter
 
 
 def _closed_event_vocabulary() -> List[EventKind]:
-    """Every `EventKind` in the closed set, in discriminant order."""
+    """Every `EventKind` in the closed set, in discriminant order.
+
+    Anchored to `EventKind.COUNT` by its caller, so a kind added to the model
+    cannot leave this transcription — and the fan-out proof built on it —
+    quietly covering less than the whole vocabulary.
+    """
     return [
         EventKind.SESSION_STARTED,
         EventKind.WARNING,
@@ -113,7 +118,10 @@ def _one_of_every_kind() -> List[Event]:
 def test_the_emitted_stream_covers_the_closed_event_vocabulary() raises:
     # The fan-out proof is only exhaustive if the stream itself is: one event
     # per kind, in the vocabulary's own order, over contiguous discriminants.
+    # The length is anchored to the model's own COUNT, so a thirteenth kind
+    # turns this red instead of leaving a stale twelve agreeing with itself.
     var expected = _closed_event_vocabulary()
+    assert_equal(len(expected), EventKind.COUNT)
     var stream = _one_of_every_kind()
     assert_equal(len(stream), len(expected))
     for i in range(len(expected)):

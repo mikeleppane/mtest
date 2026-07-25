@@ -573,6 +573,22 @@ def check_classified_entrypoint(
         )
 
 
+def _reraise_walk_error(error: OSError) -> None:
+    """Refuse to read an unreadable classified subtree as an empty one.
+
+    `os.walk` swallows a directory-listing failure by default and yields
+    nothing for that subtree, which would let an unreadable directory hide an
+    unexecuted Mojo file behind a green gate.
+
+    Args:
+        error: The listing failure `os.walk` would otherwise have discarded.
+
+    Raises:
+        OSError: Always, re-raising `error` unchanged.
+    """
+    raise error
+
+
 def classified_mojo_universe(root: Path) -> tuple[set[Path], set[Path]]:
     """Return regular and symlinked Mojo paths beneath both classified roots.
 
@@ -580,7 +596,8 @@ def classified_mojo_universe(root: Path) -> tuple[set[Path], set[Path]]:
     without following directory symlinks. A regular file joins the Mojo
     universe when `.mojo` appears anywhere in its suffixes, so a misnamed
     `helper.mojo` and a parked `test_probe.mojo.disabled` are both visible to
-    the caller rather than invisible to a `test_*.mojo` glob.
+    the caller rather than invisible to a `test_*.mojo` glob. A classified root
+    that is itself a symlink is reported rather than walked through.
 
     Args:
         root: The repository root the classified suite directories live under.
@@ -588,14 +605,25 @@ def classified_mojo_universe(root: Path) -> tuple[set[Path], set[Path]]:
     Returns:
         A pair of root-relative path sets: every regular Mojo-like file, and
         every symlinked entry regardless of its target or suffix.
+
+    Raises:
+        OSError: A directory beneath a classified root could not be listed. An
+            unreadable subtree is a failure, never an empty one.
     """
     regular: set[Path] = set()
     symlinked: set[Path] = set()
     for classified_root in CLASSIFIED_ROOTS:
         absolute = root / classified_root
+        if absolute.is_symlink():
+            # `os.walk` always walks its top argument and `is_dir` follows the
+            # link, so a relocated root has to be rejected before the walk.
+            symlinked.add(classified_root)
+            continue
         if not absolute.is_dir():
             continue
-        for directory, dirnames, filenames in os.walk(absolute, followlinks=False):
+        for directory, dirnames, filenames in os.walk(
+            absolute, onerror=_reraise_walk_error, followlinks=False
+        ):
             current = Path(directory)
             retained: list[str] = []
             for name in dirnames:

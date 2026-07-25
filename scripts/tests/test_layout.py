@@ -165,6 +165,48 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
                         ):
                             layout.check_classified_mojo_inventory(repo)
 
+    def test_an_unreadable_classified_subtree_is_an_error_not_an_absence(
+        self,
+    ) -> None:
+        if os.geteuid() == 0:
+            self.skipTest("root bypasses the directory permission being tested")
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            self._accepted_tree(repo)
+            hidden = repo / "tests" / "unit" / "hidden"
+            hidden.mkdir()
+            (hidden / "evil.mojo").write_text("", encoding="utf-8")
+            hidden.chmod(0o000)
+            try:
+                with self.assertRaises(PermissionError):
+                    layout.classified_mojo_universe(repo)
+                with mock.patch.object(
+                    layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)
+                ):
+                    with self.assertRaises(PermissionError):
+                        layout.check_classified_mojo_inventory(repo)
+            finally:
+                hidden.chmod(0o700)
+
+    def test_a_symlinked_classified_root_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            self._accepted_tree(repo)
+            relocated = repo / "elsewhere"
+            (repo / "tests" / "unit").rename(relocated)
+            os.symlink(relocated, repo / "tests" / "unit")
+
+            _regular, symlinked = layout.classified_mojo_universe(repo)
+            self.assertEqual(symlinked, {Path("tests/unit")})
+
+            with mock.patch.object(
+                layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)
+            ):
+                with self.assertRaisesRegex(
+                    AssertionError, "symlinked classified path"
+                ):
+                    layout.check_classified_mojo_inventory(repo)
+
     def test_a_registered_suite_that_vanished_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp)

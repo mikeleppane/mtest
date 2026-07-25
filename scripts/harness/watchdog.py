@@ -7,6 +7,7 @@ import argparse
 from dataclasses import dataclass
 import math
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -34,8 +35,13 @@ _PIPE_CHUNK_BYTES = 65536
 # a marker, so it is discarded rather than retained, which bounds the memory a
 # flooding child can make the supervisor hold.
 _MARKER_SCAN_LIMIT_BYTES = 65536
-# How long a drainer may still hold a pipe open after the child group is gone.
-_DRAIN_JOIN_SECONDS = 10.0
+# The whole budget for finishing the drain after the child has been reaped. Its
+# own buffered bytes are already in the pipe by then, so this only ever expires
+# when a leaked descendant still holds the write end — output the supervisor
+# deliberately stops waiting for rather than stalling every run behind it.
+DRAIN_SETTLE_SECONDS = 2.0
+# How long a drainer may block in one poll before it re-checks its stop flag.
+_DRAIN_POLL_SECONDS = 0.05
 
 
 @dataclass(frozen=True)
@@ -96,37 +102,122 @@ class _WatchdogCancellation(BaseException):
         self.signum = signum
 
 
+class _StreamTee:
+    """Forward drained child bytes to one caller stream until it is sealed.
+
+    Owns the only writer to that stream for the child's lifetime and can be
+    sealed shut. `seal` takes the same lock a write holds, so once it returns
+    no drainer can emit another byte and the supervisor's own diagnostic is
+    guaranteed to be the last thing written.
+    """
+
+    def __init__(self, stream: object) -> None:
+        """Wrap one caller stream, preferring its byte buffer.
+
+        Args:
+            stream: The caller's original `sys.stdout` or `sys.stderr`, or None
+                when the interpreter has none.
+        """
+        self._binary = getattr(stream, "buffer", None)
+        self._text = (
+            stream if self._binary is None and hasattr(stream, "write") else None
+        )
+        self._lock = threading.Lock()
+
+    def write(self, chunk: bytes) -> None:
+        """Emit one drained chunk, or drop it once the stream is unusable.
+
+        Args:
+            chunk: Raw bytes read from the child's pipe.
+        """
+        with self._lock:
+            if self._binary is not None:
+                try:
+                    self._binary.write(chunk)
+                    self._binary.flush()
+                except (OSError, ValueError):
+                    # The contributor's stream is gone. The drainer keeps
+                    # reading regardless, so the child cannot deadlock on a
+                    # pipe nobody is emptying.
+                    self._binary = None
+                return
+            if self._text is not None:
+                # A caller stream without a byte buffer — a redirected StringIO,
+                # say — still receives the bytes rather than losing them.
+                try:
+                    self._text.write(chunk.decode("utf-8", errors="replace"))
+                    self._text.flush()
+                except (OSError, ValueError, AttributeError):
+                    self._text = None
+
+    def seal(self) -> None:
+        """Refuse every later write, waiting out any write already in flight."""
+        with self._lock:
+            self._binary = None
+            self._text = None
+
+
+@dataclass(frozen=True)
+class _DrainState:
+    """The live drainers for one captured child, and how to stop them."""
+
+    threads: tuple[threading.Thread, ...]
+    """The started drainer threads, in stdout-then-stderr order."""
+    tees: tuple[_StreamTee, ...]
+    """The caller-stream writers those drainers own, in the same order."""
+    stop: threading.Event
+    """Set to make every drainer leave its poll loop at the next tick."""
+
+
 def _tee_stream(
     source: IO[bytes],
-    sink: IO[bytes] | None,
+    tee: _StreamTee,
     retention: MarkerRetention | None,
+    stop: threading.Event,
 ) -> None:
-    """Drain one captured pipe onto the caller's stream, retaining a marker.
+    """Drain one captured pipe onto a caller stream, retaining a marker.
+
+    Polls rather than blocking in a read so a stop request is honored within
+    one tick even while a leaked descendant still holds the pipe's write end.
 
     Args:
         source: The child's pipe read end. Closed before returning.
-        sink: The caller's original byte stream, or None when it has none.
+        tee: The caller-stream writer this pipe's bytes are forwarded to.
         retention: Marker state to update in place, or None to only tee.
+        stop: Shared flag that ends the drain without waiting for end of file.
     """
     prefix = b"" if retention is None else retention.prefix.encode("utf-8")
     pending = b""
     discarding = False
     try:
-        while True:
+        descriptor = source.fileno()
+    except (OSError, ValueError):
+        return
+    try:
+        while not stop.is_set():
             try:
-                chunk = source.read1(_PIPE_CHUNK_BYTES)
+                readable, _writable, _errored = select.select(
+                    [descriptor], [], [], _DRAIN_POLL_SECONDS
+                )
+            except (OSError, ValueError):
+                break
+            if not readable:
+                continue
+            try:
+                chunk = os.read(descriptor, _PIPE_CHUNK_BYTES)
+            except InterruptedError:
+                continue
             except (OSError, ValueError):
                 break
             if not chunk:
                 break
-            if sink is not None:
-                try:
-                    sink.write(chunk)
-                    sink.flush()
-                except (OSError, ValueError):
-                    # The contributor's stream is gone; keep draining so the
-                    # child cannot deadlock on a pipe nobody is reading.
-                    sink = None
+            # Each stream is drained by its own thread, so the interleaving of
+            # stdout against stderr at a shared terminal is now decided by
+            # thread scheduling rather than by the kernel's write ordering: a
+            # read boundary can split a line and let the other stream appear
+            # mid-line. That is inherent to draining two pipes concurrently,
+            # which is what capturing the marker requires; it is not a defect.
+            tee.write(chunk)
             if retention is None:
                 continue
             pending += chunk
@@ -152,7 +243,7 @@ def _tee_stream(
 def _start_drainers(
     process: subprocess.Popen[object],
     retention: MarkerRetention,
-) -> list[threading.Thread]:
+) -> _DrainState:
     """Start one drainer per captured pipe, before any blocking child wait.
 
     Args:
@@ -160,30 +251,64 @@ def _start_drainers(
         retention: Marker state the stdout drainer updates in place.
 
     Returns:
-        The started drainer threads, in stdout-then-stderr order.
+        The started drainers, their caller-stream writers, and their stop flag.
     """
+    stop = threading.Event()
     targets = (
-        (process.stdout, getattr(sys.stdout, "buffer", None), retention),
-        (process.stderr, getattr(sys.stderr, "buffer", None), None),
+        (process.stdout, sys.stdout, retention),
+        (process.stderr, sys.stderr, None),
     )
     threads: list[threading.Thread] = []
-    for source, sink, marker in targets:
+    tees: list[_StreamTee] = []
+    for source, stream, marker in targets:
         if source is None:
             continue
+        tee = _StreamTee(stream)
         thread = threading.Thread(
             target=_tee_stream,
-            args=(source, sink, marker),
+            args=(source, tee, marker, stop),
             daemon=True,
         )
         thread.start()
         threads.append(thread)
-    return threads
+        tees.append(tee)
+    return _DrainState(tuple(threads), tuple(tees), stop)
 
 
-def _join_drainers(threads: list[threading.Thread]) -> None:
-    """Wait a bounded time for every drainer to reach end of file."""
-    for thread in threads:
-        thread.join(_DRAIN_JOIN_SECONDS)
+def _settle_drainers(state: _DrainState | None) -> None:
+    """Finish the drain within a fixed budget, then seal both caller streams.
+
+    Waits only briefly for a natural end of file: once the child is reaped its
+    buffered bytes are already in the pipe, so a longer wait would only be
+    waiting on a leaked descendant's future output, which this supervisor does
+    not owe the caller. Idempotent, so a cancellation that interrupts one call
+    is fully settled by the next.
+
+    Args:
+        state: The live drainers, or None when the child was not captured.
+    """
+    if state is None:
+        return
+    deadline = time.monotonic() + DRAIN_SETTLE_SECONDS
+    for thread in state.threads:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        thread.join(remaining)
+    _seal_drainers(state)
+
+
+def _seal_drainers(state: _DrainState | None) -> None:
+    """Stop every drainer and shut its caller stream, without blocking on it.
+
+    Args:
+        state: The live drainers, or None when the child was not captured.
+    """
+    if state is None:
+        return
+    state.stop.set()
+    for tee in state.tees:
+        tee.seal()
 
 
 def _terminate_process_group(process: subprocess.Popen[object]) -> None:
@@ -356,7 +481,7 @@ def run_command(
     process: subprocess.Popen[object] | None = None
     pending_signum: int | None = None
     previous_handlers: dict[int, signal.Handlers] = {}
-    drainers: list[threading.Thread] = []
+    drain_state: _DrainState | None = None
     captured = subprocess.PIPE if marker_retention is not None else None
 
     def request_cancellation(signum: int, _frame: object) -> None:
@@ -403,13 +528,21 @@ def run_command(
                 # Both pipes must be draining before any blocking wait: a child
                 # that outruns a 64 KiB pipe buffer would otherwise block on
                 # write while the supervisor blocks on wait.
-                drainers = _start_drainers(process, marker_retention)
+                drain_state = _start_drainers(process, marker_retention)
             if pending_signum is not None:
                 raise _WatchdogCancellation(pending_signum)
             try:
                 status = process.wait(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
                 _terminate_process_group(process)
+                try:
+                    _settle_drainers(drain_state)
+                except _WatchdogCancellation:
+                    # The group is already swept and the deadline sentinel is
+                    # the timeout's standing proof, so a cancellation arriving
+                    # in the final drain cannot un-time-out an ended child.
+                    # First-signal precedence is already recorded either way.
+                    pass
                 _notify_timeout(source, step, timeout_seconds)
                 return validate_deadline_proof(TimedOut(), deadline_sentinel)
             termination: Termination
@@ -420,13 +553,21 @@ def run_command(
                 termination = Signaled(-status)
             else:
                 termination = Exited(status)
+            # Settle inside this try, never in the `finally`: the drain can wait
+            # seconds on a leaked descendant, and a caller signal in that window
+            # must reach the cancellation arm below rather than escaping as an
+            # unhandled BaseException past the caller's own except clauses.
+            _settle_drainers(drain_state)
             return _clear_non_timeout_sentinel(termination, deadline_sentinel)
         except _WatchdogCancellation as cancellation:
             # The first callback already recorded precedence. Keep the handlers
             # live during cleanup so later managed signals are synchronously
             # consumed by their no-op path instead of becoming pending signals
-            # that escape when the caller's dispositions are restored.
+            # that escape when the caller's dispositions are restored. That also
+            # makes this settle safe: `pending_signum` is set, so the callback
+            # returns without raising and cannot re-enter this arm.
             _forward_signal_and_cleanup(process, cancellation.signum)
+            _settle_drainers(drain_state)
             return _clear_non_timeout_sentinel(
                 Cancelled(cancellation.signum), deadline_sentinel
             )
@@ -441,11 +582,13 @@ def run_command(
             HarnessError(detail), deadline_sentinel
         )
     finally:
-        # Drain to end of file before the caller reads the retained marker, so
-        # the last line the child managed to flush is never lost to a race.
-        _join_drainers(drainers)
+        # Restore the caller's dispositions first, then seal without blocking.
+        # Nothing here may wait: a managed handler that outlived its `try` would
+        # raise `_WatchdogCancellation` from a `finally` with no arm left to
+        # catch it, and a blocking seal would reopen that window.
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
+        _seal_drainers(drain_state)
 
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
