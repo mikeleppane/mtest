@@ -756,10 +756,15 @@ struct Lexer:
         """
         var result = 0
         # Avoid direct String indexing (0.26.1 changed __getitem__ semantics).
-        # Convert to a list of single-character strings for stable indexing.
+        # Split into single-character strings by BYTE: an escape's hex digits are
+        # ASCII by grammar, so a byte is a codepoint here. The codepoint iterator
+        # aborts inside its own `__next__` at scanning sites like this one on
+        # arm64, so nothing that only needs ASCII asks it for codepoints. The
+        # constructor above still decodes codepoints, because the document it
+        # walks genuinely is not ASCII.
         var chars = List[String]()
-        for slice in hex_str.codepoint_slices():
-            chars.append(String(slice))
+        for index in range(hex_str.byte_length()):
+            chars.append(String(hex_str[byte=index]))
         for i in range(len(chars)):
             var c = chars[i]
             var digit_value: Int

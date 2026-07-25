@@ -26,6 +26,11 @@ Local compatibility and hardening changes are limited to:
 - pre-lexer scalar, structural-node, and depth budgets
 - a required line end after a key/value pair, so `a = 1 b = 2` is refused
   rather than accepted as two settings
+- every ASCII scanning site — decimal, hex, octal, and binary integers, and the
+  lexer's Unicode-escape hex digits — splits its token by byte instead of
+  through the codepoint iterator, which aborted inside its own `__next__` on
+  arm64. The lexer's document walk still decodes codepoints, because a document
+  genuinely is not ASCII
 
 The production build precompiles this source locally. It does not download
 dependencies. `CHECKSUMS.json` pins the authorized commits and upstream bytes,

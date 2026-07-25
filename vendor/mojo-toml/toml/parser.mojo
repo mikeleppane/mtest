@@ -538,10 +538,19 @@ struct Parser:
         """
         var clean_value = value_str
 
-        # Convert to a list of single-character strings to avoid direct String indexing.
+        # Split into single-character strings by BYTE, not through the codepoint
+        # iterator. An integer token is ASCII by grammar — the lexer admits only
+        # digits, underscores, a leading sign, and the 0x/0o/0b prefixes — so a
+        # byte is a codepoint here and the split is identical. The iterator form
+        # aborted on arm64 inside its own `__next__`, in the emptiness check that
+        # the guard admitting the call had passed one line earlier, and it did so
+        # whether it read a local copy or the caller's own string; the same
+        # iterator walks the whole document in the lexer without failing. Since
+        # this site does not need codepoint decoding at all, it no longer asks
+        # for it.
         var chars = List[String]()
-        for slice in clean_value.codepoint_slices():
-            chars.append(String(slice))
+        for index in range(value_str.byte_length()):
+            chars.append(String(value_str[byte=index]))
 
         # Check for hex prefix (0x or 0X)
         if (
@@ -612,12 +621,14 @@ struct Parser:
         # Skip "0x" or "0X" prefix
         var result = 0
         # Avoid direct String indexing for 0.26.1 by iterating from index 2.
+        # Walk bytes rather than codepoints: the token is ASCII by grammar, so
+        # this is the same walk without the iterator that aborts on arm64.
         var index = 0
-        for slice in hex_str.codepoint_slices():
+        for position in range(hex_str.byte_length()):
             if index < 2:
                 index += 1
                 continue
-            var c = String(slice)
+            var c = String(hex_str[byte=position])
             index += 1
 
             if c >= "0" and c <= "9":
@@ -652,12 +663,14 @@ struct Parser:
         """
         # Skip "0o" or "0O" prefix
         var result = 0
+        # Walk bytes rather than codepoints: the token is ASCII by grammar, so
+        # this is the same walk without the iterator that aborts on arm64.
         var index = 0
-        for slice in octal_str.codepoint_slices():
+        for position in range(octal_str.byte_length()):
             if index < 2:
                 index += 1
                 continue
-            var c = String(slice)
+            var c = String(octal_str[byte=position])
             index += 1
 
             if c >= "0" and c <= "7":
@@ -682,12 +695,14 @@ struct Parser:
         """
         # Skip "0b" or "0B" prefix
         var result = 0
+        # Walk bytes rather than codepoints: the token is ASCII by grammar, so
+        # this is the same walk without the iterator that aborts on arm64.
         var index = 0
-        for slice in binary_str.codepoint_slices():
+        for position in range(binary_str.byte_length()):
             if index < 2:
                 index += 1
                 continue
-            var c = String(slice)
+            var c = String(binary_str[byte=position])
             index += 1
 
             if c == "0" or c == "1":
