@@ -36,12 +36,19 @@ _PIPE_CHUNK_BYTES = 65536
 # flooding child can make the supervisor hold.
 _MARKER_SCAN_LIMIT_BYTES = 65536
 # The whole budget for finishing the drain after the child has been reaped. Its
-# own buffered bytes are already in the pipe by then, so this only ever expires
-# when a leaked descendant still holds the write end — output the supervisor
-# deliberately stops waiting for rather than stalling every run behind it.
+# own buffered bytes are already in the pipe by then, so it expires only when
+# something else stalls the drain: a leaked descendant still holding the write
+# end, or a caller consumer that has stopped reading and left a drainer parked
+# in a write. Either way this is output the supervisor deliberately stops
+# waiting for rather than stalling every run behind it.
 DRAIN_SETTLE_SECONDS = 2.0
 # How long a drainer may block in one poll before it re-checks its stop flag.
 _DRAIN_POLL_SECONDS = 0.05
+# How long sealing one caller stream may wait out a write already in flight.
+# A write to a stalled consumer never returns, so this wait must be bounded:
+# the whole point of this supervisor is a bounded process-group lifetime, and a
+# seal that could block forever would make the supervisor itself unkillable.
+SEAL_ACQUIRE_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -80,19 +87,46 @@ class HarnessError:
 Termination = Exited | Signaled | TimedOut | Cancelled | HarnessError
 
 
-@dataclass
 class MarkerRetention:
     """Bounded retention of one marker line drained from a child's stdout.
 
     The watchdog keeps at most a single line — the last complete one beginning
     with `prefix` — so supervising a child that floods its stdout costs a fixed
-    amount of memory rather than growing with the output.
+    amount of memory rather than growing with the output. `freeze` closes the
+    capture, so a drainer that outlives the supervisor's return cannot overwrite
+    the marker under the caller's read of `text`.
     """
 
-    prefix: str
-    """The line prefix a retained marker must start with."""
-    text: str = ""
-    """The last complete matching line, newline included; empty when none."""
+    def __init__(self, prefix: str) -> None:
+        """Open an empty capture for one marker prefix.
+
+        Args:
+            prefix: The line prefix a retained marker must start with.
+        """
+        self.prefix = prefix
+        """The line prefix a retained marker must start with."""
+        self.text = ""
+        """The last complete matching line, newline included; empty when none."""
+        self._lock = threading.Lock()
+        self._frozen = False
+
+    def record(self, line: str) -> None:
+        """Retain one complete marker line unless the capture is already frozen.
+
+        Args:
+            line: The matching line, newline included.
+        """
+        # The lock only ever spans one attribute assignment, so `freeze` can
+        # never wait on I/O to acquire it.
+        with self._lock:
+            if self._frozen:
+                return
+            self.text = line
+
+    def freeze(self) -> None:
+        """Close the capture so `text` can be read without racing a drainer."""
+        with self._lock:
+            self._frozen = True
 
 
 class _WatchdogCancellation(BaseException):
@@ -105,10 +139,12 @@ class _WatchdogCancellation(BaseException):
 class _StreamTee:
     """Forward drained child bytes to one caller stream until it is sealed.
 
-    Owns the only writer to that stream for the child's lifetime and can be
-    sealed shut. `seal` takes the same lock a write holds, so once it returns
-    no drainer can emit another byte and the supervisor's own diagnostic is
-    guaranteed to be the last thing written.
+    Owns the only writer to that stream for the child's lifetime. A write to a
+    caller stream can block indefinitely — a pipe whose consumer stopped
+    reading, a terminal under flow control — so sealing must not be expressed as
+    an unbounded wait for the writing drainer. `seal` therefore refuses further
+    writes immediately and only *bounds* how long it waits out a write already
+    in flight.
     """
 
     def __init__(self, stream: object) -> None:
@@ -123,6 +159,12 @@ class _StreamTee:
             stream if self._binary is None and hasattr(stream, "write") else None
         )
         self._lock = threading.Lock()
+        self._sealed = threading.Event()
+
+    @property
+    def sealed(self) -> bool:
+        """Whether this tee has stopped accepting new writes."""
+        return self._sealed.is_set()
 
     def write(self, chunk: bytes) -> None:
         """Emit one drained chunk, or drop it once the stream is unusable.
@@ -130,7 +172,13 @@ class _StreamTee:
         Args:
             chunk: Raw bytes read from the child's pipe.
         """
+        # Checked before the lock as well as under it, so a seal that could not
+        # take the lock still stops the next write from starting.
+        if self._sealed.is_set():
+            return
         with self._lock:
+            if self._sealed.is_set():
+                return
             if self._binary is not None:
                 try:
                     self._binary.write(chunk)
@@ -150,11 +198,24 @@ class _StreamTee:
                 except (OSError, ValueError, AttributeError):
                     self._text = None
 
-    def seal(self) -> None:
-        """Refuse every later write, waiting out any write already in flight."""
-        with self._lock:
+    def seal(self) -> bool:
+        """Refuse every later write, waiting a bounded time for one in flight.
+
+        Returns:
+            Whether the in-flight write was waited out. False means a drainer
+            is still parked inside a write to a caller stream that is not
+            draining; that one chunk may still land, but no further chunk can,
+            and the supervisor is never made to wait on it.
+        """
+        self._sealed.set()
+        if not self._lock.acquire(timeout=SEAL_ACQUIRE_SECONDS):
+            return False
+        try:
             self._binary = None
             self._text = None
+        finally:
+            self._lock.release()
+        return True
 
 
 @dataclass(frozen=True)
@@ -167,6 +228,8 @@ class _DrainState:
     """The caller-stream writers those drainers own, in the same order."""
     stop: threading.Event
     """Set to make every drainer leave its poll loop at the next tick."""
+    retention: MarkerRetention | None
+    """The marker capture the stdout drainer feeds, frozen when sealing."""
 
 
 def _tee_stream(
@@ -193,15 +256,21 @@ def _tee_stream(
         descriptor = source.fileno()
     except (OSError, ValueError):
         return
+    # `poll` rather than `select`: CPython's `select.select` raises ValueError
+    # for a descriptor at or above FD_SETSIZE, and a caller holding a thousand
+    # open files would otherwise turn that into an instant, silent end of
+    # stream that loses the whole child's output. `poll` has no such ceiling.
+    poller = select.poll()
+    poller.register(descriptor, select.POLLIN | select.POLLHUP | select.POLLERR)
     try:
         while not stop.is_set():
             try:
-                readable, _writable, _errored = select.select(
-                    [descriptor], [], [], _DRAIN_POLL_SECONDS
-                )
+                events = poller.poll(_DRAIN_POLL_SECONDS * 1000.0)
+            except InterruptedError:
+                continue
             except (OSError, ValueError):
                 break
-            if not readable:
+            if not events:
                 continue
             try:
                 chunk = os.read(descriptor, _PIPE_CHUNK_BYTES)
@@ -228,7 +297,10 @@ def _tee_stream(
                 line = pending[: break_at + 1]
                 pending = pending[break_at + 1 :]
                 if not discarding and line.startswith(prefix):
-                    retention.text = line.decode("utf-8", errors="replace")
+                    # Through `record`, never by assignment: this thread can
+                    # outlive the supervisor's return, and the capture refuses
+                    # a late marker rather than racing the caller's read.
+                    retention.record(line.decode("utf-8", errors="replace"))
                 discarding = False
             if len(pending) > _MARKER_SCAN_LIMIT_BYTES:
                 pending = b""
@@ -272,7 +344,7 @@ def _start_drainers(
         thread.start()
         threads.append(thread)
         tees.append(tee)
-    return _DrainState(tuple(threads), tuple(tees), stop)
+    return _DrainState(tuple(threads), tuple(tees), stop, retention)
 
 
 def _settle_drainers(state: _DrainState | None) -> None:
@@ -299,7 +371,13 @@ def _settle_drainers(state: _DrainState | None) -> None:
 
 
 def _seal_drainers(state: _DrainState | None) -> None:
-    """Stop every drainer and shut its caller stream, without blocking on it.
+    """Stop every drainer, shut its caller stream, and close the marker capture.
+
+    Bounded by construction: the stop flag and the marker freeze never wait on
+    I/O, and each tee's seal waits at most `SEAL_ACQUIRE_SECONDS` for a write
+    already in flight. A drainer parked in a write to a stalled consumer is
+    abandoned rather than waited on, because no path through `run_command` may
+    become unkillable. Idempotent.
 
     Args:
         state: The live drainers, or None when the child was not captured.
@@ -307,6 +385,16 @@ def _seal_drainers(state: _DrainState | None) -> None:
     if state is None:
         return
     state.stop.set()
+    # Freeze BEFORE sealing the tees, not after. A drainer already past its
+    # stop check reads one more chunk; sealing first means that chunk's bytes
+    # are dropped from the tee while its marker is still recorded, so the
+    # reported last module names a line the user never saw. Freezing first
+    # keeps the two consistent, and costs nothing on the normal path, where
+    # the drainers have hit EOF and been joined before this runs. Ordering
+    # matters most when a tee's seal blocks: freeze would otherwise wait out
+    # SEAL_ACQUIRE_SECONDS behind it, widening the window it is closing.
+    if state.retention is not None:
+        state.retention.freeze()
     for tee in state.tees:
         tee.seal()
 
@@ -542,7 +630,10 @@ def run_command(
                     # the timeout's standing proof, so a cancellation arriving
                     # in the final drain cannot un-time-out an ended child.
                     # First-signal precedence is already recorded either way.
-                    pass
+                    # Seal explicitly: the aborted settle never reached its own
+                    # seal, and the diagnostic below must not be overtaken by a
+                    # drainer that is still live.
+                    _seal_drainers(drain_state)
                 _notify_timeout(source, step, timeout_seconds)
                 return validate_deadline_proof(TimedOut(), deadline_sentinel)
             termination: Termination
@@ -582,10 +673,13 @@ def run_command(
             HarnessError(detail), deadline_sentinel
         )
     finally:
-        # Restore the caller's dispositions first, then seal without blocking.
-        # Nothing here may wait: a managed handler that outlived its `try` would
-        # raise `_WatchdogCancellation` from a `finally` with no arm left to
-        # catch it, and a blocking seal would reopen that window.
+        # Restore the caller's dispositions before the backstop seal. A managed
+        # handler that outlived its `try` would raise `_WatchdogCancellation`
+        # from a `finally` with no arm left to catch it, so nothing may run here
+        # under one. The seal below is bounded, not instantaneous — it can wait
+        # up to `SEAL_ACQUIRE_SECONDS` per stream on a write already in flight —
+        # but with the caller's own dispositions back in force that wait stays
+        # interruptible, and a signal during it terminates as the caller asked.
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
         _seal_drainers(drain_state)
