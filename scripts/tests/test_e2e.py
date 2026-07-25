@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 from dataclasses import FrozenInstanceError
 import os
 from pathlib import Path
+import signal
 import stat
+import sys
 import tempfile
 import time
 import unittest
@@ -22,6 +25,70 @@ from scripts.fixtures.toolchain import fake_retry_crash_mojo
 def _write_executable(path: Path, source: str) -> None:
     path.write_text(source, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+# A stand-in leader: it forks ONE child into its own process group, has that
+# child record the group's real id and announce readiness, and then waits. This
+# is the shape `run_mtest_signaled` must reason about — a leader whose children
+# live in groups of their own — reduced to something that starts instantly.
+_FAKE_LEADER = """import os
+import signal
+import subprocess
+import sys
+import time
+
+pgid_file, ready_file, answers = sys.argv[1], sys.argv[2], sys.argv[3]
+child = subprocess.Popen(
+    [
+        sys.executable,
+        "-c",
+        (
+            "import os, sys, time\\n"
+            "open(sys.argv[1], 'w').write(str(os.getpgrp()) + chr(10))\\n"
+            "open(sys.argv[2], 'w').write('ready' + chr(10))\\n"
+            "time.sleep(300)\\n"
+        ),
+        pgid_file,
+        ready_file,
+    ],
+    start_new_session=True,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+
+
+def _teardown(signum, frame):
+    if answers == "yes":
+        os.killpg(os.getpgid(child.pid), signal.SIGKILL)
+        child.wait()
+        sys.exit(2)
+
+
+signal.signal(signal.SIGINT, _teardown)
+signal.signal(signal.SIGTERM, _teardown)
+time.sleep(300)
+"""
+
+
+@contextlib.contextmanager
+def _recorded_signals():
+    """Record every `os.kill`/`os.killpg` the runner issues, in order."""
+    calls: list[tuple[str, int, int]] = []
+    real_kill, real_killpg = runner.os.kill, runner.os.killpg
+
+    def kill(pid: int, sig: int) -> None:
+        calls.append(("kill", pid, sig))
+        real_kill(pid, sig)
+
+    def killpg(pgid: int, sig: int) -> None:
+        calls.append(("killpg", pgid, sig))
+        real_killpg(pgid, sig)
+
+    runner.os.kill, runner.os.killpg = kill, killpg
+    try:
+        yield calls
+    finally:
+        runner.os.kill, runner.os.killpg = real_kill, real_killpg
 
 
 
@@ -75,6 +142,8 @@ RESILIENCE_SCENARIOS = (
     "internal-error",
     "runtime-open-failure",
     "interrupt",
+    "interrupt-sigterm",
+    "interrupt-double",
 )
 JSON_SCENARIOS = (
     "json-forward-compat",
@@ -137,7 +206,7 @@ class E2EFaultTopologyTests(unittest.TestCase):
         names = tuple(name for name, _scenario in e2e_main.SCENARIOS)
 
         self.assertEqual(names, layout.E2E_SCENARIO_NAMES)
-        self.assertEqual(len(names), 85)
+        self.assertEqual(len(names), 87)
         self.assertEqual(len(set(names)), len(names))
 
     def test_core_scenarios_have_one_feature_owner(self) -> None:
@@ -277,6 +346,117 @@ class E2EFaultTopologyTests(unittest.TestCase):
             runner.discovered_test_files(),
         )
 
+    def _signalled_run(
+        self, tmp: Path, *, answers: bool, signal_number: int
+    ) -> tuple[list[tuple[str, int, int]], int, int, int]:
+        """Drive one `run_mtest_signaled` against the fake leader.
+
+        Args:
+            tmp: A scratch directory this call owns.
+            answers: Whether the fake leader cleans its child group up and exits,
+                as a live mtest does for a managed interrupt.
+            signal_number: The signal delivered to the leader.
+
+        Returns:
+            The recorded signal calls, the run's exit code, the leader's pgid,
+            and the child group's real pgid.
+        """
+        leader = tmp / "fake-leader"
+        _write_executable(leader, f"#!{sys.executable}\n" + _FAKE_LEADER)
+        pgid_file = tmp / "child.pgid"
+        ready_file = tmp / "child.ready"
+        process_runner = runner.E2ERunner(repo_root=tmp, mtest=leader)
+        with _recorded_signals() as calls:
+            run, pgid = process_runner.run_mtest_signaled(
+                [os.fspath(pgid_file), os.fspath(ready_file), "yes" if answers else "no"],
+                signal_number=signal_number,
+                timeout=30.0,
+                ready_files=(os.fspath(ready_file),),
+                owned_pgid_files=(os.fspath(pgid_file),),
+            )
+        child_pgid = int(pgid_file.read_text(encoding="utf-8").strip())
+        return list(calls), run.returncode, pgid, child_pgid
+
+    def test_a_managed_interrupt_signals_only_the_leader(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-signal-topology-") as raw:
+            calls, returncode, pgid, child_pgid = self._signalled_run(
+                Path(raw), answers=True, signal_number=signal.SIGINT
+            )
+
+        self.assertEqual(returncode, 2)
+        self.assertNotEqual(child_pgid, pgid)
+        # `os.kill(leader)` and `os.killpg(leader_group)` carry the same number,
+        # so WHICH call was made is the whole distinction: forwarding the signal
+        # to the group is the product's job, and a harness that did it itself
+        # would pass even against a product that forwarded nothing.
+        terminating = [call for call in calls if call[2] != 0]
+        self.assertEqual(terminating, [("kill", pgid, int(signal.SIGINT))])
+        self.assertTrue(
+            all(call[2] == 0 for call in calls if call[0] == "killpg"),
+            f"a managed interrupt used killpg for more than existence: {calls}",
+        )
+
+    def test_a_fatal_signal_sweeps_recorded_groups_after_the_leader(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-signal-fatal-") as raw:
+            calls, _returncode, pgid, child_pgid = self._signalled_run(
+                Path(raw), answers=False, signal_number=signal.SIGKILL
+            )
+
+        self.assertNotEqual(child_pgid, pgid)
+        terminating = [call for call in calls if call[2] != 0]
+        # The leader is signalled first, alone. Only then — mtest cannot clean up
+        # after its own death — does the harness sweep the group it recorded.
+        self.assertEqual(terminating[0], ("kill", pgid, int(signal.SIGKILL)))
+        self.assertTrue(terminating[1:], "the orphaned child group was never swept")
+        for name, target, _sig in terminating[1:]:
+            self.assertEqual(name, "killpg")
+            self.assertEqual(target, child_pgid)
+        self.assertFalse(
+            runner.group_alive(child_pgid),
+            f"child group {child_pgid} survived the harness sweep",
+        )
+
+    def test_signalled_runs_reject_ambiguous_arming(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-signal-arming-") as raw:
+            tmp = Path(raw)
+            leader = tmp / "fake-leader"
+            _write_executable(leader, f"#!{sys.executable}\nimport time\ntime.sleep(30)\n")
+            process_runner = runner.E2ERunner(repo_root=tmp, mtest=leader)
+            for kwargs in (
+                {},
+                {"ready_files": (os.fspath(tmp / "x"),), "delay": 1.0},
+            ):
+                with self.subTest(arming=sorted(kwargs)):
+                    with self.assertRaisesRegex(
+                        runner.ScenarioError, "exactly one arming input"
+                    ):
+                        process_runner.run_mtest_signaled(
+                            [],
+                            signal_number=signal.SIGINT,
+                            timeout=1.0,
+                            **kwargs,
+                        )
+
+    def test_a_readiness_barrier_fails_instead_of_proceeding(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-signal-barrier-") as raw:
+            tmp = Path(raw)
+            leader = tmp / "fake-leader"
+            _write_executable(
+                leader, f"#!{sys.executable}\nimport time\ntime.sleep(30)\n"
+            )
+            process_runner = runner.E2ERunner(repo_root=tmp, mtest=leader)
+            started = time.monotonic()
+            with self.assertRaisesRegex(
+                runner.ScenarioError, "readiness barrier never appeared"
+            ):
+                process_runner.run_mtest_signaled(
+                    [],
+                    signal_number=signal.SIGINT,
+                    timeout=0.5,
+                    ready_files=(os.fspath(tmp / "never-written"),),
+                )
+            self.assertLess(time.monotonic() - started, 10.0)
+
     def test_main_open_has_one_package_owner(self) -> None:
         self.assertEqual(main_open.__name__, "scripts.e2e.main_open")
 
@@ -351,12 +531,14 @@ class E2EFaultTopologyTests(unittest.TestCase):
                 Path(runner.FAKE_SLOW_MOJO),
                 Path(runner.FAKE_CRASH_MOJO),
                 Path(runner.FAKE_RETRY_CRASH_MOJO),
+                Path(runner.FAKE_STUBBORN_MOJO),
             ),
             (
                 fixture_root / "logging_mojo.py",
                 fixture_root / "fake_slow_mojo.py",
                 fixture_root / "fake_crash_mojo.py",
                 fixture_root / "fake_retry_crash_mojo.py",
+                fixture_root / "fake_stubborn_mojo.py",
             ),
         )
         self.assertEqual(Path(fake_retry_crash_mojo.REPO_ROOT), root)
@@ -371,6 +553,7 @@ class E2EFaultTopologyTests(unittest.TestCase):
             runner.FAKE_SLOW_MOJO,
             runner.FAKE_CRASH_MOJO,
             runner.FAKE_RETRY_CRASH_MOJO,
+            runner.FAKE_STUBBORN_MOJO,
         ):
             with self.subTest(fixture=fixture):
                 self.assertTrue(os.access(fixture, os.X_OK))

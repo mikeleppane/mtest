@@ -18,11 +18,17 @@ import tempfile
 from pathlib import Path
 
 from scripts.checks.reports import json_stream as json_stream_check
+from scripts.checks.reports import junit as junit_check
 from scripts.checks.reports import junit_canonicalize
 from scripts.e2e.assertions import (
+    INTERRUPT_TIMEOUT,
     SUMMARY_RE,
     expect,
+    expect_accounting,
     expect_exit,
+    expect_report,
+    junit_not_run_files,
+    stream_files,
     verdict_paths_in_order,
 )
 from scripts.e2e.runner import (
@@ -31,6 +37,7 @@ from scripts.e2e.runner import (
     REPO_ROOT,
     ScenarioContext,
     ScenarioError,
+    expect_group_gone,
 )
 
 
@@ -300,46 +307,146 @@ def s_parallel_window_overlap(context: ScenarioContext) -> str:
     return "-n 2: build windows overlap AND run windows overlap"
 
 
-def s_parallel_interrupt(context: ScenarioContext) -> str:
-    """A SIGINT at `-n 2` mid-run exits 2, accounts unstarted files NOT-RUN, and
-    leaves no surviving process group.
+_DISPATCHED = ("a", "b")
+"""The two window files `-n 2` can hold in flight, in discovery order."""
+_UNDISPATCHED = "c"
+"""The window file that must never be dispatched behind the two blocked ones."""
+_IN_FLIGHT_FILES = (
+    "e2e/parallel/test_window_a.mojo",
+    "e2e/parallel/test_window_b.mojo",
+)
+"""The two identities `-n 2` holds when the interrupt arrives."""
+_PARALLEL_NOT_RUN_FILES = (
+    *_IN_FLIGHT_FILES,
+    "e2e/parallel/test_window_c.mojo",
+)
+"""Every file a `-n 2` interrupt leaves without a verdict: both in-flight
+identities and the one that was never scheduled."""
 
-    Two workers pin the two run-blocked files (each fixture sleeps far past the
-    signal once its run log is armed), so a third file can never be dispatched and
-    is deterministically NOT-RUN. The interrupt must be what ends the run — a
-    harness timeout would raise instead — and the whole process group must be gone
-    afterward, proving the parallel teardown left no orphan.
+
+def s_parallel_interrupt(context: ScenarioContext) -> str:
+    """A SIGINT at `-n 2` exits 2 with exact NOT-RUN identities and no survivor.
+
+    Two workers pin the two run-blocked files: each announces its own process
+    group and its readiness once its run window is open, so the signal is sent
+    on an observed state rather than a wall-clock guess. The third file cannot be
+    dispatched behind them, and the run log proves it never was — a pool that
+    scheduled one more file after observing the interrupt would leave a third
+    record there. Both in-flight identities and the undispatched one are NOT-RUN
+    in the console band, in the `--json` stream, and in the JUnit report, and
+    every process group the run owned is gone afterwards.
     """
-    run_log = _log_path("mtest_interrupt_run_")
-    run, pgid = context.runner.run_mtest_signaled(
-        [PARALLEL_TREE, "-n", "2", "--gh-annotations", "off"],
-        signal_number=signal.SIGINT,
-        delay=20.0,
-        timeout=90.0,
-        env_overrides={
-            "MTEST_WINDOW_RUN_LOG": run_log,
-            "MTEST_WINDOW_RUN_FLOOR": "3600",
-        },
-    )
-    expect(
-        run.returncode == 2,
-        f"expected exit 2 on parallel interrupt, got {run.returncode}\n"
-        f"{run.stdout}\n{run.stderr}",
-    )
-    match = SUMMARY_RE.search(run.combined)
-    expect(match is not None, f"no partial summary after interrupt:\n{run.combined}")
-    not_run = int(match.group("not_run"))
-    expect(
-        not_run >= 1,
-        f"interrupt summary showed no NOT-RUN accounting (not_run={not_run})",
-    )
-    orphan = True
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        orphan = False
-    expect(not orphan, f"process group {pgid} survived the parallel interrupt")
-    return f"-n 2 SIGINT: exit 2, {not_run} NOT-RUN, no surviving process group"
+    with tempfile.TemporaryDirectory(prefix="mtest-parallel-interrupt-") as raw:
+        tmp = Path(raw)
+        ready_dir = tmp / "arming"
+        ready_dir.mkdir()
+        run_log = _log_path("mtest_interrupt_run_")
+        stream_path = os.fspath(tmp / "stream.ndjson")
+        junit_path = os.fspath(tmp / "report.xml")
+        run, pgid = context.runner.run_mtest_signaled(
+            [
+                PARALLEL_TREE,
+                "-n",
+                "2",
+                "--json",
+                stream_path,
+                "--junit-xml",
+                junit_path,
+                "--color",
+                "never",
+                "--gh-annotations",
+                "off",
+            ],
+            signal_number=signal.SIGINT,
+            timeout=INTERRUPT_TIMEOUT,
+            ready_files=tuple(
+                os.fspath(ready_dir / f"{name}.ready") for name in _DISPATCHED
+            ),
+            owned_pgid_files=tuple(
+                os.fspath(ready_dir / f"{name}.pgid") for name in _DISPATCHED
+            ),
+            env_overrides={
+                "MTEST_WINDOW_RUN_LOG": run_log,
+                "MTEST_WINDOW_RUN_FLOOR": "3600",
+                "MTEST_WINDOW_READY_DIR": os.fspath(ready_dir),
+            },
+        )
+        expect_exit(run, 2)
+
+        # No fourth dispatch: the run log carries exactly one start record for
+        # each of the two files a `-n 2` pool can hold, and nothing for the third.
+        dispatched = [
+            line.split("\t")[1]
+            for line in _log_lines(run_log)
+            if line.split("\t")[0] == "run"
+        ]
+        # Sorted, because which of two concurrent workers stamps its start first
+        # is not a product guarantee — the exact MULTISET is.
+        expect(
+            sorted(dispatched) == list(_DISPATCHED),
+            f"the run log recorded dispatches {sorted(dispatched)}, want exactly "
+            f"{list(_DISPATCHED)} — a file was scheduled after the interrupt",
+        )
+        expect(
+            not os.path.exists(ready_dir / f"{_UNDISPATCHED}.ready"),
+            f"e2e/parallel/test_window_{_UNDISPATCHED}.mojo announced a run it "
+            "was never supposed to be dispatched for",
+        )
+
+        bands = SUMMARY_RE.findall(run.combined)
+        expect(
+            len(bands) == 1,
+            f"an interrupted pool must print exactly one terminal summary band, "
+            f"got {len(bands)}:\n{run.combined}",
+        )
+        summ = expect_accounting(run)
+        expect(
+            (summ.passed, summ.not_run) == (0, len(_PARALLEL_NOT_RUN_FILES)),
+            f"parallel interrupt accounting was ({summ.passed} passed, "
+            f"{summ.not_run} not run), want (0, {len(_PARALLEL_NOT_RUN_FILES)})"
+            f":\n{run.combined}",
+        )
+        expect(
+            not verdict_paths_in_order(run),
+            f"an interrupted pool printed verdicts: {verdict_paths_in_order(run)}",
+        )
+
+        stream = stream_files(Path(stream_path).read_text(encoding="utf-8"))
+        expect(
+            stream.has_terminal and stream.exit_code == 2,
+            f"the interrupted pool's terminal record was {stream.exit_code!r} "
+            f"(terminal={stream.has_terminal})",
+        )
+        expect(
+            sorted(stream.started) == sorted(_IN_FLIGHT_FILES),
+            f"the stream announced {stream.started}, want exactly the two "
+            f"in-flight files",
+        )
+        expect(
+            stream.finished == {},
+            f"the stream finished {stream.finished}; no file reached a verdict",
+        )
+        expect(
+            stream.summary.get("not_run") == len(_PARALLEL_NOT_RUN_FILES),
+            f"the terminal summary disagreed with the console band: "
+            f"{stream.summary}",
+        )
+
+        report = expect_report(run, junit_path, "the interrupted pool's junit")
+        junit_check.check_artifact(report)
+        rows = junit_not_run_files(report)
+        expect(
+            rows == _PARALLEL_NOT_RUN_FILES,
+            f"the junit [not-run] rows were {rows}, want "
+            f"{_PARALLEL_NOT_RUN_FILES}",
+        )
+
+        expect_group_gone(pgid, "mtest's own group after the parallel interrupt")
+        return (
+            f"-n 2 SIGINT: exit 2, both in-flight identities and the "
+            f"undispatched one NOT-RUN in console/stream/junit, no fourth "
+            f"dispatch in the run log, no surviving process group"
+        )
 
 
 def s_parallel_shard_disjoint(context: ScenarioContext) -> str:

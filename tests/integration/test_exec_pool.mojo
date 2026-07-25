@@ -5,7 +5,8 @@ supervision invariants that only surface at N: completions correlate by the
 caller's opaque tag (never a recycled slot index); a slow or draining slot never
 blocks a live sibling; each child's deadline is independent; the fixed
 observation order (deadline before interrupt, second activation escalates) picks
-the right kill cause; a spawn failure is isolated; `kill_all` and a mid-flight
+the right kill cause and the second activation escalates IMMEDIATELY rather than
+waiting out the grace; a spawn failure is isolated; `kill_all` and a mid-flight
 poll fault both leave zero surviving process groups through the two-pass
 protocol; fd use stays flat at the effective cap; a recycled slot rejects its
 stale token; and one slot's capture overflow never reaches a sibling's bytes,
@@ -33,6 +34,13 @@ from exec_helpers import bytes_to_str, count_byte, target, true_binary, py_spec
 from tmptree import temp_root
 
 comptime _SIGINT = 2
+comptime _SIGKILL = 9
+comptime _LONG_GRACE_MS = 5000
+"""The SIGTERM-to-SIGKILL grace the immediacy test asks for. Long enough that
+waiting it out is unmistakable, and the same value a killed compile gets."""
+comptime _IMMEDIATE_GUARD_MS = 2000
+"""The immediacy guard: three whole seconds below `_LONG_GRACE_MS`, so ordinary
+loaded-CI jitter cannot reach it but a grace actually waited out always does."""
 comptime _EIO = 5
 comptime _OP_POLL_SET = 36
 comptime _BYTE_O: UInt8 = 111
@@ -598,6 +606,64 @@ def test_second_activation_escalates_to_sigkill() raises:
     )
     assert_true(comps[0].result.termination.escalated, "escalate-to-kill")
     assert_true(comps[0].kill_cause.value().is_interrupt())
+
+
+def test_second_activation_kills_without_waiting_out_the_grace() raises:
+    # `test_second_activation_escalates_to_sigkill` proves the ESCALATION; this
+    # proves it is IMMEDIATE, independently of any later cleanup. The actor is
+    # deaf to SIGTERM and its spec asks for a 5 s grace, so the first activation
+    # alone could only end it by waiting that grace out. Two activations must
+    # SIGKILL the group at once, which the 2 s guard below separates from the 5 s
+    # grace by three whole seconds — far outside ordinary loaded-CI jitter.
+    var runtime = ExecRuntime()
+    runtime.open()
+    _reset_interrupt()
+    var scratch = temp_root()
+    var ready = scratch + "/deaf-" + String(perf_counter_ns()) + ".ready"
+    var supervisor = Supervisor(1)
+    var argv = List[String]()
+    argv.append("python3")
+    argv.append(target("sigterm_ignorer.py"))
+    argv.append(ready)
+    _ = supervisor.spawn(ProcessSpec.command(argv^, 0, _LONG_GRACE_MS), 1)
+    # The actor announces itself only once SIGTERM is genuinely ignored. Raising
+    # the interrupt before that could let the polite signal kill it outright, and
+    # a fast completion would then pass this guard while proving nothing.
+    var guard = 0
+    while guard < 200000 and not exists(ready):
+        guard += 1
+        _ = supervisor.wait_any(20)
+    assert_true(exists(ready), "the SIGTERM-deaf actor never armed itself")
+
+    _raise_self(_SIGINT)
+    _raise_self(_SIGINT)
+    var started_ns = perf_counter_ns()
+    var comps = _collect(supervisor, 1)
+    var elapsed_ms = (perf_counter_ns() - started_ns) // 1_000_000
+    _reset_interrupt()
+    runtime.close()
+    remove(ready)
+    rmdir(scratch)
+
+    assert_true(
+        comps[0].result.termination.is_timed_out(),
+        String(comps[0].result.termination),
+    )
+    assert_true(comps[0].kill_cause.value().is_interrupt())
+    assert_true(comps[0].result.termination.escalated, "escalate-to-kill")
+    assert_false(
+        comps[0].result.termination.final_is_exited(),
+        String(comps[0].result.termination),
+    )
+    assert_equal(
+        comps[0].result.termination.final_value,
+        _SIGKILL,
+        "only SIGKILL can end an actor that ignores SIGTERM",
+    )
+    assert_true(
+        elapsed_ms < _IMMEDIATE_GUARD_MS,
+        String("second activation waited out the grace: ") + String(elapsed_ms),
+    )
 
 
 def test_spawn_failure_isolated_from_a_healthy_sibling() raises:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run mtest's guarded 85-scenario end-to-end gate.
+"""Run mtest's guarded end-to-end gate.
 
 The harness drives the real ``build/mtest`` binary against the committed
 known-outcome tree under ``e2e/``. Expectations come from
@@ -137,6 +137,8 @@ SCENARIOS: ScenarioRegistry = (
     ("internal-error", resilience.s_internal_error),
     ("runtime-open-failure", resilience.s_runtime_open_failure),
     ("interrupt", resilience.s_interrupt),
+    ("interrupt-sigterm", resilience.s_interrupt_sigterm),
+    ("interrupt-double", resilience.s_interrupt_double),
     ("json-forward-compat", json_reporter.s_json_forward_compat),
     ("json-purity", json_reporter.s_json_purity),
     (

@@ -12,7 +12,16 @@ from xml.etree import ElementTree as ET
 from scripts.checks.reports import json_stream as json_stream_check
 from scripts.checks.reports import junit as junit_check
 from scripts.checks.reports import junit_canonicalize
-from scripts.e2e.assertions import expect, expect_exit, expect_report
+from scripts.e2e.assertions import (
+    INTERRUPT_TIMEOUT,
+    SLOW_NOT_RUN_FILES,
+    SLOW_TREE,
+    arm_slow_tree,
+    expect,
+    expect_exit,
+    expect_report,
+    junit_not_run_files,
+)
 from scripts.e2e.runner import REPO_ROOT, SHORT_TIMEOUT, ScenarioContext
 
 
@@ -285,42 +294,69 @@ def s_junit_finalization_and_interrupt(context: ScenarioContext) -> str:
     stream2 = os.path.join(tmp, "s2.ndjson")
     code2, term2 = _run_and_interrupt(
         context,
-        ["e2e/slow", "--json", stream2, "--junit-xml", undir]
+        os.path.join(tmp, "arming-2"),
+        ["--json", stream2, "--junit-xml", undir],
     )
     expect(code2 == 2, f"interrupt over a junit failure was not exit 2, got {code2}")
     expect(term2 == 2, f"json terminal under interrupt was not 2, got {term2}")
 
     # (3) Writable junit target + run-time interrupt: exit 2 AND the report
-    # carries [not-run] rows for the files that never ran.
+    # carries a `[not-run]` row for exactly the files that never ran.
     stream3 = os.path.join(tmp, "s3.ndjson")
     good = os.path.join(tmp, "interrupted.xml")
     code3, term3 = _run_and_interrupt(
         context,
-        ["e2e/slow", "--json", stream3, "--junit-xml", good]
+        os.path.join(tmp, "arming-3"),
+        ["--json", stream3, "--junit-xml", good],
     )
     expect(code3 == 2, f"interrupt with a writable junit target was not 2, got {code3}")
     expect(term3 == 2, f"json terminal was not 2 under interrupt, got {term3}")
     expect(os.path.exists(good), "the interrupted run published no junit report")
     junit_check.check_artifact(Path(good))
+    rows = junit_not_run_files(good)
     expect(
-        "[not-run]" in Path(good).read_text(),
-        "the interrupted run's junit carries no [not-run] rows for un-run files",
+        rows == SLOW_NOT_RUN_FILES,
+        f"the interrupted run's junit named {rows} as not run, want "
+        f"{SLOW_NOT_RUN_FILES}",
     )
-    return "junit/exit agreement: undirectory -> 3 (json agrees); +interrupt -> 2 (both); writable+interrupt -> 2 with [not-run] rows"
+    return (
+        "junit/exit agreement: undirectory -> 3 (json agrees); +interrupt -> 2 "
+        f"(both); writable+interrupt -> 2 with [not-run] rows for exactly "
+        f"{len(SLOW_NOT_RUN_FILES)} files"
+    )
 
 
 def _run_and_interrupt(
-    context: ScenarioContext, args: list[str]
+    context: ScenarioContext, arming_dir: str, args: list[str]
 ) -> tuple[int, int | None]:
-    """Spawn `mtest args` over the slow tree, SIGINT its group mid-run, and
-    return (process exit code, json terminal exit_code). The `--json` stream is
-    read back to recover the terminal record the run committed on interrupt."""
+    """Walk the slow tree to its armed blocked child, SIGINT mtest, and report.
+
+    The signal goes to the mtest leader only, once one file has PASSED and the
+    next child has announced that it is blocked — never on a wall-clock guess.
+    Each call owns a FRESH arming directory, so a marker one call left behind can
+    never satisfy the next call's barrier.
+
+    Args:
+        context: The scenario context.
+        arming_dir: A directory this call creates and owns for its markers.
+        args: The mtest arguments after the slow tree, including `--json PATH`.
+
+    Returns:
+        The process exit code and the `--json` terminal record's exit code.
+
+    Raises:
+        ScenarioError: If the barrier expires or the run wrote no stream.
+    """
+    os.makedirs(arming_dir)
+    arming = arm_slow_tree(arming_dir)
     stream_path = args[args.index("--json") + 1]
     run, _pgid = context.runner.run_mtest_signaled(
-        args,
+        [SLOW_TREE, *args],
         signal_number=signal.SIGINT,
-        delay=8.0,
-        timeout=60.0,
+        timeout=INTERRUPT_TIMEOUT,
+        ready_files=arming.ready_files,
+        owned_pgid_files=arming.owned_pgid_files,
+        env_overrides=arming.env,
     )
     term_code: int | None = None
     expect(

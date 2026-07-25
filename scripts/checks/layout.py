@@ -260,7 +260,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 1211
+CLASSIFIED_TEST_COUNT = 1212
 CLASSIFIED_ROOTS = (
     Path("tests/unit"),
     Path("tests/integration"),
@@ -386,6 +386,8 @@ E2E_SCENARIO_NAMES = (
     "internal-error",
     "runtime-open-failure",
     "interrupt",
+    "interrupt-sigterm",
+    "interrupt-double",
     "json-forward-compat",
     "json-purity",
     "json-color-relocated-stderr",
@@ -861,10 +863,11 @@ def check_e2e_layout() -> None:
         path.relative_to(REPO_ROOT).as_posix()
         for path in e2e_root.rglob("test_*.mojo")
     }
-    if rows != discovered or len(rows) != 39:
+    if rows != discovered or len(rows) != 41:
         raise AssertionError(
             "e2e manifest/discovery mismatch: "
-            f"missing={sorted(discovered - rows)}, stale={sorted(rows - discovered)}"
+            f"missing={sorted(discovered - rows)}, stale={sorted(rows - discovered)}, "
+            f"rows={len(rows)}"
         )
     scenario_names = tuple(name for name, _function in e2e_main.SCENARIOS)
     if scenario_names != E2E_SCENARIO_NAMES:
@@ -872,9 +875,9 @@ def check_e2e_layout() -> None:
             "E2E scenario membership/order mismatch: "
             f"expected={list(E2E_SCENARIO_NAMES)}, actual={list(scenario_names)}"
         )
-    if len(scenario_names) != 85 or len(set(scenario_names)) != len(scenario_names):
+    if len(scenario_names) != 87 or len(set(scenario_names)) != len(scenario_names):
         raise AssertionError(
-            "E2E scenarios must contain 85 unique names in the pinned order"
+            "E2E scenarios must contain 87 unique names in the pinned order"
         )
     referenced = {
         *rows,

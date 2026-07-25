@@ -8,10 +8,16 @@ import signal
 import subprocess
 import sys
 import tempfile
-import time
 
 from scripts.checks.reports import json_stream as json_stream_check
-from scripts.e2e.assertions import SUMMARY_RE, expect, expect_exit
+from scripts.e2e.assertions import (
+    INTERRUPT_TIMEOUT,
+    SLOW_TREE,
+    SUMMARY_RE,
+    arm_slow_tree,
+    expect,
+    expect_exit,
+)
 from scripts.e2e.runner import (
     DEFAULT_TIMEOUT,
     E2ERunner,
@@ -20,6 +26,7 @@ from scripts.e2e.runner import (
     SHORT_TIMEOUT,
     ScenarioContext,
     ScenarioError,
+    expect_group_gone,
 )
 
 
@@ -150,43 +157,65 @@ def s_json_truncation_interrupt(context: ScenarioContext) -> str:
     """Truncation trio (1/3): an INTERRUPTED run ends the stream WITH its terminal
     record and exit_code 2. The session fires SessionFinished on interrupt; the
     file destination is alive, so the terminal record is committed."""
-    stream_path = os.path.join(tempfile.mkdtemp(), "interrupt.ndjson")
-    run, _pgid = context.runner.run_mtest_signaled(
-        ["e2e/slow", "--json", stream_path],
-        signal_number=signal.SIGINT,
-        delay=8.0,
-        timeout=60.0,
-    )
-    expect(run.returncode == 2, f"expected exit 2 on interrupt, got {run.returncode}")
-    text = Path(stream_path).read_text()
-    report = json_stream_check.parse_stream(text)
-    expect(report.terminal is not None, "interrupted stream carried no terminal record")
-    expect(
-        report.exit_code == 2,
-        f"interrupted terminal exit_code was {report.exit_code}, want 2",
-    )
+    with tempfile.TemporaryDirectory(prefix="mtest-json-interrupt-") as raw:
+        tmp = Path(raw)
+        arming = arm_slow_tree(tmp)
+        stream_path = os.fspath(tmp / "interrupt.ndjson")
+        run, _pgid = context.runner.run_mtest_signaled(
+            [SLOW_TREE, "--json", stream_path],
+            signal_number=signal.SIGINT,
+            timeout=INTERRUPT_TIMEOUT,
+            ready_files=arming.ready_files,
+            owned_pgid_files=arming.owned_pgid_files,
+            env_overrides=arming.env,
+        )
+        expect(
+            run.returncode == 2, f"expected exit 2 on interrupt, got {run.returncode}"
+        )
+        text = Path(stream_path).read_text()
+        report = json_stream_check.parse_stream(text)
+        expect(
+            report.terminal is not None,
+            "interrupted stream carried no terminal record",
+        )
+        expect(
+            report.exit_code == 2,
+            f"interrupted terminal exit_code was {report.exit_code}, want 2",
+        )
     return "interrupt: stream ends WITH terminal record, exit_code 2"
 
 
 def s_json_truncation_sigkill(context: ScenarioContext) -> str:
     """Truncation trio (2/3): a SIGKILLed mtest leaves COMPLETE lines and at most
     one torn tail — never corruption — and NO terminal record. The absence of the
-    terminal is the truncation signal."""
-    stream_path = os.path.join(tempfile.mkdtemp(), "sigkill.ndjson")
-    context.runner.run_mtest_signaled(
-        ["e2e/slow", "--json", stream_path],
-        signal_number=signal.SIGKILL,
-        delay=8.0,
-        timeout=38.0,
-    )
-    text = Path(stream_path).read_text()
-    # parse_stream RAISES on corruption; a clean parse proves complete lines +
-    # at most one torn tail.
-    report = json_stream_check.parse_stream(text)
-    expect(
-        report.terminal is None,
-        "a SIGKILLed run produced a terminal record — it could not have finalized",
-    )
+    terminal is the truncation signal.
+
+    SIGKILL is the one signal mtest cannot answer, so it is also the one case
+    where the harness owns the cleanup: the blocked child records its real PGID
+    before announcing readiness, and the runner tears that orphaned group down —
+    after the torn stream is already on disk — and proves it gone.
+    """
+    with tempfile.TemporaryDirectory(prefix="mtest-json-sigkill-") as raw:
+        tmp = Path(raw)
+        arming = arm_slow_tree(tmp)
+        stream_path = os.fspath(tmp / "sigkill.ndjson")
+        context.runner.run_mtest_signaled(
+            [SLOW_TREE, "--json", stream_path],
+            signal_number=signal.SIGKILL,
+            timeout=INTERRUPT_TIMEOUT,
+            ready_files=arming.ready_files,
+            owned_pgid_files=arming.owned_pgid_files,
+            env_overrides=arming.env,
+        )
+        text = Path(stream_path).read_text()
+        # parse_stream RAISES on corruption; a clean parse proves complete lines +
+        # at most one torn tail.
+        report = json_stream_check.parse_stream(text)
+        expect(
+            report.terminal is None,
+            "a SIGKILLed run produced a terminal record — it could not have "
+            "finalized",
+        )
     return "sigkill: complete lines + at most one torn tail; no terminal record"
 
 
@@ -209,13 +238,7 @@ def s_json_truncation_dead_pipe(context: ScenarioContext) -> str:
     # What the reader received parses as complete lines + at most one torn tail.
     json_stream_check.parse_stream(got.decode("utf-8", "replace"), require_header=False)
     # No orphaned process group.
-    time.sleep(0.5)
-    orphan = True
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        orphan = False
-    expect(not orphan, f"process group {pgid} still alive after fatal abort (orphan)")
+    expect_group_gone(pgid, "mtest's own group after the fatal abort")
     return "dead pipe: fatal abort exit 3 (not 141), no orphan, clean partial stream"
 
 
@@ -366,15 +389,8 @@ def s_json_terminal_write_failure(context: ScenarioContext) -> str:
             f"pre-terminal file result was not the clean PASS: {file_finishes[0]}",
         )
         expect(not report.torn_tail, "the deterministic failure left a torn JSON tail")
-        time.sleep(0.5)
-        orphan = True
         assert run.pgid is not None
-        try:
-            os.killpg(run.pgid, 0)
-        except ProcessLookupError:
-            orphan = False
-        expect(
-            not orphan,
-            f"process group {run.pgid} still alive after terminal-write abort (orphan)",
+        expect_group_gone(
+            run.pgid, "mtest's own group after the terminal-write abort"
         )
         return "terminal write fault: clean PASS escalates 0 -> 3, no orphan"
