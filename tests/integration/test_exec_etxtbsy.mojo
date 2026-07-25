@@ -5,7 +5,10 @@ writer still holds it open, so the bounded retry exists to survive it. The
 recovery case proves the retry actually reaches a successful `execve`: the
 adapter fails the first two child attempts with ETXTBSY and then stops faulting,
 and the run must end as an ordinary child completion with the target's exact
-bytes — not merely as an honest failure.
+bytes — not merely as an honest failure. Because the adapter's occurrence
+counters live in the forked child and cannot be read back, that case also pins a
+duration floor only two real retry backoffs can clear; otherwise "recovered" and
+"never faulted" would look identical.
 
 When a deadline or an interrupt fires around a text-file-busy (ETXTBSY) exec,
 the run must report TimedOut — our own kill won the race — never a SpawnFailed
@@ -48,6 +51,14 @@ comptime _CLOCK_WAIT_MAX_MS = 1000
 short way INTO the busy-exec retry window — late enough that the group SIGTERM's
 grace escalation does not preempt the child before it reaches the errno path
 (the race in which the latch must still win), yet well inside the window."""
+comptime _RETRY_DELAY_MS = 50
+"""The child's per-retry busy-exec backoff, mirroring the adapter's
+MTEST_ETXTBSY_DELAY_MS. Only ever used to derive a LOWER bound, so the pinned
+value can only make the derived floor conservative, never wrong."""
+comptime _FAULTED_ATTEMPTS = 2
+"""Child execve occurrences the recovery test faults before letting one through.
+"""
+comptime _MIN_RECOVERED_MS = _RETRY_DELAY_MS * _FAULTED_ATTEMPTS
 
 
 def _native_constant(constant_id: Int) -> Int32:
@@ -133,6 +144,16 @@ def test_transient_etxtbsy_recovers_to_a_successful_child() raises:
     assert_equal(result.termination.value, 0)
     assert_false(result.stdout_truncated)
     assert_false(result.stderr_truncated)
+    # A clean exit alone cannot tell "recovered from two injected faults" apart
+    # from "no fault ever fired": the adapter's occurrence counters live in the
+    # forked child, so the parent cannot read them back. Each faulted attempt
+    # costs one _RETRY_DELAY_MS backoff, and poll's timeout is a MINIMUM, so two
+    # faults put a hard floor of _MIN_RECOVERED_MS under the run. A regression
+    # that stopped honoring the secondary occurrence, or that remapped the
+    # ETXTBSY constant, would exec on the first attempt and land far below it.
+    assert_true(
+        result.duration_ms >= _MIN_RECOVERED_MS, String(result.duration_ms)
+    )
 
 
 def _wait_before_first_post_open_clock_read() raises:

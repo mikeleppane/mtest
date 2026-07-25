@@ -45,9 +45,14 @@ comptime _CAPTURE_BOUND = 200
 comptime _HEAD_CAP = 100
 comptime _TAIL_CAP = 100
 comptime _MARKER_LEN = 66
-"""Byte length of the spliced marker for 313 omitted bytes at limit 200; the
-em dash is three bytes, so the 64-character line is 66 bytes with its
-surrounding newlines."""
+"""Byte length of the spliced marker for 313 omitted bytes at limit 200: the
+marker line is 62 characters but 64 bytes because the em dash is three bytes,
+and the surrounding newlines bring it to 66."""
+comptime _OVERFLOW_TAG = "tag10"
+"""Fixture label for the tag-10 overflowing actor. Its length is chosen so the
+token `tag10-out-` is ten bytes and the retained tail therefore starts at
+`513 - 100 = 413`, which is NOT a multiple of ten: the retained head and tail
+begin at different token phases and cannot degenerate into the same bytes."""
 
 
 def _reset_faults():
@@ -322,6 +327,17 @@ def _assert_overflowed_stream(
         Error: On any byte, length, or marker mismatch.
     """
     var payload = _tagged_payload(tag, stream, _TAGGED_SIZE)
+    var expected_head = bytes_to_str(_byte_range(payload, 0, _HEAD_CAP))
+    var expected_tail = bytes_to_str(
+        _byte_range(payload, _TAGGED_SIZE - _TAIL_CAP, _TAGGED_SIZE)
+    )
+    # Guard on the chosen tag and size, not on the capture: were the two
+    # retained windows equal, a capture that emitted the head twice would
+    # satisfy both range comparisons below and prove nothing about the tail.
+    assert_true(
+        expected_head != expected_tail,
+        "the retained head and tail must be distinguishable byte ranges",
+    )
     assert_equal(
         len(captured),
         _HEAD_CAP + _MARKER_LEN + _TAIL_CAP,
@@ -329,7 +345,7 @@ def _assert_overflowed_stream(
     )
     assert_equal(
         bytes_to_str(_byte_range(captured, 0, _HEAD_CAP)),
-        bytes_to_str(_byte_range(payload, 0, _HEAD_CAP)),
+        expected_head,
         "the retained head must be this actor's own leading bytes",
     )
     assert_equal(
@@ -344,9 +360,7 @@ def _assert_overflowed_stream(
                 _HEAD_CAP + _MARKER_LEN + _TAIL_CAP,
             )
         ),
-        bytes_to_str(
-            _byte_range(payload, _TAGGED_SIZE - _TAIL_CAP, _TAGGED_SIZE)
-        ),
+        expected_tail,
         "the retained tail must be this actor's own trailing bytes",
     )
 
@@ -367,7 +381,7 @@ def test_pool_truncation_is_slot_local_out_of_completion_order() raises:
         py_spec(
             [
                 target("tagged_streams.py"),
-                "10",
+                _OVERFLOW_TAG,
                 String(_TAGGED_SIZE),
                 String(_TAGGED_SIZE),
                 ready,
@@ -377,14 +391,12 @@ def test_pool_truncation_is_slot_local_out_of_completion_order() raises:
         ),
         10,
     )
-    _ = supervisor.spawn(
-        py_spec([target("tagged_streams.py"), "neighbor", "13", "13"], 0), 20
-    )
-
-    var comps = List[Completion]()
-    _pump_one(supervisor, comps)
-    # Tag 10 announces its payload only after both writes, so the barrier proves
-    # the overflow was already in the pipes while the neighbor finalized.
+    # Tag 10 creates its ready marker only after BOTH payloads are written, so
+    # draining until the marker exists makes "the overflow is already in the
+    # pipes" a precondition of the neighbor's run rather than something observed
+    # afterwards. Without it the neighbor could finalize before tag 10 pushed
+    # past the bound, and a mutation that copies a sibling's truncation flag
+    # would copy a False and escape.
     var guard = 0
     while guard < 200000 and not exists(ready):
         guard += 1
@@ -392,6 +404,15 @@ def test_pool_truncation_is_slot_local_out_of_completion_order() raises:
     assert_true(exists(ready), "tag 10 never announced its payload")
     assert_equal(
         supervisor.in_flight(), 1, "the overflowing slot is still live"
+    )
+
+    _ = supervisor.spawn(
+        py_spec([target("tagged_streams.py"), "neighbor", "13", "13"], 0), 20
+    )
+    var comps = List[Completion]()
+    _pump_one(supervisor, comps)
+    assert_equal(
+        supervisor.in_flight(), 1, "only the barriered slot may remain"
     )
     with open(release, "w") as handle:
         handle.write("release\n")
@@ -421,8 +442,12 @@ def test_pool_truncation_is_slot_local_out_of_completion_order() raises:
 
     assert_true(comps[1].result.stdout_truncated, "513 bytes over a 200 bound")
     assert_true(comps[1].result.stderr_truncated)
-    _assert_overflowed_stream(comps[1].result.stdout_bytes, "10", "out")
-    _assert_overflowed_stream(comps[1].result.stderr_bytes, "10", "err")
+    _assert_overflowed_stream(
+        comps[1].result.stdout_bytes, _OVERFLOW_TAG, "out"
+    )
+    _assert_overflowed_stream(
+        comps[1].result.stderr_bytes, _OVERFLOW_TAG, "err"
+    )
     assert_true(
         comps[1].result.termination.is_exited(),
         String(comps[1].result.termination),
@@ -468,13 +493,6 @@ def test_pool_overflow_and_deadline_kill_finish_without_cross_slot_bytes() raise
             )
             _assert_overflowed_stream(
                 comps[i].result.stderr_bytes, "spill", "err"
-            )
-            # The two streams stay separate as well as the two slots.
-            assert_false(
-                "spill-err-" in bytes_to_str(comps[i].result.stdout_bytes)
-            )
-            assert_false(
-                "spill-out-" in bytes_to_str(comps[i].result.stderr_bytes)
             )
         else:
             assert_true(
