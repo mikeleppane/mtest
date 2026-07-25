@@ -224,6 +224,25 @@ and `self-hosted tests` are externally configured required check names and
 must stay stable. `native-check` depends on `postfork-check`, so the native
 gate alone cannot skip the child call-graph audit.
 
+The whole local floor compiles for the host target only, so it is blind to a
+macOS-only compile failure: a `comptime` branch, `external_call` signature, or
+struct-layout offset that is wrong for Darwin passes every Linux gate and reds
+the hosted macOS preflight instead, before any test runs. A change that touches
+`CompilationTarget` branching, `external_call`, or a hand-computed struct
+offset therefore cross-compiles the product for macOS BEFORE commit:
+
+```text
+mojo build --target-triple arm64-apple-macosx14.0.0 --emit=asm \
+  -I src -I vendor/mojo-toml src/main.mojo -o /dev/null
+```
+
+That frontend-compiles every Darwin `comptime` branch in about four seconds;
+`--emit=asm` stops before linking, so no Darwin SDK and no native object are
+needed. The reverse direction — `x86_64-unknown-linux-gnu` from a macOS
+checkout — holds equally. Cross-compiling is a local pre-commit check, not a
+gate: it is absent from `ci-preflight` because the hosted macOS lane compiles
+natively and owns that verdict.
+
 Classified modules under `tests/unit/` and `tests/integration/` are
 import-only: they declare `test_*` functions and MUST NOT declare `main()`.
 `scripts/harness/aggregate.py` imports them and registers every test function
@@ -465,6 +484,12 @@ trap and its correct move.
   reach is legitimate only for a test driver pulling its own recorder out of
   a pack it composed; session-level reporter lifecycle goes through the
   `ReportCoordinator` named methods.
+- A `comptime if` guard confines only its own block. Statements AFTER the
+  block compile for every target, so a `comptime if CompilationTarget
+  .is_macos():` that returns inside the branch, followed by a bare
+  `comptime assert CompilationTarget.is_linux()`, fails to instantiate on
+  macOS and takes the whole binary with it. Every platform branch carries an
+  explicit `else`, holding that target's asserts AND its return.
 - A raw `external_call["isatty", ...]` link-conflicts with
   `std.io.FileDescriptor`'s own declaration once imported next to TestSuite;
   delegate to the std wrapper. The same discipline governs `write`.
@@ -483,6 +508,13 @@ trap and its correct move.
 - The harness gates enforce explicit membership (`scripts/checks/layout.py`
   pins exact suite/fixture sets and counts); register a new suite, fixture,
   snapshot, or e2e file in the SAME commit that adds it.
+- `mojo precompile` REJECTS `--target-triple`, so a cross-target check cannot
+  reuse the host-target packages under `-I build`; compile from sources with
+  `-I src -I vendor/mojo-toml`. Cross-compiling the test aggregate needs
+  `-I . -I tests/support` on top of those (generate the entrypoint first, about
+  eighty seconds); omitting an include prints bogus `statement indentation must
+  match the rest of the block` errors in files that parse fine — resolve the
+  module, never the indentation.
 - Never run two builds against the shared `build/` tree at once; a racing
   build corrupted `build/mtest.mojopkg` mid-write and looked exactly like a
   real regression. Builds run one at a time, full stop.
