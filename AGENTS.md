@@ -18,8 +18,8 @@ reporting for CI.
 Non-goals: not an assertion library, not a property-testing framework, not a
 TestSuite replacement. Zero runtime dependencies: product logic under `src/` is
 pure Mojo; the exec-private POSIX adapter under `native/` is compiled and
-statically linked at build time; Python appears only in build-time tooling
-under `scripts/` and test-only subprocess actors under `tests/fixtures/exec/`.
+statically linked at build time; Python appears only in build-time tooling under
+`scripts/` and test-only subprocess actors under `tests/fixtures/exec/`.
 
 ## Product principles
 
@@ -99,8 +99,10 @@ driver today and pinned by `tests/unit/test_session_pipeline.mojo`.
 
 ## Mojo, not Python
 
-`src/` is pure Mojo. All platform and foreign-ABI knowledge lives in exactly
-two audited boundaries; no layer above `exec` carries a raw platform call:
+`src/` is pure Mojo. Selected project configuration is parsed by the pinned,
+vendored native `mojo-toml` parser. All platform and foreign-ABI knowledge
+lives in exactly two audited boundaries; no layer above `exec` carries a raw
+platform call:
 
 - **`src/mtest/platform`** (Layer 0): the small per-call libc operations a
   Mojo caller needs directly, each an in-Mojo `external_call` with its own
@@ -117,9 +119,10 @@ two audited boundaries; no layer above `exec` carries a raw platform call:
 
 A new foreign call belongs in `platform`, unless it is native-adapter
 machinery, in which case it belongs in `native/` behind the ABI. Python lives
-only under `scripts/` and `tests/fixtures/exec/`. Follow the global
-`mojo-syntax` skill for all syntax; training data is stale. Docstrings are
-Google-style, triple-quoted, and mandatory on public entities.
+only under `scripts/` and
+`tests/fixtures/exec/`. Follow the global `mojo-syntax` skill for all syntax;
+training data is stale. Docstrings are Google-style, triple-quoted, and
+mandatory on public entities.
 
 ## Unsafe Mojo requires a local proof
 
@@ -184,6 +187,7 @@ pixi run postfork-check    # audit production/testing post-fork call graphs
 pixi run native-check      # verify native ABI/layout/exports and lifecycle
 pixi run junit-check       # validate the committed JUnit oracle and checker
 pixi run build             # the package-compiles gate
+pixi run readme-help-check # compare README help with the real binary
 pixi run junit-render-check  # validate bytes emitted by the real JUnit reporter
 pixi run transcripts-check # regenerate to a temp dir and diff byte-for-byte
 pixi run test              # compile the classified inventory into one direct-run binary
@@ -191,9 +195,16 @@ pixi run dogfood-check     # run three focused probes through the built mtest bi
 pixi run e2e               # exact CLI exits and output against e2e/manifest.json
 ```
 
+`fmt-check` is `format-all` AND `git diff --exit-code`, so it fails on ANY
+unstaged change, including one made after a long CI run started. Stage the work
+first, then gate; a result produced against different bytes than you commit is
+not a result. The same applies to reading outcomes: a background wrapper's exit
+status is the wrapper's, not the gate's — read the gate's own marker.
+
 `pixi run ci-preflight` chains `version-check -> fmt-check -> harness-check ->
 safety-check -> postfork-check -> native-check -> junit-check -> build ->
-junit-render-check -> transcripts-check` in that exact fail-fast order; the
+readme-help-check -> junit-render-check -> transcripts-check` in that exact
+fail-fast order; the
 canonical local `pixi run ci` is serial: `ci-preflight ->
 test -> dogfood-check -> e2e`. Hosted CI runs the same logical floor as two
 platform-local chains: Linux preflight releases fail-fast `test`,
@@ -227,6 +238,12 @@ Pins are provenance, not preference.
   flags corrupt values with spaces); wrapping it was rejected too. Revisit
   trigger: prism ships native post-`--` pass-through. Until then the parser is
   hand-rolled.
+- **A vendored dependency records three digests, not one**: the authorized
+  upstream release, upstream `main` at adoption, and — separately — every
+  retained file AFTER the local patches, recomputed by the harness. Only the
+  third tells you whether the bytes you compile are the bytes you reviewed, and
+  it is the one that goes stale the moment you touch the vendored source again.
+  Every local change is enumerated in the vendor README in the same commit.
 
 **Ask first** before: bumping the Mojo pin; changing the CLI contract after it
 freezes; adding any dependency (or reaching for Python where native Mojo would
@@ -301,6 +318,11 @@ trap and its correct move.
 - `mojo build` bakes the ABSOLUTE canonicalized source path into every
   location line, even when built with a relative path; transcript portability
   requires normalizing the repo-root prefix to `<REPO>`.
+- `mojo format` and `mojo build` do not accept the same source. `where` is a
+  keyword the FORMATTER rejects as an identifier while the COMPILER accepts it,
+  so a green build is not evidence the file is well-formed. Never discard a
+  gate's output to keep a log tidy: `pixi run fmt` failed silently for several
+  commits this way, and only `fmt-check` in CI surfaced it.
 - Discovery order is SOURCE order (`__functions_in_module()` yields source
   order); the fixtures pin this deliberately with non-alphabetical functions.
 - TestSuite buffers its whole report and flushes it at the end; on failure it

@@ -1,8 +1,8 @@
 """One `--precompile SRC[:OUT]` entry.
 
 `--precompile` is repeatable; each occurrence names a source to precompile and
-an optional output name. This module holds only the data shape — splitting
-`SRC[:OUT]` into the two parts is the parser's job.
+an optional output name. This module holds the data shape; the config layer's
+source-neutral validator splits `SRC[:OUT]` into the two parts.
 """
 
 

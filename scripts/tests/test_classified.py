@@ -155,9 +155,9 @@ def test_root_modes_discover_focused_unit_integration_and_full_inventory() -> No
     """Every contributor root mode reaches its deterministic classified inventory."""
     cases = (
         (("tests/unit/test_model_outcome.mojo",), 1, "tests/unit/"),
-        (("tests/unit",), 51, "tests/unit/"),
-        (("tests/integration",), 33, "tests/integration/"),
-        ((), 84, "tests/"),
+        (("tests/unit",), 61, "tests/unit/"),
+        (("tests/integration",), 34, "tests/integration/"),
+        ((), 95, "tests/"),
     )
     for arguments, expected_count, prefix in cases:
         roots = classified._normalized_roots(REPO_ROOT, arguments)
@@ -475,7 +475,11 @@ step = os.environ["MTEST_DIRECT_FAILURE_STEP"]
 exit_code = int(os.environ["MTEST_DIRECT_FAILURE_EXIT"])
 signum = int(os.environ["MTEST_DIRECT_FAILURE_SIGNAL"])
 if args[0] == "precompile":
-    if mode == "spawn" and step == "build":
+    if (
+        mode == "spawn"
+        and step == "build"
+        and "src/mtest" in args
+    ):
         Path(sys.argv[0]).unlink()
     raise SystemExit(0)
 if args[0] != "build":
@@ -520,8 +524,9 @@ out.chmod(out.stat().st_mode | stat.S_IXUSR)
         if mode == "timeout":
             env["MTEST_TEST_ALL_TIMEOUT_SECONDS"] = "0.1"
         if mode == "spawn" and step == "build":
-            # `precompile` removes the fake `mojo`; retain only system tools so
-            # the suite build cannot fall through to Pixi's real compiler.
+            # The final package `precompile` removes the fake `mojo`; retain
+            # only system tools so the suite build cannot fall through to
+            # Pixi's real compiler.
             cc = shutil.which("clang")
             nm = shutil.which("nm")
             if cc is None or nm is None:

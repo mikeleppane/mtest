@@ -70,6 +70,46 @@ class AsanCheckTests(unittest.TestCase):
                 entrypoint.read_text(encoding="utf-8"),
             )
 
+    def test_production_smoke_builds_only_the_exec_probe(self) -> None:
+        results = [
+            subprocess.CompletedProcess(args=["mojo"], returncode=0, stdout=""),
+            subprocess.CompletedProcess(args=["nm"], returncode=0, stdout="__asan_"),
+            subprocess.CompletedProcess(
+                args=["exec_probe"],
+                returncode=0,
+                stdout="1 tests run: 1 passed\n",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            out = Path(raw_tmp)
+            with (
+                patch.object(asan_check, "OUT", out),
+                patch.object(asan_check, "run", side_effect=results) as mocked_run,
+            ):
+                asan_check.check_production_exec({})
+
+            compile_command = mocked_run.call_args_list[0].args[0]
+            self.assertIn("--sanitize", compile_command)
+            self.assertIn("address", compile_command)
+            self.assertIn("-I", compile_command)
+            self.assertIn("src", compile_command)
+            self.assertIn("tests/support", compile_command)
+            self.assertIn(
+                "tests/dogfood/exec_probe.mojo",
+                compile_command,
+            )
+            self.assertIn(
+                str(asan_check.NATIVE_PRODUCTION_OBJECT),
+                compile_command,
+            )
+            self.assertNotIn("src/main.mojo", compile_command)
+            self.assertFalse(
+                any(
+                    "vendor" in argument or argument == "toml"
+                    for argument in compile_command
+                )
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

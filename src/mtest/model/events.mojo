@@ -138,6 +138,8 @@ struct SessionStartedPayload(EventPayload):
     """How many selected files this shard handed off to other shards."""
     var workers: Int
     """The resolved worker count for the run; 1 for a sequential run."""
+    var config_file: String
+    """The normalized project-config path, or empty when none was loaded."""
 
 
 @fieldwise_init
@@ -486,6 +488,7 @@ struct Event(Copyable, Movable):
         shard_label: String = "",
         sharded_out_count: Int = 0,
         workers: Int = 1,
+        config_file: String = "",
     ) -> Event:
         """The run began.
 
@@ -500,6 +503,8 @@ struct Event(Copyable, Movable):
                 other shards.
             workers: The resolved worker count for the run; 1 for a sequential
                 run.
+            config_file: The normalized project-config path, or empty when no
+                file was loaded.
 
         Returns:
             A SESSION_STARTED event.
@@ -513,6 +518,7 @@ struct Event(Copyable, Movable):
                 shard_label,
                 sharded_out_count,
                 workers,
+                config_file,
             )
         )
 

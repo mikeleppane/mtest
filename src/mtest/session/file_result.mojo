@@ -9,6 +9,7 @@ prologue onto a result, and counting the failing entries in a run-outcome
 multiset for `--maxfail`.
 """
 from mtest.model import Event, Outcome, TestCounts
+from mtest.session.effective_settings import EffectiveFileSettings
 
 
 @fieldwise_init
@@ -181,6 +182,8 @@ struct _CrashFile(Copyable, Movable):
 
     var rel: String
     """The root-relative path of the crashed file."""
+    var settings: EffectiveFileSettings
+    """The file's effective deadlines and retry/serial policy."""
     var binary: String
     """The binary its crashed run executed."""
     var selected: List[String]

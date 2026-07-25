@@ -14,18 +14,30 @@ from std.testing import (
     assert_raises,
 )
 
+from mtest.config import (
+    CliOverlay,
+    ConfigEnvironment,
+    FileConfig,
+    LastRunRecord,
+    LastRunState,
+    ResolvedConfig,
+    RunnerConfig,
+    resolve_config,
+)
 from mtest.model import (
     Event,
     EventKind,
     Outcome,
     ParseDisposition,
     AttributionDisposition,
+    AttemptFinishedPayload,
     CollectionKnownPayload,
     CrashAttributionPayload,
     FileFinishedPayload,
     SessionFinishedPayload,
     SessionStartedPayload,
     WarningPayload,
+    NodeId,
 )
 from mtest.report import (
     CompositeReporter,
@@ -49,6 +61,70 @@ from session_fixtures import (
     write_file,
 )
 
+comptime _SRC_RETRY_THEN_STALE_BUILD_ERROR = (
+    "from std.ffi import external_call\n"
+    "from std.os.path import exists\n"
+    "from std.sys import argv\n"
+    "from std.testing import TestSuite, assert_true\n\n\n"
+    "def test_real() raises:\n    assert_true(True)\n\n\n"
+    "def test_ghost() raises:\n    assert_true(True)\n\n\n"
+    "def main() raises:\n"
+    "    var probing = False\n"
+    "    var has_only = False\n"
+    "    for a in argv():\n"
+    '        if a == "--skip-all":\n'
+    "            probing = True\n"
+    '        if a == "--only":\n'
+    "            has_only = True\n"
+    "    if probing:\n"
+    "        var s = TestSuite()\n"
+    "        s.test[test_real]()\n"
+    "        s.test[test_ghost]()\n"
+    "        s^.run()\n"
+    "        return\n"
+    '    if not exists("recovery_build_marker"):\n'
+    '        with open("recovery_build_marker", "w") as f:\n'
+    '            f.write("1")\n'
+    '        _ = external_call["abort", Int32]()\n'
+    '    with open("tests/test_retry_recovery_build.mojo", "a") as f:\n'
+    '        f.write("\\ninvalid recovery source\\n")\n'
+    "    var s = TestSuite()\n"
+    "    s.test[test_real]()\n"
+    "    s^.run()\n"
+)
+
+comptime _SRC_RETRY_THEN_STALE_PROBE_CRASH = (
+    "from std.ffi import external_call\n"
+    "from std.os.path import exists\n"
+    "from std.sys import argv\n"
+    "from std.testing import TestSuite, assert_true\n\n\n"
+    "def test_real() raises:\n    assert_true(True)\n\n\n"
+    "def test_ghost() raises:\n    assert_true(True)\n\n\n"
+    "def main() raises:\n"
+    "    var probing = False\n"
+    "    var has_only = False\n"
+    "    for a in argv():\n"
+    '        if a == "--skip-all":\n'
+    "            probing = True\n"
+    '        if a == "--only":\n'
+    "            has_only = True\n"
+    "    if probing:\n"
+    '        if exists("recovery_probe_marker"):\n'
+    '            _ = external_call["abort", Int32]()\n'
+    "        var s = TestSuite()\n"
+    "        s.test[test_real]()\n"
+    "        s.test[test_ghost]()\n"
+    "        s^.run()\n"
+    "        return\n"
+    '    if not exists("recovery_probe_marker"):\n'
+    '        with open("recovery_probe_marker", "w") as f:\n'
+    '            f.write("1")\n'
+    '        _ = external_call["abort", Int32]()\n'
+    "    var s = TestSuite()\n"
+    "    s.test[test_real]()\n"
+    "    s^.run()\n"
+)
+
 
 def _finished(rec: RecordingReporter) raises -> FileFinishedPayload:
     var found = -1
@@ -57,6 +133,19 @@ def _finished(rec: RecordingReporter) raises -> FileFinishedPayload:
             found = i
     assert_true(found >= 0, "no FILE_FINISHED event")
     return rec.event_at(found).data[FileFinishedPayload].copy()
+
+
+def _resolved_state(
+    config: RunnerConfig, state: LastRunState
+) -> ResolvedConfig:
+    var resolved = resolve_config(
+        config,
+        FileConfig.empty(),
+        ConfigEnvironment.empty(),
+        CliOverlay.default(),
+    )
+    resolved.last_run_state = state.copy()
+    return resolved^
 
 
 def _count_kind(rec: RecordingReporter, kind: EventKind) raises -> Int:
@@ -81,6 +170,47 @@ def _crash_attribution(
         if rec.kind_at(i) == EventKind.CRASH_ATTRIBUTION:
             return rec.event_at(i).data[CrashAttributionPayload].copy()
     raise Error("no CRASH_ATTRIBUTION event")
+
+
+def _assert_retry_then_recovery_terminal(
+    rec: RecordingReporter, expected: Outcome
+) raises:
+    """Assert one TRY then stale recovery and an attempt-two terminal event."""
+    var try_i = -1
+    var stale_i = -1
+    var finished_i = -1
+    var tries = 0
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.ATTEMPT_FINISHED:
+            tries += 1
+            try_i = i
+            ref attempt = rec.event_at(i).data[AttemptFinishedPayload]
+            assert_equal(attempt.step, "run")
+            assert_equal(attempt.attempt_index, 1)
+            assert_equal(attempt.attempts_planned, 2)
+            assert_true(attempt.retry_eligible)
+        elif rec.kind_at(i) == EventKind.WARNING:
+            if (
+                rec.event_at(i).data[WarningPayload].warning_kind
+                == "stale-name"
+            ):
+                stale_i = i
+        elif rec.kind_at(i) == EventKind.FILE_FINISHED:
+            finished_i = i
+
+    assert_equal(tries, 1, "exactly one crash-class TRY precedes recovery")
+    assert_true(try_i >= 0, "the first crash must emit AttemptFinished")
+    assert_true(stale_i > try_i, "stale-name follows the first attempt's TRY")
+    assert_true(
+        finished_i > stale_i, "the recovery terminal follows its loud warning"
+    )
+    var finished = rec.event_at(finished_i).data[FileFinishedPayload].copy()
+    assert_true(finished.outcome == expected)
+    assert_equal(
+        finished.attempts_used,
+        2,
+        "a terminal recovery step belongs to the second run attempt",
+    )
 
 
 def test_keyword_subset_runs_only_selected_and_counts_deselected() raises:
@@ -298,6 +428,79 @@ def test_recovery_probe_crash_still_reaches_crash_attribution() raises:
     assert_true(
         saw_attribution,
         "a recovery-probe CRASH must reach the crash-attribution pass",
+    )
+
+
+def test_last_failed_recovery_keeps_the_soft_selection() raises:
+    var root = temp_root()
+    write_file(root, "tests/test_lf_recovery.mojo", SRC_CHAMELEON)
+    var cfg = base_config()
+    cfg.paths.append("tests/test_lf_recovery.mojo")
+    cfg.last_failed = True
+    var state = LastRunState(
+        [
+            LastRunRecord.test(
+                NodeId("tests/test_lf_recovery.mojo", "test_ghost")
+            )
+        ]
+    )
+    var resolved = _resolved_state(cfg, state)
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    _ = run_session(resolved, root, comp)
+
+    var finished = _finished(comp.composite.reporters[0])
+    assert_equal(
+        finished.deselected_tests,
+        1,
+        "stale recovery must retain only the effective --lf test",
+    )
+
+
+def test_retry_then_recovery_build_terminal_reports_attempt_two() raises:
+    var root = temp_root()
+    write_file(
+        root,
+        "tests/test_retry_recovery_build.mojo",
+        _SRC_RETRY_THEN_STALE_BUILD_ERROR,
+    )
+    var cfg = base_config()
+    cfg.timeout_secs = 10
+    cfg.retries = 1
+    cfg.paths.append("tests/test_retry_recovery_build.mojo::test_ghost")
+
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    var code = run_session(cfg, root, comp)
+
+    assert_equal(code, 1)
+    _assert_retry_then_recovery_terminal(
+        comp.composite.reporters[0], Outcome.COMPILE_ERROR
+    )
+
+
+def test_retry_then_recovery_probe_terminal_reports_attempt_two() raises:
+    var root = temp_root()
+    write_file(
+        root,
+        "tests/test_retry_recovery_probe.mojo",
+        _SRC_RETRY_THEN_STALE_PROBE_CRASH,
+    )
+    var cfg = base_config()
+    cfg.timeout_secs = 10
+    cfg.retries = 1
+    cfg.paths.append("tests/test_retry_recovery_probe.mojo::test_ghost")
+
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    var code = run_session(cfg, root, comp)
+
+    assert_equal(code, 1)
+    _assert_retry_then_recovery_terminal(
+        comp.composite.reporters[0], Outcome.CRASH
     )
 
 

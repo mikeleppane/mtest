@@ -1056,6 +1056,10 @@ struct ConsoleReporter(Reporter):
         Latches the detail so a DRIFT file's banner can fold in the offending
         line the session emitted just before its `FileFinished`.
         """
+        if e.warning_kind == "lf-stale" or e.warning_kind == "lf-empty":
+            self._last_warning_detail = e.warning_pattern.copy()
+            self._head += e.warning_pattern + "\n"
+            return
         var sentence: String
         if e.warning_kind == "stale-exclusion":
             sentence = (

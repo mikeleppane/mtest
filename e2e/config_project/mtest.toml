@@ -1,0 +1,13 @@
+[run]
+paths = ["tests/test_stateful.mojo"]
+workers = 1
+timeout = 30
+state = true
+
+[build]
+mojo = "mojo"
+compile-timeout = 60
+
+[report]
+color = "never"
+gh-annotations = "off"

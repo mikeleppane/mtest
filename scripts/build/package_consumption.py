@@ -12,7 +12,7 @@ toolchain. This script is that proof, run in five ordered stages:
      its command). No network beyond the solve; nothing is uploaded.
   2. Install the built `.conda` into a FRESH scratch pixi env, solving from the
      LOCAL channel plus the modular + conda-forge channels (needed to resolve
-     the `mojo-compiler` run dependency). Confirms the solve actually pulled
+     the declared run dependencies). Confirms the solve actually pulled
      `mojo-compiler ==1.0.0b2`.
   3. LOADER-CLEAN PROBE FIRST, on the INSTALLED binary: run `mtest --version`
      and `mtest --help` with THIS PROCESS's own child environment scrubbed --
@@ -22,7 +22,9 @@ toolchain. This script is that proof, run in five ordered stages:
      (`build/mtest`) is NOT loader-clean this way: it needs
      `libKGENCompilerRTShared.so` from the Mojo runtime, which the dev pixi env
      supplies but a scrubbed env does not. The INSTALLED package must be
-     loader-clean purely via the `mojo-compiler` run dependency.
+     loader-clean via the declared Mojo runtime dependency. The same
+     scrubbed probe parses a present config before an expected discovery
+     refusal.
      A soname failure here is a recipe run-dependency gap, not a retry-able
      flake -- this script stops and reports it.
   4. Toolchain-threaded dogfood run: three focused executable probes, run
@@ -228,7 +230,7 @@ def stage_install_from_local_channel() -> Path:
         )
     print(
         f"package-check: installed {mtest_bin.relative_to(REPO_ROOT)}; "
-        f"run dep confirmed: {conda_meta[0].name}",
+        f"run dependency confirmed: {conda_meta[0].name}",
         flush=True,
     )
     return mtest_bin
@@ -242,7 +244,7 @@ def stage_loader_clean_probe(mtest_bin: Path) -> None:
     This is us scrubbing OUR OWN subprocess environment to probe OUR OWN
     artifact -- not the forbidden child-env scrub inside the product itself.
     If the binary can only load with the dev toolchain on PATH, the recipe's
-    `mojo-compiler` run dependency is not actually sufficient, and that is a
+    declared runtime dependency set is not actually sufficient, and that is a
     packaging gap this script must stop and report, not paper over.
     """
     _banner("stage 3/5 -- LOADER-CLEAN PROBE on the installed binary")
@@ -299,9 +301,43 @@ def stage_loader_clean_probe(mtest_bin: Path) -> None:
                 f"contain {expect_substring!r}: {result.stdout!r}"
             )
 
+    config_path = LOADER_PROBE_CWD / "mtest.toml"
+    config_path.write_text(
+        "[run]\nstate = false\n[report]\ncolor = \"never\"\n",
+        encoding="utf-8",
+    )
     print(
-        "package-check: OK -- installed mtest --version/--help both ran clean "
-        "with the dev pixi env absent from PATH and LD_LIBRARY_PATH empty",
+        "$ env -i PATH=/usr/bin:/bin LD_LIBRARY_PATH= <installed mtest> "
+        "--config mtest.toml definitely-missing.mojo",
+        flush=True,
+    )
+    configured = subprocess.run(
+        [
+            str(mtest_bin),
+            "--config",
+            "mtest.toml",
+            "definitely-missing.mojo",
+        ],
+        cwd=LOADER_PROBE_CWD,
+        env=scrubbed_env,
+        capture_output=True,
+        text=True,
+        timeout=PROBE_TIMEOUT,
+    )
+    if configured.returncode != 4 or not configured.stderr.startswith(
+        "discover:"
+    ):
+        raise PackageCheckError(
+            "installed config-present invocation did not parse natively before "
+            f"the expected discovery refusal: exit "
+            f"{configured.returncode}, stdout={configured.stdout!r}, "
+            f"stderr={configured.stderr!r}"
+        )
+
+    print(
+        "package-check: OK -- installed mtest --version/--help and a "
+        "config-present parse ran with the dev pixi env absent from PATH and "
+        "LD_LIBRARY_PATH empty",
         flush=True,
     )
 
@@ -431,7 +467,7 @@ def main() -> int:
 
     print(
         "\npackage-check: OK -- built, installed from the local channel "
-        "(mojo-compiler run dep confirmed), loader-clean on the installed "
+        "(Mojo run dependency confirmed), loader-clean on the installed "
         "binary, installed binary passed the focused dogfood probes, and the "
         "tar-bz2 fallback form installed and ran cleanly. Nothing uploaded "
         "or published.",

@@ -30,6 +30,7 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
             ("E2E_SCENARIO_NAMES", layout.check_e2e_layout),
             ("E2E_HARNESS_PATHS", layout.check_e2e_layout),
             ("BUILD_SOURCE_PATHS", layout.check_build_source_visibility),
+            ("VENDORED_TOML_PATHS", layout.check_vendored_toml_layout),
         )
         for name, check in cases:
             with self.subTest(inventory=name):

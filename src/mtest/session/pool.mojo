@@ -10,10 +10,10 @@ concurrency is only ever *across* files.
 The run is three ordered batches: the gates first, as their own batch — a
 failing or drifting gate `kill_all`s the batch immediately, accounts the rest
 NOT-RUN, and aborts the whole run — then the parallel run files in discovery
-order, then the serial files (a no-op hook here; serial pinning lands later). A
-`--maxfail`/`-x` stop halts new dispatch, lets the in-flight files finish, and
-leaves the remainder NOT-RUN. An interrupt tears every live group down and
-resolves exit 2 through `resolve_exit_code`, never through the kernel's halt.
+order, then the effectively serial files at capacity one. A `--maxfail`/`-x`
+stop halts new dispatch, lets the in-flight files finish, and leaves the
+remainder NOT-RUN. An interrupt tears every live group down and resolves exit 2
+through `resolve_exit_code`, never through the kernel's halt.
 
 The token budget keeps concurrent builds from oversubscribing the cores: each
 build acquires `K = build_tokens(workers, cores)` tokens against a `cores`-wide
@@ -23,7 +23,7 @@ budget is consulted only here, so the sequential path's build argv stays clean.
 from std.io import FileDescriptor
 from std.time import perf_counter_ns
 
-from mtest.config import RunnerConfig, lossy_utf8
+from mtest.config import ResolvedConfig, RunnerConfig, lossy_utf8
 from mtest.exec import (
     Completion,
     ExecRuntime,
@@ -56,6 +56,10 @@ from mtest.session.file_result import (
     _CrashFile,
     _failing_count,
     _prepend_events,
+)
+from mtest.session.effective_settings import (
+    EffectiveFileSettings,
+    effective_file_settings,
 )
 from mtest.session.pipeline import PipelineHalt, RunPipeline
 from mtest.session.pool_plan import WorkerPlan, build_tokens, resolve_workers
@@ -147,6 +151,7 @@ struct _PoolFile(Movable):
     """One file's position and carried facts inside a pooled batch."""
 
     var rel: String
+    var settings: EffectiveFileSettings
     var phase: Int
     var attempt: Int
     var mangled: String
@@ -162,9 +167,15 @@ struct _PoolFile(Movable):
     var started_emitted: Bool
     var dispatch_ns: Int
 
-    def __init__(out self, rel: String, mangled: String):
+    def __init__(
+        out self,
+        rel: String,
+        mangled: String,
+        settings: EffectiveFileSettings,
+    ):
         """A freshly admitted file, before its first build spawns."""
         self.rel = rel
+        self.settings = settings
         self.phase = _PENDING_BUILD
         self.attempt = 1
         self.mangled = mangled
@@ -342,7 +353,7 @@ def _run_pool_batch[
     C: ReportCoordinator
 ](
     mut runtime: ExecRuntime,
-    config: RunnerConfig,
+    resolved: ResolvedConfig,
     root: String,
     files: List[String],
     include_paths: List[String],
@@ -370,7 +381,7 @@ def _run_pool_batch[
     Args:
         runtime: The active exec runtime; the Supervisor drives children under
             the process-global signal state it owns.
-        config: The resolved run configuration.
+        resolved: Layered global configuration and per-file override tables.
         root: The invocation root every child runs in.
         files: The batch's files, in discovery order.
         include_paths: Directories passed to the compiler as `-I`.
@@ -398,6 +409,7 @@ def _run_pool_batch[
     """
     if not runtime.active:
         raise Error("session: the parallel pool requires an active ExecRuntime")
+    var config = resolved.config.copy()
     var n = len(files)
     var result = PoolBatchResult(
         List[Outcome](),
@@ -413,7 +425,6 @@ def _run_pool_batch[
     if n == 0:
         return result^
 
-    var attempts_planned = config.retries + 1
     var nonce = _invocation_nonce()
     var k = build_tokens(workers, cores)
     var budget = cores if cores >= 1 else 1
@@ -421,8 +432,11 @@ def _run_pool_batch[
     _ensure_dir(root + "/build/bin")
 
     var state = List[_PoolFile]()
+    var retry_budgets = List[Int]()
     for i in range(n):
-        state.append(_PoolFile(files[i], _mangle(files[i])))
+        var settings = effective_file_settings(resolved, files[i])
+        retry_budgets.append(settings.retries)
+        state.append(_PoolFile(files[i], _mangle(files[i]), settings))
 
     # The kernel serves as the stop-policy oracle: gates are always exit-first,
     # the run batch honors the config's `-x`/`--maxfail`. `record_verdict`'s 8a
@@ -438,9 +452,8 @@ def _run_pool_batch[
     var batch_maxfail = 0 if is_gate else config.maxfail
     if batch_maxfail > 0 and initial_failing > 0:
         batch_maxfail = max(1, batch_maxfail - initial_failing)
-    var pipeline = RunPipeline(
-        n,
-        config.retries,
+    var pipeline = RunPipeline.from_retry_budgets(
+        retry_budgets^,
         True if is_gate else config.exitfirst,
         batch_maxfail,
     )
@@ -511,7 +524,9 @@ def _run_pool_batch[
                     try:
                         _ = supervisor.spawn(
                             ProcessSpec.command_in(
-                                run_argv^, root, config.timeout_secs * 1000
+                                run_argv^,
+                                root,
+                                state[picked].settings.timeout_secs * 1000,
                             ),
                             picked,
                         )
@@ -549,7 +564,8 @@ def _run_pool_batch[
                             ProcessSpec.command_in(
                                 spawn_argv^,
                                 root,
-                                config.compile_timeout_secs * 1000,
+                                state[picked].settings.compile_timeout_secs
+                                * 1000,
                                 _COMPILE_GRACE_MS,
                                 env_extra^,
                             ),
@@ -641,11 +657,10 @@ def _run_pool_batch[
                     var rc = retry_classify(
                         "build", term, False, state[i].build_stderr
                     )
-                    if (
-                        rc.retry_eligible
-                        and state[i].attempt < attempts_planned
-                        and not stop_scheduling
-                    ):
+                    var retry_admitted = False
+                    if rc.retry_eligible and not stop_scheduling:
+                        retry_admitted = pipeline.admit_crash_retry(i)
+                    if retry_admitted:
                         state[i].had_retry = True
                         var att = _AttemptResult._build_failed(
                             state[i].build_argv.copy(),
@@ -660,7 +675,7 @@ def _run_pool_batch[
                                 rc,
                                 att,
                                 state[i].attempt,
-                                attempts_planned,
+                                state[i].settings.retries + 1,
                             )
                         )
                         state[i].pre_events.append(
@@ -697,7 +712,7 @@ def _run_pool_batch[
                             state[i].out_bin,
                         )
                         var fr = _finalize_attempt(
-                            config,
+                            state[i].settings,
                             state[i].rel,
                             att^,
                             state[i].attempt,
@@ -742,11 +757,10 @@ def _run_pool_batch[
                 var cls = classify(term, trusted.report, trusted.is_overflow)
                 var attempt_passed = _flaky_eligible(cls.file_outcome)
                 var rc = retry_classify("run", term, False, res.stderr_bytes)
-                if (
-                    rc.retry_eligible
-                    and state[i].attempt < attempts_planned
-                    and not stop_scheduling
-                ):
+                var retry_admitted = False
+                if rc.retry_eligible and not stop_scheduling:
+                    retry_admitted = pipeline.admit_crash_retry(i)
+                if retry_admitted:
                     state[i].had_retry = True
                     var att = _AttemptResult(
                         0,
@@ -772,7 +786,7 @@ def _run_pool_batch[
                             rc,
                             att,
                             state[i].attempt,
-                            attempts_planned,
+                            state[i].settings.retries + 1,
                         )
                     )
                     state[i].attempt += 1
@@ -799,7 +813,7 @@ def _run_pool_batch[
                         res.stderr_truncated,
                     )
                     var fr = _finalize_attempt(
-                        config,
+                        state[i].settings,
                         state[i].rel,
                         att^,
                         state[i].attempt,
@@ -931,7 +945,12 @@ def _settle[
     result.ran_files += 1
     if (not is_gate) and settled.outcome == Outcome.CRASH:
         result.crash_files.append(
-            _CrashFile(state[i].rel, settled.binary_path, List[String]())
+            _CrashFile(
+                state[i].rel,
+                state[i].settings,
+                settled.binary_path,
+                List[String](),
+            )
         )
     pipeline.record_verdict(
         i, settled.outcome.is_failing(), _failing_count(result.run_outcomes)

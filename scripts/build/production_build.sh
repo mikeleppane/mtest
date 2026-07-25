@@ -19,8 +19,9 @@
 # the flags are defined in exactly one place.
 #
 # NOTE: mojo 1.0.0b2 has no `mojo package` subcommand -- only `mojo precompile`,
-# which produces the same .mojopkg. The output is named mtest.mojopkg so
-# `-I build` resolves `from mtest import ...`.
+# which produces the same .mojopkg. The vendored parser is precompiled first;
+# then `-I build` resolves it while precompiling mtest and resolves both
+# packages while linking main.
 #
 # Usage:  production_build.sh [precompile|native|link|all]   (default: all)
 # The test-only native variant and its symbol verification are dev/CI artifacts
@@ -50,8 +51,10 @@ read_strict_flags() {
 
 stage_precompile() {
   mkdir -p build
+  echo "==> precompiling vendor/mojo-toml/toml -> build/toml.mojopkg"
+  mojo precompile vendor/mojo-toml/toml -o build/toml.mojopkg
   echo "==> precompiling src/mtest -> build/mtest.mojopkg"
-  mojo precompile src/mtest -o build/mtest.mojopkg
+  mojo precompile -I build src/mtest -o build/mtest.mojopkg
 }
 
 stage_native() {

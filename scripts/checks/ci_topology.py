@@ -21,6 +21,7 @@ HARNESS_CHECK_MODULES = (
     "scripts.tests.test_contract",
     "scripts.tests.test_pty_capture",
     "scripts.tests.test_transcript_compare",
+    "scripts.tests.test_readme_help",
     "scripts.tests.test_layout",
     "scripts.checks.layout",
     "scripts.tests.test_ci_topology",
@@ -36,6 +37,7 @@ CI_PREFLIGHT_TASKS = [
     "native-check",
     "junit-check",
     "build",
+    "readme-help-check",
     "junit-render-check",
     "transcripts-check",
 ]
@@ -266,6 +268,16 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
             "dogfood-check task mismatch: "
             f"expected={expected_dogfood!r}, actual={tasks.get('dogfood-check')!r}"
         )
+    expected_readme_help = {
+        "cmd": "python -m scripts.checks.readme_help",
+        "depends-on": ["build-bin"],
+    }
+    if tasks.get("readme-help-check") != expected_readme_help:
+        raise AssertionError(
+            "readme-help-check task mismatch: "
+            f"expected={expected_readme_help!r}, "
+            f"actual={tasks.get('readme-help-check')!r}"
+        )
     preflight = _task_dependencies(tasks, "ci-preflight")
     if preflight != CI_PREFLIGHT_TASKS:
         raise AssertionError(
@@ -277,7 +289,12 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
         raise AssertionError(
             f"ci membership/order mismatch: expected={CI_TASKS}, actual={ci}"
         )
-    expected_preflight_closure = {"ci-preflight", *CI_PREFLIGHT_TASKS}
+    expected_preflight_closure = {
+        "ci-preflight",
+        "build-bin",
+        "build-native",
+        *CI_PREFLIGHT_TASKS,
+    }
     preflight_closure = _transitive_tasks(tasks, "ci-preflight")
     if preflight_closure != expected_preflight_closure:
         raise AssertionError(

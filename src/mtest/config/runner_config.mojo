@@ -1,9 +1,10 @@
 """`RunnerConfig`: the typed home for every runner knob.
 
 `RunnerConfig` is data plus its contract defaults — no parsing, no environment
-or file reads, no printing. The cli layer constructs and fills one from argv;
-the session layer only reads it. An empty `paths` list means "use discovery's
-own default root", not "nothing to do"; applying that rule is discover's job.
+or file reads, no printing. The cli layer folds its typed argv overlay over a
+default config; the session layer only reads the result. An empty `paths` list
+means "use discovery's own default root", not "nothing to do"; applying that
+rule is discover's job.
 """
 from mtest.config.annotations_mode import AnnotationsMode
 from mtest.config.color_when import ColorWhen
@@ -23,7 +24,16 @@ struct RunnerConfig(Copyable, Movable):
     """
 
     var paths: List[String]
-    """Positional path operands; empty means "use the default root"."""
+    """The selected path operands; see `paths_supplied` for an empty list."""
+
+    var paths_supplied: Bool
+    """Whether any layer actually supplied `paths`, empty list included.
+
+    Discovery falls back to `tests/` (else `.`) only when NO layer supplied a
+    path list. A layer that supplied an explicitly empty list replaces the
+    lower value like every other list key, so it selects nothing rather than
+    silently reopening the default tree.
+    """
 
     var excludes: List[String]
     """Repeatable `--exclude` glob patterns."""
@@ -77,6 +87,12 @@ struct RunnerConfig(Copyable, Movable):
     """Collect mode (`collect` subcommand or `--collect-only`): probe every
     discovered file for its node ids and print the sorted listing, running no
     test body. When True the session takes the collect path, not a run."""
+
+    var last_failed: Bool
+    """Whether `--lf`/`--last-failed` narrows to remembered failures."""
+
+    var failed_first: Bool
+    """Whether `--ff`/`--failed-first` orders remembered failures first."""
 
     var shard_mode: ShardMode
     """`--shard` partitioning mode: hash (default) or slice. Consulted only
@@ -145,20 +161,21 @@ struct RunnerConfig(Copyable, Movable):
         `compile_timeout_secs=600`. Every other numeric field is `0` —
         `maxfail`, `durations`, `retries`, `shard_m`, `shard_n` — which
         disables that limit and leaves the run unsharded. Every list is empty,
-        `exitfirst` and `collect` are False, and `keyword`, `json_dest`, and
-        `junit_dest` are `""`, so no keyword filter, event stream, or JUnit
-        report is configured. The rest are `mojo_path="mojo"`,
+        `exitfirst`, `collect`, `last_failed`, and `failed_first` are False,
+        and `keyword`, `json_dest`, and `junit_dest` are `""`, so no keyword
+        filter, event stream, or JUnit report is configured. The rest are
+        `mojo_path="mojo"`,
         `show_output=FAILURES`, `verbosity=NORMAL`, `color=AUTO`,
         `shard_mode=HASH`, and `gh_annotations=AUTO`.
 
         Returns:
-            A freshly allocated config. `parse_args` does not build on this —
-            it constructs its own `RunnerConfig` from the parsed tokens — so
-            the only use is the placeholder config a help or version
-            `ParseResult` carries and callers ignore.
+            A freshly allocated config used as the lower-precedence input to
+            `parse_args`'s overlay fold and as the placeholder a help or
+            version `ParseResult` carries.
         """
         return RunnerConfig(
             paths=[],
+            paths_supplied=False,
             excludes=[],
             serial_globs=[],
             gates=[],
@@ -175,6 +192,8 @@ struct RunnerConfig(Copyable, Movable):
             maxfail=0,
             durations=0,
             collect=False,
+            last_failed=False,
+            failed_first=False,
             shard_mode=ShardMode.HASH,
             shard_m=0,
             shard_n=0,

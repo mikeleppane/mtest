@@ -169,7 +169,7 @@ def discover(config: RunnerConfig, root: String) raises -> DiscoveryResult:
 
     # Stage 1: default path when no operands are given.
     var operands = List[String]()
-    if len(config.paths) == 0:
+    if len(config.paths) == 0 and not config.paths_supplied:
         if isdir(_abs_of(nroot, "tests")):
             operands.append(String("tests"))
         else:

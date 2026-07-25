@@ -1,7 +1,7 @@
 """One build-run-classify attempt for a file, and the retry loop over it.
 
 Layer 4, the plain (non-selection) run path: `_run_one` spends up to
-`config.retries + 1` attempts on one file, each attempt building it under
+the file's effective retry budget plus one attempt, each building it under
 `--compile-timeout`, executing the binary under the `exec` supervisor, and
 resolving and classifying the report its stdout carried. A crash-class ending
 with budget left is reported immediately and retried — a build rebuilds
@@ -43,6 +43,7 @@ from mtest.session.classify import (
     resolve_report,
 )
 from mtest.session.file_result import FileResult, _prepend_events
+from mtest.session.effective_settings import EffectiveFileSettings
 from mtest.session.retry_class import RetryClass, retry_classify
 from mtest.session.scratch import (
     _cleanup_quarantine,
@@ -276,6 +277,7 @@ def _blank_classification() -> Classification:
 def _single_attempt(
     mut runtime: ExecRuntime,
     config: RunnerConfig,
+    settings: EffectiveFileSettings,
     root: String,
     rel: String,
     include_paths: List[String],
@@ -303,6 +305,7 @@ def _single_attempt(
     Args:
         runtime: The exec runtime supervising the build and run spawns.
         config: The resolved runner configuration.
+        settings: The file's effective deadlines and retry/serial policy.
         root: The invocation root the child processes run in.
         rel: The root-relative path of the file to build and run.
         include_paths: Directories passed to the compiler as `-I`.
@@ -362,7 +365,7 @@ def _single_attempt(
                 ProcessSpec.command_in(
                     build_argv.copy(),
                     root,
-                    config.compile_timeout_secs * 1000,
+                    settings.compile_timeout_secs * 1000,
                     _COMPILE_GRACE_MS,
                     env_extra^,
                 ),
@@ -400,7 +403,9 @@ def _single_attempt(
     try:
         rres = run_supervised(
             runtime,
-            ProcessSpec.command_in(run_argv^, root, config.timeout_secs * 1000),
+            ProcessSpec.command_in(
+                run_argv^, root, settings.timeout_secs * 1000
+            ),
         )
     except:
         return _AttemptResult._internal(Event.internal_error("run", out_bin, 0))
@@ -519,7 +524,7 @@ def _make_attempt_finished(
 
 
 def _finalize_attempt(
-    config: RunnerConfig,
+    settings: EffectiveFileSettings,
     rel: String,
     var att: _AttemptResult,
     attempts_used: Int,
@@ -533,8 +538,7 @@ def _finalize_attempt(
     flag.
 
     Args:
-        config: The resolved runner configuration, for the deadline values the
-            verdict banner reports.
+        settings: The file's effective deadlines and retry/serial policy.
         rel: The root-relative path of the file.
         att: The last attempt, consumed for its streams and classification.
         attempts_used: How many attempts the file spent.
@@ -554,7 +558,7 @@ def _finalize_attempt(
         var bout = build_verdict(att.bterm)
         var bto = 0
         if bout == Outcome.COMPILE_TIMEOUT:
-            bto = config.compile_timeout_secs
+            bto = settings.compile_timeout_secs
         var ev = Event.file_finished(
             rel,
             bout,
@@ -598,7 +602,7 @@ def _finalize_attempt(
     elif cls.file_outcome == Outcome.FAIL:
         exit_status = att.rterm.value
     elif cls.file_outcome == Outcome.TIMEOUT:
-        timeout_seconds = config.timeout_secs
+        timeout_seconds = settings.timeout_secs
         escalated = att.rterm.escalated
 
     # A late pass after a crash-class attempt is FLAKY (not PASS): the file
@@ -713,13 +717,15 @@ def _flaky_eligible(file_outcome: Outcome) -> Bool:
 def _run_one(
     mut runtime: ExecRuntime,
     config: RunnerConfig,
+    settings: EffectiveFileSettings,
     root: String,
     rel: String,
     include_paths: List[String],
 ) raises -> FileResult:
     """Build `rel`, execute it, and retry a crash-class failure up to budget.
 
-    Runs up to `config.retries + 1` attempts through `_single_attempt`. An
+    Runs through `_single_attempt` up to the file's effective retry budget plus
+    one attempt. An
     attempt that passes, or fails deterministically with a real failure, a
     compile error, or a flooded capture, is final. A crash-class failure with
     attempts remaining is reported immediately as an `AttemptFinished` and
@@ -731,7 +737,8 @@ def _run_one(
 
     Args:
         runtime: The exec runtime supervising the build and run spawns.
-        config: The resolved runner configuration, including the retry budget.
+        config: The resolved runner configuration for build inputs.
+        settings: The file's effective deadlines and retry/serial policy.
         root: The invocation root the child processes run in.
         rel: The root-relative path of the file to build and run.
         include_paths: Directories passed to the compiler as `-I`.
@@ -750,7 +757,7 @@ def _run_one(
     _ensure_dir(root + "/build/bin")
     var mangled = _mangle(rel)
     var nonce = _invocation_nonce()
-    var attempts_planned = config.retries + 1
+    var attempts_planned = settings.retries + 1
 
     # AttemptFinished (+ any compile-kill warning) for each NON-final attempt,
     # in order; prepended to the final FileResult so the reporter renders each
@@ -772,6 +779,7 @@ def _run_one(
         var att = _single_attempt(
             runtime,
             config,
+            settings,
             root,
             rel,
             include_paths,
@@ -841,6 +849,6 @@ def _run_one(
 
         # Final attempt: passed, failed deterministically, or budget exhausted.
         var flaky = had_retry and attempt_passed
-        var fr = _finalize_attempt(config, rel, att^, attempt_index, flaky)
+        var fr = _finalize_attempt(settings, rel, att^, attempt_index, flaky)
         _cleanup_quarantine(root, quarantine_dirs)
         return _prepend_events(attempt_events^, fr^)

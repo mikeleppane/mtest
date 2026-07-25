@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Precompile the src/mtest package into build/mtest.mojopkg.
+# Precompile the vendored TOML parser and src/mtest packages into build/.
 #
 # Two jobs: (1) it is the compile GATE -- `test` and `ci` run this first, so an
 # empty-but-broken package fails fast before any test does; (2) it produces the
@@ -14,8 +14,8 @@
 # it directly.
 #
 # NOTE: mojo 1.0.0b2 has no `mojo package` subcommand -- only `mojo precompile`,
-# which produces the same .mojopkg. The output must be named mtest.mojopkg so
-# `-I build` resolves `from mtest import ...`.
+# which produces the same .mojopkg. The outputs must be named toml.mojopkg and
+# mtest.mojopkg so `-I build` resolves both package imports.
 #
 # Usage:  pixi run build
 set -euo pipefail

@@ -1,0 +1,7 @@
+[run]
+paths = ["tests/test_other.mojo"]
+state = false
+
+[report]
+color = "never"
+gh-annotations = "off"

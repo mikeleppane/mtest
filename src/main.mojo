@@ -1,31 +1,34 @@
 """The `mtest` binary entry point.
 
 `main` is the only place that reads the process argv and environment, talks to
-the terminal, and calls `exit`. It parses argv, prints help or the version and
-exits 0, constructs the exec runtime, resolves the machine-stream (`--json`)
-destination and with it the console's own descriptor, then resolves the JUnit
-report destination, composes the console, stream, JUnit, and annotation
-reporters into a `StandardReportCoordinator` (the report-layer interface the
-session drives), runs the session, flushes the console's rendered buffer to its
-resolved descriptor (stdout, or stderr under `--json -` so stdout carries only
-the byte-pure stream), and exits with the session's resolved code.
+the terminal, and calls `exit`. It parses argv and resolves project config.
+`doctor` runs its contained environment checks before main acquires the
+invocation root or exec runtime. A `config show` request renders its resolution
+and exits before state loading or run resources. Otherwise main loads last-run
+state, constructs the exec runtime, resolves report destinations, composes
+reporters into the `StandardReportCoordinator` interface the session drives,
+runs the session, closes every resource, conditionally promotes the next state
+file, and exits with the session's resolved code.
 
-Two writes bypass the event seam, both by design: a pre-session usage error
-goes straight to stderr with exit 4, having no reporter to route through, and
-`--collect-only` writes its node-id listing straight to stdout, where it is a
-frozen machine-readable contract.
+Five output classes bypass the event seam by design: pre-session diagnostics
+go straight to stderr; `config show` writes its resolution-only TOML directly
+to stdout; doctor writes its fixed check lines directly to stdout;
+`--collect-only` writes its frozen node-id listing directly to stdout; and a
+post-close state-write failure goes to stderr after the terminal event already
+sealed the stream.
 
-Every decision `main` makes is delegated. The parser resolves the config
-(including the mojo path); the console resolves color from the inputs main
-supplies; the session states the run's facts and `resolve_exit_code` in the
-model layer ranks them. `main` names no exit code of its own except
-`EXIT_USAGE_ERROR`, which is refused before any run exists and so has no facts
-to rank. Otherwise it only wires and moves bytes. All FFI stays below in `exec`
-— `stdout_isatty()` and `stderr_isatty()` are the terminal probes, while argv,
-cwd, getenv, and exit are ordinary program-level operations via `std`.
+The parser owns argv syntax; config owns typed conversion, layering, and state
+bytes; the console resolves color from the inputs main supplies; the session
+states the run's facts and `resolve_exit_code` in the model layer ranks them.
+`main` owns only process-level discovery, file I/O, resource ordering, and the
+dedicated pre-run usage refusal. All FFI stays below in `exec` —
+`stdout_isatty()` and `stderr_isatty()` are the terminal probes, while argv,
+cwd, getenv, file operations, and exit are ordinary program-level operations
+via `std`.
 """
 from std.io import FileDescriptor
-from std.os import getenv, listdir, remove, rmdir
+from std.os import getenv, listdir, makedirs, remove, rmdir
+from std.os.path import dirname, exists, isdir
 from std.pathlib import cwd
 from std.sys import argv, exit
 
@@ -35,14 +38,41 @@ from mtest.cli import (
     build_flags_string,
     help_text,
     parse_args,
+    run_doctor,
     version_text,
 )
 from mtest.exec import ExecRuntime, stderr_isatty, stdout_isatty
-from mtest.config import annotations_resolved_on
+from mtest.config import (
+    ConfigEnvironment,
+    FileConfig,
+    LastRunState,
+    Provenance,
+    ResolvedConfig,
+    RunnerConfig,
+    StateDelta,
+    TOML_SOURCE_MAX_BYTES,
+    annotations_resolved_on,
+    encode_last_run_state,
+    merge_last_run_state,
+    parse_toml,
+    parse_last_run_state,
+    render_config_show,
+    resolve_config,
+    validate_resolved_config,
+)
 from mtest.model import (
     EXIT_INTERNAL_ERROR,
     TerminalFacts,
     resolve_exit_code,
+)
+from mtest.platform import (
+    BoundedRegularFileRead,
+    close_checked_fd,
+    create_unique_temp,
+    process_id,
+    read_bounded_regular_file,
+    rename_path,
+    write_all_fd,
 )
 from mtest.report import (
     AnnotationsReporter,
@@ -56,7 +86,21 @@ from mtest.report import (
     open_junit_spool,
     resume_delimiter,
 )
-from mtest.session import CollectResult, run_collect, run_session
+from mtest.session import (
+    CollectResult,
+    SessionResult,
+    run_collect,
+    run_session_with_state,
+)
+
+
+comptime _STATE_MAX_BYTES = 1024 * 1024
+"""The accepted `.mtest-cache/lastrun` payload ceiling.
+
+Matches the doctor check's ceiling so the two agree on what a usable state
+file is. State is an accelerator, never a verdict input, so an oversized or
+non-regular file is ignored loudly rather than treated as a failure.
+"""
 
 
 comptime EXIT_USAGE_ERROR = 4
@@ -89,6 +133,311 @@ def _no_color_set() -> Bool:
 def _eprintln(text: String):
     """Write `text` and a newline to standard error (fd 2), flushed."""
     print(text, file=FileDescriptor(2), flush=True)
+
+
+def _normalize_absolute(path: String) -> String:
+    var components = List[String]()
+    for slice in path.split("/"):
+        var component = String(slice)
+        if component == "" or component == ".":
+            continue
+        if component == "..":
+            if len(components) > 0:
+                _ = components.pop()
+            continue
+        components.append(component^)
+    var normalized = String("/")
+    for i in range(len(components)):
+        if i > 0:
+            normalized += "/"
+        normalized += components[i]
+    return normalized
+
+
+def _absolute_from_root(root: String, path: String) -> String:
+    if path.startswith("/"):
+        return _normalize_absolute(path)
+    return _normalize_absolute(root + "/" + path)
+
+
+def _config_file_representation(root: String, absolute: String) -> String:
+    var normalized_root = _normalize_absolute(root)
+    var prefix = "/" if normalized_root == "/" else normalized_root + "/"
+    if absolute.startswith(prefix):
+        return String(absolute[byte = prefix.byte_length() :])
+    return absolute
+
+
+def _safe_path_label(path: String) -> String:
+    var escaped = String("")
+    comptime HEX = "0123456789abcdef"
+    for cp in path.codepoints():
+        var value = Int(cp)
+        if value == 10:
+            escaped += "\\n"
+        elif value == 13:
+            escaped += "\\r"
+        elif value == 9:
+            escaped += "\\t"
+        elif value >= 0 and value < 32:
+            escaped += "\\x"
+            escaped += String(HEX[byte=value // 16])
+            escaped += String(HEX[byte=value % 16])
+        else:
+            escaped += String(cp)
+    if escaped.count_codepoints() <= 240:
+        return escaped
+    var shortened = String("")
+    var count = 0
+    for cp in escaped.codepoint_slices():
+        if count == 237:
+            break
+        shortened += String(cp)
+        count += 1
+    return shortened + "..."
+
+
+def _origin_label(
+    resolved: ResolvedConfig, source: Provenance, table: String, key: String
+) -> String:
+    """Name a resolved value the way its own layer spells it.
+
+    A diagnostic that says `cli: '--json'` for a value the project file set
+    names a remedy the reader cannot apply: there is no such flag on their
+    command line. Key off the provenance the resolver already tracked.
+
+    Args:
+        resolved: The layered configuration carrying provenance and the file.
+        source: The winning layer for this key.
+        table: The `mtest.toml` table holding the key.
+        key: The `mtest.toml` spelling of the key.
+
+    Returns:
+        A complete diagnostic prefix ending in the offending value's name.
+    """
+    var origin = resolved.config_file
+    if origin == "":
+        origin = String("mtest.toml")
+    if source == Provenance.MTEST_TOML:
+        return "config: " + origin + ": [" + table + "] " + key
+    return "cli: '--" + key + "'"
+
+
+def _resolved_destination_error(
+    resolved: ResolvedConfig,
+) -> Optional[String]:
+    if (
+        resolved.active_keys.json_dest
+        and resolved.config.json_dest != ""
+        and resolved.config.json_dest != "-"
+    ):
+        var parent = String(dirname(resolved.config.json_dest))
+        if parent != "" and not isdir(parent):
+            return Optional[String](
+                _origin_label(
+                    resolved, resolved.provenance.json_dest, "report", "json"
+                )
+                + " destination parent directory does not exist: '"
+                + _safe_path_label(parent)
+                + "' (see mtest --help)"
+            )
+    if resolved.active_keys.junit_dest and resolved.config.junit_dest != "":
+        var parent = String(dirname(resolved.config.junit_dest))
+        if parent != "" and not isdir(parent):
+            return Optional[String](
+                _origin_label(
+                    resolved,
+                    resolved.provenance.junit_dest,
+                    "report",
+                    "junit-xml",
+                )
+                + " destination parent directory does not exist: '"
+                + _safe_path_label(parent)
+                + "' (see mtest --help)"
+            )
+    return Optional[String](None)
+
+
+@fieldwise_init
+struct ConfigLoad(Copyable, Movable):
+    """One root-time configuration discovery and parse result."""
+
+    var file: FileConfig
+    """The typed file layer, empty when no file was selected or parsing failed."""
+
+    var config_file: String
+    """The stream representation of the selected file, or empty when absent."""
+
+    var error: String
+    """The contained diagnostic, or empty on success."""
+
+    var error_code: Int
+    """The diagnostic exit code, or zero on success."""
+
+
+def _load_config(
+    root: String, explicit_path: String, no_config: Bool
+) -> ConfigLoad:
+    if no_config:
+        return ConfigLoad(FileConfig.empty(), "", "", 0)
+
+    var explicit = explicit_path != ""
+    var requested = explicit_path if explicit else "mtest.toml"
+    var absolute = _absolute_from_root(root, requested)
+    var representation = _config_file_representation(root, absolute)
+    var diagnostic_representation = _safe_path_label(representation)
+    var selected_exists = exists(absolute)
+    if not selected_exists:
+        if explicit:
+            return ConfigLoad(
+                FileConfig.empty(),
+                representation,
+                "config: "
+                + diagnostic_representation
+                + ": configuration file does not exist",
+                EXIT_USAGE_ERROR,
+            )
+        return ConfigLoad(FileConfig.empty(), "", "", 0)
+
+    var opened: BoundedRegularFileRead
+    try:
+        opened = read_bounded_regular_file(absolute, TOML_SOURCE_MAX_BYTES)
+    except:
+        return ConfigLoad(
+            FileConfig.empty(),
+            representation,
+            "config: "
+            + diagnostic_representation
+            + ": could not read configuration file",
+            EXIT_USAGE_ERROR,
+        )
+    if not opened.is_regular:
+        return ConfigLoad(
+            FileConfig.empty(),
+            representation,
+            "config: "
+            + diagnostic_representation
+            + ": configuration path is not a regular file",
+            EXIT_USAGE_ERROR,
+        )
+    var text = opened.text.copy()
+    if text.byte_length() > TOML_SOURCE_MAX_BYTES:
+        return ConfigLoad(
+            FileConfig.empty(),
+            representation,
+            "config: "
+            + diagnostic_representation
+            + ": configuration file exceeds "
+            + String(TOML_SOURCE_MAX_BYTES)
+            + "-byte limit",
+            EXIT_USAGE_ERROR,
+        )
+
+    var parsed = parse_toml(text, diagnostic_representation)
+    if not parsed.is_ok:
+        return ConfigLoad(
+            FileConfig.empty(),
+            representation,
+            parsed.failure.render(),
+            parsed.failure.exit_code(),
+        )
+    return ConfigLoad(parsed.config.copy(), representation, "", 0)
+
+
+def _resolution_defaults(parsed: RunnerConfig) -> RunnerConfig:
+    var defaults = RunnerConfig.default()
+    defaults.exitfirst = parsed.exitfirst
+    defaults.keyword = parsed.keyword.copy()
+    defaults.collect = parsed.collect
+    defaults.last_failed = parsed.last_failed
+    defaults.failed_first = parsed.failed_first
+    defaults.shard_mode = parsed.shard_mode
+    defaults.shard_m = parsed.shard_m
+    defaults.shard_n = parsed.shard_n
+    return defaults^
+
+
+@fieldwise_init
+struct StateLoad(Copyable, Movable):
+    """The previous last-run records plus contained nonfatal read diagnostics.
+    """
+
+    var state: LastRunState
+    """The accepted previous records, empty when absent or wholly malformed."""
+
+    var warnings: List[String]
+    """One physical-line diagnostic per malformed or unreadable input fact."""
+
+
+def _state_path(root: String) -> String:
+    return root + "/.mtest-cache/lastrun"
+
+
+def _load_state(root: String) -> StateLoad:
+    var path = _state_path(root)
+    var state_exists = exists(path)
+    if not state_exists:
+        return StateLoad(LastRunState.empty(), [])
+    var opened: BoundedRegularFileRead
+    try:
+        opened = read_bounded_regular_file(path, _STATE_MAX_BYTES)
+    except:
+        return StateLoad(
+            LastRunState.empty(),
+            ["state: .mtest-cache/lastrun: could not read state file"],
+        )
+    if not opened.is_regular:
+        return StateLoad(
+            LastRunState.empty(),
+            ["state: .mtest-cache/lastrun: not a regular file — ignored"],
+        )
+    var text = opened.text.copy()
+    if text.byte_length() > _STATE_MAX_BYTES:
+        return StateLoad(
+            LastRunState.empty(),
+            ["state: .mtest-cache/lastrun: exceeds the size limit — ignored"],
+        )
+    var parsed = parse_last_run_state(text, ".mtest-cache/lastrun")
+    var warnings = List[String]()
+    for diagnostic in parsed.diagnostics:
+        warnings.append(diagnostic.render())
+    return StateLoad(parsed.state.copy(), warnings^)
+
+
+def _persist_state(root: String, text: String) -> Optional[String]:
+    var directory = root + "/.mtest-cache"
+    var target = _state_path(root)
+    var template = target + ".tmp." + String(process_id()) + ".XXXXXX"
+    var temp = String("")
+    var owned_fd = -1
+    try:
+        makedirs(directory, exist_ok=True)
+        var created = create_unique_temp(template)
+        temp = created.path.copy()
+        owned_fd = created.fd
+        write_all_fd(owned_fd, text)
+        # `close(2)` may release the descriptor even when it reports an error;
+        # transfer it out of cleanup ownership before the one checked close.
+        var closing_fd = owned_fd
+        owned_fd = -1
+        close_checked_fd(closing_fd)
+        rename_path(temp, target)
+        return Optional[String](None)
+    except:
+        if owned_fd >= 0:
+            var closing_fd = owned_fd
+            try:
+                close_checked_fd(closing_fd)
+            except:
+                pass
+        if temp != "":
+            try:
+                remove(temp)
+            except:
+                pass
+        return Optional[String](
+            "mtest: state: could not persist .mtest-cache/lastrun"
+        )
 
 
 @fieldwise_init
@@ -202,7 +551,7 @@ struct RunResources:
 
 
 def main():
-    """Parse argv, run the session, and exit with the resolved code."""
+    """Parse argv, display config or run the session, and exit truthfully."""
     # The sentinel is never read: every except path below exits the process,
     # but the compiler does not treat `exit` as noreturn, so the value must be
     # initialized on the fall-through path it thinks exists.
@@ -221,12 +570,17 @@ def main():
     if result.is_version():
         print(version_text(), flush=True)
         exit(0)
+    if result.is_doctor():
+        var diagnosis = run_doctor(result, MTEST_VERSION)
+        var rendered = String("")
+        for line in diagnosis.lines:
+            rendered += line + "\n"
+        print(rendered, end="", flush=True)
+        exit(diagnosis.code)
 
-    # A configured run.
-    var config = result.config.copy()
-
-    # Resolve the invocation root, then transactionally take exclusive ownership
-    # of process-global signal/exec state. Either failure is a pre-session
+    # Resolve the invocation root, then discover and layer project configuration
+    # before taking process-global exec state. An absent file and `--no-config`
+    # never call the native TOML parser. A root lookup failure is a pre-session
     # internal error; the honest code is 3.
     var root: String
     try:
@@ -235,6 +589,54 @@ def main():
         _eprintln("mtest: internal error: " + String(e))
         exit(EXIT_INTERNAL_ERROR)
         return
+
+    var loaded = _load_config(root, result.config_path, result.no_config)
+    if loaded.error_code != 0:
+        _eprintln(loaded.error)
+        exit(loaded.error_code)
+
+    var environment = ConfigEnvironment(
+        mtest_mojo=getenv("MTEST_MOJO", ""),
+        no_color=_no_color_set(),
+    )
+    var resolved = resolve_config(
+        _resolution_defaults(result.config),
+        loaded.file,
+        environment,
+        result.overlay,
+    )
+    resolved.config_file = loaded.config_file.copy()
+    var validation = validate_resolved_config(resolved)
+    if validation:
+        _eprintln(validation.value())
+        exit(EXIT_USAGE_ERROR)
+    # Deliberately NOT before the config-show branch. §27.1 fixes that
+    # command's exit domain at {0, 3, 4} with 4 reserved for argv and
+    # selected-config failures, and states it resolves only; refusing an
+    # unusable report destination there would add an unsanctioned exit cause
+    # and make a resolution-only command probe the filesystem.
+    if result.is_config_show():
+        var state_present = exists(_state_path(root))
+        print(
+            render_config_show(resolved, state_present),
+            end="",
+            flush=True,
+        )
+        exit(0)
+
+    var destination_error = _resolved_destination_error(resolved)
+    if destination_error:
+        _eprintln(destination_error.value())
+        exit(EXIT_USAGE_ERROR)
+
+    var config = resolved.config.copy()
+    var state_enabled = resolved.active_keys.state and resolved.state
+    var previous_state = LastRunState.empty()
+    if state_enabled:
+        var state_load = _load_state(root)
+        previous_state = state_load.state.copy()
+        resolved.state_warnings = state_load.warnings.copy()
+        resolved.last_run_state = previous_state.copy()
 
     var runtime = ExecRuntime()
     try:
@@ -270,7 +672,10 @@ def main():
     if config.collect:
         var collected = CollectResult(List[String](), List[String](), 0)
         try:
-            collected = run_collect(resources.runtime, config, root)
+            # The resolved config, not the flattened one: the compatibility
+            # overload carries no override tables, so a configured per-file
+            # compile-timeout would be dropped and a probe could hang past it.
+            collected = run_collect(resources.runtime, resolved, root)
         except e:
             _eprintln(String(e))
             exit(resources.close_into(EXIT_USAGE_ERROR, rank_delivery=False))
@@ -371,10 +776,10 @@ def main():
         console^, stream^, junit^, annotations^
     )
 
-    var code = 0
+    var session_result = SessionResult(0, StateDelta.empty())
     try:
-        code = run_session(
-            resources.runtime, config, root, comp, console_fd=console_fd
+        session_result = run_session_with_state(
+            resources.runtime, resolved, root, comp, console_fd=console_fd
         )
     except e:
         # The only raise the session propagates is a discover: usage error;
@@ -384,6 +789,7 @@ def main():
         # descriptor's close status is not ranked against it.
         _eprintln(String(e))
         exit(resources.close_into(EXIT_USAGE_ERROR, rank_delivery=False))
+    var code = session_result.code
 
     # The session has already flushed the console's fully rendered buffer to its
     # RESOLVED destination — stdout normally, stderr under `--json -` so stdout
@@ -418,4 +824,30 @@ def main():
     # owns — whose deferred write error, if any, the session could not have
     # seen and the resolver re-ranks — and restores the exec runtime. Covers
     # the success, interrupt, finalize-failure, and spool-failure paths alike.
-    exit(resources.close_into(code, rank_delivery=True))
+    var state_text = String("")
+    var state_drops = List[String]()
+    if state_enabled and config.shard_n == 0:
+        var merged = merge_last_run_state(
+            previous_state, session_result.state_delta
+        )
+        var encoded = encode_last_run_state(merged)
+        state_text = encoded.text
+        # A record the codec refuses to write (a control-bearing identifier,
+        # for instance) is a failure silently missing from the next --lf.
+        # Reporters are closed by write time, so these go to stderr beside the
+        # persistence diagnostic rather than through the event stream.
+        for diagnostic in encoded.diagnostics:
+            state_drops.append(diagnostic.render())
+
+    var final_code = resources.close_into(code, rank_delivery=True)
+    if (
+        state_enabled
+        and config.shard_n == 0
+        and (final_code == 0 or final_code == 1)
+    ):
+        for drop in state_drops:
+            _eprintln(drop)
+        var state_error = _persist_state(root, state_text)
+        if state_error:
+            _eprintln(state_error.value())
+    exit(final_code)

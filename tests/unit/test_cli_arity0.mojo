@@ -62,6 +62,30 @@ def test_version_rejects_value() raises:
         _ = parse_args(argv)
 
 
+def test_no_config_rejects_value() raises:
+    var argv: List[String] = ["--no-config=true"]
+    with assert_raises(contains="takes no value"):
+        _ = parse_args(argv)
+
+
+def test_last_failed_spellings_reject_values() raises:
+    var short: List[String] = ["--lf=true"]
+    var long: List[String] = ["--last-failed=true"]
+    with assert_raises(contains="takes no value"):
+        _ = parse_args(short)
+    with assert_raises(contains="takes no value"):
+        _ = parse_args(long)
+
+
+def test_failed_first_spellings_reject_values() raises:
+    var short: List[String] = ["--ff=true"]
+    var long: List[String] = ["--failed-first=true"]
+    with assert_raises(contains="takes no value"):
+        _ = parse_args(short)
+    with assert_raises(contains="takes no value"):
+        _ = parse_args(long)
+
+
 # --- placement: a flag is recognized wherever it sits ---
 
 

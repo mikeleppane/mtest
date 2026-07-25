@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run mtest's guarded 59-scenario end-to-end gate.
+"""Run mtest's guarded 85-scenario end-to-end gate.
 
 The harness drives the real ``build/mtest`` binary against the committed
 known-outcome tree under ``e2e/``. Expectations come from
@@ -26,7 +26,10 @@ from scripts.e2e.runner import (
 )
 from scripts.e2e.scenarios import (
     annotations,
+    config_file,
+    config_show,
     core,
+    doctor,
     json_reporter,
     junit_reporter,
     parallel,
@@ -102,6 +105,19 @@ SCENARIOS: ScenarioRegistry = (
     ("show-output", core.s_show_output),
     ("durations", core.s_durations),
     ("color", core.s_color),
+    ("config-resolution", config_file.s_config_resolution),
+    ("config-diagnostics", config_file.s_config_diagnostics),
+    ("config-state", config_file.s_config_state),
+    ("failure-reselection", config_file.s_failure_reselection),
+    ("config-overrides", config_file.s_config_overrides),
+    ("config-show", config_show.s_config_show),
+    ("doctor-healthy", doctor.s_healthy),
+    ("doctor-malformed-config", doctor.s_malformed_config),
+    ("doctor-missing-config", doctor.s_missing_explicit_config),
+    ("doctor-missing-toolchain", doctor.s_missing_toolchain),
+    ("doctor-unwritable-state", doctor.s_unwritable_state),
+    ("doctor-interrupt", doctor.s_interrupt_toolchain),
+    ("doctor-config-free", doctor.s_config_free_without_python),
     ("usage-refusals", selection.s_usage_refusals),
     ("selection-keyword", selection.s_selection_keyword),
     ("selection-node-id", selection.s_selection_node_id),
