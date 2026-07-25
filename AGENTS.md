@@ -195,6 +195,12 @@ pixi run dogfood-check     # run three focused probes through the built mtest bi
 pixi run e2e               # exact CLI exits and output against e2e/manifest.json
 ```
 
+`fmt-check` is `format-all` AND `git diff --exit-code`, so it fails on ANY
+unstaged change, including one made after a long CI run started. Stage the work
+first, then gate; a result produced against different bytes than you commit is
+not a result. The same applies to reading outcomes: a background wrapper's exit
+status is the wrapper's, not the gate's — read the gate's own marker.
+
 `pixi run ci-preflight` chains `version-check -> fmt-check -> harness-check ->
 safety-check -> postfork-check -> native-check -> junit-check -> build ->
 readme-help-check -> junit-render-check -> transcripts-check` in that exact
@@ -232,6 +238,12 @@ Pins are provenance, not preference.
   flags corrupt values with spaces); wrapping it was rejected too. Revisit
   trigger: prism ships native post-`--` pass-through. Until then the parser is
   hand-rolled.
+- **A vendored dependency records three digests, not one**: the authorized
+  upstream release, upstream `main` at adoption, and — separately — every
+  retained file AFTER the local patches, recomputed by the harness. Only the
+  third tells you whether the bytes you compile are the bytes you reviewed, and
+  it is the one that goes stale the moment you touch the vendored source again.
+  Every local change is enumerated in the vendor README in the same commit.
 
 **Ask first** before: bumping the Mojo pin; changing the CLI contract after it
 freezes; adding any dependency (or reaching for Python where native Mojo would
@@ -306,6 +318,11 @@ trap and its correct move.
 - `mojo build` bakes the ABSOLUTE canonicalized source path into every
   location line, even when built with a relative path; transcript portability
   requires normalizing the repo-root prefix to `<REPO>`.
+- `mojo format` and `mojo build` do not accept the same source. `where` is a
+  keyword the FORMATTER rejects as an identifier while the COMPILER accepts it,
+  so a green build is not evidence the file is well-formed. Never discard a
+  gate's output to keep a log tidy: `pixi run fmt` failed silently for several
+  commits this way, and only `fmt-check` in CI surfaced it.
 - Discovery order is SOURCE order (`__functions_in_module()` yields source
   order); the fixtures pin this deliberately with non-alphabetical functions.
 - TestSuite buffers its whole report and flushes it at the end; on failure it
