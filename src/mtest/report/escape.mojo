@@ -262,11 +262,19 @@ def gh_escape_message(s: String) -> String:
 def gh_escape_property(s: String) -> String:
     """Escape `s` for a GitHub Actions workflow-command property value.
 
-    Applies the message escape set first (`%` -> `%25`, CR -> `%0D`,
-    LF -> `%0A`), then escapes `:` -> `%3A` and `,` -> `%2C`, which the
-    workflow-command grammar uses as field and record separators in property
-    values. The two-pass composition is safe because no message-set
-    replacement text (`%25`, `%0D`, `%0A`) contains a literal `:` or `,`.
+    Runs the whole message escape first — both of its passes, the
+    workflow-command encoding (`%` -> `%25`, CR -> `%0D`, LF -> `%0A`) and the
+    terminal-safety pass that follows it, which rewrites every remaining C0
+    control and DEL as `\\xHH` and every C1 control as `\\u00HH`. Then escapes
+    `:` -> `%3A` and `,` -> `%2C`, the two characters the workflow-command
+    grammar uses as field and record separators inside a property value.
+
+    Adding this pass on top is safe because no text those earlier passes can
+    emit contains a literal `:` or `,`: the workflow-command replacements are
+    `%25`, `%0D`, and `%0A`, and the terminal-safety replacements are a
+    backslash, `x` or `u00`, and two uppercase hex digits. This pass therefore
+    only ever escapes a separator that was in `s` itself, and can never
+    re-escape a character one of its predecessors produced.
 
     Args:
         s: The already-UTF-8-valid text to escape.
