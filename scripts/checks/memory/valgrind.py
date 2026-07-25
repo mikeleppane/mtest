@@ -41,6 +41,18 @@ NATIVE_TESTS = (
 )
 EXEC_TEST_ROOT = ROOT / "tests" / "integration"
 CONFIG_TEST = ROOT / "tests" / "unit" / "test_config.mojo"
+"""The config layer's own suite: TOML parsing, layering, and state bytes.
+
+It is here for the parser's own String and List ownership over adversarial
+input, which is the largest body of pure byte-handling the product owns outside
+`exec` and `report`.
+
+It does NOT exercise `mtest.config.lossy_utf8`, despite living in that package —
+`mtest.config` only re-exports the symbol, and this suite never calls it.
+Callgrind over the suite binary confirms no `src/mtest/config/lossy_utf8.mojo`
+frame executes. That site's evidence is `test_exec_capture` (both lanes) and the
+real-CLI probe; see `notes/test-memory-risk-map.md`. Recorded here because an
+earlier version of this file claimed the opposite."""
 REPORT_TESTS = (
     ROOT / "tests" / "unit" / "test_report_escape.mojo",
     ROOT / "tests" / "unit" / "test_report_junit.mojo",

@@ -199,6 +199,41 @@ class AsanCliProbeTests(unittest.TestCase):
                 ):
                     asan_check.check_cli({})
 
+    def test_check_cli_actually_calls_the_instrumentation_check(self) -> None:
+        """The witness must be ON the call path, not merely defined.
+
+        Every other test that drives `check_cli` patches
+        `check_cli_instrumentation` out, so without this one the whole control
+        could be deleted from `check_cli` and the suite would stay green — the
+        exact failure mode the witness exists to prevent, one level up.
+
+        This drives the real `check_cli` with a probe output that carries no
+        witness and requires the run to be rejected, which can only happen if
+        `check_cli` calls the check.
+        """
+        results = [
+            subprocess.CompletedProcess(args=["mojo"], returncode=0, stdout=""),
+            subprocess.CompletedProcess(args=["nm"], returncode=0, stdout="__asan_"),
+            subprocess.CompletedProcess(
+                args=["mtest"],
+                returncode=asan_check.CLI_PROBE_EXIT,
+                stdout="a clean-looking run that never announced a leak check\n",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            out = Path(raw_tmp)
+            with (
+                patch.object(asan_check, "OUT", out),
+                patch.object(asan_check, "CLI_BINARY", out / "mtest"),
+                patch.object(asan_check, "CLI_SCRATCH", out / "cli"),
+                patch.object(asan_check, "run", side_effect=results),
+                patch.object(
+                    asan_check, "check_cli_probe_output", return_value="ok"
+                ),
+            ):
+                with self.assertRaisesRegex(SystemExit, "leak check did not run"):
+                    asan_check.check_cli({})
+
     def test_a_run_without_the_leak_check_witness_is_rejected(self) -> None:
         """A silent run and a clean run must not be the same observation.
 

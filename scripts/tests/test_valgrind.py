@@ -376,6 +376,38 @@ class ValgrindCliProbeTests(unittest.TestCase):
                 valgrind_check.CLI_VALGRIND_FLAGS,
             )
 
+    def test_check_cli_actually_calls_the_provenance_check(self) -> None:
+        """The provenance control must be ON the call path, not merely defined.
+
+        The build/wrapper test above patches `check_cli_provenance` out, so
+        without this one the whole Memcheck-provenance control could be deleted
+        from `check_cli` and every test would stay green — which is the same
+        "did it really run" failure the control itself exists to catch, one
+        level up. Driving the real `check_cli` with an unwrapped-looking log
+        and requiring the rejection is what pins the wiring.
+        """
+        completed = subprocess.CompletedProcess(args=["mojo"], returncode=0, stdout="")
+        unwrapped = subprocess.CompletedProcess(
+            args=["mtest"],
+            returncode=valgrind_check.CLI_PROBE_EXIT,
+            stdout="mtest output with no Memcheck banner anywhere\n",
+        )
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            out = Path(raw_tmp)
+            with (
+                patch.object(valgrind_check, "OUT", out),
+                patch.object(valgrind_check, "CLI_BINARY", out / "mtest"),
+                patch.object(valgrind_check, "CLI_SCRATCH", out / "cli"),
+                patch.object(valgrind_check, "CLI_HOME", out / "home"),
+                patch.object(valgrind_check, "run", return_value=completed),
+                patch.object(valgrind_check, "valgrind", return_value=unwrapped),
+                patch.object(
+                    valgrind_check, "check_cli_probe_output", return_value="ok"
+                ),
+            ):
+                with self.assertRaisesRegex(SystemExit, "Memcheck banner"):
+                    valgrind_check.check_cli({})
+
     def test_production_native_object_drops_the_testing_controls(self) -> None:
         completed = subprocess.CompletedProcess(args=["cc"], returncode=0, stdout="")
         with tempfile.TemporaryDirectory() as raw_tmp:

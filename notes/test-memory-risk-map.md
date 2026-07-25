@@ -74,23 +74,59 @@ witness in its own way: `LSAN_OPTIONS=verbosity=1` makes LeakSanitizer announce
 `LeakSanitizer: checking for leaks` from inside the process under test, so a
 clean run proves the leak check *ran* rather than merely not complaining.
 
+## How the evidence column was verified
+
+Every `A n/14`, `V n/17` and `C ✓` below is a measured fact, not a reading of
+the import graph. Three earlier rows claimed evidence that did not exist, and
+all three failed the same way: a module **re-exports** a symbol, so the suite
+compiles and links against it, and nobody checked whether the suite ever
+**calls** it. `mtest.config` re-exporting `lossy_utf8` is the canonical example.
+
+Import-closure analysis cannot settle this. It answers "is this code linked
+in?", and for `tests/unit/test_config.mojo` it answers *yes* for `lossy_utf8`
+via `mtest.cli.doctor` — a module that suite never invokes. The question the map
+asks is "does this code RUN?", so the audit was done dynamically:
+
+```text
+valgrind --tool=callgrind --trace-children=no --enable-debuginfod=no \
+         --callgrind-out-file=<suite>.out build/safety/valgrind/<suite>
+```
+
+over each lane's own debug binary, plus one run of the fixed CLI reporter probe.
+A row's file counts as executed for a suite when it appears in that suite's
+callgrind dump in any positional role — `fl=`, `fi=`/`fe=` (inlined), or
+`cfi=`/`cfe=` (the file of a called function). All of them matter: Mojo builds
+with optimization, so most of these one-line `# SAFETY:` functions are inlined
+and never appear as their own `fn=` entry. Reading `fl=` alone reports
+`report/console.mojo` as unexecuted by a probe run that demonstrably escaped
+console bytes.
+
+The extractor was validated against eleven independently known facts before any
+row was rewritten — the four false claims found by review, plus seven positives
+established by the probe's own artifacts (it wrote `hostile.ndjson`,
+`hostile.xml`, and `.mtest-cache/lastrun`, so the NDJSON, JUnit and temp-file
+paths must show as executed). It reproduces all eleven.
+
+Native C evidence (**N**) is not measured this way: it is the two adapter
+binaries the Valgrind lane already runs and asserts on directly.
+
 ## The map
 
 | File | Sites | What they are | Evidence |
 | --- | --- | --- | --- |
-| `src/mtest/exec/supervise.mojo` | 52 | argv/env C-string marshalling, the `_NativeBuffers` allocation/free pair, every adapter syscall wrapper (poll set, fd limit, monotonic clock, process open/close, poll, read quantum, setup drain, group, observe, close channel, reap, abort), `Completion.query_effective_cap`, `Supervisor` construction/teardown | **A** 10 exec/session suites · **V** 13 `test_exec_*` suites · **N** both adapter lifecycle binaries · **C** |
-| `src/mtest/exec/signals.mojo` | 13 | signal-runtime open/close, the ABI-v1 error record's alloc/read/free including the destructor fallback, the installed/pending queries, `kill(2)` | **A** `test_exec_interrupt`, `test_exec_pool`, `test_session_schedule` · **V** `test_exec_interrupt` and every other exec suite · **N** `test_exec_native_signals.c` · **C** (the CLI opens and closes the runtime for the run) |
-| `src/mtest/platform/regular_file.mojo` | 15 | `open(2)`, `fstat(2)` into a 144-byte aligned record, the bounded read loop's pointer arithmetic, and the buffer free on every exit path | **C** only, and only partially — see the gap below. It has four product callers: `src/main.mojo:304` (config file) and `:383` (last-run state), and `src/mtest/cli/doctor.mojo:259` (config file) and `:519` (last-run state). All four are above the `cli` layer, so no unit or integration suite in either lane reaches any of them. The probe's explicit `--config` makes `main.mojo:304` mandatory — an unreadable file named on the command line is a usage error, not a silent skip. |
-| `src/mtest/platform/stream.mojo` | 7 | the `errno` location call (Darwin and Linux spellings), `read(2)`, `write(2)`, `creat(2)` (both spellings), `close(2)` | **A** `test_report_json_reporter` (descriptor open, bounded write loop, close) · **A**/**V** `test_report_junit_finalize` · **C** (NDJSON, JUnit, and state writes) |
-| `src/mtest/platform/temp_file.mojo` | 3 | `mkstemp(3)` over a mutable template buffer, the post-call template rebuild, and the byte scan that validates it | **A**/**V** `test_report_junit_finalize` · **C** (state temp file and the JUnit target temp file) |
-| `src/mtest/platform/fs.mojo` | 1 | `rename(2)` | **A**/**V** `test_report_junit_finalize` · **C** (state promotion, JUnit temp → target) |
-| `src/mtest/platform/process.mojo` | 1 | `getpid(2)` | **A**/**V** `test_report_junit_finalize` (the spool prefix) · **C** (state temp template, scratch naming) |
-| `src/mtest/report/escape.mojo` | 1 | `unsafe_from_utf8` over the escaper's rebuilt byte buffer | **A**/**V** `test_report_escape` · **C** |
-| `src/mtest/report/junit.mojo` | 1 | `unsafe_from_utf8` over the XML text escaper's byte buffer | **A**/**V** `test_report_junit` · **C** |
-| `src/mtest/report/json_stream_reporter.mojo` | 1 | a `String`'s bytes borrowed across a partial-write loop, with derived pointer arithmetic per iteration | **A** `test_report_json_reporter` · **C** (its only Memcheck evidence — see the exclusion below) |
-| `src/mtest/report/console.mojo` | 1 | `unsafe_from_utf8` over the drained byte suffix of the console's head buffer | **C** only. `tests/unit/test_report_console.mojo` covers it in the plain `pixi run test` lane, but is not in either instrumented inventory; the probe drives the same drain with a hostile capture in it. |
-| `src/mtest/select/selection.mojo` | 1 | `unsafe_from_utf8` over the ASCII case fold in `contains_ci` | **C** only, via the probe's `-k hostile`. The probe carries that flag for exactly this reason. |
-| `src/mtest/config/lossy_utf8.mojo` | 1 | the UTF-8 validity scan's leading-byte and continuation bounds | **A**/**V** `test_exec_capture` — `test_lossy_utf8_replaces_invalid_preserves_valid` calls it directly on a lone `0xFF`, and `bytes_to_str` in `tests/support/exec_helpers.mojo` routes every capture assertion in that suite through it · **C** (the actor writes bytes no decoder accepts, so the lossy path runs on real hostile input). NOT `test_config`: `mtest.config` only re-exports the symbol (`src/mtest/config/__init__.mojo:41`), and `tests/unit/test_config.mojo` never calls it. |
+| `src/mtest/exec/supervise.mojo` | 52 | argv/env C-string marshalling, the `_NativeBuffers` allocation/free pair, every adapter syscall wrapper (poll set, fd limit, monotonic clock, process open/close, poll, read quantum, setup drain, group, observe, close channel, reap, abort), `Completion.query_effective_cap`, `Supervisor` construction/teardown | **A** 10/14 · **V** 12/17 · **N** both adapter lifecycle binaries · **C** ✓. Every `test_exec_*` suite in each lane except `test_exec_paths`, which resolves paths and executes nothing else. |
+| `src/mtest/exec/signals.mojo` | 13 | signal-runtime open/close, the ABI-v1 error record's alloc/read/free including the destructor fallback, the installed/pending queries, `kill(2)` | **A** 10/14 · **V** 12/17 · **N** `test_exec_native_signals.c` · **C** ✓. The runtime opens for any supervised run, so its coverage matches `supervise.mojo` exactly rather than the three suites an earlier version of this row named. |
+| `src/mtest/platform/regular_file.mojo` | 15 | `open(2)`, `fstat(2)` into a 144-byte aligned record, the bounded read loop's pointer arithmetic, and the buffer free on every exit path | **A** 0/14 · **V** 0/17 · **C** ✓ only — see gap 2. Four product callers, all above the `cli` layer: `src/main.mojo:304` (config) and `:383` (state), `src/mtest/cli/doctor.mojo:259` (config) and `:519` (state). The probe's explicit `--config` makes `main.mojo:304` mandatory: an unreadable file named on the command line is a usage error, not a silent skip. |
+| `src/mtest/platform/stream.mojo` | 7 | the `errno` location call (Darwin and Linux spellings), `read(2)`, `write(2)`, `creat(2)` (both spellings), `close(2)` | **A** 1/14 (`test_report_json_reporter`) · **V** 0/17 · **C** ✓ — see gap 3. No Valgrind-lane suite executes this file: `test_report_json_reporter` is the only suite that reaches it and it is excluded from lane V (see the exclusions). Its Memcheck evidence is the CLI probe alone, which drives NDJSON, JUnit, and state writes through it. |
+| `src/mtest/platform/temp_file.mojo` | 3 | `mkstemp(3)` over a mutable template buffer, the post-call template rebuild, and the byte scan that validates it | **A** 0/14 · **V** 0/17 · **C** ✓ only — see gap 3. `create_unique_temp` has exactly two callers, `src/main.mojo:415` (state) and `src/mtest/cli/doctor.mojo:312`; the probe reaches the first. NOT the JUnit spool: `junit_reporter.mojo` imports only `process_id` and `rename_path` from `mtest.platform` and builds its temp from `_junit_nonce()` plus builtin `open` (`junit_reporter.mojo:198-209`), so `test_report_junit_finalize` never enters this file. |
+| `src/mtest/platform/fs.mojo` | 1 | `rename(2)` | **A** 1/14 · **V** 1/17 (`test_report_junit_finalize`, both lanes) · **C** ✓ (state promotion, JUnit temp → target). |
+| `src/mtest/platform/process.mojo` | 1 | `getpid(2)` | **A** 4/14 · **V** 3/17 (`test_exec_interrupt`, `test_exec_pool`, `test_report_junit_finalize`; plus `test_session_schedule` in A) · **C** ✓. |
+| `src/mtest/report/escape.mojo` | 1 | `unsafe_from_utf8` over the escaper's rebuilt byte buffer | **A** 4/14 · **V** 3/17 (`test_report_escape`, `test_report_junit`, `test_report_junit_finalize`; plus `test_report_json_reporter` in A) · **C** ✓. |
+| `src/mtest/report/junit.mojo` | 1 | `unsafe_from_utf8` over the XML text escaper's byte buffer | **A** 2/14 · **V** 2/17 (`test_report_junit`, `test_report_junit_finalize`) · **C** ✓. |
+| `src/mtest/report/json_stream_reporter.mojo` | 1 | a `String`'s bytes borrowed across a partial-write loop, with derived pointer arithmetic per iteration | **A** 2/14 (`test_report_json_reporter`, `test_session_schedule`) · **V** 0/17 · **C** ✓ — its only Memcheck evidence, for the reason in the exclusions. |
+| `src/mtest/report/console.mojo` | 1 | `unsafe_from_utf8` over the drained byte suffix of the console's head buffer | **A** 0/14 · **V** 0/17 · **C** ✓ only — see gap 4. `tests/unit/test_report_console.mojo` covers it in the plain `pixi run test` lane but is in neither instrumented inventory; the probe drives the same drain with a hostile capture in it. |
+| `src/mtest/select/selection.mojo` | 1 | `unsafe_from_utf8` over the ASCII case fold in `contains_ci` | **A** 0/14 · **V** 0/17 · **C** ✓ only — see gap 4, via the probe's `-k hostile`. The probe carries that flag for exactly this reason; drop it and the site loses all instrumented evidence. |
+| `src/mtest/config/lossy_utf8.mojo` | 1 | the UTF-8 validity scan's leading-byte and continuation bounds | **A** 8/14 · **V** 7/17 · **C** ✓. `test_exec_capture` calls it directly on a lone `0xFF` (`test_lossy_utf8_replaces_invalid_preserves_valid`), and `bytes_to_str` in `tests/support/exec_helpers.mojo` routes every capture assertion through it. NOT `test_config`: `mtest.config` only re-exports the symbol (`src/mtest/config/__init__.mojo:41`) and that suite never calls it — confirmed by callgrind, no frame from this file executes. |
 
 ## Exclusions, with reasons
 
@@ -119,6 +155,12 @@ clean run proves the leak check *ran* rather than merely not complaining.
   covers `open_json_fd`, `_write_all`, and `close_json_fd` on live descriptors
   through the CLI probe, under the full flag set. `scripts/tests/test_valgrind.py`
   pins both halves of that arrangement.
+
+  This exclusion has a second, less obvious cost, now measured: it is also why
+  `platform/stream.mojo` has **no** lane-V suite evidence. That suite is the only
+  one in either inventory that executes `stream.mojo` at all, so excluding it
+  from V leaves the CLI probe as the file's entire Memcheck evidence. See gap 2
+  for the cheap way to restore it.
 - **`MTEST_EXEC_TESTING=1` fault paths in `native/mtest_exec_native.c`** — absent
   from the production object by construction, which `pixi run native-check`
   proves by symbol inspection. The CLI probe links the production variant in both
@@ -140,7 +182,26 @@ full instrumented coverage.
    regression in that reader would not be caught by either lane. Closing it
    would mean a second probe run for `doctor` and a third for a warm state file,
    roughly tripling the Memcheck wall time of this probe.
-2. **The Valgrind CLI probe drops `possible` from `--errors-for-leak-kinds`.**
+2. **Three platform files have no suite evidence in either lane, only the CLI
+   probe.** `platform/temp_file.mojo`, `platform/regular_file.mojo` and — in
+   lane V — `platform/stream.mojo` are executed by no suite in the instrumented
+   inventories. Callgrind confirms it: no lane suite enters `temp_file.mojo` or
+   `regular_file.mojo` at all, and `stream.mojo` is reached only by
+   `test_report_json_reporter`, which lane V excludes. So for these three, one
+   probe run is the entire instrumented evidence — if it stopped exercising them
+   the map's claim would evaporate with no suite to fall back on.
+
+   **Cost of closing: low, and specific.** `tests/unit/test_platform_temp_file.mojo`
+   already exists and already covers exactly these three
+   (`test_unique_temp_never_reuses_predictable_links_or_collisions`,
+   `test_create_and_write_failures_leave_cleanup_to_the_exact_owner`,
+   `test_bounded_read_validates_the_opened_regular_file`). Adding it to both
+   inventories costs one instrumented build per lane plus two Memcheck passes —
+   roughly 90 seconds of Valgrind wall time — and would give all three files
+   real suite-level evidence. It is not done here only because this task's brief
+   fixes the added-suite list at the four report suites; it is the single
+   highest-value follow-up in this document.
+3. **The Valgrind CLI probe drops `possible` from `--errors-for-leak-kinds`.**
    The CLI initializes the Mojo async runtime's CPU device, which starts one
    unjoined worker thread per core; glibc's per-thread TLS descriptor table is
    then reachable only through an interior pointer and Memcheck classifies it
@@ -149,15 +210,24 @@ full instrumented coverage.
    rejects any possibly-lost or still-reachable record carrying a `src/mtest/`,
    `src/main.mojo`, or `native/mtest_exec_native.c` frame, and every other lane
    keeps `possible` as a hard error.
-3. **No post-fork audit pass for the CLI probe.** The suites get a second,
+4. **No post-fork audit pass for the CLI probe.** The suites get a second,
    unsilenced Memcheck pass that audits the pre-exec fork child. The CLI forks
    for every build and every run child, so that pass would report on transient
    copies of the whole session state rather than on a decidable ownership claim.
    The exec suites already own that channel.
-4. **The macOS platform branches have no sanitizer lane at all.** See the
+5. **The macOS platform branches have no sanitizer lane at all.** See the
    exclusion above.
-5. **Both lanes hold their own copy of the probe definition.** The two gate
+6. **Both lanes hold their own copy of the probe definition.** The two gate
    drivers share no module, so the tree, the config, the argv, and the expected
-   console rendering are defined twice. `scripts/tests/test_valgrind.py`
-   asserts the two copies are equal constant-by-constant, so a divergence is a
-   test failure rather than two lanes silently probing different programs.
+   console rendering are defined twice. `scripts/tests/test_valgrind.py` asserts
+   the two copies are equal constant-by-constant AND compares the source of all
+   three duplicated functions, so a divergence is a test failure rather than two
+   lanes silently probing different programs.
+7. **`report/console.mojo` and `select/selection.mojo` are CLI-probe-only.**
+   Neither has a suite in either inventory. `selection.mojo` is reached solely
+   because the probe passes `-k hostile`; remove that flag and its one
+   `# SAFETY:` site has no instrumented evidence at all. Closing either would
+   mean adding `tests/unit/test_report_console.mojo` (large — 86 KB, the biggest
+   suite in the repo) or a select suite to both lanes; the console suite in
+   particular would add meaningful Memcheck wall time, which is why the probe
+   carries the burden instead.
