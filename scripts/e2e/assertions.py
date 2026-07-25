@@ -142,6 +142,16 @@ INTERRUPT_TIMEOUT = 300.0
 signal round trip, and finalization. A hang guard, never a threshold — the
 readiness barrier, not the clock, decides when the signal is sent."""
 
+HARD_KILL_GUARD_SECONDS = 2.0
+"""How long a second interrupt may take to end the run, from signal to exit.
+
+The blocked actor is a compile slot, whose SIGTERM-to-SIGKILL grace is 5 s. A
+second interrupt that did NOT hard-kill would therefore surface as the whole
+grace, three seconds the far side of this bound — the same 2 s/5 s separation
+`tests/integration/test_exec_pool.mojo` uses, and far outside loaded-CI jitter.
+Without this bound the double-interrupt scenario is green against a product that
+ignores the second signal entirely."""
+
 SLOW_TREE = "e2e/slow"
 """The tree every sequential interrupt scenario walks."""
 SLOW_PASSING_FILE = "e2e/slow/test_first_pass.mojo"

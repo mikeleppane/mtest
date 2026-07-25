@@ -12,6 +12,7 @@ import tempfile
 from scripts.checks.reports import junit as junit_check
 from scripts.e2e import main_open
 from scripts.e2e.assertions import (
+    HARD_KILL_GUARD_SECONDS,
     INTERRUPT_TIMEOUT,
     SLOW_BLOCKED_FILE,
     SLOW_NOT_RUN_FILES,
@@ -960,6 +961,11 @@ def _interrupted_slow_walk(
     real, and the blocked file plus everything behind it is still NOT-RUN — so
     the same assertions cover both.
 
+    The compile slot's 5 s grace is also what makes hard termination MEASURABLE:
+    every accounting assertion here holds just as well for a product that
+    ignored the second interrupt and let that grace expire, so the double case
+    additionally bounds the interval from the second signal to the exit.
+
     Args:
         context: The scenario context.
         signal_number: The interrupt delivered to the leader once armed.
@@ -1081,13 +1087,33 @@ def _interrupted_slow_walk(
             f"{SLOW_NOT_RUN_FILES}",
         )
 
-        # (4) No survivor. The child group the actor recorded was already proven
+        # (4) Hard termination. Everything above is equally true of a product
+        # that ignored the second interrupt and simply waited out the blocked
+        # slot's 5 s grace, so the interval from that signal to the exit is the
+        # only thing that separates the two.
+        if second_signal is not None:
+            expect(
+                run.second_signal_wall is not None
+                and run.second_signal_wall < HARD_KILL_GUARD_SECONDS,
+                f"the second interrupt took {run.second_signal_wall}s to end the "
+                f"run, over the {HARD_KILL_GUARD_SECONDS}s bound — the blocked "
+                f"group was left to its 5s grace instead of being hard-killed",
+            )
+
+        # (5) No survivor. The child group the actor recorded was already proven
         # gone by the runner; mtest's own group must be gone too.
         expect_group_gone(pgid, "mtest's own group after the interrupt")
+        if second_signal is None:
+            timing = ""
+        else:
+            timing = (
+                f"; hard-killed {run.second_signal_wall:.2f}s after the second "
+                f"interrupt (bound {HARD_KILL_GUARD_SECONDS}s, grace 5s)"
+            )
         return (
             f"exit 2; 1 passed + {len(SLOW_NOT_RUN_FILES)} NOT-RUN named "
             f"identically in the console, stream, and junit; one summary band; "
-            f"no surviving process group"
+            f"no surviving process group{timing}"
         )
 
 
@@ -1115,9 +1141,10 @@ def s_interrupt_double(context: ScenarioContext) -> str:
     file's compile open. It CATCHES mtest's polite teardown SIGTERM and refuses
     to die on it, and announcing that arrival is how the harness knows teardown
     has actually begun before it delivers the second interrupt — rather than
-    guessing a moment. The escalation must not cost mtest its accounting: the run
-    still publishes the same single partial summary, the same NOT-RUN identities,
-    and exit 2, and still leaves no process group behind.
+    guessing a moment. Two things must then hold at once: the second interrupt
+    hard-kills the blocked group instead of leaving it to its 5 s grace, and the
+    escalation costs mtest nothing — the same single partial summary, the same
+    NOT-RUN identities, exit 2, and no surviving process group.
     """
     detail = _interrupted_slow_walk(
         context, signal_number=signal.SIGINT, second_signal=signal.SIGINT

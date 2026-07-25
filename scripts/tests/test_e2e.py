@@ -437,6 +437,38 @@ class E2EFaultTopologyTests(unittest.TestCase):
                             **kwargs,
                         )
 
+    def test_a_half_armed_barrier_still_sweeps_the_live_actor(self) -> None:
+        # The failure path that is supposed to clean up must not be the one that
+        # strands a process: an actor that armed before the barrier expired lives
+        # in a process group of its own, which killing the leader's group cannot
+        # reach, and the e2e actors hold for an hour.
+        with tempfile.TemporaryDirectory(prefix="mtest-signal-halfarmed-") as raw:
+            tmp = Path(raw)
+            leader = tmp / "fake-leader"
+            _write_executable(leader, f"#!{sys.executable}\n" + _FAKE_LEADER)
+            pgid_file = tmp / "child.pgid"
+            ready_file = tmp / "child.ready"
+            never = tmp / "second-actor.ready"
+            process_runner = runner.E2ERunner(repo_root=tmp, mtest=leader)
+
+            with self.assertRaisesRegex(
+                runner.ScenarioError, "readiness barrier never appeared"
+            ):
+                process_runner.run_mtest_signaled(
+                    [os.fspath(pgid_file), os.fspath(ready_file), "no"],
+                    signal_number=signal.SIGINT,
+                    timeout=5.0,
+                    ready_files=(os.fspath(ready_file), os.fspath(never)),
+                    owned_pgid_files=(os.fspath(pgid_file),),
+                )
+
+            child_pgid = int(pgid_file.read_text(encoding="utf-8").strip())
+            self.assertFalse(
+                runner.group_alive(child_pgid),
+                f"the armed actor's group {child_pgid} survived a barrier "
+                "expiry — it would sleep on the host for an hour",
+            )
+
     def test_a_readiness_barrier_fails_instead_of_proceeding(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-signal-barrier-") as raw:
             tmp = Path(raw)

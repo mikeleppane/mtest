@@ -427,7 +427,8 @@ def s_parallel_interrupt(context: ScenarioContext) -> str:
             f"the stream finished {stream.finished}; no file reached a verdict",
         )
         expect(
-            stream.summary.get("not_run") == len(_PARALLEL_NOT_RUN_FILES),
+            stream.summary.get("not_run") == len(_PARALLEL_NOT_RUN_FILES)
+            and stream.summary.get("pass") == 0,
             f"the terminal summary disagreed with the console band: "
             f"{stream.summary}",
         )

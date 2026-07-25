@@ -50,10 +50,12 @@ READY_ENV_VAR = "MTEST_STUBBORN_READY_FILE"
 TEARDOWN_ENV_VAR = "MTEST_STUBBORN_TEARDOWN_FILE"
 """Where the blocked compile announces that it observed mtest's SIGTERM."""
 
-# Longer than any deadline the e2e sets and than the harness's own per-scenario
-# budget: this compile must never finish by racing the clock, or the scenario
-# would silently stop testing the interrupt at all.
-SLEEP_SECONDS = 300.0
+# Strictly longer than any deadline the e2e sets and than the harness's own
+# per-scenario budget (`INTERRUPT_TIMEOUT`, 300 s): this compile must never
+# finish by racing the clock. Were the two merely equal, a race would return 1
+# here and turn the held compile into a compile FAILURE, silently changing the
+# scenario's accounting instead of holding.
+SLEEP_SECONDS = 900.0
 
 
 def _write(path: str, text: str) -> None:

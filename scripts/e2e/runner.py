@@ -51,6 +51,10 @@ BARRIER_POLL_SECONDS = 0.005
 # has exited and been reaped. This is a hard-failing deadline, never a tolerance:
 # a group still alive when it expires is a surviving-child defect.
 GROUP_EXIT_DEADLINE = 5.0
+# How long the harness's own cleanup waits on the polite signal before escalating.
+# Short on purpose: the actors this sweeps either die at once or refuse SIGTERM
+# outright, so a longer wait would only tax the scenarios that refuse it.
+GROUP_TERM_SECONDS = 0.3
 
 
 class ScenarioError(AssertionError):
@@ -109,6 +113,13 @@ class Run:
     stderr: str
     wall: float
     pgid: int | None = None
+    second_signal_wall: float | None = None
+    """Seconds from the second signal to the process's exit, when one was sent.
+
+    The interval a hard-termination contract is measured against: a run that
+    waited out a per-slot grace instead of being killed at once shows up here as
+    that whole grace. None when the run took only one signal.
+    """
 
     @property
     def combined(self) -> str:
@@ -293,7 +304,10 @@ class E2ERunner:
             env_overrides: Environment entries layered onto the child's env.
 
         Returns:
-            The captured run and mtest's own process-group id.
+            The captured run — carrying `second_signal_wall`, the interval from
+            a second signal to the exit, so a caller can bound hard termination
+            against the per-slot grace it must beat — and mtest's own
+            process-group id.
 
         Raises:
             ScenarioError: If the binary is missing, the arming inputs are
@@ -342,6 +356,7 @@ class E2ERunner:
         )
         pgid = os.getpgid(proc.pid)
         owned_pgids: list[int] = []
+        second_signal_at: float | None = None
         try:
             if delay is not None:
                 self._wait_out(min(start + delay, deadline))
@@ -365,6 +380,7 @@ class E2ERunner:
                 self._await_barrier(
                     proc, argv, tuple(teardown_ready_files), deadline, "teardown"
                 )
+                second_signal_at = time.monotonic()
                 os.kill(proc.pid, second_signal)
             try:
                 stdout, stderr = proc.communicate(
@@ -377,8 +393,15 @@ class E2ERunner:
                     f"mtest did not exit within {timeout}s after signal "
                     f"{signal_number}: {argv}\n{stdout}\n{stderr}"
                 )
+            exited_at = time.monotonic()
         except BaseException:
-            self._sweep_owned_groups(owned_pgids)
+            # The armed actors live in process groups of their own, which
+            # `kill_group` cannot reach. Recover whatever ids they managed to
+            # record — a barrier that expired half-armed still leaves a live
+            # child — so no failure path can strand a process on the host.
+            self._sweep_owned_groups(
+                owned_pgids or self._recover_owned_pgids(owned_pgid_files)
+            )
             raise
         finally:
             if proc.poll() is None:
@@ -405,6 +428,9 @@ class E2ERunner:
                 stderr=stderr,
                 wall=time.monotonic() - start,
                 pgid=pgid,
+                second_signal_wall=(
+                    None if second_signal_at is None else exited_at - second_signal_at
+                ),
             ),
             pgid,
         )
@@ -488,13 +514,56 @@ class E2ERunner:
         return recorded
 
     @staticmethod
+    def _recover_owned_pgids(owned_pgid_files: tuple[str, ...]) -> list[int]:
+        """Best-effort read of the PGIDs actors recorded, for a failing path.
+
+        Unlike `_read_owned_pgids` this never raises and never insists the set is
+        complete: it exists so a half-armed run — one actor live, the barrier
+        expired on another — still has its live group swept rather than left on
+        the host.
+
+        Args:
+            owned_pgid_files: Paths that MAY each hold one decimal pgid.
+
+        Returns:
+            Every id that was actually recorded and parses.
+        """
+        recovered: list[int] = []
+        for path in owned_pgid_files:
+            try:
+                value = int(Path(path).read_text(encoding="utf-8").strip())
+            except (OSError, ValueError):
+                continue
+            if value > 0:
+                recovered.append(value)
+        return recovered
+
+    @staticmethod
     def _sweep_owned_groups(owned_pgids: list[int]) -> None:
-        """Terminate, then kill, every recorded child process group."""
+        """Terminate, then kill, every recorded child process group.
+
+        Two passes with a wait after each, mirroring the product's own
+        terminate-then-kill protocol: firing both signals and returning would
+        leave the caller unable to tell a swept group from one still being
+        reaped. Silent and bounded — every caller either raises its own failure
+        around this or states the outcome with `expect_group_gone`.
+
+        Args:
+            owned_pgids: The process-group ids to tear down.
+        """
         for owned in owned_pgids:
-            for sig in (signal.SIGTERM, signal.SIGKILL):
+            for sig, budget in (
+                (signal.SIGTERM, GROUP_TERM_SECONDS),
+                (signal.SIGKILL, GROUP_EXIT_DEADLINE),
+            ):
                 try:
                     os.killpg(owned, sig)
                 except (ProcessLookupError, PermissionError):
+                    break
+                limit = time.monotonic() + budget
+                while group_alive(owned) and time.monotonic() < limit:
+                    time.sleep(BARRIER_POLL_SECONDS)
+                if not group_alive(owned):
                     break
 
     def run_mtest_split_pty(
