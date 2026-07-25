@@ -298,7 +298,13 @@ never walked by the manifest-completeness oracle, so nothing here joins a
 committed inventory."""
 
 HOSTILE_CONSOLE_NAME = "test_hostile_console"
-"""The single generated module, matching the row name the actor reports."""
+"""The single generated module, and the stem of the file mtest is asked for.
+
+Deliberately NOT the row name: the actor's `TEST_NAME` is a hostile row name
+that no filesystem should have to hold, and nothing in mtest requires the two to
+agree — the file is never really compiled, and the report's identity is its
+header path, not its row names. Every assertion about the row reads
+`hostile_actor().TEST_NAME`, so the two cannot silently drift into agreement."""
 
 HOSTILE_CONSOLE_FILE = f"{HOSTILE_CONSOLE_TREE}/{HOSTILE_CONSOLE_NAME}.mojo"
 """The generated source, as mtest is asked for it."""
@@ -497,14 +503,19 @@ def s_hostile_console(context: ScenarioContext) -> str:
         # (5) The per-test failure section rendered the child's detail through
         # the same boundary, so the failure story is neither lost nor
         # executable, and the reproduce line stays exactly one console line.
-        node = f"{HOSTILE_CONSOLE_FILE}::{HOSTILE_CONSOLE_NAME}"
+        node = f"{HOSTILE_CONSOLE_FILE}::{hostile_actor().TEST_NAME}"
         expect(
             f"--- FAIL {node} ---" in stdout_lines,
             f"no framed per-test FAIL section for {node}:\n{run.stdout}",
         )
+        # The node id ends in shell metacharacters, so the repro line has to
+        # single-quote it: pasted unquoted, `"/><testcase/>` would redirect and
+        # the reader would run something the child composed. `'` itself is
+        # absent from the name, so one pair of single quotes is the whole
+        # quoting.
         expect(
-            f"reproduce: mtest --mojo {FAKE_HOSTILE_MOJO} {node}" in stdout_lines,
-            f"no exact reproduce line for {node}:\n{run.stdout}",
+            f"reproduce: mtest --mojo {FAKE_HOSTILE_MOJO} '{node}'" in stdout_lines,
+            f"no exact, shell-quoted reproduce line for {node}:\n{run.stdout}",
         )
         detail = f"    | At {HOSTILE_CONSOLE_FILE}:1:1: {HOSTILE_CONSOLE_DETAIL}"
         expect(
@@ -685,7 +696,12 @@ def _assert_hostile_console(run: Run, streams: HostileStreams) -> str:
     Raises:
         ScenarioError: On any mismatch.
     """
-    for name, byte in (("ESC", "\x1b"), ("NUL", "\x00")):
+    # Every observable control, not just ESC and NUL. Two of these — VT and FF,
+    # and U+0085 among the C1 rows — are also line boundaries to Python's
+    # `str.splitlines()`, which `verdict_line` above uses on this very output.
+    # Pinning them here keeps that helper's safety argument local to the
+    # scenario that depends on it rather than borrowed from another one.
+    for name, byte in HOSTILE_CONSOLE_RAW_BYTES:
         expect(
             byte not in run.combined,
             f"a raw {name} byte ({byte!r}) reached the console: the child can "
@@ -716,7 +732,8 @@ def _assert_hostile_console(run: Run, streams: HostileStreams) -> str:
                 )
     return (
         f"console: {len(stdout_region)} + {len(stderr_region)} fenced lines, "
-        f"no raw ESC/NUL, exact escape tokens"
+        f"none of {len(HOSTILE_CONSOLE_RAW_BYTES)} raw controls survives, exact "
+        f"escape tokens"
     )
 
 

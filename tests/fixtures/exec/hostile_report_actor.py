@@ -47,9 +47,20 @@ CANONICAL = "@MTEST_CANONICAL_SOURCE@"
 Replaced with a real path when the build stand-in copies this file. Left as the
 placeholder in the committed copy, where it names no file on disk."""
 
-TEST_NAME = "test_hostile_console"
-"""The single test the fabricated report declares. Whitespace- and `::`-free, so
-the row name is well-formed under the report grammar."""
+TEST_NAME = 'test_hostile_console"/><testcase/>'
+"""The single test the fabricated report declares, and an attribute injection.
+
+The report grammar accepts this: `_valid_row_name` rejects only an empty name,
+one containing `::`, and one containing whitespace, so `"`, `/`, `<` and `>` all
+reach the reporters as part of a legitimate row name. That makes the name the
+one piece of child-controlled text that lands in an XML ATTRIBUTE rather than an
+element body — a `<testcase name="…">` and a JSON `"name"` field — so it is the
+only thing that exercises the attribute escaper end to end.
+
+The injection needs no space, which is what makes it possible at all: it closes
+the `name` attribute and the `<testcase>` element, then opens a second, forged
+row. Unescaped, the report declares a row the suite never ran; escaped, it is
+four entity references inside one attribute value."""
 
 INVALID_UTF8 = b"\xff\xfe\x80 not-utf8 \xc3\x28"
 """Bytes no UTF-8 decoder accepts, so the lossy decode has to produce U+FFFD."""

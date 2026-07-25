@@ -167,6 +167,22 @@ def assert_hostile_junit_report(
         "the child's injected <testcase> markup is missing from the document "
         "entirely; the text node carrying it was dropped rather than escaped",
     )
+    # The row NAME is the one piece of child text that lands in an attribute,
+    # and its injection closes that attribute. Attribute context escapes `"` as
+    # well as the entity set, so the escaped spelling is the only one allowed.
+    escaped_name = (
+        actor.TEST_NAME.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .encode("utf-8")
+    )
+    expect(
+        escaped_name in raw,
+        f"the hostile row name is not in the document in its attribute-escaped "
+        f"spelling {escaped_name!r}; the attribute escaper was bypassed or the "
+        f"row was renamed",
+    )
     expect(
         raw.count(b"<testcase") == 1,
         f"the document holds {raw.count(b'<testcase')} <testcase> elements, "
