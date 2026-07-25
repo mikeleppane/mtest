@@ -30,6 +30,10 @@ class AsanCheckTests(unittest.TestCase):
                 "tests/integration/test_exec_fdhygiene.mojo",
                 "tests/integration/test_exec_pool.mojo",
                 "tests/integration/test_session_schedule.mojo",
+                "tests/unit/test_report_escape.mojo",
+                "tests/unit/test_report_json_reporter.mojo",
+                "tests/unit/test_report_junit.mojo",
+                "tests/unit/test_report_junit_finalize.mojo",
             ),
         )
         self.assertGreater(len(asan_check.TESTS), 0)
@@ -109,6 +113,243 @@ class AsanCheckTests(unittest.TestCase):
                     for argument in compile_command
                 )
             )
+
+
+class AsanCliProbeTests(unittest.TestCase):
+    """The instrumented real-CLI reporter run and the fixtures it depends on."""
+
+    def test_cli_probe_inventory_is_exact(self) -> None:
+        self.assertEqual(
+            asan_check.CLI_SOURCE.relative_to(asan_check.ROOT).as_posix(),
+            "src/main.mojo",
+        )
+        self.assertEqual(
+            asan_check.VENDORED_TOML_INCLUDE.relative_to(
+                asan_check.ROOT
+            ).as_posix(),
+            "vendor/mojo-toml",
+        )
+        self.assertEqual(
+            asan_check.HOSTILE_BUILD_STANDIN.relative_to(
+                asan_check.ROOT
+            ).as_posix(),
+            "scripts/fixtures/toolchain/fake_hostile_mojo.py",
+        )
+        self.assertEqual(
+            asan_check.HOSTILE_ACTOR.relative_to(asan_check.ROOT).as_posix(),
+            "tests/fixtures/exec/hostile_report_actor.py",
+        )
+        self.assertTrue(asan_check.HOSTILE_BUILD_STANDIN.is_file())
+        self.assertTrue(asan_check.HOSTILE_ACTOR.is_file())
+
+    def test_cli_probe_command_is_the_fixed_reporter_run(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            scratch = Path(raw_tmp)
+            command = asan_check.cli_probe_command(scratch / "mtest", scratch)
+
+        self.assertEqual(command[0], str(scratch / "mtest"))
+        self.assertEqual(
+            command[1:3], ["--config", str(scratch / "mtest.toml")]
+        )
+        self.assertIn("--mojo", command)
+        mojo_index = command.index("--mojo")
+        self.assertEqual(
+            command[mojo_index + 1], str(asan_check.HOSTILE_BUILD_STANDIN)
+        )
+        json_index = command.index("--json")
+        self.assertEqual(
+            command[json_index + 1], str(scratch / asan_check.CLI_PROBE_STREAM)
+        )
+        junit_index = command.index("--junit-xml")
+        self.assertEqual(
+            command[junit_index + 1], str(scratch / asan_check.CLI_PROBE_REPORT)
+        )
+        self.assertNotIn("--collect-only", command)
+
+    def test_cli_probe_tree_carries_config_and_one_module(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            scratch = Path(raw_tmp)
+            asan_check.write_cli_probe_tree(scratch)
+
+            config = (scratch / "mtest.toml").read_text(encoding="utf-8")
+            self.assertIn('show-output = "all"', config)
+            self.assertIn('color = "never"', config)
+            self.assertIn("state = true", config)
+            module = scratch / asan_check.CLI_PROBE_TREE / asan_check.CLI_PROBE_MODULE
+            self.assertTrue(module.is_file())
+            self.assertIn("TestSuite", module.read_text(encoding="utf-8"))
+
+    def test_uninstrumented_cli_binary_is_rejected(self) -> None:
+        results = [
+            subprocess.CompletedProcess(args=["mojo"], returncode=0, stdout=""),
+            subprocess.CompletedProcess(
+                args=["nm"], returncode=0, stdout="__libc_start_main\n"
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            out = Path(raw_tmp)
+            with (
+                patch.object(asan_check, "OUT", out),
+                patch.object(asan_check, "CLI_BINARY", out / "mtest"),
+                patch.object(asan_check, "CLI_SCRATCH", out / "cli"),
+                patch.object(asan_check, "run", side_effect=results),
+            ):
+                with self.assertRaisesRegex(
+                    SystemExit, "ASan CLI is not instrumented"
+                ):
+                    asan_check.check_cli({})
+
+    def test_cli_probe_build_compiles_main_against_the_vendored_parser(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            out = Path(raw_tmp)
+            results = [
+                subprocess.CompletedProcess(args=["mojo"], returncode=0, stdout=""),
+                subprocess.CompletedProcess(
+                    args=["nm"], returncode=0, stdout="__asan_"
+                ),
+                subprocess.CompletedProcess(
+                    args=["mtest"], returncode=asan_check.CLI_PROBE_EXIT, stdout=""
+                ),
+            ]
+            with (
+                patch.object(asan_check, "OUT", out),
+                patch.object(asan_check, "CLI_BINARY", out / "mtest"),
+                patch.object(asan_check, "CLI_SCRATCH", out / "cli"),
+                patch.object(asan_check, "run", side_effect=results) as mocked_run,
+                patch.object(
+                    asan_check, "check_cli_probe_output", return_value="ok"
+                ),
+            ):
+                asan_check.check_cli({})
+
+            compile_command = mocked_run.call_args_list[0].args[0]
+            self.assertIn("--sanitize", compile_command)
+            self.assertIn("address", compile_command)
+            self.assertIn("src/main.mojo", compile_command)
+            self.assertIn(str(asan_check.VENDORED_TOML_INCLUDE), compile_command)
+            self.assertIn(
+                str(asan_check.NATIVE_PRODUCTION_OBJECT), compile_command
+            )
+            self.assertEqual(
+                mocked_run.call_args_list[2].kwargs["cwd"], out / "cli"
+            )
+
+
+class AsanCliProbeOracleTests(unittest.TestCase):
+    """The probe's artifact judgment, one named rejection per failure mode."""
+
+    def _tree(self, scratch: Path) -> None:
+        asan_check.write_cli_probe_tree(scratch)
+        (scratch / ".mtest-cache").mkdir(parents=True, exist_ok=True)
+        (scratch / ".mtest-cache" / "lastrun").write_text("", encoding="utf-8")
+        (scratch / asan_check.CLI_PROBE_STREAM).write_text(
+            '{"event":"stream","version":1}\n'
+            '{"event":"session_finished","exit_code":1}\n',
+            encoding="utf-8",
+        )
+        (scratch / asan_check.CLI_PROBE_REPORT).write_text(
+            self.REPORT.format(total=1), encoding="utf-8"
+        )
+
+    REPORT = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<testsuites name="mtest" tests="{total}" failures="1" errors="0">\n'
+        '<testsuite name="s" tests="1" failures="1" errors="0" skipped="0"'
+        ' time="0.0"><testcase name="t" classname="c">'
+        "<failure>boom</failure></testcase></testsuite>\n"
+        "</testsuites>\n"
+    )
+    """One accepted JUnit document, parameterized on the root `tests` total so a
+    mutation of that one number is the only difference between the accepted and
+    rejected cases below."""
+
+    def test_wrong_client_exit_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            scratch = Path(raw_tmp)
+            self._tree(scratch)
+            with self.assertRaisesRegex(SystemExit, "exited 0, expected 1"):
+                asan_check.check_cli_probe_output(
+                    0, asan_check.CLI_PROBE_ESCAPED_LINE, scratch, "ASan"
+                )
+
+    def test_missing_escaped_console_line_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            scratch = Path(raw_tmp)
+            self._tree(scratch)
+            with self.assertRaisesRegex(SystemExit, "escaped hostile line"):
+                asan_check.check_cli_probe_output(
+                    asan_check.CLI_PROBE_EXIT, "nothing hostile here", scratch, "ASan"
+                )
+
+    def test_raw_control_byte_on_the_console_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            scratch = Path(raw_tmp)
+            self._tree(scratch)
+            stdout = asan_check.CLI_PROBE_ESCAPED_LINE + "\x1b[0m"
+            with self.assertRaisesRegex(SystemExit, "raw ESC"):
+                asan_check.check_cli_probe_output(
+                    asan_check.CLI_PROBE_EXIT, stdout, scratch, "ASan"
+                )
+
+    def test_missing_promoted_state_file_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            scratch = Path(raw_tmp)
+            self._tree(scratch)
+            (scratch / ".mtest-cache" / "lastrun").unlink()
+            with self.assertRaisesRegex(SystemExit, "state file"):
+                asan_check.check_cli_probe_output(
+                    asan_check.CLI_PROBE_EXIT,
+                    asan_check.CLI_PROBE_ESCAPED_LINE,
+                    scratch,
+                    "ASan",
+                )
+
+    def test_corrupt_stream_is_rejected_by_the_strict_consumer(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            scratch = Path(raw_tmp)
+            self._tree(scratch)
+            (scratch / asan_check.CLI_PROBE_STREAM).write_text(
+                '{"event":"stream","version":1}\n{"event":"forged"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(SystemExit, "strict NDJSON consumer"):
+                asan_check.check_cli_probe_output(
+                    asan_check.CLI_PROBE_EXIT,
+                    asan_check.CLI_PROBE_ESCAPED_LINE,
+                    scratch,
+                    "ASan",
+                )
+
+    def test_invalid_report_is_rejected_by_the_junit_oracle(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            scratch = Path(raw_tmp)
+            self._tree(scratch)
+            (scratch / asan_check.CLI_PROBE_REPORT).write_text(
+                self.REPORT.format(total=9), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(SystemExit, "JUnit oracle"):
+                asan_check.check_cli_probe_output(
+                    asan_check.CLI_PROBE_EXIT,
+                    asan_check.CLI_PROBE_ESCAPED_LINE,
+                    scratch,
+                    "ASan",
+                )
+
+    def test_clean_probe_output_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            scratch = Path(raw_tmp)
+            self._tree(scratch)
+            detail = asan_check.check_cli_probe_output(
+                asan_check.CLI_PROBE_EXIT,
+                asan_check.CLI_PROBE_ESCAPED_LINE,
+                scratch,
+                "ASan",
+            )
+
+        self.assertIn("NDJSON", detail)
+        self.assertIn("JUnit", detail)
 
 
 if __name__ == "__main__":
