@@ -352,8 +352,7 @@
       "exit_class": 0,
       "in_default_suite": false,
       "reached_only_by": [
-        "maxfail",
-        "parallel-fd-clamp"
+        "maxfail"
       ],
       "disposition": "PARSED",
       "per_test": {
@@ -533,8 +532,7 @@
       "in_default_suite": false,
       "reached_only_by": [
         "parallel-serial-noverlap",
-        "parallel-serial-stale-glob",
-        "parallel-fd-clamp"
+        "parallel-serial-stale-glob"
       ],
       "disposition": "PARSED",
       "per_test": {

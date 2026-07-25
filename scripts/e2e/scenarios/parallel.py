@@ -11,9 +11,11 @@ proves the parallel teardown leaves no survivor.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import resource
+import shutil
 import signal
 import tempfile
 from pathlib import Path
@@ -822,16 +824,55 @@ number the cap arithmetic could ever produce by coincidence."""
 FD_CLAMP_CAP = 3
 """The cap `FD_CLAMP_SOFT_LIMIT` yields, asserted as an exact resolved count."""
 
-FD_CLAMP_FILES = (
-    "e2e/excluded/test_excluded.mojo",
-    "e2e/maxfail/test_c_pass.mojo",
-    "e2e/serial/test_b_next.mojo",
-    "e2e/suite/nested/test_nested.mojo",
-)
-"""Four all-pass files declaring exactly one test each, so the summary band's
-per-TEST totals and the per-FILE verdict count are the same number and neither
-can be mistaken for the other. More files than workers, so the clamped pool has
+FD_CLAMP_CONTROL_MIN_SOFT = 115
+"""The ambient soft `RLIMIT_NOFILE` the CONTROL run needs to stay unclamped.
+
+The control asserts the full 16 workers, which the same arithmetic reaches only
+from `(115 - 64 - 3) // 3 == 16`. A host below this clamps the control too, and
+the scenario would fail describing the product when the cause is the host — so
+the requirement is asserted up front, beside the hard-limit check, rather than
+left for the next reader to derive from an attribution failure."""
+
+FD_CLAMP_TREE = "build/e2e-scratch/fd-clamp"
+"""Repo-relative home of this scenario's GENERATED sources.
+
+Deliberately outside `e2e/`. mtest names each build product after the source
+path (`/` -> `_s`, `_` -> `_u`), so sources here compile to
+`build/bin/build_se2e-scratch_sfd-clamp_...` — a prefix the real compiler never
+produces for a committed fixture. That matters because the stand-in writes
+Python scripts, not ELF binaries: pointed at a committed fixture it would leave
+a `#!`-headed script sitting under the exact name a real `mojo build` produces,
+where a later scenario expecting a prebuilt binary, or a `build/` cleanliness
+check, would trip over it. `build/` is also gitignored and never walked by the
+manifest-completeness oracle, so these files join no committed inventory."""
+
+FD_CLAMP_NAMES = ("test_fd_alpha", "test_fd_beta", "test_fd_gamma", "test_fd_delta")
+"""The four generated modules. More files than workers, so the clamped pool has
 to recycle a slot to finish the set."""
+
+FD_CLAMP_FILES = tuple(f"{FD_CLAMP_TREE}/{name}.mojo" for name in FD_CLAMP_NAMES)
+"""The four generated sources, in the order they are written."""
+
+FD_CLAMP_SOURCE = '''"""Generated all-pass fixture for the live descriptor-clamp scenario."""
+from std.testing import assert_equal, TestSuite
+
+
+def {test_name}() raises:
+    assert_equal(1, 1)
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()
+'''
+"""One generated module's whole source.
+
+Exactly ONE test per file, so the summary band's per-TEST total is 4 — the
+number the contract names — while per-FILE identity is pinned separately and
+exactly by the console PASS set and the stream's finished map. Generating the
+files rather than borrowing committed fixtures also makes that test count a
+property of this scenario instead of an assumption about four unrelated files.
+Real `TestSuite` shape, so the fixture genuinely compiles and passes under the
+actual compiler even though this scenario always hands it to the stand-in."""
 
 FD_CLAMP_WARNING = (
     f"worker-clamp: requested {FD_CLAMP_REQUEST} workers but the environment's"
@@ -845,6 +886,47 @@ request and the cap would also pass against a warning that named those numbers
 in any other roles, and this scenario exists to prove which number is which.
 Interpolated from the constants above so the sentence and the counts this
 scenario asserts elsewhere can never drift apart."""
+
+
+def _write_fd_clamp_tree() -> None:
+    """Generate this scenario's four all-pass sources, replacing any residue.
+
+    Raises:
+        OSError: The scratch tree could not be created or written.
+    """
+    root = os.path.join(REPO_ROOT, FD_CLAMP_TREE)
+    os.makedirs(root, exist_ok=True)
+    for name in FD_CLAMP_NAMES:
+        with open(os.path.join(root, f"{name}.mojo"), "w", encoding="utf-8") as f:
+            f.write(FD_CLAMP_SOURCE.format(test_name=f"{name}_passes"))
+
+
+def _remove_fd_clamp_artifacts() -> None:
+    """Delete the generated sources and the products the stand-in fabricated.
+
+    The fabricated products are Python scripts under compiler-shaped names, so
+    they are removed on every path — success or failure — rather than left for
+    a later scenario to find. Best-effort: a missing artifact is the intended
+    state, and a cleanup failure must never replace a scenario's own diagnosis.
+    """
+    shutil.rmtree(os.path.join(REPO_ROOT, FD_CLAMP_TREE), ignore_errors=True)
+    # A hand-mirror of the product's `_mangle` (src/mtest/session/scratch.mojo),
+    # which cannot be imported from Python. Two sequential replaces match its
+    # single pass only while `FD_CLAMP_TREE` holds no `_` and `FD_CLAMP_NAMES`
+    # hold no `/`; introduce either and the passes interfere, the reconstructed
+    # name stops matching, and the products below go silently uncollected.
+    assert "_" not in FD_CLAMP_TREE, FD_CLAMP_TREE
+    assert not any("/" in name for name in FD_CLAMP_NAMES), FD_CLAMP_NAMES
+    mangled = FD_CLAMP_TREE.replace("_", "_u").replace("/", "_s")
+    for name in FD_CLAMP_NAMES:
+        product = os.path.join(
+            REPO_ROOT,
+            "build",
+            "bin",
+            f"{mangled}_s{name.replace('_', '_u')}",
+        )
+        with contextlib.suppress(OSError):
+            os.remove(product)
 
 
 def s_parallel_fd_clamp(context: ScenarioContext) -> str:
@@ -861,6 +943,14 @@ def s_parallel_fd_clamp(context: ScenarioContext) -> str:
     on mtest's native pool and scheduler — rather than moving the failure into
     the toolchain, where it would prove nothing about worker sizing.
 
+    The four sources are GENERATED under `build/e2e-scratch/`, not borrowed from
+    the committed tree, for two reasons: the per-file test count becomes a
+    property of this scenario rather than an assumption about other fixtures,
+    and the stand-in's Python-script products land under a `build_s...` name no
+    real `mojo build` ever produces, so they can neither be mistaken for nor
+    overwrite compiler output. Both the sources and those products are removed
+    on every exit path.
+
     The clamp is attributed, not merely observed. A CONTROL run with the same
     argv and no fd limit must resolve the full 16 workers and print no clamp
     warning at all, so the only difference between the two runs is the real
@@ -872,11 +962,23 @@ def s_parallel_fd_clamp(context: ScenarioContext) -> str:
         # RLIMIT_NOFILE, so this is a statement about portability, not a
         # tolerance that could quietly disarm the scenario on a supported host.
         return "skipped: this platform has no RLIMIT_NOFILE to lower"
-    _soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     expect(
         hard == resource.RLIM_INFINITY or hard >= FD_CLAMP_SOFT_LIMIT,
         f"the host's hard RLIMIT_NOFILE is {hard}, below the {FD_CLAMP_SOFT_LIMIT} "
         "this scenario lowers the child to — the run could not even start",
+    )
+    # The control run inherits THIS process's soft limit, so the host has to be
+    # able to reach the full request for the control to mean anything. Stated
+    # here, next to the hard-limit precondition, so a hardened host is named as
+    # the cause up front rather than surfacing later as an attribution failure.
+    expect(
+        soft == resource.RLIM_INFINITY or soft >= FD_CLAMP_CONTROL_MIN_SOFT,
+        f"the host's own soft RLIMIT_NOFILE is {soft}, below the "
+        f"{FD_CLAMP_CONTROL_MIN_SOFT} the unlimited CONTROL run needs to resolve "
+        f"the full {FD_CLAMP_REQUEST} workers — on this host the control would "
+        "clamp too, and the scenario could not attribute the clamp to the limit "
+        "it imposes",
     )
 
     args = [
@@ -890,88 +992,95 @@ def s_parallel_fd_clamp(context: ScenarioContext) -> str:
         "--gh-annotations",
         "off",
     ]
-    run = context.runner.run_mtest(
-        args, timeout=240.0, fd_limit=FD_CLAMP_SOFT_LIMIT
-    )
-    expect_exit(run, 0)
+    # Inside the `try`, not before it: writing the tree is itself a loop over
+    # four files, so a failure partway through leaves sources behind unless the
+    # `finally` already owns them.
+    try:
+        _write_fd_clamp_tree()
+        run = context.runner.run_mtest(
+            args, timeout=240.0, fd_limit=FD_CLAMP_SOFT_LIMIT
+        )
+        expect_exit(run, 0)
 
-    expect(
-        FD_CLAMP_WARNING in run.stderr,
-        f"the clamped run did not print the exact worker-clamp warning "
-        f"{FD_CLAMP_WARNING!r}:\n--- stderr ---\n{run.stderr}",
-    )
-    workers = _workers_in_stream(run.stdout)
-    expect(
-        workers == FD_CLAMP_CAP,
-        f"session_started.workers was {workers}, want exactly {FD_CLAMP_CAP} "
-        f"under a soft RLIMIT_NOFILE of {FD_CLAMP_SOFT_LIMIT}",
-    )
+        expect(
+            FD_CLAMP_WARNING in run.stderr,
+            f"the clamped run did not print the exact worker-clamp warning "
+            f"{FD_CLAMP_WARNING!r}:\n--- stderr ---\n{run.stderr}",
+        )
+        workers = _workers_in_stream(run.stdout)
+        expect(
+            workers == FD_CLAMP_CAP,
+            f"session_started.workers was {workers}, want exactly {FD_CLAMP_CAP} "
+            f"under a soft RLIMIT_NOFILE of {FD_CLAMP_SOFT_LIMIT}",
+        )
 
-    # `--json -` owns stdout, so the human console — verdict rows included —
-    # is on stderr for this run.
-    console_passes = sorted(
-        line.split()[1]
-        for line in run.stderr.splitlines()
-        if line.startswith("PASS ") and len(line.split()) > 1
-    )
-    expect(
-        console_passes == sorted(FD_CLAMP_FILES),
-        f"the clamped console reported PASS for {console_passes}, want exactly "
-        f"{sorted(FD_CLAMP_FILES)}:\n{run.stderr}",
-    )
-    stream = stream_files(run.stdout)
-    expect(
-        stream.finished == {path: "pass" for path in FD_CLAMP_FILES},
-        f"the clamped stream finished {stream.finished}, want all four files "
-        "pass",
-    )
+        # `--json -` owns stdout, so the human console — verdict rows included —
+        # is on stderr for this run.
+        console_passes = sorted(
+            line.split()[1]
+            for line in run.stderr.splitlines()
+            if line.startswith("PASS ") and len(line.split()) > 1
+        )
+        expect(
+            console_passes == sorted(FD_CLAMP_FILES),
+            f"the clamped console reported PASS for {console_passes}, want exactly "
+            f"{sorted(FD_CLAMP_FILES)}:\n{run.stderr}",
+        )
+        stream = stream_files(run.stdout)
+        expect(
+            stream.finished == {path: "pass" for path in FD_CLAMP_FILES},
+            f"the clamped stream finished {stream.finished}, want all four files "
+            "pass",
+        )
 
-    summ = expect_accounting(run)
-    actual = (
-        summ.passed,
-        summ.failed,
-        summ.skipped,
-        summ.crashed,
-        summ.timed_out,
-        summ.compile_error,
-        summ.malformed,
-        summ.excluded,
-        summ.not_run,
-    )
-    expect(
-        actual == (len(FD_CLAMP_FILES), 0, 0, 0, 0, 0, 0, 0, 0),
-        f"the clamped run's summary band was {actual}, want "
-        f"({len(FD_CLAMP_FILES)}, 0, 0, 0, 0, 0, 0, 0, 0):\n{run.combined}",
-    )
-    expect(
-        stream.summary.get("pass") == len(FD_CLAMP_FILES)
-        and stream.summary.get("not_run") == 0,
-        f"the machine summary disagreed with the console band: {stream.summary}",
-    )
-    expect(
-        "INTERNAL-ERROR" not in run.combined and "EMFILE" not in run.combined,
-        "a descriptor exhaustion or internal error surfaced under the clamp:\n"
-        f"{run.combined}",
-    )
+        summ = expect_accounting(run)
+        actual = (
+            summ.passed,
+            summ.failed,
+            summ.skipped,
+            summ.crashed,
+            summ.timed_out,
+            summ.compile_error,
+            summ.malformed,
+            summ.excluded,
+            summ.not_run,
+        )
+        expect(
+            actual == (len(FD_CLAMP_FILES), 0, 0, 0, 0, 0, 0, 0, 0),
+            f"the clamped run's summary band was {actual}, want "
+            f"({len(FD_CLAMP_FILES)}, 0, 0, 0, 0, 0, 0, 0, 0):\n{run.combined}",
+        )
+        expect(
+            stream.summary.get("pass") == len(FD_CLAMP_FILES)
+            and stream.summary.get("not_run") == 0,
+            f"the machine summary disagreed with the console band: {stream.summary}",
+        )
+        expect(
+            "INTERNAL-ERROR" not in run.combined and "EMFILE" not in run.combined,
+            "a descriptor exhaustion or internal error surfaced under the clamp:\n"
+            f"{run.combined}",
+        )
 
-    # The CONTROL: same argv, no fd limit. Its full 16 workers and silent
-    # console are what make the clamp above attributable to the kernel limit.
-    control = context.runner.run_mtest(args, timeout=240.0)
-    expect_exit(control, 0)
-    control_workers = _workers_in_stream(control.stdout)
-    expect(
-        control_workers == FD_CLAMP_REQUEST,
-        f"without the fd limit the same argv resolved {control_workers} workers, "
-        f"want the full {FD_CLAMP_REQUEST} — the clamp above cannot be "
-        "attributed to RLIMIT_NOFILE unless this run is unclamped. This host's "
-        f"own soft RLIMIT_NOFILE is {_soft}; the control needs at least 115 for "
-        f"the cap to reach {FD_CLAMP_REQUEST}",
-    )
-    expect(
-        "worker-clamp" not in control.combined,
-        f"the unlimited control run printed a worker-clamp warning:\n"
-        f"{control.combined}",
-    )
+        # The CONTROL: same argv, no fd limit. Its full 16 workers and silent
+        # console are what make the clamp above attributable to the kernel limit.
+        control = context.runner.run_mtest(args, timeout=240.0)
+        expect_exit(control, 0)
+        control_workers = _workers_in_stream(control.stdout)
+        expect(
+            control_workers == FD_CLAMP_REQUEST,
+            f"without the fd limit the same argv resolved {control_workers} workers, "
+            f"want the full {FD_CLAMP_REQUEST} — the clamp above cannot be "
+            "attributed to RLIMIT_NOFILE unless this run is unclamped. This "
+            f"host's own soft RLIMIT_NOFILE is {soft}, which the precondition "
+            f"above required to be at least {FD_CLAMP_CONTROL_MIN_SOFT}",
+        )
+        expect(
+            "worker-clamp" not in control.combined,
+            f"the unlimited control run printed a worker-clamp warning:\n"
+            f"{control.combined}",
+        )
+    finally:
+        _remove_fd_clamp_artifacts()
     return (
         f"soft RLIMIT_NOFILE {FD_CLAMP_SOFT_LIMIT}: -n {FD_CLAMP_REQUEST} clamps "
         f"loudly to {FD_CLAMP_CAP} workers, all {len(FD_CLAMP_FILES)} files PASS, "
