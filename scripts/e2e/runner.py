@@ -25,6 +25,8 @@ FAKE_SLOW_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_slow_mojo.py")
 FAKE_CRASH_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_crash_mojo.py")
 FAKE_WINDOW_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_window_mojo.py")
 FAKE_STUBBORN_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_stubborn_mojo.py")
+FAKE_FD_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_fd_mojo.py")
+PATH_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "path_mojo.py")
 FAKE_RETRY_CRASH_MOJO = os.path.join(
     TOOLCHAIN_FIXTURES, "fake_retry_crash_mojo.py"
 )
@@ -706,7 +708,15 @@ class E2ERunner:
 
     @staticmethod
     def kill_group(proc: subprocess.Popen) -> None:
-        """Terminate, then kill, the process group containing ``proc``."""
+        """Terminate, then kill, the process group containing ``proc``.
+
+        Darwin excludes zombies when it iterates process-group members, then
+        reports EPERM once only terminal members remain, where Linux reports
+        ESRCH. Both mean the group is gone, so both end the sweep. Treating
+        EPERM as fatal here raised `PermissionError` out of a cleanup path and
+        replaced the caller's own diagnosis — the timeout or stream failure that
+        made cleanup necessary — with an unrelated escaped exception.
+        """
         try:
             pgid = os.getpgid(proc.pid)
         except ProcessLookupError:
@@ -714,7 +724,7 @@ class E2ERunner:
         for sig in (signal.SIGTERM, signal.SIGKILL):
             try:
                 os.killpg(pgid, sig)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
                 return
             time.sleep(0.3)
 

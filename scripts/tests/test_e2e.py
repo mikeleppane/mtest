@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import signal
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -414,6 +415,37 @@ class E2EFaultTopologyTests(unittest.TestCase):
         self.assertFalse(
             runner.group_alive(child_pgid),
             f"child group {child_pgid} survived the harness sweep",
+        )
+
+    def test_group_sweep_reads_eperm_as_a_gone_group(self) -> None:
+        """Darwin reports EPERM, not ESRCH, for a zombie-only process group."""
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time\ntime.sleep(30)\n"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        pgid = os.getpgid(proc.pid)
+        attempts: list[tuple[int, int]] = []
+        real_killpg = runner.os.killpg
+
+        def killpg(target: int, sig: int) -> None:
+            attempts.append((target, sig))
+            raise PermissionError(1, "Operation not permitted")
+
+        runner.os.killpg = killpg
+        try:
+            # Escaping here would replace the caller's own diagnosis with an
+            # unrelated exception raised from cleanup.
+            runner.E2ERunner.kill_group(proc)
+        finally:
+            runner.os.killpg = real_killpg
+            real_killpg(pgid, signal.SIGKILL)
+            proc.wait()
+        self.assertEqual(
+            attempts,
+            [(pgid, int(signal.SIGTERM))],
+            f"EPERM did not end the group sweep: {attempts}",
         )
 
     def test_signalled_runs_reject_ambiguous_arming(self) -> None:
