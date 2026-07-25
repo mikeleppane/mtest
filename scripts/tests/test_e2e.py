@@ -101,6 +101,7 @@ CORE_SCENARIOS = (
     "manifest-completeness",
     "default-suite",
     "hostile",
+    "hostile-console",
     "single-pass",
     "exitfirst",
     "maxfail",
@@ -210,7 +211,7 @@ class E2EFaultTopologyTests(unittest.TestCase):
         names = tuple(name for name, _scenario in e2e_main.SCENARIOS)
 
         self.assertEqual(names, layout.E2E_SCENARIO_NAMES)
-        self.assertEqual(len(names), 89)
+        self.assertEqual(len(names), 90)
         self.assertEqual(len(set(names)), len(names))
 
     def test_core_scenarios_have_one_feature_owner(self) -> None:
@@ -600,6 +601,7 @@ class E2EFaultTopologyTests(unittest.TestCase):
                 Path(runner.FAKE_RETRY_CRASH_MOJO),
                 Path(runner.FAKE_STUBBORN_MOJO),
                 Path(runner.FAKE_FD_MOJO),
+                Path(runner.FAKE_HOSTILE_MOJO),
                 Path(runner.PATH_MOJO),
             ),
             (
@@ -609,6 +611,7 @@ class E2EFaultTopologyTests(unittest.TestCase):
                 fixture_root / "fake_retry_crash_mojo.py",
                 fixture_root / "fake_stubborn_mojo.py",
                 fixture_root / "fake_fd_mojo.py",
+                fixture_root / "fake_hostile_mojo.py",
                 fixture_root / "path_mojo.py",
             ),
         )
@@ -626,6 +629,7 @@ class E2EFaultTopologyTests(unittest.TestCase):
             runner.FAKE_RETRY_CRASH_MOJO,
             runner.FAKE_STUBBORN_MOJO,
             runner.FAKE_FD_MOJO,
+            runner.FAKE_HOSTILE_MOJO,
             runner.PATH_MOJO,
         ):
             with self.subTest(fixture=fixture):

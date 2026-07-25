@@ -199,18 +199,18 @@ PASS           e2e/suite/test_passing.mojo  0.02s
 NO-TESTS       e2e/suite/test_zero.mojo   0.07s
 
 --- COMPILE-ERROR e2e/suite/test_compile_error.mojo — mojo build said: ---
-/home/mikko/dev/mtest/e2e/suite/test_compile_error.mojo:12:17: error: use of unknown declaration 'this_symbol_is_never_defined_anywhere'
-    var value = this_symbol_is_never_defined_anywhere()
-                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-mojo: error: failed to parse the provided Mojo source module
+    | /home/mikko/dev/mtest/e2e/suite/test_compile_error.mojo:12:17: error: use of unknown declaration 'this_symbol_is_never_defined_anywhere'
+    |     var value = this_symbol_is_never_defined_anywhere()
+    |                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    | mojo: error: failed to parse the provided Mojo source module
 reproduce: mojo build e2e/suite/test_compile_error.mojo -o build/bin/e2e_ssuite_stest_ucompile_uerror
 
 [...CRASH detail with its captured stack trace omitted...]
 
 --- FAIL e2e/suite/test_failing.mojo::test_second_fails ---
-At e2e/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:
-   left: 1
-  right: 2
+    | At e2e/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:
+    |    left: 1
+    |   right: 2
 reproduce: mtest e2e/suite/test_failing.mojo::test_second_fails
 
 [...file-scoped captured output omitted...]
@@ -598,9 +598,9 @@ root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0
 FAIL           e2e/suite/test_failing.mojo     0.02s
 
 --- FAIL e2e/suite/test_failing.mojo::test_second_fails ---
-At e2e/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:
-   left: 1
-  right: 2
+    | At e2e/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:
+    |    left: 1
+    |   right: 2
 reproduce: mtest e2e/suite/test_failing.mojo::test_second_fails
 
 [...file-scoped captured output omitted...]
@@ -941,6 +941,13 @@ Facts about this build worth knowing before you rely on it:
 - **Captured output is file-scoped.** `TestSuite` does not attribute a
   file's stdout/stderr to individual tests, so mtest cannot either. Parsed
   FAIL assertion details are per-test; the raw captured block is per-file.
+- **The console shows child text, it does not execute it.** Every string a
+  child or the compiler produced is neutralized before printing: control
+  characters become visible escapes (`\x1B`, `\x00`, `\u009B`) and multi-line
+  blocks are fenced behind a `    | ` gutter, so a test cannot repaint your
+  terminal or forge a line that reads as mtest's own. The JUnit report, the
+  annotations, and the `--json` stream are unaffected and still carry the raw
+  text under their own escaping.
 - **`--maxfail` is checked between files.** A file already in flight always
   finishes, so a file with several failing tests can push the count past
   `N` before scheduling stops.

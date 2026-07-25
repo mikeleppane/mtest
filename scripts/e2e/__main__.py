@@ -80,6 +80,7 @@ SCENARIOS: ScenarioRegistry = (
     ("resilience-matrix", resilience.s_resilience_matrix),
     ("default-suite", core.s_default_suite),
     ("hostile", core.s_hostile),
+    ("hostile-console", core.s_hostile_console),
     ("single-pass", core.s_single_pass),
     ("exitfirst", core.s_exitfirst),
     ("maxfail", core.s_maxfail),

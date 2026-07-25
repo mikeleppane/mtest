@@ -26,6 +26,7 @@ FAKE_CRASH_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_crash_mojo.py")
 FAKE_WINDOW_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_window_mojo.py")
 FAKE_STUBBORN_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_stubborn_mojo.py")
 FAKE_FD_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_fd_mojo.py")
+FAKE_HOSTILE_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_hostile_mojo.py")
 PATH_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "path_mojo.py")
 FAKE_RETRY_CRASH_MOJO = os.path.join(
     TOOLCHAIN_FIXTURES, "fake_retry_crash_mojo.py"

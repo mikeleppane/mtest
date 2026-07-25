@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
@@ -19,6 +20,7 @@ from scripts.e2e.assertions import (
 )
 from scripts.e2e.runner import (
     E2E_ROOT,
+    FAKE_HOSTILE_MOJO,
     REPO_ROOT,
     SHORT_TIMEOUT,
     ScenarioContext,
@@ -275,6 +277,218 @@ def s_hostile(context: ScenarioContext) -> str:
         f"overflow flood did not report FAIL:\n{run.stdout}",
     )
     return "silent/forger MALFORMED-SUITE, liar DRIFT exit 3, overflow FAIL"
+
+
+HOSTILE_CONSOLE_TREE = "build/e2e-scratch/hostile-console"
+"""Repo-relative home of this scenario's GENERATED source.
+
+Deliberately outside `e2e/`, for the same reasons the descriptor-clamp scenario
+generates its tree: the stand-in compiler writes a Python script, not an ELF
+binary, so pointing it at a committed fixture would leave a `#!`-headed file
+under the exact name a real `mojo build` produces. `build/` is gitignored and is
+never walked by the manifest-completeness oracle, so nothing here joins a
+committed inventory."""
+
+HOSTILE_CONSOLE_NAME = "test_hostile_console"
+"""The single generated module, matching the row name the actor reports."""
+
+HOSTILE_CONSOLE_FILE = f"{HOSTILE_CONSOLE_TREE}/{HOSTILE_CONSOLE_NAME}.mojo"
+"""The generated source, as mtest is asked for it."""
+
+HOSTILE_CONSOLE_SOURCE = '''"""Generated source for the console text-safety scenario.
+
+Never actually compiled: the scenario hands it to a stand-in that fabricates a
+hostile report actor instead. Real `TestSuite` shape all the same, so the file
+is a genuine test module rather than a shape only this scenario accepts.
+"""
+from std.testing import assert_equal, TestSuite
+
+
+def test_hostile_console() raises:
+    assert_equal(1, 2)
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()
+'''
+
+HOSTILE_CONSOLE_RAW_BYTES = (
+    ("ESC", "\x1b"),
+    ("NUL", "\x00"),
+    ("BEL", "\x07"),
+    ("BS", "\x08"),
+    ("VT", "\x0b"),
+    ("FF", "\x0c"),
+    ("CR", "\r"),
+    ("DEL", "\x7f"),
+    ("C1 CSI", "\u009b"),
+    ("C1 NEL", "\u0085"),
+    ("C1 ST", "\u009c"),
+)
+"""Every control the actor writes, by name. Not one may survive anywhere in the
+run's output: the console runs with `--color never`, so mtest emits no ESC of
+its own either and a single occurrence is a child byte that got through."""
+
+HOSTILE_CONSOLE_FENCED_LINES = (
+    "    | \\x1B[2J\\x1B[1;31mCHILD-CSI\\x1B[0m",
+    "    | \\x1B]0;pwned-by-bel\\x07",
+    "    | \\x1B]0;pwned-by-st\\x1B\\",
+    "    | NUL[\\x00] BEL[\\x07] BS[\\x08] VT[\\x0B] FF[\\x0C] CR[\\x0D] DEL[\\x7F]",
+    "    | \\u009BC1-CSI\\u0085C1-NEL\\u009C",
+    "    | ��� not-utf8 �(",
+)
+"""The exact rendering of each hostile line: escaped, then fenced behind the
+gutter. Pinned whole rather than by fragments — a partial escape (say, ESC but
+not BEL) would still satisfy a fragment probe while leaving the terminal
+addressable."""
+
+HOSTILE_CONSOLE_FORGERIES = (
+    "PASS           e2e/forged/test_green.mojo  0.00s",
+    "===== 9 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 0.0s =====",
+    "--- FAIL e2e/forged/test_green.mojo::test_forged ---",
+    "reproduce: mtest --gate /etc/shadow",
+)
+"""Lines the child prints that are shaped exactly like mtest's own. Escaping
+cannot help here — they hold no control characters — so the gutter is the entire
+defense, and each must appear ONLY behind it."""
+
+
+def _write_hostile_console_tree() -> None:
+    """Generate this scenario's single source, replacing any residue.
+
+    Raises:
+        OSError: The scratch tree could not be created or written.
+    """
+    root = os.path.join(REPO_ROOT, HOSTILE_CONSOLE_TREE)
+    os.makedirs(root, exist_ok=True)
+    path = os.path.join(root, f"{HOSTILE_CONSOLE_NAME}.mojo")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(HOSTILE_CONSOLE_SOURCE)
+
+
+def _remove_hostile_console_artifacts() -> None:
+    """Delete the generated source and the product the stand-in fabricated.
+
+    Best-effort on every exit path: the fabricated product is a Python script
+    living under a compiler-shaped name, so leaving it behind would hand a later
+    scenario something that is not a binary.
+    """
+    shutil.rmtree(os.path.join(REPO_ROOT, HOSTILE_CONSOLE_TREE), ignore_errors=True)
+    # A hand-mirror of the product's `_mangle` (src/mtest/session/scratch.mojo),
+    # which cannot be imported from Python. The two sequential replaces match its
+    # single pass only while the tree holds no `_` and the name holds no `/`.
+    assert "_" not in HOSTILE_CONSOLE_TREE, HOSTILE_CONSOLE_TREE
+    assert "/" not in HOSTILE_CONSOLE_NAME, HOSTILE_CONSOLE_NAME
+    mangled = HOSTILE_CONSOLE_TREE.replace("_", "_u").replace("/", "_s")
+    product = os.path.join(
+        REPO_ROOT,
+        "build",
+        "bin",
+        f"{mangled}_s{HOSTILE_CONSOLE_NAME.replace('_', '_u')}",
+    )
+    with contextlib.suppress(OSError):
+        os.remove(product)
+
+
+def s_hostile_console(context: ScenarioContext) -> str:
+    """A child that writes terminal control sequences cannot drive the terminal.
+
+    The producer is real: `fake_hostile_mojo.py` fabricates a direct bytes actor
+    that writes invalid UTF-8, NUL, DEL, CSI, OSC closed by both BEL and ST, C1
+    controls, report-lookalike noise, and lines shaped exactly like mtest's own
+    verdict rows — and then a genuine reconciling report so the file lands on a
+    real FAIL with a real per-test failure section. Every console surface the
+    boundary covers is therefore rendered from bytes the child chose.
+
+    Two independent claims are asserted. First, NO raw control byte survives
+    anywhere in the run's output: the run is `--color never`, so mtest writes no
+    ESC of its own and one occurrence would be the child's. Second, the escaped
+    text lands in the exact fenced shape the contract documents, and every
+    console-shaped forgery appears only behind the gutter, never as a line of
+    its own where a reader — or a log scraper — would take it for mtest's voice.
+
+    One pinned line is deliberately about the raw side: the invalid-UTF-8 line
+    is asserted with its exact U+FFFD spelling, so a change that moved the lossy
+    decoder while "fixing" the display would fail here rather than pass quietly.
+    """
+    args = [
+        HOSTILE_CONSOLE_FILE,
+        "--mojo",
+        FAKE_HOSTILE_MOJO,
+        "--color",
+        "never",
+    ]
+    try:
+        _write_hostile_console_tree()
+        run = context.runner.run_mtest(args, timeout=SHORT_TIMEOUT)
+        expect_exit(run, 1)
+
+        # (1) The verdict itself: the hostile file is a real FAIL, not a
+        # MALFORMED-SUITE, so the framed sections below were actually rendered.
+        expect(
+            verdict_line(run, "FAIL", HOSTILE_CONSOLE_FILE) is not None,
+            f"the hostile file did not report FAIL:\n{run.stdout}",
+        )
+
+        # (2) Not one raw control byte anywhere in the run's output.
+        for name, byte in HOSTILE_CONSOLE_RAW_BYTES:
+            expect(
+                byte not in run.combined,
+                f"a raw {name} byte ({byte!r}) reached the console: the child "
+                f"can still address the terminal",
+            )
+
+        # (3) The exact escaped-and-fenced rendering of each hostile line.
+        for line in HOSTILE_CONSOLE_FENCED_LINES:
+            expect(
+                f"\n{line}\n" in run.stdout,
+                f"the console did not render the fenced line {line!r}:\n{run.stdout}",
+            )
+
+        # (4) Every console-shaped forgery is fenced, and none of them stands
+        # alone as a line. This is the claim escaping alone cannot make.
+        stdout_lines = run.stdout.split("\n")
+        for forgery in HOSTILE_CONSOLE_FORGERIES:
+            expect(
+                f"\n    | {forgery}\n" in run.stdout,
+                f"the forged console line {forgery!r} was not fenced behind the "
+                f"gutter:\n{run.stdout}",
+            )
+            expect(
+                forgery not in stdout_lines,
+                f"the forged console line {forgery!r} stood alone as a console "
+                f"line and reads as mtest's own voice:\n{run.stdout}",
+            )
+
+        # (5) The per-test failure section rendered the child's detail through
+        # the same boundary, so the failure story is neither lost nor
+        # executable, and the reproduce line stays exactly one console line.
+        node = f"{HOSTILE_CONSOLE_FILE}::{HOSTILE_CONSOLE_NAME}"
+        expect(
+            f"--- FAIL {node} ---" in stdout_lines,
+            f"no framed per-test FAIL section for {node}:\n{run.stdout}",
+        )
+        expect(
+            f"reproduce: mtest --mojo {FAKE_HOSTILE_MOJO} {node}" in stdout_lines,
+            f"no exact reproduce line for {node}:\n{run.stdout}",
+        )
+        detail = (
+            f"    | At {HOSTILE_CONSOLE_FILE}:1:1: AssertionError: "
+            "\\x1B[2J\\x1B[1;31mCHILD-CSI\\x1B[0m \\x00 \\x7F "
+            "\\u009BC1-CSI\\u0085C1-NEL\\u009C"
+        )
+        expect(
+            detail in stdout_lines,
+            f"the per-test failure detail was not dedented, root-relativized, "
+            f"escaped and fenced as expected:\n{run.stdout}",
+        )
+    finally:
+        _remove_hostile_console_artifacts()
+    return (
+        f"hostile actor: FAIL verdict, no raw control byte survives, "
+        f"{len(HOSTILE_CONSOLE_FENCED_LINES)} exact fenced lines, "
+        f"{len(HOSTILE_CONSOLE_FORGERIES)} forgeries fenced"
+    )
 
 
 def s_single_pass(context: ScenarioContext) -> str:

@@ -529,15 +529,20 @@ def test_detail_is_dedented_and_at_line_made_root_relative() raises:
         )
     )
     var out = c.output()
-    # (a) Common indentation stripped: the first detail line stands at column 0,
-    # and the relative indent under it is preserved (uniform strip, not a crush).
-    assert_true("\nUnhandled exception\n" in out)
-    assert_true("\n  extra" in out)
-    # (b) The `At` line is root-relative; the baked absolute path is gone.
-    assert_true("At tests/test_x.mojo:12:5: AssertionError: nope" in out)
+    # (a) Common indentation stripped: the first detail line stands at the
+    # gutter, and the relative indent under it is preserved (uniform strip, not
+    # a crush). (b) The `At` line is root-relative; the baked absolute path is
+    # gone. Asserted as one exact block so neither transformation can be lost
+    # while the other still satisfies a substring probe. The `    | ` gutter is
+    # the display fence every untrusted block now rides behind; the detail text
+    # inside it is byte-verbatim.
+    assert_true(
+        "    | Unhandled exception\n"
+        "    | At tests/test_x.mojo:12:5: AssertionError: nope\n"
+        "    |   extra\n"
+        in out
+    )
     assert_false("/run/root/tests/test_x.mojo" in out)
-    # Nothing ELSE is rewritten: the message text is byte-verbatim.
-    assert_true("AssertionError: nope" in out)
 
 
 def test_at_line_root_strip_is_anchored_not_a_blanket_replace() raises:
@@ -1910,3 +1915,413 @@ def test_progress_empty_running_set_still_reports_counts() raises:
     var line = c.progress_line()
     assert_true(line.byte_length() > 0)
     assert_true("8/8" in line)
+
+
+# --- The text-safety boundary: no child byte reaches the terminal as a command
+
+
+def _hostile_capture() -> String:
+    """One capture block exercising every class the escape mapping names.
+
+    Covers, in order: a plain line; a CSI color sequence; an OSC terminated by
+    BEL; an OSC terminated by the two-byte ESC-backslash ST; NUL and DEL inside
+    a line; an empty logical line; quotes and a tab; a bare CR; and a C1 control
+    written as its valid two-byte UTF-8 encoding, which is the only way a C1 can
+    survive the lossy decode as itself rather than as U+FFFD. The block ends in
+    a final LF, so the fenced rendering must not gain a phantom last line.
+    """
+    return (
+        String("plain\n")
+        + "\x1b[31mred\x1b[0m\n"
+        + "\x1b]0;title\x07\n"
+        + "\x1b]0;title\x1b\\\n"
+        + "nul\x00del\x7f\n"
+        + "\n"
+        + "quote\"tick'\ttab\n"
+        + "carriage\rreturn\n"
+        + chr(0x9B)
+        + "csi-c1\n"
+    )
+
+
+comptime _HOSTILE_RENDERED: StaticString = (
+    "    | plain\n"
+    "    | \\x1B[31mred\\x1B[0m\n"
+    "    | \\x1B]0;title\\x07\n"
+    "    | \\x1B]0;title\\x1B\\\n"
+    "    | nul\\x00del\\x7F\n"
+    "    | \n"
+    "    | quote\"tick'\ttab\n"
+    "    | carriage\\x0Dreturn\n"
+    "    | \\u009Bcsi-c1\n"
+)
+"""Exactly what `_hostile_capture()` must look like on screen: every control
+the terminal would have executed rendered as visible text, LF and Tab kept, and
+one gutter per logical line with no fourth line after the final LF."""
+
+
+def _feed_hostile_capture(mut c: ConsoleReporter, text: String):
+    """One FAIL file whose captured stdout and stderr are both `text`."""
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_hostile.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_hostile.mojo",
+            Outcome.FAIL,
+            0.1,
+            _argv("tests/test_hostile.mojo"),
+            1.0,
+            _bytes(text),
+            _bytes(text),
+            exit_status=1,
+            parse_disposition=ParseDisposition.PARSED,
+        )
+    )
+
+
+def test_captured_output_renders_every_control_class_exactly() raises:
+    var c = _console()
+    _feed_hostile_capture(c, _hostile_capture())
+    var out = c.output()
+    assert_true(
+        String(_HOSTILE_RENDERED) in out,
+        "the captured block was not rendered as the escaped, fenced text the"
+        " mapping promises:\n"
+        + out,
+    )
+
+
+def test_captured_output_carries_no_raw_escape_or_control_byte() raises:
+    # Color is off, so mtest itself emits no ESC either: a single raw ESC, CR,
+    # NUL, or DEL anywhere in the buffer is a child byte that got through.
+    var c = _console()
+    _feed_hostile_capture(c, _hostile_capture())
+    var out = c.output()
+    assert_false("\x1b" in out, "a raw ESC byte reached the console buffer")
+    assert_false("\r" in out, "a raw CR byte reached the console buffer")
+    assert_false("\x00" in out, "a raw NUL byte reached the console buffer")
+    assert_false("\x07" in out, "a raw BEL byte reached the console buffer")
+    assert_false("\x7f" in out, "a raw DEL byte reached the console buffer")
+    assert_false(
+        chr(0x9B) in out, "a raw C1 control reached the console buffer"
+    )
+
+
+def test_captured_output_appears_once_per_stream_still() raises:
+    # The boundary changes how the block is rendered, never how often: stdout
+    # and stderr are each framed exactly once for the file.
+    var c = _console()
+    _feed_hostile_capture(c, _hostile_capture())
+    var out = c.output()
+    assert_equal(_count(out, String(_HOSTILE_RENDERED)), 2)
+
+
+def test_child_ansi_is_literal_while_mtest_color_survives() raises:
+    # `--color always` is absolute, so mtest paints its own verdict line. The
+    # child's identical sequence must appear as text on the same screen.
+    var c = _console(color=ColorWhen.ALWAYS, show_output=ShowOutput.ALL)
+    _feed_hostile_capture(c, "\x1b[31mred\x1b[0m\n")
+    var out = c.output()
+    # mtest's own styling, applied AFTER escaping, is intact.
+    assert_true(
+        "\x1b[31mFAIL" in out, "mtest lost its own ANSI under --color always"
+    )
+    assert_true("\x1b[0m" in out, "mtest lost its own ANSI reset")
+    # The child's identical bytes are shown, not executed.
+    assert_true("    | \\x1B[31mred\\x1B[0m\n" in out)
+    assert_false(
+        "\x1b[31mred" in out, "the child's raw color sequence was emitted"
+    )
+
+
+def test_a_large_capture_escapes_controls_near_both_retained_ends() raises:
+    # A clamped capture keeps a head and a tail around a spliced marker line.
+    # The boundary must reach both ends, not just the first few bytes.
+    var filler = String("")
+    for _ in range(2000):
+        filler += "ab"
+    var text = (
+        String("\x1b[2Jhead ")
+        + filler
+        + "\n[... output truncated at 4096 bytes ...]\n"
+        + filler
+        + " tail\x1b[0m\n"
+    )
+    var c = _console()
+    _feed_hostile_capture(c, text)
+    var out = c.output()
+    assert_true("    | \\x1B[2Jhead ab" in out, "the head control survived")
+    assert_true("ab tail\\x1B[0m\n" in out, "the tail control survived")
+    assert_false("\x1b" in out, "a raw ESC survived in a large capture")
+    # The marker line is mtest's own splice and still reads as one fenced line.
+    assert_true("    | [... output truncated at 4096 bytes ...]\n" in out)
+
+
+def test_compiler_diagnostic_is_escaped_and_fenced() raises:
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_bad.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_bad.mojo",
+            Outcome.COMPILE_ERROR,
+            0.0,
+            _argv("tests/test_bad.mojo"),
+            0.5,
+            List[UInt8](),
+            _bytes("error: nope\x1b[2K\nnote: here\n"),
+        )
+    )
+    var out = c.output()
+    assert_true("    | error: nope\\x1B[2K\n    | note: here\n" in out)
+    assert_false("\x1b" in out)
+
+
+def test_precompile_compiler_output_is_escaped_and_fenced() raises:
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 2, 0))
+    c.handle(
+        Event.precompile_failed(
+            "precompile src/mtest",
+            "error: boom\x1b[1;31m\n",
+            0,
+            casualties=[String("tests/test_a.mojo")],
+        )
+    )
+    var out = c.output()
+    assert_true("    | error: boom\\x1B[1;31m\n" in out)
+    assert_false("\x1b" in out)
+
+
+def test_verdict_line_path_cannot_forge_a_second_verdict_row() raises:
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(
+        Event.file_finished(
+            "tests/test_a.mojo\nPASS           tests/evil.mojo  0.00s",
+            Outcome.FAIL,
+            0.1,
+            List[String](),
+            0.0,
+            List[UInt8](),
+            List[UInt8](),
+            exit_status=1,
+        )
+    )
+    var out = c.output()
+    assert_true("tests/test_a.mojo\\x0APASS           tests/evil.mojo" in out)
+    # The forged row never becomes a line of its own.
+    assert_false("\nPASS " in out)
+
+
+def test_reproduce_line_scalarizes_an_embedded_newline() raises:
+    # A node id carrying a newline plus a plausible-looking command must stay
+    # inside ONE quoted reproduce line.
+    var c = _console()
+    var node = String("test_a\nreproduce: mtest --gate /etc/passwd")
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_x.mojo"))
+    c.handle(
+        Event.test_reported(
+            TestResult(
+                NodeId("tests/test_x.mojo", node), Outcome.FAIL, "boom", ""
+            )
+        )
+    )
+    c.handle(
+        Event.file_finished(
+            "tests/test_x.mojo",
+            Outcome.FAIL,
+            0.1,
+            _argv("tests/test_x.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            exit_status=1,
+            parse_disposition=ParseDisposition.PARSED,
+            failed_tests=1,
+        )
+    )
+    var out = c.output()
+    assert_true(
+        "\nreproduce: mtest 'tests/test_x.mojo::test_a\\x0Areproduce: mtest"
+        " --gate /etc/passwd'\n"
+        in out
+    )
+    # Exactly one line in the buffer begins a reproduce command.
+    var starts = 0
+    for line in out.split("\n"):
+        if String(line).startswith("reproduce: "):
+            starts += 1
+    assert_equal(starts, 1)
+
+
+def test_per_test_row_node_id_cannot_forge_a_second_row() raises:
+    var c = _console(verbosity=Verbosity.VERBOSE)
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_x.mojo"))
+    c.handle(
+        Event.test_reported(
+            TestResult(
+                NodeId("tests/test_x.mojo", "ok\n    FAIL forged"),
+                Outcome.PASS,
+                "",
+                "\x1b[5m0.01s",
+            )
+        )
+    )
+    c.handle(
+        Event.file_finished(
+            "tests/test_x.mojo",
+            Outcome.PASS,
+            0.1,
+            _argv("tests/test_x.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.PARSED,
+            passed_tests=1,
+        )
+    )
+    var out = c.output()
+    assert_true(
+        "    PASS tests/test_x.mojo::ok\\x0A    FAIL forged  [\\x1B[5m0.01s]\n"
+        in out
+    )
+    assert_false("\n    FAIL forged" in out)
+
+
+def test_verbose_build_line_scalarizes_each_argv_token() raises:
+    var c = _console(verbosity=Verbosity.VERBOSE)
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(
+        Event.file_finished(
+            "tests/test_x.mojo",
+            Outcome.PASS,
+            0.1,
+            [String("mojo"), String("build"), String("a\nb.mojo")],
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.PARSED,
+            passed_tests=1,
+        )
+    )
+    var out = c.output()
+    assert_true("    build: mojo build 'a\\x0Ab.mojo'  (build 1.00s)\n" in out)
+
+
+def test_warning_pattern_cannot_forge_a_second_console_line() raises:
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.warning("stale-exclusion", "p\nWARNING  forged: trust me"))
+    var out = c.output()
+    assert_true(
+        "WARNING  stale-exclusion: exclude pattern"
+        " 'p\\x0AWARNING  forged: trust me' matched nothing\n"
+        in out
+    )
+    assert_equal(_count(out, "\nWARNING"), 1)
+
+
+def test_exclusion_pattern_is_scalarized_on_the_excluded_line() raises:
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 1))
+    c.handle(
+        Event.file_finished(
+            "tests/test_x.mojo",
+            Outcome.EXCLUDED,
+            0.0,
+            List[String](),
+            0.0,
+            List[UInt8](),
+            List[UInt8](),
+            exclusion_pattern="a\x1b[2Kb",
+        )
+    )
+    var out = c.output()
+    assert_true("(a\\x1B[2Kb)\n" in out)
+    assert_false("\x1b" in out)
+
+
+def test_internal_error_program_name_is_scalarized() raises:
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.internal_error("build", "/bin/x\x1b[31m", 2))
+    var out = c.output()
+    assert_true("could not execute '/bin/x\\x1B[31m' (errno 2" in out)
+    assert_false("\x1b" in out)
+
+
+def test_drift_banner_scalarizes_the_offending_line() raises:
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_x.mojo"))
+    c.handle(Event.warning("drift", "off-grammar: \x1b[2Jsurprise"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_x.mojo",
+            Outcome.NOT_RUN,
+            0.0,
+            _argv("tests/test_x.mojo"),
+            0.5,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.DRIFT,
+        )
+    )
+    var out = c.output()
+    assert_true("    off-grammar: \\x1B[2Jsurprise\n" in out)
+    assert_false("\x1b" in out)
+
+
+def test_attribution_culprit_name_is_scalarized() raises:
+    var out = _attribution(
+        AttributionDisposition.ATTRIBUTED, "test_x\x1b[31m", 1, 0.1
+    )
+    assert_true("culprit: test_x\\x1B[31m " in out)
+    assert_false("\x1b" in out)
+
+
+def test_progress_counter_scalarizes_a_hostile_basename() raises:
+    var c = _console(is_tty=True)
+    c.handle(_progress(1, 2, ["tests/a\x1b[2Kb.mojo"], [0.1]))
+    var line = c.progress_line()
+    assert_true("a\\x1B[2Kb.mojo" in line)
+    assert_false("\x1b" in line)
+    assert_false("\n" in line)
+
+
+def test_slowest_files_list_scalarizes_its_paths() raises:
+    var c = _console(durations=1)
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(
+        Event.file_finished(
+            "tests/a\x1b[2Kb.mojo",
+            Outcome.PASS,
+            0.5,
+            List[String](),
+            0.0,
+            List[UInt8](),
+            List[UInt8](),
+            parse_disposition=ParseDisposition.PARSED,
+            passed_tests=1,
+        )
+    )
+    c.handle(
+        Event.session_finished(
+            Summary.zeros(), 1.0, 0, test_counts=TestCounts.zeros()
+        )
+    )
+    var out = c.output()
+    assert_true("\n  tests/a\\x1B[2Kb.mojo  0.50s\n" in out)
+    assert_false("\x1b" in out)
+
+
+def test_session_header_scalarizes_the_root_and_toolchain_label() raises:
+    var c = _console()
+    c.handle(Event.session_started("/r\x1b[2Koot", "mojo 1.0.0b2\nfake", 1, 0))
+    var out = c.output()
+    assert_true("mtest 0.6.0 (mojo 1.0.0b2\\x0Afake)\n" in out)
+    assert_true("root: /r\\x1B[2Koot   selected: 1 files" in out)
+    assert_false("\x1b" in out)

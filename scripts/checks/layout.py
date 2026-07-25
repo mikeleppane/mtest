@@ -99,6 +99,7 @@ UNIT_SUITES = {
     "test_report_annotations.mojo",
     "test_report_composite.mojo",
     "test_report_console.mojo",
+    "test_report_console_text.mojo",
     "test_report_coordinator.mojo",
     "test_report_escape.mojo",
     "test_report_json_reporter.mojo",
@@ -235,6 +236,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_report_annotations.mojo",
     "tests/unit/test_report_composite.mojo",
     "tests/unit/test_report_console.mojo",
+    "tests/unit/test_report_console_text.mojo",
     "tests/unit/test_report_coordinator.mojo",
     "tests/unit/test_report_escape.mojo",
     "tests/unit/test_report_json_reporter.mojo",
@@ -262,7 +264,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 1231
+CLASSIFIED_TEST_COUNT = 1277
 CLASSIFIED_ROOTS = (
     Path("tests/unit"),
     Path("tests/integration"),
@@ -289,6 +291,7 @@ EXEC_FIXTURES = {
     "flooding_grandchild.py",
     "grandchild_exit0.py",
     "grandchild_spawner.py",
+    "hostile_report_actor.py",
     "path_probe.sh",
     "path_resolver.py",
     "self_signaler.py",
@@ -337,6 +340,7 @@ E2E_SCENARIO_NAMES = (
     "resilience-matrix",
     "default-suite",
     "hostile",
+    "hostile-console",
     "single-pass",
     "exitfirst",
     "maxfail",
@@ -879,9 +883,9 @@ def check_e2e_layout() -> None:
             "E2E scenario membership/order mismatch: "
             f"expected={list(E2E_SCENARIO_NAMES)}, actual={list(scenario_names)}"
         )
-    if len(scenario_names) != 89 or len(set(scenario_names)) != len(scenario_names):
+    if len(scenario_names) != 90 or len(set(scenario_names)) != len(scenario_names):
         raise AssertionError(
-            "E2E scenarios must contain 89 unique names in the pinned order"
+            "E2E scenarios must contain 90 unique names in the pinned order"
         )
     referenced = {
         *rows,

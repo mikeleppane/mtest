@@ -462,6 +462,48 @@ run's stdout carries only stream lines. `--color auto` decides against that
 **resolved** destination: stdout's terminal-ness normally, stderr's when the
 console is relocated there.
 
+**Terminal text safety.** Every string the console learns from a child process
+or from user input — paths, node ids, test names, patterns, program names,
+reproduce arguments, warnings, captured stdout and stderr, failure detail, and
+compiler diagnostics — is neutralized before it is printed, so no child can emit
+bytes a terminal emulator executes. Two modes:
+
+| Code point | Scalar fields | Multiline fields |
+| --- | --- | --- |
+| `U+0000`..`U+0008`, `U+000B`..`U+001F` | `\xHH` | `\xHH` |
+| `U+0009` (Tab) | `\x09` | literal Tab |
+| `U+000A` (LF) | `\x0A` | literal LF |
+| `U+000D` (CR) | `\x0D` | `\x0D` |
+| `U+007F` (DEL) | `\x7F` | `\x7F` |
+| `U+0080`..`U+009F` (C1) | `\u00HH` | `\u00HH` |
+| everything else | unchanged | unchanged |
+
+`HH` is always two **uppercase** hexadecimal digits. **Scalar** fields are the
+ones that occupy exactly one console line: paths, node ids, test names,
+patterns, program names, the toolchain label, warning text, and every token of a
+reproduce or build command line (each token is neutralized before it is
+shell-quoted, so the quoting covers the text actually shown). **Multiline**
+fields are the blocks whose line and tab structure is real: captured stdout and
+stderr, per-test failure detail, and compiler output.
+
+Every multiline field is additionally **line-prefixed**: each logical line is
+printed behind a four-space `| ` gutter (`"    | "`). A trailing LF closes the
+last line rather than opening an empty one, an empty logical line still gets its
+gutter, and every printed line is LF-terminated. The gutter is what separates
+the child's text from mtest's own, since a child can print a perfectly ordinary
+line that looks exactly like a verdict row or a summary band.
+
+mtest's own labels, separators, and ANSI color are applied **after** escaping
+and are never escaped, so `--color always` still paints mtest's lines while a
+child's `ESC [ 3 1 m` shows up as the literal text `\x1B[31m`.
+
+This boundary is **display-only**. It does not change what mtest captures, what
+its parser reads, or what the JUnit report (§15.2), the GitHub annotations
+(§15.3), or the machine event stream (§15.4) contain: those carry the raw text
+under their own formats' escaping rules. Console text layout remains
+**informal** (§20); the guarantee that no child-controlled control character
+reaches the terminal unescaped is not.
+
 A **live progress counter** — a running `completed/total` line naming the files
 currently in flight — is drawn during a parallel run (`-n`/`--workers` > 1). It is
 a **terminal-only** affordance: it renders solely when the resolved console
@@ -1119,9 +1161,9 @@ root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0
 FAIL           e2e/suite/test_failing.mojo     0.02s
 
 --- FAIL e2e/suite/test_failing.mojo::test_second_fails ---
-At e2e/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:
-   left: 1
-  right: 2
+    | At e2e/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:
+    |    left: 1
+    |   right: 2
 reproduce: mtest e2e/suite/test_failing.mojo::test_second_fails
 
 [...file-scoped captured output omitted...]
