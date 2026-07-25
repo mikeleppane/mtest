@@ -66,6 +66,13 @@ jobs:
             artifact_name: none
             artifact_path: none
           - runner: ubuntu-24.04
+            lane: strict contract
+            task: contract-check-strict
+            libc_debug: false
+            safety_artifact: false
+            artifact_name: none
+            artifact_path: none
+          - runner: ubuntu-24.04
             lane: ASan + LSan
             task: asan-check
             libc_debug: false
@@ -213,6 +220,13 @@ jobs:
           - runner: macos-15
             lane: end-to-end tests
             task: e2e
+            libc_debug: false
+            safety_artifact: false
+            artifact_name: none
+            artifact_path: none
+          - runner: macos-15
+            lane: strict contract
+            task: contract-check-strict
             libc_debug: false
             safety_artifact: false
             artifact_name: none

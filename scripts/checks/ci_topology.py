@@ -41,12 +41,13 @@ CI_PREFLIGHT_TASKS = [
     "junit-render-check",
     "transcripts-check",
 ]
-CI_TASKS = ["ci-preflight", "test", "dogfood-check", "e2e"]
+CI_TASKS = ["ci-preflight", "test", "dogfood-check", "e2e", "contract-check-strict"]
 CI_FLOOR_TASKS = {
     *CI_PREFLIGHT_TASKS,
     "test",
     "dogfood-check",
     "e2e",
+    "contract-check-strict",
 }
 
 LINUX_MATRIX_ROWS = [
@@ -72,6 +73,15 @@ LINUX_MATRIX_ROWS = [
         "runner": "ubuntu-24.04",
         "lane": "end-to-end tests",
         "task": "e2e",
+        "libc_debug": "false",
+        "safety_artifact": "false",
+        "artifact_name": "none",
+        "artifact_path": "none",
+    },
+    {
+        "runner": "ubuntu-24.04",
+        "lane": "strict contract",
+        "task": "contract-check-strict",
         "libc_debug": "false",
         "safety_artifact": "false",
         "artifact_name": "none",
@@ -119,6 +129,15 @@ MACOS_MATRIX_ROWS = [
         "runner": "macos-15",
         "lane": "end-to-end tests",
         "task": "e2e",
+        "libc_debug": "false",
+        "safety_artifact": "false",
+        "artifact_name": "none",
+        "artifact_path": "none",
+    },
+    {
+        "runner": "macos-15",
+        "lane": "strict contract",
+        "task": "contract-check-strict",
         "libc_debug": "false",
         "safety_artifact": "false",
         "artifact_name": "none",

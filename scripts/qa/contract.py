@@ -41,6 +41,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -88,36 +89,102 @@ def pixi_env() -> dict[str, str]:
     return env
 
 
-def _newest_mtime(dirs: list[Path]) -> float:
+# Every input whose change can change the bytes of build/mtest: the Mojo
+# sources, the private native adapter, the two build scripts that produce it,
+# the pinned strict-compile flag list, and the two manifests that pin the
+# toolchain building it. This list is a fail-closed HEURISTIC for staleness,
+# NOT a content-identity proof — mtimes can agree by coincidence and a
+# touched-but-unchanged file looks "newer" without changing a single byte.
+# The actual provenance guarantee for a strict run is the Pixi
+# `contract-check-strict -> build-bin` task edge: that edge always rebuilds
+# build/mtest from this exact tree immediately before this checker runs with
+# `--no-rebuild`. This scan exists only to fail closed if that edge was
+# bypassed (a bare `--no-rebuild` invocation against a stale or missing
+# binary left over from something else).
+BINARY_INPUT_PATHS = [
+    REPO / "src",
+    REPO / "native",
+    REPO / "scripts" / "build" / "production_build.sh",
+    REPO / "scripts" / "build" / "native.py",
+    REPO / "scripts" / "build" / "native_strict_flags.txt",
+    REPO / "pixi.toml",
+    REPO / "pixi.lock",
+]
+
+
+def _newest_mtime(paths: list[Path]) -> float:
     m = 0.0
-    for d in dirs:
-        if d.is_dir():
-            for f in d.rglob("*"):
+    for p in paths:
+        if p.is_dir():
+            for f in p.rglob("*"):
                 if f.is_file():
                     m = max(m, f.stat().st_mtime)
+        elif p.is_file():
+            m = max(m, p.stat().st_mtime)
     return m
 
 
-def ensure_binary(env: dict[str, str], rebuild: bool, allow_rebuild: bool) -> None:
-    """Build `build/mtest`, and REBUILD it when older than any source file.
+def _run_build_bin(env: dict[str, str]) -> subprocess.CompletedProcess:
+    return subprocess.run(["pixi", "run", "build-bin"], cwd=REPO, env=env)
 
-    A stale binary validates the *old* code and reports a false green — this bit
-    the project during its own QA pass. Freshness is enforced, not just warned.
+
+def ensure_binary(
+    binary: Path,
+    input_paths: list[Path],
+    env: dict[str, str],
+    rebuild: bool,
+    allow_rebuild: bool,
+    build: Callable[[dict[str, str]], subprocess.CompletedProcess] | None = None,
+) -> None:
+    """Build `binary`, and REBUILD it when missing or older than any input.
+
+    A stale binary validates the *old* code and reports a false green — this
+    bit the project during its own QA pass. Freshness is enforced, not just
+    warned: with `--no-rebuild` (`allow_rebuild=False`), a missing or stale
+    binary is a setup failure (exit 2) — this checker never silently
+    validates old or absent bytes, and it never starts a build of its own
+    when the caller explicitly forbade one.
     """
-    stale = MTEST.is_file() and MTEST.stat().st_mtime < _newest_mtime(
-        [REPO / "src", REPO / "native"]
-    )
-    if MTEST.is_file() and not rebuild and not stale:
+    if build is None:
+        build = _run_build_bin
+    missing = not binary.is_file()
+    stale = not missing and binary.stat().st_mtime < _newest_mtime(input_paths)
+    if not allow_rebuild:
+        if missing:
+            _die(f"{binary} is missing and --no-rebuild is set — this checker "
+                 "does not build on its own; run `pixi run build-bin` first "
+                 "(the contract-check-strict Pixi task does this for you)")
+        if stale:
+            _die(f"{binary} is older than a binary input (src/, native/, the "
+                 "build scripts, pixi.toml, or pixi.lock) and --no-rebuild is "
+                 "set — refusing to validate stale bytes")
         return
-    if not allow_rebuild and MTEST.is_file():
-        print("warning: build/mtest is STALE vs src/ but --no-rebuild set — "
-              "validating possibly-old code", file=sys.stderr)
+    if not missing and not rebuild and not stale:
         return
-    why = "missing" if not MTEST.is_file() else ("forced" if rebuild else "stale")
-    print(f"setup: building build/mtest ({why}) ...", flush=True)
-    r = subprocess.run(["pixi", "run", "build-bin"], cwd=REPO, env=env)
-    if r.returncode != 0 or not MTEST.is_file():
-        _die("could not build build/mtest")
+    why = "missing" if missing else ("forced" if rebuild else "stale")
+    print(f"setup: building {binary} ({why}) ...", flush=True)
+    r = build(env)
+    if r.returncode != 0 or not binary.is_file():
+        _die(f"could not build {binary}")
+
+
+def wait_until(
+    predicate: Callable[[], bool], deadline: float, poll_interval: float = 0.2
+) -> bool:
+    """Bounded poll: True as soon as `predicate()` is true, False once
+    `deadline` (a `time.time()`-comparable epoch) passes first.
+
+    A genuine readiness/absence barrier, never a fixed sleep: the caller
+    decides the acceptable bound via `deadline`, and gets an answer as soon
+    as the condition is met instead of always waiting out a guessed
+    duration.
+    """
+    while True:
+        if predicate():
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(poll_interval)
 
 
 # --------------------------------------------------------------------------- #
@@ -375,12 +442,37 @@ class Runner:
         (self.root / "irq" / "test_2pass.mojo").write_text(
             HEAD + "def test_p() raises:\n    assert_equal(1, 1)\n" + MAIN)
 
-        def pgrep_hang() -> bool:
+        def hang_pids() -> list[str]:
+            """PIDs of the exact hanging child, or raise if this platform's
+            process inspection (`pgrep`) is unavailable — routed through
+            `_skip_or_fail` below, so missing support is a strict failure
+            under `--strict`, never a silent pass."""
             try:
-                return subprocess.run(["pgrep", "-f", "irq_stest_"],
-                                      capture_output=True).returncode == 0
-            except OSError:
-                raise RuntimeError("pgrep unavailable")
+                r = subprocess.run(["pgrep", "-f", "irq_stest_"],
+                                    capture_output=True, text=True, timeout=5)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                raise RuntimeError(f"pgrep unavailable: {e}") from e
+            if r.returncode not in (0, 1):  # 1 == "no match", not an error
+                raise RuntimeError(f"pgrep exited {r.returncode}: {r.stderr.strip()}")
+            return [p for p in r.stdout.split() if p]
+
+        def hang_present() -> bool:
+            return bool(hang_pids())
+
+        def hang_ready() -> bool:
+            """The exact hanging child exists AND has reached its blocking
+            sleep (state `S`), not merely been forked — a bare `pgrep` hit
+            can catch a process still mid-startup. Raises if this
+            platform's process-state inspection (`ps`) is unavailable."""
+            pids = hang_pids()
+            if not pids:
+                return False
+            try:
+                r = subprocess.run(["ps", "-o", "state=", "-p", pids[0]],
+                                    capture_output=True, text=True, timeout=5)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                raise RuntimeError(f"ps unavailable: {e}") from e
+            return r.stdout.strip()[:1] == "S"
 
         try:
             proc = subprocess.Popen(
@@ -391,34 +483,33 @@ class Runner:
         except OSError as e:
             return self._skip_or_fail(strict, name, ref, f"could not spawn: {e}")
         try:
-            deadline = time.time() + 120
-            running = False
-            while time.time() < deadline:
-                try:
-                    if pgrep_hang():
-                        running = True
-                        break
-                except RuntimeError as e:
-                    proc.kill()
-                    return self._skip_or_fail(strict, name, ref, str(e))
-                if proc.poll() is not None:
-                    break
-                time.sleep(0.2)
-            if not running:
+            deadline = time.time() + 120  # the one outer bound every barrier below respects
+            try:
+                ready = wait_until(hang_ready, deadline, poll_interval=0.2)
+            except RuntimeError as e:
+                proc.kill()
+                return self._skip_or_fail(strict, name, ref, str(e))
+            if not ready:
                 self._killtree(proc)
-                return self._skip_or_fail(strict, name, ref, "hang binary never observed")
-            time.sleep(1.0)
-            os.kill(proc.pid, signal.SIGINT)  # ONLY mtest — teardown must free the child
+                return self._skip_or_fail(strict, name, ref, "child never became ready")
+            os.kill(proc.pid, signal.SIGINT)  # ONLY mtest — teardown must free the child; SIGINT only after readiness
             try:
                 out, _ = proc.communicate(timeout=30)
             except subprocess.TimeoutExpired:
                 self._killtree(proc)
                 return self.record(FAIL, name, ref, "did not exit within 30s of SIGINT")
-            time.sleep(0.5)
-            orphan = pgrep_hang()
+            try:
+                gone = wait_until(lambda: not hang_present(), time.time() + 10, poll_interval=0.2)
+            except RuntimeError as e:
+                self._killtree(proc)
+                return self._skip_or_fail(strict, name, ref, str(e))
+            orphan = not gone
             ok = proc.returncode == 2 and "not run" in out and not orphan
-            self.record(PASS if ok else FAIL, name, ref,
-                        "" if ok else f"exit {proc.returncode} (want 2); orphaned_child={orphan}")
+            detail = "" if ok else (
+                f"exit {proc.returncode} (want 2); orphaned_child={orphan}"
+                + ("; child survived cleanup" if orphan else "")
+            )
+            self.record(PASS if ok else FAIL, name, ref, detail)
         finally:
             self._killtree(proc)
 
@@ -581,7 +672,7 @@ def main() -> int:
     args = ap.parse_args()
 
     env = pixi_env()
-    ensure_binary(env, args.rebuild, allow_rebuild=not args.no_rebuild)
+    ensure_binary(MTEST, BINARY_INPUT_PATHS, env, args.rebuild, allow_rebuild=not args.no_rebuild)
 
     root = Path(tempfile.mkdtemp(prefix="mtest-validate-"))
     try:

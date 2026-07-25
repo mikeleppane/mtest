@@ -171,12 +171,24 @@ transcripts = "python -m scripts.gen_transcripts"
 # diff after a mojo re-pin is the protocol changelog. Hermetic.
 transcripts-check = "python -m scripts.checks.protocol_snapshots"
 
-# Manually run the exhaustive CLI contract oracle against an external throwaway
-# project. This intentionally remains outside ci/ci-preflight and hosted CI: the
-# committed E2E corpus owns the ordinary gate, while this task is release QA.
-# Pixi forwards arguments after `--`, for example:
-# `pixi run contract-check -- --strict`.
+# Contributor-friendly entry point for the exhaustive CLI contract oracle
+# against an external throwaway project: rebuild-if-stale, filterable, and
+# not strict by default. Pixi forwards arguments after `--`, for example:
+# `pixi run contract-check -- --strict`. `contract-check-strict` below is the
+# blocking gate; this task stays for local iteration (`-k`, `--keep`, `-v`).
 contract-check = "python -m scripts.qa.contract"
+
+# The blocking release-floor gate: every documented exit, stream, and
+# environment behavior in docs/cli-contract.md, asserted --strict (a SKIP
+# fails) against the binary this exact Pixi invocation's `build-bin`
+# dependency just produced, with the checker itself forbidden from starting
+# another build (`--no-rebuild`). The `build-bin` task edge — not this
+# checker's own mtime probe — is what proves the binary under test came from
+# THIS tree; see BINARY_INPUT_PATHS in scripts/qa/contract.py for what the
+# probe actually covers as a fail-closed backstop.
+contract-check-strict = { cmd = "python -m scripts.qa.contract --strict --no-rebuild", depends-on = [
+    "build-bin",
+] }
 
 # Measure how the parallel scheduler scales with the worker count, to keep the
 # `auto` sizing honest against a real machine. Drives the built binary over a
@@ -245,12 +257,16 @@ depends-on = [
 # The canonical serial local floor. Hosted CI runs the exact preflight above,
 # then gives each independent behavioral gate a fresh parallel matrix cell;
 # local development keeps one ordered aggregate for reproducible handoff.
+# contract-check-strict runs last: it needs its own fresh build-bin, so
+# running it after the other behavioral gates avoids relinking the binary
+# those gates already exercised.
 [tasks.ci]
 depends-on = [
     "ci-preflight",
     "test",
     "dogfood-check",
     "e2e",
+    "contract-check-strict",
 ]
 
 [target.linux-64.dependencies]

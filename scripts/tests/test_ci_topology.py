@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import tempfile
 import tomllib
 import unittest
@@ -33,7 +34,7 @@ class CiTopologyTests(unittest.TestCase):
         )
         self.assertEqual(
             tasks.get("ci", {}).get("depends-on"),
-            ["ci-preflight", "test", "dogfood-check", "e2e"],
+            ["ci-preflight", "test", "dogfood-check", "e2e", "contract-check-strict"],
         )
         self.assertEqual(
             tasks.get("readme-help-check"),
@@ -158,6 +159,81 @@ class CiTopologyTests(unittest.TestCase):
             (repo / "pixi.toml").write_text(mutated, encoding="utf-8")
             with self.assertRaisesRegex(AssertionError, "classified task"):
                 ci_topology.check_ci_task_graph(repo)
+
+    def test_contract_row_appears_in_both_platform_matrices(self) -> None:
+        expected_row = {
+            "lane": "strict contract",
+            "task": "contract-check-strict",
+            "libc_debug": "false",
+            "safety_artifact": "false",
+            "artifact_name": "none",
+            "artifact_path": "none",
+        }
+        for runner, rows in (
+            ("ubuntu-24.04", ci_topology.LINUX_MATRIX_ROWS),
+            ("macos-15", ci_topology.MACOS_MATRIX_ROWS),
+        ):
+            matches = [row for row in rows if row.get("task") == "contract-check-strict"]
+            self.assertEqual(len(matches), 1, rows)
+            self.assertEqual(matches[0], {"runner": runner, **expected_row})
+
+    def test_contract_row_runs_after_e2e_in_declared_order(self) -> None:
+        linux_tasks = [row["task"] for row in ci_topology.LINUX_MATRIX_ROWS]
+        macos_tasks = [row["task"] for row in ci_topology.MACOS_MATRIX_ROWS]
+        self.assertEqual(
+            linux_tasks,
+            ["test", "dogfood-check", "e2e", "contract-check-strict", "asan-check", "valgrind-check"],
+        )
+        self.assertEqual(
+            macos_tasks,
+            ["test", "dogfood-check", "e2e", "contract-check-strict"],
+        )
+
+    def test_contract_row_job_depends_on_its_platform_preflight_job(self) -> None:
+        # Each matrix job's OWN `needs:` (not a per-row field) is what makes
+        # the strict-contract row depend on that platform's preflight job —
+        # a fresh checkout runs preflight first, then this job's `build-bin`
+        # produces the binary the row's `--no-rebuild` validates.
+        workflow = (
+            ci_topology.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+        for job_name, preflight_job in (
+            ("linux-test-matrix", "linux-preflight"),
+            ("macos-test-matrix", "macos-preflight"),
+        ):
+            job = ci_topology._yaml_block(workflow, f"  {job_name}:")
+            needs = re.findall(r"^    needs:(.*)$", job, re.MULTILINE)
+            self.assertEqual(needs, [f" {preflight_job}"], job_name)
+            rows = [
+                row
+                for row in ci_topology._matrix_rows(job)
+                if row.get("task") == "contract-check-strict"
+            ]
+            self.assertEqual(len(rows), 1, job_name)
+
+    def test_contract_row_removal_is_rejected(self) -> None:
+        workflow = (
+            ci_topology.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+        mutated = workflow.replace(
+            "          - runner: ubuntu-24.04\n"
+            "            lane: strict contract\n"
+            "            task: contract-check-strict\n"
+            "            libc_debug: false\n"
+            "            safety_artifact: false\n"
+            "            artifact_name: none\n"
+            "            artifact_path: none\n",
+            "",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        with tempfile.TemporaryDirectory(prefix="mtest-ci-topology-") as raw_tmp:
+            repo = Path(raw_tmp)
+            workflow_path = repo / ".github" / "workflows" / "ci.yml"
+            workflow_path.parent.mkdir(parents=True)
+            workflow_path.write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "matrix mismatch"):
+                ci_topology.check_ci_workflow(repo)
 
     def test_matrix_role_mutation_is_rejected_by_fixed_oracle(self) -> None:
         workflow = (

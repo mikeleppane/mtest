@@ -206,16 +206,23 @@ safety-check -> postfork-check -> native-check -> junit-check -> build ->
 readme-help-check -> junit-render-check -> transcripts-check` in that exact
 fail-fast order; the
 canonical local `pixi run ci` is serial: `ci-preflight ->
-test -> dogfood-check -> e2e`. Hosted CI runs the same logical floor as two
-platform-local chains: Linux preflight releases fail-fast `test`,
-`dogfood-check`, `e2e`, ASan, and Valgrind cells; macOS preflight releases
-`test`, `dogfood-check`, and `e2e` cells with `fail-fast: false`. Every lane
-is a blocking check; memory safety runs on every pull request and configured
-main-branch push, not on a schedule. Transcripts, ASan/Valgrind, and
-packaged-artifact consumption remain Linux-only. The matrix lane display names
-`direct tests` and `self-hosted tests` are externally configured required
-check names and must stay stable. `native-check` depends on `postfork-check`,
-so the native gate alone cannot skip the child call-graph audit.
+test -> dogfood-check -> e2e -> contract-check-strict`. Hosted CI runs the
+same logical floor as two platform-local chains: Linux preflight releases
+fail-fast `test`, `dogfood-check`, `e2e`, strict contract, ASan, and Valgrind
+cells; macOS preflight releases `test`, `dogfood-check`, `e2e`, and strict
+contract cells with `fail-fast: false`. The strict contract cell runs
+`contract-check-strict` (`python -m scripts.qa.contract --strict --no-rebuild`)
+against the binary that job's own `build-bin` dependency just produced in that
+fresh checkout — every documented exit, stream, and environment behavior in
+`docs/cli-contract.md` is a blocking release-floor assertion, not manual QA;
+`pixi run contract-check` remains the contributor-friendly, non-strict,
+rebuild-if-stale entry point for local iteration. Every lane is a blocking
+check; memory safety runs on every pull request and configured main-branch
+push, not on a schedule. Transcripts, ASan/Valgrind, and packaged-artifact
+consumption remain Linux-only. The matrix lane display names `direct tests`
+and `self-hosted tests` are externally configured required check names and
+must stay stable. `native-check` depends on `postfork-check`, so the native
+gate alone cannot skip the child call-graph audit.
 
 Classified modules under `tests/unit/` and `tests/integration/` are
 import-only: they declare `test_*` functions and MUST NOT declare `main()`.
