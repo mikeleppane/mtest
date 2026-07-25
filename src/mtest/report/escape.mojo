@@ -265,9 +265,10 @@ def gh_escape_property(s: String) -> String:
     Runs the whole message escape first — both of its passes, the
     workflow-command encoding (`%` -> `%25`, CR -> `%0D`, LF -> `%0A`) and the
     terminal-safety pass that follows it, which rewrites every remaining C0
-    control and DEL as `\\xHH` and every C1 control as `\\u00HH`. Then escapes
-    `:` -> `%3A` and `,` -> `%2C`, the two characters the workflow-command
-    grammar uses as field and record separators inside a property value.
+    control except Tab, plus DEL, as `\\xHH`, and every C1 control as `\\u00HH`.
+    Tab stays literal, as it does in a message. Then escapes `:` -> `%3A` and
+    `,` -> `%2C`, the two characters the workflow-command grammar uses as field
+    and record separators inside a property value.
 
     Adding this pass on top is safe because no text those earlier passes can
     emit contains a literal `:` or `,`: the workflow-command replacements are
