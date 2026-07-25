@@ -42,7 +42,7 @@ answers and is the reference for the next phase:
 
 | Pin | As landed |
 | --- | --- |
-| `CLASSIFIED_TEST_COUNT` | 1194 |
+| `CLASSIFIED_TEST_COUNT` | 1198 |
 | E2E scenarios | 85 |
 | Dogfood probes | 3 |
 | ASan lane | the exec probe against the instrumented production adapter |
@@ -116,14 +116,18 @@ The local changes are hardening plus a syntax port, all enumerated in
 numeric-token and signed-64-bit validation, depth/node/table-update budgets,
 duplicate table/key/inline-table rejection, TOML 1.0 escape handling with
 positioned lexer failures, terminated control-free strings, and pre-lexer
-scalar/structural/depth budgets. The production build precompiles this source
-locally and downloads nothing.
+scalar/structural/depth budgets. Review added two more: a required line end
+after a key/value pair, and refusal of a NUL decoded from an escape — the
+control-free promise had a hole exactly the width of one escape sequence. The
+production build precompiles this source locally and downloads nothing.
 
 `toml_bridge.mojo` keeps a strict division: the vendored parser owns TOML syntax
 and generic values; the bridge owns every accepted table, key, type, domain, and
 diagnostic, is pure Mojo, and performs no process or file I/O. The budgets it
-enforces on top (4 MiB source, depth 64, 1024 nodes, 64 table updates, 1 MiB
-scalars) are mtest's, not the parser's.
+enforces on top (4 MiB source, depth 64, 16,384 nodes, 512 table updates, 1 MiB
+scalars and comments) are mtest's, not the parser's. The node and table-update
+ceilings were raised from 1,024/64 during review: they were sized below what the
+documented schema expresses, so a valid configuration was refused as abusive.
 
 ## The diagnostic boundary and the sentinel test
 
@@ -284,9 +288,89 @@ red, revert.
 
 ## Whole-branch review triage
 
-Pending. The standing per-phase gate is a dual adversarial review of
-`git diff main...phase-06-dx` — Claude Opus 5 at xhigh and Codex GPT-5.6-sol at
-xhigh, both briefed to attack the work rather than admire it, with concrete
-failure scenarios per finding, severity ranking, and silence meaning no finding.
-Every finding is triaged fixed or rejected-with-reason in this section before
-merge.
+Three passes: an initial dual review (Claude Opus 5 xhigh, Codex GPT-5.6-sol
+xhigh), then a re-review by both after the first round of corrections. Twenty
+findings survived verification; every one was reproduced against the built
+binary before being accepted, and the two that did not reproduce as described
+are recorded as such.
+
+### Round 1 — 14 findings
+
+| # | Finding | Disposition |
+| - | ------- | ----------- |
+| A | A FIFO or device at `.mtest-cache/lastrun` hung every run before the exec runtime existed | fixed, `7ddfbb9` |
+| B | Records the codec refused to write vanished with no diagnostic | fixed, `7ddfbb9` |
+| C | The documented key set plus eight override tables was refused by an undocumented budget | fixed, `afbde39` |
+| D | `collect` dropped every `[[override]]` | fixed, `d66637c` |
+| E | Configured `paths = []` ran the default tree | fixed, `d66637c` |
+| F | `timeout = 1 state = false` on one line parsed as two settings | fixed, `afbde39` |
+| G | `--lf` silently discards `-n` | documented, `c98fbd4` |
+| H | `config show` green-lights a configuration `run` refuses | **rejected** — see below |
+| I | An out-of-range integer flag leaked a stdlib message past all framing | fixed, `cf51303` |
+| J | A project-file value was reported as a command-line flag | fixed, `cf51303` |
+| M | `--lf` reported a live gate file as "no longer exists" | fixed, `0c68450` |
+| N | `config show` rendered `paths = []  # (cli)` for node-id operands | fixed, `cf51303` |
+| — | `serial = false` escaped the closed override schema | fixed, `afbde39` |
+| — | `collect` accepts `-n` and ignores it | documented, `c98fbd4` |
+
+### Round 2 — 6 findings, four of them caused by round 1
+
+| Finding | Disposition |
+| ------- | ----------- |
+| `[run] gates` silently deleted files from the `collect` listing | fixed, `aaa5d11` |
+| The gate filter was half done: a live gate-only state still announced no match and re-ran everything | fixed, `aaa5d11` |
+| `paths = []  # (default)` became a copy-paste trap once an empty list meant "select nothing" | fixed, `aaa5d11` |
+| The transcript-provenance sentence contradicted the transcripts below it | fixed, `aaa5d11` |
+| The drop diagnostic cited the state file's header line for a record refused on the way out | fixed, `aaa5d11` |
+| The `cli:` framing branch was unreachable; the reachable message left paths unescaped | fixed, `aaa5d11` |
+
+### Round 3 — Codex, 7 findings
+
+Three independently confirmed round-2 findings already fixed. Of the rest:
+
+| Finding | Disposition |
+| ------- | ----------- |
+| A `\u0000` escape in a report destination truncated the path at the C boundary, overwriting a different file and exiting 0 | fixed, `a610349` |
+| State records were never shape-checked: an absolute path survived as a live record | fixed, `a610349` |
+| The scalar budget also bounds comments, which the contract called scalar-only | fixed, `a610349` |
+| Concurrent state writers lose failures (read, merge, rename without re-reading) | **accepted** — documented last-writer-wins |
+| The two console SVGs still show 0.5.0 | deferred — regenerate from the primary checkout after merge |
+
+### The one rejection
+
+`config show` still does not validate report destinations, so it can render a
+configuration the run will refuse. The observation is correct and the remedy is
+not: §27.1 fixes that command's exit domain at `{0, 3, 4}` with 4 reserved for
+argv and selected-config failures, and states it resolves only. Validating
+destinations there adds an exit-4 cause the contract does not sanction and
+makes a resolution-only command probe the filesystem. Closing the gap honestly
+means changing §27.1, which is an ask-first contract change, not a review fix.
+The call site carries this reasoning so the check is not moved earlier again.
+
+### What the rounds actually measured
+
+Two-thirds of round 2 was self-inflicted. That is the number worth keeping.
+
+- **Verifying against the symptom is not verifying the fix.** The gate fix
+  stopped the false "no longer exists" line, which is what I checked, and left
+  the second half of the same defect — the run still widened to the whole suite
+  while claiming nothing matched. I looked directly at that output and called it
+  correct.
+- **A commit message can be a defect.** That same commit claimed the fallback
+  half was fixed. The message asserted more than the diff delivered, which is
+  worse than silence, because the next reader stops looking.
+- **A fix changes what the docs describing it must say.** Making an empty
+  `paths` meaningful turned a previously harmless `config show` line into a
+  trap, in a document that invites copy-pasting. The blast radius of a semantic
+  change reaches every place that renders the old semantics.
+- **Escaping belongs at one choke point.** Two destination checks disagreed
+  about whether to escape a path, and the vendored lexer promised control-free
+  strings while decoding an escape into a NUL. Each was one call site short of
+  a guarantee.
+- **A tunable pinned in three layers fails three times.** Moving the TOML
+  budgets broke the production constant, the unit corpus, and the e2e guard in
+  three separate rounds, each looking like a fresh problem.
+- **Suppressing a gate's output hides the gate.** Several batches ran
+  `pixi run fmt` with output discarded while it was failing on a Mojo keyword
+  used as a variable name; only `fmt-check` in CI surfaced it. The compiler had
+  accepted the file throughout.
