@@ -155,6 +155,7 @@ INTEGRATION_SUITES = {
     "test_session_maxfail.mojo",
     "test_session_outcomes.mojo",
     "test_session_overrides.mojo",
+    "test_session_pool_faults.mojo",
     "test_session_precompile.mojo",
     "test_session_rmtree.mojo",
     "test_session_schedule.mojo",
@@ -191,6 +192,7 @@ CLASSIFIED_PATHS = (
     "tests/integration/test_session_maxfail.mojo",
     "tests/integration/test_session_outcomes.mojo",
     "tests/integration/test_session_overrides.mojo",
+    "tests/integration/test_session_pool_faults.mojo",
     "tests/integration/test_session_precompile.mojo",
     "tests/integration/test_session_rmtree.mojo",
     "tests/integration/test_session_schedule.mojo",
@@ -258,7 +260,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 1203
+CLASSIFIED_TEST_COUNT = 1211
 CLASSIFIED_ROOTS = (
     Path("tests/unit"),
     Path("tests/integration"),

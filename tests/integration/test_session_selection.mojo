@@ -6,6 +6,12 @@ under `--only` with the rest suppressed as DESELECTED, a node id selects one
 test, an unknown name is exit 4 after the probe, an empty final selection is
 exit 5, a selected failing test reports FAIL, and the chameleon drives the
 loud recollect-once then MALFORMED-SUITE (exit-1 class, never exit 3).
+
+Two cases pin the RECONCILIATION the selection run performs against its own
+probe: a run whose rows lost a collected test, and a run in which a deselected
+test reports a real outcome instead of the selection-induced SKIP. Both are
+user-controlled suite disagreements, so both stay MALFORMED-SUITE at exit 1 with
+their own exact diagnostic — never DRIFT, never exit 3.
 """
 from std.testing import (
     assert_equal,
@@ -59,6 +65,60 @@ from session_fixtures import (
     base_config,
     temp_root,
     write_file,
+)
+
+# A suite whose --skip-all listing and --only registration DISAGREE about the
+# universe: three names are collected, but a selection run registers only two,
+# so the run's row set can never equal the collected set. The dropped name is
+# NOT the selected one, so the stdlib never refuses a requested test and the
+# stale-name recovery path is never entered — the disagreement surfaces purely
+# as membership reconciliation.
+comptime _SRC_SHRINKING_UNIVERSE = (
+    "from std.sys import argv\n"
+    "from std.testing import TestSuite, assert_true\n\n\n"
+    "def test_alpha() raises:\n    assert_true(True)\n\n\n"
+    "def test_beta() raises:\n    assert_true(True)\n\n\n"
+    "def test_gamma() raises:\n    assert_true(True)\n\n\n"
+    "def main() raises:\n"
+    "    var has_only = False\n"
+    "    for a in argv():\n"
+    '        if a == "--only":\n'
+    "            has_only = True\n"
+    "    var s = TestSuite()\n"
+    "    s.test[test_alpha]()\n"
+    "    s.test[test_beta]()\n"
+    "    if not has_only:\n"
+    "        s.test[test_gamma]()\n"
+    "    s^.run()\n"
+)
+
+# A suite that collects honestly under --skip-all but, under --only, hand-forges
+# a report in which the DESELECTED test claims PASS instead of the
+# selection-induced SKIP. The row set still equals the collected set, so only the
+# per-row selection check can catch it. The header path is resolved at runtime,
+# so the forged report carries the same byte-exact canonical identity a genuine
+# report would.
+comptime _SRC_DESELECTED_RAN = (
+    "from std.os.path import realpath\n"
+    "from std.sys import argv\n"
+    "from std.testing import TestSuite, assert_true\n\n\n"
+    "def test_one() raises:\n    assert_true(True)\n\n\n"
+    "def test_two() raises:\n    assert_true(True)\n\n\n"
+    "def main() raises:\n"
+    "    var has_only = False\n"
+    "    for a in argv():\n"
+    '        if a == "--only":\n'
+    "            has_only = True\n"
+    "    if not has_only:\n"
+    "        TestSuite.discover_tests[__functions_in_module()]().run()\n"
+    "        return\n"
+    '    var p = realpath("tests/test_deselected_ran.mojo")\n'
+    '    print("Running 2 tests for " + p + " ")\n'
+    '    print("    PASS [ 0.00s ] test_one")\n'
+    '    print("    PASS [ 0.00s ] test_two")\n'
+    '    print("--------")\n'
+    '    print("Summary [ 0.00s ] 2 tests run: 2 passed , 0 failed ,'
+    ' 0 skipped ")\n'
 )
 
 comptime _SRC_RETRY_THEN_STALE_BUILD_ERROR = (
@@ -684,3 +744,112 @@ def test_malformed_node_id_raises_even_when_a_gate_fails() raises:
     )
     with assert_raises(contains="malformed node id"):
         _ = run_session(cfg, root, comp)
+
+
+def _warning_details(rec: RecordingReporter, kind: String) -> List[String]:
+    """Every recorded warning detail carried under one warning kind.
+
+    Args:
+        rec: The recorder to read back.
+        kind: The `warning_kind` tag to collect.
+
+    Returns:
+        The details, in emission order. Allocates the returned list.
+    """
+    var out = List[String]()
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.WARNING:
+            ref w = rec.event_at(i).data[WarningPayload]
+            if w.warning_kind == kind:
+                out.append(w.warning_pattern.copy())
+    return out^
+
+
+def test_selection_run_losing_a_collected_test_is_malformed_suite() raises:
+    # The probe lists three names; the selection run registers only two, so the
+    # run's row set can never equal the collected set. That is a USER-controlled
+    # suite disagreement, not machinery drift: MALFORMED-SUITE, exit 1, never
+    # DRIFT/exit 3.
+    var root = temp_root()
+    write_file(root, "tests/test_shrink.mojo", _SRC_SHRINKING_UNIVERSE)
+    var cfg = base_config()
+    # Select a name the suite DOES still register, so the stdlib never refuses a
+    # requested test and the stale-name recovery path is never entered.
+    cfg.paths.append("tests/test_shrink.mojo::test_alpha")
+
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    var code = run_session(cfg, root, comp)
+
+    assert_equal(code, 1, "a suite/selection disagreement is exit 1")
+    ref rec = comp.composite.reporters[0]
+    var finished = _finished(rec)
+    assert_true(
+        finished.outcome == Outcome.MALFORMED_SUITE,
+        "a run whose rows lost a collected test is MALFORMED_SUITE",
+    )
+    assert_true(
+        finished.parse_disposition == ParseDisposition.NO_REPORT,
+        "the reconciled run carries no trustworthy report",
+    )
+    assert_false(
+        finished.parse_disposition == ParseDisposition.DRIFT,
+        "user suite disagreement is never DRIFT",
+    )
+    # The exact disagreement diagnostic, and only it.
+    var details = _warning_details(rec, "malformed-suite")
+    assert_equal(len(details), 1)
+    assert_equal(
+        details[0],
+        (
+            "the selection run's tests did not match the collected set (a test"
+            " appeared or vanished between collection and run)"
+        ),
+    )
+    # No drift warning fired: the grammar was never violated.
+    assert_equal(len(_warning_details(rec, "drift")), 0)
+    var last = rec.event_at(rec.count() - 1)
+    assert_true(last.kind == EventKind.SESSION_FINISHED)
+    assert_equal(last.data[SessionFinishedPayload].exit_code, 1)
+
+
+def test_deselected_test_reporting_pass_is_malformed_suite() raises:
+    # The row set MATCHES the collected set, so membership reconciles; what
+    # disagrees is the per-row selection contract — a deselected test must
+    # report the selection-induced SKIP, never a real outcome. Still a user
+    # suite disagreement: MALFORMED-SUITE, exit 1, never DRIFT/exit 3.
+    var root = temp_root()
+    write_file(root, "tests/test_deselected_ran.mojo", _SRC_DESELECTED_RAN)
+    var cfg = base_config()
+    cfg.paths.append("tests/test_deselected_ran.mojo::test_one")
+
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    var code = run_session(cfg, root, comp)
+
+    assert_equal(code, 1, "a deselected test that ran is exit 1")
+    ref rec = comp.composite.reporters[0]
+    var finished = _finished(rec)
+    assert_true(
+        finished.outcome == Outcome.MALFORMED_SUITE,
+        "a deselected test reporting PASS is MALFORMED_SUITE",
+    )
+    assert_false(
+        finished.parse_disposition == ParseDisposition.DRIFT,
+        "user suite disagreement is never DRIFT",
+    )
+    var details = _warning_details(rec, "malformed-suite")
+    assert_equal(len(details), 1)
+    assert_equal(
+        details[0],
+        (
+            "a deselected test ran under --only instead of reporting a"
+            " selection-induced SKIP: test_two"
+        ),
+    )
+    assert_equal(len(_warning_details(rec, "drift")), 0)
+    var last = rec.event_at(rec.count() - 1)
+    assert_true(last.kind == EventKind.SESSION_FINISHED)
+    assert_equal(last.data[SessionFinishedPayload].exit_code, 1)

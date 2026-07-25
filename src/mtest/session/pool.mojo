@@ -474,7 +474,12 @@ def _run_pool_batch[
     var last_progress_ns = 0
     # Set when a slot's native open (not a per-child exec) raises mid-dispatch;
     # a machinery fault the batch resolves to exit 3, like a `wait_any` fault.
+    # The boundary that actually raised is recorded with it, so the internal
+    # error names the failed step and the program that step was dispatching
+    # rather than always blaming the compiler.
     var machinery_fault = False
+    var machinery_fault_step = String("")
+    var machinery_fault_program = String("")
 
     while True:
         # Scheduling boundary: a pending interrupt tears the batch down at once,
@@ -532,6 +537,8 @@ def _run_pool_batch[
                         )
                     except:
                         machinery_fault = True
+                        machinery_fault_step = "run"
+                        machinery_fault_program = state[picked].out_bin
                         break
                     state[picked].phase = _RUNNING
                     state[picked].dispatch_ns = Int(perf_counter_ns())
@@ -573,6 +580,8 @@ def _run_pool_batch[
                         )
                     except:
                         machinery_fault = True
+                        machinery_fault_step = "build"
+                        machinery_fault_program = config.mojo_path
                         break
                     state[picked].phase = _BUILDING
                     state[picked].dispatch_ns = Int(perf_counter_ns())
@@ -585,9 +594,16 @@ def _run_pool_batch[
         # of `spawn`. It is a machinery fault, NOT a per-child spawn failure, so
         # resolve it to exit 3 and abandon the rest — never let it escape to the
         # session's usage-error (exit 4) catch. `errno` 0 marks a machinery raise
-        # rather than a child spawn errno.
+        # rather than a child spawn errno. The step and program are the ones the
+        # raising dispatch recorded: a failed RUN dispatch names the built
+        # binary, never the compiler, so the diagnostic points at the boundary
+        # that actually failed.
         if machinery_fault:
-            reporter.handle(Event.internal_error("build", config.mojo_path, 0))
+            reporter.handle(
+                Event.internal_error(
+                    machinery_fault_step, machinery_fault_program, 0
+                )
+            )
             result.internal_error = True
             pipeline.halt_internal_error()
             try:
