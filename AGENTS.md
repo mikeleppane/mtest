@@ -528,6 +528,36 @@ trap and its correct move.
   Mojo unit tests in-process.
 - Multibyte UTF-8 anywhere in `native/*.c` (comments included) misaligns
   `postfork.py`'s byte-offset AST slicing. Keep `native/` strictly ASCII.
+- A `DYLD_INSERT_LIBRARIES` interposer must NOT reach the real function through
+  `dlsym(RTLD_NEXT, name)`. Under dyld that returns the interposer's own
+  address, so every passthrough re-enters the library forever; a probe on
+  macos-15 arm64 shows identical pointers for both `open` and `close`. Call the
+  real function directly by name instead — dyld does not apply interposing
+  tuples to the image that declares them — and keep `dlfcn.h` inside the
+  non-Apple branch so the wrong mechanism is unreachable. `LD_PRELOAD` is the
+  opposite: there `dlsym(RTLD_NEXT, ...)` is the correct idiom. Confine the
+  split to a passthrough layer so the fault logic stays single-sourced.
+- That self-recursion presents as TWO unrelated-looking bugs, because the
+  symptom depends on whether the compiler can elide the frame. A wrapper that
+  uses `va_start` cannot be tail-called, so it overflows the stack and dies with
+  SIGSEGV and no output; a fixed-arity wrapper tail-calls itself, reuses one
+  frame, and spins until the harness timeout. A segfault and a hang in the same
+  subsystem can share one cause — check for a common mechanism before splitting
+  the investigation.
+- Mojo's `CodepointSliceIter` aborts inside its own `__next__`
+  (`Optional.value() called on empty Optional`) on macOS arm64 while working on
+  Linux x86_64. Scanning sites over known-ASCII tokens walk bytes with
+  `s[byte=i]` over `byte_length()`; reserve codepoint iteration for input that
+  genuinely is not ASCII. `vendor/mojo-toml` documents each converted site.
+- Darwin's `killpg` reports EPERM, not ESRCH, for a process group holding only
+  zombies. Group sweeps treat EPERM as "already gone"; reading it as a real
+  permission error turns a finished scenario into a spurious harness failure and
+  destroys the diagnosis it was supposed to produce.
+- A test whose expected outcome is "the operation fails" CANNOT refute a
+  hypothesis that the mechanism is broken — it passes either way. Retiring a
+  theory needs a probe whose pass and fail differ under that theory. Prefer
+  reporting the disputed value directly (addresses, errnos, flags) over
+  inferring it from a scenario verdict.
 - A tool that COMMITS captured program output containing filesystem paths
   must rewrite the ephemeral run root to a stable placeholder before writing
   (both the literal and realpath spellings), the way
