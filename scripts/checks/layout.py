@@ -258,7 +258,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 1200
+CLASSIFIED_TEST_COUNT = 1203
 CLASSIFIED_ROOTS = (
     Path("tests/unit"),
     Path("tests/integration"),
@@ -291,6 +291,7 @@ EXEC_FIXTURES = {
     "sigterm_grace_exit.py",
     "sigterm_ignorer.py",
     "sleeper.py",
+    "tagged_streams.py",
 }
 PROTOCOL_FIXTURES = {
     "crashing.mojo",

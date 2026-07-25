@@ -7,8 +7,9 @@ blocks a live sibling; each child's deadline is independent; the fixed
 observation order (deadline before interrupt, second activation escalates) picks
 the right kill cause; a spawn failure is isolated; `kill_all` and a mid-flight
 poll fault both leave zero surviving process groups through the two-pass
-protocol; fd use stays flat at the effective cap; and a recycled slot rejects its
-stale token.
+protocol; fd use stays flat at the effective cap; a recycled slot rejects its
+stale token; and one slot's capture overflow never reaches a sibling's bytes,
+truncation flags, or termination.
 """
 from std.ffi import external_call
 from std.os import listdir, remove, rmdir
@@ -36,6 +37,17 @@ comptime _EIO = 5
 comptime _OP_POLL_SET = 36
 comptime _BYTE_O: UInt8 = 111
 comptime _BYTE_E: UInt8 = 101
+comptime _BYTE_NEWLINE: UInt8 = 10
+comptime _TAGGED_SIZE = 513
+"""Bytes each overflowing actor writes per stream: over the 200-byte capture
+bound by enough that the head, the marker, and the tail are all distinct."""
+comptime _CAPTURE_BOUND = 200
+comptime _HEAD_CAP = 100
+comptime _TAIL_CAP = 100
+comptime _MARKER_LEN = 66
+"""Byte length of the spliced marker for 313 omitted bytes at limit 200; the
+em dash is three bytes, so the 64-character line is 66 bytes with its
+surrounding newlines."""
 
 
 def _reset_faults():
@@ -67,6 +79,69 @@ def _collect(mut supervisor: Supervisor, count: Int) raises -> List[Completion]:
             out.append(completed.take())
     assert_equal(len(out), count, "not every child finalized in time")
     return out^
+
+
+def _tagged_payload(tag: String, stream: String, size: Int) -> List[UInt8]:
+    """The exact bytes `tagged_streams.py` writes for one tagged stream.
+
+    Mirrors the fixture's rule so a test can name every retained byte: the
+    token `<tag>-<stream>-` repeated, cut to `size - 1` bytes, then a newline.
+
+    Args:
+        tag: The actor label handed to the fixture.
+        stream: The stream name, `out` or `err`.
+        size: The total byte count the fixture was asked to write.
+
+    Returns:
+        The fixture's payload for that stream, in order.
+    """
+    var token = tag + "-" + stream + "-"
+    var token_bytes = token.as_bytes()
+    var out = List[UInt8]()
+    var i = 0
+    while len(out) < size - 1:
+        out.append(token_bytes[i % len(token_bytes)])
+        i += 1
+    out.append(_BYTE_NEWLINE)
+    return out^
+
+
+def _byte_range(b: List[UInt8], start: Int, end: Int) -> List[UInt8]:
+    """A fresh copy of the bytes of `b` in `[start, end)`.
+
+    Args:
+        b: The captured bytes to read from.
+        start: The inclusive first index.
+        end: The exclusive last index.
+
+    Returns:
+        The requested bytes, in order.
+    """
+    var out = List[UInt8]()
+    for i in range(start, end):
+        out.append(b[i])
+    return out^
+
+
+def _pump_one(mut supervisor: Supervisor, mut out: List[Completion]) raises:
+    """Pump `wait_any` until exactly one more slot finalizes into `out`.
+
+    Args:
+        supervisor: The Supervisor to pump.
+        out: The completions collected so far, in arrival order; one is
+            appended.
+
+    Raises:
+        Error: If no slot finalized within the pump budget.
+    """
+    var wanted = len(out) + 1
+    var guard = 0
+    while len(out) < wanted and guard < 200000:
+        guard += 1
+        var completed = supervisor.wait_any(20)
+        if completed:
+            out.append(completed.take())
+    assert_equal(len(out), wanted, "no slot finalized within the pump budget")
 
 
 def test_two_children_complete_and_correlate_by_tag() raises:
@@ -224,6 +299,195 @@ def test_flooders_under_the_sweep_budget_are_fair() raises:
             "a starved slot would be short of its bytes",
         )
         assert_equal(count_byte(comps[i].result.stderr_bytes, _BYTE_E), 262144)
+
+
+def _truncation_marker() -> String:
+    """The exact marker spliced into a 513-byte stream at a 200-byte bound."""
+    return String(
+        "\n[mtest: output truncated — 313 bytes omitted, limit 200 bytes]\n"
+    )
+
+
+def _assert_overflowed_stream(
+    captured: List[UInt8], tag: String, stream: String
+) raises:
+    """Assert one overflowed stream is exactly its own head, marker, and tail.
+
+    Args:
+        captured: The bytes the Supervisor retained for that stream.
+        tag: The actor label that owns those bytes.
+        stream: The stream name, `out` or `err`.
+
+    Raises:
+        Error: On any byte, length, or marker mismatch.
+    """
+    var payload = _tagged_payload(tag, stream, _TAGGED_SIZE)
+    assert_equal(
+        len(captured),
+        _HEAD_CAP + _MARKER_LEN + _TAIL_CAP,
+        "retained length must be head + marker + tail",
+    )
+    assert_equal(
+        bytes_to_str(_byte_range(captured, 0, _HEAD_CAP)),
+        bytes_to_str(_byte_range(payload, 0, _HEAD_CAP)),
+        "the retained head must be this actor's own leading bytes",
+    )
+    assert_equal(
+        bytes_to_str(_byte_range(captured, _HEAD_CAP, _HEAD_CAP + _MARKER_LEN)),
+        _truncation_marker(),
+    )
+    assert_equal(
+        bytes_to_str(
+            _byte_range(
+                captured,
+                _HEAD_CAP + _MARKER_LEN,
+                _HEAD_CAP + _MARKER_LEN + _TAIL_CAP,
+            )
+        ),
+        bytes_to_str(
+            _byte_range(payload, _TAGGED_SIZE - _TAIL_CAP, _TAGGED_SIZE)
+        ),
+        "the retained tail must be this actor's own trailing bytes",
+    )
+
+
+def test_pool_truncation_is_slot_local_out_of_completion_order() raises:
+    # Tag 10 overflows both streams and is then held open on a file barrier, so
+    # tag 20 must finalize FIRST, out of spawn order and while the overflowing
+    # slot is still live. The neighbor's bytes, flags, and termination must be
+    # untouched by the overflow next to it, and the overflow's own retained
+    # bytes must be exactly its own head, marker, and tail.
+    var runtime = ExecRuntime()
+    runtime.open()
+    var scratch = temp_root()
+    var ready = scratch + "/tagged-" + String(perf_counter_ns()) + ".ready"
+    var release = scratch + "/tagged-" + String(perf_counter_ns()) + ".release"
+    var supervisor = Supervisor(2, _CAPTURE_BOUND)
+    _ = supervisor.spawn(
+        py_spec(
+            [
+                target("tagged_streams.py"),
+                "10",
+                String(_TAGGED_SIZE),
+                String(_TAGGED_SIZE),
+                ready,
+                release,
+            ],
+            0,
+        ),
+        10,
+    )
+    _ = supervisor.spawn(
+        py_spec([target("tagged_streams.py"), "neighbor", "13", "13"], 0), 20
+    )
+
+    var comps = List[Completion]()
+    _pump_one(supervisor, comps)
+    # Tag 10 announces its payload only after both writes, so the barrier proves
+    # the overflow was already in the pipes while the neighbor finalized.
+    var guard = 0
+    while guard < 200000 and not exists(ready):
+        guard += 1
+        _ = supervisor.wait_any(20)
+    assert_true(exists(ready), "tag 10 never announced its payload")
+    assert_equal(
+        supervisor.in_flight(), 1, "the overflowing slot is still live"
+    )
+    with open(release, "w") as handle:
+        handle.write("release\n")
+    _pump_one(supervisor, comps)
+    assert_equal(supervisor.in_flight(), 0)
+    runtime.close()
+    remove(ready)
+    remove(release)
+    rmdir(scratch)
+
+    assert_equal(comps[0].tag, 20, "the neighbor finalizes first")
+    assert_equal(
+        comps[1].tag, 10, "the held overflowing actor finalizes second"
+    )
+
+    assert_equal(bytes_to_str(comps[0].result.stdout_bytes), "neighbor-out\n")
+    assert_equal(bytes_to_str(comps[0].result.stderr_bytes), "neighbor-err\n")
+    assert_false(
+        comps[0].result.stdout_truncated, "the neighbor never overflowed"
+    )
+    assert_false(comps[0].result.stderr_truncated)
+    assert_true(
+        comps[0].result.termination.is_exited(),
+        String(comps[0].result.termination),
+    )
+    assert_equal(comps[0].result.termination.value, 0)
+
+    assert_true(comps[1].result.stdout_truncated, "513 bytes over a 200 bound")
+    assert_true(comps[1].result.stderr_truncated)
+    _assert_overflowed_stream(comps[1].result.stdout_bytes, "10", "out")
+    _assert_overflowed_stream(comps[1].result.stderr_bytes, "10", "err")
+    assert_true(
+        comps[1].result.termination.is_exited(),
+        String(comps[1].result.termination),
+    )
+    assert_equal(comps[1].result.termination.value, 0)
+
+
+def test_pool_overflow_and_deadline_kill_finish_without_cross_slot_bytes() raises:
+    # An overflowing slot beside a slot the deadline kills: the kill must not
+    # borrow the overflow's bytes or flags, and the overflow must not inherit
+    # the killed slot's ending. Neither slot's streams may carry the other's tag.
+    var runtime = ExecRuntime()
+    runtime.open()
+    var supervisor = Supervisor(2, _CAPTURE_BOUND)
+    _ = supervisor.spawn(
+        py_spec(
+            [
+                target("tagged_streams.py"),
+                "spill",
+                String(_TAGGED_SIZE),
+                String(_TAGGED_SIZE),
+            ],
+            0,
+        ),
+        1,
+    )
+    _ = supervisor.spawn(py_spec([target("sleeper.py")], 100), 2)
+    var comps = _collect(supervisor, 2)
+    assert_equal(supervisor.in_flight(), 0)
+    runtime.close()
+
+    for i in range(len(comps)):
+        if comps[i].tag == 1:
+            assert_true(
+                comps[i].result.termination.is_exited(),
+                String(comps[i].result.termination),
+            )
+            assert_equal(comps[i].result.termination.value, 0)
+            assert_true(comps[i].result.stdout_truncated)
+            assert_true(comps[i].result.stderr_truncated)
+            _assert_overflowed_stream(
+                comps[i].result.stdout_bytes, "spill", "out"
+            )
+            _assert_overflowed_stream(
+                comps[i].result.stderr_bytes, "spill", "err"
+            )
+            # The two streams stay separate as well as the two slots.
+            assert_false(
+                "spill-err-" in bytes_to_str(comps[i].result.stdout_bytes)
+            )
+            assert_false(
+                "spill-out-" in bytes_to_str(comps[i].result.stderr_bytes)
+            )
+        else:
+            assert_true(
+                comps[i].result.termination.is_timed_out(),
+                String(comps[i].result.termination),
+            )
+            assert_true(comps[i].kill_cause.value().is_deadline())
+            # The sleeper writes nothing, so exact emptiness is the strongest
+            # statement that no byte of the overflowing sibling reached it.
+            assert_equal(len(comps[i].result.stdout_bytes), 0)
+            assert_equal(len(comps[i].result.stderr_bytes), 0)
+            assert_false(comps[i].result.stdout_truncated)
+            assert_false(comps[i].result.stderr_truncated)
 
 
 def test_capacity_and_fd_hygiene_at_the_effective_cap() raises:

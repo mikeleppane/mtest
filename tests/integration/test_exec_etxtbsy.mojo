@@ -1,4 +1,11 @@
-"""Text-file-busy latch precedence for the `exec` supervisor.
+"""Text-file-busy retry and latch precedence for the `exec` supervisor.
+
+A transient ETXTBSY is what a freshly written executable looks like while its
+writer still holds it open, so the bounded retry exists to survive it. The
+recovery case proves the retry actually reaches a successful `execve`: the
+adapter fails the first two child attempts with ETXTBSY and then stops faulting,
+and the run must end as an ordinary child completion with the target's exact
+bytes — not merely as an honest failure.
 
 When a deadline or an interrupt fires around a text-file-busy (ETXTBSY) exec,
 the run must report TimedOut — our own kill won the race — never a SpawnFailed
@@ -19,7 +26,7 @@ wide interrupt latch, which it resets so no state leaks into the other suites.
 """
 from std.ffi import external_call
 from std.memory import alloc, memset_zero
-from std.testing import assert_true
+from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.exec import (
     ProcessSpec,
@@ -28,7 +35,7 @@ from mtest.exec import (
 )
 from mtest.exec.signals import _reset_interrupt
 
-from exec_helpers import target
+from exec_helpers import bytes_to_str, target
 
 comptime _SIGINT = 2
 comptime _CONSTANT_EIO = 4
@@ -73,6 +80,59 @@ def _inject_etxtbsy_then_exec_error() raises:
         Int64(0),
     )
     assert_true(status == 0, "could not configure terminal child execve fault")
+
+
+def _inject_etxtbsy_for_the_first_two_attempts() raises:
+    """Fault child execve occurrences one and two with ETXTBSY, then stop.
+
+    Occurrence three onward is left unfaulted, so the third attempt reaches the
+    real `execve` and the retry has to succeed rather than expire.
+    """
+    # SAFETY: these test-only ABI calls use scalar values only. The operation
+    # discriminator names CHILD_EXECVE; occurrences one and two are ordered and
+    # nonzero; ETXTBSY is positive; no pointer crosses either ABI.
+    external_call["mtest_exec_test_fault_reset", NoneType]()
+    var status = external_call["mtest_exec_test_fault_configure", Int32](
+        UInt32(_OP_CHILD_EXECVE),
+        UInt32(1),
+        _native_constant(_CONSTANT_ETXTBSY),
+        Int64(0),
+    )
+    assert_true(status == 0, "could not configure the first busy-exec fault")
+    # SAFETY: this secondary test-only ABI also accepts scalars only; occurrence
+    # two follows the configured primary occurrence, ETXTBSY is positive, the
+    # result payload is zero as required for an error, and no pointer crosses.
+    status = external_call["mtest_exec_test_fault_configure_secondary", Int32](
+        UInt32(_OP_CHILD_EXECVE),
+        UInt32(2),
+        _native_constant(_CONSTANT_ETXTBSY),
+        Int64(0),
+    )
+    assert_true(status == 0, "could not configure the second busy-exec fault")
+
+
+def test_transient_etxtbsy_recovers_to_a_successful_child() raises:
+    # Two transient ETXTBSY attempts inside the bounded retry budget, then a
+    # clean exec: the run must be an ordinary completion carrying the target's
+    # exact stdout, an empty stderr, and Exited(0) — not an honest failure.
+    var runtime = ExecRuntime()
+    runtime.open()
+    _reset_interrupt()
+    _inject_etxtbsy_for_the_first_two_attempts()
+    var t = target("etxtbsy_target.sh")
+    var argv = List[String]()
+    argv.append(t)
+    var result = run_supervised(runtime, ProcessSpec.command(argv^, 0))
+    # SAFETY: this test-only scalar ABI clears native test-control state; it
+    # accepts no pointer, retains nothing, and the runtime has no live child.
+    external_call["mtest_exec_test_fault_reset", NoneType]()
+    runtime.close()
+    assert_equal(bytes_to_str(result.stdout_bytes), "etxtbsy-recovered\n")
+    assert_equal(bytes_to_str(result.stderr_bytes), "")
+    assert_true(result.termination.is_exited(), String(result.termination))
+    assert_equal(result.termination.value, 0)
+    assert_false(result.stdout_truncated)
+    assert_false(result.stderr_truncated)
 
 
 def _wait_before_first_post_open_clock_read() raises:
