@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import math
 import os
 from pathlib import Path
+import shutil
 import signal
 import sys
 
@@ -21,6 +22,9 @@ AGGREGATE_SOURCE = Path("build/tests/aggregate_main.mojo")
 AGGREGATE_BINARY = Path("build/tests/aggregate")
 NATIVE_TEST_OBJECT = Path("build/native/mtest_exec_native_test.o")
 TIMEOUT_ENV = "MTEST_TEST_ALL_TIMEOUT_SECONDS"
+DEBUG_SYMBOLS_ENV = "MTEST_TEST_DEBUG_SYMBOLS"
+SYMBOLIZER_ENV = "LLVM_SYMBOLIZER_PATH"
+SYMBOLIZER_NAME = "llvm-symbolizer"
 INTERNAL_ERROR_EXIT_CODE = 70
 MODULE_MARKER_PREFIX = "==> "
 
@@ -103,6 +107,43 @@ def _timeout_seconds(environment: dict[str, str]) -> float:
             f"{watchdog.DEFAULT_TIMEOUT_SECONDS:g} seconds: {raw!r}"
         )
     return timeout_seconds
+
+
+def _debug_symbols_requested(environment: dict[str, str]) -> bool:
+    """Read the opt-in line-table request for the aggregate test binary.
+
+    Args:
+        environment: The harness process environment to read.
+
+    Returns:
+        Whether the aggregate is built with line tables. Absent or ``"0"`` keeps
+        the default symbol-free build; only ``"1"`` enables them.
+
+    Raises:
+        ValueError: If the variable is set to anything but ``"0"`` or ``"1"``,
+            so a typo cannot silently drop the request.
+    """
+    raw = environment.get(DEBUG_SYMBOLS_ENV)
+    if raw is None or raw == "":
+        return False
+    if raw not in ("0", "1"):
+        raise ValueError(f"{DEBUG_SYMBOLS_ENV} must be '0' or '1': {raw!r}")
+    return raw == "1"
+
+
+def _symbolizer_path() -> Path | None:
+    """Return the pinned toolchain's symbolizer, or None when it is absent.
+
+    Returns:
+        The ``llvm-symbolizer`` shipped beside the resolved ``mojo`` binary. The
+        Mojo runtime prints a crash backtrace as bare addresses unless it can
+        find this tool, and it is not on `PATH` in either hosted lane.
+    """
+    mojo = shutil.which("mojo")
+    if mojo is None:
+        return None
+    candidate = Path(mojo).resolve().parent / SYMBOLIZER_NAME
+    return candidate if candidate.is_file() else None
 
 
 def _sentinel_for(source: str, step: str) -> Path:
@@ -192,10 +233,23 @@ def _run_step(
     )
 
 
-def _build_commands() -> tuple[tuple[str, list[str]], ...]:
-    """Return the exact one-package, one-native, one-aggregate build pipeline."""
+def _build_commands(
+    *, debug_symbols: bool = False
+) -> tuple[tuple[str, list[str]], ...]:
+    """Return the exact one-package, one-native, one-aggregate build pipeline.
+
+    Args:
+        debug_symbols: Whether the aggregate carries line tables. Off by default
+            because they cost roughly forty percent more build time and double
+            the binary; a crash investigation turns them on to trade that for a
+            backtrace naming files and lines.
+
+    Returns:
+        One command per build step, in dependency order.
+    """
     aggregate_source = str(AGGREGATE_SOURCE)
     aggregate_binary = str(AGGREGATE_BINARY)
+    symbol_flags = ["--debug-level=line-tables"] if debug_symbols else []
     return (
         ("package", ["bash", "scripts/build/mojo_package.sh"]),
         ("native adapter", [sys.executable, "-m", "scripts.build.native"]),
@@ -205,6 +259,7 @@ def _build_commands() -> tuple[tuple[str, list[str]], ...]:
                 "mojo",
                 "build",
                 "--no-optimization",
+                *symbol_flags,
                 "-I",
                 ".",
                 "-I",
@@ -237,10 +292,12 @@ def run_pipeline(
         flush=True,
     )
 
-    timeout_seconds = _timeout_seconds(
+    resolved_environment = (
         dict(os.environ) if environment is None else environment
     )
-    for source, command in _build_commands():
+    timeout_seconds = _timeout_seconds(resolved_environment)
+    debug_symbols = _debug_symbols_requested(resolved_environment)
+    for source, command in _build_commands(debug_symbols=debug_symbols):
         if source == "aggregate suite":
             print(
                 f"==> building aggregate test binary -> {AGGREGATE_BINARY}",
@@ -261,6 +318,14 @@ def run_pipeline(
         )
         if result.termination != watchdog.Exited(0):
             return result
+
+    # The Mojo runtime resolves the symbolizer from the child's own environment,
+    # and the supervisor hands the aggregate this process's environment
+    # unchanged, so exporting the path here is what reaches the crashing binary.
+    # An operator-supplied value always wins.
+    symbolizer = _symbolizer_path()
+    if symbolizer is not None:
+        os.environ.setdefault(SYMBOLIZER_ENV, str(symbolizer))
 
     print("==> running aggregate test binary", flush=True)
     return _run_step(
