@@ -18,18 +18,26 @@ Design (hardened after adversarial review):
     green summary. So the oracle asserts the EXACT collected node-id set and
     EXACT counts, and uses POISON probes: a test that would FAIL/CRASH if it ran,
     so a broken selection/exclusion/early-stop flips the frozen exit code.
-  * No false green. A stale binary is rebuilt before validating; a run that
-    selects zero checks, or SKIPs a safety-critical check under --strict, exits
-    non-zero. Setup failures exit 2 (distinct from a contract failure's 1).
+  * No false green. A run that selects zero checks, or SKIPs a
+    safety-critical check under --strict, exits non-zero. Setup failures
+    exit 2 (distinct from a contract failure's 1). Freshness of the binary
+    under test is enforced, not just warned: `pixi run contract-check`
+    rebuilds a missing-or-stale `build/mtest` before validating; the
+    blocking `pixi run contract-check-strict` gate instead runs
+    `--no-rebuild` against the binary its own Pixi `build-bin` dependency
+    JUST produced, and fails closed (exit 2) if that binary is missing or
+    looks stale rather than silently building one of its own.
 
 Usage:
     pixi run contract-check --                          # rebuild-if-stale, run all
     pixi run contract-check -- -k selection             # filter by check name
     pixi run contract-check -- --strict                 # SKIP -> failure
     pixi run contract-check -- --keep --no-rebuild -v
+    pixi run contract-check-strict                      # the blocking release-floor gate
 
 Exit: 0 all passed; 1 a contract check failed (or --strict skip / zero checks);
-2 setup failure (no toolchain, binary won't build). CI-usable.
+2 setup failure (no toolchain, binary won't build, or --no-rebuild found a
+missing/stale binary). CI-usable.
 """
 from __future__ import annotations
 
@@ -185,6 +193,177 @@ def wait_until(
         if time.time() >= deadline:
             return False
         time.sleep(poll_interval)
+
+
+# --------------------------------------------------------------------------- #
+# Exact-process identification for the SIGINT probe. `mtest` builds each test
+# file with `mojo build <file> -o build/bin/<mangled-name> ...`, so a plain
+# `pgrep -f <mangled-name>` scan matches BOTH the exec'd test binary AND, for
+# as long as it is still running, its own COMPILER — the compiler's command
+# line mentions the same string as its `-o` target. These helpers resolve
+# that ambiguity by argv[0] (the process's own executable path), which only
+# the exec'd binary itself ends with, never the compiler invoking it.
+# --------------------------------------------------------------------------- #
+def matching_pids(pattern: str) -> list[str]:
+    """PIDs whose full command line contains `pattern` (`pgrep -f`).
+
+    Raises `RuntimeError` if this platform's process inspection (`pgrep`) is
+    unavailable or misbehaves — callers route that through
+    `_skip_or_fail_result`, so missing support is a strict failure under
+    `--strict`, never a silent pass.
+    """
+    try:
+        r = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"pgrep unavailable: {e}") from e
+    if r.returncode not in (0, 1):  # 1 == "no match", not an error
+        raise RuntimeError(f"pgrep exited {r.returncode}: {r.stderr.strip()}")
+    return [p for p in r.stdout.split() if p]
+
+
+def process_argv0(pid: str) -> str:
+    """The first whitespace-separated token of `pid`'s full command line.
+
+    Deliberately `ps -o args=`, never `ps -o comm=`: Linux truncates `comm`
+    to 15 characters, and a mangled test-binary name can be longer
+    (`irq_stest_u1hang` is 16), so a `comm`-based comparison would silently
+    fail to match the exact binary this probe must identify. Returns "" if
+    the process has already exited.
+    """
+    try:
+        r = subprocess.run(["ps", "-o", "args=", "-p", pid], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"ps unavailable: {e}") from e
+    args = r.stdout.strip()
+    return args.split(None, 1)[0] if args else ""
+
+
+def process_state(pid: str) -> str:
+    """`pid`'s one-letter process state (`ps -o state=`), or "" if gone."""
+    try:
+        r = subprocess.run(["ps", "-o", "state=", "-p", pid], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"ps unavailable: {e}") from e
+    return r.stdout.strip()[:1]
+
+
+def exact_process_pid(mangled_name: str) -> str | None:
+    """The PID of the process whose OWN executable is `mangled_name`, never
+    a `mojo build` compiler that merely mentions it as an `-o` argument.
+    `None` if no such process is currently running.
+    """
+    for pid in matching_pids(mangled_name):
+        argv0 = process_argv0(pid)
+        if argv0 and argv0.endswith(mangled_name):
+            return pid
+    return None
+
+
+# The mangled binary name (see `mtest.session.scratch._mangle`) for the one
+# file `check_interrupt` needs to still be hanging when it sends SIGINT:
+# `irq/test_1hang.mojo` -> strip `.mojo`, escape `/` as `_s` and `_` as `_u`.
+HANG_MANGLED_NAME = "irq_stest_u1hang"
+
+
+def _default_killtree(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        pass
+
+
+def _skip_or_fail_result(strict: bool, detail: str) -> tuple[str, str]:
+    if strict:
+        return FAIL, detail + " (--strict: counted as failure)"
+    return SKIP, detail
+
+
+def run_interrupt_probe(
+    spawn: Callable[[], subprocess.Popen],
+    hang_ready: Callable[[], bool],
+    hang_present: Callable[[], bool],
+    strict: bool,
+    outer_deadline: float,
+    orphan_timeout: float = 10.0,
+    poll_interval: float = 0.2,
+    killtree: Callable[[subprocess.Popen], None] | None = None,
+    send_sigint: Callable[[int], None] | None = None,
+) -> tuple[str, str]:
+    """Drive one SIGINT-frees-the-owned-child-group probe attempt.
+
+    Returns `(status, detail)` with `status` one of the module's `PASS`,
+    `FAIL`, `SKIP` constants. This is the EXACT code path
+    `Runner.check_interrupt` runs against the real `mtest` binary — it is
+    free of `Runner`/`self` specifically so the negative controls in
+    `scripts/tests/test_contract.py` can drive it directly with a fake
+    `spawn`, fake `hang_ready`/`hang_present` predicates, and a fake
+    `send_sigint` (never a real `os.kill` against a fabricated PID) instead
+    of re-implementing this logic in the test.
+
+    `hang_ready`/`hang_present` may raise `RuntimeError` (missing platform
+    process inspection); that is routed through `_skip_or_fail_result`, so
+    it is a FAIL under `--strict` and a SKIP otherwise — never a silent
+    pass. `SIGINT` is sent to `spawn()`'s process only after `hang_ready()`
+    reports true (readiness), never on a fixed sleep. The readiness wait
+    also exits early — before `outer_deadline` — if the spawned process
+    itself has already exited: a dead supervisor will never spawn the hang
+    child, so waiting out the full deadline would only stall this
+    now-blocking gate for no benefit.
+    """
+    if killtree is None:
+        killtree = _default_killtree
+    if send_sigint is None:
+        send_sigint = lambda pid: os.kill(pid, signal.SIGINT)  # noqa: E731
+    try:
+        proc = spawn()
+    except OSError as e:
+        return _skip_or_fail_result(strict, f"could not spawn: {e}")
+    try:
+        ready = False
+        while True:
+            try:
+                if hang_ready():
+                    ready = True
+                    break
+            except RuntimeError as e:
+                proc.kill()
+                return _skip_or_fail_result(strict, str(e))
+            if proc.poll() is not None:
+                break  # the supervisor already exited; it will never spawn
+                       # the hang child now — stop waiting for it.
+            if time.time() >= outer_deadline:
+                break
+            time.sleep(poll_interval)
+        if not ready:
+            killtree(proc)
+            return _skip_or_fail_result(strict, "child never became ready")
+        send_sigint(proc.pid)  # ONLY the supervisor — teardown must free the child; SIGINT only after readiness
+        try:
+            out, _ = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            killtree(proc)
+            return FAIL, "did not exit within 30s of SIGINT"
+        try:
+            gone = wait_until(
+                lambda: not hang_present(), time.time() + orphan_timeout, poll_interval=poll_interval
+            )
+        except RuntimeError as e:
+            killtree(proc)
+            return _skip_or_fail_result(strict, str(e))
+        orphan = not gone
+        ok = proc.returncode == 2 and "not run" in out and not orphan
+        if ok:
+            return PASS, ""
+        detail = f"exit {proc.returncode} (want 2); orphaned_child={orphan}"
+        if orphan:
+            detail += "; child survived cleanup"
+        return FAIL, detail
+    finally:
+        killtree(proc)
 
 
 # --------------------------------------------------------------------------- #
@@ -442,90 +621,24 @@ class Runner:
         (self.root / "irq" / "test_2pass.mojo").write_text(
             HEAD + "def test_p() raises:\n    assert_equal(1, 1)\n" + MAIN)
 
-        def hang_pids() -> list[str]:
-            """PIDs of the exact hanging child, or raise if this platform's
-            process inspection (`pgrep`) is unavailable — routed through
-            `_skip_or_fail` below, so missing support is a strict failure
-            under `--strict`, never a silent pass."""
-            try:
-                r = subprocess.run(["pgrep", "-f", "irq_stest_"],
-                                    capture_output=True, text=True, timeout=5)
-            except (OSError, subprocess.TimeoutExpired) as e:
-                raise RuntimeError(f"pgrep unavailable: {e}") from e
-            if r.returncode not in (0, 1):  # 1 == "no match", not an error
-                raise RuntimeError(f"pgrep exited {r.returncode}: {r.stderr.strip()}")
-            return [p for p in r.stdout.split() if p]
-
-        def hang_present() -> bool:
-            return bool(hang_pids())
-
-        def hang_ready() -> bool:
-            """The exact hanging child exists AND has reached its blocking
-            sleep (state `S`), not merely been forked — a bare `pgrep` hit
-            can catch a process still mid-startup. Raises if this
-            platform's process-state inspection (`ps`) is unavailable."""
-            pids = hang_pids()
-            if not pids:
-                return False
-            try:
-                r = subprocess.run(["ps", "-o", "state=", "-p", pids[0]],
-                                    capture_output=True, text=True, timeout=5)
-            except (OSError, subprocess.TimeoutExpired) as e:
-                raise RuntimeError(f"ps unavailable: {e}") from e
-            return r.stdout.strip()[:1] == "S"
-
-        try:
-            proc = subprocess.Popen(
+        def spawn() -> subprocess.Popen:
+            return subprocess.Popen(
                 [str(MTEST), "-I", "build", "--timeout", "0", "irq"],
                 cwd=self.root, env=self.env, text=True,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 start_new_session=True)
-        except OSError as e:
-            return self._skip_or_fail(strict, name, ref, f"could not spawn: {e}")
-        try:
-            deadline = time.time() + 120  # the one outer bound every barrier below respects
-            try:
-                ready = wait_until(hang_ready, deadline, poll_interval=0.2)
-            except RuntimeError as e:
-                proc.kill()
-                return self._skip_or_fail(strict, name, ref, str(e))
-            if not ready:
-                self._killtree(proc)
-                return self._skip_or_fail(strict, name, ref, "child never became ready")
-            os.kill(proc.pid, signal.SIGINT)  # ONLY mtest — teardown must free the child; SIGINT only after readiness
-            try:
-                out, _ = proc.communicate(timeout=30)
-            except subprocess.TimeoutExpired:
-                self._killtree(proc)
-                return self.record(FAIL, name, ref, "did not exit within 30s of SIGINT")
-            try:
-                gone = wait_until(lambda: not hang_present(), time.time() + 10, poll_interval=0.2)
-            except RuntimeError as e:
-                self._killtree(proc)
-                return self._skip_or_fail(strict, name, ref, str(e))
-            orphan = not gone
-            ok = proc.returncode == 2 and "not run" in out and not orphan
-            detail = "" if ok else (
-                f"exit {proc.returncode} (want 2); orphaned_child={orphan}"
-                + ("; child survived cleanup" if orphan else "")
-            )
-            self.record(PASS if ok else FAIL, name, ref, detail)
-        finally:
-            self._killtree(proc)
 
-    def _killtree(self, proc):
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (OSError, ProcessLookupError):
-            pass
-        try:
-            proc.wait(timeout=5)
-        except Exception:
-            pass
+        def hang_present() -> bool:
+            return exact_process_pid(HANG_MANGLED_NAME) is not None
 
-    def _skip_or_fail(self, strict, name, ref, detail):
-        self.record(FAIL if strict else SKIP, name, ref,
-                    detail + (" (--strict: counted as failure)" if strict else ""))
+        def hang_ready() -> bool:
+            pid = exact_process_pid(HANG_MANGLED_NAME)
+            return pid is not None and process_state(pid) == "S"
+
+        status, detail = run_interrupt_probe(
+            spawn, hang_ready, hang_present, strict, time.time() + 120
+        )
+        self.record(status, name, ref, detail)
 
 
 # --------------------------------------------------------------------------- #

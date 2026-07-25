@@ -257,9 +257,15 @@ depends-on = [
 # The canonical serial local floor. Hosted CI runs the exact preflight above,
 # then gives each independent behavioral gate a fresh parallel matrix cell;
 # local development keeps one ordered aggregate for reproducible handoff.
-# contract-check-strict runs last: it needs its own fresh build-bin, so
-# running it after the other behavioral gates avoids relinking the binary
-# those gates already exercised.
+# contract-check-strict's position here is a readability choice, not a
+# freshness one: `build-bin` is a single shared Pixi task node, and `test`,
+# `dogfood-check`, `e2e`, and `ci-preflight`'s `readme-help-check` already
+# depend on it, so Pixi has already run it once for this invocation well
+# before this entry — running contract-check-strict earlier would not
+# trigger a second link, and running it last does not avoid one. Its actual
+# provenance guarantee is that shared `build-bin` task edge existing at all
+# within THIS invocation; last is just where the broadest, slowest gate
+# reads best in the list.
 [tasks.ci]
 depends-on = [
     "ci-preflight",
