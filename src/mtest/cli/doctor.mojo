@@ -631,13 +631,14 @@ def _execute_check(
                 not CompilationTarget.is_x86()
             ), "doctor supports macOS arm64 only"
             return _platform_line(True)
-        comptime assert (
-            CompilationTarget.is_linux()
-        ), "doctor supports Linux or macOS only"
-        comptime assert (
-            CompilationTarget.is_x86()
-        ), "doctor supports Linux x86_64 only"
-        return _platform_line(False)
+        else:
+            comptime assert (
+                CompilationTarget.is_linux()
+            ), "doctor supports Linux or macOS only"
+            comptime assert (
+                CompilationTarget.is_x86()
+            ), "doctor supports Linux x86_64 only"
+            return _platform_line(False)
     if index == 2:
         context.root = String(cwd())
         context.root_ok = True
