@@ -222,6 +222,37 @@ def test_gh_message_does_not_escape_colon_or_comma() raises:
     assert_equal(gh_escape_message("a:b,c"), "a:b,c")
 
 
+def test_gh_message_neutralizes_terminal_controls() raises:
+    # mtest prints its annotation tail to the CONSOLE descriptor, which may be
+    # a real terminal, so a workflow command is a terminal surface as well as a
+    # GitHub one. GitHub renders the payload as inert text either way; a
+    # terminal would execute it. Exact expectations, one per control class.
+    assert_equal(gh_escape_message("\x1b]0;pwned\x07"), "\\x1B]0;pwned\\x07")
+    assert_equal(
+        gh_escape_message("\x1b[31mred\x1b[0m"), "\\x1B[31mred\\x1B[0m"
+    )
+    assert_equal(gh_escape_message("a\x00b"), "a\\x00b")
+    assert_equal(gh_escape_message("a\x7fb"), "a\\x7Fb")
+    assert_equal(gh_escape_message(chr(0x9B) + "csi"), "\\u009Bcsi")
+
+
+def test_gh_message_keeps_the_workflow_encoding_of_percent_cr_lf() raises:
+    # The terminal pass runs SECOND, after CR and LF already became `%0D`/`%0A`,
+    # so GitHub's own line-folding survives intact and is never re-escaped into
+    # visible `\\x0D`/`\\x0A` text. Asserted beside a control so the two passes
+    # are pinned composing, not merely each alone.
+    assert_equal(gh_escape_message("a\rb\nc%d\x1be"), "a%0Db%0Ac%25d\\x1Be")
+    # Tab is legal in a workflow command and cannot address a terminal.
+    assert_equal(gh_escape_message("a\tb"), "a\tb")
+
+
+def test_gh_property_inherits_the_control_neutralization() raises:
+    # The property escaper composes on top of the message escaper, so a `file=`
+    # path carrying an escape sequence is neutralized too, and the `:`/`,`
+    # encodings still apply on top.
+    assert_equal(gh_escape_property("a\x1b[2Kb:c,d"), "a\\x1B[2Kb%3Ac%2Cd")
+
+
 def test_gh_property_adds_colon_and_comma_on_message_set() raises:
     assert_equal(gh_escape_property("a:b,c"), "a%3Ab%2Cc")
     assert_equal(gh_escape_property("100%"), "100%25")

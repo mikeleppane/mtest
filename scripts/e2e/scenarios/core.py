@@ -319,15 +319,25 @@ HOSTILE_CONSOLE_RAW_BYTES = (
     ("BS", "\x08"),
     ("VT", "\x0b"),
     ("FF", "\x0c"),
-    ("CR", "\r"),
     ("DEL", "\x7f"),
     ("C1 CSI", "\u009b"),
     ("C1 NEL", "\u0085"),
     ("C1 ST", "\u009c"),
 )
-"""Every control the actor writes, by name. Not one may survive anywhere in the
-run's output: the console runs with `--color never`, so mtest emits no ESC of
-its own either and a single occurrence is a child byte that got through."""
+"""Every control the actor writes that this harness can actually observe, by
+name. Not one may survive anywhere in the run's output: the console runs with
+`--color never`, so mtest emits no ESC of its own either and a single occurrence
+is a child byte that got through.
+
+CR is deliberately ABSENT even though the actor writes one. `run_mtest` captures
+with `text=True`, so Python's universal-newline translation rewrites a surviving
+CR to LF before any assertion could see it \u2014 a `("CR", "\\r")` row here could
+never fail and would be a guard in name only. A PTY capture does not rescue it
+either: the tty's own ONLCR translation injects CR on output, so the byte stops
+being attributable to the child. CR stays pinned where it is provable: exactly,
+as `CR[\\x0D]` inside `HOSTILE_CONSOLE_FENCED_LINES` below, and by
+`test_escape_multiline_escapes_cr_so_a_child_cannot_overwrite_a_line` in
+`tests/unit/test_report_console_text.mojo`."""
 
 HOSTILE_CONSOLE_FENCED_LINES = (
     "    | \\x1B[2J\\x1B[1;31mCHILD-CSI\\x1B[0m",

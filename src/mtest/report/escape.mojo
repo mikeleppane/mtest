@@ -18,7 +18,16 @@ misinterpret a continuation byte.
 
 The `::stop-commands::<token>` fencing protocol that echoes this escaped output
 into GitHub Actions safely lives beside these escapers in `fencing.mojo`.
+
+One of the three streams is not purely machine-consumed: the annotation tail is
+printed to the console's own descriptor, which may be a terminal. The GitHub
+escapers therefore finish by running their result through `console_text`, the
+runner's single terminal-safety mapping, rather than growing a second copy of
+that policy here. The XML and JSON escapers do not: their documents are never
+handed to a terminal, and both already have a total answer for every control
+code point under their own format's rules.
 """
+from mtest.report.console_text import escape_multiline
 
 comptime _FFFD: StaticString = "�"
 """The Unicode replacement character, U+FFFD, encoded as UTF-8 (3 bytes)."""
@@ -207,16 +216,34 @@ def xml_escape_attribute(s: String) -> String:
 def gh_escape_message(s: String) -> String:
     """Escape `s` for a GitHub Actions workflow-command message payload.
 
-    `%` becomes `%25`, CR becomes `%0D`, LF becomes `%0A`. A single scan tests
-    `%` ahead of CR/LF, so the `%` that a CR/LF escape emits is never itself
-    re-escaped. Every other byte, including `:` and `,`, passes through
-    unchanged.
+    Two passes, in this order.
+
+    First the workflow-command encoding: `%` becomes `%25`, CR becomes `%0D`,
+    LF becomes `%0A`. A single scan tests `%` ahead of CR/LF, so the `%` that a
+    CR/LF escape emits is never itself re-escaped. `:` and `,` pass through;
+    the property escaper adds those.
+
+    Then the terminal-safety pass, `escape_multiline`. mtest prints its
+    annotation tail to the SAME descriptor the console writes to, which may be
+    a real terminal, so a workflow command carrying a child's `ESC ] 0 ; … BEL`
+    would address that terminal even though GitHub's own UI renders the payload
+    as inert text. Running this pass second is what keeps the two concerns from
+    fighting: by the time it runs, no raw CR or LF is left for it to see, so
+    `%0D` and `%0A` survive exactly as GitHub's line-folding needs, and the
+    `%25`/`%0D`/`%0A` text it does see is plain ASCII it copies through. Tab
+    rides through literally: it is legal inside a workflow command and cannot
+    address a terminal.
+
+    A C1 control is two UTF-8 bytes, so this pass — unlike the first — replaces
+    whole code points rather than single bytes. It never splits a sequence, so
+    the result is still valid UTF-8 and still safe to bound by code point.
 
     Args:
         s: The already-UTF-8-valid text to escape.
 
     Returns:
-        `s` escaped for a workflow-command message field.
+        `s` escaped for a workflow-command message field, carrying no control
+        character a terminal would execute.
     """
     var out = List[UInt8]()
     for b in s.as_bytes():
@@ -229,7 +256,7 @@ def gh_escape_message(s: String) -> String:
             _push_str(out, "%0A")
         else:
             out.append(b)
-    return _bytes_to_string(out)
+    return escape_multiline(_bytes_to_string(out))
 
 
 def gh_escape_property(s: String) -> String:

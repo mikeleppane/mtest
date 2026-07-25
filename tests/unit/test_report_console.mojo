@@ -748,16 +748,17 @@ def _feed_compile_timeout(
     mut c: ConsoleReporter,
     attempts_used: Int = 1,
     stderr_text: String = "mojo: warning: still lowering module\n",
+    path: String = "tests/test_slow.mojo",
 ):
     """One COMPILE_TIMEOUT FileFinished for the fixed slow-build fixture."""
     c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
-    c.handle(Event.file_started("tests/test_slow.mojo"))
+    c.handle(Event.file_started(path))
     c.handle(
         Event.file_finished(
-            "tests/test_slow.mojo",
+            path,
             Outcome.COMPILE_TIMEOUT,
             0.0,
-            _argv("tests/test_slow.mojo"),
+            _argv(path),
             1.0,
             List[UInt8](),
             _bytes(stderr_text),
@@ -778,10 +779,13 @@ def test_compile_timeout_verdict_token_and_deadline() raises:
 
 
 def test_compile_timeout_banner_shows_compiler_stderr_verbatim() raises:
+    # Exact, not a substring probe: the compiler's words ride through byte-for
+    # byte, behind the display gutter and nothing else. A substring check here
+    # would pass just as happily if the line lost its fence or gained a rewrite.
     var c = _console()
     _feed_compile_timeout(c, stderr_text="mojo: note: lowering @foo\n")
     var out = c.output()
-    assert_true("mojo: note: lowering @foo" in out)
+    assert_true("\n    | mojo: note: lowering @foo\n" in out)
 
 
 def test_compile_timeout_banner_carries_the_split_or_exclude_hint() raises:
@@ -2325,3 +2329,170 @@ def test_session_header_scalarizes_the_root_and_toolchain_label() raises:
     assert_true("mtest 0.6.0 (mojo 1.0.0b2\\x0Afake)\n" in out)
     assert_true("root: /r\\x1B[2Koot   selected: 1 files" in out)
     assert_false("\x1b" in out)
+
+
+# --- Escape sites reached only by the retry, precompile, and compile-timeout
+# --- paths. Each test is named for ONE escape call and fails when that call
+# --- alone is deleted, so no site is covered only by a neighbour's assertion.
+
+
+def _line_starting_with(text: String, prefix: String) -> String:
+    """The first line of `text` beginning with `prefix`, or `""` if none does.
+
+    Lets a test compare a whole rendered line with `assert_equal` instead of
+    probing it for fragments, so column padding and field order are pinned
+    along with the escaping.
+    """
+    for line in text.split("\n"):
+        if String(line).startswith(prefix):
+            return String(line)
+    return String("")
+
+
+def _feed_attempt(
+    mut c: ConsoleReporter,
+    path: String = "t.mojo",
+    step: String = "run",
+    classification: String = "signal",
+):
+    """One non-final retry attempt, rendered as a TRY line."""
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(
+        Event.attempt_finished(
+            path,
+            step,
+            1,
+            2,
+            0,
+            1,
+            0,
+            1,
+            False,
+            True,
+            classification,
+            0.5,
+            List[UInt8](),
+            List[UInt8](),
+            False,
+            False,
+            List[String](),
+        )
+    )
+
+
+def test_try_line_scalarizes_the_path() raises:
+    # console.mojo `_on_attempt_finished`: `_col(escape_scalar(e.path), ...)`.
+    # The whole line is pinned, so the escape is asserted together with the
+    # column padding it feeds — a raw ESC would both address the terminal and
+    # silently shift the columns.
+    var c = _console()
+    _feed_attempt(c, path="a\x1b[2Kb.mojo")
+    var out = c.output()
+    assert_equal(
+        _line_starting_with(out, "TRY"),
+        "TRY            "
+        + "a\\x1B[2Kb.mojo"
+        + "                  "
+        + "attempt 1/2  run signal  (exit 1)  0.50s",
+    )
+    assert_false("\x1b" in out)
+
+
+def test_try_line_scalarizes_the_step_label() raises:
+    # console.mojo `_on_attempt_finished`: `escape_scalar(e.step)`.
+    var c = _console()
+    _feed_attempt(c, step="ru\x1b[2Kn")
+    var out = c.output()
+    assert_equal(
+        _line_starting_with(out, "TRY"),
+        "TRY            "
+        + "t.mojo                          "
+        + "attempt 1/2  ru\\x1B[2Kn signal  (exit 1)  0.50s",
+    )
+    assert_false("\x1b" in out)
+
+
+def test_try_line_scalarizes_the_classification_tag() raises:
+    # console.mojo `_on_attempt_finished`: `escape_scalar(e.classification)`.
+    var c = _console()
+    _feed_attempt(c, classification="sig\x1b[2Knal")
+    var out = c.output()
+    assert_equal(
+        _line_starting_with(out, "TRY"),
+        "TRY            "
+        + "t.mojo                          "
+        + "attempt 1/2  run sig\\x1B[2Knal  (exit 1)  0.50s",
+    )
+    assert_false("\x1b" in out)
+
+
+def test_precompile_casualty_paths_are_scalarized() raises:
+    # console.mojo `_on_precompile_failed`: `escape_scalar(c)` over casualties.
+    # A casualty is a file path the run denied; it is named, not counted, so a
+    # hostile name reaches the console on its own line.
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 2, 0))
+    c.handle(
+        Event.precompile_failed(
+            "precompile src/mtest",
+            "error: boom\n",
+            0,
+            casualties=[
+                String("tests/a\x1b[2Kb.mojo"),
+                String("tests/plain.mojo"),
+            ],
+        )
+    )
+    var out = c.output()
+    assert_true("\n  tests/a\\x1B[2Kb.mojo\n  tests/plain.mojo\n" in out)
+    assert_false("\x1b" in out)
+
+
+def test_compile_timeout_banner_scalarizes_the_path() raises:
+    # console.mojo `_render_compile_timeout`: `escape_scalar(e.path)` in the
+    # framed banner header.
+    var c = _console()
+    _feed_compile_timeout(c, path="tests/a\x1b[2Kb.mojo")
+    var out = c.output()
+    # Scoped to THIS line, not the whole buffer: the reproduce line below
+    # renders the same path through a different call, so a buffer-wide check
+    # would go red for either site and name neither.
+    assert_equal(
+        _line_starting_with(out, "--- COMPILE-TIMEOUT"),
+        (
+            "--- COMPILE-TIMEOUT tests/a\\x1B[2Kb.mojo (timed out after 1s) —"
+            " mtest killed the build at the compile timeout; the compiler said:"
+            " ---"
+        ),
+    )
+
+
+def test_compile_timeout_banner_escapes_and_fences_the_compiler_output() raises:
+    # console.mojo `_render_compile_timeout`: `_safe_block(...)` over the
+    # compiler's captured stderr. The compiler is a child process, so its
+    # diagnostics are as untrusted as a test's own stdout.
+    var c = _console()
+    _feed_compile_timeout(
+        c, stderr_text="mojo: note: \x1b[2Klowering\nmojo: note: still\n"
+    )
+    var out = c.output()
+    assert_true(
+        "\n    | mojo: note: \\x1B[2Klowering\n    | mojo: note: still\n" in out
+    )
+    assert_false("\x1b" in out)
+
+
+def test_compile_timeout_reproduce_scalarizes_the_path() raises:
+    # console.mojo `_compile_timeout_repro`: `shell_quote(escape_scalar(e.path))`.
+    # Escaping precedes quoting, so the quoting covers the text on screen and
+    # the reproduce command stays exactly one console line.
+    var c = _console()
+    _feed_compile_timeout(c, path="tests/a\x1b[2Kb.mojo")
+    var out = c.output()
+    # The whole line, exactly — including the quoting the escape feeds. Scoped
+    # to this line for the same reason the banner test is: the banner above
+    # renders the same path through its own call.
+    assert_equal(
+        _line_starting_with(out, "reproduce:"),
+        "reproduce: mtest --compile-timeout 1 'tests/a\\x1B[2Kb.mojo'",
+    )

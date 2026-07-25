@@ -945,9 +945,13 @@ Facts about this build worth knowing before you rely on it:
   child or the compiler produced is neutralized before printing: control
   characters become visible escapes (`\x1B`, `\x00`, `\u009B`) and multi-line
   blocks are fenced behind a `    | ` gutter, so a test cannot repaint your
-  terminal or forge a line that reads as mtest's own. The JUnit report, the
-  annotations, and the `--json` stream are unaffected and still carry the raw
-  text under their own escaping.
+  terminal or forge a line that reads as mtest's own. The GitHub annotation
+  tail prints to the same destination and gets the same treatment, on top of
+  its own `%25`/`%0A`/`%0D` workflow encoding. The JUnit report and the
+  `--json` stream are written elsewhere and are unaffected \u2014 they still carry
+  the raw text under their own escaping. This stops the child *doing* things,
+  not *looking* like things: bidi overrides and homoglyphs pass through, so a
+  test name can still be visually misleading.
 - **`--maxfail` is checked between files.** A file already in flight always
   finishes, so a file with several failing tests can push the count past
   `N` before scheduling stops.

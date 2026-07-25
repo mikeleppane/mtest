@@ -497,12 +497,26 @@ mtest's own labels, separators, and ANSI color are applied **after** escaping
 and are never escaped, so `--color always` still paints mtest's lines while a
 child's `ESC [ 3 1 m` shows up as the literal text `\x1B[31m`.
 
+The same neutralization applies to the **GitHub annotation tail** (§15.3), which
+mtest prints to this same resolved console destination and which is therefore a
+terminal surface as well as a workflow one.
+
 This boundary is **display-only**. It does not change what mtest captures, what
-its parser reads, or what the JUnit report (§15.2), the GitHub annotations
-(§15.3), or the machine event stream (§15.4) contain: those carry the raw text
-under their own formats' escaping rules. Console text layout remains
+its parser reads, or what the JUnit report (§15.2) or the machine event stream
+(§15.4) contain: those are written to their own destinations and carry the raw
+text under their own formats' escaping rules. Console text layout remains
 **informal** (§20); the guarantee that no child-controlled control character
 reaches the terminal unescaped is not.
+
+**Explicit non-goal: visual spoofing.** The boundary answers "can the child
+drive the terminal", not "can the child mislead the reader". Code points that
+reorder or disguise text while executing nothing — the bidi overrides and
+isolates (`U+202A`..`U+202E`, `U+2066`..`U+2069`), zero-width characters, and
+confusable homoglyphs — are passed through **unchanged, by design**. They are a
+rendering-layer concern with no single correct answer for a terminal, and
+escaping them would corrupt legitimate right-to-left test names and assertion
+text. A test name can therefore still *look* like something it is not; it can no
+longer *do* anything.
 
 A **live progress counter** — a running `completed/total` line naming the files
 currently in flight — is drawn during a parallel run (`-n`/`--workers` > 1). It is
@@ -651,7 +665,15 @@ make per-kind grouping the deterministic, unambiguous form.
 CR→`%0D`, LF→`%0A`) and each `file=` value via the property escaper (adds
 `:`→`%3A`, `,`→`%2C`); user-controlled paths, names, and assertion text are never
 interpolated raw into a workflow command, and an escaped-away CR/LF means a
-would-be forged second command line can never form. Each message is bounded to
+would-be forged second command line can never form. Both escapers then apply the
+console's terminal-safety mapping (§15.1) to what remains, because mtest prints
+this tail to the **console destination**, which may be a terminal: every C0
+control other than the already-encoded CR/LF, plus DEL and the C1 controls,
+becomes visible `\xHH`/`\u00HH` text. Tab rides through literally — it is legal
+in a workflow command and addresses nothing. The order is load-bearing: the
+workflow encoding runs first, so `%0D` and `%0A` survive as GitHub's own
+line-folding rather than being rewritten into visible escapes. Each message is
+bounded to
 **4096 escaped bytes** (measured after escaping), with a truncation marker when
 cut. The **per-run per-STEP caps are 10 errors and 10 warnings** (a workflow STEP
 is capped at 10 error and 10 warning annotations; the "50" some readers conflate

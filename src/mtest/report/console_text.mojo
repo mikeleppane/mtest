@@ -1,4 +1,4 @@
-"""The console's text-safety boundary for untrusted, child-controlled text.
+"""The terminal text-safety boundary for untrusted, child-controlled text.
 
 Everything mtest prints for a human passes through a terminal emulator, and a
 terminal emulator is an interpreter: an ESC byte followed by a control sequence
@@ -25,10 +25,25 @@ or split. Their input is a Mojo `String`, valid UTF-8 by construction; raw child
 bytes reach that form through `lossy_utf8` first, exactly as the machine
 reporters require.
 
+Two surfaces use it, because two surfaces reach a terminal. The console renderer
+is the obvious one. The other is the GitHub annotation tail: mtest prints its
+workflow commands to the console's own descriptor, so `gh_escape_message` in
+`escape.mojo` finishes by running its result through `escape_multiline`. Sharing
+this mapping rather than copying it is deliberate — one policy, one place to
+mutation-test.
+
 The escaped result is for display only. Nothing here runs upstream of parsing,
 capture, the NDJSON stream, or the JUnit report: those keep their own raw
-semantics and their own escaping, and routing console-escaped text into them
+semantics and their own escaping, and routing terminal-escaped text into them
 would corrupt both.
+
+**Non-goal: visual spoofing.** This module answers "can the child drive the
+terminal", not "can the child mislead the reader". Code points that reorder or
+disguise text while executing nothing — the bidi overrides and isolates
+(`U+202A`..`U+202E`, `U+2066`..`U+2069`), zero-width characters, and confusable
+homoglyphs — pass through unchanged by design. They are a rendering-layer
+concern with no single correct answer for a terminal, and escaping them would
+corrupt legitimate right-to-left test names and assertion text.
 """
 
 
