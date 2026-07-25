@@ -258,7 +258,15 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 1198
+CLASSIFIED_TEST_COUNT = 1200
+CLASSIFIED_ROOTS = (
+    Path("tests/unit"),
+    Path("tests/integration"),
+)
+CLASSIFIED_PACKAGE_MARKERS = {
+    Path("tests/unit/__init__.mojo"),
+    Path("tests/integration/__init__.mojo"),
+}
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",
@@ -565,12 +573,88 @@ def check_classified_entrypoint(
         )
 
 
+def classified_mojo_universe(root: Path) -> tuple[set[Path], set[Path]]:
+    """Return regular and symlinked Mojo paths beneath both classified roots.
+
+    Walks every directory entry under `tests/unit` and `tests/integration`
+    without following directory symlinks. A regular file joins the Mojo
+    universe when `.mojo` appears anywhere in its suffixes, so a misnamed
+    `helper.mojo` and a parked `test_probe.mojo.disabled` are both visible to
+    the caller rather than invisible to a `test_*.mojo` glob.
+
+    Args:
+        root: The repository root the classified suite directories live under.
+
+    Returns:
+        A pair of root-relative path sets: every regular Mojo-like file, and
+        every symlinked entry regardless of its target or suffix.
+    """
+    regular: set[Path] = set()
+    symlinked: set[Path] = set()
+    for classified_root in CLASSIFIED_ROOTS:
+        absolute = root / classified_root
+        if not absolute.is_dir():
+            continue
+        for directory, dirnames, filenames in os.walk(absolute, followlinks=False):
+            current = Path(directory)
+            retained: list[str] = []
+            for name in dirnames:
+                if (current / name).is_symlink():
+                    symlinked.add((current / name).relative_to(root))
+                else:
+                    retained.append(name)
+            dirnames[:] = retained
+            for name in filenames:
+                path = current / name
+                relative = path.relative_to(root)
+                if path.is_symlink():
+                    symlinked.add(relative)
+                elif ".mojo" in relative.suffixes:
+                    regular.add(relative)
+    return regular, symlinked
+
+
+def check_classified_mojo_inventory(root: Path) -> None:
+    """Require the classified roots to hold exactly the registered Mojo files.
+
+    Args:
+        root: The repository root the classified suite directories live under.
+
+    Raises:
+        AssertionError: A symlink sits under a classified root, or the Mojo
+            universe there differs from the registered suites plus the two
+            package markers in either direction.
+    """
+    regular, symlinked = classified_mojo_universe(root)
+    if symlinked:
+        raise AssertionError(
+            "symlinked classified path: "
+            f"{sorted(path.as_posix() for path in symlinked)}"
+        )
+    expected = {Path(path) for path in CLASSIFIED_PATHS} | CLASSIFIED_PACKAGE_MARKERS
+    unexpected = regular - expected
+    if unexpected:
+        raise AssertionError(
+            "unexpected classified Mojo file: "
+            f"{sorted(path.as_posix() for path in unexpected)}"
+        )
+    missing = expected - regular
+    if missing:
+        raise AssertionError(
+            "missing classified Mojo file: "
+            f"{sorted(path.as_posix() for path in missing)}"
+        )
+
+
 def check_suite_layout() -> None:
     """Every aggregate module and support module has its classified home."""
     _require_nonempty("unit suite", UNIT_SUITES)
     _require_nonempty("integration suite", INTEGRATION_SUITES)
     _require_nonempty("classified path", CLASSIFIED_PATHS)
+    _require_nonempty("classified root", CLASSIFIED_ROOTS)
+    _require_nonempty("classified package marker", CLASSIFIED_PACKAGE_MARKERS)
     _require_nonempty("support module", SUPPORT_MODULES)
+    check_classified_mojo_inventory(REPO_ROOT)
     tests_dir = REPO_ROOT / "tests"
     actual_unit = {path.name for path in (tests_dir / "unit").glob("test_*.mojo")}
     actual_integration = {

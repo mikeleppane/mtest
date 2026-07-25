@@ -16,6 +16,7 @@ from scripts.harness.watchdog import (
     Cancelled,
     Exited,
     HarnessError,
+    MarkerRetention,
     Signaled,
     TimedOut,
     TIMEOUT_EXIT_CODE,
@@ -26,6 +27,20 @@ from scripts.harness.watchdog import (
 PYTHON = sys.executable
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WATCHDOG_COMMAND = [PYTHON, "-m", "scripts.harness.watchdog"]
+
+# One 64 KiB pipe buffer is the capacity a single blocking write can fill; the
+# flooding actor writes eight of them before its marker, so an undrained pipe
+# would deadlock the child long before it ever reached the line under test.
+FLOOD_LINE = "x" * 127 + "\n"
+FLOOD_LINE_COUNT = 4096
+MARKER_PREFIX = "==> "
+FLOOD_MARKERS = (
+    "==> tests/unit/test_first.mojo\n",
+    "==> tests/unit/test_crashing.mojo\n",
+)
+# Every flooding case must finish well inside this guard: the longest is the
+# timeout case at one second of deadline plus the five-second sweep grace.
+FLOOD_GUARD_SECONDS = 30.0
 
 
 def _wait_for_paths(paths: tuple[Path, ...], timeout_seconds: float = 3.0) -> None:
@@ -567,6 +582,108 @@ def test_cancellation_wins_when_spawn_then_raises() -> None:
             raise AssertionError("spawn cancellation left the deadline sentinel")
 
 
+class _TextOverBytes:
+    """A stdout/stderr stand-in exposing the byte buffer the watchdog tees to."""
+
+    def __init__(self, handle: object) -> None:
+        self.buffer = handle
+
+    def write(self, text: str) -> int:
+        """Encode one diagnostic string onto the captured byte buffer."""
+        return self.buffer.write(text.encode("utf-8"))
+
+    def flush(self) -> None:
+        """Flush the captured byte buffer."""
+        self.buffer.flush()
+
+
+def _flooding_marker_actor(tmp: Path) -> Path:
+    """Write an actor that floods past the pipe capacity before its markers."""
+    actor = tmp / "flooding_marker_actor.py"
+    actor.write_text(
+        "\n".join(
+            [
+                "import os",
+                "import signal",
+                "import sys",
+                "import time",
+                "mode = sys.argv[1]",
+                f"sys.stdout.write({FLOOD_LINE!r} * {FLOOD_LINE_COUNT})",
+                f"sys.stdout.write({FLOOD_MARKERS[0]!r})",
+                f"sys.stdout.write({FLOOD_MARKERS[1]!r})",
+                "sys.stdout.flush()",
+                "if mode == 'ordinary':",
+                "    raise SystemExit(5)",
+                "if mode == 'signal':",
+                "    os.kill(os.getpid(), signal.SIGTERM)",
+                "time.sleep(60)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return actor
+
+
+def test_flooding_child_is_drained_teed_and_marked() -> None:
+    """Every ending drains the flood, tees it whole, and keeps the last marker."""
+    expected_terminations = {
+        "ordinary": Exited(5),
+        "signal": Signaled(signal.SIGTERM),
+        "timeout": TimedOut(),
+    }
+    expected_output = (
+        FLOOD_LINE * FLOOD_LINE_COUNT + FLOOD_MARKERS[0] + FLOOD_MARKERS[1]
+    ).encode("utf-8")
+    for mode, expected in expected_terminations.items():
+        with tempfile.TemporaryDirectory(prefix="mtest-watchdog-flood-") as raw_tmp:
+            tmp = Path(raw_tmp)
+            actor = _flooding_marker_actor(tmp)
+            sentinel = tmp / "deadline-sentinel"
+            sentinel.touch()
+            retention = MarkerRetention(MARKER_PREFIX)
+            teed = tmp / "teed-stdout"
+            diagnostics = tmp / "teed-stderr"
+            original_stdout = sys.stdout
+            original_stderr = sys.stderr
+            started = time.monotonic()
+            with teed.open("wb") as stdout_handle:
+                with diagnostics.open("wb") as stderr_handle:
+                    sys.stdout = _TextOverBytes(stdout_handle)
+                    sys.stderr = _TextOverBytes(stderr_handle)
+                    try:
+                        termination = run_command(
+                            [PYTHON, str(actor), mode],
+                            source="tests/unit/test_watchdog.mojo",
+                            step="run",
+                            timeout_seconds=1.0,
+                            deadline_sentinel=sentinel,
+                            marker_retention=retention,
+                        )
+                    finally:
+                        sys.stdout = original_stdout
+                        sys.stderr = original_stderr
+            elapsed = time.monotonic() - started
+            if termination != expected:
+                raise AssertionError(
+                    f"flooding {mode} returned {termination!r}, expected {expected!r}"
+                )
+            if elapsed >= FLOOD_GUARD_SECONDS:
+                raise AssertionError(
+                    f"flooding {mode} took {elapsed:.1f}s, past the outer guard"
+                )
+            actual = teed.read_bytes()
+            if actual != expected_output:
+                raise AssertionError(
+                    f"flooding {mode} teed {len(actual)} bytes, "
+                    f"expected {len(expected_output)}"
+                )
+            if retention.text != FLOOD_MARKERS[1]:
+                raise AssertionError(
+                    f"flooding {mode} retained {retention.text!r}, "
+                    f"expected {FLOOD_MARKERS[1]!r}"
+                )
+
+
 def main() -> int:
     """Run every watchdog invariant without an external test framework."""
     for test in (
@@ -587,6 +704,7 @@ def main() -> int:
         test_sigint_is_forwarded_to_the_process_group,
         test_first_signal_wins_during_forced_cleanup,
         test_cancellation_wins_when_spawn_then_raises,
+        test_flooding_child_is_drained_teed_and_marked,
     ):
         test()
     print("process-watchdog: OK")

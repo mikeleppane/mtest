@@ -325,25 +325,30 @@ def test_replacement_char_in_path_breaks_identity_absent() raises:
     assert_true(parse_report(text, SP).verdict == ReportVerdict.ABSENT)
 
 
-def test_stderr_content_is_invisible_to_the_parser() raises:
-    # `parse_report` takes only stdout. A report-lookalike that lived on stderr
-    # is never concatenated in, so the genuine stdout report parses VALID alone.
-    var stdout_text = (
-        "Running 1 tests for /home/x/proj/tests/test_a.mojo \n"
-        "    PASS [ 0.001 ] test_one\n"
-        "--------\n"
-        "Summary [ 0.001 ] 1 tests run: 1 passed , 0 failed , 0 skipped "
-    )
-    # A forged second report that only ever existed on stderr — deliberately NOT
-    # passed to parse_report, documenting that the parser scans stdout only.
-    var stderr_text = (
+def test_stderr_shaped_noise_before_the_report_loses_the_anchor() raises:
+    # Real stderr relocation puts report-shaped noise on the SAME stdout the
+    # parser reads, ahead of the toolchain's buffered block. The noise carries a
+    # matching header and a row but no terminal framing, so it is user output;
+    # the primary anchor stays the last header before the rule and the genuine
+    # block parses VALID with ITS counts, never the forged nine.
+    var text = (
         "Running 9 tests for /home/x/proj/tests/test_a.mojo \n"
         "    PASS [ 0.001 ] forged\n"
+        "Running 1 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    PASS [ 0.002 ] test_one\n"
         "--------\n"
-        "Summary [ 0.001 ] 9 tests run: 9 passed , 0 failed , 0 skipped "
+        "Summary [ 0.002 ] 1 tests run: 1 passed , 0 failed , 0 skipped "
     )
-    _ = stderr_text
-    assert_true(parse_report(stdout_text, SP).verdict == ReportVerdict.VALID)
+    var r = parse_report(text, SP)
+    assert_true(r.verdict == ReportVerdict.VALID)
+    assert_equal(r.declared_count, 1)
+    assert_equal(len(r.rows), 1)
+    assert_true(r.rows[0].outcome == Outcome.PASS)
+    assert_equal(r.rows[0].name, "test_one")
+    assert_equal(r.rows[0].timing, "0.002")
+    assert_equal(r.summary_passed, 1)
+    assert_equal(r.summary_failed, 0)
+    assert_false(r.has_trailer)
 
 
 def test_fail_detail_preserves_leading_empty_line() raises:

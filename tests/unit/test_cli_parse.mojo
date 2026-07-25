@@ -9,7 +9,13 @@ count modest.
 """
 from std.testing import assert_equal, assert_false, assert_raises, assert_true
 
-from mtest.cli import ParseResult, parse_args, version_text, help_text
+from mtest.cli import (
+    ParseResult,
+    flag_specs,
+    help_text,
+    parse_args,
+    version_text,
+)
 from mtest.config import ColorWhen, ShowOutput, Verbosity
 
 
@@ -246,5 +252,41 @@ def test_version_text_uses_version_constant() raises:
     assert_equal(version_text(), "mtest 0.6.0")
 
 
-def test_help_text_mentions_usage() raises:
-    assert_true("usage: mtest" in help_text())
+def _rendered_option_spellings() -> List[String]:
+    """Every flag spelling the generated help physically renders, in row order.
+
+    Reads only the label region of each option row — the text before the
+    padding that separates a label from its description — and splits the alias
+    pairs the renderer collapses onto one physical row.
+    """
+    var spellings = List[String]()
+    for line_slice in help_text().split("\n"):
+        var line = String(line_slice)
+        if not line.startswith("  -"):
+            continue
+        var row = String(line.removeprefix("  "))
+        var label = String(row.split("  ")[0])
+        for part_slice in label.split(", "):
+            var spelling = String(String(part_slice).split(" ")[0])
+            spellings.append(spelling^)
+    return spellings^
+
+
+def test_help_renders_exactly_the_flag_spec_option_set() raises:
+    # The rendered option set IS the flag inventory: every spec reaches the
+    # help exactly once, and the help invents nothing the parser cannot accept.
+    var rendered = _rendered_option_spellings()
+    var specs = flag_specs()
+    assert_equal(len(rendered), len(specs))
+    for spec in specs:
+        var matches = 0
+        for spelling in rendered:
+            if spelling == spec.spelling:
+                matches += 1
+        assert_equal(matches, 1, "help does not render once: " + spec.spelling)
+    for spelling in rendered:
+        var declared = False
+        for spec in specs:
+            if spec.spelling == spelling:
+                declared = True
+        assert_true(declared, "help renders an unknown option: " + spelling)

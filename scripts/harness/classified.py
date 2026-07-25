@@ -22,6 +22,7 @@ AGGREGATE_BINARY = Path("build/tests/aggregate")
 NATIVE_TEST_OBJECT = Path("build/native/mtest_exec_native_test.o")
 TIMEOUT_ENV = "MTEST_TEST_ALL_TIMEOUT_SECONDS"
 INTERNAL_ERROR_EXIT_CODE = 70
+MODULE_MARKER_PREFIX = "==> "
 
 Supervisor = Callable[..., watchdog.Termination]
 
@@ -33,6 +34,29 @@ class StepResult:
     source: str
     step: str
     termination: watchdog.Termination
+    last_module: str | None = None
+    """The classified module the step had started when it ended, if known."""
+
+
+def _last_module(output: str) -> str | None:
+    """Return the path in the last complete aggregate module marker.
+
+    Args:
+        output: Retained aggregate stdout text. A trailing fragment with no
+            newline is an incomplete marker and never contributes.
+
+    Returns:
+        The module path from the last complete ``==> <path>`` line, or None
+        when the text carries no complete module marker.
+    """
+    last: str | None = None
+    for line in output.split("\n")[:-1]:
+        if not line.startswith(MODULE_MARKER_PREFIX):
+            continue
+        candidate = line[len(MODULE_MARKER_PREFIX) :].rstrip()
+        if candidate.startswith("tests/") and candidate.endswith(".mojo"):
+            last = candidate
+    return last
 
 
 def _normalized_roots(repo_root: Path, paths: Sequence[str]) -> list[Path]:
@@ -99,8 +123,29 @@ def _run_step(
     step: str,
     timeout_seconds: float,
     supervisor: Supervisor,
+    marker_prefix: str | None = None,
 ) -> StepResult:
-    """Supervise one step and independently reconcile its deadline sentinel."""
+    """Supervise one step and independently reconcile its deadline sentinel.
+
+    Args:
+        command: Direct executable argv for this step.
+        repo_root: Repository root the sentinel and child are anchored at.
+        source: Which pipeline artifact this step belongs to.
+        step: Either ``build`` or ``run``.
+        timeout_seconds: Wall-clock ceiling handed to the supervisor.
+        supervisor: The watchdog entrypoint that runs the command.
+        marker_prefix: When given, the step's stdout is teed through the
+            supervisor so the last complete module marker survives the ending.
+
+    Returns:
+        The step's structured termination plus, when a marker prefix was
+        requested, the last classified module the step had started.
+    """
+    retention = (
+        None
+        if marker_prefix is None
+        else watchdog.MarkerRetention(marker_prefix)
+    )
     sentinel = repo_root / _sentinel_for(source, step)
     try:
         sentinel.parent.mkdir(parents=True, exist_ok=True)
@@ -120,6 +165,7 @@ def _run_step(
             timeout_seconds=timeout_seconds,
             deadline_sentinel=sentinel,
             cwd=repo_root,
+            marker_retention=retention,
         )
     except Exception as exc:
         try:
@@ -138,7 +184,12 @@ def _run_step(
             watchdog.HarnessError(f"supervisor raised: {exc}"),
         )
     termination = watchdog.validate_deadline_proof(termination, sentinel)
-    return StepResult(source, step, termination)
+    return StepResult(
+        source,
+        step,
+        termination,
+        None if retention is None else _last_module(retention.text),
+    )
 
 
 def _build_commands() -> tuple[tuple[str, list[str]], ...]:
@@ -219,6 +270,7 @@ def run_pipeline(
         step="run",
         timeout_seconds=timeout_seconds,
         supervisor=supervisor,
+        marker_prefix=MODULE_MARKER_PREFIX,
     )
 
 
@@ -235,12 +287,18 @@ def _exit_for_result(result: StepResult) -> int:
     """Map one structured pipeline result to the classified command contract."""
     termination = result.termination
     label = f"{result.source} ({result.step}"
+    # A failed aggregate is one binary covering the whole classified inventory,
+    # so the ending alone says nothing about where it stopped. Name the last
+    # module it announced whenever the run reached one.
+    provenance = (
+        "" if result.last_module is None else f"; last module: {result.last_module}"
+    )
     if isinstance(termination, watchdog.Exited):
         if termination.code == 0:
             print("All aggregate test modules passed.")
             return 0
         print(
-            f"FAILED: {label} exit {termination.code})",
+            f"FAILED: {label} exit {termination.code}){provenance}",
             file=sys.stderr,
         )
         return 1
@@ -250,7 +308,7 @@ def _exit_for_result(result: StepResult) -> int:
         )
         print(
             f"FATAL: classified: stopping after timed-out {timed_out_source} "
-            f"{result.step}",
+            f"{result.step}{provenance}",
             file=sys.stderr,
         )
         return watchdog.TIMEOUT_EXIT_CODE
@@ -263,7 +321,7 @@ def _exit_for_result(result: StepResult) -> int:
         return INTERNAL_ERROR_EXIT_CODE
     if isinstance(termination, watchdog.Signaled):
         print(
-            f"CRASHED: {label} signal {termination.signo})",
+            f"CRASHED: {label} signal {termination.signo}){provenance}",
             file=sys.stderr,
             flush=True,
         )

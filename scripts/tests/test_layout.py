@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -23,6 +24,8 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
             ("UNIT_SUITES", layout.check_suite_layout),
             ("INTEGRATION_SUITES", layout.check_suite_layout),
             ("CLASSIFIED_PATHS", layout.check_suite_layout),
+            ("CLASSIFIED_ROOTS", layout.check_suite_layout),
+            ("CLASSIFIED_PACKAGE_MARKERS", layout.check_suite_layout),
             ("SUPPORT_MODULES", layout.check_suite_layout),
             ("EXEC_FIXTURES", layout.check_exec_fixture_layout),
             ("E2E_NATIVE_FIXTURES", layout.check_e2e_native_fixture_layout),
@@ -57,6 +60,137 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
                 "top-level scripts membership mismatch",
             ):
                 layout.check_top_level_script_layout(repo)
+
+
+class ClassifiedMojoUniverseTests(unittest.TestCase):
+    """The classified roots hold exactly the registered Mojo files, and no links."""
+
+    SOLE_SUITE = "tests/unit/test_probe.mojo"
+
+    def _accepted_tree(self, repo: Path) -> None:
+        """Create both package markers plus the one registered classified suite."""
+        for relative in (
+            "tests/unit/__init__.mojo",
+            "tests/integration/__init__.mojo",
+            self.SOLE_SUITE,
+        ):
+            path = repo / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("def test_probe():\n    pass\n", encoding="utf-8")
+
+    def test_universe_separates_regular_mojo_files_from_symlinked_entries(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            self._accepted_tree(repo)
+            for relative in (
+                "tests/unit/session_shard_test.mojo",
+                "tests/integration/test_probe.mojo.disabled",
+                "tests/unit/helper.mojo",
+                "outside.mojo",
+                "tests/unit/notes.txt",
+            ):
+                (repo / relative).write_text("", encoding="utf-8")
+            os.symlink(repo / "outside.mojo", repo / "tests/unit/test_link.mojo")
+            os.symlink(repo / "tests" / "integration", repo / "tests/unit/linked")
+
+            regular, symlinked = layout.classified_mojo_universe(repo)
+
+        self.assertEqual(
+            regular,
+            {
+                Path("tests/unit/__init__.mojo"),
+                Path("tests/unit/test_probe.mojo"),
+                Path("tests/unit/session_shard_test.mojo"),
+                Path("tests/unit/helper.mojo"),
+                Path("tests/integration/__init__.mojo"),
+                Path("tests/integration/test_probe.mojo.disabled"),
+            },
+        )
+        self.assertEqual(
+            symlinked,
+            {Path("tests/unit/test_link.mojo"), Path("tests/unit/linked")},
+        )
+
+    def test_registered_suites_and_package_markers_are_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            self._accepted_tree(repo)
+
+            with mock.patch.object(
+                layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)
+            ):
+                layout.check_classified_mojo_inventory(repo)
+
+    def test_every_unregistered_mojo_name_is_rejected(self) -> None:
+        cases = (
+            "tests/unit/session_shard_test.mojo",
+            "tests/integration/test_probe.mojo.disabled",
+            "tests/unit/helper.mojo",
+        )
+        for relative in cases:
+            with self.subTest(escape=relative):
+                with tempfile.TemporaryDirectory() as raw_tmp:
+                    repo = Path(raw_tmp)
+                    self._accepted_tree(repo)
+                    (repo / relative).write_text("", encoding="utf-8")
+
+                    with mock.patch.object(
+                        layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)
+                    ):
+                        with self.assertRaisesRegex(
+                            AssertionError, "unexpected classified Mojo file"
+                        ):
+                            layout.check_classified_mojo_inventory(repo)
+
+    def test_symlinked_classified_paths_are_rejected(self) -> None:
+        cases = (
+            ("tests/unit/test_link.mojo", "outside.mojo"),
+            ("tests/unit/linked", "tests/integration"),
+        )
+        for relative, target in cases:
+            with self.subTest(link=relative):
+                with tempfile.TemporaryDirectory() as raw_tmp:
+                    repo = Path(raw_tmp)
+                    self._accepted_tree(repo)
+                    (repo / "outside.mojo").write_text("", encoding="utf-8")
+                    os.symlink(repo / target, repo / relative)
+
+                    with mock.patch.object(
+                        layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)
+                    ):
+                        with self.assertRaisesRegex(
+                            AssertionError, "symlinked classified path"
+                        ):
+                            layout.check_classified_mojo_inventory(repo)
+
+    def test_a_registered_suite_that_vanished_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            self._accepted_tree(repo)
+            (repo / self.SOLE_SUITE).unlink()
+
+            with mock.patch.object(
+                layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)
+            ):
+                with self.assertRaisesRegex(
+                    AssertionError, "missing classified Mojo file"
+                ):
+                    layout.check_classified_mojo_inventory(repo)
+
+    def test_repository_suite_layout_walks_the_repository_universe(self) -> None:
+        roots: list[Path] = []
+        walk = layout.classified_mojo_universe
+
+        def recording(root: Path) -> tuple[set[Path], set[Path]]:
+            roots.append(root)
+            return walk(root)
+
+        with mock.patch.object(layout, "classified_mojo_universe", recording):
+            layout.check_suite_layout()
+
+        self.assertEqual(roots, [layout.REPO_ROOT])
 
 
 class AggregateMembershipOracleTests(unittest.TestCase):

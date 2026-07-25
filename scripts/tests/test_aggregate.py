@@ -74,6 +74,14 @@ class AggregateRenderingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not define main"):
             aggregate.test_function_names(source + "\ndef main():\n    pass\n")
 
+    def test_obsolete_fn_declarations_are_not_silently_accepted(self) -> None:
+        # `fn test_*` is 1.0.0b2-invalid Mojo, so the parser must report an
+        # empty module rather than registering a declaration that cannot
+        # compile. The complete-file classified inventory closes the matching
+        # silent-drop path for a module the aggregate never imports at all.
+        with self.assertRaisesRegex(ValueError, "declares no test_\\* functions"):
+            aggregate.test_function_names("fn test_old():\n    pass\n")
+
     def test_entrypoint_imports_and_registers_each_module_in_order(self) -> None:
         modules = [
             aggregate.TestModule(

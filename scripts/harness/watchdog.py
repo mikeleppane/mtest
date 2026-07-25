@@ -10,9 +10,11 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import IO
 
 
 # The per-step wall-clock ceiling. It bounds a single classified build or run so
@@ -24,6 +26,16 @@ DEFAULT_TIMEOUT_SECONDS = 900.0
 TERMINATION_GRACE_SECONDS = 5.0
 TIMEOUT_EXIT_CODE = 124
 _FORWARDED_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+# One read of a captured pipe. A child that floods faster than the caller's
+# terminal drains must never block on a full pipe, so the drainers read
+# whatever is available rather than waiting for a fixed-size block.
+_PIPE_CHUNK_BYTES = 65536
+# The longest run of bytes a marker line may occupy. Anything longer cannot be
+# a marker, so it is discarded rather than retained, which bounds the memory a
+# flooding child can make the supervisor hold.
+_MARKER_SCAN_LIMIT_BYTES = 65536
+# How long a drainer may still hold a pipe open after the child group is gone.
+_DRAIN_JOIN_SECONDS = 10.0
 
 
 @dataclass(frozen=True)
@@ -62,11 +74,116 @@ class HarnessError:
 Termination = Exited | Signaled | TimedOut | Cancelled | HarnessError
 
 
+@dataclass
+class MarkerRetention:
+    """Bounded retention of one marker line drained from a child's stdout.
+
+    The watchdog keeps at most a single line — the last complete one beginning
+    with `prefix` — so supervising a child that floods its stdout costs a fixed
+    amount of memory rather than growing with the output.
+    """
+
+    prefix: str
+    """The line prefix a retained marker must start with."""
+    text: str = ""
+    """The last complete matching line, newline included; empty when none."""
+
+
 class _WatchdogCancellation(BaseException):
     """Carry one caller cancellation out of the blocking child wait."""
 
     def __init__(self, signum: int) -> None:
         self.signum = signum
+
+
+def _tee_stream(
+    source: IO[bytes],
+    sink: IO[bytes] | None,
+    retention: MarkerRetention | None,
+) -> None:
+    """Drain one captured pipe onto the caller's stream, retaining a marker.
+
+    Args:
+        source: The child's pipe read end. Closed before returning.
+        sink: The caller's original byte stream, or None when it has none.
+        retention: Marker state to update in place, or None to only tee.
+    """
+    prefix = b"" if retention is None else retention.prefix.encode("utf-8")
+    pending = b""
+    discarding = False
+    try:
+        while True:
+            try:
+                chunk = source.read1(_PIPE_CHUNK_BYTES)
+            except (OSError, ValueError):
+                break
+            if not chunk:
+                break
+            if sink is not None:
+                try:
+                    sink.write(chunk)
+                    sink.flush()
+                except (OSError, ValueError):
+                    # The contributor's stream is gone; keep draining so the
+                    # child cannot deadlock on a pipe nobody is reading.
+                    sink = None
+            if retention is None:
+                continue
+            pending += chunk
+            while True:
+                break_at = pending.find(b"\n")
+                if break_at < 0:
+                    break
+                line = pending[: break_at + 1]
+                pending = pending[break_at + 1 :]
+                if not discarding and line.startswith(prefix):
+                    retention.text = line.decode("utf-8", errors="replace")
+                discarding = False
+            if len(pending) > _MARKER_SCAN_LIMIT_BYTES:
+                pending = b""
+                discarding = True
+    finally:
+        try:
+            source.close()
+        except (OSError, ValueError):
+            pass
+
+
+def _start_drainers(
+    process: subprocess.Popen[object],
+    retention: MarkerRetention,
+) -> list[threading.Thread]:
+    """Start one drainer per captured pipe, before any blocking child wait.
+
+    Args:
+        process: The freshly spawned child owning both captured pipes.
+        retention: Marker state the stdout drainer updates in place.
+
+    Returns:
+        The started drainer threads, in stdout-then-stderr order.
+    """
+    targets = (
+        (process.stdout, getattr(sys.stdout, "buffer", None), retention),
+        (process.stderr, getattr(sys.stderr, "buffer", None), None),
+    )
+    threads: list[threading.Thread] = []
+    for source, sink, marker in targets:
+        if source is None:
+            continue
+        thread = threading.Thread(
+            target=_tee_stream,
+            args=(source, sink, marker),
+            daemon=True,
+        )
+        thread.start()
+        threads.append(thread)
+    return threads
+
+
+def _join_drainers(threads: list[threading.Thread]) -> None:
+    """Wait a bounded time for every drainer to reach end of file."""
+    for thread in threads:
+        thread.join(_DRAIN_JOIN_SECONDS)
 
 
 def _terminate_process_group(process: subprocess.Popen[object]) -> None:
@@ -203,6 +320,7 @@ def run_command(
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     deadline_sentinel: Path | None = None,
     cwd: Path | None = None,
+    marker_retention: MarkerRetention | None = None,
 ) -> Termination:
     """Run ``command`` and return structured, signal-truthful termination.
 
@@ -213,6 +331,9 @@ def run_command(
         timeout_seconds: Positive wall-clock ceiling for the command.
         deadline_sentinel: Pre-created file removed only after non-timeout exit.
         cwd: Optional child working directory.
+        marker_retention: When given, both child streams become pipes that
+            concurrent drainers tee to the caller's own stdout and stderr while
+            retaining the last complete marker line. Updated in place.
 
     Returns:
         Exactly one structured termination kind. ``Signaled`` is created only
@@ -235,6 +356,8 @@ def run_command(
     process: subprocess.Popen[object] | None = None
     pending_signum: int | None = None
     previous_handlers: dict[int, signal.Handlers] = {}
+    drainers: list[threading.Thread] = []
+    captured = subprocess.PIPE if marker_retention is not None else None
 
     def request_cancellation(signum: int, _frame: object) -> None:
         """Record the first signal and leave the blocking wait exactly once."""
@@ -260,6 +383,8 @@ def run_command(
                     command,
                     cwd=cwd,
                     start_new_session=True,
+                    stdout=captured,
+                    stderr=captured,
                 )
             except OSError as exc:
                 # Popen can report an exec/spawn error after a cancellation was
@@ -274,6 +399,11 @@ def run_command(
                     HarnessError(f"could not spawn child: {command[0]}: {exc}"),
                     deadline_sentinel,
                 )
+            if marker_retention is not None:
+                # Both pipes must be draining before any blocking wait: a child
+                # that outruns a 64 KiB pipe buffer would otherwise block on
+                # write while the supervisor blocks on wait.
+                drainers = _start_drainers(process, marker_retention)
             if pending_signum is not None:
                 raise _WatchdogCancellation(pending_signum)
             try:
@@ -311,6 +441,9 @@ def run_command(
             HarnessError(detail), deadline_sentinel
         )
     finally:
+        # Drain to end of file before the caller reads the retained marker, so
+        # the last line the child managed to flush is never lost to a race.
+        _join_drainers(drainers)
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
 
