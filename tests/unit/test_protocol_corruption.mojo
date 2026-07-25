@@ -524,14 +524,14 @@ def _crlf(text: String) -> String:
     return out^
 
 
-def test_crlf_report_is_intentional_off_grammar_drift() raises:
+def test_wholly_crlf_report_is_absent_not_off_grammar() raises:
     # `_split_lines` splits on LF only, so a CRLF report leaves a CR as the last
     # byte of every line and NOTHING in the grammar matches: the trailing space
-    # the header, summary, and trailer each end with is no longer terminal. The
-    # identity check runs first, so a wholly CRLF block is rejected there and
-    # reads ABSENT rather than reaching the framing checks. That is the drift
-    # being pinned — the parser is deliberately LF-only, and a CR anywhere in a
-    # structural line takes the report out of the grammar. No rows, no summary.
+    # the header, summary, and trailer each end with is no longer terminal.
+    # Identity is checked before terminal framing, so a wholly CRLF block is
+    # rejected as ABSENT and never reaches the OFF_GRAMMAR checks. The name says
+    # ABSENT because that is what this input produces; the CRLF drift itself is
+    # pinned as OFF_GRAMMAR by the next test, where identity survives.
     var r = parse_report(_crlf(_raw_two_row_fail()), SP)
     assert_true(
         r.verdict == ReportVerdict.ABSENT,
@@ -545,11 +545,12 @@ def test_crlf_report_is_intentional_off_grammar_drift() raises:
     assert_false(r.has_trailer)
 
 
-def test_crlf_after_a_matching_header_is_off_grammar() raises:
-    # The same drift once identity is out of the way: an LF header matches, so
-    # the CR is caught one step later, by the terminal-framing check. The CR on
-    # the Summary line defeats the exact ` <n> skipped ` field match, leaving no
-    # terminal Summary at all.
+def test_crlf_report_is_intentional_off_grammar_drift() raises:
+    # The drift with identity out of the way: an LF header matches, so the CR is
+    # caught one step later, by the terminal-framing check. The CR on the Summary
+    # line defeats the exact ` <n> skipped ` field match, leaving no terminal
+    # Summary at all. CRLF is deliberately off-grammar — the parser is LF-only,
+    # and a CR anywhere in a structural line takes the report out of the grammar.
     var text = (
         "Running 2 tests for /home/x/proj/tests/test_a.mojo \n"
         "    PASS [ 0.012 ] test_one\r\n"

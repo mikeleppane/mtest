@@ -265,10 +265,22 @@ def test_shell_join_keeps_a_hostile_token_a_single_argv_word() raises:
 
 
 def test_build_flags_string_quotes_every_hostile_value() raises:
+    # The same corpus `_hostile_tokens` holds, spread across the four flag kinds
+    # in the fixed order `build_flags_string` emits them. Every token that needs
+    # the shell is quoted and `plain` is not, so this row also pins that the
+    # inverse-parser neither under- nor over-quotes. The remaining three tokens
+    # — the control characters and the quote breakout — are the next test.
     var c = RunnerConfig.default()
     c.mojo_path = "$(touch pwned)"
-    c.include_paths = ["star*glob", "back\\slash"]
-    c.build_args = ["line\nbreak", "tab\tvalue", ""]
+    c.include_paths = [
+        "plain",
+        "space here",
+        "star*glob",
+        "question?glob",
+        "bracket[abc]",
+        "back\\slash",
+    ]
+    c.build_args = ["$HOME", "line\nbreak", "tab\tvalue", ""]
     c.precompiles = [
         Precompile(src="semi;colon", out=Optional[String]("`cmd`")),
         Precompile(src="snowman-☃", out=Optional[String](None)),
@@ -276,8 +288,10 @@ def test_build_flags_string_quotes_every_hostile_value() raises:
     assert_equal(
         build_flags_string(c),
         (
-            "--mojo '$(touch pwned)' -I 'star*glob' -I 'back\\slash'"
-            " --build-arg 'line\nbreak' --build-arg 'tab\tvalue' --build-arg ''"
+            "--mojo '$(touch pwned)' -I plain -I 'space here' -I 'star*glob'"
+            " -I 'question?glob' -I 'bracket[abc]' -I 'back\\slash'"
+            " --build-arg '$HOME' --build-arg 'line\nbreak'"
+            " --build-arg 'tab\tvalue' --build-arg ''"
             " --precompile 'semi;colon:`cmd`' --precompile 'snowman-☃'"
         ),
     )
