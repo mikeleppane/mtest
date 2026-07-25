@@ -122,7 +122,9 @@ def test_config_show_defaults_render_every_key_in_fixed_order() raises:
         rendered,
         (
             "[run]\n"
-            "paths = []  # (default)\n"
+            # Unset, not empty: `paths = []` would be a copy-pasteable trap,
+            # because an explicitly empty list means "select nothing".
+            "# paths = (unset — discovery uses tests/, else .)\n"
             "exclude = []  # (default)\n"
             "gates = []  # (default)\n"
             "serial = []  # (default)\n"

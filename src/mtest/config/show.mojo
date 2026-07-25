@@ -171,7 +171,14 @@ def render_config_show(resolved: ResolvedConfig, state_present: Bool) -> String:
     var paths = _config_paths(config.paths)
     var node_ids_omitted = len(paths) != len(config.paths)
     var rendered = String("[run]\n")
-    rendered += "paths = " + _string_array(paths) + _comment(sources.paths)
+    # An unsupplied `paths` renders as a comment, like every other unset key.
+    # Rendering it as `paths = []` would be a trap: this output is documented
+    # as copy-pasteable, and an explicitly empty list means "select nothing",
+    # so pasting it back would silently turn a working default into exit 5.
+    if sources.paths == Provenance.DEFAULT:
+        rendered += "# paths = (unset — discovery uses tests/, else .)\n"
+    else:
+        rendered += "paths = " + _string_array(paths) + _comment(sources.paths)
     rendered += (
         "exclude = "
         + _string_array(config.excludes)

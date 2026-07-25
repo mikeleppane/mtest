@@ -35,6 +35,7 @@ from mtest.config import (
     parse_show_output_value,
     parse_worker_count,
     resolve_mojo_path,
+    safe_path_label,
 )
 
 comptime MTEST_VERSION = "0.6.0"
@@ -223,7 +224,7 @@ def _validate_json_dest(value: String, validate_parent: Bool) raises -> String:
         if parent != "" and not isdir(parent):
             raise _err(
                 "'--json' destination parent directory does not exist: '"
-                + parent
+                + safe_path_label(parent)
                 + "'"
             )
     return value
@@ -250,7 +251,7 @@ def _validate_junit_dest(value: String, validate_parent: Bool) raises -> String:
         if parent != "" and not isdir(parent):
             raise _err(
                 "'--junit-xml' destination parent directory does not exist: '"
-                + parent
+                + safe_path_label(parent)
                 + "'"
             )
     return value

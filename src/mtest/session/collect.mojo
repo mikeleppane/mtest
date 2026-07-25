@@ -110,6 +110,13 @@ def run_collect(
             into the result.
     """
     var config = resolved.config.copy()
+    # Honor the collect projection's inactive keys before discovery reads them.
+    # `gates` is inactive here, and discovery moves gate paths OUT of the run
+    # set, so a project file's [run] gates silently deleted those files from
+    # the listing — with no diagnostic and exit 0. `--gate` on the command line
+    # is already refused under collect, so the config key was the only way in.
+    if not resolved.active_keys.gates:
+        config.gates = []
     var disc = discover(config, root)  # a discover: usage error propagates.
 
     # Collect honors the same shard partition as a run: the listing is exactly

@@ -196,3 +196,46 @@ def build_arg_rejection(token: String) -> Optional[String]:
             + "': mtest owns the source list"
         )
     return Optional[String](None)
+
+
+def safe_path_label(path: String) -> String:
+    """Render a user-supplied path safely inside a one-line diagnostic.
+
+    Control characters are escaped so a crafted path cannot emit a terminal
+    escape sequence or split one diagnostic into two, and the result is
+    truncated so a very long path cannot bury the message. Shared by every
+    layer that names a path back to the user, so the escaping cannot hold on
+    one path and be forgotten on another.
+
+    Args:
+        path: The user-supplied path to label.
+
+    Returns:
+        A newly allocated single-line label of at most 240 codepoints.
+    """
+    var escaped = String("")
+    comptime HEX = "0123456789abcdef"
+    for cp in path.codepoints():
+        var value = Int(cp)
+        if value == 10:
+            escaped += "\\n"
+        elif value == 13:
+            escaped += "\\r"
+        elif value == 9:
+            escaped += "\\t"
+        elif (value >= 0 and value < 32) or value == 127:
+            escaped += "\\x"
+            escaped += String(HEX[byte=value // 16])
+            escaped += String(HEX[byte=value % 16])
+        else:
+            escaped += String(cp)
+    if escaped.count_codepoints() <= 240:
+        return escaped
+    var shortened = String("")
+    var count = 0
+    for cp in escaped.codepoint_slices():
+        if count == 237:
+            break
+        shortened += String(cp)
+        count += 1
+    return shortened + "..."

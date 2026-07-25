@@ -466,7 +466,10 @@ def encode_last_run_state(
                 _diagnostic(
                     LastRunDiagnosticKind.RECORD,
                     source,
-                    i + 1,
+                    # No line: these records are being refused on the way OUT,
+                    # so they are in no line of the file. Reporting the record
+                    # index as one cited `lastrun:1`, which is the header.
+                    0,
                     (
                         "dropped malformed "
                         + _safe_excerpt(state.records[i].identifier)

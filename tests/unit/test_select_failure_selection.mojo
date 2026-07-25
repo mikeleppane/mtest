@@ -101,7 +101,11 @@ def test_gate_records_are_live_not_stale() raises:
         files, names, LastRunState([_file("tests/test_smoke.mojo")]), gates
     )
     assert_equal(len(by_file.stale_ids), 0)
+    # No run file is selected, but the record IS live: reporting `matched`
+    # alone as false made the caller announce that nothing matched and re-run
+    # the whole suite, for a state file that was entirely current.
     assert_false(by_file.matched)
+    assert_true(by_file.gate_matched)
 
     var by_test = resolve_last_failed(
         files,
@@ -111,6 +115,7 @@ def test_gate_records_are_live_not_stale() raises:
     )
     assert_equal(len(by_test.stale_ids), 0)
     assert_false(by_test.matched)
+    assert_true(by_test.gate_matched)
 
     # A genuinely absent file is still stale when gates are present.
     var gone = resolve_last_failed(
@@ -118,6 +123,7 @@ def test_gate_records_are_live_not_stale() raises:
     )
     assert_equal(len(gone.stale_ids), 1)
     assert_equal(gone.stale_ids[0], "tests/gone.mojo")
+    assert_false(gone.gate_matched)
 
 
 def test_live_test_outside_ordinary_selection_is_not_stale() raises:

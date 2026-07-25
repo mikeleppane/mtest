@@ -872,7 +872,35 @@ def _run_selection[
                             pipeline.replace_selection_empty(
                                 ci, len(collected[ci].selected) == 0
                             )
-                    if not soft.matched or not has_final_match:
+                    # A state file whose only live records name gates matched
+                    # everything it remembered: gates always run, so the
+                    # remembered failure is already being re-run and there is
+                    # nothing left to narrow. Widening back to the full suite
+                    # would run precisely what --lf exists to skip, and saying
+                    # nothing matched would be false.
+                    if (
+                        not soft.matched
+                        and not has_final_match
+                        and soft.gate_matched
+                    ):
+                        reporter.handle(
+                            Event.warning(
+                                "lf-gates-only",
+                                (
+                                    "lf: every previously-failing entry is a"
+                                    " gate — running the gates only"
+                                ),
+                            )
+                        )
+                        for ci in range(len(collected)):
+                            if collected[ci].terminal:
+                                continue
+                            collected[ci].selected = []
+                            collected[ci].deselected = collected[
+                                ci
+                            ].universe.copy()
+                            pipeline.replace_selection_empty(ci, True)
+                    elif not soft.matched or not has_final_match:
                         reporter.handle(
                             Event.warning(
                                 "lf-empty",

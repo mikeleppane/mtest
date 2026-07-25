@@ -995,12 +995,15 @@ the built binary. Environment-dependent values appear as captured: the absolute
 invocation root, the wall-clock timings, and the worker count `workers = "auto"`
 resolved to on the capturing machine.
 
-They do not all share one setup. The configuration example, `config show`, and
-the invalid-configuration refusal were captured with the `mtest.toml` below in
-place; the `--lf`, soft-filter, and `doctor` transcripts were captured without
-it, which is why they carry no `slowest N files:` block and why `doctor` reports
-`config: none` in the second block. Each transcript states its own command, and
-none is a continuation of the one before it.
+They do not all share one setup, and each block's own output says which it had.
+The configuration example, `config show`, the invalid-configuration refusal, and
+the healthy `doctor` block were captured with the `mtest.toml` below in place —
+`doctor` reporting `PASS config: valid 'mtest.toml'` is that file being seen.
+The `--lf` and soft-filter transcripts were captured without it, which is why
+they carry no `slowest N files:` block despite the configuration setting
+`durations`. In the two failing `doctor` blocks, `config: none` comes from the
+explicit `--no-config`, not from the file's absence. Each transcript states its
+own command, and none is a continuation of the one before it.
 
 `mtest.toml` at the invocation root:
 

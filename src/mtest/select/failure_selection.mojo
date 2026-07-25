@@ -47,7 +47,15 @@ struct LastFailedSelection(Copyable, Movable):
     """Dropped identifiers, escaped to one physical diagnostic line."""
 
     var matched: Bool
-    """Whether at least one remembered failure survives."""
+    """Whether at least one remembered failure survives among run files."""
+
+    var gate_matched: Bool
+    """Whether a surviving remembered failure names a discovered gate.
+
+    Gates never enter `files`, because they always run and are never filtered.
+    A state file holding only gate records is therefore entirely live while
+    selecting no run file, which is a different thing from matching nothing.
+    """
 
 
 @fieldwise_init
@@ -160,15 +168,18 @@ def resolve_last_failed(
         A newly allocated soft-filter result and its nonfatal drops.
     """
     var stale = List[String]()
+    var gate_matched = False
     for record in state.records:
         if record.kind == LastRunRecordKind.FILE:
             if _has_file(gates, record.identifier):
+                gate_matched = True
                 continue
             if not _has_file(files, record.identifier):
                 stale.append(_safe_identifier(record.identifier))
             continue
         var split = split_node_token(record.identifier)
         if split.sep_count == 1 and _has_file(gates, split.file_part):
+            gate_matched = True
             continue
         if split.sep_count != 1 or not _has_file(files, split.file_part):
             stale.append(_safe_identifier(record.identifier))
@@ -193,7 +204,9 @@ def resolve_last_failed(
                 chosen.append(name)
         if len(chosen) > 0:
             selected.append(FailureFileSelection(path, False, chosen^))
-    return LastFailedSelection(selected^, stale^, len(selected) > 0)
+    return LastFailedSelection(
+        selected^, stale^, len(selected) > 0, gate_matched
+    )
 
 
 def _path_was_failing(state: LastRunState, path: String) -> Bool:

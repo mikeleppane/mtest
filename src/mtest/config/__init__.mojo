@@ -72,4 +72,5 @@ from mtest.config.value_validation import (
     parse_show_output_value,
     parse_verbosity_value,
     parse_worker_count,
+    safe_path_label,
 )
