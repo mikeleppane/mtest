@@ -81,6 +81,27 @@ HOSTILE_ACTOR = ROOT / "tests" / "fixtures" / "exec" / "hostile_report_actor.py"
 """The committed actor the stand-in copies. Not invoked directly; named so this
 gate's inventory records the fixture whose bytes it depends on."""
 
+CLI_PROBE_LSAN_OPTIONS = "verbosity=1"
+"""The one `LSAN_OPTIONS` value the CLI probe sets, and nothing else.
+
+`main` deliberately pops `LSAN_OPTIONS` so a developer's environment cannot
+weaken the leak check; this puts back exactly one flag, on the probe alone.
+`verbosity` only raises logging — it suppresses nothing, adds no suppression
+file, and changes no detection threshold — and it is what makes
+`CLI_LSAN_WITNESS` appear."""
+
+CLI_LSAN_WITNESS = "LeakSanitizer: checking for leaks"
+"""LeakSanitizer announcing, from inside the process under test, that it is
+running the leak check.
+
+This is the ASan lane's answer to the Valgrind lane's Memcheck-provenance
+requirement, and it is a POSITIVE witness in a place the `__asan_` symbol guard
+cannot reach. That guard is static: it proves the binary was linked against the
+runtime, not that the runtime did anything in this run. Without this line, a
+clean probe and a probe whose leak check silently never ran are the same
+observation. The hostile child cannot forge it either — it is written by the
+parent's own runtime, after the child is long gone."""
+
 CLI_PROBE_TREE = "hostile"
 """The single subdirectory of the scratch root that holds the probe module."""
 
@@ -102,10 +123,14 @@ site would have no instrumented evidence at all."""
 CLI_PROBE_EXIT = 1
 """The fixed run's expected client exit code.
 
-ONE, not zero: the actor writes a genuine reconciling report with one FAIL row,
-so a passing run would mean the hostile report was not consumed. The Memcheck
-lane pins this separately from Valgrind's own `--error-exitcode=99`, which is
-what distinguishes a clean client failure from a Memcheck finding."""
+ONE, not zero, because the actor writes a genuine reconciling report with one
+FAIL row. Pinning 1 is a stronger POSITIVE claim than pinning 0 would be: only a
+run that actually built the child, captured its bytes, parsed its report, and
+resolved a failing verdict can produce it, whereas 0 is also what a run that did
+almost nothing returns.
+
+It is NOT stronger for excluding Valgrind's `--error-exitcode=99` — any exact
+pin excludes 99 equally, including a pin of 0."""
 
 CLI_PROBE_ESCAPED_LINE = "    | \\x1B[2J\\x1B[1;31mCHILD-CSI\\x1B[0m"
 """The child's clear-screen-and-recolor sequence as the console must render it.
@@ -405,6 +430,37 @@ def check_cli_probe_output(
     )
 
 
+def check_cli_instrumentation(stdout: str) -> None:
+    """Require the probe's own output to prove the sanitizer ran, and was clean.
+
+    The ASan lane's counterpart to the Valgrind lane's Memcheck provenance. The
+    `__asan_` symbol guard in `check_cli` is a STATIC check — it proves the
+    binary links the runtime, not that the runtime did anything during this run.
+    Only `CLI_LSAN_WITNESS` distinguishes a clean probe from one whose leak check
+    never executed, and the two look identical without it.
+
+    Args:
+        stdout: The probe's complete combined output.
+
+    Raises:
+        SystemExit: The leak check left no witness, or the sanitizer reported a
+            finding.
+    """
+    require(
+        CLI_LSAN_WITNESS in stdout,
+        f"ASan CLI reporter run left no {CLI_LSAN_WITNESS!r} witness: the leak "
+        "check did not run in the probe process",
+    )
+    require(
+        "ERROR: AddressSanitizer" not in stdout,
+        "ASan CLI reporter run reported an ASan error",
+    )
+    require(
+        "LeakSanitizer: detected" not in stdout,
+        "ASan CLI reporter run reported a leak",
+    )
+
+
 def check_cli(env: dict[str, str]) -> None:
     """Source-build the real CLI under ASan and drive the fixed reporter run.
 
@@ -440,21 +496,16 @@ def check_cli(env: dict[str, str]) -> None:
     require("__asan_" in symbols.stdout, "ASan CLI is not instrumented")
 
     write_cli_probe_tree(CLI_SCRATCH)
+    probe_env = dict(env)
+    probe_env["LSAN_OPTIONS"] = CLI_PROBE_LSAN_OPTIONS
     executed = run(
         cli_probe_command(CLI_BINARY, CLI_SCRATCH),
-        env=env,
+        env=probe_env,
         timeout=600,
         cwd=CLI_SCRATCH,
     )
     (OUT / "cli-reporters.log").write_text(executed.stdout)
-    require(
-        "ERROR: AddressSanitizer" not in executed.stdout,
-        "ASan CLI reporter run reported an ASan error",
-    )
-    require(
-        "LeakSanitizer: detected" not in executed.stdout,
-        "ASan CLI reporter run reported a leak",
-    )
+    check_cli_instrumentation(executed.stdout)
     detail = check_cli_probe_output(
         executed.returncode, executed.stdout, CLI_SCRATCH, "ASan"
     )

@@ -69,7 +69,7 @@ they are exactly the operations the tests exist to perform.
 The alternatives were both worse than exclusion: running it with `--track-fds=no`
 would drop the descriptor channel and the `FILE DESCRIPTORS` assertion for a
 suite that is entirely about descriptors, and relaxing `check_product_output`
-would weaken the contract for all eighteen. The site it covers,
+would weaken the contract for all seventeen. The site it covers,
 `json_stream_reporter.mojo`'s borrowed-`String` write loop, keeps its Memcheck
 evidence through the real-CLI probe below, which drives `open_json_fd`,
 `_write_all`, and `close_json_fd` on live descriptors under the full flag set.
@@ -183,8 +183,13 @@ here as a fourth open fd rather than as a leak.
 inherited rather than freshly opened terminals."""
 
 CLI_MEMCHECK_EXIT = 99
-"""`--error-exitcode`. Distinguishes a Memcheck finding from the client's own
-nonzero exit, which the probe expects."""
+"""`--error-exitcode`, checked immediately before the exact exit pin.
+
+It adds no coverage: `returncode == CLI_PROBE_EXIT` already excludes 99, and
+would do so for any other pinned value too. It is checked first purely for the
+DIAGNOSTIC — a Memcheck rejection then reports itself as "Memcheck rejected the
+run" with the log attached, rather than as a bare "exited 99, expected 1" that
+sends the reader looking for a product exit-code defect that does not exist."""
 
 CLI_PROBE_TREE = "hostile"
 """The single subdirectory of the scratch root that holds the probe module."""
@@ -202,7 +207,16 @@ CLI_PROBE_KEYWORD = "hostile"
 """The `-k` keyword, present so the run drives `select.contains_ci`."""
 
 CLI_PROBE_EXIT = 1
-"""The fixed run's expected client exit code; see the ASan lane."""
+"""The fixed run's expected client exit code.
+
+ONE, not zero, because the actor writes a genuine reconciling report with one
+FAIL row. Pinning 1 is a stronger POSITIVE claim than pinning 0 would be: only a
+run that actually built the child, captured its bytes, parsed its report, and
+resolved a failing verdict can produce it, whereas 0 is also what a run that did
+almost nothing returns.
+
+It is NOT stronger for excluding Valgrind's `--error-exitcode=99` — any exact
+pin excludes 99 equally, including a pin of 0."""
 
 CLI_PROBE_ESCAPED_LINE = "    | \\x1B[2J\\x1B[1;31mCHILD-CSI\\x1B[0m"
 """The child's clear-screen-and-recolor sequence as the console must render it."""
@@ -575,11 +589,13 @@ def cli_probe_command(binary: Path, scratch: Path) -> list[str]:
     """The one fixed reporter invocation both memory lanes drive.
 
     Args:
-        binary: The CLI to run, here as Memcheck's client program.
+        binary: The instrumented CLI to run.
         scratch: The probe's invocation root, already materialized.
 
     Returns:
-        The complete argv, byte-identical to the ASan lane's.
+        The complete argv. The operand comes from `[run] paths` in the config
+        rather than the command line, so a configuration read that silently
+        produced nothing would select no files and fail the verdict assertion.
     """
     return [
         str(binary),
@@ -627,6 +643,8 @@ def check_cli_provenance(returncode: int, log: str) -> None:
         f"CLI artifact probe log has no {CLI_FD_SUMMARY!r}: the expected "
         "descriptor summary is absent, so fd ownership is unproven",
     )
+    # Ordered for the diagnostic, not for coverage: the exact pin below already
+    # rejects 99. See `CLI_MEMCHECK_EXIT`.
     require(
         returncode != CLI_MEMCHECK_EXIT,
         f"CLI artifact probe exited {CLI_MEMCHECK_EXIT} — Memcheck rejected "

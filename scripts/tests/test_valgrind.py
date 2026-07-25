@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 import subprocess
 from pathlib import Path
 import tempfile
@@ -143,7 +144,7 @@ class ValgrindCheckTests(unittest.TestCase):
         `test_report_json_reporter.mojo` closes a descriptor and then writes to
         it, and closes the same descriptor twice, on purpose. `--track-fds=yes`
         reports both, so this lane cannot run it without either dropping the
-        descriptor channel or relaxing a contract that eighteen other suites
+        descriptor channel or relaxing a contract that seventeen other suites
         depend on. Pinned here so re-adding it is a test failure that points at
         the reason rather than a red gate nobody can explain.
         """
@@ -226,6 +227,31 @@ class ValgrindCliProbeTests(unittest.TestCase):
                 asan_check.cli_probe_command(scratch / "mtest", scratch),
             )
 
+    def test_both_lanes_hold_the_same_probe_oracle_source(self) -> None:
+        """The duplicated FUNCTIONS, not just the constants, must stay in step.
+
+        The constants above pin what the probe runs; these three functions are
+        what materializes it and what judges the result — roughly a hundred
+        lines of tree writer, argv builder, and artifact oracle, copied into
+        both drivers because the two share no module. Equal constants with a
+        diverged oracle would be the worse failure of the two: both lanes would
+        run the identical program and disagree about whether it passed.
+
+        Comparing source text is exact and needs no execution. It is also
+        deliberately brittle about formatting — a reworded docstring in one copy
+        reds here, which is the intended cost of keeping two copies at all.
+        """
+        for name in (
+            "write_cli_probe_tree",
+            "cli_probe_command",
+            "check_cli_probe_output",
+        ):
+            with self.subTest(function=name):
+                self.assertEqual(
+                    inspect.getsource(getattr(valgrind_check, name)),
+                    inspect.getsource(getattr(asan_check, name)),
+                )
+
     def test_cli_probe_flags_keep_the_locked_scope(self) -> None:
         self.assertIn("--trace-children=no", valgrind_check.CLI_VALGRIND_FLAGS)
         self.assertIn("--track-fds=yes", valgrind_check.CLI_VALGRIND_FLAGS)
@@ -237,6 +263,67 @@ class ValgrindCliProbeTests(unittest.TestCase):
             "--default-suppressions=no", valgrind_check.CLI_VALGRIND_FLAGS
         )
         self.assertIn("--leak-check=full", valgrind_check.CLI_VALGRIND_FLAGS)
+
+    def test_only_the_cli_probe_drops_the_possibly_lost_error_channel(
+        self,
+    ) -> None:
+        """The one relaxation is pinned on both sides, so it cannot spread.
+
+        `CLI_VALGRIND_FLAGS` omits `possible` from `--errors-for-leak-kinds`
+        because the Mojo runtime's unjoined CPU-device threads leave glibc TLS
+        descriptor tables Memcheck can only classify that way. That relaxation
+        is legitimate for the CLI probe and for nothing else. Pinning both
+        values here — rather than only asserting the CLI's — makes the
+        DIFFERENCE between the lanes the thing under test: copying the CLI
+        precedent into `VALGRIND_FLAGS` would silently cost seventeen suites
+        their possibly-lost channel, and every other test in this file would
+        still pass.
+        """
+        self.assertIn(
+            "--errors-for-leak-kinds=definite,indirect,possible",
+            valgrind_check.VALGRIND_FLAGS,
+        )
+        self.assertIn(
+            "--errors-for-leak-kinds=definite,indirect",
+            valgrind_check.CLI_VALGRIND_FLAGS,
+        )
+        self.assertNotIn(
+            "--errors-for-leak-kinds=definite,indirect",
+            valgrind_check.VALGRIND_FLAGS,
+        )
+        self.assertNotIn(
+            "--errors-for-leak-kinds=definite,indirect,possible",
+            valgrind_check.CLI_VALGRIND_FLAGS,
+        )
+        # The post-fork audit sets `--leak-check=no`, so it carries no
+        # leak-kind selection at all; a value appearing there would be new.
+        self.assertFalse(
+            any(
+                flag.startswith("--errors-for-leak-kinds")
+                for flag in valgrind_check.POSTFORK_FLAGS
+            )
+        )
+
+    def test_the_relaxed_channel_is_compensated_by_the_frame_filter(
+        self,
+    ) -> None:
+        """Dropping `possible` from the ERROR channel does not drop the claim.
+
+        A possibly-lost record carrying a product frame must still fail the
+        probe, because that is the finding the relaxation could otherwise hide.
+        """
+        polluted = ValgrindCliProvenanceTests.CLEAN.replace(
+            "==1== LEAK SUMMARY:\n",
+            "==1== 64 bytes in 1 blocks are possibly lost in loss record 1 of 1\n"
+            "==1==    by 0x1: read_bounded_regular_file (src/mtest/platform/"
+            "regular_file.mojo:76)\n"
+            "==1== \n"
+            "==1== LEAK SUMMARY:\n",
+        )
+        with self.assertRaisesRegex(SystemExit, "product allocation"):
+            valgrind_check.check_cli_provenance(
+                valgrind_check.CLI_PROBE_EXIT, polluted
+            )
 
     def test_cli_probe_build_uses_the_locked_target_cpu_and_production_object(
         self,

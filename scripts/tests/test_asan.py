@@ -199,6 +199,72 @@ class AsanCliProbeTests(unittest.TestCase):
                 ):
                     asan_check.check_cli({})
 
+    def test_a_run_without_the_leak_check_witness_is_rejected(self) -> None:
+        """A silent run and a clean run must not be the same observation.
+
+        The `__asan_` symbol guard is static — it proves linkage, not that the
+        runtime executed. This is the ASan lane's counterpart to Memcheck
+        provenance: without the witness, a probe whose leak check never ran
+        would pass every artifact assertion.
+        """
+        with self.assertRaisesRegex(SystemExit, "leak check did not run"):
+            asan_check.check_cli_instrumentation("0 passed, 1 failed\n")
+
+    def test_a_clean_witnessed_run_is_accepted(self) -> None:
+        asan_check.check_cli_instrumentation(
+            f"==1=={asan_check.CLI_LSAN_WITNESS}\n"
+        )
+
+    def test_a_sanitizer_finding_is_rejected_even_with_the_witness(
+        self,
+    ) -> None:
+        witnessed = f"==1=={asan_check.CLI_LSAN_WITNESS}\n"
+        with self.assertRaisesRegex(SystemExit, "reported an ASan error"):
+            asan_check.check_cli_instrumentation(
+                witnessed + "==1==ERROR: AddressSanitizer: heap-use-after-free\n"
+            )
+        with self.assertRaisesRegex(SystemExit, "reported a leak"):
+            asan_check.check_cli_instrumentation(
+                witnessed + "==1==LeakSanitizer: detected memory leaks\n"
+            )
+
+    def test_the_probe_asks_for_the_witness_without_weakening_lsan(self) -> None:
+        """`main` pops `LSAN_OPTIONS`; the probe puts back verbosity, only.
+
+        A suppression file or a disabled detector smuggled in here would make
+        the lane green for the wrong reason, so the value is pinned whole.
+        """
+        self.assertEqual(asan_check.CLI_PROBE_LSAN_OPTIONS, "verbosity=1")
+        self.assertIn("detect_leaks=1", asan_check.ASAN_OPTIONS)
+
+        results = [
+            subprocess.CompletedProcess(args=["mojo"], returncode=0, stdout=""),
+            subprocess.CompletedProcess(args=["nm"], returncode=0, stdout="__asan_"),
+            subprocess.CompletedProcess(
+                args=["mtest"], returncode=asan_check.CLI_PROBE_EXIT, stdout=""
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            out = Path(raw_tmp)
+            with (
+                patch.object(asan_check, "OUT", out),
+                patch.object(asan_check, "CLI_BINARY", out / "mtest"),
+                patch.object(asan_check, "CLI_SCRATCH", out / "cli"),
+                patch.object(asan_check, "run", side_effect=results) as mocked_run,
+                patch.object(asan_check, "check_cli_instrumentation"),
+                patch.object(
+                    asan_check, "check_cli_probe_output", return_value="ok"
+                ),
+            ):
+                asan_check.check_cli({"ASAN_OPTIONS": asan_check.ASAN_OPTIONS})
+
+            probe_env = mocked_run.call_args_list[2].kwargs["env"]
+
+        self.assertEqual(
+            probe_env["LSAN_OPTIONS"], asan_check.CLI_PROBE_LSAN_OPTIONS
+        )
+        self.assertEqual(probe_env["ASAN_OPTIONS"], asan_check.ASAN_OPTIONS)
+
     def test_cli_probe_build_compiles_main_against_the_vendored_parser(
         self,
     ) -> None:
@@ -218,6 +284,7 @@ class AsanCliProbeTests(unittest.TestCase):
                 patch.object(asan_check, "CLI_BINARY", out / "mtest"),
                 patch.object(asan_check, "CLI_SCRATCH", out / "cli"),
                 patch.object(asan_check, "run", side_effect=results) as mocked_run,
+                patch.object(asan_check, "check_cli_instrumentation"),
                 patch.object(
                     asan_check, "check_cli_probe_output", return_value="ok"
                 ),
