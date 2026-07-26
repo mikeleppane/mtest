@@ -1,14 +1,19 @@
-"""Canonical (symlink-resolved) absolute paths for `exec`.
+"""Absolute source paths for `exec`, in the two flavors the runner needs.
 
-`mojo build` bakes the absolute, symlink-resolved source path into every
-location line of a child's report (`Running … for <path>`, `At <path>:…`,
-`ABORT: …`), so the report parser's identity key is that canonical path.
-`canonicalize` computes the same string from a repo-relative or already-absolute
-path, so the session can match a report back to the file it built.
+`mojo build` bakes the absolute source path into every location line of a
+child's report (`Running … for <path>`, `At <path>:…`, `ABORT: …`), so the
+report parser's identity key is that path. Crucially, it bakes the path it was
+HANDED: a relative argument is made absolute against the compiler's cwd, but a
+symlink component is never resolved. The identity key is therefore the
+**lexical** absolute path — `lexical_source_path` — not the canonical one.
 
-Unlike `discover`'s lexical `.`/`..` folding, this resolves symlinks against the
-live filesystem. That is why it can raise: a path with no on-disk target has no
-canonical form.
+`canonicalize` answers the different question "which file is this, really", by
+resolving symlinks against the live filesystem. The two agree for any path with
+no symlink component, which is why using the wrong one stayed invisible until a
+test file was reached through a link: the resolved path named the link's target,
+the child's report named the link, the identity match failed, and a conforming
+module was reported MALFORMED-SUITE. §2 is explicit that mtest does not resolve
+symlinks; the identity key now matches that rule.
 """
 from std.os.path import realpath
 
@@ -46,3 +51,48 @@ def canonicalize(path: String) raises -> String:
         raise Error(
             "exec: cannot canonicalize path '" + path + "': " + String(e)
         )
+
+
+def lexical_source_path(path: String) -> String:
+    """Return `path` folded lexically, with every symlink component intact.
+
+    This is the identity key a child's report is matched on: the string
+    `mojo build` bakes into its location lines. `.` and empty segments are
+    dropped and `..` pops the previous segment, exactly as the compiler's own
+    absolute-path construction does — but no symlink is resolved, so a test
+    file reached through a link keeps the link's name.
+
+    Deliberately non-raising and filesystem-free: unlike `canonicalize` it
+    asserts nothing about existence, because the caller has already built the
+    file it is naming.
+
+    Args:
+        path: An absolute path, ordinarily `root + "/" + rel`.
+
+    Returns:
+        The lexically folded absolute path, with no `.`, `..`, empty, or
+        duplicated separator segments, and no trailing slash.
+
+    Examples:
+
+    ```mojo
+    from mtest.exec import lexical_source_path
+
+    # A symlinked test file keeps its own name, unlike `canonicalize`.
+    var key = lexical_source_path("/project/tests/test_linked.mojo")
+    ```
+    """
+    var stack = List[String]()
+    for seg in path.split("/"):
+        var s = String(seg)
+        if s == "" or s == ".":
+            continue
+        if s == "..":
+            if len(stack) > 0:
+                _ = stack.pop()
+            continue
+        stack.append(s^)
+    var out = String("")
+    for s in stack:
+        out += "/" + s
+    return out^ if out != "" else String("/")

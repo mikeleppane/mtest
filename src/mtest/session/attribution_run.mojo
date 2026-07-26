@@ -22,8 +22,8 @@ from mtest.exec import (
     ExecRuntime,
     ProcessResult,
     ProcessSpec,
-    canonicalize,
     interrupt_requested,
+    lexical_source_path,
     run_supervised,
 )
 from mtest.model import AttributionDisposition, Event
@@ -116,7 +116,7 @@ def _attribution_probe(
     if not term.is_exited():
         # Signaled, timed out, or unspawnable: no listing to be had.
         return _AttributionListing(False, binary, List[String]())
-    var canonical = canonicalize(root + "/" + rel)
+    var canonical = lexical_source_path(root + "/" + rel)
     var trusted = resolve_report(
         lossy_utf8(pres.stdout_bytes), canonical, pres.stdout_truncated
     )

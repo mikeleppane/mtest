@@ -18,8 +18,8 @@ from mtest.exec import (
     ExecRuntime,
     ProcessResult,
     ProcessSpec,
-    canonicalize,
     interrupt_requested,
+    lexical_source_path,
     run_supervised,
 )
 from mtest.model import Event, Outcome, ParseDisposition, TestCounts, is_slow
@@ -193,7 +193,7 @@ def _build_for_selection(
             True,
             FileResult.ran_with(ev^, bsignal),
         )
-    var canonical = canonicalize(root + "/" + rel)
+    var canonical = lexical_source_path(root + "/" + rel)
     reg.record_build(BuildProduct.built(rel, out_bin, canonical))
     return _BuildOutcome(
         True, out_bin, canonical, build_argv^, bdur, False, _blank_file_result()

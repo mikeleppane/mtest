@@ -20,8 +20,8 @@ from mtest.exec import (
     ProcessResult,
     ProcessSpec,
     Termination,
-    canonicalize,
     interrupt_requested,
+    lexical_source_path,
     run_supervised,
 )
 from mtest.model import (
@@ -423,7 +423,7 @@ def _single_attempt(
     # The run's own report IS the handshake. Decode the captured stdout, resolve
     # WHICH report to trust under capture overflow, then run the TOTAL classifier
     # against the canonical path the child baked into its report.
-    var source_path = canonicalize(root + "/" + rel)
+    var source_path = lexical_source_path(root + "/" + rel)
     var stdout_text = lossy_utf8(rres.stdout_bytes)
     var trusted = resolve_report(
         stdout_text, source_path, rres.stdout_truncated

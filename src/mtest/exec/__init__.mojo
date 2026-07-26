@@ -12,7 +12,7 @@ The public surface is re-exported here so callers write
 from mtest.exec.spec import ProcessSpec
 from mtest.exec.termination import Termination
 from mtest.exec.result import ProcessResult
-from mtest.exec.paths import canonicalize
+from mtest.exec.paths import canonicalize, lexical_source_path
 from mtest.exec.supervise import (
     run_supervised,
     Supervisor,

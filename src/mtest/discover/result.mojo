@@ -44,3 +44,9 @@ struct DiscoveryResult(Copyable, Movable):
 
     var stale_excludes: List[String]
     """Every `--exclude` pattern that matched nothing, in listed order."""
+
+    var skipped_links: List[String]
+    """Every symlink a walk refused, root-relative and sorted: a symlinked
+    directory (not descended, for cycle safety) or a dangling `test_*.mojo`
+    link. The session warns once per entry — a dropped selection is never
+    silent."""
