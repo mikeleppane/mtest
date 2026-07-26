@@ -15,7 +15,7 @@ import sys
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-FORMAT_ROOTS = ("src", "assertions-src", "tests", "e2e")
+FORMAT_ROOTS = ("src", "assertions-src", "tests", "e2e", "examples")
 
 
 def mojo_sources(repo_root: Path = REPO_ROOT) -> list[Path]:

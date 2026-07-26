@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 import tempfile
+from typing import override
 import unittest
 
 from scripts.checks import assertions
@@ -66,6 +67,7 @@ class AssertionApiValidationTests(unittest.TestCase):
 
 
 class AssertionLocationValidationTests(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.source = Path("/checkout/tests/assertions/location_consumer.mojo")
         self.expected = {

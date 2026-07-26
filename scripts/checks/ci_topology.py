@@ -405,8 +405,7 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
             f"expected={expected_dogfood!r}, actual={tasks.get('dogfood-check')!r}"
         )
     expected_assertions = (
-        "python -m scripts.tests.test_assertions && "
-        "python -m scripts.checks.assertions"
+        "python -m scripts.tests.test_assertions && python -m scripts.checks.assertions"
     )
     if tasks.get("assertions-check") != expected_assertions:
         raise AssertionError(

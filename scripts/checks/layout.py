@@ -50,6 +50,10 @@ ASSERTION_CHECK_PATHS = {
     Path("scripts/checks/assertions.py"),
     Path("scripts/tests/test_assertions.py"),
 }
+ASSERTION_EXAMPLE_PATHS = {
+    Path("examples/assertions/test_diagnostics.mojo"),
+}
+ASSERTION_RECIPE_INSTALL_SOURCES = set(ASSERTION_SOURCE_PATHS)
 VENDORED_TOML_PATHS = {
     Path("vendor/mojo-toml/CHECKSUMS.json"),
     Path("vendor/mojo-toml/LICENSE"),
@@ -1158,28 +1162,37 @@ def check_build_source_visibility(repo_root: Path = REPO_ROOT) -> None:
 
 def check_assertion_companion_layout(repo_root: Path = REPO_ROOT) -> None:
     """Pin the public assertion source, consumers, and namespace isolation."""
+    _require_nonempty(
+        "assertion recipe install",
+        ASSERTION_RECIPE_INSTALL_SOURCES,
+    )
     for name, expected, root in (
         ("assertion source", ASSERTION_SOURCE_PATHS, "assertions-src"),
         ("assertion consumer", ASSERTION_CONSUMER_PATHS, "tests/assertions"),
+        ("assertion example", ASSERTION_EXAMPLE_PATHS, "examples/assertions"),
     ):
         _require_nonempty(name, expected)
         base = repo_root / root
-        actual = {
-            path.relative_to(repo_root)
-            for path in base.rglob("*")
-            if path.is_file()
-        } if base.is_dir() else set()
+        actual = (
+            {path.relative_to(repo_root) for path in base.rglob("*") if path.is_file()}
+            if base.is_dir()
+            else set()
+        )
         if actual != expected:
             raise AssertionError(
                 f"{name} membership mismatch: "
                 f"missing={sorted(expected - actual)}, "
                 f"extra={sorted(actual - expected)}"
             )
-        linked = [
-            path.relative_to(repo_root)
-            for path in base.rglob("*")
-            if path.is_symlink()
-        ] if base.is_dir() else []
+        linked = (
+            [
+                path.relative_to(repo_root)
+                for path in base.rglob("*")
+                if path.is_symlink()
+            ]
+            if base.is_dir()
+            else []
+        )
         if linked:
             raise AssertionError(f"{name} contains symlinks: {sorted(linked)}")
 
@@ -1194,9 +1207,9 @@ def check_assertion_companion_layout(repo_root: Path = REPO_ROOT) -> None:
     if (repo_root / "src" / "mtest" / "assertions").exists():
         raise AssertionError("assertion companion leaked into private src/mtest")
 
-    production = (
-        repo_root / "scripts" / "build" / "production_build.sh"
-    ).read_text(encoding="utf-8")
+    production = (repo_root / "scripts" / "build" / "production_build.sh").read_text(
+        encoding="utf-8"
+    )
     recipe = (repo_root / "recipe" / "build.sh").read_text(encoding="utf-8")
     for name, contents in (
         ("production build", production),
@@ -1204,6 +1217,18 @@ def check_assertion_companion_layout(repo_root: Path = REPO_ROOT) -> None:
     ):
         if re.search(r"mojo\s+precompile[^\n]*assertions-src", contents):
             raise AssertionError(f"{name} precompiles the public assertion source")
+    installed_sources = {
+        Path(match)
+        for match in re.findall(r"(?m)^\s*install -m 644 (assertions-src/\S+)", recipe)
+    }
+    if installed_sources != ASSERTION_RECIPE_INSTALL_SOURCES:
+        raise AssertionError(
+            "assertion recipe install membership mismatch: "
+            f"missing={sorted(ASSERTION_RECIPE_INSTALL_SOURCES - installed_sources)}, "
+            f"extra={sorted(installed_sources - ASSERTION_RECIPE_INSTALL_SOURCES)}"
+        )
+    if re.search(r"\bcp\s+-[A-Za-z]*r[A-Za-z]*[^\n]*assertions-src", recipe):
+        raise AssertionError("assertion recipe uses a recursive source copy")
 
 
 def check_vendored_toml_layout(repo_root: Path = REPO_ROOT) -> None:

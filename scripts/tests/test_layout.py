@@ -36,6 +36,11 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
             ("ASSERTION_SOURCE_PATHS", layout.check_assertion_companion_layout),
             ("ASSERTION_CONSUMER_PATHS", layout.check_assertion_companion_layout),
             ("ASSERTION_CHECK_PATHS", layout.check_assertion_companion_layout),
+            ("ASSERTION_EXAMPLE_PATHS", layout.check_assertion_companion_layout),
+            (
+                "ASSERTION_RECIPE_INSTALL_SOURCES",
+                layout.check_assertion_companion_layout,
+            ),
             ("VENDORED_TOML_PATHS", layout.check_vendored_toml_layout),
         )
         for name, check in cases:
@@ -96,26 +101,28 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
                 *layout.ASSERTION_SOURCE_PATHS,
                 *layout.ASSERTION_CONSUMER_PATHS,
                 *layout.ASSERTION_CHECK_PATHS,
+                *layout.ASSERTION_EXAMPLE_PATHS,
             ):
                 path = repo / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("# fixture\n", encoding="utf-8")
-            for relative in (
-                "scripts/build/production_build.sh",
-                "recipe/build.sh",
-            ):
-                path = repo / relative
+            for script_name in ("scripts/build/production_build.sh",):
+                path = repo / script_name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("# no assertion precompile\n", encoding="utf-8")
+            recipe = repo / "recipe" / "build.sh"
+            recipe.parent.mkdir(parents=True, exist_ok=True)
+            recipe.write_text(
+                "# no assertion precompile\n"
+                + "".join(
+                    f"install -m 644 {relative} destination\n"
+                    for relative in layout.ASSERTION_RECIPE_INSTALL_SOURCES
+                ),
+                encoding="utf-8",
+            )
 
             layout.check_assertion_companion_layout(repo)
-            extra = (
-                repo
-                / "assertions-src"
-                / "mtest"
-                / "assertions"
-                / "unexpected.mojo"
-            )
+            extra = repo / "assertions-src" / "mtest" / "assertions" / "unexpected.mojo"
             extra.write_text("# accidental public module\n", encoding="utf-8")
 
             with self.assertRaisesRegex(

@@ -546,6 +546,7 @@ class CallSiteTests(unittest.TestCase):
             return 0
 
         identity = mock.Mock()
+        assertion_probe = mock.Mock()
         smoke = mock.Mock(
             return_value=subprocess.CompletedProcess(
                 args=[], returncode=0, stdout=f"mtest {self.version}\n", stderr=""
@@ -559,6 +560,7 @@ class CallSiteTests(unittest.TestCase):
                 TARBALL_ENV_DIR=env_dir,
                 _run_streamed=mock.Mock(side_effect=build_or_install),
                 verify_installed_artifact_identity=identity,
+                stage_assertion_source_probe=assertion_probe,
             ),
             mock.patch.object(subprocess, "run", smoke),
             contextlib.redirect_stdout(io.StringIO()),
@@ -569,6 +571,7 @@ class CallSiteTests(unittest.TestCase):
         self.assertEqual(len(identity.call_args_list), 1)
         self.assertEqual(identity.call_args_list[0].args[0], prefix)
         self.assertEqual(identity.call_args_list[0].args[1].path.name, artifact_name)
+        assertion_probe.assert_called_once_with(prefix, "tarball")
 
     def test_loader_clean_stage_calls_the_probe_roster_check(self) -> None:
         roster = mock.Mock()
@@ -694,6 +697,8 @@ class CallSiteTests(unittest.TestCase):
                 side_effect=stage("install", install_result)
             ),
             stage_loader_clean_probe=mock.Mock(side_effect=stage("loader-clean")),
+            stage_assertion_source_probe=mock.Mock(),
+            stage_assertion_example=mock.Mock(),
             stage_suite_run_with_installed_binary=mock.Mock(
                 side_effect=stage("dogfood")
             ),
@@ -772,6 +777,159 @@ class FixtureInventoryTests(unittest.TestCase):
         self.assertEqual(
             row["per_test"]["failed"], package_consumption.FAILING_FIXTURE_FAILED
         )
+
+
+class AssertionPackageCommandTests(unittest.TestCase):
+    def test_compile_command_uses_absolute_installed_paths(self) -> None:
+        prefix = Path("/scratch/prefix")
+        self.assertEqual(
+            package_consumption.assertion_compile_command(
+                prefix,
+                Path("/scratch/probe.mojo"),
+                Path("/scratch/probe-o0"),
+                "-O0",
+            ),
+            [
+                "/scratch/prefix/bin/mojo",
+                "build",
+                "-O0",
+                "-I",
+                "/scratch/prefix/share/mtest/assertions-src",
+                "/scratch/probe.mojo",
+                "-o",
+                "/scratch/probe-o0",
+            ],
+        )
+
+    def test_probe_environment_pins_modular_home_to_installed_prefix(self) -> None:
+        prefix = Path("/scratch/prefix")
+        environment = package_consumption.assertion_probe_environment(
+            prefix,
+            package_platform("linux", "x86_64"),
+        )
+        self.assertEqual(environment["PATH"], "/usr/bin:/bin")
+        self.assertEqual(
+            environment["MODULAR_HOME"],
+            "/scratch/prefix/share/max",
+        )
+        self.assertEqual(
+            environment["LD_LIBRARY_PATH"],
+            "/scratch/prefix/lib",
+        )
+        self.assertNotIn(
+            str(package_consumption.REPO_ROOT / ".pixi"),
+            environment.values(),
+        )
+
+    def test_probe_environment_uses_the_platform_loader_variable(self) -> None:
+        prefix = Path("/scratch/prefix")
+        environment = package_consumption.assertion_probe_environment(
+            prefix,
+            package_platform("darwin", "arm64"),
+        )
+        self.assertEqual(
+            environment["DYLD_LIBRARY_PATH"],
+            "/scratch/prefix/lib",
+        )
+        self.assertNotIn("LD_LIBRARY_PATH", environment)
+
+
+class AssertionPackageLayoutTests(unittest.TestCase):
+    def _valid_prefix(self, root: Path) -> Path:
+        prefix = root / "prefix"
+        for relative in package_consumption.INSTALLED_ASSERTION_FILES:
+            path = prefix / "share" / "mtest" / "assertions-src" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# fixture\n", encoding="utf-8")
+            path.chmod(0o644)
+        for directory_name in (
+            "share/mtest",
+            "share/mtest/assertions-src",
+            "share/mtest/assertions-src/mtest",
+            "share/mtest/assertions-src/mtest/assertions",
+        ):
+            (prefix / directory_name).chmod(0o755)
+        mojo = prefix / "bin" / "mojo"
+        mojo.parent.mkdir(parents=True)
+        mojo.write_text("#!/bin/sh\n", encoding="utf-8")
+        mojo.chmod(0o755)
+        config = prefix / "share" / "max" / "modular.cfg"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            "[max]\n"
+            f"package_root = {prefix}\n"
+            "[mojo-max]\n"
+            f"package_root = {prefix}\n"
+            f"driver_path = {prefix}/bin/mojo\n"
+            f"import_path = {prefix}/lib/mojo\n",
+            encoding="utf-8",
+        )
+        return prefix
+
+    def test_accepts_exact_files_modes_and_toolchain_provenance(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            (
+                prefix / "share" / "mtest" / "assertions-src" / "mtest" / "assertions"
+            ).chmod(0o775)
+            package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_an_extra_public_mojopkg(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            extra = prefix / "share" / "mtest" / "assertions-src" / "mtest.mojopkg"
+            extra.write_text("opaque", encoding="utf-8")
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "installed assertion file set",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_a_writable_source_file(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            source = (
+                prefix
+                / "share"
+                / "mtest"
+                / "assertions-src"
+                / "mtest"
+                / "__init__.mojo"
+            )
+            source.chmod(0o664)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "mode 644",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_a_world_writable_source_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            directory = (
+                prefix / "share" / "mtest" / "assertions-src" / "mtest" / "assertions"
+            )
+            directory.chmod(0o777)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "not world-writable",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_toolchain_provenance_from_another_prefix(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            config = prefix / "share" / "max" / "modular.cfg"
+            config.write_text(
+                "[max]\npackage_root = /developer/pixi\n"
+                "[mojo-max]\nimport_path = /developer/pixi/lib/mojo\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "modular.cfg",
+            ):
+                package_consumption.validate_assertion_install(prefix)
 
 
 def main() -> int:
