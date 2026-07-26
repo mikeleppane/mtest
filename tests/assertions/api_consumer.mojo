@@ -101,7 +101,7 @@ struct ManyWritesProbe(Writable):
 
 
 @fieldwise_init
-struct RenderIdentity(Equatable, Writable):
+struct RenderIdentity(Copyable, Equatable, Writable):
     """Value whose equality identity is independent from its rendered label."""
 
     var identity: Int
@@ -628,6 +628,29 @@ def test_list_values_are_individually_bounded_before_body_assembly() raises:
         in identical_projections
     )
     testing.assert_false('" != "' in identical_projections)
+    var span_identity_actual = List[RenderIdentity]()
+    var span_identity_expected = List[RenderIdentity]()
+    span_identity_actual.append(RenderIdentity(1, "same"))
+    span_identity_expected.append(RenderIdentity(2, "same"))
+    var span_identity = _list_failure(
+        span_identity_actual,
+        span_identity_expected,
+    )
+    testing.assert_true(
+        "spans compare unequal but render identically" in span_identity
+    )
+    var span_truncated_actual = List[RenderIdentity]()
+    var span_truncated_expected = List[RenderIdentity]()
+    span_truncated_actual.append(RenderIdentity(1, shared + "-actual"))
+    span_truncated_expected.append(RenderIdentity(2, shared + "-expected"))
+    var span_truncated = _list_failure(
+        span_truncated_actual,
+        span_truncated_expected,
+    )
+    testing.assert_true(
+        "displayed span projections are identical after truncation"
+        in span_truncated
+    )
     var capped_actual = List[String]()
     var capped_expected = List[String]()
     for index in range(8):

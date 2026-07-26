@@ -34,17 +34,20 @@ struct _Selection(Movable):
         self.keys = List[String]()
         self.total = 0
 
-    def consider(mut self, key: String):
+    def consider(mut self, key: String) -> Bool:
         self.total += 1
+        if key.byte_length() > DICTIONARY_KEY_BYTE_CAP:
+            return False
         if len(self.keys) < DISPLAY_LIMIT:
             self.keys.append(key)
-            return
+            return True
         var largest = 0
         for index in range(1, len(self.keys)):
             if _byte_less(self.keys[largest], self.keys[index]):
                 largest = index
         if _byte_less(key, self.keys[largest]):
             self.keys[largest] = key
+        return True
 
     def sort(mut self):
         for first in range(len(self.keys)):
@@ -56,19 +59,6 @@ struct _Selection(Movable):
                 var temporary = self.keys[first].copy()
                 self.keys[first] = self.keys[smallest]
                 self.keys[smallest] = temporary^
-
-
-def _dictionaries_equal[
-    V: Copyable & ImplicitlyDestructible & Equatable & Writable
-](actual: Dict[String, V], expected: Dict[String, V],) raises -> Bool:
-    if len(actual) != len(expected):
-        return False
-    for entry in actual.items():
-        if entry.key not in expected:
-            return False
-        if entry.value != expected[entry.key]:
-            return False
-    return True
 
 
 def _write_keys(
@@ -136,32 +126,34 @@ def write_dictionary_difference[
 ) raises -> Bool:
     """Derive equality and write deterministic bounded dictionary categories."""
     var oversized_key = False
-    for entry in expected.items():
-        if not _key_projection_fits(entry.key):
-            oversized_key = True
-    for entry in actual.items():
-        if not _key_projection_fits(entry.key):
-            oversized_key = True
-    if oversized_key:
-        if _dictionaries_equal(actual, expected):
-            return True
-        _write_opaque_dictionary_detail(output, actual, expected)
-        return False
-
     var missing = _Selection()
     var unexpected = _Selection()
     var changed = _Selection()
     for entry in expected.items():
         if entry.key not in actual:
-            missing.consider(entry.key)
+            if not missing.consider(entry.key):
+                oversized_key = True
         elif actual[entry.key] != entry.value:
-            changed.consider(entry.key)
+            if not changed.consider(entry.key):
+                oversized_key = True
     for entry in actual.items():
         if entry.key not in expected:
-            unexpected.consider(entry.key)
+            if not unexpected.consider(entry.key):
+                oversized_key = True
 
     if not missing.total and not unexpected.total and not changed.total:
         return True
+
+    if not oversized_key:
+        for entry in expected.items():
+            if not _key_projection_fits(entry.key):
+                oversized_key = True
+        for entry in actual.items():
+            if not _key_projection_fits(entry.key):
+                oversized_key = True
+    if oversized_key:
+        _write_opaque_dictionary_detail(output, actual, expected)
+        return False
 
     output.write_trusted(
         "dictionary differs"

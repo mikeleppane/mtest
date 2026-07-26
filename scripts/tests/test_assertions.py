@@ -149,6 +149,46 @@ class AssertionApiValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "Unicode mark ranges"):
                 assertions.validate_unicode_mark_table(source)
 
+    def test_dictionary_key_rendering_must_follow_the_equal_return(self) -> None:
+        broken = """
+def write_dictionary_difference[V](actual: V) -> Bool:
+    if not _key_projection_fits("key"):
+        pass
+    if not missing.total and not unexpected.total and not changed.total:
+        return True
+"""
+        with self.assertRaisesRegex(AssertionError, "success path"):
+            assertions.validate_dictionary_success_path(broken)
+
+        fixed = """
+def write_dictionary_difference[V](actual: V) -> Bool:
+    if not missing.total and not unexpected.total and not changed.total:
+        return True
+    if not _key_projection_fits("key"):
+        pass
+        """
+        assertions.validate_dictionary_success_path(fixed)
+
+    def test_dictionary_selection_rejects_raw_oversized_keys_before_copy(
+        self,
+    ) -> None:
+        broken = """
+def consider(mut self, key: String) -> Bool:
+    self.keys.append(key)
+    return True
+"""
+        with self.assertRaisesRegex(AssertionError, "retained"):
+            assertions.validate_dictionary_selection_bound(broken)
+
+        fixed = """
+def consider(mut self, key: String) -> Bool:
+    if key.byte_length() > DICTIONARY_KEY_BYTE_CAP:
+        return False
+    self.keys.append(key)
+    return True
+"""
+        assertions.validate_dictionary_selection_bound(fixed)
+
 
 class AssertionLocationValidationTests(unittest.TestCase):
     @override

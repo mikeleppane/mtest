@@ -117,6 +117,53 @@ def validate_unicode_mark_table(source: Path) -> None:
         )
 
 
+def validate_dictionary_success_path(source: str) -> None:
+    """Require dictionary key projection to begin only after equality is known."""
+    function_start = source.find("def write_dictionary_difference[")
+    if function_start == -1:
+        raise AssertionError("dictionary difference function is missing")
+    function = source[function_start:]
+    equal_guard = (
+        "if not missing.total and not unexpected.total and not changed.total:"
+    )
+    equal_guard_at = function.find(equal_guard)
+    if equal_guard_at == -1:
+        raise AssertionError("dictionary equality return guard is missing")
+    equal_return_at = function.find("return True", equal_guard_at)
+    if equal_return_at == -1:
+        raise AssertionError("dictionary equality return is missing")
+    projection_at = function.find("_key_projection_fits(")
+    if projection_at == -1:
+        raise AssertionError("dictionary key projection guard is missing")
+    if projection_at < equal_return_at:
+        raise AssertionError(
+            "dictionary key projection is reachable on the success path"
+        )
+
+
+def validate_dictionary_selection_bound(source: str) -> None:
+    """Require raw oversized keys to be rejected before selection retains them."""
+    consider_at = source.find("def consider(mut self, key: String) -> Bool:")
+    if consider_at == -1:
+        raise AssertionError("dictionary key selection function is missing")
+    function = source[consider_at:]
+    guard_at = function.find(
+        "if key.byte_length() > DICTIONARY_KEY_BYTE_CAP:"
+    )
+    reject_at = function.find("return False", guard_at)
+    retain_at = function.find("self.keys.append(key)")
+    if (
+        guard_at == -1
+        or reject_at == -1
+        or retain_at == -1
+        or guard_at > retain_at
+        or reject_at > retain_at
+    ):
+        raise AssertionError(
+            "raw oversized dictionary key can be retained by selection"
+        )
+
+
 def compile_command(
     mojo: Path,
     repo_root: Path,
@@ -490,6 +537,11 @@ def check_assertions() -> None:
     validate_unicode_mark_table(
         ASSERTION_SOURCE_ROOT / "mtest" / "assertions" / "_display.mojo"
     )
+    mapping_source = (
+        ASSERTION_SOURCE_ROOT / "mtest" / "assertions" / "_mapping.mojo"
+    ).read_text(encoding="utf-8")
+    validate_dictionary_success_path(mapping_source)
+    validate_dictionary_selection_bound(mapping_source)
     _validate_public_api_docs(mojo)
 
     for optimization, suffix in (("-O0", "o0"), ("-O3", "o3")):

@@ -1,29 +1,47 @@
 """Bounded diagnostics for top-level lists."""
 
 from mtest.assertions._display import (
+    _render_projection,
     _render_unequal_pair,
+    BODY_BYTE_CAP,
     BoundedWriter,
     DISPLAY_LIMIT,
-    render_value,
 )
 
 
-def _write_list_slice[
+@fieldwise_init
+struct _RenderedListSlice(Movable):
+    """One bounded list-slice projection and its value-truncation state."""
+
+    var text: String
+    var truncated: Bool
+
+
+def _render_list_slice[
     T: Copyable & ImplicitlyDestructible & Equatable & Writable
-](mut output: BoundedWriter, values: List[T], start: Int, stop: Int,):
+](values: List[T], start: Int, stop: Int,) -> _RenderedListSlice:
+    var output = BoundedWriter(BODY_BYTE_CAP)
     output.write_trusted("[")
     var shown = 0
+    var truncated = False
     for index in range(start, stop):
         if shown == DISPLAY_LIMIT:
             break
-        var projection = '"' + render_value(values[index]) + '"'
+        var value = _render_projection(values[index])
+        if value.truncated:
+            truncated = True
+        var projection = '"' + value.text + '"'
         if shown:
             projection = ", " + projection
         output.write_trusted(projection)
         if output.truncated:
+            truncated = True
             break
         shown += 1
     output.write_trusted("]")
+    if output.truncated:
+        truncated = True
+    return _RenderedListSlice(output.finish(), truncated)
 
 
 def _write_list_span[
@@ -39,6 +57,10 @@ def _write_list_span[
     var expected_stop = len(expected) - suffix
     var actual_count = actual_stop - prefix
     var expected_count = expected_stop - prefix
+    var actual_projection = _render_list_slice(actual, prefix, actual_stop)
+    var expected_projection = _render_list_slice(
+        expected, prefix, expected_stop
+    )
     output.write_trusted(
         "list span at index "
         + String(prefix)
@@ -51,11 +73,18 @@ def _write_list_span[
         + String(max(0, actual_count - DISPLAY_LIMIT))
         + ", expected omitted by entry limit: "
         + String(max(0, expected_count - DISPLAY_LIMIT))
-        + "\n  actual: "
     )
-    _write_list_slice(output, actual, prefix, actual_stop)
-    output.write_trusted("\n  expected: ")
-    _write_list_slice(output, expected, prefix, expected_stop)
+    if actual_projection.text == expected_projection.text:
+        if actual_projection.truncated or expected_projection.truncated:
+            output.write_trusted(
+                "\n  displayed span projections are identical after truncation"
+            )
+        else:
+            output.write_trusted(
+                "\n  spans compare unequal but render identically"
+            )
+    output.write_trusted("\n  actual: " + actual_projection.text)
+    output.write_trusted("\n  expected: " + expected_projection.text)
 
 
 def write_list_difference[
