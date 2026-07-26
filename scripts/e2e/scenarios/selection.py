@@ -545,7 +545,12 @@ def s_mojo_executable_precedence(context: ScenarioContext) -> str:
         "no real `mojo` on PATH: the precedence wrappers exec the real compiler "
         "and cannot stand in for it",
     )
-    with tempfile.TemporaryDirectory(prefix="mtest-mojo-precedence-") as root:
+    with tempfile.TemporaryDirectory(prefix="mtest-mojo-precedence-") as raw_root:
+        # Each wrapper reports os.path.realpath(__file__) as its identity, so
+        # every path derived here has to be the resolved spelling too. On macOS
+        # the scratch root arrives under /var, a symlink to /private/var, and an
+        # unresolved expectation misses the record by that prefix alone.
+        root = os.path.realpath(raw_root)
         wrappers = _install_precedence_wrappers(root)
         logs = {
             source: os.path.join(root, f"{source}.log")
