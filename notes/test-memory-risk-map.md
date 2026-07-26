@@ -5,6 +5,25 @@ and the executable evidence that covers it. An entry here is a claim about what
 *runs*, not about what exists: where nothing instrumented executes a site, the
 entry says so and gives the reason.
 
+> **Measured 2026-07-26 at commit `27715c1`. Nothing re-runs this.**
+>
+> Every `A n/14` and `V n/17` below came from a **manual** callgrind run over
+> that commit's suite binaries — see "How the evidence column was verified". It
+> is not a gate: no CI job, no `pixi` task, and no test recomputes these numbers,
+> so nothing will go red when they stop being true. Treat a count as evidence
+> about `27715c1`, not as a live guarantee. Add a suite, delete a test, or change
+> what a reporter calls, and the count silently becomes a historical fact.
+>
+> Re-measuring costs about two minutes; the commands are in that section. Do it
+> before trusting a count to make a decision, and update the date and commit
+> above when you do.
+>
+> **Least corroborated part:** the per-suite counts. The extractor was validated
+> against thirteen independently known facts, but all of the *positive* ones come
+> from a single CLI-probe run, so no external fact pins any suite-level number.
+> The three C-only rows and the two false rows review found are the
+> best-supported claims here; the suite counts are the ones to re-measure first.
+
 ## How to regenerate the inventory
 
 The lexical inventory this map is built from is the one `pixi run safety-check`
@@ -101,11 +120,31 @@ and never appear as their own `fn=` entry. Reading `fl=` alone reports
 `report/console.mojo` as unexecuted by a probe run that demonstrably escaped
 console bytes.
 
-The extractor was validated against eleven independently known facts before any
-row was rewritten — the four false claims found by review, plus seven positives
-established by the probe's own artifacts (it wrote `hostile.ndjson`,
+The extractor was validated before any row was rewritten, against eleven
+independently known facts: the four false claims found by review, plus seven
+positives forced by the probe's own artifacts (it wrote `hostile.ndjson`,
 `hostile.xml`, and `.mtest-cache/lastrun`, so the NDJSON, JUnit and temp-file
-paths must show as executed). It reproduces all eleven.
+paths must show as executed). It reproduces all eleven. The line-level
+cross-check described above was validated against those eleven plus two more —
+that `_write_all` runs under `test_report_json_reporter` and does not under
+`test_session_schedule`, both established from source by review rather than by
+this tooling — and reproduces all thirteen.
+
+Note what that validation does **not** cover: every positive fact in it comes
+from the one CLI-probe dump, so no independently-known fact pins a per-suite
+count. The suite counts are the least corroborated numbers in this document,
+which is why the header says to re-measure them first.
+
+**Granularity: these counts are per-FILE, checked against per-SITE.** The
+callgrind dumps name executed source files, and a suite can enter a file through
+a function that carries no `# SAFETY:` comment — entering a file is not
+executing a site. So every count below was re-derived a second way, from
+callgrind's line positions: each site's enclosing function was given a line
+range, and a suite counts only if an executed line falls inside one. The two
+agree for twelve of the thirteen rows. The exception is
+`report/json_stream_reporter.mojo`, whose row says so explicitly. Read a count
+as "this many suites executed a function containing a site in this file", not as
+"this many suites executed all 52 sites".
 
 Native C evidence (**N**) is not measured this way: it is the two adapter
 binaries the Valgrind lane already runs and asserts on directly.
@@ -117,15 +156,15 @@ binaries the Valgrind lane already runs and asserts on directly.
 | `src/mtest/exec/supervise.mojo` | 52 | argv/env C-string marshalling, the `_NativeBuffers` allocation/free pair, every adapter syscall wrapper (poll set, fd limit, monotonic clock, process open/close, poll, read quantum, setup drain, group, observe, close channel, reap, abort), `Completion.query_effective_cap`, `Supervisor` construction/teardown | **A** 10/14 · **V** 12/17 · **N** both adapter lifecycle binaries · **C** ✓. Every `test_exec_*` suite in each lane except `test_exec_paths`, which resolves paths and executes nothing else. |
 | `src/mtest/exec/signals.mojo` | 13 | signal-runtime open/close, the ABI-v1 error record's alloc/read/free including the destructor fallback, the installed/pending queries, `kill(2)` | **A** 10/14 · **V** 12/17 · **N** `test_exec_native_signals.c` · **C** ✓. The runtime opens for any supervised run, so its coverage matches `supervise.mojo` exactly rather than the three suites an earlier version of this row named. |
 | `src/mtest/platform/regular_file.mojo` | 15 | `open(2)`, `fstat(2)` into a 144-byte aligned record, the bounded read loop's pointer arithmetic, and the buffer free on every exit path | **A** 0/14 · **V** 0/17 · **C** ✓ only — see gap 2. Four product callers, all above the `cli` layer: `src/main.mojo:304` (config) and `:383` (state), `src/mtest/cli/doctor.mojo:259` (config) and `:519` (state). The probe's explicit `--config` makes `main.mojo:304` mandatory: an unreadable file named on the command line is a usage error, not a silent skip. |
-| `src/mtest/platform/stream.mojo` | 7 | the `errno` location call (Darwin and Linux spellings), `read(2)`, `write(2)`, `creat(2)` (both spellings), `close(2)` | **A** 1/14 (`test_report_json_reporter`) · **V** 0/17 · **C** ✓ — see gap 3. No Valgrind-lane suite executes this file: `test_report_json_reporter` is the only suite that reaches it and it is excluded from lane V (see the exclusions). Its Memcheck evidence is the CLI probe alone, which drives NDJSON, JUnit, and state writes through it. |
-| `src/mtest/platform/temp_file.mojo` | 3 | `mkstemp(3)` over a mutable template buffer, the post-call template rebuild, and the byte scan that validates it | **A** 0/14 · **V** 0/17 · **C** ✓ only — see gap 3. `create_unique_temp` has exactly two callers, `src/main.mojo:415` (state) and `src/mtest/cli/doctor.mojo:312`; the probe reaches the first. NOT the JUnit spool: `junit_reporter.mojo` imports only `process_id` and `rename_path` from `mtest.platform` and builds its temp from `_junit_nonce()` plus builtin `open` (`junit_reporter.mojo:198-209`), so `test_report_junit_finalize` never enters this file. |
+| `src/mtest/platform/stream.mojo` | 7 | the `errno` location call (Darwin and Linux spellings), `read(2)`, `write(2)`, `creat(2)` (both spellings), `close(2)` | **A** 1/14 (`test_report_json_reporter`) · **V** 0/17 · **C** ✓ — see gap 2. No Valgrind-lane suite executes this file: `test_report_json_reporter` is the only suite that reaches it and it is excluded from lane V (see the exclusions). Its Memcheck evidence is the CLI probe alone, which drives NDJSON, JUnit, and state writes through it. |
+| `src/mtest/platform/temp_file.mojo` | 3 | `mkstemp(3)` over a mutable template buffer, the post-call template rebuild, and the byte scan that validates it | **A** 0/14 · **V** 0/17 · **C** ✓ only — see gap 2. `create_unique_temp` has exactly two callers, `src/main.mojo:415` (state) and `src/mtest/cli/doctor.mojo:312`; the probe reaches the first. NOT the JUnit spool: `junit_reporter.mojo` imports only `process_id` and `rename_path` from `mtest.platform` and builds its temp from `_junit_nonce()` plus builtin `open` (`junit_reporter.mojo:198-209`), so `test_report_junit_finalize` never enters this file. |
 | `src/mtest/platform/fs.mojo` | 1 | `rename(2)` | **A** 1/14 · **V** 1/17 (`test_report_junit_finalize`, both lanes) · **C** ✓ (state promotion, JUnit temp → target). |
 | `src/mtest/platform/process.mojo` | 1 | `getpid(2)` | **A** 4/14 · **V** 3/17 (`test_exec_interrupt`, `test_exec_pool`, `test_report_junit_finalize`; plus `test_session_schedule` in A) · **C** ✓. |
 | `src/mtest/report/escape.mojo` | 1 | `unsafe_from_utf8` over the escaper's rebuilt byte buffer | **A** 4/14 · **V** 3/17 (`test_report_escape`, `test_report_junit`, `test_report_junit_finalize`; plus `test_report_json_reporter` in A) · **C** ✓. |
 | `src/mtest/report/junit.mojo` | 1 | `unsafe_from_utf8` over the XML text escaper's byte buffer | **A** 2/14 · **V** 2/17 (`test_report_junit`, `test_report_junit_finalize`) · **C** ✓. |
-| `src/mtest/report/json_stream_reporter.mojo` | 1 | a `String`'s bytes borrowed across a partial-write loop, with derived pointer arithmetic per iteration | **A** 2/14 (`test_report_json_reporter`, `test_session_schedule`) · **V** 0/17 · **C** ✓ — its only Memcheck evidence, for the reason in the exclusions. |
-| `src/mtest/report/console.mojo` | 1 | `unsafe_from_utf8` over the drained byte suffix of the console's head buffer | **A** 0/14 · **V** 0/17 · **C** ✓ only — see gap 4. `tests/unit/test_report_console.mojo` covers it in the plain `pixi run test` lane but is in neither instrumented inventory; the probe drives the same drain with a hostile capture in it. |
-| `src/mtest/select/selection.mojo` | 1 | `unsafe_from_utf8` over the ASCII case fold in `contains_ci` | **A** 0/14 · **V** 0/17 · **C** ✓ only — see gap 4, via the probe's `-k hostile`. The probe carries that flag for exactly this reason; drop it and the site loses all instrumented evidence. |
+| `src/mtest/report/json_stream_reporter.mojo` | 1 | a `String`'s bytes borrowed across a partial-write loop, with derived pointer arithmetic per iteration | **A** 1/14 (`test_report_json_reporter`) · **V** 0/17 · **C** ✓ — its only Memcheck evidence, for the reason in the exclusions. `test_session_schedule` ENTERS this file but does not reach the site: with no `--json`, `coordinator.mojo:338` builds a `JsonStreamReporter.inert()` that never opens a descriptor, so `_write_all` — the function the `# SAFETY:` comment is in — never runs. This is the one row where the file-level and site-level counts differ; see the note on granularity above. |
+| `src/mtest/report/console.mojo` | 1 | `unsafe_from_utf8` over the drained byte suffix of the console's head buffer | **A** 0/14 · **V** 0/17 · **C** ✓ only — see gap 7. `tests/unit/test_report_console.mojo` covers it in the plain `pixi run test` lane but is in neither instrumented inventory; the probe drives the same drain with a hostile capture in it. |
+| `src/mtest/select/selection.mojo` | 1 | `unsafe_from_utf8` over the ASCII case fold in `contains_ci` | **A** 0/14 · **V** 0/17 · **C** ✓ only — see gap 7, via the probe's `-k hostile`. The probe carries that flag for exactly this reason; drop it and the site loses all instrumented evidence. |
 | `src/mtest/config/lossy_utf8.mojo` | 1 | the UTF-8 validity scan's leading-byte and continuation bounds | **A** 8/14 · **V** 7/17 · **C** ✓. `test_exec_capture` calls it directly on a lone `0xFF` (`test_lossy_utf8_replaces_invalid_preserves_valid`), and `bytes_to_str` in `tests/support/exec_helpers.mojo` routes every capture assertion through it. NOT `test_config`: `mtest.config` only re-exports the symbol (`src/mtest/config/__init__.mojo:41`) and that suite never calls it — confirmed by callgrind, no frame from this file executes. |
 
 ## Exclusions, with reasons
