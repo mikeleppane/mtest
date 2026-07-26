@@ -432,6 +432,23 @@ class StageLedgerTests(unittest.TestCase):
     def test_completed_stages_start_empty(self) -> None:
         self.assertEqual(package_consumption.completed_stages(), ())
 
+    def test_stage_roster_names_both_package_forms_assertion_proofs(self) -> None:
+        self.assertEqual(
+            package_consumption.GATE_STAGE_IDS,
+            (
+                "build",
+                "install",
+                "loader-clean",
+                "assertion-source",
+                "assertion-example",
+                "dogfood",
+                "failing-fixture",
+                "tarball-assertion-source",
+                "tarball-assertion-example",
+                "tarball",
+            ),
+        )
+
     def test_recording_an_unknown_stage_is_rejected(self) -> None:
         with self.assertRaises(PackageCheckError):
             package_consumption.record_completed_stage("polish-the-badge")
@@ -470,6 +487,17 @@ class StageLedgerTests(unittest.TestCase):
                 with self.assertRaises(PackageCheckError) as caught:
                     package_consumption.verify_loader_probe_roster(performed)
                 self.assertIn(skipped, str(caught.exception))
+
+    def test_a_skipped_assertion_optimization_is_named(self) -> None:
+        with self.assertRaises(PackageCheckError) as caught:
+            package_consumption.verify_assertion_optimization_roster(("-O0",))
+        self.assertIn("-O3", str(caught.exception))
+
+    def test_assertion_optimization_roster_is_exact(self) -> None:
+        self.assertEqual(
+            package_consumption.ASSERTION_OPTIMIZATIONS,
+            (("-O0", "o0"), ("-O3", "o3")),
+        )
 
 
 class CallSiteTests(unittest.TestCase):
@@ -574,11 +602,16 @@ class CallSiteTests(unittest.TestCase):
         self.assertEqual(len(identity.call_args_list), 1)
         self.assertEqual(identity.call_args_list[0].args[0], prefix)
         self.assertEqual(identity.call_args_list[0].args[1].path.name, artifact_name)
-        assertion_probe.assert_called_once_with(prefix, "tarball")
+        assertion_probe.assert_called_once_with(
+            prefix,
+            "tarball",
+            completion_id="tarball-assertion-source",
+        )
         assertion_example.assert_called_once_with(
             prefix,
             prefix / "bin" / "mtest",
             allow_installer_group_write=True,
+            completion_id="tarball-assertion-example",
         )
 
     def test_loader_clean_stage_calls_the_probe_roster_check(self) -> None:
@@ -715,7 +748,13 @@ class CallSiteTests(unittest.TestCase):
             stage_failing_fixture_consumption=mock.Mock(
                 side_effect=stage("failing-fixture")
             ),
-            stage_tarball_fallback_smoke=mock.Mock(side_effect=stage("tarball")),
+            stage_tarball_fallback_smoke=mock.Mock(
+                side_effect=lambda *_args, **_kwargs: (
+                    stage("tarball-assertion-source")(),
+                    stage("tarball-assertion-example")(),
+                    stage("tarball")(),
+                )[-1]
+            ),
         )
         return parent
 
@@ -755,6 +794,8 @@ class CallSiteTests(unittest.TestCase):
             "assertion-source",
             "assertion-example",
             "failing-fixture",
+            "tarball-assertion-source",
+            "tarball-assertion-example",
         ):
             with self.subTest(missing_stage=missing_stage):
                 self._patched_main(skip_recording=missing_stage)
@@ -1027,6 +1068,19 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 package_consumption.PackageCheckError,
                 "exact mode 644",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_primary_package_rejects_group_writable_source_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            directory = (
+                prefix / "share" / "mtest" / "assertions-src" / "mtest" / "assertions"
+            )
+            directory.chmod(0o775)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "group-writable",
             ):
                 package_consumption.validate_assertion_install(prefix)
 

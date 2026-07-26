@@ -299,12 +299,15 @@ GATE_STAGE_IDS = (
     "assertion-example",
     "dogfood",
     "failing-fixture",
+    "tarball-assertion-source",
+    "tarball-assertion-example",
     "tarball",
 )
 
 # The probes stage 3 must run on the installed binary, in order. Its closing
 # line is derived from these and checked against them, for the same reason.
 LOADER_PROBE_FLAGS = ("--version", "--help", "--config")
+ASSERTION_OPTIMIZATIONS = (("-O0", "o0"), ("-O3", "o3"))
 
 _COMPLETED_STAGES: list[str] = []
 
@@ -351,6 +354,17 @@ def verify_every_stage_ran() -> None:
             "the gate did not perform every stage it reports: ran "
             f"{list(completed_stages())}, expected {list(GATE_STAGE_IDS)}"
             + (f", missing {missing}" if missing else " in that order")
+        )
+
+
+def verify_assertion_optimization_roster(performed: tuple[str, ...]) -> None:
+    """Refuse to summarize assertion compiles that skipped an optimization."""
+    expected = tuple(optimization for optimization, _suffix in ASSERTION_OPTIMIZATIONS)
+    if performed != expected:
+        missing = [item for item in expected if item not in performed]
+        raise PackageCheckError(
+            "assertion optimization roster mismatch: "
+            f"ran {list(performed)}, expected {list(expected)}, missing {missing}"
         )
 
 
@@ -414,6 +428,12 @@ def validate_assertion_install(
                 "installed assertion path component must be a real directory: "
                 f"{relative}"
             )
+        if relative != Path("share"):
+            _require_safe_assertion_directory(
+                component,
+                relative,
+                allow_installer_group_write=allow_installer_group_write,
+            )
     entries = list(source_root.rglob("*"))
     symbolic_links = [
         path.relative_to(source_root) for path in entries if path.is_symlink()
@@ -470,13 +490,11 @@ def validate_assertion_install(
             )
     for relative in INSTALLED_ASSERTION_DIRECTORIES:
         directory = source_root / relative
-        mode = stat.S_IMODE(directory.stat().st_mode)
-        if mode & 0o002 or mode & 0o555 != 0o555 or mode & 0o7000:
-            raise PackageCheckError(
-                "installed assertion directory must be traversable and not "
-                "world-writable or carry special bits: "
-                f"{relative} has {mode:o}"
-            )
+        _require_safe_assertion_directory(
+            directory,
+            Path("share/mtest/assertions-src") / relative,
+            allow_installer_group_write=allow_installer_group_write,
+        )
     if list(source_root.rglob("*.mojopkg")):
         raise PackageCheckError("installed assertion source contains a mojopkg")
 
@@ -498,6 +516,27 @@ def validate_assertion_install(
             f"installed modular.cfg does not name its own prefix: {missing}"
         )
     return source_root
+
+
+def _require_safe_assertion_directory(
+    directory: Path,
+    relative: Path,
+    *,
+    allow_installer_group_write: bool,
+) -> None:
+    """Require one installed source path to resist unintended replacement."""
+    mode = stat.S_IMODE(directory.stat().st_mode)
+    if mode & 0o002 or mode & 0o555 != 0o555 or mode & 0o7000:
+        raise PackageCheckError(
+            "installed assertion directory must be traversable and not "
+            "world-writable or carry special bits: "
+            f"{relative} has {mode:o}"
+        )
+    if mode & 0o020 and not allow_installer_group_write:
+        raise PackageCheckError(
+            "installed assertion directory must not be group-writable in the "
+            f"primary package: {relative} has {mode:o}"
+        )
 
 
 def require_missing_runner_module(diagnostic: str) -> None:
@@ -554,7 +593,8 @@ def stage_assertion_source_probe(
     environment = assertion_probe_environment(env_prefix)
     checkout_source = str((REPO_ROOT / "assertions-src").resolve())
 
-    for optimization, suffix in (("-O0", "o0"), ("-O3", "o3")):
+    performed_optimizations: list[str] = []
+    for optimization, suffix in ASSERTION_OPTIMIZATIONS:
         binary = probe_root / f"consumer-{suffix}"
         command = assertion_compile_command(
             env_prefix,
@@ -604,6 +644,8 @@ def stage_assertion_source_probe(
                 f"{label} assertion probe exited {run.returncode} at "
                 f"{optimization}: {run.stdout}{run.stderr}"
             )
+        performed_optimizations.append(optimization)
+    verify_assertion_optimization_roster(tuple(performed_optimizations))
 
     negative_binary = probe_root / "private-import"
     negative_command = assertion_compile_command(
@@ -659,7 +701,8 @@ def stage_assertion_source_probe(
         )
     print(
         f"package-check: OK -- {label} installed {len(INSTALLED_ASSERTION_FILES)} "
-        f"source files at {source_root}, compiled at -O0/-O3, and kept "
+        f"source files at {source_root}, compiled at "
+        f"{'/'.join(performed_optimizations)}, and kept "
         "runner imports and helper facade exports unavailable",
         flush=True,
     )
@@ -1517,8 +1560,8 @@ def stage_tarball_fallback_smoke(target: PackagePlatform | None = None) -> None:
     """Stage 6: smoke-run the classic tar-bz2 package format.
 
     Builds the SAME recipe into its own local channel, installs it into a second
-    scratch env, and runs `--version` -- the fallback distribution form must
-    work too.
+    scratch env, runs `--version`, and repeats the source and README assertion
+    proofs.
 
     Args:
         target: Platform descriptor to build for; the host's when omitted.
@@ -1598,11 +1641,16 @@ def stage_tarball_fallback_smoke(target: PackagePlatform | None = None) -> None:
             f"(expected 0 and {expected!r} in stdout): {result.stdout!r}"
         )
 
-    stage_assertion_source_probe(mtest_bin.parents[1], "tarball")
+    stage_assertion_source_probe(
+        mtest_bin.parents[1],
+        "tarball",
+        completion_id="tarball-assertion-source",
+    )
     stage_assertion_example(
         mtest_bin.parents[1],
         mtest_bin,
         allow_installer_group_write=True,
+        completion_id="tarball-assertion-example",
     )
 
     print(
