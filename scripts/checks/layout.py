@@ -53,7 +53,6 @@ ASSERTION_CHECK_PATHS = {
 ASSERTION_EXAMPLE_PATHS = {
     Path("examples/assertions/test_diagnostics.mojo"),
 }
-ASSERTION_RECIPE_INSTALL_SOURCES = set(ASSERTION_SOURCE_PATHS)
 VENDORED_TOML_PATHS = {
     Path("vendor/mojo-toml/CHECKSUMS.json"),
     Path("vendor/mojo-toml/LICENSE"),
@@ -1162,10 +1161,6 @@ def check_build_source_visibility(repo_root: Path = REPO_ROOT) -> None:
 
 def check_assertion_companion_layout(repo_root: Path = REPO_ROOT) -> None:
     """Pin the public assertion source, consumers, and namespace isolation."""
-    _require_nonempty(
-        "assertion recipe install",
-        ASSERTION_RECIPE_INSTALL_SOURCES,
-    )
     for name, expected, root in (
         ("assertion source", ASSERTION_SOURCE_PATHS, "assertions-src"),
         ("assertion consumer", ASSERTION_CONSUMER_PATHS, "tests/assertions"),
@@ -1221,11 +1216,11 @@ def check_assertion_companion_layout(repo_root: Path = REPO_ROOT) -> None:
         Path(match)
         for match in re.findall(r"(?m)^\s*install -m 644 (assertions-src/\S+)", recipe)
     }
-    if installed_sources != ASSERTION_RECIPE_INSTALL_SOURCES:
+    if installed_sources != ASSERTION_SOURCE_PATHS:
         raise AssertionError(
             "assertion recipe install membership mismatch: "
-            f"missing={sorted(ASSERTION_RECIPE_INSTALL_SOURCES - installed_sources)}, "
-            f"extra={sorted(installed_sources - ASSERTION_RECIPE_INSTALL_SOURCES)}"
+            f"missing={sorted(ASSERTION_SOURCE_PATHS - installed_sources)}, "
+            f"extra={sorted(installed_sources - ASSERTION_SOURCE_PATHS)}"
         )
     if re.search(r"\bcp\s+-[A-Za-z]*r[A-Za-z]*[^\n]*assertions-src", recipe):
         raise AssertionError("assertion recipe uses a recursive source copy")

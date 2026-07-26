@@ -839,6 +839,64 @@ class AssertionPackageCommandTests(unittest.TestCase):
         )
         self.assertNotIn("LD_LIBRARY_PATH", environment)
 
+    def test_installed_consumer_compile_rejects_warnings(self) -> None:
+        with self.assertRaisesRegex(
+            package_consumption.PackageCheckError,
+            "compiler warning",
+        ):
+            package_consumption.require_warning_free_assertion_compile(
+                "consumer.mojo:1:1: warning: shipped warning\n",
+                "conda",
+                "-O0",
+            )
+
+
+class AssertionReadmeExampleTests(unittest.TestCase):
+    def test_extracts_the_only_console_fence_from_assertion_section(self) -> None:
+        contents = (
+            "# mtest\n\n"
+            "## Assertion diagnostics\n\n"
+            "```mojo\nassert_equal(1, 2)\n```\n\n"
+            "```console\n$ mtest examples/assertions\noutput\n```\n\n"
+            "## Usage\n"
+        )
+        self.assertEqual(
+            package_consumption.readme_assertion_example_block(contents),
+            "$ mtest examples/assertions\noutput\n",
+        )
+
+    def test_extracts_the_only_mojo_fence_from_assertion_section(self) -> None:
+        contents = (
+            "# mtest\n\n"
+            "## Assertion diagnostics\n\n"
+            "```mojo\nassert_equal(1, 2)\n```\n\n"
+            "```console\n$ mtest examples/assertions\noutput\n```\n\n"
+            "## Usage\n"
+        )
+        self.assertEqual(
+            package_consumption.readme_assertion_source_block(contents),
+            "assert_equal(1, 2)\n",
+        )
+
+    def test_normalizes_only_paths_and_elapsed_times(self) -> None:
+        output = (
+            "root: /checkout\n"
+            "FAIL           examples/assertions/test.mojo  0.07s\n"
+            "detail /prefix/share/mtest/assertions-src\n"
+            "===== 1 passed, 1 failed in 2.2s =====\n"
+        )
+        self.assertEqual(
+            package_consumption.normalize_assertion_example(
+                output,
+                Path("/prefix"),
+                Path("/checkout"),
+            ),
+            "root: <REPO>\n"
+            "FAIL           examples/assertions/test.mojo  <TIME>\n"
+            "detail <PREFIX>/share/mtest/assertions-src\n"
+            "===== 1 passed, 1 failed in <TIME> =====\n",
+        )
+
 
 class AssertionPackageLayoutTests(unittest.TestCase):
     def _valid_prefix(self, root: Path) -> Path:

@@ -100,12 +100,9 @@ def write_list_difference[
 
     var suffix = shared - last_mismatch - 1
 
-    var actual_stop = len(actual) - suffix
-    var expected_stop = len(expected) - suffix
-    var aligned = min(actual_stop - prefix, expected_stop - prefix)
     var interior_equal = (
         first_equal_after_prefix != -1
-        and first_equal_after_prefix < prefix + aligned
+        and first_equal_after_prefix <= last_mismatch
     )
 
     if not interior_equal:

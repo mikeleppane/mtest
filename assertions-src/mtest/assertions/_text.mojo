@@ -9,6 +9,7 @@ from mtest.assertions._display import (
     _is_format_control,
     _is_non_ascii_separator,
     _is_private_use,
+    _is_unassigned_default_ignorable,
     _is_variation_selector,
 )
 
@@ -106,6 +107,8 @@ def _scalar_label(text: String, byte_index: Int) -> String:
                 if value >= 0xE0020 and value <= 0xE007F:
                     return _uplus(value) + " TAG CHARACTER (category Cf)"
                 return _uplus(value) + " FORMAT CONTROL (category Cf)"
+            if _is_unassigned_default_ignorable(value):
+                return _uplus(value) + " DEFAULT IGNORABLE (category Cn)"
             if _is_private_use(value):
                 return _uplus(value) + " PRIVATE USE (category Co)"
             return _uplus(value) + " '" + _escaped_piece(value) + "'"
@@ -168,10 +171,7 @@ def write_text_detail(
 ):
     """Write bounded context around the first differing Unicode scalar."""
     var byte_index = _first_differing_byte(actual, expected)
-    var scalar_index = min(
-        _scalar_index_at(actual, byte_index),
-        _scalar_index_at(expected, byte_index),
-    )
+    var scalar_index = _scalar_index_at(actual, byte_index)
     var actual_context = BoundedWriter(_SIDE_CONTEXT_BYTE_CAP)
     _write_context(
         actual_context,

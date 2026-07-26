@@ -37,10 +37,6 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
             ("ASSERTION_CONSUMER_PATHS", layout.check_assertion_companion_layout),
             ("ASSERTION_CHECK_PATHS", layout.check_assertion_companion_layout),
             ("ASSERTION_EXAMPLE_PATHS", layout.check_assertion_companion_layout),
-            (
-                "ASSERTION_RECIPE_INSTALL_SOURCES",
-                layout.check_assertion_companion_layout,
-            ),
             ("VENDORED_TOML_PATHS", layout.check_vendored_toml_layout),
         )
         for name, check in cases:
@@ -116,7 +112,7 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
                 "# no assertion precompile\n"
                 + "".join(
                     f"install -m 644 {relative} destination\n"
-                    for relative in layout.ASSERTION_RECIPE_INSTALL_SOURCES
+                    for relative in layout.ASSERTION_SOURCE_PATHS
                 ),
                 encoding="utf-8",
             )

@@ -512,6 +512,18 @@ def require_missing_facade_export(diagnostic: str, helper: str) -> None:
         )
 
 
+def require_warning_free_assertion_compile(
+    transcript: str,
+    label: str,
+    optimization: str,
+) -> None:
+    """Reject warnings from an installed assertion-source consumer compile."""
+    if "warning:" in transcript:
+        raise PackageCheckError(
+            f"{label} assertion compiler warning at {optimization}: {transcript}"
+        )
+
+
 def stage_assertion_source_probe(env_prefix: Path, label: str) -> None:
     """Compile and run public-source probes from one installed package form."""
     _banner(f"installed assertion source probe -- {label}")
@@ -563,6 +575,11 @@ def stage_assertion_source_probe(env_prefix: Path, label: str) -> None:
                 f"{label} assertion probe compile failed at {optimization}: "
                 f"{transcript}"
             )
+        require_warning_free_assertion_compile(
+            transcript,
+            label,
+            optimization,
+        )
         run = subprocess.run(
             [str(binary)],
             cwd=probe_root,
@@ -638,8 +655,11 @@ def stage_assertion_source_probe(env_prefix: Path, label: str) -> None:
     )
 
 
-def readme_assertion_example_block(contents: str) -> str:
-    """Extract the sole console fence from the assertion-diagnostics section."""
+def _readme_assertion_fence(
+    contents: str,
+    fence: str,
+    label: str,
+) -> str:
     if contents.count(ASSERTION_README_SECTION) != 1:
         raise PackageCheckError(
             "README must contain exactly one assertion-diagnostics section"
@@ -651,39 +671,33 @@ def readme_assertion_example_block(contents: str) -> str:
     if section_end == -1:
         section_end = len(contents)
     section = contents[section_start:section_end]
-    if section.count(ASSERTION_CONSOLE_FENCE) != 1:
+    if section.count(fence) != 1:
         raise PackageCheckError(
-            "assertion-diagnostics section must contain exactly one console fence"
+            f"assertion-diagnostics section must contain exactly one {label} fence"
         )
-    block_start = section.index(ASSERTION_CONSOLE_FENCE) + len(ASSERTION_CONSOLE_FENCE)
+    block_start = section.index(fence) + len(fence)
     block_end = section.find("\n```", block_start)
     if block_end == -1:
-        raise PackageCheckError("assertion-diagnostics console fence is not closed")
+        raise PackageCheckError(f"assertion-diagnostics {label} fence is not closed")
     return section[block_start : block_end + 1]
+
+
+def readme_assertion_example_block(contents: str) -> str:
+    """Extract the sole console fence from the assertion-diagnostics section."""
+    return _readme_assertion_fence(
+        contents,
+        ASSERTION_CONSOLE_FENCE,
+        "console",
+    )
 
 
 def readme_assertion_source_block(contents: str) -> str:
     """Extract the sole Mojo fence from the assertion-diagnostics section."""
-    if contents.count(ASSERTION_README_SECTION) != 1:
-        raise PackageCheckError(
-            "README must contain exactly one assertion-diagnostics section"
-        )
-    section_start = contents.index(ASSERTION_README_SECTION) + len(
-        ASSERTION_README_SECTION
+    return _readme_assertion_fence(
+        contents,
+        ASSERTION_MOJO_FENCE,
+        "Mojo",
     )
-    section_end = contents.find("\n## ", section_start)
-    if section_end == -1:
-        section_end = len(contents)
-    section = contents[section_start:section_end]
-    if section.count(ASSERTION_MOJO_FENCE) != 1:
-        raise PackageCheckError(
-            "assertion-diagnostics section must contain exactly one Mojo fence"
-        )
-    block_start = section.index(ASSERTION_MOJO_FENCE) + len(ASSERTION_MOJO_FENCE)
-    block_end = section.find("\n```", block_start)
-    if block_end == -1:
-        raise PackageCheckError("assertion-diagnostics Mojo fence is not closed")
-    return section[block_start : block_end + 1]
 
 
 def normalize_assertion_example(

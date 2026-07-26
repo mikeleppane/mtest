@@ -142,6 +142,18 @@ def _is_private_use(value: Int) -> Bool:
     )
 
 
+def _is_unassigned_default_ignorable(value: Int) -> Bool:
+    # Unicode 15.0 reserves these Cn ranges as Default_Ignorable_Code_Point.
+    return (
+        value == 0x2065
+        or (value >= 0xFFF0 and value <= 0xFFF8)
+        or value == 0xE0000
+        or (value >= 0xE0002 and value <= 0xE001F)
+        or (value >= 0xE0080 and value <= 0xE00FF)
+        or (value >= 0xE01F0 and value <= 0xE0FFF)
+    )
+
+
 def _requires_escape(value: Int) -> Bool:
     return (
         value < 32
@@ -152,6 +164,7 @@ def _requires_escape(value: Int) -> Bool:
         or _is_combining_mark(value)
         or _is_visually_blank(value)
         or _is_private_use(value)
+        or _is_unassigned_default_ignorable(value)
     )
 
 

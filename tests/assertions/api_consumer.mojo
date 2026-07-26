@@ -327,6 +327,10 @@ def test_text_scalar_labels_expose_invisible_differences() raises:
         "U+0488 ENCLOSING MARK (category Me)" in _text_failure("a\u0488b", "ab")
     )
     testing.assert_true(
+        "U+2065 DEFAULT IGNORABLE (category Cn)"
+        in _text_failure("a\u2065b", "ab")
+    )
+    testing.assert_true(
         "U+00A0 NO-BREAK SPACE (category Zs)"
         in _text_failure("a\u00a0b", "a b")
     )
@@ -383,8 +387,9 @@ def test_invisible_scalars_are_escaped_in_structural_values() raises:
             "a\u17B4b",
             "a\u3164b",
             "a\u2800b",
+            "a\u2065b",
         ],
-        ["ab", "ab", "ab", "ab", "ab", "ab", "ab"],
+        ["ab", "ab", "ab", "ab", "ab", "ab", "ab", "ab"],
     )
     testing.assert_true("a\\u05b0b" in additional)
     testing.assert_true("a\\u064bb" in additional)
@@ -393,6 +398,20 @@ def test_invisible_scalars_are_escaped_in_structural_values() raises:
     testing.assert_true("a\\u17b4b" in additional)
     testing.assert_true("a\\u3164b" in additional)
     testing.assert_true("a\\u2800b" in additional)
+    testing.assert_true("a\\u2065b" in additional)
+    var reserved = _list_failure(
+        [
+            "a\uFFF0b",
+            "a\U000E0000b",
+            "a\U000E0080b",
+            "a\U000E01F0b",
+        ],
+        ["ab", "ab", "ab", "ab"],
+    )
+    testing.assert_true("a\\ufff0b" in reserved)
+    testing.assert_true("a\\U000e0000b" in reserved)
+    testing.assert_true("a\\U000e0080b" in reserved)
+    testing.assert_true("a\\U000e01f0b" in reserved)
 
 
 def test_text_line_endings_and_final_newline_are_explicit() raises:
