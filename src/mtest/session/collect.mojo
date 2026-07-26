@@ -22,6 +22,7 @@ from mtest.model import (
     EXIT_FAILURE,
     EXIT_NOTHING_RAN,
     EXIT_SUCCESS,
+    escape_one_line,
     resolve_exit_code,
 )
 from mtest.session.build import (
@@ -200,7 +201,9 @@ def run_collect(
                 )
             except:
                 diags.append(
-                    "collect: " + rel + ": internal build failure; aborting"
+                    "collect: "
+                    + escape_one_line(rel)
+                    + ": internal build failure; aborting"
                 )
                 internal = True
                 break
@@ -210,13 +213,18 @@ def run_collect(
                     break
                 if bo.result.internal_error:
                     diags.append(
-                        "collect: " + rel + ": internal build failure; aborting"
+                        "collect: "
+                        + escape_one_line(rel)
+                        + ": internal build failure; aborting"
                     )
                     internal = True
                     break
                 # A compile-error terminal: a diagnostic; the listing continues.
                 diags.append(
-                    "collect: " + rel + ": " + _collect_phrase(bo.result)
+                    "collect: "
+                    + escape_one_line(rel)
+                    + ": "
+                    + _collect_phrase(bo.result)
                 )
                 any_failing = True
                 continue
@@ -236,7 +244,9 @@ def run_collect(
                 )
             except:
                 diags.append(
-                    "collect: " + rel + ": internal probe failure; aborting"
+                    "collect: "
+                    + escape_one_line(rel)
+                    + ": internal probe failure; aborting"
                 )
                 internal = True
                 break
@@ -245,7 +255,9 @@ def run_collect(
                 break
             if po.internal_error:
                 diags.append(
-                    "collect: " + rel + ": internal probe failure; aborting"
+                    "collect: "
+                    + escape_one_line(rel)
+                    + ": internal probe failure; aborting"
                 )
                 internal = True
                 break
@@ -256,7 +268,12 @@ def run_collect(
 
             # A non-qualifying terminal probe: diagnostic, then classify. Drift
             # forces exit 3 but the listing still continues; the rest are exit-1.
-            diags.append("collect: " + rel + ": " + _collect_phrase(po.result))
+            diags.append(
+                "collect: "
+                + escape_one_line(rel)
+                + ": "
+                + _collect_phrase(po.result)
+            )
             if po.result.is_drift:
                 drift = True
             else:

@@ -13,6 +13,9 @@ the invocation root.
 """
 
 
+from mtest.model import escape_one_line
+
+
 def _join(segments: List[String], sep: String) -> String:
     """Join `segments` with `sep` (no leading or trailing separator)."""
     var out = String("")
@@ -64,7 +67,11 @@ def normalize_root(root: String) -> String:
 
 def _escape_error(op: String) -> Error:
     """The exit-4 usage error for an operand that escapes the root."""
-    return Error("discover: operand '" + op + "' escapes the invocation root")
+    return Error(
+        "discover: operand '"
+        + escape_one_line(op)
+        + "' escapes the invocation root"
+    )
 
 
 def normalize_operand(op: String, root: String) raises -> String:

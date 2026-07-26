@@ -29,7 +29,7 @@ from std.builtin.sort import sort
 from std.os.path import exists, isdir, isfile
 
 from mtest.config import RunnerConfig
-from mtest.model import split_node_token
+from mtest.model import escape_one_line, split_node_token
 from mtest.discover.fnmatch import fnmatch
 from mtest.discover.normalize import normalize_operand, normalize_root
 from mtest.discover.result import DiscoveryResult, ExcludedEntry
@@ -64,7 +64,7 @@ def _malformed_node_id_error(op: String) -> Error:
     """The exit-4 usage error for an operand with more than one `::`."""
     return Error(
         "discover: malformed node id '"
-        + op
+        + escape_one_line(op)
         + "': a node id is PATH::TEST with a single '::' (see mtest --help)"
     )
 
@@ -78,9 +78,9 @@ def _node_id_names_directory_error(op: String, dir_part: String) -> Error:
     """
     return Error(
         "discover: malformed node id '"
-        + op
+        + escape_one_line(op)
         + "': '"
-        + dir_part
+        + escape_one_line(dir_part)
         + "' is a directory, but a node id is FILE::TEST (see mtest --help)"
     )
 
@@ -110,7 +110,7 @@ def _classify(
     var rel = normalize_operand(file_op, nroot)  # raises on root escape
     var fpath = _abs_of(nroot, rel)
     if not exists(fpath):
-        raise Error("discover: no such path '" + file_op + "'")
+        raise Error("discover: no such path '" + escape_one_line(file_op) + "'")
     if isdir(fpath):
         if is_node_id:
             raise _node_id_names_directory_error(op, file_op)
@@ -122,7 +122,7 @@ def _classify(
     elif isfile(fpath):
         into.append(rel)
     else:
-        raise Error("discover: no such path '" + file_op + "'")
+        raise Error("discover: no such path '" + escape_one_line(file_op) + "'")
 
 
 def _apply_excludes(
