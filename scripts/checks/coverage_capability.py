@@ -4,8 +4,8 @@
 mtest has no line or branch coverage number, because Mojo 1.0.0b2 ships no
 coverage instrumentation: neither ``mojo build --help`` nor ``mojo --help``
 mentions a coverage, profile, or instrumentation flag. Release confidence
-therefore rests on the behavioral and mutation oracles catalogued in
-``notes/test-confidence-map.md``.
+therefore rests on the behavioral and mutation oracles the checks in this
+repository enforce, not on a percentage.
 
 That limitation is only honest while it is still true, so this probe is a gate
 rather than a report. The ASYMMETRY is the point: an absent facility is the
@@ -43,7 +43,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # outlive the version it names.
 PINNED_MOJO_VERSION = "1.0.0b2"
 
-# The exact commands recorded in notes/test-confidence-map.md. They are argv
+# The exact commands this probe's recorded result was produced by. They are argv
 # lists, never a shell string: no product or test oracle in this repo invokes
 # `/bin/sh -c`.
 PROBE_COMMANDS: tuple[tuple[str, ...], ...] = (
@@ -75,7 +75,7 @@ UNAVAILABLE_MESSAGE = (
 DISCOVERY_INSTRUCTION = (
     "Evaluate each item above and gate it explicitly before this task can pass "
     "again: either wire the facility into a blocking check with a reviewed "
-    "threshold, or record in notes/test-confidence-map.md why it is rejected. "
+    "threshold, or state in the rejecting commit why it is not gated. "
     "Do not publish a coverage number that no gate enforces."
 )
 
@@ -109,9 +109,8 @@ def check_version_pin(repo_root: Path = REPO_ROOT) -> None:
         raise ProbeError(
             f"the toolchain pin moved to {spec!r}, but this probe's recorded "
             f"result covers =={PINNED_MOJO_VERSION}. Re-run the probe against "
-            "the new toolchain, update PINNED_MOJO_VERSION and "
-            "notes/test-confidence-map.md together, and only then let this "
-            "task pass."
+            "the new toolchain, update PINNED_MOJO_VERSION and the recorded "
+            "result together, and only then let this task pass."
         )
 
 

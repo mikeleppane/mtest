@@ -300,17 +300,6 @@ class PixiTaskTests(unittest.TestCase):
             "python -m scripts.checks.coverage_capability",
         )
 
-    def test_the_probe_commands_match_the_recorded_map(self) -> None:
-        # notes/test-confidence-map.md records the probe a reader can re-run by
-        # hand. If this module drifts from it, the note stops being a recipe.
-        note = (
-            coverage_capability.REPO_ROOT / "notes" / "test-confidence-map.md"
-        ).read_text(encoding="utf-8")
-
-        for argv in coverage_capability.PROBE_COMMANDS:
-            self.assertIn(" ".join(argv), note)
-        self.assertIn(coverage_capability.UNAVAILABLE_MESSAGE, note)
-
 
 class EmptyProbeOutputFailsClosedTests(unittest.TestCase):
     """An exit-0 command that wrote nothing is not evidence of an absence.
