@@ -19,7 +19,7 @@ from std.testing import (
     assert_raises,
 )
 
-from mtest.exec import canonicalize, lexical_source_path
+from mtest.exec import canonicalize, lexical_source_path, source_identity_key
 
 from tmptree import temp_root, touch, link_dir, remove_tree
 
@@ -99,3 +99,47 @@ def test_lexical_source_path_needs_no_existing_file() raises:
         lexical_source_path("/no/such/mtest/xyz123.mojo"),
         "/no/such/mtest/xyz123.mojo",
     )
+
+
+# --- source_identity_key: the two halves, composed ---
+
+
+def test_source_identity_key_resolves_the_root_but_not_the_operand() raises:
+    """`mojo build` treats the two halves of what it is handed differently.
+
+    It resolves a relative argument against `getcwd(3)`, which always reports
+    the PHYSICAL directory, so the root half must be canonical; it never
+    resolves a symlink in the argument itself, so the relative half must stay
+    lexical. Reproducing the key means reproducing both.
+    """
+    var outer = temp_root()
+    touch(outer, "real/tests/test_a.mojo")
+    link_dir(outer, "real", "link")
+    link_dir(outer, "real/tests/test_a.mojo", "real/tests/test_link.mojo")
+    var physical = canonicalize(outer)
+
+    # Root half RESOLVED: entering through the link names the real directory,
+    # which is the only thing the child will ever say.
+    assert_equal(
+        source_identity_key(outer + "/link", "tests/test_a.mojo"),
+        physical + "/real/tests/test_a.mojo",
+    )
+    # Operand half NOT resolved: the linked file keeps its own name rather than
+    # collapsing onto its target.
+    assert_equal(
+        source_identity_key(outer + "/link", "tests/test_link.mojo"),
+        physical + "/real/tests/test_link.mojo",
+    )
+    remove_tree(outer)
+
+
+def test_source_identity_key_is_stable_across_equivalent_roots() raises:
+    """The link and the real directory are one root, so they key identically."""
+    var outer = temp_root()
+    touch(outer, "real/tests/test_a.mojo")
+    link_dir(outer, "real", "link")
+    assert_equal(
+        source_identity_key(outer + "/link", "tests/test_a.mojo"),
+        source_identity_key(outer + "/real", "tests/test_a.mojo"),
+    )
+    remove_tree(outer)

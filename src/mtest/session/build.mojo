@@ -19,8 +19,8 @@ from mtest.exec import (
     ProcessResult,
     ProcessSpec,
     interrupt_requested,
-    lexical_source_path,
     run_supervised,
+    source_identity_key,
 )
 from mtest.model import Event, Outcome, ParseDisposition, TestCounts, is_slow
 from mtest.protocol import (
@@ -193,7 +193,7 @@ def _build_for_selection(
             True,
             FileResult.ran_with(ev^, bsignal),
         )
-    var canonical = lexical_source_path(root + "/" + rel)
+    var canonical = source_identity_key(root, rel)
     reg.record_build(BuildProduct.built(rel, out_bin, canonical))
     return _BuildOutcome(
         True, out_bin, canonical, build_argv^, bdur, False, _blank_file_result()

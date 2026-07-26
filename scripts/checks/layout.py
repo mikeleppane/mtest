@@ -270,7 +270,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 1339
+CLASSIFIED_TEST_COUNT = 1342
 CLASSIFIED_ROOTS = (
     Path("tests/unit"),
     Path("tests/integration"),

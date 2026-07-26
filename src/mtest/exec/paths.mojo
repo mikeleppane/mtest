@@ -1,19 +1,26 @@
-"""Absolute source paths for `exec`, in the two flavors the runner needs.
+"""Absolute source paths for `exec`, in the flavors the runner needs.
 
 `mojo build` bakes the absolute source path into every location line of a
 child's report (`Running … for <path>`, `At <path>:…`, `ABORT: …`), so the
-report parser's identity key is that path. Crucially, it bakes the path it was
-HANDED: a relative argument is made absolute against the compiler's cwd, but a
-symlink component is never resolved. The identity key is therefore the
-**lexical** absolute path — `lexical_source_path` — not the canonical one.
+report parser's identity key is that path. mtest hands the compiler a
+ROOT-RELATIVE argument, so reproducing that key means reproducing exactly what
+the compiler does with it — and the two halves behave differently:
 
-`canonicalize` answers the different question "which file is this, really", by
-resolving symlinks against the live filesystem. The two agree for any path with
-no symlink component, which is why using the wrong one stayed invisible until a
-test file was reached through a link: the resolved path named the link's target,
-the child's report named the link, the identity match failed, and a conforming
-module was reported MALFORMED-SUITE. §2 is explicit that mtest does not resolve
-symlinks; the identity key now matches that rule.
+- The **root** half is resolved by `getcwd(3)`, which always reports the
+  PHYSICAL directory, every symlink already resolved. So the key's prefix must
+  be canonical, whatever string the caller happened to pass as the root.
+- The **relative** half is only made absolute, never resolved. A symlink
+  component in it survives into the report verbatim.
+
+`source_identity_key` composes those two halves and is what call sites should
+use. Getting either half wrong reports a conforming module as MALFORMED-SUITE,
+and each half hides on a different platform: an all-canonical key breaks only
+when a test file is reached through a link, and an all-lexical key breaks only
+when the ROOT is reached through one — which on macOS is the default, because
+the temp root lives under `/var`, itself a link to `/private/var`. §2 is
+explicit that mtest does not resolve symlinks *it was pointed at*; resolving
+the root it is standing in is a different act, and the one the compiler
+performs.
 """
 from std.os.path import realpath
 
@@ -96,3 +103,41 @@ def lexical_source_path(path: String) -> String:
     for s in stack:
         out += "/" + s
     return out^ if out != "" else String("/")
+
+
+def source_identity_key(root: String, rel: String) raises -> String:
+    """Return the key a child's report location lines carry for `rel`.
+
+    Reproduces what `mojo build` does with the root-relative path it is handed,
+    which treats the two halves differently: `root` is canonicalized, because
+    the compiler resolves a relative argument against `getcwd(3)` and that
+    always reports the physical directory; `rel` is folded lexically only, so a
+    test file reached through a symlink keeps the link's own name.
+
+    Callers must not hand-roll this as `lexical_source_path(root + "/" + rel)`.
+    That form is correct only when `root` is ALREADY physical, which is true of
+    the CLI (its root is `cwd()`) and need not be true of any other caller —
+    `run_session` takes the root as an argument. On macOS it is routinely false,
+    since the temp root sits under `/var`, a link to `/private/var`.
+
+    Args:
+        root: The invocation root; must exist, but need not be canonical.
+        rel: The root-relative source path, kept lexically.
+
+    Returns:
+        The absolute identity key: canonical root, lexical remainder.
+
+    Raises:
+        Error: If `root` cannot be canonicalized. The message is `exec:`-
+            prefixed and names the path.
+
+    Examples:
+
+    ```mojo
+    from mtest.exec import source_identity_key
+
+    # Resolves a symlinked root, keeps a symlinked file.
+    var key = source_identity_key("/var/tmp/proj", "tests/test_linked.mojo")
+    ```
+    """
+    return lexical_source_path(canonicalize(root) + "/" + rel)

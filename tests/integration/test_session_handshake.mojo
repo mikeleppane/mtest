@@ -31,12 +31,14 @@ from session_fixtures import (
     SRC_FLOOD_PROBE,
     SRC_FORGER,
     SRC_LIAR,
+    SRC_PASS,
     SRC_SILENT,
     SRC_ZERO,
     base_config,
     temp_root,
     write_file,
 )
+from tmptree import link_dir
 
 
 def _finished(rec: RecordingReporter) raises -> FileFinishedPayload:
@@ -184,3 +186,37 @@ def test_plain_run_overflow_marks_stdout_truncated() raises:
         finished.stdout_truncated,
         "the plain run's own overflow must mark stdout_truncated",
     )
+
+
+def test_root_reached_through_a_symlink_is_not_malformed() raises:
+    # The identity key a report is matched on is the path `mojo build` bakes,
+    # and it builds that from the ROOT-RELATIVE argument it is handed: the root
+    # half through `getcwd(3)`, which always reports the PHYSICAL directory,
+    # and the relative half untouched. A key that folds the root lexically
+    # therefore names a directory the child never mentions the moment the root
+    # is reached through a link, and a perfectly conforming suite is reported
+    # MALFORMED-SUITE.
+    #
+    # Linux hides this — an ordinary temp root has no link in it — while macOS
+    # hits it by default, because its temp root lives under `/var`, itself a
+    # link to `/private/var`. Constructing the link explicitly puts both
+    # platforms on the same footing.
+    var outer = temp_root()
+    write_file(outer, "real/tests/test_pass.mojo", SRC_PASS)
+    link_dir(outer, "real", "link")
+
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    var code = run_session(base_config(), outer + "/link", comp)
+
+    assert_equal(
+        code, 0, "a conforming suite under a symlinked root resolves to exit 0"
+    )
+    ref rec = comp.composite.reporters[0]
+    var finished = _finished(rec)
+    assert_true(
+        finished.parse_disposition == ParseDisposition.PARSED,
+        "the report must PARSE, not read as MALFORMED-SUITE",
+    )
+    assert_true(finished.outcome == Outcome.PASS, "the suite passes")

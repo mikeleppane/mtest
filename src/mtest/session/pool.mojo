@@ -32,8 +32,8 @@ from mtest.exec import (
     Supervisor,
     Termination,
     interrupt_requested,
-    lexical_source_path,
     query_effective_cap,
+    source_identity_key,
 )
 from mtest.model import (
     Event,
@@ -774,7 +774,7 @@ def _run_pool_batch[
                 state[i].phase = _DONE
             else:
                 var rdur = Float64(res.duration_ms) / 1000.0
-                var source_path = lexical_source_path(root + "/" + state[i].rel)
+                var source_path = source_identity_key(root, state[i].rel)
                 var trusted = resolve_report(
                     lossy_utf8(res.stdout_bytes),
                     source_path,
