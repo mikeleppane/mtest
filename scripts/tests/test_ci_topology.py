@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 from pathlib import Path
 import re
 import tempfile
@@ -10,6 +12,7 @@ import tomllib
 import unittest
 
 from scripts.checks import ci_topology
+from scripts.checks.memory import host_support
 
 
 class CiTopologyTests(unittest.TestCase):
@@ -34,7 +37,14 @@ class CiTopologyTests(unittest.TestCase):
         )
         self.assertEqual(
             tasks.get("ci", {}).get("depends-on"),
-            ["ci-preflight", "test", "dogfood-check", "e2e", "contract-check-strict"],
+            [
+                "ci-preflight",
+                "test",
+                "dogfood-check",
+                "e2e",
+                "contract-check-strict",
+                "ci-memory",
+            ],
         )
         self.assertEqual(
             tasks.get("readme-help-check"),
@@ -403,8 +413,8 @@ class CiTopologyTests(unittest.TestCase):
     def test_coverage_capability_entering_the_ci_floor_is_rejected(self) -> None:
         source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
         mutated = source.replace(
-            '    "contract-check-strict",\n]',
-            '    "contract-check-strict",\n    "coverage-capability",\n]',
+            '    "ci-memory",\n]',
+            '    "ci-memory",\n    "coverage-capability",\n]',
             1,
         )
         self.assertNotEqual(mutated, source)
@@ -414,6 +424,59 @@ class CiTopologyTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "ci membership/order"):
                 ci_topology.check_ci_task_graph(repo)
 
+    def test_memory_lanes_are_members_of_the_local_linux_floor(self) -> None:
+        # The whole point of the aggregate: before it, a green `pixi run ci`
+        # said nothing about memory safety, because both lanes were reachable
+        # only by naming them and in practice ran hosted or not at all.
+        self.assertIn("ci-memory", ci_topology.CI_TASKS)
+        for lane in ci_topology.MEMORY_LANE_TASKS:
+            self.assertIn(lane, ci_topology.LINUX_CI_FLOOR_TASKS, lane)
+            self.assertNotIn(lane, ci_topology.CI_FLOOR_TASKS, lane)
+
+    def test_memory_aggregate_dropped_from_the_local_floor_is_rejected(self) -> None:
+        self._reject_manifest_mutation(
+            '    "contract-check-strict",\n    "ci-memory",\n]',
+            '    "contract-check-strict",\n]',
+            "ci membership/order",
+        )
+
+    def test_silent_memory_aggregate_fallback_is_rejected(self) -> None:
+        # A bare `true` here is the tempting shortcut that would let a macOS
+        # floor imply a memory verdict it never computed.
+        self._reject_manifest_mutation(
+            f'ci-memory = "{ci_topology.CI_MEMORY_FALLBACK_COMMAND}"',
+            'ci-memory = "true"',
+            "ci-memory base command mismatch",
+        )
+
+    def test_removing_the_linux_memory_override_is_rejected(self) -> None:
+        self._reject_manifest_mutation(
+            'ci-memory = { depends-on = ["asan-check", "valgrind-check"] }',
+            "",
+            f"\\[target.{re.escape(ci_topology.MEMORY_PLATFORM)}.tasks\\] ci-memory",
+        )
+
+    def test_dropping_one_lane_from_the_memory_override_is_rejected(self) -> None:
+        self._reject_manifest_mutation(
+            'ci-memory = { depends-on = ["asan-check", "valgrind-check"] }',
+            'ci-memory = { depends-on = ["asan-check"] }',
+            "ci-memory mismatch",
+        )
+
+    def _reject_manifest_mutation(
+        self, original: str, replacement: str, pattern: str
+    ) -> None:
+        """Assert the checker rejects one exact manifest mutation."""
+        source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
+        mutated = source.replace(original, replacement, 1)
+        self.assertNotEqual(mutated, source)
+        with tempfile.TemporaryDirectory(prefix="mtest-ci-topology-") as raw_tmp:
+            repo = Path(raw_tmp)
+            (repo / "pixi.toml").write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, pattern):
+                ci_topology.check_ci_task_graph(repo)
+
+
     def test_package_test_module_owns_a_harness_check_slot(self) -> None:
         # The package gate's oracles are unit-tested in the cheap serial chain,
         # not only inside the expensive packaging job.
@@ -421,6 +484,42 @@ class CiTopologyTests(unittest.TestCase):
             "scripts.tests.test_package_consumption",
             ci_topology.HARNESS_CHECK_MODULES,
         )
+
+
+class MemoryHostSupportTests(unittest.TestCase):
+    """Behavior of the command `ci-memory` runs off linux-64.
+
+    These live beside the topology tests because the module exists only to make
+    the platform-scoped task honest: it is task-placement policy, not a memory
+    checker of its own.
+    """
+
+    def _run(self, system: str) -> tuple[int, str, str]:
+        """Run the fallback for one host, capturing both streams."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            status = host_support.main(system)
+        return status, out.getvalue(), err.getvalue()
+
+    def test_a_foreign_platform_reports_the_uncovered_lanes(self) -> None:
+        status, out, err = self._run("Darwin")
+        self.assertEqual(status, 0)
+        self.assertEqual(err, "")
+        self.assertIn("SKIPPED on Darwin", out)
+        for lane in host_support.LANES:
+            self.assertIn(lane, out, lane)
+
+    def test_linux_reaching_the_fallback_fails_closed(self) -> None:
+        # Arriving here on Linux means the manifest override was removed, so
+        # the lanes would have been skipped on the one platform that runs them.
+        status, out, err = self._run("Linux")
+        self.assertEqual(status, 1)
+        self.assertEqual(out, "")
+        self.assertIn("FATAL", err)
+        self.assertIn(ci_topology.MEMORY_PLATFORM, err)
+
+    def test_the_reported_lanes_match_the_pinned_aggregate(self) -> None:
+        self.assertEqual(list(host_support.LANES), ci_topology.MEMORY_LANE_TASKS)
 
 
 if __name__ == "__main__":

@@ -193,6 +193,7 @@ pixi run transcripts-check # regenerate to a temp dir and diff byte-for-byte
 pixi run test              # compile the classified inventory into one direct-run binary
 pixi run dogfood-check     # run three focused probes through the built mtest binary
 pixi run e2e               # exact CLI exits and output against e2e/manifest.json
+pixi run ci-memory         # Linux: both memory lanes, ASan/LSan then Memcheck
 ```
 
 `fmt-check` is `format-all` AND `git diff --exit-code`, so it fails on ANY
@@ -206,7 +207,21 @@ safety-check -> postfork-check -> native-check -> junit-check -> build ->
 readme-help-check -> junit-render-check -> transcripts-check` in that exact
 fail-fast order; the
 canonical local `pixi run ci` is serial: `ci-preflight ->
-test -> dogfood-check -> e2e -> contract-check-strict`. Hosted CI runs the
+test -> dogfood-check -> e2e -> contract-check-strict -> ci-memory`.
+
+`ci-memory` is how the local floor covers memory safety. On linux-64 a
+`[target.linux-64.tasks]` override makes it `asan-check` then
+`valgrind-check`; measured against clean main those cost about 90 seconds and
+about 3 minutes, which is why they belong in the ordinary floor rather than in
+a separate task nobody remembers to name. Off linux-64 it runs
+`scripts/checks/memory/host_support.py`, which reports the two uncovered lanes
+and exits 0 — Memcheck is pinned for linux-64 alone and the ASan controls are
+pinned against the Linux toolchain, so no other host can compute that verdict.
+That module fails closed if it is ever reached ON Linux, because arriving there
+means the override was deleted. Hosted CI never invokes `pixi run ci`: it gives
+each lane its own matrix cell, and `scripts/checks/ci_topology.py` pins both
+views plus the linux-64 task closure, so a lane cannot quietly leave either
+one. Hosted CI runs the
 same logical floor as two platform-local chains: Linux preflight releases
 fail-fast `test`, `dogfood-check`, `e2e`, strict contract, ASan, and Valgrind
 cells; macOS preflight releases `test`, `dogfood-check`, `e2e`, and strict

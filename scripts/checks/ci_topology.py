@@ -45,14 +45,34 @@ CI_PREFLIGHT_TASKS = [
     "junit-render-check",
     "transcripts-check",
 ]
-CI_TASKS = ["ci-preflight", "test", "dogfood-check", "e2e", "contract-check-strict"]
+CI_TASKS = [
+    "ci-preflight",
+    "test",
+    "dogfood-check",
+    "e2e",
+    "contract-check-strict",
+    "ci-memory",
+]
 CI_FLOOR_TASKS = {
     *CI_PREFLIGHT_TASKS,
     "test",
     "dogfood-check",
     "e2e",
     "contract-check-strict",
+    "ci-memory",
 }
+
+MEMORY_LANE_TASKS = ["asan-check", "valgrind-check"]
+"""The memory-safety lanes, in the order the linux-64 aggregate runs them."""
+
+CI_MEMORY_FALLBACK_COMMAND = "python -m scripts.checks.memory.host_support"
+"""What `ci-memory` runs off linux-64: a loud, self-defending skip report."""
+
+MEMORY_PLATFORM = "linux-64"
+"""The one platform whose task table owns the real memory-lane dependency edge."""
+
+LINUX_CI_FLOOR_TASKS = {*CI_FLOOR_TASKS, *MEMORY_LANE_TASKS}
+"""The local floor on linux-64: every portable member plus both memory lanes."""
 
 LINUX_MATRIX_ROWS = [
     {
@@ -251,10 +271,25 @@ def _transitive_tasks(tasks: dict[str, object], root: str) -> set[str]:
     return seen
 
 
+def _platform_tasks(manifest: dict[str, object], platform: str) -> dict[str, object]:
+    """Read one platform's task overrides without accepting a missing table."""
+    targets = manifest.get("target")
+    if not isinstance(targets, dict):
+        raise AssertionError("pixi.toml has no [target] table")
+    target = targets.get(platform)
+    if not isinstance(target, dict):
+        raise AssertionError(f"pixi.toml has no [target.{platform}] table")
+    tasks = target.get("tasks")
+    if not isinstance(tasks, dict):
+        raise AssertionError(f"pixi.toml has no [target.{platform}.tasks] table")
+    return tasks
+
+
 def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
     """The serial local floor is the exact preflight plus behavioral lanes."""
-    with (repo_root / "pixi.toml").open("rb") as manifest:
-        tasks = tomllib.load(manifest)["tasks"]
+    with (repo_root / "pixi.toml").open("rb") as handle:
+        manifest = tomllib.load(handle)
+    tasks = manifest["tasks"]
     expected_harness_command = " && ".join(
         f"python -m {module}" for module in HARNESS_CHECK_MODULES
     )
@@ -354,6 +389,45 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
             raise AssertionError(
                 f"{name} no longer runs its exact negative-control harness"
             )
+    # Both memory lanes are members of the LOCAL floor, not hosted-only. The
+    # `ci` closure below is what proves it; these two pin the shape that makes
+    # it work. The base command must stay the loud non-Linux report, because a
+    # bare `true` there would let a macOS floor imply a verdict it skipped.
+    if tasks.get("ci-memory") != CI_MEMORY_FALLBACK_COMMAND:
+        raise AssertionError(
+            "ci-memory base command mismatch: "
+            f"expected={CI_MEMORY_FALLBACK_COMMAND!r}, "
+            f"actual={tasks.get('ci-memory')!r}"
+        )
+    platform_tasks = _platform_tasks(manifest, MEMORY_PLATFORM)
+    expected_memory_aggregate = {"depends-on": MEMORY_LANE_TASKS}
+    if platform_tasks.get("ci-memory") != expected_memory_aggregate:
+        raise AssertionError(
+            f"[target.{MEMORY_PLATFORM}.tasks] ci-memory mismatch: "
+            f"expected={expected_memory_aggregate!r}, "
+            f"actual={platform_tasks.get('ci-memory')!r}"
+        )
+    linux_tasks = {**tasks, **platform_tasks}
+    expected_linux_closure = {
+        "ci",
+        "ci-preflight",
+        "build-bin",
+        "build-native",
+        *LINUX_CI_FLOOR_TASKS,
+    }
+    linux_closure = _transitive_tasks(linux_tasks, "ci")
+    if linux_closure != expected_linux_closure:
+        raise AssertionError(
+            f"ci transitive floor on {MEMORY_PLATFORM} mismatch: "
+            f"missing={sorted(expected_linux_closure - linux_closure)}, "
+            f"extra={sorted(linux_closure - expected_linux_closure)}"
+        )
+    for lane in MEMORY_LANE_TASKS:
+        if lane not in linux_closure:
+            raise AssertionError(
+                f"{lane} left the local {MEMORY_PLATFORM} floor; a green "
+                "`pixi run ci` would stop covering memory safety"
+            )
     # The coverage-capability probe is diagnostic, so nothing in the `ci`
     # closure depends on it and nothing else would notice it disappearing.
     # Pin its exact command here: it is the one thing standing between a
@@ -451,13 +525,19 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
                 f"CI job {name!r} matrix task dispatch mismatch: actual={run_step}"
             )
 
-    behavioral_floor = CI_TASKS[1:]
+    # The hosted matrix runs the memory LANES, one cell each, never the
+    # `ci-memory` aggregate that exists to put both of them in the serial local
+    # floor. Deriving the expected rows from CI_TASKS keeps the two views tied
+    # together, and this equality is what refuses to let the local floor gain a
+    # member the hosted matrix silently never runs.
+    behavioral_floor = [task for task in CI_TASKS[1:] if task != "ci-memory"]
+    if CI_TASKS != ["ci-preflight", *behavioral_floor, "ci-memory"]:
+        raise AssertionError(
+            "the local floor no longer ends with the memory aggregate; the "
+            f"hosted matrix expansion below is derived from it: {CI_TASKS}"
+        )
     expected_matrix_tasks = {
-        "linux-test-matrix": [
-            *behavioral_floor,
-            "asan-check",
-            "valgrind-check",
-        ],
+        "linux-test-matrix": [*behavioral_floor, *MEMORY_LANE_TASKS],
         "macos-test-matrix": behavioral_floor,
     }
     for name, expected_tasks in expected_matrix_tasks.items():
