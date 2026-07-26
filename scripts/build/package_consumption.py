@@ -375,7 +375,7 @@ def assertion_probe_environment(
 
 
 def validate_assertion_install(env_prefix: Path) -> Path:
-    """Require the exact public source files, modes, and compiler provenance."""
+    """Require the exact public source files, safe modes, and compiler provenance."""
     prefix = env_prefix.resolve()
     source_root = prefix / "share" / "mtest" / "assertions-src"
     actual_files = (
@@ -395,9 +395,12 @@ def validate_assertion_install(env_prefix: Path) -> Path:
         )
     for relative in INSTALLED_ASSERTION_FILES:
         mode = stat.S_IMODE((source_root / relative).stat().st_mode)
-        if mode != 0o644:
+        # Pixi preserves 0644 from .conda packages but applies its shared-prefix
+        # group-write policy when extracting the legacy tar.bz2 form.
+        if mode not in (0o644, 0o664):
             raise PackageCheckError(
-                f"installed assertion source must have mode 644: "
+                "installed assertion source must have mode 644 or "
+                "installer-normalized 664: "
                 f"{relative} has {mode:o}"
             )
     for relative in INSTALLED_ASSERTION_DIRECTORIES:

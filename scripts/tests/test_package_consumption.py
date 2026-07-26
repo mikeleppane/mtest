@@ -869,6 +869,15 @@ class AssertionPackageLayoutTests(unittest.TestCase):
     def test_accepts_exact_files_modes_and_toolchain_provenance(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
             prefix = self._valid_prefix(Path(raw))
+            source = (
+                prefix
+                / "share"
+                / "mtest"
+                / "assertions-src"
+                / "mtest"
+                / "__init__.mojo"
+            )
+            source.chmod(0o664)
             (
                 prefix / "share" / "mtest" / "assertions-src" / "mtest" / "assertions"
             ).chmod(0o775)
@@ -885,7 +894,7 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             ):
                 package_consumption.validate_assertion_install(prefix)
 
-    def test_rejects_a_writable_source_file(self) -> None:
+    def test_rejects_a_world_writable_source_file(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
             prefix = self._valid_prefix(Path(raw))
             source = (
@@ -896,10 +905,28 @@ class AssertionPackageLayoutTests(unittest.TestCase):
                 / "mtest"
                 / "__init__.mojo"
             )
-            source.chmod(0o664)
+            source.chmod(0o666)
             with self.assertRaisesRegex(
                 package_consumption.PackageCheckError,
-                "mode 644",
+                "installer-normalized 664",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_an_executable_source_file(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            source = (
+                prefix
+                / "share"
+                / "mtest"
+                / "assertions-src"
+                / "mtest"
+                / "__init__.mojo"
+            )
+            source.chmod(0o744)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "installer-normalized 664",
             ):
                 package_consumption.validate_assertion_install(prefix)
 
