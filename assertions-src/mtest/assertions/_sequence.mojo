@@ -1,6 +1,7 @@
 """Bounded diagnostics for top-level lists."""
 
 from mtest.assertions._display import (
+    _render_unequal_pair,
     BoundedWriter,
     DISPLAY_LIMIT,
     render_value,
@@ -46,9 +47,9 @@ def _write_list_span[
         + " item(s), expected "
         + String(expected_count)
         + " item(s)"
-        + "\n  actual omitted: "
+        + "\n  actual omitted by entry limit: "
         + String(max(0, actual_count - DISPLAY_LIMIT))
-        + ", expected omitted: "
+        + ", expected omitted by entry limit: "
         + String(max(0, expected_count - DISPLAY_LIMIT))
         + "\n  actual: "
     )
@@ -117,17 +118,14 @@ def write_list_difference[
         + String(mismatch_total)
         + " total, "
         + String(max(0, mismatch_total - DISPLAY_LIMIT))
-        + " omitted"
+        + " omitted by entry limit"
     )
     for index in mismatch_indices:
         output.write_trusted(
             "\n  ["
             + String(index)
-            + '] "'
-            + render_value(actual[index])
-            + '" != "'
-            + render_value(expected[index])
-            + '"'
+            + "] "
+            + _render_unequal_pair(actual[index], expected[index])
         )
         if output.truncated:
             break

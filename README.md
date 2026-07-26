@@ -176,11 +176,13 @@ That output was captured from the installed `.conda` artifact. The companion
 specializes only top-level `String`, `List[T]`, and `Dict[String, V]`; nested
 containers and custom values are displayed opaquely. List details show at most
 eight entries per side, and dictionary details show at most eight entries in
-each of the missing, unexpected, and changed categories. Dictionary keys longer
-than 1024 UTF-8 bytes switch to deterministic entry counts without expanding
-keys or values. Structural key and category order is deterministic; opaque
-values retain their own `Writable` formatting, including any ordering it
-chooses.
+each of the missing, unexpected, and changed categories. Their `omitted by
+entry limit` counts describe that eight-entry selection; a body-cap truncation
+is reported separately by the final marker. Dictionary keys whose escaped
+display would exceed 1024 bytes switch to deterministic entry counts without
+expanding keys or values. Structural key and category order is deterministic;
+opaque values retain their own `Writable` formatting, including any ordering
+it chooses.
 
 Finalized opaque-value projections are at most 1024 bytes, text context is at
 most 4096 bytes, and a complete assertion body is at most 16384 bytes. Each cap

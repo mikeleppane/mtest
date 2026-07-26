@@ -601,7 +601,9 @@ def test_list_displays_eight_mismatches_and_counts_omitted_first() raises:
     for index in range(0, 20, 2):
         actual[index] += 100
     var detail = _list_failure(actual, expected)
-    testing.assert_true("list mismatches: 10 total, 2 omitted" in detail)
+    testing.assert_true(
+        "list mismatches: 10 total, 2 omitted by entry limit" in detail
+    )
     testing.assert_true('[0] "100" != "0"' in detail)
     testing.assert_true('[14] "114" != "14"' in detail)
     testing.assert_false("[16]" in detail)
@@ -616,6 +618,28 @@ def test_list_values_are_individually_bounded_before_body_assembly() raises:
     testing.assert_true('... [truncated]", "tail-actual"]' in detail)
     testing.assert_true('... [truncated]", "tail-expected"]' in detail)
     testing.assert_true(detail.endswith("list reason"))
+    var shared = _repeated("s", 2000)
+    var identical_projections = _list_failure(
+        [shared + "-actual", "same", shared + "-actual-2"],
+        [shared + "-expected", "same", shared + "-expected-2"],
+    )
+    testing.assert_true(
+        "displayed projections are identical after truncation"
+        in identical_projections
+    )
+    testing.assert_false('" != "' in identical_projections)
+    var capped_actual = List[String]()
+    var capped_expected = List[String]()
+    for index in range(8):
+        capped_actual.append(_repeated("a", 4 * 1024) + String(index))
+        capped_expected.append(_repeated("b", 4 * 1024) + String(index))
+    var capped = _list_failure(capped_actual, capped_expected)
+    testing.assert_true(
+        "actual omitted by entry limit: 0, "
+        + "expected omitted by entry limit: 0"
+        in capped
+    )
+    testing.assert_true(capped.endswith("... [truncated]"))
 
 
 def test_nested_lists_are_opaque_and_user_message_is_last() raises:
@@ -753,9 +777,11 @@ def test_dictionary_categories_are_distinct_and_ordered() raises:
     var actual = {"unexpected": 1, "changed": 1}
     var expected = {"missing": 1, "changed": 2}
     var detail = _dictionary_failure(actual, expected)
-    testing.assert_true("missing: 1 total, 0 omitted" in detail)
-    testing.assert_true("unexpected: 1 total, 0 omitted" in detail)
-    testing.assert_true("changed: 1 total, 0 omitted" in detail)
+    testing.assert_true("missing: 1 total, 0 omitted by entry limit" in detail)
+    testing.assert_true(
+        "unexpected: 1 total, 0 omitted by entry limit" in detail
+    )
+    testing.assert_true("changed: 1 total, 0 omitted by entry limit" in detail)
     testing.assert_true(detail.find("missing:") < detail.find("unexpected:"))
     testing.assert_true(detail.find("unexpected:") < detail.find("changed:"))
     var blank_keys = _dictionary_failure(
@@ -791,9 +817,11 @@ def test_dictionary_displays_eight_per_category_with_totals_first() raises:
         _put(actual, "c" + String(index + 100), index)
         _put(expected, "c" + String(index + 100), index + 1)
     var detail = _dictionary_failure(actual, expected)
-    testing.assert_true("missing: 12 total, 4 omitted" in detail)
-    testing.assert_true("unexpected: 12 total, 4 omitted" in detail)
-    testing.assert_true("changed: 12 total, 4 omitted" in detail)
+    testing.assert_true("missing: 12 total, 4 omitted by entry limit" in detail)
+    testing.assert_true(
+        "unexpected: 12 total, 4 omitted by entry limit" in detail
+    )
+    testing.assert_true("changed: 12 total, 4 omitted by entry limit" in detail)
     testing.assert_true(
         detail.find("changed: 12") < detail.find("\n  missing keys:")
     )
@@ -817,12 +845,23 @@ def test_dictionary_values_are_individually_bounded_before_assembly() raises:
         {"key": "z"},
     )
     testing.assert_true('"key": "x != y" != "z"' in delimiter_detail)
+    var shared = _repeated("s", 2000)
+    var identical_projections = _dictionary_failure(
+        {"key": shared + "-actual"},
+        {"key": shared + "-expected"},
+    )
+    testing.assert_true(
+        "displayed projections are identical after truncation"
+        in identical_projections
+    )
+    testing.assert_false('" != "' in identical_projections)
     var capped_actual = Dict[String, String]()
     var capped_expected = Dict[String, String]()
     for index in range(8):
         capped_actual["key-" + String(index)] = _repeated("a", 32 * 1024)
         capped_expected["key-" + String(index)] = _repeated("b", 32 * 1024)
     var capped = _dictionary_failure(capped_actual, capped_expected)
+    testing.assert_true("changed: 8 total, 0 omitted by entry limit" in capped)
     testing.assert_true(capped.endswith("... [truncated]"))
     testing.assert_equal(_count_scalar(capped, ord('"')) % 2, 0)
 
@@ -838,8 +877,17 @@ def test_dictionary_key_cap_boundary_and_opaque_fallback() raises:
     var over = Dict[String, Int]()
     _put(over, boundary + "z", 1)
     var opaque = _dictionary_failure(over, empty)
-    testing.assert_true("structural key exceeds 1024 bytes" in opaque)
+    testing.assert_true("structural key display exceeds 1024 bytes" in opaque)
     testing.assert_false(boundary in opaque)
+    var escaped = _repeated("\U000E0041", 103)
+    var colliding = Dict[String, Int]()
+    _put(colliding, escaped + "AAA", 1)
+    _put(colliding, escaped + "BBB", 1)
+    var escaped_opaque = _dictionary_failure(colliding, empty)
+    testing.assert_true(
+        "structural key display exceeds 1024 bytes" in escaped_opaque
+    )
+    testing.assert_false("\\U000e0041" in escaped_opaque)
 
 
 def test_opaque_dictionary_projection_reports_truncation_truthfully() raises:

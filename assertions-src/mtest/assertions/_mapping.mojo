@@ -3,6 +3,8 @@
 from std.collections import Dict
 
 from mtest.assertions._display import (
+    _key_projection_fits,
+    _render_unequal_pair,
     BoundedWriter,
     DICTIONARY_KEY_BYTE_CAP,
     DISPLAY_LIMIT,
@@ -100,11 +102,8 @@ def _write_changed[
         output.write_trusted(
             '\n    "'
             + render_value(key)
-            + '": "'
-            + render_value(actual[key])
-            + '" != "'
-            + render_value(expected[key])
-            + '"'
+            + '": '
+            + _render_unequal_pair(actual[key], expected[key])
         )
         if output.truncated:
             break
@@ -118,7 +117,7 @@ def _write_opaque_dictionary_detail[
     expected: Dict[String, V],
 ):
     output.write_trusted(
-        "dictionary differs; structural key exceeds "
+        "dictionary differs; structural key display exceeds "
         + String(DICTIONARY_KEY_BYTE_CAP)
         + " bytes; deterministic value detail omitted"
         + "\n  actual entries: "
@@ -138,10 +137,10 @@ def write_dictionary_difference[
     """Derive equality and write deterministic bounded dictionary categories."""
     var oversized_key = False
     for entry in expected.items():
-        if entry.key.byte_length() > DICTIONARY_KEY_BYTE_CAP:
+        if not _key_projection_fits(entry.key):
             oversized_key = True
     for entry in actual.items():
-        if entry.key.byte_length() > DICTIONARY_KEY_BYTE_CAP:
+        if not _key_projection_fits(entry.key):
             oversized_key = True
     if oversized_key:
         if _dictionaries_equal(actual, expected):
@@ -170,17 +169,17 @@ def write_dictionary_difference[
         + String(missing.total)
         + " total, "
         + String(max(0, missing.total - DISPLAY_LIMIT))
-        + " omitted"
+        + " omitted by entry limit"
         + "\n  unexpected: "
         + String(unexpected.total)
         + " total, "
         + String(max(0, unexpected.total - DISPLAY_LIMIT))
-        + " omitted"
+        + " omitted by entry limit"
         + "\n  changed: "
         + String(changed.total)
         + " total, "
         + String(max(0, changed.total - DISPLAY_LIMIT))
-        + " omitted"
+        + " omitted by entry limit"
     )
     _write_keys(output, "missing", missing)
     _write_keys(output, "unexpected", unexpected)

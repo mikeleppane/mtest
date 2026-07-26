@@ -250,6 +250,32 @@ def render_value[T: Writable](value: T) -> String:
     return projection.text.copy()
 
 
+def _render_unequal_pair[T: Writable](actual: T, expected: T) -> String:
+    """Render one truthful structural description of an unequal value pair."""
+    var actual_projection = _render_projection(actual)
+    var expected_projection = _render_projection(expected)
+    if actual_projection.text == expected_projection.text:
+        if actual_projection.truncated or expected_projection.truncated:
+            return (
+                'displayed projections are identical after truncation: "'
+                + actual_projection.text
+                + '"'
+            )
+        return (
+            'values compare unequal but render identically: "'
+            + actual_projection.text
+            + '"'
+        )
+    return (
+        '"' + actual_projection.text + '" != "' + expected_projection.text + '"'
+    )
+
+
+def _key_projection_fits(key: String) -> Bool:
+    """Return whether one escaped key projection fits the public value cap."""
+    return not _render_projection(key).truncated
+
+
 def detail_byte_cap(has_reason: Bool) -> Int:
     """Reserve bounded room for a caller reason only on a failing path."""
     if has_reason:
