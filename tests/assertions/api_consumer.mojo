@@ -146,6 +146,11 @@ def _assert_scalar_label(value: Int, label: String) raises:
     testing.assert_true(label in _text_failure(actual, "ab"))
 
 
+def _assert_scalar_not_label(value: Int, label: String) raises:
+    var actual = "a" + String(chr(value)) + "b"
+    testing.assert_false(label in _text_failure(actual, "ab"))
+
+
 def _list_failure[
     T: Copyable & ImplicitlyDestructible & Equatable & Writable
 ](actual: List[T], expected: List[T], msg: String = "") -> String:
@@ -387,6 +392,18 @@ def test_text_scalar_labels_expose_invisible_differences() raises:
     ]:
         _assert_scalar_label(value, "ENCLOSING MARK (category Me)")
     for value in [
+        0x0487,
+        0x048A,
+        0x1ABD,
+        0x1ABF,
+        0x20DC,
+        0x20E1,
+        0x20E5,
+        0xA66F,
+        0xA673,
+    ]:
+        _assert_scalar_not_label(value, "ENCLOSING MARK (category Me)")
+    for value in [
         0x2065,
         0xFFF0,
         0xFFF8,
@@ -399,6 +416,20 @@ def test_text_scalar_labels_expose_invisible_differences() raises:
         0xE0FFF,
     ]:
         _assert_scalar_label(value, "DEFAULT IGNORABLE (category Cn)")
+    for value in [
+        0x2064,
+        0x2066,
+        0xFFEF,
+        0xFFF9,
+        0xDFFFF,
+        0xE0001,
+        0xE0020,
+        0xE007F,
+        0xE0100,
+        0xE01EF,
+        0xE1000,
+    ]:
+        _assert_scalar_not_label(value, "DEFAULT IGNORABLE (category Cn)")
     _assert_scalar_label(0x2028, "LINE SEPARATOR (category Zl)")
     _assert_scalar_label(0x2029, "PARAGRAPH SEPARATOR (category Zp)")
 
@@ -510,6 +541,12 @@ def test_text_crop_marker_requires_an_elided_line_prefix() raises:
     testing.assert_false("actual line 2: ... " in multibyte_boundary)
     testing.assert_true("expected line 2: é" in multibyte_boundary)
     testing.assert_false("expected line 2: ... " in multibyte_boundary)
+    var cropped_prefix = _text_failure(
+        _repeated("a", 200) + "X",
+        _repeated("a", 200) + "Y",
+    )
+    testing.assert_true("actual line 1: ... " in cropped_prefix)
+    testing.assert_true("expected line 1: ... " in cropped_prefix)
 
 
 def test_large_text_context_is_bounded_and_message_is_last() raises:
