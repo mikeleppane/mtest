@@ -222,7 +222,9 @@ mismatch detail is truncated.
 `mtest`, not an extension merged into another `mtest` package. Put it before
 any other include root that provides `mtest`. The runner never injects this
 path automatically, and Mojo does not merge it with the runner-private
-precompiled package.
+precompiled package. Source-file permissions follow the environment's prefix
+policy; shared-prefix installs may therefore be group-writable but are never
+accepted as world-writable by the package verifier.
 
 Only `mtest.assertions.assert_equal` is supported. The shipped underscore
 modules are source implementation details, even though Mojo can import an

@@ -11,8 +11,9 @@
 # `clang ==18.1.8` (no Python), both resolving on PATH without extra plumbing.
 #
 # Runs with $SRC_DIR as the working directory (the recipe's `source: path: ..`
-# copy of this repository). Only the $PREFIX/bin install below is recipe-specific
-# — the checkout build does not install — so it stays here rather than in the
+# copy of this repository). Only the two $PREFIX installs below are
+# recipe-specific — the binary and source-only assertion companion — because
+# the checkout build does not install, so they stay here rather than in the
 # shared entrypoint.
 set -euo pipefail
 

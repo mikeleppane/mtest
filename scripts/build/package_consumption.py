@@ -63,6 +63,7 @@ Usage:  pixi run package-check
 
 from __future__ import annotations
 
+import configparser
 from dataclasses import dataclass
 import difflib
 import glob
@@ -309,6 +310,14 @@ GATE_STAGE_IDS = (
 LOADER_PROBE_FLAGS = ("--version", "--help", "--config")
 ASSERTION_OPTIMIZATIONS = (("-O0", "o0"), ("-O3", "o3"))
 
+# Pixi 0.72.0 installs the legacy tar-bz2 artifact into its disposable prefix
+# with the prefix's group-write policy (664 files and 775 directories), while
+# the .conda artifact retains the recipe's 644/755 modes. Both non-world-
+# writable forms are accepted so the gate validates installed bytes instead of
+# rewriting installer-owned modes before compilation.
+PRIMARY_ASSERTION_FILE_MODES = (0o644,)
+TARBALL_ASSERTION_FILE_MODES = (0o644, 0o664)
+
 _COMPLETED_STAGES: list[str] = []
 
 
@@ -428,12 +437,13 @@ def validate_assertion_install(
                 "installed assertion path component must be a real directory: "
                 f"{relative}"
             )
-        if relative != Path("share"):
-            _require_safe_assertion_directory(
-                component,
-                relative,
-                allow_installer_group_write=allow_installer_group_write,
-            )
+        _require_safe_assertion_directory(
+            component,
+            relative,
+            allow_installer_group_write=(
+                allow_installer_group_write or relative == Path("share")
+            ),
+        )
     entries = list(source_root.rglob("*"))
     symbolic_links = [
         path.relative_to(source_root) for path in entries if path.is_symlink()
@@ -472,7 +482,11 @@ def validate_assertion_install(
                 f"installed assertion source must be a regular file: {relative}"
             )
         mode = stat.S_IMODE(source_mode)
-        allowed_modes = (0o644, 0o664) if allow_installer_group_write else (0o644,)
+        allowed_modes = (
+            TARBALL_ASSERTION_FILE_MODES
+            if allow_installer_group_write
+            else PRIMARY_ASSERTION_FILE_MODES
+        )
         if mode not in allowed_modes:
             requirement = (
                 "mode 644 or installer-normalized 664"
@@ -504,18 +518,38 @@ def validate_assertion_install(
     config = prefix / "share" / "max" / "modular.cfg"
     if not config.is_file():
         raise PackageCheckError(f"installed modular.cfg is missing: {config}")
-    contents = config.read_text(encoding="utf-8")
-    required = {
-        f"package_root = {prefix}",
-        f"driver_path = {prefix / 'bin' / 'mojo'}",
-        f"import_path = {prefix / 'lib' / 'mojo'}",
-    }
-    missing = sorted(line for line in required if line not in contents)
-    if missing:
-        raise PackageCheckError(
-            f"installed modular.cfg does not name its own prefix: {missing}"
-        )
+    _validate_modular_config(config, prefix)
     return source_root
+
+
+def _validate_modular_config(config: Path, prefix: Path) -> None:
+    """Require unique, exact compiler-root assignments in installed config."""
+    parser = configparser.ConfigParser(interpolation=None, strict=True)
+    try:
+        with config.open(encoding="utf-8") as stream:
+            parser.read_file(stream)
+    except (configparser.Error, UnicodeError) as exc:
+        raise PackageCheckError(
+            f"installed modular.cfg is invalid or contains a duplicate: {exc}"
+        ) from exc
+    expected = {
+        ("max", "package_root"): str(prefix),
+        ("mojo-max", "package_root"): str(prefix),
+        ("mojo-max", "driver_path"): str(prefix / "bin" / "mojo"),
+        ("mojo-max", "import_path"): str(prefix / "lib" / "mojo"),
+    }
+    mismatches: list[str] = []
+    for (section, option), expected_value in expected.items():
+        observed = parser.get(section, option, raw=True, fallback=None)
+        if observed != expected_value:
+            mismatches.append(
+                f"[{section}] {option}: expected {expected_value!r}, got {observed!r}"
+            )
+    if mismatches:
+        raise PackageCheckError(
+            "installed modular.cfg does not name its own prefix exactly: "
+            + "; ".join(mismatches)
+        )
 
 
 def _require_safe_assertion_directory(

@@ -1170,6 +1170,16 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             ):
                 package_consumption.validate_assertion_install(prefix)
 
+    def test_rejects_a_world_writable_share_ancestor(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            (prefix / "share").chmod(0o777)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "not world-writable",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
     def test_rejects_toolchain_provenance_from_another_prefix(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
             prefix = self._valid_prefix(Path(raw))
@@ -1182,6 +1192,46 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 package_consumption.PackageCheckError,
                 "modular.cfg",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_commented_or_extended_toolchain_assignments(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            config = prefix / "share" / "max" / "modular.cfg"
+            config.write_text(
+                "[max]\n"
+                f"# package_root = {prefix}\n"
+                f"package_root_extra = {prefix}\n"
+                "[mojo-max]\n"
+                f"package_root = {prefix}/foreign\n"
+                f"driver_path = {prefix}/bin/mojo-foreign\n"
+                f"import_path = {prefix}/lib/mojo-foreign\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "modular.cfg",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_duplicate_toolchain_assignments(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            config = prefix / "share" / "max" / "modular.cfg"
+            config.write_text(
+                "[max]\n"
+                f"package_root = {prefix}\n"
+                f"package_root = {prefix}/foreign\n"
+                "[mojo-max]\n"
+                f"package_root = {prefix}\n"
+                f"driver_path = {prefix}/bin/mojo\n"
+                f"import_path = {prefix}/lib/mojo\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "duplicate",
             ):
                 package_consumption.validate_assertion_install(prefix)
 
