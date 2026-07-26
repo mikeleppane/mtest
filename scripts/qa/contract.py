@@ -18,9 +18,12 @@ Design (hardened after adversarial review):
     green summary. So the oracle asserts the EXACT collected node-id set and
     EXACT counts, and uses POISON probes: a test that would FAIL/CRASH if it ran,
     so a broken selection/exclusion/early-stop flips the frozen exit code.
-  * No false green. A run that selects zero checks, or SKIPs a
-    safety-critical check under --strict, exits non-zero. Setup failures
-    exit 2 (distinct from a contract failure's 1). Freshness of the binary
+  * No false green. A run that selects zero checks, that SKIPs any check
+    under --strict, or that did not perform every check on
+    EXPECTED_CHECK_NAMES, exits non-zero. The roster exists because
+    deleting a check's call site is otherwise invisible: the remaining
+    checks keep `ran > 0` and the gate prints "0 failed, 0 skipped".
+    Setup failures exit 2 (distinct from a contract failure's 1). Freshness of the binary
     under test is enforced, not just warned: `pixi run contract-check`
     rebuilds a missing-or-stale `build/mtest` before validating; the
     blocking `pixi run contract-check-strict` gate instead runs
@@ -35,9 +38,10 @@ Usage:
     pixi run contract-check -- --keep --no-rebuild -v
     pixi run contract-check-strict                      # the blocking release-floor gate
 
-Exit: 0 all passed; 1 a contract check failed (or --strict skip / zero checks);
-2 setup failure (no toolchain, binary won't build, or --no-rebuild found a
-missing/stale binary). CI-usable.
+Exit: 0 all passed; 1 a contract check failed (or a --strict skip); 2 setup
+failure (no toolchain, binary won't build, --no-rebuild found a missing/stale
+binary, zero checks ran, or the roster of performed checks was incomplete).
+CI-usable.
 """
 from __future__ import annotations
 
@@ -486,7 +490,127 @@ class Check:
 
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
-CRITICAL = {"interrupt: SIGINT frees the owned process group"}  # skip-sensitive under --strict
+
+EXPECTED_CHECK_NAMES: tuple[str, ...] = (
+    "help: version prints the version",
+    "outcome: passing tests/ -> 0, exact count",
+    "outcome: FAIL -> 1",
+    "outcome: CRASH is not a FAIL -> 1",
+    "outcome: COMPILE-ERROR -> 1",
+    "outcome: MALFORMED-SUITE -> 1",
+    "outcome: NO-TESTS-only session -> 5",
+    "outcome: TIMEOUT -> 1",
+    "discover: nonexistent path -> 4 (stderr)",
+    "discover: empty dir -> 5",
+    "discover: explicit non-test_ file bypasses pattern",
+    "discover: operand escaping root -> 4 (stderr)",
+    "select: node id runs exactly one; sibling poison must NOT run",
+    "select: -k selects the matching set",
+    "select: -k case-insensitive",
+    "select: -k matches nothing -> 5",
+    "select: unknown test in a real file -> 4",
+    "select: node id whose path is a DIRECTORY -> 4",
+    "exclude: pattern truly removes a would-crash file (exit stays 0)",
+    "exclude: stale pattern warns loudly",
+    "exclude: everything excluded -> 5",
+    "stop: -x stops scheduling; poison sibling stays NOT-RUN",
+    "stop: --maxfail 1 stops; poison sibling stays NOT-RUN",
+    "stop: failing --gate aborts the whole run (exact not-run)",
+    "collect: --durations rejected in collect -> 4",
+    "collect: --maxfail rejected in collect -> 4",
+    "collect: --retries rejected in collect -> 4",
+    "collect: --json rejected in collect -> 4",
+    "collect: --junit-xml rejected in collect -> 4",
+    "collect: --gh-annotations rejected in collect -> 4 (even off)",
+    "collect: -k ignored with a loud notice (\u00a724.3 deviation)",
+    "collect: node-id operand lists whole file (\u00a724.3 deviation)",
+    "build-arg: -o forbidden -> 4, and the test never ran (pre-run, \u00a79)",
+    "build-arg: --emit forbidden -> 4",
+    "build-arg: extra source after -- forbidden -> 4",
+    "exit-3: bad --mojo (spawn failure) -> 3",
+    "exit-3: off-grammar report (drift) -> 3, never a verdict",
+    "value: --durations negative -> 4",
+    "value: --timeout non-integer -> 4",
+    "value: --show-output bad mode -> 4",
+    "value: --color bad mode -> 4",
+    "value: -q and -v mutually exclusive -> 4",
+    "precompile: failure -> PRECOMPILE-ERROR, casualties listed, exit 1",
+    "served: -n accepted (not exit 4)",
+    "served: --workers accepted (not exit 4)",
+    "served: --serial accepted (not exit 4)",
+    "served: --retries accepted (not exit 4)",
+    "served: --compile-timeout accepted (not exit 4)",
+    "served: --junit-xml accepted (not exit 4)",
+    "served: --gh-annotations accepted (not exit 4)",
+    "served: --json accepted (not exit 4)",
+    "served: collect --shard partitions (not exit 4)",
+    "collect: exact node-id set for tests/",
+    "determinism: collect byte-identical",
+    "help: --help -> stdout, exit 0",
+    "usage error: -V -> stderr, exit 4",
+    "collect: streams split, listing continues past a bad probe",
+    "color: --color always beats NO_COLOR",
+    "precompile: success path resolves import (auto -I)",
+    "interrupt: SIGINT frees the owned process group",
+)
+"""Every check `main` must perform, in order, on an unfiltered run.
+
+An independent origin, never derived from `build_matrix` or from the bespoke
+dispatch below. That is the whole point: the gate previously had no way to
+notice that a check it advertises did not run. Deleting
+`runner.check_interrupt(args.strict)` left every unit test green, made
+`ran > 0` true from the other checks, and let both blocking
+`contract-check-strict` lanes print "0 failed, 0 skipped" and exit 0 with the
+SIGINT clause never tested. Same shape as `package_consumption.GATE_STAGE_IDS`
+against its stage ledger.
+
+Two entries come from one dispatch: `check_help_stream` records both the
+`--help` and the `-V` clause, so they are adjacent here and move together.
+"""
+
+
+class ContractRosterError(Exception):
+    """The gate did not perform the checks it reports."""
+
+
+def verify_every_check_ran(
+    performed: tuple[str, ...], filtered: bool
+) -> None:
+    """Refuse to report a verdict unless the rostered checks actually ran.
+
+    Args:
+        performed: The check names `main` recorded, in the order recorded.
+        filtered: Whether `--filter` narrowed the run. A filtered run cannot
+            be complete, so it is held only to the weaker property that what
+            ran is a subset of the roster in roster order — enough to catch a
+            renamed or duplicated check, not enough to catch a deleted one.
+            The blocking `contract-check-strict` task passes no filter, and
+            `test_pixi_task_uses_the_package_entry_point` pins that.
+
+    Raises:
+        ContractRosterError: A rostered check did not run, an unrostered check
+            ran, or checks ran out of their declared order.
+    """
+    unknown = [name for name in performed if name not in EXPECTED_CHECK_NAMES]
+    if unknown:
+        raise ContractRosterError(
+            f"contract gate ran checks that are not on its roster: {unknown}"
+        )
+    if not filtered:
+        if performed != EXPECTED_CHECK_NAMES:
+            missing = [n for n in EXPECTED_CHECK_NAMES if n not in performed]
+            raise ContractRosterError(
+                "the contract gate did not perform every check it reports: "
+                f"ran {len(performed)} of {len(EXPECTED_CHECK_NAMES)}"
+                + (f", missing {missing}" if missing else " in that order")
+            )
+        return
+    expected_order = [n for n in EXPECTED_CHECK_NAMES if n in performed]
+    if list(performed) != expected_order:
+        raise ContractRosterError(
+            "the contract gate ran a filtered subset out of roster order or "
+            f"more than once: {list(performed)}"
+        )
 
 
 class Runner:
@@ -581,7 +705,12 @@ class Runner:
         ref = "§15.1 --color never/always; the flag wins over NO_COLOR"
         name = "color: --color always beats NO_COLOR"
 
-        def esc(mode: str, no_color: bool) -> int:
+        # The ANSI count alone is not an oracle: a run that died early after
+        # emitting one colored banner satisfies "always > 0" while never
+        # reaching a verdict. tests/test_reverse.mojo is an all-passing
+        # fixture, so exit 0 is part of what "color did not change behavior"
+        # means, and each run is held to it.
+        def esc(mode: str, no_color: bool) -> tuple[int, int]:
             e = dict(self.env)
             if no_color:
                 e["NO_COLOR"] = "1"
@@ -590,14 +719,16 @@ class Runner:
             r = subprocess.run(
                 [str(MTEST), "-I", "build", "--color", mode, "tests/test_reverse.mojo"],
                 cwd=self.root, env=e, capture_output=True, text=True)
-            return r.stdout.count("\x1b[")
+            return r.stdout.count("\x1b["), r.returncode
 
-        never = esc("never", False)
-        always = esc("always", False)
-        wins = esc("always", True)  # flag must beat NO_COLOR (§15.1)
-        ok = never == 0 and always > 0 and wins > 0
+        never, never_rc = esc("never", False)
+        always, always_rc = esc("always", False)
+        wins, wins_rc = esc("always", True)  # flag must beat NO_COLOR (§15.1)
+        exits = (never_rc, always_rc, wins_rc)
+        ok = never == 0 and always > 0 and wins > 0 and exits == (0, 0, 0)
         self.record(PASS if ok else FAIL, name, ref,
-                    "" if ok else f"never={never}(0?) always={always}(>0?) NO_COLOR+always={wins}(>0?)")
+                    "" if ok else f"never={never}(0?) always={always}(>0?) "
+                                  f"NO_COLOR+always={wins}(>0?) exits={exits}(all 0?)")
 
     def check_precompile_success(self):
         # §8.3: a successful --precompile builds the pkg and auto-adds its -I so a
@@ -820,8 +951,29 @@ def main() -> int:
             runner.check_color()
         if wanted("precompile: success path resolves import (auto -I)"):
             runner.check_precompile_success()
-        if not args.no_interrupt and wanted("interrupt: SIGINT frees the owned process group"):
-            runner.check_interrupt(args.strict)
+        if wanted("interrupt: SIGINT frees the owned process group"):
+            if args.no_interrupt:
+                # Recorded, not bypassed. Testing --no-interrupt BEFORE
+                # wanted() gated the check off before --strict could observe
+                # a SKIP, so the one skip-sensitive clause could be dropped
+                # from a blocking lane without leaving a trace.
+                runner.record(
+                    SKIP,
+                    "interrupt: SIGINT frees the owned process group",
+                    "§9/§24.2 SIGINT -> exit 2, partial summary, owned child group freed",
+                    "skipped by --no-interrupt",
+                )
+            else:
+                runner.check_interrupt(args.strict)
+
+        try:
+            verify_every_check_ran(
+                tuple(name for _, name, _, _ in runner.results),
+                filtered=bool(args.filter),
+            )
+        except ContractRosterError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
 
         n_pass = sum(1 for s, *_ in runner.results if s == PASS)
         n_fail = sum(1 for s, *_ in runner.results if s == FAIL)
@@ -838,7 +990,10 @@ def main() -> int:
         if ran == 0:
             print("error: no checks ran (filter matched nothing) — not a pass", file=sys.stderr)
             return 2
-        return 1 if n_fail else 0
+        # The NOTE above promises this. It used to be true only of the one
+        # check that converted its own skip to a failure internally, which
+        # left `--strict --no-interrupt` reporting an all-green run.
+        return 1 if (n_fail or (args.strict and n_skip)) else 0
     finally:
         if args.keep:
             print(f"\n(kept scaffold at {root})")

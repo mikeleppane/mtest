@@ -8,14 +8,18 @@ the non-strict, rebuild-if-stale entry point for local iteration.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import tomllib
 import unittest
+from unittest import mock
 
 from scripts.qa import contract
 
@@ -427,6 +431,167 @@ class InterruptProbeProductionPathTests(unittest.TestCase):
         self.assertEqual(detail, "")
         self.assertEqual(proc.returncode, 2)
         self.assertEqual(sigint_calls, [proc.pid])
+
+
+class CheckRosterTests(unittest.TestCase):
+    """The roster, and the pin that `main` actually consults it.
+
+    Without the call-site pin these body tests would all stay green while
+    `main` reported a verdict for a run that skipped half its checks — the
+    exact defect the roster exists to close, reintroduced one level up.
+    """
+
+    def test_roster_covers_the_matrix_and_every_bespoke_check(self) -> None:
+        roster = list(contract.EXPECTED_CHECK_NAMES)
+
+        self.assertEqual(len(roster), len(set(roster)), "duplicate check name")
+        matrix = [c.name for c in contract.build_matrix()]
+        self.assertEqual(roster[: len(matrix)], matrix)
+        self.assertEqual(
+            roster[len(matrix) :],
+            [
+                "collect: exact node-id set for tests/",
+                "determinism: collect byte-identical",
+                "help: --help -> stdout, exit 0",
+                "usage error: -V -> stderr, exit 4",
+                "collect: streams split, listing continues past a bad probe",
+                "color: --color always beats NO_COLOR",
+                "precompile: success path resolves import (auto -I)",
+                "interrupt: SIGINT frees the owned process group",
+            ],
+        )
+
+    def test_complete_unfiltered_run_is_accepted(self) -> None:
+        contract.verify_every_check_ran(
+            contract.EXPECTED_CHECK_NAMES, filtered=False
+        )
+
+    def test_one_missing_check_is_refused(self) -> None:
+        without_interrupt = tuple(
+            n
+            for n in contract.EXPECTED_CHECK_NAMES
+            if not n.startswith("interrupt:")
+        )
+        with self.assertRaises(contract.ContractRosterError) as caught:
+            contract.verify_every_check_ran(without_interrupt, filtered=False)
+        self.assertIn("interrupt: SIGINT", str(caught.exception))
+
+    def test_unrostered_check_is_refused_even_when_filtered(self) -> None:
+        with self.assertRaises(contract.ContractRosterError):
+            contract.verify_every_check_ran(("invented: check",), filtered=True)
+
+    def test_filtered_subset_must_keep_roster_order_and_run_once(self) -> None:
+        subset = contract.EXPECTED_CHECK_NAMES[2:5]
+        contract.verify_every_check_ran(subset, filtered=True)
+        with self.assertRaises(contract.ContractRosterError):
+            contract.verify_every_check_ran(tuple(reversed(subset)), filtered=True)
+        with self.assertRaises(contract.ContractRosterError):
+            contract.verify_every_check_ran(subset + subset[:1], filtered=True)
+
+    def _main_over_a_fake_runner(
+        self, argv: list[str], drop: str = ""
+    ) -> tuple[int, str, str]:
+        """Run `main` with every check replaced by a recording double.
+
+        Args:
+            argv: The command line to parse, without the program name.
+            drop: A check name whose double records nothing, standing in for
+                a deleted call site.
+
+        Returns:
+            The exit code and the captured stdout/stderr.
+        """
+        recorded: list[str] = []
+
+        class FakeRunner:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                self.results: list[tuple[str, str, str, str]] = []
+
+            def record(self, status, name, ref, detail="") -> None:
+                self.results.append((status, name, ref, detail))
+
+            def _perform(self, name: str) -> None:
+                recorded.append(name)
+                if name != drop:
+                    self.results.append((contract.PASS, name, "ref", ""))
+
+            def check(self, c) -> None:
+                self._perform(c.name)
+
+            def check_collect_exact(self) -> None:
+                self._perform("collect: exact node-id set for tests/")
+
+            def check_determinism(self) -> None:
+                self._perform("determinism: collect byte-identical")
+
+            def check_help_stream(self) -> None:
+                self._perform("help: --help -> stdout, exit 0")
+                self._perform("usage error: -V -> stderr, exit 4")
+
+            def check_collect_streams(self) -> None:
+                self._perform(
+                    "collect: streams split, listing continues past a bad probe"
+                )
+
+            def check_color(self) -> None:
+                self._perform("color: --color always beats NO_COLOR")
+
+            def check_precompile_success(self) -> None:
+                self._perform(
+                    "precompile: success path resolves import (auto -I)"
+                )
+
+            def check_interrupt(self, strict: bool) -> None:
+                self._perform(
+                    "interrupt: SIGINT frees the owned process group"
+                )
+
+        ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.multiple(
+            contract,
+            Runner=FakeRunner,
+            pixi_env=mock.Mock(return_value={}),
+            ensure_binary=mock.Mock(),
+            scaffold=mock.Mock(),
+        ):
+            with mock.patch.object(contract.subprocess, "run", return_value=ok):
+                with mock.patch.object(sys, "argv", ["contract.py", *argv]):
+                    with contextlib.redirect_stdout(out):
+                        with contextlib.redirect_stderr(err):
+                            code = contract.main()
+        self.performed = recorded
+        return code, out.getvalue(), err.getvalue()
+
+    def test_main_performs_every_rostered_check_in_order(self) -> None:
+        code, out, err = self._main_over_a_fake_runner([])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            tuple(self.performed), contract.EXPECTED_CHECK_NAMES
+        )
+        self.assertIn("0 failed, 0 skipped", out)
+
+    def test_main_refuses_a_verdict_when_a_call_site_recorded_nothing(self) -> None:
+        code, _out, err = self._main_over_a_fake_runner(
+            [], drop="interrupt: SIGINT frees the owned process group"
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("did not perform every check it reports", err)
+
+    def test_no_interrupt_records_a_skip_instead_of_bypassing(self) -> None:
+        code, out, err = self._main_over_a_fake_runner(["--no-interrupt"])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(
+            "interrupt: SIGINT frees the owned process group", self.performed
+        )
+        self.assertIn("1 skipped", out)
+
+    def test_strict_fails_on_a_skip_including_no_interrupt(self) -> None:
+        code, out, _err = self._main_over_a_fake_runner(
+            ["--strict", "--no-interrupt"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("1 skipped", out)
 
 
 if __name__ == "__main__":
