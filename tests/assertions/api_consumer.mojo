@@ -556,6 +556,18 @@ def test_text_crop_marker_requires_an_elided_line_prefix() raises:
     testing.assert_true("expected line 1: ... " in cropped_prefix)
 
 
+def test_text_crop_reports_whole_elided_lines() raises:
+    var line_two = _repeated("b", 127)
+    var detail = _text_failure(
+        "L1\n" + line_two + "\nX",
+        "L1\n" + line_two + "\nY",
+    )
+    testing.assert_true("actual line 1: ... [cropped]" in detail)
+    testing.assert_true("actual line 2: " + line_two + "\\n" in detail)
+    testing.assert_true("expected line 1: ... [cropped]" in detail)
+    testing.assert_true("expected line 2: " + line_two + "\\n" in detail)
+
+
 def test_large_text_context_is_bounded_and_message_is_last() raises:
     var long_tail = _repeated("a", 256 * 1024)
     var detail = _text_failure(

@@ -18,10 +18,25 @@ BUILD_ROOT = REPO_ROOT / "build" / "assertions-check"
 ASSERTION_SOURCE_ROOT = REPO_ROOT / "assertions-src"
 API_CONSUMER = REPO_ROOT / "tests" / "assertions" / "api_consumer.mojo"
 LOCATION_CONSUMER = REPO_ROOT / "tests" / "assertions" / "location_consumer.mojo"
+EXAMPLE_CONSUMER = REPO_ROOT / "examples" / "assertions" / "test_diagnostics.mojo"
 COMPILE_TIMEOUT_SECONDS = 120
 RUN_TIMEOUT_SECONDS = 30
 LOCATION_MARKER = "# ASSERT-LOCATION:"
 EXPLICIT_LOCATION_MARKER = "# ASSERT-EXPLICIT-LOCATION:"
+ASSERTION_OPTIMIZATIONS = (("-O0", "o0"), ("-O3", "o3"))
+ASSERTION_CONSUMERS = ("api", "location", "example")
+STATIC_PROOF_IDS = (
+    "unicode-categories",
+    "dictionary-success",
+    "dictionary-selection",
+    "public-api",
+)
+PRIVATE_FACADE_HELPERS = (
+    "BODY_BYTE_CAP",
+    "BoundedWriter",
+    "SourceLocation",
+    "call_location",
+)
 LOCATION_TESTS = {
     "test_generic_omitted_message",
     "test_generic_positional_message",
@@ -48,6 +63,7 @@ API_TESTS = {
     "test_text_line_endings_and_final_newline_are_explicit",
     "test_text_context_has_two_lines_each_side_and_safe_prefixes",
     "test_text_crop_marker_requires_an_elided_line_prefix",
+    "test_text_crop_reports_whole_elided_lines",
     "test_large_text_context_is_bounded_and_message_is_last",
     "test_list_replacement_and_insertions_are_clear_spans",
     "test_list_changed_content_and_lengths_have_exact_facts",
@@ -86,8 +102,43 @@ def _unicode_mark_ranges() -> list[tuple[int, int]]:
     return ranges
 
 
-def validate_unicode_mark_table(source: Path) -> None:
-    """Require the packed Mojo table to match Unicode 15.0 Mn and Me."""
+def _unicode_category_ranges(category: str) -> list[tuple[int, int]]:
+    points = [
+        value
+        for value in range(0x110000)
+        if unicodedata.category(chr(value)) == category
+    ]
+    ranges: list[tuple[int, int]] = []
+    for value in points:
+        if not ranges or value != ranges[-1][1] + 1:
+            ranges.append((value, value))
+        else:
+            ranges[-1] = (ranges[-1][0], value)
+    return ranges
+
+
+def _mojo_enclosing_mark_ranges(text: str) -> list[tuple[int, int]]:
+    start = text.find("def _is_enclosing_mark(value: Int) -> Bool:")
+    if start == -1:
+        raise AssertionError("assertion enclosing mark classifier is missing")
+    stop = text.find("\ndef ", start + 1)
+    function = text[start:] if stop == -1 else text[start:stop]
+    token = re.compile(
+        r"\(value >= 0x([0-9A-Fa-f]+) and value <= 0x([0-9A-Fa-f]+)\)"
+        r"|value == 0x([0-9A-Fa-f]+)"
+    )
+    observed: list[tuple[int, int]] = []
+    for match in token.finditer(function):
+        if match.group(3) is not None:
+            value = int(match.group(3), 16)
+            observed.append((value, value))
+        else:
+            observed.append((int(match.group(1), 16), int(match.group(2), 16)))
+    return observed
+
+
+def validate_unicode_category_tables(source: Path) -> None:
+    """Require Mojo's Unicode 15.0 mark tables to match Mn and Me exactly."""
     if unicodedata.unidata_version != "15.0.0":
         raise AssertionError(
             "assertion Unicode table checker requires Unicode 15.0.0, got "
@@ -117,14 +168,36 @@ def validate_unicode_mark_table(source: Path) -> None:
         raise AssertionError(
             "assertion Unicode mark range count must be derived from its bytes"
         )
+    enclosing = _mojo_enclosing_mark_ranges(text)
+    expected_enclosing = _unicode_category_ranges("Me")
+    if enclosing != expected_enclosing:
+        raise AssertionError(
+            "assertion enclosing mark ranges differ from Unicode 15.0 Me: "
+            f"expected {expected_enclosing}, got {enclosing}"
+        )
 
 
 def validate_dictionary_success_path(source: str) -> None:
-    """Require dictionary key projection to begin only after equality is known."""
+    """Require key selection to receive only already-classified differences."""
     function_start = source.find("def write_dictionary_difference[")
     if function_start == -1:
         raise AssertionError("dictionary difference function is missing")
     function = source[function_start:]
+    expected_selection_blocks = (
+        (
+            "if entry.key not in actual:\n"
+            "            missing.consider(entry.key)\n"
+            "        elif actual[entry.key] != entry.value:\n"
+            "            changed.consider(entry.key)"
+        ),
+        ("if entry.key not in expected:\n            unexpected.consider(entry.key)"),
+    )
+    if function.count(".consider(") != 3 or any(
+        block not in function for block in expected_selection_blocks
+    ):
+        raise AssertionError(
+            "dictionary key projection must receive only classified differences"
+        )
     equal_guard = "if not missing.total and not unexpected.total and not changed.total:"
     equal_guard_at = function.find(equal_guard)
     if equal_guard_at == -1:
@@ -132,10 +205,27 @@ def validate_dictionary_success_path(source: str) -> None:
     equal_return_at = function.find("return True", equal_guard_at)
     if equal_return_at == -1:
         raise AssertionError("dictionary equality return is missing")
-    projection_at = function.find("_key_projection_fits(", 0, equal_return_at)
-    if projection_at != -1:
+
+
+def expected_assertion_execution_roster() -> tuple[tuple[str, str], ...]:
+    """Return every consumer and optimization pair the gate must complete."""
+    return tuple(
+        (consumer, optimization)
+        for optimization, _suffix in ASSERTION_OPTIMIZATIONS
+        for consumer in ASSERTION_CONSUMERS
+    )
+
+
+def verify_assertion_execution_roster(
+    performed: tuple[tuple[str, str], ...],
+) -> None:
+    """Refuse success when any documented consumer compile or run was skipped."""
+    expected = expected_assertion_execution_roster()
+    if performed != expected:
+        missing = [pair for pair in expected if pair not in performed]
         raise AssertionError(
-            "dictionary key projection is reachable on the success path"
+            "assertion execution roster differs: "
+            f"ran {list(performed)}, expected {list(expected)}, missing {missing}"
         )
 
 
@@ -339,13 +429,9 @@ def validate_clean_compile(
         )
 
 
-def _reject_accidental_public_helpers(mojo: Path) -> None:
-    for helper in (
-        "BODY_BYTE_CAP",
-        "BoundedWriter",
-        "SourceLocation",
-        "call_location",
-    ):
+def _reject_accidental_public_helpers(mojo: Path) -> tuple[str, ...]:
+    completed: list[str] = []
+    for helper in PRIVATE_FACADE_HELPERS:
         source = BUILD_ROOT / f"private-export-{helper}.mojo"
         output = BUILD_ROOT / f"private-export-{helper}"
         source.write_text(
@@ -361,6 +447,8 @@ def _reject_accidental_public_helpers(mojo: Path) -> None:
         if result.returncode == 0 or output.exists():
             raise AssertionError(f"public assertion package exposed {helper}")
         validate_export_rejection(diagnostic, helper)
+        completed.append(helper)
+    return tuple(completed)
 
 
 def validate_export_rejection(diagnostic: str, helper: str) -> None:
@@ -523,7 +611,91 @@ def _validate_api_run(
         raise AssertionError(f"API consumer did not pass cleanly:\n{run.stdout}")
 
 
-def check_assertions() -> None:
+def validate_example_run(run: subprocess.CompletedProcess[str]) -> None:
+    """Require the committed README source example to fail exactly as documented."""
+    if run.returncode != 1:
+        raise AssertionError(
+            f"README example must terminate with exact exit 1, got {run.returncode}"
+        )
+    if run.stderr:
+        raise AssertionError(f"README example wrote stderr: {run.stderr}")
+    required = (
+        "PASS [",
+        "test_standard_assertion_still_coexists",
+        "FAIL [",
+        "test_text_difference_has_scalar_and_context",
+        "text differs at scalar 6",
+        "actual: U+0062 'b'",
+        "expected: U+0042 'B'",
+        "reason: configuration text changed",
+        "2 tests run: 1 passed , 1 failed , 0 skipped",
+    )
+    missing = [item for item in required if item not in run.stdout]
+    if missing:
+        raise AssertionError(f"README example output is incomplete: {missing}")
+    if "CRASH" in run.stdout:
+        raise AssertionError("README example reported CRASH")
+
+
+def run_static_assertion_proofs(mojo: Path) -> tuple[str, ...]:
+    """Run and record every non-execution assertion proof."""
+    completed: list[str] = []
+    validate_unicode_category_tables(
+        ASSERTION_SOURCE_ROOT / "mtest" / "assertions" / "_display.mojo"
+    )
+    completed.append("unicode-categories")
+    mapping_source = (
+        ASSERTION_SOURCE_ROOT / "mtest" / "assertions" / "_mapping.mojo"
+    ).read_text(encoding="utf-8")
+    validate_dictionary_success_path(mapping_source)
+    completed.append("dictionary-success")
+    validate_dictionary_selection_bound(mapping_source)
+    completed.append("dictionary-selection")
+    _validate_public_api_docs(mojo)
+    completed.append("public-api")
+    return tuple(completed)
+
+
+def run_assertion_consumers(
+    mojo: Path,
+    locations: dict[str, tuple[int, int]],
+) -> tuple[tuple[str, str], ...]:
+    """Compile, execute, validate, and record every consumer matrix cell."""
+    completed: list[tuple[str, str]] = []
+    for optimization, suffix in ASSERTION_OPTIMIZATIONS:
+        api_binary = BUILD_ROOT / f"api-{suffix}"
+        _compile(mojo, API_CONSUMER, api_binary, optimization)
+        api_run = _run_checked(
+            [str(api_binary)],
+            cwd=REPO_ROOT,
+            timeout=RUN_TIMEOUT_SECONDS,
+        )
+        _validate_api_run(api_run, API_TESTS)
+        completed.append(("api", optimization))
+
+        location_binary = BUILD_ROOT / f"location-{suffix}"
+        _compile(mojo, LOCATION_CONSUMER, location_binary, optimization)
+        location_run = _run_checked(
+            [str(location_binary)],
+            cwd=REPO_ROOT,
+            timeout=RUN_TIMEOUT_SECONDS,
+        )
+        validate_location_run(location_run, LOCATION_CONSUMER, locations)
+        completed.append(("location", optimization))
+
+        example_binary = BUILD_ROOT / f"example-{suffix}"
+        _compile(mojo, EXAMPLE_CONSUMER, example_binary, optimization)
+        example_run = _run_checked(
+            [str(example_binary)],
+            cwd=REPO_ROOT,
+            timeout=RUN_TIMEOUT_SECONDS,
+        )
+        validate_example_run(example_run)
+        completed.append(("example", optimization))
+    return tuple(completed)
+
+
+def check_assertions() -> tuple[tuple[str, str], ...]:
     """Compile and execute every assertion consumer at both optimization levels."""
     mojo_raw = shutil.which("mojo")
     if mojo_raw is None:
@@ -536,45 +708,32 @@ def check_assertions() -> None:
             "location consumer inventory differs: "
             f"expected {sorted(LOCATION_TESTS)}, got {sorted(locations)}"
         )
-    validate_unicode_mark_table(
-        ASSERTION_SOURCE_ROOT / "mtest" / "assertions" / "_display.mojo"
-    )
-    mapping_source = (
-        ASSERTION_SOURCE_ROOT / "mtest" / "assertions" / "_mapping.mojo"
-    ).read_text(encoding="utf-8")
-    validate_dictionary_success_path(mapping_source)
-    validate_dictionary_selection_bound(mapping_source)
-    _validate_public_api_docs(mojo)
-
-    for optimization, suffix in (("-O0", "o0"), ("-O3", "o3")):
-        api_binary = BUILD_ROOT / f"api-{suffix}"
-        _compile(mojo, API_CONSUMER, api_binary, optimization)
-        api_run = _run_checked(
-            [str(api_binary)],
-            cwd=REPO_ROOT,
-            timeout=RUN_TIMEOUT_SECONDS,
+    static_proofs = run_static_assertion_proofs(mojo)
+    if static_proofs != STATIC_PROOF_IDS:
+        raise AssertionError(
+            "static assertion proof roster differs: "
+            f"ran {list(static_proofs)}, expected {list(STATIC_PROOF_IDS)}"
         )
-        _validate_api_run(api_run, API_TESTS)
-
-        location_binary = BUILD_ROOT / f"location-{suffix}"
-        _compile(mojo, LOCATION_CONSUMER, location_binary, optimization)
-        location_run = _run_checked(
-            [str(location_binary)],
-            cwd=REPO_ROOT,
-            timeout=RUN_TIMEOUT_SECONDS,
+    executions = run_assertion_consumers(mojo, locations)
+    verify_assertion_execution_roster(executions)
+    private_helpers = _reject_accidental_public_helpers(mojo)
+    if private_helpers != PRIVATE_FACADE_HELPERS:
+        raise AssertionError(
+            "private facade helper roster differs: "
+            f"ran {list(private_helpers)}, expected "
+            f"{list(PRIVATE_FACADE_HELPERS)}"
         )
-        validate_location_run(location_run, LOCATION_CONSUMER, locations)
-    _reject_accidental_public_helpers(mojo)
+    return executions
 
 
 def main() -> int:
     """Run the assertion companion gate."""
     try:
-        check_assertions()
+        performed = check_assertions()
     except AssertionError as exc:
         print(f"assertions-check: FAIL: {exc}", file=sys.stderr)
         return 1
-    print("assertions-check: OK")
+    print(f"assertions-check: OK -- completed {list(performed)}")
     return 0
 
 

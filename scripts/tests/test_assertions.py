@@ -13,6 +13,39 @@ from scripts.checks import assertions
 
 
 class AssertionCommandTests(unittest.TestCase):
+    def test_assertion_execution_roster_is_exact(self) -> None:
+        self.assertEqual(
+            assertions.ASSERTION_OPTIMIZATIONS,
+            (("-O0", "o0"), ("-O3", "o3")),
+        )
+        self.assertEqual(
+            assertions.ASSERTION_CONSUMERS,
+            ("api", "location", "example"),
+        )
+        self.assertEqual(
+            assertions.PRIVATE_FACADE_HELPERS,
+            (
+                "BODY_BYTE_CAP",
+                "BoundedWriter",
+                "SourceLocation",
+                "call_location",
+            ),
+        )
+
+    def test_missing_consumer_optimization_pair_is_rejected(self) -> None:
+        performed = (
+            ("api", "-O0"),
+            ("location", "-O0"),
+            ("example", "-O0"),
+            ("api", "-O3"),
+            ("location", "-O3"),
+        )
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"example.*-O3",
+        ):
+            assertions.verify_assertion_execution_roster(performed)
+
     def test_compile_command_uses_only_the_public_source_root(self) -> None:
         repo = Path("/checkout")
         self.assertEqual(
@@ -147,27 +180,153 @@ class AssertionApiValidationTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(AssertionError, "Unicode mark ranges"):
-                assertions.validate_unicode_mark_table(source)
+                assertions.validate_unicode_category_tables(source)
+
+    def test_unicode_enclosing_mark_table_is_checked_independently(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-assertions-test-") as raw:
+            source = Path(raw) / "_display.mojo"
+            real_source = (
+                assertions.ASSERTION_SOURCE_ROOT
+                / "mtest"
+                / "assertions"
+                / "_display.mojo"
+            ).read_text(encoding="utf-8")
+            source.write_text(
+                real_source.replace(
+                    "or (value >= 0xA670 and value <= 0xA672)",
+                    "",
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, "enclosing mark"):
+                assertions.validate_unicode_category_tables(source)
 
     def test_dictionary_key_rendering_must_follow_the_equal_return(self) -> None:
         broken = """
 def write_dictionary_difference[V](actual: V) -> Bool:
-    if not _key_projection_fits("key"):
-        pass
+    for entry in expected.items():
+        missing.consider(entry.key)
     if not missing.total and not unexpected.total and not changed.total:
         return True
 """
-        with self.assertRaisesRegex(AssertionError, "success path"):
+        with self.assertRaisesRegex(AssertionError, "classified differences"):
             assertions.validate_dictionary_success_path(broken)
 
         fixed = """
 def write_dictionary_difference[V](actual: V) -> Bool:
+    for entry in expected.items():
+        if entry.key not in actual:
+            missing.consider(entry.key)
+        elif actual[entry.key] != entry.value:
+            changed.consider(entry.key)
+    for entry in actual.items():
+        if entry.key not in expected:
+            unexpected.consider(entry.key)
     if not missing.total and not unexpected.total and not changed.total:
         return True
-    if not _key_projection_fits("key"):
-        pass
         """
         assertions.validate_dictionary_success_path(fixed)
+
+    def test_readme_example_requires_one_ordinary_failure(self) -> None:
+        valid = subprocess.CompletedProcess(
+            args=["example-o0"],
+            returncode=1,
+            stdout=(
+                "Running 2 tests for test_diagnostics.mojo\n"
+                "    PASS [ T ] test_standard_assertion_still_coexists\n"
+                "    FAIL [ T ] test_text_difference_has_scalar_and_context\n"
+                "text differs at scalar 6\n"
+                "actual: U+0062 'b'\n"
+                "expected: U+0042 'B'\n"
+                "reason: configuration text changed\n"
+                "Summary [ T ] 2 tests run: 1 passed , 1 failed , 0 skipped\n"
+            ),
+            stderr="",
+        )
+        assertions.validate_example_run(valid)
+        with self.assertRaisesRegex(AssertionError, "exact exit 1"):
+            assertions.validate_example_run(
+                subprocess.CompletedProcess(
+                    args=["example-o0"],
+                    returncode=0,
+                    stdout=valid.stdout,
+                    stderr="",
+                )
+            )
+
+    def test_check_rejects_a_dropped_execution_pair(self) -> None:
+        expected_locations = dict.fromkeys(assertions.LOCATION_TESTS, (1, 1))
+        performed = tuple(
+            pair
+            for pair in assertions.expected_assertion_execution_roster()
+            if pair != ("example", "-O3")
+        )
+        with (
+            mock.patch(
+                "scripts.checks.assertions.shutil.which",
+                return_value="/bin/mojo",
+            ),
+            mock.patch.object(assertions, "reset_build_root"),
+            mock.patch.object(
+                assertions,
+                "expected_locations",
+                return_value=expected_locations,
+            ),
+            mock.patch.object(
+                assertions,
+                "run_static_assertion_proofs",
+                return_value=assertions.STATIC_PROOF_IDS,
+            ),
+            mock.patch.object(
+                assertions,
+                "run_assertion_consumers",
+                return_value=performed,
+            ),
+            mock.patch.object(
+                assertions,
+                "_reject_accidental_public_helpers",
+                return_value=assertions.PRIVATE_FACADE_HELPERS,
+            ),
+            self.assertRaisesRegex(AssertionError, r"example.*-O3"),
+        ):
+            assertions.check_assertions()
+
+    def test_static_proof_roster_is_exact_and_every_proof_is_called(self) -> None:
+        self.assertEqual(
+            assertions.STATIC_PROOF_IDS,
+            (
+                "unicode-categories",
+                "dictionary-success",
+                "dictionary-selection",
+                "public-api",
+            ),
+        )
+        with (
+            mock.patch.object(
+                assertions,
+                "validate_unicode_category_tables",
+            ) as unicode_check,
+            mock.patch.object(
+                assertions,
+                "validate_dictionary_success_path",
+            ) as dictionary_success,
+            mock.patch.object(
+                assertions,
+                "validate_dictionary_selection_bound",
+            ) as dictionary_selection,
+            mock.patch.object(
+                assertions,
+                "_validate_public_api_docs",
+            ) as public_api,
+        ):
+            self.assertEqual(
+                assertions.run_static_assertion_proofs(Path("/bin/mojo")),
+                assertions.STATIC_PROOF_IDS,
+            )
+        unicode_check.assert_called_once()
+        dictionary_success.assert_called_once()
+        dictionary_selection.assert_called_once()
+        public_api.assert_called_once_with(Path("/bin/mojo"))
 
     def test_dictionary_selection_rejects_raw_oversized_keys_before_copy(
         self,
