@@ -403,7 +403,9 @@ def render_suite(suite: JunitSuite) -> RenderedSuite:
 
     var primary = JunitPrimary("skipped", "", "", "")
     var cases = List[JunitCase]()
-    cases.append(JunitCase("a/x.mojo::t", "a.x", True, primary, List[JunitRerun]()))
+    cases.append(
+        JunitCase("a/x.mojo::t", "a.x", True, primary.copy(), List[JunitRerun]())
+    )
     var r = render_suite(JunitSuite("a/x.mojo", 0.043, cases^, "", ""))
     ```
     """

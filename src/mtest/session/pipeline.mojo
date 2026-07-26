@@ -21,9 +21,15 @@ been announced. A stale-name recovery rebuild is a distinct pair of stages
 (`NEEDS_REBUILD`/`NEEDS_REPROBE`) precisely so it happens *after* that barrier
 without re-arming it.
 
-Capacity belongs to the driver, not to the kernel. The sequential driver keeps
-exactly one step in flight and never needs `mark_in_flight`; the parallel pool
-reserves every file it dispatches, so `next_step` offers each one only once.
+Capacity belongs to the driver, not to the kernel. Both drivers in the tree today
+reach the kernel without reserving anything: the sequential driver in
+`session/selection.mojo` is the only production caller of `next_step`, and it
+keeps exactly one step in flight, while the pool in `session/pool.mojo` iterates
+its own file list and reaches the kernel through `admit_crash_retry`,
+`record_verdict`, and the halt predicates. `mark_in_flight` and the two
+`in_flight` skip branches it feeds therefore have no production caller; they are
+exercised by `tests/unit/test_session_pipeline.mojo` and exist for a driver that
+asks the kernel for work while earlier steps are still outstanding.
 """
 
 
@@ -362,14 +368,18 @@ struct RunPipeline(Movable):
     def mark_in_flight(mut self, index: Int):
         """Reserve one file as dispatched, so the scheduler skips it.
 
-        The driver calls this once it has handed a file's step off for execution
-        but before the completion is folded back. `next_step` then never
-        re-offers that file, so a driver that fills more than one slot (the
-        parallel pool) cannot dispatch the same file twice. Folding the file's
-        completion (any `record_*`/`admit_*` call) releases the reservation. The
-        capacity-one sequential driver never calls this: it records each
-        completion before it asks for the next step, so no file is ever in
-        flight when `next_step` runs.
+        A driver would call this once it has handed a file's step off for
+        execution but before the completion is folded back, so `next_step` never
+        re-offers that file and a driver filling more than one slot cannot
+        dispatch the same file twice. Folding the completion (any
+        `record_*`/`admit_*` call) releases the reservation.
+
+        No production driver calls this today. The sequential driver records each
+        completion before asking for the next step, so no file is ever in flight
+        when `next_step` runs, and the worker pool never asks the kernel for work
+        at all: it iterates its own file list and reaches the kernel only to fold
+        results back. The reservation and the `in_flight` skip branches it feeds
+        are exercised by `tests/unit/test_session_pipeline.mojo`.
 
         Args:
             index: The dispatched file's index. A negative index (the

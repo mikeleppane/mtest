@@ -41,6 +41,13 @@ class AnnotationsCheckError(RuntimeError):
 # `::warning [props]::message`, or `::notice::message`. Props (when present) are a
 # space then comma-separated key=value pairs; the message runs to end of line.
 _ANNOTATION_RE = re.compile(r"^::(error|warning|notice)(?: ([^:]*))?::(.*)$")
+_ANNOTATION_OPENER_RE = re.compile(r"^::(error|warning|notice)(?:$|[ :])")
+"""Anything GitHub would read as one of our workflow commands, valid or not.
+
+Deliberately looser than `_ANNOTATION_RE`: extraction uses it so a malformed
+annotation is carried into `check_tail` and rejected there, instead of being
+skipped and silently reconciling the tail to zero.
+"""
 _STOP_RE = re.compile(r"^::stop-commands::(\S+)$")
 # A per-run fence token: lowercase hex, at least 128 bits (32 hex chars).
 _TOKEN_RE = re.compile(r"^[0-9a-f]{32,}$")
@@ -80,6 +87,14 @@ def _check_escaping(ann: Annotation) -> list[str]:
     # A raw CR or LF in the message would forge a second workflow-command line.
     if "\r" in ann.message or "\n" in ann.message:
         findings.append(f"{ann.kind} message carries a raw CR/LF: {ann.message!r}")
+    # A raw CR in the PROPERTY segment forges a line just as well as one in the
+    # message, and `.` in the grammar matches CR, so it parses and would
+    # otherwise pass. A raw LF cannot reach here (the grammar refuses the line),
+    # but both are named so the rule does not depend on that detail.
+    if "\r" in ann.props or "\n" in ann.props:
+        findings.append(
+            f"{ann.kind} property segment carries a raw CR/LF: {ann.props!r}"
+        )
     # The property segment uses `:` and `,` as separators, so a `file=` VALUE must
     # never contain a raw one — they escape to %3A / %2C. We check each value.
     if ann.props:
@@ -275,16 +290,24 @@ def extract_fence_tokens(text: str) -> list[str]:
 
 
 def annotation_tail_outside_fences(text: str) -> list[str]:
-    """Mtest's OWN annotation tail: annotation lines NOT sealed in any fence.
+    """The annotation tail mtest itself emits: annotation lines NOT sealed in any fence.
 
     A `::error`/`::warning`/`::notice` line inside a stop-commands fence is echoed
     child output (inert to GitHub), not part of mtest's tail. This returns only
     the lines GitHub would actually process as workflow commands.
+
+    A line that OPENS with an annotation kind but does not parse is kept rather
+    than dropped. Dropping it is how this oracle used to go false-green: mtest
+    emitting `::error file=tests/a:b.mojo::...`, with a raw `:` in the property
+    value, produced a line the grammar refused, extraction skipped it, and the
+    tail then reconciled to zero errors. Keeping it hands the malformed line to
+    `check_tail`, which rejects it by name. GitHub reads such a line too, so it
+    belongs in the tail either way.
     """
     fences, _ = scan_fences(text)
     out: list[str] = []
     for idx, line in enumerate(text.split("\n")):
-        if parse_annotation(line) is None:
+        if parse_annotation(line) is None and not _ANNOTATION_OPENER_RE.match(line):
             continue
         if any(f.open_line < idx < f.close_line for f in fences):
             continue

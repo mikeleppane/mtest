@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Format, lint, and type-check every Python file in the repository.
+"""Format, lint, and type-check the repository's Python tooling.
 
 Python is build and check tooling here, never product code, so it is not a
 pixi dependency and neither are its tools. `uvx` fetches ruff and mypy at the

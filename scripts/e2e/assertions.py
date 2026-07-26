@@ -20,7 +20,7 @@ import importlib.util
 import os
 from pathlib import Path
 import re
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 from xml.etree import ElementTree as ET
 
 from scripts.checks.reports import json_stream as json_stream_check
@@ -329,19 +329,46 @@ def stream_files(text: str) -> StreamFiles:
     started: list[str] = []
     finished: dict[str, str] = {}
     summary: dict[str, int] = {}
-    # `parse_stream` has already rejected anything the v1 schema does not allow,
-    # so these fields are the types the schema gives them. The casts state that
-    # guarantee for the checker; deciding it again here would be a second,
-    # weaker copy of the strict consumer.
+
+    # `parse_stream` validates FRAMING, the header version, and terminal
+    # cardinality. It does NOT type-check event fields: a record carrying
+    # `"path": 7` parses fine. Casting here would therefore assert a guarantee
+    # nothing provides, and the wrong type would surface later as a TypeError
+    # from sorting mixed paths rather than as the diagnosis this oracle exists
+    # to produce. So each field is checked where it is read.
+    def field(record: dict[str, object], key: str, event_name: str) -> str:
+        """Read one string field, or reject the record naming what was wrong."""
+        value = record.get(key, "")
+        if not isinstance(value, str):
+            raise ScenarioError(
+                f"{event_name} record field {key!r} is {type(value).__name__}, "
+                f"not a string: {value!r}"
+            )
+        return value
+
     for record in report.records:
         event = record.get("event")
         if event == "file_started":
-            started.append(cast("str", record.get("path", "")))
+            started.append(field(record, "path", "file_started"))
         elif event == "file_finished":
-            finished_path = cast("str", record.get("path", ""))
-            finished[finished_path] = cast("str", record.get("outcome", ""))
+            finished_path = field(record, "path", "file_finished")
+            finished[finished_path] = field(record, "outcome", "file_finished")
         elif event == "session_finished":
-            summary = dict(cast("dict[str, int]", record.get("summary", {})))
+            raw_summary = record.get("summary", {})
+            if not isinstance(raw_summary, dict):
+                raise ScenarioError(
+                    "session_finished summary is "
+                    f"{type(raw_summary).__name__}, not an object: {raw_summary!r}"
+                )
+            for key, value in raw_summary.items():
+                # Loud, not filtered: dropping a non-integer count would make a
+                # malformed summary look like a summary that simply omitted it.
+                if not isinstance(value, int):
+                    raise ScenarioError(
+                        f"session_finished summary count {key!r} is "
+                        f"{type(value).__name__}, not an integer: {value!r}"
+                    )
+                summary[str(key)] = value
     return StreamFiles(
         started=tuple(started),
         finished=finished,

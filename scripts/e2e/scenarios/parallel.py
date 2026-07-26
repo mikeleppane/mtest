@@ -19,7 +19,7 @@ import resource
 import shutil
 import signal
 import tempfile
-from typing import Any, cast
+from typing import Any
 
 from scripts.checks.reports import json_stream as json_stream_check
 from scripts.checks.reports import junit as junit_check
@@ -117,10 +117,17 @@ def _project_stream(text: str) -> dict[str, Any]:
                 {k: v for k, v in record.items() if k != "wall_time_us"}
             )
         else:
-            # `parse_stream` already rejected anything off-schema, so `path` is
-            # the string the v1 schema gives it.
-            path = cast("str", record.get("path", ""))
-            per_file.setdefault(path, []).append(_canonical_record(record))
+            # `parse_stream` validates framing and the header, NOT event field
+            # types, so a record carrying `"path": 7` reaches here. Casting would
+            # assert a guarantee nothing provides, and the wrong type would only
+            # surface later as a TypeError from sorting mixed keys.
+            raw_path = record.get("path", "")
+            if not isinstance(raw_path, str):
+                raise ScenarioError(
+                    f"{event!r} record field 'path' is "
+                    f"{type(raw_path).__name__}, not a string: {raw_path!r}"
+                )
+            per_file.setdefault(raw_path, []).append(_canonical_record(record))
     return {
         "header": header,
         "terminal": terminal,

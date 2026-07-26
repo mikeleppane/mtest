@@ -181,7 +181,8 @@ The floor before any change is done, all green, in this order:
 ```text
 pixi run fmt               # format Mojo in place (run locally before committing)
 pixi run py-fmt            # format Python in place, plus ruff's safe lint fixes
-pixi run py-check          # ruff format/lint and mypy --strict over every .py
+pixi run py-check          # ruff format/lint and mypy --strict over scripts/ and
+                           #   tests/fixtures/exec/ (needs `uv`; see below)
 pixi run version-check     # manifest, CLI, and shipped-version identity
 pixi run harness-check     # validate exact harness/CI membership and invariants
 pixi run safety-check      # inventory every unsafe Mojo operation and local proof
@@ -210,6 +211,18 @@ readme-help-check -> junit-render-check -> transcripts-check` in that exact
 fail-fast order; the
 canonical local `pixi run ci` is serial: `ci-preflight ->
 test -> dogfood-check -> e2e -> contract-check-strict -> ci-memory`.
+
+`py-check` is the one floor member whose tools are NOT in the pixi environment.
+ruff and mypy run through `uvx` at versions pinned exactly in
+`scripts/checks/python_quality.py` (a floating formatter reformats the tree on
+its next release), which keeps two build tools out of the environment the product
+compiles in. The cost is a prerequisite: it needs `uv` on PATH, and it fails
+loudly rather than skipping when `uvx` is absent. That is also why it is absent
+from `pixi run ci` and from the hosted workflow, where `uv` is not installed: a
+red `py-check` on a fresh clone without `uv` is an environment gap, not a defect
+in the tree. It covers `scripts/` and `tests/fixtures/exec/`, which is every
+Python file the repo tracks. `pyproject.toml` holds the config and no
+`[project]`/`[build-system]`, because this repo is not a Python package.
 
 `ci-memory` is how the local floor covers memory safety. On linux-64 a
 `[target.linux-64.tasks]` override makes it `asan-check` then

@@ -273,11 +273,70 @@ def _transitive_tasks(tasks: dict[str, object], root: str) -> set[str]:
     return seen
 
 
+PLATFORM_TASK_OVERRIDES = {"ci-memory"}
+"""The ONLY task any platform table may override, and the reason it is bounded.
+
+A `[target.<platform>.tasks]` entry silently replaces the base task of the same
+name, with no warning from pixi, and every other exact-command pin in this module
+reads the base `[tasks]` table. So an unbounded override table is a hole big
+enough to drive a lane through: adding `asan-check = "true"` under linux-64 would
+leave `pixi run ci`, `harness-check`, AND the hosted "ASan + LSan" required check
+all green while running nothing, because the lane never leaves either view by
+name. Bounding the table to one known entry is what closes that.
+"""
+
+PLATFORM_TARGET_KEYS = {"dependencies", "tasks"}
+"""What a `[target.<platform>]` table may contain, so a new one cannot hide."""
+
+
 def _platform_tasks(manifest: dict[str, object], platform: str) -> dict[str, object]:
-    """Read one platform's task overrides without accepting a missing table."""
+    """Read one platform's task overrides, bounding what may live there.
+
+    Args:
+        manifest: The parsed `pixi.toml`.
+        platform: The platform whose task table is required to exist.
+
+    Returns:
+        That platform's task overrides.
+
+    Raises:
+        AssertionError: If the table is missing, if any platform other than
+            `platform` declares task overrides, if a target table grows an
+            unexpected key, or if the override table names a task outside
+            `PLATFORM_TASK_OVERRIDES`.
+    """
     targets = manifest.get("target")
     if not isinstance(targets, dict):
         raise AssertionError("pixi.toml has no [target] table")
+    for name, table in targets.items():
+        if not isinstance(table, dict):
+            raise AssertionError(f"[target.{name}] is not a table")
+        unexpected = set(table) - PLATFORM_TARGET_KEYS
+        if unexpected:
+            raise AssertionError(
+                f"[target.{name}] carries unexpected keys {sorted(unexpected)}; "
+                f"only {sorted(PLATFORM_TARGET_KEYS)} are pinned here"
+            )
+        overrides = table.get("tasks")
+        if overrides is None:
+            continue
+        if not isinstance(overrides, dict):
+            raise AssertionError(f"[target.{name}.tasks] is not a table")
+        if name != platform:
+            raise AssertionError(
+                f"[target.{name}.tasks] overrides tasks {sorted(overrides)}, but "
+                f"only {platform} may override a task; a platform override "
+                "silently replaces the base command and is invisible to every "
+                "exact-command pin in this module"
+            )
+        outside = set(overrides) - PLATFORM_TASK_OVERRIDES
+        if outside:
+            raise AssertionError(
+                f"[target.{name}.tasks] overrides {sorted(outside)}, which is "
+                f"outside the pinned set {sorted(PLATFORM_TASK_OVERRIDES)}; an "
+                "override replaces the base command with no warning, so a lane "
+                "can stay in every view by name while running nothing"
+            )
     target = targets.get(platform)
     if not isinstance(target, dict):
         raise AssertionError(f"pixi.toml has no [target.{platform}] table")
@@ -419,11 +478,18 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
             f"missing={sorted(expected_linux_closure - linux_closure)}, "
             f"extra={sorted(linux_closure - expected_linux_closure)}"
         )
+    # The closure equality above already proves each lane is present BY NAME.
+    # What it cannot see is a lane whose command was replaced, so check the
+    # merged table's commands rather than re-testing membership. `_platform_tasks`
+    # bounds which tasks may be overridden at all; this is the second lock, and
+    # the one that would fire if that set were ever widened.
     for lane in MEMORY_LANE_TASKS:
-        if lane not in linux_closure:
+        if linux_tasks.get(lane) != exact_safety_tasks[lane]:
             raise AssertionError(
-                f"{lane} left the local {MEMORY_PLATFORM} floor; a green "
-                "`pixi run ci` would stop covering memory safety"
+                f"{lane} does not run its exact negative-control harness on "
+                f"{MEMORY_PLATFORM}: expected={exact_safety_tasks[lane]!r}, "
+                f"actual={linux_tasks.get(lane)!r}. A green `pixi run ci` would "
+                "claim memory-safety coverage it did not compute."
             )
     # The coverage-capability probe is diagnostic, so nothing in the `ci`
     # closure depends on it and nothing else would notice it disappearing.

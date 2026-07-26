@@ -324,8 +324,11 @@ valgrind = "==3.27.1"
 # close the gap that made a green local floor say nothing about memory safety:
 # before it, both lanes were reachable only by naming them, which meant in
 # practice they ran hosted or not at all. It sits last in `ci` because it is
-# the broadest and slowest member, and because `ci-preflight` has already
-# produced `build/mtest.mojopkg` by then — the same prerequisite the hosted
-# cells build explicitly before running their lane.
+# the broadest and slowest member. It needs nothing from the earlier members:
+# both lanes compile the suites and the CLI from source with `-I src` so every
+# frame is instrumented, and neither reads `build/mtest.mojopkg` or
+# `build/mtest`. `pixi run ci-memory` standalone is therefore identical to how
+# `ci` reaches it, unlike `contract-check-strict` above, whose provenance really
+# does come from a shared task edge.
 [target.linux-64.tasks]
 ci-memory = { depends-on = ["asan-check", "valgrind-check"] }

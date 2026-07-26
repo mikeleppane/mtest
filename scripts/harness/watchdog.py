@@ -169,8 +169,14 @@ class _StreamTee:
         """
         # The caller's stream is duck-typed on purpose: under a redirect
         # `sys.stdout` is any object with `write`. These casts record the shape
-        # production always has without adding a runtime check; a stream missing
-        # `flush` stays covered by the `AttributeError` arm in `write` below.
+        # production always has without adding a runtime check.
+        #
+        # Note what is NOT covered: the binary arm in `write` catches OSError and
+        # ValueError only, so a `.buffer` exposing `write` but not `flush` raises
+        # AttributeError out of the drainer thread. Every stream this repo passes
+        # (`sys.stdout`, `io.StringIO`, `_TextOverBytes`) either has `flush` or
+        # has no `.buffer` at all, so the text arm handles it. The gap is real
+        # but pre-existing; do not read these casts as closing it.
         self._binary = cast("IO[bytes] | None", getattr(stream, "buffer", None))
         self._text = cast(
             "IO[str] | None",

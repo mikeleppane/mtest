@@ -21,6 +21,11 @@ AGGREGATE = "::error ::... and 3 more errors"
 """The rollup shape `src/mtest/report/annotations.mojo` renders after the cap."""
 
 
+def captured(*lines: str) -> str:
+    """One captured-stdout blob from its lines, the way a real run emits it."""
+    return "\n".join(lines)
+
+
 class AnnotationTailTests(unittest.TestCase):
     def _reject(self, lines: list[str], pattern: str) -> None:
         """Assert the oracle rejects one broken tail with a matching reason."""
@@ -89,6 +94,92 @@ class AnnotationTailTests(unittest.TestCase):
 
     def test_more_than_one_notice_is_rejected(self) -> None:
         self._reject(["::notice ::first", "::notice ::second"], "more than one")
+
+    def test_a_raw_carriage_return_in_a_property_is_rejected(self) -> None:
+        # The message check alone left this open: `.` in the grammar matches CR,
+        # so a property carrying one parses and used to pass. A property segment
+        # is just as good a place to forge a second command line from.
+        self._reject(
+            ["::error file=a.mojo\rline=9::a.mojo::test_one: failed"],
+            "property segment carries a raw CR/LF",
+        )
+
+
+class AnnotationExtractionTests(unittest.TestCase):
+    """What reaches `check_tail` from a real captured stdout.
+
+    Extraction used to skip any annotation-shaped line the grammar refused, which
+    made the whole oracle false-green: the malformed line vanished and the tail
+    then reconciled to zero errors. These pin the extraction boundary itself.
+    """
+
+    def test_a_malformed_annotation_reaches_the_tail_check(self) -> None:
+        # `tests/a:b.mojo` is a legal POSIX path. Emitted unescaped, the `:`
+        # makes the line unparseable; dropping it silently reported no errors.
+        text = captured(
+            "console output above",
+            "::error file=tests/a:b.mojo::tests/a:b.mojo::test_one: failed",
+            "::notice ::mtest: 1 error",
+        )
+        kept = oracle.annotation_tail_outside_fences(text)
+        self.assertIn(
+            "::error file=tests/a:b.mojo::tests/a:b.mojo::test_one: failed", kept
+        )
+        with self.assertRaisesRegex(
+            oracle.AnnotationsCheckError, "not a valid annotation"
+        ):
+            oracle.check_tail(kept)
+
+    def test_a_well_formed_tail_extracts_and_passes(self) -> None:
+        text = captured(
+            "console output above",
+            ROW_A,
+            ROW_B,
+            "::notice ::mtest: 2 errors",
+        )
+        kept = oracle.annotation_tail_outside_fences(text)
+        self.assertEqual(kept, [ROW_A, ROW_B, "::notice ::mtest: 2 errors"])
+        self.assertEqual(oracle.check_tail(kept)["errors"], 2)
+
+    def test_an_annotation_echoed_inside_a_fence_stays_inert(self) -> None:
+        # The fence exclusion must survive the extraction change: a child echoing
+        # `::error` inside a stop-commands fence is text, not mtest's own tail.
+        token = "abcdef0123456789abcdef0123456789"  # noqa: S105 - a fence token
+        text = captured(
+            f"::stop-commands::{token}",
+            "::error file=child.mojo::echoed by the child",
+            f"::{token}::",
+            "::notice ::mtest: 0 errors",
+        )
+        kept = oracle.annotation_tail_outside_fences(text)
+        self.assertEqual(kept, ["::notice ::mtest: 0 errors"])
+        self.assertEqual(oracle.check_tail(kept)["errors"], 0)
+
+    def test_a_malformed_annotation_inside_a_fence_also_stays_inert(self) -> None:
+        # The looser opener match must not resurrect fenced child output.
+        token = "abcdef0123456789abcdef0123456789"  # noqa: S105 - a fence token
+        text = captured(
+            f"::stop-commands::{token}",
+            "::error file=child:bad.mojo::echoed, unparseable, still inert",
+            f"::{token}::",
+            "::notice ::mtest: 0 errors",
+        )
+        kept = oracle.annotation_tail_outside_fences(text)
+        self.assertEqual(kept, ["::notice ::mtest: 0 errors"])
+
+    def test_ordinary_console_text_is_not_mistaken_for_an_annotation(self) -> None:
+        # The opener pattern must stay narrow: only our three kinds, and only
+        # when the line really opens with one.
+        text = captured(
+            "PASS tests/a.mojo",
+            "  note: ::error appears mid-line and is not an annotation",
+            "::errorish ::not one of our kinds",
+            "::notice ::mtest: 0 errors",
+        )
+        self.assertEqual(
+            oracle.annotation_tail_outside_fences(text),
+            ["::notice ::mtest: 0 errors"],
+        )
 
 
 if __name__ == "__main__":

@@ -13,7 +13,13 @@
 [tool.ruff]
 line-length = 88
 target-version = "py312"
-extend-exclude = ["build", ".pixi", "vendor"]
+# Root-anchored on purpose. A bare `build` has no path separator, so ruff
+# matches it against ANY path component and silently excludes `scripts/build/`
+# too, which hid three files (including the module behind the blocking
+# package-check gate) from both lint and format while py-check still printed
+# "clean". `/build` is not the fix either: it excludes nothing at all. The
+# effective file set is pinned by a test, so this cannot regress silently.
+extend-exclude = ["./build", "./.pixi", "./vendor"]
 
 [tool.ruff.lint]
 select = [
