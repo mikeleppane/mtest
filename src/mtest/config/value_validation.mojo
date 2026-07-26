@@ -19,6 +19,14 @@ def parse_nonnegative_decimal(value: String) -> Optional[Int]:
     every caller's diagnostic framing to the top level, naming no flag, no
     expected form, and no help pointer.
 
+    The post-conversion sign check is load-bearing, not belt-and-braces:
+    `atol` does not raise across the whole out-of-range domain — at exactly
+    `2^63` and `2^63 + 1` it WRAPS to `Int.MIN` and `Int.MIN + 1`. The digit
+    screen above has already excluded a `-`, so a wrapped result would
+    otherwise be indistinguishable from a legitimate parse and would reach
+    callers that all treat it as non-negative (silently disabling `--timeout`,
+    defeating `--maxfail`, corrupting `--retries`/`--durations`).
+
     Args:
         value: The candidate decimal spelling.
 
@@ -33,7 +41,10 @@ def parse_nonnegative_decimal(value: String) -> Optional[Int]:
         if digit < 48 or digit > 57:
             return Optional[Int](None)
     try:
-        return Optional[Int](atol(value))
+        var parsed = atol(value)
+        if parsed < 0:  # `atol` wrapped instead of raising: out of range.
+            return Optional[Int](None)
+        return Optional[Int](parsed)
     except:
         return Optional[Int](None)
 
