@@ -79,8 +79,9 @@ def _write_keys(
         return
     output.write_trusted("\n  " + title + " keys:")
     for key in selection.keys:
-        output.write_trusted("\n    ")
-        output.write(key)
+        output.write_trusted('\n    "' + render_value(key) + '"')
+        if output.truncated:
+            break
 
 
 def _write_changed[
@@ -96,13 +97,17 @@ def _write_changed[
         return
     output.write_trusted("\n  changed entries:")
     for key in selection.keys:
-        output.write_trusted("\n    ")
-        output.write(key)
-        output.write_trusted(': "')
-        output.write_trusted(render_value(actual[key]))
-        output.write_trusted('" != "')
-        output.write_trusted(render_value(expected[key]))
-        output.write_trusted('"')
+        output.write_trusted(
+            '\n    "'
+            + render_value(key)
+            + '": "'
+            + render_value(actual[key])
+            + '" != "'
+            + render_value(expected[key])
+            + '"'
+        )
+        if output.truncated:
+            break
 
 
 def _write_opaque_dictionary_detail[

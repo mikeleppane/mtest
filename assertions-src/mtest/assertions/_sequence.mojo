@@ -15,11 +15,12 @@ def _write_list_slice[
     for index in range(start, stop):
         if shown == DISPLAY_LIMIT:
             break
+        var projection = '"' + render_value(values[index]) + '"'
         if shown:
-            output.write_trusted(", ")
-        output.write_trusted('"')
-        output.write_trusted(render_value(values[index]))
-        output.write_trusted('"')
+            projection = ", " + projection
+        output.write_trusted(projection)
+        if output.truncated:
+            break
         shown += 1
     output.write_trusted("]")
 
@@ -119,10 +120,15 @@ def write_list_difference[
         + " omitted"
     )
     for index in mismatch_indices:
-        output.write_trusted("\n  [" + String(index) + "] ")
-        output.write_trusted('"')
-        output.write_trusted(render_value(actual[index]))
-        output.write_trusted('" != "')
-        output.write_trusted(render_value(expected[index]))
-        output.write_trusted('"')
+        output.write_trusted(
+            "\n  ["
+            + String(index)
+            + '] "'
+            + render_value(actual[index])
+            + '" != "'
+            + render_value(expected[index])
+            + '"'
+        )
+        if output.truncated:
+            break
     return False

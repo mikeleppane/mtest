@@ -124,6 +124,14 @@ def _repeated(piece: String, count: Int) -> String:
     return output^
 
 
+def _count_scalar(text: String, value: Int) -> Int:
+    var total = 0
+    for scalar in text.codepoints():
+        if Int(scalar) == value:
+            total += 1
+    return total
+
+
 def _text_failure(actual: String, expected: String, msg: String = "") -> String:
     var detail = String("")
     try:
@@ -310,6 +318,7 @@ def test_many_small_formatter_writes_and_body_are_bounded() raises:
     )
     testing.assert_true(structural.byte_length() <= BODY_BYTE_CAP + 512)
     testing.assert_true(structural.endswith("USER REASON SURVIVES"))
+    testing.assert_equal(_count_scalar(structural, ord('"')) % 2, 0)
 
 
 def test_text_first_difference_at_start_middle_end_and_ending() raises:
@@ -712,6 +721,12 @@ def test_dictionary_categories_are_distinct_and_ordered() raises:
     testing.assert_true("changed: 1 total, 0 omitted" in detail)
     testing.assert_true(detail.find("missing:") < detail.find("unexpected:"))
     testing.assert_true(detail.find("unexpected:") < detail.find("changed:"))
+    var blank_keys = _dictionary_failure(
+        {"": 1, "   ": 1},
+        {"\t": 1},
+    )
+    testing.assert_true('missing keys:\n    "\\t"' in blank_keys)
+    testing.assert_true('unexpected keys:\n    ""\n    "   "' in blank_keys)
 
 
 def test_dictionary_order_is_full_unsigned_utf8_not_insertion_order() raises:
@@ -726,7 +741,7 @@ def test_dictionary_order_is_full_unsigned_utf8_not_insertion_order() raises:
     var second = _dictionary_failure(actual_b, expected)
     testing.assert_equal(first, second)
     testing.assert_true(first.find("a\\nkey") < first.find("a\\u202ekey"))
-    testing.assert_true(first.find("\n    z") < first.find("\n    é"))
+    testing.assert_true(first.find('\n    "z"') < first.find('\n    "é"'))
     testing.assert_false("\na\nkey" in first)
 
 
@@ -758,13 +773,21 @@ def test_dictionary_values_are_individually_bounded_before_assembly() raises:
     }
     var detail = _dictionary_failure(actual, expected, "dictionary reason")
     testing.assert_true('... [truncated]" != "' in detail)
-    testing.assert_true('second: "tail-actual" != "tail-expected"' in detail)
+    testing.assert_true('"second": "tail-actual" != "tail-expected"' in detail)
     testing.assert_true(detail.endswith("dictionary reason"))
     var delimiter_detail = _dictionary_failure(
         {"key": "x != y"},
         {"key": "z"},
     )
-    testing.assert_true('key: "x != y" != "z"' in delimiter_detail)
+    testing.assert_true('"key": "x != y" != "z"' in delimiter_detail)
+    var capped_actual = Dict[String, String]()
+    var capped_expected = Dict[String, String]()
+    for index in range(8):
+        capped_actual["key-" + String(index)] = _repeated("a", 32 * 1024)
+        capped_expected["key-" + String(index)] = _repeated("b", 32 * 1024)
+    var capped = _dictionary_failure(capped_actual, capped_expected)
+    testing.assert_true(capped.endswith("... [truncated]"))
+    testing.assert_equal(_count_scalar(capped, ord('"')) % 2, 0)
 
 
 def test_dictionary_key_cap_boundary_and_opaque_fallback() raises:
