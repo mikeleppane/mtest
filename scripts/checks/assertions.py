@@ -234,26 +234,40 @@ def verify_assertion_execution_roster(
 
 
 def validate_dictionary_selection_bound(source: str) -> None:
-    """Require oversized key displays to be omitted before selection retains them."""
+    """Require one bounded key projection before selection retains either form."""
     consider_at = source.find("def consider(mut self, key: String):")
     if consider_at == -1:
         raise AssertionError("dictionary key selection function is missing")
     function = source[consider_at:]
     guard_at = function.find("key.byte_length() > DICTIONARY_KEY_BYTE_CAP")
-    projection_at = function.find("or not _key_projection_fits(key)")
-    reject_at = function.find("return", guard_at)
+    raw_reject_at = function.find("return", guard_at)
+    projection_at = function.find("var projection = _render_projection(key)")
+    projection_guard_at = function.find("if projection.truncated:")
+    projection_reject_at = function.find("return", projection_guard_at)
     retain_at = function.find("self.keys.append(key)")
+    projection_retain_at = function.find(
+        "self.projections.append(projection.text.copy())"
+    )
     if (
         guard_at == -1
+        or raw_reject_at == -1
         or projection_at == -1
-        or reject_at == -1
+        or projection_guard_at == -1
+        or projection_reject_at == -1
         or retain_at == -1
+        or projection_retain_at == -1
         or guard_at > retain_at
         or projection_at > retain_at
-        or reject_at > retain_at
+        or projection_guard_at > retain_at
+        or raw_reject_at > projection_at
+        or projection_reject_at > retain_at
+        or projection_retain_at < retain_at
+        or function.count("_render_projection(key)") != 1
+        or "render_value(key)" in source
     ):
         raise AssertionError(
-            "oversized dictionary key display can be retained by selection"
+            "dictionary key selection can leave an unbounded or repeated "
+            "projection retained"
         )
 
 
@@ -332,6 +346,7 @@ def validate_location_run(
     expected: dict[str, tuple[int, int]],
 ) -> None:
     """Require ordinary TestSuite failures at every marked consumer location."""
+    require_complete_capture(run, "location consumer")
     source = source.resolve()
     if run.returncode != 1:
         raise AssertionError(
@@ -399,11 +414,8 @@ def _run_checked(
             captured.stderr,
         )
     if isinstance(termination, watchdog.Signaled):
-        return subprocess.CompletedProcess(
-            command,
-            -termination.signo,
-            captured.stdout,
-            captured.stderr,
+        raise AssertionError(
+            f"command died by signal {termination.signo}: {' '.join(command)}"
         )
     if isinstance(termination, watchdog.TimedOut):
         raise AssertionError(f"command exceeded {timeout} seconds: {' '.join(command)}")
@@ -444,11 +456,21 @@ def validate_clean_compile(
     source_name: str,
 ) -> None:
     """Reject warnings emitted while compiling the shipped public source."""
+    require_complete_capture(result, f"compiler ({optimization}, {source_name})")
     transcript = result.stdout + result.stderr
     if "warning:" in transcript:
         raise AssertionError(
             f"compiler warning ({optimization}, {source_name}):\n{transcript}"
         )
+
+
+def require_complete_capture(
+    result: subprocess.CompletedProcess[str],
+    label: str,
+) -> None:
+    """Reject an oracle input whose bounded process capture omitted bytes."""
+    if PROCESS_CAPTURE_MARKER in result.stdout + result.stderr:
+        raise AssertionError(f"{label} output was truncated")
 
 
 def _reject_accidental_public_helpers(mojo: Path) -> tuple[str, ...]:
@@ -465,6 +487,7 @@ def _reject_accidental_public_helpers(mojo: Path) -> tuple[str, ...]:
             cwd=REPO_ROOT,
             timeout=COMPILE_TIMEOUT_SECONDS,
         )
+        require_complete_capture(result, f"{helper} private-export probe")
         diagnostic = result.stdout + result.stderr
         if result.returncode == 0 or output.exists():
             raise AssertionError(f"public assertion package exposed {helper}")
@@ -550,6 +573,7 @@ def _validate_public_api_docs(mojo: Path) -> None:
         cwd=REPO_ROOT,
         timeout=COMPILE_TIMEOUT_SECONDS,
     )
+    require_complete_capture(result, "public assertion documentation")
     if result.returncode != 0 or not output.is_file():
         raise AssertionError(
             f"public assertion documentation failed:\n{result.stdout}{result.stderr}"
@@ -600,6 +624,7 @@ def _validate_api_run(
     run: subprocess.CompletedProcess[str],
     expected_rows: set[str],
 ) -> None:
+    require_complete_capture(run, "API consumer")
     if run.returncode != 0:
         raise AssertionError(
             f"API consumer exited {run.returncode}:\n{run.stdout}{run.stderr}"
@@ -635,6 +660,7 @@ def _validate_api_run(
 
 def validate_example_run(run: subprocess.CompletedProcess[str]) -> None:
     """Require the committed README source example to fail exactly as documented."""
+    require_complete_capture(run, "README example")
     if run.returncode != 1:
         raise AssertionError(
             f"README example must terminate with exact exit 1, got {run.returncode}"

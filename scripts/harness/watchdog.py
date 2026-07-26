@@ -122,28 +122,35 @@ class _BoundedTextCapture:
             limit_bytes: Maximum child-output bytes retained before the marker.
         """
         self._limit_bytes = limit_bytes
-        self._chunks: list[str] = []
+        self._retained = bytearray()
         self._retained_bytes = 0
         self._truncated = False
 
-    def write(self, text: str) -> int:
-        """Retain only the prefix that fits and report the full write accepted."""
-        encoded = text.encode("utf-8", errors="replace")
+    @property
+    def buffer(self) -> _BoundedTextCapture:
+        """Expose this byte sink so pipe chunks are decoded only after capture."""
+        return self
+
+    def write(self, value: str | bytes) -> int:
+        """Retain only the byte prefix that fits and report the full write accepted."""
+        encoded = (
+            value.encode("utf-8", errors="replace") if isinstance(value, str) else value
+        )
         remaining = self._limit_bytes - self._retained_bytes
         retained = encoded[: max(0, remaining)]
         if retained:
-            self._chunks.append(retained.decode("utf-8", errors="ignore"))
+            self._retained.extend(retained)
             self._retained_bytes += len(retained)
         if len(encoded) > len(retained):
             self._truncated = True
-        return len(text)
+        return len(value)
 
     def flush(self) -> None:
         """Match the text-stream interface; capture needs no flushing."""
 
     def finish(self) -> str:
         """Return retained text plus one explicit marker when bytes were omitted."""
-        text = "".join(self._chunks)
+        text = self._retained.decode("utf-8", errors="replace")
         return text + (CAPTURE_TRUNCATION_MARKER if self._truncated else "")
 
 

@@ -3,12 +3,11 @@
 from std.collections import Dict
 
 from mtest.assertions._display import (
-    _key_projection_fits,
+    _render_projection,
     _render_unequal_pair,
     BoundedWriter,
     DICTIONARY_KEY_BYTE_CAP,
     DISPLAY_LIMIT,
-    render_value,
 )
 
 
@@ -28,24 +27,28 @@ struct _Selection(Movable):
     """Retain the full-byte lexicographically smallest displayable keys."""
 
     var keys: List[String]
+    var projections: List[String]
     var total: Int
     var key_display_omissions: Int
 
     def __init__(out self):
         self.keys = List[String]()
+        self.projections = List[String]()
         self.total = 0
         self.key_display_omissions = 0
 
     def consider(mut self, key: String):
         self.total += 1
-        if (
-            key.byte_length() > DICTIONARY_KEY_BYTE_CAP
-            or not _key_projection_fits(key)
-        ):
+        if key.byte_length() > DICTIONARY_KEY_BYTE_CAP:
+            self.key_display_omissions += 1
+            return
+        var projection = _render_projection(key)
+        if projection.truncated:
             self.key_display_omissions += 1
             return
         if len(self.keys) < DISPLAY_LIMIT:
             self.keys.append(key)
+            self.projections.append(projection.text.copy())
             return
         var largest = 0
         for index in range(1, len(self.keys)):
@@ -53,6 +56,7 @@ struct _Selection(Movable):
                 largest = index
         if _byte_less(key, self.keys[largest]):
             self.keys[largest] = key
+            self.projections[largest] = projection.text.copy()
 
     def sort(mut self):
         for first in range(len(self.keys)):
@@ -64,6 +68,9 @@ struct _Selection(Movable):
                 var temporary = self.keys[first].copy()
                 self.keys[first] = self.keys[smallest]
                 self.keys[smallest] = temporary^
+                var temporary_projection = self.projections[first].copy()
+                self.projections[first] = self.projections[smallest]
+                self.projections[smallest] = temporary_projection^
 
 
 def _write_keys(
@@ -75,8 +82,8 @@ def _write_keys(
     if not len(selection.keys):
         return
     output.write_trusted("\n  " + title + " keys:")
-    for key in selection.keys:
-        output.write_trusted('\n    "' + render_value(key) + '"')
+    for index in range(len(selection.keys)):
+        output.write_trusted('\n    "' + selection.projections[index] + '"')
         if output.truncated:
             break
 
@@ -93,10 +100,11 @@ def _write_changed[
     if not len(selection.keys):
         return
     output.write_trusted("\n  changed entries:")
-    for key in selection.keys:
+    for index in range(len(selection.keys)):
+        var key = selection.keys[index]
         output.write_trusted(
             '\n    "'
-            + render_value(key)
+            + selection.projections[index]
             + '": '
             + _render_unequal_pair(actual[key], expected[key])
         )

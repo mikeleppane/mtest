@@ -271,11 +271,6 @@ def _render_unequal_pair[T: Writable](actual: T, expected: T) -> String:
     )
 
 
-def _key_projection_fits(key: String) -> Bool:
-    """Return whether one escaped key projection fits the public value cap."""
-    return not _render_projection(key).truncated
-
-
 def detail_byte_cap(has_reason: Bool) -> Int:
     """Reserve bounded room for a caller reason only on a failing path."""
     if has_reason:

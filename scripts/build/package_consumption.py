@@ -515,9 +515,30 @@ def validate_assertion_install(
     if list(source_root.rglob("*.mojopkg")):
         raise PackageCheckError("installed assertion source contains a mojopkg")
 
-    mojo = prefix / "bin" / "mojo"
-    if not mojo.is_file() or not os.access(mojo, os.X_OK):
-        raise PackageCheckError(f"installed compiler is missing: {mojo}")
+    bin_directory = prefix / "bin"
+    try:
+        bin_mode = bin_directory.lstat().st_mode
+    except FileNotFoundError as exc:
+        raise PackageCheckError(
+            f"installed compiler directory is missing: {bin_directory}"
+        ) from exc
+    if stat.S_ISLNK(bin_mode) or not stat.S_ISDIR(bin_mode):
+        raise PackageCheckError(
+            f"installed compiler directory must be a real directory: {bin_directory}"
+        )
+    mojo = bin_directory / "mojo"
+    try:
+        mojo_mode = mojo.lstat().st_mode
+    except FileNotFoundError as exc:
+        raise PackageCheckError(f"installed compiler is missing: {mojo}") from exc
+    if (
+        stat.S_ISLNK(mojo_mode)
+        or not stat.S_ISREG(mojo_mode)
+        or not os.access(mojo, os.X_OK)
+    ):
+        raise PackageCheckError(
+            f"installed compiler must be an executable real regular file: {mojo}"
+        )
     config = prefix / "share" / "max" / "modular.cfg"
     if not config.is_file():
         raise PackageCheckError(f"installed modular.cfg is missing: {config}")
@@ -563,10 +584,10 @@ def _require_safe_assertion_directory(
 ) -> None:
     """Require one installed source path to resist unintended replacement."""
     mode = stat.S_IMODE(directory.stat().st_mode)
-    if mode & 0o002 or mode & 0o555 != 0o555 or mode & 0o7000:
+    if mode & 0o002 or mode & 0o500 != 0o500 or mode & 0o7000:
         raise PackageCheckError(
-            "installed assertion directory must be traversable and not "
-            "world-writable or carry special bits: "
+            "installed assertion directory must be owner-readable and "
+            "traversable, not world-writable, and carry no special bits: "
             f"{relative} has {mode:o}"
         )
     if mode & 0o020 and not allow_installer_group_write:
@@ -599,6 +620,10 @@ def require_warning_free_assertion_compile(
     optimization: str,
 ) -> None:
     """Reject warnings from an installed assertion-source consumer compile."""
+    if watchdog.CAPTURE_TRUNCATION_MARKER in transcript:
+        raise PackageCheckError(
+            f"{label} assertion compiler output was truncated at {optimization}"
+        )
     if "warning:" in transcript:
         raise PackageCheckError(
             f"{label} assertion compiler warning at {optimization}: {transcript}"
@@ -623,6 +648,10 @@ def _run_assertion_process(
     )
     termination = captured.termination
     if isinstance(termination, watchdog.Exited):
+        if watchdog.CAPTURE_TRUNCATION_MARKER in captured.stdout + captured.stderr:
+            raise PackageCheckError(
+                "assertion process output was truncated: " + " ".join(command)
+            )
         return subprocess.CompletedProcess(
             command,
             termination.code,
@@ -630,11 +659,9 @@ def _run_assertion_process(
             captured.stderr,
         )
     if isinstance(termination, watchdog.Signaled):
-        return subprocess.CompletedProcess(
-            command,
-            -termination.signo,
-            captured.stdout,
-            captured.stderr,
+        raise PackageCheckError(
+            f"assertion process died by signal {termination.signo}: "
+            + " ".join(command)
         )
     rendered = " ".join(command)
     if isinstance(termination, watchdog.TimedOut):

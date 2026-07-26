@@ -12,6 +12,7 @@ import unittest
 from unittest import mock
 
 from scripts.checks import assertions
+from scripts.harness import watchdog
 
 
 class AssertionCommandTests(unittest.TestCase):
@@ -136,6 +137,25 @@ class AssertionCommandTests(unittest.TestCase):
         )
         self.assertTrue(result.stdout.endswith(assertions.PROCESS_CAPTURE_MARKER))
 
+    def test_run_checked_rejects_signal_death_structurally(self) -> None:
+        with (
+            mock.patch.object(
+                watchdog,
+                "run_captured_command",
+                return_value=watchdog.CapturedCommand(
+                    watchdog.Signaled(11),
+                    "expected semantic diagnostic",
+                    "",
+                ),
+            ),
+            self.assertRaisesRegex(AssertionError, "signal 11"),
+        ):
+            assertions._run_checked(
+                ["mojo", "build"],
+                cwd=assertions.REPO_ROOT,
+                timeout=5,
+            )
+
     def test_successful_compile_must_be_warning_free(self) -> None:
         result = subprocess.CompletedProcess(
             args=["mojo", "build"],
@@ -144,6 +164,16 @@ class AssertionCommandTests(unittest.TestCase):
             stderr="source.mojo:1:1: warning: leaked warning\n",
         )
         with self.assertRaisesRegex(AssertionError, "compiler warning"):
+            assertions.validate_clean_compile(result, "-O0", "source.mojo")
+
+    def test_successful_compile_must_have_complete_capture(self) -> None:
+        result = subprocess.CompletedProcess(
+            args=["mojo", "build"],
+            returncode=0,
+            stdout=assertions.PROCESS_CAPTURE_MARKER,
+            stderr="",
+        )
+        with self.assertRaisesRegex(AssertionError, "output was truncated"):
             assertions.validate_clean_compile(result, "-O0", "source.mojo")
 
 
@@ -378,14 +408,22 @@ def consider(mut self, key: String):
 
         fixed = """
 def consider(mut self, key: String):
-    if (
-        key.byte_length() > DICTIONARY_KEY_BYTE_CAP
-        or not _key_projection_fits(key)
-    ):
+    if key.byte_length() > DICTIONARY_KEY_BYTE_CAP:
+        return
+    var projection = _render_projection(key)
+    if projection.truncated:
         return
     self.keys.append(key)
+    self.projections.append(projection.text.copy())
 """
         assertions.validate_dictionary_selection_bound(fixed)
+
+    def test_dictionary_keys_are_projected_once_before_retention(self) -> None:
+        source = (
+            assertions.ASSERTION_SOURCE_ROOT / "mtest" / "assertions" / "_mapping.mojo"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(source.count("_render_projection(key)"), 1)
+        self.assertNotIn("render_value(key)", source)
 
 
 class AssertionLocationValidationTests(unittest.TestCase):

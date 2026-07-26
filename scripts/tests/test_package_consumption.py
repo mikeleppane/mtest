@@ -906,6 +906,48 @@ class AssertionPackageCommandTests(unittest.TestCase):
                 timeout=3.0,
             )
 
+    def test_assertion_process_helper_rejects_signal_death(self) -> None:
+        captured = watchdog.CapturedCommand(
+            watchdog.Signaled(11),
+            "expected semantic diagnostic",
+            "",
+        )
+        with (
+            mock.patch.object(
+                watchdog,
+                "run_captured_command",
+                return_value=captured,
+            ),
+            self.assertRaisesRegex(PackageCheckError, "signal 11"),
+        ):
+            package_consumption._run_assertion_process(
+                ["/prefix/bin/mojo", "build"],
+                cwd=Path("/scratch/probe"),
+                env={},
+                timeout=3.0,
+            )
+
+    def test_assertion_process_helper_rejects_truncated_output(self) -> None:
+        captured = watchdog.CapturedCommand(
+            watchdog.Exited(0),
+            watchdog.CAPTURE_TRUNCATION_MARKER,
+            "",
+        )
+        with (
+            mock.patch.object(
+                watchdog,
+                "run_captured_command",
+                return_value=captured,
+            ),
+            self.assertRaisesRegex(PackageCheckError, "output was truncated"),
+        ):
+            package_consumption._run_assertion_process(
+                ["/prefix/bin/mojo", "build"],
+                cwd=Path("/scratch/probe"),
+                env={},
+                timeout=3.0,
+            )
+
     def test_installed_probe_instantiates_every_public_overload(self) -> None:
         source = package_consumption.ASSERTION_PROBE_SOURCE
         self.assertIn('assert_equal("left", "right")', source)
@@ -974,6 +1016,17 @@ class AssertionPackageCommandTests(unittest.TestCase):
         ):
             package_consumption.require_warning_free_assertion_compile(
                 "consumer.mojo:1:1: warning: shipped warning\n",
+                "conda",
+                "-O0",
+            )
+
+    def test_installed_consumer_compile_rejects_truncated_capture(self) -> None:
+        with self.assertRaisesRegex(
+            package_consumption.PackageCheckError,
+            "output was truncated",
+        ):
+            package_consumption.require_warning_free_assertion_compile(
+                watchdog.CAPTURE_TRUNCATION_MARKER,
                 "conda",
                 "-O0",
             )
@@ -1097,6 +1150,29 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 package_consumption.PackageCheckError,
                 "source bytes differ",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_accepts_owner_only_prefix_and_share_directories(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            prefix.chmod(0o700)
+            (prefix / "share").chmod(0o700)
+            package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_a_symlinked_installed_compiler(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            root = Path(raw)
+            prefix = self._valid_prefix(root)
+            external = root / "external-mojo"
+            external.write_text("#!/bin/sh\n", encoding="utf-8")
+            external.chmod(0o755)
+            mojo = prefix / "bin" / "mojo"
+            mojo.unlink()
+            mojo.symlink_to(external)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "real regular file",
             ):
                 package_consumption.validate_assertion_install(prefix)
 

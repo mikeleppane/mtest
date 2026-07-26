@@ -1372,6 +1372,15 @@ def test_a_sealable_tee_keeps_its_source_for_the_drainer_to_close() -> None:
         raise AssertionError("a cleanly sealed tee closed its source twice")
 
 
+def test_bounded_capture_preserves_a_scalar_split_across_byte_writes() -> None:
+    """Child pipe chunk boundaries must not become Unicode replacement text."""
+    capture = watchdog._BoundedTextCapture(32)
+    capture.buffer.write(b"\xc3")
+    capture.buffer.write(b"\xa9")
+    if capture.finish() != "é":
+        raise AssertionError("bounded capture decoded UTF-8 byte chunks separately")
+
+
 def main() -> int:
     """Run every watchdog invariant without an external test framework."""
     for test in (
@@ -1402,6 +1411,7 @@ def main() -> int:
         test_forwarding_a_signal_survives_a_zombie_only_group,
         test_an_unsealable_tee_releases_its_drainer_source,
         test_a_sealable_tee_keeps_its_source_for_the_drainer_to_close,
+        test_bounded_capture_preserves_a_scalar_split_across_byte_writes,
         test_a_frozen_marker_capture_refuses_later_writes,
         test_the_seal_freezes_the_capture_before_it_seals_any_tee,
         test_a_drainer_cannot_write_through_a_frozen_capture,
