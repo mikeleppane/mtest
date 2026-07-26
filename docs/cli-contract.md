@@ -505,10 +505,14 @@ Three further surfaces print untrusted text to a terminal and neutralize the
 same set of code points, in the escape spelling their own output format
 requires: `mtest doctor` (§23), which quotes the toolchain's own `--version`
 output; `mtest config show` (§25), whose values come from `mtest.toml` and which
-uses TOML's `\u00HH` form because a TOML basic string has no `\xHH` escape; and
-the configuration diagnostics, which quote an offending key or value back from
-that same file. **Which** code points are neutralized is one definition shared
-by all of them; only the spelling differs.
+uses TOML's `\u00HH` form because a TOML basic string has no `\xHH` escape at
+all; and the configuration diagnostics, which quote an offending key or value
+back from that same file. That last one matters more than it looks: TOML forbids
+a raw C0 control inside a basic string, so the parser rejects an ESC before it
+can be quoted, but C1 is a legal TOML string character — a hostile `mtest.toml`
+could otherwise drive the terminal through the very message that rejects it.
+**Which** code points are neutralized is one definition shared by all of these
+surfaces; only the spelling differs.
 
 The `--collect` listing (§16) is the one terminal-reachable output that is
 **not** escaped, deliberately: it is a byte-exact machine listing of node ids,

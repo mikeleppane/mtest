@@ -29,21 +29,28 @@ reporters require.
 lives in `mtest.model.control_chars` because mtest has more than one terminal
 surface and `config` may not import `report`. This module decides only how an
 interpreted code point is *spelled* on the console — `\\xHH` for C0 and DEL,
-`\\u00HH` for C1, uppercase hex throughout. `cli/doctor.mojo` and
-`config/show.mojo` consult the same classification and spell their own output
-their own way, the latter because it is emitting TOML, which has no `\\xHH`
-escape.
+`\\u00HH` for C1, uppercase hex throughout. `cli/doctor.mojo`,
+`config/show.mojo` and `config/toml_bridge.mojo` consult the same
+classification and spell their own output their own way; `show.mojo` must,
+because it is emitting TOML, which has no `\\xHH` escape at all.
 
-Two surfaces use this module, though five reach a terminal. The console
-renderer is the obvious one. The other is the GitHub annotation tail: mtest
-prints its workflow commands to the console's own descriptor, so
-`gh_escape_message` in `escape.mojo` finishes by running its result through
-`escape_multiline`. Sharing this mapping rather than copying it is deliberate —
-one policy, one place to mutation-test. The remaining three terminal surfaces
-are `doctor` and `config show`, which share the classification but not the
-spelling, and the `--collect` listing, which is deliberately left raw: it is a
-byte-exact machine listing of node ids, consumed by tooling rather than read as
-prose, and escaping it would break that contract.
+Two surfaces use this module, though six reach a terminal:
+
+1. the console renderer, the obvious one;
+2. the GitHub annotation tail — mtest prints its workflow commands to the
+   console's own descriptor, so `gh_escape_message` in `escape.mojo` finishes
+   by running its result through `escape_multiline`. Sharing this mapping
+   rather than copying it is deliberate: one policy, one place to
+   mutation-test;
+3. `mtest doctor`, which quotes the toolchain's own `--version` output;
+4. `mtest config show`, whose values come from `mtest.toml`;
+5. the configuration diagnostics, which quote an offending key or value back
+   from that same file;
+6. the `--collect` listing, which is deliberately left raw: it is a byte-exact
+   machine listing of node ids, consumed by tooling rather than read as prose,
+   and escaping it would break that contract.
+
+Surfaces 3 to 5 share the classification but not the spelling.
 
 The escaped result is for display only. Nothing here runs upstream of parsing,
 capture, the NDJSON stream, or the JUnit report: those keep their own raw
