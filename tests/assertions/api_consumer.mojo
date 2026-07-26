@@ -651,6 +651,29 @@ def test_list_values_are_individually_bounded_before_body_assembly() raises:
         "displayed span projections are identical after truncation"
         in span_truncated
     )
+    var entry_limited_actual = List[RenderIdentity]()
+    var entry_limited_expected = List[RenderIdentity]()
+    for index in range(9):
+        var actual_label = "shared-" + String(index)
+        var expected_label = actual_label.copy()
+        if index == 8:
+            actual_label = "actual-tail"
+            expected_label = "expected-tail"
+        entry_limited_actual.append(RenderIdentity(index, actual_label))
+        entry_limited_expected.append(
+            RenderIdentity(100 + index, expected_label)
+        )
+    var entry_limited = _list_failure(
+        entry_limited_actual,
+        entry_limited_expected,
+    )
+    testing.assert_true(
+        "displayed span projections are identical after truncation"
+        in entry_limited
+    )
+    testing.assert_false(
+        "spans compare unequal but render identically" in entry_limited
+    )
     var capped_actual = List[String]()
     var capped_expected = List[String]()
     for index in range(8):

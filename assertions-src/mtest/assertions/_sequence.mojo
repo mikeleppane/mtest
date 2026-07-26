@@ -23,7 +23,7 @@ def _render_list_slice[
     var output = BoundedWriter(BODY_BYTE_CAP)
     output.write_trusted("[")
     var shown = 0
-    var truncated = False
+    var truncated = stop - start > DISPLAY_LIMIT
     for index in range(start, stop):
         if shown == DISPLAY_LIMIT:
             break
