@@ -7,12 +7,14 @@ window — before any SIGKILL escalation. The final status is therefore
 `Exited(0)`, yet the outcome must LATCH to `TimedOut` (escalated=False): a clean
 exit provoked by our own deadline kill is still a timeout, never a pass.
 """
+
 import signal
 import sys
 import time
 
 
-def _on_term(signum, frame):
+def _on_term(_signum: int, _frame: object) -> None:
+    """Exit 0 the moment SIGTERM lands, inside the supervisor's grace window."""
     sys.exit(0)
 
 

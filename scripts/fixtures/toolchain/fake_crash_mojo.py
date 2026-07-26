@@ -44,6 +44,7 @@ import shutil
 import signal
 import sys
 
+
 BUILD_CRASH_ENV_VAR = "MTEST_FAKE_BUILD_CRASH"
 
 # The two stderr texts of the discriminating pair. Everything else about the two
@@ -117,6 +118,17 @@ def _fail_build_nonzero(mode: str) -> int:
 
 
 def main() -> int:
+    """Crash the requested compile phase, or exec the real compiler untouched.
+
+    A `precompile` always takes the crash path. A `build` crashes only when the
+    mode env var is set, so one shim serves both the precompile-crash and the
+    build-failure scenarios without either leaking into the other.
+
+    Returns:
+        The mode's chosen exit code, 2 for an unknown mode word, or 127 when no
+        real `mojo` is on PATH. An uninstrumented subcommand `os.execv`s the real
+        compiler, so this function does not return for those.
+    """
     args = sys.argv[1:]
     if len(args) > 0 and args[0] == "precompile":
         return _crash_precompile(args)
@@ -131,7 +143,10 @@ def main() -> int:
         return 127
 
     os.execv(real_mojo, [real_mojo, *args])
-    return 1  # unreachable: a successful os.execv never returns
+    # Kept as defence in depth: typeshed types os.execv as NoReturn, so mypy
+    # sees this as dead. Deleting it would remove the fallback if that ever
+    # changes.
+    return 1  # type: ignore[unreachable]
 
 
 if __name__ == "__main__":

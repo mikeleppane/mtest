@@ -61,6 +61,14 @@ def signal_name_for_target(signo: Int) -> String:
 
     Returns:
         An owned `"SIGNAME, description"` string, or `""` when unnamed.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.signals import signal_name_for_target
+
+    var name = signal_name_for_target(11)  # "SIGSEGV, segmentation fault"
+    ```
     """
     comptime if CompilationTarget.is_macos():
         return _signal_name_for_platform(signo, True)

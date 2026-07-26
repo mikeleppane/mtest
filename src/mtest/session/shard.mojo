@@ -73,6 +73,15 @@ def shard_owns(path: String, m: Int, n: Int) -> Bool:
 
     Returns:
         True iff `fnv1a64(path) % n == m - 1`.
+
+    Examples:
+
+    ```mojo
+    from mtest.session import shard_owns
+
+    # Shard 1 of 4 runs only the paths it owns.
+    var mine = shard_owns("tests/test_a.mojo", 1, 4)
+    ```
     """
     return _owns_index(fnv1a64(path), m, n)
 
@@ -96,6 +105,16 @@ def partition(
 
     Returns:
         Only the owned files, in the input order.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import ShardMode
+    from mtest.session import partition
+
+    var files: List[String] = ["tests/test_a.mojo", "tests/test_b.mojo"]
+    var mine = partition(files^, ShardMode.HASH, 1, 2)
+    ```
     """
     var owned = List[String]()
     for i in range(len(files)):

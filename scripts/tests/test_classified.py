@@ -3,13 +3,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from contextlib import redirect_stderr
 from io import StringIO
 import json
 import os
-import re
 from pathlib import Path
+import re
 import shutil
 import signal
 import stat
@@ -18,10 +17,13 @@ import sys
 import tempfile
 import threading
 import time
+from typing import TYPE_CHECKING
 
-from scripts.harness import aggregate
-from scripts.harness import classified
-from scripts.harness import watchdog
+from scripts.harness import aggregate, classified, watchdog
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -86,7 +88,7 @@ with open(os.environ["MTEST_FAKE_MOJO_LOG"], "a", encoding="utf-8") as log:
     }) + "\\n")
 out.write_text("#!/usr/bin/env bash\\nprintf '%s\\n' RAN:aggregate\\nprintf '%s\\n' run >> \\"$MTEST_FAKE_RUN_LOG\\"\\n", encoding="utf-8")
 out.chmod(out.stat().st_mode | stat.S_IXUSR)
-""",
+""",  # noqa: E501  long line is generated fixture source, not code
         )
 
         roots = [
@@ -125,20 +127,14 @@ out.chmod(out.stat().st_mode | stat.S_IXUSR)
         record = records[0]
         if record["source"] != "build/tests/aggregate_main.mojo":
             raise AssertionError(
-                "direct runner compiled an unexpected source: "
-                f"{record['source']}"
+                f"direct runner compiled an unexpected source: {record['source']}"
             )
-        expected_paths = [
-            roots[index] + "/test_same_name.mojo" for index in range(2)
-        ]
+        expected_paths = [roots[index] + "/test_same_name.mojo" for index in range(2)]
         generated = record["generated"]
-        prefix_match = re.search(
-            r'print\("(==> [0-9a-f]{16} )', generated
-        )
+        prefix_match = re.search(r'print\("(==> [0-9a-f]{16} )', generated)
         if prefix_match is None:
             raise AssertionError(
-                "generated aggregate carries no nonced module marker:\n"
-                f"{generated}"
+                f"generated aggregate carries no nonced module marker:\n{generated}"
             )
         nonced = prefix_match.group(1)
         markers = [
@@ -298,9 +294,11 @@ def test_caller_sigint_and_sigterm_remain_cancelled() -> None:
                     [
                         sys.executable,
                         "-c",
-                        "import signal, sys, time; "
-                        f"signal.signal({signum}, lambda *_: sys.exit(0)); "
-                        "time.sleep(60)",
+                        (
+                            "import signal, sys, time; "
+                            f"signal.signal({signum}, lambda *_: sys.exit(0)); "
+                            "time.sleep(60)"
+                        ),
                     ],
                     repo_root=repo,
                     source="aggregate suite",
@@ -335,33 +333,28 @@ def test_cancelled_results_re_raise_the_caller_signal() -> None:
             check=False,
         )
         if completed.returncode != -signum:
-            raise AssertionError(
-                f"Cancelled({signum}) exited {completed.returncode}"
-            )
+            raise AssertionError(f"Cancelled({signum}) exited {completed.returncode}")
 
 
 def test_cancellation_outranks_a_racing_spawn_failure() -> None:
     """A signal delivered inside failing spawn remains Cancelled at the CLI."""
     sentinel = REPO_ROOT / "build" / "tests" / "package.build-deadline"
     sentinel.unlink(missing_ok=True)
-    source = "\n".join(
-        (
-            "import os",
-            "import signal",
-            "from scripts.harness import classified, watchdog",
-            "def cancelled_spawn(*_args, **_kwargs):",
-            "    os.kill(os.getpid(), signal.SIGTERM)",
-            "    raise FileNotFoundError('injected spawn failure')",
-            "watchdog.subprocess.Popen = cancelled_spawn",
-            "raise SystemExit(classified.main(['tests/unit/test_model_outcome.mojo']))",
-        )
+    source = (
+        "import os\n"
+        "import signal\n"
+        "from scripts.harness import classified, watchdog\n"
+        "def cancelled_spawn(*_args, **_kwargs):\n"
+        "    os.kill(os.getpid(), signal.SIGTERM)\n"
+        "    raise FileNotFoundError('injected spawn failure')\n"
+        "watchdog.subprocess.Popen = cancelled_spawn\n"
+        "raise SystemExit(classified.main(['tests/unit/test_model_outcome.mojo']))"
     )
     completed = subprocess.run(
         [sys.executable, "-c", source],
         cwd=REPO_ROOT,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         timeout=5.0,
         check=False,
     )
@@ -401,24 +394,21 @@ def test_timeout_kills_the_aggregate_process_group() -> None:
         survived = repo / "grandchild-survived"
         actor = repo / "actor.py"
         actor.write_text(
-            "\n".join(
-                (
-                    "from pathlib import Path",
-                    "import signal",
-                    "import subprocess",
-                    "import sys",
-                    "import time",
-                    "grandchild = (",
-                    "    'from pathlib import Path; import signal, sys, time; '",
-                    "    'signal.signal(signal.SIGTERM, signal.SIG_IGN); '",
-                    "    'Path(sys.argv[1]).touch(); time.sleep(6); '",
-                    "    'Path(sys.argv[2]).touch()'",
-                    ")",
-                    "subprocess.Popen([sys.executable, '-c', grandchild, sys.argv[1], sys.argv[2]])",
-                    "while not Path(sys.argv[1]).exists(): time.sleep(0.01)",
-                    "time.sleep(60)",
-                )
-            ),
+            "from pathlib import Path\n"
+            "import signal\n"
+            "import subprocess\n"
+            "import sys\n"
+            "import time\n"
+            "grandchild = (\n"
+            "    'from pathlib import Path; import signal, sys, time; '\n"
+            "    'signal.signal(signal.SIGTERM, signal.SIG_IGN); '\n"
+            "    'Path(sys.argv[1]).touch(); time.sleep(6); '\n"
+            "    'Path(sys.argv[2]).touch()'\n"
+            ")\n"
+            "subprocess.Popen("
+            "[sys.executable, '-c', grandchild, sys.argv[1], sys.argv[2]])\n"
+            "while not Path(sys.argv[1]).exists(): time.sleep(0.01)\n"
+            "time.sleep(60)",
             encoding="utf-8",
         )
         result = classified._run_step(
@@ -436,7 +426,6 @@ def test_timeout_kills_the_aggregate_process_group() -> None:
         time.sleep(1.0)
         if survived.exists():
             raise AssertionError("aggregate grandchild survived process-group cleanup")
-
 
 
 def _run_direct_runner_failure(
@@ -466,7 +455,7 @@ def _run_direct_runner_failure(
         log_path = tmp / "mojo-build-log"
         _write_executable(
             tools_dir / "python",
-            f"#!/bin/sh\nexec {sys.executable} \"$@\"\n",
+            f'#!/bin/sh\nexec {sys.executable} "$@"\n',
         )
         fake_mojo = tools_dir / "mojo"
         _write_executable(
@@ -641,7 +630,8 @@ def test_direct_runner_timeout_stops_before_following_suite() -> None:
             )
         if built != ["build/tests/aggregate_main.mojo"]:
             raise AssertionError(
-                f"direct-runner {step} timeout missed its aggregate build:\n{result.stdout}"
+                f"direct-runner {step} timeout missed its aggregate build:\n"
+                f"{result.stdout}"
             )
         if not sentinel_exists:
             raise AssertionError(f"real {step} timeout removed its deadline sentinel")
@@ -658,8 +648,7 @@ def test_direct_runner_spawn_failure_is_not_a_timeout() -> None:
             )
         if f"timed-out aggregate {step}" in result.stdout:
             raise AssertionError(
-                "direct-runner spawn failure claimed timeout:\n"
-                f"{result.stdout}"
+                f"direct-runner spawn failure claimed timeout:\n{result.stdout}"
             )
         if "watchdog/internal failure" not in result.stdout:
             raise AssertionError(
@@ -669,10 +658,12 @@ def test_direct_runner_spawn_failure_is_not_a_timeout() -> None:
         expected_built = [] if step == "build" else ["build/tests/aggregate_main.mojo"]
         if built != expected_built:
             raise AssertionError(
-                f"direct-runner {step} spawn failure had unexpected builds:\n{result.stdout}"
+                f"direct-runner {step} spawn failure had unexpected builds:\n"
+                f"{result.stdout}"
             )
         if sentinel_exists:
             raise AssertionError(f"spawn failure left its {step} deadline sentinel")
+
 
 MARKER_MODULES = (
     "tests/unit/test_first.mojo",
@@ -723,9 +714,7 @@ def test_a_test_body_cannot_forge_a_module_marker() -> None:
     )
     actual = classified._last_module(forged, MARKER_TEST_PREFIX)
     if actual != "tests/unit/test_real.mojo":
-        raise AssertionError(
-            f"a forged marker changed the attribution to {actual!r}"
-        )
+        raise AssertionError(f"a forged marker changed the attribution to {actual!r}")
 
 
 def test_each_run_mints_a_fresh_unguessable_marker_prefix() -> None:
@@ -765,7 +754,7 @@ def _run_aggregate_marker_failure(
         tools_dir.mkdir()
         _write_executable(
             tools_dir / "python",
-            f"#!/bin/sh\nexec {sys.executable} \"$@\"\n",
+            f'#!/bin/sh\nexec {sys.executable} "$@"\n',
         )
         _write_executable(
             tools_dir / "mojo",
@@ -858,8 +847,7 @@ def test_aggregate_failures_name_the_last_module_reached() -> None:
             )
         if f"last module: {MARKER_MODULES[1]}" not in result.stdout:
             raise AssertionError(
-                f"aggregate marker {mode} lost its failure provenance:\n"
-                f"{result.stdout}"
+                f"aggregate marker {mode} lost its failure provenance:\n{result.stdout}"
             )
         if MARKER_UNREACHED_MODULE in result.stdout:
             raise AssertionError(
@@ -873,8 +861,7 @@ def test_aggregate_failures_name_the_last_module_reached() -> None:
                 re.MULTILINE,
             ):
                 raise AssertionError(
-                    f"aggregate marker {mode} did not tee {module}:\n"
-                    f"{result.stdout}"
+                    f"aggregate marker {mode} did not tee {module}:\n{result.stdout}"
                 )
 
 

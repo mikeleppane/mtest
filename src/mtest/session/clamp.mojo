@@ -5,8 +5,8 @@ an `AttemptFinished` event carrying an excerpt of its captured streams rather
 than the full capture; the final attempt owns the full bytes in the file's
 `FileFinished`. Retaining every attempt whole would let a flooding crash loop
 grow memory in proportion to the retry budget, so a non-final attempt's streams
-are clamped to a bounded head window plus a bounded tail window, with a flag
-recording whether anything was dropped.
+are clamped to a bounded head window plus a bounded tail window, and a flag says
+whether anything was dropped.
 
 This follows the same head-plus-tail shape as the exec layer's
 `BoundedCapture`, but is a simpler clamp over an already-materialized
@@ -44,6 +44,18 @@ def clamp_stream(
 
     Returns:
         The clamped excerpt and its truncation flag.
+
+    Examples:
+
+    ```mojo
+    from mtest.session import clamp_stream
+
+    var data = List[UInt8]()
+    for i in range(100):
+        data.append(UInt8(i))
+    var c = clamp_stream(data, 8, 8)
+    # c.truncated is True and len(c.bytes) is 16: bytes 0..7 then 92..99.
+    ```
     """
     var n = len(data)
     if n <= head_max + tail_max:

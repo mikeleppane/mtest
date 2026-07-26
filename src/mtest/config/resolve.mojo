@@ -294,6 +294,20 @@ def resolve_config(
     Returns:
         Newly allocated effective values, provenance, ordered overrides, and
         the run or collect active-key projection.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import CliOverlay, ConfigEnvironment, FileConfig
+    from mtest.config import RunnerConfig, resolve_config
+
+    var resolved = resolve_config(
+        RunnerConfig.default(),
+        FileConfig.empty(),
+        ConfigEnvironment.empty(),
+        CliOverlay.default(),
+    )
+    ```
     """
     var config = defaults.copy()
     var state = True

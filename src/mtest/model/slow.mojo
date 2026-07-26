@@ -4,7 +4,7 @@
 rides alongside a file's real verdict and changes neither that verdict, nor its
 counts, nor the exit code (see the `slow` field on
 `mtest.model.events.Event.file_finished`). It exists so a step that runs a very
-long time gets named even when it eventually succeeds — a comptime-stalled
+long time gets named even when it eventually succeeds: a comptime-stalled
 compile becomes visible at 60s rather than at the 600s compile deadline, or
 never for a run with no `--timeout`.
 
@@ -29,6 +29,15 @@ def is_slow(build_seconds: Float64, run_seconds: Float64) -> Bool:
 
     Returns:
         True iff either step is at or above `SLOW_THRESHOLD_SECONDS`.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import is_slow
+
+    var slow = is_slow(65.0, 1.2)  # True: the build crossed 60s
+    var quick = is_slow(59.9, 59.9)  # False: neither step reached 60s
+    ```
     """
     return (
         build_seconds >= SLOW_THRESHOLD_SECONDS
@@ -49,6 +58,15 @@ def slow_step_label(build_seconds: Float64, run_seconds: Float64) -> String:
     Returns:
         `"build"`, `"run"`, `"build and run"`, or `""` when neither step is
         slow.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import slow_step_label
+
+    var one = slow_step_label(65.0, 1.2)  # "build"
+    var both = slow_step_label(70.0, 80.0)  # "build and run"
+    ```
     """
     var build_slow = build_seconds >= SLOW_THRESHOLD_SECONDS
     var run_slow = run_seconds >= SLOW_THRESHOLD_SECONDS

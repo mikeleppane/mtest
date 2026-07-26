@@ -28,11 +28,12 @@ import os
 import shutil
 import sys
 
+
 LOG_ENV_VAR = "MTEST_MOJO_LOG"
 
 
 def _log_invocation(args: list[str]) -> None:
-    """Append `<subcommand>\\t<target>\\t<full argv>` to MTEST_MOJO_LOG.
+    r"""Append `<subcommand>\t<target>\t<full argv>` to MTEST_MOJO_LOG.
 
     A no-op when the env var is unset. `args` is the wrapper's own argv with
     the program name stripped, i.e. exactly what real `mojo` would receive:
@@ -50,6 +51,12 @@ def _log_invocation(args: list[str]) -> None:
 
 
 def main() -> int:
+    """Log the invocation, then exec the real compiler with the untouched argv.
+
+    Returns:
+        127 when no real `mojo` is on PATH. Otherwise `os.execv` replaces this
+        process image, so this function does not return.
+    """
     args = sys.argv[1:]
     _log_invocation(args)
 
@@ -59,7 +66,10 @@ def main() -> int:
         return 127
 
     os.execv(real_mojo, [real_mojo, *args])
-    return 1  # unreachable: a successful os.execv never returns
+    # Kept as defence in depth: typeshed types os.execv as NoReturn, so mypy
+    # sees this as dead. Deleting it would remove the fallback if that ever
+    # changes.
+    return 1  # type: ignore[unreachable]
 
 
 if __name__ == "__main__":

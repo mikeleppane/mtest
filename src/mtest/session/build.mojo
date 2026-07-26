@@ -316,7 +316,7 @@ def _probe_file(
     is a timeout. On a clean exit the captured stdout is decoded and resolved
     under the same truncation policy the run path uses (`resolve_report`), so
     only a report wholly retained in the tail is trusted and a forged report in
-    a truncated head is refused as capture overflow — a failing outcome, never a
+    a truncated head is refused as capture overflow: a failing outcome, never a
     qualifying listing.
 
     A qualifying probe yields the universe as its collection listing, recorded

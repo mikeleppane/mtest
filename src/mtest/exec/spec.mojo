@@ -9,15 +9,15 @@ overrides the child receives on top of the inherited environment.
 
 The grace is per-spawn rather than one global constant because the right answer
 depends on what is being killed. A test binary owes nothing on the way out, so
-300 ms is generous. A compiler killed mid-cache-write needs materially longer
-to unwind cleanly, and SIGKILLing it early is how a half-written module cache
-gets produced. The default is the run path's 300 ms, so a caller that says
-nothing gets the behavior it always had.
+300 ms is generous. A compiler killed mid-cache-write needs longer to unwind
+cleanly, and SIGKILLing it early is how a half-written module cache gets
+produced. The default is the run path's 300 ms, so a caller that passes no grace
+keeps it.
 """
 
 
 comptime DEFAULT_GRACE_MS = 300
-"""The default SIGTERM->SIGKILL grace in ms: what a supervised run gets."""
+"""The default SIGTERM->SIGKILL grace in ms, applied to every supervised run."""
 
 
 @fieldwise_init
@@ -45,11 +45,11 @@ struct ProcessSpec(Copyable, Movable):
 
     Each entry must have a `=` with a nonempty key and no NUL byte, and no key
     may repeat across the list. The adapter merges them replace-not-append: an
-    override whose key is already inherited replaces every inherited occurrence,
-    leaving no duplicate, and PATH-based resolution reads the merged environment
-    so a `PATH=` override governs it. An empty list leaves the inherited
-    environment untouched. Validation and the merge live in the C adapter; this
-    field carries the raw entries across.
+    override whose key is already inherited replaces every inherited occurrence
+    rather than adding a duplicate, and PATH-based resolution reads the merged
+    environment, so a `PATH=` override governs it. An empty list leaves the
+    inherited environment untouched. Validation and the merge live in the C
+    adapter; this field carries the raw entries across.
     """
 
     @staticmethod
@@ -70,6 +70,14 @@ struct ProcessSpec(Copyable, Movable):
         Returns:
             A spec with no cwd override and a freshly allocated empty
             `env_extra` list.
+
+        Examples:
+
+        ```mojo
+        from mtest.exec import ProcessSpec
+
+        var spec = ProcessSpec.command(["/bin/true"], 1000, 5000)
+        ```
         """
         return Self(argv^, None, timeout_ms, grace_ms, List[String]())
 
@@ -93,11 +101,20 @@ struct ProcessSpec(Copyable, Movable):
             env_extra: `KEY=VALUE` overrides the child receives on top of the
                 inherited environment (see the field of the same name).
                 Consumed; the returned spec owns it. Defaults to an empty list,
-                so a caller that says nothing leaves the child's environment
-                exactly inherited — byte-identical to the no-override spec.
+                so a caller that passes no overrides leaves the child's
+                environment exactly inherited, byte-identical to the
+                no-override spec.
 
         Returns:
             A spec whose child chdirs into `cwd` before exec, carrying the given
             `env_extra` overrides (empty by default).
+
+        Examples:
+
+        ```mojo
+        from mtest.exec import ProcessSpec
+
+        var spec = ProcessSpec.command_in(["/bin/true"], "/tmp", 1000, 5000)
+        ```
         """
         return Self(argv^, Optional(cwd), timeout_ms, grace_ms, env_extra^)

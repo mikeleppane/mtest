@@ -13,7 +13,7 @@ The supported metacharacters mirror POSIX `fnmatch`:
   A `]` immediately after `[` or `[!` is a literal member; an unterminated `[`
   is treated as a literal `[`.
 - Every other character matches itself, so a pattern with no metacharacter
-  matches by exact equality — the contract's "plain path" rule.
+  matches by exact equality, the contract's "plain path" rule.
 
 Matching is over Unicode codepoints, so `?` matches one codepoint, not one
 UTF-8 byte. The matcher is anchored: it succeeds only on a full-string match.
@@ -133,5 +133,14 @@ def fnmatch(name: String, pattern: String) -> Bool:
     Returns:
         `True` iff the entire `name` is matched by the entire `pattern`. A
         metacharacter-free pattern matches by exact equality.
+
+    Examples:
+
+    ```mojo
+    from mtest.discover import fnmatch
+
+    print(fnmatch("test_addition.mojo", "test_*.mojo"))  # True
+    print(fnmatch("tests/sub/test_slow.mojo", "tests/*slow*"))  # True: * spans /
+    ```
     """
     return _match(_codes(pattern), 0, _codes(name), 0)

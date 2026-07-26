@@ -60,9 +60,7 @@ def _expect_checks(run: Run) -> list[str]:
 def _write_identity_probe(path: Path, identity: str) -> None:
     """Write one executable that prints a chosen version identity."""
     path.write_text(
-        f"#!{sys.executable}\n"
-        "import sys\n"
-        f"sys.stdout.write({identity!r} + '\\n')\n",
+        f"#!{sys.executable}\nimport sys\nsys.stdout.write({identity!r} + '\\n')\n",
         encoding="utf-8",
     )
     path.chmod(0o700)
@@ -101,9 +99,7 @@ def s_malformed_config(context: ScenarioContext) -> str:
             '[run]\nworkers = "not-a-worker-count"\n',
             encoding="utf-8",
         )
-        run = _runner(context, root).run_mtest(
-            ["doctor", "--color", "never"]
-        )
+        run = _runner(context, root).run_mtest(["doctor", "--color", "never"])
         expect_exit(run, 1)
         lines = _expect_checks(run)
         expect(
@@ -136,8 +132,7 @@ def s_missing_explicit_config(context: ScenarioContext) -> str:
             run.stdout,
         )
         expect(
-            lines[5]
-            == "FAIL config: absent.toml: configuration file does not exist",
+            lines[5] == "FAIL config: absent.toml: configuration file does not exist",
             run.stdout,
         )
         expect(lines[8].startswith("PASS temp: "), run.stdout)
@@ -168,9 +163,7 @@ def s_missing_toolchain(context: ScenarioContext) -> str:
         expect_exit(fake_run, 1)
         fake_lines = _expect_checks(fake_run)
         expect(
-            fake_lines[4].startswith(
-                "FAIL toolchain: "
-            )
+            fake_lines[4].startswith("FAIL toolchain: ")
             and "expected Mojo 1.0.0b2" in fake_lines[4],
             fake_run.stdout,
         )
@@ -184,17 +177,13 @@ def s_missing_toolchain(context: ScenarioContext) -> str:
         expect_exit(wrong_run, 1)
         wrong_lines = _expect_checks(wrong_run)
         expect(
-            wrong_lines[4].startswith(
-                "FAIL toolchain: "
-            )
+            wrong_lines[4].startswith("FAIL toolchain: ")
             and "expected Mojo 1.0.0b2" in wrong_lines[4],
             wrong_run.stdout,
         )
 
         wrong_revision = root / "wrong-revision"
-        _write_identity_probe(
-            wrong_revision, "Mojo 1.0.0b2 (deadbeef)"
-        )
+        _write_identity_probe(wrong_revision, "Mojo 1.0.0b2 (deadbeef)")
         wrong_revision_run = _runner(context, root).run_mtest(
             ["doctor", "--no-config", "--color", "never"],
             env_overrides={"MTEST_MOJO": os.fspath(wrong_revision)},
@@ -202,17 +191,11 @@ def s_missing_toolchain(context: ScenarioContext) -> str:
         expect_exit(wrong_revision_run, 1)
         wrong_revision_lines = _expect_checks(wrong_revision_run)
         expect(
-            wrong_revision_lines[4].startswith(
-                "FAIL toolchain: "
-            )
-            and "expected Mojo 1.0.0b2 (2cf4d08a)"
-            in wrong_revision_lines[4],
+            wrong_revision_lines[4].startswith("FAIL toolchain: ")
+            and "expected Mojo 1.0.0b2 (2cf4d08a)" in wrong_revision_lines[4],
             wrong_revision_run.stdout,
         )
-    return (
-        "missing, fake, wrong-version, and wrong-revision toolchains"
-        " failed honestly"
-    )
+    return "missing, fake, wrong-version, and wrong-revision toolchains failed honestly"
 
 
 def s_unwritable_state(context: ScenarioContext) -> str:
@@ -251,9 +234,7 @@ def s_interrupt_toolchain(context: ScenarioContext) -> str:
         root = Path(raw)
         slow = root / "slow-version"
         slow.write_text(
-            f"#!{sys.executable}\n"
-            "import time\n"
-            "time.sleep(300)\n",
+            f"#!{sys.executable}\nimport time\ntime.sleep(300)\n",
             encoding="utf-8",
         )
         slow.chmod(0o700)

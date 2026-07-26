@@ -13,7 +13,7 @@ The frozen shapes, one entry per kind:
 - Per-test FAIL, from `TestReported`:
   `::error file=<path>[,line=<n>]::<node id>: <first line of the detail>`.
   `line=` appears only when that first line itself carries a recognizable
-  `At <path>:<line>:<col>:` pointer — the same backtrace-pointer shape
+  `At <path>:<line>:<col>:` pointer, the same backtrace-pointer shape
   `console.mojo` renders root-relative. No other event carries that fact, so a
   detail without such a pointer (a bare `raise Error(...)`, say) omits `line=`
   rather than guessing one.
@@ -23,10 +23,10 @@ The frozen shapes, one entry per kind:
   `::error file=<path>::<path>: <outcome in words>`. Never carries `line=`;
   there is no per-test location for a whole-file abnormal outcome. A plain
   per-test FAIL file is covered by its `TestReported` rows, so
-  `FileFinished(FAIL)` emits nothing here — otherwise every failing test would
+  `FileFinished(FAIL)` emits nothing here; otherwise every failing test would
   be counted twice against the error cap.
-- FLAKY, from `FileFinished.flaky`:
-  `::warning file=<path>::<path>: flaky — passed on attempt K of N`. `K` is
+- FLAKY, from `FileFinished.flaky`: a `::warning file=<path>` whose message is
+  `<path>: flaky`, an em dash, then `passed on attempt K of N`. `K` is
   `FileFinished.attempts_used`; `N` is reconciled from the `attempts_planned`
   carried by an earlier `AttemptFinished` for the same file. A FLAKY file
   always had at least one retry-eligible attempt, so that fact is always in
@@ -39,16 +39,16 @@ The frozen shapes, one entry per kind:
 
 Bounds are GitHub's own; see `_MAX_ERRORS`/`_MAX_WARNINGS` below. Every message
 is escaped through the shared `gh_escape_message` and every `file=` value
-through `gh_escape_property` (`mtest.report.escape`) — the only escaping path.
-Every field this module reads is already a valid Mojo string — assertion detail
-was decoded through `lossy_utf8` upstream, and paths and node ids were never
-raw bytes — so this module never decodes and never touches raw captured bytes.
+through `gh_escape_property` (`mtest.report.escape`), the only escaping path.
+Every field this module reads is already a valid Mojo string: assertion detail
+was decoded through `lossy_utf8` upstream, and paths and node ids were never raw
+bytes. This module therefore never decodes and never touches raw captured bytes.
 
 Root convention: every `file=` value is the file's run-root-relative path,
 emitted verbatim. GitHub resolves a workflow-command `file=` against the
 repository root of the checkout, so an annotation lands on the right source
-line only when the invocation root is the repository root — `mtest` run from
-the repo root, the ordinary case. Run from a subdirectory the path still
+line only when the invocation root is the repository root, which is `mtest` run
+from the repo root, the ordinary case. Run from a subdirectory the path still
 renders, but GitHub anchors it under that subdirectory.
 """
 from mtest.model.events import (
@@ -95,7 +95,7 @@ struct _AnnotationRow(Copyable, Movable):
 
     `sort_key` orders it among rows of the same command kind: a real node id
     for a per-test row, a bracket-sentinel key for a file-level, flaky, or
-    precompile row. `file` and `message` are raw, unescaped text — escaping
+    precompile row. `file` and `message` are raw, unescaped text. Escaping
     happens exactly once, in `_render_capped`, so no row-building helper below
     needs to know GitHub's escape grammar.
     """
@@ -155,10 +155,10 @@ def _detail_line_number(first_line: String) -> Int:
     Mirrors the one recognized backtrace-pointer shape TestSuite bakes into a
     FAIL's detail, the same shape `console.mojo` renders root-relative: after
     any leading spaces, a line starting `At ` followed by a path, then `:`,
-    then digits, then `:`. The path portion is not used — the caller already
-    has the test's own root-relative path for `file=` — so only the digit run
-    immediately after the first `:` is read, and a path that itself contains a
-    `:` degrades to "no line found" rather than mis-locating one.
+    then digits, then `:`. The path portion is not used, because the caller
+    already has the test's own root-relative path for `file=`, so only the digit
+    run immediately after the first `:` is read, and a path that itself contains
+    a `:` degrades to "no line found" rather than mis-locating one.
     """
     var core = _strip_leading_spaces(first_line)
     if not core.startswith("At "):
@@ -286,7 +286,11 @@ def _file_level_row(e: FileFinishedPayload) -> _AnnotationRow:
 def _flaky_row(
     path: String, attempts_used: Int, attempts_planned: Int
 ) -> _AnnotationRow:
-    """The FLAKY row: `<path>: flaky — passed on attempt K of N`."""
+    """The FLAKY warning row for a file that passed only after a retry.
+
+    The message is `<path>: flaky`, an em dash, then `passed on attempt K of N`,
+    where `K` is `attempts_used` and `N` is `attempts_planned`.
+    """
     return _AnnotationRow(
         sort_key=path + "::[flaky]",
         has_file=True,
@@ -432,8 +436,8 @@ def _bound_escaped(escaped: String, max_bytes: Int) -> String:
     """`escaped` cut to at most `max_bytes`, with a marker when it was cut.
 
     `escaped` is already valid UTF-8: the GitHub escapers replace whole code
-    points — single ASCII bytes with ASCII escape sequences, and a two-byte C1
-    control with its six-byte `\\u00HH` rendering — and never split a multi-byte
+    points (single ASCII bytes with ASCII escape sequences, and a two-byte C1
+    control with its six-byte `\\u00HH` rendering) and never split a multi-byte
     sequence. The cut therefore walks whole codepoints via `codepoint_slices()`;
     a plain byte-offset cut could split one in half and produce invalid UTF-8.
     """
@@ -483,7 +487,7 @@ def _less(a: String, b: String) -> Bool:
 def _sort_rows(mut rows: List[_AnnotationRow]):
     """Sort `rows` in place by `sort_key`.
 
-    Row counts are small — one run's worth of failed and flaky files — so an
+    Row counts are small, one run's worth of failed and flaky files, so an
     O(n^2) insertion sort keeps this dependency-free and stable.
     """
     var n = len(rows)
@@ -562,8 +566,8 @@ struct AnnotationAccumulator(Copyable, Movable):
     retained; the renderer does not read it, and each row's message is truncated
     to a bounded length as the row is built.
 
-    Every candidate row is held until `render` runs — the caps apply to the
-    rendered output, not to what is accumulated — so retention grows as
+    Every candidate row is held until `render` runs, since the caps apply to the
+    rendered output rather than to what is accumulated, so retention grows as
     O(failures x bounded message) rather than O(files x capture bytes). A
     CI-scale run of hundreds of large-capture failures therefore cannot exhaust
     memory, even though it accumulates far more rows than it will print.
@@ -571,6 +575,17 @@ struct AnnotationAccumulator(Copyable, Movable):
     The only cross-event fact carried is a FLAKY row's `attempts_planned`,
     reconciled from the most recent `AttemptFinished` for the same file since
     its last `FileStarted`.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import Event, Summary
+    from mtest.report.annotations import AnnotationAccumulator
+
+    var acc = AnnotationAccumulator()
+    acc.observe(Event.session_finished(Summary.zeros(), 1.5, 0))
+    var lines = acc.render()  # one "::notice::..." line
+    ```
     """
 
     var _error_rows: List[_AnnotationRow]
@@ -675,6 +690,17 @@ def render_annotations(events: List[Event]) -> List[String]:
 
     Returns:
         The ordered workflow-command lines, ready to print one per line.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import Event, Summary
+    from mtest.report.annotations import render_annotations
+
+    var events = List[Event]()
+    events.append(Event.session_finished(Summary.zeros(), 1.5, 0))
+    var lines = render_annotations(events)  # one "::notice::..." line
+    ```
     """
     var acc = AnnotationAccumulator()
     for e in events:

@@ -2,21 +2,21 @@
 
 `mtest` builds each test file once, then may probe it (`--skip-all`) and run it,
 and `collect`, `probe`, and `run` must all share that one build. This registry
-is the passive store that makes the sharing possible: a map keyed by
-root-relative path, each entry carrying the built binary, the canonical source
-path `mojo build` baked in (the report parser's identity key), and — once
-probed — the qualifying collection listing.
+is the passive store behind that sharing: a map keyed by root-relative path,
+each entry carrying the built binary, the canonical source path `mojo build`
+baked in (the report parser's identity key), and, once probed, the qualifying
+collection listing.
 
 It is a data structure only. It performs no building, probing, or I/O; the
 session drives those and records the results here. The once-built and
 once-probed bookkeeping rests on that split: the store holds the state, and the
-session's check-then-record pattern (build only when `not has(rel)`) is what
-makes the build happen exactly once.
+session's check-then-record pattern (build only when `not has(rel)`) keeps the
+build to exactly one.
 
 Storage is a `Dict[String, Int]` index into a `List[BuildProduct]`. The dict
 maps a rel-path to its slot, so lookup is O(1) and `record_build` replaces a
-slot's whole `BuildProduct` in place. No prior field survives that replacement,
-which is what stale-name recovery (rebuild yields a fresh entry) relies on.
+slot's whole `BuildProduct` in place. No prior field survives that replacement.
+Stale-name recovery relies on it: a rebuild yields a completely fresh entry.
 """
 from std.collections import Dict
 
@@ -25,13 +25,13 @@ from std.collections import Dict
 struct BuildProduct(Copyable, Movable):
     """One file's build (and, once probed, collection) state.
 
-    A built product carries its binary and canonical source; a compile-error
-    product carries only the captured compiler output and its `compile_error`
-    flag set, which the session checks to skip probe and run.
+    A built product carries its binary and canonical source. A compile-error
+    product carries only the captured compiler output, with `compile_error`
+    set; the session checks that flag and skips probe and run.
     """
 
     var rel_path: String
-    """The root-relative path — the registry key."""
+    """The root-relative path, which is the registry key."""
     var binary_path: String
     """The built test binary (e.g. `build/bin/<mangled>`); empty on a compile
     error."""
@@ -89,6 +89,17 @@ struct BuildRegistry(Movable):
     `record_compile_error`, and `record_probe` (attach a probe result to an
     existing entry); `has`/`get`/`size` read it back. Owns its storage; a `get`
     returns a copy so the caller cannot mutate an entry behind the registry.
+
+    Examples:
+
+    ```mojo
+    from mtest.cache import BuildProduct, BuildRegistry
+
+    var reg = BuildRegistry()
+    reg.record_build(BuildProduct.built("f.mojo", "build/bin/f", "/repo/f.mojo"))
+    reg.record_probe("f.mojo", True, ["f.mojo::test_one"])
+    print(reg.get("f.mojo").listing[0])  # f.mojo::test_one
+    ```
     """
 
     var _index: Dict[String, Int]
@@ -128,6 +139,9 @@ struct BuildRegistry(Movable):
         On replacement no field of the prior entry survives, so the probe state
         resets unless `product` itself carries it. Stale-name rebuilds rely on
         that: a rebuild yields a completely fresh entry.
+
+        Args:
+            product: The entry to store, keyed by its own `rel_path`. Copied.
         """
         var pos = self._index.get(product.rel_path)
         if pos:
@@ -149,6 +163,11 @@ struct BuildRegistry(Movable):
 
         Sets `probed=True`, `qualified`, and `listing`. The entry must already
         exist; the session always builds before probing.
+
+        Args:
+            rel: The root-relative path whose entry to update.
+            qualified: Whether the probe qualified as a collection listing.
+            listing: The qualifying node-id names. Copied.
 
         Raises:
             Error: If no entry exists for `rel`. The message names `rel`.

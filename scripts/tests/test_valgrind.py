@@ -6,14 +6,20 @@ from __future__ import annotations
 import contextlib
 import inspect
 import io
-import subprocess
 from pathlib import Path
+import subprocess
 import tempfile
+from typing import TYPE_CHECKING
 import unittest
 from unittest.mock import patch
 
+from scripts.checks import native_abi as native_abi_check
 from scripts.checks.memory import asan as asan_check
 from scripts.checks.memory import valgrind as valgrind_check
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class ValgrindCheckTests(unittest.TestCase):
@@ -35,14 +41,18 @@ class ValgrindCheckTests(unittest.TestCase):
         self.assertGreater(len(valgrind_check.TESTS), 0)
 
     def test_empty_native_source_inventory_is_rejected(self) -> None:
-        with patch.object(valgrind_check, "NATIVE_TESTS", ()):
-            with self.assertRaisesRegex(SystemExit, "native source inventory is empty"):
-                valgrind_check.main()
+        with (
+            patch.object(valgrind_check, "NATIVE_TESTS", ()),
+            self.assertRaisesRegex(SystemExit, "native source inventory is empty"),
+        ):
+            valgrind_check.main()
 
     def test_empty_mojo_source_inventory_is_rejected(self) -> None:
-        with patch.object(valgrind_check, "TESTS", ()):
-            with self.assertRaisesRegex(SystemExit, "Mojo source inventory is empty"):
-                valgrind_check.main()
+        with (
+            patch.object(valgrind_check, "TESTS", ()),
+            self.assertRaisesRegex(SystemExit, "Mojo source inventory is empty"),
+        ):
+            valgrind_check.main()
 
     def test_classified_suite_builds_generated_entrypoint(self) -> None:
         source = valgrind_check.ROOT / "tests" / "unit" / "test_config.mojo"
@@ -56,9 +66,7 @@ class ValgrindCheckTests(unittest.TestCase):
                 patch.object(
                     valgrind_check, "run", return_value=completed
                 ) as mocked_run,
-                patch.object(
-                    valgrind_check, "valgrind", return_value=completed
-                ),
+                patch.object(valgrind_check, "valgrind", return_value=completed),
                 patch.object(valgrind_check, "check_product_output"),
                 patch.object(valgrind_check, "check_postfork_output"),
             ):
@@ -104,9 +112,9 @@ class ValgrindCheckTests(unittest.TestCase):
             with (
                 patch.object(valgrind_check, "OUT", out),
                 patch.object(valgrind_check, "run", return_value=result),
+                self.assertRaises(SystemExit) as raised,
             ):
-                with self.assertRaises(SystemExit) as raised:
-                    valgrind_check.valgrind(command, {}, quiet_child=False)
+                valgrind_check.valgrind(command, {}, quiet_child=False)
 
             log = out / "startup-failure.log"
             self.assertTrue(log.exists())
@@ -134,9 +142,7 @@ class ValgrindCheckTests(unittest.TestCase):
             ),
         )
         for source in valgrind_check.REPORT_TESTS:
-            self.assertIn(
-                source.relative_to(valgrind_check.ROOT).as_posix(), selected
-            )
+            self.assertIn(source.relative_to(valgrind_check.ROOT).as_posix(), selected)
 
     def test_the_descriptor_adversarial_suite_is_excluded_here_but_not_in_asan(
         self,
@@ -165,9 +171,7 @@ class ValgrindCliProbeTests(unittest.TestCase):
 
     def test_cli_probe_inventory_is_exact(self) -> None:
         self.assertEqual(
-            valgrind_check.CLI_SOURCE.relative_to(
-                valgrind_check.ROOT
-            ).as_posix(),
+            valgrind_check.CLI_SOURCE.relative_to(valgrind_check.ROOT).as_posix(),
             "src/main.mojo",
         )
         self.assertEqual(
@@ -183,9 +187,7 @@ class ValgrindCliProbeTests(unittest.TestCase):
             "scripts/fixtures/toolchain/fake_hostile_mojo.py",
         )
         self.assertEqual(
-            valgrind_check.HOSTILE_ACTOR.relative_to(
-                valgrind_check.ROOT
-            ).as_posix(),
+            valgrind_check.HOSTILE_ACTOR.relative_to(valgrind_check.ROOT).as_posix(),
             "tests/fixtures/exec/hostile_report_actor.py",
         )
         self.assertEqual(
@@ -217,7 +219,12 @@ class ValgrindCliProbeTests(unittest.TestCase):
                 self.assertEqual(
                     getattr(valgrind_check, name), getattr(asan_check, name)
                 )
-        for name in ("CLI_SOURCE", "VENDORED_TOML_INCLUDE", "HOSTILE_BUILD_STANDIN", "HOSTILE_ACTOR"):
+        for name in (
+            "CLI_SOURCE",
+            "VENDORED_TOML_INCLUDE",
+            "HOSTILE_BUILD_STANDIN",
+            "HOSTILE_ACTOR",
+        ):
             with self.subTest(constant=name):
                 self.assertEqual(
                     getattr(valgrind_check, name), getattr(asan_check, name)
@@ -258,12 +265,8 @@ class ValgrindCliProbeTests(unittest.TestCase):
         self.assertIn("--trace-children=no", valgrind_check.CLI_VALGRIND_FLAGS)
         self.assertIn("--track-fds=yes", valgrind_check.CLI_VALGRIND_FLAGS)
         self.assertIn("--tool=memcheck", valgrind_check.CLI_VALGRIND_FLAGS)
-        self.assertIn(
-            "--error-exitcode=99", valgrind_check.CLI_VALGRIND_FLAGS
-        )
-        self.assertIn(
-            "--default-suppressions=no", valgrind_check.CLI_VALGRIND_FLAGS
-        )
+        self.assertIn("--error-exitcode=99", valgrind_check.CLI_VALGRIND_FLAGS)
+        self.assertIn("--default-suppressions=no", valgrind_check.CLI_VALGRIND_FLAGS)
         self.assertIn("--leak-check=full", valgrind_check.CLI_VALGRIND_FLAGS)
 
     def test_only_the_cli_probe_drops_the_possibly_lost_error_channel(
@@ -323,16 +326,12 @@ class ValgrindCliProbeTests(unittest.TestCase):
             "==1== LEAK SUMMARY:\n",
         )
         with self.assertRaisesRegex(SystemExit, "product allocation"):
-            valgrind_check.check_cli_provenance(
-                valgrind_check.CLI_PROBE_EXIT, polluted
-            )
+            valgrind_check.check_cli_provenance(valgrind_check.CLI_PROBE_EXIT, polluted)
 
     def test_cli_probe_build_uses_the_locked_target_cpu_and_production_object(
         self,
     ) -> None:
-        completed = subprocess.CompletedProcess(
-            args=["mojo"], returncode=0, stdout=""
-        )
+        completed = subprocess.CompletedProcess(args=["mojo"], returncode=0, stdout="")
         wrapped = subprocess.CompletedProcess(
             args=["valgrind"],
             returncode=valgrind_check.CLI_PROBE_EXIT,
@@ -364,12 +363,8 @@ class ValgrindCliProbeTests(unittest.TestCase):
                 ["--target-cpu", "x86-64-v3"],
             )
             self.assertIn("src/main.mojo", compile_command)
-            self.assertIn(
-                str(valgrind_check.VENDORED_TOML_INCLUDE), compile_command
-            )
-            self.assertIn(
-                str(valgrind_check.NATIVE_PRODUCTION_OBJECT), compile_command
-            )
+            self.assertIn(str(valgrind_check.VENDORED_TOML_INCLUDE), compile_command)
+            self.assertIn(str(valgrind_check.NATIVE_PRODUCTION_OBJECT), compile_command)
 
             wrapped_command = mocked_valgrind.call_args_list[0].args[0]
             self.assertEqual(wrapped_command[0], str(out / "mtest"))
@@ -406,9 +401,9 @@ class ValgrindCliProbeTests(unittest.TestCase):
                 patch.object(
                     valgrind_check, "check_cli_probe_output", return_value="ok"
                 ),
+                self.assertRaisesRegex(SystemExit, "Memcheck banner"),
             ):
-                with self.assertRaisesRegex(SystemExit, "Memcheck banner"):
-                    valgrind_check.check_cli({})
+                valgrind_check.check_cli({})
 
     def test_production_native_object_drops_the_testing_controls(self) -> None:
         completed = subprocess.CompletedProcess(args=["cc"], returncode=0, stdout="")
@@ -460,18 +455,12 @@ class ValgrindCliProvenanceTests(unittest.TestCase):
     )
 
     def test_clean_memcheck_log_is_accepted(self) -> None:
-        valgrind_check.check_cli_provenance(
-            valgrind_check.CLI_PROBE_EXIT, self.CLEAN
-        )
+        valgrind_check.check_cli_provenance(valgrind_check.CLI_PROBE_EXIT, self.CLEAN)
 
     def test_log_without_the_memcheck_banner_is_rejected(self) -> None:
-        stripped = self.CLEAN.replace(
-            "==1== Memcheck, a memory error detector\n", ""
-        )
+        stripped = self.CLEAN.replace("==1== Memcheck, a memory error detector\n", "")
         with self.assertRaisesRegex(SystemExit, "Memcheck banner"):
-            valgrind_check.check_cli_provenance(
-                valgrind_check.CLI_PROBE_EXIT, stripped
-            )
+            valgrind_check.check_cli_provenance(valgrind_check.CLI_PROBE_EXIT, stripped)
 
     def test_log_without_a_zero_error_summary_is_rejected(self) -> None:
         stripped = self.CLEAN.replace(
@@ -479,18 +468,14 @@ class ValgrindCliProvenanceTests(unittest.TestCase):
             "",
         )
         with self.assertRaisesRegex(SystemExit, "ERROR SUMMARY"):
-            valgrind_check.check_cli_provenance(
-                valgrind_check.CLI_PROBE_EXIT, stripped
-            )
+            valgrind_check.check_cli_provenance(valgrind_check.CLI_PROBE_EXIT, stripped)
 
     def test_log_without_the_expected_fd_summary_is_rejected(self) -> None:
         stripped = self.CLEAN.replace(
             "==1== FILE DESCRIPTORS: 3 open (3 inherited) at exit.\n", ""
         )
         with self.assertRaisesRegex(SystemExit, "descriptor summary"):
-            valgrind_check.check_cli_provenance(
-                valgrind_check.CLI_PROBE_EXIT, stripped
-            )
+            valgrind_check.check_cli_provenance(valgrind_check.CLI_PROBE_EXIT, stripped)
 
     def test_memcheck_error_exit_is_rejected(self) -> None:
         with self.assertRaisesRegex(SystemExit, "exited 99"):
@@ -505,9 +490,7 @@ class ValgrindCliProvenanceTests(unittest.TestCase):
             "==1== LEAK SUMMARY:\n",
         )
         with self.assertRaisesRegex(SystemExit, "product allocation"):
-            valgrind_check.check_cli_provenance(
-                valgrind_check.CLI_PROBE_EXIT, polluted
-            )
+            valgrind_check.check_cli_provenance(valgrind_check.CLI_PROBE_EXIT, polluted)
 
 
 class ValgrindMainProbeRosterTests(unittest.TestCase):
@@ -528,8 +511,8 @@ class ValgrindMainProbeRosterTests(unittest.TestCase):
             args=["valgrind"], returncode=0, stdout="valgrind-3.27.1\n"
         )
 
-        def probe(name: str):
-            def run(env: dict[str, str]) -> None:
+        def probe(name: str) -> Callable[[dict[str, str]], None]:
+            def run(_env: dict[str, str]) -> None:
                 performed.append(name)
 
             return run
@@ -538,31 +521,23 @@ class ValgrindMainProbeRosterTests(unittest.TestCase):
             out = Path(raw_tmp) / "valgrind"
             with (
                 patch.object(valgrind_check, "OUT", out),
-                patch.object(
-                    valgrind_check, "TESTS", (Path("tests/unit/a.mojo"),)
-                ),
+                patch.object(valgrind_check, "TESTS", (Path("tests/unit/a.mojo"),)),
                 patch.object(
                     valgrind_check, "NATIVE_TESTS", (Path("tests/native/a.c"),)
                 ),
                 patch.object(valgrind_check, "prepare_test_scratch", lambda: None),
                 patch.object(valgrind_check, "clean_environment", dict),
-                patch.object(valgrind_check, "run", lambda *a, **k: version),
-                patch.object(
-                    valgrind_check, "compile_inputs", lambda cc, env: None
-                ),
+                patch.object(valgrind_check, "run", lambda *_a, **_k: version),
+                patch.object(valgrind_check, "compile_inputs", lambda _cc, _env: None),
                 patch.object(valgrind_check, "check_controls", probe("controls")),
-                patch.object(
-                    valgrind_check, "check_native_tests", probe("native")
-                ),
+                patch.object(valgrind_check, "check_native_tests", probe("native")),
                 patch.object(valgrind_check, "check_cli", probe("cli")),
                 patch.object(
                     valgrind_check,
                     "compile_and_run_test",
-                    lambda source, env: compiled.append(source.name),
+                    lambda source, _env: compiled.append(source.name),
                 ),
-                patch.object(
-                    valgrind_check.native_abi_check, "compiler", lambda: "clang"
-                ),
+                patch.object(native_abi_check, "compiler", lambda: "clang"),
             ):
                 with contextlib.redirect_stdout(io.StringIO()) as captured:
                     code = valgrind_check.main()
@@ -634,7 +609,7 @@ class LeakRecordsCallSiteTests(unittest.TestCase):
     def test_parse_reachable_routes_through_leak_records(self) -> None:
         seen: list[str] = []
 
-        def _recorder(log: str, kinds: str, label: str) -> list[str]:
+        def _recorder(_log: str, _kinds: str, label: str) -> list[str]:
             seen.append(label)
             return []
 
@@ -646,7 +621,7 @@ class LeakRecordsCallSiteTests(unittest.TestCase):
     def test_cli_provenance_routes_through_leak_records(self) -> None:
         seen: list[str] = []
 
-        def _recorder(log: str, kinds: str, label: str) -> list[str]:
+        def _recorder(_log: str, _kinds: str, label: str) -> list[str]:
             seen.append(label)
             return []
 

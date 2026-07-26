@@ -1,10 +1,10 @@
 """The discovery layer of the mtest runner.
 
 `discover` turns the operands, gates, and exclude globs in a `RunnerConfig`
-into the concrete, ordered set of files a session will run: the gate files, the
-run files, the excluded files each paired with the pattern that excluded it,
-and the exclude patterns that matched nothing. It reads the filesystem to walk
-directories, but emits no events, prints nothing, and runs nothing — it returns
+into the ordered set of files a session will run: the gate files, the run
+files, the excluded files each paired with the pattern that excluded it, and
+the exclude patterns that matched nothing. It reads the filesystem to walk
+directories, but emits no events, prints nothing, and runs nothing. It returns
 a `DiscoveryResult` data value the session turns into events.
 
 Two policies are load-bearing and documented at their definitions:

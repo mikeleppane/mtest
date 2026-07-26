@@ -26,9 +26,7 @@ def mojo_sources(repo_root: Path = REPO_ROOT) -> list[Path]:
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
             current = Path(dirpath)
             dirnames[:] = [
-                name
-                for name in dirnames
-                if not (current / name).is_symlink()
+                name for name in dirnames if not (current / name).is_symlink()
             ]
             for name in filenames:
                 path = current / name
@@ -38,6 +36,14 @@ def mojo_sources(repo_root: Path = REPO_ROOT) -> list[Path]:
 
 
 def main() -> int:
+    """Format every discovered Mojo source with one `mojo format` call each.
+
+    Returns:
+        0 once every source formatted cleanly. 1 when discovery found no Mojo
+        source at all, which means the format roots moved and the gate would
+        otherwise pass by formatting nothing. Otherwise the non-zero exit of
+        the first failing `mojo format`, with its merged output on stderr.
+    """
     sources = mojo_sources()
     if not sources:
         print("FATAL: format-all: no Mojo sources found", file=sys.stderr)

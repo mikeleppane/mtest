@@ -20,7 +20,9 @@ class NativeCheckCommandTests(unittest.TestCase):
     def test_source_inventory_is_nonempty_and_exact(self) -> None:
         root = Path(__file__).resolve().parents[2]
         self.assertEqual(
-            tuple(path.relative_to(root).as_posix() for path in native_check.TEST_SOURCES),
+            tuple(
+                path.relative_to(root).as_posix() for path in native_check.TEST_SOURCES
+            ),
             (
                 "tests/native/test_exec_native.c",
                 "tests/native/test_exec_native_signals.c",
@@ -29,9 +31,11 @@ class NativeCheckCommandTests(unittest.TestCase):
         self.assertGreater(len(native_check.TEST_SOURCES), 0)
 
     def test_empty_source_inventory_is_rejected(self) -> None:
-        with mock.patch.object(native_check, "TEST_SOURCES", ()):
-            with self.assertRaisesRegex(SystemExit, "source inventory is empty"):
-                native_check.main()
+        with (
+            mock.patch.object(native_check, "TEST_SOURCES", ()),
+            self.assertRaisesRegex(SystemExit, "source inventory is empty"),
+        ):
+            native_check.main()
 
     def test_darwin_link_uses_system_driver_and_precompiled_objects(self) -> None:
         command = native_check.link_command(

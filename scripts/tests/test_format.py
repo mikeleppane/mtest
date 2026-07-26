@@ -14,9 +14,9 @@ from scripts.checks import format as format_check
 
 class FormatInventoryTests(unittest.TestCase):
     def test_pixi_tasks_use_the_focused_formatter_module(self) -> None:
-        pixi = (
-            Path(__file__).resolve().parents[2] / "pixi.toml"
-        ).read_text(encoding="utf-8")
+        pixi = (Path(__file__).resolve().parents[2] / "pixi.toml").read_text(
+            encoding="utf-8"
+        )
         expected = {
             'fmt = "python -m scripts.checks.format"',
             'fmt-check = "python -m scripts.checks.format && git diff --exit-code"',

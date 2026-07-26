@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+from typing import Any
 
 from scripts.e2e.assertions import expect, expect_exit
 from scripts.e2e.runner import (
@@ -20,8 +21,9 @@ from scripts.e2e.runner import (
     SHORT_TIMEOUT,
     STATE_PERSISTENCE_FAULT,
     E2ERunner,
-    ScenarioError,
+    Run,
     ScenarioContext,
+    ScenarioError,
 )
 from scripts.e2e.scenarios.json_reporter import (
     _build_json_terminal_write_fault,
@@ -56,8 +58,8 @@ def _clean_project_runtime() -> None:
     shutil.rmtree(PROJECT / "build", ignore_errors=True)
 
 
-def _started_record(stream_path: Path) -> dict:
-    records = [
+def _started_record(stream_path: Path) -> dict[str, Any]:
+    records: list[dict[str, Any]] = [
         json.loads(line)
         for line in stream_path.read_text(encoding="utf-8").splitlines()
     ]
@@ -69,16 +71,14 @@ def _started_record(stream_path: Path) -> dict:
 
 def _run_stream(
     runner: E2ERunner, args: list[str], stream_path: Path
-) -> tuple[object, dict]:
+) -> tuple[Run, dict[str, Any]]:
     run = runner.run_mtest(
         [*args, "--json", os.fspath(stream_path), "--gh-annotations", "off"]
     )
     return run, _started_record(stream_path)
 
 
-def _assert_parser_resource_guards(
-    context: ScenarioContext, tmp: Path
-) -> None:
+def _assert_parser_resource_guards(context: ScenarioContext, tmp: Path) -> None:
     """Exercise parser termination and cost guards through the real binary."""
     assignment_boundary = tmp / "assignment-limit.toml"
     assignment_boundary.write_text(
@@ -91,8 +91,7 @@ def _assert_parser_resource_guards(
     expect_exit(boundary, 4)
     expect(
         "table-update limit" not in boundary.stderr,
-        "the exact assignment ceiling was rejected:\n"
-        f"{boundary.combined[:1_024]}",
+        f"the exact assignment ceiling was rejected:\n{boundary.combined[:1_024]}",
     )
     header_boundary = tmp / "table-header-limit.toml"
     header_boundary.write_text(
@@ -105,15 +104,11 @@ def _assert_parser_resource_guards(
     expect_exit(boundary, 4)
     expect(
         "table-update limit" not in boundary.stderr,
-        "the exact table-header ceiling was rejected:\n"
-        f"{boundary.combined[:1_024]}",
+        f"the exact table-header ceiling was rejected:\n{boundary.combined[:1_024]}",
     )
     nested_arrays = tmp / "multiline-nested-arrays.toml"
     nested_arrays.write_text(
-        "[run]\npaths = "
-        + ("[\n" * 64)
-        + '"value"\n'
-        + ("]\n" * 64),
+        "[run]\npaths = " + ("[\n" * 64) + '"value"\n' + ("]\n" * 64),
         encoding="utf-8",
     )
     boundary = context.runner.run_mtest(
@@ -123,8 +118,7 @@ def _assert_parser_resource_guards(
     expect(
         "table-update limit" not in boundary.stderr
         and "nesting limit" not in boundary.stderr,
-        "line-leading nested arrays were misclassified:\n"
-        f"{boundary.combined[:1_024]}",
+        f"line-leading nested arrays were misclassified:\n{boundary.combined[:1_024]}",
     )
 
     guarded_documents = (
@@ -135,24 +129,20 @@ def _assert_parser_resource_guards(
         ),
         (
             "long-quoted-token.toml",
-            b'[run]\npaths = ["'
-            + (b"x" * (TOML_SCALAR_MAX_BYTES + 1))
-            + b'"]\n',
+            b'[run]\npaths = ["' + (b"x" * (TOML_SCALAR_MAX_BYTES + 1)) + b'"]\n',
             "1048576-byte limit",
         ),
         (
             "assignment-limit-plus-one.toml",
             "".join(
-                f"key{index} = 0\n"
-                for index in range(TOML_TABLE_UPDATE_MAX + 1)
+                f"key{index} = 0\n" for index in range(TOML_TABLE_UPDATE_MAX + 1)
             ).encode(),
             "table-update limit",
         ),
         (
             "table-header-limit-plus-one.toml",
             "".join(
-                f"[table{index}]\n"
-                for index in range(TOML_TABLE_UPDATE_MAX + 1)
+                f"[table{index}]\n" for index in range(TOML_TABLE_UPDATE_MAX + 1)
             ).encode(),
             "table-update limit",
         ),
@@ -169,14 +159,11 @@ def _assert_parser_resource_guards(
     for name, contents, expected in guarded_documents:
         path = tmp / name
         path.write_bytes(contents)
-        run = context.runner.run_mtest(
-            ["--config", os.fspath(path)], timeout=5.0
-        )
+        run = context.runner.run_mtest(["--config", os.fspath(path)], timeout=5.0)
         expect_exit(run, 4)
         expect(
             expected in run.stderr,
-            f"parser resource guard drifted for {name}:\n"
-            f"{run.combined[:1_024]}",
+            f"parser resource guard drifted for {name}:\n{run.combined[:1_024]}",
         )
 
     for name, character in (
@@ -186,14 +173,11 @@ def _assert_parser_resource_guards(
     ):
         path = tmp / name
         path.write_text(character, encoding="utf-8")
-        run = context.runner.run_mtest(
-            ["--config", os.fspath(path)], timeout=2.0
-        )
+        run = context.runner.run_mtest(["--config", os.fspath(path)], timeout=2.0)
         expect_exit(run, 4)
         expect(
             "line 1, column 1" in run.stderr,
-            f"unexpected TOML byte lost its position for {name}:\n"
-            f"{run.combined}",
+            f"unexpected TOML byte lost its position for {name}:\n{run.combined}",
         )
 
 
@@ -232,9 +216,7 @@ def s_config_resolution(context: ScenarioContext) -> str:
                 tmp / "outside.ndjson",
             )
             expect_exit(outside, 0)
-            outside_expected = os.path.normpath(
-                os.path.join(PROJECT, outside_arg)
-            )
+            outside_expected = os.path.normpath(os.path.join(PROJECT, outside_arg))
             expect(
                 outside_started.get("config_file") == outside_expected,
                 f"outside config was not normalized absolute: "
@@ -262,8 +244,8 @@ def s_config_resolution(context: ScenarioContext) -> str:
 
             bad_mojo = tmp / "bad-mojo.toml"
             bad_mojo.write_text(
-                "[run]\npaths = [\"tests/test_other.mojo\"]\nstate = false\n"
-                "[build]\nmojo = \"/definitely/missing/mojo\"\n",
+                '[run]\npaths = ["tests/test_other.mojo"]\nstate = false\n'
+                '[build]\nmojo = "/definitely/missing/mojo"\n',
                 encoding="utf-8",
             )
             from_env = runner.run_mtest(
@@ -301,8 +283,8 @@ def s_config_resolution(context: ScenarioContext) -> str:
                 'show-output = "none"\n'
                 'verbosity = "quiet"\n'
                 "durations = 0\n"
-                f'junit-xml = {json.dumps(os.fspath(junit_path))}\n'
-                f'json = {json.dumps(os.fspath(json_path))}\n'
+                f"junit-xml = {json.dumps(os.fspath(junit_path))}\n"
+                f"json = {json.dumps(os.fspath(json_path))}\n"
                 'gh-annotations = "off"\n'
                 "[[override]]\n"
                 'files = "tests/test_other.mojo"\n'
@@ -331,8 +313,7 @@ def s_config_resolution(context: ScenarioContext) -> str:
             expect_exit(emptied, 5)
             expect(
                 "selected: 0 files" in emptied.stdout,
-                f"configured empty paths still selected files:\n"
-                f"{emptied.stdout}",
+                f"configured empty paths still selected files:\n{emptied.stdout}",
             )
     finally:
         _clean_project_runtime()
@@ -370,9 +351,7 @@ def s_config_diagnostics(context: ScenarioContext) -> str:
         expect_exit(unreadable, 4)
         fifo = tmp / "blocking-config.toml"
         os.mkfifo(fifo)
-        blocked = context.runner.run_mtest(
-            ["--config", os.fspath(fifo)], timeout=30.0
-        )
+        blocked = context.runner.run_mtest(["--config", os.fspath(fifo)], timeout=30.0)
         expect_exit(blocked, 4)
         expect(
             blocked.stdout == ""
@@ -385,14 +364,10 @@ def s_config_diagnostics(context: ScenarioContext) -> str:
         ) as fault_root:
             library = _build_config_open_fault(fault_root)
             loader = (
-                "DYLD_INSERT_LIBRARIES"
-                if sys.platform == "darwin"
-                else "LD_PRELOAD"
+                "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD"
             )
             inherited = os.environ.get(loader, "")
-            preload = library + (
-                os.pathsep + inherited if inherited else ""
-            )
+            preload = library + (os.pathsep + inherited if inherited else "")
             swapped = tmp / "swapped-before-open.toml"
             swapped.write_text("[run]\ntimeout = 1\n", encoding="utf-8")
             raced = context.runner.run_mtest(
@@ -407,19 +382,14 @@ def s_config_diagnostics(context: ScenarioContext) -> str:
             expect(
                 raced.stdout == ""
                 and raced.stderr
-                == (
-                    f"config: {swapped}: configuration path is not a "
-                    "regular file\n"
-                ),
+                == (f"config: {swapped}: configuration path is not a regular file\n"),
                 "a regular-to-FIFO pathname swap was not rejected from the "
                 f"opened descriptor:\n{raced.combined}",
             )
 
         malformed = tmp / "malformed.toml"
         malformed.write_text("[run\n", encoding="utf-8")
-        malformed_run = context.runner.run_mtest(
-            ["--config", os.fspath(malformed)]
-        )
+        malformed_run = context.runner.run_mtest(["--config", os.fspath(malformed)])
         expect_exit(malformed_run, 4)
         expect(
             malformed_run.stderr.startswith("config: "),
@@ -429,8 +399,7 @@ def s_config_diagnostics(context: ScenarioContext) -> str:
         hostile_documents = (
             (
                 "oversized.toml",
-                "[run]\ntimeout = "
-                "999999999999999999999999999999999999\n",
+                "[run]\ntimeout = 999999999999999999999999999999999999\n",
             ),
             ("negative.toml", "[run]\nretries = -1\n"),
             ("bool-int.toml", "[run]\nmaxfail = true\n"),
@@ -455,9 +424,11 @@ def s_config_diagnostics(context: ScenarioContext) -> str:
             ),
             (
                 "hostile-build-value.toml",
-                "[build]\n"
-                'build-args = ["-o=SENTINEL\\nFAIL config: forged'
-                '\\u001b\\u0003"]\n',
+                (
+                    "[build]\n"
+                    'build-args = ["-o=SENTINEL\\nFAIL config: forged'
+                    '\\u001b\\u0003"]\n'
+                ),
             ),
             ("report-negative.toml", "[report]\ndurations = -1\n"),
             ("report-float.toml", "[report]\ncolor = 1.5\n"),
@@ -477,8 +448,10 @@ def s_config_diagnostics(context: ScenarioContext) -> str:
             ),
             (
                 "oversized-override.toml",
-                '[[override]]\nfiles = "*"\n'
-                "timeout = 999999999999999999999999999999999999\n",
+                (
+                    '[[override]]\nfiles = "*"\n'
+                    "timeout = 999999999999999999999999999999999999\n"
+                ),
             ),
             ("malformed\nFAIL config: forged\x1b.toml", "[run\n"),
             (
@@ -489,9 +462,7 @@ def s_config_diagnostics(context: ScenarioContext) -> str:
         for name, text in hostile_documents:
             hostile_path = tmp / name
             hostile_path.write_text(text, encoding="utf-8")
-            hostile = context.runner.run_mtest(
-                ["--config", os.fspath(hostile_path)]
-            )
+            hostile = context.runner.run_mtest(["--config", os.fspath(hostile_path)])
             expect_exit(hostile, 4)
             lines = hostile.stderr.splitlines()
             expect(
@@ -554,8 +525,7 @@ def s_config_diagnostics(context: ScenarioContext) -> str:
                 f"config: {oversized_source}: configuration file exceeds "
                 f"{TOML_SOURCE_MAX_BYTES}-byte limit\n"
             ),
-            f"oversized source lost its owned limit diagnostic:\n"
-            f"{oversized.combined}",
+            f"oversized source lost its owned limit diagnostic:\n{oversized.combined}",
         )
 
         zero_device = Path("/dev/zero")
@@ -588,7 +558,8 @@ def s_config_diagnostics(context: ScenarioContext) -> str:
         expect_exit(missing_parent, 4)
         expect(
             missing_parent.stderr.startswith(
-                "config: " + os.fspath(missing_parent_config)
+                "config: "
+                + os.fspath(missing_parent_config)
                 + ": [report] json destination parent directory does not "
                 "exist:"
             ),
@@ -612,7 +583,8 @@ def s_config_diagnostics(context: ScenarioContext) -> str:
         expect_exit(missing_junit_parent, 4)
         expect(
             missing_junit_parent.stderr.startswith(
-                "config: " + os.fspath(missing_junit_parent_config)
+                "config: "
+                + os.fspath(missing_junit_parent_config)
                 + ": [report] junit-xml destination parent directory does not "
                 "exist:"
             ),
@@ -671,9 +643,7 @@ def _build_state_persistence_fault(directory: str) -> str:
         object_path,
     ]
     if sys.platform == "darwin":
-        library = os.path.join(
-            directory, "libmtest_state_persistence_fault.dylib"
-        )
+        library = os.path.join(directory, "libmtest_state_persistence_fault.dylib")
         link_command = [
             "/usr/bin/cc",
             "-dynamiclib",
@@ -682,9 +652,7 @@ def _build_state_persistence_fault(directory: str) -> str:
             library,
         ]
     else:
-        library = os.path.join(
-            directory, "libmtest_state_persistence_fault.so"
-        )
+        library = os.path.join(directory, "libmtest_state_persistence_fault.so")
         link_command = [
             compiler,
             "-shared",
@@ -707,13 +675,13 @@ def _build_state_persistence_fault(directory: str) -> str:
         )
         try:
             output, _ = process.communicate(timeout=SHORT_TIMEOUT)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             E2ERunner.kill_group(process)
             output, _ = process.communicate()
             raise ScenarioError(
                 "the state-persistence fault interposer did not "
                 f"{action} within {SHORT_TIMEOUT}s:\n{output}"
-            )
+            ) from exc
         expect(
             process.returncode == 0,
             "could not "
@@ -765,13 +733,13 @@ def _build_config_open_fault(directory: str) -> str:
         )
         try:
             output, _ = process.communicate(timeout=SHORT_TIMEOUT)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             E2ERunner.kill_group(process)
             output, _ = process.communicate()
             raise ScenarioError(
                 "the configuration-open fault interposer did not "
                 f"{action} within {SHORT_TIMEOUT}s:\n{output}"
-            )
+            ) from exc
         expect(
             process.returncode == 0,
             "could not "
@@ -862,9 +830,7 @@ def s_config_state(context: ScenarioContext) -> str:
         expect_exit(nothing, 5)
         expect(_read_state() == sentinel, "exit 5 rewrote last-run state")
 
-        sharded = runner.run_mtest(
-            ["tests/test_other.mojo", "--shard", "1/1"]
-        )
+        sharded = runner.run_mtest(["tests/test_other.mojo", "--shard", "1/1"])
         expect_exit(sharded, 0)
         expect(_read_state() == sentinel, "sharded invocation rewrote state")
 
@@ -932,7 +898,7 @@ def s_config_state(context: ScenarioContext) -> str:
                 and row.get("warning_kind") == "state-malformed-line"
             ]
             expect(
-                warnings,
+                bool(warnings),
                 f"malformed state emitted no state-malformed-line: {records}",
             )
 
@@ -968,17 +934,13 @@ def s_config_state(context: ScenarioContext) -> str:
                     start_new_session=True,
                     env={**os.environ, "GITHUB_ACTIONS": ""},
                 )
-                collision = Path(
-                    os.fspath(STATE_PATH) + f".tmp.{child.pid}"
-                )
+                collision = Path(os.fspath(STATE_PATH) + f".tmp.{child.pid}")
                 try:
                     if collision_kind == "symlink":
                         collision.symlink_to(victim)
                     else:
                         os.link(victim, collision)
-                    stdout, stderr = child.communicate(
-                        timeout=DEFAULT_TIMEOUT
-                    )
+                    stdout, stderr = child.communicate(timeout=DEFAULT_TIMEOUT)
                 except BaseException:
                     if child.poll() is None:
                         E2ERunner.kill_group(child)
@@ -1008,25 +970,18 @@ def s_config_state(context: ScenarioContext) -> str:
             if STATE_PATH.is_symlink():
                 STATE_PATH.unlink()
 
-        persistence_diagnostic = (
-            "mtest: state: could not persist .mtest-cache/lastrun"
-        )
+        persistence_diagnostic = "mtest: state: could not persist .mtest-cache/lastrun"
         with tempfile.TemporaryDirectory(
             prefix="mtest-state-persistence-fault-"
         ) as raw:
             library = _build_state_persistence_fault(raw)
             loader = (
-                "DYLD_INSERT_LIBRARIES"
-                if sys.platform == "darwin"
-                else "LD_PRELOAD"
+                "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD"
             )
             inherited = os.environ.get(loader, "")
-            preload = library + (
-                os.pathsep + inherited if inherited else ""
-            )
+            preload = library + (os.pathsep + inherited if inherited else "")
             fault_sentinel = (
-                STATE_HEADER
-                + "test\ttests/test_other.mojo::test_other_passes\n"
+                STATE_HEADER + "test\ttests/test_other.mojo::test_other_passes\n"
             )
             for fault in ("short-eintr", "write", "close", "rename"):
                 _write_state(fault_sentinel)
@@ -1060,8 +1015,7 @@ def s_config_state(context: ScenarioContext) -> str:
                         f"{fault} failure damaged the prior state file",
                     )
                     expect(
-                        faulted.stderr.splitlines()
-                        == [persistence_diagnostic],
+                        faulted.stderr.splitlines() == [persistence_diagnostic],
                         f"{fault} failure did not emit exactly one stable "
                         f"diagnostic:\n{faulted.stderr}",
                     )
@@ -1086,10 +1040,7 @@ def s_config_state(context: ScenarioContext) -> str:
             "failed atomic promotion damaged the prior state file",
         )
         expect(
-            promotion_failed.stderr.count(
-                persistence_diagnostic
-            )
-            == 1,
+            promotion_failed.stderr.count(persistence_diagnostic) == 1,
             f"state write failure was not one post-finalization line:\n"
             f"{promotion_failed.stderr}",
         )
@@ -1104,14 +1055,10 @@ def s_config_state(context: ScenarioContext) -> str:
             stream = tmp / "stream.ndjson"
             library = _build_json_terminal_write_fault(raw)
             loader = (
-                "DYLD_INSERT_LIBRARIES"
-                if sys.platform == "darwin"
-                else "LD_PRELOAD"
+                "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD"
             )
             inherited = os.environ.get(loader, "")
-            preload = os.fspath(library) + (
-                os.pathsep + inherited if inherited else ""
-            )
+            preload = os.fspath(library) + (os.pathsep + inherited if inherited else "")
             terminal = runner.run_mtest(
                 [
                     "--no-config",
@@ -1137,9 +1084,7 @@ def s_config_state(context: ScenarioContext) -> str:
         STATE_PATH.unlink(missing_ok=True)
         os.mkfifo(STATE_PATH)
         try:
-            fifo = runner.run_mtest(
-                ["tests/test_other.mojo"], timeout=DEFAULT_TIMEOUT
-            )
+            fifo = runner.run_mtest(["tests/test_other.mojo"], timeout=DEFAULT_TIMEOUT)
             expect_exit(fifo, 0)
             expect(
                 "not a regular file" in fifo.combined,
@@ -1149,14 +1094,11 @@ def s_config_state(context: ScenarioContext) -> str:
             STATE_PATH.unlink(missing_ok=True)
 
         _write_state(STATE_HEADER + "x" * (1024 * 1024 + 1) + "\n")
-        oversized = runner.run_mtest(
-            ["tests/test_other.mojo"], timeout=DEFAULT_TIMEOUT
-        )
+        oversized = runner.run_mtest(["tests/test_other.mojo"], timeout=DEFAULT_TIMEOUT)
         expect_exit(oversized, 0)
         expect(
             "exceeds the size limit" in oversized.combined,
-            f"an oversized state file was not refused loudly:\n"
-            f"{oversized.combined}",
+            f"an oversized state file was not refused loudly:\n{oversized.combined}",
         )
     finally:
         _clean_project_runtime()
@@ -1225,10 +1167,7 @@ def s_failure_reselection(context: ScenarioContext) -> str:
                 "tests/gone.mojo",
                 "tests/test_other.mojo::test_gone",
             ):
-                line = (
-                    f"lf: previously-failing {identifier} "
-                    "no longer exists — dropped"
-                )
+                line = f"lf: previously-failing {identifier} no longer exists — dropped"
                 expect(
                     stale.combined.count(line) == 1,
                     f"stale identifier was not one exact line: {identifier}\n"
@@ -1252,9 +1191,7 @@ def s_failure_reselection(context: ScenarioContext) -> str:
             "running the full selection"
         )
         STATE_PATH.unlink()
-        missing_state = runner.run_mtest(
-            ["tests/test_other.mojo", "--lf"]
-        )
+        missing_state = runner.run_mtest(["tests/test_other.mojo", "--lf"])
         expect_exit(missing_state, 0)
         expect(
             missing_state.combined.count(fallback) == 1,
@@ -1271,8 +1208,7 @@ def s_failure_reselection(context: ScenarioContext) -> str:
         expect(
             all_stale.combined.count("no longer exists — dropped") == 2
             and all_stale.combined.count(fallback) == 1,
-            f"all-stale-only state did not drop and fall back:\n"
-            f"{all_stale.combined}",
+            f"all-stale-only state did not drop and fall back:\n{all_stale.combined}",
         )
 
         _write_state(STATE_HEADER)
@@ -1322,10 +1258,7 @@ def s_failure_reselection(context: ScenarioContext) -> str:
             f"malformed state did not warn and fall back:\n{malformed.combined}",
         )
 
-        _write_state(
-            STATE_HEADER
-            + "test\ttests/test_other.mojo::test_other_passes\n"
-        )
+        _write_state(STATE_HEADER + "test\ttests/test_other.mojo::test_other_passes\n")
         disabled = runner.run_mtest(
             [
                 "--config",
@@ -1335,9 +1268,7 @@ def s_failure_reselection(context: ScenarioContext) -> str:
             ]
         )
         expect_exit(disabled, 0)
-        disabled_line = (
-            "lf: state disabled by mtest.toml — running the full selection"
-        )
+        disabled_line = "lf: state disabled by mtest.toml — running the full selection"
         expect(
             disabled.combined.count(disabled_line) == 1,
             f"state=false fallback did not name state:\n{disabled.combined}",
@@ -1519,8 +1450,7 @@ def s_failure_reselection(context: ScenarioContext) -> str:
             f"--lf -x discarded the unverdicted B record:\n{truncated_state}",
         )
         expect(
-            "test\ttests/test_a_truncate_temp.mojo::test_fails\n"
-            in truncated_state,
+            "test\ttests/test_a_truncate_temp.mojo::test_fails\n" in truncated_state,
             f"--lf -x did not replace A with its fresh failure:\n{truncated_state}",
         )
         truncate_a.unlink()
@@ -1669,8 +1599,7 @@ def s_config_overrides(context: ScenarioContext) -> str:
         expect_exit(collected, 1)
         expect(
             "timed out" in collected.stderr,
-            f"override timeout did not reach the collect probe:\n"
-            f"{collected.stderr}",
+            f"override timeout did not reach the collect probe:\n{collected.stderr}",
         )
         expect(
             collected.wall < 15.0,

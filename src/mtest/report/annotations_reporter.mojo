@@ -3,7 +3,7 @@
 Where `annotations` is the pure renderer, this is the thin stateful shell
 around it: a `Reporter` that feeds each event through an
 `AnnotationAccumulator` as it arrives and, on demand, renders the deterministic
-annotation tail. It self-gates on the resolved `--gh-annotations` mode — an
+annotation tail. It self-gates on the resolved `--gh-annotations` mode. An
 inactive reporter (mode `off`, or `auto` outside GitHub Actions) records
 nothing and renders nothing, so composing it is always safe and costs nothing
 when annotations are not wanted.
@@ -16,13 +16,13 @@ built. The rows themselves all persist until `render`; the caps bound the
 output, not the accumulation. A CI-scale run of hundreds of large-capture
 failures therefore cannot exhaust memory, though it accumulates far more rows
 than it prints. The tail is capped at 10 `::error` lines and 10 `::warning`
-lines, plus the single `::notice` — at most 21 lines.
+lines, plus the single `::notice`, so at most 21 lines.
 
 `handle` is total and non-raising, per the `Reporter` seam. The reporter never
-prints: `main` reaches the concrete reporter at its fixed composite index and
-writes the rendered lines to stdout in the tail after the console summary band,
-once `SessionFinished` has been seen so the single `::notice` is present.
-`Copyable, Movable` so it slots into the reporter composition.
+prints: `main` asks its coordinator for the lines through
+`ReportCoordinator.annotation_tail` and writes them to stdout after the console
+summary band, once `SessionFinished` has been seen so the single `::notice` is
+present. `Copyable, Movable` so it slots into a coordinator's reporter set.
 """
 from mtest.model import Event
 
@@ -37,6 +37,17 @@ struct AnnotationsReporter(Reporter):
     `--gh-annotations` mode and `GITHUB_ACTIONS`: when inactive it accumulates
     nothing and `render` returns an empty list, so an off/auto-outside-Actions
     run pays only the empty composition slot.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import Event, Summary
+    from mtest.report import AnnotationsReporter
+
+    var rep = AnnotationsReporter(active=True)
+    rep.handle(Event.session_finished(Summary.zeros(), 1.5, 0))
+    var tail = rep.render()  # one "::notice::..." line
+    ```
     """
 
     var _active: Bool
@@ -63,7 +74,7 @@ struct AnnotationsReporter(Reporter):
     def handle(mut self, e: Event):
         """Accumulate one event's annotation rows when active, then drop it.
 
-        Emits nothing on its own — `main` renders the tail via `render`.
+        Emits nothing on its own; the tail comes from `render`.
 
         Args:
             e: The event to extract annotation rows from. Not retained.

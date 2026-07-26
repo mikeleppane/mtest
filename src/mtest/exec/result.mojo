@@ -20,6 +20,21 @@ struct ProcessResult(Copyable, Movable):
     """The captured streams, the termination, and the duration of one run.
 
     Owns the two capture buffers, so copies are explicit; holds no fds.
+
+    Examples:
+
+    ```mojo
+    from mtest.exec import ExecRuntime
+    from mtest.exec import ProcessSpec
+    from mtest.exec import run_supervised
+
+    var runtime = ExecRuntime()
+    runtime.open()
+    var result = run_supervised(runtime, ProcessSpec.command(["/bin/true"]))
+    var ok = result.termination.is_exited()
+    var overflowed = result.stdout_truncated
+    runtime.close()
+    ```
     """
 
     var stdout_bytes: List[UInt8]

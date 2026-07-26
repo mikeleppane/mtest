@@ -3,13 +3,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from typing import TYPE_CHECKING
 
 from scripts.checks.transcript_compare import DirectoryComparison, compare_directories
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -45,8 +49,7 @@ def generate_into(output_dir: Path) -> None:
     )
     if completed.returncode != 0:
         raise SnapshotGenerationError(
-            "scripts.gen_transcripts failed with exit "
-            f"{completed.returncode}"
+            f"scripts.gen_transcripts failed with exit {completed.returncode}"
         )
 
 

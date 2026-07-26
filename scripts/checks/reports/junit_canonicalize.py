@@ -104,6 +104,13 @@ def assert_equal_runs(first: Path, second: Path) -> None:
 
 
 def main() -> int:
+    """Emit one artifact's canonical form, or compare two of them.
+
+    Returns:
+        0 after writing the canonical bytes of a single artifact to stdout, or
+        after confirming two artifacts share a canonical form. 1 after printing
+        the parse failure or the two differing canonical forms to stderr.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("artifact", type=Path, help="a JUnit XML artifact")
     parser.add_argument(

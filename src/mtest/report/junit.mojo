@@ -32,7 +32,8 @@ with the body.
 
 Escaping goes only through the shared `xml_escape_text`/`xml_escape_attribute`,
 and every value originating as raw child bytes is decoded through `lossy_utf8`
-first (see `bounded_text_from_bytes`). No CDATA, no second path.
+first (see `bounded_text_from_bytes`). There is no CDATA and no second escaping
+path.
 """
 from mtest.config.lossy_utf8 import lossy_utf8
 from mtest.report.escape import xml_escape_attribute, xml_escape_text
@@ -100,8 +101,8 @@ struct JunitCase(Copyable, Movable):
     """
 
     var name: String
-    """The `name` attribute — the full node id for a real test, or the bracket
-    token for a sentinel; emitted verbatim."""
+    """The `name` attribute: the full node id for a real test, or the bracket
+    token for a sentinel. Emitted verbatim."""
     var classname: String
     """The `classname` attribute (the suite's dotted stem)."""
     var has_primary: Bool
@@ -122,8 +123,8 @@ struct JunitSuite(Copyable, Movable):
     """
 
     var name: String
-    """The suite `name` — the exact root-relative path (or a session-level id
-    like `mtest::precompile`)."""
+    """The suite `name`: the exact root-relative path, or a session-level id
+    like `mtest::precompile`."""
     var time_seconds: Float64
     """The suite wall clock, rendered by `format_seconds`."""
     var cases: List[JunitCase]
@@ -180,6 +181,14 @@ def format_seconds(seconds: Float64) -> String:
 
     Returns:
         `"<whole>.<3 digits>"`, for example `"0.043"`.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.junit import format_seconds
+
+    var t = format_seconds(0.21)  # "0.210"
+    ```
     """
     if not (seconds > 0.0):
         return "0.000"
@@ -212,6 +221,14 @@ def dotted_classname(path: String) -> String:
 
     Returns:
         The dotted stem.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.junit import dotted_classname
+
+    var cn = dotted_classname("e2e/suite/test_failing.mojo")
+    ```
     """
     var noext = String(path.removesuffix(".mojo"))
     var out = List[UInt8]()
@@ -238,6 +255,14 @@ def node_sort_key(suite_name: String, case_name: String) -> String:
 
     Returns:
         The node-id string used as the row order key.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.junit import node_sort_key
+
+    var k = node_sort_key("e2e/x.mojo", "[build]")  # "e2e/x.mojo::[build]"
+    ```
     """
     if "::" in case_name:
         return case_name.copy()
@@ -260,6 +285,17 @@ def bounded_text_from_bytes(data: List[UInt8]) -> String:
 
     Returns:
         The bounded, lossy-decoded text.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.junit import bounded_text_from_bytes
+
+    var data = List[UInt8]()
+    for b in String("hi & <there>").as_bytes():
+        data.append(b)
+    var text = bounded_text_from_bytes(data)
+    ```
     """
     var n = len(data)
     if n <= _JUNIT_HEAD + _JUNIT_TAIL:
@@ -347,9 +383,9 @@ def render_suite(suite: JunitSuite) -> RenderedSuite:
     """Render one `<testsuite>` fragment, node-id-sorted, with computed counts.
 
     The rows are ordered by the frozen `node_sort_key`. The aggregate counts are
-    recomputed from the rows — a `failure`/`error`/`skipped` primary counts once
-    against its class, every other row is passing — so the declared attributes
-    cannot disagree with the body. Suite-scope `system_out`/`system_err` attach
+    recomputed from the rows, so the declared attributes cannot disagree with the
+    body: a `failure`/`error`/`skipped` primary counts once against its class,
+    and every other row is passing. Suite-scope `system_out`/`system_err` attach
     after the rows.
 
     Args:
@@ -357,6 +393,21 @@ def render_suite(suite: JunitSuite) -> RenderedSuite:
 
     Returns:
         The rendered fragment plus its counts and order key.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.junit import (
+        JunitCase, JunitPrimary, JunitRerun, JunitSuite, render_suite
+    )
+
+    var primary = JunitPrimary("skipped", "", "", "")
+    var cases = List[JunitCase]()
+    cases.append(
+        JunitCase("a/x.mojo::t", "a.x", True, primary.copy(), List[JunitRerun]())
+    )
+    var r = render_suite(JunitSuite("a/x.mojo", 0.043, cases^, "", ""))
+    ```
     """
     var n = len(suite.cases)
     var keys = List[String]()
@@ -420,6 +471,19 @@ def assemble(root_name: String, frags: List[RenderedSuite]) -> String:
     Returns:
         The complete, well-formed `<testsuites>` document with a leading XML
         declaration and a trailing newline.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.junit import (
+        JunitCase, JunitSuite, RenderedSuite, assemble, render_suite
+    )
+
+    var cases = List[JunitCase]()
+    var frags = List[RenderedSuite]()
+    frags.append(render_suite(JunitSuite("b/y.mojo", 0.0, cases^, "", "")))
+    var doc = assemble("mtest", frags)
+    ```
     """
     var n = len(frags)
     var order = List[Int]()

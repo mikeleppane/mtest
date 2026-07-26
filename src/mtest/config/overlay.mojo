@@ -211,6 +211,18 @@ struct CliOverlay(Copyable, Movable):
 
         Returns:
             A newly allocated defaults-folded config.
+
+        Examples:
+
+        ```mojo
+        from mtest.config import CliOverlay, RunnerConfig
+
+        var overlay = CliOverlay.default()
+        overlay.timeout_secs = 9
+        overlay.saw_timeout = True
+        # Only `timeout_secs` moves; every other field stays at its default.
+        var config = overlay.fold(RunnerConfig.default())
+        ```
         """
         var config = defaults.copy()
         if self.saw_paths:

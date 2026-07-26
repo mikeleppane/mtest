@@ -14,17 +14,21 @@ that actor wrote and on what the runner's capture bound retained of it.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import functools
 import importlib.util
 import os
-import re
-from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType
-from xml.etree import ElementTree
+import re
+from typing import TYPE_CHECKING
+from xml.etree import ElementTree as ET
 
 from scripts.checks.reports import json_stream as json_stream_check
 from scripts.e2e.runner import REPO_ROOT, Run, ScenarioError
+
+
+if TYPE_CHECKING:
+    from types import ModuleType
 
 
 SUMMARY_RE = re.compile(
@@ -48,9 +52,11 @@ VERDICT_TO_BUCKET = {
     "TIMEOUT": "timed_out",
     "COMPILE-ERROR": "compile_error",
 }
-VERDICT_LINE_TOKENS = list(VERDICT_TO_BUCKET) + ["NO-TESTS"]
+VERDICT_LINE_TOKENS = [*list(VERDICT_TO_BUCKET), "NO-TESTS"]
 VERDICT_LINE_RE = re.compile(
-    r"^(?:" + "|".join(re.escape(token) for token in VERDICT_LINE_TOKENS) + r")\s+(\S+)",
+    r"^(?:"
+    + "|".join(re.escape(token) for token in VERDICT_LINE_TOKENS)
+    + r")\s+(\S+)",
     re.MULTILINE,
 )
 
@@ -323,14 +329,46 @@ def stream_files(text: str) -> StreamFiles:
     started: list[str] = []
     finished: dict[str, str] = {}
     summary: dict[str, int] = {}
+
+    # `parse_stream` validates FRAMING, the header version, and terminal
+    # cardinality. It does NOT type-check event fields: a record carrying
+    # `"path": 7` parses fine. Casting here would therefore assert a guarantee
+    # nothing provides, and the wrong type would surface later as a TypeError
+    # from sorting mixed paths rather than as the diagnosis this oracle exists
+    # to produce. So each field is checked where it is read.
+    def field(record: dict[str, object], key: str, event_name: str) -> str:
+        """Read one string field, or reject the record naming what was wrong."""
+        value = record.get(key, "")
+        if not isinstance(value, str):
+            raise ScenarioError(
+                f"{event_name} record field {key!r} is {type(value).__name__}, "
+                f"not a string: {value!r}"
+            )
+        return value
+
     for record in report.records:
         event = record.get("event")
         if event == "file_started":
-            started.append(record.get("path", ""))
+            started.append(field(record, "path", "file_started"))
         elif event == "file_finished":
-            finished[record.get("path", "")] = record.get("outcome", "")
+            finished_path = field(record, "path", "file_finished")
+            finished[finished_path] = field(record, "outcome", "file_finished")
         elif event == "session_finished":
-            summary = dict(record.get("summary", {}))
+            raw_summary = record.get("summary", {})
+            if not isinstance(raw_summary, dict):
+                raise ScenarioError(
+                    "session_finished summary is "
+                    f"{type(raw_summary).__name__}, not an object: {raw_summary!r}"
+                )
+            for key, value in raw_summary.items():
+                # Loud, not filtered: dropping a non-integer count would make a
+                # malformed summary look like a summary that simply omitted it.
+                if not isinstance(value, int):
+                    raise ScenarioError(
+                        f"session_finished summary count {key!r} is "
+                        f"{type(value).__name__}, not an integer: {value!r}"
+                    )
+                summary[str(key)] = value
     return StreamFiles(
         started=tuple(started),
         finished=finished,
@@ -349,7 +387,7 @@ def junit_not_run_files(path: str | Path) -> tuple[str, ...]:
     Returns:
         Each suite name whose only row is the not-run marker.
     """
-    root = ElementTree.parse(os.fspath(path)).getroot()
+    root = ET.parse(os.fspath(path)).getroot()
     suites = root.iter("testsuite") if root.tag != "testsuite" else [root]
     names: list[str] = []
     for suite in suites:
@@ -433,7 +471,7 @@ def capture_marker(omitted: int) -> bytes:
     return (
         f"\n[mtest: output truncated — {omitted} bytes omitted, "
         f"limit {CAPTURE_BOUND_BYTES} bytes]\n"
-    ).encode("utf-8")
+    ).encode()
 
 
 @dataclass(frozen=True)

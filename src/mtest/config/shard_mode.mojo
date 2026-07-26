@@ -13,6 +13,15 @@ struct ShardMode(Equatable, ImplicitlyCopyable, Movable):
 
     A wrapper over a stable integer discriminant, so the vocabulary is a closed
     set of named constants that compare by value.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import RunnerConfig, ShardMode
+
+    var config = RunnerConfig.default()
+    config.shard_mode = ShardMode.SLICE
+    ```
     """
 
     var value: Int

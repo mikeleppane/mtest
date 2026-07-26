@@ -2,10 +2,10 @@
 
 The session's honesty rests on keeping the four run endings distinct: a crash is
 never a failure, our deadline kill is never a crash, and a spawn failure is not
-a test outcome at all. It also rests on treating a compiler that dies by a
-signal as a build failure rather than a test crash. Those two mappings are
-isolated here as pure, total functions, so they can be table-tested over every
-`Termination` kind independently of any process, filesystem, or reporter.
+a test outcome at all. A compiler that dies by a signal is likewise a build
+failure, not a test crash. Both mappings are pure, total functions here, so they
+can be table-tested over every `Termination` kind independently of any process,
+filesystem, or reporter.
 
 Both borrow two vocabulary values as internal sentinels that the orchestrator
 branches on but never emits as a file's outcome:
@@ -38,6 +38,17 @@ def run_verdict(t: Termination) -> Outcome:
 
     Returns:
         The reported `Outcome` for the run.
+
+    Examples:
+
+    ```mojo
+    from mtest.exec import Termination
+    from mtest.session import run_verdict
+
+    var crashed = run_verdict(Termination.signaled(11))
+    var failed = run_verdict(Termination.exited(1))
+    # crashed is Outcome.CRASH and failed is Outcome.FAIL: distinct tallies.
+    ```
     """
     if t.is_exited():
         return Outcome.PASS if t.value == 0 else Outcome.FAIL
@@ -74,6 +85,17 @@ def build_verdict(t: Termination) -> Outcome:
         `PASS` to proceed, `COMPILE_TIMEOUT` for a deadline kill,
         `COMPILE_ERROR` on any other failed build, or the `NOT_RUN` spawn
         sentinel.
+
+    Examples:
+
+    ```mojo
+    from mtest.exec import Termination
+    from mtest.session import build_verdict
+
+    var ok = build_verdict(Termination.exited(0))
+    var broken = build_verdict(Termination.exited(1))
+    # ok is the PASS sentinel (proceed to the run); broken is COMPILE_ERROR.
+    ```
     """
     if t.is_exited() and t.value == 0:
         return Outcome.PASS

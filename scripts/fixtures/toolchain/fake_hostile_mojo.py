@@ -30,6 +30,7 @@ import os
 import stat
 import sys
 
+
 REPO_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
@@ -88,7 +89,9 @@ def _write_actor(out: str, canonical: str) -> None:
     with open(out, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines))
     mode = os.stat(out).st_mode
-    os.chmod(out, mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    # S103 is expected: mtest spawns this build product as a binary, so the
+    # execute bits are what makes the fixture mean anything.
+    os.chmod(out, mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)  # noqa: S103
 
 
 def main() -> int:

@@ -25,7 +25,9 @@ expected and is exactly why these are documentation, not wired into any check.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import os
+from pathlib import Path
 import pty
 import re
 import select
@@ -33,8 +35,7 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
-from pathlib import Path
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MTEST = REPO_ROOT / "build" / "mtest"
@@ -168,19 +169,24 @@ def ansi_to_svg(raw: bytes, display_command: str) -> str:
     width = round(PAD * 2 + max(plain_lengths) * CHAR_W)
     height = PAD * 2 + len(lines) * LINE_H
     parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}"'
-        f' font-family="{FONT}" font-size="{FONT_SIZE}">',
-        f'<rect width="{width}" height="{height}" rx="8" fill="{BG}"'
-        f' stroke="{BORDER}"/>',
+        (
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}"'
+            f' font-family="{FONT}" font-size="{FONT_SIZE}">'
+        ),
+        (
+            f'<rect width="{width}" height="{height}" rx="8" fill="{BG}"'
+            f' stroke="{BORDER}"/>'
+        ),
     ]
     for index, line in enumerate(lines):
         y = PAD + LINE_H * index + FONT_SIZE
         spans = ""
         for color, segment in _line_segments(line):
-            if index == 0 and segment.startswith("$ "):
+            chunk = segment
+            if index == 0 and chunk.startswith("$ "):
                 spans += f'<tspan fill="{PROMPT}">$ </tspan>'
-                segment = segment[2:]
-            spans += f'<tspan fill="{color}">{_xml_escape(segment)}</tspan>'
+                chunk = chunk[2:]
+            spans += f'<tspan fill="{color}">{_xml_escape(chunk)}</tspan>'
         if spans:
             parts.append(f'<text x="{PAD}" y="{y}" xml:space="preserve">{spans}</text>')
     parts.append("</svg>")
@@ -188,6 +194,16 @@ def ansi_to_svg(raw: bytes, display_command: str) -> str:
 
 
 def main() -> int:
+    """Re-record every console scenario and write its SVG into the output dir.
+
+    Each scenario's reset paths are removed first so a capture never inherits
+    state from the previous one, and a scenario whose exit code does not match
+    the expected one aborts the whole regeneration.
+
+    Returns:
+        0 once every scenario has been captured and written, or 1 when the mtest
+        binary is missing or a scenario exited unexpectedly.
+    """
     if not MTEST.is_file():
         print(f"console-svg: missing {MTEST}; run `pixi run build-bin` first")
         return 1

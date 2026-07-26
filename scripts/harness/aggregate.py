@@ -50,11 +50,7 @@ def discover_test_files(repo_root: Path, roots: list[Path]) -> list[Path]:
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
             current = Path(dirpath)
             dirnames[:] = sorted(
-                (
-                    name
-                    for name in dirnames
-                    if not (current / name).is_symlink()
-                ),
+                (name for name in dirnames if not (current / name).is_symlink()),
                 key=os.fsencode,
             )
             for name in sorted(filenames, key=os.fsencode):
@@ -130,18 +126,23 @@ def render_entrypoint(
         "",
     ]
     for index, module in enumerate(modules):
-        lines.append(
-            f"import {_module_name(module.path)} as _mtest_module_{index}"
-        )
-    lines.extend(["", "", "def main() raises:", '    """Run every generated module suite in deterministic order."""'])
+        lines.append(f"import {_module_name(module.path)} as _mtest_module_{index}")
+    lines.extend(
+        [
+            "",
+            "",
+            "def main() raises:",
+            '    """Run every generated module suite in deterministic order."""',
+        ]
+    )
     for index, module in enumerate(modules):
         alias = f"_mtest_module_{index}"
-        lines.append(
-            f'    print("{marker_prefix}{module.path}", flush=True)'
-        )
+        lines.append(f'    print("{marker_prefix}{module.path}", flush=True)')
         lines.append(f"    var suite_{index} = TestSuite()")
-        for function in module.test_functions:
-            lines.append(f"    suite_{index}.test[{alias}.{function}]()")
+        lines.extend(
+            f"    suite_{index}.test[{alias}.{function}]()"
+            for function in module.test_functions
+        )
         lines.append(f"    suite_{index}^.run()")
         if index + 1 < len(modules):
             lines.append("")
@@ -170,13 +171,19 @@ def write_entrypoint(
     paths = discover_test_files(repo_root, roots)
     modules = load_modules(repo_root, paths)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(
-        render_entrypoint(modules, marker_prefix), encoding="utf-8"
-    )
+    output.write_text(render_entrypoint(modules, marker_prefix), encoding="utf-8")
     return modules
 
 
 def main(argv: list[str]) -> int:
+    """Generate the aggregate entrypoint for the roots named on the command line.
+
+    Args:
+        argv: Full process argv; `argv[0]` is skipped as the program name.
+
+    Returns:
+        0 once the entrypoint is written, or 2 when discovery or the write failed.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("roots", nargs="+", type=Path)

@@ -12,12 +12,7 @@ from scripts.checks import readme_help
 
 
 VALID_README = (
-    b"# mtest\n\n"
-    b"## CLI reference\n\n"
-    b"```text\n"
-    b"generated help\n"
-    b"```\n\n"
-    b"## Next section\n"
+    b"# mtest\n\n## CLI reference\n\n```text\ngenerated help\n```\n\n## Next section\n"
 )
 
 
@@ -66,9 +61,11 @@ class ReadmeHelpSubprocessTests(unittest.TestCase):
                 stdout=b"",
                 stderr=b"bad invocation\n",
             )
-            with mock.patch.object(readme_help.subprocess, "run", return_value=run):
-                with self.assertRaisesRegex(AssertionError, "exited 4"):
-                    readme_help.check_readme_help(self._repo(raw_tmp))
+            with (
+                mock.patch.object(subprocess, "run", return_value=run),
+                self.assertRaisesRegex(AssertionError, "exited 4"),
+            ):
+                readme_help.check_readme_help(self._repo(raw_tmp))
 
     def test_rejects_help_stderr(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-readme-help-") as raw_tmp:
@@ -78,30 +75,36 @@ class ReadmeHelpSubprocessTests(unittest.TestCase):
                 stdout=b"generated help\n",
                 stderr=b"unexpected\n",
             )
-            with mock.patch.object(readme_help.subprocess, "run", return_value=run):
-                with self.assertRaisesRegex(AssertionError, "wrote stderr"):
-                    readme_help.check_readme_help(self._repo(raw_tmp))
+            with (
+                mock.patch.object(subprocess, "run", return_value=run),
+                self.assertRaisesRegex(AssertionError, "wrote stderr"),
+            ):
+                readme_help.check_readme_help(self._repo(raw_tmp))
 
     def test_rejects_help_timeout(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-readme-help-") as raw_tmp:
             timeout = subprocess.TimeoutExpired(["mtest", "--help"], 30)
-            with mock.patch.object(
-                readme_help.subprocess,
-                "run",
-                side_effect=timeout,
+            with (
+                mock.patch.object(
+                    subprocess,
+                    "run",
+                    side_effect=timeout,
+                ),
+                self.assertRaisesRegex(AssertionError, "exceeded 30 seconds"),
             ):
-                with self.assertRaisesRegex(AssertionError, "exceeded 30 seconds"):
-                    readme_help.check_readme_help(self._repo(raw_tmp))
+                readme_help.check_readme_help(self._repo(raw_tmp))
 
     def test_rejects_missing_binary(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="mtest-readme-help-") as raw_tmp:
-            with mock.patch.object(
-                readme_help.subprocess,
+        with (
+            tempfile.TemporaryDirectory(prefix="mtest-readme-help-") as raw_tmp,
+            mock.patch.object(
+                subprocess,
                 "run",
                 side_effect=FileNotFoundError,
-            ):
-                with self.assertRaisesRegex(AssertionError, "binary is missing"):
-                    readme_help.check_readme_help(self._repo(raw_tmp))
+            ),
+            self.assertRaisesRegex(AssertionError, "binary is missing"),
+        ):
+            readme_help.check_readme_help(self._repo(raw_tmp))
 
     def test_rejects_stdout_drift(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-readme-help-") as raw_tmp:
@@ -111,9 +114,11 @@ class ReadmeHelpSubprocessTests(unittest.TestCase):
                 stdout=b"different help\n",
                 stderr=b"",
             )
-            with mock.patch.object(readme_help.subprocess, "run", return_value=run):
-                with self.assertRaisesRegex(AssertionError, "differs"):
-                    readme_help.check_readme_help(self._repo(raw_tmp))
+            with (
+                mock.patch.object(subprocess, "run", return_value=run),
+                self.assertRaisesRegex(AssertionError, "differs"),
+            ):
+                readme_help.check_readme_help(self._repo(raw_tmp))
 
 
 if __name__ == "__main__":

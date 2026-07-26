@@ -11,6 +11,17 @@ struct Precompile(Copyable, Movable):
     """One `--precompile` entry: a source path and an optional output name.
 
     Owns its string fields, so every copy is an explicit `.copy()`.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import Precompile
+
+    var src_only = Precompile(src="tests/helper.mojo", out=Optional[String](None))
+    var named = Precompile(
+        src="tests/helper.mojo", out=Optional[String]("helper")
+    )
+    ```
     """
 
     var src: String

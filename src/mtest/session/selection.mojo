@@ -2,18 +2,18 @@
 
 Layer 4, the path taken when any operand is a node id or `-k` is present. This
 module is the DRIVER: it asks `pipeline`'s `RunPipeline` kernel which step the
-run wants next — build this file, probe it, announce the collection, replay a
-terminal verdict, skip a fully deselected file, run a selection — executes that
+run wants next (build this file, probe it, announce the collection, replay a
+terminal verdict, skip a fully deselected file, run a selection), executes that
 one step against `exec`, and folds what happened back into the kernel. The
 kernel decides; the driver performs. Exactly one step is ever in flight.
 
 The kernel's collection barrier is what makes the run two-pass: every run file
 is built and probed so the run-wide selected and deselected totals are known
 before a single body executes, and only then does each file's subset run under
-`--only`, suppressing the deselected rows and reconciling what came back
+`--only`, which suppresses the deselected rows and reconciles what came back
 against the universe the probe collected. A row set that disagrees with the
-universe, or a deselected test that ran anyway, is a malformed suite at exit 1 —
-never drift, which stays reserved for a report that left the pinned grammar.
+universe, or a deselected test that ran anyway, is a malformed suite at exit 1,
+never drift: drift stays reserved for a report that left the pinned grammar.
 
 Two recovery mechanisms compose here with separate budgets, both admitted by the
 kernel: a bounded recover-once for a suite that refuses a name it just listed
@@ -92,7 +92,7 @@ comptime _UNHANDLED_PREFIX = "Unhandled exception caught during execution:"
 """The runtime framing that carries a stale-name refusal as its payload.
 
 A stale-name refusal aborts the suite before any report is printed, so the
-stdlib emits the phrase as this line's payload — e.g. `Unhandled exception
+stdlib emits the phrase as this line's payload, for example `Unhandled exception
 caught during execution: explicitly allowed test not found in suite: test_x`.
 Anchoring stale-name detection on this framing keeps a test that merely prints
 the phrase in its own output from tripping a wasted rebuild and reprobe."""
@@ -185,7 +185,7 @@ struct _Collected(Copyable, Movable):
     (possibly re-probed) `selected`, but a crash is attributed against this
     original set: a recovery re-probe can re-select to EMPTY under a `-k` filter
     that no longer matches the fresh universe, and empty means "no selection",
-    which attribution widens to the whole universe — falsely accusing a
+    which attribution widens to the whole universe. That would falsely accuse a
     deselected test. Attributing against the original keeps a deselected test
     out of the isolation set exactly as it was before recovery ran."""
     var deselected: List[String]
@@ -286,7 +286,7 @@ def _reconcile_and_classify(
     must be valid and its row set must equal the universe, and every
     non-selected row must be a suppressed skip counted as deselected. A
     non-selected row that ran, or any membership instability, is
-    `MALFORMED_SUITE` — the exit-1 class, never drift. The selected rows drive
+    `MALFORMED_SUITE`, the exit-1 class, never drift. The selected rows drive
     the verdict through the classifier.
 
     Args:
@@ -558,12 +558,12 @@ def _classified_terminal(
 ) -> FileResult:
     """Build a file-level terminal result from a `Classification`.
 
-    Bridges a selection run whose report was not a reconcilable valid one — a
-    capture overflow, an off-grammar drift, or an absent or ambiguous report —
-    from the `classify` result to a `FileResult`, so the selection path emits
-    the same outcome, disposition, warning, exit-code contribution, and drift
-    flag the default run path would for the identical report. Carries no
-    per-test rows.
+    Bridges the `classify` result to a `FileResult` for a selection run whose
+    report was not a reconcilable valid one: a capture overflow, an off-grammar
+    drift, or an absent or ambiguous report. The selection path then emits the
+    same outcome, disposition, warning, exit-code contribution, and drift flag
+    the default run path would for the identical report. Carries no per-test
+    rows.
 
     Args:
         rel: The root-relative path of the file.
@@ -685,8 +685,8 @@ def _chameleon_result(
     """The verdict for a suite that refused a listed name twice running.
 
     A second stale-name refusal after a fresh rebuild and recollect is a
-    malformed suite at exit 1 — the module's `--skip-all` listing disagrees
-    with the names it accepts under `--only` — never drift.
+    malformed suite at exit 1, never drift: the module's `--skip-all` listing
+    disagrees with the names it accepts under `--only`.
 
     Args:
         c: The refusing file's payload.

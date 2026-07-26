@@ -3,8 +3,9 @@
 Where `json_stream` is the pure serializer turning one `Event` into one NDJSON
 line, this is its sink: a `Reporter` that owns one resolved destination
 descriptor and writes each serialized line to it live, as the session emits
-events. It is the machine twin of `ConsoleReporter` — same `handle` seam,
-different medium — and the one place in the report layer that performs I/O.
+events. It is the machine twin of `ConsoleReporter`, sharing the `handle` seam
+over a different medium, and the one place in the report layer that performs
+I/O.
 
 Three properties define it:
 
@@ -21,21 +22,21 @@ Three properties define it:
   itself stays total and non-raising per the trait.
 
 An inert reporter, from `inert()`, is the no-`--json` shape: it owns no
-descriptor, writes nothing, emits no header, and never latches. It exists so
-the session's reporter composition can carry a stream slot at a fixed tuple
-position whether or not `--json` was requested.
+descriptor, writes nothing, emits no header, and never latches. It exists so a
+coordinator can fill its named stream slot whether or not `--json` was
+requested, and answer `stream_failed()` without branching on what is composed.
 
 Descriptor ownership stays with the caller: `open_json_fd` opens a path and
 `close_json_fd` closes it, and `main` closes what it opened after the session.
 The reporter only borrows the descriptor, which keeps the type trivially
-`Copyable, Movable` — an fd is an integer — with no double-close hazard.
+`Copyable, Movable` (an fd is an integer) with no double-close hazard.
 
 The write and create/close syscalls, and the `errno` reading that classifies
 their failures, are raw platform operations from `mtest.platform.stream`. They
 are imported from that submodule directly rather than through the platform
 package's public surface, so the raw libc `write` declaration reaches only this
-one report module — the layer that already carried it — and not every module
-that merely wants a process id. This module keeps only the policy: the retrying
+one report module, the layer that already carried it, and not every module that
+merely wants a process id. This module keeps only the policy: the retrying
 write-all loop, the failure latch, the error messages, and the `EINTR` rules.
 """
 from mtest.model import Event, EventKind
@@ -49,7 +50,7 @@ from mtest.report.json_stream import serialize_event, stream_header
 from mtest.report.reporter import Reporter
 
 comptime _EINTR = 4
-"""`errno` for an interrupted syscall — a `write` to retry, not a failure."""
+"""`errno` for an interrupted syscall: a `write` to retry, not a failure."""
 
 
 def open_json_fd(path: String) raises -> Int:
@@ -65,10 +66,19 @@ def open_json_fd(path: String) raises -> Int:
         The open descriptor.
 
     Raises:
-        Error: When `creat(2)` failed — a missing parent directory that slipped
+        Error: When `creat(2)` failed: a missing parent directory that slipped
             past parse-time validation, a permission denial, or descriptor
             exhaustion. The message names the errno. The caller resolves this
             to the internal-error exit code, a pre-run environment failure.
+
+    Examples:
+
+    ```mojo
+    from mtest.report import close_json_fd, open_json_fd
+
+    var fd = open_json_fd("events.ndjson")
+    _ = close_json_fd(fd)
+    ```
     """
     var result = create_truncate_fd(path)
     if result.fd < 0:
@@ -117,9 +127,9 @@ struct StreamStatus(Copyable, Movable):
     """The pollable health of a `JsonStreamReporter`'s destination.
 
     `failed` is the latch: once true it stays true. `errno` is the captured
-    cause of the first failed write — 0 when the stream never failed, and also
-    0 when a write reported no progress rather than an error. `context` names
-    what was being written when the latch tripped, for a diagnostic.
+    cause of the first failed write. It is 0 when the stream never failed, and
+    also 0 when a write reported no progress rather than an error. `context`
+    names what was being written when the latch tripped, for a diagnostic.
     """
 
     var failed: Bool
@@ -137,8 +147,22 @@ struct JsonStreamReporter(Reporter):
     active reporter writes the header line; each `handle` serializes the event
     and writes the line plus a newline through the write-all loop. On any write
     failure the reporter latches and goes silent. `Copyable, Movable`, since
-    every field is trivial or an owned `String`, so it composes into the
-    reporter tuple.
+    every field is trivial or an owned `String`, so it moves into a
+    coordinator's named slot or a composite's tuple.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import Event
+    from mtest.report.json_stream_reporter import (
+        JsonStreamReporter, close_json_fd, open_json_fd,
+    )
+
+    var fd = open_json_fd("events.ndjson")
+    var rep = JsonStreamReporter(fd, "0.6.0", True)
+    rep.handle(Event.file_started("tests/test_a.mojo"))
+    _ = close_json_fd(fd)
+    ```
     """
 
     var _fd: Int

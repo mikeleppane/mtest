@@ -10,11 +10,10 @@ These escapers take Mojo `String`s, which are valid UTF-8 by construction, and
 never re-decode. Callers are responsible for getting raw captured child bytes
 into that form first, by decoding them through `lossy_utf8`; strings that were
 never raw bytes (a version label, a JUnit root or suite name) arrive here
-directly. They work byte-for-byte: every
-delimiter they act on (`"`, `\\`, `&`, `<`, `>`, `%`, `:`, `,`, and the C0
-control bytes) is a single ASCII byte, so a plain byte scan that copies every
-other byte straight through can never split a multi-byte UTF-8 sequence or
-misinterpret a continuation byte.
+directly. They work byte-for-byte: every delimiter they act on (`"`, `\\`, `&`,
+`<`, `>`, `%`, `:`, `,`, and the C0 control bytes) is a single ASCII byte, so a
+plain byte scan that copies every other byte straight through can never split a
+multi-byte UTF-8 sequence or misinterpret a continuation byte.
 
 The `::stop-commands::<token>` fencing protocol that echoes this escaped output
 into GitHub Actions safely lives beside these escapers in `fencing.mojo`.
@@ -25,9 +24,9 @@ escapers therefore finish by running their result through `console_text`, the
 runner's console escaper, rather than growing a second copy of that policy
 here. `console_text` in turn takes its classification of which code points a
 terminal interprets from `mtest.model.control_chars`, the one definition every
-terminal-facing surface in the runner shares. The XML and JSON escapers do not: their documents are never
-handed to a terminal, and both already have a total answer for every control
-code point under their own format's rules.
+terminal-facing surface in the runner shares. The XML and JSON escapers do not
+run that pass: their documents are never handed to a terminal, and both already
+have a total answer for every control code point under their own format's rules.
 """
 from mtest.report.console_text import escape_multiline
 
@@ -64,9 +63,9 @@ def json_escape_string(s: String) -> String:
 
     `"` becomes `\\"`, `\\` becomes `\\\\`, LF/CR/Tab take their short forms
     `\\n`/`\\r`/`\\t`, and every remaining byte below 0x20 becomes `\\u00XX`.
-    Every other byte — including a valid multi-byte UTF-8 sequence or an
-    embedded U+FFFD — passes through unchanged: `s` is already valid UTF-8, so
-    a plain byte copy cannot corrupt a sequence, and JSON does not require
+    Every other byte passes through unchanged, including a valid multi-byte
+    UTF-8 sequence and an embedded U+FFFD: `s` is already valid UTF-8, so a
+    plain byte copy cannot corrupt a sequence, and JSON does not require
     escaping non-ASCII text.
 
     This covers string content only; number formatting is the caller's policy.
@@ -76,6 +75,14 @@ def json_escape_string(s: String) -> String:
 
     Returns:
         `s` with `"`, `\\`, and every C0 control byte escaped.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.escape import json_escape_string
+
+    var line = '{"detail":"' + json_escape_string('say "hi"') + '"}'
+    ```
     """
     var out = List[UInt8]()
     for b in s.as_bytes():
@@ -111,7 +118,7 @@ def _is_xml_noncharacter(data: List[UInt8], i: Int) -> Bool:
     """Whether an XML-1.0-forbidden noncharacter begins at byte `i`.
 
     XML 1.0's `Char` production excludes U+FFFE and U+FFFF; its BMP range stops
-    at U+FFFD. Both are valid UTF-8 scalars — `EF BF BE` and `EF BF BF` — that
+    at U+FFFD. Both are valid UTF-8 scalars (`EF BF BE` and `EF BF BF`) that
     `lossy_utf8` passes through, so text can be well-formed UTF-8 yet illegal
     XML 1.0. The XML escapers use this to replace them. JSON permits these
     scalars and is unaffected.
@@ -139,6 +146,14 @@ def xml_escape_text(s: String) -> String:
 
     Returns:
         `s` escaped for a well-formed XML 1.0 text node.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.escape import xml_escape_text
+
+    var body = "<failure>" + xml_escape_text("a & b") + "</failure>"
+    ```
     """
     var data = _string_bytes(s)
     var n = len(data)
@@ -182,6 +197,14 @@ def xml_escape_attribute(s: String) -> String:
 
     Returns:
         `s` escaped for a well-formed, round-trip-safe XML 1.0 attribute value.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.escape import xml_escape_attribute
+
+    var attr = ' name="' + xml_escape_attribute('t "x"') + '"'
+    ```
     """
     var data = _string_bytes(s)
     var n = len(data)
@@ -236,7 +259,7 @@ def gh_escape_message(s: String) -> String:
     rides through literally: it is legal inside a workflow command and cannot
     address a terminal.
 
-    A C1 control is two UTF-8 bytes, so this pass — unlike the first — replaces
+    A C1 control is two UTF-8 bytes, so this pass, unlike the first, replaces
     whole code points rather than single bytes. It never splits a sequence, so
     the result is still valid UTF-8 and still safe to bound by code point.
 
@@ -246,6 +269,14 @@ def gh_escape_message(s: String) -> String:
     Returns:
         `s` escaped for a workflow-command message field, carrying no control
         character a terminal would execute.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.escape import gh_escape_message
+
+    var line = "::error::" + gh_escape_message("100% broken")
+    ```
     """
     var out = List[UInt8]()
     for b in s.as_bytes():
@@ -264,7 +295,7 @@ def gh_escape_message(s: String) -> String:
 def gh_escape_property(s: String) -> String:
     """Escape `s` for a GitHub Actions workflow-command property value.
 
-    Runs the whole message escape first — both of its passes, the
+    Runs the whole message escape first, both of its passes: the
     workflow-command encoding (`%` -> `%25`, CR -> `%0D`, LF -> `%0A`) and the
     terminal-safety pass that follows it, which rewrites every remaining C0
     control except Tab, plus DEL, as `\\xHH`, and every C1 control as `\\u00HH`.
@@ -284,6 +315,14 @@ def gh_escape_property(s: String) -> String:
 
     Returns:
         `s` escaped for a workflow-command property value.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.escape import gh_escape_property
+
+    var head = "::error file=" + gh_escape_property("tests/a:b.mojo") + "::"
+    ```
     """
     var msg_escaped = gh_escape_message(s)
     var out = List[UInt8]()

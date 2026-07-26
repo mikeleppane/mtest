@@ -1,17 +1,16 @@
 """The cli layer of the mtest runner: parsing and command-local diagnosis.
 
-The parser turns an argument vector into a
-`ParseResult` — a typed argv overlay plus its defaults-folded `RunnerConfig`,
-tagged as a run, config-display, or doctor request, or a directive to print
-help or the version. A usage error is raised as a `cli:`-prefixed `Error` for
-`main` to print to stderr before exiting 4. The doctor runner owns its fixed,
-contained Layer-5 diagnostics and returns lines to `main`; it never enters a
-session or reporter.
+The parser turns an argument vector into a `ParseResult`: a typed argv overlay
+plus its defaults-folded `RunnerConfig`, tagged as a run, config-display, or
+doctor request, or a directive to print help or the version. A usage error is
+raised as a `cli:`-prefixed `Error` for `main` to print to stderr before
+exiting 4. The doctor runner owns its fixed, contained Layer-5 diagnostics and
+returns lines to `main`; it never enters a session or reporter.
 
 The parser is table-driven. `flag_specs()` is the single source of truth for
 every accepted spelling: its arity, whether it repeats, and its owned help text,
-value placeholder, and group. The full v1 grammar is parsed today, and the
-grouped help output is generated from that same table.
+value placeholder, and group. It parses the full v1 grammar, and the grouped
+help output is generated from that same table.
 
 The layer also owns `build_flags_string`, which renders a `RunnerConfig` back
 into the shell-ready flag string the console echoes in a run-failure

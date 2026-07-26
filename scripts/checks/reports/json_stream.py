@@ -29,12 +29,14 @@ LENIENT (the forward-compatibility obligation)
 Run directly (`python -m scripts.checks.reports.json_stream`) to self-test against the
 forward-compatibility and truncation fixtures under `scripts/fixtures/`.
 """
+
 from __future__ import annotations
 
-import json
-import sys
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
+import sys
+
 
 STREAM_VERSION = 1
 """The frozen v1 stream version carried on the header line."""
@@ -79,11 +81,11 @@ def strict_loads(line: str) -> object:
 class StreamReport:
     """The result of consuming a stream: its records and its truncation state."""
 
-    records: list[dict] = field(default_factory=list)
+    records: list[dict[str, object]] = field(default_factory=list)
     """Every committed (newline-terminated) record, in order."""
     version: int | None = None
     """The header's `version` integer, or `None` when the header was absent."""
-    terminal: dict | None = None
+    terminal: dict[str, object] | None = None
     """The single `session_finished` record, or `None` when the stream was torn."""
     torn_tail: bool = False
     """Whether a trailing UNTERMINATED fragment was present (a truncation signal).
@@ -91,6 +93,12 @@ class StreamReport:
 
     @property
     def exit_code(self) -> int | None:
+        """The terminal record's `exit_code`, or None when it is absent.
+
+        None also covers a torn stream (no terminal record at all) and a
+        terminal whose `exit_code` is not an integer, so a caller can never
+        read a forged non-integer as a process exit status.
+        """
         if self.terminal is None:
             return None
         code = self.terminal.get("exit_code")
@@ -130,8 +138,7 @@ def parse_stream(text: str, *, require_header: bool = True) -> StreamReport:
         header = report.records[0]
         if header.get("event") != "stream":
             raise StreamError(
-                f"first record is not the stream header: event="
-                f"{header.get('event')!r}"
+                f"first record is not the stream header: event={header.get('event')!r}"
             )
         version = header.get("version")
         if not isinstance(version, int):
@@ -167,7 +174,9 @@ def _selftest() -> int:
     # kind are ACCEPTED; the terminal and version still read cleanly.
     fc = (FIXTURE_DIR / "forward_compat.ndjson").read_text(encoding="utf-8")
     report = parse_stream(fc)
-    check("forward_compat.version", report.version == STREAM_VERSION, str(report.version))
+    check(
+        "forward_compat.version", report.version == STREAM_VERSION, str(report.version)
+    )
     check("forward_compat.terminal", report.terminal is not None, "no terminal")
     check("forward_compat.exit_code", report.exit_code == 0, str(report.exit_code))
     check(
@@ -221,7 +230,10 @@ def _selftest() -> int:
     check("duplicate_key.raises", raised, "duplicate key did not raise")
 
     # A non-finite token is corruption (no floats in the v1 stream).
-    naninf = '{"event":"stream","version":1,"generator":"mtest x"}\n{"event":"file_finished","duration_us":NaN}\n'
+    naninf = (
+        '{"event":"stream","version":1,"generator":"mtest x"}\n'
+        '{"event":"file_finished","duration_us":NaN}\n'
+    )
     raised = False
     try:
         parse_stream(naninf)
@@ -238,6 +250,19 @@ def _selftest() -> int:
 
 
 def main(argv: list[str]) -> int:
+    """Summarize one stream file, or run the fixture self-test.
+
+    Args:
+        argv: The process argv. With a path in `argv[1]`, that stream is
+            consumed and summarized; with no path, the committed
+            forward-compatibility, truncation, and corruption fixtures are
+            replayed instead.
+
+    Returns:
+        0 when the summary printed or every self-test case held, 1 when a
+        self-test case failed. A `StreamError` from a supplied file propagates,
+        since corruption is not a summarizable outcome.
+    """
     if len(argv) > 1:
         text = Path(argv[1]).read_text(encoding="utf-8")
         report = parse_stream(text)

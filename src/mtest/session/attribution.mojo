@@ -7,8 +7,8 @@ already built, and names the first one that dies by signal.
 
 Attribution is secondary evidence, never a verdict input: the file's CRASH
 stands whether or not a culprit is found, and the pass emits nothing but
-`CrashAttribution` events. What remains at risk is the pass spending unbounded
-time, which is what these bounds exist to prevent:
+`CrashAttribution` events. The one thing left at risk is the pass spending
+unbounded time, so these bounds cap it:
 
 - at most `ISOLATION_RUN_CAP` reruns per file;
 - `isolation_timeout_secs(config.timeout_secs)` per rerun;
@@ -73,6 +73,15 @@ def isolation_timeout_secs(timeout_secs: Int) -> Int:
 
     Returns:
         The rerun deadline in seconds, always in `1 ..= 60`.
+
+    Examples:
+
+    ```mojo
+    from mtest.session import isolation_timeout_secs
+
+    var capped = isolation_timeout_secs(90)  # 60: the cap wins
+    var disabled = isolation_timeout_secs(0)  # 60: `--timeout 0` falls back
+    ```
     """
     if timeout_secs <= 0:
         return ISOLATION_TIMEOUT_CAP_SECS
@@ -92,7 +101,7 @@ struct AttributionStep(Copyable, Movable):
     var should_stop: Bool
     """True iff the pass must stop now and render `disposition`."""
     var disposition: AttributionDisposition
-    """Why the pass stopped — meaningful only when `should_stop`."""
+    """Why the pass stopped. Meaningful only when `should_stop`."""
 
 
 def attribution_step(
@@ -124,6 +133,17 @@ def attribution_step(
 
     Returns:
         The stop decision and, when stopping, its typed disposition.
+
+    Examples:
+
+    ```mojo
+    from mtest.session import attribution_step
+
+    var go = attribution_step(3, 0, 0.0, 0.0)
+    # go.should_stop is False: three names left and no budget spent.
+    var done = attribution_step(0, 5, 1.0, 1.0)
+    # done.disposition is AttributionDisposition.NO_REPRODUCTION.
+    ```
     """
     if tests_left <= 0:
         return AttributionStep(True, AttributionDisposition.NO_REPRODUCTION)

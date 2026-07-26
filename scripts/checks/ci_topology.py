@@ -28,6 +28,8 @@ HARNESS_CHECK_MODULES = (
     "scripts.checks.layout",
     "scripts.tests.test_ci_topology",
     "scripts.checks.ci_topology",
+    "scripts.tests.test_python_quality",
+    "scripts.tests.test_annotations_oracle",
 )
 
 COVERAGE_CAPABILITY_COMMAND = "python -m scripts.checks.coverage_capability"
@@ -45,14 +47,34 @@ CI_PREFLIGHT_TASKS = [
     "junit-render-check",
     "transcripts-check",
 ]
-CI_TASKS = ["ci-preflight", "test", "dogfood-check", "e2e", "contract-check-strict"]
+CI_TASKS = [
+    "ci-preflight",
+    "test",
+    "dogfood-check",
+    "e2e",
+    "contract-check-strict",
+    "ci-memory",
+]
 CI_FLOOR_TASKS = {
     *CI_PREFLIGHT_TASKS,
     "test",
     "dogfood-check",
     "e2e",
     "contract-check-strict",
+    "ci-memory",
 }
+
+MEMORY_LANE_TASKS = ["asan-check", "valgrind-check"]
+"""The memory-safety lanes, in the order the linux-64 aggregate runs them."""
+
+CI_MEMORY_FALLBACK_COMMAND = "python -m scripts.checks.memory.host_support"
+"""What `ci-memory` runs off linux-64: a loud, self-defending skip report."""
+
+MEMORY_PLATFORM = "linux-64"
+"""The one platform whose task table owns the real memory-lane dependency edge."""
+
+LINUX_CI_FLOOR_TASKS = {*CI_FLOOR_TASKS, *MEMORY_LANE_TASKS}
+"""The local floor on linux-64: every portable member plus both memory lanes."""
 
 LINUX_MATRIX_ROWS = [
     {
@@ -251,10 +273,84 @@ def _transitive_tasks(tasks: dict[str, object], root: str) -> set[str]:
     return seen
 
 
+PLATFORM_TASK_OVERRIDES = {"ci-memory"}
+"""The ONLY task any platform table may override, and the reason it is bounded.
+
+A `[target.<platform>.tasks]` entry silently replaces the base task of the same
+name, with no warning from pixi, and every other exact-command pin in this module
+reads the base `[tasks]` table. So an unbounded override table is a hole big
+enough to drive a lane through: adding `asan-check = "true"` under linux-64 would
+leave `pixi run ci`, `harness-check`, AND the hosted "ASan + LSan" required check
+all green while running nothing, because the lane never leaves either view by
+name. Bounding the table to one known entry is what closes that.
+"""
+
+PLATFORM_TARGET_KEYS = {"dependencies", "tasks"}
+"""What a `[target.<platform>]` table may contain, so a new one cannot hide."""
+
+
+def _platform_tasks(manifest: dict[str, object], platform: str) -> dict[str, object]:
+    """Read one platform's task overrides, bounding what may live there.
+
+    Args:
+        manifest: The parsed `pixi.toml`.
+        platform: The platform whose task table is required to exist.
+
+    Returns:
+        That platform's task overrides.
+
+    Raises:
+        AssertionError: If the table is missing, if any platform other than
+            `platform` declares task overrides, if a target table grows an
+            unexpected key, or if the override table names a task outside
+            `PLATFORM_TASK_OVERRIDES`.
+    """
+    targets = manifest.get("target")
+    if not isinstance(targets, dict):
+        raise AssertionError("pixi.toml has no [target] table")
+    for name, table in targets.items():
+        if not isinstance(table, dict):
+            raise AssertionError(f"[target.{name}] is not a table")
+        unexpected = set(table) - PLATFORM_TARGET_KEYS
+        if unexpected:
+            raise AssertionError(
+                f"[target.{name}] carries unexpected keys {sorted(unexpected)}; "
+                f"only {sorted(PLATFORM_TARGET_KEYS)} are pinned here"
+            )
+        overrides = table.get("tasks")
+        if overrides is None:
+            continue
+        if not isinstance(overrides, dict):
+            raise AssertionError(f"[target.{name}.tasks] is not a table")
+        if name != platform:
+            raise AssertionError(
+                f"[target.{name}.tasks] overrides tasks {sorted(overrides)}, but "
+                f"only {platform} may override a task; a platform override "
+                "silently replaces the base command and is invisible to every "
+                "exact-command pin in this module"
+            )
+        outside = set(overrides) - PLATFORM_TASK_OVERRIDES
+        if outside:
+            raise AssertionError(
+                f"[target.{name}.tasks] overrides {sorted(outside)}, which is "
+                f"outside the pinned set {sorted(PLATFORM_TASK_OVERRIDES)}; an "
+                "override replaces the base command with no warning, so a lane "
+                "can stay in every view by name while running nothing"
+            )
+    target = targets.get(platform)
+    if not isinstance(target, dict):
+        raise AssertionError(f"pixi.toml has no [target.{platform}] table")
+    tasks = target.get("tasks")
+    if not isinstance(tasks, dict):
+        raise AssertionError(f"pixi.toml has no [target.{platform}.tasks] table")
+    return tasks
+
+
 def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
     """The serial local floor is the exact preflight plus behavioral lanes."""
-    with (repo_root / "pixi.toml").open("rb") as manifest:
-        tasks = tomllib.load(manifest)["tasks"]
+    with (repo_root / "pixi.toml").open("rb") as handle:
+        manifest = tomllib.load(handle)
+    tasks = manifest["tasks"]
     expected_harness_command = " && ".join(
         f"python -m {module}" for module in HARNESS_CHECK_MODULES
     )
@@ -267,13 +363,9 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
     if "test-direct" in tasks:
         raise AssertionError("obsolete test-direct Pixi alias still exists")
     expected_classified_tasks = {
-        "test": (
-            "python -m scripts.harness.classified tests/unit tests/integration"
-        ),
+        "test": ("python -m scripts.harness.classified tests/unit tests/integration"),
         "test-unit": "python -m scripts.harness.classified tests/unit",
-        "test-integration": (
-            "python -m scripts.harness.classified tests/integration"
-        ),
+        "test-integration": ("python -m scripts.harness.classified tests/integration"),
         "test-file": "python -m scripts.harness.classified",
     }
     for name, command in expected_classified_tasks.items():
@@ -341,8 +433,7 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
         )
     exact_safety_tasks = {
         "asan-check": (
-            "python -m scripts.tests.test_asan && "
-            "python -m scripts.checks.memory.asan"
+            "python -m scripts.tests.test_asan && python -m scripts.checks.memory.asan"
         ),
         "valgrind-check": (
             "python -m scripts.tests.test_valgrind && "
@@ -353,6 +444,52 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
         if tasks.get(name) != command:
             raise AssertionError(
                 f"{name} no longer runs its exact negative-control harness"
+            )
+    # Both memory lanes are members of the LOCAL floor, not hosted-only. The
+    # `ci` closure below is what proves it; these two pin the shape that makes
+    # it work. The base command must stay the loud non-Linux report, because a
+    # bare `true` there would let a macOS floor imply a verdict it skipped.
+    if tasks.get("ci-memory") != CI_MEMORY_FALLBACK_COMMAND:
+        raise AssertionError(
+            "ci-memory base command mismatch: "
+            f"expected={CI_MEMORY_FALLBACK_COMMAND!r}, "
+            f"actual={tasks.get('ci-memory')!r}"
+        )
+    platform_tasks = _platform_tasks(manifest, MEMORY_PLATFORM)
+    expected_memory_aggregate = {"depends-on": MEMORY_LANE_TASKS}
+    if platform_tasks.get("ci-memory") != expected_memory_aggregate:
+        raise AssertionError(
+            f"[target.{MEMORY_PLATFORM}.tasks] ci-memory mismatch: "
+            f"expected={expected_memory_aggregate!r}, "
+            f"actual={platform_tasks.get('ci-memory')!r}"
+        )
+    linux_tasks = {**tasks, **platform_tasks}
+    expected_linux_closure = {
+        "ci",
+        "ci-preflight",
+        "build-bin",
+        "build-native",
+        *LINUX_CI_FLOOR_TASKS,
+    }
+    linux_closure = _transitive_tasks(linux_tasks, "ci")
+    if linux_closure != expected_linux_closure:
+        raise AssertionError(
+            f"ci transitive floor on {MEMORY_PLATFORM} mismatch: "
+            f"missing={sorted(expected_linux_closure - linux_closure)}, "
+            f"extra={sorted(linux_closure - expected_linux_closure)}"
+        )
+    # The closure equality above already proves each lane is present BY NAME.
+    # What it cannot see is a lane whose command was replaced, so check the
+    # merged table's commands rather than re-testing membership. `_platform_tasks`
+    # bounds which tasks may be overridden at all; this is the second lock, and
+    # the one that would fire if that set were ever widened.
+    for lane in MEMORY_LANE_TASKS:
+        if linux_tasks.get(lane) != exact_safety_tasks[lane]:
+            raise AssertionError(
+                f"{lane} does not run its exact negative-control harness on "
+                f"{MEMORY_PLATFORM}: expected={exact_safety_tasks[lane]!r}, "
+                f"actual={linux_tasks.get(lane)!r}. A green `pixi run ci` would "
+                "claim memory-safety coverage it did not compute."
             )
     # The coverage-capability probe is diagnostic, so nothing in the `ci`
     # closure depends on it and nothing else would notice it disappearing.
@@ -376,7 +513,8 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
     expected_triggers = ["push", "pull_request", "workflow_dispatch"]
     if triggers != expected_triggers or "schedule:" in _yaml_block(workflow, "on:"):
         raise AssertionError(
-            f"CI workflow trigger mismatch: expected={expected_triggers}, actual={triggers}"
+            f"CI workflow trigger mismatch: expected={expected_triggers}, "
+            f"actual={triggers}"
         )
     if "    branches: [main, master]" not in _yaml_block(workflow, "on:"):
         raise AssertionError("CI push trigger no longer pins main and master")
@@ -392,7 +530,8 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
     ]
     if jobs != expected_jobs:
         raise AssertionError(
-            f"CI workflow job membership mismatch: expected={expected_jobs}, actual={jobs}"
+            f"CI workflow job membership mismatch: expected={expected_jobs}, "
+            f"actual={jobs}"
         )
     job_blocks = {name: _yaml_block(workflow, f"  {name}:") for name in jobs}
     expected_needs = {
@@ -422,7 +561,7 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
         "linux-test-matrix": "true",
         "macos-test-matrix": "false",
     }
-    for name, expected in matrices.items():
+    for name, expected_rows in matrices.items():
         job = job_blocks[name]
         expected_strategy = (
             "    strategy:\n"
@@ -435,10 +574,11 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
                 f"CI job {name!r} strategy/fail-fast layout mismatch: "
                 f"expected={expected_strategy!r}"
             )
-        actual = _matrix_rows(job)
-        if actual != expected:
+        actual_rows = _matrix_rows(job)
+        if actual_rows != expected_rows:
             raise AssertionError(
-                f"CI job {name!r} matrix mismatch: expected={expected}, actual={actual}"
+                f"CI job {name!r} matrix mismatch: "
+                f"expected={expected_rows}, actual={actual_rows}"
             )
         runs_on = re.findall(r"^    runs-on: (.+)$", job, re.MULTILINE)
         if runs_on != ["${{ matrix.runner }}"]:
@@ -451,13 +591,19 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
                 f"CI job {name!r} matrix task dispatch mismatch: actual={run_step}"
             )
 
-    behavioral_floor = CI_TASKS[1:]
+    # The hosted matrix runs the memory LANES, one cell each, never the
+    # `ci-memory` aggregate that exists to put both of them in the serial local
+    # floor. Deriving the expected rows from CI_TASKS keeps the two views tied
+    # together, and this equality is what refuses to let the local floor gain a
+    # member the hosted matrix silently never runs.
+    behavioral_floor = [task for task in CI_TASKS[1:] if task != "ci-memory"]
+    if ["ci-preflight", *behavioral_floor, "ci-memory"] != CI_TASKS:
+        raise AssertionError(
+            "the local floor no longer ends with the memory aggregate; the "
+            f"hosted matrix expansion below is derived from it: {CI_TASKS}"
+        )
     expected_matrix_tasks = {
-        "linux-test-matrix": [
-            *behavioral_floor,
-            "asan-check",
-            "valgrind-check",
-        ],
+        "linux-test-matrix": [*behavioral_floor, *MEMORY_LANE_TASKS],
         "macos-test-matrix": behavioral_floor,
     }
     for name, expected_tasks in expected_matrix_tasks.items():
@@ -548,12 +694,12 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
             "uses": "actions/upload-artifact@v4",
         },
     }
-    for name, expected in expected_linux_steps.items():
-        actual = _step_attributes(linux_matrix, name)
-        if actual != expected:
+    for name, expected_step in expected_linux_steps.items():
+        actual_step = _step_attributes(linux_matrix, name)
+        if actual_step != expected_step:
             raise AssertionError(
                 f"Linux matrix step {name!r} mismatch: "
-                f"expected={expected}, actual={actual}"
+                f"expected={expected_step}, actual={actual_step}"
             )
 
     required_linux_lines = [

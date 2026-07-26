@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from typing import TYPE_CHECKING
 from unittest import mock
 
 from scripts.checks import protocol_snapshots
@@ -17,6 +18,10 @@ from scripts.checks.transcript_compare import (
     DirectoryComparison,
     compare_directories,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def test_transcript_comparator() -> None:
@@ -41,9 +46,7 @@ def test_transcript_comparator() -> None:
                 f"{relocated.errors}"
             )
 
-        (after / "case.txt").write_bytes(
-            b"source: " + new + b"passing.mojo\nFAIL\n"
-        )
+        (after / "case.txt").write_bytes(b"source: " + new + b"passing.mojo\nFAIL\n")
         mutated = compare_directories(before, after, replacement=(old, new))
         if mutated.ok or not any(
             "expected/case.txt" in error and "actual/case.txt" in error
@@ -56,7 +59,9 @@ def test_transcript_comparator() -> None:
         (after / "case.txt").write_bytes((before / "case.txt").read_bytes())
         exact = compare_directories(before, after)
         if not exact.ok:
-            raise AssertionError(f"exact snapshot comparator rejected equality: {exact.errors}")
+            raise AssertionError(
+                f"exact snapshot comparator rejected equality: {exact.errors}"
+            )
         (after / "extra.txt").write_bytes(b"unexpected\n")
         extra = compare_directories(before, after)
         if extra.ok or "unexpected snapshot files: ['extra.txt']" not in extra.errors:
@@ -77,7 +82,9 @@ def _snapshot_tree(root: Path) -> None:
 
 def _check_with_mutation(
     expected: Path,
-    mutate,
+    # The return value is discarded; callers pass expressions such as
+    # `write_bytes`, which answers a byte count.
+    mutate: Callable[[Path], object],
 ) -> tuple[DirectoryComparison, Path]:
     generated_root: Path | None = None
 
@@ -101,9 +108,7 @@ def test_protocol_snapshot_check_mutations() -> None:
     with tempfile.TemporaryDirectory(prefix="mtest-protocol-check-test-") as raw_tmp:
         expected = Path(raw_tmp) / "expected"
         _snapshot_tree(expected)
-        expected_before = {
-            path.name: path.read_bytes() for path in expected.iterdir()
-        }
+        expected_before = {path.name: path.read_bytes() for path in expected.iterdir()}
 
         added, added_root = _check_with_mutation(
             expected,
@@ -131,9 +136,7 @@ def test_protocol_snapshot_check_mutations() -> None:
 
         if any(path.exists() for path in (added_root, removed_root, modified_root)):
             raise AssertionError("check mode leaked a generated temporary directory")
-        expected_after = {
-            path.name: path.read_bytes() for path in expected.iterdir()
-        }
+        expected_after = {path.name: path.read_bytes() for path in expected.iterdir()}
         if expected_after != expected_before:
             raise AssertionError("check mode changed the committed-tree stand-in")
 
@@ -141,9 +144,9 @@ def test_protocol_snapshot_check_mutations() -> None:
 def test_protocol_snapshot_check_delegates_to_the_generator() -> None:
     """The check command invokes the provenance-pinned writer as a module."""
     output_dir = Path("/tmp/mtest-generated-protocol-test")
-    completed = subprocess.CompletedProcess([], 0)
+    completed: subprocess.CompletedProcess[bytes] = subprocess.CompletedProcess([], 0)
     with mock.patch.object(
-        protocol_snapshots.subprocess,
+        subprocess,
         "run",
         return_value=completed,
     ) as run:
@@ -167,13 +170,15 @@ def test_protocol_snapshot_failure_retains_lifecycle_warning() -> None:
     """A failed check explains why maintainers must not bless changed bytes."""
     result = DirectoryComparison(False, (), ("byte mismatch in case.txt",))
     stderr = io.StringIO()
-    with mock.patch.object(
-        protocol_snapshots,
-        "check_snapshots",
-        return_value=result,
+    with (
+        mock.patch.object(
+            protocol_snapshots,
+            "check_snapshots",
+            return_value=result,
+        ),
+        redirect_stderr(stderr),
     ):
-        with redirect_stderr(stderr):
-            returncode = protocol_snapshots.main()
+        returncode = protocol_snapshots.main()
 
     message = stderr.getvalue()
     if returncode != 1:
@@ -187,7 +192,6 @@ def test_protocol_snapshot_failure_retains_lifecycle_warning() -> None:
     ):
         if expected not in message:
             raise AssertionError(f"lifecycle warning omitted {expected!r}")
-
 
 
 def main() -> int:

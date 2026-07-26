@@ -17,9 +17,13 @@ import json
 from pathlib import Path
 import subprocess
 import sys
-from typing import Iterator
+from typing import TYPE_CHECKING, cast
 
 from scripts.checks import native_abi as native_abi_check
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -48,7 +52,9 @@ _TRANSPARENT_CALLEE_NODES = frozenset(
 )
 
 
-class AuditFailure(RuntimeError):
+# The self-tests catch this by name with assertRaises; renaming it to an Error
+# suffix is an API change, not a lint fix.
+class AuditFailure(RuntimeError):  # noqa: N818
     """A fail-closed post-fork compiler or call-graph finding."""
 
 
@@ -79,26 +85,69 @@ def platform_allowlist() -> frozenset[str]:
     return _PLATFORM_ENTRY_POINTS | {errno_accessor}
 
 
+def _array_field(node: dict[str, object], key: str) -> list[object]:
+    """Read one AST array field, using Clang's absent-is-empty shape.
+
+    Every value in a `-ast-dump=json` node is untyped JSON, so this states the
+    shape the dump documents rather than re-deciding it: `cast` is a
+    compile-time claim only, which keeps this audit's behavior on a node Clang
+    could not have emitted exactly what it was before it was annotated.
+
+    Args:
+        node: One Clang AST node.
+        key: The field to read.
+
+    Returns:
+        The field's array, or an empty list when Clang omitted the field.
+    """
+    return cast("list[object]", node.get(key, []))
+
+
+def _object_field(node: dict[str, object], key: str) -> dict[str, object]:
+    """Read one nested AST object field, using Clang's absent-is-empty shape.
+
+    Args:
+        node: One Clang AST node, or one of its location sub-objects.
+        key: The field to read.
+
+    Returns:
+        The field's object, or an empty mapping when Clang omitted the field.
+    """
+    return cast("dict[str, object]", node.get(key, {}))
+
+
+def _child_nodes(node: dict[str, object]) -> list[dict[str, object]]:
+    """Return the directly nested AST nodes, in Clang's own order.
+
+    Args:
+        node: One Clang AST node.
+
+    Returns:
+        Every `inner` entry that is itself a node, non-nodes dropped.
+    """
+    return [child for child in _array_field(node, "inner") if isinstance(child, dict)]
+
+
 def _walk(node: dict[str, object]) -> Iterator[dict[str, object]]:
     yield node
-    for child in node.get("inner", []):
-        if isinstance(child, dict):
-            yield from _walk(child)
+    for child in _child_nodes(node):
+        yield from _walk(child)
 
 
 def _has_body(node: dict[str, object]) -> bool:
-    return any(
-        isinstance(child, dict) and child.get("kind") == "CompoundStmt"
-        for child in node.get("inner", [])
-    )
+    return any(child.get("kind") == "CompoundStmt" for child in _child_nodes(node))
 
 
 def _is_source_definition(node: dict[str, object], source: Path) -> bool:
     """Return whether Clang locates a function body in the audited source."""
     source = source.resolve()
-    for location in (node.get("loc", {}), node.get("range", {}).get("begin", {})):
+    for candidate in (
+        _object_field(node, "loc"),
+        _object_field(_object_field(node, "range"), "begin"),
+    ):
+        location = candidate
         if "spellingLoc" in location:
-            location = location["spellingLoc"]
+            location = _object_field(location, "spellingLoc")
         if "includedFrom" in location:
             return False
         filename = location.get("file")
@@ -108,19 +157,19 @@ def _is_source_definition(node: dict[str, object], source: Path) -> bool:
 
 
 def _line(node: dict[str, object], source_text: str) -> int:
-    begin = node.get("range", {}).get("begin", {})
+    begin = _object_field(_object_field(node, "range"), "begin")
     if "expansionLoc" in begin:
-        begin = begin["expansionLoc"]
+        begin = _object_field(begin, "expansionLoc")
     offset = begin.get("offset")
     if isinstance(offset, int) and 0 <= offset <= len(source_text):
         return source_text.count("\n", 0, offset) + 1
-    return int(begin.get("line", 0))
+    return int(cast("str | int | float", begin.get("line", 0)))
 
 
 def _offset(node: dict[str, object], *, end: bool = False) -> int:
-    location = node.get("range", {}).get("end" if end else "begin", {})
+    location = _object_field(_object_field(node, "range"), "end" if end else "begin")
     if "expansionLoc" in location:
-        location = location["expansionLoc"]
+        location = _object_field(location, "expansionLoc")
     offset = location.get("offset")
     if not isinstance(offset, int):
         return -1
@@ -140,16 +189,13 @@ def _source_segment(node: dict[str, object], source_text: str) -> str:
 
 
 def _direct_callee(call: dict[str, object]) -> tuple[str | None, str]:
-    inner = call.get("inner", [])
+    inner = _array_field(call, "inner")
     if not inner or not isinstance(inner[0], dict):
         return None, "<unresolved-call>"
-    expression = inner[0]
+    # The guard above already proved the callee slot holds a node.
+    expression = cast("dict[str, object]", inner[0])
     while expression.get("kind") in _TRANSPARENT_CALLEE_NODES:
-        children = [
-            child
-            for child in expression.get("inner", [])
-            if isinstance(child, dict)
-        ]
+        children = _child_nodes(expression)
         if len(children) != 1:
             return None, "<indirect-call>"
         expression = children[0]
@@ -200,8 +246,7 @@ def _compiler_ast(source: Path, *, testing: bool, cc: str) -> dict[str, object]:
         cwd=ROOT,
         check=False,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
     )
     variant = int(testing)
     if compiled.returncode != 0:
@@ -264,10 +309,7 @@ def audit_source(source: Path, *, testing: bool, cc: str) -> AuditResult:
     for node in _walk(open_function):
         if node.get("kind") != "IfStmt":
             continue
-        if any(
-            call.callee_name == ROOT_FUNCTION
-            for call in _calls(node, source_text)
-        ):
+        if any(call.callee_name == ROOT_FUNCTION for call in _calls(node, source_text)):
             branch_candidates.append(node)
     if len(branch_candidates) != 1:
         raise AuditFailure(
@@ -314,9 +356,7 @@ def audit_source(source: Path, *, testing: bool, cc: str) -> AuditResult:
                 f"{' -> '.join(current_path)}"
             )
 
-    def visit_calls(
-        node: dict[str, object], current_path: tuple[str, ...]
-    ) -> None:
+    def visit_calls(node: dict[str, object], current_path: tuple[str, ...]) -> None:
         reject_implicit_cleanup(node, current_path)
         visit_call_sequence(_calls(node, source_text), current_path)
 
@@ -332,24 +372,19 @@ def audit_source(source: Path, *, testing: bool, cc: str) -> AuditResult:
 
     body_candidates = [
         child
-        for child in open_function.get("inner", [])
-        if isinstance(child, dict) and child.get("kind") == "CompoundStmt"
+        for child in _child_nodes(open_function)
+        if child.get("kind") == "CompoundStmt"
     ]
     if len(body_candidates) != 1:
         raise AuditFailure(
             f"MTEST_EXEC_TESTING={int(testing)}: expected exactly one "
             f"{OPEN_FUNCTION} body, found {len(body_candidates)}"
         )
-    body_statements = [
-        child
-        for child in body_candidates[0].get("inner", [])
-        if isinstance(child, dict)
-    ]
+    body_statements = _child_nodes(body_candidates[0])
     fork_calls = [
         node
         for node in _walk(open_function)
-        if node.get("kind") == "CallExpr"
-        and _direct_callee(node)[1] == "fork"
+        if node.get("kind") == "CallExpr" and _direct_callee(node)[1] == "fork"
     ]
     if len(fork_calls) != 1:
         raise AuditFailure(
@@ -392,18 +427,14 @@ def audit_source(source: Path, *, testing: bool, cc: str) -> AuditResult:
     visit_call_sequence(fork_statement_calls, ("post-fork-gap",))
     for statement in body_statements[fork_index + 1 : branch_index]:
         if statement.get("kind") == "IfStmt":
-            children = [
-                child
-                for child in statement.get("inner", [])
-                if isinstance(child, dict)
-            ]
+            children = _child_nodes(statement)
             condition = children[0] if children else None
             compact_condition = (
                 "".join(_source_segment(condition, source_text).split())
                 if condition is not None
                 else ""
             )
-            if compact_condition == "leader<0":
+            if condition is not None and compact_condition == "leader<0":
                 visit_calls(condition, ("post-fork-gap",))
                 for child_executed_by_success_path in children[2:]:
                     visit_calls(
@@ -413,11 +444,7 @@ def audit_source(source: Path, *, testing: bool, cc: str) -> AuditResult:
                 continue
         visit_calls(statement, ("post-fork-gap",))
 
-    child_parts = [
-        child
-        for child in branch_candidates[0].get("inner", [])
-        if isinstance(child, dict)
-    ]
+    child_parts = _child_nodes(branch_candidates[0])
     child_condition = child_parts[0] if child_parts else None
     compact_child_condition = (
         "".join(_source_segment(child_condition, source_text).split())
@@ -429,19 +456,12 @@ def audit_source(source: Path, *, testing: bool, cc: str) -> AuditResult:
             f"MTEST_EXEC_TESTING={int(testing)}: post-fork child branch must "
             "be guarded by leader == 0"
         )
-    if (
-        len(child_parts) != 2
-        or child_parts[1].get("kind") != "CompoundStmt"
-    ):
+    if len(child_parts) != 2 or child_parts[1].get("kind") != "CompoundStmt":
         raise AuditFailure(
             f"MTEST_EXEC_TESTING={int(testing)}: post-fork child branch must "
             "have exactly one body and no else"
         )
-    child_statements = [
-        child
-        for child in child_parts[1].get("inner", [])
-        if isinstance(child, dict)
-    ]
+    child_statements = _child_nodes(child_parts[1])
     terminal = child_statements[-1] if child_statements else None
     if (
         terminal is None

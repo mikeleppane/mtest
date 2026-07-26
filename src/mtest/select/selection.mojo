@@ -1,6 +1,6 @@
 """Pure selection logic: operand parsing and universe->selected/deselected.
 
-This module is the pure, filesystem-free heart of the selection pipeline. It
+This module holds the pure, filesystem-free part of the selection pipeline. It
 turns raw CLI operands into a per-file selection intent (operand parsing) and
 folds a file's collected test universe together with that intent and the `-k`
 keyword into the selected and deselected name sets (selection). It imports only
@@ -27,9 +27,9 @@ struct NamedTarget(Copyable, Movable):
     """One node-id operand: the file it named and the test name it selected."""
 
     var file_part: String
-    """The operand text before the `::` — the file the node id implies."""
+    """The operand text before the `::`, the file the node id implies."""
     var name: String
-    """The operand text after the `::` — a selected test name for that file."""
+    """The operand text after the `::`, a selected test name for that file."""
 
 
 @fieldwise_init
@@ -39,7 +39,7 @@ struct OperandParse(Copyable, Movable):
     var has_node_id: Bool
     """Whether any operand carried a `::` node id, activating name selection."""
     var plain_operands: List[String]
-    """The operands with no `::` — file or directory operands, taken whole."""
+    """The operands with no `::`: file or directory operands, taken whole."""
     var named_targets: List[NamedTarget]
     """Every node-id operand as a (file_part, name) pair."""
 
@@ -119,8 +119,18 @@ def parse_operands(paths: List[String]) raises -> OperandParse:
 
     Raises:
         Error: A `select:`-prefixed usage error (exit-4 class) for an operand
-            with more than one `::` — a malformed node id, never an unknown
+            with more than one `::`: a malformed node id, never an unknown
             test.
+
+    Examples:
+
+    ```mojo
+    from mtest.select import parse_operands
+
+    var ops: List[String] = ["tests/", "tests/test_a.mojo::test_foo"]
+    var plan = parse_operands(ops)
+    print(plan.named_targets[0].name)  # test_foo
+    ```
     """
     var plain = List[String]()
     var named = List[NamedTarget]()
@@ -203,8 +213,18 @@ def select_from(
 
     Raises:
         Error: A `select:`-prefixed usage error (exit-4 class) naming
-            `rel::name` when an explicitly named test is not in the universe —
-            an unknown test.
+            `rel::name` when an explicitly named test is not in the universe:
+            an unknown test, never a malformed node id.
+
+    Examples:
+
+    ```mojo
+    from mtest.select import FileIntent, select_from
+
+    var universe: List[String] = ["test_add", "test_sub", "test_addmul"]
+    var r = select_from(universe, "f.mojo", FileIntent.whole_file(), "add")
+    print(len(r.selected), len(r.deselected))  # 2 1
+    ```
     """
     # Validate every explicitly named test against the universe first, so an
     # unknown name is a usage error rather than a silent empty selection.

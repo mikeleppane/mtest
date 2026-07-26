@@ -11,6 +11,7 @@ import stat
 import tempfile
 import unittest
 
+from scripts.e2e import runner
 from scripts.e2e.scenarios import json_reporter
 
 
@@ -71,9 +72,7 @@ def _check_e2e_interposer_source_policy(source: str) -> None:
 
     def active_source(branch: str) -> str:
         without_blocks = re.sub(r"/\*.*?\*/", "", branch, flags=re.DOTALL)
-        return "\n".join(
-            line.split("//", 1)[0] for line in without_blocks.splitlines()
-        )
+        return "\n".join(line.split("//", 1)[0] for line in without_blocks.splitlines())
 
     active_apple = active_source(apple_branch)
     active_other = active_source(other_branch)
@@ -98,8 +97,7 @@ def _check_e2e_interposer_source_policy(source: str) -> None:
     )
     if not apple_required.issubset(active_apple_lines):
         raise AssertionError(
-            "Darwin E2E interposer must use DYLD_INTERPOSE and writev "
-            "forwarding"
+            "Darwin E2E interposer must use DYLD_INTERPOSE and writev forwarding"
         )
     if any(fragment in active_apple for fragment in apple_forbidden):
         raise AssertionError(
@@ -122,7 +120,7 @@ def _check_e2e_interposer_source_policy(source: str) -> None:
 
 def check_e2e_interposer_source_policy() -> None:
     """The interposer policy rejects known source-level bypass mutations."""
-    source = Path(json_reporter.JSON_TERMINAL_WRITE_FAULT).read_text(encoding="utf-8")
+    source = Path(runner.JSON_TERMINAL_WRITE_FAULT).read_text(encoding="utf-8")
     _check_e2e_interposer_source_policy(source)
 
     registration = "DYLD_INTERPOSE(mtest_faulting_write, write)"
@@ -169,7 +167,7 @@ def check_e2e_interposer_command_topology() -> None:
     if command_builder is None:
         raise AssertionError("E2E interposer command builder is missing")
     directory = "/tmp/mtest-json-terminal-fault"
-    source = json_reporter.JSON_TERMINAL_WRITE_FAULT
+    source = runner.JSON_TERMINAL_WRITE_FAULT
     object_path = os.path.join(directory, "mtest_json_terminal_fault.o")
     common_compile = [
         "/pinned/clang",
@@ -223,9 +221,7 @@ def check_e2e_interposer_command_topology() -> None:
         platform="linux",
         platform_driver="/unused/platform/driver",
     )
-    expected_linux_library = os.path.join(
-        directory, "libmtest_json_terminal_fault.so"
-    )
+    expected_linux_library = os.path.join(directory, "libmtest_json_terminal_fault.so")
     expected_linux_steps = [
         ("compile", common_compile),
         (
@@ -273,7 +269,7 @@ def check_e2e_interposer_failure_propagation() -> None:
                 compiler=false_program,
                 platform_driver=str(marker_linker),
             )
-        except json_reporter.ScenarioError as exc:
+        except runner.ScenarioError as exc:
             if "could not compile" not in str(exc):
                 raise AssertionError(
                     f"interposer compile failure lost its step: {exc}"
@@ -290,7 +286,7 @@ def check_e2e_interposer_failure_propagation() -> None:
                 compiler=compiler,
                 platform_driver=false_program,
             )
-        except json_reporter.ScenarioError as exc:
+        except runner.ScenarioError as exc:
             if "could not link" not in str(exc):
                 raise AssertionError(
                     f"interposer link failure lost its step: {exc}"

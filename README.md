@@ -1022,7 +1022,9 @@ The tasks:
 
 | Task | What it does |
 |------|--------------|
-| `pixi run fmt` | format in place |
+| `pixi run fmt` | format Mojo in place |
+| `pixi run py-fmt` | apply ruff's safe lint fixes to the Python tooling, then format it in place |
+| `pixi run py-check` | ruff format/lint and `mypy --strict` over the Python tooling (needs `uv`; not part of `ci`) |
 | `pixi run build` | precompile `src/mtest` to `build/mtest.mojopkg`, the compile gate |
 | `pixi run build-bin` | link the runnable binary at `build/mtest` |
 | `pixi run test` | compile every classified unit and integration module into one aggregate binary and execute it directly |
@@ -1030,13 +1032,18 @@ The tasks:
 | `pixi run dogfood-check` | run three focused probes through the built `mtest` binary itself |
 | `pixi run e2e` | drive `build/mtest` against the committed known-outcome tree under `e2e/` and assert exact exit codes and output structure |
 | `pixi run transcripts-check` | regenerate the `TestSuite` protocol snapshots to a temp dir and diff byte-for-byte |
-| `pixi run ci` | the canonical serial floor: preflight checks, then `test`, `dogfood-check`, `e2e` |
+| `pixi run ci` | the canonical serial floor: preflight checks, then `test`, `dogfood-check`, `e2e`, the strict contract, and the memory lanes |
 | `pixi run asan-check` | Linux: build and run the highest-risk exec suites under ASan/LSan |
 | `pixi run valgrind-check` | Linux: run the exec/native coverage under Memcheck |
+| `pixi run ci-memory` | Linux: both memory lanes together, the way `ci` runs them |
 
 `pixi run ci` opens with a fail-fast preflight (version, formatting,
 harness membership, unsafe-Mojo inventory, post-fork audit, native ABI,
-JUnit oracle, build, rendered-JUnit, and transcript checks). Hosted CI runs
+JUnit oracle, build, rendered-JUnit, and transcript checks) and closes with
+`ci-memory`, so a green local floor covers memory safety rather than deferring
+it. On Linux that is ASan/LSan then Memcheck, roughly four minutes together;
+elsewhere it reports the two lanes as uncovered and names the Linux cells that
+own them. Hosted CI runs
 the behavioral floor (`test`, `dogfood-check`, `e2e`) as parallel cells on
 both Linux and macOS; the full preflight chain and the memory-safety cells
 run on Linux, on every pull request.

@@ -16,8 +16,7 @@ import tomllib
 
 from scripts.build import package_consumption
 from scripts.e2e import __main__ as e2e_main
-from scripts.harness import aggregate
-from scripts.harness import dogfood
+from scripts.harness import aggregate, dogfood
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -436,7 +435,6 @@ LIVE_COMMAND_FIXED_PATHS = (
     Path("README.md"),
     Path("AGENTS.md"),
     Path("pixi.toml"),
-    Path("notes/console-captures/README.md"),
 )
 LIVE_COMMAND_GLOBS = (
     "scripts/**/*.py",
@@ -465,9 +463,14 @@ README_SCAN_EXCLUDED_DIRS = {
     ".git",
     ".pixi",
     "build",
+    # untracked working notes, and linked worktrees holding other branches'
+    # checkouts. Both are present locally and absent in a fresh clone, so
+    # walking them would make this gate read a different file set on a
+    # contributor's machine than on CI, and a README from an unrelated branch
+    # could red it.
     "notes",
+    ".worktrees",
 }
-
 
 
 def check_top_level_script_layout(repo_root: Path = REPO_ROOT) -> None:
@@ -557,9 +560,7 @@ def check_classified_entrypoint(
     if actual_imports != expected_imports:
         raise AssertionError("aggregate entrypoint import membership/order drifted")
 
-    expected_markers = [
-        f'    print("==> {path}", flush=True)' for path in paths
-    ]
+    expected_markers = [f'    print("==> {path}", flush=True)' for path in paths]
     actual_markers = [
         line for line in generated_lines if line.startswith('    print("==> tests/')
     ]
@@ -573,15 +574,13 @@ def check_classified_entrypoint(
         match = REGISTRATION_RE.fullmatch(line)
         if match is None:
             raise AssertionError(
-                "aggregate entrypoint test registration syntax drifted: "
-                f"{line!r}"
+                f"aggregate entrypoint test registration syntax drifted: {line!r}"
             )
         suite_index = int(match.group(1))
         module_index = int(match.group(2))
         if suite_index != module_index or module_index >= len(paths):
             raise AssertionError(
-                "aggregate entrypoint test registration alias drifted: "
-                f"{line!r}"
+                f"aggregate entrypoint test registration alias drifted: {line!r}"
             )
         actual_membership.append((paths[module_index], match.group(3)))
     if tuple(actual_membership) != expected_membership:
@@ -759,9 +758,7 @@ def check_suite_layout() -> None:
         dogfood.dogfood_test_files(REPO_ROOT)
     except RuntimeError as exc:
         raise AssertionError(str(exc)) from exc
-    actual_support = {
-        path.name for path in (tests_dir / "support").glob("*.mojo")
-    }
+    actual_support = {path.name for path in (tests_dir / "support").glob("*.mojo")}
     if actual_support != SUPPORT_MODULES:
         raise AssertionError(
             "support module membership mismatch: "
@@ -809,7 +806,6 @@ def check_e2e_native_fixture_layout() -> None:
         )
 
 
-
 def check_protocol_asset_layout() -> None:
     """Protocol generator inputs and outputs occupy their documented homes."""
     _require_nonempty("protocol fixture", PROTOCOL_FIXTURES)
@@ -839,7 +835,9 @@ def check_protocol_asset_layout() -> None:
         )
     for obsolete in (REPO_ROOT / "fixtures", REPO_ROOT / "goldens"):
         if obsolete.exists():
-            raise AssertionError(f"obsolete protocol asset root still exists: {obsolete}")
+            raise AssertionError(
+                f"obsolete protocol asset root still exists: {obsolete}"
+            )
 
 
 def check_e2e_layout() -> None:
@@ -865,9 +863,7 @@ def check_e2e_layout() -> None:
     if any(path.exists() for path in obsolete_paths):
         raise AssertionError("obsolete top-level E2E compatibility module remains")
 
-    pixi_manifest = tomllib.loads(
-        (REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
-    )
+    pixi_manifest = tomllib.loads((REPO_ROOT / "pixi.toml").read_text(encoding="utf-8"))
     e2e_command = pixi_manifest.get("tasks", {}).get("e2e", {}).get("cmd")
     if e2e_command != "python -m scripts.e2e":
         raise AssertionError(
@@ -883,8 +879,7 @@ def check_e2e_layout() -> None:
         raise AssertionError("e2e manifest does not declare e2e_root=e2e")
     rows = set(manifest["tests"])
     discovered = {
-        path.relative_to(REPO_ROOT).as_posix()
-        for path in e2e_root.rglob("test_*.mojo")
+        path.relative_to(REPO_ROOT).as_posix() for path in e2e_root.rglob("test_*.mojo")
     }
     if rows != discovered or len(rows) != 41:
         raise AssertionError(
@@ -911,7 +906,6 @@ def check_e2e_layout() -> None:
         raise AssertionError("e2e manifest retains a path outside e2e/")
     if (REPO_ROOT / "testdata").exists():
         raise AssertionError("obsolete testdata/ root still exists")
-
 
 
 def live_command_files(repo_root: Path) -> tuple[Path, ...]:
@@ -1034,10 +1028,13 @@ def direct_script_invocations(path: Path, contents: str) -> tuple[str, ...]:
             tree = None
         if tree is not None:
             for node in ast.walk(tree):
-                if _ast_argv_has_direct_script(node):
-                    findings.add(
-                        f"{path.as_posix()}:{node.lineno}: direct argv"
-                    )
+                # The helper matches only a literal list/tuple, both of which
+                # are expressions; restating that here is what establishes that
+                # `node.lineno` exists on the matched node.
+                if isinstance(
+                    node, (ast.List, ast.Tuple)
+                ) and _ast_argv_has_direct_script(node):
+                    findings.add(f"{path.as_posix()}:{node.lineno}: direct argv")
     return tuple(sorted(findings))
 
 
@@ -1068,12 +1065,12 @@ def check_python_package_invocation() -> None:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                for imported in node.names:
-                    if imported.name in module_names:
-                        flat_imports.append(
-                            f"{path.relative_to(REPO_ROOT)}:{node.lineno}: "
-                            f"import {imported.name}"
-                        )
+                flat_imports.extend(
+                    f"{path.relative_to(REPO_ROOT)}:{node.lineno}: "
+                    f"import {imported.name}"
+                    for imported in node.names
+                    if imported.name in module_names
+                )
             elif isinstance(node, ast.ImportFrom) and node.module in module_names:
                 flat_imports.append(
                     f"{path.relative_to(REPO_ROOT)}:{node.lineno}: "
@@ -1085,8 +1082,7 @@ def check_python_package_invocation() -> None:
     direct_invocations = live_direct_invocations(REPO_ROOT)
     if direct_invocations:
         raise AssertionError(
-            "direct Python script invocations remain: "
-            f"{list(direct_invocations)}"
+            f"direct Python script invocations remain: {list(direct_invocations)}"
         )
 
 
@@ -1094,11 +1090,11 @@ def check_build_source_visibility(repo_root: Path = REPO_ROOT) -> None:
     """Require the build-tool package to be complete, visible, and tracked."""
     _require_nonempty("build source", BUILD_SOURCE_PATHS)
     build_dir = repo_root / "scripts" / "build"
-    actual = {
-        path.relative_to(repo_root)
-        for path in build_dir.iterdir()
-        if path.is_file()
-    } if build_dir.is_dir() else set()
+    actual = (
+        {path.relative_to(repo_root) for path in build_dir.iterdir() if path.is_file()}
+        if build_dir.is_dir()
+        else set()
+    )
     expected = set(BUILD_SOURCE_PATHS)
     if actual != expected:
         raise AssertionError(
@@ -1111,8 +1107,7 @@ def check_build_source_visibility(repo_root: Path = REPO_ROOT) -> None:
         ["git", "-C", str(repo_root), "check-ignore", "--no-index", *operands],
         check=False,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
     )
     if ignored.returncode not in (0, 1):
         raise AssertionError(
@@ -1120,8 +1115,7 @@ def check_build_source_visibility(repo_root: Path = REPO_ROOT) -> None:
         )
     if ignored.returncode == 0:
         raise AssertionError(
-            "scripts/build source is ignored: "
-            f"{ignored.stdout.splitlines()}"
+            f"scripts/build source is ignored: {ignored.stdout.splitlines()}"
         )
 
     tracked = subprocess.run(
@@ -1136,8 +1130,7 @@ def check_build_source_visibility(repo_root: Path = REPO_ROOT) -> None:
         ],
         check=False,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
     )
     if tracked.returncode != 0:
         raise AssertionError("scripts/build source is untracked")
@@ -1148,9 +1141,7 @@ def check_vendored_toml_layout(repo_root: Path = REPO_ROOT) -> None:
     _require_nonempty("vendored TOML source", VENDORED_TOML_PATHS)
     vendor_root = repo_root / "vendor" / "mojo-toml"
     actual = {
-        path.relative_to(repo_root)
-        for path in vendor_root.rglob("*")
-        if path.is_file()
+        path.relative_to(repo_root) for path in vendor_root.rglob("*") if path.is_file()
     }
     if actual != VENDORED_TOML_PATHS:
         raise AssertionError(
@@ -1198,9 +1189,9 @@ def check_vendored_toml_layout(repo_root: Path = REPO_ROOT) -> None:
                 f"expected={expected}, got={actual_digest}"
             )
 
-    build_source = (
-        repo_root / "scripts" / "build" / "production_build.sh"
-    ).read_text(encoding="utf-8")
+    build_source = (repo_root / "scripts" / "build" / "production_build.sh").read_text(
+        encoding="utf-8"
+    )
     required_commands = (
         "mojo precompile vendor/mojo-toml/toml -o build/toml.mojopkg",
         "mojo precompile -I build src/mtest -o build/mtest.mojopkg",
@@ -1216,7 +1207,6 @@ def check_vendored_toml_layout(repo_root: Path = REPO_ROOT) -> None:
         )
     if re.search(r"\b(curl|wget|git\s+(clone|fetch|pull))\b", build_source):
         raise AssertionError("production build fetches a dependency from the network")
-
 
 
 def _require_nonempty(name: str, values: object) -> None:

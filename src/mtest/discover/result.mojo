@@ -2,8 +2,8 @@
 
 `DiscoveryResult` is pure data: the ordered gate and run file sets, the
 excluded files each paired with the pattern that removed it, and the stale
-exclude patterns that matched nothing. The session turns this into events — a
-loud skip line per excluded file, a warning per stale pattern. This module
+exclude patterns that matched nothing. The session turns this into events: a
+loud skip line per excluded file and a warning per stale pattern. This module
 reads and prints nothing.
 """
 

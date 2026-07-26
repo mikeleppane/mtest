@@ -2,9 +2,9 @@
 
 Everything mtest prints for a human passes through a terminal emulator, and a
 terminal emulator is an interpreter: an ESC byte followed by a control sequence
-repositions the cursor, repaints the screen, changes the title, or — with an OSC
-sequence — asks the terminal to answer back. A test binary controls its own
-stdout, its assertion messages, its file and test names, and the compiler
+repositions the cursor, repaints the screen, changes the title, or, with an OSC
+sequence, asks the terminal to answer back. A test binary controls its own
+stdout, its assertion messages, and its file and test names, and the compiler
 controls its diagnostics, so every one of those strings is attacker-controlled
 text that must never reach the terminal as instructions.
 
@@ -12,9 +12,9 @@ This module is that one boundary. It holds three pure functions and no state, no
 I/O, and no environment access, so the policy is auditable in one place and the
 console renderer never decides per-call what is safe:
 
-- `escape_scalar` for a value that must occupy exactly one console line — a
+- `escape_scalar` for a value that must occupy exactly one console line: a
   path, a node id, a pattern, a program name, a reproduce argument;
-- `escape_multiline` for a block that legitimately spans lines — captured
+- `escape_multiline` for a block that legitimately spans lines: captured
   stdout/stderr, a failure detail, a compiler diagnostic;
 - `prefix_lines` for fencing such a block behind a visible gutter, so a child
   cannot forge a line that reads as one of mtest's own.
@@ -28,16 +28,16 @@ reporters require.
 **Which** code points are interpreted is not decided here: that classification
 lives in `mtest.model.control_chars` because mtest has more than one terminal
 surface and `config` may not import `report`. This module decides only how an
-interpreted code point is *spelled* on the console — `\\xHH` for C0 and DEL,
+interpreted code point is *spelled* on the console: `\\xHH` for C0 and DEL,
 `\\u00HH` for C1, uppercase hex throughout. `cli/doctor.mojo`,
 `config/show.mojo` and `config/toml_bridge.mojo` consult the same
 classification and spell their own output their own way; `show.mojo` must,
-because it is emitting TOML, which has no `\\xHH` escape at all.
+because it emits TOML, which has no `\\xHH` escape at all.
 
 Two surfaces use this module, though six reach a terminal:
 
 1. the console renderer, the obvious one;
-2. the GitHub annotation tail — mtest prints its workflow commands to the
+2. the GitHub annotation tail: mtest prints its workflow commands to the
    console's own descriptor, so `gh_escape_message` in `escape.mojo` finishes
    by running its result through `escape_multiline`. Sharing this mapping
    rather than copying it is deliberate: one policy, one place to
@@ -59,11 +59,11 @@ would corrupt both.
 
 **Non-goal: visual spoofing.** This module answers "can the child drive the
 terminal", not "can the child mislead the reader". Code points that reorder or
-disguise text while executing nothing — the bidi overrides and isolates
-(`U+202A`..`U+202E`, `U+2066`..`U+2069`), zero-width characters, and confusable
-homoglyphs — pass through unchanged by design. They are a rendering-layer
-concern with no single correct answer for a terminal, and escaping them would
-corrupt legitimate right-to-left test names and assertion text.
+disguise text while executing nothing pass through unchanged by design: the bidi
+overrides and isolates (`U+202A`..`U+202E`, `U+2066`..`U+2069`), zero-width
+characters, and confusable homoglyphs. They are a rendering-layer concern with
+no single correct answer for a terminal, and escaping them would corrupt
+legitimate right-to-left test names and assertion text.
 """
 from mtest.model.control_chars import is_c1_control, is_interpreted_control
 
@@ -106,10 +106,10 @@ def _escape_controls(text: String, preserve_lf_tab: Bool) -> String:
     Walks `text` by code point and rewrites exactly what
     `mtest.model.control_chars.is_interpreted_control` classifies as terminal
     instructions: the C0 controls `U+0000..U+001F`, DEL `U+007F`, and the C1
-    controls `U+0080..U+009F`. Every other code point — printable ASCII,
-    accented Latin, CJK, emoji, and the U+FFFD a lossy decode produced — is
-    copied through unchanged, so the only difference between the input and the
-    output is a control the terminal would have executed.
+    controls `U+0080..U+009F`. Every other code point is copied through
+    unchanged, including printable ASCII, accented Latin, CJK, emoji, and the
+    U+FFFD a lossy decode produced, so the only difference between the input and
+    the output is a control the terminal would have executed.
 
     The classification is shared with `doctor` and `config show`; the spelling
     is this module's own. C1 takes the `\\u00HH` form rather than `\\xHH`
@@ -142,7 +142,7 @@ def _escape_controls(text: String, preserve_lf_tab: Bool) -> String:
 def escape_scalar(text: String) -> String:
     """Neutralize `text` for a console value that must stay on one line.
 
-    Escapes every C0 control `U+0000..U+001F` — LF and Tab included — plus DEL
+    Escapes every C0 control `U+0000..U+001F`, LF and Tab included, plus DEL
     `U+007F` and every C1 control `U+0080..U+009F`. A path, node id, pattern,
     program name, or reproduce argument therefore cannot break its own line,
     realign a column, or start a control sequence, whatever bytes the child
@@ -153,6 +153,15 @@ def escape_scalar(text: String) -> String:
 
     Returns:
         A single-line, control-free rendering of `text`.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.console_text import escape_scalar
+
+    # A child's ESC byte becomes the four visible characters `\\x1B`.
+    var safe = escape_scalar(chr(0x1B))
+    ```
     """
     return _escape_controls(text, preserve_lf_tab=False)
 
@@ -172,6 +181,15 @@ def escape_multiline(text: String) -> String:
     Returns:
         `text` with its line and tab structure intact and every other control
         rendered as visible escape text.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.console_text import escape_multiline
+
+    # The LF survives; the bare CR becomes `\\x0D`.
+    var block = escape_multiline("done\\rfake\\n")
+    ```
     """
     return _escape_controls(text, preserve_lf_tab=True)
 
@@ -181,7 +199,7 @@ def prefix_lines(text: String, prefix: String = "    | ") -> String:
 
     Owns line fencing and nothing else: it makes no judgement about which
     characters are safe, so it must be applied to already-escaped text. The
-    gutter is what makes the child's territory visible — an escaped line can no
+    gutter is what makes the child's territory visible. An escaped line can no
     longer forge a control sequence, but it could still forge text that reads
     like one of mtest's own verdict or banner lines, and a gutter it cannot
     reproduce settles that.
@@ -199,6 +217,15 @@ def prefix_lines(text: String, prefix: String = "    | ") -> String:
 
     Returns:
         The fenced block, or `""` when `text` is empty.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.console_text import escape_multiline, prefix_lines
+
+    # Escape first, then fence: `    | a\\n    | b\\n`.
+    var fenced = prefix_lines(escape_multiline("a\\nb\\n"))
+    ```
     """
     if text.byte_length() == 0:
         return String("")

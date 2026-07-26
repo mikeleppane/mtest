@@ -41,6 +41,7 @@ from __future__ import annotations
 import os
 import sys
 
+
 CANONICAL = "@MTEST_CANONICAL_SOURCE@"
 """The absolute, symlink-resolved source path the report header must match.
 
@@ -86,7 +87,7 @@ would be invalid UTF-8 and would decode to U+FFFD; only this spelling survives
 the decode as a real control the terminal still acts on."""
 
 DELIMITERS = (
-    b'delims: dquote["] squote[\'] backslash[\\] lt[<] gt[>] amp[&] '
+    b"delims: dquote[\"] squote['] backslash[\\] lt[<] gt[>] amp[&] "
     b"cdata-close[]]>] entity[&amp;]"
 )
 """Every byte that ENDS a value in one of the machine formats: `"` and `\\` for
@@ -278,7 +279,13 @@ def report_block(skipping: bool, canonical: str | None = None) -> bytes:
         summary = b"Summary [ 0.00s ] 1 tests run: 0 passed , 1 failed , 0 skipped \n"
         trailer = b"Test suite' " + path + b" 'failed! \n"
     return (
-        b"\nRunning 1 tests for " + path + b" \n" + row + b"--------\n" + summary + trailer
+        b"\nRunning 1 tests for "
+        + path
+        + b" \n"
+        + row
+        + b"--------\n"
+        + summary
+        + trailer
     )
 
 

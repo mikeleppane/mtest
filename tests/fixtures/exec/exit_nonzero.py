@@ -6,6 +6,8 @@ inherited `SIG_IGN` disposition for SIGCHLD the kernel auto-reaps children and
 `waitpid` cannot retrieve a status, so a supervisor that decodes the unfilled
 status word would launder this real failure into a false `Exited(0)` PASS.
 """
+
 import sys
+
 
 sys.exit(7)

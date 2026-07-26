@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import math
 import os
@@ -14,17 +15,17 @@ import sys
 import tempfile
 import threading
 import time
+from typing import IO, cast, override
 
 from scripts.harness import watchdog
 from scripts.harness.watchdog import (
-    Cancelled,
     DRAIN_SETTLE_SECONDS,
+    TIMEOUT_EXIT_CODE,
     Exited,
     HarnessError,
     MarkerRetention,
     Signaled,
     TimedOut,
-    TIMEOUT_EXIT_CODE,
     run_command,
 )
 
@@ -97,8 +98,7 @@ def _run(
         ],
         check=False,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         timeout=outer_timeout_seconds,
     )
 
@@ -169,8 +169,7 @@ def test_inherited_blocked_sigterm_is_preserved() -> None:
         ],
         check=False,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
     )
     if result.returncode != -signal.SIGTERM:
         raise AssertionError(
@@ -246,8 +245,10 @@ def test_invalid_run_command_timeouts_never_spawn_payloads() -> None:
                 [
                     PYTHON,
                     "-c",
-                    "from pathlib import Path; import sys; "
-                    "Path(sys.argv[1]).write_text('started')",
+                    (
+                        "from pathlib import Path; import sys; "
+                        "Path(sys.argv[1]).write_text('started')"
+                    ),
                     str(marker),
                 ],
                 source="tests/unit/test_watchdog.mojo",
@@ -274,8 +275,10 @@ def test_parser_rejects_invalid_timeouts_before_payload_start() -> None:
                 [
                     PYTHON,
                     "-c",
-                    "from pathlib import Path; import sys; "
-                    "Path(sys.argv[1]).write_text('started')",
+                    (
+                        "from pathlib import Path; import sys; "
+                        "Path(sys.argv[1]).write_text('started')"
+                    ),
                     str(marker),
                 ],
                 timeout_seconds=float(timeout_seconds),
@@ -298,7 +301,9 @@ def test_spawn_failure_is_not_a_timeout() -> None:
             deadline_sentinel=sentinel,
         )
         if result.returncode != 70:
-            raise AssertionError(f"spawn failure exited {result.returncode}, expected 70")
+            raise AssertionError(
+                f"spawn failure exited {result.returncode}, expected 70"
+            )
         if "exceeded" in result.stderr or "timed out" in result.stderr:
             raise AssertionError(f"spawn failure claimed timeout:\n{result.stderr}")
         if sentinel.exists():
@@ -307,6 +312,7 @@ def test_spawn_failure_is_not_a_timeout() -> None:
 
 def test_broken_timeout_diagnostic_leaves_the_deadline_sentinel() -> None:
     """A notification write failure cannot bypass cleanup or make the shell pass."""
+
     class BrokenStderr:
         """A pipe-like stderr that rejects the watchdog's timeout diagnostic."""
 
@@ -334,7 +340,9 @@ def test_broken_timeout_diagnostic_leaves_the_deadline_sentinel() -> None:
         if not isinstance(termination, TimedOut):
             raise AssertionError(f"expected TimedOut, got {termination!r}")
         if not sentinel.exists():
-            raise AssertionError("broken timeout diagnostic cleared the deadline sentinel")
+            raise AssertionError(
+                "broken timeout diagnostic cleared the deadline sentinel"
+            )
 
 
 def test_timeout_terminates_the_whole_process_group() -> None:
@@ -348,33 +356,25 @@ def test_timeout_terminates_the_whole_process_group() -> None:
         grandchild = tmp / "grandchild.py"
         child = tmp / "parent.py"
         grandchild.write_text(
-            "\n".join(
-                [
-                    "from pathlib import Path",
-                    "import signal",
-                    "import sys",
-                    "import time",
-                    "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
-                    "Path(sys.argv[1]).write_text('ready')",
-                    "time.sleep(6.0)",
-                    "Path(sys.argv[2]).write_text('survived')",
-                ]
-            ),
+            "from pathlib import Path\n"
+            "import signal\n"
+            "import sys\n"
+            "import time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "Path(sys.argv[1]).write_text('ready')\n"
+            "time.sleep(6.0)\n"
+            "Path(sys.argv[2]).write_text('survived')",
             encoding="utf-8",
         )
         child.write_text(
-            "\n".join(
-                [
-                    "import subprocess",
-                    "import sys",
-                    "import time",
-                    "ready, marker, grandchild = sys.argv[1:]",
-                    "subprocess.Popen([sys.executable, grandchild, ready, marker])",
-                    "while not __import__('pathlib').Path(ready).exists():",
-                    "    time.sleep(0.01)",
-                    "time.sleep(60)",
-                ]
-            ),
+            "import subprocess\n"
+            "import sys\n"
+            "import time\n"
+            "ready, marker, grandchild = sys.argv[1:]\n"
+            "subprocess.Popen([sys.executable, grandchild, ready, marker])\n"
+            "while not __import__('pathlib').Path(ready).exists():\n"
+            "    time.sleep(0.01)\n"
+            "time.sleep(60)",
             encoding="utf-8",
         )
         result = _run(
@@ -388,12 +388,19 @@ def test_timeout_terminates_the_whole_process_group() -> None:
                 f"expected timeout exit {TIMEOUT_EXIT_CODE}, got {result.returncode}"
             )
         diagnostic = result.stderr
-        if "tests/unit/test_watchdog.mojo" not in diagnostic or ": run " not in diagnostic:
-            raise AssertionError(f"timeout diagnostic lost its source or step: {diagnostic}")
+        if (
+            "tests/unit/test_watchdog.mojo" not in diagnostic
+            or ": run " not in diagnostic
+        ):
+            raise AssertionError(
+                f"timeout diagnostic lost its source or step: {diagnostic}"
+            )
         if not deadline_sentinel.exists():
             raise AssertionError("actual timeout removed its deadline sentinel")
         if not ready.exists():
-            raise AssertionError("timeout raced before the SIGTERM-ignoring child was ready")
+            raise AssertionError(
+                "timeout raced before the SIGTERM-ignoring child was ready"
+            )
         # `_run` captures the watchdog's inherited stdout/stderr. It cannot
         # return until the descendant closes those inherited pipe ends; then
         # this delayed marker separately proves the descendant did not survive
@@ -420,30 +427,28 @@ def _assert_cancellation_reaches_process_group(
         deadline_sentinel.touch()
         actor = tmp / "signal_actor.py"
         actor.write_text(
-            "\n".join(
-                [
-                    "from pathlib import Path",
-                    "import os",
-                    "import signal",
-                    "import subprocess",
-                    "import sys",
-                    "import time",
-                    "role, ready, received, child_ready, child_received = sys.argv[1:6]",
-                    "signum = int(sys.argv[6])",
-                    "linger_after_signal = sys.argv[8] == 'linger'",
-                    "def handle(actual, _frame):",
-                    "    Path(received).write_text(str(actual))",
-                    "    if linger_after_signal:",
-                    "        return",
-                    "    raise SystemExit(0)",
-                    "signal.signal(signum, handle)",
-                    "if role == 'leader':",
-                    "    Path(sys.argv[7]).write_text(str(os.getpid()))",
-                    "    subprocess.Popen([sys.executable, __file__, 'descendant', child_ready, child_received, '', '', str(signum), '', sys.argv[8]])",
-                    "Path(ready).write_text('ready')",
-                    "time.sleep(60)",
-                ]
-            ),
+            "from pathlib import Path\n"
+            "import os\n"
+            "import signal\n"
+            "import subprocess\n"
+            "import sys\n"
+            "import time\n"
+            "role, ready, received, child_ready, child_received = sys.argv[1:6]\n"
+            "signum = int(sys.argv[6])\n"
+            "linger_after_signal = sys.argv[8] == 'linger'\n"
+            "def handle(actual, _frame):\n"
+            "    Path(received).write_text(str(actual))\n"
+            "    if linger_after_signal:\n"
+            "        return\n"
+            "    raise SystemExit(0)\n"
+            "signal.signal(signum, handle)\n"
+            "if role == 'leader':\n"
+            "    Path(sys.argv[7]).write_text(str(os.getpid()))\n"
+            "    subprocess.Popen([sys.executable, __file__, 'descendant', "
+            "child_ready, child_received, '', '', str(signum), '', "
+            "sys.argv[8]])\n"
+            "Path(ready).write_text('ready')\n"
+            "time.sleep(60)",
             encoding="utf-8",
         )
         watchdog_args = [
@@ -507,7 +512,8 @@ def _assert_cancellation_reaches_process_group(
                     time.sleep(0.01)
             if deadline_sentinel.exists():
                 raise AssertionError("cancellation left the deadline sentinel")
-            assert watchdog.stderr is not None
+            if watchdog.stderr is None:
+                raise AssertionError("the watchdog was spawned without a stderr pipe")
             diagnostic = watchdog.stderr.read()
             if "Traceback" in diagnostic:
                 raise AssertionError(
@@ -518,10 +524,10 @@ def _assert_cancellation_reaches_process_group(
                 watchdog.kill()
                 watchdog.wait()
             if leader_pid.exists():
-                try:
-                    os.killpg(int(leader_pid.read_text(encoding="utf-8")), signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(
+                        int(leader_pid.read_text(encoding="utf-8")), signal.SIGKILL
+                    )
 
 
 def test_sigterm_is_forwarded_to_the_process_group() -> None:
@@ -550,20 +556,16 @@ def test_cancellation_wins_when_spawn_then_raises() -> None:
         sentinel.touch()
         wrapper = tmp / "cancelled_spawn_watchdog.py"
         wrapper.write_text(
-            "\n".join(
-                [
-                    "import os",
-                    "import signal",
-                    "import sys",
-                    "sys.path.insert(0, sys.argv[1])",
-                    "from scripts.harness import watchdog",
-                    "def cancelled_spawn(*_args, **_kwargs):",
-                    "    os.kill(os.getpid(), signal.SIGTERM)",
-                    "    raise FileNotFoundError('injected spawn failure')",
-                    "watchdog.subprocess.Popen = cancelled_spawn",
-                    "raise SystemExit(watchdog.main(sys.argv[2:]))",
-                ]
-            ),
+            "import os\n"
+            "import signal\n"
+            "import sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from scripts.harness import watchdog\n"
+            "def cancelled_spawn(*_args, **_kwargs):\n"
+            "    os.kill(os.getpid(), signal.SIGTERM)\n"
+            "    raise FileNotFoundError('injected spawn failure')\n"
+            "watchdog.subprocess.Popen = cancelled_spawn\n"
+            "raise SystemExit(watchdog.main(sys.argv[2:]))",
             encoding="utf-8",
         )
         result = subprocess.run(
@@ -584,8 +586,7 @@ def test_cancellation_wins_when_spawn_then_raises() -> None:
             ],
             check=False,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=5.0,
         )
         if result.returncode != -signal.SIGTERM:
@@ -602,7 +603,7 @@ def test_cancellation_wins_when_spawn_then_raises() -> None:
 class _TextOverBytes:
     """A stdout/stderr stand-in exposing the byte buffer the watchdog tees to."""
 
-    def __init__(self, handle: object) -> None:
+    def __init__(self, handle: IO[bytes]) -> None:
         self.buffer = handle
 
     def write(self, text: str) -> int:
@@ -663,22 +664,24 @@ def test_flooding_child_is_drained_teed_and_marked() -> None:
             original_stdout = sys.stdout
             original_stderr = sys.stderr
             started = time.monotonic()
-            with teed.open("wb") as stdout_handle:
-                with diagnostics.open("wb") as stderr_handle:
-                    sys.stdout = _TextOverBytes(stdout_handle)
-                    sys.stderr = _TextOverBytes(stderr_handle)
-                    try:
-                        termination = run_command(
-                            [PYTHON, str(actor), mode],
-                            source="tests/unit/test_watchdog.mojo",
-                            step="run",
-                            timeout_seconds=1.0,
-                            deadline_sentinel=sentinel,
-                            marker_retention=retention,
-                        )
-                    finally:
-                        sys.stdout = original_stdout
-                        sys.stderr = original_stderr
+            with (
+                teed.open("wb") as stdout_handle,
+                diagnostics.open("wb") as stderr_handle,
+            ):
+                sys.stdout = _TextOverBytes(stdout_handle)
+                sys.stderr = _TextOverBytes(stderr_handle)
+                try:
+                    termination = run_command(
+                        [PYTHON, str(actor), mode],
+                        source="tests/unit/test_watchdog.mojo",
+                        step="run",
+                        timeout_seconds=1.0,
+                        deadline_sentinel=sentinel,
+                        marker_retention=retention,
+                    )
+                finally:
+                    sys.stdout = original_stdout
+                    sys.stderr = original_stderr
             elapsed = time.monotonic() - started
             if termination != expected:
                 raise AssertionError(
@@ -720,24 +723,20 @@ def _retaining_watchdog_argv(
     """
     wrapper = tmp / "retaining_watchdog.py"
     wrapper.write_text(
-        "\n".join(
-            [
-                "from pathlib import Path",
-                "import sys",
-                "sys.path.insert(0, sys.argv[1])",
-                "from scripts.harness import watchdog",
-                "retention = watchdog.MarkerRetention(sys.argv[2])",
-                "termination = watchdog.run_command(",
-                "    sys.argv[5:],",
-                "    source='tests/unit/test_watchdog.mojo',",
-                "    step='run',",
-                "    timeout_seconds=float(sys.argv[4]),",
-                "    deadline_sentinel=Path(sys.argv[3]),",
-                "    marker_retention=retention,",
-                ")",
-                "raise SystemExit(watchdog._exit_with_termination(termination))",
-            ]
-        ),
+        "from pathlib import Path\n"
+        "import sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "from scripts.harness import watchdog\n"
+        "retention = watchdog.MarkerRetention(sys.argv[2])\n"
+        "termination = watchdog.run_command(\n"
+        "    sys.argv[5:],\n"
+        "    source='tests/unit/test_watchdog.mojo',\n"
+        "    step='run',\n"
+        "    timeout_seconds=float(sys.argv[4]),\n"
+        "    deadline_sentinel=Path(sys.argv[3]),\n"
+        "    marker_retention=retention,\n"
+        ")\n"
+        "raise SystemExit(watchdog._exit_with_termination(termination))",
         encoding="utf-8",
     )
     return [
@@ -800,7 +799,8 @@ def test_a_blocked_caller_stream_cannot_swallow_a_caller_signal() -> None:
             if supervisor.poll() is None:
                 supervisor.kill()
                 supervisor.wait()
-            assert supervisor.stderr is not None
+            if supervisor.stderr is None:
+                raise AssertionError("the supervisor was spawned without a stderr pipe")
             diagnostic = supervisor.stderr.read()
             for stream in (supervisor.stdout, supervisor.stderr):
                 if stream is not None:
@@ -844,9 +844,9 @@ def test_high_numbered_pipe_descriptors_do_not_lose_output() -> None:
             sentinel.touch()
             retention = MarkerRetention(MARKER_PREFIX)
             teed = tmp / "teed-stdout"
-            expected = (
-                FLOOD_LINE * FLOOD_LINE_COUNT + FLOOD_MARKERS[1]
-            ).encode("utf-8")
+            expected = (FLOOD_LINE * FLOOD_LINE_COUNT + FLOOD_MARKERS[1]).encode(
+                "utf-8"
+            )
             original_stdout = sys.stdout
             with teed.open("wb") as handle:
                 sys.stdout = _TextOverBytes(handle)
@@ -855,10 +855,12 @@ def test_high_numbered_pipe_descriptors_do_not_lose_output() -> None:
                         [
                             PYTHON,
                             "-c",
-                            "import sys; "
-                            f"sys.stdout.write({FLOOD_LINE!r} * "
-                            f"{FLOOD_LINE_COUNT}); "
-                            f"sys.stdout.write({FLOOD_MARKERS[1]!r})",
+                            (
+                                "import sys; "
+                                f"sys.stdout.write({FLOOD_LINE!r} * "
+                                f"{FLOOD_LINE_COUNT}); "
+                                f"sys.stdout.write({FLOOD_MARKERS[1]!r})"
+                            ),
                         ],
                         source="tests/unit/test_watchdog.mojo",
                         step="run",
@@ -873,8 +875,7 @@ def test_high_numbered_pipe_descriptors_do_not_lose_output() -> None:
             actual = teed.read_bytes()
             if actual != expected:
                 raise AssertionError(
-                    f"high-fd drain teed {len(actual)} bytes, "
-                    f"expected {len(expected)}"
+                    f"high-fd drain teed {len(actual)} bytes, expected {len(expected)}"
                 )
             if retention.text != FLOOD_MARKERS[1]:
                 raise AssertionError(
@@ -894,8 +895,7 @@ def test_a_frozen_marker_capture_refuses_later_writes() -> None:
     retention.record(FLOOD_MARKERS[1])
     if retention.text != FLOOD_MARKERS[1]:
         raise AssertionError(
-            f"open capture retained {retention.text!r}, "
-            f"expected {FLOOD_MARKERS[1]!r}"
+            f"open capture retained {retention.text!r}, expected {FLOOD_MARKERS[1]!r}"
         )
     retention.freeze()
     retention.record(LATE_MARKER)
@@ -918,11 +918,13 @@ def test_the_seal_freezes_the_capture_before_it_seals_any_tee() -> None:
     order: list[str] = []
 
     class _OrderingTee(watchdog._StreamTee):
+        @override
         def seal(self) -> bool:
             order.append("seal")
             return super().seal()
 
     class _OrderingRetention(MarkerRetention):
+        @override
         def freeze(self) -> None:
             order.append("freeze")
             super().freeze()
@@ -936,9 +938,7 @@ def test_the_seal_freezes_the_capture_before_it_seals_any_tee() -> None:
     )
     watchdog._seal_drainers(state)
     if order != ["freeze", "seal", "seal"]:
-        raise AssertionError(
-            f"seal ordering was {order}, expected the freeze first"
-        )
+        raise AssertionError(f"seal ordering was {order}, expected the freeze first")
     if not state.stop.is_set():
         raise AssertionError("sealing left the drainers' stop flag clear")
 
@@ -960,9 +960,7 @@ def test_a_drainer_cannot_write_through_a_frozen_capture() -> None:
             threading.Event(),
         )
     if sink.getvalue() != LATE_MARKER:
-        raise AssertionError(
-            f"the drain lost its tee: {sink.getvalue()!r}"
-        )
+        raise AssertionError(f"the drain lost its tee: {sink.getvalue()!r}")
     if retention.text != FLOOD_MARKERS[1]:
         raise AssertionError(
             f"a drainer wrote through a frozen capture: {retention.text!r}"
@@ -983,20 +981,22 @@ def test_a_cancelled_timeout_settle_seals_before_the_timeout_diagnostic() -> Non
         original_notify = watchdog._notify_timeout
 
         def recording_start(
-            process: object, marker: MarkerRetention
+            process: subprocess.Popen[bytes], retention: MarkerRetention
         ) -> watchdog._DrainState:
             """Capture the live drainers so the diagnostic can be inspected."""
-            state = original_start(process, marker)
+            state = original_start(process, retention)
             states.append(state)
             return state
 
-        def cancelling_settle(_state: watchdog._DrainState | None) -> None:
+        def cancelling_settle(
+            # ARG001: the name and type must match `_settle_drainers` for this
+            # stand-in to be a type-compatible replacement for it.
+            state: watchdog._DrainState | None,  # noqa: ARG001
+        ) -> None:
             """Stand in for a caller signal delivered inside the drain settle."""
             raise watchdog._WatchdogCancellation(signal.SIGTERM)
 
-        def observing_notify(
-            source: str, step: str, timeout_seconds: float
-        ) -> None:
+        def observing_notify(source: str, step: str, timeout_seconds: float) -> None:
             """Record whether every tee was already shut when FATAL was printed."""
             sealed_at_diagnostic.append(
                 bool(states) and all(tee.sealed for tee in states[-1].tees)
@@ -1020,9 +1020,7 @@ def test_a_cancelled_timeout_settle_seals_before_the_timeout_diagnostic() -> Non
             watchdog._settle_drainers = original_settle
             watchdog._notify_timeout = original_notify
         if not isinstance(termination, TimedOut):
-            raise AssertionError(
-                f"cancelled timeout settle returned {termination!r}"
-            )
+            raise AssertionError(f"cancelled timeout settle returned {termination!r}")
         if sealed_at_diagnostic != [True]:
             raise AssertionError(
                 "the timeout diagnostic was printed with a live drainer: "
@@ -1210,7 +1208,8 @@ def test_cancellation_during_the_drain_settle_stays_cancelled() -> None:
             time.sleep(DRAIN_SETTLE_SECONDS / 4.0)
             os.kill(supervisor.pid, signal.SIGTERM)
             status = supervisor.wait(timeout=30.0)
-            assert supervisor.stderr is not None
+            if supervisor.stderr is None:
+                raise AssertionError("the supervisor was spawned without a stderr pipe")
             diagnostic = supervisor.stderr.read()
         finally:
             if supervisor.poll() is None:
@@ -1240,32 +1239,35 @@ def test_a_zombie_only_group_reports_gone_on_both_spellings() -> None:
     supervisor owns every member of the group it signals, so EPERM cannot mean
     a permission boundary.
     """
+    # `watchdog.os` is this module's own `os`, so patching it here reaches the
+    # identical object the supervisor calls through.
     for error in (ProcessLookupError(), PermissionError()):
-        def refuse(pid: int, signum: int, exc=error) -> None:
+
+        def refuse(_pid: int, _signum: int, exc: OSError = error) -> None:
             raise exc
 
-        original = watchdog.os.killpg
-        watchdog.os.killpg = refuse
+        original = os.killpg
+        os.killpg = refuse
         try:
             if watchdog._signal_group(1234, 0):
                 raise AssertionError(
                     f"{type(error).__name__} was not treated as a gone group"
                 )
         finally:
-            watchdog.os.killpg = original
+            os.killpg = original
 
     delivered: list[tuple[int, int]] = []
 
     def accept(pid: int, signum: int) -> None:
         delivered.append((pid, signum))
 
-    original = watchdog.os.killpg
-    watchdog.os.killpg = accept
+    original = os.killpg
+    os.killpg = accept
     try:
         if not watchdog._signal_group(99, 15):
             raise AssertionError("a live group was reported gone")
     finally:
-        watchdog.os.killpg = original
+        os.killpg = original
     if delivered != [(99, 15)]:
         raise AssertionError(f"signal not forwarded verbatim: {delivered}")
 
@@ -1285,17 +1287,20 @@ def test_forwarding_a_signal_survives_a_zombie_only_group() -> None:
         def wait(self) -> None:
             self.waited += 1
 
-    def zombie_only(pid: int, signum: int) -> None:
-        raise PermissionError()
+    def zombie_only(_pid: int, _signum: int) -> None:
+        raise PermissionError
 
     process = _Reaped()
-    original = watchdog.os.killpg
-    watchdog.os.killpg = zombie_only
+    # `_Reaped` is a duck-typed stand-in exposing exactly the three members both
+    # cleanup paths touch; the cast states that without changing what is passed.
+    reaped = cast("subprocess.Popen[bytes]", process)
+    original = os.killpg
+    os.killpg = zombie_only
     try:
-        watchdog._forward_signal_and_cleanup(process, 2)
-        watchdog._terminate_process_group(process)
+        watchdog._forward_signal_and_cleanup(reaped, 2)
+        watchdog._terminate_process_group(reaped)
     finally:
-        watchdog.os.killpg = original
+        os.killpg = original
     if process.waited != 2:
         raise AssertionError(
             f"cleanup did not reap the leader on both paths: {process.waited}"
@@ -1324,10 +1329,12 @@ def test_an_unsealable_tee_releases_its_drainer_source() -> None:
     source = _Source()
     state = watchdog._DrainState(
         threads=(),
-        tees=(_UnsealableTee(),),
+        # Duck-typed stand-ins for the only two members `_seal_drainers`
+        # touches; the casts state that without changing what is passed.
+        tees=cast("tuple[watchdog._StreamTee, ...]", (_UnsealableTee(),)),
         stop=threading.Event(),
         retention=None,
-        sources=(source,),
+        sources=cast("tuple[IO[bytes], ...]", (source,)),
     )
     watchdog._seal_drainers(state)
     if not source.closed:
@@ -1354,10 +1361,11 @@ def test_a_sealable_tee_keeps_its_source_for_the_drainer_to_close() -> None:
     watchdog._seal_drainers(
         watchdog._DrainState(
             threads=(),
-            tees=(_SealableTee(),),
+            # Duck-typed stand-ins, as in the unsealable case above.
+            tees=cast("tuple[watchdog._StreamTee, ...]", (_SealableTee(),)),
             stop=threading.Event(),
             retention=None,
-            sources=(source,),
+            sources=cast("tuple[IO[bytes], ...]", (source,)),
         )
     )
     if source.closed:

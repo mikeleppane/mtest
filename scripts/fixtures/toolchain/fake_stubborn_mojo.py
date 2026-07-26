@@ -41,6 +41,7 @@ import signal
 import sys
 import time
 
+
 TARGET_ENV_VAR = "MTEST_STUBBORN_TARGET"
 """The repo-relative source path whose compile blocks instead of building."""
 PGID_ENV_VAR = "MTEST_STUBBORN_PGID_FILE"
@@ -112,7 +113,10 @@ def main() -> int:
         return 127
 
     os.execv(real_mojo, [real_mojo, *args])
-    return 1  # unreachable: a successful os.execv never returns
+    # Kept as defence in depth: typeshed types os.execv as NoReturn, so mypy
+    # sees this as dead. Deleting it would remove the fallback if that ever
+    # changes.
+    return 1  # type: ignore[unreachable]
 
 
 if __name__ == "__main__":

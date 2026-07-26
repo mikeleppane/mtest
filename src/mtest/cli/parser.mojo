@@ -1,8 +1,12 @@
 """The hand-rolled full-contract argument parser.
 
-`parse_args` turns an argument vector into a `ParseResult` — a configured run,
-a resolved-config display request, a doctor request, or a help/version
-directive — or raises a `cli:`-prefixed usage error.
+`parse_args` turns an argument vector into a `ParseResult`: a configured run, a
+resolved-config display request, a doctor request, or a help/version directive.
+Anything it refuses becomes a `cli:`-prefixed usage error instead.
+
+The parser is hand-rolled by decision. The `prism` argument-parsing library was
+evaluated and rejected on source evidence: it has no `--` pass-through, and
+repeated flags corrupt values containing spaces. Wrapping it was rejected too.
 
 Every raise names the offending token, states the expected form, and points at
 `mtest --help`. This layer never prints and never exits; `main` prints help and
@@ -39,7 +43,11 @@ from mtest.config import (
 )
 
 comptime MTEST_VERSION = "0.6.0"
-"""The single source of the version string; `main` reuses this exact value."""
+"""The single source of the version string; `main` reuses this exact value.
+
+`pixi run version-check` asserts it agrees with `pixi.toml`, with
+`recipe/recipe.yaml`, and with the version this repo ships.
+"""
 
 comptime _HELP_COLUMN = 30
 
@@ -166,7 +174,7 @@ def _parse_workers(value: String) raises -> Int:
 
     Raises:
         A usage error (exit 4) when the value is neither `auto` nor a positive
-        integer — `0`, a negative, or any non-digit spelling.
+        integer: `0`, a negative, or any non-digit spelling.
     """
     var parsed = parse_worker_count(value)
     if not parsed:
@@ -331,11 +339,11 @@ def _err_shard(value: String) -> Error:
 def _check_build_arg(tok: String) raises:
     """Reject a build argument that would seize control mtest owns.
 
-    Forbids output selection (`-o`), emit-type selection (`--emit`), build
-    parallelism (`-j`, `--num-threads` — the runner owns the build thread
-    budget), and any extra Mojo source operand — a bare `*.mojo` or `*.🔥`
-    positional that would reach `mojo build`. A bare value that is not a source
-    file, such as a forwarded flag's value, passes.
+    Forbids output selection (`-o`), emit-type selection (`--emit`), and build
+    parallelism (`-j`, `--num-threads`), because the runner owns the build
+    thread budget. It also forbids any extra Mojo source operand: a bare
+    `*.mojo` or `*.🔥` positional that would reach `mojo build`. A bare value
+    that is not a source file, such as a forwarded flag's value, passes.
     """
     var rejection = build_arg_rejection(tok)
     if rejection:
@@ -362,26 +370,42 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     """Parse `argv` into a run, config-display, doctor, help, or version result.
 
     A leading `help` or `version` token returns that directive immediately. A
-    leading `run` or `collect` token is consumed as a subcommand, with `collect`
-    equivalent to `--collect-only`. A leading `config show` pair requests
-    resolution-only display while reusing the run grammar. Any other first
-    token is left to the general token loop, which reads it as a flag when it
-    starts with `-` (a bare `-` excepted) and as a path operand otherwise, so
-    an argument vector may open with a flag. Everything after a bare `--` is
-    forwarded as a build argument.
+    leading `run`, `collect`, or `doctor` token is consumed as a subcommand,
+    with `collect` equivalent to `--collect-only`. A leading `config show` pair
+    requests resolution-only display while reusing the run grammar. Any other
+    first token is left to the general token loop, which reads it as a flag
+    when it starts with `-` (a bare `-` excepted) and as a path operand
+    otherwise, so an argument vector may open with a flag. Everything after a
+    bare `--` is forwarded as a build argument.
+
+    The `--json -` conflict with the annotation tail is not refused here.
+    Either value can also come from `mtest.toml`, so `validate_resolved_config`
+    refuses the pair after layering and `main` exits 4.
 
     Args:
         argv: The argument tokens, excluding the program name.
 
     Returns:
-        A configured run, config-display request, or help/version directive.
+        A configured run, config-display request, doctor request, or
+        help/version directive.
 
     Raises:
         Error: A `cli:`-prefixed usage error, raised for an unknown flag, a
             missing or malformed value, a forbidden build argument, a bundled
-            short-flag group, `-q` and `-v` together, a run-only flag combined
-            with collect mode, `--json -` alongside an annotation tail that is
-            not explicitly off.
+            short-flag group, `-q` and `-v` together, `--config` with
+            `--no-config`, `--lf` with `--ff`, either of those with `--shard`,
+            a run-only flag combined with collect mode, or a run, build, or
+            reporter flag combined with doctor.
+
+    Examples:
+
+    ```mojo
+    from mtest.cli import parse_args
+
+    var argv: List[String] = ["run", "tests/", "--timeout", "45"]
+    var result = parse_args(argv)
+    print(result.is_run(), result.config.timeout_secs)
+    ```
     """
     var start = 0
     var collect = False

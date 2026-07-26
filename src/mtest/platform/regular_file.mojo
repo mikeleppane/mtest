@@ -90,6 +90,17 @@ def read_bounded_regular_file(
     Raises:
         Error: If open, fstat, read, close, allocation, or UTF-8 validation
             fails. Every successfully opened descriptor is closed first.
+
+    Examples:
+
+    ```mojo
+    from mtest.platform import read_bounded_regular_file
+
+    var opened = read_bounded_regular_file("mtest.toml", 65536)
+    if not opened.is_regular:
+        raise Error("mtest.toml is not a regular file")
+    var text = opened.text.copy()
+    ```
     """
     if max_bytes < 0:
         raise Error("platform: bounded read requires a nonnegative limit")

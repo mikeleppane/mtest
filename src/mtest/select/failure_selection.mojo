@@ -166,6 +166,17 @@ def resolve_last_failed(
 
     Returns:
         A newly allocated soft-filter result and its nonfatal drops.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import LastRunRecord, LastRunState
+    from mtest.select.failure_selection import resolve_last_failed
+
+    var files: List[String] = ["tests/a.mojo", "tests/b.mojo"]
+    var state = LastRunState([LastRunRecord.file("tests/b.mojo")])
+    var sel = resolve_last_failed(files, [], state)  # only tests/b.mojo runs
+    ```
     """
     var stale = List[String]()
     var gate_matched = False

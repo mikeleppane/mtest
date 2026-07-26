@@ -270,7 +270,7 @@ struct StateDelta(Copyable, Movable):
             path: The root-relative file path. Not mutated.
             outcome: Its normalized file outcome.
             fully_observed: Whether every collected test in the file received
-                a verdict, allowing all stale test records to clear.
+                a verdict. True clears all of the file's stale test records.
         """
         if (
             outcome == Outcome.DESELECTED
@@ -467,6 +467,15 @@ def encode_last_run_state(
 
     Returns:
         Newly allocated canonical text plus contained drop diagnostics.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import LastRunRecord, LastRunState, encode_last_run_state
+
+    var state = LastRunState(records=[LastRunRecord.file("tests/a.mojo")])
+    var encoded = encode_last_run_state(state)
+    ```
     """
     var lines = List[String]()
     var diagnostics = List[LastRunDiagnostic]()
@@ -520,6 +529,15 @@ def parse_last_run_state(
 
     Returns:
         Newly allocated accepted state plus contained typed diagnostics.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import parse_last_run_state
+
+    var parsed = parse_last_run_state("mtest-lastrun v1\\nfile\\ttests/a.mojo\\n")
+    var failures = len(parsed.state.records)
+    ```
     """
     var lines = text.split("\n")
     if len(lines) == 0 or String(lines[0]) != String(_HEADER):
@@ -625,6 +643,18 @@ def merge_last_run_state(
 
     Returns:
         A newly allocated merged logical state. Encoding canonicalizes order.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import LastRunState, StateDelta, merge_last_run_state
+    from mtest.model import NodeId, Outcome
+
+    var delta = StateDelta.empty()
+    delta.observe_test(NodeId("tests/a.mojo", "test_add"), Outcome.PASS)
+    # A PASS clears that exact test; unobserved failures survive the merge.
+    var merged = merge_last_run_state(LastRunState.empty(), delta)
+    ```
     """
     var merged = List[LastRunRecord]()
     for record in previous.records:

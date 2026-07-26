@@ -90,7 +90,7 @@ class CaptureError(RuntimeError):
     """A build-missing or runner-hang failure while capturing."""
 
 
-def _kill_group(proc: subprocess.Popen) -> None:
+def _kill_group(proc: subprocess.Popen[bytes]) -> None:
     """Kill the runner's whole process group so a hang cannot wedge the tool."""
     try:
         pgid = os.getpgid(proc.pid)
@@ -226,7 +226,10 @@ def main() -> int:
             dest = OUTPUT_DIR / f"{name}.ansi"
             dest.write_bytes(clean_bytes)
             results.append((name, code, len(clean_bytes)))
-            print(f"pty-capture: wrote {dest.relative_to(REPO_ROOT)} (exit {code}, {len(clean_bytes)} bytes)")
+            print(
+                f"pty-capture: wrote {dest.relative_to(REPO_ROOT)} "
+                f"(exit {code}, {len(clean_bytes)} bytes)"
+            )
 
     print("pty-capture: OK -- " + ", ".join(n for n, _, _ in results))
     return 0

@@ -3,12 +3,13 @@
 
 `junit.py` proves the checker blesses a hand-authored mock; this gate
 proves the shipped renderer's OWN output passes it. It builds the tiny
-`tests/fixtures/junit/junit_emit.mojo` tool against the prebuilt package, runs it to emit a
-full `<testsuites>` document that exercises every sentinel-matrix cell (build /
-attempts / flaky / rerun-exhausted / retried per-test / non-retried per-test /
-not-run / precompile + casualties / suite capture), and runs the schema +
-arithmetic + structural checker over that document. It then TAMPERS the root
-count and confirms the checker REJECTS it, so a silently-broken gate cannot pass.
+`tests/fixtures/junit/junit_emit.mojo` tool against the prebuilt package, runs
+it to emit a full `<testsuites>` document that exercises every sentinel-matrix
+cell (build / attempts / flaky / rerun-exhausted / retried per-test /
+non-retried per-test / not-run / precompile + casualties / suite capture), and
+runs the schema + arithmetic + structural checker over that document. It then
+TAMPERS the root count and confirms the checker REJECTS it, so a
+silently-broken gate cannot pass.
 
 Kept separate from the Mojo unit tests on purpose: spawning `python`/`xmllint`
 from inside a built Mojo test binary is pathologically slow (the runtime raises
@@ -19,11 +20,11 @@ renderer's structure and the event->fragment mapping directly.
 
 from __future__ import annotations
 
+from pathlib import Path
 import re
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
 
 from scripts.checks.reports import junit as junit_check
 
@@ -57,9 +58,7 @@ def _build_emitter(out_binary: Path) -> None:
         check=False,
     )
     if result.returncode != 0:
-        raise RenderCheckError(
-            f"building {EMITTER_SRC.name} failed:\n{result.stdout}"
-        )
+        raise RenderCheckError(f"building {EMITTER_SRC.name} failed:\n{result.stdout}")
 
 
 def _emit_document(binary: Path) -> str:
@@ -68,14 +67,11 @@ def _emit_document(binary: Path) -> str:
         [str(binary)],
         cwd=REPO_ROOT,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     if result.returncode != 0:
-        raise RenderCheckError(
-            f"emitter exited {result.returncode}:\n{result.stderr}"
-        )
+        raise RenderCheckError(f"emitter exited {result.returncode}:\n{result.stderr}")
     if "<testsuites" not in result.stdout:
         raise RenderCheckError(
             f"emitter produced no <testsuites> document:\n{result.stdout!r}"
@@ -114,6 +110,14 @@ def _tamper_root_count(document: str) -> str:
 
 
 def main() -> int:
+    """Build the emitter, gate its real output, and prove the gate rejects a tamper.
+
+    Returns:
+        0 when the rendered document passes the junit-10 oracle and the
+        tampered copy is rejected. 1 after printing the failure to stderr,
+        including the case where the tamper no longer bites, which would mean
+        the negative half of this gate had gone dead.
+    """
     with tempfile.TemporaryDirectory(prefix="mtest-junit-render-") as raw:
         tmp = Path(raw)
         binary = tmp / "junit_emit"
@@ -123,7 +127,9 @@ def main() -> int:
             _accepts(document, tmp, "rendered.xml")
             tampered = _tamper_root_count(document)
             if tampered == document:
-                raise RenderCheckError(
+                # TRY301 exempt: this raise exists to reach the handler below,
+                # which is what turns every failure into the one FAIL line.
+                raise RenderCheckError(  # noqa: TRY301
                     "could not tamper the root count; the document shape changed"
                 )
             _rejects(tampered, tmp, "tampered.xml")

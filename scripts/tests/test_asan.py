@@ -8,10 +8,16 @@ import io
 from pathlib import Path
 import subprocess
 import tempfile
+from typing import TYPE_CHECKING
 import unittest
 from unittest.mock import patch
 
+from scripts.checks import native_abi as native_abi_check
 from scripts.checks.memory import asan as asan_check
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class AsanCheckTests(unittest.TestCase):
@@ -20,7 +26,10 @@ class AsanCheckTests(unittest.TestCase):
 
     def test_source_inventory_is_nonempty_and_exact(self) -> None:
         self.assertEqual(
-            tuple(path.relative_to(asan_check.ROOT).as_posix() for path in asan_check.TESTS),
+            tuple(
+                path.relative_to(asan_check.ROOT).as_posix()
+                for path in asan_check.TESTS
+            ),
             (
                 "tests/integration/test_exec_capture.mojo",
                 "tests/integration/test_exec_env.mojo",
@@ -41,9 +50,11 @@ class AsanCheckTests(unittest.TestCase):
         self.assertGreater(len(asan_check.TESTS), 0)
 
     def test_empty_source_inventory_is_rejected(self) -> None:
-        with patch.object(asan_check, "TESTS", ()):
-            with self.assertRaisesRegex(SystemExit, "source inventory is empty"):
-                asan_check.main()
+        with (
+            patch.object(asan_check, "TESTS", ()),
+            self.assertRaisesRegex(SystemExit, "source inventory is empty"),
+        ):
+            asan_check.main()
 
     def test_classified_suite_builds_generated_entrypoint(self) -> None:
         source = asan_check.ROOT / "tests" / "unit" / "test_config.mojo"
@@ -68,9 +79,7 @@ class AsanCheckTests(unittest.TestCase):
             entrypoint = out / "test_config_main.mojo"
             compile_command = mocked_run.call_args_list[0].args[0]
             self.assertIn(str(entrypoint), compile_command)
-            self.assertNotIn(
-                str(source.relative_to(asan_check.ROOT)), compile_command
-            )
+            self.assertNotIn(str(source.relative_to(asan_check.ROOT)), compile_command)
             self.assertIn(
                 "import tests.unit.test_config as _mtest_module_0",
                 entrypoint.read_text(encoding="utf-8"),
@@ -126,15 +135,11 @@ class AsanCliProbeTests(unittest.TestCase):
             "src/main.mojo",
         )
         self.assertEqual(
-            asan_check.VENDORED_TOML_INCLUDE.relative_to(
-                asan_check.ROOT
-            ).as_posix(),
+            asan_check.VENDORED_TOML_INCLUDE.relative_to(asan_check.ROOT).as_posix(),
             "vendor/mojo-toml",
         )
         self.assertEqual(
-            asan_check.HOSTILE_BUILD_STANDIN.relative_to(
-                asan_check.ROOT
-            ).as_posix(),
+            asan_check.HOSTILE_BUILD_STANDIN.relative_to(asan_check.ROOT).as_posix(),
             "scripts/fixtures/toolchain/fake_hostile_mojo.py",
         )
         self.assertEqual(
@@ -150,14 +155,10 @@ class AsanCliProbeTests(unittest.TestCase):
             command = asan_check.cli_probe_command(scratch / "mtest", scratch)
 
         self.assertEqual(command[0], str(scratch / "mtest"))
-        self.assertEqual(
-            command[1:3], ["--config", str(scratch / "mtest.toml")]
-        )
+        self.assertEqual(command[1:3], ["--config", str(scratch / "mtest.toml")])
         self.assertIn("--mojo", command)
         mojo_index = command.index("--mojo")
-        self.assertEqual(
-            command[mojo_index + 1], str(asan_check.HOSTILE_BUILD_STANDIN)
-        )
+        self.assertEqual(command[mojo_index + 1], str(asan_check.HOSTILE_BUILD_STANDIN))
         json_index = command.index("--json")
         self.assertEqual(
             command[json_index + 1], str(scratch / asan_check.CLI_PROBE_STREAM)
@@ -195,11 +196,9 @@ class AsanCliProbeTests(unittest.TestCase):
                 patch.object(asan_check, "CLI_BINARY", out / "mtest"),
                 patch.object(asan_check, "CLI_SCRATCH", out / "cli"),
                 patch.object(asan_check, "run", side_effect=results),
+                self.assertRaisesRegex(SystemExit, "ASan CLI is not instrumented"),
             ):
-                with self.assertRaisesRegex(
-                    SystemExit, "ASan CLI is not instrumented"
-                ):
-                    asan_check.check_cli({})
+                asan_check.check_cli({})
 
     def test_check_cli_actually_calls_the_instrumentation_check(self) -> None:
         """The witness must be ON the call path, not merely defined.
@@ -229,12 +228,10 @@ class AsanCliProbeTests(unittest.TestCase):
                 patch.object(asan_check, "CLI_BINARY", out / "mtest"),
                 patch.object(asan_check, "CLI_SCRATCH", out / "cli"),
                 patch.object(asan_check, "run", side_effect=results),
-                patch.object(
-                    asan_check, "check_cli_probe_output", return_value="ok"
-                ),
+                patch.object(asan_check, "check_cli_probe_output", return_value="ok"),
+                self.assertRaisesRegex(SystemExit, "leak check did not run"),
             ):
-                with self.assertRaisesRegex(SystemExit, "leak check did not run"):
-                    asan_check.check_cli({})
+                asan_check.check_cli({})
 
     def test_a_run_without_the_leak_check_witness_is_rejected(self) -> None:
         """A silent run and a clean run must not be the same observation.
@@ -248,9 +245,7 @@ class AsanCliProbeTests(unittest.TestCase):
             asan_check.check_cli_instrumentation("0 passed, 1 failed\n")
 
     def test_a_clean_witnessed_run_is_accepted(self) -> None:
-        asan_check.check_cli_instrumentation(
-            f"==1=={asan_check.CLI_LSAN_WITNESS}\n"
-        )
+        asan_check.check_cli_instrumentation(f"==1=={asan_check.CLI_LSAN_WITNESS}\n")
 
     def test_a_sanitizer_finding_is_rejected_even_with_the_witness(
         self,
@@ -289,17 +284,13 @@ class AsanCliProbeTests(unittest.TestCase):
                 patch.object(asan_check, "CLI_SCRATCH", out / "cli"),
                 patch.object(asan_check, "run", side_effect=results) as mocked_run,
                 patch.object(asan_check, "check_cli_instrumentation"),
-                patch.object(
-                    asan_check, "check_cli_probe_output", return_value="ok"
-                ),
+                patch.object(asan_check, "check_cli_probe_output", return_value="ok"),
             ):
                 asan_check.check_cli({"ASAN_OPTIONS": asan_check.ASAN_OPTIONS})
 
             probe_env = mocked_run.call_args_list[2].kwargs["env"]
 
-        self.assertEqual(
-            probe_env["LSAN_OPTIONS"], asan_check.CLI_PROBE_LSAN_OPTIONS
-        )
+        self.assertEqual(probe_env["LSAN_OPTIONS"], asan_check.CLI_PROBE_LSAN_OPTIONS)
         self.assertEqual(probe_env["ASAN_OPTIONS"], asan_check.ASAN_OPTIONS)
 
     def test_cli_probe_build_compiles_main_against_the_vendored_parser(
@@ -322,9 +313,7 @@ class AsanCliProbeTests(unittest.TestCase):
                 patch.object(asan_check, "CLI_SCRATCH", out / "cli"),
                 patch.object(asan_check, "run", side_effect=results) as mocked_run,
                 patch.object(asan_check, "check_cli_instrumentation"),
-                patch.object(
-                    asan_check, "check_cli_probe_output", return_value="ok"
-                ),
+                patch.object(asan_check, "check_cli_probe_output", return_value="ok"),
             ):
                 asan_check.check_cli({})
 
@@ -333,12 +322,8 @@ class AsanCliProbeTests(unittest.TestCase):
             self.assertIn("address", compile_command)
             self.assertIn("src/main.mojo", compile_command)
             self.assertIn(str(asan_check.VENDORED_TOML_INCLUDE), compile_command)
-            self.assertIn(
-                str(asan_check.NATIVE_PRODUCTION_OBJECT), compile_command
-            )
-            self.assertEqual(
-                mocked_run.call_args_list[2].kwargs["cwd"], out / "cli"
-            )
+            self.assertIn(str(asan_check.NATIVE_PRODUCTION_OBJECT), compile_command)
+            self.assertEqual(mocked_run.call_args_list[2].kwargs["cwd"], out / "cli")
 
 
 class AsanCliProbeOracleTests(unittest.TestCase):
@@ -471,7 +456,7 @@ class AsanMainProbeRosterTests(unittest.TestCase):
         performed: list[str] = []
         compiled: list[str] = []
 
-        def probe(name: str):
+        def probe(name: str) -> Callable[[dict[str, str]], None]:
             def run(env: dict[str, str]) -> None:
                 performed.append(name)
                 self.assertIn("ASAN_OPTIONS", env)
@@ -483,7 +468,7 @@ class AsanMainProbeRosterTests(unittest.TestCase):
             with (
                 patch.object(asan_check, "OUT", out),
                 patch.object(asan_check, "TESTS", (Path("tests/unit/a.mojo"),)),
-                patch.object(asan_check, "compile_native", lambda cc: None),
+                patch.object(asan_check, "compile_native", lambda _cc: None),
                 patch.object(asan_check, "check_controls", probe("controls")),
                 patch.object(
                     asan_check, "check_production_exec", probe("production-exec")
@@ -492,11 +477,9 @@ class AsanMainProbeRosterTests(unittest.TestCase):
                 patch.object(
                     asan_check,
                     "compile_and_run_test",
-                    lambda source, env: compiled.append(source.name),
+                    lambda source, _env: compiled.append(source.name),
                 ),
-                patch.object(
-                    asan_check.native_abi_check, "compiler", lambda: "clang"
-                ),
+                patch.object(native_abi_check, "compiler", lambda: "clang"),
             ):
                 with contextlib.redirect_stdout(io.StringIO()) as captured:
                     code = asan_check.main()

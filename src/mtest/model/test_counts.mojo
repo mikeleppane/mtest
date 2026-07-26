@@ -11,6 +11,15 @@ struct TestCounts(ImplicitlyCopyable, Movable):
 
     Four plain Int fields with no owned resources, so copies and moves are
     trivial.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import TestCounts
+
+    var counts = TestCounts(passed=3, failed=1, skipped=2, deselected=4)
+    var empty = TestCounts.zeros()  # every count at 0
+    ```
     """
 
     var passed: Int

@@ -107,9 +107,9 @@ def open_junit_spool() raises -> String:
     against a persisted `/tmp` reproduces the budget exhaustion this function
     exists to remove. A re-read clock cannot be walked into again.
 
-    Honors `TMPDIR`, then `TEMP`, then `TMP`, falling back to `/tmp` — the same
-    precedence `gettempdir()` applies behind the `mkdtemp()` this replaces, so
-    confining a run's scratch keeps working exactly as it did before.
+    Honors `TMPDIR`, then `TEMP`, then `TMP`, falling back to `/tmp`. That is the
+    same precedence `gettempdir()` applies behind the `mkdtemp()` this replaces,
+    so confining a run's scratch keeps working exactly as it did before.
 
     Returns:
         The path of the freshly created, empty directory, mode 0o700. The
@@ -122,6 +122,14 @@ def open_junit_spool() raises -> String:
             verbatim, since every one of those causes burns the whole budget
             identically and only the errno text tells them apart. The caller
             resolves this to the pre-run internal-error exit code.
+
+    Examples:
+
+    ```mojo
+    from mtest.report import JunitReporter, open_junit_spool
+
+    var rep = JunitReporter(open_junit_spool(), True)
+    ```
     """
     var base = getenv("TMPDIR", "")
     if base == "":
@@ -195,6 +203,14 @@ def open_junit_artifact(
         Error: When the unique temp file cannot be created, because the target
             directory is unwritable or missing. The caller resolves this to the
             pre-run internal-error exit code.
+
+    Examples:
+
+    ```mojo
+    from mtest.report import open_junit_artifact, open_junit_spool
+
+    var art = open_junit_artifact(open_junit_spool(), "build/report.xml")
+    ```
     """
     var target_dir = String(dirname(path))
     var temp_name = (
@@ -419,8 +435,10 @@ def _case_for_test(t: TestResult, cn: String) -> JunitCase:
 
 
 def _is_failing_test(t: TestResult) -> Bool:
-    """Whether a per-test row already carries the failing verdict, so the suite
-    needs no outcome sentinel for it."""
+    """Whether a per-test row already carries the failing verdict.
+
+    When it does, the suite needs no outcome sentinel for that row.
+    """
     return t.outcome == Outcome.FAIL or t.outcome == Outcome.CRASH
 
 
@@ -474,6 +492,17 @@ struct JunitReporter(Reporter):
                 is what a test driver that only drives `assemble` wants.
             temp_path: The unique temp file the document is written to before
                 the rename. Empty leaves `finalize` a no-op.
+
+        Examples:
+
+        ```mojo
+        from mtest.report.junit_reporter import (
+            JunitReporter, open_junit_artifact, open_junit_spool
+        )
+
+        var art = open_junit_artifact(open_junit_spool(), "build/report.xml")
+        var rep = JunitReporter(art.spool_dir, True, art.target_path, art.temp_path)
+        ```
         """
         self._active = active
         self._spool_dir = spool_dir
@@ -496,9 +525,9 @@ struct JunitReporter(Reporter):
         Called by the session during terminal finalization, outside the
         `Reporter` trait, so an interrupted, gate-aborted, or `--maxfail`-capped
         run still carries a `[not-run]` skipped row for every selected file that
-        never produced a verdict. A file that already spooled a suite — because
-        it ran, or was a precompile casualty — is in the index and is skipped
-        here, so no suite is ever doubled. Deselected and excluded files never
+        never produced a verdict. A file that already spooled a suite, because it
+        ran or was a precompile casualty, is in the index and is skipped here, so
+        no suite is ever doubled. Deselected and excluded files never
         spool a suite at all and so are never in the index; keeping them out of
         the report is the caller's job, and the session passes only the files
         that reached no verdict.
@@ -507,6 +536,16 @@ struct JunitReporter(Reporter):
 
         Args:
             selected_paths: The selected files that must appear in the report.
+
+        Examples:
+
+        ```mojo
+        from mtest.report import JunitReporter, open_junit_spool
+
+        var rep = JunitReporter(open_junit_spool(), True)
+        var selected: List[String] = [String("e2e/suite/skipped_a.mojo")]
+        rep.note_not_run(selected)
+        ```
         """
         if not self._active or self._failed:
             return
@@ -550,7 +589,7 @@ struct JunitReporter(Reporter):
         the unique temp, and renamed atomically onto the target.
 
         The prior report at the target is never truncated: on any failure the
-        target is left exactly as it was. Temp cleanup is narrower — a failure
+        target is left exactly as it was. Temp cleanup is narrower. A failure
         assembling or writing the temp removes it, but a run that arrives here
         with an already-latched spool failure returns without touching the temp
         the session created, so that empty temp outlives the run.
@@ -558,6 +597,18 @@ struct JunitReporter(Reporter):
         Returns:
             A clean result when inert or published, otherwise the failure flag
             and its diagnostic.
+
+        Examples:
+
+        ```mojo
+        from mtest.report.junit_reporter import (
+            JunitReporter, open_junit_artifact, open_junit_spool
+        )
+
+        var art = open_junit_artifact(open_junit_spool(), "build/report.xml")
+        var rep = JunitReporter(art.spool_dir, True, art.target_path, art.temp_path)
+        var result = rep.finalize()  # result.failed is False once published
+        ```
         """
         if not self._active or self._target_path == "":
             return JunitFinalizeResult(False, "")
@@ -594,6 +645,16 @@ struct JunitReporter(Reporter):
 
         Args:
             e: The event to consume.
+
+        Examples:
+
+        ```mojo
+        from mtest.model import Event
+        from mtest.report import JunitReporter, open_junit_spool
+
+        var rep = JunitReporter(open_junit_spool(), True)
+        rep.handle(Event.file_started("e2e/suite/test_a.mojo"))
+        ```
         """
         if not self._active or self._failed:
             return
@@ -652,6 +713,15 @@ struct JunitReporter(Reporter):
 
         Raises:
             Error: When a spooled fragment cannot be read back.
+
+        Examples:
+
+        ```mojo
+        from mtest.report import JunitReporter, open_junit_spool
+
+        var rep = JunitReporter(open_junit_spool(), True)
+        var doc = rep.assemble("mtest")
+        ```
         """
         var frags = List[RenderedSuite]()
         for i in range(len(self._index)):
@@ -769,9 +839,10 @@ struct JunitReporter(Reporter):
 
         Flaky children are always `flakyFailure`, never `flakyError`. The file's
         final verdict is a pass, so earlier attempts are reported as flaky
-        annotations that never count against the suite's failures or errors,
-        each carrying the schema-required `type` from that attempt's
-        termination."""
+        annotations that never count against the suite's failures or errors, and
+        each one carries the schema-required `type` from that attempt's
+        termination.
+        """
         var reruns = List[JunitRerun]()
         for i in range(len(self._accums[accum_idx].attempts)):
             var a = self._accums[accum_idx].attempts[i].copy()
@@ -789,9 +860,11 @@ struct JunitReporter(Reporter):
         return JunitCase("[attempts]", cn, False, _blank_primary(), reruns^)
 
     def _attempts_pertest(self, cn: String, accum_idx: Int) -> JunitCase:
-        """The `[attempts]` row for retried per-test failures: prior attempts as
-        reruns, with no primary of its own, since the per-test rows carry the
-        verdict."""
+        """The `[attempts]` row for retried per-test failures.
+
+        Prior attempts ride as reruns and the row carries no primary of its own,
+        since the per-test rows already carry the verdict.
+        """
         var reruns = List[JunitRerun]()
         for i in range(len(self._accums[accum_idx].attempts)):
             var a = self._accums[accum_idx].attempts[i].copy()

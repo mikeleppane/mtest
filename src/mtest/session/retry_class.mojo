@@ -5,7 +5,7 @@ deadline kill, and never deterministic ones such as a failing assertion, a
 nonzero compile error, or a flooded capture. Getting this wrong either masks a
 legitimately failing test by retrying it until it passes, or wastes time
 retrying a flood. This module is the single source of that decision; the attempt
-loop that consumes it is wired separately.
+loop that consumes it lives in `attempt`.
 
 `retry_classify` folds four facts into one `RetryClass`: the step (`"run"` vs a
 compile step), the `Termination`, whether an interrupt was pending, and the raw
@@ -34,12 +34,12 @@ stderr. The policy is total. In precedence order:
                                 build is not a failure; present for totality.
 
 The crash-signature marker list in `has_crash_signature` is assumption-pinned:
-it was not validated against a real Mojo internal compiler error on this
-toolchain, because no ICE was reproduced during the resilience spike. The
-markers port the intent of the transcript normalizer's crash patterns in
-`scripts/gen_transcripts.py`: the LLVM/Mojo "PLEASE submit a bug report"
-banner, a `Stack dump` header line, and the two stack-frame shapes. If a real
-ICE later prints a different banner, extend the list here and re-pin the tests.
+no real Mojo internal compiler error has ever been observed on this toolchain,
+so the list was never validated against one. The markers port the intent of the
+transcript normalizer's crash patterns in `scripts/gen_transcripts.py`: the
+LLVM/Mojo "PLEASE submit a bug report" banner, a `Stack dump` header line, and
+the two stack-frame shapes. If a real ICE later prints a different banner,
+extend the list here and re-pin the tests.
 
 The banner match is anchored at a line start rather than matched as a bare
 substring, so a deterministic compile error that echoes the phrase mid-line, in
@@ -83,6 +83,19 @@ def retry_classify(
 
     Returns:
         The eligibility decision and its label.
+
+    Examples:
+
+    ```mojo
+    from mtest.exec import Termination
+    from mtest.session import retry_classify
+
+    var empty = List[UInt8]()
+    var rc = retry_classify("run", Termination.signaled(11), False, empty)
+    # rc.retry_eligible is True, rc.label is "signal".
+    var det = retry_classify("run", Termination.exited(134), False, empty)
+    # det.retry_eligible is False: it exited under its own control.
+    ```
     """
     # Rule 1: a spawn failure is an internal error, never a retryable outcome.
     if term.is_spawn_failed():
@@ -236,6 +249,18 @@ def has_crash_signature(stderr: List[UInt8]) -> Bool:
 
     Returns:
         True iff a crash marker is present.
+
+    Examples:
+
+    ```mojo
+    from mtest.session import has_crash_signature
+
+    var text = String("Stack dump:")
+    var raw = List[UInt8]()
+    for b in text.as_bytes():
+        raw.append(b)
+    var ice = has_crash_signature(raw)  # True: an ICE marker line
+    ```
     """
     var text = lossy_utf8(stderr)
     for line in text.split("\n"):

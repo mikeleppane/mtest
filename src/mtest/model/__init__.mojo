@@ -1,12 +1,12 @@
 """The model layer of the mtest runner.
 
-The base layer: the outcome vocabulary, the closed typed event set that is the
-only channel from the session to the reporters, the exit-code authority — the
-outcome-multiset mapping plus the one resolver every caller that reaches an
-exit code goes through — and the classification of which code points a terminal
-interprets, which the three terminal-facing surfaces in `report`, `cli` and
-`config` all consult. It imports nothing internal; every layer above imports
-from here.
+Layer 0: the outcome vocabulary, the closed typed event set that is the only
+channel from the session to the reporters, the exit-code authority, and the
+classification of which code points a terminal interprets. The exit-code
+authority is the outcome-multiset mapping plus the one resolver every caller
+that reaches an exit code goes through. The four terminal-facing surfaces in
+`report`, `cli` and `config` all consult the control-point classification. This
+layer imports nothing internal; every layer above imports from here.
 
 The public surface is re-exported here, so callers can write
 `from mtest.model import Outcome, Event, resolve_exit_code, ...`.

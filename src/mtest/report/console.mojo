@@ -2,8 +2,8 @@
 
 The one place in the runner that formats text for humans. It renders the event
 stream into an owned `String` buffer, exposed via `output()`, so unit tests can
-assert the structure directly and `main` writes that buffer to stdout, flushing
-even on an interrupt or partial-summary path.
+assert the structure directly and `main` flushes that buffer to stdout even on
+an interrupt or partial-summary path.
 
 Every fact it prints comes from an event; there is no side channel. It tells the
 per-test failure story: a framed section for every failing test carrying its
@@ -12,8 +12,10 @@ shown once per file under an explicit file-scope label, `-v` per-test rows, the
 NO-TESTS, MALFORMED-SUITE, DRIFT and capture-overflow tokens, and a summary band
 that counts tests for pass/fail/skip and files for the abnormals.
 
-Only the version string, a build constant, and the color/verbosity/show-output
-config are passed at construction; those are not session facts. Color is always
+Construction takes only build constants, config, and environment answers, never
+session facts: the version string, the `--color`/verbosity/show-output settings,
+the build-flags echo for repro lines, `--durations`, the destination's TTY
+status, `NO_COLOR`, and whether the run is inside GitHub Actions. Color is always
 redundant: the verdict tokens carry the meaning, and when color is off no escape
 code is emitted at all.
 
@@ -353,11 +355,11 @@ def _outcome_detail(e: FileFinishedPayload) -> String:
     """The per-outcome detail suffix the console renders from event data.
 
     `FAIL` carries the exit code (`"exit <n>"`). `CRASH` carries the terminating
-    signal, named in words when recognized (`"signal 4 — SIGILL, illegal
-    instruction"`, else just `"signal <n>"`). `TIMEOUT` and `COMPILE_TIMEOUT`
-    carry the configured deadline (`"timed out after <n>s"`); both read the same
-    because both name a deadline mtest enforced. Every other outcome has no
-    detail.
+    signal as `"signal <n>"`, and when `signal_name_for_target` recognizes the
+    number, a spaced em dash and the name follow it, as in `signal 4` then
+    `SIGILL, illegal instruction`. `TIMEOUT` and `COMPILE_TIMEOUT` carry the
+    configured deadline (`"timed out after <n>s"`); both read the same because
+    both name a deadline mtest enforced. Every other outcome has no detail.
 
     A deadline that had to be escalated says so, in `_term_phrase`'s words so
     the verdict line and the TRY lines agree. When no retry ran, this is the
@@ -403,9 +405,9 @@ def _is_no_tests(e: FileFinishedPayload) -> Bool:
 def _disposition_note(e: FileFinishedPayload) -> String:
     """A verdict-line note naming a non-plain disposition, or `""`.
 
-    A CAPTURE_OVERFLOW FAIL and a MALFORMED_SUITE each get a distinct sentence
-    naming why no report can be trusted, so neither reads as a plain assertion
-    failure.
+    A CAPTURE_OVERFLOW disposition and a MALFORMED_SUITE outcome each get a
+    distinct sentence naming why no report can be trusted, so neither reads as a
+    plain assertion failure.
     """
     if e.parse_disposition == ParseDisposition.CAPTURE_OVERFLOW:
         return String(
@@ -683,10 +685,10 @@ def _truncate_cols(text: String, limit: Int) -> String:
 struct ConsoleReporter(Reporter):
     """Renders the event stream into an owned, inspectable console buffer.
 
-    Accumulates three parts as events arrive — the streamed header and verdict
-    block, the framed failure sections, and the final summary band — and joins
-    them in `output()`. Per file it accumulates the retrospective TEST_REPORTED
-    results so `FILE_FINISHED` can render per-test failure sections.
+    Accumulates three parts as events arrive, then joins them in `output()`: the
+    streamed header and verdict block, the framed failure sections, and the final
+    summary band. Per file it accumulates the retrospective TEST_REPORTED results
+    so `FILE_FINISHED` can render per-test failure sections.
     """
 
     var version: String
@@ -793,6 +795,19 @@ struct ConsoleReporter(Reporter):
             gh_actions: Whether the run is inside GitHub Actions
                 (`GITHUB_ACTIONS=true`). When True, echoed captured child output
                 is wrapped in collision-proof stop-commands fencing.
+
+        Examples:
+
+        ```mojo
+        from mtest.config import ColorWhen, ShowOutput, Verbosity
+        from mtest.report import ConsoleReporter
+
+        var c = ConsoleReporter(
+            "0.6.0", ColorWhen.NEVER, is_tty=False, no_color=False,
+            verbosity=Verbosity.NORMAL, show_output=ShowOutput.FAILURES,
+            mtest_build_flags="", durations=0,
+        )
+        ```
         """
         self.version = version^
         if color == ColorWhen.ALWAYS:
@@ -903,10 +918,10 @@ struct ConsoleReporter(Reporter):
         Shows a single `▸ completed/total · running <names>` line naming the
         in-flight files by basename, capped to `_PROGRESS_MAX_NAMES` names with
         an ` +N more` overflow marker and truncated to `_PROGRESS_MAX_COLS`
-        codepoints so it stays one physical line — the driver's `\\r\\x1b[K`
-        erase clears a single line only. A coarse whole-seconds elapsed hint for
-        the oldest in-flight file trails the names, kept whole-second so it is
-        stable across rapid ticks.
+        codepoints so it stays one physical line: the driver's `\\r\\x1b[K` erase
+        clears a single line only. An elapsed hint for the oldest in-flight file
+        trails the names, floored to whole seconds so it is stable across rapid
+        ticks.
 
         Gated on the retained TTY-ness and the verbosity: off a terminal or
         under quiet the line is cleared to `""`, so no counter byte is ever
@@ -962,6 +977,17 @@ struct ConsoleReporter(Reporter):
         Joins the streamed head, the framed sections, and the summary band. Safe
         to read at any point, including mid-run, so `main` can flush it on an
         interrupt.
+
+        Examples:
+
+        ```mojo
+        from mtest.config import ColorWhen, ShowOutput, Verbosity
+        from mtest.report import ConsoleReporter
+
+        var c = ConsoleReporter("0.6.0", ColorWhen.NEVER, False, False,
+                                Verbosity.NORMAL, ShowOutput.FAILURES, "", 0)
+        var rendered = c.output()
+        ```
         """
         var out = self._head.copy()
         if self._sections.byte_length() > 0:
@@ -982,9 +1008,9 @@ struct ConsoleReporter(Reporter):
         summary band, in `output()` order. So `concat(every drain)` reproduces
         `output()` byte-for-byte, the invariant the mutation test pins.
 
-        A drain boundary always falls between whole event renders — a driver
-        drains only between dispatches — so a stop-commands fence, always
-        appended as one contiguous region, is never split across two drains.
+        A driver drains only between dispatches, so a drain boundary always falls
+        between whole event renders. A stop-commands fence is always appended as
+        one contiguous region, so it is never split across two drains.
 
         Args:
             closing: Whether this is the terminal drain. False returns only the
@@ -994,6 +1020,18 @@ struct ConsoleReporter(Reporter):
         Returns:
             The undrained bytes, newline-terminated within each appended render.
             Empty when nothing new is pending.
+
+        Examples:
+
+        ```mojo
+        from mtest.config import ColorWhen, ShowOutput, Verbosity
+        from mtest.report import ConsoleReporter
+
+        var c = ConsoleReporter("0.6.0", ColorWhen.NEVER, False, False,
+                                Verbosity.NORMAL, ShowOutput.FAILURES, "", 0)
+        var drained = c.drain(closing=False)  # the header bytes so far
+        drained += c.drain(closing=True)  # the rest, sections, and summary
+        ```
         """
         var bytes = self._head.as_bytes()
         var n = self._head.byte_length()
@@ -1019,6 +1057,18 @@ struct ConsoleReporter(Reporter):
 
         Args:
             e: The event to render.
+
+        Examples:
+
+        ```mojo
+        from mtest.config import ColorWhen, ShowOutput, Verbosity
+        from mtest.model import Event
+        from mtest.report import ConsoleReporter
+
+        var c = ConsoleReporter("0.6.0", ColorWhen.NEVER, False, False,
+                                Verbosity.NORMAL, ShowOutput.FAILURES, "", 0)
+        c.handle(Event.session_started("tests", "mojo 1.0.0b2", 5, 1))
+        ```
         """
         var k = e.kind
         if k == EventKind.SESSION_STARTED:
@@ -1088,7 +1138,7 @@ struct ConsoleReporter(Reporter):
         quiet for root-relativizing `At` lines and naming the pin in a DRIFT
         banner. Both are latched RAW: `_run_root` has to byte-match the path the
         compiler baked into an `At` line, and escaping it would break that match.
-        Each is scalarized where it is displayed instead — the toolchain label
+        Each is scalarized where it is displayed instead. The toolchain label
         comes from the child compiler's own version output, and the root is a
         filesystem path, so neither is trusted one-line text.
         """
@@ -1189,9 +1239,9 @@ struct ConsoleReporter(Reporter):
     def _on_crash_attribution(mut self, e: CrashAttributionPayload):
         """Render one crashed file's bounded-isolation attribution result.
 
-        Composed from the event's typed fields only — the disposition, the
-        culprit, the rerun count, and the elapsed time — never from a sentence
-        the session pre-rendered.
+        Composed from the event's typed fields only, never from a sentence the
+        session pre-rendered: the disposition, the culprit, the rerun count, and
+        the elapsed time.
 
         Attribution is secondary evidence: the file's CRASH verdict was already
         rendered above and is not restated here as a verdict. Every
@@ -1564,7 +1614,7 @@ struct ConsoleReporter(Reporter):
         dedent and a root-relative `At` line; the untransformed bytes remain in
         the file-scope captured-output block below. Both transformations run on
         the RAW detail, before any escaping, because both match on leading
-        spaces and on the run-root path the compiler baked in — escaping first
+        spaces and on the run-root path the compiler baked in, and escaping first
         would rewrite the very bytes they anchor on.
 
         The transformed detail is then a multi-line untrusted block and takes
@@ -1588,9 +1638,9 @@ struct ConsoleReporter(Reporter):
         labelled file-scoped and says so on screen. A file-level repro rides
         here only when no per-test section already carried one.
 
-        This is the block a hostile child controls most directly — it is its own
-        stdout and stderr, verbatim — so both streams go through `_safe_block`
-        and appear behind the gutter. The header's path takes the scalar escape.
+        This is the block a hostile child controls most directly, its own stdout
+        and stderr verbatim, so both streams go through `_safe_block` and appear
+        behind the gutter. The header's path takes the scalar escape.
         """
         var token = String("NO-TESTS") if _is_no_tests(e) else _verdict_token(
             e.outcome
@@ -1620,10 +1670,10 @@ struct ConsoleReporter(Reporter):
         """Render the summary band, colored by the worst outcome present.
 
         The arithmetic: `passed`, `failed` and `skipped` are per-test totals
-        over the tests that actually ran. The file-level abnormals — crashed,
-        timed out, compile error, malformed suite and their kin — are per-file
-        counts appended only when nonzero, accounting for files that produced no
-        per-test attribution. `excluded`, `not run` and `deselected` are
+        over the tests that actually ran. The file-level abnormals (crashed,
+        timed out, compile error, malformed suite and their kin) are per-file
+        counts appended only when nonzero, which accounts for files that produced
+        no per-test attribution. `excluded`, `not run` and `deselected` are
         separate counts in the parenthetical.
 
         So passed + failed + skipped is the number of tests run, and the file

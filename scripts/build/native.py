@@ -28,8 +28,7 @@ def main() -> int:
     test_symbols = native_abi_check.defined_symbols(TEST_OUTPUT)
     native_abi_check.require(
         test_symbols
-        == native_abi_check.PRODUCTION_SYMBOLS
-        | native_abi_check.TEST_ONLY_SYMBOLS,
+        == native_abi_check.PRODUCTION_SYMBOLS | native_abi_check.TEST_ONLY_SYMBOLS,
         "testing build exported an unexpected symbol set",
     )
     print(

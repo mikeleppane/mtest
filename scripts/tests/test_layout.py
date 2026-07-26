@@ -36,12 +36,12 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
             ("VENDORED_TOML_PATHS", layout.check_vendored_toml_layout),
         )
         for name, check in cases:
-            with self.subTest(inventory=name):
-                with mock.patch.object(layout, name, ()):
-                    with self.assertRaisesRegex(
-                        AssertionError, "intended inventory is empty"
-                    ):
-                        check()
+            with (
+                self.subTest(inventory=name),
+                mock.patch.object(layout, name, ()),
+                self.assertRaisesRegex(AssertionError, "intended inventory is empty"),
+            ):
+                check()
 
     def test_top_level_script_membership_is_exact(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-layout-") as raw_tmp:
@@ -143,9 +143,7 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
             repo = Path(raw_tmp)
             self._accepted_tree(repo)
 
-            with mock.patch.object(
-                layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)
-            ):
+            with mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)):
                 layout.check_classified_mojo_inventory(repo)
 
     def test_every_unregistered_mojo_name_is_rejected(self) -> None:
@@ -155,19 +153,21 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
             "tests/unit/helper.mojo",
         )
         for relative in cases:
-            with self.subTest(escape=relative):
-                with tempfile.TemporaryDirectory() as raw_tmp:
-                    repo = Path(raw_tmp)
-                    self._accepted_tree(repo)
-                    (repo / relative).write_text("", encoding="utf-8")
+            with (
+                self.subTest(escape=relative),
+                tempfile.TemporaryDirectory() as raw_tmp,
+            ):
+                repo = Path(raw_tmp)
+                self._accepted_tree(repo)
+                (repo / relative).write_text("", encoding="utf-8")
 
-                    with mock.patch.object(
-                        layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)
-                    ):
-                        with self.assertRaisesRegex(
-                            AssertionError, "unexpected classified Mojo file"
-                        ):
-                            layout.check_classified_mojo_inventory(repo)
+                with (
+                    mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)),
+                    self.assertRaisesRegex(
+                        AssertionError, "unexpected classified Mojo file"
+                    ),
+                ):
+                    layout.check_classified_mojo_inventory(repo)
 
     def test_symlinked_classified_paths_are_rejected(self) -> None:
         cases = (
@@ -175,20 +175,20 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
             ("tests/unit/linked", "tests/integration"),
         )
         for relative, target in cases:
-            with self.subTest(link=relative):
-                with tempfile.TemporaryDirectory() as raw_tmp:
-                    repo = Path(raw_tmp)
-                    self._accepted_tree(repo)
-                    (repo / "outside.mojo").write_text("", encoding="utf-8")
-                    os.symlink(repo / target, repo / relative)
+            with (
+                self.subTest(link=relative),
+                tempfile.TemporaryDirectory() as raw_tmp,
+            ):
+                repo = Path(raw_tmp)
+                self._accepted_tree(repo)
+                (repo / "outside.mojo").write_text("", encoding="utf-8")
+                os.symlink(repo / target, repo / relative)
 
-                    with mock.patch.object(
-                        layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)
-                    ):
-                        with self.assertRaisesRegex(
-                            AssertionError, "symlinked classified path"
-                        ):
-                            layout.check_classified_mojo_inventory(repo)
+                with (
+                    mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)),
+                    self.assertRaisesRegex(AssertionError, "symlinked classified path"),
+                ):
+                    layout.check_classified_mojo_inventory(repo)
 
     def test_an_unreadable_classified_subtree_is_an_error_not_an_absence(
         self,
@@ -205,11 +205,11 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
             try:
                 with self.assertRaises(PermissionError):
                     layout.classified_mojo_universe(repo)
-                with mock.patch.object(
-                    layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)
+                with (
+                    mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)),
+                    self.assertRaises(PermissionError),
                 ):
-                    with self.assertRaises(PermissionError):
-                        layout.check_classified_mojo_inventory(repo)
+                    layout.check_classified_mojo_inventory(repo)
             finally:
                 hidden.chmod(0o700)
 
@@ -224,13 +224,11 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
             _regular, symlinked = layout.classified_mojo_universe(repo)
             self.assertEqual(symlinked, {Path("tests/unit")})
 
-            with mock.patch.object(
-                layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)
+            with (
+                mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)),
+                self.assertRaisesRegex(AssertionError, "symlinked classified path"),
             ):
-                with self.assertRaisesRegex(
-                    AssertionError, "symlinked classified path"
-                ):
-                    layout.check_classified_mojo_inventory(repo)
+                layout.check_classified_mojo_inventory(repo)
 
     def test_a_registered_suite_that_vanished_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -238,13 +236,11 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
             self._accepted_tree(repo)
             (repo / self.SOLE_SUITE).unlink()
 
-            with mock.patch.object(
-                layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)
+            with (
+                mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)),
+                self.assertRaisesRegex(AssertionError, "missing classified Mojo file"),
             ):
-                with self.assertRaisesRegex(
-                    AssertionError, "missing classified Mojo file"
-                ):
-                    layout.check_classified_mojo_inventory(repo)
+                layout.check_classified_mojo_inventory(repo)
 
     def test_repository_suite_layout_walks_the_repository_universe(self) -> None:
         roots: list[Path] = []
@@ -266,8 +262,7 @@ class AggregateMembershipOracleTests(unittest.TestCase):
         source = repo / relative
         source.parent.mkdir(parents=True)
         source.write_text(
-            "def test_alpha():\n    pass\n\n"
-            "def test_beta() raises:\n    pass\n",
+            "def test_alpha():\n    pass\n\ndef test_beta() raises:\n    pass\n",
             encoding="utf-8",
         )
         return (relative,)
@@ -282,9 +277,7 @@ class AggregateMembershipOracleTests(unittest.TestCase):
                 "test_function_names",
                 return_value=["test_wrong_a", "test_wrong_b"],
             ):
-                membership = layout.independent_registration_membership(
-                    repo, paths
-                )
+                membership = layout.independent_registration_membership(repo, paths)
 
         self.assertEqual(
             membership,
@@ -299,34 +292,30 @@ class AggregateMembershipOracleTests(unittest.TestCase):
             repo = Path(raw_tmp)
             paths = self._fixture(repo)
 
-            with mock.patch.object(
-                aggregate,
-                "test_function_names",
-                return_value=["test_alpha", "test_gamma"],
+            with (
+                mock.patch.object(
+                    aggregate,
+                    "test_function_names",
+                    return_value=["test_alpha", "test_gamma"],
+                ),
+                self.assertRaisesRegex(AssertionError, "registration membership/order"),
             ):
-                with self.assertRaisesRegex(
-                    AssertionError, "registration membership/order"
-                ):
-                    layout.check_classified_entrypoint(
-                        repo, paths, expected_count=2
-                    )
+                layout.check_classified_entrypoint(repo, paths, expected_count=2)
 
     def test_same_count_loader_reordering_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp)
             paths = self._fixture(repo)
 
-            with mock.patch.object(
-                aggregate,
-                "test_function_names",
-                return_value=["test_beta", "test_alpha"],
+            with (
+                mock.patch.object(
+                    aggregate,
+                    "test_function_names",
+                    return_value=["test_beta", "test_alpha"],
+                ),
+                self.assertRaisesRegex(AssertionError, "registration membership/order"),
             ):
-                with self.assertRaisesRegex(
-                    AssertionError, "registration membership/order"
-                ):
-                    layout.check_classified_entrypoint(
-                        repo, paths, expected_count=2
-                    )
+                layout.check_classified_entrypoint(repo, paths, expected_count=2)
 
 
 class DirectInvocationPolicyTests(unittest.TestCase):
@@ -341,24 +330,18 @@ class DirectInvocationPolicyTests(unittest.TestCase):
         for form in forms:
             with self.subTest(form=form):
                 self.assertTrue(
-                    layout.direct_script_invocations(
-                        Path("README.md"), form
-                    )
+                    layout.direct_script_invocations(Path("README.md"), form)
                 )
 
     def test_sys_executable_argv_is_rejected(self) -> None:
         source = (
             "import subprocess\n"
             "import sys\n"
-            "subprocess.run([sys.executable, "
-            + repr(self.SCRIPT_PATH)
-            + "])\n"
+            "subprocess.run([sys.executable, " + repr(self.SCRIPT_PATH) + "])\n"
         )
 
         self.assertTrue(
-            layout.direct_script_invocations(
-                Path("scripts/caller.py"), source
-            )
+            layout.direct_script_invocations(Path("scripts/caller.py"), source)
         )
 
     def test_dot_relative_script_operands_are_rejected(self) -> None:
@@ -369,17 +352,13 @@ class DirectInvocationPolicyTests(unittest.TestCase):
                 Path("scripts/caller.py"),
                 "import subprocess\n"
                 "import sys\n"
-                "subprocess.run([sys.executable, "
-                + repr(operand)
-                + "])\n",
+                "subprocess.run([sys.executable, " + repr(operand) + "])\n",
             ),
         )
 
         for path, contents in cases:
             with self.subTest(path=path):
-                self.assertTrue(
-                    layout.direct_script_invocations(path, contents)
-                )
+                self.assertTrue(layout.direct_script_invocations(path, contents))
 
     def test_module_invocation_is_accepted(self) -> None:
         self.assertFalse(
@@ -395,9 +374,7 @@ class DirectInvocationPolicyTests(unittest.TestCase):
             historical = repo / "notes" / "phase-00-history.md"
             historical.parent.mkdir(parents=True)
             live.write_text("python -m scripts.probe\n", encoding="utf-8")
-            historical.write_text(
-                f"python -u {self.SCRIPT_PATH}\n", encoding="utf-8"
-            )
+            historical.write_text(f"python -u {self.SCRIPT_PATH}\n", encoding="utf-8")
 
             files = layout.live_command_files(repo)
             violations = layout.live_direct_invocations(repo)
@@ -420,7 +397,6 @@ class DirectInvocationPolicyTests(unittest.TestCase):
                 Path(".github/workflows/ci.yml"),
                 Path("recipe/build.sh"),
                 Path(".agents/skills/example/SKILL.md"),
-                Path("notes/console-captures/README.md"),
             )
             for index, relative in enumerate(relative_paths):
                 path = repo / relative
@@ -461,9 +437,7 @@ class BuildSourceVisibilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp)
             self._repo(repo, "/build/")
-            subprocess.run(
-                ["git", "-C", str(repo), "add", ".gitignore"], check=True
-            )
+            subprocess.run(["git", "-C", str(repo), "add", ".gitignore"], check=True)
 
             with self.assertRaisesRegex(AssertionError, "untracked"):
                 layout.check_build_source_visibility(repo)

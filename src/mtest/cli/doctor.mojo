@@ -98,9 +98,9 @@ def _hex_escape(value: Int) -> String:
 
     The single place doctor's escape text is assembled, so the C0/DEL and C1
     forms cannot drift apart in width or letter case. Doctor keeps one spelling
-    for both classes — unlike the console reporter, which distinguishes them —
-    because a diagnostic line is read, not parsed, and one form is the shorter
-    thing to recognize.
+    for both classes (the console reporter distinguishes them) because a
+    diagnostic line is read, not parsed, and one form is the shorter thing to
+    recognize.
 
     Args:
         value: The code point being escaped. Only its low byte is rendered,
@@ -119,7 +119,7 @@ def _safe_text(text: String) -> String:
 
     Escapes every code point `mtest.model.control_chars` classifies as a
     terminal instruction: the C0 controls `U+0000..U+001F`, DEL `U+007F`, and
-    the C1 controls `U+0080..U+009F`. C1 is not optional — `U+009B` is CSI,
+    the C1 controls `U+0080..U+009F`. C1 is not optional: `U+009B` is CSI,
     `U+009D` is OSC and `U+009C` is ST in their single-code-point form, so a
     `--version` probe doctor interpolates could drive a terminal with no ESC
     byte anywhere in its output. LF, CR and Tab get named short forms because
@@ -796,14 +796,28 @@ def _record_exec_failure(mut lines: List[String], detail: String):
 def run_doctor(request: ParseResult, version: String) -> DoctorReport:
     """Run every doctor check with per-check containment and cleanup.
 
+    A check that throws is recorded as one failed line and the checks after it
+    still run. Cleanup refusal is itself a failed check, and it may leave the
+    named unique probe or the created state directory behind.
+
     Args:
         request: The parsed doctor controls. Not mutated.
         version: The mtest build identity to report.
 
     Returns:
         Ten deterministic check lines and the dedicated doctor exit code.
-        Allocates transient probe results. Cleanup refusal is a failed check
-        and may leave only the named unique probe or state directory.
+        Allocates transient probe results.
+
+    Examples:
+
+    ```mojo
+    from mtest.cli import run_doctor
+    from mtest.cli import MTEST_VERSION, parse_args
+
+    var argv: List[String] = ["doctor", "--no-config"]
+    var report = run_doctor(parse_args(argv), MTEST_VERSION)
+    print(report.lines[0], report.code)
+    ```
     """
     return _run_checks(request, version, -1, _CHECK_COUNT)
 
@@ -813,7 +827,7 @@ def _doctor_containment_probe() -> DoctorReport:
 
     Returns:
         The real version/platform/root prefix with the platform check replaced
-        by a contained failure, proving continuation and exit one.
+        by a contained failure: the driver continues past a throw and exits one.
     """
     return _run_checks(
         ParseResult.doctor(

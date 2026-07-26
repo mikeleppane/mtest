@@ -97,6 +97,16 @@ struct FlagSpec(Copyable, Movable):
     """One accepted flag spelling and everything the parser needs about it.
 
     Owns its `String` fields, so every copy is an explicit `.copy()`.
+
+    Examples:
+
+    ```mojo
+    from mtest.cli import flag_specs
+
+    for spec in flag_specs():
+        if spec.arity == 1:
+            print(spec.spelling, spec.value_name)
+    ```
     """
 
     var spelling: String

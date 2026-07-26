@@ -9,8 +9,10 @@ PATH-less or scrubbed environment makes `execvp` raise and the grandchild exits
 inherited stdout and exits 0. This actor forwards the grandchild's exit status as
 its own, so the supervised result's exit code is the resolution verdict.
 """
+
 import os
 import sys
+
 
 pid = os.fork()
 if pid == 0:

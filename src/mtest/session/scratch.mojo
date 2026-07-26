@@ -1,10 +1,10 @@
 """Disposable scratch paths and the module-cache quarantine, for `session`.
 
-Layer 4 plumbing beneath the orchestration itself: the binary-name mangling, the
-per-invocation and per-attempt directory naming, the quarantine-cache directory
-naming, and the recursive delete that the build, attempt, and precompile paths
-share. Every entity here is pure path arithmetic or a filesystem operation —
-none of it knows about outcomes, events, or verdicts, so it sits below every
+Layer 4 plumbing beneath the orchestration itself: binary-name mangling, the
+per-invocation and per-attempt directory names, the quarantine-cache directory
+name, and the recursive delete that the build, attempt, and precompile paths
+share. Every entity here is pure path arithmetic or a filesystem operation.
+None of it knows about outcomes, events, or verdicts, so it sits below every
 other module in `session` and reaches only for the platform boundary at
 Layer 0.
 """
@@ -95,8 +95,8 @@ def _discard_path(path: String):
 def _invocation_nonce() -> String:
     """Return a per-invocation token isolating this process's scratch dirs.
 
-    Two mtest processes over one checkout — plausible with `mtest --shard 1/2`
-    and `mtest --shard 2/2` in one tree — must never collide on a temp path
+    Two mtest processes over one checkout (plausible with `mtest --shard 1/2`
+    and `mtest --shard 2/2` in one tree) must never collide on a temp path
     one's compiler is writing, or on a quarantine cache the other's cleanup
     would delete. The process id is stable within a run and distinct across
     concurrent runs, so it keys each invocation's disposable directories apart.
@@ -187,7 +187,7 @@ def _precompile_temp_path(
     The enclosing directory is what hides an unpromoted attempt from the
     `-I <dir>` scan of the output directory. The temp cannot simply be
     `<out>.tmp`, because the pinned toolchain rejects a package output path not
-    ending in `.mojopkg` or `.mojoc` — `mojo precompile -o x.tmp` is a hard
+    ending in `.mojopkg` or `.mojoc`: `mojo precompile -o x.tmp` is a hard
     error. Keeping the required extension and moving the file out of the scanned
     directory buys the same guarantee the suffix would have.
 

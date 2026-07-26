@@ -18,7 +18,7 @@ The policy is total over every child fate. In precedence order:
   spoke no honest report.
 - `Exited`, report OFF_GRAMMAR -> drift: the report shape moved away from the
   pinned toolchain. Routes to exit 3 and contributes nothing to the exit-code
-  multiset. This path is expected to be rare.
+  multiset.
 - `Exited`, report VALID -> PASS or FAIL per the reconciled report, with the
   exit status cross-checked under a worse-of rule: exit 0 with failing rows, or
   exit 1 with none, is still a FAIL.
@@ -127,6 +127,18 @@ def resolve_report(
 
     Returns:
         The report to consult and whether the capture overflowed.
+
+    Examples:
+
+    ```mojo
+    from mtest.exec import Termination
+    from mtest.session import classify, resolve_report
+
+    var stdout_text = String("")
+    var trusted = resolve_report(stdout_text, "/root/tests/test_a.mojo", False)
+    var c = classify(Termination.exited(0), trusted.report, trusted.is_overflow)
+    # An absent report on a clean exit is MALFORMED_SUITE, never a PASS.
+    ```
     """
     if not truncated:
         return TrustedReport(parse_report(stdout_text, source_path), False)
@@ -194,8 +206,20 @@ def classify(
         is_overflow: Whether the capture overflowed and lost the report.
 
     Returns:
-        The full `Classification` — outcome, disposition, counts, the exit-code
-        multiset contribution, the drift flag, and any loud-warning info.
+        The full `Classification`: the outcome, the disposition, the per-test
+        counts, the exit-code multiset contribution, the drift flag, and any
+        loud-warning info.
+
+    Examples:
+
+    ```mojo
+    from mtest.exec import Termination
+    from mtest.protocol import ParsedReport
+    from mtest.session import classify
+
+    var c = classify(Termination.signaled(11), ParsedReport.absent(), False)
+    # c.file_outcome is Outcome.CRASH: a crash never consults the parser.
+    ```
     """
     # A crash is a crash: the parser is unconsulted.
     if t.is_signaled():

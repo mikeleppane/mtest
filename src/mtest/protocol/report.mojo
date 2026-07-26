@@ -18,11 +18,11 @@ path is `P`:
     Summary [ <t> ] <N> tests run: <p> passed , <f> failed , <s> skipped
     Test suite' <P> 'failed!             (trailer, present iff f>0)
 
-The classifier's central discipline: the report grammar is the toolchain's, so
-a structural break that a user's own stdout cannot forge — a missing rule, a
-broken count, a fabricated failure trailer, drift from the pinned shape — is
-OFF_GRAMMAR, while a pattern user bytes can produce — a second appended block,
-more rows than declared, a duplicate name — is AMBIGUOUS. Identity is exact
+The classifier's discipline: the report grammar is the toolchain's. A
+structural break that a user's own stdout cannot forge (a missing rule, a
+broken count, a fabricated failure trailer, drift from the pinned shape) is
+OFF_GRAMMAR. A pattern user bytes can produce (a second appended block, more
+rows than declared, a duplicate name) is AMBIGUOUS. Identity is exact
 byte-equality on the header path, never a suffix, so a
 same-suffix-different-root impostor fails to match and the report reads ABSENT.
 
@@ -32,10 +32,10 @@ longer the rule, so the report classifies OFF_GRAMMAR ("missing rule before
 summary") and not AMBIGUOUS. Both are non-VALID, so no forgery reaches VALID
 either way.
 
-The header anchor follows the same buffered-report-after-user-output reality: a
-test's own stdout is streamed before the toolchain's buffered report block, so
-an earlier header-lookalike is user output to ignore, and the last matching
-header before the terminal rule is the primary anchor. The anchor is settled by
+The header anchor follows from the same buffering: a test's own stdout is
+streamed before the toolchain's buffered report block, so an earlier
+header-lookalike is user output to ignore, and the last matching header before
+the terminal rule is the primary anchor. The anchor is settled by
 reconciliation rather than taken blindly, though. A conforming FAIL detail line
 can byte-equal this file's own header, and anchoring there would underflow the
 declared count and misread conforming content as toolchain drift (exit 3). So
@@ -495,6 +495,17 @@ def parse_report(stdout_text: String, source_path: String) -> ParsedReport:
 
     Returns:
         The verdict plus, for VALID, the parsed rows and reconciled counts.
+
+    Examples:
+
+    ```mojo
+    from mtest.protocol import ReportVerdict, parse_report
+
+    var text = String("Running 1 tests for /p/a.mojo \\n")
+    text += "    PASS [ 0.0 ] test_one\\n--------\\n"
+    text += "Summary [ 0.0 ] 1 tests run: 1 passed , 0 failed , 0 skipped "
+    print(parse_report(text, "/p/a.mojo").verdict == ReportVerdict.VALID)
+    ```
     """
     var lines = _split_lines(stdout_text)
     var n = len(lines)

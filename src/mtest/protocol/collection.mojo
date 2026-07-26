@@ -16,8 +16,8 @@ The disqualifiers fire in this order, and the first to fire decides:
     4. `has_trailer`        -> "collection carried a failure trailer"
 
 A FAIL row is therefore caught by (2) before (3) or (4), so it is reported by
-the offending row's name rather than as a bare failure-count or trailer phrase,
-which gives a caller the more actionable collection error message.
+the offending row's name rather than as a bare failure-count or trailer phrase.
+Naming the row gives the caller a more actionable collection error.
 """
 from mtest.model import Outcome
 from mtest.protocol.report import ParsedReport, ReportVerdict
@@ -26,8 +26,8 @@ from mtest.protocol.report import ParsedReport, ReportVerdict
 def collection_disqualifier(report: ParsedReport) -> String:
     """The first reason `report` fails to qualify as a collection listing.
 
-    A qualifying report is VALID, every row is SKIP, `summary_failed == 0`,
-    and it carries no failure trailer — the shape a conforming module prints
+    A qualifying report is VALID, every row is SKIP, `summary_failed == 0`, and
+    it carries no failure trailer. That is the shape a conforming module prints
     under `--skip-all`, which runs no test body. See the module docstring for
     the exact precedence among disqualifiers.
 

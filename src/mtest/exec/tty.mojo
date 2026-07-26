@@ -13,10 +13,10 @@ caller, not guessed here.
 declares that same libc symbol through `FileDescriptor`, and a second,
 independently-attributed `external_call` declaration for the identical C symbol
 in one compiled binary is a link-time attribute conflict the Mojo toolchain
-rejects outright — it appears as soon as any unit test imports these probes
-alongside `TestSuite`. Going through `FileDescriptor` reuses the stdlib's
-declaration instead of shadowing it, which is also why this module carries no
-`# SAFETY:` comment: there is no raw FFI call here to document.
+rejects. It surfaces as soon as any unit test imports these probes alongside
+`TestSuite`. Going through `FileDescriptor` reuses the stdlib's declaration
+instead of shadowing it, which is also why this module carries no `# SAFETY:`
+comment: there is no raw FFI call here to document.
 """
 from std.io import FileDescriptor
 

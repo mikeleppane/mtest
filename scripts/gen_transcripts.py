@@ -19,9 +19,10 @@ and (3) collapsing a crash stack dump to <STACK-DUMP>. Everything else is
 captured verbatim.
 
 Usage:
-    python -m scripts.gen_transcripts              # write into tests/snapshots/protocol/
-    python -m scripts.gen_transcripts --out DIR    # write into DIR (check harness)
+    python -m scripts.gen_transcripts             # write into tests/snapshots/protocol/
+    python -m scripts.gen_transcripts --out DIR   # write into DIR (check harness)
 """
+
 from __future__ import annotations
 
 import argparse
@@ -31,6 +32,7 @@ import re
 import subprocess
 import sys
 import tempfile
+
 
 NORMALIZER_VERSION = "v1"
 REPO_ROOT = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
@@ -58,7 +60,11 @@ MATRIX = [
     ("skip-one", "mixed", ["--skip", "test_second_fails"]),
     ("skip-unknown", "passing", ["--skip", "test_missing"]),
     ("flag-unknown", "passing", ["--bogus-flag"]),
-    ("no-compose", "passing", ["--only", "test_zeta_passes", "--skip", "test_alpha_passes"]),
+    (
+        "no-compose",
+        "passing",
+        ["--only", "test_zeta_passes", "--skip", "test_alpha_passes"],
+    ),
     ("skip-all-args", "passing", ["--skip-all", "--only", "x"]),
     # Conditional: only because 1.0.0b2's TestSuite exposes an in-code skip API.
     ("default", "skipped", []),
@@ -89,6 +95,15 @@ class GenError(Exception):
 
 
 def toolchain() -> tuple[str, str]:
+    """Return the toolchain identity every transcript header records.
+
+    Returns:
+        The `mojo` version string and its build commit hash, in that order.
+
+    Raises:
+        GenError: If `mojo --version` output does not carry a parsable version
+            and commit, since a transcript may not claim an unknown toolchain.
+    """
     out = subprocess.run(
         ["mojo", "--version"], check=True, capture_output=True, text=True
     ).stdout.strip()
@@ -99,6 +114,12 @@ def toolchain() -> tuple[str, str]:
 
 
 def os_arch() -> str:
+    """Return the `<os>-<machine>` tag the transcript header records.
+
+    Returns:
+        The lowercased system name joined to the machine name, for example
+        `linux-x86_64`.
+    """
     return f"{platform.system().lower()}-{platform.machine()}"
 
 
@@ -145,7 +166,7 @@ def normalize(raw: bytes, *, is_crash_stream: bool) -> str:
                         "unrecognized line inside the stack-dump block "
                         f"(rule must be extended deliberately): {ln!r}"
                     )
-            lines = lines[:start] + ["<STACK-DUMP>"]
+            lines = [*lines[:start], "<STACK-DUMP>"]
 
     # (1) Timing tokens -> [ T ], ANCHORED: only on report-grammar lines at or
     # after the `Running <N> tests for` line that OPENS the real report block.
@@ -159,9 +180,7 @@ def normalize(raw: bytes, *, is_crash_stream: bool) -> str:
     if summary_idxs:
         last_summary = summary_idxs[-1]
         running_before = [
-            i
-            for i, ln in enumerate(lines)
-            if RUNNING_RE.match(ln) and i < last_summary
+            i for i, ln in enumerate(lines) if RUNNING_RE.match(ln) and i < last_summary
         ]
         if running_before:
             anchor = running_before[-1]
@@ -175,6 +194,14 @@ def normalize(raw: bytes, *, is_crash_stream: bool) -> str:
 
 
 def termination(returncode: int) -> str:
+    """Render how a scenario ended, structurally rather than shell-encoded.
+
+    Args:
+        returncode: A `subprocess` return code, negative for death by signal.
+
+    Returns:
+        `signal <n>` for a signalled death, otherwise `exit <n>`.
+    """
     # Python reports death-by-signal as a negative returncode. Record the raw
     # signal number, structurally — never the shell-encoded 128+N.
     if returncode < 0:
@@ -183,6 +210,23 @@ def termination(returncode: int) -> str:
 
 
 def build_fixture(fixture: str, out_dir: str) -> str:
+    """Build one committed protocol fixture into a throwaway directory.
+
+    The build is unoptimized so the emitted binary stays cheap; nothing about
+    the protocol under snapshot depends on optimization.
+
+    Args:
+        fixture: Fixture stem under `tests/fixtures/protocol`, without `.mojo`.
+        out_dir: Directory the binary is written into, normally a temp dir so
+            its path can never leak into a transcript.
+
+    Returns:
+        The path of the built binary.
+
+    Raises:
+        subprocess.CalledProcessError: If the compile fails, because a snapshot
+            may not be generated from a fixture that did not build.
+    """
     src = os.path.join(FIXTURES_DIR, f"{fixture}.mojo")
     binpath = os.path.join(out_dir, fixture)
     subprocess.run(
@@ -194,7 +238,22 @@ def build_fixture(fixture: str, out_dir: str) -> str:
 
 
 def run_scenario(binpath: str, argv: list[str]) -> tuple[bytes, bytes, int]:
-    proc = subprocess.run([binpath] + argv, capture_output=True)
+    """Run one built fixture and capture both streams byte-exactly.
+
+    Streams are captured separately and as raw bytes, never merged and never
+    decoded here, because the snapshot pins each stream's exact content.
+
+    Args:
+        binpath: The built fixture binary to run.
+        argv: The scenario's arguments, appended after the binary path.
+
+    Returns:
+        The raw stdout bytes, the raw stderr bytes, and the return code, which
+        is negative when the fixture died by a signal.
+    """
+    # check=False: a nonzero exit and a fatal signal are both expected outcomes
+    # here, and the return code is recorded rather than raised on.
+    proc = subprocess.run([binpath, *argv], capture_output=True, check=False)
     return proc.stdout, proc.stderr, proc.returncode
 
 
@@ -209,6 +268,25 @@ def render(
     err_norm: str,
     returncode: int,
 ) -> str:
+    """Render one transcript: provenance header, command, termination, streams.
+
+    The binary path is written as the fixed token `<BIN>` so the transcript does
+    not depend on where the throwaway build directory happened to be.
+
+    Args:
+        fixture: Fixture stem the scenario ran.
+        scenario: Scenario id from the matrix.
+        argv: The scenario's arguments, rendered after `<BIN>`.
+        ver: The `mojo` version recorded in the header.
+        commit: The `mojo` build commit recorded in the header.
+        oa: The `<os>-<machine>` tag recorded in the header.
+        out_norm: Already-normalized stdout text.
+        err_norm: Already-normalized stderr text.
+        returncode: The scenario's return code, rendered by `termination`.
+
+    Returns:
+        The full transcript text, with each stream section newline-terminated.
+    """
     cmd = "<BIN>" + ("" if not argv else " " + " ".join(argv))
     header = (
         f"# generated by scripts/gen_transcripts.py — mojo {ver} ({commit}), "
@@ -242,7 +320,34 @@ def _report_result_lines(out_norm: str) -> list[tuple[str, str]]:
     return res
 
 
-def verify_scenario(fixture, scenario, out_norm, err_norm, returncode, transcript):
+def verify_scenario(
+    fixture: str,
+    scenario: str,
+    out_norm: str,
+    err_norm: str,
+    returncode: int,
+    transcript: str,
+) -> None:
+    """Hard-assert every structural pin one scenario's transcript must hold.
+
+    The pins cover section-marker framing, path and symbolizer leakage, the
+    signalled death and ABORT shape of the crash fixtures, the exact SKIP
+    listings of the selection scenarios, byte-exact survival of the noisy
+    fixture's report-lookalike lines, and reconciliation of the declared count
+    against the rows and the summary tallies.
+
+    Args:
+        fixture: Fixture stem the scenario ran.
+        scenario: Scenario id from the matrix.
+        out_norm: Normalized stdout text.
+        err_norm: Normalized stderr text.
+        returncode: The scenario's return code, negative for death by signal.
+        transcript: The fully rendered transcript, checked for leaked paths.
+
+    Raises:
+        GenError: On the first pin that fails, naming the fixture, the scenario,
+            and what was expected, so generation aborts loudly.
+    """
     # Framing guard: captured output must never contain a line starting "--- ",
     # which would collide with the section markers.
     for stream_name, stream in (("stdout", out_norm), ("stderr", err_norm)):
@@ -296,9 +401,7 @@ def verify_scenario(fixture, scenario, out_norm, err_norm, returncode, transcrip
         names = [n for (r, n) in _report_result_lines(out_norm) if r == "SKIP"]
         expected = ["test_zeta_passes", "test_alpha_passes", "test_mid_passes"]
         if names != expected:
-            raise GenError(
-                f"skip-all listing {names} != fixture test names {expected}"
-            )
+            raise GenError(f"skip-all listing {names} != fixture test names {expected}")
 
     # native-skip skip-all collection: BOTH names are listed as SKIP, in source
     # (discovery) order — pins that a natively skipped test is not omitted or
@@ -307,9 +410,7 @@ def verify_scenario(fixture, scenario, out_norm, err_norm, returncode, transcrip
         names = [n for (r, n) in _report_result_lines(out_norm) if r == "SKIP"]
         expected = ["test_runs_normally", "test_natively_skipped"]
         if names != expected:
-            raise GenError(
-                f"skip-all listing {names} != fixture test names {expected}"
-            )
+            raise GenError(f"skip-all listing {names} != fixture test names {expected}")
 
     # native-skip survives explicit selection: --only the natively-skipped test
     # still reports it as SKIP, not PASS — the native skip is not overridden by
@@ -326,9 +427,7 @@ def verify_scenario(fixture, scenario, out_norm, err_norm, returncode, transcrip
             ("SKIP", "test_natively_skipped"),
         ]
         if rows != expected_rows:
-            raise GenError(
-                f"only-native rows {rows} != expected {expected_rows}"
-            )
+            raise GenError(f"only-native rows {rows} != expected {expected_rows}")
 
     # noisy: the report-lookalike and timing-lookalike user lines must survive
     # byte-exact (NOT normalized to [ T ]).
@@ -343,13 +442,23 @@ def verify_scenario(fixture, scenario, out_norm, err_norm, returncode, transcrip
     if rows:
         lines = out_norm.split("\n")
         run_line = [ln for ln in lines if RUNNING_RE.match(ln)][-1]
-        declared = int(re.match(r"^Running (\d+) tests for ", run_line).group(1))
+        run_match = re.match(r"^Running (\d+) tests for ", run_line)
+        if run_match is None:
+            # Cannot fire: `run_line` was selected by RUNNING_RE, which is this
+            # same pattern without the capture group.
+            raise GenError(f"{fixture}--{scenario}: unparsable run line {run_line!r}")
+        declared = int(run_match.group(1))
         summ = [ln for ln in lines if ln.startswith("Summary ")]
         if summ:
             m = re.search(
                 r"(\d+) tests run: (\d+) passed , (\d+) failed , (\d+) skipped",
                 summ[-1],
             )
+            if m is None:
+                raise GenError(
+                    f"{fixture}--{scenario}: summary line does not carry the "
+                    f"tally grammar: {summ[-1]!r}"
+                )
             total, p, f, s = (int(x) for x in m.groups())
             got_p = sum(1 for r, _ in rows if r == "PASS")
             got_f = sum(1 for r, _ in rows if r == "FAIL")
@@ -367,6 +476,20 @@ def verify_scenario(fixture, scenario, out_norm, err_norm, returncode, transcrip
 
 
 def generate() -> dict[str, str]:
+    """Build, run, normalize, verify, and render the whole scenario matrix once.
+
+    Each fixture is built at most once per pass and reused across the scenarios
+    that share it. The build directory is a temp dir that is asserted never to
+    appear in a rendered transcript.
+
+    Returns:
+        A mapping from transcript filename to transcript text, one entry per
+        matrix row.
+
+    Raises:
+        GenError: If a structural pin fails or the build directory leaks into a
+            transcript.
+    """
     ver, commit = toolchain()
     oa = os_arch()
     transcripts: dict[str, str] = {}
@@ -391,6 +514,19 @@ def generate() -> dict[str, str]:
 
 
 def main() -> int:
+    """Generate the matrix twice, pin the manifest, and write the snapshots.
+
+    The second generation exists to prove byte-identical output; the files are
+    written only after both passes agree and the emitted name set equals the
+    matrix exactly.
+
+    Returns:
+        0 once every transcript and the MANIFEST have been written.
+
+    Raises:
+        GenError: If the generated name set differs from the matrix, or any
+            transcript differs between the two generations.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--out",
@@ -416,9 +552,13 @@ def main() -> int:
 
     os.makedirs(args.out, exist_ok=True)
     for name in expected_names:
-        with open(os.path.join(args.out, name), "w", encoding="utf-8", newline="\n") as fh:
+        with open(
+            os.path.join(args.out, name), "w", encoding="utf-8", newline="\n"
+        ) as fh:
             fh.write(first[name])
-    with open(os.path.join(args.out, "MANIFEST.txt"), "w", encoding="utf-8", newline="\n") as fh:
+    with open(
+        os.path.join(args.out, "MANIFEST.txt"), "w", encoding="utf-8", newline="\n"
+    ) as fh:
         fh.write("\n".join(expected_names) + "\n")
 
     print(f"wrote {len(expected_names)} transcripts + MANIFEST.txt to {args.out}")

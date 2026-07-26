@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 from pathlib import Path
 import re
 import tempfile
@@ -10,6 +12,7 @@ import tomllib
 import unittest
 
 from scripts.checks import ci_topology
+from scripts.checks.memory import host_support
 
 
 class CiTopologyTests(unittest.TestCase):
@@ -34,7 +37,14 @@ class CiTopologyTests(unittest.TestCase):
         )
         self.assertEqual(
             tasks.get("ci", {}).get("depends-on"),
-            ["ci-preflight", "test", "dogfood-check", "e2e", "contract-check-strict"],
+            [
+                "ci-preflight",
+                "test",
+                "dogfood-check",
+                "e2e",
+                "contract-check-strict",
+                "ci-memory",
+            ],
         )
         self.assertEqual(
             tasks.get("readme-help-check"),
@@ -50,14 +60,12 @@ class CiTopologyTests(unittest.TestCase):
 
     def test_contributor_workflow_is_documented_without_legacy_aliases(self) -> None:
         readme = (ci_topology.REPO_ROOT / "README.md").read_text(encoding="utf-8")
-        expected = "\n".join(
-            (
-                "$ pixi run fmt",
-                "$ pixi run test-file -- PATH",
-                "$ pixi run test",
-                "$ pixi run e2e",
-                "$ pixi run ci",
-            )
+        expected = (
+            "$ pixi run fmt\n"
+            "$ pixi run test-file -- PATH\n"
+            "$ pixi run test\n"
+            "$ pixi run e2e\n"
+            "$ pixi run ci"
         )
         self.assertIn(expected, readme)
         for relative in (
@@ -70,17 +78,18 @@ class CiTopologyTests(unittest.TestCase):
             ".agents/skills/improve-architecture/SKILL.md",
             ".agents/skills/validating-mtest/SKILL.md",
         ):
-            contents = (ci_topology.REPO_ROOT / relative).read_text(
-                encoding="utf-8"
-            )
+            contents = (ci_topology.REPO_ROOT / relative).read_text(encoding="utf-8")
             self.assertNotIn("test-direct", contents, relative)
 
     def test_obsolete_test_alias_mutation_is_rejected(self) -> None:
         source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
         mutated = source.replace(
-            'test = "python -m scripts.harness.classified tests/unit tests/integration"',
-            'test-direct = "python -m scripts.harness.classified tests/unit tests/integration"\n'
-            'test = "python -m scripts.harness.classified tests/unit tests/integration"',
+            'test = "python -m scripts.harness.classified tests/unit '
+            'tests/integration"',
+            'test-direct = "python -m scripts.harness.classified tests/unit '
+            'tests/integration"\n'
+            'test = "python -m scripts.harness.classified tests/unit '
+            'tests/integration"',
             1,
         )
         self.assertNotEqual(mutated, source)
@@ -173,7 +182,9 @@ class CiTopologyTests(unittest.TestCase):
             ("ubuntu-24.04", ci_topology.LINUX_MATRIX_ROWS),
             ("macos-15", ci_topology.MACOS_MATRIX_ROWS),
         ):
-            matches = [row for row in rows if row.get("task") == "contract-check-strict"]
+            matches = [
+                row for row in rows if row.get("task") == "contract-check-strict"
+            ]
             self.assertEqual(len(matches), 1, rows)
             self.assertEqual(matches[0], {"runner": runner, **expected_row})
 
@@ -182,7 +193,14 @@ class CiTopologyTests(unittest.TestCase):
         macos_tasks = [row["task"] for row in ci_topology.MACOS_MATRIX_ROWS]
         self.assertEqual(
             linux_tasks,
-            ["test", "dogfood-check", "e2e", "contract-check-strict", "asan-check", "valgrind-check"],
+            [
+                "test",
+                "dogfood-check",
+                "e2e",
+                "contract-check-strict",
+                "asan-check",
+                "valgrind-check",
+            ],
         )
         self.assertEqual(
             macos_tasks,
@@ -265,9 +283,9 @@ class CiTopologyTests(unittest.TestCase):
 
     def _workflow(self) -> str:
         """Return the live CI workflow text."""
-        return (
-            ci_topology.REPO_ROOT / ".github" / "workflows" / "ci.yml"
-        ).read_text(encoding="utf-8")
+        return (ci_topology.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
 
     def _reject(self, mutated: str, pattern: str) -> None:
         """Require the topology oracle to reject one mutated workflow.
@@ -311,8 +329,10 @@ class CiTopologyTests(unittest.TestCase):
     def test_macos_package_job_on_a_linux_runner_is_rejected(self) -> None:
         workflow = self._workflow()
         head, _, tail = workflow.partition("  macos-package:")
-        mutated = head + "  macos-package:" + tail.replace(
-            "    runs-on: macos-15", "    runs-on: ubuntu-24.04", 1
+        mutated = (
+            head
+            + "  macos-package:"
+            + tail.replace("    runs-on: macos-15", "    runs-on: ubuntu-24.04", 1)
         )
         self._reject(mutated, "package runner mismatch")
 
@@ -330,10 +350,14 @@ class CiTopologyTests(unittest.TestCase):
     def test_macos_package_job_running_another_task_is_rejected(self) -> None:
         workflow = self._workflow()
         head, _, tail = workflow.partition("  macos-package:")
-        mutated = head + "  macos-package:" + tail.replace(
-            "        run: pixi run package-check",
-            "        run: pixi run package-build",
-            1,
+        mutated = (
+            head
+            + "  macos-package:"
+            + tail.replace(
+                "        run: pixi run package-check",
+                "        run: pixi run package-build",
+                1,
+            )
         )
         self._reject(mutated, "package command mismatch")
 
@@ -350,8 +374,10 @@ class CiTopologyTests(unittest.TestCase):
     def test_linux_package_job_removal_is_rejected(self) -> None:
         workflow = self._workflow()
         head, _, tail = workflow.partition("  package:\n")
-        mutated = head + tail.partition("  macos-preflight:\n")[1] + (
-            tail.partition("  macos-preflight:\n")[2]
+        mutated = (
+            head
+            + tail.partition("  macos-preflight:\n")[1]
+            + (tail.partition("  macos-preflight:\n")[2])
         )
         self._reject(mutated, "job membership mismatch")
 
@@ -403,8 +429,8 @@ class CiTopologyTests(unittest.TestCase):
     def test_coverage_capability_entering_the_ci_floor_is_rejected(self) -> None:
         source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
         mutated = source.replace(
-            '    "contract-check-strict",\n]',
-            '    "contract-check-strict",\n    "coverage-capability",\n]',
+            '    "ci-memory",\n]',
+            '    "ci-memory",\n    "coverage-capability",\n]',
             1,
         )
         self.assertNotEqual(mutated, source)
@@ -414,6 +440,58 @@ class CiTopologyTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "ci membership/order"):
                 ci_topology.check_ci_task_graph(repo)
 
+    def test_memory_lanes_are_members_of_the_local_linux_floor(self) -> None:
+        # The whole point of the aggregate: before it, a green `pixi run ci`
+        # said nothing about memory safety, because both lanes were reachable
+        # only by naming them and in practice ran hosted or not at all.
+        self.assertIn("ci-memory", ci_topology.CI_TASKS)
+        for lane in ci_topology.MEMORY_LANE_TASKS:
+            self.assertIn(lane, ci_topology.LINUX_CI_FLOOR_TASKS, lane)
+            self.assertNotIn(lane, ci_topology.CI_FLOOR_TASKS, lane)
+
+    def test_memory_aggregate_dropped_from_the_local_floor_is_rejected(self) -> None:
+        self._reject_manifest_mutation(
+            '    "contract-check-strict",\n    "ci-memory",\n]',
+            '    "contract-check-strict",\n]',
+            "ci membership/order",
+        )
+
+    def test_silent_memory_aggregate_fallback_is_rejected(self) -> None:
+        # A bare `true` here is the tempting shortcut that would let a macOS
+        # floor imply a memory verdict it never computed.
+        self._reject_manifest_mutation(
+            f'ci-memory = "{ci_topology.CI_MEMORY_FALLBACK_COMMAND}"',
+            'ci-memory = "true"',
+            "ci-memory base command mismatch",
+        )
+
+    def test_removing_the_linux_memory_override_is_rejected(self) -> None:
+        self._reject_manifest_mutation(
+            'ci-memory = { depends-on = ["asan-check", "valgrind-check"] }',
+            "",
+            f"\\[target.{re.escape(ci_topology.MEMORY_PLATFORM)}.tasks\\] ci-memory",
+        )
+
+    def test_dropping_one_lane_from_the_memory_override_is_rejected(self) -> None:
+        self._reject_manifest_mutation(
+            'ci-memory = { depends-on = ["asan-check", "valgrind-check"] }',
+            'ci-memory = { depends-on = ["asan-check"] }',
+            "ci-memory mismatch",
+        )
+
+    def _reject_manifest_mutation(
+        self, original: str, replacement: str, pattern: str
+    ) -> None:
+        """Assert the checker rejects one exact manifest mutation."""
+        source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
+        mutated = source.replace(original, replacement, 1)
+        self.assertNotEqual(mutated, source)
+        with tempfile.TemporaryDirectory(prefix="mtest-ci-topology-") as raw_tmp:
+            repo = Path(raw_tmp)
+            (repo / "pixi.toml").write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, pattern):
+                ci_topology.check_ci_task_graph(repo)
+
     def test_package_test_module_owns_a_harness_check_slot(self) -> None:
         # The package gate's oracles are unit-tested in the cheap serial chain,
         # not only inside the expensive packaging job.
@@ -421,6 +499,42 @@ class CiTopologyTests(unittest.TestCase):
             "scripts.tests.test_package_consumption",
             ci_topology.HARNESS_CHECK_MODULES,
         )
+
+
+class MemoryHostSupportTests(unittest.TestCase):
+    """Behavior of the command `ci-memory` runs off linux-64.
+
+    These live beside the topology tests because the module exists only to make
+    the platform-scoped task honest: it is task-placement policy, not a memory
+    checker of its own.
+    """
+
+    def _run(self, system: str) -> tuple[int, str, str]:
+        """Run the fallback for one host, capturing both streams."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            status = host_support.main(system)
+        return status, out.getvalue(), err.getvalue()
+
+    def test_a_foreign_platform_reports_the_uncovered_lanes(self) -> None:
+        status, out, err = self._run("Darwin")
+        self.assertEqual(status, 0)
+        self.assertEqual(err, "")
+        self.assertIn("SKIPPED on Darwin", out)
+        for lane in host_support.LANES:
+            self.assertIn(lane, out, lane)
+
+    def test_linux_reaching_the_fallback_fails_closed(self) -> None:
+        # Arriving here on Linux means the manifest override was removed, so
+        # the lanes would have been skipped on the one platform that runs them.
+        status, out, err = self._run("Linux")
+        self.assertEqual(status, 1)
+        self.assertEqual(out, "")
+        self.assertIn("FATAL", err)
+        self.assertIn(ci_topology.MEMORY_PLATFORM, err)
+
+    def test_the_reported_lanes_match_the_pinned_aggregate(self) -> None:
+        self.assertEqual(list(host_support.LANES), ci_topology.MEMORY_LANE_TASKS)
 
 
 if __name__ == "__main__":

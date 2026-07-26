@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import tempfile
+from typing import Any
 
 from scripts.e2e.assertions import (
     expect,
@@ -40,14 +41,17 @@ COLLECT_DIR_EXPECTED = [
 
 
 def s_collect(context: ScenarioContext) -> str:
-    """`collect` / `--collect-only`: STDOUT is byte-clean and is ONLY the sorted
-    node-id listing; every diagnostic goes to STDERR; the total per-file policy
-    holds (qualifying listed; compile-error/crash/timeout/malformed -> stderr +
-    continue + exit-1; drift -> exit 3; nothing collectable -> exit 5).
+    """`collect` and `--collect-only` keep STDOUT byte-clean.
+
+    STDOUT is ONLY the sorted node-id listing; every diagnostic goes to STDERR;
+    the total per-file policy holds (qualifying listed;
+    compile-error/crash/timeout/malformed -> stderr + continue + exit-1; drift ->
+    exit 3; nothing collectable -> exit 5).
 
     STDOUT purity is asserted MECHANICALLY: stdout is split into lines and the
     lines must be exactly the sorted expected node-id set — nothing else may ride
-    stdout, ever."""
+    stdout, ever.
+    """
     # 1. Byte-purity on a clean tree: stdout is EXACTLY the sorted listing.
     run = context.runner.run_mtest(["collect", "e2e/matrix"])
     expect_exit(run, 0)
@@ -126,9 +130,7 @@ def s_collect(context: ScenarioContext) -> str:
     )
 
     # 6. Nothing collectable -> exit 5; STDOUT empty.
-    tmp = tempfile.mkdtemp(
-        prefix=".e2e_collect_empty_", dir=E2E_ROOT
-    )
+    tmp = tempfile.mkdtemp(prefix=".e2e_collect_empty_", dir=E2E_ROOT)
     try:
         rel = os.path.relpath(tmp, REPO_ROOT)
         empt = context.runner.run_mtest(["collect", rel], timeout=SHORT_TIMEOUT)
@@ -145,14 +147,16 @@ def s_collect(context: ScenarioContext) -> str:
 
 
 def s_usage_refusals(context: ScenarioContext) -> str:
-    """collect is now served, so the collect-subcommand refusal is gone. The
-    remaining usage refusal this build enforces is a RUN-ONLY flag combined with
-    collect mode: a listing is not a run, so every served run-only flag
+    """Collect is now served, so the collect-subcommand refusal is gone.
+
+    The remaining usage refusal this build enforces is a RUN-ONLY flag combined
+    with collect mode: a listing is not a run, so every served run-only flag
     (--maxfail, -x/--exitfirst, --gate, -s/--show-output) is refused with exit 4,
     while --timeout is NOT refused (it bounds the probes). Every flag in the v1
     contract is served now, so there is no availability refusal left to probe.
     (--json is now SERVED — its destination taxonomy is proven by
-    s_json_destination_taxonomy, not here.)"""
+    s_json_destination_taxonomy, not here.)
+    """
     run = context.runner.run_mtest(
         ["collect", "--maxfail", "1", "e2e/matrix"], timeout=SHORT_TIMEOUT
     )
@@ -221,7 +225,8 @@ def s_selection_keyword(context: ScenarioContext) -> str:
 
     `-k two` selects only test_alpha_two of the three; the file runs under
     --only, PASSes, and the two unselected tests are counted DESELECTED (a
-    summary count, never a listed verdict row)."""
+    summary count, never a listed verdict row).
+    """
     run = context.runner.run_mtest([MATRIX_ALPHA, "-k", "two"])
     expect_exit(run, 0)
     summ = expect_accounting(run)
@@ -258,7 +263,8 @@ def s_selection_union(context: ScenarioContext) -> str:
     `mtest e2e/matrix e2e/matrix/test_alpha.mojo::test_alpha_one`
     covers test_alpha.mojo with BOTH a plain dir operand and a node id — the
     plain operand wins (whole), so every test in both files runs and nothing is
-    deselected."""
+    deselected.
+    """
     run = context.runner.run_mtest(["e2e/matrix", f"{MATRIX_ALPHA}::test_alpha_one"])
     expect_exit(run, 0)
     summ = expect_accounting(run)
@@ -278,8 +284,7 @@ def s_selection_union(context: ScenarioContext) -> str:
 
 
 def s_selection_malformed_node_id(context: ScenarioContext) -> str:
-    """More than one `::` is a MALFORMED node id -> exit 4, never 'unknown test'.
-    """
+    """More than one `::` is a MALFORMED node id -> exit 4, never 'unknown test'."""
     run = context.runner.run_mtest(
         [f"{MATRIX_ALPHA}::test_alpha_one::extra"], timeout=SHORT_TIMEOUT
     )
@@ -296,9 +301,10 @@ def s_selection_malformed_node_id(context: ScenarioContext) -> str:
 
 
 def s_selection_unknown_test(context: ScenarioContext) -> str:
-    """A node id naming a test the file does not collect -> exit 4 'unknown test'.
-    """
-    run = context.runner.run_mtest([f"{MATRIX_ALPHA}::test_does_not_exist"], timeout=SHORT_TIMEOUT)
+    """A node id naming a test the file does not collect -> exit 4 'unknown test'."""
+    run = context.runner.run_mtest(
+        [f"{MATRIX_ALPHA}::test_does_not_exist"], timeout=SHORT_TIMEOUT
+    )
     expect_exit(run, 4)
     expect(
         "unknown test" in run.stderr,
@@ -308,8 +314,7 @@ def s_selection_unknown_test(context: ScenarioContext) -> str:
 
 
 def s_selection_empty(context: ScenarioContext) -> str:
-    """A `-k` that matches nothing deselects every test -> nothing runs -> exit 5.
-    """
+    """A `-k` that matches nothing deselects every test -> nothing runs -> exit 5."""
     run = context.runner.run_mtest([MATRIX_ALPHA, "-k", "no_such_keyword_zzz"])
     expect_exit(run, 5)
     return "empty final selection (all deselected) -> exit 5"
@@ -320,7 +325,8 @@ def s_selection_chameleon(context: ScenarioContext) -> str:
 
     Selecting the ghost forces a --only run; the suite lists it under --skip-all
     but refuses it under --only, so mtest warns loudly, rebuilds + recollects,
-    retries, sees the same refusal, and reports MALFORMED-SUITE."""
+    retries, sees the same refusal, and reports MALFORMED-SUITE.
+    """
     run = context.runner.run_mtest([CHAMELEON, "-k", "ghost"], timeout=SHORT_TIMEOUT)
     expect_exit(run, 1)
     expect(
@@ -335,8 +341,10 @@ def s_selection_chameleon(context: ScenarioContext) -> str:
 
 
 def _mojo_log_path() -> str:
-    """A fresh path for MTEST_MOJO_LOG, absent until the logging wrapper writes
-    it — proves the wrapper (not some pre-existing file) produced the log."""
+    """A fresh path for MTEST_MOJO_LOG, absent until the wrapper writes it.
+
+    Proves the wrapper, not some pre-existing file, produced the log.
+    """
     fd, path = tempfile.mkstemp(prefix="mtest_mojo_log_", suffix=".tsv")
     os.close(fd)
     os.remove(path)
@@ -352,7 +360,7 @@ def _mojo_log_lines(path: str) -> list[str]:
 
 
 def _count_builds(lines: list[str], rel: str) -> int:
-    """How many `build\\t<rel>\\t...` entries the wrapper logged for `rel`."""
+    r"""How many `build\t<rel>\t...` entries the wrapper logged for `rel`."""
     count = 0
     for ln in lines:
         fields = ln.split("\t")
@@ -362,17 +370,19 @@ def _count_builds(lines: list[str], rel: str) -> int:
 
 
 def s_single_build(context: ScenarioContext) -> str:
-    """The BuildProducts registry shares ONE `mojo build` per file between the
-    selection probe and the run — proved with the committed logging `--mojo`
-    wrapper (scripts/fixtures/toolchain/logging_mojo.py) over a SINGLE selection-run invocation.
-    Two separate `mtest` invocations would legitimately rebuild; this scenario
-    never does that.
+    """The BuildProducts registry shares ONE `mojo build` per file.
+
+    The selection probe and the run share it — proved with the committed logging
+    `--mojo` wrapper (scripts/fixtures/toolchain/logging_mojo.py) over a SINGLE
+    selection-run invocation. Two separate `mtest` invocations would legitimately
+    rebuild; this scenario never does that.
 
     `-k one` over the whole e2e/matrix tree matches test_alpha_one AND
     test_beta_one, so BOTH files are touched — a multi-file selection. Phase 1
     (probe every run file) builds each file once; Phase 2 (run the selected
     subset) reuses that same binary. The wrapper's log is the independent
-    witness: exactly one `mojo build <file>` line per file, not two."""
+    witness: exactly one `mojo build <file>` line per file, not two.
+    """
     log_path = _mojo_log_path()
     try:
         run = context.runner.run_mtest(
@@ -402,11 +412,13 @@ def s_single_build(context: ScenarioContext) -> str:
 
 
 def s_stale_recovery_two_builds(context: ScenarioContext) -> str:
-    """The chameleon's stale-name recovery rebuilds the file EXACTLY TWICE: the
-    initial Phase-1 build, then the one recollect-once rebuild the recovery
+    """The chameleon's stale-name recovery rebuilds the file EXACTLY TWICE.
+
+    The initial Phase-1 build, then the one recollect-once rebuild the recovery
     flow triggers when the suite refuses under `--only` a name it just listed
-    under `--skip-all`. The run still ends MALFORMED-SUITE (exit-1 class),
-    never exit 3 — the recovery is a bounded retry, not a drift."""
+    under `--skip-all`. The run still ends MALFORMED-SUITE (exit-1 class), never
+    exit 3 — the recovery is a bounded retry, not a drift.
+    """
     log_path = _mojo_log_path()
     try:
         run = context.runner.run_mtest(
@@ -478,12 +490,14 @@ def _install_precedence_wrappers(root: str) -> dict[str, str]:
         os.makedirs(directory)
         wrapper = os.path.join(directory, "mojo")
         shutil.copyfile(PATH_MOJO, wrapper)
-        os.chmod(wrapper, 0o755)
+        # S103: the copy IS a compiler stand-in mtest has to exec, so the mode
+        # has to carry the execute bit; the tree is a per-run temp directory.
+        os.chmod(wrapper, 0o755)  # noqa: S103
         installed[source] = wrapper
     return installed
 
 
-def _precedence_records(log_path: str) -> list[dict]:
+def _precedence_records(log_path: str) -> list[dict[str, Any]]:
     """The invocations one wrapper copy recorded, in order.
 
     Args:
@@ -497,7 +511,7 @@ def _precedence_records(log_path: str) -> list[dict]:
     """
     if not os.path.exists(log_path):
         return []
-    records: list[dict] = []
+    records: list[dict[str, Any]] = []
     with open(log_path, encoding="utf-8") as handle:
         for line in handle:
             if not line.strip():
@@ -506,8 +520,7 @@ def _precedence_records(log_path: str) -> list[dict]:
                 records.append(json.loads(line))
             except json.JSONDecodeError as error:
                 raise ScenarioError(
-                    f"wrapper log {log_path} holds a non-JSON line {line!r}: "
-                    f"{error}"
+                    f"wrapper log {log_path} holds a non-JSON line {line!r}: {error}"
                 ) from None
     return records
 
@@ -540,11 +553,11 @@ def s_mojo_executable_precedence(context: ScenarioContext) -> str:
     would exec itself forever.
     """
     real_mojo = shutil.which("mojo")
-    expect(
-        real_mojo is not None,
-        "no real `mojo` on PATH: the precedence wrappers exec the real compiler "
-        "and cannot stand in for it",
-    )
+    if real_mojo is None:
+        raise ScenarioError(
+            "no real `mojo` on PATH: the precedence wrappers exec the real compiler "
+            "and cannot stand in for it"
+        )
     with tempfile.TemporaryDirectory(prefix="mtest-mojo-precedence-") as raw_root:
         # Each wrapper reports os.path.realpath(__file__) as its identity, so
         # every path derived here has to be the resolved spelling too. On macOS
@@ -553,8 +566,7 @@ def s_mojo_executable_precedence(context: ScenarioContext) -> str:
         root = os.path.realpath(raw_root)
         wrappers = _install_precedence_wrappers(root)
         logs = {
-            source: os.path.join(root, f"{source}.log")
-            for source in PRECEDENCE_SOURCES
+            source: os.path.join(root, f"{source}.log") for source in PRECEDENCE_SOURCES
         }
         base_env = {
             "MTEST_REAL_MOJO": os.fspath(real_mojo),

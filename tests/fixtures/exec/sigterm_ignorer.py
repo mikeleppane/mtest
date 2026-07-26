@@ -12,10 +12,12 @@ SIGTERM; without it, a signal raised during interpreter start-up would kill the
 child politely and a test meaning to prove the escalation would quietly prove
 nothing instead.
 """
+
 import os
 import signal
 import sys
 import time
+
 
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 if len(sys.argv) > 1:

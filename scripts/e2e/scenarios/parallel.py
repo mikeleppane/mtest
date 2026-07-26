@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import contextlib
 import os
+from pathlib import Path
 import re
 import resource
 import shutil
 import signal
 import tempfile
-from pathlib import Path
+from typing import Any
 
 from scripts.checks.reports import json_stream as json_stream_check
 from scripts.checks.reports import junit as junit_check
@@ -80,11 +81,10 @@ def _mask_timing(text: str) -> str:
     """
     masked = _TIMING_BRACKET.sub("[T]", text)
     masked = _TIMING_TAGS.sub("in Ts", masked)
-    masked = _TIMING_SECONDS.sub("Ts", masked)
-    return masked
+    return _TIMING_SECONDS.sub("Ts", masked)
 
 
-def _canonical_record(record: dict) -> tuple:
+def _canonical_record(record: dict[str, Any]) -> tuple[tuple[str, str], ...]:
     """A record reduced to its semantic fields, sorted and volatility-stripped."""
     items = sorted(
         (key, str(value))
@@ -94,7 +94,7 @@ def _canonical_record(record: dict) -> tuple:
     return tuple(items)
 
 
-def _project_stream(text: str) -> dict:
+def _project_stream(text: str) -> dict[str, Any]:
     """Project a `--json` stream to a worker-count-independent shape.
 
     Records are grouped by file so concurrent interleaving cannot perturb the
@@ -103,9 +103,9 @@ def _project_stream(text: str) -> dict:
     that differ only in `-n` must project equally.
     """
     report = json_stream_check.parse_stream(text)
-    per_file: dict[str, list[tuple]] = {}
-    header: tuple = ()
-    terminal: tuple = ()
+    per_file: dict[str, list[tuple[tuple[str, str], ...]]] = {}
+    header: tuple[tuple[str, str], ...] = ()
+    terminal: tuple[tuple[str, str], ...] = ()
     for record in report.records:
         event = record.get("event")
         if event == "session_started":
@@ -117,16 +117,23 @@ def _project_stream(text: str) -> dict:
                 {k: v for k, v in record.items() if k != "wall_time_us"}
             )
         else:
-            path = record.get("path", "")
-            per_file.setdefault(path, []).append(_canonical_record(record))
+            # `parse_stream` validates framing and the header, NOT event field
+            # types, so a record carrying `"path": 7` reaches here. Casting would
+            # assert a guarantee nothing provides, and the wrong type would only
+            # surface later as a TypeError from sorting mixed keys.
+            raw_path = record.get("path", "")
+            if not isinstance(raw_path, str):
+                raise ScenarioError(
+                    f"{event!r} record field 'path' is "
+                    f"{type(raw_path).__name__}, not a string: {raw_path!r}"
+                )
+            per_file.setdefault(raw_path, []).append(_canonical_record(record))
     return {
         "header": header,
         "terminal": terminal,
         "exit_code": report.exit_code,
         "per_file": {path: per_file[path] for path in sorted(per_file)},
-        "has_progress": any(
-            r.get("event") == "progress" for r in report.records
-        ),
+        "has_progress": any(r.get("event") == "progress" for r in report.records),
     }
 
 
@@ -158,7 +165,7 @@ def _log_lines(path: str) -> list[str]:
 
 
 def _intervals(lines: list[str], kind: str) -> dict[str, tuple[float, float]]:
-    """Fold `<kind>\\t<name>\\t<edge>[...]` records into per-name (start, end) spans.
+    r"""Fold `<kind>\t<name>\t<edge>[...]` records into per-name (start, end) spans.
 
     Each name is stamped twice, start then end, in that order — the build shim
     appends a return code to its end record, the run fixture does not, so the two
@@ -433,8 +440,7 @@ def s_parallel_interrupt(context: ScenarioContext) -> str:
         expect(
             stream.summary.get("not_run") == len(_PARALLEL_NOT_RUN_FILES)
             and stream.summary.get("pass") == 0,
-            f"the terminal summary disagreed with the console band: "
-            f"{stream.summary}",
+            f"the terminal summary disagreed with the console band: {stream.summary}",
         )
 
         report = expect_report(run, junit_path, "the interrupted pool's junit")
@@ -442,15 +448,14 @@ def s_parallel_interrupt(context: ScenarioContext) -> str:
         rows = junit_not_run_files(report)
         expect(
             rows == _PARALLEL_NOT_RUN_FILES,
-            f"the junit [not-run] rows were {rows}, want "
-            f"{_PARALLEL_NOT_RUN_FILES}",
+            f"the junit [not-run] rows were {rows}, want {_PARALLEL_NOT_RUN_FILES}",
         )
 
         expect_group_gone(pgid, "mtest's own group after the parallel interrupt")
         return (
-            f"-n 2 SIGINT: exit 2, both in-flight identities and the "
-            f"undispatched one NOT-RUN in console/stream/junit, no fourth "
-            f"dispatch in the run log, no surviving process group"
+            "-n 2 SIGINT: exit 2, both in-flight identities and the "
+            "undispatched one NOT-RUN in console/stream/junit, no fourth "
+            "dispatch in the run log, no surviving process group"
         )
 
 
@@ -589,7 +594,7 @@ def s_parallel_j_rejected(context: ScenarioContext) -> str:
     return "--build-arg -j and --num-threads both rejected exit 4 (name -n/--workers)"
 
 
-_PROGRESS_MARKER = "▸".encode("utf-8")
+_PROGRESS_MARKER = "▸".encode()
 
 
 def s_parallel_progress_tty(context: ScenarioContext) -> str:
@@ -853,7 +858,8 @@ to recycle a slot to finish the set."""
 FD_CLAMP_FILES = tuple(f"{FD_CLAMP_TREE}/{name}.mojo" for name in FD_CLAMP_NAMES)
 """The four generated sources, in the order they are written."""
 
-FD_CLAMP_SOURCE = '''"""Generated all-pass fixture for the live descriptor-clamp scenario."""
+FD_CLAMP_SOURCE = '''\
+"""Generated all-pass fixture for the live descriptor-clamp scenario."""
 from std.testing import assert_equal, TestSuite
 
 
@@ -915,8 +921,10 @@ def _remove_fd_clamp_artifacts() -> None:
     # single pass only while `FD_CLAMP_TREE` holds no `_` and `FD_CLAMP_NAMES`
     # hold no `/`; introduce either and the passes interfere, the reconstructed
     # name stops matching, and the products below go silently uncollected.
-    assert "_" not in FD_CLAMP_TREE, FD_CLAMP_TREE
-    assert not any("/" in name for name in FD_CLAMP_NAMES), FD_CLAMP_NAMES
+    if "_" in FD_CLAMP_TREE:
+        raise AssertionError(FD_CLAMP_TREE)
+    if any("/" in name for name in FD_CLAMP_NAMES):
+        raise AssertionError(FD_CLAMP_NAMES)
     mangled = FD_CLAMP_TREE.replace("_", "_u").replace("/", "_s")
     for name in FD_CLAMP_NAMES:
         product = os.path.join(
@@ -1028,9 +1036,8 @@ def s_parallel_fd_clamp(context: ScenarioContext) -> str:
         )
         stream = stream_files(run.stdout)
         expect(
-            stream.finished == {path: "pass" for path in FD_CLAMP_FILES},
-            f"the clamped stream finished {stream.finished}, want all four files "
-            "pass",
+            stream.finished == dict.fromkeys(FD_CLAMP_FILES, "pass"),
+            f"the clamped stream finished {stream.finished}, want all four files pass",
         )
 
         summ = expect_accounting(run)

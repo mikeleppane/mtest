@@ -9,6 +9,12 @@
 # python bytecode
 __pycache__/
 *.pyc
-# internal working plans and review outputs — never committed or published
+# ruff and mypy caches, written at the repo root by pixi run py-check
+.mypy_cache/
+.ruff_cache/
+# linked git worktrees for parallel branches; checkouts, not repository content
+.worktrees/
+# internal working plans, notes, and review outputs — never committed or published
 docs/plans/
+notes/
 .superpowers

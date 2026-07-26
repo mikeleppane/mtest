@@ -28,9 +28,7 @@ class AggregateDiscoveryTests(unittest.TestCase):
             ignored.write_text("def test_no():\n    pass\n", encoding="utf-8")
             os.symlink(second.parent, tests / "unit" / "linked")
 
-            found = aggregate.discover_test_files(
-                repo, [tests / "unit", second.parent]
-            )
+            found = aggregate.discover_test_files(repo, [tests / "unit", second.parent])
 
         self.assertEqual(
             found,
@@ -98,9 +96,7 @@ class AggregateRenderingTests(unittest.TestCase):
             "import tests.integration.test_same as _mtest_module_0",
             rendered,
         )
-        self.assertIn(
-            "import tests.unit.test_same as _mtest_module_1", rendered
-        )
+        self.assertIn("import tests.unit.test_same as _mtest_module_1", rendered)
         integration_marker = rendered.index(
             'print("==> tests/integration/test_same.mojo", flush=True)'
         )
@@ -108,12 +104,8 @@ class AggregateRenderingTests(unittest.TestCase):
             'print("==> tests/unit/test_same.mojo", flush=True)'
         )
         self.assertLess(integration_marker, unit_marker)
-        self.assertIn(
-            "suite_0.test[_mtest_module_0.test_beta]()", rendered
-        )
-        self.assertIn(
-            "suite_1.test[_mtest_module_1.test_alpha]()", rendered
-        )
+        self.assertIn("suite_0.test[_mtest_module_0.test_beta]()", rendered)
+        self.assertIn("suite_1.test[_mtest_module_1.test_alpha]()", rendered)
         self.assertIn("suite_1^.run()", rendered)
 
     def test_invalid_mojo_module_path_is_rejected(self) -> None:

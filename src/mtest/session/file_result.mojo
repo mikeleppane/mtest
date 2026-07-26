@@ -1,12 +1,12 @@
 """The per-file records the `session` run paths produce, and their operations.
 
-Layer 4, beneath the orchestration that fills these in: `FileResult` is what
-every step — the plain attempt loop, the build-and-probe pass, and the
-selection run — hands back for one file, and `_CrashFile` is the diagnostic
-record a CRASH verdict queues for the attribution post-pass. The two pure
-operations the run loops perform on them live here too: merging an event
-prologue onto a result, and counting the failing entries in a run-outcome
-multiset for `--maxfail`.
+Layer 4, beneath the orchestration that fills these in. `FileResult` is what
+every step hands back for one file: the plain attempt loop, the build-and-probe
+pass, and the selection run. `_CrashFile` is the diagnostic record a CRASH
+verdict queues for the attribution post-pass. The two pure operations the run
+loops perform on those records live here too: merging an event prologue onto a
+result, and counting the failing entries in a run-outcome multiset for
+`--maxfail`.
 """
 from mtest.model import Event, Outcome, TestCounts
 from mtest.session.effective_settings import EffectiveFileSettings
@@ -19,11 +19,12 @@ struct FileResult(Copyable, Movable):
     Owns its lists and its event; copies are explicit.
 
     A completed file emits its `pre_events` in order, then its `event`. The
-    session accumulates `test_counts` unconditionally, adding it before it
-    inspects `is_drift`. A non-drift file also tallies `outcome` once in the
-    summary and appends `exit_outcomes` to the run outcomes. A drift file emits
-    its events and forces exit 3; drift suppresses the file-level outcome and
-    exit-outcome tally, not the per-test totals.
+    session accumulates `test_counts` unconditionally, before it inspects
+    `is_drift`. A non-drift file also tallies `outcome` once in the summary and
+    appends `exit_outcomes` to the run outcomes. A drift file emits its events
+    and forces exit 3; drift suppresses the file-level outcome and exit-outcome
+    tally, not the per-test totals.
+
     `internal_error` and `interrupted` are mutually exclusive short-circuits:
     the session emits `event` (for an internal error) and resolves the exit code
     (3 or 2) directly.
@@ -73,6 +74,20 @@ struct FileResult(Copyable, Movable):
 
         Returns:
             The completed `FileResult`.
+
+        Examples:
+
+        ```mojo
+        from mtest.model import Event, Outcome
+        from mtest.session.file_result import FileResult
+
+        var argv: List[String] = ["mojo", "build", "tests/test_a.mojo"]
+        var ev = Event.file_finished(
+            "tests/test_a.mojo", Outcome.COMPILE_ERROR, 0.0, argv^, 1.5,
+            List[UInt8](), List[UInt8]()
+        )
+        var fr = FileResult.ran_with(ev^, Outcome.COMPILE_ERROR)
+        ```
         """
         return Self(
             List[Event](),
@@ -217,15 +232,16 @@ def _prepend_events(var extra: List[Event], var fr: FileResult) -> FileResult:
 def _failing_count(outcomes: List[Outcome]) -> Int:
     """Count the failing-class entries in a run-outcome multiset.
 
-    `outcomes` is already test-granular — per-test for a valid report, one
-    file-level entry otherwise — so this is exactly the `--maxfail` counter:
+    `outcomes` is already test-granular (per-test for a valid report, one
+    file-level entry otherwise), so this is exactly the `--maxfail` counter:
     each element counts once, with no re-derivation from file-level outcomes.
 
     Args:
         outcomes: The accumulated run-outcome multiset.
 
     Returns:
-        How many entries are failing-class."""
+        How many entries are failing-class.
+    """
     var n = 0
     for o in outcomes:
         if o.is_failing():

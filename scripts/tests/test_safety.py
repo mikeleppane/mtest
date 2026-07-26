@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-import unittest
 from pathlib import Path
 import tempfile
+import unittest
 
 from scripts.checks import safety as safety_check
 
@@ -38,8 +38,7 @@ class SafetyCheckTests(unittest.TestCase):
 
     def test_adjacent_safety_clause_covers_candidate(self) -> None:
         self.assert_clean(
-            "# SAFETY: `p` owns one initialized Int slot here.\n"
-            "p.free()\n"
+            "# SAFETY: `p` owns one initialized Int slot here.\np.free()\n"
         )
 
     def test_one_clause_covers_a_contiguous_unsafe_block(self) -> None:
@@ -63,9 +62,7 @@ class SafetyCheckTests(unittest.TestCase):
 
     def test_multiline_ffi_call_uses_opening_line(self) -> None:
         self.assert_undocumented(
-            "var rc = external_call[\n"
-            '    "read", Int,\n'
-            "](fd, p, n)\n",
+            'var rc = external_call[\n    "read", Int,\n](fd, p, n)\n',
             "FFI call",
         )
 
@@ -90,7 +87,7 @@ class SafetyCheckTests(unittest.TestCase):
 
     def test_ignores_comments_imports_and_type_annotations(self) -> None:
         self.assert_clean(
-            "# external_call[\"abort\", Int32]()\n"
+            '# external_call["abort", Int32]()\n'
             "from std.ffi import external_call\n"
             "from std.memory import UnsafePointer, alloc\n"
             "def consume(p: UnsafePointer[Int, origin]):\n"
@@ -103,7 +100,7 @@ class SafetyCheckTests(unittest.TestCase):
             'var generated = """\n'
             "from std.ffi import external_call\n"
             "def main():\n"
-            "    _ = external_call[\"abort\", Int32]()\n"
+            '    _ = external_call["abort", Int32]()\n'
             '"""\n'
         )
 
@@ -116,10 +113,13 @@ class SafetyCheckTests(unittest.TestCase):
             "var value = p[1]\n",
         )
         self.assertEqual(findings, [])
-        self.assertEqual([item.kind for item in inventory], [
-            "possible pointer arithmetic",
-            "possible typed dereference",
-        ])
+        self.assertEqual(
+            [item.kind for item in inventory],
+            [
+                "possible pointer arithmetic",
+                "possible typed dereference",
+            ],
+        )
 
     def test_inventory_includes_derived_pointer_operations(self) -> None:
         findings, inventory = safety_check.scan_text(

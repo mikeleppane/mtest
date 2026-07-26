@@ -24,9 +24,7 @@ def _readme_help_block(contents: bytes) -> bytes:
     section_end = len(contents) if next_section == -1 else next_section
     section = contents[section_start:section_end]
     lines = section.splitlines(keepends=True)
-    opening_indices = [
-        index for index, line in enumerate(lines) if line == OPEN_FENCE
-    ]
+    opening_indices = [index for index, line in enumerate(lines) if line == OPEN_FENCE]
     if len(opening_indices) != 1:
         raise AssertionError("CLI reference must contain exactly one text fence")
     block_lines: list[bytes] = []
@@ -45,8 +43,7 @@ def check_readme_help(repo_root: Path = REPO_ROOT) -> None:
         run = subprocess.run(
             [binary, "--help"],
             cwd=repo_root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=30,
             check=False,
         )
@@ -68,9 +65,7 @@ def check_readme_help(repo_root: Path = REPO_ROOT) -> None:
         diff = "".join(
             difflib.unified_diff(
                 readme.decode("utf-8", errors="replace").splitlines(keepends=True),
-                run.stdout.decode("utf-8", errors="replace").splitlines(
-                    keepends=True
-                ),
+                run.stdout.decode("utf-8", errors="replace").splitlines(keepends=True),
                 fromfile="README.md help fence",
                 tofile="build/mtest --help",
             )

@@ -1,11 +1,11 @@
 """One build-run-classify attempt for a file, and the retry loop over it.
 
-Layer 4, the plain (non-selection) run path: `_run_one` spends up to
-the file's effective retry budget plus one attempt, each building it under
-`--compile-timeout`, executing the binary under the `exec` supervisor, and
+Layer 4, the plain (non-selection) run path. `_run_one` spends up to the file's
+effective retry budget plus one attempt, each building it under
+`--compile-timeout`, executing the binary under the `exec` supervisor, then
 resolving and classifying the report its stdout carried. A crash-class ending
-with budget left is reported immediately and retried — a build rebuilds
-quarantined against a fresh module cache, a run re-runs the same binary — and a
+with budget left is reported immediately and retried: a build rebuilds
+quarantined against a fresh module cache, and a run re-runs the same binary. A
 late pass after any retry is flaky.
 
 It sits above `build` (for the compile-spawn policy), `scratch`, `file_result`,
@@ -725,15 +725,15 @@ def _run_one(
     """Build `rel`, execute it, and retry a crash-class failure up to budget.
 
     Runs through `_single_attempt` up to the file's effective retry budget plus
-    one attempt. An
-    attempt that passes, or fails deterministically with a real failure, a
-    compile error, or a flooded capture, is final. A crash-class failure with
-    attempts remaining is reported immediately as an `AttemptFinished` and
-    retried: a crash-class build failure rebuilds quarantined against a fresh
-    cache and emits a residual-risk warning, while a crash-class run failure
-    re-runs the same binary. If the final attempt passes after any retry the
-    file is flaky. An interrupt is short-circuited before the retry decision and
-    so is never retried, and an unset `--retries` runs exactly one attempt.
+    one attempt. An attempt that passes, or fails deterministically with a real
+    failure, a compile error, or a flooded capture, is final. A crash-class
+    failure with attempts remaining is reported immediately as an
+    `AttemptFinished` and retried: a crash-class build failure rebuilds
+    quarantined against a fresh cache and emits a residual-risk warning, while
+    a crash-class run failure re-runs the same binary. If the final attempt
+    passes after any retry the file is flaky. An interrupt is short-circuited
+    before the retry decision and so is never retried, and an unset `--retries`
+    runs exactly one attempt.
 
     Args:
         runtime: The exec runtime supervising the build and run spawns.

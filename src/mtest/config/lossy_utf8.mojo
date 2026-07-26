@@ -11,8 +11,8 @@ I/O, no environment reads.
 This is a pure cross-cutting text utility, not a configuration concern: it
 reads no `RunnerConfig` and imports nothing internal, so its natural home is
 Layer 0 alongside the other dependency-free primitives. It is parked in
-`config` purely for graph position — a low-enough layer that both `report` and
-`session` can reach it without an upward import — and it stays here because the
+`config` purely for graph position, a low-enough layer that both `report` and
+`session` can reach it without an upward import. It stays here because the
 decoder has importers spread across the `config`, `report`, and `session`
 packages, so relocating it would churn every one of them for no behavioral gain.
 """
@@ -33,6 +33,17 @@ def lossy_utf8(bytes: List[UInt8]) -> String:
     Returns:
         A `String` with every valid sequence preserved and every invalid byte
         replaced by U+FFFD.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import lossy_utf8
+
+    var text = lossy_utf8([0x41, 0x42, 0x43])
+    # 0xFF can never begin a sequence, so it becomes one U+FFFD between
+    # the surviving "A" and "B".
+    var partial = lossy_utf8([0x41, 0xFF, 0x42])
+    ```
     """
     comptime REPLACEMENT = "�"
     var out = String("")

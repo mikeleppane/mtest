@@ -30,11 +30,12 @@ import contextlib
 import dataclasses
 import io
 import json
+from pathlib import Path
 import stat
 import subprocess
 import tempfile
+from typing import TYPE_CHECKING, override
 import unittest
-from pathlib import Path
 from unittest import mock
 
 from scripts.build import package_consumption
@@ -43,10 +44,15 @@ from scripts.build.package_consumption import (
     PackageCheckError,
     check_failing_fixture_consumption,
     package_platform,
-    scrubbed_probe_env,
     scratch_manifest_text,
+    scrubbed_probe_env,
     verify_installed_artifact_identity,
 )
+from scripts.harness import dogfood
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 # One real transcript, captured from `build/mtest --no-config --color never
@@ -200,6 +206,7 @@ class ArtifactIdentityTests(unittest.TestCase):
     ARTIFACT_SHA = "a" * 64
     IMPOSTOR_SHA = "b" * 64
 
+    @override
     def setUp(self) -> None:
         self._temp = tempfile.TemporaryDirectory()
         self.addCleanup(self._temp.cleanup)
@@ -345,7 +352,7 @@ class FailingFixtureConsumptionTests(unittest.TestCase):
         self.assertIn("not run", str(caught.exception))
 
     def test_missing_summary_band_is_rejected(self) -> None:
-        transcript = TRUTHFUL_TRANSCRIPT.split("=====")[0]
+        transcript = TRUTHFUL_TRANSCRIPT.split("=====", maxsplit=1)[0]
         with self.assertRaises(PackageCheckError):
             self._check(transcript)
 
@@ -403,17 +410,20 @@ class FailingFixtureStageTests(unittest.TestCase):
 
     def test_stage_rejects_a_stand_in_that_exits_zero(self) -> None:
         binary, marker = self._fake_mtest(TRUTHFUL_TRANSCRIPT, 0)
-        with contextlib.redirect_stdout(io.StringIO()):
-            with self.assertRaises(PackageCheckError):
-                package_consumption.stage_failing_fixture_consumption(
-                    binary, TRUTHFUL_VERSION
-                )
+        with (
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaises(PackageCheckError),
+        ):
+            package_consumption.stage_failing_fixture_consumption(
+                binary, TRUTHFUL_VERSION
+            )
         self.assertTrue(marker.exists(), "stage never executed the binary")
 
 
 class StageLedgerTests(unittest.TestCase):
     """The gate records what it performed and refuses to overclaim."""
 
+    @override
     def setUp(self) -> None:
         package_consumption.reset_completed_stages()
         self.addCleanup(package_consumption.reset_completed_stages)
@@ -469,6 +479,7 @@ class CallSiteTests(unittest.TestCase):
     observe and the test reds.
     """
 
+    @override
     def setUp(self) -> None:
         package_consumption.reset_completed_stages()
         self.addCleanup(package_consumption.reset_completed_stages)
@@ -501,19 +512,21 @@ class CallSiteTests(unittest.TestCase):
         env_dir = scratch / "conda-env"
         prefix = env_dir / ".pixi" / "envs" / "default"
         identity = mock.Mock()
-        with mock.patch.multiple(
-            package_consumption,
-            REPO_ROOT=self.root,
-            SCRATCH_ROOT=scratch,
-            CONDA_ENV_DIR=env_dir,
-            CONDA_CHANNEL_DIR=self.root / "channel",
-            _run_streamed=mock.Mock(
-                side_effect=lambda *a, **k: (self._install_prefix(env_dir), 0)[1]
+        with (
+            mock.patch.multiple(
+                package_consumption,
+                REPO_ROOT=self.root,
+                SCRATCH_ROOT=scratch,
+                CONDA_ENV_DIR=env_dir,
+                CONDA_CHANNEL_DIR=self.root / "channel",
+                _run_streamed=mock.Mock(
+                    side_effect=lambda *_a, **_k: (self._install_prefix(env_dir), 0)[1]
+                ),
+                verify_installed_artifact_identity=identity,
             ),
-            verify_installed_artifact_identity=identity,
+            contextlib.redirect_stdout(io.StringIO()),
         ):
-            with contextlib.redirect_stdout(io.StringIO()):
-                package_consumption.stage_install_from_local_channel(self.artifact)
+            package_consumption.stage_install_from_local_channel(self.artifact)
         identity.assert_called_once_with(prefix, self.artifact)
 
     def test_tarball_stage_calls_the_artifact_identity_proof(self) -> None:
@@ -522,7 +535,7 @@ class CallSiteTests(unittest.TestCase):
         prefix = env_dir / ".pixi" / "envs" / "default"
         artifact_name = f"mtest-{self.version}-hb0f4dca_0.tar.bz2"
 
-        def build_or_install(argv: list[str], **kwargs: object) -> int:
+        def build_or_install(argv: list[str], **_kwargs: object) -> int:
             """Stand in for rattler-build and pixi install, in that order."""
             if argv[0] == "rattler-build":
                 path = channel_dir / "linux-64" / artifact_name
@@ -538,29 +551,31 @@ class CallSiteTests(unittest.TestCase):
                 args=[], returncode=0, stdout=f"mtest {self.version}\n", stderr=""
             )
         )
-        with mock.patch.multiple(
-            package_consumption,
-            REPO_ROOT=self.root,
-            TARBALL_CHANNEL_DIR=channel_dir,
-            TARBALL_ENV_DIR=env_dir,
-            _run_streamed=mock.Mock(side_effect=build_or_install),
-            verify_installed_artifact_identity=identity,
+        with (
+            mock.patch.multiple(
+                package_consumption,
+                REPO_ROOT=self.root,
+                TARBALL_CHANNEL_DIR=channel_dir,
+                TARBALL_ENV_DIR=env_dir,
+                _run_streamed=mock.Mock(side_effect=build_or_install),
+                verify_installed_artifact_identity=identity,
+            ),
+            mock.patch.object(subprocess, "run", smoke),
+            contextlib.redirect_stdout(io.StringIO()),
         ):
-            with mock.patch.object(package_consumption.subprocess, "run", smoke):
-                with contextlib.redirect_stdout(io.StringIO()):
-                    package_consumption.stage_tarball_fallback_smoke(
-                        package_platform("linux", "x86_64")
-                    )
+            package_consumption.stage_tarball_fallback_smoke(
+                package_platform("linux", "x86_64")
+            )
         self.assertEqual(len(identity.call_args_list), 1)
         self.assertEqual(identity.call_args_list[0].args[0], prefix)
-        self.assertEqual(
-            identity.call_args_list[0].args[1].path.name, artifact_name
-        )
+        self.assertEqual(identity.call_args_list[0].args[1].path.name, artifact_name)
 
     def test_loader_clean_stage_calls_the_probe_roster_check(self) -> None:
         roster = mock.Mock()
 
-        def fake_run(argv: list[str], **kwargs: object):
+        def fake_run(
+            argv: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
             """Answer each loader-clean probe as a healthy install would."""
             if argv[0] == "ldd":
                 return subprocess.CompletedProcess(argv, 0, "", "")
@@ -570,23 +585,21 @@ class CallSiteTests(unittest.TestCase):
                 )
             if "--help" in argv:
                 return subprocess.CompletedProcess(argv, 0, "usage: mtest\n", "")
-            return subprocess.CompletedProcess(
-                argv, 4, "", "discover: no such file\n"
-            )
+            return subprocess.CompletedProcess(argv, 4, "", "discover: no such file\n")
 
-        with mock.patch.multiple(
-            package_consumption,
-            LOADER_PROBE_CWD=self.root / "loader-probe-cwd",
-            verify_loader_probe_roster=roster,
+        with (
+            mock.patch.multiple(
+                package_consumption,
+                LOADER_PROBE_CWD=self.root / "loader-probe-cwd",
+                verify_loader_probe_roster=roster,
+            ),
+            mock.patch.object(subprocess, "run", side_effect=fake_run),
+            contextlib.redirect_stdout(io.StringIO()),
         ):
-            with mock.patch.object(
-                package_consumption.subprocess, "run", side_effect=fake_run
-            ):
-                with contextlib.redirect_stdout(io.StringIO()):
-                    package_consumption.stage_loader_clean_probe(
-                        self.root / "bin" / "mtest",
-                        package_platform("linux", "x86_64"),
-                    )
+            package_consumption.stage_loader_clean_probe(
+                self.root / "bin" / "mtest",
+                package_platform("linux", "x86_64"),
+            )
         roster.assert_called_once_with(package_consumption.LOADER_PROBE_FLAGS)
 
     def test_dogfood_stage_drives_the_installed_binary_through_the_probes(
@@ -611,16 +624,16 @@ class CallSiteTests(unittest.TestCase):
         native.write_text("", encoding="utf-8")
         verify = mock.Mock(return_value=0)
 
-        with mock.patch.multiple(
-            package_consumption,
-            MOJOPKG_INCLUDE_DIR=include,
-            NATIVE_TEST_OBJECT=native,
+        with (
+            mock.patch.multiple(
+                package_consumption,
+                MOJOPKG_INCLUDE_DIR=include,
+                NATIVE_TEST_OBJECT=native,
+            ),
+            mock.patch.object(dogfood, "verify", verify),
+            contextlib.redirect_stdout(io.StringIO()),
         ):
-            with mock.patch.object(package_consumption.dogfood, "verify", verify):
-                with contextlib.redirect_stdout(io.StringIO()):
-                    package_consumption.stage_suite_run_with_installed_binary(
-                        installed
-                    )
+            package_consumption.stage_suite_run_with_installed_binary(installed)
 
         verify.assert_called_once_with(str(installed), str(native))
         self.assertIn("dogfood", package_consumption.completed_stages())
@@ -635,19 +648,17 @@ class CallSiteTests(unittest.TestCase):
         native = self.root / "mtest_exec_native_test.o"
         native.write_text("", encoding="utf-8")
 
-        with mock.patch.multiple(
-            package_consumption,
-            MOJOPKG_INCLUDE_DIR=include,
-            NATIVE_TEST_OBJECT=native,
+        with (
+            mock.patch.multiple(
+                package_consumption,
+                MOJOPKG_INCLUDE_DIR=include,
+                NATIVE_TEST_OBJECT=native,
+            ),
+            mock.patch.object(dogfood, "verify", mock.Mock(return_value=1)),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaises(package_consumption.PackageCheckError),
         ):
-            with mock.patch.object(
-                package_consumption.dogfood, "verify", mock.Mock(return_value=1)
-            ):
-                with contextlib.redirect_stdout(io.StringIO()):
-                    with self.assertRaises(package_consumption.PackageCheckError):
-                        package_consumption.stage_suite_run_with_installed_binary(
-                            installed
-                        )
+            package_consumption.stage_suite_run_with_installed_binary(installed)
 
         self.assertNotIn("dogfood", package_consumption.completed_stages())
 
@@ -663,8 +674,8 @@ class CallSiteTests(unittest.TestCase):
         """
         parent = mock.Mock()
 
-        def stage(stage_id: str, result: object = None):
-            def run(*args: object, **kwargs: object) -> object:
+        def stage(stage_id: str, result: object = None) -> Callable[..., object]:
+            def run(*_args: object, **_kwargs: object) -> object:
                 parent.stage(stage_id)
                 if stage_id != skip_recording:
                     package_consumption.record_completed_stage(stage_id)
@@ -675,9 +686,7 @@ class CallSiteTests(unittest.TestCase):
         install_result = self.root / "prefix" / "bin" / "mtest"
         self._patches = mock.patch.multiple(
             package_consumption,
-            host_platform=mock.Mock(
-                return_value=package_platform("linux", "x86_64")
-            ),
+            host_platform=mock.Mock(return_value=package_platform("linux", "x86_64")),
             stage_build_local_channel=mock.Mock(
                 side_effect=stage("build", self.artifact)
             ),
@@ -698,9 +707,12 @@ class CallSiteTests(unittest.TestCase):
     def test_main_invokes_every_stage_once_in_the_declared_order(self) -> None:
         parent = self._patched_main()
         out, err = io.StringIO(), io.StringIO()
-        with self._patches:
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                code = package_consumption.main()
+        with (
+            self._patches,
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = package_consumption.main()
         self.assertEqual(code, 0, err.getvalue())
         self.assertEqual(
             [call.args[0] for call in parent.stage.call_args_list],
@@ -711,11 +723,12 @@ class CallSiteTests(unittest.TestCase):
     def test_main_reports_the_stages_it_actually_performed(self) -> None:
         self._patched_main()
         out = io.StringIO()
-        with self._patches:
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(
-                io.StringIO()
-            ):
-                package_consumption.main()
+        with (
+            self._patches,
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            package_consumption.main()
         self.assertIn(
             f"stages performed: {list(package_consumption.GATE_STAGE_IDS)}",
             out.getvalue(),
@@ -725,9 +738,12 @@ class CallSiteTests(unittest.TestCase):
         # The banner must not be able to claim a proof the run never performed.
         self._patched_main(skip_recording="failing-fixture")
         out, err = io.StringIO(), io.StringIO()
-        with self._patches:
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                code = package_consumption.main()
+        with (
+            self._patches,
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = package_consumption.main()
         self.assertEqual(code, 1)
         self.assertNotIn("package-check: OK (", out.getvalue())
         self.assertIn("failing-fixture", err.getvalue())

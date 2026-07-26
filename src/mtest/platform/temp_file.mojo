@@ -39,6 +39,20 @@ def create_unique_temp(template: String) raises -> UniqueTempFile:
 
     Raises:
         Error: If the template is invalid or `mkstemp(3)` cannot create a file.
+
+    Examples:
+
+    ```mojo
+    from mtest.platform.temp_file import (
+        close_checked_fd,
+        create_unique_temp,
+        write_all_fd,
+    )
+
+    var created = create_unique_temp("build/state.XXXXXX")
+    write_all_fd(created.fd, "{}")
+    close_checked_fd(created.fd)
+    ```
     """
     if not template.endswith("XXXXXX"):
         raise Error(

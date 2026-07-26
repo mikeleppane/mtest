@@ -15,9 +15,9 @@ def parse_nonnegative_decimal(value: String) -> Optional[Int]:
     """Parse one non-negative ASCII decimal integer.
 
     An out-of-range value is rejected exactly like a non-decimal one. Letting
-    the conversion raise instead sent a stdlib message — naming no flag, no
-    expected form, and no help pointer — straight past every caller's
-    diagnostic framing to the top level.
+    the conversion raise instead would send a stdlib message straight past
+    every caller's diagnostic framing to the top level, naming no flag, no
+    expected form, and no help pointer.
 
     Args:
         value: The candidate decimal spelling.
@@ -47,6 +47,16 @@ def parse_worker_count(value: String) -> Optional[Int]:
     Returns:
         `0` for `auto`, a positive count, or `None` when invalid, which
         includes an out-of-range decimal.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import parse_worker_count
+
+    var explicit = parse_worker_count("4")
+    # `auto` resolves to the `0` sentinel, not to a core count.
+    var automatic = parse_worker_count("auto")
+    ```
     """
     if value == "auto":
         return Optional[Int](0)
@@ -136,6 +146,16 @@ def parse_precompile_value(value: String) -> Optional[Precompile]:
 
     Returns:
         The typed entry, or `None` when either required part is empty.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import parse_precompile_value
+
+    # No `:OUT`, so `out` is None.
+    var src_only = parse_precompile_value("tests/helper.mojo")
+    var named = parse_precompile_value("tests/helper.mojo:helper")
+    ```
     """
     var colon = value.find(":")
     if colon == -1:

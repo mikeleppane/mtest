@@ -42,6 +42,7 @@ import signal
 import sys
 import time
 
+
 # Longer than any deadline the e2e sets, and longer than the harness's own
 # per-scenario timeout: the build must never complete by racing the clock, or
 # the scenario would silently stop testing the timeout at all.
@@ -80,7 +81,9 @@ def _slow_compile(subcommand: str, args: list[str]) -> int:
     _clobber_output(args)
     # Emit BEFORE sleeping and flush: the bytes must already be in mtest's
     # capture pipe when the deadline fires, so the banner can show them.
-    sys.stderr.write(f"fake_slow_mojo.py: {subcommand}: lowering module (this will not finish)\n")
+    sys.stderr.write(
+        f"fake_slow_mojo.py: {subcommand}: lowering module (this will not finish)\n"
+    )
     sys.stderr.flush()
     time.sleep(SLEEP_SECONDS)
     # Only reachable if nothing ever killed us — i.e. the deadline did not fire.
@@ -89,6 +92,14 @@ def _slow_compile(subcommand: str, args: list[str]) -> int:
 
 
 def main() -> int:
+    """Slow a compile past every deadline, or exec the real compiler untouched.
+
+    Returns:
+        1 if a `build`/`precompile` somehow slept its full sleep with no deadline
+        firing, or 127 when no real `mojo` is on PATH. Every other subcommand
+        `os.execv`s the real compiler, so this function does not return for
+        those.
+    """
     args = sys.argv[1:]
     if len(args) > 0 and args[0] in ("build", "precompile"):
         return _slow_compile(args[0], args)
@@ -99,7 +110,10 @@ def main() -> int:
         return 127
 
     os.execv(real_mojo, [real_mojo, *args])
-    return 1  # unreachable: a successful os.execv never returns
+    # Kept as defence in depth: typeshed types os.execv as NoReturn, so mypy
+    # sees this as dead. Deleting it would remove the fallback if that ever
+    # changes.
+    return 1  # type: ignore[unreachable]
 
 
 if __name__ == "__main__":

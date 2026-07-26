@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import sys
 
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PARSER_PATH = REPO_ROOT / "src" / "mtest" / "cli" / "parser.mojo"
 PIXI_PATH = REPO_ROOT / "pixi.toml"
@@ -60,31 +61,55 @@ def _parse_recipe_version() -> str:
     return match.group(1)
 
 
+def _assert_versions_agree(
+    mtest_version: str, pixi_version: str, recipe_version: str
+) -> None:
+    """Assert the three parsed versions agree with each other and the release.
+
+    Args:
+        mtest_version: The `MTEST_VERSION` literal from the Mojo parser source.
+        pixi_version: The workspace `version` field from `pixi.toml`.
+        recipe_version: The quoted `version` context var from the conda recipe.
+
+    Raises:
+        AssertionError: If any pair disagrees, or if the agreed value is not
+            `EXPECTED_VERSION`. The pin against `EXPECTED_VERSION` is what stops
+            a coordinated bump of all three files from sliding past this gate
+            unreviewed.
+    """
+    if mtest_version != pixi_version:
+        raise AssertionError(
+            "version drift: "
+            f"MTEST_VERSION={mtest_version!r} ({PARSER_PATH}) != "
+            f"pixi version={pixi_version!r} ({PIXI_PATH})"
+        )
+    if recipe_version != mtest_version:
+        raise AssertionError(
+            "version drift: "
+            f"recipe version={recipe_version!r} ({RECIPE_PATH}) != "
+            f"MTEST_VERSION={mtest_version!r} ({PARSER_PATH})"
+        )
+    if mtest_version != EXPECTED_VERSION:
+        raise AssertionError(
+            f"MTEST_VERSION and pixi version agree on {mtest_version!r} but "
+            f"neither matches the expected release {EXPECTED_VERSION!r}"
+        )
+
+
 def main() -> int:
-    """Assert MTEST_VERSION, pixi.toml, and the conda recipe agree with each
-    other and with the version this repo is currently shipping.
+    """Assert MTEST_VERSION, pixi.toml, and the conda recipe agree.
+
+    Returns:
+        0 once all three parsed versions are byte-identical and equal to
+        `EXPECTED_VERSION`, printing the agreed version. 1 after printing the
+        drift to stderr, so `pixi run ci` fails instead of building a
+        mislabeled artifact.
     """
     try:
         mtest_version = _parse_mtest_version()
         pixi_version = _parse_pixi_version()
         recipe_version = _parse_recipe_version()
-        if mtest_version != pixi_version:
-            raise AssertionError(
-                "version drift: "
-                f"MTEST_VERSION={mtest_version!r} ({PARSER_PATH}) != "
-                f"pixi version={pixi_version!r} ({PIXI_PATH})"
-            )
-        if recipe_version != mtest_version:
-            raise AssertionError(
-                "version drift: "
-                f"recipe version={recipe_version!r} ({RECIPE_PATH}) != "
-                f"MTEST_VERSION={mtest_version!r} ({PARSER_PATH})"
-            )
-        if mtest_version != EXPECTED_VERSION:
-            raise AssertionError(
-                f"MTEST_VERSION and pixi version agree on {mtest_version!r} but "
-                f"neither matches the expected release {EXPECTED_VERSION!r}"
-            )
+        _assert_versions_agree(mtest_version, pixi_version, recipe_version)
     except AssertionError as exc:
         print(f"version-check: FAIL: {exc}", file=sys.stderr)
         return 1

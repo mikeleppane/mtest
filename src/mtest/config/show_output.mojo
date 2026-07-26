@@ -12,6 +12,15 @@ struct ShowOutput(Equatable, ImplicitlyCopyable, Movable):
 
     A wrapper over a stable integer discriminant, so the vocabulary is a closed
     set of named constants that compare by value.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import RunnerConfig, ShowOutput
+
+    var config = RunnerConfig.default()
+    config.show_output = ShowOutput.ALL
+    ```
     """
 
     var value: Int

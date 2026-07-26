@@ -2,8 +2,8 @@
 
 The precedence is fixed: an explicit `--mojo` flag beats the `MTEST_MOJO`
 environment variable, which beats the plain `"mojo"` fallback (resolved via
-`PATH`). This module does not read the environment itself — the cli layer reads
-`MTEST_MOJO` and passes it in — so the precedence is a function of its two
+`PATH`). This module does not read the environment itself. The cli layer reads
+`MTEST_MOJO` and passes it in, so the precedence is a function of its two
 inputs alone.
 """
 
@@ -20,6 +20,17 @@ def resolve_mojo_path(
     Returns:
         `flag`'s value when present, else `env_value`'s value when present,
         else the literal `"mojo"`.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import resolve_mojo_path
+
+    # The flag wins, so this is "/flag/mojo".
+    var chosen = resolve_mojo_path(
+        Optional[String]("/flag/mojo"), Optional[String]("/env/mojo")
+    )
+    ```
     """
     if flag:
         return flag.value()

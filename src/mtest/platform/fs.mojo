@@ -8,15 +8,15 @@ promotes its assembled document onto the `--junit-xml` target, so a prior report
 survives a run that dies mid-write. A copy would leave a window in which the
 destination is half a file. `rename(2)` has no such window: within one directory
 it either replaces the destination completely or leaves it entirely alone, with
-no intermediate state a concurrent reader — or a SIGKILLed mtest — can observe.
+no intermediate state a concurrent reader (or a SIGKILLed mtest) can observe.
 
 The standard library has no rename at the pinned toolchain. `std.os` offers
 `link`, `unlink`, `remove`, `rmdir`, `makedirs`, and `listdir`, but nothing that
 moves a path, and `link` followed by `unlink` is not a substitute: `link` refuses
 an existing destination, so it cannot replace one, and the two-call sequence is
 interruptible where the single syscall is not. That leaves one foreign call,
-proven here and shared by both callers, in place of the two identical copies
-this replaces.
+proven here and shared by both callers, instead of one identical copy per
+caller.
 """
 from std.ffi import external_call
 
@@ -40,6 +40,17 @@ def rename_path(src: String, dst: String) raises:
             the paths straddle filesystems, or the destination directory became
             unwritable. Nothing here is retried or ignored; the caller decides
             what a failed promotion means.
+
+    Examples:
+
+    ```mojo
+    from mtest.platform import rename_path
+    from mtest.platform import close_checked_fd, create_unique_temp
+
+    var created = create_unique_temp("build/report.xml.XXXXXX")
+    close_checked_fd(created.fd)
+    rename_path(created.path, "build/report.xml")  # replaces any prior report
+    ```
     """
     var s = c_string_bytes(src)
     var d = c_string_bytes(dst)

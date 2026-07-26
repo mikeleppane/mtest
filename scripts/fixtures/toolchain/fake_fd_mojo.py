@@ -42,6 +42,7 @@ import re
 import stat
 import sys
 
+
 TEST_DEF_RE = re.compile(r"^def[ \t]+(test_[A-Za-z0-9_]*)[ \t]*\(", re.MULTILINE)
 """Matches a module-level `def test_...(` — the shape `TestSuite.discover_tests`
 collects, anchored at column zero so a nested or commented definition cannot
@@ -143,7 +144,9 @@ def _write_actor(out: str, canonical: str, names: list[str]) -> None:
             )
         )
     mode = os.stat(out).st_mode
-    os.chmod(out, mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    # S103 is expected: mtest spawns this build product as a binary, so the
+    # execute bits are what makes the fixture mean anything.
+    os.chmod(out, mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)  # noqa: S103
 
 
 def main() -> int:

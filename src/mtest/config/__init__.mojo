@@ -1,15 +1,16 @@
 """The config layer of the mtest runner.
 
-Centered on `RunnerConfig`, the typed home for every knob the session reads,
-`CliOverlay`, the presence-aware values supplied by argv, and `FileConfig`, the
+`RunnerConfig` is the typed home for every knob the session reads. `CliOverlay`
+carries the presence-aware values supplied by argv, and `FileConfig` is the
 typed presence-aware `mtest.toml` layer. `ResolvedConfig` carries layered
 values, per-key provenance, ordered overrides, and command-active key metadata.
+
 Alongside them live the closed vocabularies that name a config choice
-(`ShowOutput`, `Verbosity`, `ColorWhen`, `ShardMode`, `AnnotationsMode`),
-source-neutral single-value validators, the mojo-path resolution helper, the
-shell-quoting helpers (`shell_quote`, `shell_join`) that every reproduce line
-is rendered through, and the byte-to-text codec (`lossy_utf8`) that every
-captured stream is decoded with.
+(`ShowOutput`, `Verbosity`, `ColorWhen`, `ShardMode`, `AnnotationsMode`) and
+the source-neutral single-value validators. The cross-cutting helpers sit here
+too: `resolve_mojo_path`, the shell-quoting pair `shell_quote` and `shell_join`
+that every reproduce line is rendered through, and the byte-to-text codec
+`lossy_utf8` that every captured stream is decoded with.
 
 This layer is data plus pure helpers: no argv parsing, environment or file
 reads, spawning, or printing. `toml_bridge` parses with the pinned vendored

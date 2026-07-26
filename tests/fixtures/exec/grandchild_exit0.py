@@ -8,9 +8,11 @@ group-kills on the timeout/interrupt path leaves the grandchild to survive its
 sleep and create the sentinel (argv[1]); a supervisor that sweeps the group on
 EVERY exit path kills it first, so the sentinel is never written.
 """
+
 import os
 import sys
 import time
+
 
 sentinel = sys.argv[1]
 

@@ -3,8 +3,8 @@
 This module owns the process exit code end to end. `exit_code_for` maps the
 multiset of run outcomes to the three codes that mapping alone decides: 1, 5,
 and 0. `resolve_exit_code` then folds that outcome code together with the run's
-control-flow facts — an interrupt, an internal error, protocol drift, a
-precompile failure, and whether a terminal artifact was delivered — into the
+control-flow facts (an interrupt, an internal error, protocol drift, a
+precompile failure, and whether a terminal artifact was delivered) into the
 single code the process exits with. Every caller that reaches an exit code goes
 through it, so the precedence is stated once and re-derived nowhere.
 
@@ -16,7 +16,7 @@ test that actually ran (PASS/FAIL/SKIP/…), plus one file-level outcome for eac
 file with no per-test attribution (CRASH, TIMEOUT, COMPILE_ERROR,
 MALFORMED_SUITE, PRECOMPILE_ERROR). DESELECTED, EXCLUDED, and NOT_RUN never
 appear in it, since a deselected, excluded, or not-run test did not run. An
-empty multiset — an empty final selection, or an empty collection — maps to 5.
+empty multiset (an empty final selection, or an empty collection) maps to 5.
 """
 from mtest.model.outcome import Outcome
 
@@ -49,6 +49,17 @@ def exit_code_for(outcomes: List[Outcome]) -> Int:
 
     Returns:
         One of `EXIT_SUCCESS`, `EXIT_FAILURE`, or `EXIT_NOTHING_RAN`.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import exit_code_for
+    from mtest.model import Outcome
+
+    var clean = exit_code_for([Outcome.PASS, Outcome.SKIP])  # 0
+    var failed = exit_code_for([Outcome.PASS, Outcome.CRASH])  # 1
+    var nothing = exit_code_for(List[Outcome]())  # 5
+    ```
     """
     for o in outcomes:
         if o.is_failing():
@@ -113,8 +124,25 @@ def resolve_exit_code(facts: TerminalFacts) -> Int:
         facts: What the run observed. Not mutated.
 
     Returns:
-        One of 2, 3, `EXIT_FAILURE`, `EXIT_NOTHING_RAN`, or `EXIT_SUCCESS` —
-        or, when no fact is set, `facts.outcome_code` unchanged.
+        One of 2, 3, `EXIT_FAILURE`, `EXIT_NOTHING_RAN`, or `EXIT_SUCCESS`. When
+        no fact is set, `facts.outcome_code` unchanged.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import TerminalFacts, resolve_exit_code
+
+    var code = resolve_exit_code(
+        TerminalFacts(
+            interrupted=False,
+            internal_error=True,
+            drift=False,
+            precompile_failed=False,
+            outcome_code=0,
+            delivery_failed=False,
+        )
+    )  # 3: an internal error outranks the clean outcome code
+    ```
     """
     var base: Int
     if facts.interrupted:

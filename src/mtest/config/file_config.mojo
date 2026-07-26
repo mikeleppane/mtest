@@ -69,6 +69,19 @@ struct FileConfig(Copyable, Movable):
 
     Deliberately `Copyable, Movable` but not `ImplicitlyCopyable`: the model
     owns lists and strings, so every copy remains visible at call sites.
+
+    A value slot alone changes nothing. Resolution reads the presence bit, so a
+    supplied key means setting both.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import FileConfig
+
+    var file = FileConfig.empty()
+    file.timeout_secs = 41
+    file.saw_timeout = True
+    ```
     """
 
     var paths: List[String]

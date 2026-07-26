@@ -9,6 +9,7 @@ import shutil
 import signal
 import sys
 import tempfile
+from typing import Any
 
 from scripts.e2e.assertions import (
     CAPTURE_BOUND_BYTES,
@@ -37,12 +38,21 @@ from scripts.e2e.scenarios.junit_reporter import assert_hostile_junit_report
 
 
 def s_manifest_completeness(context: ScenarioContext) -> str:
+    """Reconcile the manifest and the committed tree in both directions.
+
+    Every discoverable file must own a row, every row must name a file that is
+    really on disk, and the non-discovered and support entries must exist while
+    keeping a name no discovery walk would pick up.
+    """
     tests = context.manifest["tests"]
     rows = set(tests.keys())
     disk = discovered_test_files()
     missing_rows = disk - rows
     stale_rows = rows - disk
-    expect(not missing_rows, f"discovered files with no manifest row: {sorted(missing_rows)}")
+    expect(
+        not missing_rows,
+        f"discovered files with no manifest row: {sorted(missing_rows)}",
+    )
     expect(not stale_rows, f"manifest rows with no file on disk: {sorted(stale_rows)}")
     for rel in rows:
         expect(
@@ -64,7 +74,7 @@ def s_manifest_completeness(context: ScenarioContext) -> str:
     return f"{len(rows)} rows == {len(disk)} discovered files; both-way complete"
 
 
-def _suite_tests(manifest: dict) -> dict:
+def _suite_tests(manifest: dict[str, Any]) -> dict[str, Any]:
     return {
         rel: row
         for rel, row in manifest["tests"].items()
@@ -73,6 +83,15 @@ def _suite_tests(manifest: dict) -> dict:
 
 
 def s_default_suite(context: ScenarioContext) -> str:
+    """Reconcile a whole default-suite run against the manifest rows it covers.
+
+    Each member shows its manifest verdict token on a line naming its path, the
+    zero-test file renders NO-TESTS instead of a plain PASS, the CRASH row keeps
+    the target-pinned abort signal number and name, the COMPILE-ERROR banner
+    references the undefined symbol its fixture names, the per-file and per-test
+    bands agree with the manifest's own numbers, and the verdict lines arrive in
+    lexicographic path order.
+    """
     suite = _suite_tests(context.manifest)
     run = context.runner.run_mtest(["e2e/suite"])
     # Any exit_class-1 member means the session exits 1.
@@ -87,17 +106,21 @@ def s_default_suite(context: ScenarioContext) -> str:
         # A zero-test file renders NO-TESTS, not the manifest's PASS verdict.
         token = "NO-TESTS" if row.get("zero_tests") else row["verdict"]
         line = verdict_line(run, token, rel)
-        expect(line is not None, f"missing verdict line {token} for {rel}")
-        if token == "CRASH":
+        if line is None:
+            raise ScenarioError(f"missing verdict line {token} for {rel}")
+        # S105: a console verdict token, not a credential.
+        if token == "CRASH":  # noqa: S105
             crash_lines[rel] = line
-        if token == "COMPILE-ERROR":
+        if token == "COMPILE-ERROR":  # noqa: S105 - verdict token, not a secret
             compile_error_files.append(rel)
 
     # Standing pin: std.os.abort lowers to the served target's trap instruction:
     # SIGILL (signal 4) on linux-64/x86_64, SIGTRAP (signal 5) on osx-arm64.
     # Require the exact number/name association on the verdict line, so neither a
     # changed death signal nor lost word-name can hide behind a generic CRASH.
-    expect(len(crash_lines) == 1, f"expected exactly one CRASH fixture, got {crash_lines}")
+    expect(
+        len(crash_lines) == 1, f"expected exactly one CRASH fixture, got {crash_lines}"
+    )
     target = (sys.platform.lower(), os.uname().machine.lower())
     abort_expectations = {
         ("linux", "x86_64"): (int(signal.SIGILL), "SIGILL"),
@@ -166,7 +189,8 @@ def s_default_suite(context: ScenarioContext) -> str:
     )
     expect(
         summ.timed_out == file_abnormals["timed_out"],
-        f"timed-out FILES: band {summ.timed_out} != manifest {file_abnormals['timed_out']}",
+        f"timed-out FILES: band {summ.timed_out} != manifest "
+        f"{file_abnormals['timed_out']}",
     )
     expect(
         summ.compile_error == file_abnormals["compile_error"],
@@ -243,7 +267,8 @@ def s_hostile(context: ScenarioContext) -> str:
     flood) -> CAPTURE-OVERFLOW FAIL (exit 1). These files are NOT in the default
     suite — the liar alone forces exit 3, which would swamp a whole-suite run —
     so each is driven on its own here. The verdict tokens and exit codes come
-    straight from the manifest rows for e2e/hostile/*."""
+    straight from the manifest rows for e2e/hostile/*.
+    """
     hostile = {
         rel: row
         for rel, row in context.manifest["tests"].items()
@@ -371,7 +396,7 @@ HOSTILE_CONSOLE_DETAIL = (
     "\\u009BC1-CSI\\u0085C1-NEL\\u009C delims: dquote[\"] squote['] "
     "backslash[\\] lt[<] gt[>] amp[&] cdata-close[]]>] entity[&amp;] "
     'json-injection: ","event":"forged","captured_stdout":" '
-    "xml-injection: </system-out><testcase name=\"forged\" "
+    'xml-injection: </system-out><testcase name="forged" '
     'classname="forged"/><system-out>'
 )
 """The child's failure detail as the console must render it.
@@ -417,8 +442,10 @@ def _remove_hostile_console_artifacts() -> None:
     # A hand-mirror of the product's `_mangle` (src/mtest/session/scratch.mojo),
     # which cannot be imported from Python. The two sequential replaces match its
     # single pass only while the tree holds no `_` and the name holds no `/`.
-    assert "_" not in HOSTILE_CONSOLE_TREE, HOSTILE_CONSOLE_TREE
-    assert "/" not in HOSTILE_CONSOLE_NAME, HOSTILE_CONSOLE_NAME
+    if "_" in HOSTILE_CONSOLE_TREE:
+        raise AssertionError(HOSTILE_CONSOLE_TREE)
+    if "/" in HOSTILE_CONSOLE_NAME:
+        raise AssertionError(HOSTILE_CONSOLE_NAME)
     mangled = HOSTILE_CONSOLE_TREE.replace("_", "_u").replace("/", "_s")
     product = os.path.join(
         REPO_ROOT,
@@ -586,8 +613,7 @@ def _fenced_capture_regions(run: Run) -> tuple[list[str], list[str]]:
     ]
     expect(
         len(headers) == 1,
-        f"expected exactly one file-scoped captured-output header, got "
-        f"{len(headers)}",
+        f"expected exactly one file-scoped captured-output header, got {len(headers)}",
     )
     separators = [
         index
@@ -657,9 +683,7 @@ def s_hostile_reporters(context: ScenarioContext) -> str:
             _write_hostile_console_tree()
             # The path the build stand-in resolves and embeds in the actor, which
             # the report header must byte-equal for the block to be this file's.
-            canonical = os.path.realpath(
-                os.path.join(REPO_ROOT, HOSTILE_CONSOLE_FILE)
-            )
+            canonical = os.path.realpath(os.path.join(REPO_ROOT, HOSTILE_CONSOLE_FILE))
             streams = hostile_streams(canonical, flood_lines)
             run = context.runner.run_mtest(
                 [*args, "--json", stream_path, "--junit-xml", report_path],
@@ -738,6 +762,7 @@ def _assert_hostile_console(run: Run, streams: HostileStreams) -> str:
 
 
 def s_single_pass(context: ScenarioContext) -> str:
+    """A lone passing file exits 0, shows PASS, and reconciles its accounting."""
     rel = "e2e/suite/test_passing.mojo"
     run = context.runner.run_mtest([rel])
     expect_exit(run, 0)
@@ -747,6 +772,7 @@ def s_single_pass(context: ScenarioContext) -> str:
 
 
 def s_exitfirst(context: ScenarioContext) -> str:
+    """`-x` stops scheduling at the first failure and leaves the rest NOT-RUN."""
     run = context.runner.run_mtest(["e2e/suite", "-x"])
     expect_exit(run, 1)
     summ = expect_accounting(run)
@@ -759,7 +785,8 @@ def s_maxfail(context: ScenarioContext) -> str:
 
     e2e/maxfail/ sorts test_a_fail, test_b_fail, test_c_pass; each failing
     file contributes exactly one failing test. `--maxfail 1` must stop right
-    after test_a_fail, leaving the other two NOT-RUN."""
+    after test_a_fail, leaving the other two NOT-RUN.
+    """
     run = context.runner.run_mtest(["e2e/maxfail", "--maxfail", "1"])
     expect_exit(run, 1)
     summ = expect_accounting(run)
@@ -769,10 +796,19 @@ def s_maxfail(context: ScenarioContext) -> str:
         verdict_line(run, "FAIL", "e2e/maxfail/test_a_fail.mojo") is not None,
         "the file that tripped --maxfail did not report FAIL",
     )
-    return f"--maxfail 1 stopped after 1 failing test; {summ.not_run} NOT-RUN, accounting holds"
+    return (
+        f"--maxfail 1 stopped after 1 failing test; {summ.not_run} NOT-RUN, "
+        f"accounting holds"
+    )
 
 
 def s_exclude_and_stale(context: ScenarioContext) -> str:
+    """`--exclude` announces every exclusion and warns on a pattern that misses.
+
+    A pattern matching nothing must produce a stale-exclusion warning instead of
+    passing silently, and the excluded count must reflect only the file that was
+    really dropped.
+    """
     run = context.runner.run_mtest(
         [
             "e2e/excluded",
@@ -798,6 +834,7 @@ def s_exclude_and_stale(context: ScenarioContext) -> str:
 
 
 def s_all_excluded(context: ScenarioContext) -> str:
+    """Excluding every selected file exits 5 and still prints the EXCLUDED line."""
     run = context.runner.run_mtest(
         ["e2e/excluded", "--exclude", "e2e/excluded/test_excluded.mojo"]
     )
@@ -810,6 +847,7 @@ def s_all_excluded(context: ScenarioContext) -> str:
 
 
 def s_empty_dir(context: ScenarioContext) -> str:
+    """An empty directory inside the invocation root exits 5, not 0."""
     # Must live inside the invocation root (an out-of-root operand is exit 4).
     tmp = tempfile.mkdtemp(prefix=".e2e_empty_", dir=E2E_ROOT)
     try:
@@ -822,6 +860,7 @@ def s_empty_dir(context: ScenarioContext) -> str:
 
 
 def s_failing_gate(context: ScenarioContext) -> str:
+    """A failing `--gate` aborts the session and leaves the rest NOT-RUN."""
     run = context.runner.run_mtest(
         ["e2e/suite", "--gate", "e2e/suite/test_failing.mojo"]
     )
@@ -833,11 +872,16 @@ def s_failing_gate(context: ScenarioContext) -> str:
 
 
 def s_quiet_verbose(context: ScenarioContext) -> str:
+    """`-q` drops the PASS verdict lines but keeps the summary band.
+
+    `-v` adds the build command, so each verbosity end is asserted against what
+    it is documented to change rather than against the other.
+    """
     rel = "e2e/suite/test_passing.mojo"
     quiet = context.runner.run_mtest([rel, "-q"])
     expect_exit(quiet, 0)
     expect(
-        not any(l.startswith("PASS") for l in quiet.stdout.splitlines()),
+        not any(line.startswith("PASS") for line in quiet.stdout.splitlines()),
         "-q still printed a PASS verdict line",
     )
     expect("passed" in quiet.combined, "-q dropped the summary band")
@@ -850,8 +894,13 @@ def s_quiet_verbose(context: ScenarioContext) -> str:
 
 
 def s_show_output(context: ScenarioContext) -> str:
+    """`--show-output` decides which captures are framed, and nothing else.
+
+    `none` suppresses the framed FAIL section, the default frames a failure and
+    keeps the `reproduce:` line INSIDE that section, and `all` frames a pass too.
+    """
     fail = "e2e/suite/test_failing.mojo"
-    pass_ = "e2e/suite/test_passing.mojo"
+    pass_ = "e2e/suite/test_passing.mojo"  # noqa: S105 - a fixture path, not a secret
     none = context.runner.run_mtest([fail, "--show-output", "none"])
     expect_exit(none, 1)
     expect("--- FAIL" not in none.stdout, "--show-output none still framed the FAIL")
@@ -877,9 +926,11 @@ DURATIONS_ROW_RE = re.compile(r"^  (\S+)\s+([\d.]+)s\s*$")
 
 
 def s_durations(context: ScenarioContext) -> str:
-    """`--durations N` renders a file-level slowest-files list, INFORMAL tier:
-    structure only (presence, size, order, `-q` survival) — never exact
-    timings."""
+    """`--durations N` renders a file-level slowest-files list.
+
+    INFORMAL tier: structure only (presence, size, order, `-q` survival) — never
+    exact timings.
+    """
     suite = _suite_tests(context.manifest)
     files_run = sum(1 for row in suite.values() if row["verdict"] != "COMPILE-ERROR")
     cerr_rel = next(
@@ -898,10 +949,10 @@ def s_durations(context: ScenarioContext) -> str:
     requested = files_run + 50
     run = context.runner.run_mtest(["e2e/suite", "--durations", str(requested)])
     m = re.search(r"slowest (\d+) files:\n((?:  .+\n)+)", run.stdout)
-    expect(
-        m is not None,
-        f"no slowest-files section with --durations {requested}:\n{run.stdout}",
-    )
+    if m is None:
+        raise ScenarioError(
+            f"no slowest-files section with --durations {requested}:\n{run.stdout}"
+        )
     shown = int(m.group(1))
     rows = [ln for ln in m.group(2).splitlines() if ln.strip()]
     expect(
@@ -914,7 +965,8 @@ def s_durations(context: ScenarioContext) -> str:
     parsed = []
     for ln in rows:
         rm = DURATIONS_ROW_RE.match(ln)
-        expect(rm is not None, f"slowest-files row is not 'path  N.NNs': {ln!r}")
+        if rm is None:
+            raise ScenarioError(f"slowest-files row is not 'path  N.NNs': {ln!r}")
         parsed.append((rm.group(1), float(rm.group(2))))
 
     # The COMPILE-ERROR file never reached the run step (duration 0.0) and
@@ -937,12 +989,16 @@ def s_durations(context: ScenarioContext) -> str:
     quiet = context.runner.run_mtest(["e2e/suite", "--durations", "2", "-q"])
     expect("slowest 2 files:" in quiet.stdout, "-q suppressed the --durations list")
 
-    return f"absent w/o flag; {shown} rows (capped from {requested}), descending, survives -q"
+    return (
+        f"absent w/o flag; {shown} rows (capped from {requested}), descending, "
+        f"survives -q"
+    )
 
 
 def s_color(context: ScenarioContext) -> str:
-    """NO_COLOR must silence AUTO color even on a real tty; --color always is
-    absolute and paints regardless of NO_COLOR or tty-ness.
+    """NO_COLOR must silence AUTO color even on a real tty.
+
+    `--color always` is absolute and paints regardless of NO_COLOR or tty-ness.
 
     A piped stdout (run_mtest) is NEVER a tty, so AUTO would already be
     colorless for an unrelated reason — that would make "NO_COLOR -> no ANSI"
@@ -984,10 +1040,17 @@ def s_color(context: ScenarioContext) -> str:
 
 
 def s_passthrough_and_forbidden(context: ScenarioContext) -> str:
+    """A forwarded build argument reaches the build; a forbidden one exits 4.
+
+    `-o`, `--emit=`, and an extra source operand each refuse with something on
+    stderr, so passthrough cannot be used to redirect or extend the build.
+    """
     rel = "e2e/suite/test_passing.mojo"
     good = context.runner.run_mtest([rel, "--", "--no-optimization"])
     expect_exit(good, 0)
-    expect(verdict_line(good, "PASS", rel) is not None, "forwarded build arg broke the run")
+    expect(
+        verdict_line(good, "PASS", rel) is not None, "forwarded build arg broke the run"
+    )
 
     forbidden = [
         [rel, "--", "-o", "/tmp/x"],
@@ -997,11 +1060,15 @@ def s_passthrough_and_forbidden(context: ScenarioContext) -> str:
     for args in forbidden:
         run = context.runner.run_mtest(args, timeout=SHORT_TIMEOUT)
         expect_exit(run, 4)
-        expect(run.stderr.strip() != "", f"forbidden build arg {args} wrote nothing to stderr")
+        expect(
+            run.stderr.strip() != "",
+            f"forbidden build arg {args} wrote nothing to stderr",
+        )
     return "passthrough build arg works; -o/--emit/extra-source each exit 4"
 
 
 def s_out_of_root(context: ScenarioContext) -> str:
+    """An operand outside the invocation root exits 4 and says it escaped."""
     run = context.runner.run_mtest(["../outside_the_root.mojo"], timeout=SHORT_TIMEOUT)
     expect_exit(run, 4)
     expect(

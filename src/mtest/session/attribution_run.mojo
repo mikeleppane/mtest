@@ -5,8 +5,8 @@ A CRASH verdict is honest but cannot say WHICH test killed the process, so this
 pass re-runs a crashed file's tests one at a time and names the first that dies
 by signal.
 
-It is SECONDARY EVIDENCE and never a verdict input: it emits `CrashAttribution`
-events and one loud announcement and touches nothing else — not the summary
+It is SECONDARY EVIDENCE and never a verdict input. It emits `CrashAttribution`
+events and one loud announcement, and touches nothing else: not the summary
 counts, not the run outcomes, not the exit code, not the file's `FileFinished`.
 A crashed file's verdict and the process exit code are identical whether the
 pass names a culprit, fails to reproduce the crash, or never runs at all. It
@@ -152,10 +152,9 @@ def _attribution_listing(
     to `build/bin/<mangled>.inv-<nonce>.attempt-N` and runs that binary, so a
     file whose rebuilt binary crashes at runtime earns its crash verdict on a
     path the mangled name does not name. Reconstructing `build/bin/<mangled>`
-    would probe
-    a binary that either does not exist, yielding a useless `PROBE_FAILED`, or
-    is a stale leftover from an earlier run, which could name a culprit in code
-    that never ran.
+    would probe a binary that either does not exist, yielding a useless
+    `PROBE_FAILED`, or is a stale leftover from an earlier run, which could name
+    a culprit in code that never ran.
 
     The plain run loop keeps no registry entry, so its crashed files fall back
     to a fresh probe. A missing binary or a non-qualifying probe yields
@@ -205,8 +204,8 @@ def _attribute_one[
     """Attribute one crashed file, normally emitting one `CrashAttribution`.
 
     An interrupt observed while recovering the listing or between reruns
-    abandons the file and returns False, emitting nothing for it. Every other
-    path emits exactly one event.
+    abandons the file and returns False without emitting anything for it. Every
+    other path emits exactly one event.
 
     Runs each of the file's tests alone under `--only <name>` in source order
     and stops at the first rerun that dies by signal; that test is the culprit,

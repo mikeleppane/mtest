@@ -34,7 +34,7 @@ def _strip_trailing_slash(s: String) -> String:
 def _normalize_abs(path: String) -> String:
     """Fold an absolute `path`'s `.` and `..` segments lexically.
 
-    A leading `..` at the filesystem root is clamped (POSIX behavior), so the
+    A leading `..` at the filesystem root is clamped (POSIX behavior). The
     result is always an absolute path with no `.` or `..` segments and no
     trailing slash, except for the root itself, `/`.
     """
