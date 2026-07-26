@@ -23,11 +23,14 @@ HARNESS_CHECK_MODULES = (
     "scripts.tests.test_pty_capture",
     "scripts.tests.test_transcript_compare",
     "scripts.tests.test_readme_help",
+    "scripts.tests.test_coverage_capability",
     "scripts.tests.test_layout",
     "scripts.checks.layout",
     "scripts.tests.test_ci_topology",
     "scripts.checks.ci_topology",
 )
+
+COVERAGE_CAPABILITY_COMMAND = "python -m scripts.checks.coverage_capability"
 
 CI_PREFLIGHT_TASKS = [
     "version-check",
@@ -351,6 +354,16 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
             raise AssertionError(
                 f"{name} no longer runs its exact negative-control harness"
             )
+    # The coverage-capability probe is diagnostic, so nothing in the `ci`
+    # closure depends on it and nothing else would notice it disappearing.
+    # Pin its exact command here: it is the one thing standing between a
+    # toolchain upgrade and an unreviewed coverage number.
+    if tasks.get("coverage-capability") != COVERAGE_CAPABILITY_COMMAND:
+        raise AssertionError(
+            "coverage-capability task mismatch: "
+            f"expected={COVERAGE_CAPABILITY_COMMAND!r}, "
+            f"actual={tasks.get('coverage-capability')!r}"
+        )
 
 
 def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:

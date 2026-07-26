@@ -355,6 +355,65 @@ class CiTopologyTests(unittest.TestCase):
         )
         self._reject(mutated, "job membership mismatch")
 
+    def test_coverage_capability_module_owns_a_harness_check_slot(self) -> None:
+        # The probe itself is diagnostic, but the branch logic that decides
+        # between "no facility, exit 0" and "facility found, exit nonzero" is
+        # blocking: it rides the cheap serial chain.
+        self.assertIn(
+            "scripts.tests.test_coverage_capability",
+            ci_topology.HARNESS_CHECK_MODULES,
+        )
+
+    def test_coverage_capability_task_command_mutation_is_rejected(self) -> None:
+        source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
+        mutated = source.replace(
+            'coverage-capability = "python -m scripts.checks.coverage_capability"',
+            'coverage-capability = "python -m scripts.checks.version"',
+            1,
+        )
+        self.assertNotEqual(mutated, source)
+        with tempfile.TemporaryDirectory(prefix="mtest-ci-topology-") as raw_tmp:
+            repo = Path(raw_tmp)
+            (repo / "pixi.toml").write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "coverage-capability task"):
+                ci_topology.check_ci_task_graph(repo)
+
+    def test_coverage_capability_task_removal_is_rejected(self) -> None:
+        source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
+        mutated = source.replace(
+            'coverage-capability = "python -m scripts.checks.coverage_capability"\n',
+            "",
+            1,
+        )
+        self.assertNotEqual(mutated, source)
+        with tempfile.TemporaryDirectory(prefix="mtest-ci-topology-") as raw_tmp:
+            repo = Path(raw_tmp)
+            (repo / "pixi.toml").write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "coverage-capability task"):
+                ci_topology.check_ci_task_graph(repo)
+
+    def test_coverage_capability_stays_outside_the_ci_floor(self) -> None:
+        # It shells out to the real compiler, and it is a diagnostic rather
+        # than a release gate. The exact `ci` list and the pinned transitive
+        # closure are what keep it out; this test names the reason.
+        self.assertNotIn("coverage-capability", ci_topology.CI_TASKS)
+        self.assertNotIn("coverage-capability", ci_topology.CI_PREFLIGHT_TASKS)
+        self.assertNotIn("coverage-capability", ci_topology.CI_FLOOR_TASKS)
+
+    def test_coverage_capability_entering_the_ci_floor_is_rejected(self) -> None:
+        source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
+        mutated = source.replace(
+            '    "contract-check-strict",\n]',
+            '    "contract-check-strict",\n    "coverage-capability",\n]',
+            1,
+        )
+        self.assertNotEqual(mutated, source)
+        with tempfile.TemporaryDirectory(prefix="mtest-ci-topology-") as raw_tmp:
+            repo = Path(raw_tmp)
+            (repo / "pixi.toml").write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "ci membership/order"):
+                ci_topology.check_ci_task_graph(repo)
+
     def test_package_test_module_owns_a_harness_check_slot(self) -> None:
         # The package gate's oracles are unit-tested in the cheap serial chain,
         # not only inside the expensive packaging job.

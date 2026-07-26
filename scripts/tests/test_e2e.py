@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import inspect
 from dataclasses import FrozenInstanceError
+import io
 import os
 from pathlib import Path
+import re
 import resource
 import signal
 import stat
@@ -16,6 +19,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from scripts.checks import layout
 from scripts.e2e import __main__ as e2e_main
@@ -211,8 +215,10 @@ class E2EFaultTopologyTests(unittest.TestCase):
     def test_master_registry_has_exact_pinned_order_and_unique_names(self) -> None:
         names = tuple(name for name, _scenario in e2e_main.SCENARIOS)
 
+        # No literal total appears here. `layout.E2E_SCENARIO_NAMES` already
+        # pins exact membership AND order, so a hand-maintained length would
+        # add no detection — it would only be a second number to keep true.
         self.assertEqual(names, layout.E2E_SCENARIO_NAMES)
-        self.assertEqual(len(names), 91)
         self.assertEqual(len(set(names)), len(names))
 
     def test_core_scenarios_have_one_feature_owner(self) -> None:
@@ -635,6 +641,107 @@ class E2EFaultTopologyTests(unittest.TestCase):
         ):
             with self.subTest(fixture=fixture):
                 self.assertTrue(os.access(fixture, os.X_OK))
+
+
+class ScenarioTotalIsRegistryDerivedTests(unittest.TestCase):
+    """The gate's headline number must be counted, never remembered.
+
+    `=== <passed>/<total> scenarios passed ===` is the line a reader treats as
+    the E2E result. If the total were a constant, it would keep reading as
+    proof after the registry moved underneath it, so these tests drive `main`
+    with a substituted registry and read the banner back.
+    """
+
+    # "91 scenarios", "1,053 classified tests", "72 end-to-end scenarios" —
+    # a bare integer standing in front of a countable noun, with room for the
+    # adjectives such claims usually carry.
+    _COUNT_CLAIM = re.compile(
+        r"\b\d[\d,_]*\s+(?:[A-Za-z-]+\s+){0,2}"
+        r"(?:scenarios?|tests?|suites?|checks?|cases?|files?|modules?)\b",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _passing(detail: str):
+        def scenario(_context) -> str:
+            return detail
+
+        return scenario
+
+    def _banner(self, registry) -> str:
+        buffer = io.StringIO()
+        with mock.patch.object(e2e_main, "SCENARIOS", registry), mock.patch.object(
+            e2e_main.os.path, "exists", return_value=True
+        ), mock.patch.object(e2e_main, "load_manifest", return_value={}):
+            with contextlib.redirect_stdout(buffer):
+                code = e2e_main.main()
+        self.assertEqual(code, 0, buffer.getvalue())
+        return buffer.getvalue()
+
+    def test_the_banner_total_counts_the_registry_it_was_given(self) -> None:
+        for size in (1, 3, 7):
+            with self.subTest(size=size):
+                registry = tuple(
+                    (f"s{index}", self._passing("")) for index in range(size)
+                )
+
+                self.assertIn(f"=== {size}/{size} scenarios passed ===",
+                              self._banner(registry))
+
+    def test_the_banner_total_is_not_the_committed_registry_length(self) -> None:
+        # Guards the shape where a "derived" total is really `len(SCENARIOS)`
+        # read from module scope while a different registry is executed.
+        banner = self._banner((("only-one", self._passing("")),))
+
+        self.assertNotIn(
+            f"/{len(e2e_main.SCENARIOS)} scenarios passed", banner
+        )
+
+    def test_a_failing_scenario_is_excluded_from_the_passed_count(self) -> None:
+        def failing(_context) -> str:
+            raise runner.ScenarioError("deliberate")
+
+        buffer = io.StringIO()
+        registry = (("ok", self._passing("")), ("bad", failing))
+        with mock.patch.object(e2e_main, "SCENARIOS", registry), mock.patch.object(
+            e2e_main.os.path, "exists", return_value=True
+        ), mock.patch.object(e2e_main, "load_manifest", return_value={}):
+            with contextlib.redirect_stdout(buffer):
+                code = e2e_main.main()
+
+        self.assertEqual(code, 1)
+        self.assertIn("=== 1/2 scenarios passed ===", buffer.getvalue())
+
+    def test_no_e2e_docstring_hard_codes_a_count(self) -> None:
+        harness_root = Path(runner.REPO_ROOT) / "scripts" / "e2e"
+        sources = sorted(harness_root.rglob("*.py"))
+        self.assertTrue(sources)
+
+        offenders: list[str] = []
+        for source in sources:
+            tree = ast.parse(source.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(
+                    node,
+                    (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+                ):
+                    continue
+                text = ast.get_docstring(node, clean=False)
+                if text is None:
+                    continue
+                owner = getattr(node, "name", "<module>")
+                offenders.extend(
+                    f"{source.relative_to(runner.REPO_ROOT)}:{owner}: "
+                    f"{match.group(0)!r}"
+                    for match in self._COUNT_CLAIM.finditer(text)
+                )
+
+        self.assertEqual(
+            offenders,
+            [],
+            "an E2E docstring states a total that nothing recomputes; describe "
+            "the registry instead of counting it",
+        )
 
 
 @unittest.skipUnless(

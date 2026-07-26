@@ -5,6 +5,13 @@ The harness drives the real ``build/mtest`` binary against the committed
 known-outcome tree under ``e2e/``. Expectations come from
 ``e2e/manifest.json``, and every child process is guarded by the shared runner.
 
+The closing ``<passed>/<total> scenarios passed`` banner is computed from the
+results this run actually produced, and the registry it iterates is the
+``SCENARIOS`` tuple below. No scenario total is written down anywhere in this
+package: a hand-maintained count would keep reading as proof long after it
+stopped being true, so ``scripts/tests/test_e2e.py`` fails if a docstring here
+starts carrying one.
+
 Usage: ``python -m scripts.e2e``
 """
 
