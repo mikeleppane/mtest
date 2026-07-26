@@ -118,6 +118,15 @@ it. `bytes_to_str` in `tests/support/exec_helpers.mojo` routes every capture
 assertion through `config/lossy_utf8.mojo`, so the memory map credits suites
 for that file which this column does not.
 
+That undercount is bounded, and the bound was checked rather than assumed: the
+four support modules import from **`mtest.config` and `mtest.exec` only**
+(`exec_helpers.mojo` takes `lossy_utf8` and `ProcessSpec`,
+`session_fixtures.mojo` takes config types; `tmptree.mojo` and
+`transcript_cases.mojo` import no product symbol). So only the `config` and
+`exec` rows can be undercounted through that path — the `platform`, `cache`,
+and `select` rows saying "the only direct caller" are not quietly hiding a
+helper route.
+
 | Layer | Direct-call modules | Blocking oracles | Notes and residual risk |
 | --- | --- | --- | --- |
 | `model` | 40 | `test` | The widest surface, because outcomes/events/exit codes are the vocabulary every other layer speaks. |
@@ -131,7 +140,7 @@ for that file which this column does not.
 | `exec` | 23 | `test`, plus `native-check` for the C adapter and the ASan/Valgrind lanes | The deepest module and the best-covered one; see §4 rows 3–5 and the memory risk map. |
 | `session` | 30 | `test`, `e2e`, `dogfood-check` | Orchestration; most integration suites live here. |
 | `cli` | 12 | `test`, `contract-check-strict`, `e2e`, `readme-help-check` | `contract-check-strict` is the authority: it asserts every documented exit, stream, and environment behavior against the real binary. |
-| `main` (`src/main.mojo`, 853 lines) | **0** | `e2e`, `contract-check-strict`, `dogfood-check`, `package-check` | **No classified suite imports or calls it.** By design — it is the composition root and the only `exit()` caller — but it means every regression in argv/env/exit wiring must be caught by a binary-level gate. This is also why the memory map's CLI probe (`C`) is the sole instrumented evidence for several platform files. |
+| `main` (`src/main.mojo`, 853 lines) | **0** | `e2e`, `contract-check-strict`, `dogfood-check`, `package-check` | **No classified suite can import it** — it is not in the `mtest` package, so there is no module path to name; see gap 1 for the chain. By design — it is the composition root and the only `exit()` caller — but it means every regression in argv/env/exit wiring must be caught by a binary-level gate. This is also why the memory map's CLI probe (`C`) is the sole instrumented evidence for several platform files. |
 
 ### How the direct-call column was produced, and how it was checked
 
@@ -183,42 +192,79 @@ own commits carry their proofs, and this map does not re-assert those runs.
 | 6 | Signals × teardown: SIGINT/SIGTERM during work exits 2 with exact accounting; a second interrupt forces hard termination; no child group survives | `e2e` scenarios `interrupt`, `interrupt-sigterm`, `interrupt-double`, `parallel-interrupt`; `tests/integration/test_exec_pool.mojo` `test_second_activation_*`; `tests/integration/test_exec_interrupt.mojo` | `e2e`, `test` | `scripts/tests/test_e2e.py` pins the runner's own group-signalling helper against a fake leader that forks into its own process group | linux-64, osx-arm64 |
 | 7 | Descriptor exhaustion × worker sizing, and compiler resolution order | `e2e` scenarios `parallel-fd-clamp`, `mojo-executable-precedence`; fixtures `scripts/fixtures/toolchain/fake_fd_mojo.py`, `path_mojo.py` | `e2e` | `scripts/tests/test_e2e.py::LimitNofileTests` reads the limit the *spawned child* observed, so a `preexec_fn` that was accepted and ignored fails | linux-64, osx-arm64 |
 | 8 | Hostile child bytes × console rendering: no child-controlled text may execute a terminal control | `src/mtest/report/console_text.mojo`; `tests/unit/test_report_console_text.mojo` (one test per control class); `tests/unit/test_report_escape.mojo`; `e2e` `hostile-console` | `test`, `e2e` | Each escaper test asserts one control family's exact rendering, and `test_escape_scalar_leaves_every_interpreted_control_unrenderable` sweeps the whole interpreted set | linux-64, osx-arm64 |
-| 9 | Hostile child bytes × machine reports: invalid UTF-8, NUL, XML-illegal controls, and report-lookalike lines must still yield valid NDJSON and JUnit | `tests/fixtures/exec/hostile_report_actor.py`; `e2e` `hostile`, `hostile-reporters`, `junit-schema-gate`, the `json-*` scenarios | `e2e`, `junit-check`, `junit-render-check` | JUnit only: `scripts/tests/test_junit.py::test_a_rejects_the_broken_fixture` proves the checker rejects a broken artifact before `junit-check` runs it. **The NDJSON checker has no equivalent** — see the gap below | linux-64, osx-arm64 |
+| 9 | Hostile child bytes × machine reports: invalid UTF-8, NUL, XML-illegal controls, and report-lookalike lines must still yield valid NDJSON and JUnit | `tests/fixtures/exec/hostile_report_actor.py`; `e2e` `hostile`, `hostile-reporters`, `junit-schema-gate`, the `json-*` scenarios | `e2e`, `junit-check`, `junit-render-check` | Both oracles are self-tested before they judge anything. JUnit: `scripts/tests/test_junit.py::test_a_rejects_the_broken_fixture` runs inside `junit-check`. NDJSON: the `json-forward-compat` scenario calls `json_stream_check.main(["json_stream_check.py"])` — a one-element argv, which falls through to `_selftest()` — and asserts `rc == 0`, so the consumer's corrupt-line, duplicate-key, and non-finite rejections are gated inside `e2e` itself | linux-64, osx-arm64 |
 | 10 | Raw text semantics: RFC 3629 lossy decoding, shell quoting, CRLF as off-grammar drift | `tests/unit/test_config_lossy_utf8.mojo` (byte-exact tables), `tests/unit/test_config.mojo` (quoting tables), `tests/unit/test_protocol_corruption.mojo` (CRLF) | `test` | Every row carries the complete expected `String`, never a length or a substring, so a decoder change cannot pass by coincidence | linux-64, osx-arm64 |
 | 11 | Unsafe/native ownership boundaries | — | `asan-check`, `valgrind-check`, `native-check` | See [`notes/test-memory-risk-map.md`](test-memory-risk-map.md) | ASan/Valgrind: **linux-64 only**; `native-check`: both |
 | 12 | Packaged artifact × clean environment: the published package must install and run with the dev environment off `PATH` | `scripts/build/package_consumption.py` | `package-check` (`Linux / packaged artifact`, `macOS arm64 / packaged artifact`) | `scripts/tests/test_package_consumption.py`, including a pin that the gate invokes its own probes | linux-64, osx-arm64 |
-| 13 | Toolchain upgrade × coverage claims | `scripts/checks/coverage_capability.py` | `harness-check` (branch logic); `coverage-capability` (diagnostic) | `scripts/tests/test_coverage_capability.py` — turning the discovered-flag branch's exit code to 0 reds three tests and only those three, each naming the exit code it expected: the branch test, the prose-fallback test, and the `main`-invocation test | linux-64, osx-arm64 |
+| 13 | Toolchain upgrade × coverage claims | `scripts/checks/coverage_capability.py` | `harness-check` (branch logic); `coverage-capability` (diagnostic) | `scripts/tests/test_coverage_capability.py` — turning the discovered-flag branch's exit code to 0 reds three tests and only those three, each naming the exit code it expected: the branch test, the prose-fallback test, and the `main`-invocation test | **linux-64 only** — see the note below |
+
+**Where the mutation proofs themselves run.** The "Platforms" column describes
+the *blocking oracle*. Several mutation proofs above live in `scripts/tests/*`
+and therefore ride `harness-check`, which is a member of `ci-preflight` and so
+runs on **linux-64 only** (`ci.yml` invokes `pixi run ci-preflight` in
+`linux-preflight` and nowhere else; `macos-preflight` runs `native-check`,
+`build-bin`, and `./build/mtest --help`). Rows 1, 2, 6, 7, 9, 12 keep a
+cross-platform blocking oracle regardless. Row 13 does not: its oracle *is*
+`harness-check`, and `coverage-capability` is in no hosted lane at all, so a
+macOS-only coverage facility would be caught by no hosted job — only by
+somebody running the diagnostic on a Mac.
+
+*Method for that last claim, because the obvious check is insufficient:* the
+workflow does not name every task it runs. Both matrix jobs dispatch through
+`run: pixi run ${{ matrix.task }}`, so listing the literal `pixi run X` lines
+would miss six tasks. The values come from the matrix `include` rows, which
+`check_ci_workflow` compares against `LINUX_MATRIX_ROWS`/`MACOS_MATRIX_ROWS`
+constant-for-constant on every `harness-check`. Resolving the indirection
+through those pinned rows gives the complete hosted task set —
+`mojo-version`, `clang --version`, `ci-preflight`, `build`, `valgrind
+--version`, `native-check`, `build-bin`, `package-check`, and the ten matrix
+tasks — and `coverage-capability` is not in it.
 
 ### Gaps found while building this map
 
-Both are recorded rather than fixed, because closing them is outside this
-task's scope. Neither is a claim of coverage.
+Recorded rather than fixed, because closing them is outside this task's scope.
+Not a claim of coverage.
 
-1. **The NDJSON stream oracle's self-test is never run by a gate.**
-   `scripts/checks/reports/json_stream.py` carries a `_selftest()` covering
-   forward compatibility, torn tails, duplicate keys, and non-finite numbers,
-   reachable only as `python -m scripts.checks.reports.json_stream` with no
-   arguments. No `pixi` task invokes it. Its `parse_stream` is used as an
-   oracle by `scripts/e2e/assertions.py` and by both memory lanes, so a
-   regression *in the oracle itself* would weaken every one of those callers
-   silently. Its JUnit counterpart is wired up correctly:
-   `junit-check` runs `scripts/tests/test_junit.py` before the checker.
-   Closing this means one `&&` in a Pixi task, no new code.
-2. **`src/main.mojo` has no suite at any level.** 853 lines of composition
+**How a gap here was verified — read this before trusting one.** A "nothing
+runs this" claim must follow the call chain, not a grep. Searching `pixi.toml`
+and `ci.yml` for a module name answers *"is this module named by a task?"*,
+which is the "is it linked?" question all over again: a task names a module, not
+what that module's callees call. One draft gap in this document died exactly
+that way (the NDJSON self-test, which `pixi run e2e` does reach, through
+`json-forward-compat` → `json_stream_check.main([...])` → `_selftest()`). The
+surviving gap below states the chain it was checked against.
+
+1. **`src/main.mojo` has no suite at any level.** 853 lines of composition
    root — argv, env, config load, state load, reporter wiring, `exit()` — with
-   no classified test module importing it. Every regression there has to
-   surface through `e2e`, `contract-check-strict`, `dogfood-check`, or
-   `package-check`. Those are strong gates, but they are all binary-level, so a
-   fault in a branch none of them takes is invisible. The memory map's residual
-   gap 1 is the same shape observed from the instrumentation side.
+   nothing under `tests/` able to reach it.
+
+   *Method:* not a grep for the filename. `src/main.mojo` is not part of the
+   `mtest` package at all — it is a standalone file that
+   `scripts/build/production_build.sh` compiles with
+   `mojo build -I build src/main.mojo -o build/mtest`, where `-I build`
+   resolves `from mtest... import` against the precompiled package. There is
+   therefore **no import path by which any suite could name it**, which is a
+   stronger statement than "no suite happens to import it": confirmed by there
+   being no `mtest.main` module, and by no `from main` / `import main` in
+   `tests/` or `e2e/`.
+
+   Every regression there has to surface through `e2e`,
+   `contract-check-strict`, `dogfood-check`, or `package-check`. Those are
+   strong gates, but they are all binary-level, so a fault in a branch none of
+   them takes is invisible. The memory map's residual gap 1 is the same shape
+   observed from the instrumentation side.
 
 ## 5. Counts, and why almost none of them are written down
 
-The one hand-maintained total that stays is **`CLASSIFIED_TEST_COUNT` in
-`scripts/checks/layout.py`**. It is not documentation; it is a tripwire. No
-list pins the number of test *functions* inside an already-registered module, so
-adding one changes a number nothing else would notice — which is exactly what
-makes a deliberate, hand-edited constant the right instrument there.
+Three hand-maintained totals stay, all of them in `scripts/checks/layout.py`
+and all blocking through `harness-check`. They are not documentation; they are
+tripwires, and each one fails on a change that no membership list would notice:
+
+| Constant | Site | What it notices |
+| --- | --- | --- |
+| `CLASSIFIED_TEST_COUNT` | `layout.py:268`, checked in `check_classified_entrypoint` | A test *function* added to an already-registered module. No list pins that. |
+| `len(rows) != 41` | `layout.py:887`, in `check_e2e_layout` | The e2e manifest and disk agreeing with each other while both moved. |
+| `len(scenario_names) != 91` | `layout.py:899`, in `check_e2e_layout` | A scenario added to `SCENARIOS` *and* to `E2E_SCENARIO_NAMES` in the same edit — the membership comparison stays green, this does not. |
 
 Everything else is computed:
 
@@ -226,9 +272,14 @@ Everything else is computed:
   the run produced. `scripts/tests/test_e2e.py` drives `main` with substituted
   registries of several sizes and reads the banner back, and separately fails
   if any docstring under `scripts/e2e/` starts carrying a total.
-- `scripts/tests/test_e2e.py` no longer asserts a literal registry length:
-  `layout.E2E_SCENARIO_NAMES` already pins exact membership *and* order, so a
-  second number would have added no detection.
+- `scripts/tests/test_e2e.py` no longer asserts a literal registry length. Note
+  what the reason is **not**: that assertion could have failed independently of
+  the membership comparison above it, in exactly the case the table's third row
+  describes. It was removed because `layout.py:899` already holds the identical
+  literal, reached through `check_e2e_layout` from `python -m
+  scripts.checks.layout`, which is its own blocking link in the `harness-check`
+  chain. The deleted line was a duplicate of a surviving tripwire, so the net
+  change in detection is zero — not a count that stopped being worth keeping.
 - `pixi run harness-check` prints the real classified inventory. Use its output
   rather than any number found in a comment; a hand count in a `pixi.toml`
   comment had already gone stale by several hundred tests before this pass

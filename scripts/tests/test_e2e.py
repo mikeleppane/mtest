@@ -215,9 +215,13 @@ class E2EFaultTopologyTests(unittest.TestCase):
     def test_master_registry_has_exact_pinned_order_and_unique_names(self) -> None:
         names = tuple(name for name, _scenario in e2e_main.SCENARIOS)
 
-        # No literal total appears here. `layout.E2E_SCENARIO_NAMES` already
-        # pins exact membership AND order, so a hand-maintained length would
-        # add no detection — it would only be a second number to keep true.
+        # No literal total appears here, and NOT because a length assertion
+        # would be redundant with the membership comparison below — it would
+        # not be: adding a scenario to both SCENARIOS and E2E_SCENARIO_NAMES
+        # keeps the comparison green and moves the length. The literal lives in
+        # `layout.check_e2e_layout` instead (`len(scenario_names) != 91`),
+        # which is its own blocking link in the harness-check chain, so a copy
+        # here would be a second hand-maintained number guarding nothing new.
         self.assertEqual(names, layout.E2E_SCENARIO_NAMES)
         self.assertEqual(len(set(names)), len(names))
 
