@@ -16,5 +16,6 @@ __pycache__/
 .worktrees/
 # internal working plans, notes, and review outputs — never committed or published
 docs/plans/
+docs/superpowers/plans/
 notes/
 .superpowers
