@@ -159,11 +159,13 @@ jobs:
       - name: Mojo version
         run: pixi run mojo-version
 
-      # This independent Linux-only lane intentionally solves the build
-      # environment against Modular + conda-forge, then installs the local
-      # artifact into fresh scratch environments while using those channels to
-      # resolve its declared runtime dependency. Nothing uploads, publishes, or
-      # authenticates.
+      # This independent lane intentionally solves the build environment
+      # against Modular + conda-forge, then installs the local artifact into
+      # fresh scratch environments while using those channels to resolve its
+      # declared runtime dependency. Nothing uploads, publishes, or
+      # authenticates. The macOS package job below runs the same task; both are
+      # blocking, and this job's display name is an externally configured
+      # required check that must not drift.
       - name: Package check
         run: pixi run package-check
 
@@ -248,3 +250,27 @@ jobs:
 
       - name: Run ${{ matrix.lane }}
         run: pixi run ${{ matrix.task }}
+
+  macos-package:
+    name: macOS arm64 / packaged artifact
+    needs: macos-preflight
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          locked: true
+          cache: true
+
+      - name: Mojo version
+        run: pixi run mojo-version
+
+      # The same gate the Linux package job runs, resolved for osx-arm64: the
+      # recipe builds into a local channel, the exact artifact is installed
+      # into fresh scratch environments, and the installed binary is executed.
+      # It waits on the macOS preflight because a packaged artifact is only
+      # worth consuming once the source build for this platform is green.
+      - name: Package check
+        run: pixi run package-check

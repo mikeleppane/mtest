@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tomllib
 
+from scripts.build import package_consumption
 from scripts.e2e import __main__ as e2e_main
 from scripts.harness import aggregate
 from scripts.harness import dogfood
@@ -1222,6 +1223,56 @@ def _require_nonempty(name: str, values: object) -> None:
         raise AssertionError(f"{name} intended inventory is empty")
 
 
+def check_package_fixture_contract(repo_root: Path = REPO_ROOT) -> None:
+    """The package gate's failing fixture still has its declared outcome.
+
+    `scripts/build/package_consumption.py` runs one fixed known-failing fixture
+    through the INSTALLED binary and asserts an exact verdict and per-test
+    arithmetic. Those expectations are only meaningful while the fixture itself
+    still declares them, and the package gate costs a full package build to
+    discover a drift. This pins the two together in the cheap harness gate.
+
+    Args:
+        repo_root: Repository root to read the fixture and E2E manifest from.
+
+    Raises:
+        AssertionError: The fixture is missing, is not a real file, or its
+            declared outcome disagrees with what the package gate asserts.
+    """
+    relative = package_consumption.FAILING_FIXTURE
+    fixture = repo_root / relative
+    if not fixture.is_file() or fixture.is_symlink():
+        raise AssertionError(
+            f"the package gate's failing fixture is not a real file: {relative}"
+        )
+    manifest = json.loads(
+        (repo_root / "e2e" / "manifest.json").read_text(encoding="utf-8")
+    )
+    row = manifest["tests"].get(relative)
+    if row is None:
+        raise AssertionError(
+            f"the package gate's failing fixture is not declared in the E2E "
+            f"manifest: {relative}"
+        )
+    declared = (
+        row["verdict"],
+        row["exit_class"],
+        row["per_test"]["passed"],
+        row["per_test"]["failed"],
+    )
+    expected = (
+        "FAIL",
+        1,
+        package_consumption.FAILING_FIXTURE_PASSED,
+        package_consumption.FAILING_FIXTURE_FAILED,
+    )
+    if declared != expected:
+        raise AssertionError(
+            "the package gate's failing fixture no longer declares the outcome "
+            f"the gate asserts: declared={declared}, gate expects={expected}"
+        )
+
+
 def main() -> int:
     """Run every repository layout and command-policy check serially."""
     try:
@@ -1234,6 +1285,7 @@ def main() -> int:
         check_python_package_invocation()
         check_build_source_visibility()
         check_vendored_toml_layout()
+        check_package_fixture_contract()
     except (AssertionError, OSError, subprocess.SubprocessError) as exc:
         print(f"layout-check: FAIL: {exc}", file=sys.stderr)
         return 1

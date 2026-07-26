@@ -6,11 +6,11 @@
 # rather than repackaging a prebuilt binary. See recipe/build.sh for the exact
 # steps.
 #
-# Targets: linux-64 is the GATED platform (the only one exercised by a CI
-# runner). osx-arm64 is declared here as a target — it matches pixi.toml's
-# `platforms` list and the modular/conda-forge channels solve for it — but it
-# is UNGATED in this phase: no CI runner builds or executes it, so it is a
-# documented ceiling, not a proven target.
+# Targets: linux-64 and osx-arm64 are both GATED. Each has its own blocking CI
+# job that builds this recipe into a local channel, installs the exact artifact
+# it produced into a fresh environment carrying only the declared run
+# dependency, and executes the installed binary (`pixi run package-check`).
+# Neither platform is a documented ceiling any more.
 schema_version: 1
 
 context:

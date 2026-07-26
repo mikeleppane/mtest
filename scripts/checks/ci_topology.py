@@ -15,6 +15,7 @@ HARNESS_CHECK_MODULES = (
     "scripts.tests.test_process_watchdog",
     "scripts.tests.test_format",
     "scripts.tests.test_dogfood",
+    "scripts.tests.test_package_consumption",
     "scripts.tests.test_classified",
     "scripts.tests.test_e2e",
     "scripts.tests.test_e2e_json",
@@ -374,6 +375,7 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
         "package",
         "macos-preflight",
         "macos-test-matrix",
+        "macos-package",
     ]
     if jobs != expected_jobs:
         raise AssertionError(
@@ -386,6 +388,7 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
         "package": None,
         "macos-preflight": None,
         "macos-test-matrix": "macos-preflight",
+        "macos-package": "macos-preflight",
     }
     for name, expected in expected_needs.items():
         if re.search(r"^    if:", job_blocks[name], re.MULTILINE):
@@ -474,18 +477,43 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
             f"expected={expected_macos_commands}, actual={macos_commands}"
         )
 
-    package_commands = re.findall(
-        r"^        run: (.+)$", job_blocks["package"], re.MULTILINE
-    )
+    # Both gated platforms consume the installed artifact, and both do it with
+    # the same task. The Linux job's `package` key and `Linux / packaged
+    # artifact` display name are externally configured required checks: renaming
+    # either silently drops branch protection, so both are pinned here.
     expected_package_commands = [
         "pixi run mojo-version",
         "pixi run package-check",
     ]
-    if package_commands != expected_package_commands:
-        raise AssertionError(
-            "independent package command mismatch: "
-            f"expected={expected_package_commands}, actual={package_commands}"
+    expected_package_runners = {
+        "package": "ubuntu-24.04",
+        "macos-package": "macos-15",
+    }
+    expected_package_names = {
+        "package": "Linux / packaged artifact",
+        "macos-package": "macOS arm64 / packaged artifact",
+    }
+    for name, expected_runner in expected_package_runners.items():
+        package_commands = re.findall(
+            r"^        run: (.+)$", job_blocks[name], re.MULTILINE
         )
+        if package_commands != expected_package_commands:
+            raise AssertionError(
+                f"{name} package command mismatch: "
+                f"expected={expected_package_commands}, actual={package_commands}"
+            )
+        runs_on = re.findall(r"^    runs-on: (.+)$", job_blocks[name], re.MULTILINE)
+        if runs_on != [expected_runner]:
+            raise AssertionError(
+                f"{name} package runner mismatch: "
+                f"expected={[expected_runner]}, actual={runs_on}"
+            )
+        display = re.findall(r"^    name: (.+)$", job_blocks[name], re.MULTILINE)
+        if display != [expected_package_names[name]]:
+            raise AssertionError(
+                f"{name} package display name mismatch: "
+                f"expected={[expected_package_names[name]]}, actual={display}"
+            )
 
     linux_matrix = job_blocks["linux-test-matrix"]
     expected_linux_steps = {

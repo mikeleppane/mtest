@@ -169,10 +169,10 @@ The source, test, and memory-analysis lanes touch the network once for the
 locked `pixi install`; everything after is offline, with one exception: the
 Linux Valgrind cell may install exactly the `libc6-dbg` version matching the
 runner's `libc6`, logging apt provenance and failing on any mismatch. The
-independent Linux package-consumption job has a separate approved network
-contract (rattler-build solves against the pinned Modular and conda-forge
-channels; nothing uploads or authenticates). Do not describe that job as
-hermetic or collapse it into the Valgrind exception.
+independent package-consumption jobs — one per gated platform — have a separate
+approved network contract (rattler-build solves against the pinned Modular and
+conda-forge channels; nothing uploads or authenticates). Do not describe those
+jobs as hermetic or collapse them into the Valgrind exception.
 
 ## Toolchain and the quality floor
 
@@ -218,10 +218,12 @@ fresh checkout — every documented exit, stream, and environment behavior in
 `pixi run contract-check` remains the contributor-friendly, non-strict,
 rebuild-if-stale entry point for local iteration. Every lane is a blocking
 check; memory safety runs on every pull request and configured main-branch
-push, not on a schedule. Transcripts, ASan/Valgrind, and packaged-artifact
-consumption remain Linux-only. The matrix lane display names `direct tests`
-and `self-hosted tests` are externally configured required check names and
-must stay stable. `native-check` depends on `postfork-check`, so the native
+push, not on a schedule. Transcripts and ASan/Valgrind remain Linux-only;
+packaged-artifact consumption is blocking on both linux-64 and osx-arm64, one
+job per platform, both running `pixi run package-check`. The matrix lane
+display names `direct tests` and `self-hosted tests`, and the package job
+display name `Linux / packaged artifact`, are externally configured required
+check names and must stay stable. `native-check` depends on `postfork-check`, so the native
 gate alone cannot skip the child call-graph audit.
 
 The whole local floor compiles for the host target only, so it is blind to a

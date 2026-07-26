@@ -980,10 +980,11 @@ preserves that logical floor while overlapping independent work: a Linux
 preflight releases separate direct, dogfood, end-to-end, ASan/LSan, and
 Valgrind cells; a macOS preflight independently releases separate direct,
 dogfood, and end-to-end cells. The Linux packaged-artifact job starts
-independently. Memory-safety cells run for every pull request, configured
-`main`/`master` push, and manual unified-CI invocation; there is no scheduled
-memory-safety workflow. Protocol transcripts, sanitizers, and packaged-artifact
-consumption remain Linux-only.
+independently; the macOS packaged-artifact job waits on the macOS preflight.
+Memory-safety cells run for every pull request, configured `main`/`master`
+push, and manual unified-CI invocation; there is no scheduled memory-safety
+workflow. Protocol transcripts and sanitizers remain Linux-only;
+packaged-artifact consumption is blocking on both linux-64 and osx-arm64.
 
 **The packaged artifact.** The distribution recipe builds `mtest` **in-env from
 source**, inside an isolated build environment pinned to the same
@@ -997,16 +998,21 @@ configuration is parsed natively by a pinned vendored Mojo parser compiled
 into the binary. A fresh environment carrying only the declared dependency
 (not the full build toolchain) is proven sufficient to load and run the
 installed binary.
-**linux-64 is the gated platform**: a dedicated CI job builds the package into
-a local channel, installs it into a scratch environment from that channel, and
-exercises the installed binary. **osx-arm64 packaged-artifact consumption is
-declared, not gated**: it matches the recipe's and the build tool's platform
-list and the package channels solve for it, but no CI runner builds or installs
-the conda artifact there. This is a packaging ceiling only: the source-checkout
-workflow now requires full direct, dogfood, and end-to-end macOS cells, whose
-first hosted green is still pending as stated above. Runtime supervision from
-the installed macOS conda artifact remains a documented ceiling, not a proven
-target.
+**linux-64 and osx-arm64 are both gated**: each platform has its own dedicated
+blocking CI job that builds the package into a local channel, installs it into
+a scratch environment from that channel, and exercises the installed binary.
+The install is pinned to the exact version AND build string that job just
+produced, and the installed `conda-meta` record's SHA-256 and subdir are
+compared against the built artifact's, so a same-version package solved from a
+remote channel fails the gate instead of standing in for it. Installed-binary
+evidence covers `--version`, `--help`, a config-present parse, the focused
+dogfood probes, and a known-failing fixture that must exit 1 with exactly one
+FAIL row and no PASS row — the installed package is proven to report failure,
+not only success. The gate itself is parameterized by an immutable platform
+descriptor (subdir, loader-inspection command, loader environment variables);
+an unsupported host stops the gate rather than borrowing another platform's
+answers. The first hosted green for the macOS package job is pending as stated
+above.
 
 ---
 

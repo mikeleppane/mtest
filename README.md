@@ -110,10 +110,12 @@ To use the package in an environment of your own, install `mtest` from
 `build/conda-channel` alongside the Modular and conda-forge channels, so
 the declared Mojo run dependency resolves.
 
-linux-64 is the gated platform: a CI job builds the package, installs it
-into a fresh environment carrying only the declared run dependencies, and
-exercises the installed binary. osx-arm64 is declared in the recipe and the
-channels solve for it, but no CI runner executes the packaged artifact there.
+linux-64 and osx-arm64 are both gated: each has its own blocking CI job that
+builds the package, installs the exact artifact it just built into a fresh
+environment carrying only the declared run dependencies, and exercises the
+installed binary — including running a known-failing fixture through it, so
+the installed package is proven to report failures truthfully, not just
+successes.
 
 To run mtest straight from a checkout instead, see
 [Developing](#developing).
@@ -962,11 +964,10 @@ Facts about this build worth knowing before you rely on it:
   see the slowest individual test inside a fast file.
 - **The SLOW annotation is a fixed 60s threshold**, informational only; it
   never changes a verdict or the exit code.
-- **Memory analysis and packaging are Linux-only.** macOS arm64 CI is a
-  blocking check too: it audits the native adapter, links the binary, and
-  runs the direct, dogfood, and end-to-end suites. ASan/LSan, Valgrind, and
-  the conda package build and consumption run only on linux-64; no runner
-  executes the packaged artifact on macOS.
+- **Memory analysis is Linux-only; packaging is not.** macOS arm64 CI is a
+  blocking check too: it audits the native adapter, links the binary, runs the
+  direct, dogfood, and end-to-end suites, and consumes the installed conda
+  artifact in its own job. ASan/LSan and Valgrind run only on linux-64.
 - **GitHub annotations are capped and root-relative.** GitHub's
   workflow-step limits allow 10 error and 10 warning annotations per step
   (past the cap, one aggregate line accounts for the rest), and every

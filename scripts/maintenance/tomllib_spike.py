@@ -192,8 +192,8 @@ def _package_probe() -> ProbeEnvironment:
         )
 
     try:
-        package_consumption.stage_build_local_channel()
-        mtest_binary = package_consumption.stage_install_from_local_channel()
+        artifact = package_consumption.stage_build_local_channel()
+        mtest_binary = package_consumption.stage_install_from_local_channel(artifact)
     except package_consumption.PackageCheckError as exc:
         raise SpikeError(f"package setup failed: {exc}") from exc
     prefix = mtest_binary.parent.parent

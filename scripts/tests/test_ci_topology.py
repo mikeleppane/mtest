@@ -263,6 +263,106 @@ class CiTopologyTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "matrix mismatch"):
                 ci_topology.check_ci_workflow(repo)
 
+    def _workflow(self) -> str:
+        """Return the live CI workflow text."""
+        return (
+            ci_topology.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+
+    def _reject(self, mutated: str, pattern: str) -> None:
+        """Require the topology oracle to reject one mutated workflow.
+
+        Args:
+            mutated: Workflow text differing from the live one.
+            pattern: Regex the rejection message must match.
+        """
+        self.assertNotEqual(mutated, self._workflow())
+        with tempfile.TemporaryDirectory(prefix="mtest-ci-topology-") as raw_tmp:
+            repo = Path(raw_tmp)
+            workflow_path = repo / ".github" / "workflows" / "ci.yml"
+            workflow_path.parent.mkdir(parents=True)
+            workflow_path.write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, pattern):
+                ci_topology.check_ci_workflow(repo)
+
+    def test_both_platforms_own_a_blocking_package_job(self) -> None:
+        workflow = self._workflow()
+        for job_name, display, runner in (
+            ("package", "Linux / packaged artifact", "ubuntu-24.04"),
+            ("macos-package", "macOS arm64 / packaged artifact", "macos-15"),
+        ):
+            job = ci_topology._yaml_block(workflow, f"  {job_name}:")
+            self.assertEqual(
+                re.findall(r"^    name: (.+)$", job, re.MULTILINE), [display]
+            )
+            self.assertEqual(
+                re.findall(r"^    runs-on: (.+)$", job, re.MULTILINE), [runner]
+            )
+            self.assertEqual(
+                re.findall(r"^        run: (.+)$", job, re.MULTILINE),
+                ["pixi run mojo-version", "pixi run package-check"],
+            )
+
+    def test_macos_package_job_removal_is_rejected(self) -> None:
+        workflow = self._workflow()
+        mutated = workflow.split("  macos-package:")[0]
+        self._reject(mutated, "job membership mismatch")
+
+    def test_macos_package_job_on_a_linux_runner_is_rejected(self) -> None:
+        workflow = self._workflow()
+        head, _, tail = workflow.partition("  macos-package:")
+        mutated = head + "  macos-package:" + tail.replace(
+            "    runs-on: macos-15", "    runs-on: ubuntu-24.04", 1
+        )
+        self._reject(mutated, "package runner mismatch")
+
+    def test_macos_package_job_without_its_preflight_dependency_is_rejected(
+        self,
+    ) -> None:
+        workflow = self._workflow()
+        mutated = workflow.replace(
+            "    name: macOS arm64 / packaged artifact\n    needs: macos-preflight\n",
+            "    name: macOS arm64 / packaged artifact\n",
+            1,
+        )
+        self._reject(mutated, "needs mismatch")
+
+    def test_macos_package_job_running_another_task_is_rejected(self) -> None:
+        workflow = self._workflow()
+        head, _, tail = workflow.partition("  macos-package:")
+        mutated = head + "  macos-package:" + tail.replace(
+            "        run: pixi run package-check",
+            "        run: pixi run package-build",
+            1,
+        )
+        self._reject(mutated, "package command mismatch")
+
+    def test_linux_package_job_display_name_mutation_is_rejected(self) -> None:
+        # The Linux display name is an externally configured required check.
+        workflow = self._workflow()
+        mutated = workflow.replace(
+            "    name: Linux / packaged artifact",
+            "    name: Linux / conda package",
+            1,
+        )
+        self._reject(mutated, "package display name mismatch")
+
+    def test_linux_package_job_removal_is_rejected(self) -> None:
+        workflow = self._workflow()
+        head, _, tail = workflow.partition("  package:\n")
+        mutated = head + tail.partition("  macos-preflight:\n")[1] + (
+            tail.partition("  macos-preflight:\n")[2]
+        )
+        self._reject(mutated, "job membership mismatch")
+
+    def test_package_test_module_owns_a_harness_check_slot(self) -> None:
+        # The package gate's oracles are unit-tested in the cheap serial chain,
+        # not only inside the expensive packaging job.
+        self.assertIn(
+            "scripts.tests.test_package_consumption",
+            ci_topology.HARNESS_CHECK_MODULES,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
