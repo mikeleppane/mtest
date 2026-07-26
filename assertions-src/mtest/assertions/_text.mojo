@@ -5,6 +5,7 @@ from mtest.assertions._display import (
     TEXT_CONTEXT_BYTE_CAP,
     _escaped_piece,
     _is_combining_mark,
+    _is_enclosing_mark,
     _is_format_control,
     _is_non_ascii_separator,
     _is_private_use,
@@ -89,6 +90,8 @@ def _scalar_label(text: String, byte_index: Int) -> String:
                 return _uplus(value) + " SPACE SEPARATOR (category Zs)"
             if _is_variation_selector(value):
                 return _uplus(value) + " VARIATION SELECTOR (category Mn)"
+            if _is_enclosing_mark(value):
+                return _uplus(value) + " ENCLOSING MARK (category Me)"
             if _is_combining_mark(value):
                 return _uplus(value) + " COMBINING MARK (category Mn)"
             if value == 0x200B:
@@ -121,7 +124,12 @@ def _write_context(
     var last = focus_line + 2
     var crop_start = max(0, focus_byte - _CONTEXT_PREFIX_RAW_BYTES)
     var crop_line = _line_at(text, crop_start)
-    var prefix_cropped = crop_start > 0 and crop_line >= first
+    var text_bytes = text.as_bytes()
+    var prefix_cropped = (
+        crop_start > 0
+        and crop_line >= first
+        and text_bytes[crop_start - 1] != UInt8(ord("\n"))
+    )
     var line = 1
     var offset = 0
     var header_written = False

@@ -47,6 +47,7 @@ API_TESTS = {
     "test_invisible_scalars_are_escaped_in_structural_values",
     "test_text_line_endings_and_final_newline_are_explicit",
     "test_text_context_has_two_lines_each_side_and_safe_prefixes",
+    "test_text_crop_marker_requires_an_elided_line_prefix",
     "test_large_text_context_is_bounded_and_message_is_last",
     "test_list_replacement_and_insertions_are_clear_spans",
     "test_list_changed_content_and_lengths_have_exact_facts",
@@ -55,6 +56,7 @@ API_TESTS = {
     "test_nested_lists_are_opaque_and_user_message_is_last",
     "test_list_specializer_renders_zero_on_pass_and_eight_on_failure",
     "test_unequal_list_suffix_does_not_repeat_the_aligned_scan",
+    "test_expected_front_insertion_compares_each_receiver_once",
     "test_dictionary_categories_are_distinct_and_ordered",
     "test_dictionary_order_is_full_unsigned_utf8_not_insertion_order",
     "test_dictionary_displays_eight_per_category_with_totals_first",
@@ -103,21 +105,15 @@ def validate_unicode_mark_table(source: Path) -> None:
         for index in range(0, len(packed), 12)
     ]
     expected = _unicode_mark_ranges()
-    count_match = re.search(
-        r"^comptime _MARK_RANGE_COUNT = (\d+)$",
-        text,
-        re.MULTILINE,
-    )
-    declared_count = int(count_match.group(1)) if count_match else -1
     if observed != expected:
         raise AssertionError(
             "assertion Unicode mark ranges differ from Unicode 15.0 "
             f"Mn/Me: expected {len(expected)}, got {len(observed)}"
         )
-    if declared_count != len(expected):
+    derived_count = "comptime _MARK_RANGE_COUNT = _MARK_RANGES.byte_length() // 12"
+    if derived_count not in text:
         raise AssertionError(
-            "assertion Unicode mark range count differs: "
-            f"expected {len(expected)}, got {declared_count}"
+            "assertion Unicode mark range count must be derived from its bytes"
         )
 
 
@@ -276,8 +272,22 @@ def _compile(
             f"compile failed ({optimization}, {source.name}):\n"
             f"{result.stdout}{result.stderr}"
         )
+    validate_clean_compile(result, optimization, source.name)
     if not output.is_file():
         raise AssertionError(f"compile did not create a fresh binary: {output}")
+
+
+def validate_clean_compile(
+    result: subprocess.CompletedProcess[str],
+    optimization: str,
+    source_name: str,
+) -> None:
+    """Reject warnings emitted while compiling the shipped public source."""
+    transcript = result.stdout + result.stderr
+    if "warning:" in transcript:
+        raise AssertionError(
+            f"compiler warning ({optimization}, {source_name}):\n{transcript}"
+        )
 
 
 def _reject_accidental_public_helpers(mojo: Path) -> None:
@@ -340,14 +350,22 @@ def _declaration_names(
 
 
 def public_api_surface(declaration: dict[str, object]) -> dict[str, object]:
-    """Project every public declaration kind and function overload count."""
+    """Project every public declaration kind and exact function signature."""
     functions: list[dict[str, object]] = []
     for item in _declaration_rows(declaration, "functions"):
         name = item.get("name")
         overloads = item.get("overloads")
         if not isinstance(name, str) or not isinstance(overloads, list):
             raise AssertionError("public API function declaration is malformed")
-        functions.append({"name": name, "overloads": len(overloads)})
+        signatures: list[str] = []
+        for overload in overloads:
+            if not isinstance(overload, dict):
+                raise AssertionError("public API function overload is malformed")
+            signature = overload.get("signature")
+            if not isinstance(signature, str):
+                raise AssertionError("public API function signature is malformed")
+            signatures.append(signature)
+        functions.append({"name": name, "overloads": signatures})
     return {
         "functions": functions,
         "structs": _declaration_names(declaration, "structs"),
@@ -380,7 +398,35 @@ def _validate_public_api_docs(mojo: Path) -> None:
     declaration = json.loads(output.read_text(encoding="utf-8"))["decl"]
     surface = public_api_surface(declaration)
     expected = {
-        "functions": [{"name": "assert_equal", "overloads": 4}],
+        "functions": [
+            {
+                "name": "assert_equal",
+                "overloads": [
+                    (
+                        "def assert_equal(actual: String, expected: String, "
+                        'msg: String = "", *, location: '
+                        "Optional[SourceLocation] = None)"
+                    ),
+                    (
+                        "def assert_equal[T: Copyable & ImplicitlyDeletable & "
+                        "Equatable & Writable](actual: List[T], expected: "
+                        'List[T], msg: String = "", *, location: '
+                        "Optional[SourceLocation] = None)"
+                    ),
+                    (
+                        "def assert_equal[V: Copyable & ImplicitlyDeletable & "
+                        "Equatable & Writable](actual: Dict[String, V], "
+                        'expected: Dict[String, V], msg: String = "", *, '
+                        "location: Optional[SourceLocation] = None)"
+                    ),
+                    (
+                        "def assert_equal[T: Equatable & Writable, _fallback: "
+                        "Bool = True, //](actual: T, expected: T, msg: String = "
+                        '"", *, location: Optional[SourceLocation] = None)'
+                    ),
+                ],
+            }
+        ],
         "structs": [],
         "aliases": [],
         "traits": [],

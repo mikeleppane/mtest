@@ -279,6 +279,9 @@ def main():
     _ = BoundedWriter(16)
 """
 ASSERTION_EXAMPLE = REPO_ROOT / "examples" / "assertions" / "test_diagnostics.mojo"
+ASSERTION_README_SECTION = "## Assertion diagnostics\n"
+ASSERTION_MOJO_FENCE = "```mojo\n"
+ASSERTION_CONSOLE_FENCE = "```console\n"
 
 
 # The exact roster of stages one full gate run must perform, in order. The
@@ -389,15 +392,47 @@ def validate_assertion_install(
     """Require the exact public source files, safe modes, and compiler provenance."""
     prefix = env_prefix.resolve()
     source_root = prefix / "share" / "mtest" / "assertions-src"
-    actual_files = (
-        {
-            path.relative_to(source_root)
-            for path in source_root.rglob("*")
-            if path.is_file()
-        }
-        if source_root.is_dir()
-        else set()
+    for relative in (
+        Path("share"),
+        Path("share/mtest"),
+        Path("share/mtest/assertions-src"),
+    ):
+        component = prefix / relative
+        try:
+            component_mode = component.lstat().st_mode
+        except FileNotFoundError as exc:
+            raise PackageCheckError(
+                f"installed assertion path component is missing: {relative}"
+            ) from exc
+        if stat.S_ISLNK(component_mode) or not stat.S_ISDIR(component_mode):
+            raise PackageCheckError(
+                "installed assertion path component must be a real directory: "
+                f"{relative}"
+            )
+    entries = list(source_root.rglob("*"))
+    symbolic_links = [
+        path.relative_to(source_root) for path in entries if path.is_symlink()
+    ]
+    if symbolic_links:
+        raise PackageCheckError(
+            f"installed assertion source contains a symbolic link: "
+            f"{sorted(symbolic_links)}"
+        )
+    actual_entries = {path.relative_to(source_root) for path in entries}
+    expected_entries = INSTALLED_ASSERTION_FILES | (
+        INSTALLED_ASSERTION_DIRECTORIES - {Path(".")}
     )
+    if actual_entries != expected_entries:
+        raise PackageCheckError(
+            "installed assertion entry set differs: "
+            f"missing={sorted(expected_entries - actual_entries)}, "
+            f"extra={sorted(actual_entries - expected_entries)}"
+        )
+    actual_files = {
+        path.relative_to(source_root)
+        for path in entries
+        if stat.S_ISREG(path.lstat().st_mode)
+    }
     if actual_files != INSTALLED_ASSERTION_FILES:
         raise PackageCheckError(
             "installed assertion file set differs: "
@@ -422,6 +457,11 @@ def validate_assertion_install(
             raise PackageCheckError(
                 f"installed assertion source must have {requirement}: "
                 f"{relative} has {mode:o}"
+            )
+        checkout_source = REPO_ROOT / "assertions-src" / relative
+        if source.read_bytes() != checkout_source.read_bytes():
+            raise PackageCheckError(
+                f"installed assertion source bytes differ: {relative}"
             )
     for relative in INSTALLED_ASSERTION_DIRECTORIES:
         directory = source_root / relative
@@ -598,11 +638,93 @@ def stage_assertion_source_probe(env_prefix: Path, label: str) -> None:
     )
 
 
-def stage_assertion_example(env_prefix: Path, mtest_bin: Path) -> None:
+def readme_assertion_example_block(contents: str) -> str:
+    """Extract the sole console fence from the assertion-diagnostics section."""
+    if contents.count(ASSERTION_README_SECTION) != 1:
+        raise PackageCheckError(
+            "README must contain exactly one assertion-diagnostics section"
+        )
+    section_start = contents.index(ASSERTION_README_SECTION) + len(
+        ASSERTION_README_SECTION
+    )
+    section_end = contents.find("\n## ", section_start)
+    if section_end == -1:
+        section_end = len(contents)
+    section = contents[section_start:section_end]
+    if section.count(ASSERTION_CONSOLE_FENCE) != 1:
+        raise PackageCheckError(
+            "assertion-diagnostics section must contain exactly one console fence"
+        )
+    block_start = section.index(ASSERTION_CONSOLE_FENCE) + len(ASSERTION_CONSOLE_FENCE)
+    block_end = section.find("\n```", block_start)
+    if block_end == -1:
+        raise PackageCheckError("assertion-diagnostics console fence is not closed")
+    return section[block_start : block_end + 1]
+
+
+def readme_assertion_source_block(contents: str) -> str:
+    """Extract the sole Mojo fence from the assertion-diagnostics section."""
+    if contents.count(ASSERTION_README_SECTION) != 1:
+        raise PackageCheckError(
+            "README must contain exactly one assertion-diagnostics section"
+        )
+    section_start = contents.index(ASSERTION_README_SECTION) + len(
+        ASSERTION_README_SECTION
+    )
+    section_end = contents.find("\n## ", section_start)
+    if section_end == -1:
+        section_end = len(contents)
+    section = contents[section_start:section_end]
+    if section.count(ASSERTION_MOJO_FENCE) != 1:
+        raise PackageCheckError(
+            "assertion-diagnostics section must contain exactly one Mojo fence"
+        )
+    block_start = section.index(ASSERTION_MOJO_FENCE) + len(ASSERTION_MOJO_FENCE)
+    block_end = section.find("\n```", block_start)
+    if block_end == -1:
+        raise PackageCheckError("assertion-diagnostics Mojo fence is not closed")
+    return section[block_start : block_end + 1]
+
+
+def normalize_assertion_example(
+    output: str,
+    prefix: Path,
+    repo_root: Path,
+) -> str:
+    """Normalize only installed paths and nondeterministic elapsed times."""
+    normalized = output.replace(str(prefix.resolve()), "<PREFIX>").replace(
+        str(repo_root.resolve()),
+        "<REPO>",
+    )
+    return _normalize_assertion_times(normalized)
+
+
+def _normalize_assertion_times(output: str) -> str:
+    normalized = re.sub(
+        r"(?m)^(FAIL\s+.+?)\s+\d+(?:\.\d+)?s$",
+        r"\1  <TIME>",
+        output,
+    )
+    return re.sub(
+        r"(?m)(^===== .+ in )\d+(?:\.\d+)?s( =====$)",
+        r"\1<TIME>\2",
+        normalized,
+    )
+
+
+def stage_assertion_example(
+    env_prefix: Path,
+    mtest_bin: Path,
+    *,
+    allow_installer_group_write: bool = False,
+) -> None:
     """Run the committed diagnostic example through the installed artifact."""
     _banner("installed assertion README example")
     prefix = env_prefix.resolve()
-    source_root = validate_assertion_install(prefix)
+    source_root = validate_assertion_install(
+        prefix,
+        allow_installer_group_write=allow_installer_group_write,
+    )
     environment = assertion_probe_environment(prefix)
     environment["PATH"] = str(prefix / "bin") + ":/usr/bin:/bin"
     command = [
@@ -1397,6 +1519,11 @@ def stage_tarball_fallback_smoke(target: PackagePlatform | None = None) -> None:
         )
 
     stage_assertion_source_probe(mtest_bin.parents[1], "tarball")
+    stage_assertion_example(
+        mtest_bin.parents[1],
+        mtest_bin,
+        allow_installer_group_write=True,
+    )
 
     print(
         "package-check: OK -- tar-bz2 fallback form installed and ran "

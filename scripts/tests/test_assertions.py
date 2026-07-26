@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 from typing import override
 import unittest
+from unittest import mock
 
 from scripts.checks import assertions
 
@@ -46,6 +47,34 @@ class AssertionCommandTests(unittest.TestCase):
             self.assertTrue(build_root.is_dir())
             self.assertFalse(stale.exists())
 
+    def test_run_checked_turns_timeout_into_a_bounded_failure(self) -> None:
+        timeout = subprocess.TimeoutExpired(["mojo", "build"], 7)
+        with (
+            mock.patch(
+                "scripts.checks.assertions.subprocess.run",
+                side_effect=timeout,
+            ),
+            self.assertRaisesRegex(
+                AssertionError,
+                r"command exceeded 7 seconds: mojo build",
+            ),
+        ):
+            assertions._run_checked(
+                ["mojo", "build"],
+                cwd=Path("/checkout"),
+                timeout=7,
+            )
+
+    def test_successful_compile_must_be_warning_free(self) -> None:
+        result = subprocess.CompletedProcess(
+            args=["mojo", "build"],
+            returncode=0,
+            stdout="",
+            stderr="source.mojo:1:1: warning: leaked warning\n",
+        )
+        with self.assertRaisesRegex(AssertionError, "compiler warning"):
+            assertions.validate_clean_compile(result, "-O0", "source.mojo")
+
 
 class AssertionApiValidationTests(unittest.TestCase):
     def test_accepts_a_zero_failed_testsuite_summary(self) -> None:
@@ -65,9 +94,17 @@ class AssertionApiValidationTests(unittest.TestCase):
             {"test_one"},
         )
 
-    def test_public_surface_includes_traits_and_overload_count(self) -> None:
+    def test_public_surface_includes_traits_and_exact_signatures(self) -> None:
         declaration = {
-            "functions": [{"name": "assert_equal", "overloads": [{}, {}, {}, {}]}],
+            "functions": [
+                {
+                    "name": "assert_equal",
+                    "overloads": [
+                        {"signature": "def assert_equal(actual: Int)"},
+                        {"signature": "def assert_equal(actual: String)"},
+                    ],
+                }
+            ],
             "structs": [],
             "aliases": [],
             "traits": [{"name": "AccidentalTrait"}],
@@ -75,7 +112,15 @@ class AssertionApiValidationTests(unittest.TestCase):
         self.assertEqual(
             assertions.public_api_surface(declaration),
             {
-                "functions": [{"name": "assert_equal", "overloads": 4}],
+                "functions": [
+                    {
+                        "name": "assert_equal",
+                        "overloads": [
+                            "def assert_equal(actual: Int)",
+                            "def assert_equal(actual: String)",
+                        ],
+                    }
+                ],
                 "structs": [],
                 "aliases": [],
                 "traits": ["AccidentalTrait"],

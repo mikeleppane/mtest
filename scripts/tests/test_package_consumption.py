@@ -30,6 +30,7 @@ import contextlib
 import dataclasses
 import io
 import json
+import os
 from pathlib import Path
 import stat
 import subprocess
@@ -547,6 +548,7 @@ class CallSiteTests(unittest.TestCase):
 
         identity = mock.Mock()
         assertion_probe = mock.Mock()
+        assertion_example = mock.Mock()
         smoke = mock.Mock(
             return_value=subprocess.CompletedProcess(
                 args=[], returncode=0, stdout=f"mtest {self.version}\n", stderr=""
@@ -561,6 +563,7 @@ class CallSiteTests(unittest.TestCase):
                 _run_streamed=mock.Mock(side_effect=build_or_install),
                 verify_installed_artifact_identity=identity,
                 stage_assertion_source_probe=assertion_probe,
+                stage_assertion_example=assertion_example,
             ),
             mock.patch.object(subprocess, "run", smoke),
             contextlib.redirect_stdout(io.StringIO()),
@@ -572,6 +575,11 @@ class CallSiteTests(unittest.TestCase):
         self.assertEqual(identity.call_args_list[0].args[0], prefix)
         self.assertEqual(identity.call_args_list[0].args[1].path.name, artifact_name)
         assertion_probe.assert_called_once_with(prefix, "tarball")
+        assertion_example.assert_called_once_with(
+            prefix,
+            prefix / "bin" / "mtest",
+            allow_installer_group_write=True,
+        )
 
     def test_loader_clean_stage_calls_the_probe_roster_check(self) -> None:
         roster = mock.Mock()
@@ -816,10 +824,8 @@ class AssertionPackageCommandTests(unittest.TestCase):
             environment["LD_LIBRARY_PATH"],
             "/scratch/prefix/lib",
         )
-        self.assertNotIn(
-            str(package_consumption.REPO_ROOT / ".pixi"),
-            environment.values(),
-        )
+        dev_prefix = str(package_consumption.REPO_ROOT / ".pixi")
+        self.assertFalse(any(dev_prefix in value for value in environment.values()))
 
     def test_probe_environment_uses_the_platform_loader_variable(self) -> None:
         prefix = Path("/scratch/prefix")
@@ -840,7 +846,8 @@ class AssertionPackageLayoutTests(unittest.TestCase):
         for relative in package_consumption.INSTALLED_ASSERTION_FILES:
             path = prefix / "share" / "mtest" / "assertions-src" / relative
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("# fixture\n", encoding="utf-8")
+            checkout = package_consumption.REPO_ROOT / "assertions-src" / relative
+            path.write_bytes(checkout.read_bytes())
             path.chmod(0o644)
         for directory_name in (
             "share/mtest",
@@ -865,6 +872,37 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             encoding="utf-8",
         )
         return prefix
+
+    def test_rejects_changed_installed_source_bytes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            source = (
+                prefix
+                / "share"
+                / "mtest"
+                / "assertions-src"
+                / "mtest"
+                / "assertions"
+                / "_mapping.mojo"
+            )
+            source.write_text("# changed installed bytes\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "source bytes differ",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO requires POSIX")
+    def test_rejects_a_non_regular_extra_entry(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            fifo = prefix / "share" / "mtest" / "assertions-src" / "unexpected-fifo"
+            os.mkfifo(fifo)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "installed assertion entry set",
+            ):
+                package_consumption.validate_assertion_install(prefix)
 
     def test_tarball_accepts_installer_normalized_group_write(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
@@ -937,7 +975,7 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             extra.write_text("opaque", encoding="utf-8")
             with self.assertRaisesRegex(
                 package_consumption.PackageCheckError,
-                "installed assertion file set",
+                "installed assertion entry set",
             ):
                 package_consumption.validate_assertion_install(prefix)
 

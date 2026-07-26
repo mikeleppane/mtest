@@ -324,6 +324,9 @@ def test_text_scalar_labels_expose_invisible_differences() raises:
         "U+0301 COMBINING MARK (category Mn)" in _text_failure("e\u0301", "e")
     )
     testing.assert_true(
+        "U+0488 ENCLOSING MARK (category Me)" in _text_failure("a\u0488b", "ab")
+    )
+    testing.assert_true(
         "U+00A0 NO-BREAK SPACE (category Zs)"
         in _text_failure("a\u00a0b", "a b")
     )
@@ -419,19 +422,33 @@ def test_text_context_has_two_lines_each_side_and_safe_prefixes() raises:
     testing.assert_false("\nSummary [ T ] 99 tests run" in detail)
 
 
-def test_large_text_context_is_bounded_and_message_is_last() raises:
-    var common = _repeated("a", 256 * 1024)
+def test_text_crop_marker_requires_an_elided_line_prefix() raises:
+    var line_two = _repeated("b", 63)
+    var line_three = _repeated("c", 63)
     var detail = _text_failure(
-        common + "LEFT-tail",
-        common + "RIGHT-tail",
+        "aaaaaaaaa\n" + line_two + "\n" + line_three + "\nX",
+        "aaaaaaaaa\n" + line_two + "\n" + line_three + "\nY",
+    )
+    testing.assert_true(("actual line 2: " + line_two + "\\n") in detail)
+    testing.assert_false("actual line 2: ... " in detail)
+    testing.assert_true(("expected line 2: " + line_two + "\\n") in detail)
+    testing.assert_false("expected line 2: ... " in detail)
+
+
+def test_large_text_context_is_bounded_and_message_is_last() raises:
+    var long_tail = _repeated("a", 256 * 1024)
+    var detail = _text_failure(
+        "LEFT-" + long_tail,
+        "RIGHT-" + long_tail,
         "final reason",
     )
     testing.assert_true(detail.byte_length() <= 4096 + 256)
-    testing.assert_true("text differs at scalar 262144" in detail)
-    testing.assert_true("LEFT-tail" in detail)
-    testing.assert_true("RIGHT-tail" in detail)
+    testing.assert_true("text differs at scalar 0" in detail)
+    testing.assert_true("LEFT-" in detail)
+    testing.assert_true("RIGHT-" in detail)
     testing.assert_true("actual line 1:" in detail)
     testing.assert_true("expected line 1:" in detail)
+    testing.assert_true("... [truncated]" in detail)
     testing.assert_true(detail.endswith("final reason"))
 
 
@@ -579,6 +596,43 @@ def test_unequal_list_suffix_does_not_repeat_the_aligned_scan() raises:
     )
     testing.assert_equal(counters.read(0), 11)
     testing.assert_equal(counters.read(1), 0)
+
+
+def test_expected_front_insertion_compares_each_receiver_once() raises:
+    var counters = CounterOwner()
+    var actual = List[ObservedValue]()
+    var expected = List[ObservedValue]()
+    expected.append(
+        ObservedValue(
+            -1,
+            "inserted",
+            counters.expected_equality.copy(),
+            counters.expected_render.copy(),
+        )
+    )
+    for index in range(10):
+        actual.append(
+            ObservedValue(
+                index,
+                "actual-" + String(index),
+                counters.actual_equality.copy(),
+                counters.actual_render.copy(),
+            )
+        )
+        expected.append(
+            ObservedValue(
+                index,
+                "expected-" + String(index),
+                counters.expected_equality.copy(),
+                counters.expected_render.copy(),
+            )
+        )
+    var detail = _list_failure(actual, expected)
+    testing.assert_true(
+        "list span at index 0: actual 0 item(s), expected 1 item(s)" in detail
+    )
+    testing.assert_equal(counters.read(0), 1)
+    testing.assert_equal(counters.read(1), 10)
 
 
 def test_dictionary_categories_are_distinct_and_ordered() raises:

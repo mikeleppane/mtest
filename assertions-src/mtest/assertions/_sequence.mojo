@@ -65,12 +65,16 @@ def write_list_difference[
         while prefix < shared and actual[prefix] == expected[prefix]:
             prefix += 1
         var suffix = 0
-        while (
-            suffix < len(actual) - prefix
-            and suffix < len(expected) - prefix
-            and actual[len(actual) - suffix - 1]
-            == expected[len(expected) - suffix - 1]
-        ):
+        while suffix < len(actual) - prefix and suffix < len(expected) - prefix:
+            var actual_index = len(actual) - suffix - 1
+            var expected_index = len(expected) - suffix - 1
+            var equal: Bool
+            if len(actual) > len(expected):
+                equal = actual[actual_index] == expected[expected_index]
+            else:
+                equal = expected[expected_index] == actual[actual_index]
+            if not equal:
+                break
             suffix += 1
         _write_list_span(output, actual, expected, prefix, suffix)
         return False
