@@ -15,8 +15,12 @@ is what makes `--check` mode a stable verdict rather than a moving one.
 
 Two modes:
 
-- `--fix` rewrites files in place: ruff format, then ruff's safe lint fixes.
-  This is what `pixi run py-fmt` runs before committing.
+- `--fix` rewrites files in place: ruff's safe lint fixes, then ruff format.
+  This is what `pixi run py-fmt` runs before committing. The order matters and
+  is not interchangeable: a lint fix edits code and can leave formatting
+  residue behind it, so formatting has to come second or `py-fmt` exits 0 on a
+  tree that `py-check` then rejects. Formatting never introduces a finding the
+  lint fixer would have removed, so one pass in this order is a fixed point.
 - default (check) mode rewrites nothing and fails on any finding: formatting
   drift, a lint finding, or a mypy error. This is what `pixi run py-check`
   runs, and it is the verdict.
@@ -87,7 +91,8 @@ def quality_steps(*, fix: bool) -> tuple[tuple[str, tuple[str, ...]], ...]:
 
     Split out from `main` so the step list is checkable without running the
     tools: what matters is that check mode rewrites nothing and still runs
-    mypy, and that both modes pin their tool versions.
+    mypy, that fix mode lints before it formats, and that both modes pin their
+    tool versions.
 
     Args:
         fix: True for the in-place mode, False for the verdict mode.
@@ -96,9 +101,12 @@ def quality_steps(*, fix: bool) -> tuple[tuple[str, tuple[str, ...]], ...]:
         The steps in fail-fast order.
     """
     if fix:
+        # Lint fixes first. Removing an unused import leaves the blank lines
+        # that followed it, which is drift only the formatter collapses, so
+        # formatting last is what makes py-fmt's exit 0 mean py-check is green.
         return (
-            ("ruff format", (*RUFF, "format", *TARGETS)),
             ("ruff check --fix", (*RUFF, "check", "--fix", *TARGETS)),
+            ("ruff format", (*RUFF, "format", *TARGETS)),
         )
     return (
         ("ruff format --check", (*RUFF, "format", "--check", *TARGETS)),

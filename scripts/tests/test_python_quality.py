@@ -28,7 +28,22 @@ class QualityStepTests(unittest.TestCase):
 
     def test_fix_mode_rewrites_and_skips_the_type_checker(self) -> None:
         labels = [label for label, _ in python_quality.quality_steps(fix=True)]
-        self.assertEqual(labels, ["ruff format", "ruff check --fix"])
+        self.assertEqual(labels, ["ruff check --fix", "ruff format"])
+
+    def test_fix_mode_lints_before_it_formats(self) -> None:
+        # Not a style preference; the reverse order makes py-fmt lie. Formatting
+        # first, then fixing, leaves the formatter's own work stale: `ruff check
+        # --fix` deleting an unused import leaves the two blank lines that
+        # followed it, and nothing collapses them. py-fmt exits 0 and the very
+        # next `pixi run py-check` reds on `ruff format --check`, which is the
+        # one thing py-fmt exists to prevent. Reproduced against ruff 0.16.0.
+        labels = [label for label, _ in python_quality.quality_steps(fix=True)]
+        self.assertLess(
+            labels.index("ruff check --fix"),
+            labels.index("ruff format"),
+            "fix mode must lint before it formats, or py-fmt can exit 0 on a "
+            "tree that py-check rejects",
+        )
 
     def test_check_mode_cannot_rewrite_a_file(self) -> None:
         # The whole point of the two modes: a verdict run must be readonly, so

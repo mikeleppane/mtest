@@ -180,7 +180,7 @@ The floor before any change is done, all green, in this order:
 
 ```text
 pixi run fmt               # format Mojo in place (run locally before committing)
-pixi run py-fmt            # format Python in place, plus ruff's safe lint fixes
+pixi run py-fmt            # ruff's safe lint fixes, then format Python in place
 pixi run py-check          # ruff format/lint and mypy --strict over scripts/ and
                            #   tests/fixtures/exec/ (needs `uv`; see below)
 pixi run version-check     # manifest, CLI, and shipped-version identity

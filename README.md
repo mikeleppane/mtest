@@ -1023,7 +1023,7 @@ The tasks:
 | Task | What it does |
 |------|--------------|
 | `pixi run fmt` | format Mojo in place |
-| `pixi run py-fmt` | format the Python tooling in place, plus ruff's safe lint fixes |
+| `pixi run py-fmt` | apply ruff's safe lint fixes to the Python tooling, then format it in place |
 | `pixi run py-check` | ruff format/lint and `mypy --strict` over the Python tooling (needs `uv`; not part of `ci`) |
 | `pixi run build` | precompile `src/mtest` to `build/mtest.mojopkg`, the compile gate |
 | `pixi run build-bin` | link the runnable binary at `build/mtest` |
