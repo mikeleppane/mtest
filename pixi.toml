@@ -105,6 +105,19 @@ package-check = { cmd = "python -m scripts.build.package_consumption", depends-o
     "build-native",
 ] }
 
+# Rewrite Python files in place: ruff format, then ruff's safe lint fixes. Run
+# locally before committing, the same way `fmt` is run for Mojo.
+py-fmt = "python -m scripts.checks.python_quality --fix"
+
+# The Python quality verdict: formatting drift, any lint finding, or any mypy
+# --strict error fails. Deliberately NOT in `pixi run ci` and not in the hosted
+# workflow: ruff and mypy run through `uvx` so they stay out of the pixi
+# environment (no new packages), which means the tool is a contributor's local
+# `uv` install rather than something the gate may assume. The checker fails
+# loudly when `uvx` is absent instead of skipping. See
+# scripts/checks/python_quality.py for why the versions are pinned exactly.
+py-check = "python -m scripts.checks.python_quality"
+
 # Rewrite Mojo files in place — run locally before committing. Protocol fixtures
 # live beneath tests/, so this covers the runner, fixtures, and suites.
 fmt = "python -m scripts.checks.format"

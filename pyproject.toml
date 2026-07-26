@@ -1,0 +1,173 @@
+# Tool configuration only. This is NOT a Python package and there is
+# deliberately no [build-system] or [project] table: `pixi.toml` is the
+# workspace manifest, product code under `src/` is pure Mojo, and the shipped
+# artifact has no Python dependency. Python exists here for build and check
+# tooling under `scripts/` plus the test-only subprocess actors under
+# `tests/fixtures/exec/`, and this file governs exactly that surface.
+#
+# ruff and mypy are NOT pixi dependencies. `scripts/checks/python_quality.py`
+# runs them through `uvx` at the versions pinned there, so the check adds no
+# package to the environment the product builds in and the hosted gate stays
+# unchanged. See that module for what the version pins buy.
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+extend-exclude = ["build", ".pixi", "vendor"]
+
+[tool.ruff.lint]
+select = [
+    "A", # builtin shadowing
+    "ANN", # missing annotations, complementing mypy --strict
+    "ARG", # unused arguments
+    "B", # bugbear: real bugs
+    "BLE", # blind except
+    "C4", # comprehension rewrites
+    "D", # docstring conventions, google
+    "DTZ", # naive datetimes
+    "E", # pycodestyle errors
+    "ERA", # commented-out code
+    "F", # pyflakes: real bugs
+    "FA", # future annotations
+    "FLY", # static join to f-string
+    "FURB", # modern-stdlib refurbishing
+    "G", # logging format
+    "I", # import sorting
+    "ICN", # import conventions
+    "INP", # implicit namespace packages
+    "INT", # gettext
+    "ISC", # implicit string concatenation
+    "LOG", # logging misuse
+    "N", # pep8 naming
+    "PERF", # obvious performance traps
+    "PIE", # misc lints
+    "PL", # pylint
+    "PYI", # stub conventions
+    "Q", # quote conventions
+    "RET", # return simplification
+    "RSE", # raise conventions
+    "RUF", # ruff-native rules
+    "S", # bandit
+    "SIM", # simplification
+    "SLF", # private member access
+    "SLOT", # __slots__ conventions
+    "T10", # stray debugger
+    "TC", # type-checking blocks
+    "TID", # tidy imports
+    "TRY", # exception antipatterns
+    "UP", # pyupgrade
+    "W", # pycodestyle warnings
+    "YTT", # sys.version misuse
+]
+ignore = [
+    # The formatter owns trailing commas; ruff documents COM as redundant with
+    # it, and enabling both produces fights rather than diffs.
+    "COM812",
+    "COM819",
+    # These scripts exist to drive the pinned toolchain and fake compilers as
+    # child processes. `subprocess` import, argv-list spawning, and PATH
+    # resolution of `mojo` are the job, not a finding: the runner must resolve
+    # `mojo` through the pixi environment's PATH, so a fully-qualified path is
+    # wrong here. Command construction stays list-form and never uses a shell,
+    # which is the property that actually matters and which S602 still pins.
+    "S404",
+    "S603",
+    "S606",
+    "S607",
+    # The JUnit checker parses this repo's OWN emitted document and the
+    # vendored junit-10.xsd. The recommended fix is a new dependency, and
+    # zero-runtime-dependency plus no-new-packages both forbid one.
+    "S314",
+    # Shebangs on these modules document the interpreter. Invocation is always
+    # `python -m scripts.x` (scripts/checks/layout.py enforces that form and
+    # rejects a direct `python scripts/x.py`), so the files are correctly
+    # non-executable and EXE001 is reading them as something they are not.
+    "EXE001",
+    # Every one of these modules is a console checker whose entire output
+    # contract is what it prints. Loud over silent is a product principle here.
+    "T201",
+    "T203",
+    # The exception-message rules want the message hoisted into a local before
+    # the raise. Across ~500 sites that trades readable, specific failure text
+    # for indirection, and these checkers' messages ARE the diagnosis a
+    # contributor reads on a red gate.
+    "EM101",
+    "EM102",
+    "EM103",
+    "TRY003",
+    # Complexity thresholds flag the checkers that are long because they pin
+    # long exact inventories (layout.py, ci_topology.py). Splitting a fixed
+    # membership list to satisfy a counter would scatter the pin, not simplify
+    # it. Genuine complexity is a review question, not a lint gate.
+    "C901",
+    "PLR0911",
+    "PLR0912",
+    "PLR0913",
+    "PLR0914",
+    "PLR0915",
+    "PLR0916",
+    "PLR0917",
+    "PLR1702",
+    "PLR2004",
+    "PLR6301",
+    # `x == ""` says "is the empty string" where `not x` also accepts None and
+    # 0. In parsers that distinguish absent from empty, the explicit form is
+    # the correct one.
+    "PLC1901",
+    # `os.path` and `pathlib` both appear by design: these scripts hand string
+    # paths to subprocess argv and to snapshot normalization that pins exact
+    # repo-relative spellings. Rewriting those call sites to Path arithmetic is
+    # a refactor with snapshot-visible risk, not a formatting fix.
+    "PTH",
+    # Keyword-only booleans would change harness signatures across the repo for
+    # a call-site readability preference.
+    "FBT",
+    # No copyright headers anywhere in this repo, by choice.
+    "CPY001",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The self-tests exist to reach into a checker's internals and mutate its
+# inputs; that access is the test, not a leak. Their `test_*` method names are
+# already full sentences describing the property under test, so requiring a
+# docstring on each of ~370 of them would add restatement, not information.
+# Every docstring FORMAT rule still applies to the ones that do have one.
+"scripts/tests/*.py" = ["SLF001", "D101", "D102", "D103", "D107"]
+# The exec fixtures are standalone subprocess actors that `exec` spawns by
+# path, so they are neither importable modules nor part of a package.
+"tests/fixtures/exec/*.py" = ["INP001"]
+
+[tool.ruff.lint.isort]
+# Matches the existing house style: one import per line where it was written
+# that way, module names sorted together regardless of `import x` versus
+# `from x import y`, and two blank lines before the first declaration.
+force-sort-within-sections = true
+lines-after-imports = 2
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+docstring-code-format = false
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["scripts", "tests/fixtures/exec"]
+exclude = ["^build/", "^\\.pixi/", "^vendor/"]
+# Strict already implies most of these; the explicit ones below are the checks
+# strict does NOT turn on, kept here so a mypy release cannot quietly relax the
+# floor.
+warn_unreachable = true
+strict_equality = true
+strict_bytes = true
+enable_error_code = [
+    "redundant-expr",
+    "possibly-undefined",
+    "truthy-bool",
+    "truthy-iterable",
+    "ignore-without-code",
+    "unused-awaitable",
+    "explicit-override",
+    "mutable-override",
+]
