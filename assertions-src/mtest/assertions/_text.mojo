@@ -4,7 +4,15 @@ from mtest.assertions._display import (
     BoundedWriter,
     TEXT_CONTEXT_BYTE_CAP,
     _escaped_piece,
+    _is_combining_mark,
+    _is_format_control,
+    _is_non_ascii_separator,
+    _is_private_use,
+    _is_variation_selector,
 )
+
+comptime _SIDE_CONTEXT_BYTE_CAP = 1850
+comptime _CONTEXT_PREFIX_RAW_BYTES = 128
 
 
 def _hex_digit(value: Int) -> String:
@@ -14,27 +22,14 @@ def _hex_digit(value: Int) -> String:
 
 def _uplus(value: Int) -> String:
     var output = String("U+")
-    if value <= 0xFFFF:
-        for shift in range(3, -1, -1):
-            output += _hex_digit((value >> (shift * 4)) & 0xF)
-    else:
-        for shift in range(7, -1, -1):
-            output += _hex_digit((value >> (shift * 4)) & 0xF)
+    var highest_shift = 3
+    if value > 0xFFFF:
+        highest_shift = 4
+    if value > 0xFFFFF:
+        highest_shift = 5
+    for shift in range(highest_shift, -1, -1):
+        output += _hex_digit((value >> (shift * 4)) & 0xF)
     return output^
-
-
-def _is_format_control(value: Int) -> Bool:
-    return (
-        value == 0x200B
-        or value == 0x200C
-        or value == 0x200D
-        or value == 0x200E
-        or value == 0x200F
-        or (value >= 0x202A and value <= 0x202E)
-        or (value >= 0x2060 and value <= 0x2064)
-        or (value >= 0x2066 and value <= 0x206F)
-        or value == 0xFEFF
-    )
 
 
 def _first_differing_byte(actual: String, expected: String) -> Int:
@@ -82,9 +77,19 @@ def _scalar_label(text: String, byte_index: Int) -> String:
                 return _uplus(value) + " LINE FEED (category Cc)"
             if value == 13:
                 return _uplus(value) + " CARRIAGE RETURN (category Cc)"
+            if value >= 0x80 and value <= 0x9F:
+                return _uplus(value) + " CONTROL (category Cc)"
             if value == 0xA0:
                 return _uplus(value) + " NO-BREAK SPACE (category Zs)"
-            if value >= 0x300 and value <= 0x36F:
+            if _is_non_ascii_separator(value):
+                if value == 0x2028:
+                    return _uplus(value) + " LINE SEPARATOR (category Zl)"
+                if value == 0x2029:
+                    return _uplus(value) + " PARAGRAPH SEPARATOR (category Zp)"
+                return _uplus(value) + " SPACE SEPARATOR (category Zs)"
+            if _is_variation_selector(value):
+                return _uplus(value) + " VARIATION SELECTOR (category Mn)"
+            if _is_combining_mark(value):
                 return _uplus(value) + " COMBINING MARK (category Mn)"
             if value == 0x200B:
                 return _uplus(value) + " ZERO WIDTH SPACE (category Cf)"
@@ -93,7 +98,13 @@ def _scalar_label(text: String, byte_index: Int) -> String:
             ):
                 return _uplus(value) + " BIDI CONTROL (category Cf)"
             if _is_format_control(value):
+                if value == 0xAD:
+                    return _uplus(value) + " FORMAT CONTROL (category Cf)"
+                if value >= 0xE0020 and value <= 0xE007F:
+                    return _uplus(value) + " TAG CHARACTER (category Cf)"
                 return _uplus(value) + " FORMAT CONTROL (category Cf)"
+            if _is_private_use(value):
+                return _uplus(value) + " PRIVATE USE (category Co)"
             return _uplus(value) + " '" + _escaped_piece(value) + "'"
         offset += scalar.byte_length()
     return "<END> (end of text)"
@@ -104,22 +115,40 @@ def _write_context(
     title: String,
     text: String,
     focus_line: Int,
+    focus_byte: Int,
 ):
     var first = max(1, focus_line - 2)
     var last = focus_line + 2
+    var crop_start = max(0, focus_byte - _CONTEXT_PREFIX_RAW_BYTES)
+    var crop_line = _line_at(text, crop_start)
+    var prefix_cropped = crop_start > 0 and crop_line >= first
     var line = 1
+    var offset = 0
     var header_written = False
-    for scalar in text.codepoints():
+    var first_header = True
+    for scalar in text.codepoint_slices():
+        if output.truncated or line > last:
+            return
+        var scalar_stop = offset + scalar.byte_length()
+        if scalar_stop <= crop_start:
+            if Int(ord(scalar)) == 10:
+                line += 1
+            offset = scalar_stop
+            continue
         if line >= first and line <= last and not header_written:
             output.write_trusted(
                 "\n  " + title + " line " + String(line) + ": "
             )
+            if first_header and prefix_cropped:
+                output.write_trusted("... ")
             header_written = True
+            first_header = False
         if line >= first and line <= last:
-            output.write_trusted(_escaped_piece(Int(scalar)))
-        if Int(scalar) == 10:
+            output.write_escaped_scalar(Int(ord(scalar)))
+        if Int(ord(scalar)) == 10:
             line += 1
             header_written = False
+        offset = scalar_stop
     if line >= first and line <= last and not header_written:
         output.write_trusted("\n  " + title + " line " + String(line) + ": ")
 
@@ -135,6 +164,22 @@ def write_text_detail(
         _scalar_index_at(actual, byte_index),
         _scalar_index_at(expected, byte_index),
     )
+    var actual_context = BoundedWriter(_SIDE_CONTEXT_BYTE_CAP)
+    _write_context(
+        actual_context,
+        "actual",
+        actual,
+        _line_at(actual, byte_index),
+        byte_index,
+    )
+    var expected_context = BoundedWriter(_SIDE_CONTEXT_BYTE_CAP)
+    _write_context(
+        expected_context,
+        "expected",
+        expected,
+        _line_at(expected, byte_index),
+        byte_index,
+    )
     var detail = BoundedWriter(TEXT_CONTEXT_BYTE_CAP)
     detail.write_trusted(
         "text differs at scalar "
@@ -144,6 +189,6 @@ def write_text_detail(
         + "\n  expected: "
         + _scalar_label(expected, byte_index)
     )
-    _write_context(detail, "actual", actual, _line_at(actual, byte_index))
-    _write_context(detail, "expected", expected, _line_at(expected, byte_index))
+    detail.write_trusted(actual_context.finish())
+    detail.write_trusted(expected_context.finish())
     output.write_trusted(detail.finish())

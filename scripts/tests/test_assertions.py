@@ -65,6 +65,45 @@ class AssertionApiValidationTests(unittest.TestCase):
             {"test_one"},
         )
 
+    def test_public_surface_includes_traits_and_overload_count(self) -> None:
+        declaration = {
+            "functions": [{"name": "assert_equal", "overloads": [{}, {}, {}, {}]}],
+            "structs": [],
+            "aliases": [],
+            "traits": [{"name": "AccidentalTrait"}],
+        }
+        self.assertEqual(
+            assertions.public_api_surface(declaration),
+            {
+                "functions": [{"name": "assert_equal", "overloads": 4}],
+                "structs": [],
+                "aliases": [],
+                "traits": ["AccidentalTrait"],
+            },
+        )
+
+    def test_export_rejection_requires_the_compiler_absence_message(self) -> None:
+        echoed_only = (
+            "error: unable to locate module 'mtest'\n"
+            "from mtest.assertions import BoundedWriter\n"
+        )
+        with self.assertRaisesRegex(AssertionError, "wrong reason"):
+            assertions.validate_export_rejection(echoed_only, "BoundedWriter")
+        assertions.validate_export_rejection(
+            "error: package 'assertions' does not contain 'BoundedWriter'\n",
+            "BoundedWriter",
+        )
+
+    def test_unicode_mark_table_rejects_an_incomplete_range_set(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-assertions-test-") as raw:
+            source = Path(raw) / "_display.mojo"
+            source.write_text(
+                'comptime _MARK_RANGES: StaticString = "00030000036f"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, "Unicode mark ranges"):
+                assertions.validate_unicode_mark_table(source)
+
 
 class AssertionLocationValidationTests(unittest.TestCase):
     @override

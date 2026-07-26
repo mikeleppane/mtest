@@ -271,6 +271,13 @@ from mtest.session import run_session
 def main():
     pass
 """
+PRIVATE_HELPER_PROBE_SOURCE = """\
+from mtest.assertions import BoundedWriter
+
+
+def main():
+    _ = BoundedWriter(16)
+"""
 ASSERTION_EXAMPLE = REPO_ROOT / "examples" / "assertions" / "test_diagnostics.mojo"
 
 
@@ -374,7 +381,11 @@ def assertion_probe_environment(
     return environment
 
 
-def validate_assertion_install(env_prefix: Path) -> Path:
+def validate_assertion_install(
+    env_prefix: Path,
+    *,
+    allow_installer_group_write: bool = False,
+) -> Path:
     """Require the exact public source files, safe modes, and compiler provenance."""
     prefix = env_prefix.resolve()
     source_root = prefix / "share" / "mtest" / "assertions-src"
@@ -394,13 +405,22 @@ def validate_assertion_install(env_prefix: Path) -> Path:
             f"extra={sorted(actual_files - INSTALLED_ASSERTION_FILES)}"
         )
     for relative in INSTALLED_ASSERTION_FILES:
-        mode = stat.S_IMODE((source_root / relative).stat().st_mode)
-        # Pixi preserves 0644 from .conda packages but applies its shared-prefix
-        # group-write policy when extracting the legacy tar.bz2 form.
-        if mode not in (0o644, 0o664):
+        source = source_root / relative
+        source_mode = source.lstat().st_mode
+        if not stat.S_ISREG(source_mode):
             raise PackageCheckError(
-                "installed assertion source must have mode 644 or "
-                "installer-normalized 664: "
+                f"installed assertion source must be a regular file: {relative}"
+            )
+        mode = stat.S_IMODE(source_mode)
+        allowed_modes = (0o644, 0o664) if allow_installer_group_write else (0o644,)
+        if mode not in allowed_modes:
+            requirement = (
+                "mode 644 or installer-normalized 664"
+                if allow_installer_group_write
+                else "exact mode 644"
+            )
+            raise PackageCheckError(
+                f"installed assertion source must have {requirement}: "
                 f"{relative} has {mode:o}"
             )
     for relative in INSTALLED_ASSERTION_DIRECTORIES:
@@ -435,18 +455,40 @@ def validate_assertion_install(env_prefix: Path) -> Path:
     return source_root
 
 
+def require_missing_runner_module(diagnostic: str) -> None:
+    """Require the semantic rejection for the runner-private module."""
+    if "error: unable to locate module 'session'" not in diagnostic:
+        raise PackageCheckError(
+            "private runner import failed for the wrong reason: " + diagnostic
+        )
+
+
+def require_missing_facade_export(diagnostic: str, helper: str) -> None:
+    """Require the semantic rejection for one package-facade helper."""
+    expected = f"package 'assertions' does not contain '{helper}'"
+    if expected not in diagnostic:
+        raise PackageCheckError(
+            f"{helper} facade probe failed for the wrong reason: " + diagnostic
+        )
+
+
 def stage_assertion_source_probe(env_prefix: Path, label: str) -> None:
     """Compile and run public-source probes from one installed package form."""
     _banner(f"installed assertion source probe -- {label}")
-    source_root = validate_assertion_install(env_prefix)
+    source_root = validate_assertion_install(
+        env_prefix,
+        allow_installer_group_write=label == "tarball",
+    )
     probe_root = SCRATCH_ROOT / f"assertion-probe-{label}"
     if probe_root.exists():
         shutil.rmtree(probe_root)
     probe_root.mkdir(parents=True)
     positive = probe_root / "consumer.mojo"
     negative = probe_root / "private_import.mojo"
+    private_helper = probe_root / "private_helper.mojo"
     positive.write_text(ASSERTION_PROBE_SOURCE, encoding="utf-8")
     negative.write_text(PRIVATE_IMPORT_PROBE_SOURCE, encoding="utf-8")
+    private_helper.write_text(PRIVATE_HELPER_PROBE_SOURCE, encoding="utf-8")
     environment = assertion_probe_environment(env_prefix)
     checkout_source = str((REPO_ROOT / "assertions-src").resolve())
 
@@ -517,18 +559,41 @@ def stage_assertion_source_probe(env_prefix: Path, label: str) -> None:
         raise PackageCheckError(
             f"{label} public source unexpectedly exposed mtest.session"
         )
-    if "mtest.session" not in rejection and "module 'session'" not in rejection:
-        raise PackageCheckError(
-            f"{label} private import failed for the wrong reason: {rejection}"
-        )
+    require_missing_runner_module(rejection)
     if checkout_source in rejection:
         raise PackageCheckError(
             "installed assertion negative probe leaked checkout source"
         )
+
+    helper_binary = probe_root / "private-helper"
+    helper_rejected = subprocess.run(
+        assertion_compile_command(
+            env_prefix,
+            private_helper,
+            helper_binary,
+            "-O0",
+        ),
+        cwd=probe_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=SMOKE_TIMEOUT,
+        check=False,
+    )
+    helper_rejection = helper_rejected.stdout + helper_rejected.stderr
+    if helper_rejected.returncode == 0 or helper_binary.exists():
+        raise PackageCheckError(
+            f"{label} public source unexpectedly exposed BoundedWriter"
+        )
+    require_missing_facade_export(helper_rejection, "BoundedWriter")
+    if checkout_source in helper_rejection:
+        raise PackageCheckError(
+            "installed assertion helper probe leaked checkout source"
+        )
     print(
         f"package-check: OK -- {label} installed {len(INSTALLED_ASSERTION_FILES)} "
         f"source files at {source_root}, compiled at -O0/-O3, and kept "
-        "mtest.session private",
+        "runner imports and helper facade exports unavailable",
         flush=True,
     )
 

@@ -174,22 +174,32 @@ Failing tests:
 
 That output was captured from the installed `.conda` artifact. The companion
 specializes only top-level `String`, `List[T]`, and `Dict[String, V]`; nested
-containers and custom values are displayed opaquely. List and dictionary
-details show at most eight entries, and dictionary keys longer than 1024 UTF-8
-bytes switch the whole dictionary to opaque display.
+containers and custom values are displayed opaquely. List details show at most
+eight entries per side, and dictionary details show at most eight entries in
+each of the missing, unexpected, and changed categories. Dictionary keys longer
+than 1024 UTF-8 bytes switch to deterministic entry counts without expanding
+keys or values. Structural key and category order is deterministic; opaque
+values retain their own `Writable` formatting, including any ordering it
+chooses.
 
 Finalized opaque-value projections are at most 1024 bytes, text context is at
 most 4096 bytes, and a complete assertion body is at most 16384 bytes. Each cap
 includes the complete `... [truncated]` marker. Equality is exact; a passing
 assertion formats nothing, while a failing assertion formats each displayed
 operand once. These limits bound bytes finalized and emitted by the companion,
-not private work performed inside user-defined equality or formatting code.
+not private work performed inside user-defined equality or formatting code. A
+present reason retains bounded space at the end even when mismatch detail is
+truncated.
 
 `<PREFIX>/share/mtest/assertions-src` is one complete source package named
 `mtest`, not an extension merged into another `mtest` package. Put it before
 any other include root that provides `mtest`. The runner never injects this
 path automatically, and Mojo does not merge it with the runner-private
 precompiled package.
+
+Only `mtest.assertions.assert_equal` is supported. The shipped underscore
+modules are source implementation details, even though Mojo can import an
+explicit source-module path.
 
 ## Usage
 

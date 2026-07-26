@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
+from typing import cast
+import unicodedata
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -19,30 +22,103 @@ COMPILE_TIMEOUT_SECONDS = 120
 RUN_TIMEOUT_SECONDS = 30
 LOCATION_MARKER = "# ASSERT-LOCATION:"
 EXPLICIT_LOCATION_MARKER = "# ASSERT-EXPLICIT-LOCATION:"
+LOCATION_TESTS = {
+    "test_generic_omitted_message",
+    "test_generic_positional_message",
+    "test_generic_keyword_message",
+    "test_string_location",
+    "test_list_location",
+    "test_dictionary_location",
+    "test_generic_explicit_location",
+    "test_string_explicit_location",
+    "test_list_explicit_location",
+    "test_dictionary_explicit_location",
+}
 API_TESTS = {
     "test_message_call_shapes_and_explicit_location",
     "test_standard_and_companion_names_coexist",
     "test_pass_compares_once_and_never_renders",
     "test_failure_compares_once_and_renders_each_operand_once",
     "test_opaque_render_caps_apply_after_escaping",
+    "test_identical_opaque_projections_report_whether_they_were_truncated",
     "test_many_small_formatter_writes_and_body_are_bounded",
     "test_text_first_difference_at_start_middle_end_and_ending",
     "test_text_scalar_labels_expose_invisible_differences",
+    "test_invisible_scalars_are_escaped_in_structural_values",
     "test_text_line_endings_and_final_newline_are_explicit",
     "test_text_context_has_two_lines_each_side_and_safe_prefixes",
     "test_large_text_context_is_bounded_and_message_is_last",
     "test_list_replacement_and_insertions_are_clear_spans",
     "test_list_changed_content_and_lengths_have_exact_facts",
     "test_list_displays_eight_mismatches_and_counts_omitted_first",
+    "test_list_values_are_individually_bounded_before_body_assembly",
     "test_nested_lists_are_opaque_and_user_message_is_last",
     "test_list_specializer_renders_zero_on_pass_and_eight_on_failure",
+    "test_unequal_list_suffix_does_not_repeat_the_aligned_scan",
     "test_dictionary_categories_are_distinct_and_ordered",
     "test_dictionary_order_is_full_unsigned_utf8_not_insertion_order",
     "test_dictionary_displays_eight_per_category_with_totals_first",
+    "test_dictionary_values_are_individually_bounded_before_assembly",
     "test_dictionary_key_cap_boundary_and_opaque_fallback",
+    "test_opaque_dictionary_projection_reports_truncation_truthfully",
+    "test_opaque_dictionary_fallback_is_insertion_order_independent",
     "test_equal_dictionary_with_oversized_key_returns_without_rendering",
     "test_dictionary_specializer_renders_only_eight_changed_values",
 }
+
+
+def _unicode_mark_ranges() -> list[tuple[int, int]]:
+    points = [
+        value
+        for value in range(0x110000)
+        if unicodedata.category(chr(value)) in {"Mn", "Me"}
+    ]
+    ranges: list[tuple[int, int]] = []
+    for value in points:
+        if not ranges or value != ranges[-1][1] + 1:
+            ranges.append((value, value))
+        else:
+            ranges[-1] = (ranges[-1][0], value)
+    return ranges
+
+
+def validate_unicode_mark_table(source: Path) -> None:
+    """Require the packed Mojo table to match Unicode 15.0 Mn and Me."""
+    if unicodedata.unidata_version != "15.0.0":
+        raise AssertionError(
+            "assertion Unicode table checker requires Unicode 15.0.0, got "
+            + unicodedata.unidata_version
+        )
+    text = source.read_text(encoding="utf-8")
+    match = re.search(
+        r'^comptime _MARK_RANGES: StaticString = "([0-9a-f]+)"$',
+        text,
+        re.MULTILINE,
+    )
+    if match is None or len(match.group(1)) % 12:
+        raise AssertionError("assertion Unicode mark range encoding is invalid")
+    packed = match.group(1)
+    observed = [
+        (int(packed[index : index + 6], 16), int(packed[index + 6 : index + 12], 16))
+        for index in range(0, len(packed), 12)
+    ]
+    expected = _unicode_mark_ranges()
+    count_match = re.search(
+        r"^comptime _MARK_RANGE_COUNT = (\d+)$",
+        text,
+        re.MULTILINE,
+    )
+    declared_count = int(count_match.group(1)) if count_match else -1
+    if observed != expected:
+        raise AssertionError(
+            "assertion Unicode mark ranges differ from Unicode 15.0 "
+            f"Mn/Me: expected {len(expected)}, got {len(observed)}"
+        )
+    if declared_count != len(expected):
+        raise AssertionError(
+            "assertion Unicode mark range count differs: "
+            f"expected {len(expected)}, got {declared_count}"
+        )
 
 
 def compile_command(
@@ -204,6 +280,117 @@ def _compile(
         raise AssertionError(f"compile did not create a fresh binary: {output}")
 
 
+def _reject_accidental_public_helpers(mojo: Path) -> None:
+    for helper in (
+        "BODY_BYTE_CAP",
+        "BoundedWriter",
+        "SourceLocation",
+        "call_location",
+    ):
+        source = BUILD_ROOT / f"private-export-{helper}.mojo"
+        output = BUILD_ROOT / f"private-export-{helper}"
+        source.write_text(
+            f"from mtest.assertions import {helper}\n\ndef main():\n    pass\n",
+            encoding="utf-8",
+        )
+        result = _run_checked(
+            compile_command(mojo, REPO_ROOT, source, output, "-O0"),
+            cwd=REPO_ROOT,
+            timeout=COMPILE_TIMEOUT_SECONDS,
+        )
+        diagnostic = result.stdout + result.stderr
+        if result.returncode == 0 or output.exists():
+            raise AssertionError(f"public assertion package exposed {helper}")
+        validate_export_rejection(diagnostic, helper)
+
+
+def validate_export_rejection(diagnostic: str, helper: str) -> None:
+    """Require the compiler's semantic package-facade rejection."""
+    expected = f"package 'assertions' does not contain '{helper}'"
+    if expected not in diagnostic:
+        raise AssertionError(
+            f"{helper} probe failed for the wrong reason:\n" + diagnostic
+        )
+
+
+def _declaration_rows(
+    declaration: dict[str, object],
+    kind: str,
+) -> list[dict[str, object]]:
+    value = declaration.get(kind)
+    if not isinstance(value, list) or not all(
+        isinstance(item, dict) and all(isinstance(key, str) for key in item)
+        for item in value
+    ):
+        raise AssertionError(f"public API {kind} declaration is malformed")
+    return cast("list[dict[str, object]]", value)
+
+
+def _declaration_names(
+    declaration: dict[str, object],
+    kind: str,
+) -> list[str]:
+    names: list[str] = []
+    for item in _declaration_rows(declaration, kind):
+        name = item.get("name")
+        if not isinstance(name, str):
+            raise AssertionError(f"public API {kind} name is malformed")
+        names.append(name)
+    return names
+
+
+def public_api_surface(declaration: dict[str, object]) -> dict[str, object]:
+    """Project every public declaration kind and function overload count."""
+    functions: list[dict[str, object]] = []
+    for item in _declaration_rows(declaration, "functions"):
+        name = item.get("name")
+        overloads = item.get("overloads")
+        if not isinstance(name, str) or not isinstance(overloads, list):
+            raise AssertionError("public API function declaration is malformed")
+        functions.append({"name": name, "overloads": len(overloads)})
+    return {
+        "functions": functions,
+        "structs": _declaration_names(declaration, "structs"),
+        "aliases": _declaration_names(declaration, "aliases"),
+        "traits": _declaration_names(declaration, "traits"),
+    }
+
+
+def _validate_public_api_docs(mojo: Path) -> None:
+    output = BUILD_ROOT / "public-api.json"
+    result = _run_checked(
+        [
+            str(mojo),
+            "doc",
+            "--diagnose-missing-doc-strings",
+            "--Werror",
+            "-I",
+            str(ASSERTION_SOURCE_ROOT),
+            str(ASSERTION_SOURCE_ROOT / "mtest" / "assertions" / "__init__.mojo"),
+            "-o",
+            str(output),
+        ],
+        cwd=REPO_ROOT,
+        timeout=COMPILE_TIMEOUT_SECONDS,
+    )
+    if result.returncode != 0 or not output.is_file():
+        raise AssertionError(
+            f"public assertion documentation failed:\n{result.stdout}{result.stderr}"
+        )
+    declaration = json.loads(output.read_text(encoding="utf-8"))["decl"]
+    surface = public_api_surface(declaration)
+    expected = {
+        "functions": [{"name": "assert_equal", "overloads": 4}],
+        "structs": [],
+        "aliases": [],
+        "traits": [],
+    }
+    if surface != expected:
+        raise AssertionError(
+            f"public assertion API differs: expected {expected}, got {surface}"
+        )
+
+
 def _validate_api_run(
     run: subprocess.CompletedProcess[str],
     expected_rows: set[str],
@@ -249,6 +436,15 @@ def check_assertions() -> None:
     mojo = Path(mojo_raw).resolve()
     reset_build_root()
     locations = expected_locations(LOCATION_CONSUMER)
+    if set(locations) != LOCATION_TESTS:
+        raise AssertionError(
+            "location consumer inventory differs: "
+            f"expected {sorted(LOCATION_TESTS)}, got {sorted(locations)}"
+        )
+    validate_unicode_mark_table(
+        ASSERTION_SOURCE_ROOT / "mtest" / "assertions" / "_display.mojo"
+    )
+    _validate_public_api_docs(mojo)
 
     for optimization, suffix in (("-O0", "o0"), ("-O3", "o3")):
         api_binary = BUILD_ROOT / f"api-{suffix}"

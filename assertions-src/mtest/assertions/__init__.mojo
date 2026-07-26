@@ -1,15 +1,10 @@
 """Bounded source-only assertions that preserve TestSuite failure semantics."""
 
-from std.reflection import SourceLocation, call_location
-
-from mtest.assertions._display import (
-    BODY_BYTE_CAP,
-    BoundedWriter,
-    write_opaque_detail,
-)
-from mtest.assertions._text import write_text_detail
-from mtest.assertions._sequence import write_list_difference
-from mtest.assertions._mapping import write_dictionary_difference
+import mtest.assertions._display as _display
+import mtest.assertions._mapping as _mapping
+import mtest.assertions._sequence as _sequence
+import mtest.assertions._text as _text
+import std.reflection as _reflection
 
 
 @always_inline
@@ -18,7 +13,7 @@ def assert_equal(
     expected: String,
     msg: String = "",
     *,
-    location: Optional[SourceLocation] = None,
+    location: Optional[_reflection.SourceLocation] = None,
 ) raises:
     """Assert exact string equality with bounded first-difference context.
 
@@ -33,15 +28,12 @@ def assert_equal(
     """
     if actual == expected:
         return
-    var output = BoundedWriter(BODY_BYTE_CAP)
-    write_text_detail(output, actual, expected)
-    if msg:
-        output.write_trusted("\n  reason: ")
-        output.write(msg)
-    var detail = output.finish()
+    var output = _display.BoundedWriter(_display.detail_byte_cap(msg != ""))
+    _text.write_text_detail(output, actual, expected)
+    var detail = _display.finish_detail(output.finish(), msg)
     if location:
         raise Error(location.value().prefix(detail))
-    raise Error(call_location().prefix(detail))
+    raise Error(_reflection.call_location().prefix(detail))
 
 
 @always_inline
@@ -52,9 +44,12 @@ def assert_equal[
     expected: List[T],
     msg: String = "",
     *,
-    location: Optional[SourceLocation] = None,
+    location: Optional[_reflection.SourceLocation] = None,
 ) raises:
     """Assert exact list equality with bounded top-level structural details.
+
+    Parameters:
+        T: Copyable, equatable, writable list element type.
 
     Args:
         actual: Observed list.
@@ -65,16 +60,13 @@ def assert_equal[
     Raises:
         Error: If the lists compare unequal.
     """
-    var output = BoundedWriter(BODY_BYTE_CAP)
-    if write_list_difference(output, actual, expected):
+    var output = _display.BoundedWriter(_display.detail_byte_cap(msg != ""))
+    if _sequence.write_list_difference(output, actual, expected):
         return
-    if msg:
-        output.write_trusted("\n  reason: ")
-        output.write(msg)
-    var detail = output.finish()
+    var detail = _display.finish_detail(output.finish(), msg)
     if location:
         raise Error(location.value().prefix(detail))
-    raise Error(call_location().prefix(detail))
+    raise Error(_reflection.call_location().prefix(detail))
 
 
 @always_inline
@@ -85,9 +77,12 @@ def assert_equal[
     expected: Dict[String, V],
     msg: String = "",
     *,
-    location: Optional[SourceLocation] = None,
+    location: Optional[_reflection.SourceLocation] = None,
 ) raises:
     """Assert exact dictionary equality with deterministic bounded categories.
+
+    Parameters:
+        V: Copyable, equatable, writable dictionary value type.
 
     Args:
         actual: Observed String-key dictionary.
@@ -98,16 +93,13 @@ def assert_equal[
     Raises:
         Error: If the dictionaries compare unequal.
     """
-    var output = BoundedWriter(BODY_BYTE_CAP)
-    if write_dictionary_difference(output, actual, expected):
+    var output = _display.BoundedWriter(_display.detail_byte_cap(msg != ""))
+    if _mapping.write_dictionary_difference(output, actual, expected):
         return
-    if msg:
-        output.write_trusted("\n  reason: ")
-        output.write(msg)
-    var detail = output.finish()
+    var detail = _display.finish_detail(output.finish(), msg)
     if location:
         raise Error(location.value().prefix(detail))
-    raise Error(call_location().prefix(detail))
+    raise Error(_reflection.call_location().prefix(detail))
 
 
 @always_inline
@@ -118,9 +110,13 @@ def assert_equal[
     expected: T,
     msg: String = "",
     *,
-    location: Optional[SourceLocation] = None,
+    location: Optional[_reflection.SourceLocation] = None,
 ) raises:
     """Assert exact equality with a bounded opaque mismatch diagnostic.
+
+    Parameters:
+        T: Equatable and writable operand type.
+        _fallback: Internal overload-ranking parameter.
 
     Args:
         actual: Observed value.
@@ -133,12 +129,9 @@ def assert_equal[
     """
     if actual == expected:
         return
-    var output = BoundedWriter(BODY_BYTE_CAP)
-    write_opaque_detail(output, actual, expected)
-    if msg:
-        output.write_trusted("\n  reason: ")
-        output.write(msg)
-    var detail = output.finish()
+    var output = _display.BoundedWriter(_display.detail_byte_cap(msg != ""))
+    _display.write_opaque_detail(output, actual, expected)
+    var detail = _display.finish_detail(output.finish(), msg)
     if location:
         raise Error(location.value().prefix(detail))
-    raise Error(call_location().prefix(detail))
+    raise Error(_reflection.call_location().prefix(detail))

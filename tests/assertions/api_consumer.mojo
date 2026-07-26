@@ -1,6 +1,6 @@
 """Passing consumer coverage for the public assertion companion API."""
 
-from std.memory import UnsafePointer, alloc, memset_zero
+from std.memory import UnsafePointer, alloc
 from std.reflection import source_location
 import std.testing as testing
 from std.testing import TestSuite
@@ -15,10 +15,51 @@ from mtest.assertions._display import (
 
 def _counter() -> UnsafePointer[Int, MutUntrackedOrigin]:
     # SAFETY: this function returns one uniquely owned, correctly aligned Int
-    # cell; memset initializes every byte before any test reads the counter.
+    # cell. Index zero is within that one-Int allocation, and assigning an Int
+    # initializes its complete target-specific representation before any read.
     var pointer = alloc[Int](1)
-    memset_zero(pointer.bitcast[UInt8](), 8)
+    # SAFETY: `pointer` owns one aligned Int; index zero is in bounds, and the
+    # assignment fully initializes it without exposing or retaining the pointer.
+    pointer[0] = 0
     return pointer
+
+
+struct CounterOwner(Movable):
+    """Own the four counters shared by one equality/rendering probe."""
+
+    var actual_equality: UnsafePointer[Int, MutUntrackedOrigin]
+    var expected_equality: UnsafePointer[Int, MutUntrackedOrigin]
+    var actual_render: UnsafePointer[Int, MutUntrackedOrigin]
+    var expected_render: UnsafePointer[Int, MutUntrackedOrigin]
+
+    def __init__(out self):
+        """Allocate four initialized counter cells."""
+        self.actual_equality = _counter()
+        self.expected_equality = _counter()
+        self.actual_render = _counter()
+        self.expected_render = _counter()
+
+    def __del__(deinit self):
+        """Free each uniquely owned counter exactly once."""
+        # SAFETY: this owner holds four distinct one-Int allocations, test
+        # values only borrow their addresses, and destruction runs after those
+        # values on success or exception without any earlier free.
+        self.actual_equality.free()
+        self.expected_equality.free()
+        self.actual_render.free()
+        self.expected_render.free()
+
+    def read(self, slot: Int) -> Int:
+        """Read one of the four live cells by its test-only slot number."""
+        # SAFETY: this owner keeps four distinct one-Int allocations live;
+        # every branch reads index zero in one allocation without escaping it.
+        if slot == 0:
+            return self.actual_equality[0]
+        if slot == 1:
+            return self.expected_equality[0]
+        if slot == 2:
+            return self.actual_render[0]
+        return self.expected_render[0]
 
 
 @fieldwise_init
@@ -31,6 +72,8 @@ struct ObservedValue(Copyable, Equatable, Writable):
     var render_calls: UnsafePointer[Int, MutUntrackedOrigin]
 
     def __eq__(self, other: Self) -> Bool:
+        # SAFETY: tests construct this value only with a live CounterOwner cell
+        # that outlives every ObservedValue; index zero is within the allocation.
         self.equality_calls[0] += 1
         return self.identity == other.identity
 
@@ -38,6 +81,8 @@ struct ObservedValue(Copyable, Equatable, Writable):
         return not (self == other)
 
     def write_to(self, mut writer: Some[Writer]):
+        # SAFETY: tests construct this value only with a live CounterOwner cell
+        # that outlives every ObservedValue; index zero is within the allocation.
         self.render_calls[0] += 1
         writer.write(self.label)
 
@@ -52,6 +97,23 @@ struct ManyWritesProbe(Writable):
     def write_to(self, mut writer: Some[Writer]):
         for _ in range(self.writes):
             writer.write(self.chunk)
+
+
+@fieldwise_init
+struct RenderIdentity(Equatable, Writable):
+    """Value whose equality identity is independent from its rendered label."""
+
+    var identity: Int
+    var label: String
+
+    def __eq__(self, other: Self) -> Bool:
+        return self.identity == other.identity
+
+    def __ne__(self, other: Self) -> Bool:
+        return not (self == other)
+
+    def write_to(self, mut writer: Some[Writer]):
+        writer.write(self.label)
 
 
 def _repeated(piece: String, count: Int) -> String:
@@ -192,6 +254,29 @@ def test_opaque_render_caps_apply_after_escaping() raises:
     testing.assert_equal(controls, "\\n\\u202e")
 
 
+def test_identical_opaque_projections_report_whether_they_were_truncated() raises:
+    var exact = String("")
+    try:
+        assert_equal(RenderIdentity(1, "same"), RenderIdentity(2, "same"))
+    except error:
+        exact = String(error)
+    testing.assert_true("compare unequal but render identically" in exact)
+
+    var shared = _repeated("p", 2048)
+    var truncated = String("")
+    try:
+        assert_equal(
+            RenderIdentity(1, shared + "actual"),
+            RenderIdentity(2, shared + "expected"),
+        )
+    except error:
+        truncated = String(error)
+    testing.assert_false("compare unequal but render identically" in truncated)
+    testing.assert_true(
+        "projections are identical up to the 1024-byte display cap" in truncated
+    )
+
+
 def test_many_small_formatter_writes_and_body_are_bounded() raises:
     var rendered = render_value(ManyWritesProbe(32_768, "abcdefgh"))
     testing.assert_equal(rendered.byte_length(), VALUE_BYTE_CAP)
@@ -203,6 +288,19 @@ def test_many_small_formatter_writes_and_body_are_bounded() raises:
         detail = String(error)
     testing.assert_true(detail.byte_length() <= BODY_BYTE_CAP + 512)
     testing.assert_true(detail.endswith("... [truncated]"))
+
+    var actual = List[String]()
+    var expected = List[String]()
+    for index in range(10):
+        actual.append(_repeated("a", 4096) + String(index))
+        expected.append(_repeated("b", 4096) + String(index))
+    var structural = _list_failure(
+        actual,
+        expected,
+        "USER REASON SURVIVES",
+    )
+    testing.assert_true(structural.byte_length() <= BODY_BYTE_CAP + 512)
+    testing.assert_true(structural.endswith("USER REASON SURVIVES"))
 
 
 def test_text_first_difference_at_start_middle_end_and_ending() raises:
@@ -236,6 +334,62 @@ def test_text_scalar_labels_expose_invisible_differences() raises:
         "U+200B ZERO WIDTH SPACE (category Cf)"
         in _text_failure("a\u200bb", "ab")
     )
+    testing.assert_true(
+        "U+0085 CONTROL (category Cc)" in _text_failure("a\u0085b", "ab")
+    )
+    testing.assert_true(
+        "U+00AD FORMAT CONTROL (category Cf)" in _text_failure("a\u00adb", "ab")
+    )
+    testing.assert_true(
+        "U+FE0F VARIATION SELECTOR (category Mn)"
+        in _text_failure("a\uFE0Fb", "ab")
+    )
+    testing.assert_true(
+        "U+E0041 TAG CHARACTER (category Cf)"
+        in _text_failure("a\U000E0041b", "ab")
+    )
+    testing.assert_false("U+000E0041" in _text_failure("a\U000E0041b", "ab"))
+
+
+def test_invisible_scalars_are_escaped_in_structural_values() raises:
+    var detail = _list_failure(
+        [
+            "a\u0085b",
+            "a\u00adb",
+            "a\uFE0Fb",
+            "a\U000E0041b",
+            "e\u0301",
+            "a\u180Eb",
+            "a\u009Bb",
+            "a\u061Cb",
+        ],
+        ["ab", "ab", "ab", "ab", "e", "ab", "ab", "ab"],
+    )
+    testing.assert_true(
+        "actual: [a\\x85b, a\\xadb, a\\ufe0fb, a\\U000e0041b, "
+        + "e\\u0301, a\\u180eb, a\\x9bb, a\\u061cb]"
+        in detail
+    )
+    testing.assert_true("expected: [ab, ab, ab, ab, e, ab, ab, ab]" in detail)
+    var additional = _list_failure(
+        [
+            "a\u05B0b",
+            "a\u064Bb",
+            "a\u0488b",
+            "a\u093Cb",
+            "a\u17B4b",
+            "a\u3164b",
+            "a\u2800b",
+        ],
+        ["ab", "ab", "ab", "ab", "ab", "ab", "ab"],
+    )
+    testing.assert_true("a\\u05b0b" in additional)
+    testing.assert_true("a\\u064bb" in additional)
+    testing.assert_true("a\\u0488b" in additional)
+    testing.assert_true("a\\u093cb" in additional)
+    testing.assert_true("a\\u17b4b" in additional)
+    testing.assert_true("a\\u3164b" in additional)
+    testing.assert_true("a\\u2800b" in additional)
 
 
 def test_text_line_endings_and_final_newline_are_explicit() raises:
@@ -267,12 +421,18 @@ def test_text_context_has_two_lines_each_side_and_safe_prefixes() raises:
 
 def test_large_text_context_is_bounded_and_message_is_last() raises:
     var common = _repeated("a", 256 * 1024)
-    var detail = _text_failure(common + "X", common + "Y", "final reason")
+    var detail = _text_failure(
+        common + "LEFT-tail",
+        common + "RIGHT-tail",
+        "final reason",
+    )
     testing.assert_true(detail.byte_length() <= 4096 + 256)
     testing.assert_true("text differs at scalar 262144" in detail)
-    testing.assert_true(
-        detail.endswith("... [truncated]") or detail.endswith("final reason")
-    )
+    testing.assert_true("LEFT-tail" in detail)
+    testing.assert_true("RIGHT-tail" in detail)
+    testing.assert_true("actual line 1:" in detail)
+    testing.assert_true("expected line 1:" in detail)
+    testing.assert_true(detail.endswith("final reason"))
 
 
 def test_list_replacement_and_insertions_are_clear_spans() raises:
@@ -297,10 +457,11 @@ def test_list_replacement_and_insertions_are_clear_spans() raises:
 
 def test_list_changed_content_and_lengths_have_exact_facts() raises:
     var detail = _list_failure([0, 8, 2, 7, 4, 6], [0, 1, 2, 3, 4])
-    testing.assert_true("list mismatches: 3 total, 0 omitted" in detail)
-    testing.assert_true("[1] 8 != 1" in detail)
-    testing.assert_true("[3] 7 != 3" in detail)
-    testing.assert_true("[5] unexpected 6" in detail)
+    testing.assert_true(
+        "list span at index 1: actual 5 item(s), expected 4 item(s)" in detail
+    )
+    testing.assert_true("actual: [8, 2, 7, 4, 6]" in detail)
+    testing.assert_true("expected: [1, 2, 3, 4]" in detail)
 
 
 def test_list_displays_eight_mismatches_and_counts_omitted_first() raises:
@@ -313,6 +474,17 @@ def test_list_displays_eight_mismatches_and_counts_omitted_first() raises:
     testing.assert_true("[0] 100 != 0" in detail)
     testing.assert_true("[14] 114 != 14" in detail)
     testing.assert_false("[16]" in detail)
+
+
+def test_list_values_are_individually_bounded_before_body_assembly() raises:
+    var detail = _list_failure(
+        [_repeated("a", 32 * 1024), "tail-actual"],
+        [_repeated("b", 32 * 1024), "tail-expected"],
+        "list reason",
+    )
+    testing.assert_true("... [truncated], tail-actual]" in detail)
+    testing.assert_true("... [truncated], tail-expected]" in detail)
+    testing.assert_true(detail.endswith("list reason"))
 
 
 def test_nested_lists_are_opaque_and_user_message_is_last() raises:
@@ -372,6 +544,43 @@ def test_list_specializer_renders_zero_on_pass_and_eight_on_failure() raises:
     expected_render.free()
 
 
+def test_unequal_list_suffix_does_not_repeat_the_aligned_scan() raises:
+    var counters = CounterOwner()
+    var actual = List[ObservedValue]()
+    var expected = List[ObservedValue]()
+    actual.append(
+        ObservedValue(
+            -1,
+            "inserted",
+            counters.actual_equality.copy(),
+            counters.actual_render.copy(),
+        )
+    )
+    for index in range(10):
+        actual.append(
+            ObservedValue(
+                index,
+                "actual-" + String(index),
+                counters.actual_equality.copy(),
+                counters.actual_render.copy(),
+            )
+        )
+        expected.append(
+            ObservedValue(
+                index,
+                "expected-" + String(index),
+                counters.expected_equality.copy(),
+                counters.expected_render.copy(),
+            )
+        )
+    var detail = _list_failure(actual, expected)
+    testing.assert_true(
+        "list span at index 0: actual 1 item(s), expected 0 item(s)" in detail
+    )
+    testing.assert_equal(counters.read(0), 11)
+    testing.assert_equal(counters.read(1), 0)
+
+
 def test_dictionary_categories_are_distinct_and_ordered() raises:
     var actual = {"unexpected": 1, "changed": 1}
     var expected = {"missing": 1, "changed": 2}
@@ -416,6 +625,21 @@ def test_dictionary_displays_eight_per_category_with_totals_first() raises:
     )
 
 
+def test_dictionary_values_are_individually_bounded_before_assembly() raises:
+    var actual = {
+        "first": _repeated("a", 32 * 1024),
+        "second": "tail-actual",
+    }
+    var expected = {
+        "first": _repeated("b", 32 * 1024),
+        "second": "tail-expected",
+    }
+    var detail = _dictionary_failure(actual, expected, "dictionary reason")
+    testing.assert_true("... [truncated] != " in detail)
+    testing.assert_true("second: tail-actual != tail-expected" in detail)
+    testing.assert_true(detail.endswith("dictionary reason"))
+
+
 def test_dictionary_key_cap_boundary_and_opaque_fallback() raises:
     var boundary = _repeated("q", 1024)
     var within = Dict[String, Int]()
@@ -429,6 +653,34 @@ def test_dictionary_key_cap_boundary_and_opaque_fallback() raises:
     var opaque = _dictionary_failure(over, empty)
     testing.assert_true("structural key exceeds 1024 bytes" in opaque)
     testing.assert_false(boundary in opaque)
+
+
+def test_opaque_dictionary_projection_reports_truncation_truthfully() raises:
+    var key = _repeated("k", 1025)
+    var actual = Dict[String, Int]()
+    var expected = Dict[String, Int]()
+    _put(actual, key, 1)
+    _put(expected, key, 2)
+    var detail = _dictionary_failure(actual, expected)
+    testing.assert_false("compare unequal but render identically" in detail)
+    testing.assert_true("deterministic value detail omitted" in detail)
+
+
+def test_opaque_dictionary_fallback_is_insertion_order_independent() raises:
+    var key = _repeated("k", 1025)
+    var actual_a = Dict[String, Int]()
+    var actual_b = Dict[String, Int]()
+    var expected = Dict[String, Int]()
+    _put(actual_a, key, 1)
+    _put(actual_a, "short", 2)
+    _put(actual_b, "short", 2)
+    _put(actual_b, key, 1)
+    _put(expected, key, 3)
+    _put(expected, "short", 4)
+    testing.assert_equal(
+        _dictionary_failure(actual_a, expected),
+        _dictionary_failure(actual_b, expected),
+    )
 
 
 def test_equal_dictionary_with_oversized_key_returns_without_rendering() raises:

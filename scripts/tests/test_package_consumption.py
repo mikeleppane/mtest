@@ -866,7 +866,7 @@ class AssertionPackageLayoutTests(unittest.TestCase):
         )
         return prefix
 
-    def test_accepts_exact_files_modes_and_toolchain_provenance(self) -> None:
+    def test_tarball_accepts_installer_normalized_group_write(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
             prefix = self._valid_prefix(Path(raw))
             source = (
@@ -881,7 +881,54 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             (
                 prefix / "share" / "mtest" / "assertions-src" / "mtest" / "assertions"
             ).chmod(0o775)
-            package_consumption.validate_assertion_install(prefix)
+            package_consumption.validate_assertion_install(
+                prefix,
+                allow_installer_group_write=True,
+            )
+
+    def test_primary_package_rejects_group_writable_source(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            source = (
+                prefix
+                / "share"
+                / "mtest"
+                / "assertions-src"
+                / "mtest"
+                / "__init__.mojo"
+            )
+            source.chmod(0o664)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "exact mode 644",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_private_probe_diagnostics_require_semantic_rejections(self) -> None:
+        with self.assertRaisesRegex(
+            package_consumption.PackageCheckError,
+            "wrong reason",
+        ):
+            package_consumption.require_missing_facade_export(
+                "unable to locate module 'mtest'\n"
+                "from mtest.assertions import BoundedWriter\n",
+                "BoundedWriter",
+            )
+        package_consumption.require_missing_facade_export(
+            "package 'assertions' does not contain 'BoundedWriter'",
+            "BoundedWriter",
+        )
+        with self.assertRaisesRegex(
+            package_consumption.PackageCheckError,
+            "wrong reason",
+        ):
+            package_consumption.require_missing_runner_module(
+                "unable to locate module 'mtest'\n"
+                "from mtest.session import run_session\n"
+            )
+        package_consumption.require_missing_runner_module(
+            "error: unable to locate module 'session'"
+        )
 
     def test_rejects_an_extra_public_mojopkg(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
@@ -908,7 +955,7 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             source.chmod(0o666)
             with self.assertRaisesRegex(
                 package_consumption.PackageCheckError,
-                "installer-normalized 664",
+                "exact mode 644",
             ):
                 package_consumption.validate_assertion_install(prefix)
 
@@ -926,7 +973,7 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             source.chmod(0o744)
             with self.assertRaisesRegex(
                 package_consumption.PackageCheckError,
-                "installer-normalized 664",
+                "exact mode 644",
             ):
                 package_consumption.validate_assertion_install(prefix)
 

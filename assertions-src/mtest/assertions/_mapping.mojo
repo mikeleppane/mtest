@@ -99,9 +99,9 @@ def _write_changed[
         output.write_trusted("\n    ")
         output.write(key)
         output.write_trusted(": ")
-        output.write(actual[key])
+        output.write_trusted(render_value(actual[key]))
         output.write_trusted(" != ")
-        output.write(expected[key])
+        output.write_trusted(render_value(expected[key]))
 
 
 def _write_opaque_dictionary_detail[
@@ -111,21 +111,15 @@ def _write_opaque_dictionary_detail[
     actual: Dict[String, V],
     expected: Dict[String, V],
 ):
-    var actual_text = render_value(actual)
-    var expected_text = render_value(expected)
     output.write_trusted(
         "dictionary differs; structural key exceeds "
         + String(DICTIONARY_KEY_BYTE_CAP)
-        + " bytes; values shown opaquely"
+        + " bytes; deterministic value detail omitted"
+        + "\n  actual entries: "
+        + String(len(actual))
+        + "\n  expected entries: "
+        + String(len(expected))
     )
-    if actual_text == expected_text:
-        output.write_trusted(
-            "\n  values compare unequal but render identically"
-        )
-    output.write_trusted("\n  actual: ")
-    output.write_trusted(actual_text)
-    output.write_trusted("\n  expected: ")
-    output.write_trusted(expected_text)
 
 
 def write_dictionary_difference[
