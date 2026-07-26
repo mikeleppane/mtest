@@ -15,11 +15,14 @@ mtest owns everything between files: recursive discovery, building each file,
 executing and supervising it as a subprocess, aggregating results, and
 reporting for CI.
 
-Non-goals: not an assertion library, not a property-testing framework, not a
-TestSuite replacement. Zero runtime dependencies: product logic under `src/` is
-pure Mojo; the exec-private POSIX adapter under `native/` is compiled and
-statically linked at build time; Python appears only in build-time tooling under
-`scripts/` and test-only subprocess actors under `tests/fixtures/exec/`.
+Non-goals: not a property-testing framework and not a TestSuite replacement.
+The optional source-only `mtest.assertions` companion improves failure detail;
+it still raises ordinary errors inside TestSuite and owns no discovery, report
+framing, or runner outcome. Zero runtime dependencies: runner logic under
+`src/` and companion logic under `assertions-src/` are pure Mojo; the
+exec-private POSIX adapter under `native/` is compiled and statically linked at
+build time; Python appears only in build-time tooling under `scripts/` and
+test-only subprocess actors under `tests/fixtures/exec/`.
 
 ## Product principles
 
@@ -194,6 +197,7 @@ pixi run readme-help-check # compare README help with the real binary
 pixi run junit-render-check  # validate bytes emitted by the real JUnit reporter
 pixi run transcripts-check # regenerate to a temp dir and diff byte-for-byte
 pixi run test              # compile the classified inventory into one direct-run binary
+pixi run assertions-check  # direct-run public assertion consumers at O0 and O3
 pixi run dogfood-check     # run three focused probes through the built mtest binary
 pixi run e2e               # exact CLI exits and output against e2e/manifest.json
 pixi run ci-memory         # Linux: both memory lanes, ASan/LSan then Memcheck
@@ -210,7 +214,8 @@ safety-check -> postfork-check -> native-check -> junit-check -> build ->
 readme-help-check -> junit-render-check -> transcripts-check` in that exact
 fail-fast order; the
 canonical local `pixi run ci` is serial: `ci-preflight ->
-test -> dogfood-check -> e2e -> contract-check-strict -> ci-memory`.
+test -> assertions-check -> dogfood-check -> e2e -> contract-check-strict ->
+ci-memory`.
 
 `py-check` is the one floor member whose tools are NOT in the pixi environment.
 ruff and mypy run through `uvx` at versions pinned exactly in
@@ -238,9 +243,10 @@ each lane its own matrix cell, and `scripts/checks/ci_topology.py` pins both
 views plus the linux-64 task closure, so a lane cannot quietly leave either
 one. Hosted CI runs the
 same logical floor as two platform-local chains: Linux preflight releases
-fail-fast `test`, `dogfood-check`, `e2e`, strict contract, ASan, and Valgrind
-cells; macOS preflight releases `test`, `dogfood-check`, `e2e`, and strict
-contract cells with `fail-fast: false`. The strict contract cell runs
+fail-fast `test`, `assertions-check`, `dogfood-check`, `e2e`, strict contract,
+ASan, and Valgrind cells; macOS preflight releases `test`,
+`assertions-check`, `dogfood-check`, `e2e`, and strict contract cells with
+`fail-fast: false`. The strict contract cell runs
 `contract-check-strict` (`python -m scripts.qa.contract --strict --no-rebuild`)
 against the binary that job's own `build-bin` dependency just produced in that
 fresh checkout — every documented exit, stream, and environment behavior in
@@ -251,10 +257,11 @@ check; memory safety runs on every pull request and configured main-branch
 push, not on a schedule. Transcripts and ASan/Valgrind remain Linux-only;
 packaged-artifact consumption is blocking on both linux-64 and osx-arm64, one
 job per platform, both running `pixi run package-check`. The matrix lane
-display names `direct tests` and `self-hosted tests`, and the package job
-display name `Linux / packaged artifact`, are externally configured required
-check names and must stay stable. `native-check` depends on `postfork-check`, so the native
-gate alone cannot skip the child call-graph audit.
+display names `direct tests`, `assertions`, and `self-hosted tests`, and the
+package job display name `Linux / packaged artifact`, are externally
+configured required check names and must stay stable. `native-check` depends
+on `postfork-check`, so the native gate alone cannot skip the child call-graph
+audit.
 
 The whole local floor compiles for the host target only, so it is blind to a
 macOS-only compile failure: a `comptime` branch, `external_call` signature, or
@@ -351,6 +358,7 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `exec` | `src/mtest/exec` (the POSIX process adapter) |
 | `session` | `src/mtest/session` (orchestration) |
 | `report` | `src/mtest/report` (event consumers, reporters) |
+| `assertions` | source-only companion under `assertions-src/mtest/assertions` |
 | `cli` | `src/mtest/cli` (arg parsing, main) |
 | `cache` | in-session build/collection reuse |
 | `test` | test infrastructure (`scripts/harness/{classified,dogfood}.py`, `scripts/build/mojo_package.sh`, shared helpers) |

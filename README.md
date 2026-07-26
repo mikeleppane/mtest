@@ -1029,10 +1029,11 @@ The tasks:
 | `pixi run build-bin` | link the runnable binary at `build/mtest` |
 | `pixi run test` | compile every classified unit and integration module into one aggregate binary and execute it directly |
 | `pixi run test-file -- PATH` | the same, focused on one module |
+| `pixi run assertions-check` | compile and directly execute the source-only assertion consumers at `-O0` and `-O3` |
 | `pixi run dogfood-check` | run three focused probes through the built `mtest` binary itself |
 | `pixi run e2e` | drive `build/mtest` against the committed known-outcome tree under `e2e/` and assert exact exit codes and output structure |
 | `pixi run transcripts-check` | regenerate the `TestSuite` protocol snapshots to a temp dir and diff byte-for-byte |
-| `pixi run ci` | the canonical serial floor: preflight checks, then `test`, `dogfood-check`, `e2e`, the strict contract, and the memory lanes |
+| `pixi run ci` | the canonical serial floor: preflight checks, then `test`, `assertions-check`, `dogfood-check`, `e2e`, the strict contract, and the memory lanes |
 | `pixi run asan-check` | Linux: build and run the highest-risk exec suites under ASan/LSan |
 | `pixi run valgrind-check` | Linux: run the exec/native coverage under Memcheck |
 | `pixi run ci-memory` | Linux: both memory lanes together, the way `ci` runs them |
@@ -1044,9 +1045,9 @@ JUnit oracle, build, rendered-JUnit, and transcript checks) and closes with
 it. On Linux that is ASan/LSan then Memcheck, roughly four minutes together;
 elsewhere it reports the two lanes as uncovered and names the Linux cells that
 own them. Hosted CI runs
-the behavioral floor (`test`, `dogfood-check`, `e2e`) as parallel cells on
-both Linux and macOS; the full preflight chain and the memory-safety cells
-run on Linux, on every pull request.
+the behavioral floor (`test`, `assertions-check`, `dogfood-check`, `e2e`) as
+parallel cells on both Linux and macOS; the full preflight chain and the
+memory-safety cells run on Linux, on every pull request.
 
 Three properties of the test setup are worth knowing up front:
 
@@ -1065,11 +1066,10 @@ Three properties of the test setup are worth knowing up front:
 
 ## Non-goals
 
-- **An assertion library.** Assertions come from `std.testing`
-  (`assert_equal`, `assert_raises`, and friends); property testing likewise
-  belongs upstream.
 - **A TestSuite replacement.** mtest orchestrates the standard library's
-  harness and depends on its per-file protocol.
+  harness and depends on its per-file protocol. Its optional source-only
+  `assert_equal` companion only improves mismatch detail; it still reports an
+  ordinary TestSuite failure. Property testing belongs upstream.
 - **Third-party runtime dependencies.** mtest has none. Product logic is pure
   Mojo plus one statically linked C adapter and the pinned native TOML parser
   compiled into the shipped binary.
