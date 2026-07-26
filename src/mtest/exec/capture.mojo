@@ -4,11 +4,12 @@ A supervised child can emit unbounded output, so capture is bounded in memory:
 the first `head_cap` bytes and the last `tail_cap` bytes are always kept. Under
 the bound (total <= head_cap + tail_cap) capture is byte-exact; nothing is lost
 or reordered. Over the bound, the middle is dropped and a single-line marker is
-spliced between the head and the surviving tail, naming how many bytes were
-omitted.
+spliced between the head and the surviving tail. The marker names how many bytes
+were omitted.
 
-The tail is retained deliberately: a later report parser anchors on the last
-report block, so the end of the stream must never be the part that is dropped.
+Keeping the tail rather than only the head is deliberate: a later report parser
+anchors on the last report block, so the end of the stream must never be the
+part that is dropped.
 """
 
 
@@ -18,6 +19,17 @@ struct BoundedCapture(Movable):
     Bytes flow in through `push_byte`; `finish` materializes the retained bytes.
     Owns two backing lists: the head buffer and a tail ring. Construction
     validates the capacities before creating those lists, and can raise.
+
+    Examples:
+
+    ```mojo
+    from mtest.exec.capture import BoundedCapture
+
+    var capture = BoundedCapture(100, 100)
+    capture.push_byte(UInt8(ord("x")))
+    var kept = capture.finish()
+    var lost_middle = capture.was_truncated()
+    ```
     """
 
     var head: List[UInt8]

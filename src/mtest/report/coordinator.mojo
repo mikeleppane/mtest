@@ -8,11 +8,14 @@ coordinator owns its reporter set and exposes those interactions by NAME, so the
 session depends on this interface rather than on a concrete reporter type or a
 fixed position in a composition tuple.
 
-Two coordinators conform. `StandardReportCoordinator` is the production set —
-console, machine stream, JUnit, annotations — and `RecordingCoordinator` swaps
-the console for an arbitrary comptime pack of reporters, which is what the
-session's own drivers compose. `CompositeReporter` remains the general fan-out
-mechanism and does the pack's dispatch inside the recording coordinator.
+Two coordinators conform. `StandardReportCoordinator` is the production set
+(console, machine stream, JUnit, annotations). `RecordingCoordinator` swaps the
+console for an arbitrary comptime pack of reporters, which is what the session's
+own drivers compose. `CompositeReporter` remains the general fan-out mechanism
+and does the pack's dispatch inside the recording coordinator.
+
+Because every caller reaches the layer through these named methods, adding a
+reporter stays a local change inside a coordinator.
 """
 from mtest.config import StateDelta
 from mtest.model import (
@@ -36,9 +39,22 @@ trait ReportCoordinator:
 
     Every operation the session or `main` needs beyond the event stream appears
     here as a named method. A coordinator that composes no reporter for a given
-    channel answers inertly — an absent machine stream never latches, an absent
-    JUnit reporter finalizes successfully, an absent annotations reporter
-    renders an empty tail — so a caller never branches on what is composed.
+    channel answers inertly: an absent machine stream never latches, an absent
+    JUnit reporter finalizes successfully, and an absent annotations reporter
+    renders an empty tail. A caller therefore never branches on what is
+    composed.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import Event
+    from mtest.report import ReportCoordinator
+
+    def drive[C: ReportCoordinator](mut c: C, events: List[Event]) -> Bool:
+        for ref e in events:
+            c.handle(e)
+        return c.stream_failed()
+    ```
     """
 
     def handle(mut self, e: Event):
@@ -200,8 +216,31 @@ struct StandardReportCoordinator(ReportCoordinator):
     """The production reporter set: console, machine stream, JUnit, annotations.
 
     Owns all four reporters by name. Each is independently inert when its
-    feature is off — no `--json`, no `--junit-xml`, annotations resolved off —
-    so the set is fixed and the composition carries no positional convention.
+    feature is off (no `--json`, no `--junit-xml`, annotations resolved off), so
+    the set is fixed and the composition carries no positional convention.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import ColorWhen, ShowOutput, Verbosity
+    from mtest.model import Event
+    from mtest.report import AnnotationsReporter
+    from mtest.report import ConsoleReporter
+    from mtest.report import StandardReportCoordinator
+    from mtest.report import JsonStreamReporter
+    from mtest.report import JunitReporter
+
+    var console = ConsoleReporter(
+        "0.6.0", ColorWhen.NEVER, False, False, Verbosity.NORMAL,
+        ShowOutput.FAILURES, "", 0,
+    )
+    var coord = StandardReportCoordinator(
+        console^, JsonStreamReporter.inert(), JunitReporter.inert(),
+        AnnotationsReporter.inert(),
+    )
+    coord.handle(Event.file_started("tests/test_a.mojo"))
+    var rendered = coord.console_output()
+    ```
     """
 
     var console: ConsoleReporter
@@ -279,7 +318,12 @@ struct StandardReportCoordinator(ReportCoordinator):
         return self.console.output()
 
     def drain_console(mut self, closing: Bool) -> String:
-        """The console bytes not yet drained; delegates to the console."""
+        """The console bytes not yet drained; delegates to the console.
+
+        Args:
+            closing: Whether this is the terminal drain, which additionally
+                emits the sections and summary tail.
+        """
         return self.console.drain(closing)
 
     def progress_overlay(self) -> String:
@@ -291,7 +335,11 @@ struct StandardReportCoordinator(ReportCoordinator):
         return self.console.fence_token()
 
     def configure_state_gates(mut self, paths: List[String]):
-        """Name gate paths before verdict events begin."""
+        """Name gate paths before verdict events begin.
+
+        Args:
+            paths: The root-relative gate paths. Not mutated.
+        """
         self.state_tracker.configure_gates(paths)
 
     def state_delta(self) -> StateDelta:
@@ -306,11 +354,31 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
     composes a console, and pair them with whichever real lifecycle reporter the
     driver is exercising. The pack is dispatched by `CompositeReporter`, so a
     driver reads its recorders back through `composite.reporters[i]` at a
-    comptime index. The console channel has no reporter behind it and answers
-    with empty strings.
+    comptime index, bound to a typed reference rather than a bare `rebind`, so a
+    wrong index fails to compile instead of being undefined behavior. That reach
+    is legitimate only for a driver pulling its own recorder out of a pack it
+    composed; session-level reporter lifecycle goes through the named methods
+    above. The console channel has no reporter behind it and answers with empty
+    strings.
+
+    A function returning one spells the pack parameter bare, without the `*`, as
+    `RecordingCoordinator[RecordingReporter]`.
 
     Parameters:
         Rs: The reporter types composing the pack, in fan-out order.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import Event
+    from mtest.report import CompositeReporter
+    from mtest.report import RecordingCoordinator
+    from mtest.report import RecordingReporter
+
+    var coord = RecordingCoordinator(CompositeReporter(Tuple(RecordingReporter())))
+    coord.handle(Event.file_started("tests/test_a.mojo"))
+    var seen = coord.composite.reporters[0].count()  # 1
+    ```
     """
 
     var composite: CompositeReporter[*Self.Rs]
@@ -400,7 +468,12 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
         return String("")
 
     def drain_console(mut self, closing: Bool) -> String:
-        """Empty: no console reporter stands behind the pack."""
+        """Empty: no console reporter stands behind the pack.
+
+        Args:
+            closing: Accepted to satisfy the interface; the answer is empty
+                either way.
+        """
         return String("")
 
     def progress_overlay(self) -> String:
@@ -412,7 +485,11 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
         return String("")
 
     def configure_state_gates(mut self, paths: List[String]):
-        """Name gate paths before verdict events begin."""
+        """Name gate paths before verdict events begin.
+
+        Args:
+            paths: The root-relative gate paths. Not mutated.
+        """
         self.state_tracker.configure_gates(paths)
 
     def state_delta(self) -> StateDelta:

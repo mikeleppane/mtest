@@ -1,9 +1,9 @@
 """The process-identity probe: `process_id`.
 
 Part of the narrow platform-I/O boundary. `getpid(2)` has no standard-library
-wrapper at the pinned toolchain — `std.os` offers `getuid` but nothing that
-answers for the calling process — so it stays one raw foreign call, proven once
-here and reused, rather than redeclared in each module that wants it.
+wrapper at the pinned toolchain: `std.os` offers `getuid` but nothing that
+answers for the calling process. It stays one raw foreign call, proven once here
+and reused rather than redeclared in each module that wants it.
 
 Callers want it as a nonce. Two mtest processes over one checkout, which
 `--shard` makes plausible, must never collide on a disposable path one of them
@@ -19,6 +19,14 @@ def process_id() -> Int:
     Returns:
         The value of `getpid(2)`, always positive. Allocates nothing, mutates
         nothing, and cannot fail.
+
+    Examples:
+
+    ```mojo
+    from mtest.platform import process_id
+
+    var template = "build/report.xml.tmp." + String(process_id()) + ".XXXXXX"
+    ```
     """
     # SAFETY: libc `getpid` has the exact ABI `pid_t getpid(void)`, and `pid_t`
     # is a 32-bit signed integer on both supported targets (linux-64 and

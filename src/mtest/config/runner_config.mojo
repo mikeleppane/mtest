@@ -1,6 +1,6 @@
 """`RunnerConfig`: the typed home for every runner knob.
 
-`RunnerConfig` is data plus its contract defaults — no parsing, no environment
+`RunnerConfig` is data plus its contract defaults: no parsing, no environment
 or file reads, no printing. The cli layer folds its typed argv overlay over a
 default config; the session layer only reads the result. An empty `paths` list
 means "use discovery's own default root", not "nothing to do"; applying that
@@ -114,7 +114,7 @@ struct RunnerConfig(Copyable, Movable):
 
     var workers: Int
     """`-n N`: how many run files to build and execute concurrently. `1` (the
-    default) is the sequential path — one child at a time, argv byte-identical
+    default) is the sequential path: one child at a time, argv byte-identical
     to a single-worker run. A value above one drives the parallel pool. `0`
     means `auto`, resolved from the machine's core count; the CLI does not yet
     surface the flag, so every parsed config carries `1` until the flip lands."""
@@ -157,14 +157,14 @@ struct RunnerConfig(Copyable, Movable):
     def default() -> RunnerConfig:
         """A config with every field at its contract default.
 
-        The two deadlines are the only nonzero counts: `timeout_secs=300` and
-        `compile_timeout_secs=600`. Every other numeric field is `0` —
-        `maxfail`, `durations`, `retries`, `shard_m`, `shard_n` — which
-        disables that limit and leaves the run unsharded. Every list is empty,
-        `exitfirst`, `collect`, `last_failed`, and `failed_first` are False,
-        and `keyword`, `json_dest`, and `junit_dest` are `""`, so no keyword
-        filter, event stream, or JUnit report is configured. The rest are
-        `mojo_path="mojo"`,
+        The nonzero numeric defaults are the two deadlines, `timeout_secs=300`
+        and `compile_timeout_secs=600`, plus `workers=1` for the sequential
+        path. `maxfail`, `durations`, `retries`, `shard_m`, and `shard_n` are
+        all `0`, which disables each limit and leaves the run unsharded. Every
+        list is empty; `paths_supplied`, `exitfirst`, `collect`, `last_failed`,
+        and `failed_first` are False; and `keyword`, `json_dest`, and
+        `junit_dest` are `""`, so no keyword filter, event stream, or JUnit
+        report is configured. The rest are `mojo_path="mojo"`,
         `show_output=FAILURES`, `verbosity=NORMAL`, `color=AUTO`,
         `shard_mode=HASH`, and `gh_annotations=AUTO`.
 
@@ -172,6 +172,16 @@ struct RunnerConfig(Copyable, Movable):
             A freshly allocated config used as the lower-precedence input to
             `parse_args`'s overlay fold and as the placeholder a help or
             version `ParseResult` carries.
+
+        Examples:
+
+        ```mojo
+        from mtest.config import RunnerConfig, Verbosity
+
+        var config = RunnerConfig.default()
+        config.timeout_secs = 30
+        config.verbosity = Verbosity.VERBOSE
+        ```
         """
         return RunnerConfig(
             paths=[],

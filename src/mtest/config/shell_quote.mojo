@@ -27,6 +27,16 @@ def shell_quote(s: String) -> String:
 
     Returns:
         A shell-safe token.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import shell_quote
+
+    # Safe throughout, so this passes through unchanged.
+    var safe = shell_quote("tests/test_a.mojo")
+    var quoted = shell_quote("my dir")
+    ```
     """
     if s.byte_length() == 0:
         return "''"
@@ -60,6 +70,16 @@ def shell_join(tokens: List[String]) -> String:
 
     Returns:
         The shell-quoted, space-joined command line.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import shell_join
+
+    var tokens: List[String] = ["mojo", "build", "-I", "my dir"]
+    # "mojo build -I 'my dir'"
+    var line = shell_join(tokens)
+    ```
     """
     var out = String("")
     for i in range(len(tokens)):

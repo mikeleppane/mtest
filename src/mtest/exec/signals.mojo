@@ -64,6 +64,19 @@ struct ExecRuntime(Movable):
     `open()`, pass it by mutable borrow to child operations, then call `close()`
     explicitly. A second simultaneously active instance raises `EBUSY` through
     the native error record. Sequential open/use/close cycles are supported.
+
+    Examples:
+
+    ```mojo
+    from mtest.exec import ExecRuntime
+    from mtest.exec import ProcessSpec
+    from mtest.exec import run_supervised
+
+    var runtime = ExecRuntime()
+    runtime.open()
+    var result = run_supervised(runtime, ProcessSpec.command(["/bin/true"]))
+    runtime.close()
+    ```
     """
 
     var active: Bool

@@ -2,28 +2,28 @@
 
 Layer 4, beneath the pool driver. Every function here is pure: it reads its
 arguments, computes, and returns, touching no process, environment, or clock.
-The one impure read — the machine's logical core count — is fed in as a
-parameter so the resolver and the token budget are unit-pinnable against any
-core count without a real machine to stand on.
+The one impure read, the machine's logical core count, is fed in as a parameter
+so the resolver and the token budget are unit-pinnable against any core count
+without a real machine to stand on.
 
 Three decisions live here and nowhere else:
 
-- The `auto` worker count: `max(1, cores // 2)` — half the logical cores, never
+- The `auto` worker count: `max(1, cores // 2)`, half the logical cores, never
   below one. The sizing benchmark measured scaling that keeps paying well past a
-  handful of workers, so there is no small ceiling; taking half rather than the
-  whole machine is a politeness bound — it leaves cores for other work and holds
-  the peak output-capture memory to `cores // 2 * 16 MiB` — not a compile-
-  starvation limit.
+  handful of workers, so there is no small ceiling. Taking half rather than the
+  whole machine is a politeness bound, not a compile-starvation limit: it leaves
+  cores for other work and holds the peak output-capture memory to
+  `cores // 2 * 16 MiB`.
 - The clamp: the resolved count is the requested-or-auto count capped by the
-  effective descriptor ceiling the exec layer reports. A clamp is loud — it
-  names the ceiling — because a run that asked for more parallelism than the
-  machine can honor should say so.
+  effective descriptor ceiling the exec layer reports. A clamp is loud and names
+  the ceiling, because a run that asked for more parallelism than the machine
+  can honor should say so.
 - The build token budget: `K = max(1, cores // min(workers, cores))` threads per
   build, so concurrent builds never oversubscribe the cores. A build acquires
   `K` tokens against a `cores`-wide budget and spawns `mojo build` with
   `--num-threads K`; a run takes no tokens. At `workers == 1` the budget is
-  never consulted: the sequential path adds no `--num-threads` flag at all, so
-  its build argv stays byte-identical to a single-worker run.
+  never consulted: that path adds no `--num-threads` flag at all, so its build
+  argv stays byte-identical to the sequential driver's.
 
 The `--serial` partition also lives here as pure list arithmetic: which run
 files are pinned to the one-at-a-time serial pass and which stay in the parallel
@@ -58,9 +58,9 @@ struct WorkerPlan(Copyable, Movable):
         """The loud warning detail for a clamp, or empty when none applies.
 
         Returns:
-            A sentence naming the requested count, the cap, and that the file
-            descriptor ceiling is the limiting resource; empty when the plan
-            did not clamp.
+            A sentence naming the requested count and the cap, and saying that
+            the file-descriptor ceiling is what limits concurrency; empty when
+            the plan did not clamp.
         """
         if not self.clamped:
             return String("")
@@ -81,10 +81,10 @@ def resolve_auto_workers(cores: Int) -> Int:
 
     `max(1, cores // 2)`: half the logical cores, never below one. The sizing
     benchmark measured scaling that keeps paying past a handful of workers, so
-    the count is not capped at a small ceiling; taking half rather than all the
-    cores is a politeness bound — it leaves headroom for other work and holds the
-    peak output-capture memory to `cores // 2 * 16 MiB` — not a starvation limit.
-    Pure in `cores`, so it pins against any core count.
+    the count is not capped at a small ceiling. Taking half the cores rather
+    than all of them is a politeness bound, not a starvation limit: it leaves
+    headroom for other work and holds the peak output-capture memory to
+    `cores // 2 * 16 MiB`. Pure in `cores`, so it pins against any core count.
 
     Args:
         cores: The machine's logical core count.
@@ -112,6 +112,17 @@ def resolve_workers(requested: Int, cores: Int, cap: Int) -> WorkerPlan:
     Returns:
         The resolved plan, with `resolved` in `1 ..= cap` and `clamped` set when
         the cap lowered the requested-or-auto count.
+
+    Examples:
+
+    ```mojo
+    from mtest.session.pool_plan import resolve_workers
+
+    var plan = resolve_workers(0, 8, 64)
+    # plan.resolved == 4 (auto on 8 cores), plan.clamped == False
+    var capped = resolve_workers(8, 16, 4)
+    # capped.resolved == 4, capped.clamped == True, so limiting_note() speaks
+    ```
     """
     var want = resolve_auto_workers(cores) if requested <= 0 else requested
     if want < 1:
@@ -132,9 +143,9 @@ struct SerialPartition(Movable):
     """
 
     var parallel: List[String]
-    """Files matching no serial glob — the parallel batch, in input order."""
+    """Files matching no serial glob: the parallel batch, in input order."""
     var serial: List[String]
-    """Files matching at least one serial glob — the serial pass, in input
+    """Files matching at least one serial glob: the serial pass, in input
     order."""
 
 
@@ -155,6 +166,16 @@ def partition_serial(
 
     Returns:
         The parallel and serial sub-lists.
+
+    Examples:
+
+    ```mojo
+    from mtest.session.pool_plan import partition_serial
+
+    var files: List[String] = ["a/x.mojo", "b/y.mojo"]
+    var split = partition_serial(files, ["*y*"])
+    # split.parallel == ["a/x.mojo"], split.serial == ["b/y.mojo"]
+    ```
     """
     var parallel = List[String]()
     var serial = List[String]()
@@ -207,6 +228,16 @@ def stale_serials(files: List[String], globs: List[String]) -> List[String]:
 
     Returns:
         The subset of `globs` that matched nothing, in their original order.
+
+    Examples:
+
+    ```mojo
+    from mtest.session.pool_plan import stale_serials
+
+    var files: List[String] = ["a/x.mojo", "b/y.mojo"]
+    var stale = stale_serials(files, ["*x*", "*nope*"])
+    # stale == ["*nope*"]: the run universe never satisfies "*nope*".
+    ```
     """
     var stale = List[String]()
     for g in globs:
@@ -234,6 +265,15 @@ def build_tokens(workers: Int, cores: Int) -> Int:
 
     Returns:
         The per-build thread budget, at least one.
+
+    Examples:
+
+    ```mojo
+    from mtest.session.pool_plan import build_tokens
+
+    var k = build_tokens(2, 8)  # 4: two concurrent builds, four threads each
+    var solo = build_tokens(1, 8)  # 8: one build gets the whole machine
+    ```
     """
     if cores < 1:
         return 1

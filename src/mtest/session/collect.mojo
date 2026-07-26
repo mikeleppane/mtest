@@ -5,9 +5,9 @@ the build-and-probe pass to learn each file's test names under `--skip-all`,
 running no test body, and returns a sorted `rel::name` listing plus the stderr
 diagnostics for the files that could not be listed.
 
-It drives no reporter and prints nothing — `main` prints the listing to stdout
-and the diagnostics to stderr, the second sanctioned exception to the event
-seam after usage errors — so stdout carries only the listing. The exit code is
+It drives no reporter and prints nothing. `main` prints the listing to stdout
+and the diagnostics to stderr, the second sanctioned exception to the event seam
+after usage errors, so stdout carries only the listing. The exit code is
 resolved by the model's ranking over the same facts a run reports.
 """
 from std.builtin.sort import sort
@@ -80,8 +80,8 @@ def run_collect(
 ) raises -> CollectResult:
     """Probe every discovered run file for its node ids and build the listing.
 
-    Reuses the selection probe machinery — `_build_for_selection` and
-    `_probe_file`, sharing each build through a `BuildRegistry` — to learn each
+    Reuses the selection probe machinery (`_build_for_selection` and
+    `_probe_file`, sharing each build through a `BuildRegistry`) to learn each
     file's node ids under `--skip-all`, running no test body. A qualifying file
     contributes `rel::name` for every collected name. A compile error, crash,
     timeout, or malformed suite writes a stderr diagnostic and the listing
@@ -89,9 +89,9 @@ def run_collect(
     drift, at exit 3; a spawn or machinery failure aborts the listing, also at
     exit 3. The listing is sorted lexicographically.
 
-    `main` prints the result outside the event seam — the second sanctioned
-    exception, after usage errors — so stdout carries only the listing while
-    every diagnostic goes to stderr. This function prints nothing and drives no
+    `main` prints the result outside the event seam, the second sanctioned
+    exception after usage errors, so stdout carries only the listing while every
+    diagnostic goes to stderr. This function prints nothing and drives no
     reporter.
 
     Args:
@@ -321,6 +321,20 @@ def run_collect(config: RunnerConfig, root: String) raises -> CollectResult:
         Error: If the runtime cannot be opened or closed, or if the primary
             overload raises. A close failure during error handling is appended
             to the original message.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import RunnerConfig
+    from mtest.session import run_collect
+
+    var cfg = RunnerConfig.default()
+    cfg.collect = True
+    cfg.paths.append("tests")
+    var res = run_collect(cfg, "/path/to/checkout")
+    # res.listing holds the sorted `rel::name` node ids, one per line for
+    # `main` to print; a file that could not be listed adds a diagnostic.
+    ```
     """
     var runtime = ExecRuntime()
     try:

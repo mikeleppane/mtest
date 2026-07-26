@@ -1,15 +1,15 @@
 """The selection pipeline kernel: which step each run file needs next.
 
-Layer 4, beneath the selection sub-session that drives it. The kernel holds
-where every run file sits between being discovered and having a verdict — it
-needs building, it needs probing, it has been collected, it needs running, it is
-recovering from a stale name, it is finished — and answers one question:
+Layer 4, beneath the drivers that execute its steps. The kernel holds where
+every run file sits between being discovered and having a verdict (it needs
+building, it needs probing, it has been collected, it needs running, it is
+recovering from a stale name, it is finished) and answers one question:
 `next_step`, the step the run wants performed now. The driver performs that step
 against `exec` and hands back what happened; the kernel folds the completion
 into the file's stage and the run's stop policy.
 
-The split is deliberate: **the kernel decides what step comes next, the driver
-executes it.** Admission, the stale-name recover-once budget, the `--retries`
+The split is deliberate: the kernel decides what step comes next, the driver
+executes it. Admission, the stale-name recover-once budget, the `--retries`
 crash-class budget, and the `-x`/`--maxfail` stop policy live here, in
 `session`, and never leak into `exec` or `native`. The kernel spawns nothing,
 emits no event, and owns no captured bytes; the driver owns all of that.
@@ -21,8 +21,9 @@ been announced. A stale-name recovery rebuild is a distinct pair of stages
 (`NEEDS_REBUILD`/`NEEDS_REPROBE`) precisely so it happens *after* that barrier
 without re-arming it.
 
-Capacity is one: exactly one step is in flight, because `exec` supervises
-exactly one child at a time.
+Capacity belongs to the driver, not to the kernel. The sequential driver keeps
+exactly one step in flight and never needs `mark_in_flight`; the parallel pool
+reserves every file it dispatches, so `next_step` offers each one only once.
 """
 
 
@@ -30,8 +31,8 @@ exactly one child at a time.
 struct FileStage(Equatable, ImplicitlyCopyable, Movable):
     """Where one run file sits in the build, probe, and run pipeline.
 
-    A thin wrapper over a stable integer discriminant, holding no owned
-    resources, so copies and moves are trivial.
+    A thin wrapper over a stable integer discriminant. It owns no resources, so
+    copies and moves are trivial.
     """
 
     var code: Int
@@ -67,8 +68,8 @@ struct FileStage(Equatable, ImplicitlyCopyable, Movable):
 struct StepKind(Equatable, ImplicitlyCopyable, Movable):
     """What the pipeline wants done next.
 
-    A thin wrapper over a stable integer discriminant, holding no owned
-    resources, so copies and moves are trivial.
+    A thin wrapper over a stable integer discriminant. It owns no resources, so
+    copies and moves are trivial.
     """
 
     var code: Int
@@ -82,7 +83,7 @@ struct StepKind(Equatable, ImplicitlyCopyable, Movable):
     """Every file is collected: publish the run-wide selected/deselected
     totals before the first test body executes."""
     comptime REPLAY_TERMINAL = Self(3)
-    """Emit and account a file that never became runnable — a compile error, a
+    """Emit and account a file that never became runnable: a compile error, a
     probe crash, a probe timeout, a malformed suite, or drift."""
     comptime SKIP_DESELECTED = Self(4)
     """Account a runnable file whose every test was deselected. It is not
@@ -105,8 +106,8 @@ struct StepKind(Equatable, ImplicitlyCopyable, Movable):
 struct PipelineHalt(Equatable, ImplicitlyCopyable, Movable):
     """Why the pipeline stopped issuing steps.
 
-    A thin wrapper over a stable integer discriminant, holding no owned
-    resources, so copies and moves are trivial.
+    A thin wrapper over a stable integer discriminant. It owns no resources, so
+    copies and moves are trivial.
     """
 
     var code: Int
@@ -181,11 +182,11 @@ struct _PipelineFile(Copyable, Movable):
     var attempts_planned: Int
     """The file's effective crash-class attempt ceiling."""
     var in_flight: Bool
-    """Whether this file has been dispatched to the driver and is awaiting its
-    completion. The scheduler skips an in-flight file, so no file is ever handed
-    out twice; folding the file's completion clears it. Always False on the
-    capacity-one sequential path, which records each completion before it asks
-    for the next step."""
+    """Whether the driver has dispatched this file for execution and is awaiting
+    its completion. The scheduler skips an in-flight file, so no file is ever
+    handed out twice; folding the file's completion clears it. Always False on
+    the capacity-one sequential path, which records each completion before it
+    asks for the next step."""
 
 
 struct RunPipeline(Movable):
@@ -194,6 +195,18 @@ struct RunPipeline(Movable):
     Owns one `_PipelineFile` per run file, the collection barrier, and the
     admission budgets. It performs no I/O and emits no event: it answers
     `next_step` and folds completions the driver reports back.
+
+    Examples:
+
+    ```mojo
+    from mtest.session import RunPipeline
+
+    var p = RunPipeline(1, 0, False, 0)
+    p.record_build_ready(0)
+    p.record_probe_qualified(0, False)
+    p.record_collection_announced()
+    var step = p.next_step()  # RUN_SELECTION for file 0, attempt 1
+    ```
     """
 
     var _files: List[_PipelineFile]
@@ -258,6 +271,15 @@ struct RunPipeline(Movable):
 
         Returns:
             A pipeline whose per-file attempt ceilings are `retries[i] + 1`.
+
+        Examples:
+
+        ```mojo
+        from mtest.session import RunPipeline
+
+        var p = RunPipeline.from_retry_budgets([0, 2], False, 0)
+        var again = p.admit_crash_retry(1)  # True: file 1 may retry twice
+        ```
         """
         var pipeline = RunPipeline(len(retries), 0, exitfirst, maxfail)
         for i in range(len(retries)):
@@ -291,12 +313,12 @@ struct RunPipeline(Movable):
         probed before the next is, the collection totals are announced once
         every file has left the front half, and only then does any file run. A
         file the driver has marked in flight is skipped, so a driver that fills
-        more than one slot — the parallel pool — never receives the same file
+        more than one slot (the parallel pool) never receives the same file
         twice.
 
         Returns:
             The next step, or a `NOTHING` request when the run has halted or
-            every file is finished. Pure: it mutates nothing.
+            every file is finished. Mutates nothing.
         """
         if self._halt != PipelineHalt.RUNNING:
             return StepRequest.nothing()
@@ -342,16 +364,16 @@ struct RunPipeline(Movable):
 
         The driver calls this once it has handed a file's step off for execution
         but before the completion is folded back. `next_step` then never
-        re-offers that file, so a driver that fills more than one slot — the
-        parallel pool — cannot dispatch the same file twice. Folding the file's
+        re-offers that file, so a driver that fills more than one slot (the
+        parallel pool) cannot dispatch the same file twice. Folding the file's
         completion (any `record_*`/`admit_*` call) releases the reservation. The
         capacity-one sequential driver never calls this: it records each
         completion before it asks for the next step, so no file is ever in
         flight when `next_step` runs.
 
         Args:
-            index: The dispatched file's index. A negative index — the
-                `ANNOUNCE_COLLECTION`/`NOTHING` sentinel — reserves nothing.
+            index: The dispatched file's index. A negative index (the
+                `ANNOUNCE_COLLECTION`/`NOTHING` sentinel) reserves nothing.
         """
         if index < 0:
             return
@@ -389,8 +411,7 @@ struct RunPipeline(Movable):
             index: The probed file's index.
             selection_empty: Whether selecting against the fresh universe
                 chose no test at all. Only consulted on the collection pass; a
-                recovery re-probe runs whatever it reselected, exactly as the
-                recovery loop it replaces did.
+                recovery re-probe runs whatever it reselected.
         """
         self._files[index].in_flight = False
         if self._files[index].stage == FileStage.NEEDS_REPROBE:
@@ -415,8 +436,7 @@ struct RunPipeline(Movable):
             self._files[index].stage = FileStage.COLLECTED
 
     def record_collection_announced(mut self):
-        """Fold the published run-wide collection totals, opening the run pass.
-        """
+        """Fold the published run-wide totals, opening the run pass."""
         self._announced = True
 
     def replace_selection_empty(mut self, index: Int, selection_empty: Bool):

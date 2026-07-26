@@ -12,6 +12,15 @@ struct Verbosity(Equatable, ImplicitlyCopyable, Movable):
 
     A wrapper over a stable integer discriminant, so the vocabulary is a closed
     set of named constants that compare by value.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import RunnerConfig, Verbosity
+
+    var config = RunnerConfig.default()
+    config.verbosity = Verbosity.QUIET
+    ```
     """
 
     var value: Int

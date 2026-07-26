@@ -21,7 +21,7 @@ The parser owns argv syntax; config owns typed conversion, layering, and state
 bytes; the console resolves color from the inputs main supplies; the session
 states the run's facts and `resolve_exit_code` in the model layer ranks them.
 `main` owns only process-level discovery, file I/O, resource ordering, and the
-dedicated pre-run usage refusal. All FFI stays below in `exec` —
+dedicated pre-run usage refusal. All FFI stays below in `exec`.
 `stdout_isatty()` and `stderr_isatty()` are the terminal probes, while argv,
 cwd, getenv, file operations, and exit are ordinary program-level operations
 via `std`.
@@ -444,11 +444,11 @@ def _persist_state(root: String, text: String) -> Optional[String]:
 struct RunResources:
     """Everything a configured run owns, and the one ladder that releases it.
 
-    `main` takes these resources at three different points — the exec runtime
-    first, then the machine-stream descriptor, then the JUnit scratch — and
-    every exit path from there on has to release all of them, in one order,
-    under one precedence. Holding them together is what lets `close_into` state
-    that ladder once instead of once per exit path.
+    `main` takes these resources at three different points: the exec runtime
+    first, then the machine-stream descriptor, then the JUnit scratch. Every
+    exit path from there on has to release all of them, in one order, under one
+    precedence. Holding them together is what lets `close_into` state that
+    ladder once instead of once per exit path.
 
     A resource is recorded here at the moment ownership is actually taken, so
     an empty path or a false ownership flag means there is nothing to release.
@@ -476,10 +476,10 @@ struct RunResources:
     def _discard_junit_scratch(self):
         """Remove the JUnit spool directory, its fragments, and any leftover temp.
 
-        `main` owns this scratch — it created the spool with `open_junit_spool`
-        and the temp with `open_junit_artifact` — so it frees them once the
+        `main` owns this scratch: it created the spool with `open_junit_spool`
+        and the temp with `open_junit_artifact`, so it frees them once the
         session has finished with them. On success the temp has already been
-        renamed onto the report target, making its removal a no-op that never
+        renamed onto the report target, so its removal is a no-op that never
         touches the published report; on failure the reporter discarded it.
         Either way the fragments and the spool directory are what is left.
 

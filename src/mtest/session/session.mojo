@@ -1,23 +1,29 @@
-"""Sequential orchestration: discover, build, execute, classify, exit.
+"""Run orchestration: discover, build, execute, classify, exit.
 
-`run_session` runs the discovered files in a fixed order — precompile steps,
-then gates, then run files — building each to a binary and executing it under
-the `exec` supervisor. It owns the run-report handshake and the verdict policy:
-it decodes each child's captured stdout, resolves which report a truncated
-capture may trust (`resolve_report`), runs the per-test classifier (`classify`),
+`run_session` runs the discovered files in a fixed order (precompile steps, then
+gates, then run files), building each to a binary and executing it under the
+`exec` supervisor. It owns the run-report handshake and the verdict policy: it
+decodes each child's captured stdout, resolves which report a truncated capture
+may trust (`resolve_report`), runs the per-test classifier (`classify`),
 reconciles a `--only` selection run against its `--skip-all` collection
-universe, and maps every termination to an `Outcome` — emitting events to the
-composed reporter and resolving the process exit code. Execution is sequential
-by contract: no parallelism. Two retry mechanisms exist. The bounded stale-name
-recover-once reprobes a file whose `--only` names vanished from the suite.
-Crash-class file runs spend one initial attempt plus their effective per-file
-retries, while precompile steps retain the resolved global retry budget.
+universe, and maps every termination to an `Outcome`, emitting events to the
+composed reporter and resolving the process exit code.
+
+The resolved worker count picks the driver. One worker keeps the sequential loop
+in this module; more than one hands the gate batch and the run files to the
+parallel pool, which enforces the same admission, retry, and stop policy through
+the same `RunPipeline` kernel. Selection (`-k` or a node id) always resolves to
+one worker and runs through the sequential selection sub-session. Two retry
+mechanisms exist. The bounded stale-name recover-once reprobes a file whose
+`--only` names vanished from the suite. Crash-class file runs spend one initial
+attempt plus their effective per-file retries, while precompile steps retain the
+resolved global retry budget.
 
 The session emits events and nothing else; the reporter formats, and pre-session
 CLI usage errors belong to main. Only two failures propagate out of
 `run_session`: a `discover:` usage error and an unknown selected test name, both
-of which main maps to exit 4. Every other failure — an `exec:` machinery raise
-or a spawn failure — is caught here and resolved to internal-error exit 3.
+of which main maps to exit 4. Every other failure, an `exec:` machinery raise or
+a spawn failure, is caught here and resolved to internal-error exit 3.
 
 The session does not decide the exit code: it states the facts it observed and
 `resolve_exit_code` in the model layer ranks them. The precedence, high to low:
@@ -76,9 +82,8 @@ def _flush_console[
     The driver owns no console destination of its own: `main` resolves it and
     lends the descriptor, keeping close and teardown. A negative handle (a
     library caller that lent none, or a recording driver) or an empty drain
-    writes nothing. The write is best-effort, exactly as the single terminal
-    console flush was — a dead destination is not a new exit cause, so a failed
-    incremental write is not distinguished here either.
+    writes nothing. The write is best-effort: a dead destination is not a new
+    exit cause, so a failed incremental write is not distinguished here.
 
     Args:
         reporter: The coordinator to drain. A recording coordinator drains
@@ -122,21 +127,21 @@ def run_session[
     stale-exclusion events, then runs the precompile steps, the gates, and the
     run files in that fixed order. Termination then proceeds in two ordered
     steps. First it seals the run accounting and finalizes each machine
-    artifact — assembling, verify-writing, and atomically renaming the JUnit
-    report, and collecting and reporting a finalization failure — with the
-    interrupt linearization fixed at the moment the accounting is sealed. Only
-    then does it resolve the final exit code and dispatch `SessionFinished`
-    exactly once, carrying it. The session emits events only; it prints nothing.
+    artifact: assembling, verify-writing, and atomically renaming the JUnit
+    report, then collecting and reporting a finalization failure. The interrupt
+    linearization is fixed at the moment the accounting is sealed. Only then does
+    it resolve the final exit code and dispatch `SessionFinished` exactly once,
+    carrying it. The session emits events only; it prints nothing.
 
     Parameters:
         C: The report coordinator this session drives, inferred from the
             argument. The session polls its stream health at each scheduling
-            boundary and treats a latched write failure as a fatal abort, and
-            synthesizes `[not-run]` rows and finalizes the JUnit report while
-            sealing the accounting. A coordinator with no reporter behind a
-            channel answers inertly, so the session never branches on what is
-            composed. The annotation tail is rendered by `main` after this
-            returns, from the same coordinator.
+            boundary and treats a latched write failure as a fatal abort. While
+            sealing the accounting it synthesizes `[not-run]` rows and finalizes
+            the JUnit report through the same coordinator. A coordinator with no
+            reporter behind a channel answers inertly, so the session never
+            branches on what is composed. `main` renders the annotation tail
+            from that coordinator after this returns.
 
     Args:
         runtime: Exclusive owner of process-global exec and signal state.
@@ -147,9 +152,9 @@ def run_session[
             bytes to as the run progresses, then seals with a closing drain
             before returning. `main` lends the resolved destination and keeps
             close and teardown; a negative value (the default, and every
-            recording driver) flushes nothing, leaving the buffer for the
+            recording driver) flushes nothing and leaves the buffer for the
             caller to read. The write is best-effort and carries no new exit
-            cause, exactly as the single terminal flush did.
+            cause.
 
     Returns:
         The resolved exit code: 2 on an interrupt; 3 on an internal error, a
@@ -905,6 +910,10 @@ def run_session_with_state[
 ) raises -> SessionResult:
     """Run one layered session and return its code plus live state delta.
 
+    Parameters:
+        C: The report coordinator this session drives, inferred from the
+            argument. The state delta is read back from it once the run returns.
+
     Args:
         runtime: Exclusive owner of process-global exec and signal state.
         resolved: Layered global configuration and override tables.
@@ -932,6 +941,10 @@ def run_session[
     console_fd: Int = -1,
 ) raises -> Int:
     """Run from the legacy config with no per-file override tables.
+
+    Parameters:
+        C: The report coordinator this session drives, inferred from the
+            argument.
 
     Args:
         runtime: Exclusive owner of process-global exec and signal state.
@@ -973,6 +986,18 @@ def run_session[
         Error: If the runtime cannot be opened or closed, or if the primary
             overload raises. A close failure during error handling is appended
             to the original message.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import RunnerConfig
+    from mtest.report import CompositeReporter, RecordingCoordinator
+    from mtest.report import RecordingReporter
+    from mtest.session import run_session
+
+    var comp = RecordingCoordinator(CompositeReporter(Tuple(RecordingReporter())))
+    var code = run_session(RunnerConfig.default(), "/path/to/suite", comp)
+    ```
     """
     var runtime = ExecRuntime()
     try:
@@ -993,6 +1018,10 @@ def run_session[
     C: ReportCoordinator
 ](resolved: ResolvedConfig, root: String, mut reporter: C) raises -> Int:
     """Run a session from layered configuration for direct library callers.
+
+    Parameters:
+        C: The report coordinator this session drives, inferred from the
+            argument.
 
     Args:
         resolved: Layered values, provenance, and per-file override tables.

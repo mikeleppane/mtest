@@ -1,27 +1,29 @@
-"""The raw streaming descriptor primitives: errno, write, create, close.
+"""The raw descriptor primitives: errno, read, write, create, close.
 
-Part of the narrow platform-I/O boundary. A live-writing reporter cannot promote
-its output atomically the way a whole-file writer can — it appends to a
-descriptor as events arrive — so it needs the raw `write(2)`/`creat(2)`/
-`close(2)` calls plus a reading of `errno` to tell a retryable interruption from
-a real failure. The standard library expresses none of these with the exact
-error semantics that caller needs: `FileDescriptor.write` returns nothing, so it
+Part of the narrow platform-I/O boundary. A live-writing reporter appends to a
+descriptor as events arrive, so it cannot promote its output atomically the
+way a whole-file writer can. It needs the raw `write(2)`/`creat(2)`/`close(2)`
+calls plus a reading of `errno` to tell a retryable interruption from a real
+failure. The standard library expresses none of these with the exact error
+semantics that caller needs: `FileDescriptor.write` returns nothing, so it
 surfaces neither a short write nor the `errno` a partial-write loop must branch
 on, and there is no stdlib wrapper for `creat`, `close`, or the thread-local
 `errno` slot at the pinned toolchain. So these stay foreign calls, proven here
-and shared, rather than redeclared in the report layer.
+and shared, rather than redeclared in the report layer. `read(2)` is here for
+the same reason: the bounded regular-file read in `regular_file.mojo` retries
+on `EINTR` and needs the raw count.
 
 Each function returns the raw libc result and reads no policy into it. The
-caller decides what a short write, a negative return, or a given `errno` means —
+caller decides what a short write, a negative return, or a given `errno` means:
 whether an `EINTR` is a retry or a failure, what exit code an open failure maps
-to — because those are report-layer decisions, not platform facts.
+to. Those are report-layer decisions, not platform facts.
 
 The `write` declaration deliberately takes an opaque `NoneType` pointer and
 returns `Int`, matching the standard library's own `write` external declaration
 exactly. A second, differently-typed declaration of the same C symbol in one
-binary is a link-time attribute conflict the toolchain rejects — the same trap
-`tty.mojo` documents for `isatty` — so this reuses the stdlib's declaration
-shape instead of shadowing it.
+binary is a link-time attribute conflict the toolchain rejects, the same trap
+`tty.mojo` documents for `isatty`, so this reuses the stdlib's declaration shape
+instead of shadowing it.
 """
 from std.ffi import external_call
 from std.sys.info import CompilationTarget
@@ -43,6 +45,16 @@ def errno_now() -> Int:
 
     Returns:
         The `errno` value. Allocates nothing and cannot fail.
+
+    Examples:
+
+    ```mojo
+    from mtest.platform.stream import close_fd, create_truncate_fd, errno_now
+
+    var fd = create_truncate_fd("build/events.ndjson").fd
+    if close_fd(fd) != 0:
+        raise Error("close failed: errno " + String(errno_now()))
+    ```
     """
     comptime if CompilationTarget.is_macos():
         # SAFETY: Darwin libc `__error` has the ABI `int* __error(void)`. It
@@ -120,6 +132,19 @@ def write_fd[o: Origin](fd: Int, ptr: UnsafePointer[UInt8, o], n: Int) -> Int:
     Returns:
         The number of bytes written, which may be short of `n`, or a negative
         value on error with `errno` set. Allocates nothing.
+
+    Examples:
+
+    ```mojo
+    from mtest.platform.stream import create_truncate_fd, errno_now, write_fd
+
+    var fd = create_truncate_fd("build/events.ndjson").fd
+    var payload = String("{}\\n")
+    var bytes = payload.as_bytes()
+    var written = write_fd(fd, bytes.unsafe_ptr(), len(bytes))
+    if written < 0:
+        raise Error("write failed: errno " + String(errno_now()))
+    ```
     """
     # SAFETY: libc `write` has the ABI `ssize_t write(int, const void*, size_t)`.
     # `ptr` is a caller-owned pointer, borrowed for this call only, addressing
@@ -142,8 +167,8 @@ struct CreatResult(Copyable, Movable):
     `err` is meaningful only when `fd` is negative; on success it is a filler
     `0` the caller must not consult. Bundling the two lets `create_truncate_fd`
     snapshot `errno` while it still owns the fresh error, before its transient
-    C-string is freed, so a caller need not — and must not — re-read `errno`
-    after the call, when an intervening `free` may already have clobbered it.
+    C-string is freed. A caller therefore has no reason to re-read `errno` after
+    the call, and must not: an intervening `free` may already have clobbered it.
     """
 
     var fd: Int
@@ -170,6 +195,17 @@ def create_truncate_fd(path: String) -> CreatResult:
         error, and whose `err` holds the failing `creat`'s `errno` when `fd < 0`
         (a filler `0` on success). Allocates a transient C-string copy that is
         freed before returning.
+
+    Examples:
+
+    ```mojo
+    from mtest.platform.stream import create_truncate_fd
+
+    var result = create_truncate_fd("build/events.ndjson")
+    if result.fd < 0:
+        raise Error("could not open destination: errno " + String(result.err))
+    var fd = result.fd
+    ```
     """
     var c = path.as_bytes()
     var terminated = List[UInt8]()

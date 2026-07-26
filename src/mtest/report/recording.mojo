@@ -2,7 +2,7 @@
 
 A stateful `Reporter` that records the whole event stream in order and prints
 nothing. Session and composition tests use it to assert what the session
-emitted — ordering, kinds, and payload fields — without parsing rendered text.
+emitted (ordering, kinds, and payload fields) without parsing rendered text.
 It stores each event whole, so any field is recoverable later; the convenience
 accessors cover the fields tests reach for most.
 """
@@ -33,6 +33,17 @@ struct RecordingReporter(Reporter):
 
     The `*_at` accessors index the recording by position in emission order,
     from 0; an index at or past `count()` is out of bounds.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import Event, EventKind
+    from mtest.report import RecordingReporter
+
+    var r = RecordingReporter()
+    r.handle(Event.file_started("tests/test_a.mojo"))
+    var is_start = r.kind_at(0) == EventKind.FILE_STARTED
+    ```
     """
 
     var events: List[Event]
@@ -55,14 +66,21 @@ struct RecordingReporter(Reporter):
         return len(self.events)
 
     def kind_at(self, i: Int) -> EventKind:
-        """The kind of the i-th recorded event."""
+        """The kind of the i-th recorded event.
+
+        Args:
+            i: The position in the recording, from 0.
+        """
         return self.events[i].kind
 
     def outcome_at(self, i: Int) -> Outcome:
         """The outcome of the i-th recorded event, or NOT_RUN if it carries none.
 
         Only a `FileFinished` carries a file outcome; any other kind reads as
-        NOT_RUN, matching the blank default the flat event exposed before.
+        NOT_RUN.
+
+        Args:
+            i: The position in the recording, from 0.
         """
         ref e = self.events[i]
         if e.kind == EventKind.FILE_FINISHED:
@@ -74,6 +92,9 @@ struct RecordingReporter(Reporter):
 
         Every kind that names a file carries a `path`; a kind that names none
         reads as the empty string.
+
+        Args:
+            i: The position in the recording, from 0.
         """
         ref e = self.events[i]
         if e.kind == EventKind.FILE_STARTED:
@@ -89,7 +110,11 @@ struct RecordingReporter(Reporter):
         return String("")
 
     def event_at(self, i: Int) -> Event:
-        """A copy of the i-th recorded event, whole, for richer assertions."""
+        """A copy of the i-th recorded event, whole, for richer assertions.
+
+        Args:
+            i: The position in the recording, from 0.
+        """
         return self.events[i].copy()
 
     def test_at(self, i: Int) -> TestResult:
@@ -97,6 +122,9 @@ struct RecordingReporter(Reporter):
 
         A non-`TestReported` event carries no per-test result and reads as a
         NOT_RUN placeholder.
+
+        Args:
+            i: The position in the recording, from 0.
         """
         ref e = self.events[i]
         if e.kind == EventKind.TEST_REPORTED:
@@ -104,14 +132,22 @@ struct RecordingReporter(Reporter):
         return TestResult(NodeId("", ""), Outcome.NOT_RUN)
 
     def selected_test_total_at(self, i: Int) -> Int:
-        """The selected-test total of the i-th recorded event (0 if none)."""
+        """The selected-test total of the i-th recorded event (0 if none).
+
+        Args:
+            i: The position in the recording, from 0.
+        """
         ref e = self.events[i]
         if e.kind == EventKind.COLLECTION_KNOWN:
             return e.data[CollectionKnownPayload].selected_test_total
         return 0
 
     def deselected_test_total_at(self, i: Int) -> Int:
-        """The deselected-test total of the i-th recorded event (0 if none)."""
+        """The deselected-test total of the i-th recorded event (0 if none).
+
+        Args:
+            i: The position in the recording, from 0.
+        """
         ref e = self.events[i]
         if e.kind == EventKind.COLLECTION_KNOWN:
             return e.data[CollectionKnownPayload].deselected_test_total
@@ -121,6 +157,9 @@ struct RecordingReporter(Reporter):
         """The `FileFinished` parse disposition of the i-th recorded event.
 
         A non-`FileFinished` event carries none and reads as NO_REPORT.
+
+        Args:
+            i: The position in the recording, from 0.
         """
         ref e = self.events[i]
         if e.kind == EventKind.FILE_FINISHED:

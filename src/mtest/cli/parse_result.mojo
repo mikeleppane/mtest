@@ -3,7 +3,7 @@
 Parsing either yields a configured run, `config show`, or `doctor` request with
 both its typed argv overlay and defaults-folded compatibility config, or a
 non-error directive to print help or the version. A usage error is not a
-`ParseResult` — it is raised. `main` handles each result; this layer never
+`ParseResult`: it is raised. `main` handles each result; this layer never
 prints or exits.
 """
 from mtest.config import CliOverlay, RunnerConfig
@@ -17,6 +17,17 @@ struct ParseResult(Copyable, Movable):
     `overlay` holds argv presence and values while `config` holds their
     defaults-folded compatibility view. Only help and version carry
     placeholder fields.
+
+    Examples:
+
+    ```mojo
+    from mtest.cli import parse_args
+
+    var argv: List[String] = ["tests/", "-k", "test_add"]
+    var result = parse_args(argv)
+    if result.is_run():
+        print(result.config.keyword)
+    ```
     """
 
     var kind: Int

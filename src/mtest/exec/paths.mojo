@@ -31,6 +31,14 @@ def canonicalize(path: String) raises -> String:
     Raises:
         Error: If `path` cannot be resolved, for example because a component
             does not exist. The message is `exec:`-prefixed and names `path`.
+
+    Examples:
+
+    ```mojo
+    from mtest.exec import canonicalize
+
+    var source = canonicalize("tests/fixtures/protocol/passing.mojo")
+    ```
     """
     try:
         return realpath(path)

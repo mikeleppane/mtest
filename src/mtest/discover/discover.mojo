@@ -2,8 +2,8 @@
 
 `discover` turns a `RunnerConfig`'s operands, gates, and exclude globs,
 resolved against an explicit invocation `root`, into a `DiscoveryResult`. The
-`root` is a parameter — production passes the current working directory, tests
-pass a temp directory — so the walk is unit-testable without touching the
+`root` is a parameter (production passes the current working directory, tests
+pass a temp directory), so the walk is unit-testable without touching the
 process's cwd.
 
 The stages:
@@ -16,7 +16,7 @@ The stages:
    file part. A nonexistent operand, an operand that escapes the root, an
    operand with more than one `::`, and a node id whose path is a directory
    each raise a `discover:` usage error (the exit-4 class). An empty walk is
-   not an error — it yields empty run files.
+   not an error: it yields empty run files.
 3. Deduplicate on the root-relative path; a file that is both a gate and in a
    walk lands once, in `gate_files` (gate-overlap promotion).
 4. Apply excludes (fnmatch against the whole path). An exclusion wins over both
@@ -72,7 +72,7 @@ def _malformed_node_id_error(op: String) -> Error:
 def _node_id_names_directory_error(op: String, dir_part: String) -> Error:
     """The exit-4 usage error for a node id whose path resolves to a directory.
 
-    A node id is FILE::TEST — it selects one test in one file. A directory path
+    A node id is FILE::TEST: it selects one test in one file. A directory path
     is refused as malformed rather than walked, since walking it would drop the
     `::TEST` selector and run the whole tree.
     """
@@ -164,6 +164,17 @@ def discover(config: RunnerConfig, root: String) raises -> DiscoveryResult:
         Error: A `discover:`-prefixed usage error (exit-4 class) for a
             nonexistent operand, an operand escaping the root, or a malformed
             node id. An empty walk is not an error.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import RunnerConfig
+    from mtest.discover import discover
+
+    var config = RunnerConfig.default()
+    config.paths = ["tests"]
+    var result = discover(config, "/repo")  # walks tests/ for test_*.mojo
+    ```
     """
     var nroot = normalize_root(root)
 

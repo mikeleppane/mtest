@@ -5,12 +5,12 @@ neutralize it first: the console reporter (`report/console_text.mojo`), the
 `doctor` diagnostic lines (`cli/doctor.mojo`), the `config show` TOML rendering
 (`config/show.mojo`), and the configuration diagnostics that quote an offending
 key or value back from `mtest.toml` (`config/toml_bridge.mojo`). They cannot
-share their *escape text* — the console emits `\\xHH` and `\\u00HH` in uppercase
+share their *escape text*: the console emits `\\xHH` and `\\u00HH` in uppercase
 hex, `doctor` and the TOML diagnostics emit lowercase `\\xHH`, and `config show`
 must emit `\\u00HH` because it is producing TOML, whose basic strings have a
 `\\uXXXX` escape and no `\\xHH` escape at all.
 
-What they can and must share is the *classification*: the set of code points a
+They can and must share the *classification*: the set of code points a
 terminal treats as instructions. That set is defined once, here, so extending
 it reaches every surface at once instead of leaving one of them behind. This
 module lives in `model` because it is the only layer all four may import from:
@@ -19,7 +19,7 @@ copies of this policy came to exist.
 
 **Bound on that promise: the set must stay within `U+0000..U+00FF`.** Every
 consuming surface renders exactly two hex digits from the low byte, so a code
-point above `U+00FF` would be spelled wrongly rather than escaped — silently in
+point above `U+00FF` would be spelled wrongly rather than escaped: silently in
 the console (its assembler masks the value) and as an out-of-range index in the
 other three. Adding a code point inside Latin-1 reaches all four surfaces for
 free; adding one above it requires widening each surface's escape assembler
@@ -32,8 +32,8 @@ The set is:
   introducer for every classic control sequence;
 - **DEL** `U+007F`;
 - the **C1 controls** `U+0080..U+009F`, which are the single-code-point forms of
-  sequences that otherwise need ESC — `U+009B` is CSI, `U+009D` is OSC,
-  `U+009C` is ST — so a payload carrying them drives a terminal with no ESC byte
+  sequences that otherwise need ESC (`U+009B` is CSI, `U+009D` is OSC, `U+009C`
+  is ST), so a payload carrying them drives a terminal with no ESC byte
   anywhere in it. Omitting C1 is the classic hole in a terminal escaper, because
   a scan for ESC never sees one.
 
@@ -42,8 +42,8 @@ sequences that a byte scan would either miss or split.
 
 **Non-goal: visual spoofing.** This module answers "can the child drive the
 terminal", not "can the child mislead the reader". Code points that reorder or
-disguise text while executing nothing — the bidi overrides and isolates, zero
-width characters, and confusable homoglyphs — are not interpreted controls and
+disguise text while executing nothing (the bidi overrides and isolates, zero
+width characters, and confusable homoglyphs) are not interpreted controls and
 are deliberately absent from the set.
 """
 
@@ -69,6 +69,15 @@ def is_c1_control(code: Int) -> Bool:
     Returns:
         True for `U+0080..U+009F`, which a terminal in UTF-8 mode interprets as
         CSI, OSC, ST and their neighbours without any ESC byte present.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import is_c1_control
+
+    var csi = is_c1_control(0x9B)  # True: CSI, reached with no ESC byte
+    var nbsp = is_c1_control(0xA0)  # False: just above the C1 block
+    ```
     """
     return code >= 0x80 and code <= 0x9F
 
@@ -91,6 +100,16 @@ def is_interpreted_control(code: Int, preserve_lf_tab: Bool) -> Bool:
     Returns:
         True when `code` is a C0 control, DEL, or a C1 control, except that LF
         and Tab are excluded when `preserve_lf_tab` is set.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import is_interpreted_control
+
+    var esc = is_interpreted_control(0x1B, preserve_lf_tab=False)  # True
+    var letter = is_interpreted_control(0x41, preserve_lf_tab=False)  # False
+    var newline = is_interpreted_control(0x0A, preserve_lf_tab=True)  # False
+    ```
     """
     if preserve_lf_tab and (code == 0x0A or code == 0x09):
         return False

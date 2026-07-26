@@ -14,6 +14,20 @@ struct TestResult(Copyable, Movable):
     """One test's identity, outcome, and raw captured detail.
 
     Owns its String fields, so copies are explicit via `.copy()`.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import NodeId
+    from mtest.model import Outcome
+    from mtest.model import TestResult
+
+    var node = NodeId("tests/test_a.mojo", "test_foo")
+    var failed = TestResult(
+        node.copy(), Outcome.FAIL, "AssertionError: 1 != 2", "[ 0.004 ]"
+    )
+    var passed = TestResult(node.copy(), Outcome.PASS)  # no detail or timing
+    ```
     """
 
     var node: NodeId

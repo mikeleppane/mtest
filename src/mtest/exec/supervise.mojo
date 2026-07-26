@@ -36,15 +36,15 @@ where there is no spec in hand and nothing mid-flight worth waiting on.
 comptime _POST_LEADER_MS = 2000
 """Bound for group sweep and nonblocking drain after leader observation.
 
-This is the wall-clock window a swept group is given for its descendants' write
-ends to close before a still-open channel is declared a retained-pipe honesty
-error. A clean teardown finalizes the moment both channels close, well inside
-the window, so this bound only governs a genuinely leaked pipe (one whose holder
+This is the wall-clock window a swept group gets for its descendants' write ends
+to close before a still-open channel is declared a retained-pipe honesty error.
+A clean teardown finalizes the moment both channels close, well inside the
+window, so this bound only governs a genuinely leaked pipe (one whose holder
 escaped the process group and `killpg` cannot reach). It is deliberately
-generous: on a slow, contended host — a 2-core CI runner under Valgrind — a
+generous: on a slow, contended host (a 2-core CI runner under Valgrind), a
 flooding grandchild that IS in the group still dies and drains within the window,
-where a tighter bound fired the honesty error prematurely on a pipe that was
-about to close. It stays far below the suites' 5000 ms wall-clock assertions, and
+where a tighter bound fires the honesty error prematurely on a pipe that is about
+to close. It stays far below the suites' 5000 ms wall-clock assertions, and
 matches the reap-wait budget below."""
 comptime _POST_LEADER_SLICE_MS = 10
 """Short poll slice while waiting for swept pipes to reach EOF."""
@@ -277,10 +277,10 @@ def _native_poll_set(
 ) -> Int32:
     """Thin ABI-v2 binding: poll readiness across a set of handles at once.
 
-    The Supervisor's readiness-set driver is wired in a later commit; this is
-    the reachable declaration so it can call the primitive. `handles` names
-    `count` live tokens; `results` addresses `count` 8-byte poll-result records
-    that the native two-phase validation zeroes; C retains neither pointer.
+    The Supervisor's `_poll_set` blocks here once per sweep, which is the one
+    place a sweep sleeps. `handles` names `count` live tokens; `results`
+    addresses `count` 8-byte poll-result records that the native two-phase
+    validation zeroes; C retains neither pointer.
     """
     # SAFETY: `handles` and `results` are caller-owned records spanning exactly
     # `count` entries each, and `error` a complete aligned error record; the ABI
@@ -294,7 +294,7 @@ def _native_poll_set(
 def _native_fd_limit(soft_limit: _BytePtr, error: _BytePtr) -> Int32:
     """Thin ABI-v2 binding: report the RLIMIT_NOFILE soft limit.
 
-    Wired into the Supervisor's effective-cap derivation in a later commit;
+    `query_effective_cap` reads the live soft limit through this binding, and
     RLIM_INFINITY arrives as the UINT64_MAX sentinel. C retains no pointer.
     """
     # SAFETY: `soft_limit` addresses a caller-owned 8-byte cell and `error` a
@@ -537,6 +537,20 @@ def run_supervised(
     Raises:
         Error: An input or runner-machinery failure. Child exit, signal,
             timeout, and spawn failure stay structured data, not exceptions.
+
+    Examples:
+
+    ```mojo
+    from mtest.exec import ExecRuntime
+    from mtest.exec import ProcessSpec
+    from mtest.exec import run_supervised
+
+    var runtime = ExecRuntime()
+    runtime.open()
+    var spec = ProcessSpec.command(["/usr/bin/true"], 5000)
+    var result = run_supervised(runtime, spec)
+    runtime.close()
+    ```
     """
     if len(spec.argv) == 0:
         raise Error("exec: run_supervised got an empty argv")
@@ -645,7 +659,14 @@ struct Completion(Movable):
         var result: ProcessResult,
         var kill_cause: Optional[KillCause],
     ):
-        """Take ownership of a finalized slot's projected outcome."""
+        """Take ownership of a finalized slot's projected outcome.
+
+        Args:
+            tag: The opaque identity the caller passed to `spawn`.
+            result: The projected streams, termination, and duration. Consumed.
+            kill_cause: The latched cause when the Supervisor initiated a kill,
+                or `None` when the child ended on its own. Consumed.
+        """
         self.tag = tag
         self.result = result^
         self.kill_cause = kill_cause^
@@ -677,6 +698,15 @@ def effective_cap(soft_fd_limit: UInt64) raises -> Int:
         Error: When the soft limit cannot fit even a single child. The message
             names the offending limit and the required minimum; a caller maps
             this hard environment fault to exit 3.
+
+    Examples:
+
+    ```mojo
+    from mtest.exec import effective_cap
+
+    var unbounded = effective_cap(UInt64.MAX)       # 64, the ceiling
+    var macos_default = effective_cap(UInt64(256))  # 63
+    ```
     """
     if soft_fd_limit == UInt64.MAX:
         return _COMPILE_CAP
@@ -698,6 +728,9 @@ def query_effective_cap() raises -> Int:
     """Resolve the effective capacity from the live RLIMIT_NOFILE soft limit.
 
     Reads the soft limit through the native adapter and applies `effective_cap`.
+
+    Returns:
+        The effective live-child capacity in `1 ..= 64`.
 
     Raises:
         Error: A native fd-limit query failure, or the hard environment error
@@ -746,6 +779,15 @@ def decide_kill(
 
     Returns:
         The cause to latch, or `None` when no kill is initiated this sweep.
+
+    Examples:
+
+    ```mojo
+    from mtest.exec import decide_kill
+
+    var cause = decide_kill(True, 1)
+    var deadline_won = cause.value().is_deadline()
+    ```
     """
     if deadline_expired:
         return Optional(KillCause.deadline())
@@ -847,6 +889,19 @@ struct Supervisor(Movable):
     finalized slot's `Completion` (its fields extracted before the slot is
     recycled); `kill_all` tears every live group down through the two-pass
     protocol; `in_flight` reports how many slots are live.
+
+    Examples:
+
+    ```mojo
+    from mtest.exec import ProcessSpec
+    from mtest.exec import Supervisor
+
+    var supervisor = Supervisor(2)
+    _ = supervisor.spawn(ProcessSpec.command(["/usr/bin/true"]), 11)
+    _ = supervisor.spawn(ProcessSpec.command(["/usr/bin/true"]), 22)
+    while supervisor.in_flight() > 0:
+        _ = supervisor.wait_any(20)
+    ```
     """
 
     var capacity: Int
@@ -954,6 +1009,17 @@ struct Supervisor(Movable):
             Error: An empty argv, a full Supervisor, or a native open failure.
                 A per-child spawn failure is not this error: it resolves through
                 the slot's eventual `Completion` as a `SpawnFailed` termination.
+
+        Examples:
+
+        ```mojo
+        from mtest.exec import ProcessSpec
+        from mtest.exec import Supervisor
+
+        var supervisor = Supervisor(2)
+        var slot = supervisor.spawn(ProcessSpec.command(["/usr/bin/true"]), 11)
+        var live = supervisor.slot_is_live(slot)
+        ```
         """
         if len(spec.argv) == 0:
             raise Error("exec: spawn got an empty argv")
@@ -1001,6 +1067,19 @@ struct Supervisor(Movable):
         Raises:
             Error: A runner-machinery failure, or the descendant-retained-pipe
                 honesty error for a slot whose pipe outlived the drain window.
+
+        Examples:
+
+        ```mojo
+        from mtest.exec import ProcessSpec
+        from mtest.exec import Supervisor
+
+        var supervisor = Supervisor(1)
+        _ = supervisor.spawn(ProcessSpec.command(["/usr/bin/true"]), 7)
+        var completed = supervisor.wait_any(20)
+        if completed:
+            var tag = completed.take().tag
+        ```
         """
         if self.in_flight() == 0:
             return None

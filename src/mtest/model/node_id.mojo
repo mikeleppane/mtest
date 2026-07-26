@@ -2,10 +2,10 @@
 
 A `NodeId` is a test's lexical identity: the file's root-relative path as
 discovered or as the user typed it, plus the test function name. It is
-deliberately lexical, not canonical -- canonical path identity (realpath,
-symlink resolution) is a separate concern that lives elsewhere. `render()`
-produces the single canonical string form, `path::name`, used for display,
-selection, and repro lines.
+deliberately lexical, not canonical. Canonical path identity (realpath, symlink
+resolution) is a separate concern that lives elsewhere. `render()` produces the
+single canonical string form, `path::name`, used for display, selection, and
+repro lines.
 
 `split_node_token` is the policy-free half of turning a raw CLI operand into a
 `NodeId`: it counts `::` occurrences and splits at the first one, deciding
@@ -20,6 +20,15 @@ struct NodeId(Copyable, Equatable, Movable):
     """A test's lexical identity: a root-relative path and a test name.
 
     Owns its two String fields, so copies are explicit via `.copy()`.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import NodeId
+
+    var node = NodeId("tests/test_a.mojo", "test_foo")
+    var rendered = node.render()  # "tests/test_a.mojo::test_foo"
+    ```
     """
 
     var path: String
@@ -69,6 +78,17 @@ def split_node_token(token: String) -> NodeIdSplit:
     Returns:
         The split. A `sep_count` of 0 means `file_part` is the whole token and
         `name_part` is empty.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import split_node_token
+
+    var split = split_node_token("tests/test_a.mojo::test_foo")
+    var is_node_id = split.sep_count == 1  # True
+    var path = split.file_part  # "tests/test_a.mojo"
+    var name = split.name_part  # "test_foo"
+    ```
     """
     var all_parts = token.split("::")
     var sep_count = len(all_parts) - 1

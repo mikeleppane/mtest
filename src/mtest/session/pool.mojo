@@ -2,14 +2,14 @@
 
 Layer 4, the path `run_session` takes when the resolved worker count exceeds
 one. Where the sequential drivers run one child at a time, this module drives up
-to `workers` children concurrently under one `Supervisor`, each child one step —
-a build or a run — of some file's own strictly ordered pipeline. A file's steps
-stay in order (build, then run, then any crash-class retry, then its verdict);
+to `workers` children concurrently under one `Supervisor`, each child one step (a
+build or a run) of some file's own strictly ordered pipeline. A file's steps stay
+in order (build, then run, then any crash-class retry, then its verdict);
 concurrency is only ever *across* files.
 
-The run is three ordered batches: the gates first, as their own batch — a
+The run is three ordered batches. The gates go first, as their own batch: a
 failing or drifting gate `kill_all`s the batch immediately, accounts the rest
-NOT-RUN, and aborts the whole run — then the parallel run files in discovery
+NOT-RUN, and aborts the whole run. Then come the parallel run files in discovery
 order, then the effectively serial files at capacity one. A `--maxfail`/`-x`
 stop halts new dispatch, lets the in-flight files finish, and leaves the
 remainder NOT-RUN. An interrupt tears every live group down and resolves exit 2
@@ -94,11 +94,10 @@ def resolve_worker_plan(config: RunnerConfig) raises -> WorkerPlan:
     """Resolve the run's worker plan from the config, cores, and the fd cap.
 
     A `workers` of exactly one is the sequential path and never queries the cap:
-    it resolves to a plain one-worker plan so the sequential run keeps its exact
-    behavior and never gains a new failure mode. Any other value reads the
-    machine's logical core count and the exec layer's effective descriptor
-    ceiling and resolves against both, clamping loudly when the request exceeds
-    the ceiling.
+    it resolves to a plain one-worker plan, so the sequential run cannot fail on
+    a descriptor query it never makes. Any other value reads the machine's
+    logical core count and the exec layer's effective descriptor ceiling and
+    resolves against both, clamping loudly when the request exceeds the ceiling.
 
     Args:
         config: The run configuration, carrying the requested worker count.
@@ -111,6 +110,17 @@ def resolve_worker_plan(config: RunnerConfig) raises -> WorkerPlan:
         Error: The hard environment fault from `query_effective_cap` when the
             descriptor ceiling cannot fit even a single child. A caller maps it
             to internal-error exit 3.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import RunnerConfig
+    from mtest.session.pool import resolve_worker_plan
+
+    var plan = resolve_worker_plan(RunnerConfig.default())
+    # plan.resolved == 1: the default is the sequential path, and a clamped
+    # plan would carry the loud detail in plan.limiting_note().
+    ```
     """
     if config.workers == 1:
         return WorkerPlan(1, 1, 1, False)
@@ -140,9 +150,10 @@ struct PoolBatchResult(Movable):
     var aborted: Bool
     """Whether a failing or drifting gate aborted the whole run."""
     var halted: Bool
-    """Whether a run batch's `-x`/`--maxfail` limit latched, leaving the rest
-    NOT-RUN. A later batch (the serial pass) reads this to honor the same stop
-    and never starts serial work after the parallel batch already halted."""
+    """Whether a run batch's `-x`/`--maxfail` limit latched, which leaves the
+    rest of the batch NOT-RUN. A later batch (the serial pass) reads this to
+    honor the same stop, and never starts serial work after the parallel batch
+    already halted."""
     var crash_files: List[_CrashFile]
     """The files that ended CRASH, for the sequential attribution post-pass."""
 
@@ -258,9 +269,9 @@ def _should_emit_progress(
 ) -> Bool:
     """Whether this tick warrants a fresh progress emission.
 
-    A completion or a change in the in-flight set is always shown at once; with
+    A completion or a change in the in-flight set is always shown at once. With
     neither, an elapsed-only refresh is admitted only once the interval has
-    elapsed since the last emission, bounding the redraw rate.
+    elapsed since the last emission. That bounds the redraw rate.
 
     Args:
         completed: The current completed count.
@@ -317,15 +328,14 @@ def _flush_console_with_progress[
 ](mut reporter: C, console_fd: Int, counter_shown: Bool, closing: Bool) -> Bool:
     """Flush committed console bytes while erasing and redrawing the counter.
 
-    Drains the coordinator's pending committed bytes NON-closing — the session's
-    single terminal flush owns the closing drain that emits the framed sections
-    and summary band, so a batch never emits them — erases any shown counter
-    before those bytes, and redraws the counter after unless `closing`. On a
-    non-terminal destination the overlay is empty and `counter_shown` never
+    Drains the coordinator's pending committed bytes NON-closing, since the
+    session's single terminal flush owns the closing drain that emits the framed
+    sections and summary band, so a batch never emits them. Erases any shown
+    counter before those bytes, and redraws the counter after unless `closing`.
+    On a non-terminal destination the overlay is empty and `counter_shown` never
     becomes True, so no erase or counter byte is ever written to a pipe. A
     negative handle or an empty assembly writes nothing; the write is
-    best-effort, exactly as the plain pool flush, so a dead destination is not a
-    new exit cause.
+    best-effort, so a dead destination is not a new exit cause.
 
     Args:
         reporter: The coordinator to drain and read the overlay from.
@@ -368,9 +378,9 @@ def _run_pool_batch[
 ) raises -> PoolBatchResult:
     """Drive one batch of files' build-run pipelines at capacity `workers`.
 
-    The engine fills open slots in discovery order — a ready run first, since a
+    The engine fills open slots in discovery order: a ready run first, since a
     run frees a slot without a token, then the earliest pending build the token
-    budget admits — blocks once in `wait_any`, and folds each completion into
+    budget admits. It blocks once in `wait_any`, then folds each completion into
     its file's pipeline, spawning that file's next step or settling its verdict.
     A `Completion`'s `kill_cause` is consumed: an interrupt-caused kill abandons
     its file NOT-RUN and tears the batch down; a deadline kill is a genuine
@@ -387,7 +397,7 @@ def _run_pool_batch[
         include_paths: Directories passed to the compiler as `-I`.
         reporter: The coordinator every event is handed to.
         summary: The run summary, accumulated as files settle.
-        workers: The resolved worker count — the Supervisor's capacity.
+        workers: The resolved worker count, the Supervisor's capacity.
         cores: The machine's logical core count, for the token budget.
         is_gate: Whether this batch is the gates, which abort the run on a
             failing or drifting verdict.
@@ -918,11 +928,11 @@ def _settle[
 ) raises -> Bool:
     """Settle one file's verdict: emit it, account it, and apply the policy.
 
-    Prepends the file's accumulated attempt events, emits the verdict, folds the
-    per-test totals, and — for a non-drift verdict — tallies the outcome, extends
-    the run multiset, records the verdict against the stop policy, and queues a
-    crash for attribution. A drift verdict forces exit 3 and is accounted NOT-RUN
-    rather than tallied, exactly as the sequential path does.
+    Prepends the file's accumulated attempt events, emits the verdict, and folds
+    the per-test totals. For a non-drift verdict it then tallies the outcome,
+    extends the run multiset, records the verdict against the stop policy, and
+    queues a crash for attribution. A drift verdict forces exit 3 and is
+    accounted NOT-RUN rather than tallied, exactly as the sequential path does.
 
     Args:
         state: The batch's file state, whose `i`th entry is being settled.

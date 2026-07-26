@@ -5,7 +5,7 @@ consumes that stream through a single method, `handle`. That one method is what
 lets heterogeneous reporters compose statically: a `CompositeReporter` fans one
 event to a comptime-known tuple of reporters, each conforming to this trait.
 
-`handle` must be total over the event set — it must accept every `EventKind`
+`handle` must be total over the event set: it must accept every `EventKind`
 without raising, because the session cannot recover from a reporter that throws
 mid-run. Reporters are `Copyable, Movable` so they can be moved into the
 composition tuple and their state read back by index.
@@ -19,6 +19,20 @@ trait Reporter(Copyable, Movable):
     One method, `handle`, receives every event in emission order. Conforming
     reporters own whatever state they accumulate (a recorded list, a rendered
     buffer); the trait fixes only the seam.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import Event
+    from mtest.report import Reporter
+
+    @fieldwise_init
+    struct Tap(Reporter):
+        var seen: List[Event]
+
+        def handle(mut self, e: Event):
+            self.seen.append(e.copy())
+    ```
     """
 
     def handle(mut self, e: Event):

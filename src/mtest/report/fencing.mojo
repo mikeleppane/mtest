@@ -9,8 +9,8 @@ fenced-output assembly; the entropy source that mints the real per-run token
 wires in elsewhere, after the producing child has exited.
 
 These are pure string operations with no I/O and no private helper shared with
-the escapers in `escape.mojo`. They live apart so the escaping primitives and
-the fencing protocol read as the two separate concerns they are.
+the escapers in `escape.mojo`. Escaping and fencing are separate concerns, so
+they live in separate modules.
 """
 
 
@@ -68,6 +68,15 @@ def select_collision_free_token(
 
     Raises:
         Error: When every candidate collided with `region`.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.fencing import select_collision_free_token
+
+    var candidates: List[String] = ["badtoken", "goodtoken"]
+    var token = select_collision_free_token("junk ::badtoken::", candidates)
+    ```
     """
     for i in range(len(candidates)):
         if not contains_resume_delimiter(region, candidates[i]):
@@ -108,6 +117,14 @@ def fence_region(token: String, region: String) -> String:
     Returns:
         `stop_commands_opener(token)`, `region`, and `resume_delimiter(token)`
         joined by newlines.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.fencing import fence_region
+
+    var fenced = fence_region("tok1", "captured child output, benign")
+    ```
     """
     return (
         stop_commands_opener(token)

@@ -11,8 +11,17 @@ as a sentence rendered before the reporter sees it. It mirrors
 struct AttributionDisposition(Equatable, ImplicitlyCopyable, Movable):
     """One value from the crash-attribution disposition vocabulary.
 
-    A thin wrapper over a stable integer discriminant, holding no owned
+    A thin wrapper over a stable integer discriminant. It holds no owned
     resources, so copies and moves are trivial.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import AttributionDisposition
+
+    var disposition = AttributionDisposition.NO_REPRODUCTION
+    var named = disposition == AttributionDisposition.ATTRIBUTED  # False
+    ```
     """
 
     var code: Int

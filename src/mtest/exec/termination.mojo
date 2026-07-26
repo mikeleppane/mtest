@@ -3,13 +3,13 @@
 The runner keeps four endings distinct, so a crash is never read as a failure
 and mtest's own deadline kill is never read as a crash:
 
-- `Exited(code)` — the child exited normally with this code (a genuine 127 too).
-- `Signaled(signo)` — the child was terminated by this signal: a crash.
-- `TimedOut(final, escalated)` — mtest's deadline (or an interrupt) killed it.
-  The outcome latches here regardless of how the child then died: `final_*`
+- `Exited(code)`: the child exited normally with this code (a genuine 127 too).
+- `Signaled(signo)`: the child was terminated by this signal, which is a crash.
+- `TimedOut(final, escalated)`: mtest's deadline (or an interrupt) killed it.
+  The outcome latches here regardless of how the child then died. `final_*`
   retains what actually happened (a clean grace exit, a SIGTERM death, or a
   SIGKILL escalation) and `escalated` records whether SIGKILL was needed.
-- `SpawnFailed(errno)` — the child could not be exec'd at all (the errno from a
+- `SpawnFailed(errno)`: the child could not be exec'd at all (the errno from a
   failed `execve`/`chdir`, reported through the close-on-exec errno pipe).
 
 This is one tagged struct rather than four types, so it is a plain copyable data
@@ -19,7 +19,18 @@ value that a caller matches on; it owns nothing and never raises.
 
 @fieldwise_init
 struct Termination(Equatable, ImplicitlyCopyable, Movable, Writable):
-    """A tagged record of how a supervised child ended; data only."""
+    """A tagged record of how a supervised child ended; data only.
+
+    Examples:
+
+    ```mojo
+    from mtest.exec import Termination
+
+    var termination = Termination.exited(2)
+    var crashed = termination.is_signaled()
+    var code = termination.value
+    ```
+    """
 
     var kind: Int
     """Which ending this is: EXITED, SIGNALED, TIMED_OUT, or SPAWN_FAILED."""
@@ -29,7 +40,7 @@ struct Termination(Equatable, ImplicitlyCopyable, Movable, Writable):
     lives in `final_kind`, `final_value`, and `escalated` instead.
     """
     var final_kind: Int
-    """TIMED_OUT only: EXITED or SIGNALED — how the child actually died."""
+    """TIMED_OUT only: how the child actually died, EXITED or SIGNALED."""
     var final_value: Int
     """TIMED_OUT only: the exit code or signal number of that actual death."""
     var escalated: Bool
@@ -81,7 +92,7 @@ struct Termination(Equatable, ImplicitlyCopyable, Movable, Writable):
         """A kill by an mtest deadline or interrupt; the outcome latches here.
 
         Args:
-            final_kind: EXITED or SIGNALED — how the child actually died.
+            final_kind: Whether the actual death was EXITED or SIGNALED.
             final_value: The exit code or signal number of that death.
             escalated: Whether SIGTERM had to be escalated to SIGKILL.
 

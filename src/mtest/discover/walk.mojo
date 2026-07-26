@@ -1,15 +1,17 @@
 """Recursive directory walking for `discover`.
 
-`walk_dir` collects the files under a directory whose basename matches the
-`test_*.mojo` pattern, recursively, with each directory's entries visited in
-sorted order for determinism. The pattern gates directory walks only; an
-explicitly named operand bypasses it, which the caller handles rather than the
-walk.
+`walk_dir` collects the files under a directory, recursively, whose basename
+matches the `test_*.mojo` pattern. `listdir` returns entries unsorted, so each
+directory's entries are sorted before use and the walk stays deterministic. The
+pattern gates directory walks only; an explicitly named operand bypasses it,
+which the caller handles rather than the walk.
 
 Symlink no-follow: the walk never follows a symlink, neither a symlinked
 subdirectory nor a symlinked file. Lexical normalization cannot detect a cycle,
-so a walk that followed links could loop forever or reach outside the root. An
-explicitly named symlink operand is the caller's concern, not the walk's.
+so a walk that followed links could loop forever or reach outside the root.
+`isdir` and `isfile` both follow symlinks, so a link entry is skipped before
+either of those tests runs. An explicitly named symlink operand is the caller's
+concern, not the walk's.
 """
 from std.builtin.sort import sort
 from std.os import listdir

@@ -27,8 +27,8 @@ comptime _TOML_MAX_DEPTH = 64
 comptime _TOML_MAX_NODES = 16_384
 """The maximum structural nodes (`[`, `{`, `=`, `,`) accepted before parsing.
 
-Sized above anything the documented schema expresses: the earlier 1,024
-refused an ordinary `[run] exclude` list of about a thousand globs, which a
+Sized above anything the documented schema expresses. A budget of 1,024 would
+refuse an ordinary `[run] exclude` list of about a thousand globs, which a
 generated-test project reaches without doing anything unusual. The bound
 still exists because the pre-scan is what keeps pathological input from
 reaching the parser at all, and it stays well under the adversarial corpus so
@@ -38,8 +38,8 @@ comptime _TOML_MAX_TABLE_UPDATES = 512
 """The maximum top-level table headers and assignments accepted.
 
 The pre-scan counts every top-level `[` and every depth-zero `=`, so this is
-an assignment budget, not a table-count budget. The earlier 64 refused the
-documented key set plus eight `[[override]]` tables — a configuration §25
+an assignment budget, not a table-count budget. A budget of 64 would refuse
+the documented key set plus eight `[[override]]` tables, a configuration §25
 describes as valid. 512 clears roughly eighty such tables, far past any real
 project, while staying small enough that the adversarial corpus can prove the
 ceiling cheaply: the parser costs milliseconds per assignment.
@@ -79,11 +79,21 @@ struct ConfigDiagnostic(Copyable, Movable):
     """Optional unstable parser detail, empty when absent."""
 
     def exit_code(self) -> Int:
-        """Return the owned usage-error exit for selected-config failures."""
+        """Return the owned usage-error exit for selected-config failures.
+
+        Returns:
+            `4`, the usage-error exit domain every selected-config failure
+            reports under.
+        """
         return 4
 
     def render(self) -> String:
-        """Render owned framing with at most one control-escaped detail line."""
+        """Render owned framing with at most one control-escaped detail line.
+
+        Returns:
+            The framing alone when no detail is present, otherwise the framing
+            followed by one indented detail line.
+        """
         if self.detail.byte_length() == 0:
             return self.framing.copy()
         return (
@@ -94,7 +104,12 @@ struct ConfigDiagnostic(Copyable, Movable):
 
     @staticmethod
     def empty() -> Self:
-        """Build the placeholder carried by a successful parse result."""
+        """Build the placeholder carried by a successful parse result.
+
+        Returns:
+            A diagnostic whose kind is `NONE` and whose framing and detail are
+            both empty.
+        """
         return Self(ConfigFailureKind.NONE, "", "")
 
 
@@ -113,14 +128,14 @@ struct TomlParseResult(Copyable, Movable):
 def _escape_controls(text: String) -> String:
     """Neutralize every terminal-interpreted control in one diagnostic.
 
-    A config diagnostic quotes `mtest.toml`'s own bytes — the source label, an
-    offending key, a rejected value — and `main` prints it to stderr, so it is
+    A config diagnostic quotes `mtest.toml`'s own bytes (the source label, an
+    offending key, a rejected value), and `main` prints it to stderr, so it is
     a terminal surface carrying text from a file the user may not have written.
     The set escaped is `mtest.model.control_chars`'s: the C0 controls, DEL, and
     the C1 controls `U+0080..U+009F`.
 
     C1 matters most here. TOML forbids a raw C0 control inside a basic string,
-    so the parser rejects ESC before it reaches a diagnostic — but C1 is a legal
+    so the parser rejects ESC before it reaches a diagnostic. But C1 is a legal
     TOML string character, and `U+009B` is CSI, `U+009D` is OSC and `U+009C` is
     ST in their single-code-point form. A hostile `mtest.toml` therefore drives
     the terminal through the very message that rejects it, with no ESC byte
@@ -944,6 +959,16 @@ def parse_toml(toml_text: String, source: String) -> TomlParseResult:
     Returns:
         A typed file model or an owned exit-4 syntax/schema diagnostic. No
         parser error escapes.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import parse_toml
+
+    var text = "[run]\\ntimeout = 1\\nstate = false\\n"
+    var result = parse_toml(text, "fine.toml")
+    var ok = result.is_ok and result.config.saw_timeout
+    ```
     """
     if toml_text.byte_length() > TOML_SOURCE_MAX_BYTES:
         return _failure(

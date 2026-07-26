@@ -11,8 +11,17 @@ collapsing it into MALFORMED_SUITE before the reporter sees it. It mirrors
 struct ParseDisposition(Equatable, ImplicitlyCopyable, Movable):
     """One value from the report-parse disposition vocabulary.
 
-    A thin wrapper over a stable integer discriminant, holding no owned
+    A thin wrapper over a stable integer discriminant. It holds no owned
     resources, so copies and moves are trivial.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import ParseDisposition
+
+    var disposition = ParseDisposition.CAPTURE_OVERFLOW
+    var trustworthy = disposition == ParseDisposition.PARSED  # False
+    ```
     """
 
     var code: Int

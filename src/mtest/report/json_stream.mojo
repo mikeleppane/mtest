@@ -3,9 +3,9 @@
 The machine-readable twin of the console reporter. Where the console renders
 English, this turns each landed `Event` into exactly one NDJSON object line and
 produces the one-line stream header, so a second consumer recovers every fact
-the session emitted without parsing prose. It is a pure serializer — `Event` to
-`String`, plus a header `String` — with no I/O and no sink; the caller writes
-the lines later.
+the session emitted without parsing prose. It is a pure serializer, `Event` to
+`String` plus a header `String`, with no I/O and no sink; the caller writes the
+lines later.
 
 The mapping is mechanical: every event object opens with
 `"event":"<snake_case_kind>"` and then mirrors the landed model's payload
@@ -21,8 +21,8 @@ No single line grows without limit, but the bound is not applied in one place.
 Most variable-length fields are bounded here at serialization: the captured
 streams and the long text fields become a head window plus a tail window with a
 visible elision marker between, and each such field rides beside omission
-metadata computed here — a retained-byte count, an omitted-byte count, or an
-omitted-entry count — rather than a parsed human truncation marker or an
+metadata computed here (a retained-byte count, an omitted-byte count, or an
+omitted-entry count) rather than a parsed human truncation marker or an
 inferred original total. The exception is `attempt_finished`, whose captured
 streams the session already clamped when it built the event; those serialize
 whole, carrying the event's own `*_truncated` markers.
@@ -198,7 +198,7 @@ def _string_bytes(s: String) -> List[UInt8]:
 def _cap_runner_excerpt(s: String) -> _Excerpt:
     """A runner-authored string bounded to a head and tail window, escaped.
 
-    Most runner-authored strings — toolchain, labels, short paths — are never
+    Most runner-authored strings (toolchain, labels, short paths) are never
     realistically long, so the bound is a formality that keeps a pathological
     value from unbounding a line. Some are not: `build_argv` and `attempt_argv`
     elements carry user-supplied build arguments and can be arbitrarily long.
@@ -313,6 +313,15 @@ def stream_header(version: String) -> String:
 
     Returns:
         The complete header line, without a trailing newline.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.json_stream import stream_header
+
+    var head = stream_header("0.6.0")
+    # '{"event":"stream","version":1,"generator":"mtest 0.6.0"}'
+    ```
     """
     return (
         '{"event":"stream","version":1,"generator":"mtest '
@@ -334,6 +343,16 @@ def serialize_event(e: Event) -> String:
         delimits it in the stream; the caller appends that. An empty string
         for an `EventKind` with no serializer, which cannot happen while the
         vocabulary stays closed.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import Event
+    from mtest.report.json_stream import serialize_event
+
+    var line = serialize_event(Event.file_started("tests/test_a.mojo"))
+    # '{"event":"file_started","path":"tests/test_a.mojo"}'
+    ```
     """
     if e.kind == EventKind.SESSION_STARTED:
         return _session_started(e.data[SessionStartedPayload])

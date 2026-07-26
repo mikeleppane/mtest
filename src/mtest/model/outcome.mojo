@@ -31,6 +31,16 @@ struct Outcome(Equatable, ImplicitlyCopyable, Movable):
     A thin wrapper over a stable integer discriminant, so the vocabulary is a
     closed set of named constants that compare by value. It holds no owned
     resources, so copies and moves are trivial.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import Outcome
+
+    var outcome = Outcome.CRASH
+    var failing = outcome.is_failing()  # True: CRASH is in the failing class
+    var distinct = outcome != Outcome.FAIL  # True: a crash is not a failure
+    ```
     """
 
     var code: Int
@@ -58,13 +68,13 @@ struct Outcome(Equatable, ImplicitlyCopyable, Movable):
     off-grammar, or ambiguous against the pinned report grammar."""
     comptime PRECOMPILE_ERROR = Self(8)
     """A session-level precompile step failed. In the failing class, but never
-    assigned — precompile failure travels as its own event instead."""
+    assigned, because precompile failure travels as its own event instead."""
     comptime FLAKY = Self(9)
     """A pass that only arrived after a crash-class attempt was retried; an
     annotation on a pass, not a failure."""
     # Internal states (not per-test outcomes).
     comptime DESELECTED = Self(10)
-    """A test suppressed from the run by selection. Never assigned — a
+    """A test suppressed from the run by selection. Never assigned, because a
     deselected test is dropped from the selection rather than marked."""
     comptime EXCLUDED = Self(11)
     """A discovered file an `--exclude` pattern removed before any build."""

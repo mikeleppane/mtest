@@ -2,7 +2,7 @@
 
 Layer 4 leaf beneath the orchestration: membership, order-independent set
 equality, and the restriction of a probed name universe to the names a
-selection actually ran. Pure list arithmetic over `String` names — it imports
+selection actually ran. Pure list arithmetic over `String` names. It imports
 nothing, from `mtest` or the stdlib, so both the selection pipeline and the
 crash-attribution post-pass can depend on it without either depending on the
 other.

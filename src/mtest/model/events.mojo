@@ -14,7 +14,7 @@ The payloads are data only; there is no formatting, I/O, or printing here. The
 console reporter renders everything from these fields, so the fields carry
 everything it needs: captured stdout and stderr stay owned raw byte buffers the
 reporter decodes verbatim, the build command rides as raw `build_argv` for the
-reporter to shell-join, and the per-outcome specifics ride as data —
+reporter to shell-join, and the per-outcome specifics ride as data:
 `signal_number` for a crash, `exit_status` for a failure, `timeout_seconds` for
 a timeout, `exclusion_pattern` for an exclusion. A machine reporter can recover
 every one of these without parsing English.
@@ -59,8 +59,8 @@ struct EventKind(Equatable, ImplicitlyCopyable, Movable):
     comptime COUNT = 12
     """The number of distinct kinds in the vocabulary.
 
-    Every exhaustive proof over the event set — the composite fan-out, the
-    distinctness table — is anchored to this, so adding a kind without
+    Every exhaustive proof over the event set (the composite fan-out, the
+    distinctness table) is anchored to this, so adding a kind without
     extending those proofs fails loudly instead of narrowing them in silence."""
 
     def __eq__(self, other: Self) -> Bool:
@@ -80,6 +80,19 @@ struct Summary(Copyable, Movable):
     includes the internal EXCLUDED and NOT_RUN tallies, so the session summary
     accounts for every discovered file, not only the ones that ran. Owns its
     backing list, so copies are explicit.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import Summary
+    from mtest.model import Outcome
+
+    var summary = Summary.zeros()
+    summary.counts[Outcome.PASS.code] = 4
+    summary.counts[Outcome.EXCLUDED.code] += 1
+    var passed = summary.count_of(Outcome.PASS)  # 4
+    var every = summary.total()  # 5, excluded files included
+    ```
     """
 
     var counts: List[Int]
@@ -466,6 +479,17 @@ struct Event(Copyable, Movable):
     through the typed arm, e.g. `e.data[FileFinishedPayload].outcome` under an
     `e.kind == EventKind.FILE_FINISHED` guard. Owns its payload, so copies are
     explicit.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import Event, EventKind, FileStartedPayload
+
+    var event = Event.file_started("tests/test_a.mojo")
+    if event.kind == EventKind.FILE_STARTED:
+        ref payload = event.data[FileStartedPayload]
+        var path = payload.path  # "tests/test_a.mojo"
+    ```
     """
 
     var kind: EventKind
@@ -679,6 +703,24 @@ struct Event(Copyable, Movable):
 
         Returns:
             A FILE_FINISHED event.
+
+        Examples:
+
+        ```mojo
+        from mtest.model import Event
+        from mtest.model import Outcome
+
+        var event = Event.file_finished(
+            "tests/test_a.mojo",
+            Outcome.CRASH,
+            0.5,
+            ["mojo", "build", "tests/test_a.mojo"],
+            1.25,
+            List[UInt8](),
+            List[UInt8](),
+            signal_number=11,
+        )
+        ```
         """
         return Event(
             FileFinishedPayload(

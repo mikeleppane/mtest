@@ -1,9 +1,9 @@
 """The shared C-string conversion: `c_string_bytes`.
 
 Internal to the platform boundary. Every foreign call here that takes a
-`const char*` needs the same thing — an owned, NUL-terminated byte copy of a
-Mojo `String` that the caller keeps alive across the call — so the conversion is
-written once instead of once per call site.
+`const char*` needs the same thing: an owned, NUL-terminated byte copy of a Mojo
+`String` that the caller keeps alive across the call. The conversion is written
+once instead of once per call site.
 
 A copy rather than a borrow of the string's own buffer is deliberate: a Mojo
 `String` is not guaranteed NUL-terminated, and appending the terminator to a

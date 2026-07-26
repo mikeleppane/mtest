@@ -52,7 +52,7 @@ def _toml_string(value: String) -> String:
     `config show` prints `mtest.toml` string values to a terminal, so the
     escaping covers every code point `mtest.model.control_chars` classifies as
     a terminal instruction: the C0 controls `U+0000..U+001F`, DEL `U+007F`, and
-    the C1 controls `U+0080..U+009F`. C1 is not optional — `U+009B` is CSI,
+    the C1 controls `U+0080..U+009F`. C1 is not optional: `U+009B` is CSI,
     `U+009D` is OSC and `U+009C` is ST in their single-code-point form, so a
     config file could otherwise drive a terminal with no ESC byte anywhere in
     it. The classification is shared with the console reporter and `doctor`;
@@ -171,8 +171,8 @@ def _annotations(value: AnnotationsMode) -> String:
 def _comment_text(value: String) -> String:
     """Escape every terminal-interpreted control in a user-controlled comment.
 
-    Consults the same classification `_toml_string` does — C0, DEL, and the C1
-    controls `U+0080..U+009F` — because this trailer reaches the same terminal
+    Consults the same classification `_toml_string` does (C0, DEL, and the C1
+    controls `U+0080..U+009F`) because this trailer reaches the same terminal
     and carries the same untrusted config text.
 
     Args:
@@ -208,6 +208,21 @@ def render_config_show(resolved: ResolvedConfig, state_present: Bool) -> String:
 
     Returns:
         A newly allocated human-facing TOML document in fixed table order.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import CliOverlay, ConfigEnvironment, FileConfig
+    from mtest.config import RunnerConfig, render_config_show, resolve_config
+
+    var resolved = resolve_config(
+        RunnerConfig.default(),
+        FileConfig.empty(),
+        ConfigEnvironment.empty(),
+        CliOverlay.default(),
+    )
+    var document = render_config_show(resolved, state_present=False)
+    ```
     """
     var config = resolved.config.copy()
     var sources = resolved.provenance.copy()

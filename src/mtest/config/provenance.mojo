@@ -7,7 +7,11 @@ values equal to their lower-precedence defaults.
 
 @fieldwise_init
 struct Provenance(Equatable, ImplicitlyCopyable, Movable):
-    """One source in the configuration precedence order."""
+    """One source in the configuration precedence order.
+
+    The order runs `DEFAULT`, `MTEST_TOML`, `ENV_MTEST_MOJO`, then `CLI`, each
+    replacing the value below it. `ENV_MTEST_MOJO` reaches only `mojo_path`.
+    """
 
     var value: Int
     """The stable integer discriminant identifying the source."""

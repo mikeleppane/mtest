@@ -4,12 +4,12 @@ Layer 4, the session-level step that runs before any test file is built: it
 compiles a source with `mojo precompile` into a per-attempt temp path and
 renames that onto the output only after the attempt exits 0, so a killed,
 crashed, or rejected attempt never touches a package a dependent might build
-against. A failed step is a precompile error at exit 1 and its success widens
+against. A failed step is a precompile error at exit 1. A successful one widens
 the include set every later build sees.
 
 It reuses the attempt machinery's retry policy, event shapes, and residual
-warning so a session-level step's attempt line carries the same identity a file
-build's does, and it sits below `session` and `collect`, which both run the
+warning, so a session-level step's attempt line carries the same identity a file
+build's does. It sits below `session` and `collect`, which both run the
 configured steps before their own work.
 """
 from std.os.path import basename, dirname
@@ -240,11 +240,11 @@ def _run_precompile(
     deleted best-effort, and a cleanup failure never fails the session.
 
     The step is bounded by `--compile-timeout` with the compile-specific grace,
-    the same treatment per-file builds get, and gets the same crash-class
-    `--retries` budget: up to `config.retries + 1` attempts, retried only when
+    exactly as a per-file build is, and it gets the same crash-class `--retries`
+    budget: up to `config.retries + 1` attempts, retried only when
     `retry_classify("precompile", ...)` calls the failure crash-class. Each
     retry writes a fresh temp path and is quarantined against a fresh
-    per-attempt module cache, with a residual warning.
+    per-attempt module cache, and emits a residual warning.
 
     Precompile attempts are session-level: their `AttemptFinished` events name
     the `src` spelling and carry `step="precompile"`. There is no flaky verdict

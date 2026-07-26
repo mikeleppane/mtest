@@ -14,6 +14,15 @@ struct AnnotationsMode(Equatable, ImplicitlyCopyable, Movable):
 
     A wrapper over a stable integer discriminant, so the vocabulary is a closed
     set of named constants that compare by value.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import AnnotationsMode, RunnerConfig
+
+    var config = RunnerConfig.default()
+    config.gh_annotations = AnnotationsMode.ON
+    ```
     """
 
     var value: Int
@@ -45,6 +54,15 @@ def annotations_resolved_on(
 
     Returns:
         True when the annotation tail should render.
+
+    Examples:
+
+    ```mojo
+    from mtest.config import AnnotationsMode, annotations_resolved_on
+
+    var inside_ci = annotations_resolved_on(AnnotationsMode.AUTO, True)
+    var outside_ci = annotations_resolved_on(AnnotationsMode.AUTO, False)
+    ```
     """
     if mode == AnnotationsMode.OFF:
         return False

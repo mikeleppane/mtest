@@ -2,10 +2,10 @@
 
 The console splices this string into a run-failure `reproduce:` line so a
 failing file can be re-run under the exact build the session used. It inverts
-the parser for the flags that change how a file is built — `--mojo` (only when
+the parser for the flags that change how a file is built: `--mojo` (only when
 it differs from the plain `mojo` default), `-I`, `--build-arg`, and
-`--precompile` — and it lives in `cli` because those spellings are the parser's
-own. Quoting goes through `mtest.config`'s shared `shell_join`, the same helper
+`--precompile`. It lives in `cli` because those spellings are the parser's own.
+Quoting goes through `mtest.config`'s shared `shell_join`, the same helper
 `report` and `session` use, so every reproduce line quotes uniformly.
 """
 from mtest.config import RunnerConfig, shell_join
@@ -25,6 +25,17 @@ def build_flags_string(config: RunnerConfig) -> String:
     Returns:
         A copy-paste-safe flag string, or the empty string when no
         build-affecting option is in effect.
+
+    Examples:
+
+    ```mojo
+    from mtest.cli import build_flags_string
+    from mtest.config import RunnerConfig
+
+    var config = RunnerConfig.default()
+    config.include_paths = ["my dir"]
+    print(build_flags_string(config))  # -I 'my dir'
+    ```
     """
     var tokens = List[String]()
     if config.mojo_path != "mojo":
