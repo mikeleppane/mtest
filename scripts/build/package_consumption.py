@@ -76,7 +76,6 @@ import stat
 import subprocess
 import sys
 
-from scripts.checks.layout import ASSERTION_SOURCE_PATHS
 from scripts.harness import dogfood
 
 
@@ -239,7 +238,12 @@ SUMMARY_RE = re.compile(
 )
 
 INSTALLED_ASSERTION_FILES = {
-    path.relative_to("assertions-src") for path in ASSERTION_SOURCE_PATHS
+    Path("mtest/__init__.mojo"),
+    Path("mtest/assertions/__init__.mojo"),
+    Path("mtest/assertions/_display.mojo"),
+    Path("mtest/assertions/_mapping.mojo"),
+    Path("mtest/assertions/_sequence.mojo"),
+    Path("mtest/assertions/_text.mojo"),
 }
 INSTALLED_ASSERTION_DIRECTORIES = {
     Path("."),

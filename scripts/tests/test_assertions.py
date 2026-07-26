@@ -272,6 +272,36 @@ class AssertionLocationValidationTests(unittest.TestCase):
                 self.expected,
             )
 
+    def test_rejects_coordinates_swapped_between_test_names(self) -> None:
+        output = (
+            self.valid_output.replace(
+                ":12:18:",
+                ":99:99:",
+                1,
+            )
+            .replace(
+                ":18:18:",
+                ":12:18:",
+                1,
+            )
+            .replace(
+                ":99:99:",
+                ":18:18:",
+                1,
+            )
+        )
+        with self.assertRaisesRegex(AssertionError, "name-to-coordinate"):
+            assertions.validate_location_run(
+                subprocess.CompletedProcess(
+                    args=["location-o0"],
+                    returncode=1,
+                    stdout=output,
+                    stderr="",
+                ),
+                self.source,
+                self.expected,
+            )
+
     def test_rejects_provider_coordinates(self) -> None:
         output = self.valid_output.replace(
             "At /checkout/tests/assertions/location_consumer.mojo:12:18",

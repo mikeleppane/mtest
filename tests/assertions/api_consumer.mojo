@@ -202,35 +202,41 @@ def test_standard_and_companion_names_coexist() raises:
 
 
 def test_pass_compares_once_and_never_renders() raises:
-    var actual_equality = _counter()
-    var expected_equality = _counter()
-    var actual_render = _counter()
-    var expected_render = _counter()
-    var actual = ObservedValue(7, "same", actual_equality, actual_render)
-    var expected = ObservedValue(7, "same", expected_equality, expected_render)
+    var counters = CounterOwner()
+    var actual = ObservedValue(
+        7,
+        "same",
+        counters.actual_equality.copy(),
+        counters.actual_render.copy(),
+    )
+    var expected = ObservedValue(
+        7,
+        "same",
+        counters.expected_equality.copy(),
+        counters.expected_render.copy(),
+    )
 
     assert_equal(actual, expected)
 
-    testing.assert_equal(actual_equality[0], 1)
-    testing.assert_equal(expected_equality[0], 0)
-    testing.assert_equal(actual_render[0], 0)
-    testing.assert_equal(expected_render[0], 0)
-    # SAFETY: these four allocations remain uniquely owned by this test and no
-    # ObservedValue escapes; each allocation is freed exactly once after use.
-    actual_equality.free()
-    expected_equality.free()
-    actual_render.free()
-    expected_render.free()
+    testing.assert_equal(counters.read(0), 1)
+    testing.assert_equal(counters.read(1), 0)
+    testing.assert_equal(counters.read(2), 0)
+    testing.assert_equal(counters.read(3), 0)
 
 
 def test_failure_compares_once_and_renders_each_operand_once() raises:
-    var actual_equality = _counter()
-    var expected_equality = _counter()
-    var actual_render = _counter()
-    var expected_render = _counter()
-    var actual = ObservedValue(1, "actual", actual_equality, actual_render)
+    var counters = CounterOwner()
+    var actual = ObservedValue(
+        1,
+        "actual",
+        counters.actual_equality.copy(),
+        counters.actual_render.copy(),
+    )
     var expected = ObservedValue(
-        2, "expected", expected_equality, expected_render
+        2,
+        "expected",
+        counters.expected_equality.copy(),
+        counters.expected_render.copy(),
     )
     var detail = String("")
 
@@ -243,16 +249,10 @@ def test_failure_compares_once_and_renders_each_operand_once() raises:
     testing.assert_true("actual" in detail)
     testing.assert_true("expected" in detail)
     testing.assert_true("because" in detail)
-    testing.assert_equal(actual_equality[0], 1)
-    testing.assert_equal(expected_equality[0], 0)
-    testing.assert_equal(actual_render[0], 1)
-    testing.assert_equal(expected_render[0], 1)
-    # SAFETY: these four allocations remain uniquely owned by this test and no
-    # ObservedValue escapes; each allocation is freed exactly once after use.
-    actual_equality.free()
-    expected_equality.free()
-    actual_render.free()
-    expected_render.free()
+    testing.assert_equal(counters.read(0), 1)
+    testing.assert_equal(counters.read(1), 0)
+    testing.assert_equal(counters.read(2), 1)
+    testing.assert_equal(counters.read(3), 1)
 
 
 def test_opaque_render_caps_apply_after_escaping() raises:
@@ -271,6 +271,13 @@ def test_opaque_render_caps_apply_after_escaping() raises:
     testing.assert_true(multibyte.endswith("... [truncated]"))
     var controls = render_value("\n\u202e")
     testing.assert_equal(controls, "\\n\\u202e")
+    var atomic_escape = render_value(
+        _repeated("a", VALUE_BYTE_CAP - 16) + "\U000E0041" + _repeated("z", 10)
+    )
+    testing.assert_equal(
+        atomic_escape,
+        _repeated("a", VALUE_BYTE_CAP - 16) + String("... [truncated]"),
+    )
 
 
 def test_identical_opaque_projections_report_whether_they_were_truncated() raises:
@@ -696,19 +703,26 @@ def test_nested_lists_are_opaque_and_user_message_is_last() raises:
 
 
 def test_list_specializer_renders_zero_on_pass_and_eight_on_failure() raises:
-    var actual_equality = _counter()
-    var expected_equality = _counter()
-    var actual_render = _counter()
-    var expected_render = _counter()
+    var counters = CounterOwner()
     var passing_actual = [
-        ObservedValue(1, "same", actual_equality, actual_render)
+        ObservedValue(
+            1,
+            "same",
+            counters.actual_equality.copy(),
+            counters.actual_render.copy(),
+        )
     ]
     var passing_expected = [
-        ObservedValue(1, "same", expected_equality, expected_render)
+        ObservedValue(
+            1,
+            "same",
+            counters.expected_equality.copy(),
+            counters.expected_render.copy(),
+        )
     ]
     assert_equal(passing_actual, passing_expected)
-    testing.assert_equal(actual_render[0], 0)
-    testing.assert_equal(expected_render[0], 0)
+    testing.assert_equal(counters.read(2), 0)
+    testing.assert_equal(counters.read(3), 0)
 
     var failing_actual = List[ObservedValue]()
     var failing_expected = List[ObservedValue]()
@@ -717,32 +731,26 @@ def test_list_specializer_renders_zero_on_pass_and_eight_on_failure() raises:
             ObservedValue(
                 100 + index,
                 "actual-" + String(index),
-                actual_equality,
-                actual_render,
+                counters.actual_equality.copy(),
+                counters.actual_render.copy(),
             )
         )
         failing_expected.append(
             ObservedValue(
                 index,
                 "expected-" + String(index),
-                expected_equality,
-                expected_render,
+                counters.expected_equality.copy(),
+                counters.expected_render.copy(),
             )
         )
     try:
         assert_equal(failing_actual, failing_expected)
     except:
         pass
-    testing.assert_equal(actual_equality[0], 11)
-    testing.assert_equal(expected_equality[0], 0)
-    testing.assert_equal(actual_render[0], 8)
-    testing.assert_equal(expected_render[0], 8)
-    # SAFETY: all probe values are dead before their four uniquely owned
-    # counters are freed exactly once.
-    actual_equality.free()
-    expected_equality.free()
-    actual_render.free()
-    expected_render.free()
+    testing.assert_equal(counters.read(0), 11)
+    testing.assert_equal(counters.read(1), 0)
+    testing.assert_equal(counters.read(2), 8)
+    testing.assert_equal(counters.read(3), 8)
 
 
 def test_unequal_list_suffix_does_not_repeat_the_aligned_scan() raises:
@@ -966,34 +974,30 @@ def test_opaque_dictionary_fallback_is_insertion_order_independent() raises:
 
 def test_equal_dictionary_with_oversized_key_returns_without_rendering() raises:
     var key = _repeated("k", 1025)
-    var actual_equality = _counter()
-    var expected_equality = _counter()
-    var actual_render = _counter()
-    var expected_render = _counter()
+    var counters = CounterOwner()
     var actual = Dict[String, ObservedValue]()
     var expected = Dict[String, ObservedValue]()
-    actual[key] = ObservedValue(7, "actual", actual_equality, actual_render)
     expected[key] = ObservedValue(
-        7, "expected", expected_equality, expected_render
+        7,
+        "expected",
+        counters.expected_equality.copy(),
+        counters.expected_render.copy(),
+    )
+    actual[key] = ObservedValue(
+        7,
+        "actual",
+        counters.actual_equality.copy(),
+        counters.actual_render.copy(),
     )
     assert_equal(actual, expected)
-    testing.assert_equal(actual_equality[0], 1)
-    testing.assert_equal(expected_equality[0], 0)
-    testing.assert_equal(actual_render[0], 0)
-    testing.assert_equal(expected_render[0], 0)
-    # SAFETY: both dictionaries and their values are dead before the four
-    # uniquely owned counters are freed exactly once.
-    actual_equality.free()
-    expected_equality.free()
-    actual_render.free()
-    expected_render.free()
+    testing.assert_equal(counters.read(0), 1)
+    testing.assert_equal(counters.read(1), 0)
+    testing.assert_equal(counters.read(2), 0)
+    testing.assert_equal(counters.read(3), 0)
 
 
 def test_dictionary_specializer_renders_only_eight_changed_values() raises:
-    var actual_equality = _counter()
-    var expected_equality = _counter()
-    var actual_render = _counter()
-    var expected_render = _counter()
+    var counters = CounterOwner()
     var actual = Dict[String, ObservedValue]()
     var expected = Dict[String, ObservedValue]()
     for index in range(12):
@@ -1001,29 +1005,23 @@ def test_dictionary_specializer_renders_only_eight_changed_values() raises:
         actual[key] = ObservedValue(
             index,
             "actual-" + String(index),
-            actual_equality,
-            actual_render,
+            counters.actual_equality.copy(),
+            counters.actual_render.copy(),
         )
         expected[key] = ObservedValue(
             100 + index,
             "expected-" + String(index),
-            expected_equality,
-            expected_render,
+            counters.expected_equality.copy(),
+            counters.expected_render.copy(),
         )
     try:
         assert_equal(actual, expected)
     except:
         pass
-    testing.assert_equal(actual_equality[0], 12)
-    testing.assert_equal(expected_equality[0], 0)
-    testing.assert_equal(actual_render[0], 8)
-    testing.assert_equal(expected_render[0], 8)
-    # SAFETY: both dictionaries and their values are dead before the four
-    # uniquely owned counters are freed exactly once.
-    actual_equality.free()
-    expected_equality.free()
-    actual_render.free()
-    expected_render.free()
+    testing.assert_equal(counters.read(0), 12)
+    testing.assert_equal(counters.read(1), 0)
+    testing.assert_equal(counters.read(2), 8)
+    testing.assert_equal(counters.read(3), 8)
 
 
 def main() raises:

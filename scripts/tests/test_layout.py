@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from scripts.build import package_consumption
 from scripts.checks import layout
 from scripts.harness import aggregate
 
@@ -118,6 +119,19 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
             )
 
             layout.check_assertion_companion_layout(repo)
+            with (
+                mock.patch.object(
+                    package_consumption,
+                    "INSTALLED_ASSERTION_FILES",
+                    {Path("mtest/__init__.mojo")},
+                ),
+                self.assertRaisesRegex(
+                    AssertionError,
+                    "assertion package-check membership mismatch",
+                ),
+            ):
+                layout.check_assertion_companion_layout(repo)
+
             extra = repo / "assertions-src" / "mtest" / "assertions" / "unexpected.mojo"
             extra.write_text("# accidental public module\n", encoding="utf-8")
 

@@ -123,9 +123,7 @@ def validate_dictionary_success_path(source: str) -> None:
     if function_start == -1:
         raise AssertionError("dictionary difference function is missing")
     function = source[function_start:]
-    equal_guard = (
-        "if not missing.total and not unexpected.total and not changed.total:"
-    )
+    equal_guard = "if not missing.total and not unexpected.total and not changed.total:"
     equal_guard_at = function.find(equal_guard)
     if equal_guard_at == -1:
         raise AssertionError("dictionary equality return guard is missing")
@@ -147,9 +145,7 @@ def validate_dictionary_selection_bound(source: str) -> None:
     if consider_at == -1:
         raise AssertionError("dictionary key selection function is missing")
     function = source[consider_at:]
-    guard_at = function.find(
-        "if key.byte_length() > DICTIONARY_KEY_BYTE_CAP:"
-    )
+    guard_at = function.find("if key.byte_length() > DICTIONARY_KEY_BYTE_CAP:")
     reject_at = function.find("return False", guard_at)
     retain_at = function.find("self.keys.append(key)")
     if (
@@ -269,15 +265,18 @@ def validate_location_run(
         raise AssertionError("location consumer exposed a provider coordinate")
 
     escaped_source = re.escape(str(source))
-    observed = {
-        (int(line), int(column))
-        for line, column in re.findall(rf"At {escaped_source}:(\d+):(\d+):", run.stdout)
-    }
-    expected_coordinates = set(expected.values())
-    if observed != expected_coordinates:
+    observed_rows = re.findall(
+        rf"^\s+FAIL \[[^\]]+\] ([A-Za-z0-9_]+)\s*\n"
+        rf"\s+At {escaped_source}:(\d+):(\d+):",
+        run.stdout,
+        re.MULTILINE,
+    )
+    observed = {name: (int(line), int(column)) for name, line, column in observed_rows}
+    if len(observed_rows) != len(observed) or observed != expected:
         raise AssertionError(
-            "location consumer coordinates differ: "
-            f"expected {sorted(expected_coordinates)}, got {sorted(observed)}"
+            "location consumer name-to-coordinate mapping differs: "
+            f"expected {sorted(expected.items())}, got "
+            f"{sorted(observed.items())}"
         )
 
 
@@ -562,6 +561,7 @@ def check_assertions() -> None:
             timeout=RUN_TIMEOUT_SECONDS,
         )
         validate_location_run(location_run, LOCATION_CONSUMER, locations)
+    _reject_accidental_public_helpers(mojo)
 
 
 def main() -> int:

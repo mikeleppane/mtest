@@ -1201,6 +1201,16 @@ def check_assertion_companion_layout(repo_root: Path = REPO_ROOT) -> None:
         )
     if (repo_root / "src" / "mtest" / "assertions").exists():
         raise AssertionError("assertion companion leaked into private src/mtest")
+    packaged_sources = {
+        Path("assertions-src") / path
+        for path in package_consumption.INSTALLED_ASSERTION_FILES
+    }
+    if packaged_sources != ASSERTION_SOURCE_PATHS:
+        raise AssertionError(
+            "assertion package-check membership mismatch: "
+            f"missing={sorted(ASSERTION_SOURCE_PATHS - packaged_sources)}, "
+            f"extra={sorted(packaged_sources - ASSERTION_SOURCE_PATHS)}"
+        )
 
     production = (repo_root / "scripts" / "build" / "production_build.sh").read_text(
         encoding="utf-8"
