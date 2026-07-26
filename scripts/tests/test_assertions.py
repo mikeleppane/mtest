@@ -173,19 +173,20 @@ def write_dictionary_difference[V](actual: V) -> Bool:
         self,
     ) -> None:
         broken = """
-def consider(mut self, key: String) -> Bool:
+def consider(mut self, key: String):
     self.keys.append(key)
-    return True
 """
         with self.assertRaisesRegex(AssertionError, "retained"):
             assertions.validate_dictionary_selection_bound(broken)
 
         fixed = """
-def consider(mut self, key: String) -> Bool:
-    if key.byte_length() > DICTIONARY_KEY_BYTE_CAP:
-        return False
+def consider(mut self, key: String):
+    if (
+        key.byte_length() > DICTIONARY_KEY_BYTE_CAP
+        or not _key_projection_fits(key)
+    ):
+        return
     self.keys.append(key)
-    return True
 """
         assertions.validate_dictionary_selection_bound(fixed)
 

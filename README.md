@@ -201,21 +201,22 @@ specializes only top-level `String`, `List[T]`, and `Dict[String, V]`; nested
 containers and custom values are displayed opaquely. List details show at most
 eight entries per side, and dictionary details show at most eight entries in
 each of the missing, unexpected, and changed categories. Their `omitted by
-entry limit` counts describe that eight-entry selection; a body-cap truncation
-is reported separately by the final marker. Dictionary keys whose escaped
-display would exceed 1024 bytes switch to deterministic entry counts without
-expanding keys or values. Structural key and category order is deterministic;
-opaque values retain their own `Writable` formatting, including any ordering
-it chooses.
+entry limit` counts describe that eight-entry selection. Dictionary keys whose
+escaped display would exceed 1024 bytes are omitted from structural rows and
+counted separately by `omitted by key display limit`; category totals and
+displayable short-key details remain. Structural key and category order is
+deterministic; opaque values retain their own `Writable` formatting, including
+any ordering it chooses.
 
 Finalized opaque-value projections are at most 1024 bytes, text context is at
 most 4096 bytes, and a complete assertion body is at most 16384 bytes. Each cap
-includes the complete `... [truncated]` marker. Equality is exact; a passing
-assertion formats nothing, while a failing assertion formats each displayed
-operand once. These limits bound bytes finalized and emitted by the companion,
-not private work performed inside user-defined equality or formatting code. A
-present reason retains bounded space at the end even when mismatch detail is
-truncated.
+includes a complete `... [truncated]` marker at the point where that projection
+or body omitted bytes; later detail can follow a per-operand marker. Equality is
+exact; a passing assertion formats nothing, while a failing assertion formats
+each displayed operand once. These limits bound bytes finalized and emitted by
+the companion, not private work performed inside user-defined equality or
+formatting code. A present reason retains bounded space at the end even when
+mismatch detail is truncated.
 
 `<PREFIX>/share/mtest/assertions-src` is one complete source package named
 `mtest`, not an extension merged into another `mtest` package. Put it before

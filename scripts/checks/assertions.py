@@ -61,11 +61,12 @@ API_TESTS = {
     "test_dictionary_order_is_full_unsigned_utf8_not_insertion_order",
     "test_dictionary_displays_eight_per_category_with_totals_first",
     "test_dictionary_values_are_individually_bounded_before_assembly",
-    "test_dictionary_key_cap_boundary_and_opaque_fallback",
-    "test_opaque_dictionary_projection_reports_truncation_truthfully",
-    "test_opaque_dictionary_fallback_is_insertion_order_independent",
+    "test_dictionary_key_cap_boundary_and_omission",
+    "test_oversized_dictionary_key_omission_is_truthful",
+    "test_dictionary_key_omission_is_insertion_order_independent",
     "test_equal_dictionary_with_oversized_key_returns_without_rendering",
     "test_equal_oversized_dictionary_key_does_not_hide_short_change",
+    "test_undisplayed_oversized_dictionary_key_keeps_short_details",
     "test_dictionary_specializer_renders_only_eight_changed_values",
 }
 
@@ -131,33 +132,34 @@ def validate_dictionary_success_path(source: str) -> None:
     equal_return_at = function.find("return True", equal_guard_at)
     if equal_return_at == -1:
         raise AssertionError("dictionary equality return is missing")
-    projection_at = function.find("_key_projection_fits(")
-    if projection_at == -1:
-        raise AssertionError("dictionary key projection guard is missing")
-    if projection_at < equal_return_at:
+    projection_at = function.find("_key_projection_fits(", 0, equal_return_at)
+    if projection_at != -1:
         raise AssertionError(
             "dictionary key projection is reachable on the success path"
         )
 
 
 def validate_dictionary_selection_bound(source: str) -> None:
-    """Require raw oversized keys to be rejected before selection retains them."""
-    consider_at = source.find("def consider(mut self, key: String) -> Bool:")
+    """Require oversized key displays to be omitted before selection retains them."""
+    consider_at = source.find("def consider(mut self, key: String):")
     if consider_at == -1:
         raise AssertionError("dictionary key selection function is missing")
     function = source[consider_at:]
-    guard_at = function.find("if key.byte_length() > DICTIONARY_KEY_BYTE_CAP:")
-    reject_at = function.find("return False", guard_at)
+    guard_at = function.find("key.byte_length() > DICTIONARY_KEY_BYTE_CAP")
+    projection_at = function.find("or not _key_projection_fits(key)")
+    reject_at = function.find("return", guard_at)
     retain_at = function.find("self.keys.append(key)")
     if (
         guard_at == -1
+        or projection_at == -1
         or reject_at == -1
         or retain_at == -1
         or guard_at > retain_at
+        or projection_at > retain_at
         or reject_at > retain_at
     ):
         raise AssertionError(
-            "raw oversized dictionary key can be retained by selection"
+            "oversized dictionary key display can be retained by selection"
         )
 
 

@@ -29,25 +29,30 @@ struct _Selection(Movable):
 
     var keys: List[String]
     var total: Int
+    var key_display_omissions: Int
 
     def __init__(out self):
         self.keys = List[String]()
         self.total = 0
+        self.key_display_omissions = 0
 
-    def consider(mut self, key: String) -> Bool:
+    def consider(mut self, key: String):
         self.total += 1
-        if key.byte_length() > DICTIONARY_KEY_BYTE_CAP:
-            return False
+        if (
+            key.byte_length() > DICTIONARY_KEY_BYTE_CAP
+            or not _key_projection_fits(key)
+        ):
+            self.key_display_omissions += 1
+            return
         if len(self.keys) < DISPLAY_LIMIT:
             self.keys.append(key)
-            return True
+            return
         var largest = 0
         for index in range(1, len(self.keys)):
             if _byte_less(self.keys[largest], self.keys[index]):
                 largest = index
         if _byte_less(key, self.keys[largest]):
             self.keys[largest] = key
-        return True
 
     def sort(mut self):
         for first in range(len(self.keys)):
@@ -67,7 +72,7 @@ def _write_keys(
     mut selection: _Selection,
 ):
     selection.sort()
-    if not selection.total:
+    if not len(selection.keys):
         return
     output.write_trusted("\n  " + title + " keys:")
     for key in selection.keys:
@@ -85,7 +90,7 @@ def _write_changed[
     expected: Dict[String, V],
 ) raises:
     selection.sort()
-    if not selection.total:
+    if not len(selection.keys):
         return
     output.write_trusted("\n  changed entries:")
     for key in selection.keys:
@@ -99,24 +104,6 @@ def _write_changed[
             break
 
 
-def _write_opaque_dictionary_detail[
-    V: Copyable & ImplicitlyDestructible & Equatable & Writable
-](
-    mut output: BoundedWriter,
-    actual: Dict[String, V],
-    expected: Dict[String, V],
-):
-    output.write_trusted(
-        "dictionary differs; structural key display exceeds "
-        + String(DICTIONARY_KEY_BYTE_CAP)
-        + " bytes; deterministic value detail omitted"
-        + "\n  actual entries: "
-        + String(len(actual))
-        + "\n  expected entries: "
-        + String(len(expected))
-    )
-
-
 def write_dictionary_difference[
     V: Copyable & ImplicitlyDestructible & Equatable & Writable
 ](
@@ -125,57 +112,69 @@ def write_dictionary_difference[
     expected: Dict[String, V],
 ) raises -> Bool:
     """Derive equality and write deterministic bounded dictionary categories."""
-    var oversized_key = False
     var missing = _Selection()
     var unexpected = _Selection()
     var changed = _Selection()
     for entry in expected.items():
         if entry.key not in actual:
-            if not missing.consider(entry.key):
-                oversized_key = True
+            missing.consider(entry.key)
         elif actual[entry.key] != entry.value:
-            if not changed.consider(entry.key):
-                oversized_key = True
+            changed.consider(entry.key)
     for entry in actual.items():
         if entry.key not in expected:
-            if not unexpected.consider(entry.key):
-                oversized_key = True
+            unexpected.consider(entry.key)
 
     if not missing.total and not unexpected.total and not changed.total:
         return True
-
-    if not oversized_key:
-        for key in missing.keys:
-            if not _key_projection_fits(key):
-                oversized_key = True
-        for key in unexpected.keys:
-            if not _key_projection_fits(key):
-                oversized_key = True
-        for key in changed.keys:
-            if not _key_projection_fits(key):
-                oversized_key = True
-    if oversized_key:
-        _write_opaque_dictionary_detail(output, actual, expected)
-        return False
 
     output.write_trusted(
         "dictionary differs"
         + "\n  missing: "
         + String(missing.total)
         + " total, "
-        + String(max(0, missing.total - DISPLAY_LIMIT))
+        + String(
+            max(
+                0,
+                missing.total - missing.key_display_omissions - DISPLAY_LIMIT,
+            )
+        )
         + " omitted by entry limit"
         + "\n  unexpected: "
         + String(unexpected.total)
         + " total, "
-        + String(max(0, unexpected.total - DISPLAY_LIMIT))
+        + String(
+            max(
+                0,
+                unexpected.total
+                - unexpected.key_display_omissions
+                - DISPLAY_LIMIT,
+            )
+        )
         + " omitted by entry limit"
         + "\n  changed: "
         + String(changed.total)
         + " total, "
-        + String(max(0, changed.total - DISPLAY_LIMIT))
+        + String(
+            max(
+                0,
+                changed.total - changed.key_display_omissions - DISPLAY_LIMIT,
+            )
+        )
         + " omitted by entry limit"
     )
+    if (
+        missing.key_display_omissions
+        or unexpected.key_display_omissions
+        or changed.key_display_omissions
+    ):
+        output.write_trusted(
+            "\n  omitted by key display limit: missing "
+            + String(missing.key_display_omissions)
+            + ", unexpected "
+            + String(unexpected.key_display_omissions)
+            + ", changed "
+            + String(changed.key_display_omissions)
+        )
     _write_keys(output, "missing", missing)
     _write_keys(output, "unexpected", unexpected)
     _write_changed(output, changed, actual, expected)

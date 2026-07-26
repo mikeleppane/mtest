@@ -922,7 +922,7 @@ def test_dictionary_values_are_individually_bounded_before_assembly() raises:
     testing.assert_equal(_count_scalar(capped, ord('"')) % 2, 0)
 
 
-def test_dictionary_key_cap_boundary_and_opaque_fallback() raises:
+def test_dictionary_key_cap_boundary_and_omission() raises:
     var boundary = _repeated("q", 1024)
     var within = Dict[String, Int]()
     var empty = Dict[String, Int]()
@@ -932,18 +932,23 @@ def test_dictionary_key_cap_boundary_and_opaque_fallback() raises:
 
     var over = Dict[String, Int]()
     _put(over, boundary + "z", 1)
-    var opaque = _dictionary_failure(over, empty)
-    testing.assert_true("structural key display exceeds 1024 bytes" in opaque)
-    testing.assert_false(boundary in opaque)
+    var omitted = _dictionary_failure(over, empty)
+    testing.assert_true("unexpected: 1 total" in omitted)
+    testing.assert_true(
+        "omitted by key display limit: missing 0, unexpected 1, changed 0"
+        in omitted
+    )
+    testing.assert_false(boundary in omitted)
     var escaped = _repeated("\U000E0041", 103)
     var colliding = Dict[String, Int]()
     _put(colliding, escaped + "AAA", 1)
     _put(colliding, escaped + "BBB", 1)
-    var escaped_opaque = _dictionary_failure(colliding, empty)
+    var escaped_omitted = _dictionary_failure(colliding, empty)
     testing.assert_true(
-        "structural key display exceeds 1024 bytes" in escaped_opaque
+        "omitted by key display limit: missing 0, unexpected 2, changed 0"
+        in escaped_omitted
     )
-    testing.assert_false("\\U000e0041" in escaped_opaque)
+    testing.assert_false("\\U000e0041" in escaped_omitted)
 
 
 def test_equal_oversized_dictionary_key_does_not_hide_short_change() raises:
@@ -960,7 +965,26 @@ def test_equal_oversized_dictionary_key_does_not_hide_short_change() raises:
     testing.assert_false("structural key display exceeds" in detail)
 
 
-def test_opaque_dictionary_projection_reports_truncation_truthfully() raises:
+def test_undisplayed_oversized_dictionary_key_keeps_short_details() raises:
+    var oversized = "z-" + _repeated("k", 1025)
+    var actual = Dict[String, Int]()
+    var expected = Dict[String, Int]()
+    for index in range(12):
+        _put(expected, "missing-" + String(index + 100), index)
+    _put(expected, oversized, 1)
+    _put(actual, "changed", 2)
+    _put(expected, "changed", 3)
+
+    var detail = _dictionary_failure(actual, expected)
+    testing.assert_true("missing: 13 total" in detail)
+    testing.assert_true('"changed": "2" != "3"' in detail)
+    testing.assert_true(
+        "omitted by key display limit: missing 1, unexpected 0, changed 0"
+        in detail
+    )
+
+
+def test_oversized_dictionary_key_omission_is_truthful() raises:
     var key = _repeated("k", 1025)
     var actual = Dict[String, Int]()
     var expected = Dict[String, Int]()
@@ -968,10 +992,14 @@ def test_opaque_dictionary_projection_reports_truncation_truthfully() raises:
     _put(expected, key, 2)
     var detail = _dictionary_failure(actual, expected)
     testing.assert_false("compare unequal but render identically" in detail)
-    testing.assert_true("deterministic value detail omitted" in detail)
+    testing.assert_true("changed: 1 total" in detail)
+    testing.assert_true(
+        "omitted by key display limit: missing 0, unexpected 0, changed 1"
+        in detail
+    )
 
 
-def test_opaque_dictionary_fallback_is_insertion_order_independent() raises:
+def test_dictionary_key_omission_is_insertion_order_independent() raises:
     var key = _repeated("k", 1025)
     var actual_a = Dict[String, Int]()
     var actual_b = Dict[String, Int]()
