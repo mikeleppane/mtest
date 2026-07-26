@@ -421,6 +421,7 @@ def validate_assertion_install(
     prefix = env_prefix.resolve()
     source_root = prefix / "share" / "mtest" / "assertions-src"
     for relative in (
+        Path("."),
         Path("share"),
         Path("share/mtest"),
         Path("share/mtest/assertions-src"),
@@ -441,7 +442,9 @@ def validate_assertion_install(
             component,
             relative,
             allow_installer_group_write=(
-                allow_installer_group_write or relative == Path("share")
+                allow_installer_group_write
+                or relative == Path(".")
+                or relative == Path("share")
             ),
         )
     entries = list(source_root.rglob("*"))
@@ -474,7 +477,7 @@ def validate_assertion_install(
             f"missing={sorted(INSTALLED_ASSERTION_FILES - actual_files)}, "
             f"extra={sorted(actual_files - INSTALLED_ASSERTION_FILES)}"
         )
-    for relative in INSTALLED_ASSERTION_FILES:
+    for relative in sorted(INSTALLED_ASSERTION_FILES):
         source = source_root / relative
         source_mode = source.lstat().st_mode
         if not stat.S_ISREG(source_mode):
@@ -502,7 +505,7 @@ def validate_assertion_install(
             raise PackageCheckError(
                 f"installed assertion source bytes differ: {relative}"
             )
-    for relative in INSTALLED_ASSERTION_DIRECTORIES:
+    for relative in sorted(INSTALLED_ASSERTION_DIRECTORIES):
         directory = source_root / relative
         _require_safe_assertion_directory(
             directory,

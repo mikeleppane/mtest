@@ -970,6 +970,16 @@ class AssertionReadmeExampleTests(unittest.TestCase):
 
 
 class AssertionPackageLayoutTests(unittest.TestCase):
+    def test_assertion_file_mode_policies_are_exact(self) -> None:
+        self.assertEqual(
+            package_consumption.PRIMARY_ASSERTION_FILE_MODES,
+            (0o644,),
+        )
+        self.assertEqual(
+            package_consumption.TARBALL_ASSERTION_FILE_MODES,
+            (0o644, 0o664),
+        )
+
     def _valid_prefix(self, root: Path) -> Path:
         prefix = root / "prefix"
         for relative in package_consumption.INSTALLED_ASSERTION_FILES:
@@ -1179,6 +1189,55 @@ class AssertionPackageLayoutTests(unittest.TestCase):
                 "not world-writable",
             ):
                 package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_a_world_writable_prefix(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            prefix.chmod(0o777)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "not world-writable",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_tarball_policy_rejects_unsafe_source_modes(self) -> None:
+        for mode in (0o666, 0o744):
+            with (
+                self.subTest(mode=oct(mode)),
+                tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw,
+            ):
+                prefix = self._valid_prefix(Path(raw))
+                source = (
+                    prefix
+                    / "share"
+                    / "mtest"
+                    / "assertions-src"
+                    / "mtest"
+                    / "__init__.mojo"
+                )
+                source.chmod(mode)
+                with self.assertRaisesRegex(
+                    package_consumption.PackageCheckError,
+                    "mode 644 or installer-normalized 664",
+                ):
+                    package_consumption.validate_assertion_install(
+                        prefix,
+                        allow_installer_group_write=True,
+                    )
+
+    def test_tarball_policy_rejects_world_writable_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            directory = prefix / "share" / "mtest" / "assertions-src" / "mtest"
+            directory.chmod(0o777)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "not world-writable",
+            ):
+                package_consumption.validate_assertion_install(
+                    prefix,
+                    allow_installer_group_write=True,
+                )
 
     def test_rejects_toolchain_provenance_from_another_prefix(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
