@@ -932,6 +932,7 @@ def test_the_seal_freezes_the_capture_before_it_seals_any_tee() -> None:
         tees=(_OrderingTee(io.StringIO()), _OrderingTee(io.StringIO())),
         stop=threading.Event(),
         retention=_OrderingRetention(MARKER_PREFIX),
+        sources=(),
     )
     watchdog._seal_drainers(state)
     if order != ["freeze", "seal", "seal"]:
@@ -1230,6 +1231,139 @@ def test_cancellation_during_the_drain_settle_stays_cancelled() -> None:
             )
 
 
+def test_a_zombie_only_group_reports_gone_on_both_spellings() -> None:
+    """Darwin spells "every member is a zombie" EPERM, not ESRCH.
+
+    Treating that as an error let a Ctrl-C racing the child's exit replace a
+    truthful Cancelled or Signaled with HarnessError, so the classified harness
+    returned internal exit 70 for a cancellation that in fact completed. This
+    supervisor owns every member of the group it signals, so EPERM cannot mean
+    a permission boundary.
+    """
+    for error in (ProcessLookupError(), PermissionError()):
+        def refuse(pid: int, signum: int, exc=error) -> None:
+            raise exc
+
+        original = watchdog.os.killpg
+        watchdog.os.killpg = refuse
+        try:
+            if watchdog._signal_group(1234, 0):
+                raise AssertionError(
+                    f"{type(error).__name__} was not treated as a gone group"
+                )
+        finally:
+            watchdog.os.killpg = original
+
+    delivered: list[tuple[int, int]] = []
+
+    def accept(pid: int, signum: int) -> None:
+        delivered.append((pid, signum))
+
+    original = watchdog.os.killpg
+    watchdog.os.killpg = accept
+    try:
+        if not watchdog._signal_group(99, 15):
+            raise AssertionError("a live group was reported gone")
+    finally:
+        watchdog.os.killpg = original
+    if delivered != [(99, 15)]:
+        raise AssertionError(f"signal not forwarded verbatim: {delivered}")
+
+
+def test_forwarding_a_signal_survives_a_zombie_only_group() -> None:
+    """The whole cleanup path, not just the helper, must tolerate EPERM."""
+
+    class _Reaped:
+        pid = 4321
+
+        def __init__(self) -> None:
+            self.waited = 0
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self) -> None:
+            self.waited += 1
+
+    def zombie_only(pid: int, signum: int) -> None:
+        raise PermissionError()
+
+    process = _Reaped()
+    original = watchdog.os.killpg
+    watchdog.os.killpg = zombie_only
+    try:
+        watchdog._forward_signal_and_cleanup(process, 2)
+        watchdog._terminate_process_group(process)
+    finally:
+        watchdog.os.killpg = original
+    if process.waited != 2:
+        raise AssertionError(
+            f"cleanup did not reap the leader on both paths: {process.waited}"
+        )
+
+
+def test_an_unsealable_tee_releases_its_drainer_source() -> None:
+    """A stalled caller stream must not leak a thread and a descriptor.
+
+    `seal` returns False when a drainer is parked in a write nobody is
+    reading. Ignoring that left the thread blocked forever holding the child's
+    pipe, so a caller running `run_command` in a loop exhausted both.
+    """
+
+    class _UnsealableTee:
+        def seal(self) -> bool:
+            return False
+
+    class _Source:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    source = _Source()
+    state = watchdog._DrainState(
+        threads=(),
+        tees=(_UnsealableTee(),),
+        stop=threading.Event(),
+        retention=None,
+        sources=(source,),
+    )
+    watchdog._seal_drainers(state)
+    if not source.closed:
+        raise AssertionError(
+            "an unsealable tee left its drainer holding the child pipe"
+        )
+
+
+def test_a_sealable_tee_keeps_its_source_for_the_drainer_to_close() -> None:
+    """The normal path is unchanged: `_tee_stream` closes its own source."""
+
+    class _SealableTee:
+        def seal(self) -> bool:
+            return True
+
+    class _Source:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    source = _Source()
+    watchdog._seal_drainers(
+        watchdog._DrainState(
+            threads=(),
+            tees=(_SealableTee(),),
+            stop=threading.Event(),
+            retention=None,
+            sources=(source,),
+        )
+    )
+    if source.closed:
+        raise AssertionError("a cleanly sealed tee closed its source twice")
+
+
 def main() -> int:
     """Run every watchdog invariant without an external test framework."""
     for test in (
@@ -1256,6 +1390,10 @@ def main() -> int:
         test_cancellation_during_the_drain_settle_stays_cancelled,
         test_a_blocked_caller_stream_cannot_swallow_a_caller_signal,
         test_high_numbered_pipe_descriptors_do_not_lose_output,
+        test_a_zombie_only_group_reports_gone_on_both_spellings,
+        test_forwarding_a_signal_survives_a_zombie_only_group,
+        test_an_unsealable_tee_releases_its_drainer_source,
+        test_a_sealable_tee_keeps_its_source_for_the_drainer_to_close,
         test_a_frozen_marker_capture_refuses_later_writes,
         test_the_seal_freezes_the_capture_before_it_seals_any_tee,
         test_a_drainer_cannot_write_through_a_frozen_capture,

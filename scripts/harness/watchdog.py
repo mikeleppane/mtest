@@ -49,6 +49,10 @@ _DRAIN_POLL_SECONDS = 0.05
 # the whole point of this supervisor is a bounded process-group lifetime, and a
 # seal that could block forever would make the supervisor itself unkillable.
 SEAL_ACQUIRE_SECONDS = 0.5
+# How long the seal may wait for one already-finished drainer to be reaped.
+# Only a thread that has left its loop is joined within this; one still parked
+# in a write falls straight through, so the total wait stays bounded and small.
+_SEAL_JOIN_SECONDS = 0.05
 
 
 @dataclass(frozen=True)
@@ -230,6 +234,13 @@ class _DrainState:
     """Set to make every drainer leave its poll loop at the next tick."""
     retention: MarkerRetention | None
     """The marker capture the stdout drainer feeds, frozen when sealing."""
+    sources: tuple[IO[bytes], ...]
+    """The child pipe read ends those drainers own, in the same order.
+
+    Held so that a drainer abandoned inside a write to a stalled caller stream
+    can still be released: closing its source makes its next read fail, so the
+    thread ends as soon as that write returns instead of living forever.
+    """
 
 
 def _tee_stream(
@@ -332,6 +343,7 @@ def _start_drainers(
     )
     threads: list[threading.Thread] = []
     tees: list[_StreamTee] = []
+    sources: list[IO[bytes]] = []
     for source, stream, marker in targets:
         if source is None:
             continue
@@ -344,7 +356,10 @@ def _start_drainers(
         thread.start()
         threads.append(thread)
         tees.append(tee)
-    return _DrainState(tuple(threads), tuple(tees), stop, retention)
+        sources.append(source)
+    return _DrainState(
+        tuple(threads), tuple(tees), stop, retention, tuple(sources)
+    )
 
 
 def _settle_drainers(state: _DrainState | None) -> None:
@@ -376,8 +391,20 @@ def _seal_drainers(state: _DrainState | None) -> None:
     Bounded by construction: the stop flag and the marker freeze never wait on
     I/O, and each tee's seal waits at most `SEAL_ACQUIRE_SECONDS` for a write
     already in flight. A drainer parked in a write to a stalled consumer is
-    abandoned rather than waited on, because no path through `run_command` may
-    become unkillable. Idempotent.
+    never *waited on*, because no path through `run_command` may become
+    unkillable — but it is no longer simply forgotten either. A seal that could
+    not take the lock means exactly that, and this function then closes the
+    child pipe that drainer owns, so the thread ends the moment its in-flight
+    write returns instead of parking forever on a descriptor nobody will read
+    again. Without that, every such call leaked one thread and one descriptor,
+    and a caller invoking `run_command` in a loop exhausted both.
+
+    The close is safe against the drainer's own use of the pipe: the tee is
+    sealed first, so any bytes a racing read produces are dropped anyway, and
+    `_tee_stream` treats a failing read as end of stream and returns through
+    its own `finally`, where a second close is tolerated.
+
+    Idempotent.
 
     Args:
         state: The live drainers, or None when the child was not captured.
@@ -395,15 +422,58 @@ def _seal_drainers(state: _DrainState | None) -> None:
     # SEAL_ACQUIRE_SECONDS behind it, widening the window it is closing.
     if state.retention is not None:
         state.retention.freeze()
-    for tee in state.tees:
-        tee.seal()
+    for index, tee in enumerate(state.tees):
+        if tee.seal():
+            continue
+        # This drainer is parked in a write to a caller stream that is not
+        # draining. Release the resources it holds rather than abandoning them.
+        if index < len(state.sources):
+            try:
+                state.sources[index].close()
+            except (OSError, ValueError):
+                pass
+    # A brief, bounded join so a drainer that has already finished is reaped
+    # here rather than left for the interpreter. Threads still parked in a
+    # write fall through untouched; the supervisor never waits on them.
+    for thread in state.threads:
+        thread.join(_SEAL_JOIN_SECONDS)
+
+
+def _signal_group(pid: int, signum: int) -> bool:
+    """Signal one owned process group, reporting whether it still exists.
+
+    `ESRCH` is the portable "no such group". Darwin adds a second spelling for
+    the same fact: `killpg` reports `EPERM` when every remaining member is a
+    zombie, because a zombie can no longer be sent a signal. This supervisor
+    created the group and owns every member, so `EPERM` cannot mean a
+    permission boundary here — a caller that may not signal its own children
+    could not have spawned them. Treating it as a hard error let a Ctrl-C that
+    raced the child's exit replace a truthful `Cancelled` or `Signaled` with a
+    `HarnessError`, so the classified harness returned internal exit 70 for a
+    run that had in fact been cancelled cleanly.
+
+    Args:
+        pid: The group leader's pid, which is also the process-group id.
+        signum: The signal to send, or `0` to probe for the group's existence.
+
+    Returns:
+        True when the signal was delivered, False when the group is gone —
+        either fully reaped or, on Darwin, zombie-only.
+    """
+    try:
+        os.killpg(pid, signum)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Darwin's zombie-only group. See above for why this is not a
+        # permission failure for a group this supervisor owns.
+        return False
+    return True
 
 
 def _terminate_process_group(process: subprocess.Popen[object]) -> None:
     """Terminate a timed-out process group and wait for its leader."""
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
+    if not _signal_group(process.pid, signal.SIGTERM):
         process.wait()
         return
 
@@ -412,10 +482,7 @@ def _terminate_process_group(process: subprocess.Popen[object]) -> None:
     # leader has already exited and been reaped.
     time.sleep(TERMINATION_GRACE_SECONDS)
 
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    _signal_group(process.pid, signal.SIGKILL)
     process.wait()
 
 
@@ -423,9 +490,7 @@ def _forward_signal_and_cleanup(
     process: subprocess.Popen[object], signum: int
 ) -> None:
     """Forward caller cancellation, then force-reap the complete child group."""
-    try:
-        os.killpg(process.pid, signum)
-    except ProcessLookupError:
+    if not _signal_group(process.pid, signum):
         process.wait()
         return
 
@@ -435,17 +500,12 @@ def _forward_signal_and_cleanup(
         # group alive after that point, so group existence remains the cleanup
         # condition rather than leader status alone.
         process.poll()
-        try:
-            os.killpg(process.pid, 0)
-        except ProcessLookupError:
+        if not _signal_group(process.pid, 0):
             process.wait()
             return
         time.sleep(0.01)
 
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    _signal_group(process.pid, signal.SIGKILL)
     process.wait()
 
 
