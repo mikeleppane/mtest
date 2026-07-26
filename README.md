@@ -120,6 +120,77 @@ successes.
 To run mtest straight from a checkout instead, see
 [Developing](#developing).
 
+## Assertion diagnostics
+
+The package includes an optional source-only
+`mtest.assertions.assert_equal`. It still raises an ordinary error inside
+`TestSuite`; the runner, report format, and exit code do not change. Add the
+installed source root to both the test compiler and mtest:
+
+```mojo
+import mtest.assertions as assertions
+from std.testing import TestSuite
+
+
+def test_configuration_text() raises:
+    assertions.assert_equal(
+        "alpha\nbeta\ngamma",
+        "alpha\nBETa\ngamma",
+        msg="configuration text changed",
+    )
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()
+```
+
+```console
+$ mtest --show-output none -I <PREFIX>/share/mtest/assertions-src examples/assertions
+mtest 0.6.0 (mojo)
+root: <REPO>   selected: 1 files   excluded: 0
+
+FAIL           examples/assertions/test_diagnostics.mojo  0.07s
+
+--- FAIL examples/assertions/test_diagnostics.mojo::test_text_difference_has_scalar_and_context ---
+At examples/assertions/test_diagnostics.mojo:13:28: text differs at scalar 6
+  actual: U+0062 'b'
+  expected: U+0042 'B'
+  actual line 1: alpha\n
+  actual line 2: beta\n
+  actual line 3: gamma
+  expected line 1: alpha\n
+  expected line 2: BETa\n
+  expected line 3: gamma
+  reason: configuration text changed
+inspect the failure detail above, then rerun the reproduction command
+reproduce: mtest -I <PREFIX>/share/mtest/assertions-src examples/assertions/test_diagnostics.mojo::test_text_difference_has_scalar_and_context
+
+
+===== 1 passed, 1 failed, 0 skipped (0 excluded, 0 not run) in 0.7s =====
+
+Failing tests:
+  examples/assertions/test_diagnostics.mojo::test_text_difference_has_scalar_and_context
+```
+
+That output was captured from the installed `.conda` artifact. The companion
+specializes only top-level `String`, `List[T]`, and `Dict[String, V]`; nested
+containers and custom values are displayed opaquely. List and dictionary
+details show at most eight entries, and dictionary keys longer than 1024 UTF-8
+bytes switch the whole dictionary to opaque display.
+
+Finalized opaque-value projections are at most 1024 bytes, text context is at
+most 4096 bytes, and a complete assertion body is at most 16384 bytes. Each cap
+includes the complete `... [truncated]` marker. Equality is exact; a passing
+assertion formats nothing, while a failing assertion formats each displayed
+operand once. These limits bound bytes finalized and emitted by the companion,
+not private work performed inside user-defined equality or formatting code.
+
+`<PREFIX>/share/mtest/assertions-src` is one complete source package named
+`mtest`, not an extension merged into another `mtest` package. Put it before
+any other include root that provides `mtest`. The runner never injects this
+path automatically, and Mojo does not merge it with the runner-private
+precompiled package.
+
 ## Usage
 
 mtest spawns a `mojo build` child per file, so `mojo` must be on that
