@@ -78,7 +78,7 @@ import stat
 import subprocess
 import sys
 
-from scripts.harness import dogfood
+from scripts.harness import dogfood, watchdog
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -605,6 +605,51 @@ def require_warning_free_assertion_compile(
         )
 
 
+def _run_assertion_process(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    """Run one package assertion probe with bounded process-group supervision."""
+    captured = watchdog.run_captured_command(
+        command,
+        source=command[0] if command else "<empty>",
+        step="package assertion probe",
+        timeout_seconds=timeout,
+        cwd=cwd,
+        env=env,
+    )
+    termination = captured.termination
+    if isinstance(termination, watchdog.Exited):
+        return subprocess.CompletedProcess(
+            command,
+            termination.code,
+            captured.stdout,
+            captured.stderr,
+        )
+    if isinstance(termination, watchdog.Signaled):
+        return subprocess.CompletedProcess(
+            command,
+            -termination.signo,
+            captured.stdout,
+            captured.stderr,
+        )
+    rendered = " ".join(command)
+    if isinstance(termination, watchdog.TimedOut):
+        raise PackageCheckError(
+            f"assertion process exceeded {timeout} seconds: {rendered}"
+        )
+    if isinstance(termination, watchdog.Cancelled):
+        raise PackageCheckError(
+            f"assertion process cancelled by signal {termination.signo}: {rendered}"
+        )
+    raise PackageCheckError(
+        f"assertion process supervision failed: {termination.detail}: {rendered}"
+    )
+
+
 def stage_assertion_source_probe(
     env_prefix: Path,
     label: str,
@@ -643,14 +688,11 @@ def stage_assertion_source_probe(
             raise PackageCheckError(
                 "installed assertion compile command leaked checkout source"
             )
-        build = subprocess.run(
+        build = _run_assertion_process(
             command,
             cwd=probe_root,
             env=environment,
-            capture_output=True,
-            text=True,
             timeout=SMOKE_TIMEOUT,
-            check=False,
         )
         transcript = build.stdout + build.stderr
         if checkout_source in transcript:
@@ -667,14 +709,11 @@ def stage_assertion_source_probe(
             label,
             optimization,
         )
-        run = subprocess.run(
+        run = _run_assertion_process(
             [str(binary)],
             cwd=probe_root,
             env=environment,
-            capture_output=True,
-            text=True,
             timeout=SMOKE_TIMEOUT,
-            check=False,
         )
         if run.returncode != 0:
             raise PackageCheckError(
@@ -691,14 +730,11 @@ def stage_assertion_source_probe(
         negative_binary,
         "-O0",
     )
-    rejected = subprocess.run(
+    rejected = _run_assertion_process(
         negative_command,
         cwd=probe_root,
         env=environment,
-        capture_output=True,
-        text=True,
         timeout=SMOKE_TIMEOUT,
-        check=False,
     )
     rejection = rejected.stdout + rejected.stderr
     if rejected.returncode == 0 or negative_binary.exists():
@@ -712,7 +748,7 @@ def stage_assertion_source_probe(
         )
 
     helper_binary = probe_root / "private-helper"
-    helper_rejected = subprocess.run(
+    helper_rejected = _run_assertion_process(
         assertion_compile_command(
             env_prefix,
             private_helper,
@@ -721,10 +757,7 @@ def stage_assertion_source_probe(
         ),
         cwd=probe_root,
         env=environment,
-        capture_output=True,
-        text=True,
         timeout=SMOKE_TIMEOUT,
-        check=False,
     )
     helper_rejection = helper_rejected.stdout + helper_rejected.stderr
     if helper_rejected.returncode == 0 or helper_binary.exists():
@@ -864,14 +897,11 @@ def stage_assertion_example(
         str(source_root),
         str(ASSERTION_EXAMPLE.parent.relative_to(REPO_ROOT)),
     ]
-    result = subprocess.run(
+    result = _run_assertion_process(
         command,
         cwd=REPO_ROOT,
         env=environment,
-        capture_output=True,
-        text=True,
         timeout=SMOKE_TIMEOUT,
-        check=False,
     )
     if result.returncode != 1 or result.stderr:
         raise PackageCheckError(

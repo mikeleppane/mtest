@@ -13,13 +13,14 @@ import select
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import IO, TYPE_CHECKING, cast
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from types import FrameType
 
     # Exactly what `signal.getsignal` hands back and `signal.signal` accepts:
@@ -33,6 +34,8 @@ if TYPE_CHECKING:
 # legitimate run needs well over five minutes, so the ceiling sits at fifteen to
 # leave headroom above the real workload while still catching a genuine hang.
 DEFAULT_TIMEOUT_SECONDS = 900.0
+DEFAULT_CAPTURE_LIMIT_BYTES = 1024 * 1024
+CAPTURE_TRUNCATION_MARKER = "\n[mtest-check: output truncated]\n"
 TERMINATION_GRACE_SECONDS = 5.0
 TIMEOUT_EXIT_CODE = 124
 _FORWARDED_SIGNALS = (signal.SIGINT, signal.SIGTERM)
@@ -98,6 +101,50 @@ class HarnessError:
 
 
 Termination = Exited | Signaled | TimedOut | Cancelled | HarnessError
+
+
+@dataclass(frozen=True)
+class CapturedCommand:
+    """One supervised command's structured termination and bounded output."""
+
+    termination: Termination
+    stdout: str
+    stderr: str
+
+
+class _BoundedTextCapture:
+    """Collect a fixed-size UTF-8 prefix from one drained child stream."""
+
+    def __init__(self, limit_bytes: int) -> None:
+        """Open one bounded capture.
+
+        Args:
+            limit_bytes: Maximum child-output bytes retained before the marker.
+        """
+        self._limit_bytes = limit_bytes
+        self._chunks: list[str] = []
+        self._retained_bytes = 0
+        self._truncated = False
+
+    def write(self, text: str) -> int:
+        """Retain only the prefix that fits and report the full write accepted."""
+        encoded = text.encode("utf-8", errors="replace")
+        remaining = self._limit_bytes - self._retained_bytes
+        retained = encoded[: max(0, remaining)]
+        if retained:
+            self._chunks.append(retained.decode("utf-8", errors="ignore"))
+            self._retained_bytes += len(retained)
+        if len(encoded) > len(retained):
+            self._truncated = True
+        return len(text)
+
+    def flush(self) -> None:
+        """Match the text-stream interface; capture needs no flushing."""
+
+    def finish(self) -> str:
+        """Return retained text plus one explicit marker when bytes were omitted."""
+        text = "".join(self._chunks)
+        return text + (CAPTURE_TRUNCATION_MARKER if self._truncated else "")
 
 
 class MarkerRetention:
@@ -603,6 +650,7 @@ def run_command(
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     deadline_sentinel: Path | None = None,
     cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
     marker_retention: MarkerRetention | None = None,
 ) -> Termination:
     """Run ``command`` and return structured, signal-truthful termination.
@@ -614,6 +662,7 @@ def run_command(
         timeout_seconds: Positive wall-clock ceiling for the command.
         deadline_sentinel: Pre-created file removed only after non-timeout exit.
         cwd: Optional child working directory.
+        env: Optional complete child environment.
         marker_retention: When given, both child streams become pipes that
             concurrent drainers tee to the caller's own stdout and stderr while
             retaining the last complete marker line. Updated in place.
@@ -665,6 +714,7 @@ def run_command(
                 process = subprocess.Popen(
                     command,
                     cwd=cwd,
+                    env=env,
                     start_new_session=True,
                     stdout=captured,
                     stderr=captured,
@@ -768,6 +818,58 @@ def run_command(
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
         _seal_drainers(drain_state)
+
+
+def run_captured_command(
+    command: Sequence[str],
+    *,
+    source: str,
+    step: str,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    capture_limit_bytes: int = DEFAULT_CAPTURE_LIMIT_BYTES,
+) -> CapturedCommand:
+    """Run one process group and retain only bounded stdout and stderr prefixes.
+
+    Args:
+        command: Direct executable argv, without shell interpretation.
+        source: Source label displayed if the command times out.
+        step: Work label displayed if the command times out.
+        timeout_seconds: Positive wall-clock ceiling for the process group.
+        cwd: Optional child working directory.
+        env: Optional complete child environment.
+        capture_limit_bytes: Maximum retained bytes for each child stream.
+
+    Returns:
+        Structured termination plus bounded stdout and stderr.
+
+    Raises:
+        ValueError: If ``capture_limit_bytes`` is not positive.
+    """
+    if capture_limit_bytes <= 0:
+        raise ValueError("capture limit must be greater than zero")
+    stdout = _BoundedTextCapture(capture_limit_bytes)
+    stderr = _BoundedTextCapture(capture_limit_bytes)
+    retention = MarkerRetention("\0mtest-captured-command-no-marker")
+    with tempfile.TemporaryDirectory(prefix="mtest-command-watchdog-") as raw:
+        sentinel = Path(raw) / "deadline"
+        sentinel.touch()
+        with (
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            termination = run_command(
+                command,
+                source=source,
+                step=step,
+                timeout_seconds=timeout_seconds,
+                deadline_sentinel=sentinel,
+                cwd=cwd,
+                env=env,
+                marker_retention=retention,
+            )
+    return CapturedCommand(termination, stdout.finish(), stderr.finish())
 
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:

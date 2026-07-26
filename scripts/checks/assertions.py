@@ -3,14 +3,12 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
-import tempfile
 from typing import cast
 import unicodedata
 
@@ -25,8 +23,8 @@ LOCATION_CONSUMER = REPO_ROOT / "tests" / "assertions" / "location_consumer.mojo
 EXAMPLE_CONSUMER = REPO_ROOT / "examples" / "assertions" / "test_diagnostics.mojo"
 COMPILE_TIMEOUT_SECONDS = 120
 RUN_TIMEOUT_SECONDS = 30
-PROCESS_CAPTURE_BYTE_CAP = 1024 * 1024
-PROCESS_CAPTURE_MARKER = "\n[assertions-check: output truncated]\n"
+PROCESS_CAPTURE_BYTE_CAP = watchdog.DEFAULT_CAPTURE_LIMIT_BYTES
+PROCESS_CAPTURE_MARKER = watchdog.CAPTURE_TRUNCATION_MARKER
 LOCATION_MARKER = "# ASSERT-LOCATION:"
 EXPLICIT_LOCATION_MARKER = "# ASSERT-EXPLICIT-LOCATION:"
 ASSERTION_OPTIMIZATIONS = (("-O0", "o0"), ("-O3", "o3"))
@@ -379,75 +377,33 @@ def validate_location_run(
         )
 
 
-class _BoundedTextCapture:
-    """Collect a fixed-size UTF-8 prefix from one drained child stream."""
-
-    def __init__(self) -> None:
-        self._chunks: list[str] = []
-        self._retained_bytes = 0
-        self._truncated = False
-
-    def write(self, text: str) -> int:
-        """Retain only the prefix that fits and report the full write accepted."""
-        encoded = text.encode("utf-8", errors="replace")
-        remaining = PROCESS_CAPTURE_BYTE_CAP - self._retained_bytes
-        retained = encoded[: max(0, remaining)]
-        if retained:
-            self._chunks.append(retained.decode("utf-8", errors="ignore"))
-            self._retained_bytes += len(retained)
-        if len(encoded) > len(retained):
-            self._truncated = True
-        return len(text)
-
-    def flush(self) -> None:
-        """Match the text-stream interface; capture needs no flushing."""
-
-    def finish(self) -> str:
-        """Return retained text plus one explicit marker when bytes were omitted."""
-        text = "".join(self._chunks)
-        return text + (PROCESS_CAPTURE_MARKER if self._truncated else "")
-
-
 def _run_checked(
     command: list[str],
     *,
     cwd: Path,
     timeout: float,
 ) -> subprocess.CompletedProcess[str]:
-    stdout = _BoundedTextCapture()
-    stderr = _BoundedTextCapture()
-    retention = watchdog.MarkerRetention("\0assertions-check-no-marker")
-    with tempfile.TemporaryDirectory(prefix="mtest-assertions-watchdog-") as raw:
-        sentinel = Path(raw) / "deadline"
-        sentinel.touch()
-        with (
-            contextlib.redirect_stdout(stdout),
-            contextlib.redirect_stderr(stderr),
-        ):
-            termination = watchdog.run_command(
-                command,
-                source=str(command[0]) if command else "<empty>",
-                step="assertions-check",
-                timeout_seconds=timeout,
-                deadline_sentinel=sentinel,
-                cwd=cwd,
-                marker_retention=retention,
-            )
-    captured_stdout = stdout.finish()
-    captured_stderr = stderr.finish()
+    captured = watchdog.run_captured_command(
+        command,
+        source=str(command[0]) if command else "<empty>",
+        step="assertions-check",
+        timeout_seconds=timeout,
+        cwd=cwd,
+    )
+    termination = captured.termination
     if isinstance(termination, watchdog.Exited):
         return subprocess.CompletedProcess(
             command,
             termination.code,
-            captured_stdout,
-            captured_stderr,
+            captured.stdout,
+            captured.stderr,
         )
     if isinstance(termination, watchdog.Signaled):
         return subprocess.CompletedProcess(
             command,
             -termination.signo,
-            captured_stdout,
-            captured_stderr,
+            captured.stdout,
+            captured.stderr,
         )
     if isinstance(termination, watchdog.TimedOut):
         raise AssertionError(f"command exceeded {timeout} seconds: {' '.join(command)}")

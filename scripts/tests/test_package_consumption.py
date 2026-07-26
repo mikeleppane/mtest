@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import inspect
 import io
 import json
 import os
@@ -49,7 +50,7 @@ from scripts.build.package_consumption import (
     scrubbed_probe_env,
     verify_installed_artifact_identity,
 )
-from scripts.harness import dogfood
+from scripts.harness import dogfood, watchdog
 
 
 if TYPE_CHECKING:
@@ -837,6 +838,74 @@ class FixtureInventoryTests(unittest.TestCase):
 
 
 class AssertionPackageCommandTests(unittest.TestCase):
+    def test_assertion_stages_use_only_the_supervised_process_helper(self) -> None:
+        expected_calls = (
+            (package_consumption.stage_assertion_source_probe, 4),
+            (package_consumption.stage_assertion_example, 1),
+        )
+        for stage, count in expected_calls:
+            with self.subTest(stage=stage.__name__):
+                source = inspect.getsource(stage)
+                self.assertNotIn("subprocess.run(", source)
+                self.assertEqual(source.count("_run_assertion_process("), count)
+
+    def test_assertion_process_helper_delegates_environment_and_timeout(
+        self,
+    ) -> None:
+        command = ["/prefix/bin/mojo", "build"]
+        cwd = Path("/scratch/probe")
+        environment = {"PATH": "/prefix/bin:/usr/bin"}
+        captured = watchdog.CapturedCommand(
+            watchdog.Exited(7),
+            "bounded stdout",
+            "bounded stderr",
+        )
+        with mock.patch.object(
+            watchdog,
+            "run_captured_command",
+            return_value=captured,
+        ) as run:
+            result = package_consumption._run_assertion_process(
+                command,
+                cwd=cwd,
+                env=environment,
+                timeout=12.5,
+            )
+
+        self.assertEqual(result.args, command)
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(result.stdout, "bounded stdout")
+        self.assertEqual(result.stderr, "bounded stderr")
+        run.assert_called_once_with(
+            command,
+            source="/prefix/bin/mojo",
+            step="package assertion probe",
+            timeout_seconds=12.5,
+            cwd=cwd,
+            env=environment,
+        )
+
+    def test_assertion_process_helper_rejects_a_watchdog_timeout(self) -> None:
+        captured = watchdog.CapturedCommand(
+            watchdog.TimedOut(),
+            "",
+            "",
+        )
+        with (
+            mock.patch.object(
+                watchdog,
+                "run_captured_command",
+                return_value=captured,
+            ),
+            self.assertRaisesRegex(PackageCheckError, "exceeded 3.0 seconds"),
+        ):
+            package_consumption._run_assertion_process(
+                ["/prefix/bin/mojo", "build"],
+                cwd=Path("/scratch/probe"),
+                env={},
+                timeout=3.0,
+            )
+
     def test_installed_probe_instantiates_every_public_overload(self) -> None:
         source = package_consumption.ASSERTION_PROBE_SOURCE
         self.assertIn('assert_equal("left", "right")', source)
