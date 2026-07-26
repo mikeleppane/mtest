@@ -14,9 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 BUILD_ROOT = REPO_ROOT / "build" / "assertions-check"
 ASSERTION_SOURCE_ROOT = REPO_ROOT / "assertions-src"
 API_CONSUMER = REPO_ROOT / "tests" / "assertions" / "api_consumer.mojo"
-LOCATION_CONSUMER = (
-    REPO_ROOT / "tests" / "assertions" / "location_consumer.mojo"
-)
+LOCATION_CONSUMER = REPO_ROOT / "tests" / "assertions" / "location_consumer.mojo"
 COMPILE_TIMEOUT_SECONDS = 120
 RUN_TIMEOUT_SECONDS = 30
 LOCATION_MARKER = "# ASSERT-LOCATION:"
@@ -104,9 +102,7 @@ def expected_locations(source: Path) -> dict[str, tuple[int, int]]:
             raise AssertionError(f"empty location marker at {source}:{line_number}")
         if name in locations:
             raise AssertionError(f"duplicate location marker: {name}")
-        coordinate = (
-            last_explicit if marker == EXPLICIT_LOCATION_MARKER else last_call
-        )
+        coordinate = last_explicit if marker == EXPLICIT_LOCATION_MARKER else last_call
         if coordinate is None:
             raise AssertionError(
                 f"location marker has no preceding matching call at "
@@ -127,8 +123,7 @@ def validate_location_run(
     source = source.resolve()
     if run.returncode != 1:
         raise AssertionError(
-            f"location consumer must terminate with exact exit 1, got "
-            f"{run.returncode}"
+            f"location consumer must terminate with exact exit 1, got {run.returncode}"
         )
     if run.stderr:
         raise AssertionError(f"location consumer wrote stderr: {run.stderr}")
@@ -136,7 +131,7 @@ def validate_location_run(
         raise AssertionError("location consumer reported CRASH")
 
     fail_rows = set(
-        re.findall(r"^\s+FAIL \[[^\]]+\] ([A-Za-z0-9_]+)\s*$", run.stdout, re.M)
+        re.findall(r"^\s+FAIL \[[^\]]+\] ([A-Za-z0-9_]+)\s*$", run.stdout, re.MULTILINE)
     )
     expected_rows = set(expected)
     if fail_rows != expected_rows:
@@ -146,9 +141,7 @@ def validate_location_run(
         )
 
     count = len(expected)
-    summary = (
-        f"{count} tests run: 0 passed , {count} failed , 0 skipped"
-    )
+    summary = f"{count} tests run: 0 passed , {count} failed , 0 skipped"
     if summary not in run.stdout:
         raise AssertionError(f"location consumer summary differs: want {summary!r}")
 
@@ -159,9 +152,7 @@ def validate_location_run(
     escaped_source = re.escape(str(source))
     observed = {
         (int(line), int(column))
-        for line, column in re.findall(
-            rf"At {escaped_source}:(\d+):(\d+):", run.stdout
-        )
+        for line, column in re.findall(rf"At {escaped_source}:(\d+):(\d+):", run.stdout)
     }
     expected_coordinates = set(expected.values())
     if observed != expected_coordinates:
@@ -181,8 +172,7 @@ def _run_checked(
         return subprocess.run(
             command,
             cwd=cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             timeout=timeout,
             check=False,
@@ -224,10 +214,10 @@ def _validate_api_run(
         )
     if run.stderr:
         raise AssertionError(f"API consumer wrote stderr: {run.stderr}")
-    if re.search(r"^\s+(?:FAIL|CRASH) \[", run.stdout, re.M):
+    if re.search(r"^\s+(?:FAIL|CRASH) \[", run.stdout, re.MULTILINE):
         raise AssertionError(f"API consumer did not pass cleanly:\n{run.stdout}")
     pass_rows = set(
-        re.findall(r"^\s+PASS \[[^\]]+\] ([A-Za-z0-9_]+)\s*$", run.stdout, re.M)
+        re.findall(r"^\s+PASS \[[^\]]+\] ([A-Za-z0-9_]+)\s*$", run.stdout, re.MULTILINE)
     )
     if pass_rows != expected_rows:
         raise AssertionError(
@@ -238,7 +228,7 @@ def _validate_api_run(
         r"^Summary \[[^\]]+\] (\d+) tests run: (\d+) passed , "
         r"(\d+) failed , (\d+) skipped\s*$",
         run.stdout,
-        re.M,
+        re.MULTILINE,
     )
     if summary is None:
         raise AssertionError("API consumer did not emit a TestSuite summary")
