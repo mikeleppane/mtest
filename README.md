@@ -944,16 +944,20 @@ Facts about this build worth knowing before you rely on it:
   file's stdout/stderr to individual tests, so mtest cannot either. Parsed
   FAIL assertion details are per-test; the raw captured block is per-file.
 - **The console shows child text, it does not execute it.** Every string a
-  child or the compiler produced is neutralized before printing: control
-  characters become visible escapes (`\x1B`, `\x00`, `\u009B`) and multi-line
-  blocks are fenced behind a `    | ` gutter, so a test cannot repaint your
-  terminal or forge a line that reads as mtest's own. The GitHub annotation
-  tail prints to the same destination and gets the same treatment, on top of
-  its own `%25`/`%0A`/`%0D` workflow encoding. The JUnit report and the
+  child or the compiler produced is neutralized before it is printed for a
+  human: control characters become visible escapes (`\x1B`, `\x00`, `\u009B`)
+  and multi-line blocks are fenced behind a `    | ` gutter, so a test cannot
+  repaint your terminal or forge a line that reads as mtest's own. The GitHub
+  annotation tail prints to the same destination and gets the same treatment,
+  on top of its own `%25`/`%0A`/`%0D` workflow encoding. `mtest doctor`,
+  `mtest config show`, and the configuration diagnostics neutralize the same
+  set of code points in their own output's escape spelling — the set is defined
+  once and shared, so it cannot drift between them. The JUnit report and the
   `--json` stream are written elsewhere and are unaffected \u2014 they still carry
-  the raw text under their own escaping. This stops the child *doing* things,
-  not *looking* like things: bidi overrides and homoglyphs pass through, so a
-  test name can still be visually misleading.
+  the raw text under their own escaping, as does `mtest collect`, whose node-id
+  listing is specified byte-exact for tooling to consume. This stops the child
+  *doing* things, not *looking* like things: bidi overrides and homoglyphs pass
+  through, so a test name can still be visually misleading.
 - **`--maxfail` is checked between files.** A file already in flight always
   finishes, so a file with several failing tests can push the count past
   `N` before scheduling stops.

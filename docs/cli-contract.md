@@ -501,6 +501,19 @@ The same neutralization applies to the **GitHub annotation tail** (§15.3), whic
 mtest prints to this same resolved console destination and which is therefore a
 terminal surface as well as a workflow one.
 
+Three further surfaces print untrusted text to a terminal and neutralize the
+same set of code points, in the escape spelling their own output format
+requires: `mtest doctor` (§23), which quotes the toolchain's own `--version`
+output; `mtest config show` (§25), whose values come from `mtest.toml` and which
+uses TOML's `\u00HH` form because a TOML basic string has no `\xHH` escape; and
+the configuration diagnostics, which quote an offending key or value back from
+that same file. **Which** code points are neutralized is one definition shared
+by all of them; only the spelling differs.
+
+The `--collect` listing (§16) is the one terminal-reachable output that is
+**not** escaped, deliberately: it is a byte-exact machine listing of node ids,
+specified for tooling to consume, and escaping it would break that contract.
+
 This boundary is **display-only**. It does not change what mtest captures, what
 its parser reads, or what the JUnit report (§15.2) or the machine event stream
 (§15.4) contain: those are written to their own destinations and carry the raw

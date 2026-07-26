@@ -163,7 +163,7 @@ binaries the Valgrind lane already runs and asserts on directly.
 | `src/mtest/report/escape.mojo` | 1 | `unsafe_from_utf8` over the escaper's rebuilt byte buffer | **A** 4/14 · **V** 3/17 (`test_report_escape`, `test_report_junit`, `test_report_junit_finalize`; plus `test_report_json_reporter` in A) · **C** ✓. |
 | `src/mtest/report/junit.mojo` | 1 | `unsafe_from_utf8` over the XML text escaper's byte buffer | **A** 2/14 · **V** 2/17 (`test_report_junit`, `test_report_junit_finalize`) · **C** ✓. |
 | `src/mtest/report/json_stream_reporter.mojo` | 1 | a `String`'s bytes borrowed across a partial-write loop, with derived pointer arithmetic per iteration | **A** 1/14 (`test_report_json_reporter`) · **V** 0/17 · **C** ✓ — its only Memcheck evidence, for the reason in the exclusions. `test_session_schedule` ENTERS this file but does not reach the site: with no `--json`, `coordinator.mojo:338` builds a `JsonStreamReporter.inert()` that never opens a descriptor, so `_write_all` — the function the `# SAFETY:` comment is in — never runs. This is the one row where the file-level and site-level counts differ; see the note on granularity above. |
-| `src/mtest/report/console.mojo` | 1 | `unsafe_from_utf8` over the drained byte suffix of the console's head buffer | **A** 0/14 · **V** 0/17 · **C** ✓ only — see gap 7. `tests/unit/test_report_console.mojo` covers it in the plain `pixi run test` lane but is in neither instrumented inventory; the probe drives the same drain with a hostile capture in it. |
+| `src/mtest/report/console.mojo` | 1 | `unsafe_from_utf8` over the drained byte suffix of the console's head buffer | **A** 0/14 · **V** 0/17 · **C** ✓ only — see gap 7. NOT `tests/unit/test_report_console.mojo`: the site is inside `ConsoleReporter.drain` (`console.mojo:972`), that suite asserts through `output()` (`console.mojo:959`, which neither calls `drain` nor touches `unsafe_from_utf8`), and `rg '\.drain\(' tests/unit/test_report_console.mojo` returns nothing. The suite that does execute it in the plain `pixi run test` lane is `tests/unit/test_report_coordinator.mojo` — `test_standard_coordinator_incremental_drain_reconstructs_output` (`:133`) reaches it through `coordinator.mojo:283` — and that suite is in neither instrumented inventory; the probe drives the same drain with a hostile capture in it. |
 | `src/mtest/select/selection.mojo` | 1 | `unsafe_from_utf8` over the ASCII case fold in `contains_ci` | **A** 0/14 · **V** 0/17 · **C** ✓ only — see gap 7, via the probe's `-k hostile`. The probe carries that flag for exactly this reason; drop it and the site loses all instrumented evidence. |
 | `src/mtest/config/lossy_utf8.mojo` | 1 | the UTF-8 validity scan's leading-byte and continuation bounds | **A** 8/14 · **V** 7/17 · **C** ✓. `test_exec_capture` calls it directly on a lone `0xFF` (`test_lossy_utf8_replaces_invalid_preserves_valid`), and `bytes_to_str` in `tests/support/exec_helpers.mojo` routes every capture assertion through it. NOT `test_config`: `mtest.config` only re-exports the symbol (`src/mtest/config/__init__.mojo:41`) and that suite never calls it — confirmed by callgrind, no frame from this file executes. |
 
@@ -265,8 +265,11 @@ full instrumented coverage.
 7. **`report/console.mojo` and `select/selection.mojo` are CLI-probe-only.**
    Neither has a suite in either inventory. `selection.mojo` is reached solely
    because the probe passes `-k hostile`; remove that flag and its one
-   `# SAFETY:` site has no instrumented evidence at all. Closing either would
-   mean adding `tests/unit/test_report_console.mojo` (large — 86 KB, the biggest
-   suite in the repo) or a select suite to both lanes; the console suite in
-   particular would add meaningful Memcheck wall time, which is why the probe
-   carries the burden instead.
+   `# SAFETY:` site has no instrumented evidence at all. Closing the console one
+   would mean adding `tests/unit/test_report_coordinator.mojo` (13,680 bytes) —
+   **not** `tests/unit/test_report_console.mojo`, which is 85,536 bytes and,
+   despite its name, never calls `drain` and so would add no evidence for this
+   site at all. Adding the coordinator suite is therefore cheap in wall time;
+   what it is not is free, since each addition is paid on every run of both
+   lanes. The probe carries the burden today; this gap is a candidate to close,
+   and the earlier claim that closing it required the 86 KB suite was wrong.

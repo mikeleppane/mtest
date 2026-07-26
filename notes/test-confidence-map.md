@@ -105,7 +105,7 @@ Layering (from `AGENTS.md`, enforced by `scripts/checks/layout.py`):
 root.
 
 **What the "direct-call modules" column means, exactly.** It is the number of
-classified test modules (of 98, holding 1287 test functions, all of which the
+classified test modules (of 99, holding 1300 test functions, all of which the
 `test` aggregate binary executes) that contain a *syntactic* call to or
 construction of a symbol imported from that layer, reachable from a
 `def test_*` body — directly, or through a helper defined in the same file.
@@ -129,7 +129,7 @@ helper route.
 
 | Layer | Direct-call modules | Blocking oracles | Notes and residual risk |
 | --- | --- | --- | --- |
-| `model` | 40 | `test` | The widest surface, because outcomes/events/exit codes are the vocabulary every other layer speaks. |
+| `model` | 41 | `test` | The widest surface, because outcomes/events/exit codes are the vocabulary every other layer speaks — and, since `control_chars`, the classification of which code points a terminal interprets. |
 | `platform` | 1 | `test`, plus `e2e` and `contract-check-strict` through the binary | `tests/unit/test_platform_temp_file.mojo` is the **only** classified suite that calls this layer directly. Everything else reaches it through `main`/`cli`. The memory map's gap 2 is the same thinness seen from the ASan/Valgrind side. |
 | `config` | 26 | `test`, `e2e` (`config-*` scenarios), `contract-check-strict` | Includes the vendored TOML parser's callers. `lossy_utf8` is a `config` symbol; `mtest.config` re-exports it, so importing `mtest.config` is not evidence of decoding anything. |
 | `discover` | 4 | `test`, `e2e` | Thin, but the layer is small and `e2e` walks real trees. |
@@ -144,7 +144,7 @@ helper route.
 
 ### How the direct-call column was produced, and how it was checked
 
-A one-off static pass over the 98 classified modules: collect each
+A one-off static pass over the classified modules: collect each
 `from mtest... import ...` binding, find the top-level function bodies, mark the
 `test_*` ones plus every same-file function transitively named from them, and
 count a layer when an imported symbol appears in a use position (`SYM(`,
@@ -191,7 +191,7 @@ own commits carry their proofs, and this map does not re-assert those runs.
 | 5 | Live pool machinery fault × accounting: exit 3, no new scheduling, no live group, exact NOT-RUN remainder | `tests/integration/test_session_pool_faults.mojo` — five named faults (build dispatch, run dispatch, `wait_any` poll, gate-abort cleanup, interrupt cleanup) | `test` | Each test injects one fault at one boundary and asserts one exit class, so a fix that resolved every fault to the same code would red exactly one row | linux-64, osx-arm64 |
 | 6 | Signals × teardown: SIGINT/SIGTERM during work exits 2 with exact accounting; a second interrupt forces hard termination; no child group survives | `e2e` scenarios `interrupt`, `interrupt-sigterm`, `interrupt-double`, `parallel-interrupt`; `tests/integration/test_exec_pool.mojo` `test_second_activation_*`; `tests/integration/test_exec_interrupt.mojo` | `e2e`, `test` | `scripts/tests/test_e2e.py` pins the runner's own group-signalling helper against a fake leader that forks into its own process group | linux-64, osx-arm64 |
 | 7 | Descriptor exhaustion × worker sizing, and compiler resolution order | `e2e` scenarios `parallel-fd-clamp`, `mojo-executable-precedence`; fixtures `scripts/fixtures/toolchain/fake_fd_mojo.py`, `path_mojo.py` | `e2e` | `scripts/tests/test_e2e.py::LimitNofileTests` reads the limit the *spawned child* observed, so a `preexec_fn` that was accepted and ignored fails | linux-64, osx-arm64 |
-| 8 | Hostile child bytes × console rendering: no child-controlled text may execute a terminal control | `src/mtest/report/console_text.mojo`; `tests/unit/test_report_console_text.mojo` (one test per control class); `tests/unit/test_report_escape.mojo`; `e2e` `hostile-console` | `test`, `e2e` | Each escaper test asserts one control family's exact rendering, and `test_escape_scalar_leaves_every_interpreted_control_unrenderable` sweeps the whole interpreted set | linux-64, osx-arm64 |
+| 8 | Hostile child bytes × every terminal surface: no child- or config-controlled text may execute a terminal control | `src/mtest/model/control_chars.mojo` (the one classification, `tests/unit/test_model_control_chars.mojo`); its four consumers `src/mtest/report/console_text.mojo`, `src/mtest/cli/doctor.mojo`, `src/mtest/config/show.mojo`, `src/mtest/config/toml_bridge.mojo`, tested in `tests/unit/test_report_console_text.mojo` (one test per control class), `tests/unit/test_cli_doctor.mojo`, `tests/unit/test_config_show.mojo`, `tests/unit/test_config_file.mojo`; `tests/unit/test_report_escape.mojo`; `e2e` `hostile-console` | `test`, `e2e` | Each escaper test asserts one control family's exact rendering, and `test_escape_scalar_leaves_every_interpreted_control_unrenderable` sweeps the whole interpreted set. Dropping C1 from the shared classification reds a named test in all four consumer suites, so they share the policy rather than happening to agree | linux-64, osx-arm64 |
 | 9 | Hostile child bytes × machine reports: invalid UTF-8, NUL, XML-illegal controls, and report-lookalike lines must still yield valid NDJSON and JUnit | `tests/fixtures/exec/hostile_report_actor.py`; `e2e` `hostile`, `hostile-reporters`, `junit-schema-gate`, the `json-*` scenarios | `e2e`, `junit-check`, `junit-render-check` | Both oracles are self-tested before they judge anything. JUnit: `scripts/tests/test_junit.py::test_a_rejects_the_broken_fixture` runs inside `junit-check`. NDJSON: the `json-forward-compat` scenario calls `json_stream_check.main(["json_stream_check.py"])` — a one-element argv, which falls through to `_selftest()` — and asserts `rc == 0`, so the consumer's corrupt-line, duplicate-key, and non-finite rejections are gated inside `e2e` itself | linux-64, osx-arm64 |
 | 10 | Raw text semantics: RFC 3629 lossy decoding, shell quoting, CRLF as off-grammar drift | `tests/unit/test_config_lossy_utf8.mojo` (byte-exact tables), `tests/unit/test_config.mojo` (quoting tables), `tests/unit/test_protocol_corruption.mojo` (CRLF) | `test` | Every row carries the complete expected `String`, never a length or a substring, so a decoder change cannot pass by coincidence | linux-64, osx-arm64 |
 | 11 | Unsafe/native ownership boundaries | — | `asan-check`, `valgrind-check`, `native-check` | See [`notes/test-memory-risk-map.md`](test-memory-risk-map.md) | ASan/Valgrind: **linux-64 only**; `native-check`: both |
