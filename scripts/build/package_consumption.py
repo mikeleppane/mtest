@@ -236,6 +236,73 @@ SUMMARY_RE = re.compile(
 )
 
 
+# The exact roster of stages one full gate run must perform, in order. The
+# closing summary is DERIVED from what actually ran (see `completed_stages`),
+# never assembled from this roster: a gate that skips a proof while printing
+# that the proof happened is worse than one that omits it honestly.
+GATE_STAGE_IDS = (
+    "build",
+    "install",
+    "loader-clean",
+    "dogfood",
+    "failing-fixture",
+    "tarball",
+)
+
+# The probes stage 3 must run on the installed binary, in order. Its closing
+# line is derived from these and checked against them, for the same reason.
+LOADER_PROBE_FLAGS = ("--version", "--help", "--config")
+
+_COMPLETED_STAGES: list[str] = []
+
+
+def reset_completed_stages() -> None:
+    """Forget every recorded stage, so one process can run the gate twice."""
+    _COMPLETED_STAGES.clear()
+
+
+def record_completed_stage(stage_id: str) -> None:
+    """Record that one stage reached its end without stopping the gate.
+
+    Args:
+        stage_id: A member of `GATE_STAGE_IDS`.
+
+    Raises:
+        PackageCheckError: The id is not a known stage, or already recorded.
+    """
+    if stage_id not in GATE_STAGE_IDS:
+        raise PackageCheckError(f"unknown gate stage {stage_id!r}")
+    if stage_id in _COMPLETED_STAGES:
+        raise PackageCheckError(f"gate stage {stage_id!r} completed twice")
+    _COMPLETED_STAGES.append(stage_id)
+
+
+def completed_stages() -> tuple[str, ...]:
+    """Return the stages this process has completed, in completion order."""
+    return tuple(_COMPLETED_STAGES)
+
+
+def verify_every_stage_ran() -> None:
+    """Refuse to report success unless every rostered stage actually ran.
+
+    A deleted stage call site would otherwise leave the gate exiting 0 while its
+    closing banner still claimed the missing proof.
+
+    Raises:
+        PackageCheckError: A rostered stage did not run, or stages ran out of
+            their declared order.
+    """
+    if completed_stages() != GATE_STAGE_IDS:
+        missing = [
+            stage for stage in GATE_STAGE_IDS if stage not in _COMPLETED_STAGES
+        ]
+        raise PackageCheckError(
+            "the gate did not perform every stage it reports: ran "
+            f"{list(completed_stages())}, expected {list(GATE_STAGE_IDS)}"
+            + (f", missing {missing}" if missing else " in that order")
+        )
+
+
 def _banner(label: str) -> None:
     print(f"\n==> package-check: {label}", flush=True)
 
@@ -367,6 +434,7 @@ def stage_build_local_channel(target: PackagePlatform | None = None) -> BuiltArt
         f"(build {artifact.build_string}, sha256 {artifact.sha256})",
         flush=True,
     )
+    record_completed_stage("build")
     return artifact
 
 
@@ -531,7 +599,27 @@ def stage_install_from_local_channel(artifact: BuiltArtifact) -> Path:
         f"run dependency confirmed: {conda_meta[0].name}",
         flush=True,
     )
+    record_completed_stage("install")
     return mtest_bin
+
+
+def verify_loader_probe_roster(performed: tuple[str, ...]) -> None:
+    """Refuse to summarize the loader-clean stage as more than it ran.
+
+    Stage 3's closing line names several probes in one sentence, so it must be
+    derived from the probes that actually executed rather than written as prose.
+
+    Args:
+        performed: The probe flags that ran, in execution order.
+
+    Raises:
+        PackageCheckError: A declared probe did not run, or ran out of order.
+    """
+    if performed != LOADER_PROBE_FLAGS:
+        raise PackageCheckError(
+            "the loader-clean stage did not run every probe it reports: ran "
+            f"{list(performed)}, expected {list(LOADER_PROBE_FLAGS)}"
+        )
 
 
 def scrubbed_probe_env(target: PackagePlatform) -> dict[str, str]:
@@ -607,6 +695,7 @@ def stage_loader_clean_probe(mtest_bin: Path, target: PackagePlatform) -> None:
     scrubbed_prefix = "env -i " + " ".join(
         f"{name}={value}" for name, value in scrubbed_env.items() if name != "HOME"
     )
+    performed: list[str] = []
 
     for flag, expect_substring in (
         ("--version", expected_version_line),
@@ -636,6 +725,7 @@ def stage_loader_clean_probe(mtest_bin: Path, target: PackagePlatform) -> None:
                 f"installed mtest {flag} exited 0 but its stdout did not "
                 f"contain {expect_substring!r}: {result.stdout!r}"
             )
+        performed.append(flag)
 
     config_path = LOADER_PROBE_CWD / "mtest.toml"
     config_path.write_text(
@@ -669,13 +759,16 @@ def stage_loader_clean_probe(mtest_bin: Path, target: PackagePlatform) -> None:
             f"{configured.returncode}, stdout={configured.stdout!r}, "
             f"stderr={configured.stderr!r}"
         )
+    performed.append("--config")
 
+    verify_loader_probe_roster(tuple(performed))
     print(
-        "package-check: OK -- installed mtest --version/--help and a "
-        "config-present parse ran with the dev pixi env absent from PATH and "
+        f"package-check: OK -- installed mtest {', '.join(performed)} ran with "
+        "the dev pixi env absent from PATH and "
         f"{', '.join(target.loader_env_names)} empty",
         flush=True,
     )
+    record_completed_stage("loader-clean")
 
 
 def stage_suite_run_with_installed_binary(mtest_bin: Path) -> None:
@@ -716,6 +809,7 @@ def stage_suite_run_with_installed_binary(mtest_bin: Path) -> None:
             "the installed binary did not drive the dogfood probes green "
             "(see dogfood output above)"
         )
+    record_completed_stage("dogfood")
 
 
 def check_failing_fixture_consumption(
@@ -856,6 +950,7 @@ def stage_failing_fixture_consumption(mtest_bin: Path, version: str) -> None:
         "with exit 1, one FAIL row, and no PASS row",
         flush=True,
     )
+    record_completed_stage("failing-fixture")
 
 
 def stage_tarball_fallback_smoke(target: PackagePlatform | None = None) -> None:
@@ -943,6 +1038,7 @@ def stage_tarball_fallback_smoke(target: PackagePlatform | None = None) -> None:
         f"{expected!r} cleanly",
         flush=True,
     )
+    record_completed_stage("tarball")
 
 
 def main() -> int:
@@ -951,6 +1047,7 @@ def main() -> int:
     Returns:
         0 when every stage passed, 1 when any stage stopped the gate.
     """
+    reset_completed_stages()
     try:
         target = host_platform()
         print(
@@ -964,6 +1061,7 @@ def main() -> int:
         stage_suite_run_with_installed_binary(mtest_bin)
         stage_failing_fixture_consumption(mtest_bin, artifact.version)
         stage_tarball_fallback_smoke(target)
+        verify_every_stage_ran()
     except PackageCheckError as exc:
         print(f"FATAL: package-check: {exc}", file=sys.stderr)
         return 1
@@ -974,7 +1072,8 @@ def main() -> int:
         "dependency confirmed), loader-clean on the installed binary, "
         "installed binary passed the focused dogfood probes and reported the "
         "known-failing fixture as a failure, and the tar-bz2 fallback form "
-        "installed and ran cleanly. Nothing uploaded or published.",
+        "installed and ran cleanly. Nothing uploaded or published.\n"
+        f"package-check: stages performed: {list(completed_stages())}",
         flush=True,
     )
     return 0

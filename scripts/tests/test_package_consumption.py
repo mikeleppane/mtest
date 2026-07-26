@@ -31,9 +31,11 @@ import dataclasses
 import io
 import json
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts.build import package_consumption
 from scripts.build.package_consumption import (
@@ -229,7 +231,8 @@ class ArtifactIdentityTests(unittest.TestCase):
 
     def test_matching_record_is_accepted(self) -> None:
         self._write_record()
-        verify_installed_artifact_identity(self.prefix, self.artifact)
+        with contextlib.redirect_stdout(io.StringIO()):
+            verify_installed_artifact_identity(self.prefix, self.artifact)
 
     def test_same_version_artifact_with_a_foreign_sha256_is_rejected(self) -> None:
         # The exact defect this gate exists for: the solver picked an mtest of
@@ -406,6 +409,266 @@ class FailingFixtureStageTests(unittest.TestCase):
                     binary, TRUTHFUL_VERSION
                 )
         self.assertTrue(marker.exists(), "stage never executed the binary")
+
+
+class StageLedgerTests(unittest.TestCase):
+    """The gate records what it performed and refuses to overclaim."""
+
+    def setUp(self) -> None:
+        package_consumption.reset_completed_stages()
+        self.addCleanup(package_consumption.reset_completed_stages)
+
+    def test_completed_stages_start_empty(self) -> None:
+        self.assertEqual(package_consumption.completed_stages(), ())
+
+    def test_recording_an_unknown_stage_is_rejected(self) -> None:
+        with self.assertRaises(PackageCheckError):
+            package_consumption.record_completed_stage("polish-the-badge")
+
+    def test_recording_a_stage_twice_is_rejected(self) -> None:
+        package_consumption.record_completed_stage("build")
+        with self.assertRaises(PackageCheckError):
+            package_consumption.record_completed_stage("build")
+
+    def test_a_missing_stage_is_named(self) -> None:
+        for stage in package_consumption.GATE_STAGE_IDS:
+            if stage != "failing-fixture":
+                package_consumption.record_completed_stage(stage)
+        with self.assertRaises(PackageCheckError) as caught:
+            package_consumption.verify_every_stage_ran()
+        self.assertIn("failing-fixture", str(caught.exception))
+
+    def test_a_full_roster_is_accepted(self) -> None:
+        for stage in package_consumption.GATE_STAGE_IDS:
+            package_consumption.record_completed_stage(stage)
+        package_consumption.verify_every_stage_ran()
+
+    def test_the_full_loader_probe_roster_is_accepted(self) -> None:
+        package_consumption.verify_loader_probe_roster(
+            package_consumption.LOADER_PROBE_FLAGS
+        )
+
+    def test_a_skipped_loader_probe_is_named(self) -> None:
+        for skipped in package_consumption.LOADER_PROBE_FLAGS:
+            with self.subTest(skipped=skipped):
+                performed = tuple(
+                    flag
+                    for flag in package_consumption.LOADER_PROBE_FLAGS
+                    if flag != skipped
+                )
+                with self.assertRaises(PackageCheckError) as caught:
+                    package_consumption.verify_loader_probe_roster(performed)
+                self.assertIn(skipped, str(caught.exception))
+
+
+class CallSiteTests(unittest.TestCase):
+    """The proofs are not merely correct -- they are actually invoked.
+
+    A guard mutation shows a guard works; only these tests show the gate calls
+    it. Each patches the callee out, so deleting the CALL leaves nothing to
+    observe and the test reds.
+    """
+
+    def setUp(self) -> None:
+        package_consumption.reset_completed_stages()
+        self.addCleanup(package_consumption.reset_completed_stages)
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.root = Path(self._temp.name)
+        self.version = package_consumption.repo_version()
+        self.artifact = BuiltArtifact(
+            path=self.root / "channel" / "linux-64" / "mtest-x.conda",
+            version=self.version,
+            build_string="hb0f4dca_0",
+            sha256="d" * 64,
+            subdir="linux-64",
+        )
+
+    @staticmethod
+    def _install_prefix(env_dir: Path) -> Path:
+        """Create a plausible installed prefix under one scratch env dir."""
+        prefix = env_dir / ".pixi" / "envs" / "default"
+        (prefix / "bin").mkdir(parents=True, exist_ok=True)
+        (prefix / "bin" / "mtest").write_text("", encoding="utf-8")
+        (prefix / "conda-meta").mkdir(parents=True, exist_ok=True)
+        (prefix / "conda-meta" / "mojo-compiler-1.0.0b2-release.json").write_text(
+            "{}", encoding="utf-8"
+        )
+        return prefix
+
+    def test_install_stage_calls_the_artifact_identity_proof(self) -> None:
+        scratch = self.root / "package-check"
+        env_dir = scratch / "conda-env"
+        prefix = env_dir / ".pixi" / "envs" / "default"
+        identity = mock.Mock()
+        with mock.patch.multiple(
+            package_consumption,
+            REPO_ROOT=self.root,
+            SCRATCH_ROOT=scratch,
+            CONDA_ENV_DIR=env_dir,
+            CONDA_CHANNEL_DIR=self.root / "channel",
+            _run_streamed=mock.Mock(
+                side_effect=lambda *a, **k: (self._install_prefix(env_dir), 0)[1]
+            ),
+            verify_installed_artifact_identity=identity,
+        ):
+            with contextlib.redirect_stdout(io.StringIO()):
+                package_consumption.stage_install_from_local_channel(self.artifact)
+        identity.assert_called_once_with(prefix, self.artifact)
+
+    def test_tarball_stage_calls_the_artifact_identity_proof(self) -> None:
+        channel_dir = self.root / "tarball-channel"
+        env_dir = self.root / "tarball-env"
+        prefix = env_dir / ".pixi" / "envs" / "default"
+        artifact_name = f"mtest-{self.version}-hb0f4dca_0.tar.bz2"
+
+        def build_or_install(argv: list[str], **kwargs: object) -> int:
+            """Stand in for rattler-build and pixi install, in that order."""
+            if argv[0] == "rattler-build":
+                path = channel_dir / "linux-64" / artifact_name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"tarball")
+            else:
+                self._install_prefix(env_dir)
+            return 0
+
+        identity = mock.Mock()
+        smoke = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=f"mtest {self.version}\n", stderr=""
+            )
+        )
+        with mock.patch.multiple(
+            package_consumption,
+            REPO_ROOT=self.root,
+            TARBALL_CHANNEL_DIR=channel_dir,
+            TARBALL_ENV_DIR=env_dir,
+            _run_streamed=mock.Mock(side_effect=build_or_install),
+            verify_installed_artifact_identity=identity,
+        ):
+            with mock.patch.object(package_consumption.subprocess, "run", smoke):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    package_consumption.stage_tarball_fallback_smoke(
+                        package_platform("linux", "x86_64")
+                    )
+        self.assertEqual(len(identity.call_args_list), 1)
+        self.assertEqual(identity.call_args_list[0].args[0], prefix)
+        self.assertEqual(
+            identity.call_args_list[0].args[1].path.name, artifact_name
+        )
+
+    def test_loader_clean_stage_calls_the_probe_roster_check(self) -> None:
+        roster = mock.Mock()
+
+        def fake_run(argv: list[str], **kwargs: object):
+            """Answer each loader-clean probe as a healthy install would."""
+            if argv[0] == "ldd":
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            if "--version" in argv:
+                return subprocess.CompletedProcess(
+                    argv, 0, f"mtest {self.version}\n", ""
+                )
+            if "--help" in argv:
+                return subprocess.CompletedProcess(argv, 0, "usage: mtest\n", "")
+            return subprocess.CompletedProcess(
+                argv, 4, "", "discover: no such file\n"
+            )
+
+        with mock.patch.multiple(
+            package_consumption,
+            LOADER_PROBE_CWD=self.root / "loader-probe-cwd",
+            verify_loader_probe_roster=roster,
+        ):
+            with mock.patch.object(
+                package_consumption.subprocess, "run", side_effect=fake_run
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    package_consumption.stage_loader_clean_probe(
+                        self.root / "bin" / "mtest",
+                        package_platform("linux", "x86_64"),
+                    )
+        roster.assert_called_once_with(package_consumption.LOADER_PROBE_FLAGS)
+
+    def _patched_main(self, *, skip_recording: str | None = None) -> mock.Mock:
+        """Patch every stage with a recording double and return the call log.
+
+        Args:
+            skip_recording: A stage id whose double must NOT record itself,
+                simulating a stage that silently did not happen.
+
+        Returns:
+            A parent mock whose `mock_calls` carry the stage call order.
+        """
+        parent = mock.Mock()
+
+        def stage(stage_id: str, result: object = None):
+            def run(*args: object, **kwargs: object) -> object:
+                parent.stage(stage_id)
+                if stage_id != skip_recording:
+                    package_consumption.record_completed_stage(stage_id)
+                return result
+
+            return run
+
+        install_result = self.root / "prefix" / "bin" / "mtest"
+        self._patches = mock.patch.multiple(
+            package_consumption,
+            host_platform=mock.Mock(
+                return_value=package_platform("linux", "x86_64")
+            ),
+            stage_build_local_channel=mock.Mock(
+                side_effect=stage("build", self.artifact)
+            ),
+            stage_install_from_local_channel=mock.Mock(
+                side_effect=stage("install", install_result)
+            ),
+            stage_loader_clean_probe=mock.Mock(side_effect=stage("loader-clean")),
+            stage_suite_run_with_installed_binary=mock.Mock(
+                side_effect=stage("dogfood")
+            ),
+            stage_failing_fixture_consumption=mock.Mock(
+                side_effect=stage("failing-fixture")
+            ),
+            stage_tarball_fallback_smoke=mock.Mock(side_effect=stage("tarball")),
+        )
+        return parent
+
+    def test_main_invokes_every_stage_once_in_the_declared_order(self) -> None:
+        parent = self._patched_main()
+        out, err = io.StringIO(), io.StringIO()
+        with self._patches:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = package_consumption.main()
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual(
+            [call.args[0] for call in parent.stage.call_args_list],
+            list(package_consumption.GATE_STAGE_IDS),
+        )
+        self.assertIn("package-check: OK (linux-64)", out.getvalue())
+
+    def test_main_reports_the_stages_it_actually_performed(self) -> None:
+        self._patched_main()
+        out = io.StringIO()
+        with self._patches:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(
+                io.StringIO()
+            ):
+                package_consumption.main()
+        self.assertIn(
+            f"stages performed: {list(package_consumption.GATE_STAGE_IDS)}",
+            out.getvalue(),
+        )
+
+    def test_main_refuses_to_report_ok_when_a_stage_did_not_happen(self) -> None:
+        # The banner must not be able to claim a proof the run never performed.
+        self._patched_main(skip_recording="failing-fixture")
+        out, err = io.StringIO(), io.StringIO()
+        with self._patches:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = package_consumption.main()
+        self.assertEqual(code, 1)
+        self.assertNotIn("package-check: OK (", out.getvalue())
+        self.assertIn("failing-fixture", err.getvalue())
 
 
 class FixtureInventoryTests(unittest.TestCase):

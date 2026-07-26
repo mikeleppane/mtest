@@ -34,18 +34,21 @@ requirements:
   build:
     - mojo ==1.0.0b2
     - clang ==18.1.8
-  # Run-time: the installed `mtest` binary is NOT loader-clean on its own.
-  # `readelf -d` shows a direct NEEDED on `libKGENCompilerRTShared.so`, whose
+  # Run-time: the installed `mtest` binary is NOT loader-clean on its own, in
+  # either object format. On linux-64 `readelf -d` shows a direct ELF NEEDED on
+  # `libKGENCompilerRTShared.so`; on osx-arm64 `otool -L` shows the
+  # corresponding Mach-O load command for the same runtime library. Its
   # transitive closure pulls in the Mojo-runtime libraries (libMSupportGlobals,
   # libAsyncRTRuntimeGlobals, libNVPTX, libAsyncRTMojoBindings) that
-  # `mojo-compiler-1.0.0b2-release` owns, plus the standard C++/GCC runtime
-  # (libstdc++, libgcc_s) — which the base environment provides and
-  # `mojo-compiler` itself depends on, NOT libraries mtest vendors or that
-  # mojo-compiler "owns". The native adapter is statically linked (no extra
-  # NEEDED entry), so it adds no run dependency of its own. Declaring
-  # `mojo-compiler` therefore drags in the whole native closure transitively.
-  # package-check proves this dependency empirically in a fresh environment
-  # carrying only the declared run dependency.
+  # `mojo-compiler-1.0.0b2-release` owns, plus the platform's standard C++
+  # runtime (libstdc++/libgcc_s on Linux, libc++ on macOS) — which the base
+  # environment provides and `mojo-compiler` itself depends on, NOT libraries
+  # mtest vendors or that mojo-compiler "owns". The native adapter is statically
+  # linked (no extra load command on either platform), so it adds no run
+  # dependency of its own. Declaring `mojo-compiler` therefore drags in the
+  # whole native closure transitively. package-check proves this dependency
+  # empirically ON BOTH PLATFORMS, in a fresh environment carrying only the
+  # declared run dependency with that platform's loader search path emptied.
   run:
     - mojo-compiler ==1.0.0b2
 

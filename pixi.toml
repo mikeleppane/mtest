@@ -80,22 +80,26 @@ readme-help-check = { cmd = "python -m scripts.checks.readme_help", depends-on =
 # isolated build env (mojo ==1.0.0b2 + the C toolchain, from the modular +
 # conda-forge channels), builds mtest FROM SOURCE inside that sandbox (mirroring
 # build -> build-native -> build-bin), and writes the resulting .conda under
-# build/conda-channel — a plain directory with repodata.json, nothing uploaded
-# or published anywhere. Not wired into `pixi run ci`; the dedicated Linux
-# package job runs independently from both platform test chains.
+# build/conda-channel/<subdir> — a plain directory with repodata.json, nothing
+# uploaded or published anywhere. The subdir is the host's: linux-64 and
+# osx-arm64 are both gated. Not wired into `pixi run ci`; each platform's
+# dedicated package job runs independently from the test chains.
 package-build = "rattler-build build --recipe recipe/recipe.yaml -c https://conda.modular.com/max/ -c conda-forge --output-dir build/conda-channel"
 
-# The packaged-artifact consumption GATE: build -> install the .conda into a
-# FRESH scratch env from the local channel (proving it pulls mojo-compiler
-# ==1.0.0b2) -> a loader-clean probe on the INSTALLED binary (dev pixi env
-# absent from PATH, empty LD_LIBRARY_PATH) -> focused dogfood probes run through
-# that installed binary with the toolchain threaded so its build children can
-# still resolve mojo -> a tar-bz2 fallback-format install + smoke-run. Depends
-# on build + build-native (not build-bin) so this repo's own build/mtest.mojopkg
-# and the test-variant native object exist for the probe run — the binary under
-# test is the INSTALLED one, never build/mtest. Standalone: NOT wired into
-# `pixi run ci`; its dedicated Linux CI job is independent. Nothing uploads or
-# publishes anywhere.
+# The packaged-artifact consumption GATE, identical on both gated platforms:
+# build -> install THAT EXACT artifact (version + build string, checked against
+# the installed conda-meta SHA-256) into a FRESH scratch env from the local
+# channel, proving it pulls mojo-compiler ==1.0.0b2 -> a loader-clean probe on
+# the INSTALLED binary (dev pixi env absent from PATH, this platform's loader
+# search path — LD_LIBRARY_PATH on linux-64, DYLD_LIBRARY_PATH on osx-arm64 —
+# empty) -> focused dogfood probes run through that installed binary with the
+# toolchain threaded so its build children can still resolve mojo -> the
+# known-failing fixture through the same binary, which must exit 1 -> a tar-bz2
+# fallback-format install + smoke-run. Depends on build + build-native (not
+# build-bin) so this repo's own build/mtest.mojopkg and the test-variant native
+# object exist for the probe run — the binary under test is the INSTALLED one,
+# never build/mtest. Standalone: NOT wired into `pixi run ci`; each platform's
+# CI package job is independent. Nothing uploads or publishes anywhere.
 package-check = { cmd = "python -m scripts.build.package_consumption", depends-on = [
     "build",
     "build-native",
