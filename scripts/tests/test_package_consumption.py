@@ -893,6 +893,10 @@ class AssertionReadmeExampleTests(unittest.TestCase):
             "root: /checkout\n"
             "FAIL           examples/assertions/test.mojo  0.07s\n"
             "detail /prefix/share/mtest/assertions-src\n"
+            "    |     PASS [ 0.001 ] test_pass\n"
+            "    |     FAIL [ 0.082 ] test_fail\n"
+            "    | Summary [ 0.083 ] 2 tests run: 1 passed , 1 failed \n"
+            "    | \n"
             "===== 1 passed, 1 failed in 2.2s =====\n"
         )
         self.assertEqual(
@@ -904,6 +908,10 @@ class AssertionReadmeExampleTests(unittest.TestCase):
             "root: <REPO>\n"
             "FAIL           examples/assertions/test.mojo  <TIME>\n"
             "detail <PREFIX>/share/mtest/assertions-src\n"
+            "    |     PASS [ <TIME> ] test_pass\n"
+            "    |     FAIL [ <TIME> ] test_fail\n"
+            "    | Summary [ <TIME> ] 2 tests run: 1 passed , 1 failed\n"
+            "    |\n"
             "===== 1 passed, 1 failed in <TIME> =====\n",
         )
 

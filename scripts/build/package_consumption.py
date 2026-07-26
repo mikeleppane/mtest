@@ -64,6 +64,7 @@ Usage:  pixi run package-check
 from __future__ import annotations
 
 from dataclasses import dataclass
+import difflib
 import glob
 import hashlib
 import json
@@ -721,10 +722,24 @@ def _normalize_assertion_times(output: str) -> str:
         r"\1  <TIME>",
         output,
     )
-    return re.sub(
+    normalized = re.sub(
         r"(?m)(^===== .+ in )\d+(?:\.\d+)?s( =====$)",
         r"\1<TIME>\2",
         normalized,
+    )
+    normalized = re.sub(
+        r"(?m)^(\s+\|\s+(?:PASS|FAIL) \[ )\d+(?:\.\d+)?( \] .+)$",
+        r"\1<TIME>\2",
+        normalized,
+    )
+    normalized = re.sub(
+        r"(?m)^(\s+\| Summary \[ )\d+(?:\.\d+)?( \] .+)$",
+        r"\1<TIME>\2",
+        normalized,
+    )
+    return re.sub(r"(?m)^(\s+\|.*\S) +$", r"\1", normalized).replace(
+        "    | \n",
+        "    |\n",
     )
 
 
@@ -745,12 +760,11 @@ def stage_assertion_example(
     environment["PATH"] = str(prefix / "bin") + ":/usr/bin:/bin"
     command = [
         str(mtest_bin.resolve()),
-        "--no-config",
         "--show-output",
-        "none",
+        "failures",
         "-I",
         str(source_root),
-        str(ASSERTION_EXAMPLE.relative_to(REPO_ROOT)),
+        str(ASSERTION_EXAMPLE.parent.relative_to(REPO_ROOT)),
     ]
     result = subprocess.run(
         command,
@@ -779,13 +793,43 @@ def stage_assertion_example(
         raise PackageCheckError(
             f"installed assertion example output is incomplete: {missing}"
         )
-    normalized = result.stdout.replace(str(prefix), "<PREFIX>").replace(
-        str(REPO_ROOT.resolve()),
-        "<REPO>",
+    normalized = normalize_assertion_example(result.stdout, prefix, REPO_ROOT)
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    documented_source = readme_assertion_source_block(readme)
+    example_source = ASSERTION_EXAMPLE.read_text(encoding="utf-8")
+    if documented_source != example_source:
+        diff = "".join(
+            difflib.unified_diff(
+                documented_source.splitlines(keepends=True),
+                example_source.splitlines(keepends=True),
+                fromfile="README.md assertion Mojo fence",
+                tofile=str(ASSERTION_EXAMPLE.relative_to(REPO_ROOT)),
+            )
+        )
+        raise PackageCheckError(
+            "README assertion source differs from the executed example:\n" + diff
+        )
+    documented = readme_assertion_example_block(readme)
+    actual = (
+        "$ mtest --show-output failures -I "
+        "<PREFIX>/share/mtest/assertions-src examples/assertions\n" + normalized
     )
+    normalized_documented = _normalize_assertion_times(documented)
+    if normalized_documented != actual:
+        diff = "".join(
+            difflib.unified_diff(
+                normalized_documented.splitlines(keepends=True),
+                actual.splitlines(keepends=True),
+                fromfile="README.md assertion console fence",
+                tofile="installed assertion example",
+            )
+        )
+        raise PackageCheckError(
+            "README assertion example differs from installed output:\n" + diff
+        )
     capture = SCRATCH_ROOT / "assertion-example-output.txt"
-    capture.write_text(normalized, encoding="utf-8")
-    print(normalized, end="", flush=True)
+    capture.write_text(actual, encoding="utf-8")
+    print(actual, end="", flush=True)
     print(
         f"package-check: captured normalized README output at {capture}",
         flush=True,

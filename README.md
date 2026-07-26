@@ -128,11 +128,18 @@ The package includes an optional source-only
 installed source root to both the test compiler and mtest:
 
 ```mojo
+"""Executable example for the optional source-only assertion companion."""
+
 import mtest.assertions as assertions
+import std.testing as testing
 from std.testing import TestSuite
 
 
-def test_configuration_text() raises:
+def test_standard_assertion_still_coexists() raises:
+    testing.assert_equal(2 + 2, 4)
+
+
+def test_text_difference_has_scalar_and_context() raises:
     assertions.assert_equal(
         "alpha\nbeta\ngamma",
         "alpha\nBETa\ngamma",
@@ -145,31 +152,48 @@ def main() raises:
 ```
 
 ```console
-$ mtest --show-output none -I <PREFIX>/share/mtest/assertions-src examples/assertions
+$ mtest --show-output failures -I <PREFIX>/share/mtest/assertions-src examples/assertions
 mtest 0.6.0 (mojo)
 root: <REPO>   selected: 1 files   excluded: 0
 
-FAIL           examples/assertions/test_diagnostics.mojo  0.07s
+FAIL           examples/assertions/test_diagnostics.mojo  <TIME>
 
 --- FAIL examples/assertions/test_diagnostics.mojo::test_text_difference_has_scalar_and_context ---
-At examples/assertions/test_diagnostics.mojo:13:28: text differs at scalar 6
-  actual: U+0062 'b'
-  expected: U+0042 'B'
-  actual line 1: alpha\n
-  actual line 2: beta\n
-  actual line 3: gamma
-  expected line 1: alpha\n
-  expected line 2: BETa\n
-  expected line 3: gamma
-  reason: configuration text changed
-inspect the failure detail above, then rerun the reproduction command
+    | At examples/assertions/test_diagnostics.mojo:13:28: text differs at scalar 6
+    |   actual: U+0062 'b'
+    |   expected: U+0042 'B'
+    |   actual line 1: alpha\n
+    |   actual line 2: beta\n
+    |   actual line 3: gamma
+    |   expected line 1: alpha\n
+    |   expected line 2: BETa\n
+    |   expected line 3: gamma
+    |   reason: configuration text changed
 reproduce: mtest -I <PREFIX>/share/mtest/assertions-src examples/assertions/test_diagnostics.mojo::test_text_difference_has_scalar_and_context
 
+--- FAIL examples/assertions/test_diagnostics.mojo (exit 1) — captured output (file-scoped; TestSuite does not attribute output to individual tests) ---
+    | Unhandled exception caught during execution:
+    | Running 2 tests for <REPO>/examples/assertions/test_diagnostics.mojo
+    |     PASS [ <TIME> ] test_standard_assertion_still_coexists
+    |     FAIL [ <TIME> ] test_text_difference_has_scalar_and_context
+    |       At <REPO>/examples/assertions/test_diagnostics.mojo:13:28: text differs at scalar 6
+    |         actual: U+0062 'b'
+    |         expected: U+0042 'B'
+    |         actual line 1: alpha\n
+    |         actual line 2: beta\n
+    |         actual line 3: gamma
+    |         expected line 1: alpha\n
+    |         expected line 2: BETa\n
+    |         expected line 3: gamma
+    |         reason: configuration text changed
+    | --------
+    | Summary [ <TIME> ] 2 tests run: 1 passed , 1 failed , 0 skipped
+    | Test suite' <REPO>/examples/assertions/test_diagnostics.mojo 'failed!
+    |
+--- captured stderr ---
 
-===== 1 passed, 1 failed, 0 skipped (0 excluded, 0 not run) in 0.7s =====
 
-Failing tests:
-  examples/assertions/test_diagnostics.mojo::test_text_difference_has_scalar_and_context
+===== 1 passed, 1 failed, 0 skipped (0 excluded, 0 not run) in <TIME> =====
 ```
 
 That output was captured from the installed `.conda` artifact. The companion
