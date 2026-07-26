@@ -132,6 +132,13 @@ def _count_scalar(text: String, value: Int) -> Int:
     return total
 
 
+def _assertion_body_byte_length(detail: String, marker: String) raises -> Int:
+    testing.assert_true(detail.startswith("At "))
+    var body_at = detail.find(marker)
+    testing.assert_true(body_at >= 0)
+    return detail.byte_length() - body_at
+
+
 def _text_failure(actual: String, expected: String, msg: String = "") -> String:
     var detail = String("")
     try:
@@ -315,7 +322,9 @@ def test_many_small_formatter_writes_and_body_are_bounded() raises:
         assert_equal("left", "right", msg=_repeated("m", 4 * 1024 * 1024))
     except error:
         detail = String(error)
-    testing.assert_true(detail.byte_length() <= BODY_BYTE_CAP + 512)
+    testing.assert_true(
+        _assertion_body_byte_length(detail, "text differs") <= BODY_BYTE_CAP
+    )
     testing.assert_true(detail.endswith("... [truncated]"))
 
     var actual = List[String]()
@@ -328,7 +337,9 @@ def test_many_small_formatter_writes_and_body_are_bounded() raises:
         expected,
         "USER REASON SURVIVES",
     )
-    testing.assert_true(structural.byte_length() <= BODY_BYTE_CAP + 512)
+    testing.assert_true(
+        _assertion_body_byte_length(structural, "list span") <= BODY_BYTE_CAP
+    )
     testing.assert_true(structural.endswith("USER REASON SURVIVES"))
     testing.assert_equal(_count_scalar(structural, ord('"')) % 2, 0)
 
@@ -575,7 +586,10 @@ def test_large_text_context_is_bounded_and_message_is_last() raises:
         "RIGHT-" + long_tail,
         "final reason",
     )
-    testing.assert_true(detail.byte_length() <= 4096 + 256)
+    testing.assert_true(
+        _assertion_body_byte_length(detail, "text differs")
+        <= TEXT_CONTEXT_BYTE_CAP + 256
+    )
     testing.assert_true("text differs at scalar 0" in detail)
     testing.assert_true("LEFT-" in detail)
     testing.assert_true("RIGHT-" in detail)

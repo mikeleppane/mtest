@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
+import time
 from typing import override
 import unittest
 from unittest import mock
@@ -81,22 +83,58 @@ class AssertionCommandTests(unittest.TestCase):
             self.assertFalse(stale.exists())
 
     def test_run_checked_turns_timeout_into_a_bounded_failure(self) -> None:
-        timeout = subprocess.TimeoutExpired(["mojo", "build"], 7)
-        with (
-            mock.patch(
-                "scripts.checks.assertions.subprocess.run",
-                side_effect=timeout,
-            ),
-            self.assertRaisesRegex(
-                AssertionError,
-                r"command exceeded 7 seconds: mojo build",
-            ),
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"command exceeded .* seconds",
         ):
             assertions._run_checked(
-                ["mojo", "build"],
-                cwd=Path("/checkout"),
-                timeout=7,
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                cwd=assertions.REPO_ROOT,
+                timeout=0.05,
             )
+
+    def test_run_checked_timeout_kills_descendants(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-assertions-test-") as raw:
+            marker = Path(raw) / "survived"
+            child = (
+                "import pathlib,time;"
+                "time.sleep(0.5);"
+                f"pathlib.Path({str(marker)!r}).write_text('alive')"
+            )
+            parent = (
+                "import subprocess,sys,time;"
+                f"subprocess.Popen([sys.executable,'-c',{child!r}]);"
+                "time.sleep(60)"
+            )
+            with self.assertRaisesRegex(AssertionError, "command exceeded"):
+                assertions._run_checked(
+                    [sys.executable, "-c", parent],
+                    cwd=assertions.REPO_ROOT,
+                    timeout=0.1,
+                )
+            time.sleep(0.7)
+            self.assertFalse(marker.exists())
+
+    def test_run_checked_bounds_flood_capture(self) -> None:
+        result = assertions._run_checked(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys;"
+                    f"sys.stdout.write('x'*{assertions.PROCESS_CAPTURE_BYTE_CAP * 2})"
+                ),
+            ],
+            cwd=assertions.REPO_ROOT,
+            timeout=5,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertLessEqual(
+            len(result.stdout.encode("utf-8")),
+            assertions.PROCESS_CAPTURE_BYTE_CAP
+            + len(assertions.PROCESS_CAPTURE_MARKER.encode("utf-8")),
+        )
+        self.assertTrue(result.stdout.endswith(assertions.PROCESS_CAPTURE_MARKER))
 
     def test_successful_compile_must_be_warning_free(self) -> None:
         result = subprocess.CompletedProcess(
