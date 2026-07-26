@@ -360,6 +360,8 @@ def test_list_specializer_renders_zero_on_pass_and_eight_on_failure() raises:
         assert_equal(failing_actual, failing_expected)
     except:
         pass
+    testing.assert_equal(actual_equality[0], 11)
+    testing.assert_equal(expected_equality[0], 0)
     testing.assert_equal(actual_render[0], 8)
     testing.assert_equal(expected_render[0], 8)
     # SAFETY: all probe values are dead before their four uniquely owned
@@ -442,6 +444,8 @@ def test_equal_dictionary_with_oversized_key_returns_without_rendering() raises:
         7, "expected", expected_equality, expected_render
     )
     assert_equal(actual, expected)
+    testing.assert_equal(actual_equality[0], 1)
+    testing.assert_equal(expected_equality[0], 0)
     testing.assert_equal(actual_render[0], 0)
     testing.assert_equal(expected_render[0], 0)
     # SAFETY: both dictionaries and their values are dead before the four
@@ -477,6 +481,8 @@ def test_dictionary_specializer_renders_only_eight_changed_values() raises:
         assert_equal(actual, expected)
     except:
         pass
+    testing.assert_equal(actual_equality[0], 12)
+    testing.assert_equal(expected_equality[0], 0)
     testing.assert_equal(actual_render[0], 8)
     testing.assert_equal(expected_render[0], 8)
     # SAFETY: both dictionaries and their values are dead before the four

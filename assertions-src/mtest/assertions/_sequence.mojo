@@ -22,30 +22,45 @@ def write_list_difference[
     T: Copyable & ImplicitlyDestructible & Equatable & Writable
 ](mut output: BoundedWriter, actual: List[T], expected: List[T],) -> Bool:
     """Derive equality and write one bounded list mismatch diagnostic."""
-    var prefix = 0
     var shared = min(len(actual), len(expected))
-    while prefix < shared and actual[prefix] == expected[prefix]:
-        prefix += 1
+    var prefix = shared
+    var last_mismatch = -1
+    var first_equal_after_prefix = -1
+    var mismatch_total = 0
+    var mismatch_indices = List[Int]()
+    for index in range(shared):
+        if actual[index] == expected[index]:
+            if prefix != shared and first_equal_after_prefix == -1:
+                first_equal_after_prefix = index
+        else:
+            if prefix == shared:
+                prefix = index
+            last_mismatch = index
+            mismatch_total += 1
+            if len(mismatch_indices) < DISPLAY_LIMIT:
+                mismatch_indices.append(index)
     if prefix == shared and len(actual) == len(expected):
         return True
 
     var suffix = 0
-    while (
-        suffix < len(actual) - prefix
-        and suffix < len(expected) - prefix
-        and actual[len(actual) - suffix - 1]
-        == expected[len(expected) - suffix - 1]
-    ):
-        suffix += 1
+    if len(actual) == len(expected):
+        suffix = shared - last_mismatch - 1
+    else:
+        while (
+            suffix < len(actual) - prefix
+            and suffix < len(expected) - prefix
+            and actual[len(actual) - suffix - 1]
+            == expected[len(expected) - suffix - 1]
+        ):
+            suffix += 1
 
     var actual_stop = len(actual) - suffix
     var expected_stop = len(expected) - suffix
     var aligned = min(actual_stop - prefix, expected_stop - prefix)
-    var interior_equal = False
-    for offset in range(1, aligned):
-        if actual[prefix + offset] == expected[prefix + offset]:
-            interior_equal = True
-            break
+    var interior_equal = (
+        first_equal_after_prefix != -1
+        and first_equal_after_prefix < prefix + aligned
+    )
 
     if not interior_equal:
         var actual_count = actual_stop - prefix
@@ -69,11 +84,7 @@ def write_list_difference[
         _write_list_slice(output, expected, prefix, expected_stop)
         return False
 
-    var total = 0
-    for index in range(shared):
-        if actual[index] != expected[index]:
-            total += 1
-    total += abs(len(actual) - len(expected))
+    var total = mismatch_total + abs(len(actual) - len(expected))
     output.write_trusted(
         "list mismatches: "
         + String(total)
@@ -82,14 +93,12 @@ def write_list_difference[
         + " omitted"
     )
     var displayed = 0
-    for index in range(shared):
-        if actual[index] != expected[index]:
-            if displayed < DISPLAY_LIMIT:
-                output.write_trusted("\n  [" + String(index) + "] ")
-                output.write(actual[index])
-                output.write_trusted(" != ")
-                output.write(expected[index])
-            displayed += 1
+    for index in mismatch_indices:
+        output.write_trusted("\n  [" + String(index) + "] ")
+        output.write(actual[index])
+        output.write_trusted(" != ")
+        output.write(expected[index])
+        displayed += 1
     if len(actual) > shared:
         for index in range(shared, len(actual)):
             if displayed < DISPLAY_LIMIT:
