@@ -65,12 +65,20 @@ def test_lexical_source_path_keeps_the_symlink_component() raises:
 
 
 def test_lexical_source_path_agrees_with_canonicalize_without_links() raises:
-    """No symlink component means no behavior change for ordinary files."""
+    """No symlink component means no behavior change for ordinary files.
+
+    The root is canonicalized FIRST so the premise actually holds: on macOS the
+    temp root is handed out under `/var`, which is itself a symlink to
+    `/private/var`, so composing from the raw root would compare a path that
+    does contain a link and fail on the platform difference rather than on the
+    behavior under test.
+    """
     var root = temp_root()
     touch(root, "sub/test_a.mojo")
+    var link_free_root = canonicalize(root)
     assert_equal(
-        lexical_source_path(root + "/sub/test_a.mojo"),
-        canonicalize(root + "/sub/test_a.mojo"),
+        lexical_source_path(link_free_root + "/sub/test_a.mojo"),
+        canonicalize(link_free_root + "/sub/test_a.mojo"),
     )
     remove_tree(root)
 
