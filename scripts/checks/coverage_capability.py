@@ -16,10 +16,13 @@ on them.
 
 Four outcomes, three of them nonzero:
 
-* the recorded probe finds nothing        -> print the pinned message, exit 0;
+* the recorded probe reads help and finds nothing -> pinned message, exit 0;
 * coverage-shaped flags are discovered    -> echo them, exit nonzero;
 * coverage-shaped prose is discovered     -> echo the lines, exit nonzero;
-* the pin drifted or the probe failed     -> say why, exit nonzero.
+* the pin drifted or the probe failed     -> say why, exit nonzero;
+* a command exited 0 but wrote no readable help -> say why, exit nonzero.
+  Reading zero bytes is not evidence that a facility is absent, and an
+  exit-0 command that writes nothing otherwise looks exactly like one.
 
 Usage: ``pixi run coverage-capability``.
 """
@@ -52,6 +55,19 @@ PROBE_TIMEOUT_SECONDS = 60
 # The same needles the recorded `rg -i 'cover|profile|instrument'` probe uses.
 RELEVANT_WORDS: tuple[str, ...] = ("cover", "profile", "instrument")
 _FLAG = re.compile(r"--[A-Za-z0-9][A-Za-z0-9-]*")
+
+# The positive witness each probe's output must carry before "we looked and
+# found nothing" is allowed to mean anything. Without one, an exit-0 command
+# that writes nothing at all -- a renamed subcommand path, a shim that pages
+# its help, a wrapper that swallows both streams -- reads exactly like a
+# toolchain with no coverage facility, and the gate concludes the facility is
+# absent having inspected zero bytes.
+#
+# The witness is a named `--flag`, because that is precisely what the probe
+# claims to have read: the verdict is "the flag list contains nothing
+# coverage-shaped", which presupposes a flag list. `MINIMUM_HELP_BYTES` rejects
+# a stub too short to be anyone's help output even if it does mention a flag.
+MINIMUM_HELP_BYTES = 200
 
 UNAVAILABLE_MESSAGE = (
     f"Mojo source coverage unavailable at {PINNED_MOJO_VERSION}; "
@@ -185,6 +201,32 @@ def collect_help_text(
     return tuple(reports)
 
 
+def unreadable_reports(
+    reports: tuple[tuple[tuple[str, ...], str], ...],
+) -> str:
+    """Name every recorded command whose output is not recognizable as help.
+
+    Args:
+        reports: ``(argv, combined output)`` pairs from `collect_help_text`.
+
+    Returns:
+        One indented line per unreadable report, empty when every recorded
+        command produced help text and at least one command was recorded. An
+        empty `reports` tuple is itself unreadable: the probe ran nothing.
+    """
+    if not reports:
+        return "  (no command was probed at all)"
+    lines: list[str] = []
+    for argv, text in reports:
+        if len(text) >= MINIMUM_HELP_BYTES and _FLAG.search(text) is not None:
+            continue
+        lines.append(
+            f"  {' '.join(argv)}: {len(text)} bytes, "
+            f"{'no' if _FLAG.search(text) is None else 'a'} `--flag` named"
+        )
+    return "\n".join(lines)
+
+
 def evaluate(
     reports: tuple[tuple[tuple[str, ...], str], ...],
 ) -> tuple[str, int]:
@@ -194,9 +236,11 @@ def evaluate(
         reports: ``(argv, combined output)`` pairs from `collect_help_text`.
 
     Returns:
-        A ``(message, exit code)`` pair. The code is ``0`` only when no command
-        named anything coverage-shaped; any discovery returns a nonzero code so
-        the task fails until a human gates the facility.
+        A ``(message, exit code)`` pair. The code is ``0`` only when every
+        recorded command produced recognizable help text AND none of it named
+        anything coverage-shaped. Any discovery, and any report that cannot be
+        recognized as help at all, returns a nonzero code — reading zero bytes
+        is not evidence that a facility is absent.
     """
     discovered: list[str] = []
     for argv, text in reports:
@@ -207,6 +251,19 @@ def evaluate(
             continue
         discovered.extend(f"  {label}: {line}" for line in relevant_lines(text))
     if not discovered:
+        # Only the PASS needs a positive witness. A discovery above is already
+        # a failure and reports itself; it is the "we looked and found nothing"
+        # verdict that must prove it looked.
+        unreadable = unreadable_reports(reports)
+        if unreadable:
+            return (
+                "coverage-capability: FAIL: the probe cannot claim the "
+                "toolchain names no coverage facility, because it read no "
+                f"help text from:\n{unreadable}\nThe probe's whole claim is "
+                "'we looked and found nothing', so being unable to look is a "
+                "failure, never an absence.\n" + DISCOVERY_INSTRUCTION,
+                1,
+            )
         return UNAVAILABLE_MESSAGE, 0
     body = "\n".join(discovered)
     return (

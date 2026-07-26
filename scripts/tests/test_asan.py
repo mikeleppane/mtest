@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 from pathlib import Path
 import subprocess
 import tempfile
@@ -452,6 +454,68 @@ class AsanCliProbeOracleTests(unittest.TestCase):
 
         self.assertIn("NDJSON", detail)
         self.assertIn("JUnit", detail)
+
+
+class AsanMainProbeRosterTests(unittest.TestCase):
+    """Pin that `main` performs the probes its closing banner claims.
+
+    Every other test in this file calls a probe directly, and the only `main`
+    cases stop at the empty-inventory guard, so deleting `check_cli(env)` from
+    `main` left the whole suite green while the gate still exited 0 printing
+    "+ 1 CLI reporter run".
+    """
+
+    EXPECTED_PROBES = ("controls", "production-exec", "cli")
+
+    def _main_with_recorded_probes(self) -> tuple[int, list[str], list[str], str]:
+        performed: list[str] = []
+        compiled: list[str] = []
+
+        def probe(name: str):
+            def run(env: dict[str, str]) -> None:
+                performed.append(name)
+                self.assertIn("ASAN_OPTIONS", env)
+
+            return run
+
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            out = Path(raw_tmp) / "asan"
+            with (
+                patch.object(asan_check, "OUT", out),
+                patch.object(asan_check, "TESTS", (Path("tests/unit/a.mojo"),)),
+                patch.object(asan_check, "compile_native", lambda cc: None),
+                patch.object(asan_check, "check_controls", probe("controls")),
+                patch.object(
+                    asan_check, "check_production_exec", probe("production-exec")
+                ),
+                patch.object(asan_check, "check_cli", probe("cli")),
+                patch.object(
+                    asan_check,
+                    "compile_and_run_test",
+                    lambda source, env: compiled.append(source.name),
+                ),
+                patch.object(
+                    asan_check.native_abi_check, "compiler", lambda: "clang"
+                ),
+            ):
+                with contextlib.redirect_stdout(io.StringIO()) as captured:
+                    code = asan_check.main()
+                summary = (out / "summary.log").read_text(encoding="utf-8")
+        return code, performed, compiled, summary + captured.getvalue()
+
+    def test_main_runs_every_probe_once_in_order(self) -> None:
+        code, performed, compiled, _text = self._main_with_recorded_probes()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(tuple(performed), self.EXPECTED_PROBES)
+        self.assertEqual(compiled, ["a.mojo"])
+
+    def test_the_banner_only_claims_probes_that_ran(self) -> None:
+        _code, performed, _compiled, text = self._main_with_recorded_probes()
+
+        self.assertIn("cli", performed)
+        self.assertIn("ASan real-CLI reporter run", text)
+        self.assertIn("+ 1 CLI reporter run", text)
 
 
 if __name__ == "__main__":

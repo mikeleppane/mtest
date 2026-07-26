@@ -589,6 +589,68 @@ class CallSiteTests(unittest.TestCase):
                     )
         roster.assert_called_once_with(package_consumption.LOADER_PROBE_FLAGS)
 
+    def test_dogfood_stage_drives_the_installed_binary_through_the_probes(
+        self,
+    ) -> None:
+        """Stage 4's body is otherwise the one stage no test executes.
+
+        Every `main` case replaces this stage with a recording double, so
+        deleting the `dogfood.verify` call while keeping
+        `record_completed_stage("dogfood")` left `verify_every_stage_ran`
+        satisfied and the gate exiting 0 claiming probes that never ran. The
+        argv matters as much as the call: passing `dogfood.MTEST` instead of
+        the installed path would prove `build/mtest`, not the artifact.
+        """
+        installed = self.root / "prefix" / "bin" / "mtest"
+        installed.parent.mkdir(parents=True, exist_ok=True)
+        installed.write_text("", encoding="utf-8")
+        include = self.root / "include"
+        include.mkdir(parents=True, exist_ok=True)
+        (include / "mtest.mojopkg").write_text("", encoding="utf-8")
+        native = self.root / "mtest_exec_native_test.o"
+        native.write_text("", encoding="utf-8")
+        verify = mock.Mock(return_value=0)
+
+        with mock.patch.multiple(
+            package_consumption,
+            MOJOPKG_INCLUDE_DIR=include,
+            NATIVE_TEST_OBJECT=native,
+        ):
+            with mock.patch.object(package_consumption.dogfood, "verify", verify):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    package_consumption.stage_suite_run_with_installed_binary(
+                        installed
+                    )
+
+        verify.assert_called_once_with(str(installed), str(native))
+        self.assertIn("dogfood", package_consumption.completed_stages())
+
+    def test_dogfood_stage_refuses_to_record_when_the_probes_fail(self) -> None:
+        installed = self.root / "prefix" / "bin" / "mtest"
+        installed.parent.mkdir(parents=True, exist_ok=True)
+        installed.write_text("", encoding="utf-8")
+        include = self.root / "include"
+        include.mkdir(parents=True, exist_ok=True)
+        (include / "mtest.mojopkg").write_text("", encoding="utf-8")
+        native = self.root / "mtest_exec_native_test.o"
+        native.write_text("", encoding="utf-8")
+
+        with mock.patch.multiple(
+            package_consumption,
+            MOJOPKG_INCLUDE_DIR=include,
+            NATIVE_TEST_OBJECT=native,
+        ):
+            with mock.patch.object(
+                package_consumption.dogfood, "verify", mock.Mock(return_value=1)
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises(package_consumption.PackageCheckError):
+                        package_consumption.stage_suite_run_with_installed_binary(
+                            installed
+                        )
+
+        self.assertNotIn("dogfood", package_consumption.completed_stages())
+
     def _patched_main(self, *, skip_recording: str | None = None) -> mock.Mock:
         """Patch every stage with a recording double and return the call log.
 

@@ -311,5 +311,68 @@ class PixiTaskTests(unittest.TestCase):
         self.assertIn(coverage_capability.UNAVAILABLE_MESSAGE, note)
 
 
+class EmptyProbeOutputFailsClosedTests(unittest.TestCase):
+    """An exit-0 command that wrote nothing is not evidence of an absence.
+
+    `collect_help_text` treats only a missing executable, a timeout, and a
+    nonzero exit as failures, so a renamed subcommand path or a shim that pages
+    its help leaves `evaluate` concluding the toolchain names no coverage
+    facility having inspected zero bytes -- contradicting the docstring the
+    probe's whole value rests on.
+    """
+
+    def test_no_reports_at_all_is_a_failure(self) -> None:
+        message, code = coverage_capability.evaluate(())
+
+        self.assertEqual(code, 1)
+        self.assertIn("no command was probed at all", message)
+
+    def test_an_empty_report_is_a_failure(self) -> None:
+        message, code = coverage_capability.evaluate(
+            ((("mojo", "build", "--help"), ""), (("mojo", "--help"), ""))
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn("mojo build --help: 0 bytes", message)
+        self.assertIn("being unable to look is a failure", message)
+
+    def test_one_readable_report_does_not_excuse_an_empty_sibling(self) -> None:
+        message, code = coverage_capability.evaluate(
+            (
+                (("mojo", "build", "--help"), MOJO_BUILD_HELP_1_0_0B2),
+                (("mojo", "--help"), ""),
+            )
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn("mojo --help: 0 bytes", message)
+        self.assertNotIn("mojo build --help", message)
+
+    def test_prose_without_a_flag_is_long_enough_to_be_read(self) -> None:
+        """A stub too short to be help fails even when it names a flag."""
+        message, code = coverage_capability.evaluate(
+            ((("mojo", "--help"), "--help\n"),)
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn("a `--flag` named", message)
+
+    def test_a_discovery_still_reports_itself_not_an_unreadable_probe(
+        self,
+    ) -> None:
+        """The witness gates the PASS only; a discovery is already a failure."""
+        message, code = coverage_capability.evaluate(
+            ((("mojo", "--help"), "coverage   \u2014 Reports source coverage."),)
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn("Reports source coverage.", message)
+        self.assertNotIn("being unable to look", message)
+
+    def test_the_recorded_toolchain_output_satisfies_the_witness(self) -> None:
+        self.assertEqual(coverage_capability.unreadable_reports(ABSENT), "")
+        self.assertEqual(coverage_capability.evaluate(ABSENT)[1], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

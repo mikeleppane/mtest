@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import inspect
+import io
 import subprocess
 from pathlib import Path
 import tempfile
@@ -442,6 +444,14 @@ class ValgrindCliProvenanceTests(unittest.TestCase):
     CLEAN = (
         "==1== Memcheck, a memory error detector\n"
         "==1== FILE DESCRIPTORS: 3 open (3 inherited) at exit.\n"
+        # A real log always carries reachable records: the Mojo runtime
+        # allocates and does not free at exit, which is what EXPECTED_REACHABLE
+        # pins for the suite lane. The fixture carries one so the record scan
+        # has something to inspect, exactly as the gate requires.
+        "==1== 72 bytes in 3 blocks are still reachable in loss record 1 of 1\n"
+        "==1==    at 0x1: malloc (vg_replace_malloc.c:1)\n"
+        "==1==    by 0x2: runtime_init (libmojo.so)\n"
+        "==1== \n"
         "==1== LEAK SUMMARY:\n"
         "==1==    definitely lost: 0 bytes in 0 blocks\n"
         "==1==    indirectly lost: 0 bytes in 0 blocks\n"
@@ -497,6 +507,108 @@ class ValgrindCliProvenanceTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "product allocation"):
             valgrind_check.check_cli_provenance(
                 valgrind_check.CLI_PROBE_EXIT, polluted
+            )
+
+
+class ValgrindMainProbeRosterTests(unittest.TestCase):
+    """Pin that `main` performs the probes its closing banner claims.
+
+    Every other test in this file calls a probe directly, and the only `main`
+    cases stop at an empty-inventory guard, so deleting `check_cli(env)` from
+    `main` left the whole suite green while the gate still exited 0 printing
+    "+ 1 CLI reporter run".
+    """
+
+    EXPECTED_PROBES = ("controls", "native", "cli")
+
+    def _main_with_recorded_probes(self) -> tuple[int, list[str], list[str], str]:
+        performed: list[str] = []
+        compiled: list[str] = []
+        version = subprocess.CompletedProcess(
+            args=["valgrind"], returncode=0, stdout="valgrind-3.27.1\n"
+        )
+
+        def probe(name: str):
+            def run(env: dict[str, str]) -> None:
+                performed.append(name)
+
+            return run
+
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            out = Path(raw_tmp) / "valgrind"
+            with (
+                patch.object(valgrind_check, "OUT", out),
+                patch.object(
+                    valgrind_check, "TESTS", (Path("tests/unit/a.mojo"),)
+                ),
+                patch.object(
+                    valgrind_check, "NATIVE_TESTS", (Path("tests/native/a.c"),)
+                ),
+                patch.object(valgrind_check, "prepare_test_scratch", lambda: None),
+                patch.object(valgrind_check, "clean_environment", dict),
+                patch.object(valgrind_check, "run", lambda *a, **k: version),
+                patch.object(
+                    valgrind_check, "compile_inputs", lambda cc, env: None
+                ),
+                patch.object(valgrind_check, "check_controls", probe("controls")),
+                patch.object(
+                    valgrind_check, "check_native_tests", probe("native")
+                ),
+                patch.object(valgrind_check, "check_cli", probe("cli")),
+                patch.object(
+                    valgrind_check,
+                    "compile_and_run_test",
+                    lambda source, env: compiled.append(source.name),
+                ),
+                patch.object(
+                    valgrind_check.native_abi_check, "compiler", lambda: "clang"
+                ),
+            ):
+                with contextlib.redirect_stdout(io.StringIO()) as captured:
+                    code = valgrind_check.main()
+                summary = (out / "summary.log").read_text(encoding="utf-8")
+        return code, performed, compiled, summary + captured.getvalue()
+
+    def test_main_runs_every_probe_once_in_order(self) -> None:
+        code, performed, compiled, _text = self._main_with_recorded_probes()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(tuple(performed), self.EXPECTED_PROBES)
+        self.assertEqual(compiled, ["a.mojo"])
+
+    def test_the_banner_only_claims_probes_that_ran(self) -> None:
+        _code, performed, _compiled, text = self._main_with_recorded_probes()
+
+        self.assertIn("cli", performed)
+        self.assertIn("Real-CLI reporter run", text)
+        self.assertIn("+ 1 CLI reporter run", text)
+
+
+class LeakRecordParseTests(unittest.TestCase):
+    """The compensating control must not be able to pass by matching nothing."""
+
+    HEALTHY = (
+        "==1== 40 bytes in 2 blocks are still reachable in loss record 1 of 2\n"
+        "==1==    at 0x4: malloc (vg_replace_malloc.c:1)\n"
+        "==1==    by 0x5: something (elsewhere.c:9)\n"
+        "==1== 8 bytes in 1 blocks are possibly lost in loss record 2 of 2\n"
+        "==1==    at 0x4: malloc (vg_replace_malloc.c:1)\n"
+        "==1==    by 0x6: other (other.c:9)\n"
+        "==1== LEAK SUMMARY:\n"
+    )
+
+    def test_records_are_returned_when_the_wording_is_intact(self) -> None:
+        records = valgrind_check.leak_records(
+            self.HEALTHY, "possibly lost|still reachable", "probe"
+        )
+        self.assertEqual(len(records), 2)
+
+    def test_drifted_record_wording_fails_closed(self) -> None:
+        drifted = self.HEALTHY.replace("still reachable", "STILL-REACHABLE")
+        drifted = drifted.replace("possibly lost", "MAYBE-LOST")
+        with self.assertRaisesRegex(SystemExit, "record parse found nothing"):
+            valgrind_check.leak_records(
+                drifted, "possibly lost|still reachable", "probe"
             )
 
 

@@ -511,6 +511,46 @@ def check_native_tests(env: dict[str, str]) -> None:
         print(f"valgrind-native: {source.name}: passed")
 
 
+def leak_records(log: str, kinds: str, label: str) -> list[str]:
+    """Parse the leak records of `kinds` out of a Memcheck log, fail-closed.
+
+    The callers scan these records for a product or native-adapter frame, which
+    is the compensating control for `CLI_VALGRIND_FLAGS` deliberately dropping
+    `possible` from the error channel. A `re.findall` that matched nothing
+    would make that scan vacuously pass, so a Valgrind upgrade that reworded a
+    leak-record header — while leaving the `LEAK SUMMARY:` and `ERROR SUMMARY:`
+    lines the neighbouring assertions match intact — would silently retire the
+    control. Every log this gate accepts carries reachable records (the Mojo
+    runtime's own allocations, pinned by `EXPECTED_REACHABLE`), so finding none
+    means the parse broke, not that the program got cleaner.
+
+    Args:
+        log: The complete Memcheck output for one run.
+        kinds: A regex alternation of leak kinds to collect, such as
+            ``"possibly lost|still reachable"``.
+        label: What to name in the failure message.
+
+    Returns:
+        The matched record texts, guaranteed non-empty.
+
+    Raises:
+        SystemExit: The log carries no record of these kinds, so the scan below
+            it would inspect nothing.
+    """
+    records = re.findall(
+        r"(?ms)^==\d+== [0-9,]+ bytes in .*?(?:" + kinds + r").*?"
+        r"(?=^==\d+== (?:[0-9,]+ bytes|LEAK SUMMARY:))",
+        log,
+    )
+    require(
+        bool(records),
+        f"{label}: no leak record matched ({kinds}) — the record parse found "
+        "nothing to scan, so the product/native-frame rejection below it is "
+        "vacuous. Valgrind's leak-record wording most likely drifted.",
+    )
+    return records
+
+
 def parse_reachable(output: str, source: Path) -> None:
     """Require the reviewed pinned Mojo-runtime reachable-allocation baseline."""
     match = re.search(r"still reachable: ([0-9,]+) bytes in ([0-9,]+) blocks", output)
@@ -520,11 +560,7 @@ def parse_reachable(output: str, source: Path) -> None:
         got == EXPECTED_REACHABLE,
         f"{source.name} reachable baseline changed: {got} != {EXPECTED_REACHABLE}",
     )
-    records = re.findall(
-        r"(?ms)^==\d+== [0-9,]+ bytes in .*?still reachable.*?"
-        r"(?=^==\d+== (?:[0-9,]+ bytes|LEAK SUMMARY:))",
-        output,
-    )
+    records = leak_records(output, "still reachable", source.name)
     for record in records:
         require(
             "native/mtest_exec_native.c" not in record,
@@ -675,10 +711,8 @@ def check_cli_provenance(returncode: int, log: str) -> None:
         "suppressed: 0 bytes in 0 blocks" in log,
         "CLI artifact probe unexpectedly used a suppression",
     )
-    records = re.findall(
-        r"(?ms)^==\d+== [0-9,]+ bytes in .*?(?:possibly lost|still reachable).*?"
-        r"(?=^==\d+== (?:[0-9,]+ bytes|LEAK SUMMARY:))",
-        log,
+    records = leak_records(
+        log, "possibly lost|still reachable", "CLI artifact probe"
     )
     for record in records:
         require(
