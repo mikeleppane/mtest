@@ -42,7 +42,7 @@ write-all loop, the failure latch, the error messages, and the `EINTR` rules.
 from mtest.model import Event, EventKind
 from mtest.platform.stream import (
     close_fd,
-    create_truncate_fd,
+    create_truncate_fd_guarded,
     errno_now,
     write_fd,
 )
@@ -59,6 +59,13 @@ def open_json_fd(path: String) raises -> Int:
     Opens write-only, creating the file if absent and truncating it if present.
     The caller owns the returned descriptor and must `close_json_fd` it.
 
+    The open is guarded against blocking: a plain write-open of a FIFO with no
+    reader waits forever, which wedged the run before the session started —
+    no diagnostic, no deadline, and no exit code, since `--timeout` bounds
+    tests rather than setup. The guarded open turns that into an immediate
+    `ENXIO` resolved as the ordinary report-destination environment failure,
+    while a FIFO with a reader attached still streams normally.
+
     Args:
         path: The destination file to create or truncate.
 
@@ -66,10 +73,11 @@ def open_json_fd(path: String) raises -> Int:
         The open descriptor.
 
     Raises:
-        Error: When `creat(2)` failed: a missing parent directory that slipped
-            past parse-time validation, a permission denial, or descriptor
-            exhaustion. The message names the errno. The caller resolves this
-            to the internal-error exit code, a pre-run environment failure.
+        Error: When the open failed: a readerless FIFO, a missing parent
+            directory that slipped past parse-time validation, a permission
+            denial, or descriptor exhaustion. The message names the errno. The
+            caller resolves this to the internal-error exit code, a pre-run
+            environment failure.
 
     Examples:
 
@@ -80,7 +88,7 @@ def open_json_fd(path: String) raises -> Int:
     _ = close_json_fd(fd)
     ```
     """
-    var result = create_truncate_fd(path)
+    var result = create_truncate_fd_guarded(path)
     if result.fd < 0:
         raise Error(
             "report: could not open --json destination '"

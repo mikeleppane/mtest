@@ -551,6 +551,10 @@ class CheckRosterTests(unittest.TestCase):
                 "collect: streams split, listing continues past a bad probe",
                 "color: --color always beats NO_COLOR",
                 "precompile: success path resolves import (auto -I)",
+                "symlink: a symlinked test file is collected and run, never dropped",
+                "value: 2^63 refused for every non-negative integer flag",
+                "report: --json to a readerless FIFO fails fast, never blocks",
+                "path: a long-but-legal path builds, never a false COMPILE-ERROR",
                 "interrupt: SIGINT frees the owned process group",
             ],
         )
@@ -630,6 +634,24 @@ class CheckRosterTests(unittest.TestCase):
 
             def check_precompile_success(self) -> None:
                 self._perform("precompile: success path resolves import (auto -I)")
+
+            def check_symlinked_test_file(self) -> None:
+                self._perform(
+                    "symlink: a symlinked test file is collected and run, never dropped"
+                )
+
+            def check_integer_overflow_values(self) -> None:
+                self._perform("value: 2^63 refused for every non-negative integer flag")
+
+            def check_json_fifo_does_not_block(self) -> None:
+                self._perform(
+                    "report: --json to a readerless FIFO fails fast, never blocks"
+                )
+
+            def check_long_path_builds(self) -> None:
+                self._perform(
+                    "path: a long-but-legal path builds, never a false COMPILE-ERROR"
+                )
 
             def check_interrupt(self, _strict: bool) -> None:
                 self._perform("interrupt: SIGINT frees the owned process group")

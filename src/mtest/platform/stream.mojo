@@ -28,11 +28,31 @@ instead of shadowing it.
 from std.ffi import external_call
 from std.sys.info import CompilationTarget
 
+from mtest.platform.cstring import c_string_bytes
+
 # Darwin's `mode_t` is UInt16; Linux's is UInt32. `creat` is a fixed-parameter
 # call (unlike variadic `open(2)`), so its mode argument is passed by value in a
 # register, and the exact width must be selected at compile time — Darwin arm64
 # does not place a fixed argument in the variadic stack area.
 comptime _CREATE_MODE = 0o644
+
+comptime _EINTR = 4
+"""`EINTR`, identical on Linux and Darwin: retry the interrupted open."""
+
+comptime _F_GETFL = 3
+"""`F_GETFL`, identical on Linux and Darwin."""
+
+comptime _F_SETFL = 4
+"""`F_SETFL`, identical on Linux and Darwin."""
+
+
+def _o_nonblock_bit() -> Int32:
+    """`O_NONBLOCK` for the guarded target: `0o4000` on Linux, `0x4` on Darwin.
+    """
+    comptime if CompilationTarget.is_macos():
+        return Int32(0x4)
+    else:
+        return Int32(0o4000)
 
 
 def errno_now() -> Int:
@@ -250,6 +270,119 @@ def create_truncate_fd(path: String) -> CreatResult:
     var err = errno_now() if fd < 0 else 0
     _ = terminated^
     return CreatResult(Int(fd), Int32(err))
+
+
+def _write_open_flags() -> Int32:
+    """`O_WRONLY|O_CREAT|O_TRUNC|O_NONBLOCK|O_CLOEXEC` for the guarded target.
+    """
+    comptime if CompilationTarget.is_macos():
+        comptime assert (
+            not CompilationTarget.is_x86()
+        ), "platform guarded writes support macOS arm64 only"
+        # O_WRONLY 0x1 | O_CREAT 0x200 | O_TRUNC 0x400
+        #        | O_NONBLOCK 0x4 | O_CLOEXEC 0x1000000
+        return Int32(0x1 | 0x200 | 0x400 | 0x4 | 0x1000000)
+    else:
+        comptime assert (
+            CompilationTarget.is_linux()
+        ), "platform guarded writes support Linux or macOS only"
+        # O_WRONLY 0o1 | O_CREAT 0o100 | O_TRUNC 0o1000
+        #        | O_NONBLOCK 0o4000 | O_CLOEXEC 0o2000000
+        return Int32(0o1 | 0o100 | 0o1000 | 0o4000 | 0o2000000)
+
+
+def create_truncate_fd_guarded(path: String) -> CreatResult:
+    """Create or truncate `path` write-only WITHOUT ever blocking on the open.
+
+    `creat(2)`, and any plain `O_WRONLY` open, BLOCKS INDEFINITELY on a FIFO
+    that has no reader — POSIX makes the writer wait for a reader to arrive.
+    A report destination that happens to be a stale named pipe therefore wedged
+    the whole run before the session started, with no diagnostic, no deadline,
+    and no exit code: `--timeout` cannot bound something that happens before
+    any test is scheduled. `O_NONBLOCK` turns exactly that case into an
+    immediate `ENXIO`, which the caller resolves as the ordinary
+    report-destination environment failure.
+
+    `O_NONBLOCK` is then CLEARED before returning. It is wanted only for the
+    open; leaving it set would make later writes fail with `EAGAIN` whenever a
+    live consumer read slowly, which the drain loop does not treat as a retry.
+    So a FIFO with a reader attached keeps working exactly as before, and only
+    the readerless case changes — from a hang into an error.
+
+    `O_CLOEXEC` keeps the descriptor from leaking into the test children this
+    process spawns.
+
+    Args:
+        path: The destination file to create or truncate.
+
+    Returns:
+        A `CreatResult` whose `fd` is the open descriptor, or a negative value
+        on error with `err` holding the failing `errno` (a filler `0` on
+        success). Allocates a transient C-string copy, freed before returning.
+
+    Examples:
+
+    ```mojo
+    from mtest.platform.stream import create_truncate_fd_guarded
+
+    var result = create_truncate_fd_guarded("build/events.ndjson")
+    if result.fd < 0:
+        raise Error("could not open destination: errno " + String(result.err))
+    ```
+    """
+    var terminated = c_string_bytes(path)
+    var fd: Int32
+    var err = 0
+    while True:
+        # SAFETY: libc `open` has ABI `int open(const char*, int, ...)`, with the
+        # variadic mode consumed because O_CREAT is present; it is passed as the
+        # plain scalar the stdlib declaration expects. `terminated` uniquely owns
+        # a complete, fully-initialized NUL-terminated byte copy with a concrete
+        # local origin, so its pointer does not alias; it stays live across this
+        # synchronous call and libc neither retains nor frees it. The bytes read
+        # stop at the terminator, inside the initialized region. The guarded
+        # flags include O_NONBLOCK, so a readerless FIFO cannot block, and
+        # O_CLOEXEC, so the descriptor cannot cross an exec. Failure owns no
+        # descriptor; success transfers exactly one descriptor to the caller.
+        fd = external_call["open", Int32](
+            terminated.unsafe_ptr().bitcast[NoneType](),
+            _write_open_flags(),
+            UInt32(_CREATE_MODE),
+        )
+        if fd >= 0:
+            break
+        # Snapshot while the failing `open` is still the last syscall.
+        err = errno_now()
+        if err != _EINTR:
+            break
+    _ = terminated^
+    if fd < 0:
+        return CreatResult(Int(fd), Int32(err))
+    _clear_nonblocking(Int(fd))
+    return CreatResult(Int(fd), Int32(0))
+
+
+def _clear_nonblocking(fd: Int):
+    """Drop `O_NONBLOCK` from `fd`'s status flags, leaving the rest intact.
+
+    Best-effort: a failure here leaves the descriptor non-blocking, which the
+    drain loop would surface as a write error rather than silently losing
+    output, so there is nothing safer to do than proceed.
+    """
+    # SAFETY: libc `fcntl` has ABI `int fcntl(int, int, ...)`. Both guarded
+    # commands take a plain scalar third argument, never a pointer, so nothing
+    # is aliased, borrowed, kept live, or freed. `fd` is live and owned by the
+    # caller across both calls, which retain nothing past their return. Both
+    # sites pass three arguments: `F_GETFL` ignores the third, and one arity per
+    # symbol is required because a single external declaration is emitted for
+    # `fcntl` across the whole module.
+    var flags = external_call["fcntl", Int32](
+        Int32(fd), Int32(_F_GETFL), Int32(0)
+    )
+    if flags < 0:
+        return
+    var cleared = flags & ~_o_nonblock_bit()
+    _ = external_call["fcntl", Int32](Int32(fd), Int32(_F_SETFL), cleared)
 
 
 def close_fd(fd: Int) -> Int:
