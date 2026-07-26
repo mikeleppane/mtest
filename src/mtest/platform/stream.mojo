@@ -39,20 +39,8 @@ comptime _CREATE_MODE = 0o644
 comptime _EINTR = 4
 """`EINTR`, identical on Linux and Darwin: retry the interrupted open."""
 
-comptime _F_GETFL = 3
-"""`F_GETFL`, identical on Linux and Darwin."""
-
-comptime _F_SETFL = 4
-"""`F_SETFL`, identical on Linux and Darwin."""
-
-
-def _o_nonblock_bit() -> Int32:
-    """`O_NONBLOCK` for the guarded target: `0o4000` on Linux, `0x4` on Darwin.
-    """
-    comptime if CompilationTarget.is_macos():
-        return Int32(0x4)
-    else:
-        return Int32(0o4000)
+comptime _ENOENT = 2
+"""`ENOENT`, identical on Linux and Darwin: the destination does not exist."""
 
 
 def errno_now() -> Int:
@@ -272,45 +260,65 @@ def create_truncate_fd(path: String) -> CreatResult:
     return CreatResult(Int(fd), Int32(err))
 
 
-def _write_open_flags() -> Int32:
-    """`O_WRONLY|O_CREAT|O_TRUNC|O_NONBLOCK|O_CLOEXEC` for the guarded target.
+def _probe_open_flags() -> Int32:
+    """`O_WRONLY|O_NONBLOCK|O_CLOEXEC` for the would-this-block probe.
+
+    Deliberately WITHOUT `O_CREAT`, for two independent reasons. It keeps the
+    probe side-effect-free, so a destination it cannot open is left exactly as
+    it was found; and it keeps `open(2)` from consuming a variadic argument,
+    which is what makes the call ABI-portable — see `create_truncate_fd_guarded`.
+    `O_TRUNC` is omitted for the same side-effect reason: truncation belongs to
+    the real `creat` that follows.
     """
     comptime if CompilationTarget.is_macos():
         comptime assert (
             not CompilationTarget.is_x86()
         ), "platform guarded writes support macOS arm64 only"
-        # O_WRONLY 0x1 | O_CREAT 0x200 | O_TRUNC 0x400
-        #        | O_NONBLOCK 0x4 | O_CLOEXEC 0x1000000
-        return Int32(0x1 | 0x200 | 0x400 | 0x4 | 0x1000000)
+        # O_WRONLY 0x1 | O_NONBLOCK 0x4 | O_CLOEXEC 0x1000000
+        return Int32(0x1 | 0x4 | 0x1000000)
     else:
         comptime assert (
             CompilationTarget.is_linux()
         ), "platform guarded writes support Linux or macOS only"
-        # O_WRONLY 0o1 | O_CREAT 0o100 | O_TRUNC 0o1000
-        #        | O_NONBLOCK 0o4000 | O_CLOEXEC 0o2000000
-        return Int32(0o1 | 0o100 | 0o1000 | 0o4000 | 0o2000000)
+        # O_WRONLY 0o1 | O_NONBLOCK 0o4000 | O_CLOEXEC 0o2000000
+        return Int32(0o1 | 0o4000 | 0o2000000)
 
 
 def create_truncate_fd_guarded(path: String) -> CreatResult:
-    """Create or truncate `path` write-only WITHOUT ever blocking on the open.
+    """Create or truncate `path` write-only without blocking on a dead FIFO.
 
     `creat(2)`, and any plain `O_WRONLY` open, BLOCKS INDEFINITELY on a FIFO
     that has no reader — POSIX makes the writer wait for a reader to arrive.
     A report destination that happens to be a stale named pipe therefore wedged
     the whole run before the session started, with no diagnostic, no deadline,
     and no exit code: `--timeout` cannot bound something that happens before
-    any test is scheduled. `O_NONBLOCK` turns exactly that case into an
-    immediate `ENXIO`, which the caller resolves as the ordinary
-    report-destination environment failure.
+    any test is scheduled.
 
-    `O_NONBLOCK` is then CLEARED before returning. It is wanted only for the
-    open; leaving it set would make later writes fail with `EAGAIN` whenever a
-    live consumer read slowly, which the drain loop does not treat as a retry.
-    So a FIFO with a reader attached keeps working exactly as before, and only
-    the readerless case changes — from a hang into an error.
+    So the open is preceded by a PROBE that asks only "would a write open block
+    here?" — an `O_NONBLOCK` open that turns exactly that case into an immediate
+    `ENXIO`, which the caller resolves as the ordinary report-destination
+    environment failure. The probe is then closed and the real descriptor comes
+    from `create_truncate_fd`, unchanged. Three properties follow:
 
-    `O_CLOEXEC` keeps the descriptor from leaking into the test children this
-    process spawns.
+    - `ENOENT` from the probe is not an error. A path that does not exist cannot
+      be a FIFO, so there is nothing to guard against and `creat` runs directly.
+    - The returned descriptor is an ordinary blocking one, so a live consumer
+      reading slowly applies backpressure exactly as it always did. Nothing but
+      the readerless case changes — from a hang into an error.
+    - The mode is `creat`'s, whose ABI is fixed. This is not a stylistic choice:
+      `open(2)` is VARIADIC, and on Darwin arm64 a variadic argument is passed
+      on the stack while the non-variadic declaration Mojo emits passes it in a
+      register. An `open` that consumed a mode would therefore create the file
+      with whatever junk the stack held. The probe passes no `O_CREAT`, so libc
+      never reads its third argument and the mismatch cannot bite; the argument
+      is supplied only because one declaration per symbol is emitted per module
+      and `regular_file.mojo` already fixed the arity at three.
+
+    Residual race, stated rather than hidden: for a FIFO destination whose
+    reader disconnects between the probe's close and `creat`, the open blocks as
+    before. The window is two syscalls wide and needs the consumer to exit
+    inside it; closing it entirely would need `fcntl(F_SETFL)`, which is
+    variadic and so unavailable at this boundary.
 
     Args:
         path: The destination file to create or truncate.
@@ -331,68 +339,38 @@ def create_truncate_fd_guarded(path: String) -> CreatResult:
     ```
     """
     var terminated = c_string_bytes(path)
-    var fd: Int32
+    var probe: Int32
     var err = 0
     while True:
-        # SAFETY: libc `open` has ABI `int open(const char*, int, ...)`, with the
-        # variadic mode consumed because O_CREAT is present; it is passed as the
-        # plain scalar the stdlib declaration expects. `terminated` uniquely owns
-        # a complete, fully-initialized NUL-terminated byte copy with a concrete
-        # local origin, so its pointer does not alias; it stays live across this
-        # synchronous call and libc neither retains nor frees it. The bytes read
-        # stop at the terminator, inside the initialized region. The guarded
-        # flags include O_NONBLOCK, so a readerless FIFO cannot block, and
-        # O_CLOEXEC, so the descriptor cannot cross an exec. Failure owns no
-        # descriptor; success transfers exactly one descriptor to the caller.
-        fd = external_call["open", Int32](
+        # SAFETY: libc `open` has ABI `int open(const char*, int, ...)`. The
+        # flags carry no O_CREAT, so libc never invokes `va_arg` and the third
+        # argument is read by nothing; it is passed only to match the single
+        # three-argument declaration this binary emits for the symbol.
+        # `terminated` uniquely owns a complete, fully-initialized
+        # NUL-terminated byte copy with a concrete local origin, so its pointer
+        # does not alias; it stays live across this synchronous call and libc
+        # neither retains nor frees it. The bytes read stop at the terminator,
+        # inside the initialized region. O_NONBLOCK means a readerless FIFO
+        # cannot block, and O_CLOEXEC means the probe cannot cross an exec.
+        # Failure owns no descriptor; success owns exactly one, closed below.
+        probe = external_call["open", Int32](
             terminated.unsafe_ptr().bitcast[NoneType](),
-            _write_open_flags(),
-            UInt32(_CREATE_MODE),
+            _probe_open_flags(),
+            UInt32(0),
         )
-        if fd >= 0:
+        if probe >= 0:
             break
         # Snapshot while the failing `open` is still the last syscall.
         err = errno_now()
         if err != _EINTR:
             break
     _ = terminated^
-    if fd < 0:
-        return CreatResult(Int(fd), Int32(err))
-    _clear_nonblocking(Int(fd))
-    return CreatResult(Int(fd), Int32(0))
-
-
-def _clear_nonblocking(fd: Int):
-    """Drop `O_NONBLOCK` from `fd`'s status flags, leaving the rest intact.
-
-    Best-effort: a failure here leaves the descriptor non-blocking, which the
-    drain loop would surface as a write error rather than silently losing
-    output, so there is nothing safer to do than proceed.
-    """
-    # SAFETY: libc `fcntl` has ABI `int fcntl(int, int, ...)`. `F_GETFL` takes
-    # no third argument and ignores the one supplied; it is passed anyway
-    # because a single external declaration is emitted per symbol, so both
-    # sites in this module must agree on arity. Every argument is a plain
-    # scalar, never a pointer, so nothing is aliased, borrowed, kept live, or
-    # freed. `fd` is live and owned by the caller across the call, which
-    # retains nothing past its return and writes no memory this process owns.
-    # The result is a plain scalar; a negative value owns no resource and is
-    # handled on the next line.
-    var flags = external_call["fcntl", Int32](
-        Int32(fd), Int32(_F_GETFL), Int32(0)
-    )
-    if flags < 0:
-        return
-    var cleared = flags & ~_o_nonblock_bit()
-    # SAFETY: the same `int fcntl(int, int, ...)` ABI and the same three-scalar
-    # arity as the `F_GETFL` call above. `F_SETFL` does consume its third
-    # argument, and `cleared` is a plain status-flag scalar derived from the
-    # value `F_GETFL` just returned, so no pointer is supplied, aliased, or
-    # retained. `fd` remains live and caller-owned; the call writes no memory
-    # this process owns. The result is discarded deliberately: this helper is
-    # documented best-effort, and a failure leaves the descriptor non-blocking,
-    # which the drain loop surfaces as a write error rather than lost output.
-    _ = external_call["fcntl", Int32](Int32(fd), Int32(_F_SETFL), cleared)
+    if probe < 0 and err != _ENOENT:
+        return CreatResult(Int(probe), Int32(err))
+    if probe >= 0:
+        # The probe proved a write open resolves here; it owns nothing further.
+        _ = close_fd(Int(probe))
+    return create_truncate_fd(path)
 
 
 def close_fd(fd: Int) -> Int:
