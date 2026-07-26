@@ -373,7 +373,7 @@ def s_json_color_on_relocated_stderr(context: ScenarioContext) -> str:
     console lives on stderr, so color renders on STDERR (the tty-probe's
     PTY-positive oracle) while the byte-pure stream on stdout stays free of ANSI.
     """
-    _returncode, stream_bytes, console_bytes = context.runner.run_mtest_split_pty(
+    returncode, stream_bytes, console_bytes = context.runner.run_mtest_split_pty(
         [
             "e2e/suite/test_failing.mojo",
             "--json",
@@ -385,6 +385,17 @@ def s_json_color_on_relocated_stderr(context: ScenarioContext) -> str:
         ],
         env_overrides={"NO_COLOR": None, "GITHUB_ACTIONS": ""},
         timeout=SHORT_TIMEOUT,
+    )
+    # The exit code first, and it is not incidental. Colour presence alone is
+    # satisfied by a run that died early after painting one banner: the ANSI is
+    # on stderr, the stream header parses, and the scenario would report a pass
+    # for a run that never reached a verdict. test_failing.mojo is a
+    # known-outcome fixture, so exit 1 is part of what this case asserts.
+    expect(
+        returncode == 1,
+        f"expected exit 1 from the known-failing fixture, got {returncode}; "
+        "the colour assertions below cannot tell an incomplete run from a "
+        "complete one",
     )
     esc = b"\x1b["
     expect(
@@ -401,6 +412,12 @@ def s_json_color_on_relocated_stderr(context: ScenarioContext) -> str:
         stream_bytes.decode("utf-8", "replace")
     )
     expect(report.version == 1, "the stream header regressed under the color case")
+    # A terminal record, not merely a parseable header: the run reached its end.
+    expect(
+        report.exit_code == returncode,
+        f"stream exit_code {report.exit_code} != process exit {returncode}",
+    )
+    expect(not report.torn_tail, "the colour case produced a torn stream")
     return "color renders on the relocated stderr; stream on stdout stays ANSI-free"
 
 

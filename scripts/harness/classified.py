@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import math
 import os
 from pathlib import Path
+import secrets
 import shutil
 import signal
 import sys
@@ -26,7 +27,8 @@ DEBUG_SYMBOLS_ENV = "MTEST_TEST_DEBUG_SYMBOLS"
 SYMBOLIZER_ENV = "LLVM_SYMBOLIZER_PATH"
 SYMBOLIZER_NAME = "llvm-symbolizer"
 INTERNAL_ERROR_EXIT_CODE = 70
-MODULE_MARKER_PREFIX = "==> "
+MODULE_MARKER_PREFIX = aggregate.MODULE_MARKER_PREFIX
+MARKER_NONCE_BYTES = 8
 
 Supervisor = Callable[..., watchdog.Termination]
 
@@ -42,22 +44,43 @@ class StepResult:
     """The classified module the step had started when it ended, if known."""
 
 
-def _last_module(output: str) -> str | None:
+def _marker_prefix() -> str:
+    """Mint the per-run introducer the aggregate prints its markers behind.
+
+    The aggregate's stdout is shared with every test body in the run, so any
+    line shaped like a marker is otherwise as authoritative as the generated
+    one: a crashing test that printed ``==> tests/unit/test_innocent.mojo``
+    immediately before aborting had the crash attributed to a module that was
+    never running. The marker is only trustworthy if the child cannot write
+    it, so the introducer carries a nonce minted after the test sources were
+    read and never written anywhere a test can reach.
+
+    Returns:
+        An unguessable introducer of the form ``"==> <nonce> "``.
+    """
+    return f"{MODULE_MARKER_PREFIX}{secrets.token_hex(MARKER_NONCE_BYTES)} "
+
+
+def _last_module(output: str, marker_prefix: str) -> str | None:
     """Return the path in the last complete aggregate module marker.
 
     Args:
         output: Retained aggregate stdout text. A trailing fragment with no
             newline is an incomplete marker and never contributes.
+        marker_prefix: The per-run introducer from `_marker_prefix`. Only a
+            line carrying this exact prefix is a marker; the retention that
+            produced `output` filters on it too, so a forged line is dropped
+            before it reaches here as well as rejected here.
 
     Returns:
-        The module path from the last complete ``==> <path>`` line, or None
-        when the text carries no complete module marker.
+        The module path from the last complete marker line, or None when the
+        text carries no complete module marker.
     """
     last: str | None = None
     for line in output.split("\n")[:-1]:
-        if not line.startswith(MODULE_MARKER_PREFIX):
+        if not line.startswith(marker_prefix):
             continue
-        candidate = line[len(MODULE_MARKER_PREFIX) :].rstrip()
+        candidate = line[len(marker_prefix) :].rstrip()
         if candidate.startswith("tests/") and candidate.endswith(".mojo"):
             last = candidate
     return last
@@ -229,7 +252,9 @@ def _run_step(
         source,
         step,
         termination,
-        None if retention is None else _last_module(retention.text),
+        None
+        if retention is None
+        else _last_module(retention.text, marker_prefix or ""),
     )
 
 
@@ -285,7 +310,10 @@ def run_pipeline(
 ) -> StepResult:
     """Generate and run one aggregate through the complete classified pipeline."""
     aggregate_source = repo_root / AGGREGATE_SOURCE
-    modules = aggregate.write_entrypoint(repo_root, aggregate_source, roots)
+    marker_prefix = _marker_prefix()
+    modules = aggregate.write_entrypoint(
+        repo_root, aggregate_source, roots, marker_prefix
+    )
     print(
         f"aggregate-tests: generated {AGGREGATE_SOURCE} for {len(modules)} "
         f"module(s), {sum(len(module.test_functions) for module in modules)} test(s)",
@@ -335,7 +363,7 @@ def run_pipeline(
         step="run",
         timeout_seconds=timeout_seconds,
         supervisor=supervisor,
-        marker_prefix=MODULE_MARKER_PREFIX,
+        marker_prefix=marker_prefix,
     )
 
 
