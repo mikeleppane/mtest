@@ -788,6 +788,16 @@ class FixtureInventoryTests(unittest.TestCase):
 
 
 class AssertionPackageCommandTests(unittest.TestCase):
+    def test_installed_probe_instantiates_every_public_overload(self) -> None:
+        source = package_consumption.ASSERTION_PROBE_SOURCE
+        self.assertIn('assert_equal("left", "right")', source)
+        self.assertIn("assert_equal([1, 2], [1, 2])", source)
+        self.assertIn(
+            'assert_equal({"key": 1}, {"key": 1})',
+            source,
+        )
+        self.assertIn("assert_equal(1, 1)", source)
+
     def test_compile_command_uses_absolute_installed_paths(self) -> None:
         prefix = Path("/scratch/prefix")
         self.assertEqual(

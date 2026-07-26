@@ -8,6 +8,7 @@ from std.testing import TestSuite
 from mtest.assertions import assert_equal
 from mtest.assertions._display import (
     BODY_BYTE_CAP,
+    TEXT_CONTEXT_BYTE_CAP,
     VALUE_BYTE_CAP,
     render_value,
 )
@@ -130,6 +131,11 @@ def _text_failure(actual: String, expected: String, msg: String = "") -> String:
     except error:
         detail = String(error)
     return detail^
+
+
+def _assert_scalar_label(value: Int, label: String) raises:
+    var actual = "a" + String(chr(value)) + "b"
+    testing.assert_true(label in _text_failure(actual, "ab"))
 
 
 def _list_failure[
@@ -273,11 +279,14 @@ def test_identical_opaque_projections_report_whether_they_were_truncated() raise
         truncated = String(error)
     testing.assert_false("compare unequal but render identically" in truncated)
     testing.assert_true(
-        "projections are identical up to the 1024-byte display cap" in truncated
+        "displayed projections are identical after truncation" in truncated
     )
 
 
 def test_many_small_formatter_writes_and_body_are_bounded() raises:
+    testing.assert_equal(VALUE_BYTE_CAP, 1024)
+    testing.assert_equal(TEXT_CONTEXT_BYTE_CAP, 4096)
+    testing.assert_equal(BODY_BYTE_CAP, 16384)
     var rendered = render_value(ManyWritesProbe(32_768, "abcdefgh"))
     testing.assert_equal(rendered.byte_length(), VALUE_BYTE_CAP)
     testing.assert_true(rendered.endswith("... [truncated]"))
@@ -356,6 +365,33 @@ def test_text_scalar_labels_expose_invisible_differences() raises:
         in _text_failure("a\U000E0041b", "ab")
     )
     testing.assert_false("U+000E0041" in _text_failure("a\U000E0041b", "ab"))
+    for value in [
+        0x0488,
+        0x0489,
+        0x1ABE,
+        0x20DD,
+        0x20E0,
+        0x20E2,
+        0x20E4,
+        0xA670,
+        0xA672,
+    ]:
+        _assert_scalar_label(value, "ENCLOSING MARK (category Me)")
+    for value in [
+        0x2065,
+        0xFFF0,
+        0xFFF8,
+        0xE0000,
+        0xE0002,
+        0xE001F,
+        0xE0080,
+        0xE00FF,
+        0xE01F0,
+        0xE0FFF,
+    ]:
+        _assert_scalar_label(value, "DEFAULT IGNORABLE (category Cn)")
+    _assert_scalar_label(0x2028, "LINE SEPARATOR (category Zl)")
+    _assert_scalar_label(0x2029, "PARAGRAPH SEPARATOR (category Zp)")
 
 
 def test_invisible_scalars_are_escaped_in_structural_values() raises:
@@ -373,11 +409,13 @@ def test_invisible_scalars_are_escaped_in_structural_values() raises:
         ["ab", "ab", "ab", "ab", "e", "ab", "ab", "ab"],
     )
     testing.assert_true(
-        "actual: [a\\x85b, a\\xadb, a\\ufe0fb, a\\U000e0041b, "
-        + "e\\u0301, a\\u180eb, a\\x9bb, a\\u061cb]"
+        'actual: ["a\\x85b", "a\\xadb", "a\\ufe0fb", "a\\U000e0041b", '
+        + '"e\\u0301", "a\\u180eb", "a\\x9bb", "a\\u061cb"]'
         in detail
     )
-    testing.assert_true("expected: [ab, ab, ab, ab, e, ab, ab, ab]" in detail)
+    testing.assert_true(
+        'expected: ["ab", "ab", "ab", "ab", "e", "ab", "ab", "ab"]' in detail
+    )
     var additional = _list_failure(
         [
             "a\u05B0b",
@@ -412,6 +450,9 @@ def test_invisible_scalars_are_escaped_in_structural_values() raises:
     testing.assert_true("a\\U000e0000b" in reserved)
     testing.assert_true("a\\U000e0080b" in reserved)
     testing.assert_true("a\\U000e01f0b" in reserved)
+    var delimiters = _list_failure(["a, b", "c"], ["a", "b, c"])
+    testing.assert_true('actual: ["a, b", "c"]' in delimiters)
+    testing.assert_true('expected: ["a", "b, c"]' in delimiters)
 
 
 def test_text_line_endings_and_final_newline_are_explicit() raises:
@@ -452,6 +493,14 @@ def test_text_crop_marker_requires_an_elided_line_prefix() raises:
     testing.assert_false("actual line 2: ... " in detail)
     testing.assert_true(("expected line 2: " + line_two + "\\n") in detail)
     testing.assert_false("expected line 2: ... " in detail)
+    var multibyte_boundary = _text_failure(
+        "\né" + _repeated("a", 127) + "X",
+        "\né" + _repeated("a", 127) + "Y",
+    )
+    testing.assert_true("actual line 2: é" in multibyte_boundary)
+    testing.assert_false("actual line 2: ... " in multibyte_boundary)
+    testing.assert_true("expected line 2: é" in multibyte_boundary)
+    testing.assert_false("expected line 2: ... " in multibyte_boundary)
 
 
 def test_large_text_context_is_bounded_and_message_is_last() raises:
@@ -496,8 +545,8 @@ def test_list_changed_content_and_lengths_have_exact_facts() raises:
     testing.assert_true(
         "list span at index 1: actual 5 item(s), expected 4 item(s)" in detail
     )
-    testing.assert_true("actual: [8, 2, 7, 4, 6]" in detail)
-    testing.assert_true("expected: [1, 2, 3, 4]" in detail)
+    testing.assert_true('actual: ["8", "2", "7", "4", "6"]' in detail)
+    testing.assert_true('expected: ["1", "2", "3", "4"]' in detail)
 
 
 def test_list_displays_eight_mismatches_and_counts_omitted_first() raises:
@@ -507,8 +556,8 @@ def test_list_displays_eight_mismatches_and_counts_omitted_first() raises:
         actual[index] += 100
     var detail = _list_failure(actual, expected)
     testing.assert_true("list mismatches: 10 total, 2 omitted" in detail)
-    testing.assert_true("[0] 100 != 0" in detail)
-    testing.assert_true("[14] 114 != 14" in detail)
+    testing.assert_true('[0] "100" != "0"' in detail)
+    testing.assert_true('[14] "114" != "14"' in detail)
     testing.assert_false("[16]" in detail)
 
 
@@ -518,8 +567,8 @@ def test_list_values_are_individually_bounded_before_body_assembly() raises:
         [_repeated("b", 32 * 1024), "tail-expected"],
         "list reason",
     )
-    testing.assert_true("... [truncated], tail-actual]" in detail)
-    testing.assert_true("... [truncated], tail-expected]" in detail)
+    testing.assert_true('... [truncated]", "tail-actual"]' in detail)
+    testing.assert_true('... [truncated]", "tail-expected"]' in detail)
     testing.assert_true(detail.endswith("list reason"))
 
 
@@ -708,9 +757,14 @@ def test_dictionary_values_are_individually_bounded_before_assembly() raises:
         "second": "tail-expected",
     }
     var detail = _dictionary_failure(actual, expected, "dictionary reason")
-    testing.assert_true("... [truncated] != " in detail)
-    testing.assert_true("second: tail-actual != tail-expected" in detail)
+    testing.assert_true('... [truncated]" != "' in detail)
+    testing.assert_true('second: "tail-actual" != "tail-expected"' in detail)
     testing.assert_true(detail.endswith("dictionary reason"))
+    var delimiter_detail = _dictionary_failure(
+        {"key": "x != y"},
+        {"key": "z"},
+    )
+    testing.assert_true('key: "x != y" != "z"' in delimiter_detail)
 
 
 def test_dictionary_key_cap_boundary_and_opaque_fallback() raises:

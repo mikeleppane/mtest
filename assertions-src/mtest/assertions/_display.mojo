@@ -63,8 +63,6 @@ def _is_format_control(value: Int) -> Bool:
         or value == 0x200D
         or value == 0x200E
         or value == 0x200F
-        or value == 0x2028
-        or value == 0x2029
         or (value >= 0x202A and value <= 0x202E)
         or (value >= 0x2060 and value <= 0x2064)
         or (value >= 0x2066 and value <= 0x206F)
@@ -185,12 +183,7 @@ def _escaped_piece(value: Int) -> String:
 
 
 struct BoundedWriter(Movable, Writer):
-    """Retain complete escaped UTF-8 scalars under a fixed byte cap.
-
-    Args:
-        max_bytes: Maximum bytes returned by `finish`, including its complete
-            truncation marker.
-    """
+    """Retain complete escaped UTF-8 scalars under a fixed byte cap."""
 
     var retained: String
     var max_bytes: Int
@@ -198,7 +191,7 @@ struct BoundedWriter(Movable, Writer):
     var truncated: Bool
 
     def __init__(out self, max_bytes: Int):
-        """Create an empty writer with a finalized-output byte cap."""
+        """Create a writer whose finalized output is capped at `max_bytes`."""
         self.retained = String("")
         self.max_bytes = max_bytes
         self.marker_safe_bytes = 0
@@ -300,9 +293,8 @@ def write_opaque_detail[
     if actual_projection.text == expected_projection.text:
         if actual_projection.truncated or expected_projection.truncated:
             output.write_trusted(
-                "values differ; projections are identical up to the "
-                + String(VALUE_BYTE_CAP)
-                + "-byte display cap"
+                "values differ; displayed projections are identical "
+                + "after truncation"
             )
         else:
             output.write_trusted(

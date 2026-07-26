@@ -76,6 +76,7 @@ import stat
 import subprocess
 import sys
 
+from scripts.checks.layout import ASSERTION_SOURCE_PATHS
 from scripts.harness import dogfood
 
 
@@ -238,12 +239,7 @@ SUMMARY_RE = re.compile(
 )
 
 INSTALLED_ASSERTION_FILES = {
-    Path("mtest/__init__.mojo"),
-    Path("mtest/assertions/__init__.mojo"),
-    Path("mtest/assertions/_display.mojo"),
-    Path("mtest/assertions/_mapping.mojo"),
-    Path("mtest/assertions/_sequence.mojo"),
-    Path("mtest/assertions/_text.mojo"),
+    path.relative_to("assertions-src") for path in ASSERTION_SOURCE_PATHS
 }
 INSTALLED_ASSERTION_DIRECTORIES = {
     Path("."),
@@ -256,6 +252,8 @@ from mtest.assertions import assert_equal
 
 def main() raises:
     assert_equal(1, 1)
+    assert_equal([1, 2], [1, 2])
+    assert_equal({"key": 1}, {"key": 1})
     var detail = String("")
     try:
         assert_equal("left", "right")

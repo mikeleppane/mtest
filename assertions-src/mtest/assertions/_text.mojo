@@ -126,13 +126,7 @@ def _write_context(
     var first = max(1, focus_line - 2)
     var last = focus_line + 2
     var crop_start = max(0, focus_byte - _CONTEXT_PREFIX_RAW_BYTES)
-    var crop_line = _line_at(text, crop_start)
     var text_bytes = text.as_bytes()
-    var prefix_cropped = (
-        crop_start > 0
-        and crop_line >= first
-        and text_bytes[crop_start - 1] != UInt8(ord("\n"))
-    )
     var line = 1
     var offset = 0
     var header_written = False
@@ -150,7 +144,11 @@ def _write_context(
             output.write_trusted(
                 "\n  " + title + " line " + String(line) + ": "
             )
-            if first_header and prefix_cropped:
+            if (
+                first_header
+                and offset > 0
+                and text_bytes[offset - 1] != UInt8(ord("\n"))
+            ):
                 output.write_trusted("... ")
             header_written = True
             first_header = False

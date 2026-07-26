@@ -17,7 +17,9 @@ def _write_list_slice[
             break
         if shown:
             output.write_trusted(", ")
+        output.write_trusted('"')
         output.write_trusted(render_value(values[index]))
+        output.write_trusted('"')
         shown += 1
     output.write_trusted("]")
 
@@ -109,17 +111,18 @@ def write_list_difference[
         _write_list_span(output, actual, expected, prefix, suffix)
         return False
 
-    var total = mismatch_total
     output.write_trusted(
         "list mismatches: "
-        + String(total)
+        + String(mismatch_total)
         + " total, "
-        + String(max(0, total - DISPLAY_LIMIT))
+        + String(max(0, mismatch_total - DISPLAY_LIMIT))
         + " omitted"
     )
     for index in mismatch_indices:
         output.write_trusted("\n  [" + String(index) + "] ")
+        output.write_trusted('"')
         output.write_trusted(render_value(actual[index]))
-        output.write_trusted(" != ")
+        output.write_trusted('" != "')
         output.write_trusted(render_value(expected[index]))
+        output.write_trusted('"')
     return False

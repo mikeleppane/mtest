@@ -98,10 +98,11 @@ def _write_changed[
     for key in selection.keys:
         output.write_trusted("\n    ")
         output.write(key)
-        output.write_trusted(": ")
+        output.write_trusted(': "')
         output.write_trusted(render_value(actual[key]))
-        output.write_trusted(" != ")
+        output.write_trusted('" != "')
         output.write_trusted(render_value(expected[key]))
+        output.write_trusted('"')
 
 
 def _write_opaque_dictionary_detail[
