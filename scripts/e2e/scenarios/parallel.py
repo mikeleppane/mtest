@@ -19,6 +19,7 @@ import resource
 import shutil
 import signal
 import tempfile
+from typing import Any, cast
 
 from scripts.checks.reports import json_stream as json_stream_check
 from scripts.checks.reports import junit as junit_check
@@ -80,11 +81,10 @@ def _mask_timing(text: str) -> str:
     """
     masked = _TIMING_BRACKET.sub("[T]", text)
     masked = _TIMING_TAGS.sub("in Ts", masked)
-    masked = _TIMING_SECONDS.sub("Ts", masked)
-    return masked
+    return _TIMING_SECONDS.sub("Ts", masked)
 
 
-def _canonical_record(record: dict) -> tuple:
+def _canonical_record(record: dict[str, Any]) -> tuple[tuple[str, str], ...]:
     """A record reduced to its semantic fields, sorted and volatility-stripped."""
     items = sorted(
         (key, str(value))
@@ -94,7 +94,7 @@ def _canonical_record(record: dict) -> tuple:
     return tuple(items)
 
 
-def _project_stream(text: str) -> dict:
+def _project_stream(text: str) -> dict[str, Any]:
     """Project a `--json` stream to a worker-count-independent shape.
 
     Records are grouped by file so concurrent interleaving cannot perturb the
@@ -103,9 +103,9 @@ def _project_stream(text: str) -> dict:
     that differ only in `-n` must project equally.
     """
     report = json_stream_check.parse_stream(text)
-    per_file: dict[str, list[tuple]] = {}
-    header: tuple = ()
-    terminal: tuple = ()
+    per_file: dict[str, list[tuple[tuple[str, str], ...]]] = {}
+    header: tuple[tuple[str, str], ...] = ()
+    terminal: tuple[tuple[str, str], ...] = ()
     for record in report.records:
         event = record.get("event")
         if event == "session_started":
@@ -117,7 +117,9 @@ def _project_stream(text: str) -> dict:
                 {k: v for k, v in record.items() if k != "wall_time_us"}
             )
         else:
-            path = record.get("path", "")
+            # `parse_stream` already rejected anything off-schema, so `path` is
+            # the string the v1 schema gives it.
+            path = cast("str", record.get("path", ""))
             per_file.setdefault(path, []).append(_canonical_record(record))
     return {
         "header": header,
@@ -156,7 +158,7 @@ def _log_lines(path: str) -> list[str]:
 
 
 def _intervals(lines: list[str], kind: str) -> dict[str, tuple[float, float]]:
-    """Fold `<kind>\\t<name>\\t<edge>[...]` records into per-name (start, end) spans.
+    r"""Fold `<kind>\t<name>\t<edge>[...]` records into per-name (start, end) spans.
 
     Each name is stamped twice, start then end, in that order — the build shim
     appends a return code to its end record, the run fixture does not, so the two
@@ -849,7 +851,8 @@ to recycle a slot to finish the set."""
 FD_CLAMP_FILES = tuple(f"{FD_CLAMP_TREE}/{name}.mojo" for name in FD_CLAMP_NAMES)
 """The four generated sources, in the order they are written."""
 
-FD_CLAMP_SOURCE = '''"""Generated all-pass fixture for the live descriptor-clamp scenario."""
+FD_CLAMP_SOURCE = '''\
+"""Generated all-pass fixture for the live descriptor-clamp scenario."""
 from std.testing import assert_equal, TestSuite
 
 
@@ -911,8 +914,10 @@ def _remove_fd_clamp_artifacts() -> None:
     # single pass only while `FD_CLAMP_TREE` holds no `_` and `FD_CLAMP_NAMES`
     # hold no `/`; introduce either and the passes interfere, the reconstructed
     # name stops matching, and the products below go silently uncollected.
-    assert "_" not in FD_CLAMP_TREE, FD_CLAMP_TREE
-    assert not any("/" in name for name in FD_CLAMP_NAMES), FD_CLAMP_NAMES
+    if "_" in FD_CLAMP_TREE:
+        raise AssertionError(FD_CLAMP_TREE)
+    if any("/" in name for name in FD_CLAMP_NAMES):
+        raise AssertionError(FD_CLAMP_NAMES)
     mangled = FD_CLAMP_TREE.replace("_", "_u").replace("/", "_s")
     for name in FD_CLAMP_NAMES:
         product = os.path.join(

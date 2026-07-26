@@ -139,8 +139,10 @@ def render_entrypoint(
         alias = f"_mtest_module_{index}"
         lines.append(f'    print("{marker_prefix}{module.path}", flush=True)')
         lines.append(f"    var suite_{index} = TestSuite()")
-        for function in module.test_functions:
-            lines.append(f"    suite_{index}.test[{alias}.{function}]()")
+        lines.extend(
+            f"    suite_{index}.test[{alias}.{function}]()"
+            for function in module.test_functions
+        )
         lines.append(f"    suite_{index}^.run()")
         if index + 1 < len(modules):
             lines.append("")
@@ -174,6 +176,14 @@ def write_entrypoint(
 
 
 def main(argv: list[str]) -> int:
+    """Generate the aggregate entrypoint for the roots named on the command line.
+
+    Args:
+        argv: Full process argv; `argv[0]` is skipped as the program name.
+
+    Returns:
+        0 once the entrypoint is written, or 2 when discovery or the write failed.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("roots", nargs="+", type=Path)

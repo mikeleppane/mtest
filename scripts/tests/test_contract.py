@@ -18,10 +18,15 @@ import sys
 import tempfile
 import time
 import tomllib
+from typing import TYPE_CHECKING, TypedDict, Unpack, cast, override
 import unittest
 from unittest import mock
 
 from scripts.qa import contract
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class ContractToolLocationTests(unittest.TestCase):
@@ -58,6 +63,7 @@ class EnsureBinaryFailsClosedTests(unittest.TestCase):
     invoke `pixi`/`mojo`.
     """
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="mtest-contract-binary-")
         self.addCleanup(self.tmp.cleanup)
@@ -69,7 +75,7 @@ class EnsureBinaryFailsClosedTests(unittest.TestCase):
         self.input_paths = [self.src]
         self.build_calls: list[dict[str, str]] = []
 
-    def _fake_build(self, env: dict[str, str]) -> subprocess.CompletedProcess:
+    def _fake_build(self, env: dict[str, str]) -> subprocess.CompletedProcess[bytes]:
         self.build_calls.append(env)
         self.binary.write_text("built")
         return subprocess.CompletedProcess(args=["fake-build"], returncode=0)
@@ -160,7 +166,7 @@ class EnsureBinaryFailsClosedTests(unittest.TestCase):
         self.assertTrue(self.binary.is_file())
 
     def test_failed_build_dies_closed(self) -> None:
-        def failing_build(env: dict[str, str]) -> subprocess.CompletedProcess:
+        def failing_build(env: dict[str, str]) -> subprocess.CompletedProcess[bytes]:
             self.build_calls.append(env)
             return subprocess.CompletedProcess(args=["fake-build"], returncode=1)
 
@@ -193,14 +199,15 @@ class EnsureBinaryFailsClosedTests(unittest.TestCase):
 
 
 class WaitUntilBoundedPollTests(unittest.TestCase):
-    """Negative controls for the SIGINT probe's bounded readiness/absence
-    barrier, which replaced fixed `time.sleep` calls. These exercise the
-    pure polling primitive directly — no subprocess, no real mtest binary —
-    so they stay fast and deterministic.
+    """Negative controls for the SIGINT probe's bounded barrier.
+
+    The bounded readiness/absence barrier replaced fixed `time.sleep` calls.
+    These exercise the pure polling primitive directly — no subprocess, no
+    real mtest binary — so they stay fast and deterministic.
     """
 
     def test_child_never_became_ready_returns_false_within_bound(self) -> None:
-        calls = []
+        calls: list[int] = []
 
         def never_ready() -> bool:
             calls.append(1)
@@ -244,9 +251,10 @@ class WaitUntilBoundedPollTests(unittest.TestCase):
 
 
 class ExactProcessIdentificationTests(unittest.TestCase):
-    """`exact_process_pid` must identify the compiled TEST BINARY, never a
-    `mojo build` compiler that is still running and merely mentions the
-    same mangled name as its `-o` output argument. This is a real bug the
+    """`exact_process_pid` must identify the compiled TEST BINARY.
+
+    Never a `mojo build` compiler that is still running and merely mentions
+    the same mangled name as its `-o` output argument. This is a real bug the
     old `pgrep -f irq_stest_` (a shared prefix, matching BOTH files' builds
     AND both files' binaries) let through: readiness could flip True while
     mtest was still compiling, sending SIGINT before any hang child
@@ -258,21 +266,22 @@ class ExactProcessIdentificationTests(unittest.TestCase):
 
     MANGLED = "tch_probe_uexactuid"  # a throwaway name, not the real HANG_MANGLED_NAME
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="mtest-exact-pid-")
         self.addCleanup(self.tmp.cleanup)
-        self.procs: list[subprocess.Popen] = []
+        self.procs: list[subprocess.Popen[bytes]] = []
         self.addCleanup(self._killall)
 
     def _killall(self) -> None:
         for p in self.procs:
-            try:
+            # Cleanup must never mask the assertion that already failed, so
+            # every teardown error stays suppressed exactly as before.
+            with contextlib.suppress(Exception):
                 p.kill()
                 p.wait(timeout=5)
-            except Exception:
-                pass
 
-    def _spawn(self, argv: list[str]) -> subprocess.Popen:
+    def _spawn(self, argv: list[str]) -> subprocess.Popen[bytes]:
         p = subprocess.Popen(argv)
         self.procs.append(p)
         return p
@@ -309,7 +318,10 @@ class ExactProcessIdentificationTests(unittest.TestCase):
                 poll_interval=0.05,
             )
             self.assertTrue(pid, "the real binary was never identified")
-            found = contract.exact_process_pid(self.MANGLED)
+            # The `wait_until` above already blocked on a non-None pid, and
+            # the assertion below re-checks it; the cast only tells the type
+            # checker what those two lines already establish.
+            found = cast("str", contract.exact_process_pid(self.MANGLED))
             self.assertIsNotNone(found)
             self.assertEqual(int(found), real.pid)
             self.assertNotEqual(int(found), decoy.pid)
@@ -334,7 +346,10 @@ class ExactProcessIdentificationTests(unittest.TestCase):
             poll_interval=0.05,
         )
         self.assertTrue(ready)
-        pid = contract.exact_process_pid(self.MANGLED)
+        # `ready` above is exactly the "pid is not None" barrier, and the
+        # assertion below fails loudly if it somehow is; the cast adds no
+        # runtime behavior.
+        pid = cast("str", contract.exact_process_pid(self.MANGLED))
         self.assertEqual(int(pid), real.pid)
         state = contract.wait_until(
             lambda: contract.process_state(pid) == "S",
@@ -347,7 +362,7 @@ class ExactProcessIdentificationTests(unittest.TestCase):
 class FakeSupervisor:
     """A `subprocess.Popen`-shaped test double for `run_interrupt_probe`."""
 
-    def __init__(self, exit_code: int = 2, out: str = "1 not run\n"):
+    def __init__(self, exit_code: int = 2, out: str = "1 not run\n") -> None:
         self.pid = 999999  # never sent a REAL signal; run_interrupt_probe's
         # `send_sigint` is always overridden in these tests
         self.returncode: int | None = None
@@ -356,47 +371,78 @@ class FakeSupervisor:
         self.killed = False
         self.communicate_calls = 0
 
-    def poll(self):
+    def poll(self) -> int | None:
         return self.returncode
 
-    def communicate(self, timeout=None):
+    # `timeout` mirrors `Popen.communicate`'s keyword, which the probe passes
+    # by name; the double has nothing to wait for, so it only records the call.
+    def communicate(self, timeout: float | None = None) -> tuple[str, None]:  # noqa: ARG002
         self.communicate_calls += 1
         self.returncode = self._exit_code
         return self._out, None
 
-    def kill(self):
+    def kill(self) -> None:
         self.killed = True
 
 
-class InterruptProbeProductionPathTests(unittest.TestCase):
-    """Negative controls that drive `run_interrupt_probe` itself — the EXACT
-    function `Runner.check_interrupt` calls against the real `mtest` binary
-    — rather than the generic `wait_until` primitive under a different name.
-    A fake `spawn`/`send_sigint`/`killtree` means no real subprocess or
-    signal is involved; only `hang_ready`/`hang_present` are faked directly.
+class ProbeArgs(TypedDict, total=False):
+    """The keyword arguments of `contract.run_interrupt_probe`, all optional.
+
+    `total=False` is what lets one dict serve as both the default set and a
+    per-test override set, which is how `_run` keeps each test to naming only
+    the one knob it is actually exercising.
     """
 
-    def _run(self, **kwargs):
-        proc = kwargs.pop("proc", None) or FakeSupervisor()
-        sigint_calls = []
-        killtree_calls = []
-        defaults = dict(
-            spawn=lambda: proc,
-            hang_ready=lambda: True,
-            hang_present=lambda: False,
-            strict=False,
-            outer_deadline=time.time() + 5,
-            orphan_timeout=0.3,
-            poll_interval=0.02,
-            killtree=lambda p: killtree_calls.append(p),
-            send_sigint=lambda pid: sigint_calls.append(pid),
-        )
+    spawn: Callable[[], subprocess.Popen[str]]
+    hang_ready: Callable[[], bool]
+    hang_present: Callable[[], bool]
+    strict: bool
+    outer_deadline: float
+    orphan_timeout: float
+    poll_interval: float
+    killtree: Callable[[subprocess.Popen[str]], None] | None
+    send_sigint: Callable[[int], None] | None
+
+
+class InterruptProbeProductionPathTests(unittest.TestCase):
+    """Negative controls that drive `run_interrupt_probe` itself.
+
+    That is the EXACT function `Runner.check_interrupt` calls against the real
+    `mtest` binary — rather than the generic `wait_until` primitive under a
+    different name. A fake `spawn`/`send_sigint`/`killtree` means no real
+    subprocess or signal is involved; only `hang_ready`/`hang_present` are
+    faked directly.
+    """
+
+    def _run(
+        self,
+        *,
+        proc: FakeSupervisor | None = None,
+        **kwargs: Unpack[ProbeArgs],
+    ) -> tuple[str, str, FakeSupervisor, list[int], list[object]]:
+        proc = proc or FakeSupervisor()
+        sigint_calls: list[int] = []
+        killtree_calls: list[object] = []
+        defaults: ProbeArgs = {
+            # `FakeSupervisor` implements the three members the probe touches
+            # (`poll`, `communicate`, `kill`); the cast states that without
+            # dragging a real `Popen` into a unit test.
+            "spawn": lambda: cast("subprocess.Popen[str]", proc),
+            "hang_ready": lambda: True,
+            "hang_present": lambda: False,
+            "strict": False,
+            "outer_deadline": time.time() + 5,
+            "orphan_timeout": 0.3,
+            "poll_interval": 0.02,
+            "killtree": killtree_calls.append,
+            "send_sigint": sigint_calls.append,
+        }
         defaults.update(kwargs)
         status, detail = contract.run_interrupt_probe(**defaults)
         return status, detail, proc, sigint_calls, killtree_calls
 
     def test_child_never_ready_is_skip_when_not_strict(self) -> None:
-        status, detail, proc, sigint_calls, _ = self._run(
+        status, detail, _proc, sigint_calls, _ = self._run(
             hang_ready=lambda: False,
             strict=False,
             outer_deadline=time.time() + 0.2,
@@ -406,7 +452,7 @@ class InterruptProbeProductionPathTests(unittest.TestCase):
         self.assertEqual(sigint_calls, [])  # never signaled — not ready
 
     def test_child_never_ready_is_fail_when_strict(self) -> None:
-        status, detail, proc, sigint_calls, _ = self._run(
+        status, detail, _proc, sigint_calls, _ = self._run(
             hang_ready=lambda: False,
             strict=True,
             outer_deadline=time.time() + 0.2,
@@ -436,7 +482,7 @@ class InterruptProbeProductionPathTests(unittest.TestCase):
         self.assertEqual(sigint_calls, [])
 
     def test_missing_process_inspection_is_skip_when_not_strict(self) -> None:
-        def raises():
+        def raises() -> bool:
             raise RuntimeError("pgrep unavailable: [Errno 2] no such file")
 
         status, detail, proc, sigint_calls, _ = self._run(
@@ -448,10 +494,10 @@ class InterruptProbeProductionPathTests(unittest.TestCase):
         self.assertEqual(sigint_calls, [])
 
     def test_missing_process_inspection_is_fail_when_strict(self) -> None:
-        def raises():
+        def raises() -> bool:
             raise RuntimeError("ps unavailable: [Errno 2] no such file")
 
-        status, detail, proc, sigint_calls, _ = self._run(
+        status, detail, proc, _sigint_calls, _ = self._run(
             hang_ready=raises, strict=True
         )
         self.assertEqual(status, contract.FAIL)
@@ -548,10 +594,12 @@ class CheckRosterTests(unittest.TestCase):
         recorded: list[str] = []
 
         class FakeRunner:
-            def __init__(self, *args: object, **kwargs: object) -> None:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
                 self.results: list[tuple[str, str, str, str]] = []
 
-            def record(self, status, name, ref, detail="") -> None:
+            def record(
+                self, status: str, name: str, ref: str, detail: str = ""
+            ) -> None:
                 self.results.append((status, name, ref, detail))
 
             def _perform(self, name: str) -> None:
@@ -559,7 +607,7 @@ class CheckRosterTests(unittest.TestCase):
                 if name != drop:
                     self.results.append((contract.PASS, name, "ref", ""))
 
-            def check(self, c) -> None:
+            def check(self, c: contract.Check) -> None:
                 self._perform(c.name)
 
             def check_collect_exact(self) -> None:
@@ -583,22 +631,27 @@ class CheckRosterTests(unittest.TestCase):
             def check_precompile_success(self) -> None:
                 self._perform("precompile: success path resolves import (auto -I)")
 
-            def check_interrupt(self, strict: bool) -> None:
+            def check_interrupt(self, _strict: bool) -> None:
                 self._perform("interrupt: SIGINT frees the owned process group")
 
         ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.multiple(
-            contract,
-            Runner=FakeRunner,
-            pixi_env=mock.Mock(return_value={}),
-            ensure_binary=mock.Mock(),
-            scaffold=mock.Mock(),
-        ), mock.patch.object(contract.subprocess, "run", return_value=ok):
-            with mock.patch.object(sys, "argv", ["contract.py", *argv]):
-                with contextlib.redirect_stdout(out):
-                    with contextlib.redirect_stderr(err):
-                        code = contract.main()
+        with (
+            mock.patch.multiple(
+                contract,
+                Runner=FakeRunner,
+                pixi_env=mock.Mock(return_value={}),
+                ensure_binary=mock.Mock(),
+                scaffold=mock.Mock(),
+            ),
+            # `contract` imports `subprocess`, so this patches the identical
+            # module object the checker calls through.
+            mock.patch.object(subprocess, "run", return_value=ok),
+            mock.patch.object(sys, "argv", ["contract.py", *argv]),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = contract.main()
         self.performed = recorded
         return code, out.getvalue(), err.getvalue()
 

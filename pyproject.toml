@@ -124,6 +124,17 @@ ignore = [
     "FBT",
     # No copyright headers anywhere in this repo, by choice.
     "CPY001",
+    # Every checker in this repo signals a gate failure by raising
+    # AssertionError, including on a shape or type guard, and the mutation tests
+    # assert exactly that with assertRaisesRegex(AssertionError, ...). Swapping
+    # some of those raises to TypeError would split one uniform failure protocol
+    # into two for no gain.
+    "TRY004",
+    # The `/tmp/...` hits are path literals used as data: forbidden-argv
+    # expectations in e2e scenarios, and fake binary paths handed to pure
+    # argv-building functions in unit tests. Nothing here creates a temp file at
+    # a predictable path; real scratch space goes through tempfile.
+    "S108",
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -132,7 +143,16 @@ ignore = [
 # already full sentences describing the property under test, so requiring a
 # docstring on each of ~370 of them would add restatement, not information.
 # Every docstring FORMAT rule still applies to the ones that do have one.
-"scripts/tests/*.py" = ["SLF001", "D101", "D102", "D103", "D107"]
+"scripts/tests/*.py" = [
+    "SLF001",
+    "D101",
+    "D102",
+    "D103",
+    "D107",
+    # A test that imports the module under test inside the test method does it
+    # to control when the import happens relative to the state it patched.
+    "PLC0415",
+]
 # The exec fixtures are standalone subprocess actors that `exec` spawns by
 # path, so they are neither importable modules nor part of a package.
 "tests/fixtures/exec/*.py" = ["INP001"]
@@ -171,3 +191,11 @@ enable_error_code = [
     "explicit-override",
     "mutable-override",
 ]
+
+# The IDE's type checker infers a src/ import layout from this file's presence,
+# but `src/` is Mojo: the Python packages are `scripts` and the exec fixtures,
+# imported as `python -m scripts.x` from the repository root. Point the search
+# path there so editor diagnostics match what mypy and the runtime actually see.
+[tool.pyrefly]
+search-path = ["."]
+project-includes = ["scripts", "tests/fixtures/exec"]

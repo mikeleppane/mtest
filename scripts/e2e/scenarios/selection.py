@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import tempfile
+from typing import Any
 
 from scripts.e2e.assertions import (
     expect,
@@ -40,10 +41,12 @@ COLLECT_DIR_EXPECTED = [
 
 
 def s_collect(context: ScenarioContext) -> str:
-    """`collect` / `--collect-only`: STDOUT is byte-clean and is ONLY the sorted
-    node-id listing; every diagnostic goes to STDERR; the total per-file policy
-    holds (qualifying listed; compile-error/crash/timeout/malformed -> stderr +
-    continue + exit-1; drift -> exit 3; nothing collectable -> exit 5).
+    """`collect` and `--collect-only` keep STDOUT byte-clean.
+
+    STDOUT is ONLY the sorted node-id listing; every diagnostic goes to STDERR;
+    the total per-file policy holds (qualifying listed;
+    compile-error/crash/timeout/malformed -> stderr + continue + exit-1; drift ->
+    exit 3; nothing collectable -> exit 5).
 
     STDOUT purity is asserted MECHANICALLY: stdout is split into lines and the
     lines must be exactly the sorted expected node-id set — nothing else may ride
@@ -144,9 +147,10 @@ def s_collect(context: ScenarioContext) -> str:
 
 
 def s_usage_refusals(context: ScenarioContext) -> str:
-    """Collect is now served, so the collect-subcommand refusal is gone. The
-    remaining usage refusal this build enforces is a RUN-ONLY flag combined with
-    collect mode: a listing is not a run, so every served run-only flag
+    """Collect is now served, so the collect-subcommand refusal is gone.
+
+    The remaining usage refusal this build enforces is a RUN-ONLY flag combined
+    with collect mode: a listing is not a run, so every served run-only flag
     (--maxfail, -x/--exitfirst, --gate, -s/--show-output) is refused with exit 4,
     while --timeout is NOT refused (it bounds the probes). Every flag in the v1
     contract is served now, so there is no availability refusal left to probe.
@@ -337,8 +341,9 @@ def s_selection_chameleon(context: ScenarioContext) -> str:
 
 
 def _mojo_log_path() -> str:
-    """A fresh path for MTEST_MOJO_LOG, absent until the logging wrapper writes
-    it — proves the wrapper (not some pre-existing file) produced the log.
+    """A fresh path for MTEST_MOJO_LOG, absent until the wrapper writes it.
+
+    Proves the wrapper, not some pre-existing file, produced the log.
     """
     fd, path = tempfile.mkstemp(prefix="mtest_mojo_log_", suffix=".tsv")
     os.close(fd)
@@ -355,7 +360,7 @@ def _mojo_log_lines(path: str) -> list[str]:
 
 
 def _count_builds(lines: list[str], rel: str) -> int:
-    """How many `build\\t<rel>\\t...` entries the wrapper logged for `rel`."""
+    r"""How many `build\t<rel>\t...` entries the wrapper logged for `rel`."""
     count = 0
     for ln in lines:
         fields = ln.split("\t")
@@ -365,11 +370,12 @@ def _count_builds(lines: list[str], rel: str) -> int:
 
 
 def s_single_build(context: ScenarioContext) -> str:
-    """The BuildProducts registry shares ONE `mojo build` per file between the
-    selection probe and the run — proved with the committed logging `--mojo`
-    wrapper (scripts/fixtures/toolchain/logging_mojo.py) over a SINGLE selection-run invocation.
-    Two separate `mtest` invocations would legitimately rebuild; this scenario
-    never does that.
+    """The BuildProducts registry shares ONE `mojo build` per file.
+
+    The selection probe and the run share it — proved with the committed logging
+    `--mojo` wrapper (scripts/fixtures/toolchain/logging_mojo.py) over a SINGLE
+    selection-run invocation. Two separate `mtest` invocations would legitimately
+    rebuild; this scenario never does that.
 
     `-k one` over the whole e2e/matrix tree matches test_alpha_one AND
     test_beta_one, so BOTH files are touched — a multi-file selection. Phase 1
@@ -406,11 +412,12 @@ def s_single_build(context: ScenarioContext) -> str:
 
 
 def s_stale_recovery_two_builds(context: ScenarioContext) -> str:
-    """The chameleon's stale-name recovery rebuilds the file EXACTLY TWICE: the
-    initial Phase-1 build, then the one recollect-once rebuild the recovery
+    """The chameleon's stale-name recovery rebuilds the file EXACTLY TWICE.
+
+    The initial Phase-1 build, then the one recollect-once rebuild the recovery
     flow triggers when the suite refuses under `--only` a name it just listed
-    under `--skip-all`. The run still ends MALFORMED-SUITE (exit-1 class),
-    never exit 3 — the recovery is a bounded retry, not a drift.
+    under `--skip-all`. The run still ends MALFORMED-SUITE (exit-1 class), never
+    exit 3 — the recovery is a bounded retry, not a drift.
     """
     log_path = _mojo_log_path()
     try:
@@ -483,12 +490,14 @@ def _install_precedence_wrappers(root: str) -> dict[str, str]:
         os.makedirs(directory)
         wrapper = os.path.join(directory, "mojo")
         shutil.copyfile(PATH_MOJO, wrapper)
-        os.chmod(wrapper, 0o755)
+        # S103: the copy IS a compiler stand-in mtest has to exec, so the mode
+        # has to carry the execute bit; the tree is a per-run temp directory.
+        os.chmod(wrapper, 0o755)  # noqa: S103
         installed[source] = wrapper
     return installed
 
 
-def _precedence_records(log_path: str) -> list[dict]:
+def _precedence_records(log_path: str) -> list[dict[str, Any]]:
     """The invocations one wrapper copy recorded, in order.
 
     Args:
@@ -502,7 +511,7 @@ def _precedence_records(log_path: str) -> list[dict]:
     """
     if not os.path.exists(log_path):
         return []
-    records: list[dict] = []
+    records: list[dict[str, Any]] = []
     with open(log_path, encoding="utf-8") as handle:
         for line in handle:
             if not line.strip():
@@ -544,11 +553,11 @@ def s_mojo_executable_precedence(context: ScenarioContext) -> str:
     would exec itself forever.
     """
     real_mojo = shutil.which("mojo")
-    expect(
-        real_mojo is not None,
-        "no real `mojo` on PATH: the precedence wrappers exec the real compiler "
-        "and cannot stand in for it",
-    )
+    if real_mojo is None:
+        raise ScenarioError(
+            "no real `mojo` on PATH: the precedence wrappers exec the real compiler "
+            "and cannot stand in for it"
+        )
     with tempfile.TemporaryDirectory(prefix="mtest-mojo-precedence-") as raw_root:
         # Each wrapper reports os.path.realpath(__file__) as its identity, so
         # every path derived here has to be the resolved spelling too. On macOS

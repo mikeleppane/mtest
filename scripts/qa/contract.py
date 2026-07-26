@@ -23,20 +23,20 @@ Design (hardened after adversarial review):
     EXPECTED_CHECK_NAMES, exits non-zero. The roster exists because
     deleting a check's call site is otherwise invisible: the remaining
     checks keep `ran > 0` and the gate prints "0 failed, 0 skipped".
-    Setup failures exit 2 (distinct from a contract failure's 1). Freshness of the binary
-    under test is enforced, not just warned: `pixi run contract-check`
-    rebuilds a missing-or-stale `build/mtest` before validating; the
-    blocking `pixi run contract-check-strict` gate instead runs
-    `--no-rebuild` against the binary its own Pixi `build-bin` dependency
+    Setup failures exit 2 (distinct from a contract failure's 1). Freshness of
+    the binary under test is enforced, not just warned:
+    `pixi run contract-check` rebuilds a missing-or-stale `build/mtest` before
+    validating; the blocking `pixi run contract-check-strict` gate instead
+    runs `--no-rebuild` against the binary its own Pixi `build-bin` dependency
     JUST produced, and fails closed (exit 2) if that binary is missing or
     looks stale rather than silently building one of its own.
 
 Usage:
-    pixi run contract-check --                          # rebuild-if-stale, run all
-    pixi run contract-check -- -k selection             # filter by check name
-    pixi run contract-check -- --strict                 # SKIP -> failure
+    pixi run contract-check --                         # rebuild-if-stale, run all
+    pixi run contract-check -- -k selection            # filter by check name
+    pixi run contract-check -- --strict                # SKIP -> failure
     pixi run contract-check -- --keep --no-rebuild -v
-    pixi run contract-check-strict                      # the blocking release-floor gate
+    pixi run contract-check-strict                     # the blocking release-floor gate
 
 Exit: 0 all passed; 1 a contract check failed (or a --strict skip); 2 setup
 failure (no toolchain, binary won't build, --no-rebuild found a missing/stale
@@ -47,7 +47,7 @@ CI-usable.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable
+import contextlib
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -57,22 +57,41 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import TYPE_CHECKING, NoReturn
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 # --------------------------------------------------------------------------- #
 # Repo + toolchain.
 # --------------------------------------------------------------------------- #
+def _die(msg: str) -> NoReturn:
+    """Setup failure: exit 2, distinct from a contract-nonconformance exit 1."""
+    print(f"setup: {msg}", file=sys.stderr)
+    sys.exit(2)
+
+
 def find_repo_root(start: Path) -> Path:
+    """The nearest directory at or above `start` that holds a `pixi.toml`.
+
+    Args:
+        start: A path inside the repository, normally this module's own file.
+
+    Returns:
+        The first directory in `[start, *start.parents]` containing
+        `pixi.toml`.
+
+    Raises:
+        SystemExit: No such directory exists. Nothing else in this checker can
+            be located without the repo root, so that is a setup failure
+            (exit 2) rather than a contract failure.
+    """
     for d in [start, *start.parents]:
         if (d / "pixi.toml").is_file():
             return d
     _die("could not find repo root (no pixi.toml above this script)")
-
-
-def _die(msg: str) -> None:
-    """Setup failure: exit 2, distinct from a contract-nonconformance exit 1."""
-    print(f"setup: {msg}", file=sys.stderr)
-    sys.exit(2)
 
 
 REPO = find_repo_root(Path(__file__).resolve())
@@ -92,6 +111,7 @@ def pixi_env() -> dict[str, str]:
         cwd=REPO,
         capture_output=True,
         text=True,
+        check=False,
     )
     if out.returncode != 0:
         _die(f"`pixi run` failed — is pixi installed?\n{out.stderr}")
@@ -139,8 +159,8 @@ def _newest_mtime(paths: list[Path]) -> float:
     return m
 
 
-def _run_build_bin(env: dict[str, str]) -> subprocess.CompletedProcess:
-    return subprocess.run(["pixi", "run", "build-bin"], cwd=REPO, env=env)
+def _run_build_bin(env: dict[str, str]) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(["pixi", "run", "build-bin"], cwd=REPO, env=env, check=False)
 
 
 def ensure_binary(
@@ -149,7 +169,7 @@ def ensure_binary(
     env: dict[str, str],
     rebuild: bool,
     allow_rebuild: bool,
-    build: Callable[[dict[str, str]], subprocess.CompletedProcess] | None = None,
+    build: Callable[[dict[str, str]], subprocess.CompletedProcess[bytes]] | None = None,
 ) -> None:
     """Build `binary`, and REBUILD it when missing or older than any input.
 
@@ -190,8 +210,10 @@ def ensure_binary(
 def wait_until(
     predicate: Callable[[], bool], deadline: float, poll_interval: float = 0.2
 ) -> bool:
-    """Bounded poll: True as soon as `predicate()` is true, False once
-    `deadline` (a `time.time()`-comparable epoch) passes first.
+    """Poll `predicate` until it holds or `deadline` passes, whichever is first.
+
+    True as soon as `predicate()` is true, False once `deadline` (a
+    `time.time()`-comparable epoch) passes first.
 
     A genuine readiness/absence barrier, never a fixed sleep: the caller
     decides the acceptable bound via `deadline`, and gets an answer as soon
@@ -225,7 +247,11 @@ def matching_pids(pattern: str) -> list[str]:
     """
     try:
         r = subprocess.run(
-            ["pgrep", "-f", pattern], capture_output=True, text=True, timeout=5
+            ["pgrep", "-f", pattern],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         raise RuntimeError(f"pgrep unavailable: {e}") from e
@@ -245,7 +271,11 @@ def process_argv0(pid: str) -> str:
     """
     try:
         r = subprocess.run(
-            ["ps", "-o", "args=", "-p", pid], capture_output=True, text=True, timeout=5
+            ["ps", "-o", "args=", "-p", pid],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         raise RuntimeError(f"ps unavailable: {e}") from e
@@ -257,7 +287,11 @@ def process_state(pid: str) -> str:
     """`pid`'s one-letter process state (`ps -o state=`), or "" if gone."""
     try:
         r = subprocess.run(
-            ["ps", "-o", "state=", "-p", pid], capture_output=True, text=True, timeout=5
+            ["ps", "-o", "state=", "-p", pid],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         raise RuntimeError(f"ps unavailable: {e}") from e
@@ -265,9 +299,10 @@ def process_state(pid: str) -> str:
 
 
 def exact_process_pid(mangled_name: str) -> str | None:
-    """The PID of the process whose OWN executable is `mangled_name`, never
-    a `mojo build` compiler that merely mentions it as an `-o` argument.
-    `None` if no such process is currently running.
+    """The PID of the process whose OWN executable is `mangled_name`.
+
+    Never a `mojo build` compiler that merely mentions it as an `-o`
+    argument. `None` if no such process is currently running.
     """
     for pid in matching_pids(mangled_name):
         argv0 = process_argv0(pid)
@@ -282,15 +317,11 @@ def exact_process_pid(mangled_name: str) -> str | None:
 HANG_MANGLED_NAME = "irq_stest_u1hang"
 
 
-def _default_killtree(proc: subprocess.Popen) -> None:
-    try:
+def _default_killtree(proc: subprocess.Popen[str]) -> None:
+    with contextlib.suppress(OSError, ProcessLookupError):
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (OSError, ProcessLookupError):
-        pass
-    try:
+    with contextlib.suppress(Exception):
         proc.wait(timeout=5)
-    except Exception:
-        pass
 
 
 def _skip_or_fail_result(strict: bool, detail: str) -> tuple[str, str]:
@@ -300,14 +331,14 @@ def _skip_or_fail_result(strict: bool, detail: str) -> tuple[str, str]:
 
 
 def run_interrupt_probe(
-    spawn: Callable[[], subprocess.Popen],
+    spawn: Callable[[], subprocess.Popen[str]],
     hang_ready: Callable[[], bool],
     hang_present: Callable[[], bool],
     strict: bool,
     outer_deadline: float,
     orphan_timeout: float = 10.0,
     poll_interval: float = 0.2,
-    killtree: Callable[[subprocess.Popen], None] | None = None,
+    killtree: Callable[[subprocess.Popen[str]], None] | None = None,
     send_sigint: Callable[[int], None] | None = None,
 ) -> tuple[str, str]:
     """Drive one SIGINT-frees-the-owned-child-group probe attempt.
@@ -358,9 +389,9 @@ def run_interrupt_probe(
         if not ready:
             killtree(proc)
             return _skip_or_fail_result(strict, "child never became ready")
-        send_sigint(
-            proc.pid
-        )  # ONLY the supervisor — teardown must free the child; SIGINT only after readiness
+        # ONLY the supervisor — teardown must free the child; SIGINT only after
+        # readiness
+        send_sigint(proc.pid)
         try:
             out, _ = proc.communicate(timeout=30)
         except subprocess.TimeoutExpired:
@@ -409,7 +440,10 @@ def is_palindrome(s: String) -> Bool:
     return s == reverse(s)
 '''
 
-MAIN = "\n\ndef main() raises:\n    TestSuite.discover_tests[__functions_in_module()]().run()\n"
+MAIN = (
+    "\n\ndef main() raises:\n"
+    "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
+)
 HEAD = (
     "from textkit import reverse, is_palindrome\n"
     "from std.testing import assert_equal, assert_true, TestSuite\n\n\n"
@@ -428,6 +462,16 @@ EXPECTED_TESTS = [
 
 
 def scaffold(root: Path) -> None:
+    """Write the throwaway user project every check drives `mtest` against.
+
+    Args:
+        root: An existing empty directory that becomes the project root. It
+            gains a `textkit` library, a `build/` output directory, the clean
+            `tests/` tree whose node ids `EXPECTED_TESTS` pins exactly, and
+            the poison suites whose tests fail or crash if a selection,
+            exclusion, or early-stop clause lets them run.
+    """
+
     def w(rel: str, body: str) -> None:
         p = root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -445,9 +489,8 @@ def scaffold(root: Path) -> None:
     )
     w(
         "tests/test_palindrome.mojo",
-        HEAD
-        + 'def test_palindrome_true() raises:\n    assert_true(is_palindrome("racecar"))\n'
-        + MAIN,
+        HEAD + "def test_palindrome_true() raises:\n"
+        '    assert_true(is_palindrome("racecar"))\n' + MAIN,
     )
     w(
         "tests/nested/test_nested.mojo",
@@ -546,7 +589,8 @@ def scaffold(root: Path) -> None:
         "def test_one() raises:\n    assert_true(True)\n\n\n"
         "def main() raises:\n"
         "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
-        '    print("Summary [ 0.00s ] 1 tests run: 1 passed , 0 failed , 0 skipped ")\n',
+        '    print("Summary [ 0.00s ] 1 tests run: '
+        '1 passed , 0 failed , 0 skipped ")\n',
     )
 
     # -- broken package for the precompile-failure path.
@@ -562,6 +606,20 @@ def scaffold(root: Path) -> None:
 # --------------------------------------------------------------------------- #
 @dataclass
 class Check:
+    """One table-driven check: an argv, its frozen exit code, its stream text.
+
+    Attributes:
+        name: The roster name recorded for this check; it must appear in
+            `EXPECTED_CHECK_NAMES` verbatim.
+        ref: The `docs/cli-contract.md` section(s) this check enforces.
+        argv: Arguments passed after the `mtest` binary path.
+        exit: The exact exit code the contract freezes for this argv.
+        out_has: Substrings that must appear in stdout.
+        err_has: Substrings that must appear in stderr.
+        any_has: Substrings that must appear in stdout or stderr.
+        any_absent: Substrings that must appear in neither stream.
+    """
+
     name: str
     ref: str
     argv: list[str]
@@ -695,11 +753,34 @@ def verify_every_check_ran(performed: tuple[str, ...], filtered: bool) -> None:
 
 
 class Runner:
-    def __init__(self, root: Path, env: dict[str, str], verbose: bool):
+    """Drives the built binary against one scaffold and records each verdict."""
+
+    def __init__(self, root: Path, env: dict[str, str], verbose: bool) -> None:
+        """Bind the scaffold, the child environment, and failure verbosity.
+
+        Args:
+            root: The scaffolded project directory every `mtest` run uses as
+                its working directory.
+            env: The environment handed to every child process.
+            verbose: Whether a failing check also dumps its argv and both
+                captured streams.
+        """
         self.root, self.env, self.verbose = root, env, verbose
         self.results: list[tuple[str, str, str, str]] = []
 
-    def mtest(self, argv: list[str], timeout: int = 180):
+    def mtest(
+        self, argv: list[str], timeout: int = 180
+    ) -> subprocess.CompletedProcess[str]:
+        """Run the binary under test inside the scaffold, capturing both streams.
+
+        Args:
+            argv: Arguments passed after the binary path.
+            timeout: Seconds to wait before `subprocess.TimeoutExpired` is
+                raised; callers turn that into a FAIL, never a pass.
+
+        Returns:
+            The completed process, with both streams decoded as text.
+        """
         return subprocess.run(
             [str(MTEST), *argv],
             cwd=self.root,
@@ -707,9 +788,22 @@ class Runner:
             capture_output=True,
             text=True,
             timeout=timeout,
+            check=False,
         )
 
-    def record(self, status, name, ref, detail=""):
+    def record(self, status: str, name: str, ref: str, detail: str = "") -> None:
+        """Append one verdict to `results` and print its line immediately.
+
+        Recording is what makes a check countable: `verify_every_check_ran`
+        reads `name` back out of `results`, so a check that runs without
+        recording is indistinguishable from one that never ran.
+
+        Args:
+            status: One of `PASS`, `FAIL`, `SKIP`.
+            name: The check's roster name, verbatim.
+            ref: The contract section(s) the check enforces.
+            detail: Diagnosis printed under the line for a non-PASS verdict.
+        """
         self.results.append((status, name, ref, detail))
         mark = {PASS: "  ok ", FAIL: "FAIL ", SKIP: "skip "}[status]
         line = f"[{mark}] {name}  ({ref})"
@@ -717,7 +811,15 @@ class Runner:
             line += f"\n         {detail}"
         print(line, flush=True)
 
-    def check(self, c: Check):
+    def check(self, c: Check) -> None:
+        """Run one table-driven check and record PASS or a FAIL listing every miss.
+
+        A timeout is a FAIL, never a skip: the binary failing to finish is a
+        contract failure in its own right.
+
+        Args:
+            c: The check to run.
+        """
         try:
             r = self.mtest(c.argv)
         except subprocess.TimeoutExpired:
@@ -735,13 +837,24 @@ class Runner:
         if probs:
             d = "; ".join(probs)
             if self.verbose:
-                d += f"\n         argv: {c.argv}\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+                d += (
+                    f"\n         argv: {c.argv}\n--- stdout ---\n{r.stdout}"
+                    f"\n--- stderr ---\n{r.stderr}"
+                )
             self.record(FAIL, c.name, c.ref, d)
         else:
             self.record(PASS, c.name, c.ref)
+        return None
 
     # -- bespoke: exact collect set (the anti-silent-corruption oracle) -------- #
-    def check_collect_exact(self):
+    def check_collect_exact(self) -> None:
+        """Assert `collect` lists the EXACT expected node-id set, in sort order.
+
+        The anti-silent-corruption oracle: a substring or count assertion
+        passes while the wrong set is listed, so this compares the listing to
+        `EXPECTED_TESTS` element for element and names both the missing and
+        the extra ids on failure.
+        """
         ref = "§16 collect lists EXACTLY the discovered node ids, sorted (§5,§17)"
         name = "collect: exact node-id set for tests/"
         r = self.mtest(["collect", "-I", "build", "tests"])
@@ -755,10 +868,17 @@ class Runner:
                 FAIL,
                 name,
                 ref,
-                f"exit {r.returncode}; missing={missing}; extra={extra}; sorted={got == sorted(got)}",
+                f"exit {r.returncode}; missing={missing}; extra={extra}; "
+                f"sorted={got == sorted(got)}",
             )
 
-    def check_determinism(self):
+    def check_determinism(self) -> None:
+        """Assert two identical `collect` runs produce byte-identical stdout.
+
+        An empty listing does not count as identical: both runs must also
+        exit 0 and print something, so a `collect` that silently stopped
+        finding anything fails here instead of passing twice.
+        """
         ref = "§17 machine output (collect) is byte-identical across runs"
         name = "determinism: collect byte-identical"
         a = self.mtest(["collect", "-I", "build", "tests"])
@@ -771,7 +891,13 @@ class Runner:
             "" if ok else "two collect runs differed or were empty",
         )
 
-    def check_help_stream(self):
+    def check_help_stream(self) -> None:
+        """Assert help goes to stdout and a usage error goes to stderr.
+
+        Records TWO roster entries from this one dispatch, `--help` first and
+        then `-V`, which is why those names are adjacent in
+        `EXPECTED_CHECK_NAMES`.
+        """
         # §19: --help -> STDOUT, exit 0. A usage error -> STDERR, exit 4.
         h = self.mtest(["--help"])
         self.record(
@@ -796,7 +922,13 @@ class Runner:
             else f"exit {u.returncode}; stderr empty={not u.stderr.strip()}",
         )
 
-    def check_collect_streams(self):
+    def check_collect_streams(self) -> None:
+        """Assert `collect` splits its streams and keeps listing past a bad file.
+
+        Node ids belong on stdout and per-file diagnostics on stderr, so a
+        consumer piping stdout gets only node ids even when one probed file
+        fails to compile.
+        """
         # §16: node ids -> STDOUT; per-file diagnostics -> STDERR; listing continues.
         ref = (
             "§16 collect: node ids to stdout, diagnostics to stderr, listing continues"
@@ -815,10 +947,17 @@ class Runner:
             ref,
             ""
             if ok
-            else f"exit {r.returncode}; good-node-in-stdout={ok_nodes}; diag-in-stderr={diag_err}; clean-stdout={no_diag_out}",
+            else f"exit {r.returncode}; good-node-in-stdout={ok_nodes}; "
+            f"diag-in-stderr={diag_err}; clean-stdout={no_diag_out}",
         )
 
-    def check_color(self):
+    def check_color(self) -> None:
+        """Assert `--color never/always` behaves, and that the flag beats NO_COLOR.
+
+        Each of the three runs is also held to exit 0 on an all-passing
+        fixture: an ANSI count alone is not an oracle, because a run that
+        died after one colored banner still satisfies "always > 0".
+        """
         # §15.1: --color never -> no ANSI; always -> ANSI; and the flag WINS over
         # NO_COLOR. This is the exact interaction the original QA pass false-flagged.
         ref = "§15.1 --color never/always; the flag wins over NO_COLOR"
@@ -841,6 +980,7 @@ class Runner:
                 env=e,
                 capture_output=True,
                 text=True,
+                check=False,
             )
             return r.stdout.count("\x1b["), r.returncode
 
@@ -859,7 +999,13 @@ class Runner:
             f"NO_COLOR+always={wins}(>0?) exits={exits}(all 0?)",
         )
 
-    def check_precompile_success(self):
+    def check_precompile_success(self) -> None:
+        """Assert a successful `--precompile` auto-adds its own `-I`.
+
+        The dependent test resolves `from textkit import ...` with no manual
+        `-I`, and both of its tests must PASS, so the auto-added include path
+        is proven to have reached the compiler rather than merely been logged.
+        """
         # §8.3: a successful --precompile builds the pkg and auto-adds its -I so a
         # dependent test resolves `from textkit import ...` with NO manual -I.
         ref = "§8.3 successful --precompile auto-adds -I; dependent test PASSes"
@@ -876,7 +1022,18 @@ class Runner:
 
     # -- interrupt: signal ONLY mtest so the child's survival tests mtest's own
     #    process-group teardown (§18/§24.2), not a signal the child caught directly.
-    def check_interrupt(self, strict: bool):
+    def check_interrupt(self, strict: bool) -> None:
+        """Assert SIGINT to `mtest` alone frees the child process group it owns.
+
+        Writes the hanging and passing suites this needs, then hands the real
+        `spawn` and the real process-inspection predicates to
+        `run_interrupt_probe`, which is the shared code path the negative
+        controls in `scripts/tests/test_contract.py` drive with fakes.
+
+        Args:
+            strict: Whether a SKIP from the probe is recorded as a FAIL,
+                mirroring `--strict`.
+        """
         ref = "§9/§24.2 SIGINT -> exit 2, partial summary, owned child group freed"
         name = "interrupt: SIGINT frees the owned process group"
         (self.root / "irq").mkdir(exist_ok=True)
@@ -888,7 +1045,7 @@ class Runner:
             HEAD + "def test_p() raises:\n    assert_equal(1, 1)\n" + MAIN
         )
 
-        def spawn() -> subprocess.Popen:
+        def spawn() -> subprocess.Popen[str]:
             return subprocess.Popen(
                 [str(MTEST), "-I", "build", "--timeout", "0", "irq"],
                 cwd=self.root,
@@ -916,7 +1073,17 @@ class Runner:
 # Matrix.
 # --------------------------------------------------------------------------- #
 def build_matrix() -> list[Check]:
-    I = ["-I", "build"]  # noqa: E741
+    """The table-driven checks, in the order `EXPECTED_CHECK_NAMES` lists them.
+
+    Returns:
+        Every `Check` whose whole assertion is an exit code plus stream text.
+        Checks needing more than that (an exact node-id set, two runs
+        compared, a signal) are `Runner` methods instead, and the roster
+        covers both kinds.
+    """
+    # `I` names the `-I` include flag every argv below carries, so the shorter
+    # spelling is the readable one; renaming it would only obscure that.
+    I = ["-I", "build"]  # noqa: E741, N806
     # Nothing is refused in this build (§24.1): every v1 flag spelling this build
     # knows is served now. The refused machinery stays (driving zero checks) so
     # the served/refused loop below still compiles.
@@ -948,25 +1115,26 @@ def build_matrix() -> list[Check]:
             0,
             out_has=["mtest 0.6.0"],
         ),
-        # Outcomes + FROZEN exit codes (§9,§10). CRASH must stay distinct from FAIL (§10).
+        # Outcomes + FROZEN exit codes (§9,§10). CRASH must stay distinct from
+        # FAIL (§10).
         Check(
             "outcome: passing tests/ -> 0, exact count",
             "§9,§10",
-            I + ["tests"],
+            [*I, "tests"],
             0,
             any_has=["4 passed", "NO-TESTS"],
         ),
         Check(
             "outcome: FAIL -> 1",
             "§9,§10",
-            I + ["probes/test_fail.mojo"],
+            [*I, "probes/test_fail.mojo"],
             1,
             any_has=["FAIL"],
         ),
         Check(
             "outcome: CRASH is not a FAIL -> 1",
             "§10",
-            I + ["probes/test_crash.mojo"],
+            [*I, "probes/test_crash.mojo"],
             1,
             any_has=["CRASH"],
             any_absent=["FAIL "],
@@ -974,28 +1142,28 @@ def build_matrix() -> list[Check]:
         Check(
             "outcome: COMPILE-ERROR -> 1",
             "§6,§9",
-            I + ["probes/test_compile_error.mojo"],
+            [*I, "probes/test_compile_error.mojo"],
             1,
             any_has=["COMPILE-ERROR"],
         ),
         Check(
             "outcome: MALFORMED-SUITE -> 1",
             "§6",
-            I + ["probes/test_malformed.mojo"],
+            [*I, "probes/test_malformed.mojo"],
             1,
             any_has=["MALFORMED-SUITE"],
         ),
         Check(
             "outcome: NO-TESTS-only session -> 5",
             "§9(nothing collected)",
-            I + ["tests/test_todo.mojo"],
+            [*I, "tests/test_todo.mojo"],
             5,
             any_has=["NO-TESTS"],
         ),
         Check(
             "outcome: TIMEOUT -> 1",
             "§18",
-            I + ["--timeout", "3", "probes/test_hang.mojo"],
+            [*I, "--timeout", "3", "probes/test_hang.mojo"],
             1,
             any_has=["TIMEOUT"],
         ),
@@ -1003,22 +1171,22 @@ def build_matrix() -> list[Check]:
         Check(
             "discover: nonexistent path -> 4 (stderr)",
             "§5",
-            I + ["tests/nope.mojo"],
+            [*I, "tests/nope.mojo"],
             4,
             err_has=["discover"],
         ),
-        Check("discover: empty dir -> 5", "§5,§9", I + ["empty"], 5),
+        Check("discover: empty dir -> 5", "§5,§9", [*I, "empty"], 5),
         Check(
             "discover: explicit non-test_ file bypasses pattern",
             "§5",
-            I + ["tests/helper.mojo"],
+            [*I, "tests/helper.mojo"],
             5,
             any_has=["NO-TESTS"],
         ),
         Check(
             "discover: operand escaping root -> 4 (stderr)",
             "§2",
-            I + [".."],
+            [*I, ".."],
             4,
             err_has=["discover"],
         ),  # structural prefix, not the informal sentence
@@ -1026,7 +1194,7 @@ def build_matrix() -> list[Check]:
         Check(
             "select: node id runs exactly one; sibling poison must NOT run",
             "§5,§10.1",
-            I + ["poison/test_pick.mojo::test_keep"],
+            [*I, "poison/test_pick.mojo::test_keep"],
             0,
             any_has=["1 passed", "1 deselected"],
             any_absent=["CRASH", "test_drop"],
@@ -1034,40 +1202,40 @@ def build_matrix() -> list[Check]:
         Check(
             "select: -k selects the matching set",
             "§5",
-            I + ["-k", "reverse", "tests"],
+            [*I, "-k", "reverse", "tests"],
             0,
             any_has=["2 passed"],
         ),
         Check(
             "select: -k case-insensitive",
             "§5",
-            I + ["-k", "REVERSE", "tests"],
+            [*I, "-k", "REVERSE", "tests"],
             0,
             any_has=["2 passed"],
         ),
         Check(
             "select: -k matches nothing -> 5",
             "§5,§9",
-            I + ["-k", "zzzznope", "tests"],
+            [*I, "-k", "zzzznope", "tests"],
             5,
         ),
         Check(
             "select: unknown test in a real file -> 4",
             "§5",
-            I + ["tests/test_reverse.mojo::ghost"],
+            [*I, "tests/test_reverse.mojo::ghost"],
             4,
         ),
         Check(
             "select: node id whose path is a DIRECTORY -> 4",
             "§5",
-            I + ["tests::test_reverse_ab"],
+            [*I, "tests::test_reverse_ab"],
             4,
         ),
         # Exclusion (§12) — POISON crash file must be REALLY removed, not just named.
         Check(
             "exclude: pattern truly removes a would-crash file (exit stays 0)",
             "§12",
-            I + ["--exclude", "*_bad.mojo", "excl"],
+            [*I, "--exclude", "*_bad.mojo", "excl"],
             0,
             any_has=["EXCLUDED"],
             any_absent=["CRASH"],
@@ -1075,21 +1243,21 @@ def build_matrix() -> list[Check]:
         Check(
             "exclude: stale pattern warns loudly",
             "§12",
-            I + ["--exclude", "*_missing.mojo", "tests"],
+            [*I, "--exclude", "*_missing.mojo", "tests"],
             0,
             any_has=["stale"],
         ),
         Check(
             "exclude: everything excluded -> 5",
             "§12,§9",
-            I + ["--exclude", "*", "excl"],
+            [*I, "--exclude", "*", "excl"],
             5,
         ),
         # Early stop (§11) — the not-run COUNT is the discriminator (poison sibling).
         Check(
             "stop: -x stops scheduling; poison sibling stays NOT-RUN",
             "§11",
-            I + ["-x", "estop"],
+            [*I, "-x", "estop"],
             1,
             any_has=["1 not run"],
             any_absent=["POISON must stop", "test_b"],
@@ -1097,7 +1265,7 @@ def build_matrix() -> list[Check]:
         Check(
             "stop: --maxfail 1 stops; poison sibling stays NOT-RUN",
             "§11",
-            I + ["--maxfail", "1", "maxf"],
+            [*I, "--maxfail", "1", "maxf"],
             1,
             any_has=["1 not run"],
             any_absent=["test_b"],
@@ -1105,7 +1273,7 @@ def build_matrix() -> list[Check]:
         Check(
             "stop: failing --gate aborts the whole run (exact not-run)",
             "§11",
-            I + ["--gate", "gatefail/test_smoke.mojo", "gate"],
+            [*I, "--gate", "gatefail/test_smoke.mojo", "gate"],
             1,
             any_has=["2 not run"],
         ),
@@ -1113,50 +1281,50 @@ def build_matrix() -> list[Check]:
         Check(
             "collect: --durations rejected in collect -> 4",
             "§4",
-            ["collect"] + I + ["--durations", "3", "tests"],
+            ["collect", *I, "--durations", "3", "tests"],
             4,
         ),
         Check(
             "collect: --maxfail rejected in collect -> 4",
             "§4",
-            ["collect"] + I + ["--maxfail", "1", "tests"],
+            ["collect", *I, "--maxfail", "1", "tests"],
             4,
         ),
         Check(
             "collect: --retries rejected in collect -> 4",
             "§4",
-            ["collect"] + I + ["--retries", "1", "tests"],
+            ["collect", *I, "--retries", "1", "tests"],
             4,
         ),
         Check(
             "collect: --json rejected in collect -> 4",
             "§4",
-            ["collect"] + I + ["--json", "out.ndjson", "tests"],
+            ["collect", *I, "--json", "out.ndjson", "tests"],
             4,
         ),
         Check(
             "collect: --junit-xml rejected in collect -> 4",
             "§4",
-            ["collect"] + I + ["--junit-xml", "r.xml", "tests"],
+            ["collect", *I, "--junit-xml", "r.xml", "tests"],
             4,
         ),
         Check(
             "collect: --gh-annotations rejected in collect -> 4 (even off)",
             "§4",
-            ["collect"] + I + ["--gh-annotations", "off", "tests"],
+            ["collect", *I, "--gh-annotations", "off", "tests"],
             4,
         ),
         Check(
             "collect: -k ignored with a loud notice (§24.3 deviation)",
             "§24.3",
-            ["collect"] + I + ["-k", "reverse", "tests"],
+            ["collect", *I, "-k", "reverse", "tests"],
             0,
             any_has=["ignored", "test_palindrome_true"],
         ),  # notice + un-filtered listing
         Check(
             "collect: node-id operand lists whole file (§24.3 deviation)",
             "§24.3",
-            ["collect"] + I + ["tests/test_reverse.mojo::test_reverse_ab"],
+            ["collect", *I, "tests/test_reverse.mojo::test_reverse_ab"],
             0,
             any_has=["test_reverse_ab", "test_reverse_empty"],
         ),
@@ -1164,61 +1332,61 @@ def build_matrix() -> list[Check]:
         Check(
             "build-arg: -o forbidden -> 4, and the test never ran (pre-run, §9)",
             "§8.4,§9",
-            I + ["--build-arg", "-o", "--build-arg", "x", "poison/test_pick.mojo"],
+            [*I, "--build-arg", "-o", "--build-arg", "x", "poison/test_pick.mojo"],
             4,
             any_absent=["1 passed", "CRASH"],
         ),
         Check(
             "build-arg: --emit forbidden -> 4",
             "§8.4",
-            I + ["--build-arg", "--emit=llvm", "tests/test_reverse.mojo"],
+            [*I, "--build-arg", "--emit=llvm", "tests/test_reverse.mojo"],
             4,
         ),
         Check(
             "build-arg: extra source after -- forbidden -> 4",
             "§8.4",
-            I + ["tests/test_reverse.mojo", "--", "extra.mojo"],
+            [*I, "tests/test_reverse.mojo", "--", "extra.mojo"],
             4,
         ),
         # Internal error (§24.2) — spawn failure and protocol drift both -> exit 3.
         Check(
             "exit-3: bad --mojo (spawn failure) -> 3",
             "§24.2",
-            I + ["--mojo", "/nonexistent/mojo", "tests/test_reverse.mojo"],
+            [*I, "--mojo", "/nonexistent/mojo", "tests/test_reverse.mojo"],
             3,
         ),
         Check(
             "exit-3: off-grammar report (drift) -> 3, never a verdict",
             "§6,§16,§24.2",
-            I + ["drift/test_liar.mojo"],
+            [*I, "drift/test_liar.mojo"],
             3,
         ),
         # Value validation (§3,§15.1).
         Check(
             "value: --durations negative -> 4",
             "§3",
-            I + ["--durations", "-1", "tests"],
+            [*I, "--durations", "-1", "tests"],
             4,
         ),
         Check(
             "value: --timeout non-integer -> 4",
             "§3",
-            I + ["--timeout", "abc", "tests"],
+            [*I, "--timeout", "abc", "tests"],
             4,
         ),
         Check(
             "value: --show-output bad mode -> 4",
             "§3",
-            I + ["--show-output", "bogus", "tests"],
+            [*I, "--show-output", "bogus", "tests"],
             4,
         ),
         Check(
-            "value: --color bad mode -> 4", "§3", I + ["--color", "bogus", "tests"], 4
+            "value: --color bad mode -> 4", "§3", [*I, "--color", "bogus", "tests"], 4
         ),
         Check(
             "value: -q and -v mutually exclusive -> 4",
             "§15.1",
-            I + ["-q", "-v", "tests"],
+            [*I, "-q", "-v", "tests"],
             4,
         ),
         # Precompile failure (§8.3) — pass a DIRECTORY so the casualty path is not
@@ -1226,7 +1394,7 @@ def build_matrix() -> list[Check]:
         Check(
             "precompile: failure -> PRECOMPILE-ERROR, casualties listed, exit 1",
             "§8.3,§10",
-            ["--precompile", "brokenlib"] + I + ["tests"],
+            ["--precompile", "brokenlib", *I, "tests"],
             1,
             any_has=["PRECOMPILE-ERROR", "tests/test_reverse.mojo"],
             any_absent=["PRECOMPILE-FAILED"],
@@ -1238,7 +1406,7 @@ def build_matrix() -> list[Check]:
             Check(
                 f"refused: {flag} -> 4 names flag + v1 contract",
                 "§24.1",
-                I + [flag, val, "tests"],
+                [*I, flag, val, "tests"],
                 4,
                 any_has=["v1 contract", flag],
             )
@@ -1250,7 +1418,7 @@ def build_matrix() -> list[Check]:
             Check(
                 f"served: {flag} accepted (not exit 4)",
                 ref,
-                I + [flag, val, "tests"],
+                [*I, flag, val, "tests"],
                 0,
                 any_absent=["v1 contract"],
             )
@@ -1259,7 +1427,7 @@ def build_matrix() -> list[Check]:
         Check(
             "served: collect --shard partitions (not exit 4)",
             "§18,§24.1",
-            ["collect"] + I + ["--shard", "1/2", "tests"],
+            ["collect", *I, "--shard", "1/2", "tests"],
             0,
             any_absent=["v1 contract"],
         )
@@ -1269,6 +1437,15 @@ def build_matrix() -> list[Check]:
 
 # --------------------------------------------------------------------------- #
 def main() -> int:
+    """Scaffold a throwaway project, run every check against it, and report.
+
+    Returns:
+        0 when every performed check passed, 1 when a contract check failed
+        (or `--strict` saw a SKIP), and 2 for a setup failure: no toolchain,
+        an unbuildable or stale binary, zero checks matched the filter, or a
+        roster of performed checks that does not match
+        `EXPECTED_CHECK_NAMES`. The scaffold is removed unless `--keep`.
+    """
     ap = argparse.ArgumentParser(description="Black-box contract validator for mtest.")
     ap.add_argument(
         "-k", dest="filter", default="", help="substring filter over check names"
@@ -1307,12 +1484,15 @@ def main() -> int:
             env=env,
             capture_output=True,
             text=True,
+            check=False,
         )
         if pc.returncode != 0:
             _die(
-                f"could not precompile the scaffolded textkit package\n{pc.stdout}{pc.stderr}"
+                "could not precompile the scaffolded textkit package\n"
+                f"{pc.stdout}{pc.stderr}"
             )
-        # A mixed dir for the collect stream/continue check: a good file + a compile error.
+        # A mixed dir for the collect stream/continue check: a good file + a
+        # compile error.
         (root / "cmix").mkdir()
         (root / "cmix" / "test_ok.mojo").write_text(
             HEAD + "def test_ok() raises:\n    assert_equal(1, 1)\n" + MAIN
@@ -1353,7 +1533,8 @@ def main() -> int:
                 runner.record(
                     SKIP,
                     "interrupt: SIGINT frees the owned process group",
-                    "§9/§24.2 SIGINT -> exit 2, partial summary, owned child group freed",
+                    "§9/§24.2 SIGINT -> exit 2, partial summary, owned child "
+                    "group freed",
                     "skipped by --no-interrupt",
                 )
             else:
@@ -1378,11 +1559,13 @@ def main() -> int:
             for s, name, ref, detail in runner.results:
                 if s == FAIL:
                     print(
-                        f"  - {name}  ({ref}): {detail.splitlines()[0] if detail else ''}"
+                        f"  - {name}  ({ref}): "
+                        f"{detail.splitlines()[0] if detail else ''}"
                     )
         if n_skip:
             print(
-                f"\nNOTE: {n_skip} check(s) SKIPPED (not a pass). Use --strict to fail on skip."
+                f"\nNOTE: {n_skip} check(s) SKIPPED (not a pass). "
+                "Use --strict to fail on skip."
             )
         if ran == 0:
             print(

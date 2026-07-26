@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from typing import TYPE_CHECKING
 from unittest import mock
 
 from scripts.checks import protocol_snapshots
@@ -17,6 +18,10 @@ from scripts.checks.transcript_compare import (
     DirectoryComparison,
     compare_directories,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def test_transcript_comparator() -> None:
@@ -77,7 +82,9 @@ def _snapshot_tree(root: Path) -> None:
 
 def _check_with_mutation(
     expected: Path,
-    mutate,
+    # The return value is discarded; callers pass expressions such as
+    # `write_bytes`, which answers a byte count.
+    mutate: Callable[[Path], object],
 ) -> tuple[DirectoryComparison, Path]:
     generated_root: Path | None = None
 
@@ -137,9 +144,9 @@ def test_protocol_snapshot_check_mutations() -> None:
 def test_protocol_snapshot_check_delegates_to_the_generator() -> None:
     """The check command invokes the provenance-pinned writer as a module."""
     output_dir = Path("/tmp/mtest-generated-protocol-test")
-    completed = subprocess.CompletedProcess([], 0)
+    completed: subprocess.CompletedProcess[bytes] = subprocess.CompletedProcess([], 0)
     with mock.patch.object(
-        protocol_snapshots.subprocess,
+        subprocess,
         "run",
         return_value=completed,
     ) as run:
@@ -163,11 +170,14 @@ def test_protocol_snapshot_failure_retains_lifecycle_warning() -> None:
     """A failed check explains why maintainers must not bless changed bytes."""
     result = DirectoryComparison(False, (), ("byte mismatch in case.txt",))
     stderr = io.StringIO()
-    with mock.patch.object(
-        protocol_snapshots,
-        "check_snapshots",
-        return_value=result,
-    ), redirect_stderr(stderr):
+    with (
+        mock.patch.object(
+            protocol_snapshots,
+            "check_snapshots",
+            return_value=result,
+        ),
+        redirect_stderr(stderr),
+    ):
         returncode = protocol_snapshots.main()
 
     message = stderr.getvalue()

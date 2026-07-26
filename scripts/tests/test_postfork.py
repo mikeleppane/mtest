@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import tempfile
+from typing import override
 import unittest
 from unittest import mock
 
@@ -17,6 +18,10 @@ SOURCE = ROOT / "native" / "mtest_exec_native.c"
 
 
 class PostforkCheckTests(unittest.TestCase):
+    # Established once per class by `setUpClass` below.
+    cc: str
+    source: str
+
     def test_repository_roots_are_exact(self) -> None:
         self.assertEqual(postfork_check.ROOT, ROOT)
         self.assertEqual(native_abi_check.ROOT, ROOT)
@@ -35,10 +40,13 @@ class PostforkCheckTests(unittest.TestCase):
         self.assertGreater(len(native_abi_check.SOURCE_FILES), 0)
 
     def test_empty_native_abi_source_inventory_is_rejected(self) -> None:
-        with mock.patch.object(native_abi_check, "SOURCE_FILES", ()):
-            with self.assertRaisesRegex(SystemExit, "source inventory is empty"):
-                native_abi_check.main()
+        with (
+            mock.patch.object(native_abi_check, "SOURCE_FILES", ()),
+            self.assertRaisesRegex(SystemExit, "source inventory is empty"),
+        ):
+            native_abi_check.main()
 
+    @override
     @classmethod
     def setUpClass(cls) -> None:
         cls.cc = native_abi_check.compiler()
@@ -185,7 +193,8 @@ class PostforkCheckTests(unittest.TestCase):
             (
                 fork_marker
                 + "        {\n"
-                + "            void *owned __attribute__((cleanup(mtest_child_cleanup))) = NULL;\n"
+                + "            void *owned "
+                + "__attribute__((cleanup(mtest_child_cleanup))) = NULL;\n"
                 + "            (void)owned;\n"
                 + "        }\n"
             ),

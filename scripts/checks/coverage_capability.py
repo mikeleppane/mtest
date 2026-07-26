@@ -180,8 +180,7 @@ def collect_help_text(
             run = subprocess.run(
                 list(argv),
                 cwd=REPO_ROOT,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 timeout=PROBE_TIMEOUT_SECONDS,
                 check=False,
             )
@@ -266,8 +265,10 @@ def evaluate(
         return UNAVAILABLE_MESSAGE, 0
     body = "\n".join(discovered)
     return (
-        "coverage-capability: FAIL: the pinned Mojo toolchain now names a "
-        f"coverage facility:\n{body}\n{DISCOVERY_INSTRUCTION}",
+        (
+            "coverage-capability: FAIL: the pinned Mojo toolchain now names a "
+            f"coverage facility:\n{body}\n{DISCOVERY_INSTRUCTION}"
+        ),
         1,
     )
 

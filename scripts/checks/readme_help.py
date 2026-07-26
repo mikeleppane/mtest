@@ -43,8 +43,7 @@ def check_readme_help(repo_root: Path = REPO_ROOT) -> None:
         run = subprocess.run(
             [binary, "--help"],
             cwd=repo_root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=30,
             check=False,
         )

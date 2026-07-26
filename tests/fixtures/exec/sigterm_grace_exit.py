@@ -13,7 +13,8 @@ import sys
 import time
 
 
-def _on_term(signum, frame):
+def _on_term(_signum: int, _frame: object) -> None:
+    """Exit 0 the moment SIGTERM lands, inside the supervisor's grace window."""
     sys.exit(0)
 
 

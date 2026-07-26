@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Validate mtest's GitHub Actions annotation surface: the workflow-command
-GRAMMAR, both escaping contexts, and the collision-proof stop-commands FENCING
-(including fence TERMINATION) of echoed child output.
+"""Validate mtest's GitHub Actions annotation surface.
+
+Covers the workflow-command GRAMMAR, both escaping contexts, and the
+collision-proof stop-commands FENCING (including fence TERMINATION) of echoed
+child output.
 
 This is the LOCAL proxy for what GitHub itself would do with mtest's stdout under
 Actions. It has two independent jobs, exercised together by the e2e hostile-console
@@ -86,28 +88,38 @@ def _check_escaping(ann: Annotation) -> list[str]:
                 findings.append(f"{ann.kind} property is not key=value: {pair!r}")
                 continue
             _key, value = pair.split("=", 1)
+            # Defense in depth, currently unreachable, and kept deliberately:
+            # `_ANNOTATION_RE`'s property group is `[^:]*`, so a raw `:` makes the
+            # whole line fail to parse before it reaches here, and the `,` split
+            # above means no `pair` can still hold one. The property is therefore
+            # enforced by the grammar today, which the oracle's tests pin
+            # directly. This stays so that loosening that regex cannot silently
+            # drop the rule.
             if ":" in value or "," in value:
                 findings.append(
                     f"{ann.kind} property value has an unescaped ':'/',': {value!r}"
                 )
-            if "%0a" in value.lower() or "%0d" in value.lower():
-                # CR/LF should never reach a property value pre-escaped here; a
-                # literal one is caught above. (Percent forms are acceptable.)
-                pass
+            # %0A and %0D are the CORRECT escaped forms for CR/LF in a property
+            # value, so they are accepted here without comment. A raw one is
+            # caught by the message check above. This deliberately records no
+            # finding; there used to be an `if` here that could not fail, which
+            # read like a check while asserting nothing.
     return findings
 
 
-def check_tail(lines: list[str]) -> dict:
+def check_tail(lines: list[str]) -> dict[str, int]:
     """Validate the annotation TAIL: grammar, escaping, per-kind grouping, sort.
 
     `lines` is the sequence of annotation lines mtest emitted (each already a
     single line). Returns a small summary dict; raises AnnotationsCheckError on
     any violation.
     """
-    anns = [parse_annotation(ln) for ln in lines]
-    for raw, ann in zip(lines, anns):
+    parsed = [parse_annotation(ln) for ln in lines]
+    anns: list[Annotation] = []
+    for raw, ann in zip(lines, parsed, strict=False):
         if ann is None:
             raise AnnotationsCheckError(f"not a valid annotation line: {raw!r}")
+        anns.append(ann)
 
     findings: list[str] = []
     for ann in anns:
@@ -139,6 +151,14 @@ def check_tail(lines: list[str]) -> dict:
         if aggregates and block[-1] != aggregates[0]:
             findings.append(f"::{kind} aggregate line is not last: {block}")
         keys = [_node_id_key(m) for m in block if not _is_aggregate(m, kind)]
+        # An aggregate rolls up the rows the cap dropped, so it can only follow
+        # at least one row. With no rows the sort assertion below would pass
+        # vacuously, which is exactly how a broken cap would slip through, so
+        # fail closed on the empty case rather than sort nothing.
+        if aggregates and not keys:
+            findings.append(
+                f"::{kind} block has an aggregate line but no rows to roll up: {block}"
+            )
         if keys != sorted(keys):
             findings.append(f"::{kind} block is not node-id sorted: {keys}")
 
@@ -199,7 +219,7 @@ def check_fencing(
     forged_needle: str | None = None,
     seeded_token: str | None = None,
     require_fence: bool = True,
-) -> dict:
+) -> dict[str, object]:
     """Validate the stop-commands fencing over `text`.
 
     Enforces: every opened fence is TERMINATED; every real token is high-entropy
@@ -217,11 +237,11 @@ def check_fencing(
     if require_fence and not fences:
         findings.append("no stop-commands fence was emitted")
 
-    for fence in fences:
-        if not _TOKEN_RE.match(fence.token):
-            findings.append(
-                f"fence token is not >=128-bit lowercase hex: {fence.token!r}"
-            )
+    findings.extend(
+        f"fence token is not >=128-bit lowercase hex: {fence.token!r}"
+        for fence in fences
+        if not _TOKEN_RE.match(fence.token)
+    )
 
     tokens = {f.token for f in fences}
     if seeded_token is not None and seeded_token in tokens:
@@ -273,6 +293,14 @@ def annotation_tail_outside_fences(text: str) -> list[str]:
 
 
 def main() -> int:
+    """Validate a captured mtest stdout file standalone.
+
+    Returns:
+        0 when the capture's fencing holds and any annotation tail outside the
+        fences passes, printing both summaries. 0 as well when no capture file
+        was given, since there is then nothing to validate. 1 after printing
+        the violations to stderr.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "capture",

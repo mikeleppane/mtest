@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Echo each argv element on its own bracketed line; a fixed marker to stderr.
+r"""Echo each argv element on its own bracketed line; a fixed marker to stderr.
 
 Every argument after the script path is written to stdout as `[<arg>]\n`, so
 trailing spaces and empty entries are visible and byte-exact (an empty argument

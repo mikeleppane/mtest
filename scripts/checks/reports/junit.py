@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Validate a JUnit XML artifact against the vendored junit-10 schema plus the
-arithmetic and structural invariants the schema cannot express.
+"""Validate a JUnit XML artifact against the vendored junit-10 schema.
+
+Adds the arithmetic and structural invariants the schema cannot express.
 
 `xmllint --schema junit-10.xsd --noout` enforces structure and required
 attributes — `flakyFailure`'s `type` chief among them — over the shipped
@@ -34,7 +35,9 @@ _ATTEMPTS_SENTINEL = "[attempts]"
 _OUTCOME_ATTRIBUTE = {"failure": "failures", "error": "errors", "skipped": "skipped"}
 
 
-class CheckFailure(RuntimeError):
+# The asan, valgrind, junit_render, e2e, and self-test callers all catch this by
+# name; renaming it to an Error suffix is an API change, not a lint fix.
+class CheckFailure(RuntimeError):  # noqa: N818
     """One schema, arithmetic, or structural violation."""
 
 
@@ -199,6 +202,13 @@ def check_artifact(artifact: Path, schema: Path = SCHEMA) -> SuiteTotals:
 
 
 def main() -> int:
+    """Validate one JUnit artifact from the command line.
+
+    Returns:
+        0 when the artifact passes both the schema gate and the
+        arithmetic/structural gate, printing the recomputed totals. 1 after
+        printing the single violation to stderr.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "artifact",

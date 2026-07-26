@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+import contextlib
 from dataclasses import dataclass
 import math
 import os
@@ -15,7 +15,16 @@ import subprocess
 import sys
 import threading
 import time
-from typing import IO
+from typing import IO, TYPE_CHECKING, cast
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+    from types import FrameType
+
+    # Exactly what `signal.getsignal` hands back and `signal.signal` accepts:
+    # the caller's own callback, or one of the integer dispositions.
+    _SignalHandler = Callable[[int, FrameType | None], object] | int | None
 
 
 # The per-step wall-clock ceiling. It bounds a single classified build or run so
@@ -158,9 +167,14 @@ class _StreamTee:
             stream: The caller's original `sys.stdout` or `sys.stderr`, or None
                 when the interpreter has none.
         """
-        self._binary = getattr(stream, "buffer", None)
-        self._text = (
-            stream if self._binary is None and hasattr(stream, "write") else None
+        # The caller's stream is duck-typed on purpose: under a redirect
+        # `sys.stdout` is any object with `write`. These casts record the shape
+        # production always has without adding a runtime check; a stream missing
+        # `flush` stays covered by the `AttributeError` arm in `write` below.
+        self._binary = cast("IO[bytes] | None", getattr(stream, "buffer", None))
+        self._text = cast(
+            "IO[str] | None",
+            stream if self._binary is None and hasattr(stream, "write") else None,
         )
         self._lock = threading.Lock()
         self._sealed = threading.Event()
@@ -317,14 +331,12 @@ def _tee_stream(
                 pending = b""
                 discarding = True
     finally:
-        try:
+        with contextlib.suppress(OSError, ValueError):
             source.close()
-        except (OSError, ValueError):
-            pass
 
 
 def _start_drainers(
-    process: subprocess.Popen[object],
+    process: subprocess.Popen[bytes],
     retention: MarkerRetention,
 ) -> _DrainState:
     """Start one drainer per captured pipe, before any blocking child wait.
@@ -426,10 +438,8 @@ def _seal_drainers(state: _DrainState | None) -> None:
         # This drainer is parked in a write to a caller stream that is not
         # draining. Release the resources it holds rather than abandoning them.
         if index < len(state.sources):
-            try:
+            with contextlib.suppress(OSError, ValueError):
                 state.sources[index].close()
-            except (OSError, ValueError):
-                pass
     # A brief, bounded join so a drainer that has already finished is reaped
     # here rather than left for the interpreter. Threads still parked in a
     # write fall through untouched; the supervisor never waits on them.
@@ -469,7 +479,7 @@ def _signal_group(pid: int, signum: int) -> bool:
     return True
 
 
-def _terminate_process_group(process: subprocess.Popen[object]) -> None:
+def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
     """Terminate a timed-out process group and wait for its leader."""
     if not _signal_group(process.pid, signal.SIGTERM):
         process.wait()
@@ -484,7 +494,7 @@ def _terminate_process_group(process: subprocess.Popen[object]) -> None:
     process.wait()
 
 
-def _forward_signal_and_cleanup(process: subprocess.Popen[object], signum: int) -> None:
+def _forward_signal_and_cleanup(process: subprocess.Popen[bytes], signum: int) -> None:
     """Forward caller cancellation, then force-reap the complete child group."""
     if not _signal_group(process.pid, signum):
         process.wait()
@@ -529,15 +539,13 @@ def _validate_timeout_seconds(timeout_seconds: float) -> None:
 
 def _notify_timeout(source: str, step: str, timeout_seconds: float) -> None:
     """Best-effort timeout diagnostic after process-group cleanup."""
-    try:
+    with contextlib.suppress(BrokenPipeError, OSError):
         print(
             "FATAL: classified: "
             f"{source}: {step} exceeded {timeout_seconds:g}s; "
             "terminating its process group",
             file=sys.stderr,
         )
-    except (BrokenPipeError, OSError):
-        pass
 
 
 def validate_deadline_proof(
@@ -622,9 +630,9 @@ def run_command(
             deadline_sentinel,
         )
 
-    process: subprocess.Popen[object] | None = None
+    process: subprocess.Popen[bytes] | None = None
     pending_signum: int | None = None
-    previous_handlers: dict[int, signal.Handlers] = {}
+    previous_handlers: dict[signal.Signals, _SignalHandler] = {}
     drain_state: _DrainState | None = None
     captured = subprocess.PIPE if marker_retention is not None else None
 
@@ -674,7 +682,10 @@ def run_command(
                 # write while the supervisor blocks on wait.
                 drain_state = _start_drainers(process, marker_retention)
             if pending_signum is not None:
-                raise _WatchdogCancellation(pending_signum)
+                # TRY301 is suppressed here: this raise IS the cancellation
+                # path, caught by the arm that closes this try. Abstracting it
+                # into an inner function would only hide the control flow.
+                raise _WatchdogCancellation(pending_signum)  # noqa: TRY301
             try:
                 status = process.wait(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
@@ -713,17 +724,31 @@ def run_command(
             # that escape when the caller's dispositions are restored. That also
             # makes this settle safe: `pending_signum` is set, so the callback
             # returns without raising and cannot re-enter this arm.
-            _forward_signal_and_cleanup(process, cancellation.signum)
+            #
+            # `process` cannot be None here: the only source of this exception is
+            # `request_cancellation`, which returns without raising while
+            # `process` is still None, and the explicit raise above runs only
+            # after the spawn has been assigned. The cast states that invariant
+            # without adding a branch; if it were ever violated the attribute
+            # access inside would still fall to the internal-failure arm below,
+            # exactly as it does today.
+            _forward_signal_and_cleanup(
+                cast("subprocess.Popen[bytes]", process), cancellation.signum
+            )
             _settle_drainers(drain_state)
             return _clear_non_timeout_sentinel(
                 Cancelled(cancellation.signum), deadline_sentinel
             )
-    except Exception as exc:
+    # BLE001 is suppressed on both arms below: this is the supervisor's
+    # outermost boundary. Anything escaping here wedges the gate that spawned
+    # it, so every exception must become a HarnessError, and a failure inside
+    # cleanup must not replace the detail that caused it.
+    except Exception as exc:  # noqa: BLE001
         detail = f"watchdog internal failure: {exc}"
         if process is not None and process.poll() is None:
             try:
                 _terminate_process_group(process)
-            except Exception as cleanup_exc:
+            except Exception as cleanup_exc:  # noqa: BLE001
                 detail += f"; process-group cleanup failed: {cleanup_exc}"
         return _clear_non_timeout_sentinel(HarnessError(detail), deadline_sentinel)
     finally:

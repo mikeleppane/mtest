@@ -8,6 +8,7 @@ Cleanup cooperates through those markers only; it never stores or signals a
 numeric PID that could be reused by an unrelated process.
 """
 
+import contextlib
 import os
 import sys
 import time
@@ -21,10 +22,8 @@ def spawn(control_path: str) -> None:
     ready_path = control_path + ".ready"
     stop_path = control_path + ".stop"
     for stale_path in (ready_path, stop_path):
-        try:
+        with contextlib.suppress(FileNotFoundError):
             os.unlink(stale_path)
-        except FileNotFoundError:
-            pass
 
     ready_r, ready_w = os.pipe()
     pid = os.fork()
@@ -42,12 +41,11 @@ def spawn(control_path: str) -> None:
                 os.close(2)
                 os.unlink(ready_path)
                 os._exit(0)
-            try:
+            # A BrokenPipeError means the supervisor reached its post-leader
+            # bound and closed the read end. Stay alive for the test's
+            # explicit cleanup proof.
+            with contextlib.suppress(BrokenPipeError):
                 os.write(1, b"escaped-writer\n")
-            except BrokenPipeError:
-                # The supervisor reached its post-leader bound and closed the
-                # read end. Stay alive for the test's explicit cleanup proof.
-                pass
             time.sleep(0.02)
         os.close(1)
         os.close(2)
@@ -84,15 +82,19 @@ def make_unresponsive(control_path: str) -> None:
     ready_path = control_path + ".ready"
     stop_path = control_path + ".stop"
     for stale_path in (ready_path, stop_path):
-        try:
+        with contextlib.suppress(FileNotFoundError):
             os.unlink(stale_path)
-        except FileNotFoundError:
-            pass
     with open(ready_path, "x", encoding="ascii") as ready_file:
         ready_file.write("no-owner-can-acknowledge\n")
 
 
 def main() -> None:
+    """Dispatch the one requested mode from `argv`, or exit 64 on a bad call.
+
+    Raises:
+        SystemExit: With code 64 when the argument count is not exactly two or
+            the mode word is not `spawn`, `cleanup`, or `unresponsive`.
+    """
     if len(sys.argv) != 3:
         raise SystemExit(64)
     if sys.argv[1] == "spawn":

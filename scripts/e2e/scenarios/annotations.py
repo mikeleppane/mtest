@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from scripts.checks.reports import annotations as annotations_check
 from scripts.checks.reports import json_stream as json_stream_check
 from scripts.e2e.assertions import expect, expect_exit
-from scripts.e2e.runner import ScenarioContext
+
+
+if TYPE_CHECKING:
+    from scripts.e2e.runner import ScenarioContext
 
 
 def _annotation_lines(stdout: str) -> list[str]:
@@ -14,8 +19,10 @@ def _annotation_lines(stdout: str) -> list[str]:
 
 
 def s_annotations_modes(context: ScenarioContext) -> str:
-    """MODE resolution: `on` always renders the tail; `auto` follows
-    GITHUB_ACTIONS; `off` never renders even under Actions.
+    """Resolve annotation MODE against the environment.
+
+    `on` always renders the tail; `auto` follows GITHUB_ACTIONS; `off` never
+    renders even under Actions.
 
     The tail is the node-id-sorted `::error` block then the single `::notice`,
     printed to stdout AFTER the console summary band, only when resolved-on.
@@ -66,8 +73,10 @@ def s_annotations_modes(context: ScenarioContext) -> str:
 
 
 def s_annotations_caps(context: ScenarioContext) -> str:
-    """The 10-error per-STEP cap: twelve failures render nine node-id-sorted
-    rows plus ONE `... and 3 more errors` aggregate — never eleven lines.
+    """Hold the 10-error per-STEP cap.
+
+    Twelve failures render nine node-id-sorted rows plus ONE
+    `... and 3 more errors` aggregate — never eleven lines.
     """
     run = context.runner.run_mtest(
         ["e2e/annotations/test_many_fail.mojo", "--gh-annotations", "on"]
@@ -154,7 +163,7 @@ def s_annotations_fencing(context: ScenarioContext) -> str:
     # mtest's OWN tail (outside the fence) is a well-formed annotation tail.
     annotations_check.check_tail(_annotation_lines(run.stdout))
     real_tokens = set(annotations_check.extract_fence_tokens(run.stdout))
-    expect(real_tokens, "no terminated fence was emitted")
+    expect(bool(real_tokens), "no terminated fence was emitted")
     expect(seeded not in real_tokens, "the real token equalled the seeded guess")
 
     # PER-RUN-UNIQUE: a second run mints a DIFFERENT token.

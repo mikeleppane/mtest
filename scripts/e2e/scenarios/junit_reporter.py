@@ -269,10 +269,12 @@ def _expect_xml_text(actual: str | None, source: str, what: str) -> None:
 
 
 def s_junit_scratch_cleanup(context: ScenarioContext) -> str:
-    """A `--junit-xml` run leaves no spool directory behind. `main` owns the
-    `mkdtemp` scratch it creates for per-suite fragments and frees it on exit;
-    a busy /tmp would otherwise accrete one leaked directory (plus a fragment)
-    per invocation, and eventually a `mkdtemp` failure before tests even run.
+    """A `--junit-xml` run leaves no spool directory behind.
+
+    `main` owns the `mkdtemp` scratch it creates for per-suite fragments and
+    frees it on exit; a busy /tmp would otherwise accrete one leaked directory
+    (plus a fragment) per invocation, and eventually a `mkdtemp` failure before
+    tests even run.
     """
     report_dir = tempfile.mkdtemp()
     tmpdir = tempfile.mkdtemp()  # the isolated TMPDIR the run's mkdtemp lands in
@@ -297,8 +299,9 @@ def s_junit_scratch_cleanup(context: ScenarioContext) -> str:
 
 
 def s_junit_schema_gate(context: ScenarioContext) -> str:
-    """`--junit-xml PATH` writes a document that PASSES the junit-10 oracle
-    (schema + arithmetic), including a flaky suite in chronological order and a
+    """`--junit-xml PATH` writes a document that PASSES the junit-10 oracle.
+
+    Schema plus arithmetic, including a flaky suite in chronological order and a
     rerun-exhausted suite with the FIRST attempt as the initial primary.
     """
     tmp = tempfile.mkdtemp()
@@ -369,16 +372,20 @@ def s_junit_schema_gate(context: ScenarioContext) -> str:
         0 <= i_primary < i_rerun,
         "the rerun-exhausted [attempts] row is not initial-primary chronology",
     )
-    return "junit passes the junit-10 oracle: base + flaky (chronological) + rerun-exhausted (initial-primary)"
+    return (
+        "junit passes the junit-10 oracle: base + flaky (chronological) + "
+        "rerun-exhausted (initial-primary)"
+    )
 
 
 def s_junit_determinism(context: ScenarioContext) -> str:
-    """Two repeated SEQUENTIAL `--junit-xml` runs of the same suite are equal
-    under the JUnit CANONICAL form (`time` and embedded text masked; structure,
-    identity, classification, and counts kept). Derived copies prove each mask is
-    load-bearing without relying on incidental differences between real runs:
-    changing a masked `time` or diagnostic body preserves canonical equality,
-    while changing an unmasked classification attribute does not.
+    """Two repeated SEQUENTIAL `--junit-xml` runs of one suite are equal.
+
+    Equal under the JUnit CANONICAL form (`time` and embedded text masked;
+    structure, identity, classification, and counts kept). Derived copies prove
+    each mask is load-bearing without relying on incidental differences between
+    real runs: changing a masked `time` or diagnostic body preserves canonical
+    equality, while changing an unmasked classification attribute does not.
     """
     with tempfile.TemporaryDirectory(prefix="mtest-junit-determinism-") as tmp:
         first = Path(tmp) / "run1.xml"
@@ -407,7 +414,8 @@ def s_junit_determinism(context: ScenarioContext) -> str:
             (element for element in time_root.iter() if "time" in element.attrib),
             None,
         )
-        expect(time_element is not None, "the real JUnit report has no time attribute")
+        if time_element is None:
+            raise ScenarioError("the real JUnit report has no time attribute")
         time_element.set("time", "98765.432")
         ET.ElementTree(time_root).write(
             time_mutation, encoding="utf-8", xml_declaration=True
@@ -439,7 +447,8 @@ def s_junit_determinism(context: ScenarioContext) -> str:
             ),
             None,
         )
-        expect(text_element is not None, "the real JUnit report has no diagnostic text")
+        if text_element is None:
+            raise ScenarioError("the real JUnit report has no diagnostic text")
         text_element.text = (text_element.text or "") + "\nDETERMINISTIC-MUTATION\n"
         ET.ElementTree(text_root).write(
             text_mutation, encoding="utf-8", xml_declaration=True
@@ -460,10 +469,10 @@ def s_junit_determinism(context: ScenarioContext) -> str:
             ),
             None,
         )
-        expect(
-            classification_element is not None,
-            "the real JUnit report has no classified failure/error child",
-        )
+        if classification_element is None:
+            raise ScenarioError(
+                "the real JUnit report has no classified failure/error child"
+            )
         classification_element.set(
             "type", classification_element.attrib["type"] + "-MUTATED"
         )
@@ -486,10 +495,11 @@ def s_junit_determinism(context: ScenarioContext) -> str:
 
 
 def s_junit_prior_report_intact(context: ScenarioContext) -> str:
-    """A finalization failure -> exit 3 AND the PRIOR report at PATH survives
-    unmodified. Unlike `--json` (which truncates its destination at open), JUnit
-    never touches PATH until the final atomic rename, so a doomed run leaves a
-    previous report exactly as it was.
+    """A finalization failure exits 3 AND the PRIOR report at PATH survives.
+
+    It survives unmodified. Unlike `--json` (which truncates its destination at
+    open), JUnit never touches PATH until the final atomic rename, so a doomed
+    run leaves a previous report exactly as it was.
     """
     tmp = tempfile.mkdtemp()
     target = os.path.join(tmp, "report.xml")
@@ -513,7 +523,10 @@ def s_junit_prior_report_intact(context: ScenarioContext) -> str:
         )
     finally:
         os.chmod(tmp, 0o700)
-    return "unwritable junit target -> exit 3 pre-run; the prior report survives byte-for-byte"
+    return (
+        "unwritable junit target -> exit 3 pre-run; the prior report survives "
+        "byte-for-byte"
+    )
 
 
 def s_junit_finalization_and_interrupt(context: ScenarioContext) -> str:

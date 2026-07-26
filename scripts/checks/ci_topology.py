@@ -28,6 +28,8 @@ HARNESS_CHECK_MODULES = (
     "scripts.checks.layout",
     "scripts.tests.test_ci_topology",
     "scripts.checks.ci_topology",
+    "scripts.tests.test_python_quality",
+    "scripts.tests.test_annotations_oracle",
 )
 
 COVERAGE_CAPABILITY_COMMAND = "python -m scripts.checks.coverage_capability"
@@ -445,7 +447,8 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
     expected_triggers = ["push", "pull_request", "workflow_dispatch"]
     if triggers != expected_triggers or "schedule:" in _yaml_block(workflow, "on:"):
         raise AssertionError(
-            f"CI workflow trigger mismatch: expected={expected_triggers}, actual={triggers}"
+            f"CI workflow trigger mismatch: expected={expected_triggers}, "
+            f"actual={triggers}"
         )
     if "    branches: [main, master]" not in _yaml_block(workflow, "on:"):
         raise AssertionError("CI push trigger no longer pins main and master")
@@ -461,7 +464,8 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
     ]
     if jobs != expected_jobs:
         raise AssertionError(
-            f"CI workflow job membership mismatch: expected={expected_jobs}, actual={jobs}"
+            f"CI workflow job membership mismatch: expected={expected_jobs}, "
+            f"actual={jobs}"
         )
     job_blocks = {name: _yaml_block(workflow, f"  {name}:") for name in jobs}
     expected_needs = {
@@ -491,7 +495,7 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
         "linux-test-matrix": "true",
         "macos-test-matrix": "false",
     }
-    for name, expected in matrices.items():
+    for name, expected_rows in matrices.items():
         job = job_blocks[name]
         expected_strategy = (
             "    strategy:\n"
@@ -504,10 +508,11 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
                 f"CI job {name!r} strategy/fail-fast layout mismatch: "
                 f"expected={expected_strategy!r}"
             )
-        actual = _matrix_rows(job)
-        if actual != expected:
+        actual_rows = _matrix_rows(job)
+        if actual_rows != expected_rows:
             raise AssertionError(
-                f"CI job {name!r} matrix mismatch: expected={expected}, actual={actual}"
+                f"CI job {name!r} matrix mismatch: "
+                f"expected={expected_rows}, actual={actual_rows}"
             )
         runs_on = re.findall(r"^    runs-on: (.+)$", job, re.MULTILINE)
         if runs_on != ["${{ matrix.runner }}"]:
@@ -623,12 +628,12 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
             "uses": "actions/upload-artifact@v4",
         },
     }
-    for name, expected in expected_linux_steps.items():
-        actual = _step_attributes(linux_matrix, name)
-        if actual != expected:
+    for name, expected_step in expected_linux_steps.items():
+        actual_step = _step_attributes(linux_matrix, name)
+        if actual_step != expected_step:
             raise AssertionError(
                 f"Linux matrix step {name!r} mismatch: "
-                f"expected={expected}, actual={actual}"
+                f"expected={expected_step}, actual={actual_step}"
             )
 
     required_linux_lines = [

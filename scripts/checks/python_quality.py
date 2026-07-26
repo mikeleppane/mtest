@@ -82,6 +82,31 @@ def _missing_uvx() -> str | None:
     )
 
 
+def quality_steps(*, fix: bool) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Return the ordered (label, argv) steps for one mode.
+
+    Split out from `main` so the step list is checkable without running the
+    tools: what matters is that check mode rewrites nothing and still runs
+    mypy, and that both modes pin their tool versions.
+
+    Args:
+        fix: True for the in-place mode, False for the verdict mode.
+
+    Returns:
+        The steps in fail-fast order.
+    """
+    if fix:
+        return (
+            ("ruff format", (*RUFF, "format", *TARGETS)),
+            ("ruff check --fix", (*RUFF, "check", "--fix", *TARGETS)),
+        )
+    return (
+        ("ruff format --check", (*RUFF, "format", "--check", *TARGETS)),
+        ("ruff check", (*RUFF, "check", *TARGETS)),
+        ("mypy --strict", MYPY),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the Python quality steps in fail-fast order.
 
@@ -107,19 +132,7 @@ def main(argv: list[str] | None = None) -> int:
         print(unavailable, file=sys.stderr)
         return 1
 
-    if fix:
-        steps = (
-            ("ruff format", (*RUFF, "format", *TARGETS)),
-            ("ruff check --fix", (*RUFF, "check", "--fix", *TARGETS)),
-        )
-    else:
-        steps = (
-            ("ruff format --check", (*RUFF, "format", "--check", *TARGETS)),
-            ("ruff check", (*RUFF, "check", *TARGETS)),
-            ("mypy --strict", MYPY),
-        )
-
-    for label, command in steps:
+    for label, command in quality_steps(fix=fix):
         if not _run(label, command):
             return 1
 

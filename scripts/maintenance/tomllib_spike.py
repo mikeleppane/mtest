@@ -235,7 +235,9 @@ def _expected_maps_stdout() -> str:
     """Return the target-specific no-config mapping report."""
     if sys.platform.startswith("linux"):
         return "libpython_mapped=false\n"
-    return "libpython_mapped=unsupported\n"
+    # mypy narrows `sys.platform` to the checking host (linux here) and calls
+    # this dead. It is the live branch on Darwin, so it stays.
+    return "libpython_mapped=unsupported\n"  # type: ignore[unreachable]
 
 
 def _require_success(
@@ -339,7 +341,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--warm-runs",
         type=int,
         default=DEFAULT_WARM_RUNS,
-        help=f"subsequent launches used for the warm median (default {DEFAULT_WARM_RUNS})",
+        help=(
+            "subsequent launches used for the warm median "
+            f"(default {DEFAULT_WARM_RUNS})"
+        ),
     )
     args = parser.parse_args(argv)
     if args.warm_runs < 1:

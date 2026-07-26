@@ -63,19 +63,20 @@ Usage:  pixi run package-check
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import glob
 import hashlib
 import json
 import os
+from pathlib import Path
 import platform
 import re
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
-from pathlib import Path
 
 from scripts.harness import dogfood
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PIXI_TOML = REPO_ROOT / "pixi.toml"
@@ -293,9 +294,7 @@ def verify_every_stage_ran() -> None:
             their declared order.
     """
     if completed_stages() != GATE_STAGE_IDS:
-        missing = [
-            stage for stage in GATE_STAGE_IDS if stage not in _COMPLETED_STAGES
-        ]
+        missing = [stage for stage in GATE_STAGE_IDS if stage not in _COMPLETED_STAGES]
         raise PackageCheckError(
             "the gate did not perform every stage it reports: ran "
             f"{list(completed_stages())}, expected {list(GATE_STAGE_IDS)}"
@@ -324,8 +323,10 @@ def repo_version() -> str:
 def _run_streamed(
     argv: list[str], *, cwd: Path, timeout: float, env: dict[str, str] | None = None
 ) -> int:
-    """Run `argv`, letting stdout/stderr pass straight through to ours (so the
-    transcript is visible live), with a hard wall-clock ceiling.
+    """Run `argv` with stdout/stderr passed straight through to ours.
+
+    Passing the streams through keeps the transcript visible live. The run is
+    held to a hard wall-clock ceiling.
 
     `env=None` means inherit this process's own environment unchanged --
     stages 1, 2, 4, and 5 rely on that to keep `mojo`/`rattler-build`/`pixi` on
@@ -402,9 +403,11 @@ def sole_built_artifact(
 
 
 def stage_build_local_channel(target: PackagePlatform | None = None) -> BuiltArtifact:
-    """Stage 1: build the recipe into the LOCAL channel via the unmodified
-    `package-build` pixi task. Wipes any prior channel dir first so this run's
-    artifact can never be mistaken for a stale one.
+    """Stage 1: build the recipe into the LOCAL channel.
+
+    Goes through the unmodified `package-build` pixi task, and wipes any prior
+    channel dir first so this run's artifact can never be mistaken for a stale
+    one.
 
     Args:
         target: Platform descriptor to build for; the host's when omitted.
@@ -416,13 +419,13 @@ def stage_build_local_channel(target: PackagePlatform | None = None) -> BuiltArt
         PackageCheckError: The build failed or produced no unique artifact.
     """
     resolved = host_platform() if target is None else target
-    _banner(
-        f"stage 1/6 -- build the package into a LOCAL channel ({resolved.subdir})"
-    )
+    _banner(f"stage 1/6 -- build the package into a LOCAL channel ({resolved.subdir})")
     if CONDA_CHANNEL_DIR.exists():
         shutil.rmtree(CONDA_CHANNEL_DIR)
 
-    code = _run_streamed(["pixi", "run", "package-build"], cwd=REPO_ROOT, timeout=BUILD_TIMEOUT)
+    code = _run_streamed(
+        ["pixi", "run", "package-build"], cwd=REPO_ROOT, timeout=BUILD_TIMEOUT
+    )
     if code != 0:
         raise PackageCheckError(f"`pixi run package-build` exited {code}")
 
@@ -438,9 +441,7 @@ def stage_build_local_channel(target: PackagePlatform | None = None) -> BuiltArt
     return artifact
 
 
-def scratch_manifest_text(
-    name: str, channel_dir: Path, artifact: BuiltArtifact
-) -> str:
+def scratch_manifest_text(name: str, channel_dir: Path, artifact: BuiltArtifact) -> str:
     """Render a throwaway pixi manifest pinned to one exact built artifact.
 
     The dependency is constrained to the produced version AND build string, and
@@ -551,9 +552,10 @@ def verify_installed_artifact_identity(
 
 
 def stage_install_from_local_channel(artifact: BuiltArtifact) -> Path:
-    """Stage 2: install the just-built package into a FRESH scratch pixi env
-    solving from CONDA_CHANNEL_DIR (+ modular/conda-forge), prove the installed
-    package IS that artifact, and confirm the solve pulled
+    """Stage 2: install the just-built package into a FRESH scratch pixi env.
+
+    Solves from CONDA_CHANNEL_DIR (+ modular/conda-forge), proves the installed
+    package IS that artifact, and confirms the solve pulled
     `mojo-compiler ==1.0.0b2` as a run dependency.
 
     Args:
@@ -587,7 +589,9 @@ def stage_install_from_local_channel(artifact: BuiltArtifact) -> Path:
 
     verify_installed_artifact_identity(env_prefix, artifact)
 
-    conda_meta = sorted((env_prefix / "conda-meta").glob("mojo-compiler-1.0.0b2-*.json"))
+    conda_meta = sorted(
+        (env_prefix / "conda-meta").glob("mojo-compiler-1.0.0b2-*.json")
+    )
     if not conda_meta:
         raise PackageCheckError(
             "install did NOT pull mojo-compiler ==1.0.0b2 as a run dependency -- "
@@ -641,14 +645,15 @@ def scrubbed_probe_env(target: PackagePlatform) -> dict[str, str]:
         "PATH": "/usr/bin:/bin",
         "HOME": os.environ.get("HOME", "/root"),
     }
-    env.update({name: "" for name in target.loader_env_names})
+    env.update(dict.fromkeys(target.loader_env_names, ""))
     return env
 
 
 def stage_loader_clean_probe(mtest_bin: Path, target: PackagePlatform) -> None:
-    """Stage 3: run the INSTALLED binary's `--version` and `--help` with our
-    own child environment scrubbed clean of the dev pixi env (PATH) and of this
-    platform's loader search paths.
+    """Stage 3: run the INSTALLED binary under a loader-clean child environment.
+
+    Probes `--version` and `--help` with our own child environment scrubbed
+    clean of the dev pixi env (PATH) and of this platform's loader search paths.
 
     This is us scrubbing OUR OWN subprocess environment to probe OUR OWN
     artifact -- not the forbidden child-env scrub inside the product itself.
@@ -681,6 +686,7 @@ def stage_loader_clean_probe(mtest_bin: Path, target: PackagePlatform) -> None:
             capture_output=True,
             text=True,
             timeout=PROBE_TIMEOUT,
+            check=False,
         )
     except FileNotFoundError as exc:
         # Diagnostics only: the executable probes below are the gate.
@@ -709,6 +715,7 @@ def stage_loader_clean_probe(mtest_bin: Path, target: PackagePlatform) -> None:
             capture_output=True,
             text=True,
             timeout=PROBE_TIMEOUT,
+            check=False,
         )
         print(result.stdout, end="", flush=True)
         if result.stderr:
@@ -729,7 +736,7 @@ def stage_loader_clean_probe(mtest_bin: Path, target: PackagePlatform) -> None:
 
     config_path = LOADER_PROBE_CWD / "mtest.toml"
     config_path.write_text(
-        "[run]\nstate = false\n[report]\ncolor = \"never\"\n",
+        '[run]\nstate = false\n[report]\ncolor = "never"\n',
         encoding="utf-8",
     )
     print(
@@ -749,10 +756,9 @@ def stage_loader_clean_probe(mtest_bin: Path, target: PackagePlatform) -> None:
         capture_output=True,
         text=True,
         timeout=PROBE_TIMEOUT,
+        check=False,
     )
-    if configured.returncode != 4 or not configured.stderr.startswith(
-        "discover:"
-    ):
+    if configured.returncode != 4 or not configured.stderr.startswith("discover:"):
         raise PackageCheckError(
             "installed config-present invocation did not parse natively before "
             f"the expected discovery refusal: exit "
@@ -850,21 +856,21 @@ def check_failing_fixture_consumption(
         (match.group("token"), match.group("path"))
         for match in VERDICT_ROW_RE.finditer(stdout)
     ]
-    pass_rows = [path for token, path in rows if token == "PASS"]
+    # S105 exempt: a console-band verdict token, never a credential.
+    pass_rows = [path for token, path in rows if token == "PASS"]  # noqa: S105
     if pass_rows:
         raise PackageCheckError(
             "installed mtest reported a PASS verdict row while consuming the "
             f"known-failing fixture: {pass_rows}"
         )
-    fail_rows = [path for token, path in rows if token == "FAIL"]
+    # S105 exempt: a console-band verdict token, never a credential.
+    fail_rows = [path for token, path in rows if token == "FAIL"]  # noqa: S105
     if fail_rows != [FAILING_FIXTURE]:
         raise PackageCheckError(
             f"installed mtest did not report exactly one FAIL row for "
             f"{FAILING_FIXTURE}: FAIL rows were {fail_rows}"
         )
-    foreign_rows = [
-        (token, path) for token, path in rows if path != FAILING_FIXTURE
-    ]
+    foreign_rows = [(token, path) for token, path in rows if path != FAILING_FIXTURE]
     if foreign_rows:
         raise PackageCheckError(
             f"installed mtest reported verdict rows for files other than "
@@ -954,9 +960,11 @@ def stage_failing_fixture_consumption(mtest_bin: Path, version: str) -> None:
 
 
 def stage_tarball_fallback_smoke(target: PackagePlatform | None = None) -> None:
-    """Stage 6: build the SAME recipe in the classic tar-bz2 package format
-    into its own local channel, install it into a second scratch env, and run
-    `--version` -- the fallback distribution form must work too.
+    """Stage 6: smoke-run the classic tar-bz2 package format.
+
+    Builds the SAME recipe into its own local channel, installs it into a second
+    scratch env, and runs `--version` -- the fallback distribution form must
+    work too.
 
     Args:
         target: Platform descriptor to build for; the host's when omitted.
@@ -990,9 +998,7 @@ def stage_tarball_fallback_smoke(target: PackagePlatform | None = None) -> None:
         raise PackageCheckError(f"tar-bz2 `rattler-build build` exited {code}")
 
     version = repo_version()
-    artifact = sole_built_artifact(
-        TARBALL_CHANNEL_DIR, version, resolved, ".tar.bz2"
-    )
+    artifact = sole_built_artifact(TARBALL_CHANNEL_DIR, version, resolved, ".tar.bz2")
     print(
         f"package-check: built tarball form {artifact.path.relative_to(REPO_ROOT)} "
         f"(build {artifact.build_string}, sha256 {artifact.sha256})",
@@ -1011,17 +1017,22 @@ def stage_tarball_fallback_smoke(target: PackagePlatform | None = None) -> None:
     env_prefix = TARBALL_ENV_DIR / ".pixi" / "envs" / "default"
     mtest_bin = env_prefix / "bin" / "mtest"
     if not mtest_bin.is_file():
-        raise PackageCheckError(f"tarball-installed env has no bin/mtest at {mtest_bin}")
+        raise PackageCheckError(
+            f"tarball-installed env has no bin/mtest at {mtest_bin}"
+        )
 
     verify_installed_artifact_identity(env_prefix, artifact)
 
-    print(f"$ {mtest_bin} --version (tarball-installed, full inherited env)", flush=True)
+    print(
+        f"$ {mtest_bin} --version (tarball-installed, full inherited env)", flush=True
+    )
     result = subprocess.run(
         [str(mtest_bin), "--version"],
         cwd=TARBALL_ENV_DIR,
         capture_output=True,
         text=True,
         timeout=SMOKE_TIMEOUT,
+        check=False,
     )
     print(result.stdout, end="", flush=True)
     if result.stderr:

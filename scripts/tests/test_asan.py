@@ -8,10 +8,16 @@ import io
 from pathlib import Path
 import subprocess
 import tempfile
+from typing import TYPE_CHECKING
 import unittest
 from unittest.mock import patch
 
+from scripts.checks import native_abi as native_abi_check
 from scripts.checks.memory import asan as asan_check
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class AsanCheckTests(unittest.TestCase):
@@ -44,9 +50,11 @@ class AsanCheckTests(unittest.TestCase):
         self.assertGreater(len(asan_check.TESTS), 0)
 
     def test_empty_source_inventory_is_rejected(self) -> None:
-        with patch.object(asan_check, "TESTS", ()):
-            with self.assertRaisesRegex(SystemExit, "source inventory is empty"):
-                asan_check.main()
+        with (
+            patch.object(asan_check, "TESTS", ()),
+            self.assertRaisesRegex(SystemExit, "source inventory is empty"),
+        ):
+            asan_check.main()
 
     def test_classified_suite_builds_generated_entrypoint(self) -> None:
         source = asan_check.ROOT / "tests" / "unit" / "test_config.mojo"
@@ -188,9 +196,9 @@ class AsanCliProbeTests(unittest.TestCase):
                 patch.object(asan_check, "CLI_BINARY", out / "mtest"),
                 patch.object(asan_check, "CLI_SCRATCH", out / "cli"),
                 patch.object(asan_check, "run", side_effect=results),
+                self.assertRaisesRegex(SystemExit, "ASan CLI is not instrumented"),
             ):
-                with self.assertRaisesRegex(SystemExit, "ASan CLI is not instrumented"):
-                    asan_check.check_cli({})
+                asan_check.check_cli({})
 
     def test_check_cli_actually_calls_the_instrumentation_check(self) -> None:
         """The witness must be ON the call path, not merely defined.
@@ -221,9 +229,9 @@ class AsanCliProbeTests(unittest.TestCase):
                 patch.object(asan_check, "CLI_SCRATCH", out / "cli"),
                 patch.object(asan_check, "run", side_effect=results),
                 patch.object(asan_check, "check_cli_probe_output", return_value="ok"),
+                self.assertRaisesRegex(SystemExit, "leak check did not run"),
             ):
-                with self.assertRaisesRegex(SystemExit, "leak check did not run"):
-                    asan_check.check_cli({})
+                asan_check.check_cli({})
 
     def test_a_run_without_the_leak_check_witness_is_rejected(self) -> None:
         """A silent run and a clean run must not be the same observation.
@@ -448,7 +456,7 @@ class AsanMainProbeRosterTests(unittest.TestCase):
         performed: list[str] = []
         compiled: list[str] = []
 
-        def probe(name: str):
+        def probe(name: str) -> Callable[[dict[str, str]], None]:
             def run(env: dict[str, str]) -> None:
                 performed.append(name)
                 self.assertIn("ASAN_OPTIONS", env)
@@ -460,7 +468,7 @@ class AsanMainProbeRosterTests(unittest.TestCase):
             with (
                 patch.object(asan_check, "OUT", out),
                 patch.object(asan_check, "TESTS", (Path("tests/unit/a.mojo"),)),
-                patch.object(asan_check, "compile_native", lambda cc: None),
+                patch.object(asan_check, "compile_native", lambda _cc: None),
                 patch.object(asan_check, "check_controls", probe("controls")),
                 patch.object(
                     asan_check, "check_production_exec", probe("production-exec")
@@ -469,9 +477,9 @@ class AsanMainProbeRosterTests(unittest.TestCase):
                 patch.object(
                     asan_check,
                     "compile_and_run_test",
-                    lambda source, env: compiled.append(source.name),
+                    lambda source, _env: compiled.append(source.name),
                 ),
-                patch.object(asan_check.native_abi_check, "compiler", lambda: "clang"),
+                patch.object(native_abi_check, "compiler", lambda: "clang"),
             ):
                 with contextlib.redirect_stdout(io.StringIO()) as captured:
                     code = asan_check.main()

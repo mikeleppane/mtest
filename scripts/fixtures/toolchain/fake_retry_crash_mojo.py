@@ -176,6 +176,17 @@ def _retry_build_succeeds(args: list[str]) -> int:
 
 
 def main() -> int:
+    """Hang the first `build`, succeed on the retry, exec anything else.
+
+    The marker file left by the first attempt is what makes the two builds
+    differ, so the retry path is chosen by observed state rather than by argv.
+
+    Returns:
+        0 once the retry has written a working binary, 1 when a build argv could
+        not be understood or the first attempt slept unkilled, or 127 when no
+        real `mojo` is on PATH. Any non-`build` subcommand `os.execv`s the real
+        compiler, so this function does not return for those.
+    """
     args = sys.argv[1:]
     if len(args) > 0 and args[0] == "build":
         if os.path.exists(MARKER):
@@ -188,7 +199,10 @@ def main() -> int:
         return 127
 
     os.execv(real_mojo, [real_mojo, *args])
-    return 1  # unreachable: a successful os.execv never returns
+    # Kept as defence in depth: typeshed types os.execv as NoReturn, so mypy
+    # sees this as dead. Deleting it would remove the fallback if that ever
+    # changes.
+    return 1  # type: ignore[unreachable]
 
 
 if __name__ == "__main__":

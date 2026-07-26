@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Echo the child's full environment as `KEY=VALUE` lines, then exit 0.
+r"""Echo the child's full environment as `KEY=VALUE` lines, then exit 0.
 
 Every entry of `os.environ` is written to stdout as `KEY=VALUE\n` in raw bytes,
 nothing added and nothing filtered, so a test can assert the exact presence,

@@ -36,12 +36,12 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
             ("VENDORED_TOML_PATHS", layout.check_vendored_toml_layout),
         )
         for name, check in cases:
-            with self.subTest(inventory=name):
-                with mock.patch.object(layout, name, ()):
-                    with self.assertRaisesRegex(
-                        AssertionError, "intended inventory is empty"
-                    ):
-                        check()
+            with (
+                self.subTest(inventory=name),
+                mock.patch.object(layout, name, ()),
+                self.assertRaisesRegex(AssertionError, "intended inventory is empty"),
+            ):
+                check()
 
     def test_top_level_script_membership_is_exact(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-layout-") as raw_tmp:
@@ -153,18 +153,21 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
             "tests/unit/helper.mojo",
         )
         for relative in cases:
-            with self.subTest(escape=relative):
-                with tempfile.TemporaryDirectory() as raw_tmp:
-                    repo = Path(raw_tmp)
-                    self._accepted_tree(repo)
-                    (repo / relative).write_text("", encoding="utf-8")
+            with (
+                self.subTest(escape=relative),
+                tempfile.TemporaryDirectory() as raw_tmp,
+            ):
+                repo = Path(raw_tmp)
+                self._accepted_tree(repo)
+                (repo / relative).write_text("", encoding="utf-8")
 
-                    with mock.patch.object(
-                        layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)
-                    ), self.assertRaisesRegex(
+                with (
+                    mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)),
+                    self.assertRaisesRegex(
                         AssertionError, "unexpected classified Mojo file"
-                    ):
-                        layout.check_classified_mojo_inventory(repo)
+                    ),
+                ):
+                    layout.check_classified_mojo_inventory(repo)
 
     def test_symlinked_classified_paths_are_rejected(self) -> None:
         cases = (
@@ -172,19 +175,20 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
             ("tests/unit/linked", "tests/integration"),
         )
         for relative, target in cases:
-            with self.subTest(link=relative):
-                with tempfile.TemporaryDirectory() as raw_tmp:
-                    repo = Path(raw_tmp)
-                    self._accepted_tree(repo)
-                    (repo / "outside.mojo").write_text("", encoding="utf-8")
-                    os.symlink(repo / target, repo / relative)
+            with (
+                self.subTest(link=relative),
+                tempfile.TemporaryDirectory() as raw_tmp,
+            ):
+                repo = Path(raw_tmp)
+                self._accepted_tree(repo)
+                (repo / "outside.mojo").write_text("", encoding="utf-8")
+                os.symlink(repo / target, repo / relative)
 
-                    with mock.patch.object(
-                        layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)
-                    ), self.assertRaisesRegex(
-                        AssertionError, "symlinked classified path"
-                    ):
-                        layout.check_classified_mojo_inventory(repo)
+                with (
+                    mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)),
+                    self.assertRaisesRegex(AssertionError, "symlinked classified path"),
+                ):
+                    layout.check_classified_mojo_inventory(repo)
 
     def test_an_unreadable_classified_subtree_is_an_error_not_an_absence(
         self,
@@ -201,9 +205,11 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
             try:
                 with self.assertRaises(PermissionError):
                     layout.classified_mojo_universe(repo)
-                with mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)):
-                    with self.assertRaises(PermissionError):
-                        layout.check_classified_mojo_inventory(repo)
+                with (
+                    mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)),
+                    self.assertRaises(PermissionError),
+                ):
+                    layout.check_classified_mojo_inventory(repo)
             finally:
                 hidden.chmod(0o700)
 
@@ -218,11 +224,11 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
             _regular, symlinked = layout.classified_mojo_universe(repo)
             self.assertEqual(symlinked, {Path("tests/unit")})
 
-            with mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)):
-                with self.assertRaisesRegex(
-                    AssertionError, "symlinked classified path"
-                ):
-                    layout.check_classified_mojo_inventory(repo)
+            with (
+                mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)),
+                self.assertRaisesRegex(AssertionError, "symlinked classified path"),
+            ):
+                layout.check_classified_mojo_inventory(repo)
 
     def test_a_registered_suite_that_vanished_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -230,11 +236,11 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
             self._accepted_tree(repo)
             (repo / self.SOLE_SUITE).unlink()
 
-            with mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)):
-                with self.assertRaisesRegex(
-                    AssertionError, "missing classified Mojo file"
-                ):
-                    layout.check_classified_mojo_inventory(repo)
+            with (
+                mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)),
+                self.assertRaisesRegex(AssertionError, "missing classified Mojo file"),
+            ):
+                layout.check_classified_mojo_inventory(repo)
 
     def test_repository_suite_layout_walks_the_repository_universe(self) -> None:
         roots: list[Path] = []
@@ -286,12 +292,13 @@ class AggregateMembershipOracleTests(unittest.TestCase):
             repo = Path(raw_tmp)
             paths = self._fixture(repo)
 
-            with mock.patch.object(
-                aggregate,
-                "test_function_names",
-                return_value=["test_alpha", "test_gamma"],
-            ), self.assertRaisesRegex(
-                AssertionError, "registration membership/order"
+            with (
+                mock.patch.object(
+                    aggregate,
+                    "test_function_names",
+                    return_value=["test_alpha", "test_gamma"],
+                ),
+                self.assertRaisesRegex(AssertionError, "registration membership/order"),
             ):
                 layout.check_classified_entrypoint(repo, paths, expected_count=2)
 
@@ -300,12 +307,13 @@ class AggregateMembershipOracleTests(unittest.TestCase):
             repo = Path(raw_tmp)
             paths = self._fixture(repo)
 
-            with mock.patch.object(
-                aggregate,
-                "test_function_names",
-                return_value=["test_beta", "test_alpha"],
-            ), self.assertRaisesRegex(
-                AssertionError, "registration membership/order"
+            with (
+                mock.patch.object(
+                    aggregate,
+                    "test_function_names",
+                    return_value=["test_beta", "test_alpha"],
+                ),
+                self.assertRaisesRegex(AssertionError, "registration membership/order"),
             ):
                 layout.check_classified_entrypoint(repo, paths, expected_count=2)
 

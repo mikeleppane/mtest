@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+from typing import NoReturn
 
 from scripts.checks import native_abi as native_abi_check
 from scripts.checks.reports import json_stream as json_stream_oracle
@@ -89,9 +90,9 @@ The ASan lane runs this suite unchanged: LeakSanitizer does not track
 descriptors, so the deliberate `EBADF` calls are inert there."""
 
 TESTS = (
-    tuple(sorted(EXEC_TEST_ROOT.glob("test_exec_*.mojo")))
-    + (CONFIG_TEST,)
-    + REPORT_TESTS
+    *tuple(sorted(EXEC_TEST_ROOT.glob("test_exec_*.mojo"))),
+    CONFIG_TEST,
+    *REPORT_TESTS,
 )
 VALGRIND_FLAGS = (
     "--tool=memcheck",
@@ -304,10 +305,23 @@ def run(
     )
 
 
+def fail(message: str) -> NoReturn:
+    """Fail the memory gate with one actionable diagnostic.
+
+    Args:
+        message: The diagnostic, printed after the `valgrind-check: ` prefix.
+
+    Raises:
+        SystemExit: Always. Declaring that here is what lets a caller narrow a
+            value it has just required to be present.
+    """
+    raise SystemExit(f"valgrind-check: {message}")
+
+
 def require(condition: bool, message: str) -> None:
     """Fail the memory gate with one actionable diagnostic."""
     if not condition:
-        raise SystemExit(f"valgrind-check: {message}")
+        fail(message)
 
 
 def clean_environment() -> dict[str, str]:
@@ -528,7 +542,7 @@ def check_native_tests(env: dict[str, str]) -> None:
             for value in re.findall(r"ERROR SUMMARY: ([0-9,]+) errors", postfork.stdout)
         ]
         require(
-            summaries and all(value == 0 for value in summaries),
+            bool(summaries) and all(value == 0 for value in summaries),
             f"{source.name} post-fork errors: {summaries}",
         )
         print(f"valgrind-native: {source.name}: passed")
@@ -577,7 +591,8 @@ def leak_records(log: str, kinds: str, label: str) -> list[str]:
 def parse_reachable(output: str, source: Path) -> None:
     """Require the reviewed pinned Mojo-runtime reachable-allocation baseline."""
     match = re.search(r"still reachable: ([0-9,]+) bytes in ([0-9,]+) blocks", output)
-    require(match is not None, f"{source.name} has no reachable summary")
+    if match is None:
+        fail(f"{source.name} has no reachable summary")
     got = (int(match.group(1).replace(",", "")), int(match.group(2).replace(",", "")))
     require(
         got == EXPECTED_REACHABLE,
@@ -649,7 +664,7 @@ def check_postfork_output(
         int(value.replace(",", ""))
         for value in re.findall(r"ERROR SUMMARY: ([0-9,]+) errors", result.stdout)
     ]
-    require(summaries, f"{source.name} post-fork audit has no Memcheck summary")
+    require(bool(summaries), f"{source.name} post-fork audit has no Memcheck summary")
     require(
         all(value == 0 for value in summaries),
         f"{source.name} post-fork audit reported errors: {summaries}",

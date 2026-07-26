@@ -37,6 +37,7 @@ load-specific by nature; the table's shape is fixed, its numbers are not.
 from __future__ import annotations
 
 import argparse
+import contextlib
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -125,7 +126,7 @@ def _slice_evenly(names: list[str], parts: int) -> list[list[str]]:
     return [s for s in slices if s]
 
 
-def _spawn(argv: list[str], cwd: Path, cache_dir: Path) -> subprocess.Popen:
+def _spawn(argv: list[str], cwd: Path, cache_dir: Path) -> subprocess.Popen[bytes]:
     """Spawn one mtest process with a quarantined cache and mojo on PATH."""
     env = dict(os.environ)
     env["MODULAR_CACHE_DIR"] = str(cache_dir)
@@ -140,23 +141,21 @@ def _spawn(argv: list[str], cwd: Path, cache_dir: Path) -> subprocess.Popen:
     )
 
 
-def _await(procs: list[subprocess.Popen]) -> None:
+def _await(procs: list[subprocess.Popen[bytes]]) -> None:
     """Wait for every process under one deadline; kill the group on overrun."""
     deadline = time.monotonic() + RUN_TIMEOUT
     for proc in procs:
         remaining = deadline - time.monotonic()
         try:
             proc.wait(timeout=max(0.0, remaining))
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             for other in procs:
                 if other.poll() is None:
-                    try:
+                    with contextlib.suppress(ProcessLookupError):
                         os.killpg(os.getpgid(other.pid), 9)
-                    except ProcessLookupError:
-                        pass
             raise SystemExit(
                 f"bench-workers: a run exceeded {RUN_TIMEOUT:.0f}s; aborting"
-            )
+            ) from exc
 
 
 def run_once(
@@ -182,7 +181,7 @@ def run_once(
         return time.monotonic() - start
     slices = _slice_evenly(names, workers)
     start = time.monotonic()
-    procs: list[subprocess.Popen] = []
+    procs: list[subprocess.Popen[bytes]] = []
     for i, slice_names in enumerate(slices):
         cache = cache_root / f"off-{i}"
         cache.mkdir(parents=True, exist_ok=True)
@@ -243,11 +242,15 @@ def format_table(cells: list[Cell], cores: int, files: int, reps: int) -> str:
             baseline[cell.temp] = cell.median_seconds
     lines = [
         "mtest worker-sizing benchmark",
-        f"machine: {cores} logical cores | tree: {files} files | "
-        f"reps: {reps} (median reported)",
+        (
+            f"machine: {cores} logical cores | tree: {files} files | "
+            f"reps: {reps} (median reported)"
+        ),
         "",
-        f"{'workers':>7}  {'tokens':<6}  {'temp':<4}  "
-        f"{'median_s':>9}  {'speedup_vs_-n1':>14}",
+        (
+            f"{'workers':>7}  {'tokens':<6}  {'temp':<4}  "
+            f"{'median_s':>9}  {'speedup_vs_-n1':>14}"
+        ),
     ]
     for cell in cells:
         base = baseline.get(cell.temp)

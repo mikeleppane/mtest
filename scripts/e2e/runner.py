@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import time
+from typing import Any
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -120,7 +121,9 @@ def limit_nofile(soft: int) -> Callable[[], None]:
     """
 
     def apply() -> None:
-        import resource
+        # Deliberately function-local: this runs in the forked child, so the
+        # import belongs to the child's `preexec_fn`, not to module scope.
+        import resource  # noqa: PLC0415
 
         _old_soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
@@ -203,6 +206,10 @@ class E2ERunner:
             child_env.update(env_overrides)
         wall_limit = self.default_timeout if timeout is None else timeout
         start = time.monotonic()
+        # `preexec_fn` is load-bearing: a CHILD-ONLY descriptor limit can only
+        # be set between the fork and the exec, and this harness is not
+        # threaded, so the rule's thread caveat does not apply.
+        preexec = None if fd_limit is None else limit_nofile(fd_limit)
         proc = subprocess.Popen(
             argv,
             cwd=os.fspath(self.repo_root),
@@ -211,18 +218,18 @@ class E2ERunner:
             text=True,
             start_new_session=True,
             env=child_env,
-            preexec_fn=None if fd_limit is None else limit_nofile(fd_limit),
+            preexec_fn=preexec,  # noqa: PLW1509
         )
         pgid = os.getpgid(proc.pid)
         try:
             out, err = proc.communicate(timeout=wall_limit)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             self.kill_group(proc)
             out, err = proc.communicate()
             raise ScenarioError(
                 f"mtest did not return within {wall_limit}s for argv {argv} — "
                 "killed its process group (possible runner hang)"
-            )
+            ) from exc
         return Run(
             argv=argv,
             returncode=proc.returncode,
@@ -297,13 +304,13 @@ class E2ERunner:
         remaining = max(0.0, deadline - time.monotonic())
         try:
             returncode = proc.wait(timeout=remaining)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             self.kill_group(proc)
             proc.wait(timeout=5)
             raise ScenarioError(
                 f"mtest closed its pty but never exited for argv {argv} — "
                 "killed its process group (possible runner hang)"
-            )
+            ) from exc
         return returncode, bytes(out)
 
     def run_mtest_signaled(
@@ -417,7 +424,10 @@ class E2ERunner:
                 )
             if proc.poll() is not None:
                 stdout, stderr = proc.communicate()
-                raise ScenarioError(
+                # The `except BaseException` below is the sweep that keeps this
+                # failure from stranding an armed actor, so the raise has to
+                # happen inside the try, not in a helper outside it.
+                raise ScenarioError(  # noqa: TRY301
                     f"mtest exited before signal {signal_number} could be sent: "
                     f"{argv}\n{stdout}\n{stderr}"
                 )
@@ -433,13 +443,13 @@ class E2ERunner:
                 stdout, stderr = proc.communicate(
                     timeout=max(0.0, deadline - time.monotonic())
                 )
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as exc:
                 self.kill_group(proc)
                 stdout, stderr = proc.communicate()
                 raise ScenarioError(
                     f"mtest did not exit within {timeout}s after signal "
                     f"{signal_number}: {argv}\n{stdout}\n{stderr}"
-                )
+                ) from exc
             exited_at = time.monotonic()
         except BaseException:
             # The armed actors live in process groups of their own, which
@@ -491,7 +501,7 @@ class E2ERunner:
 
     def _await_barrier(
         self,
-        proc: subprocess.Popen,
+        proc: subprocess.Popen[str],
         argv: list[str],
         paths: tuple[str, ...],
         deadline: float,
@@ -677,12 +687,12 @@ class E2ERunner:
             os.close(stderr_master)
         try:
             returncode = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             self.kill_group(proc)
             proc.wait(timeout=5)
             raise ScenarioError(
                 f"mtest closed split capture streams but never exited for argv {argv}"
-            )
+            ) from exc
         return returncode, bytes(stdout), bytes(stderr)
 
     def run_mtest_dead_pipe(
@@ -714,7 +724,8 @@ class E2ERunner:
         deadline = time.monotonic() + wall_limit
         captured = bytearray()
         try:
-            assert proc.stdout is not None
+            if proc.stdout is None:
+                raise AssertionError
             stdout_fd = proc.stdout.fileno()
             while len(captured) < read_size:
                 remaining = deadline - time.monotonic()
@@ -735,19 +746,19 @@ class E2ERunner:
             proc.stdout.close()
             try:
                 returncode = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as exc:
                 self.kill_group(proc)
                 proc.wait(timeout=5)
                 raise ScenarioError(
                     f"mtest did not exit after its stdout pipe closed: {argv}"
-                )
+                ) from exc
         finally:
             if proc.poll() is None:
                 self.kill_group(proc)
         return returncode, bytes(captured), pgid
 
     @staticmethod
-    def kill_group(proc: subprocess.Popen) -> None:
+    def kill_group(proc: subprocess.Popen[str] | subprocess.Popen[bytes]) -> None:
         """Terminate, then kill, the process group containing ``proc``.
 
         Darwin excludes zombies when it iterates process-group members, then
@@ -777,7 +788,7 @@ ScenarioRegistry = tuple[tuple[str, Scenario], ...]
 class ScenarioContext:
     """Immutable access to one run's manifest, runner, and master registry."""
 
-    manifest: dict
+    manifest: dict[str, Any]
     registry: ScenarioRegistry
     runner: E2ERunner = field(default_factory=E2ERunner)
 
@@ -785,10 +796,11 @@ class ScenarioContext:
 DEFAULT_RUNNER = E2ERunner()
 
 
-def load_manifest() -> dict:
+def load_manifest() -> dict[str, Any]:
     """Load the committed E2E manifest."""
     with open(MANIFEST_PATH, encoding="utf-8") as manifest_file:
-        return json.load(manifest_file)
+        manifest: dict[str, Any] = json.load(manifest_file)
+        return manifest
 
 
 def discovered_test_files() -> set[str]:

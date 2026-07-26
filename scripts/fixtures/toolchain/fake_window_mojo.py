@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Window-recording `--mojo` stand-in — proves builds overlap under the pool.
+r"""Window-recording `--mojo` stand-in — proves builds overlap under the pool.
 
 Test-only toolchain shim. Passing this file to `mtest --mojo` routes every child
 `mojo build`/`mojo precompile` spawn through this script first, exactly as the
@@ -9,8 +9,8 @@ build's wall-clock window so the harness can prove two builds ran concurrently.
 So it SPAWN-AND-WAITs the real compiler instead of exec-replacing itself:
 
 1. `MTEST_WINDOW_LOG` names an append log. On a `build`/`precompile` subcommand it
-   appends `build\\t<target>\\t<start_monotonic>` before the compile and
-   `build\\t<target>\\t<end_monotonic>\\t<returncode>` after it. Unset → the shim
+   appends `build\t<target>\t<start_monotonic>` before the compile and
+   `build\t<target>\t<end_monotonic>\t<returncode>` after it. Unset → the shim
    is a transparent passthrough that records nothing.
 2. A BUILD FLOOR (`MTEST_WINDOW_BUILD_FLOOR` seconds, default 0.3) keeps every
    window observably wide. It floors the WALL time from the start stamp to the
@@ -29,6 +29,7 @@ the pure-Mojo product.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import signal
@@ -75,16 +76,31 @@ def _forward_signal(signum: int, _frame: object) -> None:
             child.send_signal(signum)
             child.wait(timeout=5.0)
         except (ProcessLookupError, subprocess.TimeoutExpired):
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 child.kill()
-            except ProcessLookupError:
-                pass
     os._exit(128 + signum)
 
 
-def _run_build(real_mojo: str, subcommand: str, args: list[str]) -> int:
-    """Spawn the real compiler, stamp both window edges, and floor the window."""
-    global _child
+def _run_build(real_mojo: str, _subcommand: str, args: list[str]) -> int:
+    """Spawn the real compiler, stamp both window edges, and floor the window.
+
+    Both compile subcommands are stamped under the single literal `build` tag,
+    which is what `scripts.e2e.scenarios.parallel` filters records on, so the
+    caller's subcommand word is accepted and deliberately not recorded.
+
+    Args:
+        real_mojo: Absolute path to the real compiler to spawn and wait on.
+        _subcommand: The `build`/`precompile` word, unused by design (see above).
+        args: The wrapper's argv tail, passed to the real compiler untouched.
+            `args[1]`, when present, is the target source path used as the
+            window's key in the log.
+
+    Returns:
+        The real compiler's exit code.
+    """
+    # The signal handler installed below must reach the spawned child, and a
+    # handler can only see module state.
+    global _child  # noqa: PLW0603
     log_path = os.environ.get(LOG_ENV_VAR)
     target = args[1] if len(args) > 1 else ""
 
@@ -111,6 +127,13 @@ def _run_build(real_mojo: str, subcommand: str, args: list[str]) -> int:
 
 
 def main() -> int:
+    """Record a window around a compile, or exec the real compiler untouched.
+
+    Returns:
+        127 when no real `mojo` is on PATH, or the real compiler's exit code for
+        a `build`/`precompile` window. Every other subcommand `os.execv`s the
+        real compiler, so this function does not return for those.
+    """
     args = sys.argv[1:]
     real_mojo = shutil.which("mojo")
     if real_mojo is None:
@@ -121,7 +144,10 @@ def main() -> int:
         return _run_build(real_mojo, args[0], args)
 
     os.execv(real_mojo, [real_mojo, *args])
-    return 1  # unreachable: a successful os.execv never returns
+    # Kept as defence in depth: typeshed types os.execv as NoReturn, so mypy
+    # sees this as dead. Deleting it would remove the fallback if that ever
+    # changes.
+    return 1  # type: ignore[unreachable]
 
 
 if __name__ == "__main__":

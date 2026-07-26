@@ -144,7 +144,9 @@ def _write_actor(out: str, canonical: str, names: list[str]) -> None:
             )
         )
     mode = os.stat(out).st_mode
-    os.chmod(out, mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    # S103 is expected: mtest spawns this build product as a binary, so the
+    # execute bits are what makes the fixture mean anything.
+    os.chmod(out, mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)  # noqa: S103
 
 
 def main() -> int:

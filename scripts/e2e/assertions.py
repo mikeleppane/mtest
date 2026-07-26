@@ -20,11 +20,15 @@ import importlib.util
 import os
 from pathlib import Path
 import re
-from types import ModuleType
-from xml.etree import ElementTree
+from typing import TYPE_CHECKING, cast
+from xml.etree import ElementTree as ET
 
 from scripts.checks.reports import json_stream as json_stream_check
 from scripts.e2e.runner import REPO_ROOT, Run, ScenarioError
+
+
+if TYPE_CHECKING:
+    from types import ModuleType
 
 
 SUMMARY_RE = re.compile(
@@ -48,7 +52,7 @@ VERDICT_TO_BUCKET = {
     "TIMEOUT": "timed_out",
     "COMPILE-ERROR": "compile_error",
 }
-VERDICT_LINE_TOKENS = list(VERDICT_TO_BUCKET) + ["NO-TESTS"]
+VERDICT_LINE_TOKENS = [*list(VERDICT_TO_BUCKET), "NO-TESTS"]
 VERDICT_LINE_RE = re.compile(
     r"^(?:"
     + "|".join(re.escape(token) for token in VERDICT_LINE_TOKENS)
@@ -325,14 +329,19 @@ def stream_files(text: str) -> StreamFiles:
     started: list[str] = []
     finished: dict[str, str] = {}
     summary: dict[str, int] = {}
+    # `parse_stream` has already rejected anything the v1 schema does not allow,
+    # so these fields are the types the schema gives them. The casts state that
+    # guarantee for the checker; deciding it again here would be a second,
+    # weaker copy of the strict consumer.
     for record in report.records:
         event = record.get("event")
         if event == "file_started":
-            started.append(record.get("path", ""))
+            started.append(cast("str", record.get("path", "")))
         elif event == "file_finished":
-            finished[record.get("path", "")] = record.get("outcome", "")
+            finished_path = cast("str", record.get("path", ""))
+            finished[finished_path] = cast("str", record.get("outcome", ""))
         elif event == "session_finished":
-            summary = dict(record.get("summary", {}))
+            summary = dict(cast("dict[str, int]", record.get("summary", {})))
     return StreamFiles(
         started=tuple(started),
         finished=finished,
@@ -351,7 +360,7 @@ def junit_not_run_files(path: str | Path) -> tuple[str, ...]:
     Returns:
         Each suite name whose only row is the not-run marker.
     """
-    root = ElementTree.parse(os.fspath(path)).getroot()
+    root = ET.parse(os.fspath(path)).getroot()
     suites = root.iter("testsuite") if root.tag != "testsuite" else [root]
     names: list[str] = []
     for suite in suites:

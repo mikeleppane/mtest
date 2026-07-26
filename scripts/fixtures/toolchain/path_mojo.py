@@ -118,7 +118,10 @@ def main() -> int:
         print(f"path_mojo.py: {error}", file=sys.stderr)
         return 127
     os.execv(real, [real, *sys.argv[1:]])
-    return 1  # unreachable: a successful os.execv never returns
+    # Kept as defence in depth: typeshed types os.execv as NoReturn, so mypy
+    # sees this as dead. Deleting it would remove the fallback if that ever
+    # changes.
+    return 1  # type: ignore[unreachable]
 
 
 if __name__ == "__main__":

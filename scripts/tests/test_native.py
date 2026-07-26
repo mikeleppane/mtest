@@ -31,9 +31,11 @@ class NativeCheckCommandTests(unittest.TestCase):
         self.assertGreater(len(native_check.TEST_SOURCES), 0)
 
     def test_empty_source_inventory_is_rejected(self) -> None:
-        with mock.patch.object(native_check, "TEST_SOURCES", ()):
-            with self.assertRaisesRegex(SystemExit, "source inventory is empty"):
-                native_check.main()
+        with (
+            mock.patch.object(native_check, "TEST_SOURCES", ()),
+            self.assertRaisesRegex(SystemExit, "source inventory is empty"),
+        ):
+            native_check.main()
 
     def test_darwin_link_uses_system_driver_and_precompiled_objects(self) -> None:
         command = native_check.link_command(

@@ -60,14 +60,12 @@ class CiTopologyTests(unittest.TestCase):
 
     def test_contributor_workflow_is_documented_without_legacy_aliases(self) -> None:
         readme = (ci_topology.REPO_ROOT / "README.md").read_text(encoding="utf-8")
-        expected = "\n".join(
-            (
-                "$ pixi run fmt",
-                "$ pixi run test-file -- PATH",
-                "$ pixi run test",
-                "$ pixi run e2e",
-                "$ pixi run ci",
-            )
+        expected = (
+            "$ pixi run fmt\n"
+            "$ pixi run test-file -- PATH\n"
+            "$ pixi run test\n"
+            "$ pixi run e2e\n"
+            "$ pixi run ci"
         )
         self.assertIn(expected, readme)
         for relative in (
@@ -86,9 +84,12 @@ class CiTopologyTests(unittest.TestCase):
     def test_obsolete_test_alias_mutation_is_rejected(self) -> None:
         source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
         mutated = source.replace(
-            'test = "python -m scripts.harness.classified tests/unit tests/integration"',
-            'test-direct = "python -m scripts.harness.classified tests/unit tests/integration"\n'
-            'test = "python -m scripts.harness.classified tests/unit tests/integration"',
+            'test = "python -m scripts.harness.classified tests/unit '
+            'tests/integration"',
+            'test-direct = "python -m scripts.harness.classified tests/unit '
+            'tests/integration"\n'
+            'test = "python -m scripts.harness.classified tests/unit '
+            'tests/integration"',
             1,
         )
         self.assertNotEqual(mutated, source)

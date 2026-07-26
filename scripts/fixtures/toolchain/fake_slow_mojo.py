@@ -92,6 +92,14 @@ def _slow_compile(subcommand: str, args: list[str]) -> int:
 
 
 def main() -> int:
+    """Slow a compile past every deadline, or exec the real compiler untouched.
+
+    Returns:
+        1 if a `build`/`precompile` somehow slept its full sleep with no deadline
+        firing, or 127 when no real `mojo` is on PATH. Every other subcommand
+        `os.execv`s the real compiler, so this function does not return for
+        those.
+    """
     args = sys.argv[1:]
     if len(args) > 0 and args[0] in ("build", "precompile"):
         return _slow_compile(args[0], args)
@@ -102,7 +110,10 @@ def main() -> int:
         return 127
 
     os.execv(real_mojo, [real_mojo, *args])
-    return 1  # unreachable: a successful os.execv never returns
+    # Kept as defence in depth: typeshed types os.execv as NoReturn, so mypy
+    # sees this as dead. Deleting it would remove the fallback if that ever
+    # changes.
+    return 1  # type: ignore[unreachable]
 
 
 if __name__ == "__main__":

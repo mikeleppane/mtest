@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+from typing import Any
 
 from scripts.e2e.assertions import expect, expect_exit
 from scripts.e2e.runner import (
@@ -20,6 +21,7 @@ from scripts.e2e.runner import (
     SHORT_TIMEOUT,
     STATE_PERSISTENCE_FAULT,
     E2ERunner,
+    Run,
     ScenarioContext,
     ScenarioError,
 )
@@ -56,8 +58,8 @@ def _clean_project_runtime() -> None:
     shutil.rmtree(PROJECT / "build", ignore_errors=True)
 
 
-def _started_record(stream_path: Path) -> dict:
-    records = [
+def _started_record(stream_path: Path) -> dict[str, Any]:
+    records: list[dict[str, Any]] = [
         json.loads(line)
         for line in stream_path.read_text(encoding="utf-8").splitlines()
     ]
@@ -69,7 +71,7 @@ def _started_record(stream_path: Path) -> dict:
 
 def _run_stream(
     runner: E2ERunner, args: list[str], stream_path: Path
-) -> tuple[object, dict]:
+) -> tuple[Run, dict[str, Any]]:
     run = runner.run_mtest(
         [*args, "--json", os.fspath(stream_path), "--gh-annotations", "off"]
     )
@@ -422,9 +424,11 @@ def s_config_diagnostics(context: ScenarioContext) -> str:
             ),
             (
                 "hostile-build-value.toml",
-                "[build]\n"
-                'build-args = ["-o=SENTINEL\\nFAIL config: forged'
-                '\\u001b\\u0003"]\n',
+                (
+                    "[build]\n"
+                    'build-args = ["-o=SENTINEL\\nFAIL config: forged'
+                    '\\u001b\\u0003"]\n'
+                ),
             ),
             ("report-negative.toml", "[report]\ndurations = -1\n"),
             ("report-float.toml", "[report]\ncolor = 1.5\n"),
@@ -444,8 +448,10 @@ def s_config_diagnostics(context: ScenarioContext) -> str:
             ),
             (
                 "oversized-override.toml",
-                '[[override]]\nfiles = "*"\n'
-                "timeout = 999999999999999999999999999999999999\n",
+                (
+                    '[[override]]\nfiles = "*"\n'
+                    "timeout = 999999999999999999999999999999999999\n"
+                ),
             ),
             ("malformed\nFAIL config: forged\x1b.toml", "[run\n"),
             (
@@ -669,13 +675,13 @@ def _build_state_persistence_fault(directory: str) -> str:
         )
         try:
             output, _ = process.communicate(timeout=SHORT_TIMEOUT)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             E2ERunner.kill_group(process)
             output, _ = process.communicate()
             raise ScenarioError(
                 "the state-persistence fault interposer did not "
                 f"{action} within {SHORT_TIMEOUT}s:\n{output}"
-            )
+            ) from exc
         expect(
             process.returncode == 0,
             "could not "
@@ -727,13 +733,13 @@ def _build_config_open_fault(directory: str) -> str:
         )
         try:
             output, _ = process.communicate(timeout=SHORT_TIMEOUT)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             E2ERunner.kill_group(process)
             output, _ = process.communicate()
             raise ScenarioError(
                 "the configuration-open fault interposer did not "
                 f"{action} within {SHORT_TIMEOUT}s:\n{output}"
-            )
+            ) from exc
         expect(
             process.returncode == 0,
             "could not "
@@ -892,7 +898,7 @@ def s_config_state(context: ScenarioContext) -> str:
                 and row.get("warning_kind") == "state-malformed-line"
             ]
             expect(
-                warnings,
+                bool(warnings),
                 f"malformed state emitted no state-malformed-line: {records}",
             )
 

@@ -25,14 +25,19 @@ import traceback
 from scripts.e2e.runner import (
     MTEST,
     Scenario,
-    ScenarioContext,
     ScenarioError,
     ScenarioRegistry,
     bootstrap_build_bin,
     load_manifest,
 )
+
+# Re-exported on purpose, in the redundant-alias form that declares it:
+# `scripts/tests/test_e2e.py` asserts this entrypoint's `ScenarioContext` IS the
+# runner's, so the name belongs to this module's surface, not to an incidental
+# import. The alias is what makes that export explicit rather than implicit.
+from scripts.e2e.runner import ScenarioContext as ScenarioContext  # noqa: PLC0414
+from scripts.e2e.scenarios import annotations as annotations_scenarios
 from scripts.e2e.scenarios import (
-    annotations,
     config_file,
     config_show,
     core,
@@ -61,7 +66,7 @@ class Harness:
         except ScenarioError as exc:
             self.results.append((name, False, str(exc)))
             print(f"FAIL  {name}\n      {exc}")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - containment boundary, see below
             # CONTAINMENT. ScenarioError above is the expected failure channel;
             # any other exception is still a real failure, but it must not hide
             # the coverage provided by every later registered scenario.
@@ -171,10 +176,10 @@ SCENARIOS: ScenarioRegistry = (
         "junit-finalization-and-interrupt",
         junit_reporter.s_junit_finalization_and_interrupt,
     ),
-    ("annotations-modes", annotations.s_annotations_modes),
-    ("annotations-caps", annotations.s_annotations_caps),
-    ("annotations-conflict", annotations.s_annotations_conflict),
-    ("annotations-fencing", annotations.s_annotations_fencing),
+    ("annotations-modes", annotations_scenarios.s_annotations_modes),
+    ("annotations-caps", annotations_scenarios.s_annotations_caps),
+    ("annotations-conflict", annotations_scenarios.s_annotations_conflict),
+    ("annotations-fencing", annotations_scenarios.s_annotations_fencing),
     ("parallel-projection-eq", parallel.s_parallel_projection_eq),
     ("parallel-capacity-one", parallel.s_parallel_capacity_one),
     ("parallel-window-overlap", parallel.s_parallel_window_overlap),

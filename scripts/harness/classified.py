@@ -229,7 +229,10 @@ def _run_step(
             cwd=repo_root,
             marker_retention=retention,
         )
-    except Exception as exc:
+    # BLE001: the supervisor boundary must convert EVERY failure into a
+    # StepResult. An exception escaping here would wedge the run instead of
+    # reporting a harness error for this step.
+    except Exception as exc:  # noqa: BLE001
         try:
             sentinel.unlink(missing_ok=True)
         except OSError as cleanup_exc:

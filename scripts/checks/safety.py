@@ -8,10 +8,14 @@ SAFETY argument is correct; that remains a code-review responsibility.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 import re
+from typing import TYPE_CHECKING
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 
 MAX_COVERAGE_LINES = 8
@@ -20,6 +24,8 @@ DEFAULT_ROOTS = ("src", "tests", "e2e")
 
 @dataclass(frozen=True)
 class Finding:
+    """One unsafe operation with no SAFETY comment covering it. Gating."""
+
     path: Path
     line: int
     family: str
@@ -27,6 +33,8 @@ class Finding:
 
 @dataclass(frozen=True)
 class InventoryItem:
+    """One lexical hint for manual review. Never gating, reported only."""
+
     path: Path
     line: int
     kind: str
@@ -246,6 +254,18 @@ def mojo_files(roots: Iterable[Path]) -> list[Path]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Scan the given roots and gate on undocumented unsafe operations.
+
+    Args:
+        argv: Command-line arguments, or None to read `sys.argv`. Positional
+            roots override `DEFAULT_ROOTS`.
+
+    Returns:
+        0 when every candidate line has a SAFETY comment covering it. 1 when
+        any candidate is undocumented, and also when the inventory came back
+        empty, since an empty inventory means the roots stopped resolving and
+        the gate would otherwise pass by scanning nothing.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("roots", nargs="*", type=Path, default=[])
     args = parser.parse_args(argv)

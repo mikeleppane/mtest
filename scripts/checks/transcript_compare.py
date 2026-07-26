@@ -95,6 +95,13 @@ def compare_directories(
 
 
 def main() -> int:
+    """Compare two snapshot trees from the command line.
+
+    Returns:
+        0 when the trees match byte for byte under the optional replacement,
+        and, with `--require-change`, only if that replacement actually
+        rewrote at least one file. 1 after printing every error to stderr.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("expected", type=Path)
     parser.add_argument("actual", type=Path)

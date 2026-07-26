@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import TYPE_CHECKING, Any
 import unittest
 from unittest import mock
 
@@ -25,6 +26,10 @@ from scripts.checks import layout
 from scripts.e2e import __main__ as e2e_main
 from scripts.e2e import main_open, runner
 from scripts.fixtures.toolchain import fake_retry_crash_mojo
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -76,10 +81,12 @@ time.sleep(300)
 
 
 @contextlib.contextmanager
-def _recorded_signals():
+def _recorded_signals() -> Iterator[list[tuple[str, int, int]]]:
     """Record every `os.kill`/`os.killpg` the runner issues, in order."""
     calls: list[tuple[str, int, int]] = []
-    real_kill, real_killpg = runner.os.kill, runner.os.killpg
+    # `runner.os` IS this module's `os`, so patching here patches the object the
+    # runner calls through; reaching in via `runner.os` only named it indirectly.
+    real_kill, real_killpg = os.kill, os.killpg
 
     def kill(pid: int, sig: int) -> None:
         calls.append(("kill", pid, sig))
@@ -89,11 +96,11 @@ def _recorded_signals():
         calls.append(("killpg", pgid, sig))
         real_killpg(pgid, sig)
 
-    runner.os.kill, runner.os.killpg = kill, killpg
+    os.kill, os.killpg = kill, killpg
     try:
         yield calls
     finally:
-        runner.os.kill, runner.os.killpg = real_kill, real_killpg
+        os.kill, os.killpg = real_kill, real_killpg
 
 
 CORE_SCENARIOS = (
@@ -433,19 +440,20 @@ class E2EFaultTopologyTests(unittest.TestCase):
         )
         pgid = os.getpgid(proc.pid)
         attempts: list[tuple[int, int]] = []
-        real_killpg = runner.os.killpg
+        # `runner.os` IS this module's `os`: same object, same patch.
+        real_killpg = os.killpg
 
         def killpg(target: int, sig: int) -> None:
             attempts.append((target, sig))
             raise PermissionError(1, "Operation not permitted")
 
-        runner.os.killpg = killpg
+        os.killpg = killpg
         try:
             # Escaping here would replace the caller's own diagnosis with an
             # unrelated exception raised from cleanup.
             runner.E2ERunner.kill_group(proc)
         finally:
-            runner.os.killpg = real_killpg
+            os.killpg = real_killpg
             real_killpg(pgid, signal.SIGKILL)
             proc.wait()
         self.assertEqual(
@@ -462,20 +470,23 @@ class E2EFaultTopologyTests(unittest.TestCase):
                 leader, f"#!{sys.executable}\nimport time\ntime.sleep(30)\n"
             )
             process_runner = runner.E2ERunner(repo_root=tmp, mtest=leader)
-            for kwargs in (
+            arming_cases: tuple[dict[str, Any], ...] = (
                 {},
                 {"ready_files": (os.fspath(tmp / "x"),), "delay": 1.0},
-            ):
-                with self.subTest(arming=sorted(kwargs)):
-                    with self.assertRaisesRegex(
+            )
+            for kwargs in arming_cases:
+                with (
+                    self.subTest(arming=sorted(kwargs)),
+                    self.assertRaisesRegex(
                         runner.ScenarioError, "exactly one arming input"
-                    ):
-                        process_runner.run_mtest_signaled(
-                            [],
-                            signal_number=signal.SIGINT,
-                            timeout=1.0,
-                            **kwargs,
-                        )
+                    ),
+                ):
+                    process_runner.run_mtest_signaled(
+                        [],
+                        signal_number=signal.SIGINT,
+                        timeout=1.0,
+                        **kwargs,
+                    )
 
     def test_a_half_armed_barrier_still_sweeps_the_live_actor(self) -> None:
         # The failure path that is supposed to clean up must not be the one that
@@ -538,7 +549,9 @@ class E2EFaultTopologyTests(unittest.TestCase):
 
         self.assertIs(context.registry, registry)
         with self.assertRaises(FrozenInstanceError):
-            context.registry = ()
+            # The frozen dataclass is the property under test, so the assignment
+            # mypy rejects is exactly what this asserts fails at runtime.
+            context.registry = ()  # type: ignore[misc]
         for name, scenario in registry:
             with self.subTest(scenario=name):
                 self.assertEqual(
@@ -657,21 +670,21 @@ class ScenarioTotalIsRegistryDerivedTests(unittest.TestCase):
     )
 
     @staticmethod
-    def _passing(detail: str):
-        def scenario(_context) -> str:
+    def _passing(detail: str) -> runner.Scenario:
+        def scenario(_context: runner.ScenarioContext) -> str:
             return detail
 
         return scenario
 
-    def _banner(self, registry) -> str:
+    def _banner(self, registry: runner.ScenarioRegistry) -> str:
         buffer = io.StringIO()
         with (
             mock.patch.object(e2e_main, "SCENARIOS", registry),
-            mock.patch.object(e2e_main.os.path, "exists", return_value=True),
+            mock.patch.object(os.path, "exists", return_value=True),
             mock.patch.object(e2e_main, "load_manifest", return_value={}),
+            contextlib.redirect_stdout(buffer),
         ):
-            with contextlib.redirect_stdout(buffer):
-                code = e2e_main.main()
+            code = e2e_main.main()
         self.assertEqual(code, 0, buffer.getvalue())
         return buffer.getvalue()
 
@@ -694,18 +707,18 @@ class ScenarioTotalIsRegistryDerivedTests(unittest.TestCase):
         self.assertNotIn(f"/{len(e2e_main.SCENARIOS)} scenarios passed", banner)
 
     def test_a_failing_scenario_is_excluded_from_the_passed_count(self) -> None:
-        def failing(_context) -> str:
+        def failing(_context: runner.ScenarioContext) -> str:
             raise runner.ScenarioError("deliberate")
 
         buffer = io.StringIO()
         registry = (("ok", self._passing("")), ("bad", failing))
         with (
             mock.patch.object(e2e_main, "SCENARIOS", registry),
-            mock.patch.object(e2e_main.os.path, "exists", return_value=True),
+            mock.patch.object(os.path, "exists", return_value=True),
             mock.patch.object(e2e_main, "load_manifest", return_value={}),
+            contextlib.redirect_stdout(buffer),
         ):
-            with contextlib.redirect_stdout(buffer):
-                code = e2e_main.main()
+            code = e2e_main.main()
 
         self.assertEqual(code, 1)
         self.assertIn("=== 1/2 scenarios passed ===", buffer.getvalue())
@@ -760,7 +773,7 @@ class LimitNofileTests(unittest.TestCase):
     )
     """A child that prints the soft `RLIMIT_NOFILE` the kernel gave it."""
 
-    def _child_soft_limit(self, preexec) -> int:
+    def _child_soft_limit(self, preexec: Callable[[], None] | None) -> int:
         """The soft limit a child observes when spawned under `preexec`."""
         completed = subprocess.run(
             [sys.executable, "-c", self._REPORT_SOFT],
@@ -802,8 +815,10 @@ class LimitNofileTests(unittest.TestCase):
             [
                 sys.executable,
                 "-c",
-                "import resource, sys;"
-                "sys.stdout.write(str(resource.getrlimit(resource.RLIMIT_NOFILE)))",
+                (
+                    "import resource, sys;"
+                    "sys.stdout.write(str(resource.getrlimit(resource.RLIMIT_NOFILE)))"
+                ),
             ],
             capture_output=True,
             text=True,

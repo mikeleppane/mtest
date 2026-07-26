@@ -205,7 +205,7 @@ def s_crash_attribution(context: ScenarioContext) -> str:
     attributed_rel = "e2e/attribution/test_deterministic_crasher.mojo"
     unattributed_rel = "e2e/attribution/test_order_dependent_crasher.mojo"
 
-    def verdict_facts(rel: str) -> tuple:
+    def verdict_facts(rel: str) -> tuple[int, tuple[int, ...], str]:
         run = context.runner.run_mtest([rel], timeout=SHORT_TIMEOUT)
         # THE claim: the CRASH verdict and the exit code stand on their own.
         expect_exit(run, 1)
@@ -226,10 +226,10 @@ def s_crash_attribution(context: ScenarioContext) -> str:
             f"{rel}: the attribution pass never announced itself:\n{run.stdout}",
         )
         line = verdict_line(run, "ATTRIBUTION", rel)
-        expect(
-            line is not None,
-            f"{rel}: no ATTRIBUTION line for a crashed file:\n{run.stdout}",
-        )
+        if line is None:
+            raise ScenarioError(
+                f"{rel}: no ATTRIBUTION line for a crashed file:\n{run.stdout}"
+            )
         facts = (
             summ.passed,
             summ.failed,
@@ -303,10 +303,8 @@ def s_crash_attribution(context: ScenarioContext) -> str:
         f"-k boom did not report the file CRASH:\n{keyword.stdout}",
     )
     keyword_line = verdict_line(keyword, "ATTRIBUTION", attributed_rel)
-    expect(
-        keyword_line is not None,
-        f"-k boom produced no ATTRIBUTION line:\n{keyword.stdout}",
-    )
+    if keyword_line is None:
+        raise ScenarioError(f"-k boom produced no ATTRIBUTION line:\n{keyword.stdout}")
     expect(
         "ATTRIBUTED" in keyword_line and "test_boom" in keyword_line,
         f"the registry-recorded listing did not name the culprit (a node-id "
@@ -375,10 +373,10 @@ def s_attribution_reruns_the_binary_that_crashed(context: ScenarioContext) -> st
             f"the rebuilt binary's runtime crash was not reported CRASH:\n{run.stdout}",
         )
         line = verdict_line(run, "ATTRIBUTION", rel)
-        expect(
-            line is not None,
-            f"no ATTRIBUTION line for the retried-build crash:\n{run.stdout}",
-        )
+        if line is None:
+            raise ScenarioError(
+                f"no ATTRIBUTION line for the retried-build crash:\n{run.stdout}"
+            )
         # THE claim: only the `.attempt-2` binary can name this culprit.
         expect(
             "ATTRIBUTED" in line and "test_boom" in line,
@@ -400,11 +398,11 @@ def s_compile_timeout(context: ScenarioContext) -> str:
     """`--compile-timeout` bounds the BUILD; a blown deadline is COMPILE-TIMEOUT.
 
     Uses the committed slow-compiler `--mojo` stand-in
-    (scripts/fixtures/toolchain/fake_slow_mojo.py), which sleeps forever on `build` but honors
-    SIGTERM promptly — so this exercises the GRACEFUL half of the supervised kill
-    protocol against a normal, perfectly valid fixture. The file is only slow to
-    compile, never broken: that is exactly what separates COMPILE-TIMEOUT from
-    COMPILE-ERROR.
+    (scripts/fixtures/toolchain/fake_slow_mojo.py), which sleeps forever on
+    `build` but honors SIGTERM promptly — so this exercises the GRACEFUL half of
+    the supervised kill protocol against a normal, perfectly valid fixture. The
+    file is only slow to compile, never broken: that is exactly what separates
+    COMPILE-TIMEOUT from COMPILE-ERROR.
 
       * --compile-timeout 1 -> COMPILE-TIMEOUT, the split-or-exclude hint, exit 1;
       * --compile-timeout 1 --retries 1 -> the first timed-out compile shows a TRY
@@ -513,7 +511,8 @@ def s_compile_crash_signature(context: ScenarioContext) -> str:
     )
     expect(
         "compile-crash" in sig.stdout,
-        f"the retried build's TRY line did not classify it compile-crash:\n{sig.stdout}",
+        f"the retried build's TRY line did not classify it compile-crash:"
+        f"\n{sig.stdout}",
     )
     expect(
         "compile-kill-residual" in sig.stdout and "quarantin" in sig.stdout,
@@ -556,13 +555,14 @@ def s_compile_crash_signature(context: ScenarioContext) -> str:
 
 
 def s_timeout(context: ScenarioContext) -> str:
-    """The POLITE half of the escalation pair (the stubborn half is
-    timeout-escalation). This fixture sleeps without disarming SIGTERM, so the
-    supervisor's polite signal ends it inside the grace and NO SIGKILL is ever
-    sent. The verdict must therefore name the deadline and say nothing about an
-    escalation: this is the assertion that makes the escalation clause a
-    CONDITIONAL fact rather than a constant, so a clause appended unconditionally
-    fails HERE while the stubborn scenario stays green.
+    """The POLITE half of the escalation pair.
+
+    The stubborn half is timeout-escalation. This fixture sleeps without
+    disarming SIGTERM, so the supervisor's polite signal ends it inside the grace
+    and NO SIGKILL is ever sent. The verdict must therefore name the deadline and
+    say nothing about an escalation: this is the assertion that makes the
+    escalation clause a CONDITIONAL fact rather than a constant, so a clause
+    appended unconditionally fails HERE while the stubborn scenario stays green.
     """
     rel = "e2e/slow/test_hanging.mojo"
     run = context.runner.run_mtest([rel, "--timeout", "1"], timeout=SHORT_TIMEOUT)
@@ -570,7 +570,8 @@ def s_timeout(context: ScenarioContext) -> str:
     summ = expect_accounting(run)
     expect(summ.timed_out == 1, f"expected 1 timed out, got {summ.timed_out}")
     verdict = verdict_line(run, "TIMEOUT", rel)
-    expect(verdict is not None, "no TIMEOUT verdict line")
+    if verdict is None:
+        raise ScenarioError("no TIMEOUT verdict line")
     expect(
         "timed out after 1s" in verdict,
         f"the TIMEOUT verdict did not name the deadline:\n{verdict}",
@@ -589,7 +590,8 @@ def s_timeout(context: ScenarioContext) -> str:
 
 
 def s_timeout_escalation(context: ScenarioContext) -> str:
-    """A child that IGNORES SIGTERM forces the supervisor's full kill protocol:
+    """A child that IGNORES SIGTERM forces the supervisor's full kill protocol.
+
     SIGTERM -> 300ms run-step grace -> SIGKILL. The escalation is latched on the
     Termination, and BOTH places that can narrate it must:
 
@@ -619,7 +621,8 @@ def s_timeout_escalation(context: ScenarioContext) -> str:
         f"--retries 0 scheduled only one attempt but showed a TRY line:\n{run0.stdout}",
     )
     verdict0 = verdict_line(run0, "TIMEOUT", rel)
-    expect(verdict0 is not None, f"no TIMEOUT verdict line:\n{run0.stdout}")
+    if verdict0 is None:
+        raise ScenarioError(f"no TIMEOUT verdict line:\n{run0.stdout}")
     expect(
         "escalated to SIGKILL" in verdict0,
         f"a SIGTERM-ignoring child's TIMEOUT verdict did not report the SIGKILL"
@@ -638,10 +641,10 @@ def s_timeout_escalation(context: ScenarioContext) -> str:
     summ = expect_accounting(run)
     expect(summ.timed_out == 1, f"expected 1 timed out, got {summ.timed_out}")
     try_line = verdict_line(run, "TRY", rel)
-    expect(
-        try_line is not None,
-        f"the timed-out first attempt showed no TRY line:\n{run.stdout}",
-    )
+    if try_line is None:
+        raise ScenarioError(
+            f"the timed-out first attempt showed no TRY line:\n{run.stdout}"
+        )
     expect(
         "escalated to SIGKILL" in try_line,
         f"a SIGTERM-ignoring child's TRY line did not report the SIGKILL"
@@ -652,18 +655,27 @@ def s_timeout_escalation(context: ScenarioContext) -> str:
         f"the TRY line did not name the deadline as the cause:\n{try_line}",
     )
     verdict = verdict_line(run, "TIMEOUT", rel)
-    expect(verdict is not None, f"no final TIMEOUT verdict line:\n{run.stdout}")
+    if verdict is None:
+        raise ScenarioError(f"no final TIMEOUT verdict line:\n{run.stdout}")
     expect(
         "escalated to SIGKILL" in verdict,
-        f"the TRY line reported the escalation but the final verdict did not:\n{verdict}",
+        f"the TRY line reported the escalation but the final verdict did not:"
+        f"\n{verdict}",
     )
     return (
         "SIGTERM ignored -> --retries 0: TIMEOUT verdict itself reports the SIGKILL"
-        f" escalation (no TRY line); --retries 1: TRY + verdict agree; exit 1, {run.wall:.1f}s"
+        f" escalation (no TRY line); --retries 1: TRY + verdict agree; exit 1,"
+        f" {run.wall:.1f}s"
     )
 
 
 def s_precompile(context: ScenarioContext) -> str:
+    """`--precompile` builds a package first and auto-resolves `-I` for it.
+
+    A good package PASSES the importing file with no COMPILE-ERROR; a broken one
+    raises a PRECOMPILE banner, names the dependents as casualties, accounts them
+    NOT-RUN, and exits 1.
+    """
     rel = "e2e/pkg/test_uses_pkg.mojo"
     # Success: package precompiled, auto -I resolves the import -> PASS.
     ok = context.runner.run_mtest([rel, "--precompile", "e2e/pkg/mathlib"])
@@ -690,10 +702,12 @@ def s_precompile(context: ScenarioContext) -> str:
 
 
 def s_precompile_timeout(context: ScenarioContext) -> str:
-    """`--compile-timeout` bounds a `--precompile` step too; a blown deadline is
-    a PRECOMPILE-ERROR that NAMES the timeout.
+    """`--compile-timeout` bounds a `--precompile` step too.
 
-    Uses the slow-compiler stand-in (scripts/fixtures/toolchain/fake_slow_mojo.py), which sleeps
+    A blown deadline is a PRECOMPILE-ERROR that NAMES the timeout.
+
+    Uses the slow-compiler stand-in
+    (scripts/fixtures/toolchain/fake_slow_mojo.py), which sleeps
     forever on `precompile` and honors SIGTERM promptly. The package is fine; only
     the compiler is slow — so this separates "we killed it at our deadline" from
     "the compiler rejected the code", which read identically at exit 1 unless the
@@ -734,13 +748,17 @@ def s_precompile_timeout(context: ScenarioContext) -> str:
         f"the timed-out precompile listed no casualties:\n{run.stdout}",
     )
     expect(run.wall < 20.0, f"mtest took {run.wall:.1f}s to honor --compile-timeout 1")
-    return "precompile --compile-timeout 1 -> PRECOMPILE-ERROR naming the timeout + casualties (exit 1)"
+    return (
+        "precompile --compile-timeout 1 -> PRECOMPILE-ERROR naming the timeout"
+        " + casualties (exit 1)"
+    )
 
 
 def s_precompile_crash_retry(context: ScenarioContext) -> str:
     """A crash-class precompile is retried under `--retries`, then reported.
 
-    Uses the crashing-compiler stand-in (scripts/fixtures/toolchain/fake_crash_mojo.py), which dies
+    Uses the crashing-compiler stand-in
+    (scripts/fixtures/toolchain/fake_crash_mojo.py), which dies
     by SIGSEGV on `precompile`. A signal death is crash-class, so:
 
       * --retries 0 -> one attempt, PRECOMPILE-ERROR naming the signal, exit 1;
@@ -850,8 +868,8 @@ def s_precompile_promotion(context: ScenarioContext) -> str:
                 f"a precompile {label} DESTROYED the good OUT package "
                 f"({out_rel} no longer exists)",
             )
-            with open(out_path, "rb") as fh:
-                after = fh.read()
+            with open(out_path, "rb") as reader:
+                after = reader.read()
             expect(
                 after == sentinel,
                 f"a precompile {label} DAMAGED the good OUT package: "
@@ -942,7 +960,10 @@ def s_internal_error(context: ScenarioContext) -> str:
     )
 
 
-def s_runtime_open_failure(context: ScenarioContext) -> str:
+# This scenario drives its own build, so it never reads `context` — but the
+# parameter cannot be renamed: `scripts/tests/test_e2e.py` asserts every
+# registered scenario takes exactly one parameter, spelled `context`.
+def s_runtime_open_failure(context: ScenarioContext) -> str:  # noqa: ARG001
     """The real CLI main must report and explicitly repair failed signal open."""
     try:
         return main_open.check_main_open_failure()

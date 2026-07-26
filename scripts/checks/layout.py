@@ -1023,7 +1023,12 @@ def direct_script_invocations(path: Path, contents: str) -> tuple[str, ...]:
             tree = None
         if tree is not None:
             for node in ast.walk(tree):
-                if _ast_argv_has_direct_script(node):
+                # The helper matches only a literal list/tuple, both of which
+                # are expressions; restating that here is what establishes that
+                # `node.lineno` exists on the matched node.
+                if isinstance(
+                    node, (ast.List, ast.Tuple)
+                ) and _ast_argv_has_direct_script(node):
                     findings.add(f"{path.as_posix()}:{node.lineno}: direct argv")
     return tuple(sorted(findings))
 
@@ -1055,12 +1060,12 @@ def check_python_package_invocation() -> None:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                for imported in node.names:
-                    if imported.name in module_names:
-                        flat_imports.append(
-                            f"{path.relative_to(REPO_ROOT)}:{node.lineno}: "
-                            f"import {imported.name}"
-                        )
+                flat_imports.extend(
+                    f"{path.relative_to(REPO_ROOT)}:{node.lineno}: "
+                    f"import {imported.name}"
+                    for imported in node.names
+                    if imported.name in module_names
+                )
             elif isinstance(node, ast.ImportFrom) and node.module in module_names:
                 flat_imports.append(
                     f"{path.relative_to(REPO_ROOT)}:{node.lineno}: "
@@ -1097,8 +1102,7 @@ def check_build_source_visibility(repo_root: Path = REPO_ROOT) -> None:
         ["git", "-C", str(repo_root), "check-ignore", "--no-index", *operands],
         check=False,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
     )
     if ignored.returncode not in (0, 1):
         raise AssertionError(
@@ -1121,8 +1125,7 @@ def check_build_source_visibility(repo_root: Path = REPO_ROOT) -> None:
         ],
         check=False,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
     )
     if tracked.returncode != 0:
         raise AssertionError("scripts/build source is untracked")
