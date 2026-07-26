@@ -157,7 +157,7 @@ def escape_one_line(text: String) -> String:
     from mtest.model import escape_one_line
 
     # A newline in a path can no longer forge a second diagnostic line.
-    var safe = escape_one_line("paths/line\nbreak/test_a.mojo")
+    var safe = escape_one_line("paths/line\\nbreak/test_a.mojo")
     ```
     """
     var escaped = String("")
