@@ -45,23 +45,36 @@ drift (`pixi run transcripts-check`).
 
 ## Quick start — run the oracle
 
+This oracle is a **blocking release-floor gate**, not a manual tool:
+`contract-check-strict` runs inside `pixi run ci` and both hosted platform
+matrices (immediately after each platform's end-to-end row). Use the
+commands below for local iteration; `pixi run contract-check-strict` is
+what actually gates a merge.
+
 ```bash
-pixi run contract-check --                 # rebuild-if-stale, run all ~55 checks
+pixi run contract-check --                 # rebuild-if-stale, run all ~60 checks
 pixi run contract-check -- -k select       # filter by check name
 pixi run contract-check -- --strict        # safety-critical SKIP fails
 pixi run contract-check -- -v --keep       # dump streams, keep scaffold
+pixi run contract-check-strict             # the actual blocking gate: --strict --no-rebuild
+                                            # against the binary THIS invocation's build-bin just produced
 ```
 
 `scripts/qa/contract.py` (Python lives under `scripts/`, per AGENTS.md)
 scaffolds a throwaway user project — a library, clean all-pass suites with a
 **known exact node-id set**, and **poison** files — outside the repo, then drives
 `build/mtest` across the contract matrix, printing PASS/FAIL per check tagged
-with its contract §. It **rebuilds `build/mtest` when stale** (a stale binary
-validates old code — a real false-green risk), **exits 2 on setup failure**
-(distinct from a contract failure's 1), and treats a zero-check run or a
-`--strict` skip as non-passing. Extend it by adding a `Check(...)` to
-`build_matrix()` (or a bespoke method for multi-run checks) — one behavior, cite
-the §, prefer an exact/poison assertion over a substring.
+with its contract §. `contract-check` (the local-iteration task above)
+**rebuilds `build/mtest` when stale** (a stale binary validates old code — a
+real false-green risk); `contract-check-strict` (the gate) instead runs
+`--no-rebuild` against the binary its own Pixi `build-bin` dependency just
+produced in this invocation, and **fails closed (exit 2)** if that binary is
+missing or looks older than its inputs, rather than silently building or
+validating something stale. Both **exit 2 on setup failure** (distinct from a
+contract failure's 1), and treat a zero-check run or a `--strict` skip as
+non-passing. Extend it by adding a `Check(...)` to `build_matrix()` (or a
+bespoke method for multi-run checks) — one behavior, cite the §, prefer an
+exact/poison assertion over a substring.
 
 This is the mechanical floor. The judgment below finds what the matrix does not
 yet encode.
@@ -166,8 +179,10 @@ Severity by user impact: silent-wrong > wrong-exit-code > confusing-output.
   non-empty") — it cannot catch a within-class miscount or wrong set. Assert the
   **exact** set/count, or add a **poison** probe.
 - You are asserting informal wording the contract calls out as changeable (§20).
-- The oracle is all-green but you did not rebuild — a stale binary validates the
-  old code.
+- Running `contract-check` (not `-strict`) by hand and it is all-green but you
+  passed `--no-rebuild` — that flag now fails closed (exit 2) on a stale or
+  missing binary rather than silently validating old code, but only if you
+  pass it; without it, `contract-check` rebuilds first.
 - A safety-critical check SKIPped and the suite still exited 0 — run `--strict`.
 
 ## Complementary gates (do not reinvent)

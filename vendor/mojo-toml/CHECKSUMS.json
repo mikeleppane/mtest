@@ -1,0 +1,24 @@
+{
+  "repository": "https://github.com/DataBooth/mojo-toml",
+  "license": "Apache-2.0",
+  "release": "346b7ad723c034f7696723f4846203d47ef86951",
+  "main": "c3262adea2d314748716991f99d0276f4a0b5e79",
+  "release_sha256": {
+    "LICENSE": "f091af39a05aa9864f099a672495096e97ce62e962f03fa90324da83061dab43",
+    "src/toml/__init__.mojo": "2c95e4cac433f0639125be700472001963ac319324f397465e309cdde97764e7",
+    "src/toml/lexer.mojo": "408f420337d6a5b2d74c5f04f44f638ae6317333b833ba3a8ff92664cf811b16",
+    "src/toml/parser.mojo": "5b49c67071f99bdf6096c5ec4745037ca043061a7fcbdcfb20a86ee127067a4a"
+  },
+  "main_sha256": {
+    "LICENSE": "f091af39a05aa9864f099a672495096e97ce62e962f03fa90324da83061dab43",
+    "src/toml/__init__.mojo": "2c95e4cac433f0639125be700472001963ac319324f397465e309cdde97764e7",
+    "src/toml/lexer.mojo": "408f420337d6a5b2d74c5f04f44f638ae6317333b833ba3a8ff92664cf811b16",
+    "src/toml/parser.mojo": "5b49c67071f99bdf6096c5ec4745037ca043061a7fcbdcfb20a86ee127067a4a"
+  },
+  "local_sha256": {
+    "LICENSE": "f091af39a05aa9864f099a672495096e97ce62e962f03fa90324da83061dab43",
+    "toml/__init__.mojo": "6612bd67ba91168295838d732f852158418c217894befec14131ce07c6a95384",
+    "toml/lexer.mojo": "c061e509173d1aee5d9a378ce7ef0c6ee76378b57ac3e0a0595497353da4088e",
+    "toml/parser.mojo": "f99b8cc2835d451f92eb530e6215907d9b588472b23de0fee7916e920aa7f795"
+  }
+}

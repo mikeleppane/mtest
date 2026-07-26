@@ -1,15 +1,21 @@
 """Tests for the cli parser: successful parses into a `RunnerConfig` and the
 help/version directives.
 
-Every available flag is exercised for the value it lands in the config, both
+Every flag is exercised for the value it lands in the config, both
 short and long spellings where they exist, plus the subcommands and the two
 non-error directives. Grammar edges (passthrough, forbidden args, arity errors,
-refusals, the frozen inventory) live in sibling files to keep each module's test
+and the frozen inventory) live in sibling files to keep each module's test
 count modest.
 """
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_raises, assert_true
 
-from mtest.cli import ParseResult, parse_args, version_text, help_text
+from mtest.cli import (
+    ParseResult,
+    flag_specs,
+    help_text,
+    parse_args,
+    version_text,
+)
 from mtest.config import ColorWhen, ShowOutput, Verbosity
 
 
@@ -72,6 +78,26 @@ def test_run_subcommand_alone_is_defaults() raises:
     var r = parse_args(argv)
     assert_true(r.is_run())
     assert_equal(len(r.config.paths), 0)
+
+
+def test_config_controls_are_parse_result_metadata() raises:
+    var explicit: List[String] = ["run", "--config", "../mtest.toml"]
+    var explicit_result = parse_args(explicit)
+    assert_equal(explicit_result.config_path, "../mtest.toml")
+    assert_false(explicit_result.no_config)
+
+    var disabled: List[String] = ["collect", "--no-config"]
+    var disabled_result = parse_args(disabled)
+    assert_equal(disabled_result.config_path, "")
+    assert_true(disabled_result.no_config)
+
+
+def test_config_controls_are_mutually_exclusive() raises:
+    var argv: List[String] = ["--config", "other.toml", "--no-config"]
+    with assert_raises(
+        contains="cli: '--config' and '--no-config' are mutually exclusive"
+    ):
+        _ = parse_args(argv)
 
 
 def test_leading_nonsubcommand_token_is_a_path() raises:
@@ -223,8 +249,44 @@ def test_color_modes() raises:
 
 
 def test_version_text_uses_version_constant() raises:
-    assert_equal(version_text(), "mtest 0.5.0")
+    assert_equal(version_text(), "mtest 0.6.0")
 
 
-def test_help_text_mentions_usage() raises:
-    assert_true("usage: mtest" in help_text())
+def _rendered_option_spellings() -> List[String]:
+    """Every flag spelling the generated help physically renders, in row order.
+
+    Reads only the label region of each option row — the text before the
+    padding that separates a label from its description — and splits the alias
+    pairs the renderer collapses onto one physical row.
+    """
+    var spellings = List[String]()
+    for line_slice in help_text().split("\n"):
+        var line = String(line_slice)
+        if not line.startswith("  -"):
+            continue
+        var row = String(line.removeprefix("  "))
+        var label = String(row.split("  ")[0])
+        for part_slice in label.split(", "):
+            var spelling = String(String(part_slice).split(" ")[0])
+            spellings.append(spelling^)
+    return spellings^
+
+
+def test_help_renders_exactly_the_flag_spec_option_set() raises:
+    # The rendered option set IS the flag inventory: every spec reaches the
+    # help exactly once, and the help invents nothing the parser cannot accept.
+    var rendered = _rendered_option_spellings()
+    var specs = flag_specs()
+    assert_equal(len(rendered), len(specs))
+    for spec in specs:
+        var matches = 0
+        for spelling in rendered:
+            if spelling == spec.spelling:
+                matches += 1
+        assert_equal(matches, 1, "help does not render once: " + spec.spelling)
+    for spelling in rendered:
+        var declared = False
+        for spec in specs:
+            if spec.spelling == spelling:
+                declared = True
+        assert_true(declared, "help renders an unknown option: " + spelling)

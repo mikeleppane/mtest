@@ -377,6 +377,7 @@ def _session_started(p: SessionStartedPayload) -> String:
     s += ',"shard_label":"' + _cap_runner_string(p.shard_label) + '"'
     s += ',"sharded_out_count":' + String(p.sharded_out_count)
     s += ',"workers":' + String(p.workers)
+    s += ',"config_file":"' + _cap_runner_string(p.config_file) + '"'
     s += "}"
     return s^
 

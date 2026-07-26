@@ -6,6 +6,12 @@ under `--only` with the rest suppressed as DESELECTED, a node id selects one
 test, an unknown name is exit 4 after the probe, an empty final selection is
 exit 5, a selected failing test reports FAIL, and the chameleon drives the
 loud recollect-once then MALFORMED-SUITE (exit-1 class, never exit 3).
+
+Two cases pin the RECONCILIATION the selection run performs against its own
+probe: a run whose rows lost a collected test, and a run in which a deselected
+test reports a real outcome instead of the selection-induced SKIP. Both are
+user-controlled suite disagreements, so both stay MALFORMED-SUITE at exit 1 with
+their own exact diagnostic — never DRIFT, never exit 3.
 """
 from std.testing import (
     assert_equal,
@@ -14,18 +20,30 @@ from std.testing import (
     assert_raises,
 )
 
+from mtest.config import (
+    CliOverlay,
+    ConfigEnvironment,
+    FileConfig,
+    LastRunRecord,
+    LastRunState,
+    ResolvedConfig,
+    RunnerConfig,
+    resolve_config,
+)
 from mtest.model import (
     Event,
     EventKind,
     Outcome,
     ParseDisposition,
     AttributionDisposition,
+    AttemptFinishedPayload,
     CollectionKnownPayload,
     CrashAttributionPayload,
     FileFinishedPayload,
     SessionFinishedPayload,
     SessionStartedPayload,
     WarningPayload,
+    NodeId,
 )
 from mtest.report import (
     CompositeReporter,
@@ -49,6 +67,124 @@ from session_fixtures import (
     write_file,
 )
 
+# A suite whose --skip-all listing and --only registration DISAGREE about the
+# universe: three names are collected, but a selection run registers only two,
+# so the run's row set can never equal the collected set. The dropped name is
+# NOT the selected one, so the stdlib never refuses a requested test and the
+# stale-name recovery path is never entered — the disagreement surfaces purely
+# as membership reconciliation.
+comptime _SRC_SHRINKING_UNIVERSE = (
+    "from std.sys import argv\n"
+    "from std.testing import TestSuite, assert_true\n\n\n"
+    "def test_alpha() raises:\n    assert_true(True)\n\n\n"
+    "def test_beta() raises:\n    assert_true(True)\n\n\n"
+    "def test_gamma() raises:\n    assert_true(True)\n\n\n"
+    "def main() raises:\n"
+    "    var has_only = False\n"
+    "    for a in argv():\n"
+    '        if a == "--only":\n'
+    "            has_only = True\n"
+    "    var s = TestSuite()\n"
+    "    s.test[test_alpha]()\n"
+    "    s.test[test_beta]()\n"
+    "    if not has_only:\n"
+    "        s.test[test_gamma]()\n"
+    "    s^.run()\n"
+)
+
+# A suite that collects honestly under --skip-all but, under --only, hand-forges
+# a report in which the DESELECTED test claims PASS instead of the
+# selection-induced SKIP. The row set still equals the collected set, so only the
+# per-row selection check can catch it. The header path is resolved at runtime,
+# so the forged report carries the same byte-exact canonical identity a genuine
+# report would.
+comptime _SRC_DESELECTED_RAN = (
+    "from std.os.path import realpath\n"
+    "from std.sys import argv\n"
+    "from std.testing import TestSuite, assert_true\n\n\n"
+    "def test_one() raises:\n    assert_true(True)\n\n\n"
+    "def test_two() raises:\n    assert_true(True)\n\n\n"
+    "def main() raises:\n"
+    "    var has_only = False\n"
+    "    for a in argv():\n"
+    '        if a == "--only":\n'
+    "            has_only = True\n"
+    "    if not has_only:\n"
+    "        TestSuite.discover_tests[__functions_in_module()]().run()\n"
+    "        return\n"
+    '    var p = realpath("tests/test_deselected_ran.mojo")\n'
+    '    print("Running 2 tests for " + p + " ")\n'
+    '    print("    PASS [ 0.00s ] test_one")\n'
+    '    print("    PASS [ 0.00s ] test_two")\n'
+    '    print("--------")\n'
+    '    print("Summary [ 0.00s ] 2 tests run: 2 passed , 0 failed ,'
+    ' 0 skipped ")\n'
+)
+
+comptime _SRC_RETRY_THEN_STALE_BUILD_ERROR = (
+    "from std.ffi import external_call\n"
+    "from std.os.path import exists\n"
+    "from std.sys import argv\n"
+    "from std.testing import TestSuite, assert_true\n\n\n"
+    "def test_real() raises:\n    assert_true(True)\n\n\n"
+    "def test_ghost() raises:\n    assert_true(True)\n\n\n"
+    "def main() raises:\n"
+    "    var probing = False\n"
+    "    var has_only = False\n"
+    "    for a in argv():\n"
+    '        if a == "--skip-all":\n'
+    "            probing = True\n"
+    '        if a == "--only":\n'
+    "            has_only = True\n"
+    "    if probing:\n"
+    "        var s = TestSuite()\n"
+    "        s.test[test_real]()\n"
+    "        s.test[test_ghost]()\n"
+    "        s^.run()\n"
+    "        return\n"
+    '    if not exists("recovery_build_marker"):\n'
+    '        with open("recovery_build_marker", "w") as f:\n'
+    '            f.write("1")\n'
+    '        _ = external_call["abort", Int32]()\n'
+    '    with open("tests/test_retry_recovery_build.mojo", "a") as f:\n'
+    '        f.write("\\ninvalid recovery source\\n")\n'
+    "    var s = TestSuite()\n"
+    "    s.test[test_real]()\n"
+    "    s^.run()\n"
+)
+
+comptime _SRC_RETRY_THEN_STALE_PROBE_CRASH = (
+    "from std.ffi import external_call\n"
+    "from std.os.path import exists\n"
+    "from std.sys import argv\n"
+    "from std.testing import TestSuite, assert_true\n\n\n"
+    "def test_real() raises:\n    assert_true(True)\n\n\n"
+    "def test_ghost() raises:\n    assert_true(True)\n\n\n"
+    "def main() raises:\n"
+    "    var probing = False\n"
+    "    var has_only = False\n"
+    "    for a in argv():\n"
+    '        if a == "--skip-all":\n'
+    "            probing = True\n"
+    '        if a == "--only":\n'
+    "            has_only = True\n"
+    "    if probing:\n"
+    '        if exists("recovery_probe_marker"):\n'
+    '            _ = external_call["abort", Int32]()\n'
+    "        var s = TestSuite()\n"
+    "        s.test[test_real]()\n"
+    "        s.test[test_ghost]()\n"
+    "        s^.run()\n"
+    "        return\n"
+    '    if not exists("recovery_probe_marker"):\n'
+    '        with open("recovery_probe_marker", "w") as f:\n'
+    '            f.write("1")\n'
+    '        _ = external_call["abort", Int32]()\n'
+    "    var s = TestSuite()\n"
+    "    s.test[test_real]()\n"
+    "    s^.run()\n"
+)
+
 
 def _finished(rec: RecordingReporter) raises -> FileFinishedPayload:
     var found = -1
@@ -57,6 +193,19 @@ def _finished(rec: RecordingReporter) raises -> FileFinishedPayload:
             found = i
     assert_true(found >= 0, "no FILE_FINISHED event")
     return rec.event_at(found).data[FileFinishedPayload].copy()
+
+
+def _resolved_state(
+    config: RunnerConfig, state: LastRunState
+) -> ResolvedConfig:
+    var resolved = resolve_config(
+        config,
+        FileConfig.empty(),
+        ConfigEnvironment.empty(),
+        CliOverlay.default(),
+    )
+    resolved.last_run_state = state.copy()
+    return resolved^
 
 
 def _count_kind(rec: RecordingReporter, kind: EventKind) raises -> Int:
@@ -81,6 +230,47 @@ def _crash_attribution(
         if rec.kind_at(i) == EventKind.CRASH_ATTRIBUTION:
             return rec.event_at(i).data[CrashAttributionPayload].copy()
     raise Error("no CRASH_ATTRIBUTION event")
+
+
+def _assert_retry_then_recovery_terminal(
+    rec: RecordingReporter, expected: Outcome
+) raises:
+    """Assert one TRY then stale recovery and an attempt-two terminal event."""
+    var try_i = -1
+    var stale_i = -1
+    var finished_i = -1
+    var tries = 0
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.ATTEMPT_FINISHED:
+            tries += 1
+            try_i = i
+            ref attempt = rec.event_at(i).data[AttemptFinishedPayload]
+            assert_equal(attempt.step, "run")
+            assert_equal(attempt.attempt_index, 1)
+            assert_equal(attempt.attempts_planned, 2)
+            assert_true(attempt.retry_eligible)
+        elif rec.kind_at(i) == EventKind.WARNING:
+            if (
+                rec.event_at(i).data[WarningPayload].warning_kind
+                == "stale-name"
+            ):
+                stale_i = i
+        elif rec.kind_at(i) == EventKind.FILE_FINISHED:
+            finished_i = i
+
+    assert_equal(tries, 1, "exactly one crash-class TRY precedes recovery")
+    assert_true(try_i >= 0, "the first crash must emit AttemptFinished")
+    assert_true(stale_i > try_i, "stale-name follows the first attempt's TRY")
+    assert_true(
+        finished_i > stale_i, "the recovery terminal follows its loud warning"
+    )
+    var finished = rec.event_at(finished_i).data[FileFinishedPayload].copy()
+    assert_true(finished.outcome == expected)
+    assert_equal(
+        finished.attempts_used,
+        2,
+        "a terminal recovery step belongs to the second run attempt",
+    )
 
 
 def test_keyword_subset_runs_only_selected_and_counts_deselected() raises:
@@ -301,6 +491,79 @@ def test_recovery_probe_crash_still_reaches_crash_attribution() raises:
     )
 
 
+def test_last_failed_recovery_keeps_the_soft_selection() raises:
+    var root = temp_root()
+    write_file(root, "tests/test_lf_recovery.mojo", SRC_CHAMELEON)
+    var cfg = base_config()
+    cfg.paths.append("tests/test_lf_recovery.mojo")
+    cfg.last_failed = True
+    var state = LastRunState(
+        [
+            LastRunRecord.test(
+                NodeId("tests/test_lf_recovery.mojo", "test_ghost")
+            )
+        ]
+    )
+    var resolved = _resolved_state(cfg, state)
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    _ = run_session(resolved, root, comp)
+
+    var finished = _finished(comp.composite.reporters[0])
+    assert_equal(
+        finished.deselected_tests,
+        1,
+        "stale recovery must retain only the effective --lf test",
+    )
+
+
+def test_retry_then_recovery_build_terminal_reports_attempt_two() raises:
+    var root = temp_root()
+    write_file(
+        root,
+        "tests/test_retry_recovery_build.mojo",
+        _SRC_RETRY_THEN_STALE_BUILD_ERROR,
+    )
+    var cfg = base_config()
+    cfg.timeout_secs = 10
+    cfg.retries = 1
+    cfg.paths.append("tests/test_retry_recovery_build.mojo::test_ghost")
+
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    var code = run_session(cfg, root, comp)
+
+    assert_equal(code, 1)
+    _assert_retry_then_recovery_terminal(
+        comp.composite.reporters[0], Outcome.COMPILE_ERROR
+    )
+
+
+def test_retry_then_recovery_probe_terminal_reports_attempt_two() raises:
+    var root = temp_root()
+    write_file(
+        root,
+        "tests/test_retry_recovery_probe.mojo",
+        _SRC_RETRY_THEN_STALE_PROBE_CRASH,
+    )
+    var cfg = base_config()
+    cfg.timeout_secs = 10
+    cfg.retries = 1
+    cfg.paths.append("tests/test_retry_recovery_probe.mojo::test_ghost")
+
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    var code = run_session(cfg, root, comp)
+
+    assert_equal(code, 1)
+    _assert_retry_then_recovery_terminal(
+        comp.composite.reporters[0], Outcome.CRASH
+    )
+
+
 def test_recovery_crash_is_attributed_against_original_selection() raises:
     # The stale-name recovery re-probe RENAMES the universe: `-k old` first
     # selects test_old, the run is refused, and the rebuilt re-probe now lists
@@ -481,3 +744,112 @@ def test_malformed_node_id_raises_even_when_a_gate_fails() raises:
     )
     with assert_raises(contains="malformed node id"):
         _ = run_session(cfg, root, comp)
+
+
+def _warning_details(rec: RecordingReporter, kind: String) -> List[String]:
+    """Every recorded warning detail carried under one warning kind.
+
+    Args:
+        rec: The recorder to read back.
+        kind: The `warning_kind` tag to collect.
+
+    Returns:
+        The details, in emission order. Allocates the returned list.
+    """
+    var out = List[String]()
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.WARNING:
+            ref w = rec.event_at(i).data[WarningPayload]
+            if w.warning_kind == kind:
+                out.append(w.warning_pattern.copy())
+    return out^
+
+
+def test_selection_run_losing_a_collected_test_is_malformed_suite() raises:
+    # The probe lists three names; the selection run registers only two, so the
+    # run's row set can never equal the collected set. That is a USER-controlled
+    # suite disagreement, not machinery drift: MALFORMED-SUITE, exit 1, never
+    # DRIFT/exit 3.
+    var root = temp_root()
+    write_file(root, "tests/test_shrink.mojo", _SRC_SHRINKING_UNIVERSE)
+    var cfg = base_config()
+    # Select a name the suite DOES still register, so the stdlib never refuses a
+    # requested test and the stale-name recovery path is never entered.
+    cfg.paths.append("tests/test_shrink.mojo::test_alpha")
+
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    var code = run_session(cfg, root, comp)
+
+    assert_equal(code, 1, "a suite/selection disagreement is exit 1")
+    ref rec = comp.composite.reporters[0]
+    var finished = _finished(rec)
+    assert_true(
+        finished.outcome == Outcome.MALFORMED_SUITE,
+        "a run whose rows lost a collected test is MALFORMED_SUITE",
+    )
+    assert_true(
+        finished.parse_disposition == ParseDisposition.NO_REPORT,
+        "the reconciled run carries no trustworthy report",
+    )
+    assert_false(
+        finished.parse_disposition == ParseDisposition.DRIFT,
+        "user suite disagreement is never DRIFT",
+    )
+    # The exact disagreement diagnostic, and only it.
+    var details = _warning_details(rec, "malformed-suite")
+    assert_equal(len(details), 1)
+    assert_equal(
+        details[0],
+        (
+            "the selection run's tests did not match the collected set (a test"
+            " appeared or vanished between collection and run)"
+        ),
+    )
+    # No drift warning fired: the grammar was never violated.
+    assert_equal(len(_warning_details(rec, "drift")), 0)
+    var last = rec.event_at(rec.count() - 1)
+    assert_true(last.kind == EventKind.SESSION_FINISHED)
+    assert_equal(last.data[SessionFinishedPayload].exit_code, 1)
+
+
+def test_deselected_test_reporting_pass_is_malformed_suite() raises:
+    # The row set MATCHES the collected set, so membership reconciles; what
+    # disagrees is the per-row selection contract — a deselected test must
+    # report the selection-induced SKIP, never a real outcome. Still a user
+    # suite disagreement: MALFORMED-SUITE, exit 1, never DRIFT/exit 3.
+    var root = temp_root()
+    write_file(root, "tests/test_deselected_ran.mojo", _SRC_DESELECTED_RAN)
+    var cfg = base_config()
+    cfg.paths.append("tests/test_deselected_ran.mojo::test_one")
+
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    var code = run_session(cfg, root, comp)
+
+    assert_equal(code, 1, "a deselected test that ran is exit 1")
+    ref rec = comp.composite.reporters[0]
+    var finished = _finished(rec)
+    assert_true(
+        finished.outcome == Outcome.MALFORMED_SUITE,
+        "a deselected test reporting PASS is MALFORMED_SUITE",
+    )
+    assert_false(
+        finished.parse_disposition == ParseDisposition.DRIFT,
+        "user suite disagreement is never DRIFT",
+    )
+    var details = _warning_details(rec, "malformed-suite")
+    assert_equal(len(details), 1)
+    assert_equal(
+        details[0],
+        (
+            "a deselected test ran under --only instead of reporting a"
+            " selection-induced SKIP: test_two"
+        ),
+    )
+    assert_equal(len(_warning_details(rec, "drift")), 0)
+    var last = rec.event_at(rec.count() - 1)
+    assert_true(last.kind == EventKind.SESSION_FINISHED)
+    assert_equal(last.data[SessionFinishedPayload].exit_code, 1)

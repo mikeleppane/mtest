@@ -98,8 +98,31 @@ def _module_name(path: Path) -> str:
     return ".".join(parts)
 
 
-def render_entrypoint(modules: list[TestModule]) -> str:
-    """Render an aggregate executable with one explicit TestSuite per module."""
+MODULE_MARKER_PREFIX = "==> "
+"""The default introducer for a generated per-module progress marker.
+
+Callers that must be able to tell their own marker apart from a line a test
+body printed pass a longer prefix carrying a per-run nonce; see
+`scripts/harness/classified.py`.
+"""
+
+
+def render_entrypoint(
+    modules: list[TestModule], marker_prefix: str = MODULE_MARKER_PREFIX
+) -> str:
+    """Render an aggregate executable with one explicit TestSuite per module.
+
+    Args:
+        modules: The validated modules to import, register, and run, in order.
+        marker_prefix: The introducer each per-module progress marker is
+            printed behind. The caller owns this string; a caller that parses
+            the markers back out of the child's stdout should make it
+            unguessable, because everything else on that stream is written by
+            test bodies.
+
+    Returns:
+        The complete Mojo source of the aggregate entrypoint.
+    """
     lines = [
         '"""Generated aggregate runner; edit scripts/harness/aggregate.py."""',
         "",
@@ -113,7 +136,9 @@ def render_entrypoint(modules: list[TestModule]) -> str:
     lines.extend(["", "", "def main() raises:", '    """Run every generated module suite in deterministic order."""'])
     for index, module in enumerate(modules):
         alias = f"_mtest_module_{index}"
-        lines.append(f'    print("==> {module.path}", flush=True)')
+        lines.append(
+            f'    print("{marker_prefix}{module.path}", flush=True)'
+        )
         lines.append(f"    var suite_{index} = TestSuite()")
         for function in module.test_functions:
             lines.append(f"    suite_{index}.test[{alias}.{function}]()")
@@ -125,13 +150,29 @@ def render_entrypoint(modules: list[TestModule]) -> str:
 
 
 def write_entrypoint(
-    repo_root: Path, output: Path, roots: list[Path]
+    repo_root: Path,
+    output: Path,
+    roots: list[Path],
+    marker_prefix: str = MODULE_MARKER_PREFIX,
 ) -> list[TestModule]:
-    """Write an aggregate executable for validated roots and return its modules."""
+    """Write an aggregate executable for validated roots and return its modules.
+
+    Args:
+        repo_root: Repository root the roots are resolved against.
+        output: Path the generated entrypoint is written to.
+        roots: The classified suite roots to discover modules under.
+        marker_prefix: The introducer for each per-module progress marker; see
+            `render_entrypoint`.
+
+    Returns:
+        The modules the generated entrypoint imports, in generated order.
+    """
     paths = discover_test_files(repo_root, roots)
     modules = load_modules(repo_root, paths)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(render_entrypoint(modules), encoding="utf-8")
+    output.write_text(
+        render_entrypoint(modules, marker_prefix), encoding="utf-8"
+    )
     return modules
 
 

@@ -8,6 +8,8 @@ from dataclasses import dataclass
 import math
 import os
 from pathlib import Path
+import secrets
+import shutil
 import signal
 import sys
 
@@ -21,7 +23,12 @@ AGGREGATE_SOURCE = Path("build/tests/aggregate_main.mojo")
 AGGREGATE_BINARY = Path("build/tests/aggregate")
 NATIVE_TEST_OBJECT = Path("build/native/mtest_exec_native_test.o")
 TIMEOUT_ENV = "MTEST_TEST_ALL_TIMEOUT_SECONDS"
+DEBUG_SYMBOLS_ENV = "MTEST_TEST_DEBUG_SYMBOLS"
+SYMBOLIZER_ENV = "LLVM_SYMBOLIZER_PATH"
+SYMBOLIZER_NAME = "llvm-symbolizer"
 INTERNAL_ERROR_EXIT_CODE = 70
+MODULE_MARKER_PREFIX = aggregate.MODULE_MARKER_PREFIX
+MARKER_NONCE_BYTES = 8
 
 Supervisor = Callable[..., watchdog.Termination]
 
@@ -33,6 +40,57 @@ class StepResult:
     source: str
     step: str
     termination: watchdog.Termination
+    last_module: str | None = None
+    """The classified module the step had started when it ended, if known."""
+
+
+def _marker_prefix() -> str:
+    """Mint the per-run introducer the aggregate prints its markers behind.
+
+    The aggregate's stdout is shared with every test body in the run, so any
+    line shaped like a marker is otherwise as authoritative as the generated
+    one: a crashing test that printed ``==> tests/unit/test_innocent.mojo``
+    immediately before aborting had the crash attributed to a module that was
+    never running. The marker is only trustworthy if the child cannot write
+    it, so the introducer carries a nonce minted after the test sources were
+    read and never written anywhere a test can reach.
+
+    Returns:
+        An unguessable introducer of the form ``"==> <nonce> "``.
+    """
+    return f"{MODULE_MARKER_PREFIX}{secrets.token_hex(MARKER_NONCE_BYTES)} "
+
+
+def _last_module(output: str, marker_prefix: str) -> str | None:
+    """Return the path in the last complete aggregate module marker.
+
+    Args:
+        output: Retained aggregate stdout text. A trailing fragment with no
+            newline is an incomplete marker and never contributes.
+        marker_prefix: The per-run introducer from `_marker_prefix`. Only a
+            line carrying this exact prefix is a marker; the retention that
+            produced `output` filters on it too, so a forged line is dropped
+            before it reaches here as well as rejected here. An empty prefix
+            is rejected rather than matched: `str.startswith("")` is true of
+            every line, so treating it as a prefix would accept any
+            `tests/….mojo` line a test body printed and reinstate exactly the
+            forgery this check exists to stop.
+
+    Returns:
+        The module path from the last complete marker line, or None when the
+        text carries no complete module marker, or None when `marker_prefix`
+        is empty and no line can be authenticated.
+    """
+    if not marker_prefix:
+        return None
+    last: str | None = None
+    for line in output.split("\n")[:-1]:
+        if not line.startswith(marker_prefix):
+            continue
+        candidate = line[len(marker_prefix) :].rstrip()
+        if candidate.startswith("tests/") and candidate.endswith(".mojo"):
+            last = candidate
+    return last
 
 
 def _normalized_roots(repo_root: Path, paths: Sequence[str]) -> list[Path]:
@@ -81,6 +139,43 @@ def _timeout_seconds(environment: dict[str, str]) -> float:
     return timeout_seconds
 
 
+def _debug_symbols_requested(environment: dict[str, str]) -> bool:
+    """Read the opt-in line-table request for the aggregate test binary.
+
+    Args:
+        environment: The harness process environment to read.
+
+    Returns:
+        Whether the aggregate is built with line tables. Absent or ``"0"`` keeps
+        the default symbol-free build; only ``"1"`` enables them.
+
+    Raises:
+        ValueError: If the variable is set to anything but ``"0"`` or ``"1"``,
+            so a typo cannot silently drop the request.
+    """
+    raw = environment.get(DEBUG_SYMBOLS_ENV)
+    if raw is None or raw == "":
+        return False
+    if raw not in ("0", "1"):
+        raise ValueError(f"{DEBUG_SYMBOLS_ENV} must be '0' or '1': {raw!r}")
+    return raw == "1"
+
+
+def _symbolizer_path() -> Path | None:
+    """Return the pinned toolchain's symbolizer, or None when it is absent.
+
+    Returns:
+        The ``llvm-symbolizer`` shipped beside the resolved ``mojo`` binary. The
+        Mojo runtime prints a crash backtrace as bare addresses unless it can
+        find this tool, and it is not on `PATH` in either hosted lane.
+    """
+    mojo = shutil.which("mojo")
+    if mojo is None:
+        return None
+    candidate = Path(mojo).resolve().parent / SYMBOLIZER_NAME
+    return candidate if candidate.is_file() else None
+
+
 def _sentinel_for(source: str, step: str) -> Path:
     """Return the independent deadline sentinel for one pipeline step."""
     stem = {
@@ -99,8 +194,29 @@ def _run_step(
     step: str,
     timeout_seconds: float,
     supervisor: Supervisor,
+    marker_prefix: str | None = None,
 ) -> StepResult:
-    """Supervise one step and independently reconcile its deadline sentinel."""
+    """Supervise one step and independently reconcile its deadline sentinel.
+
+    Args:
+        command: Direct executable argv for this step.
+        repo_root: Repository root the sentinel and child are anchored at.
+        source: Which pipeline artifact this step belongs to.
+        step: Either ``build`` or ``run``.
+        timeout_seconds: Wall-clock ceiling handed to the supervisor.
+        supervisor: The watchdog entrypoint that runs the command.
+        marker_prefix: When given, the step's stdout is teed through the
+            supervisor so the last complete module marker survives the ending.
+
+    Returns:
+        The step's structured termination plus, when a marker prefix was
+        requested, the last classified module the step had started.
+    """
+    retention = (
+        None
+        if marker_prefix is None
+        else watchdog.MarkerRetention(marker_prefix)
+    )
     sentinel = repo_root / _sentinel_for(source, step)
     try:
         sentinel.parent.mkdir(parents=True, exist_ok=True)
@@ -120,6 +236,7 @@ def _run_step(
             timeout_seconds=timeout_seconds,
             deadline_sentinel=sentinel,
             cwd=repo_root,
+            marker_retention=retention,
         )
     except Exception as exc:
         try:
@@ -138,13 +255,33 @@ def _run_step(
             watchdog.HarnessError(f"supervisor raised: {exc}"),
         )
     termination = watchdog.validate_deadline_proof(termination, sentinel)
-    return StepResult(source, step, termination)
+    return StepResult(
+        source,
+        step,
+        termination,
+        None
+        if retention is None
+        else _last_module(retention.text, marker_prefix or ""),
+    )
 
 
-def _build_commands() -> tuple[tuple[str, list[str]], ...]:
-    """Return the exact one-package, one-native, one-aggregate build pipeline."""
+def _build_commands(
+    *, debug_symbols: bool = False
+) -> tuple[tuple[str, list[str]], ...]:
+    """Return the exact one-package, one-native, one-aggregate build pipeline.
+
+    Args:
+        debug_symbols: Whether the aggregate carries line tables. Off by default
+            because they cost roughly forty percent more build time and double
+            the binary; a crash investigation turns them on to trade that for a
+            backtrace naming files and lines.
+
+    Returns:
+        One command per build step, in dependency order.
+    """
     aggregate_source = str(AGGREGATE_SOURCE)
     aggregate_binary = str(AGGREGATE_BINARY)
+    symbol_flags = ["--debug-level=line-tables"] if debug_symbols else []
     return (
         ("package", ["bash", "scripts/build/mojo_package.sh"]),
         ("native adapter", [sys.executable, "-m", "scripts.build.native"]),
@@ -154,6 +291,7 @@ def _build_commands() -> tuple[tuple[str, list[str]], ...]:
                 "mojo",
                 "build",
                 "--no-optimization",
+                *symbol_flags,
                 "-I",
                 ".",
                 "-I",
@@ -179,17 +317,22 @@ def run_pipeline(
 ) -> StepResult:
     """Generate and run one aggregate through the complete classified pipeline."""
     aggregate_source = repo_root / AGGREGATE_SOURCE
-    modules = aggregate.write_entrypoint(repo_root, aggregate_source, roots)
+    marker_prefix = _marker_prefix()
+    modules = aggregate.write_entrypoint(
+        repo_root, aggregate_source, roots, marker_prefix
+    )
     print(
         f"aggregate-tests: generated {AGGREGATE_SOURCE} for {len(modules)} "
         f"module(s), {sum(len(module.test_functions) for module in modules)} test(s)",
         flush=True,
     )
 
-    timeout_seconds = _timeout_seconds(
+    resolved_environment = (
         dict(os.environ) if environment is None else environment
     )
-    for source, command in _build_commands():
+    timeout_seconds = _timeout_seconds(resolved_environment)
+    debug_symbols = _debug_symbols_requested(resolved_environment)
+    for source, command in _build_commands(debug_symbols=debug_symbols):
         if source == "aggregate suite":
             print(
                 f"==> building aggregate test binary -> {AGGREGATE_BINARY}",
@@ -211,6 +354,14 @@ def run_pipeline(
         if result.termination != watchdog.Exited(0):
             return result
 
+    # The Mojo runtime resolves the symbolizer from the child's own environment,
+    # and the supervisor hands the aggregate this process's environment
+    # unchanged, so exporting the path here is what reaches the crashing binary.
+    # An operator-supplied value always wins.
+    symbolizer = _symbolizer_path()
+    if symbolizer is not None:
+        os.environ.setdefault(SYMBOLIZER_ENV, str(symbolizer))
+
     print("==> running aggregate test binary", flush=True)
     return _run_step(
         [str(repo_root / AGGREGATE_BINARY)],
@@ -219,6 +370,7 @@ def run_pipeline(
         step="run",
         timeout_seconds=timeout_seconds,
         supervisor=supervisor,
+        marker_prefix=marker_prefix,
     )
 
 
@@ -235,12 +387,18 @@ def _exit_for_result(result: StepResult) -> int:
     """Map one structured pipeline result to the classified command contract."""
     termination = result.termination
     label = f"{result.source} ({result.step}"
+    # A failed aggregate is one binary covering the whole classified inventory,
+    # so the ending alone says nothing about where it stopped. Name the last
+    # module it announced whenever the run reached one.
+    provenance = (
+        "" if result.last_module is None else f"; last module: {result.last_module}"
+    )
     if isinstance(termination, watchdog.Exited):
         if termination.code == 0:
             print("All aggregate test modules passed.")
             return 0
         print(
-            f"FAILED: {label} exit {termination.code})",
+            f"FAILED: {label} exit {termination.code}){provenance}",
             file=sys.stderr,
         )
         return 1
@@ -250,7 +408,7 @@ def _exit_for_result(result: StepResult) -> int:
         )
         print(
             f"FATAL: classified: stopping after timed-out {timed_out_source} "
-            f"{result.step}",
+            f"{result.step}{provenance}",
             file=sys.stderr,
         )
         return watchdog.TIMEOUT_EXIT_CODE
@@ -263,7 +421,7 @@ def _exit_for_result(result: StepResult) -> int:
         return INTERNAL_ERROR_EXIT_CODE
     if isinstance(termination, watchdog.Signaled):
         print(
-            f"CRASHED: {label} signal {termination.signo})",
+            f"CRASHED: {label} signal {termination.signo}){provenance}",
             file=sys.stderr,
             flush=True,
         )

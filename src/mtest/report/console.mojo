@@ -16,6 +16,15 @@ Only the version string, a build constant, and the color/verbosity/show-output
 config are passed at construction; those are not session facts. Color is always
 redundant: the verdict tokens carry the meaning, and when color is off no escape
 code is emitted at all.
+
+Every string this reporter learns from an event is child- or user-controlled and
+reaches the terminal only through `console_text`: a one-line value through
+`escape_scalar`, a multi-line block through `escape_multiline` and then
+`prefix_lines`. mtest's own labels, separators, and ANSI styling are applied
+AFTER that escaping and are never escaped themselves, so the runner keeps its
+color while a child's `\\x1b[31m` shows up as the literal text `\\x1B[31m`. The
+boundary is display-only: raw captures, the machine event stream, and the JUnit
+report keep their own untouched semantics.
 """
 from mtest.config import (
     ColorWhen,
@@ -47,6 +56,11 @@ from mtest.model import (
     slow_step_label,
 )
 
+from mtest.report.console_text import (
+    escape_multiline,
+    escape_scalar,
+    prefix_lines,
+)
 from mtest.report.fencing import fence_region, select_collision_free_token
 from mtest.report.reporter import Reporter
 from mtest.report.signals import signal_name_for_target
@@ -217,6 +231,44 @@ def _fmt_fixed(x: Float64, decimals: Int) -> String:
             out += "0"
         out += fs
     return out
+
+
+def _safe_join(argv: List[String]) -> String:
+    """Shell-join `argv` for display, scalarizing each token first.
+
+    A build argv carries user- and child-controlled paths, so each token is
+    neutralized through `escape_scalar` before `shell_quote` sees it. Escaping
+    first means the quoting applies to the text actually shown, so the rendered
+    command line is a correct quoting of itself rather than of bytes nobody can
+    see.
+
+    Args:
+        argv: The command tokens, in order.
+
+    Returns:
+        The scalarized, shell-quoted, space-joined command line.
+    """
+    var safe = List[String]()
+    for i in range(len(argv)):
+        safe.append(escape_scalar(argv[i]))
+    return shell_join(safe)
+
+
+def _safe_block(text: String) -> String:
+    """One untrusted multi-line block, escaped and fenced behind the gutter.
+
+    The two display steps every captured stream, failure detail, and compiler
+    diagnostic takes, in the only order that is safe: escape the controls the
+    terminal would execute, then prefix each surviving logical line so the
+    child's territory is visibly its own.
+
+    Args:
+        text: The untrusted block, already lossy-decoded to valid UTF-8.
+
+    Returns:
+        The fenced block, LF-terminated per line, or `""` when `text` is empty.
+    """
+    return prefix_lines(escape_multiline(text))
 
 
 def _ensure_trailing_newline(s: String) -> String:
@@ -862,6 +914,11 @@ struct ConsoleReporter(Reporter):
         dim cyan only when color is enabled; under `--color never` on a terminal
         it still shows, uncolored.
 
+        Each in-flight basename is scalarized before it joins the line and
+        before the width cap is applied, so the cap counts the code points that
+        will actually be printed and no path can inject the `\\r\\x1b[K` the
+        driver itself uses to erase this line.
+
         Args:
             p: The progress tick: the completed/total counts and the in-flight
                 paths with their elapsed seconds.
@@ -884,7 +941,7 @@ struct ConsoleReporter(Reporter):
             for i in range(shown):
                 if i > 0:
                     text += ", "
-                text += _progress_basename(p.running_paths[i])
+                text += escape_scalar(_progress_basename(p.running_paths[i]))
             var overflow = len(p.running_paths) - shown
             if overflow > 0:
                 text += " +" + String(overflow) + " more"
@@ -1004,16 +1061,19 @@ struct ConsoleReporter(Reporter):
 
         A spawn failure, meaning a nonzero errno, names the cause. Errno 0 is a
         machinery failure and carries no errno suffix.
+
+        The step label and the program name are both scalarized: the program is
+        a resolved executable path, which a project file or `--mojo` can point
+        anywhere, so it is untrusted one-line text.
         """
-        var banner = String("INTERNAL-ERROR  ") + e.step + ": "
+        var step = escape_scalar(e.step)
+        var program = escape_scalar(e.program)
+        var banner = String("INTERNAL-ERROR  ") + step + ": "
         if e.errno == 0:
-            banner += "internal failure running '" + e.program + "'"
+            banner += "internal failure running '" + program + "'"
         else:
             banner += (
-                "could not execute '"
-                + e.program
-                + "' (errno "
-                + String(e.errno)
+                "could not execute '" + program + "' (errno " + String(e.errno)
             )
             var name = _errno_name(e.errno)
             if name.byte_length() > 0:
@@ -1026,18 +1086,26 @@ struct ConsoleReporter(Reporter):
 
         Also latches the run root and toolchain, which are needed even under
         quiet for root-relativizing `At` lines and naming the pin in a DRIFT
-        banner.
+        banner. Both are latched RAW: `_run_root` has to byte-match the path the
+        compiler baked into an `At` line, and escaping it would break that match.
+        Each is scalarized where it is displayed instead — the toolchain label
+        comes from the child compiler's own version output, and the root is a
+        filesystem path, so neither is trusted one-line text.
         """
         self._run_root = e.root.copy()
         self._toolchain = e.toolchain.copy()
         if self.verbosity == Verbosity.QUIET:
             return
         self._head += (
-            String("mtest ") + self.version + " (" + e.toolchain + ")\n"
+            String("mtest ")
+            + self.version
+            + " ("
+            + escape_scalar(e.toolchain)
+            + ")\n"
         )
         var counts = (
             String("root: ")
-            + e.root
+            + escape_scalar(e.root)
             + "   selected: "
             + String(e.selected_count)
             + " files   excluded: "
@@ -1054,25 +1122,34 @@ struct ConsoleReporter(Reporter):
         """Render a yellow warning line, composing the sentence per kind.
 
         Latches the detail so a DRIFT file's banner can fold in the offending
-        line the session emitted just before its `FileFinished`.
+        line the session emitted just before its `FileFinished`. The latch keeps
+        the RAW detail and the banner scalarizes it there, so exactly one escape
+        is applied wherever the detail is shown.
+
+        A warning is a single-line diagnostic, and its pattern is whatever the
+        user typed or the child's report contained, so both the kind tag and the
+        pattern are scalarized. A pattern carrying a newline can no longer forge
+        a second console line that reads as one of mtest's own.
         """
+        var kind = escape_scalar(e.warning_kind)
+        var pattern = escape_scalar(e.warning_pattern)
+        if e.warning_kind == "lf-stale" or e.warning_kind == "lf-empty":
+            self._last_warning_detail = e.warning_pattern.copy()
+            self._head += pattern + "\n"
+            return
         var sentence: String
         if e.warning_kind == "stale-exclusion":
             sentence = (
-                String("exclude pattern '")
-                + e.warning_pattern
-                + "' matched nothing"
+                String("exclude pattern '") + pattern + "' matched nothing"
             )
         elif e.warning_kind == "stale-serial":
             sentence = (
-                String("serial pattern '")
-                + e.warning_pattern
-                + "' matched no files"
+                String("serial pattern '") + pattern + "' matched no files"
             )
         else:
-            sentence = e.warning_pattern.copy()
+            sentence = pattern.copy()
         self._last_warning_detail = e.warning_pattern.copy()
-        var line = String("WARNING  ") + e.warning_kind + ": " + sentence
+        var line = String("WARNING  ") + kind + ": " + sentence
         self._head += self._paint(_YELLOW, line) + "\n"
 
     def _on_attempt_finished(mut self, e: AttemptFinishedPayload):
@@ -1082,18 +1159,23 @@ struct ConsoleReporter(Reporter):
         carries, never by re-parsing bytes: which attempt of how many, the step
         and classification, and a short phrase for the termination. An excerpt
         marker says when the captured streams were clamped.
+
+        The path, the step, and the classification tag are scalarized before
+        they enter the aligned columns, so a control byte can neither break the
+        line nor shift the column arithmetic that `_col` performs on the text it
+        is handed.
         """
         var phrase = _term_phrase(e.term_kind, e.term_value, e.escalated)
-        var line = _col("TRY", _TOKEN_W) + _col(e.path, _PATH_W)
+        var line = _col("TRY", _TOKEN_W) + _col(escape_scalar(e.path), _PATH_W)
         line += (
             String("attempt ")
             + String(e.attempt_index)
             + "/"
             + String(e.attempts_planned)
             + "  "
-            + e.step
+            + escape_scalar(e.step)
             + " "
-            + e.classification
+            + escape_scalar(e.classification)
             + "  ("
             + phrase
             + ")  "
@@ -1118,13 +1200,18 @@ struct ConsoleReporter(Reporter):
         cannot read as a soft accusation. The line's token is `ATTRIBUTION`,
         which is not a prefix of any verdict token in the vocabulary, so a
         line-oriented reader scanning for `CRASH` never matches this diagnostic.
+
+        The path and the culprit test name are the two child-controlled values
+        here; both are scalarized, so a test named with an embedded newline
+        cannot split this diagnostic into two lines, the second of which could
+        impersonate a verdict.
         """
         var d = e.attribution_disposition
         var label: String
         var detail: String
         if d == AttributionDisposition.ATTRIBUTED:
             label = String("ATTRIBUTED")
-            detail = String("culprit: ") + e.culprit_test
+            detail = String("culprit: ") + escape_scalar(e.culprit_test)
         elif d == AttributionDisposition.NO_REPRODUCTION:
             label = String("NO-REPRODUCTION")
             detail = String(
@@ -1152,7 +1239,9 @@ struct ConsoleReporter(Reporter):
                 " alone; the CRASH verdict stands and the culprit is"
                 " UNATTRIBUTED"
             )
-        var line = _col("ATTRIBUTION", _TOKEN_W) + _col(e.path, _PATH_W)
+        var line = _col("ATTRIBUTION", _TOKEN_W) + _col(
+            escape_scalar(e.path), _PATH_W
+        )
         line += (
             label
             + "  "
@@ -1175,7 +1264,13 @@ struct ConsoleReporter(Reporter):
         at the compile deadline reads as a timeout, never as the compiler
         rejecting the code, and a step that burned its retry budget says how
         many attempts it spent. Rendered from typed fields only; the compiler's
-        own output rides verbatim below.
+        own output rides below, escaped and fenced but otherwise unaltered.
+
+        The compiler is a child process, so its diagnostics are untrusted
+        multi-line text: they go through `_safe_block`, which neutralizes every
+        control it could use to repaint the screen and puts each surviving line
+        behind the gutter. The step label and every named casualty path are
+        one-line values and take the scalar escape.
         """
         var detail = String("")
         if e.ending_known:
@@ -1189,7 +1284,7 @@ struct ConsoleReporter(Reporter):
                 detail += String(e.attempts_used) + " attempts; "
         var banner = (
             String("PRECOMPILE-ERROR  ")
-            + e.step
+            + escape_scalar(e.step)
             + "  ("
             + detail
             + String(e.casualty_count)
@@ -1197,14 +1292,23 @@ struct ConsoleReporter(Reporter):
         )
         self._head += self._paint(_RED_BOLD, banner) + "\n"
         for c in e.casualties:
-            self._head += "  " + c + "\n"
+            self._head += "  " + escape_scalar(c) + "\n"
         if self._gh_actions:
             self._ensure_fence_tokens()
-        self._head += _ensure_trailing_newline(self._fence(e.compiler_output))
+        self._head += _ensure_trailing_newline(
+            self._fence(_safe_block(e.compiler_output))
+        )
         self._head += "\n"
 
     def _on_file_finished(mut self, e: FileFinishedPayload):
-        """Render an excluded line, verdict line, sections, or a banner."""
+        """Render an excluded line, verdict line, sections, or a banner.
+
+        The file path and the exclusion pattern that named it are scalarized
+        once here and reused, so every line this handler writes carries the same
+        neutralized spelling of the path. The `-v` build line is joined through
+        `_safe_join`, which scalarizes each argv token before quoting it.
+        """
+        var path = escape_scalar(e.path)
         if e.duration_seconds > 0.0:
             # RUN-ONLY signal: a file that never reached the run step (an
             # EXCLUDED, COMPILE_ERROR-before-run, or NOT_RUN file) carries
@@ -1215,8 +1319,8 @@ struct ConsoleReporter(Reporter):
                 _FileDuration(e.path.copy(), e.duration_seconds)
             )
         if e.outcome == Outcome.EXCLUDED:
-            var line = _col("EXCLUDED", _TOKEN_W) + _col(e.path, _PATH_W)
-            line += "(" + e.exclusion_pattern + ")"
+            var line = _col("EXCLUDED", _TOKEN_W) + _col(path, _PATH_W)
+            line += "(" + escape_scalar(e.exclusion_pattern) + ")"
             self._head += self._paint(_YELLOW, line) + "\n"
             self._reset_file()
             return
@@ -1242,7 +1346,7 @@ struct ConsoleReporter(Reporter):
             var token = String("NO-TESTS") if no_tests else _verdict_token(
                 e.outcome
             )
-            var line = _col(token, _TOKEN_W) + _col(e.path, _PATH_W)
+            var line = _col(token, _TOKEN_W) + _col(path, _PATH_W)
             line += _fmt_fixed(e.duration_seconds, 2) + "s"
             var detail = _outcome_detail(e)
             if (
@@ -1270,7 +1374,7 @@ struct ConsoleReporter(Reporter):
             if self.verbosity == Verbosity.VERBOSE:
                 self._head += (
                     String("    build: ")
-                    + shell_join(e.build_argv)
+                    + _safe_join(e.build_argv)
                     + "  (build "
                     + _fmt_fixed(e.build_duration_seconds, 2)
                     + "s)\n"
@@ -1290,25 +1394,38 @@ struct ConsoleReporter(Reporter):
         self._reset_file()
 
     def _render_test_row(self, t: TestResult) -> String:
-        """One `-v` per-test row: outcome token, node id, and raw timing."""
+        """One `-v` per-test row: outcome token, node id, and raw timing.
+
+        The node id and the timing text both come out of the child's own report
+        block, so both are scalarized: the row is one line by contract, and a
+        test name carrying a newline must not be able to add another.
+        """
         var out = String("    ") + _verdict_token(t.outcome) + " "
-        out += t.node.render()
+        out += escape_scalar(t.node.render())
         if t.timing.byte_length() > 0:
-            out += "  [" + t.timing + "]"
+            out += "  [" + escape_scalar(t.timing) + "]"
         return out + "\n"
 
     def _render_drift(mut self, e: FileFinishedPayload):
-        """A DRIFT banner naming the pin, snapshots, and offending line."""
+        """A DRIFT banner naming the pin, snapshots, and offending line.
+
+        The offending line is the one place a drifting child's own report text
+        is quoted back, and the toolchain label came from the compiler, so the
+        path, the label, and the latched detail are all scalarized. A drift
+        diagnostic must stay exactly the two lines it claims to be.
+        """
         var banner = (
             String("DRIFT  ")
-            + e.path
+            + escape_scalar(e.path)
             + " — the pinned toolchain "
-            + self._toolchain
+            + escape_scalar(self._toolchain)
             + " emitted an off-grammar report."
         )
         self._head += self._paint(_RED_BOLD, banner) + "\n"
         if self._last_warning_detail.byte_length() > 0:
-            self._head += "    " + self._last_warning_detail + "\n"
+            self._head += (
+                "    " + escape_scalar(self._last_warning_detail) + "\n"
+            )
         self._head += (
             "    Check the toolchain pin and tests/snapshots/protocol/, and"
             " this file's own captured output.\n"
@@ -1323,11 +1440,23 @@ struct ConsoleReporter(Reporter):
         return outcome.is_failing()
 
     def _repro_line(self, target: String) -> String:
-        """A `reproduce: mtest [<flags>] <target>` line, shell-quoted."""
+        """A `reproduce: mtest [<flags>] <target>` line, shell-quoted.
+
+        The target is a path or a node id, so it is scalarized BEFORE it is
+        quoted: the quoting then covers the exact text on screen, and a target
+        carrying an embedded newline stays one copy-pasteable console line
+        instead of becoming a second line that reads like a command.
+
+        Args:
+            target: The untrusted path or node id to reproduce.
+
+        Returns:
+            The single-line reproduce command.
+        """
         var repro = String("reproduce: mtest ")
         if self.mtest_build_flags.byte_length() > 0:
-            repro += self.mtest_build_flags + " "
-        repro += shell_quote(target)
+            repro += escape_scalar(self.mtest_build_flags) + " "
+        repro += shell_quote(escape_scalar(target))
         return repro
 
     def _compile_timeout_repro(self, e: FileFinishedPayload) -> String:
@@ -1341,9 +1470,9 @@ struct ConsoleReporter(Reporter):
         """
         var repro = String("reproduce: mtest ")
         if self.mtest_build_flags.byte_length() > 0:
-            repro += self.mtest_build_flags + " "
+            repro += escape_scalar(self.mtest_build_flags) + " "
         repro += "--compile-timeout " + String(e.timeout_seconds) + " "
-        repro += shell_quote(e.path)
+        repro += shell_quote(escape_scalar(e.path))
         return repro
 
     def _render_compile_timeout(self, e: FileFinishedPayload) -> String:
@@ -1371,14 +1500,14 @@ struct ConsoleReporter(Reporter):
         var secs = String(e.timeout_seconds)
         var out = (
             String("--- COMPILE-TIMEOUT ")
-            + e.path
+            + escape_scalar(e.path)
             + " (timed out after "
             + secs
             + "s) — mtest killed the build at the compile timeout; the"
             + " compiler said: ---\n"
         )
         out += _ensure_trailing_newline(
-            self._fence(lossy_utf8(e.captured_stderr))
+            self._fence(_safe_block(lossy_utf8(e.captured_stderr)))
         )
         out += (
             "the build exceeded the "
@@ -1410,13 +1539,13 @@ struct ConsoleReporter(Reporter):
         if e.outcome == Outcome.COMPILE_ERROR:
             var out = (
                 String("--- COMPILE-ERROR ")
-                + e.path
+                + escape_scalar(e.path)
                 + " — mojo build said: ---\n"
             )
             out += _ensure_trailing_newline(
-                self._fence(lossy_utf8(e.captured_stderr))
+                self._fence(_safe_block(lossy_utf8(e.captured_stderr)))
             )
-            out += "reproduce: " + shell_join(e.build_argv) + "\n\n"
+            out += "reproduce: " + _safe_join(e.build_argv) + "\n\n"
             return out
 
         var out = String("")
@@ -1433,13 +1562,20 @@ struct ConsoleReporter(Reporter):
 
         The detail carries the two permitted transformations only, a uniform
         dedent and a root-relative `At` line; the untransformed bytes remain in
-        the file-scope captured-output block below.
+        the file-scope captured-output block below. Both transformations run on
+        the RAW detail, before any escaping, because both match on leading
+        spaces and on the run-root path the compiler baked in — escaping first
+        would rewrite the very bytes they anchor on.
+
+        The transformed detail is then a multi-line untrusted block and takes
+        `_safe_block`; the node id heading the frame and the repro line beneath
+        it are one-line values and take the scalar escape.
         """
         var node = t.node.render()
-        var out = String("--- FAIL ") + node + " ---\n"
+        var out = String("--- FAIL ") + escape_scalar(node) + " ---\n"
         var d = _transform_detail(t.detail, self._run_root)
         if d.byte_length() > 0:
-            out += _ensure_trailing_newline(self._fence(d))
+            out += _ensure_trailing_newline(self._fence(_safe_block(d)))
         out += self._repro_line(node) + "\n\n"
         return out
 
@@ -1451,11 +1587,15 @@ struct ConsoleReporter(Reporter):
         TestSuite does not attribute captured output per test, so the block is
         labelled file-scoped and says so on screen. A file-level repro rides
         here only when no per-test section already carried one.
+
+        This is the block a hostile child controls most directly — it is its own
+        stdout and stderr, verbatim — so both streams go through `_safe_block`
+        and appear behind the gutter. The header's path takes the scalar escape.
         """
         var token = String("NO-TESTS") if _is_no_tests(e) else _verdict_token(
             e.outcome
         )
-        var header = String("--- ") + token + " " + e.path
+        var header = String("--- ") + token + " " + escape_scalar(e.path)
         var detail = _outcome_detail(e)
         if detail.byte_length() > 0:
             header += " (" + detail + ")"
@@ -1465,11 +1605,11 @@ struct ConsoleReporter(Reporter):
         )
         var out = header
         out += _ensure_trailing_newline(
-            self._fence(lossy_utf8(e.captured_stdout))
+            self._fence(_safe_block(lossy_utf8(e.captured_stdout)))
         )
         out += "--- captured stderr ---\n"
         out += _ensure_trailing_newline(
-            self._fence(lossy_utf8(e.captured_stderr))
+            self._fence(_safe_block(lossy_utf8(e.captured_stderr)))
         )
         if not has_pertest:
             out += self._repro_line(e.path) + "\n"
@@ -1542,6 +1682,9 @@ struct ConsoleReporter(Reporter):
         This is file-level: the header says "files" and no per-test timing is
         shown or implied. Renders regardless of `verbosity`, so an explicit
         `--durations` survives `-q`.
+
+        The accumulated paths are latched raw and scalarized here, at the one
+        place they are printed, so the sort still compares real path bytes.
         """
         if self.durations <= 0:
             return String("")
@@ -1555,7 +1698,7 @@ struct ConsoleReporter(Reporter):
         for i in range(n_rows):
             out += (
                 "  "
-                + files[i].path
+                + escape_scalar(files[i].path)
                 + "  "
                 + _fmt_fixed(files[i].duration_seconds, 2)
                 + "s\n"

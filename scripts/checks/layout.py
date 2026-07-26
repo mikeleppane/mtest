@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import tomllib
 
+from scripts.build import package_consumption
 from scripts.e2e import __main__ as e2e_main
 from scripts.harness import aggregate
 from scripts.harness import dogfood
@@ -33,21 +35,58 @@ BUILD_SOURCE_PATHS = (
     Path("scripts/build/package_consumption.py"),
     Path("scripts/build/production_build.sh"),
 )
+VENDORED_TOML_PATHS = {
+    Path("vendor/mojo-toml/CHECKSUMS.json"),
+    Path("vendor/mojo-toml/LICENSE"),
+    Path("vendor/mojo-toml/README.md"),
+    Path("vendor/mojo-toml/toml/__init__.mojo"),
+    Path("vendor/mojo-toml/toml/lexer.mojo"),
+    Path("vendor/mojo-toml/toml/parser.mojo"),
+}
+VENDORED_TOML_RELEASE = "346b7ad723c034f7696723f4846203d47ef86951"
+VENDORED_TOML_MAIN = "c3262adea2d314748716991f99d0276f4a0b5e79"
+VENDORED_TOML_UPSTREAM_SHA256 = {
+    "LICENSE": "f091af39a05aa9864f099a672495096e97ce62e962f03fa90324da83061dab43",
+    "src/toml/__init__.mojo": (
+        "2c95e4cac433f0639125be700472001963ac319324f397465e309cdde97764e7"
+    ),
+    "src/toml/lexer.mojo": (
+        "408f420337d6a5b2d74c5f04f44f638ae6317333b833ba3a8ff92664cf811b16"
+    ),
+    "src/toml/parser.mojo": (
+        "5b49c67071f99bdf6096c5ec4745037ca043061a7fcbdcfb20a86ee127067a4a"
+    ),
+}
+VENDORED_TOML_LOCAL_CHECKSUM_PATHS = {
+    "LICENSE",
+    "toml/__init__.mojo",
+    "toml/lexer.mojo",
+    "toml/parser.mojo",
+}
 UNIT_SUITES = {
     "test_cache_registry.mojo",
     "test_cli_arity.mojo",
     "test_cli_arity0.mojo",
     "test_cli_build_flags.mojo",
     "test_cli_collect.mojo",
+    "test_cli_doctor.mojo",
     "test_cli_grammar.mojo",
     "test_cli_inventory.mojo",
+    "test_cli_overlay.mojo",
     "test_cli_parse.mojo",
     "test_config.mojo",
+    "test_config_file.mojo",
+    "test_config_lossy_utf8.mojo",
+    "test_config_resolve.mojo",
+    "test_config_show.mojo",
+    "test_config_state.mojo",
+    "test_config_toml_adversarial.mojo",
     "test_discover_fnmatch.mojo",
     "test_discover_normalize.mojo",
     "test_exec_pool_policy.mojo",
     "test_exec_spec.mojo",
     "test_exec_tty.mojo",
+    "test_model_control_chars.mojo",
     "test_model_events.mojo",
     "test_model_exit_code.mojo",
     "test_model_node_id.mojo",
@@ -56,11 +95,13 @@ UNIT_SUITES = {
     "test_model_slow.mojo",
     "test_model_test_counts.mojo",
     "test_model_test_result.mojo",
+    "test_platform_temp_file.mojo",
     "test_protocol_corruption.mojo",
     "test_protocol_matrix.mojo",
     "test_report_annotations.mojo",
     "test_report_composite.mojo",
     "test_report_console.mojo",
+    "test_report_console_text.mojo",
     "test_report_coordinator.mojo",
     "test_report_escape.mojo",
     "test_report_json_reporter.mojo",
@@ -70,12 +111,14 @@ UNIT_SUITES = {
     "test_report_junit_reporter.mojo",
     "test_report_recording.mojo",
     "test_report_signals.mojo",
+    "test_select_failure_selection.mojo",
     "test_select_logic.mojo",
     "test_select_operands.mojo",
     "test_session_attribution.mojo",
     "test_session_clamp.mojo",
     "test_session_classify.mojo",
     "test_session_detail.mojo",
+    "test_session_effective_settings.mojo",
     "test_session_mangle.mojo",
     "test_session_pipeline.mojo",
     "test_session_pool_plan.mojo",
@@ -115,6 +158,8 @@ INTEGRATION_SUITES = {
     "test_session_junit.mojo",
     "test_session_maxfail.mojo",
     "test_session_outcomes.mojo",
+    "test_session_overrides.mojo",
+    "test_session_pool_faults.mojo",
     "test_session_precompile.mojo",
     "test_session_rmtree.mojo",
     "test_session_schedule.mojo",
@@ -150,6 +195,8 @@ CLASSIFIED_PATHS = (
     "tests/integration/test_session_junit.mojo",
     "tests/integration/test_session_maxfail.mojo",
     "tests/integration/test_session_outcomes.mojo",
+    "tests/integration/test_session_overrides.mojo",
+    "tests/integration/test_session_pool_faults.mojo",
     "tests/integration/test_session_precompile.mojo",
     "tests/integration/test_session_rmtree.mojo",
     "tests/integration/test_session_schedule.mojo",
@@ -160,15 +207,24 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_cli_arity0.mojo",
     "tests/unit/test_cli_build_flags.mojo",
     "tests/unit/test_cli_collect.mojo",
+    "tests/unit/test_cli_doctor.mojo",
     "tests/unit/test_cli_grammar.mojo",
     "tests/unit/test_cli_inventory.mojo",
+    "tests/unit/test_cli_overlay.mojo",
     "tests/unit/test_cli_parse.mojo",
     "tests/unit/test_config.mojo",
+    "tests/unit/test_config_file.mojo",
+    "tests/unit/test_config_lossy_utf8.mojo",
+    "tests/unit/test_config_resolve.mojo",
+    "tests/unit/test_config_show.mojo",
+    "tests/unit/test_config_state.mojo",
+    "tests/unit/test_config_toml_adversarial.mojo",
     "tests/unit/test_discover_fnmatch.mojo",
     "tests/unit/test_discover_normalize.mojo",
     "tests/unit/test_exec_pool_policy.mojo",
     "tests/unit/test_exec_spec.mojo",
     "tests/unit/test_exec_tty.mojo",
+    "tests/unit/test_model_control_chars.mojo",
     "tests/unit/test_model_events.mojo",
     "tests/unit/test_model_exit_code.mojo",
     "tests/unit/test_model_node_id.mojo",
@@ -177,11 +233,13 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_model_slow.mojo",
     "tests/unit/test_model_test_counts.mojo",
     "tests/unit/test_model_test_result.mojo",
+    "tests/unit/test_platform_temp_file.mojo",
     "tests/unit/test_protocol_corruption.mojo",
     "tests/unit/test_protocol_matrix.mojo",
     "tests/unit/test_report_annotations.mojo",
     "tests/unit/test_report_composite.mojo",
     "tests/unit/test_report_console.mojo",
+    "tests/unit/test_report_console_text.mojo",
     "tests/unit/test_report_coordinator.mojo",
     "tests/unit/test_report_escape.mojo",
     "tests/unit/test_report_json_reporter.mojo",
@@ -191,12 +249,14 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_report_junit_reporter.mojo",
     "tests/unit/test_report_recording.mojo",
     "tests/unit/test_report_signals.mojo",
+    "tests/unit/test_select_failure_selection.mojo",
     "tests/unit/test_select_logic.mojo",
     "tests/unit/test_select_operands.mojo",
     "tests/unit/test_session_attribution.mojo",
     "tests/unit/test_session_clamp.mojo",
     "tests/unit/test_session_classify.mojo",
     "tests/unit/test_session_detail.mojo",
+    "tests/unit/test_session_effective_settings.mojo",
     "tests/unit/test_session_mangle.mojo",
     "tests/unit/test_session_pipeline.mojo",
     "tests/unit/test_session_pool_plan.mojo",
@@ -207,7 +267,15 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 1053
+CLASSIFIED_TEST_COUNT = 1300
+CLASSIFIED_ROOTS = (
+    Path("tests/unit"),
+    Path("tests/integration"),
+)
+CLASSIFIED_PACKAGE_MARKERS = {
+    Path("tests/unit/__init__.mojo"),
+    Path("tests/integration/__init__.mojo"),
+}
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",
@@ -226,12 +294,14 @@ EXEC_FIXTURES = {
     "flooding_grandchild.py",
     "grandchild_exit0.py",
     "grandchild_spawner.py",
+    "hostile_report_actor.py",
     "path_probe.sh",
     "path_resolver.py",
     "self_signaler.py",
     "sigterm_grace_exit.py",
     "sigterm_ignorer.py",
     "sleeper.py",
+    "tagged_streams.py",
 }
 PROTOCOL_FIXTURES = {
     "crashing.mojo",
@@ -245,7 +315,9 @@ PROTOCOL_FIXTURES = {
     "twofail.mojo",
 }
 E2E_NATIVE_FIXTURES = {
+    "e2e_config_open_fault.c",
     "e2e_json_terminal_write_fault.c",
+    "e2e_state_persistence_fault.c",
 }
 E2E_HARNESS_PATHS = {
     Path("scripts/e2e/__init__.py"),
@@ -255,7 +327,10 @@ E2E_HARNESS_PATHS = {
     Path("scripts/e2e/runner.py"),
     Path("scripts/e2e/scenarios/__init__.py"),
     Path("scripts/e2e/scenarios/annotations.py"),
+    Path("scripts/e2e/scenarios/config_file.py"),
+    Path("scripts/e2e/scenarios/config_show.py"),
     Path("scripts/e2e/scenarios/core.py"),
+    Path("scripts/e2e/scenarios/doctor.py"),
     Path("scripts/e2e/scenarios/json_reporter.py"),
     Path("scripts/e2e/scenarios/junit_reporter.py"),
     Path("scripts/e2e/scenarios/parallel.py"),
@@ -268,6 +343,8 @@ E2E_SCENARIO_NAMES = (
     "resilience-matrix",
     "default-suite",
     "hostile",
+    "hostile-console",
+    "hostile-reporters",
     "single-pass",
     "exitfirst",
     "maxfail",
@@ -290,6 +367,19 @@ E2E_SCENARIO_NAMES = (
     "show-output",
     "durations",
     "color",
+    "config-resolution",
+    "config-diagnostics",
+    "config-state",
+    "failure-reselection",
+    "config-overrides",
+    "config-show",
+    "doctor-healthy",
+    "doctor-malformed-config",
+    "doctor-missing-config",
+    "doctor-missing-toolchain",
+    "doctor-unwritable-state",
+    "doctor-interrupt",
+    "doctor-config-free",
     "usage-refusals",
     "selection-keyword",
     "selection-node-id",
@@ -300,12 +390,15 @@ E2E_SCENARIO_NAMES = (
     "selection-chameleon",
     "single-build",
     "stale-recovery-two-builds",
+    "mojo-executable-precedence",
     "collect",
     "passthrough+forbidden",
     "out-of-root",
     "internal-error",
     "runtime-open-failure",
     "interrupt",
+    "interrupt-sigterm",
+    "interrupt-double",
     "json-forward-compat",
     "json-purity",
     "json-color-relocated-stderr",
@@ -336,6 +429,7 @@ E2E_SCENARIO_NAMES = (
     "parallel-progress-tty",
     "parallel-serial-noverlap",
     "parallel-serial-stale-glob",
+    "parallel-fd-clamp",
 )
 
 LIVE_COMMAND_FIXED_PATHS = (
@@ -496,12 +590,116 @@ def check_classified_entrypoint(
         )
 
 
+def _reraise_walk_error(error: OSError) -> None:
+    """Refuse to read an unreadable classified subtree as an empty one.
+
+    `os.walk` swallows a directory-listing failure by default and yields
+    nothing for that subtree, which would let an unreadable directory hide an
+    unexecuted Mojo file behind a green gate.
+
+    Args:
+        error: The listing failure `os.walk` would otherwise have discarded.
+
+    Raises:
+        OSError: Always, re-raising `error` unchanged.
+    """
+    raise error
+
+
+def classified_mojo_universe(root: Path) -> tuple[set[Path], set[Path]]:
+    """Return regular and symlinked Mojo paths beneath both classified roots.
+
+    Walks every directory entry under `tests/unit` and `tests/integration`
+    without following directory symlinks. A regular file joins the Mojo
+    universe when `.mojo` appears anywhere in its suffixes, so a misnamed
+    `helper.mojo` and a parked `test_probe.mojo.disabled` are both visible to
+    the caller rather than invisible to a `test_*.mojo` glob. A classified root
+    that is itself a symlink is reported rather than walked through.
+
+    Args:
+        root: The repository root the classified suite directories live under.
+
+    Returns:
+        A pair of root-relative path sets: every regular Mojo-like file, and
+        every symlinked entry regardless of its target or suffix.
+
+    Raises:
+        OSError: A directory beneath a classified root could not be listed. An
+            unreadable subtree is a failure, never an empty one.
+    """
+    regular: set[Path] = set()
+    symlinked: set[Path] = set()
+    for classified_root in CLASSIFIED_ROOTS:
+        absolute = root / classified_root
+        if absolute.is_symlink():
+            # `os.walk` always walks its top argument and `is_dir` follows the
+            # link, so a relocated root has to be rejected before the walk.
+            symlinked.add(classified_root)
+            continue
+        if not absolute.is_dir():
+            continue
+        for directory, dirnames, filenames in os.walk(
+            absolute, onerror=_reraise_walk_error, followlinks=False
+        ):
+            current = Path(directory)
+            retained: list[str] = []
+            for name in dirnames:
+                if (current / name).is_symlink():
+                    symlinked.add((current / name).relative_to(root))
+                else:
+                    retained.append(name)
+            dirnames[:] = retained
+            for name in filenames:
+                path = current / name
+                relative = path.relative_to(root)
+                if path.is_symlink():
+                    symlinked.add(relative)
+                elif ".mojo" in relative.suffixes:
+                    regular.add(relative)
+    return regular, symlinked
+
+
+def check_classified_mojo_inventory(root: Path) -> None:
+    """Require the classified roots to hold exactly the registered Mojo files.
+
+    Args:
+        root: The repository root the classified suite directories live under.
+
+    Raises:
+        AssertionError: A symlink sits under a classified root, or the Mojo
+            universe there differs from the registered suites plus the two
+            package markers in either direction.
+    """
+    regular, symlinked = classified_mojo_universe(root)
+    if symlinked:
+        raise AssertionError(
+            "symlinked classified path: "
+            f"{sorted(path.as_posix() for path in symlinked)}"
+        )
+    expected = {Path(path) for path in CLASSIFIED_PATHS} | CLASSIFIED_PACKAGE_MARKERS
+    unexpected = regular - expected
+    if unexpected:
+        raise AssertionError(
+            "unexpected classified Mojo file: "
+            f"{sorted(path.as_posix() for path in unexpected)}"
+        )
+    missing = expected - regular
+    if missing:
+        raise AssertionError(
+            "missing classified Mojo file: "
+            f"{sorted(path.as_posix() for path in missing)}"
+        )
+
+
 def check_suite_layout() -> None:
     """Every aggregate module and support module has its classified home."""
     _require_nonempty("unit suite", UNIT_SUITES)
     _require_nonempty("integration suite", INTEGRATION_SUITES)
     _require_nonempty("classified path", CLASSIFIED_PATHS)
+    _require_nonempty("classified root", CLASSIFIED_ROOTS)
+    _require_nonempty("classified package marker", CLASSIFIED_PACKAGE_MARKERS)
     _require_nonempty("support module", SUPPORT_MODULES)
+    check_classified_mojo_inventory(REPO_ROOT)
     tests_dir = REPO_ROOT / "tests"
     actual_unit = {path.name for path in (tests_dir / "unit").glob("test_*.mojo")}
     actual_integration = {
@@ -573,10 +771,21 @@ def check_suite_layout() -> None:
 
 
 def check_exec_fixture_layout() -> None:
-    """Exec subprocess actors live with tests, not developer harnesses."""
+    """Exec subprocess actors live with tests, not developer harnesses.
+
+    Membership is exact and fail-closed: an unlisted actor is a finding, not a
+    tolerated extra. The single exemption is `__pycache__`, which CPython writes
+    into this directory the moment anything imports an actor as a module — the
+    E2E harness does, to predict the hostile actor's payload — and which is
+    generated output rather than a fixture anyone chose to add.
+    """
     _require_nonempty("exec fixture", EXEC_FIXTURES)
     fixture_dir = REPO_ROOT / "tests" / "fixtures" / "exec"
-    actual = {path.name for path in fixture_dir.iterdir()} if fixture_dir.exists() else set()
+    actual = (
+        {path.name for path in fixture_dir.iterdir() if path.name != "__pycache__"}
+        if fixture_dir.exists()
+        else set()
+    )
     if actual != EXEC_FIXTURES:
         raise AssertionError(
             "exec fixture membership mismatch: "
@@ -677,10 +886,11 @@ def check_e2e_layout() -> None:
         path.relative_to(REPO_ROOT).as_posix()
         for path in e2e_root.rglob("test_*.mojo")
     }
-    if rows != discovered or len(rows) != 36:
+    if rows != discovered or len(rows) != 41:
         raise AssertionError(
             "e2e manifest/discovery mismatch: "
-            f"missing={sorted(discovered - rows)}, stale={sorted(rows - discovered)}"
+            f"missing={sorted(discovered - rows)}, stale={sorted(rows - discovered)}, "
+            f"rows={len(rows)}"
         )
     scenario_names = tuple(name for name, _function in e2e_main.SCENARIOS)
     if scenario_names != E2E_SCENARIO_NAMES:
@@ -688,9 +898,9 @@ def check_e2e_layout() -> None:
             "E2E scenario membership/order mismatch: "
             f"expected={list(E2E_SCENARIO_NAMES)}, actual={list(scenario_names)}"
         )
-    if len(scenario_names) != 72 or len(set(scenario_names)) != len(scenario_names):
+    if len(scenario_names) != 91 or len(set(scenario_names)) != len(scenario_names):
         raise AssertionError(
-            "E2E scenarios must contain 72 unique names in the pinned order"
+            "E2E scenarios must contain 91 unique names in the pinned order"
         )
     referenced = {
         *rows,
@@ -933,11 +1143,136 @@ def check_build_source_visibility(repo_root: Path = REPO_ROOT) -> None:
         raise AssertionError("scripts/build source is untracked")
 
 
+def check_vendored_toml_layout(repo_root: Path = REPO_ROOT) -> None:
+    """Pin the native TOML source and its offline production-build path."""
+    _require_nonempty("vendored TOML source", VENDORED_TOML_PATHS)
+    vendor_root = repo_root / "vendor" / "mojo-toml"
+    actual = {
+        path.relative_to(repo_root)
+        for path in vendor_root.rglob("*")
+        if path.is_file()
+    }
+    if actual != VENDORED_TOML_PATHS:
+        raise AssertionError(
+            "vendored TOML membership mismatch: "
+            f"missing={sorted(VENDORED_TOML_PATHS - actual)}, "
+            f"extra={sorted(actual - VENDORED_TOML_PATHS)}"
+        )
+
+    manifest_path = vendor_root / "CHECKSUMS.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    expected_metadata = {
+        "repository": "https://github.com/DataBooth/mojo-toml",
+        "license": "Apache-2.0",
+        "release": VENDORED_TOML_RELEASE,
+        "main": VENDORED_TOML_MAIN,
+        "release_sha256": VENDORED_TOML_UPSTREAM_SHA256,
+        "main_sha256": VENDORED_TOML_UPSTREAM_SHA256,
+    }
+    expected_keys = {*expected_metadata, "local_sha256"}
+    if set(manifest) != expected_keys:
+        raise AssertionError(
+            "vendored TOML manifest key mismatch: "
+            f"expected={sorted(expected_keys)}, got={sorted(manifest)}"
+        )
+    for key, expected in expected_metadata.items():
+        if manifest.get(key) != expected:
+            raise AssertionError(
+                f"vendored TOML provenance mismatch for {key}: "
+                f"expected={expected!r}, got={manifest.get(key)!r}"
+            )
+    local = manifest.get("local_sha256")
+    if not isinstance(local, dict) or set(local) != VENDORED_TOML_LOCAL_CHECKSUM_PATHS:
+        raise AssertionError(
+            "vendored TOML local checksum membership mismatch: "
+            f"expected={sorted(VENDORED_TOML_LOCAL_CHECKSUM_PATHS)}, "
+            f"got={sorted(local) if isinstance(local, dict) else local!r}"
+        )
+    for relative, expected in local.items():
+        actual_digest = hashlib.sha256(
+            (vendor_root / relative).read_bytes()
+        ).hexdigest()
+        if actual_digest != expected:
+            raise AssertionError(
+                f"vendored TOML local checksum mismatch for {relative}: "
+                f"expected={expected}, got={actual_digest}"
+            )
+
+    build_source = (
+        repo_root / "scripts" / "build" / "production_build.sh"
+    ).read_text(encoding="utf-8")
+    required_commands = (
+        "mojo precompile vendor/mojo-toml/toml -o build/toml.mojopkg",
+        "mojo precompile -I build src/mtest -o build/mtest.mojopkg",
+        "mojo build -I build src/main.mojo -o build/mtest",
+    )
+    if any(command not in build_source for command in required_commands):
+        raise AssertionError(
+            "production build does not compile and link the vendored TOML package"
+        )
+    if len(re.findall(r"(?m)^\s*mojo precompile\b", build_source)) != 2:
+        raise AssertionError(
+            "production build must execute exactly two package precompiles"
+        )
+    if re.search(r"\b(curl|wget|git\s+(clone|fetch|pull))\b", build_source):
+        raise AssertionError("production build fetches a dependency from the network")
+
+
 
 def _require_nonempty(name: str, values: object) -> None:
     """Reject an accidentally disabled intended inventory."""
     if not values:
         raise AssertionError(f"{name} intended inventory is empty")
+
+
+def check_package_fixture_contract(repo_root: Path = REPO_ROOT) -> None:
+    """The package gate's failing fixture still has its declared outcome.
+
+    `scripts/build/package_consumption.py` runs one fixed known-failing fixture
+    through the INSTALLED binary and asserts an exact verdict and per-test
+    arithmetic. Those expectations are only meaningful while the fixture itself
+    still declares them, and the package gate costs a full package build to
+    discover a drift. This pins the two together in the cheap harness gate.
+
+    Args:
+        repo_root: Repository root to read the fixture and E2E manifest from.
+
+    Raises:
+        AssertionError: The fixture is missing, is not a real file, or its
+            declared outcome disagrees with what the package gate asserts.
+    """
+    relative = package_consumption.FAILING_FIXTURE
+    fixture = repo_root / relative
+    if not fixture.is_file() or fixture.is_symlink():
+        raise AssertionError(
+            f"the package gate's failing fixture is not a real file: {relative}"
+        )
+    manifest = json.loads(
+        (repo_root / "e2e" / "manifest.json").read_text(encoding="utf-8")
+    )
+    row = manifest["tests"].get(relative)
+    if row is None:
+        raise AssertionError(
+            f"the package gate's failing fixture is not declared in the E2E "
+            f"manifest: {relative}"
+        )
+    declared = (
+        row["verdict"],
+        row["exit_class"],
+        row["per_test"]["passed"],
+        row["per_test"]["failed"],
+    )
+    expected = (
+        "FAIL",
+        1,
+        package_consumption.FAILING_FIXTURE_PASSED,
+        package_consumption.FAILING_FIXTURE_FAILED,
+    )
+    if declared != expected:
+        raise AssertionError(
+            "the package gate's failing fixture no longer declares the outcome "
+            f"the gate asserts: declared={declared}, gate expects={expected}"
+        )
 
 
 def main() -> int:
@@ -951,6 +1286,8 @@ def main() -> int:
         check_e2e_layout()
         check_python_package_invocation()
         check_build_source_visibility()
+        check_vendored_toml_layout()
+        check_package_fixture_contract()
     except (AssertionError, OSError, subprocess.SubprocessError) as exc:
         print(f"layout-check: FAIL: {exc}", file=sys.stderr)
         return 1

@@ -1,10 +1,9 @@
 """The flag-spec table: the single source of truth for every flag spelling.
 
 The parser is table-driven rather than a pile of ad-hoc branches. Each accepted
-*spelling* is one `FlagSpec` row carrying its arity, whether it repeats, whether
-this build serves it, and — for a flag whose feature is not built yet — the
-roadmap milestone that brings it. Two spellings of the same flag (`-x` and
-`--exitfirst`) are two rows sharing one `id`.
+*spelling* is one `FlagSpec` row carrying its arity, repetition behavior, and
+owned help metadata. Two spellings of the same flag (`-x` and `--exitfirst`)
+are two rows sharing one `id`.
 
 `flag_specs()` exposes the whole table so the command-line contract can be
 checked against an independently written inventory rather than against itself.
@@ -36,7 +35,6 @@ struct FlagId:
     comptime COLOR = 11
     comptime HELP = 12
     comptime VERSION = 13
-    # Recognized but not served by this build (refused with a milestone note).
     comptime SELECT = 14
     comptime MAXFAIL = 15
     comptime WORKERS = 16
@@ -50,6 +48,48 @@ struct FlagId:
     comptime SHARD = 24
     comptime SERIAL = 25
     comptime JSON = 26
+    comptime CONFIG = 27
+    comptime NO_CONFIG = 28
+    comptime LAST_FAILED = 29
+    comptime FAILED_FIRST = 30
+
+
+struct FlagGroup:
+    """Closed identities for the six user-facing help sections."""
+
+    comptime SELECTION = 0
+    comptime EXECUTION = 1
+    comptime BUILDING = 2
+    comptime REPORTING = 3
+    comptime SESSION_STATE = 4
+    comptime GENERAL = 5
+
+
+def flag_group_name(group: Int) -> String:
+    """Return the heading for a help-group identity.
+
+    An invalid identity is rendered visibly rather than indexing a table or
+    trapping. The inventory tests reject such an identity before release.
+
+    Args:
+        group: One of the `FlagGroup` integer constants.
+
+    Returns:
+        The user-facing section heading, or `Invalid` for a corrupt identity.
+    """
+    if group == FlagGroup.SELECTION:
+        return "Selection"
+    if group == FlagGroup.EXECUTION:
+        return "Execution"
+    if group == FlagGroup.BUILDING:
+        return "Building"
+    if group == FlagGroup.REPORTING:
+        return "Reporting"
+    if group == FlagGroup.SESSION_STATE:
+        return "Session state"
+    if group == FlagGroup.GENERAL:
+        return "General"
+    return "Invalid"
 
 
 @fieldwise_init
@@ -75,12 +115,14 @@ struct FlagSpec(Copyable, Movable):
     repeat accumulates or overwrites is decided by that flag's branch in
     `parse_args`."""
 
-    var available: Bool
-    """Whether this build serves the flag; if not, it is refused before the
-    run starts."""
+    var help: String
+    """The canonical one-line description for this spelling's help row."""
 
-    var arrives_with: String
-    """For a refused flag, the milestone that brings it; empty if available."""
+    var value_name: String
+    """The rendered value placeholder, or empty for an arity-zero flag."""
+
+    var group: Int
+    """The closed `FlagGroup` identity that owns this spelling."""
 
 
 def flag_specs() -> List[FlagSpec]:
@@ -91,37 +133,334 @@ def flag_specs() -> List[FlagSpec]:
         order.
     """
     return [
-        # Available in this build.
-        FlagSpec("--exclude", FlagId.EXCLUDE, 1, True, True, ""),
-        FlagSpec("-I", FlagId.INCLUDE, 1, True, True, ""),
-        FlagSpec("--build-arg", FlagId.BUILD_ARG, 1, True, True, ""),
-        FlagSpec("--gate", FlagId.GATE, 1, True, True, ""),
-        FlagSpec("--precompile", FlagId.PRECOMPILE, 1, True, True, ""),
-        FlagSpec("--mojo", FlagId.MOJO, 1, False, True, ""),
-        FlagSpec("-x", FlagId.EXITFIRST, 0, False, True, ""),
-        FlagSpec("--exitfirst", FlagId.EXITFIRST, 0, False, True, ""),
-        FlagSpec("--timeout", FlagId.TIMEOUT, 1, False, True, ""),
-        FlagSpec("-s", FlagId.SHOW_ALL, 0, False, True, ""),
-        FlagSpec("--show-output", FlagId.SHOW_OUTPUT, 1, False, True, ""),
-        FlagSpec("-q", FlagId.QUIET, 0, False, True, ""),
-        FlagSpec("-v", FlagId.VERBOSE, 0, False, True, ""),
-        FlagSpec("--color", FlagId.COLOR, 1, False, True, ""),
-        FlagSpec("-h", FlagId.HELP, 0, False, True, ""),
-        FlagSpec("--help", FlagId.HELP, 0, False, True, ""),
-        FlagSpec("--version", FlagId.VERSION, 0, False, True, ""),
-        FlagSpec("-k", FlagId.SELECT, 1, False, True, ""),
-        FlagSpec("--maxfail", FlagId.MAXFAIL, 1, False, True, ""),
-        FlagSpec("--durations", FlagId.DURATIONS, 1, False, True, ""),
-        FlagSpec("--shard", FlagId.SHARD, 1, False, True, ""),
-        FlagSpec("--retries", FlagId.RETRIES, 1, False, True, ""),
+        # Selection.
         FlagSpec(
-            "--compile-timeout", FlagId.COMPILE_TIMEOUT, 1, False, True, ""
+            "--exclude",
+            FlagId.EXCLUDE,
+            1,
+            True,
+            "Exclude matching files (repeatable).",
+            "GLOB",
+            FlagGroup.SELECTION,
         ),
-        FlagSpec("-n", FlagId.WORKERS, 1, False, True, ""),
-        FlagSpec("--workers", FlagId.WORKERS, 1, False, True, ""),
-        FlagSpec("--serial", FlagId.SERIAL, 1, True, True, ""),
-        FlagSpec("--json", FlagId.JSON, 1, False, True, ""),
-        FlagSpec("--junit-xml", FlagId.JUNIT_XML, 1, False, True, ""),
-        FlagSpec("--gh-annotations", FlagId.GH_ANNOTATIONS, 1, False, True, ""),
-        FlagSpec("--collect-only", FlagId.COLLECT_ONLY, 0, False, True, ""),
+        FlagSpec(
+            "-k",
+            FlagId.SELECT,
+            1,
+            False,
+            "Select node ids containing STR.",
+            "STR",
+            FlagGroup.SELECTION,
+        ),
+        FlagSpec(
+            "--gate",
+            FlagId.GATE,
+            1,
+            True,
+            "Run PATH before ordinary files (repeatable).",
+            "PATH",
+            FlagGroup.SELECTION,
+        ),
+        FlagSpec(
+            "--shard",
+            FlagId.SHARD,
+            1,
+            False,
+            "Run only the selected shard.",
+            "[hash:|slice:]M/N",
+            FlagGroup.SELECTION,
+        ),
+        # Execution.
+        FlagSpec(
+            "-x",
+            FlagId.EXITFIRST,
+            0,
+            False,
+            "Stop after the first failing file.",
+            "",
+            FlagGroup.EXECUTION,
+        ),
+        FlagSpec(
+            "--exitfirst",
+            FlagId.EXITFIRST,
+            0,
+            False,
+            "Stop after the first failing file.",
+            "",
+            FlagGroup.EXECUTION,
+        ),
+        FlagSpec(
+            "--maxfail",
+            FlagId.MAXFAIL,
+            1,
+            False,
+            "Stop after N failed tests (0 disables).",
+            "N",
+            FlagGroup.EXECUTION,
+        ),
+        FlagSpec(
+            "--timeout",
+            FlagId.TIMEOUT,
+            1,
+            False,
+            "Set per-file run timeout (0 disables).",
+            "SECS",
+            FlagGroup.EXECUTION,
+        ),
+        FlagSpec(
+            "--retries",
+            FlagId.RETRIES,
+            1,
+            False,
+            "Retry crash-class outcomes N times.",
+            "N",
+            FlagGroup.EXECUTION,
+        ),
+        FlagSpec(
+            "-n",
+            FlagId.WORKERS,
+            1,
+            False,
+            "Set worker count (default: 1).",
+            "N|auto",
+            FlagGroup.EXECUTION,
+        ),
+        FlagSpec(
+            "--workers",
+            FlagId.WORKERS,
+            1,
+            False,
+            "Set worker count (default: 1).",
+            "N|auto",
+            FlagGroup.EXECUTION,
+        ),
+        FlagSpec(
+            "--serial",
+            FlagId.SERIAL,
+            1,
+            True,
+            "Run matching files serially (repeatable).",
+            "GLOB",
+            FlagGroup.EXECUTION,
+        ),
+        # Building.
+        FlagSpec(
+            "-I",
+            FlagId.INCLUDE,
+            1,
+            True,
+            "Add a Mojo include path (repeatable).",
+            "PATH",
+            FlagGroup.BUILDING,
+        ),
+        FlagSpec(
+            "--build-arg",
+            FlagId.BUILD_ARG,
+            1,
+            True,
+            "Forward one argument to mojo build (repeatable).",
+            "ARG",
+            FlagGroup.BUILDING,
+        ),
+        FlagSpec(
+            "--precompile",
+            FlagId.PRECOMPILE,
+            1,
+            True,
+            "Precompile package before builds (repeatable).",
+            "SRC[:OUT]",
+            FlagGroup.BUILDING,
+        ),
+        FlagSpec(
+            "--mojo",
+            FlagId.MOJO,
+            1,
+            False,
+            "Use this Mojo executable.",
+            "PATH",
+            FlagGroup.BUILDING,
+        ),
+        FlagSpec(
+            "--compile-timeout",
+            FlagId.COMPILE_TIMEOUT,
+            1,
+            False,
+            "Set per-file build timeout (0 disables).",
+            "SECS",
+            FlagGroup.BUILDING,
+        ),
+        # Reporting.
+        FlagSpec(
+            "-s",
+            FlagId.SHOW_ALL,
+            0,
+            False,
+            "Show captured output for all files.",
+            "",
+            FlagGroup.REPORTING,
+        ),
+        FlagSpec(
+            "--show-output",
+            FlagId.SHOW_OUTPUT,
+            1,
+            False,
+            "Choose failures|all|none captured output.",
+            "MODE",
+            FlagGroup.REPORTING,
+        ),
+        FlagSpec(
+            "--durations",
+            FlagId.DURATIONS,
+            1,
+            False,
+            "Show N slowest file durations (0 disables).",
+            "N",
+            FlagGroup.REPORTING,
+        ),
+        FlagSpec(
+            "-q",
+            FlagId.QUIET,
+            0,
+            False,
+            "Suppress passing file rows.",
+            "",
+            FlagGroup.REPORTING,
+        ),
+        FlagSpec(
+            "-v",
+            FlagId.VERBOSE,
+            0,
+            False,
+            "Show build commands and step timings.",
+            "",
+            FlagGroup.REPORTING,
+        ),
+        FlagSpec(
+            "--color",
+            FlagId.COLOR,
+            1,
+            False,
+            "Choose auto|always|never color output.",
+            "WHEN",
+            FlagGroup.REPORTING,
+        ),
+        FlagSpec(
+            "--json",
+            FlagId.JSON,
+            1,
+            False,
+            "Write NDJSON events to PATH or stdout.",
+            "PATH|-",
+            FlagGroup.REPORTING,
+        ),
+        FlagSpec(
+            "--junit-xml",
+            FlagId.JUNIT_XML,
+            1,
+            False,
+            "Write a JUnit XML report.",
+            "PATH",
+            FlagGroup.REPORTING,
+        ),
+        FlagSpec(
+            "--gh-annotations",
+            FlagId.GH_ANNOTATIONS,
+            1,
+            False,
+            "Choose off|on|auto GitHub annotations.",
+            "MODE",
+            FlagGroup.REPORTING,
+        ),
+        # Session state.
+        FlagSpec(
+            "--config",
+            FlagId.CONFIG,
+            1,
+            False,
+            "Use this project configuration file.",
+            "PATH",
+            FlagGroup.SESSION_STATE,
+        ),
+        FlagSpec(
+            "--no-config",
+            FlagId.NO_CONFIG,
+            0,
+            False,
+            "Disable project configuration discovery.",
+            "",
+            FlagGroup.SESSION_STATE,
+        ),
+        FlagSpec(
+            "--lf",
+            FlagId.LAST_FAILED,
+            0,
+            False,
+            "Run only entries from the last-failed state.",
+            "",
+            FlagGroup.SESSION_STATE,
+        ),
+        FlagSpec(
+            "--last-failed",
+            FlagId.LAST_FAILED,
+            0,
+            False,
+            "Run only entries from the last-failed state.",
+            "",
+            FlagGroup.SESSION_STATE,
+        ),
+        FlagSpec(
+            "--ff",
+            FlagId.FAILED_FIRST,
+            0,
+            False,
+            "Run last-failed entries before the rest.",
+            "",
+            FlagGroup.SESSION_STATE,
+        ),
+        FlagSpec(
+            "--failed-first",
+            FlagId.FAILED_FIRST,
+            0,
+            False,
+            "Run last-failed entries before the rest.",
+            "",
+            FlagGroup.SESSION_STATE,
+        ),
+        # General.
+        FlagSpec(
+            "--collect-only",
+            FlagId.COLLECT_ONLY,
+            0,
+            False,
+            "List node ids without running tests.",
+            "",
+            FlagGroup.GENERAL,
+        ),
+        FlagSpec(
+            "-h",
+            FlagId.HELP,
+            0,
+            False,
+            "Show this help and exit.",
+            "",
+            FlagGroup.GENERAL,
+        ),
+        FlagSpec(
+            "--help",
+            FlagId.HELP,
+            0,
+            False,
+            "Show this help and exit.",
+            "",
+            FlagGroup.GENERAL,
+        ),
+        FlagSpec(
+            "--version",
+            FlagId.VERSION,
+            0,
+            False,
+            "Show the version and exit.",
+            "",
+            FlagGroup.GENERAL,
+        ),
     ]

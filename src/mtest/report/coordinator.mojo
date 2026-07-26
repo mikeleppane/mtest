@@ -14,7 +14,14 @@ the console for an arbitrary comptime pack of reporters, which is what the
 session's own drivers compose. `CompositeReporter` remains the general fan-out
 mechanism and does the pack's dispatch inside the recording coordinator.
 """
-from mtest.model import Event
+from mtest.config import StateDelta
+from mtest.model import (
+    Event,
+    EventKind,
+    FileFinishedPayload,
+    PrecompileFailedPayload,
+    TestReportedPayload,
+)
 
 from mtest.report.annotations_reporter import AnnotationsReporter
 from mtest.report.composite import CompositeReporter
@@ -130,6 +137,64 @@ trait ReportCoordinator:
         """
         ...
 
+    def configure_state_gates(mut self, paths: List[String]):
+        """Name gate paths before verdict events begin.
+
+        Args:
+            paths: The root-relative gate paths. Not mutated.
+        """
+        ...
+
+    def state_delta(self) -> StateDelta:
+        """Return a copy of the live verdict delta folded from events."""
+        ...
+
+
+@fieldwise_init
+struct _StateTracker(Copyable, Movable):
+    """An event consumer that folds only persisted last-run verdict facts."""
+
+    var delta: StateDelta
+    var gates: List[String]
+
+    @staticmethod
+    def empty() -> Self:
+        return Self(StateDelta.empty(), [])
+
+    def configure_gates(mut self, paths: List[String]):
+        self.gates = paths.copy()
+
+    def _is_gate(self, path: String) -> Bool:
+        for gate in self.gates:
+            if gate == path:
+                return True
+        return False
+
+    def handle(mut self, event: Event):
+        if event.kind == EventKind.TEST_REPORTED:
+            ref payload = event.data[TestReportedPayload]
+            if not self._is_gate(payload.path):
+                self.delta.observe_test(
+                    payload.test.node.copy(), payload.test.outcome
+                )
+            return
+        if event.kind == EventKind.FILE_FINISHED:
+            ref payload = event.data[FileFinishedPayload]
+            if self._is_gate(payload.path):
+                self.delta.observe_gate(
+                    payload.path, failed=payload.outcome.is_failing()
+                )
+            else:
+                self.delta.observe_file(
+                    payload.path,
+                    payload.outcome,
+                    fully_observed=payload.deselected_tests == 0,
+                )
+            return
+        if event.kind == EventKind.PRECOMPILE_FAILED:
+            ref payload = event.data[PrecompileFailedPayload]
+            self.delta.observe_precompile_casualties(payload.casualties)
+
 
 struct StandardReportCoordinator(ReportCoordinator):
     """The production reporter set: console, machine stream, JUnit, annotations.
@@ -150,6 +215,9 @@ struct StandardReportCoordinator(ReportCoordinator):
 
     var annotations: AnnotationsReporter
     """Accumulates the stream and renders the workflow-command tail."""
+
+    var state_tracker: _StateTracker
+    """Folds the state delta from the same ordered event stream."""
 
     def __init__(
         out self,
@@ -172,6 +240,7 @@ struct StandardReportCoordinator(ReportCoordinator):
         self.stream = stream^
         self.junit = junit^
         self.annotations = annotations^
+        self.state_tracker = _StateTracker.empty()
 
     def handle(mut self, e: Event):
         """Fan the event to all four reporters, console first.
@@ -183,6 +252,7 @@ struct StandardReportCoordinator(ReportCoordinator):
         self.stream.handle(e)
         self.junit.handle(e)
         self.annotations.handle(e)
+        self.state_tracker.handle(e)
 
     def stream_failed(self) -> Bool:
         """Whether the machine stream latched a write failure."""
@@ -220,6 +290,14 @@ struct StandardReportCoordinator(ReportCoordinator):
         """The console's fence token, or an empty string."""
         return self.console.fence_token()
 
+    def configure_state_gates(mut self, paths: List[String]):
+        """Name gate paths before verdict events begin."""
+        self.state_tracker.configure_gates(paths)
+
+    def state_delta(self) -> StateDelta:
+        """Return a copy of the live verdict delta."""
+        return self.state_tracker.delta.copy()
+
 
 struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
     """A coordinator whose console slot is an arbitrary pack of reporters.
@@ -247,6 +325,9 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
     var annotations: AnnotationsReporter
     """The annotations reporter, inert unless the driver supplies one."""
 
+    var state_tracker: _StateTracker
+    """Folds the state delta from the same ordered event stream."""
+
     def __init__(out self, var composite: CompositeReporter[*Self.Rs]):
         """Compose the pack alone, with every lifecycle channel inert.
 
@@ -257,6 +338,7 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
         self.stream = JsonStreamReporter.inert()
         self.junit = JunitReporter.inert()
         self.annotations = AnnotationsReporter.inert()
+        self.state_tracker = _StateTracker.empty()
 
     def __init__(
         out self,
@@ -279,6 +361,7 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
         self.stream = stream^
         self.junit = junit^
         self.annotations = annotations^
+        self.state_tracker = _StateTracker.empty()
 
     def handle(mut self, e: Event):
         """Fan the event to the pack, then to each lifecycle reporter.
@@ -290,6 +373,7 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
         self.stream.handle(e)
         self.junit.handle(e)
         self.annotations.handle(e)
+        self.state_tracker.handle(e)
 
     def stream_failed(self) -> Bool:
         """Whether the composed machine stream latched a write failure."""
@@ -326,3 +410,11 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
     def fence_token(self) -> String:
         """Empty: no console reporter stands behind the pack."""
         return String("")
+
+    def configure_state_gates(mut self, paths: List[String]):
+        """Name gate paths before verdict events begin."""
+        self.state_tracker.configure_gates(paths)
+
+    def state_delta(self) -> StateDelta:
+        """Return a copy of the live verdict delta."""
+        return self.state_tracker.delta.copy()

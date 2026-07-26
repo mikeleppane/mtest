@@ -1,11 +1,25 @@
 #!/usr/bin/env python3
-"""Focused tests for the manually invoked release-contract oracle."""
+"""Focused tests for the release-contract oracle (`scripts/qa/contract.py`).
+
+`contract-check-strict` is a blocking release-floor Pixi task (part of
+`pixi run ci` and both hosted platform matrices); `contract-check` remains
+the non-strict, rebuild-if-stale entry point for local iteration.
+"""
 
 from __future__ import annotations
 
+import contextlib
+import io
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
 import tomllib
 import unittest
+from unittest import mock
 
 from scripts.qa import contract
 
@@ -24,8 +38,560 @@ class ContractToolLocationTests(unittest.TestCase):
         )["tasks"]
 
         self.assertEqual(tasks["contract-check"], "python -m scripts.qa.contract")
-        self.assertNotIn("contract-check", tasks["ci"]["depends-on"])
-        self.assertNotIn("contract-check", tasks["ci-preflight"]["depends-on"])
+        self.assertEqual(
+            tasks["contract-check-strict"],
+            {
+                "cmd": "python -m scripts.qa.contract --strict --no-rebuild",
+                "depends-on": ["build-bin"],
+            },
+        )
+        self.assertIn("contract-check-strict", tasks["ci"]["depends-on"])
+        self.assertNotIn("contract-check-strict", tasks["ci-preflight"]["depends-on"])
+
+
+class EnsureBinaryFailsClosedTests(unittest.TestCase):
+    """`--no-rebuild` must never validate a missing or stale binary.
+
+    `ensure_binary` takes the binary path and its input paths explicitly so
+    these tests exercise the real fail-closed/build-triggering logic against
+    a disposable temp tree — never the repo's own `build/mtest` — and never
+    invoke `pixi`/`mojo`.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="mtest-contract-binary-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.binary = self.root / "build" / "mtest"
+        self.binary.parent.mkdir(parents=True)
+        self.src = self.root / "src"
+        self.src.mkdir()
+        self.input_paths = [self.src]
+        self.build_calls: list[dict[str, str]] = []
+
+    def _fake_build(self, env: dict[str, str]) -> subprocess.CompletedProcess:
+        self.build_calls.append(env)
+        self.binary.write_text("built")
+        return subprocess.CompletedProcess(args=["fake-build"], returncode=0)
+
+    def test_missing_binary_with_no_rebuild_dies_closed(self) -> None:
+        with self.assertRaises(SystemExit) as ctx:
+            contract.ensure_binary(
+                self.binary, self.input_paths, {}, rebuild=False,
+                allow_rebuild=False, build=self._fake_build,
+            )
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(self.build_calls, [])
+
+    def test_stale_binary_with_no_rebuild_dies_closed(self) -> None:
+        self.binary.write_text("old")
+        stale_time = time.time() - 100
+        os.utime(self.binary, (stale_time, stale_time))
+        (self.src / "main.mojo").write_text("code")  # newer than the binary
+
+        with self.assertRaises(SystemExit) as ctx:
+            contract.ensure_binary(
+                self.binary, self.input_paths, {}, rebuild=False,
+                allow_rebuild=False, build=self._fake_build,
+            )
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(self.build_calls, [])
+
+    def test_stale_file_input_with_no_rebuild_dies_closed(self) -> None:
+        # `_newest_mtime`'s `elif p.is_file():` limb is what makes a FILE
+        # input (as opposed to a directory) count toward staleness — 5 of
+        # the 7 documented BINARY_INPUT_PATHS entries are files
+        # (production_build.sh, native.py, native_strict_flags.txt,
+        # pixi.toml, pixi.lock). Every OTHER case in this class passes only
+        # a directory input, so a regression that mistypes that limb as
+        # `elif p.is_dir():` (or deletes it) would leave every other case
+        # green while `--no-rebuild` happily validated a binary older than
+        # a touched `pixi.lock`. Exercise the file limb directly.
+        self.binary.write_text("old")
+        stale_time = time.time() - 100
+        os.utime(self.binary, (stale_time, stale_time))
+        pixi_lock = self.root / "pixi.lock"
+        pixi_lock.write_text("locked")  # newer than the backdated binary
+
+        with self.assertRaises(SystemExit) as ctx:
+            contract.ensure_binary(
+                self.binary, [self.src, pixi_lock], {}, rebuild=False,
+                allow_rebuild=False, build=self._fake_build,
+            )
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(self.build_calls, [])
+
+    def test_fresh_binary_with_no_rebuild_returns_without_building(self) -> None:
+        (self.src / "main.mojo").write_text("code")
+        self.binary.write_text("built")  # written after the source -> fresh
+
+        contract.ensure_binary(
+            self.binary, self.input_paths, {}, rebuild=False,
+            allow_rebuild=False, build=self._fake_build,
+        )
+        self.assertEqual(self.build_calls, [])
+
+    def test_missing_binary_with_rebuild_allowed_builds_once(self) -> None:
+        contract.ensure_binary(
+            self.binary, self.input_paths, {}, rebuild=False,
+            allow_rebuild=True, build=self._fake_build,
+        )
+        self.assertEqual(len(self.build_calls), 1)
+        self.assertTrue(self.binary.is_file())
+
+    def test_failed_build_dies_closed(self) -> None:
+        def failing_build(env: dict[str, str]) -> subprocess.CompletedProcess:
+            self.build_calls.append(env)
+            return subprocess.CompletedProcess(args=["fake-build"], returncode=1)
+
+        with self.assertRaises(SystemExit) as ctx:
+            contract.ensure_binary(
+                self.binary, self.input_paths, {}, rebuild=False,
+                allow_rebuild=True, build=failing_build,
+            )
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(len(self.build_calls), 1)
+
+    def test_binary_input_paths_cover_the_documented_provenance_set(self) -> None:
+        # The mtime scan is a fail-closed HEURISTIC, not a content-identity
+        # proof (that proof is the Pixi `contract-check-strict -> build-bin`
+        # task edge) — but it must at least cover every documented input.
+        expected = {
+            contract.REPO / "src",
+            contract.REPO / "native",
+            contract.REPO / "scripts" / "build" / "production_build.sh",
+            contract.REPO / "scripts" / "build" / "native.py",
+            contract.REPO / "scripts" / "build" / "native_strict_flags.txt",
+            contract.REPO / "pixi.toml",
+            contract.REPO / "pixi.lock",
+        }
+        self.assertEqual(set(contract.BINARY_INPUT_PATHS), expected)
+
+
+class WaitUntilBoundedPollTests(unittest.TestCase):
+    """Negative controls for the SIGINT probe's bounded readiness/absence
+    barrier, which replaced fixed `time.sleep` calls. These exercise the
+    pure polling primitive directly — no subprocess, no real mtest binary —
+    so they stay fast and deterministic.
+    """
+
+    def test_child_never_became_ready_returns_false_within_bound(self) -> None:
+        calls = []
+
+        def never_ready() -> bool:
+            calls.append(1)
+            return False
+
+        start = time.time()
+        ok = contract.wait_until(never_ready, deadline=start + 0.2, poll_interval=0.02)
+        elapsed = time.time() - start
+
+        self.assertFalse(ok)
+        self.assertLess(elapsed, 2.0)
+        self.assertGreaterEqual(len(calls), 2)
+
+    def test_child_survived_cleanup_returns_false_when_presence_persists(self) -> None:
+        # The orphan barrier polls `not present()`; a child that never exits
+        # keeps `present` True forever, so the barrier must report "not
+        # gone" within its bound instead of waiting indefinitely.
+        def still_present() -> bool:
+            return True
+
+        start = time.time()
+        gone = contract.wait_until(
+            lambda: not still_present(), deadline=start + 0.2, poll_interval=0.02
+        )
+
+        self.assertFalse(gone)
+
+    def test_predicate_becoming_true_returns_as_soon_as_it_does(self) -> None:
+        calls = {"n": 0}
+
+        def ready_after_two_polls() -> bool:
+            calls["n"] += 1
+            return calls["n"] >= 2
+
+        ok = contract.wait_until(ready_after_two_polls, deadline=time.time() + 5, poll_interval=0.01)
+
+        self.assertTrue(ok)
+        self.assertEqual(calls["n"], 2)
+
+
+class ExactProcessIdentificationTests(unittest.TestCase):
+    """`exact_process_pid` must identify the compiled TEST BINARY, never a
+    `mojo build` compiler that is still running and merely mentions the
+    same mangled name as its `-o` output argument. This is a real bug the
+    old `pgrep -f irq_stest_` (a shared prefix, matching BOTH files' builds
+    AND both files' binaries) let through: readiness could flip True while
+    mtest was still compiling, sending SIGINT before any hang child
+    existed. These tests spawn two REAL processes standing in for that
+    exact ambiguity — a decoy whose command line CONTAINS the mangled name
+    only as an argument, and a "binary" whose argv[0] itself IS the mangled
+    name — and confirm only the latter is identified.
+    """
+
+    MANGLED = "tch_probe_uexactuid"  # a throwaway name, not the real HANG_MANGLED_NAME
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="mtest-exact-pid-")
+        self.addCleanup(self.tmp.cleanup)
+        self.procs: list[subprocess.Popen] = []
+        self.addCleanup(self._killall)
+
+    def _killall(self) -> None:
+        for p in self.procs:
+            try:
+                p.kill()
+                p.wait(timeout=5)
+            except Exception:
+                pass
+
+    def _spawn(self, argv: list[str]) -> subprocess.Popen:
+        p = subprocess.Popen(argv)
+        self.procs.append(p)
+        return p
+
+    def test_exact_process_pid_ignores_a_compiler_mentioning_the_same_name(self) -> None:
+        # The decoy stands in for `mojo build irq/test_1hang.mojo -o
+        # build/bin/<mangled> ...`: its full command line CONTAINS the
+        # mangled name (as `-o`'s value would), but argv[0] is the
+        # compiler driver, not that name.
+        decoy = self._spawn(
+            ["python3", "-c", "import time; time.sleep(300)",
+             "-o", f"build/bin/{self.MANGLED}"]
+        )
+        # The "binary" stands in for the exec'd test binary: a real ELF
+        # executable (a copy of /bin/sleep — NOT a `#!`-script, whose
+        # argv[0] the kernel rewrites to the interpreter) invoked directly,
+        # so argv[0] IS its own path and ends with the mangled name.
+        fake_bin = Path(self.tmp.name) / self.MANGLED
+        shutil.copy2("/bin/sleep", fake_bin)
+        fake_bin.chmod(0o755)
+        real = self._spawn([str(fake_bin), "300"])
+
+        try:
+            pid = contract.wait_until(
+                lambda: contract.exact_process_pid(self.MANGLED) is not None,
+                deadline=time.time() + 10, poll_interval=0.05,
+            )
+            self.assertTrue(pid, "the real binary was never identified")
+            found = contract.exact_process_pid(self.MANGLED)
+            self.assertIsNotNone(found)
+            self.assertEqual(int(found), real.pid)
+            self.assertNotEqual(int(found), decoy.pid)
+            # The decoy DOES show up in the raw pgrep scan — proving the
+            # ambiguity is real, and that `exact_process_pid` is doing
+            # actual disambiguation, not just getting lucky.
+            raw = contract.matching_pids(self.MANGLED)
+            self.assertIn(str(decoy.pid), raw)
+            self.assertIn(str(real.pid), raw)
+        finally:
+            self._killall()
+
+    def test_process_state_reports_sleeping_for_the_identified_binary(self) -> None:
+        fake_bin = Path(self.tmp.name) / self.MANGLED
+        shutil.copy2("/bin/sleep", fake_bin)
+        fake_bin.chmod(0o755)
+        real = self._spawn([str(fake_bin), "300"])
+
+        ready = contract.wait_until(
+            lambda: contract.exact_process_pid(self.MANGLED) is not None,
+            deadline=time.time() + 10, poll_interval=0.05,
+        )
+        self.assertTrue(ready)
+        pid = contract.exact_process_pid(self.MANGLED)
+        self.assertEqual(int(pid), real.pid)
+        state = contract.wait_until(
+            lambda: contract.process_state(pid) == "S",
+            deadline=time.time() + 10, poll_interval=0.05,
+        )
+        self.assertTrue(state, f"pid {pid} never reported state S")
+
+
+class FakeSupervisor:
+    """A `subprocess.Popen`-shaped test double for `run_interrupt_probe`."""
+
+    def __init__(self, exit_code: int = 2, out: str = "1 not run\n"):
+        self.pid = 999999  # never sent a REAL signal; run_interrupt_probe's
+                            # `send_sigint` is always overridden in these tests
+        self.returncode: int | None = None
+        self._exit_code = exit_code
+        self._out = out
+        self.killed = False
+        self.communicate_calls = 0
+
+    def poll(self):
+        return self.returncode
+
+    def communicate(self, timeout=None):
+        self.communicate_calls += 1
+        self.returncode = self._exit_code
+        return self._out, None
+
+    def kill(self):
+        self.killed = True
+
+
+class InterruptProbeProductionPathTests(unittest.TestCase):
+    """Negative controls that drive `run_interrupt_probe` itself — the EXACT
+    function `Runner.check_interrupt` calls against the real `mtest` binary
+    — rather than the generic `wait_until` primitive under a different name.
+    A fake `spawn`/`send_sigint`/`killtree` means no real subprocess or
+    signal is involved; only `hang_ready`/`hang_present` are faked directly.
+    """
+
+    def _run(self, **kwargs):
+        proc = kwargs.pop("proc", None) or FakeSupervisor()
+        sigint_calls = []
+        killtree_calls = []
+        defaults = dict(
+            spawn=lambda: proc,
+            hang_ready=lambda: True,
+            hang_present=lambda: False,
+            strict=False,
+            outer_deadline=time.time() + 5,
+            orphan_timeout=0.3,
+            poll_interval=0.02,
+            killtree=lambda p: killtree_calls.append(p),
+            send_sigint=lambda pid: sigint_calls.append(pid),
+        )
+        defaults.update(kwargs)
+        status, detail = contract.run_interrupt_probe(**defaults)
+        return status, detail, proc, sigint_calls, killtree_calls
+
+    def test_child_never_ready_is_skip_when_not_strict(self) -> None:
+        status, detail, proc, sigint_calls, _ = self._run(
+            hang_ready=lambda: False, strict=False, outer_deadline=time.time() + 0.2,
+        )
+        self.assertEqual(status, contract.SKIP)
+        self.assertIn("child never became ready", detail)
+        self.assertEqual(sigint_calls, [])  # never signaled — not ready
+
+    def test_child_never_ready_is_fail_when_strict(self) -> None:
+        status, detail, proc, sigint_calls, _ = self._run(
+            hang_ready=lambda: False, strict=True, outer_deadline=time.time() + 0.2,
+        )
+        self.assertEqual(status, contract.FAIL)
+        self.assertIn("child never became ready", detail)
+        self.assertIn("--strict", detail)
+        self.assertEqual(sigint_calls, [])
+
+    def test_supervisor_already_dead_exits_before_the_outer_deadline(self) -> None:
+        # Finding: without a `proc.poll()` fast-exit, a dead supervisor
+        # burns the FULL outer deadline waiting for a child it will never
+        # spawn. `outer_deadline` here is 5s away; a working fast-exit
+        # returns in well under a second regardless.
+        proc = FakeSupervisor()
+        proc.returncode = 137  # already exited before the probe even started
+        start = time.time()
+        status, detail, _, sigint_calls, _ = self._run(
+            proc=proc, hang_ready=lambda: False, outer_deadline=time.time() + 5,
+        )
+        elapsed = time.time() - start
+        self.assertEqual(status, contract.SKIP)
+        self.assertIn("child never became ready", detail)
+        self.assertLess(elapsed, 2.0, "did not fast-exit on a dead supervisor")
+        self.assertEqual(sigint_calls, [])
+
+    def test_missing_process_inspection_is_skip_when_not_strict(self) -> None:
+        def raises():
+            raise RuntimeError("pgrep unavailable: [Errno 2] no such file")
+
+        status, detail, proc, sigint_calls, _ = self._run(hang_ready=raises, strict=False)
+        self.assertEqual(status, contract.SKIP)
+        self.assertIn("pgrep unavailable", detail)
+        self.assertTrue(proc.killed)
+        self.assertEqual(sigint_calls, [])
+
+    def test_missing_process_inspection_is_fail_when_strict(self) -> None:
+        def raises():
+            raise RuntimeError("ps unavailable: [Errno 2] no such file")
+
+        status, detail, proc, sigint_calls, _ = self._run(hang_ready=raises, strict=True)
+        self.assertEqual(status, contract.FAIL)
+        self.assertIn("ps unavailable", detail)
+        self.assertIn("--strict", detail)
+        self.assertTrue(proc.killed)
+
+    def test_child_survived_cleanup_is_named_in_the_failure_detail(self) -> None:
+        status, detail, proc, sigint_calls, killtree_calls = self._run(
+            hang_ready=lambda: True, hang_present=lambda: True,  # never leaves
+        )
+        self.assertEqual(status, contract.FAIL)
+        self.assertIn("orphaned_child=True", detail)
+        self.assertIn("; child survived cleanup", detail)
+        self.assertEqual(sigint_calls, [proc.pid])  # SIGINT only after readiness
+        self.assertEqual(killtree_calls, [proc])
+
+    def test_clean_pass_when_child_gone_and_supervisor_reports_not_run(self) -> None:
+        status, detail, proc, sigint_calls, _ = self._run(
+            hang_ready=lambda: True, hang_present=lambda: False,
+        )
+        self.assertEqual(status, contract.PASS)
+        self.assertEqual(detail, "")
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(sigint_calls, [proc.pid])
+
+
+class CheckRosterTests(unittest.TestCase):
+    """The roster, and the pin that `main` actually consults it.
+
+    Without the call-site pin these body tests would all stay green while
+    `main` reported a verdict for a run that skipped half its checks — the
+    exact defect the roster exists to close, reintroduced one level up.
+    """
+
+    def test_roster_covers_the_matrix_and_every_bespoke_check(self) -> None:
+        roster = list(contract.EXPECTED_CHECK_NAMES)
+
+        self.assertEqual(len(roster), len(set(roster)), "duplicate check name")
+        matrix = [c.name for c in contract.build_matrix()]
+        self.assertEqual(roster[: len(matrix)], matrix)
+        self.assertEqual(
+            roster[len(matrix) :],
+            [
+                "collect: exact node-id set for tests/",
+                "determinism: collect byte-identical",
+                "help: --help -> stdout, exit 0",
+                "usage error: -V -> stderr, exit 4",
+                "collect: streams split, listing continues past a bad probe",
+                "color: --color always beats NO_COLOR",
+                "precompile: success path resolves import (auto -I)",
+                "interrupt: SIGINT frees the owned process group",
+            ],
+        )
+
+    def test_complete_unfiltered_run_is_accepted(self) -> None:
+        contract.verify_every_check_ran(
+            contract.EXPECTED_CHECK_NAMES, filtered=False
+        )
+
+    def test_one_missing_check_is_refused(self) -> None:
+        without_interrupt = tuple(
+            n
+            for n in contract.EXPECTED_CHECK_NAMES
+            if not n.startswith("interrupt:")
+        )
+        with self.assertRaises(contract.ContractRosterError) as caught:
+            contract.verify_every_check_ran(without_interrupt, filtered=False)
+        self.assertIn("interrupt: SIGINT", str(caught.exception))
+
+    def test_unrostered_check_is_refused_even_when_filtered(self) -> None:
+        with self.assertRaises(contract.ContractRosterError):
+            contract.verify_every_check_ran(("invented: check",), filtered=True)
+
+    def test_filtered_subset_must_keep_roster_order_and_run_once(self) -> None:
+        subset = contract.EXPECTED_CHECK_NAMES[2:5]
+        contract.verify_every_check_ran(subset, filtered=True)
+        with self.assertRaises(contract.ContractRosterError):
+            contract.verify_every_check_ran(tuple(reversed(subset)), filtered=True)
+        with self.assertRaises(contract.ContractRosterError):
+            contract.verify_every_check_ran(subset + subset[:1], filtered=True)
+
+    def _main_over_a_fake_runner(
+        self, argv: list[str], drop: str = ""
+    ) -> tuple[int, str, str]:
+        """Run `main` with every check replaced by a recording double.
+
+        Args:
+            argv: The command line to parse, without the program name.
+            drop: A check name whose double records nothing, standing in for
+                a deleted call site.
+
+        Returns:
+            The exit code and the captured stdout/stderr.
+        """
+        recorded: list[str] = []
+
+        class FakeRunner:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                self.results: list[tuple[str, str, str, str]] = []
+
+            def record(self, status, name, ref, detail="") -> None:
+                self.results.append((status, name, ref, detail))
+
+            def _perform(self, name: str) -> None:
+                recorded.append(name)
+                if name != drop:
+                    self.results.append((contract.PASS, name, "ref", ""))
+
+            def check(self, c) -> None:
+                self._perform(c.name)
+
+            def check_collect_exact(self) -> None:
+                self._perform("collect: exact node-id set for tests/")
+
+            def check_determinism(self) -> None:
+                self._perform("determinism: collect byte-identical")
+
+            def check_help_stream(self) -> None:
+                self._perform("help: --help -> stdout, exit 0")
+                self._perform("usage error: -V -> stderr, exit 4")
+
+            def check_collect_streams(self) -> None:
+                self._perform(
+                    "collect: streams split, listing continues past a bad probe"
+                )
+
+            def check_color(self) -> None:
+                self._perform("color: --color always beats NO_COLOR")
+
+            def check_precompile_success(self) -> None:
+                self._perform(
+                    "precompile: success path resolves import (auto -I)"
+                )
+
+            def check_interrupt(self, strict: bool) -> None:
+                self._perform(
+                    "interrupt: SIGINT frees the owned process group"
+                )
+
+        ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.multiple(
+            contract,
+            Runner=FakeRunner,
+            pixi_env=mock.Mock(return_value={}),
+            ensure_binary=mock.Mock(),
+            scaffold=mock.Mock(),
+        ):
+            with mock.patch.object(contract.subprocess, "run", return_value=ok):
+                with mock.patch.object(sys, "argv", ["contract.py", *argv]):
+                    with contextlib.redirect_stdout(out):
+                        with contextlib.redirect_stderr(err):
+                            code = contract.main()
+        self.performed = recorded
+        return code, out.getvalue(), err.getvalue()
+
+    def test_main_performs_every_rostered_check_in_order(self) -> None:
+        code, out, err = self._main_over_a_fake_runner([])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            tuple(self.performed), contract.EXPECTED_CHECK_NAMES
+        )
+        self.assertIn("0 failed, 0 skipped", out)
+
+    def test_main_refuses_a_verdict_when_a_call_site_recorded_nothing(self) -> None:
+        code, _out, err = self._main_over_a_fake_runner(
+            [], drop="interrupt: SIGINT frees the owned process group"
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("did not perform every check it reports", err)
+
+    def test_no_interrupt_records_a_skip_instead_of_bypassing(self) -> None:
+        code, out, err = self._main_over_a_fake_runner(["--no-interrupt"])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(
+            "interrupt: SIGINT frees the owned process group", self.performed
+        )
+        self.assertIn("1 skipped", out)
+
+    def test_strict_fails_on_a_skip_including_no_interrupt(self) -> None:
+        code, out, _err = self._main_over_a_fake_runner(
+            ["--strict", "--no-interrupt"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("1 skipped", out)
 
 
 if __name__ == "__main__":

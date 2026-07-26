@@ -325,25 +325,30 @@ def test_replacement_char_in_path_breaks_identity_absent() raises:
     assert_true(parse_report(text, SP).verdict == ReportVerdict.ABSENT)
 
 
-def test_stderr_content_is_invisible_to_the_parser() raises:
-    # `parse_report` takes only stdout. A report-lookalike that lived on stderr
-    # is never concatenated in, so the genuine stdout report parses VALID alone.
-    var stdout_text = (
-        "Running 1 tests for /home/x/proj/tests/test_a.mojo \n"
-        "    PASS [ 0.001 ] test_one\n"
-        "--------\n"
-        "Summary [ 0.001 ] 1 tests run: 1 passed , 0 failed , 0 skipped "
-    )
-    # A forged second report that only ever existed on stderr — deliberately NOT
-    # passed to parse_report, documenting that the parser scans stdout only.
-    var stderr_text = (
+def test_stderr_shaped_noise_before_the_report_loses_the_anchor() raises:
+    # Real stderr relocation puts report-shaped noise on the SAME stdout the
+    # parser reads, ahead of the toolchain's buffered block. The noise carries a
+    # matching header and a row but no terminal framing, so it is user output;
+    # the primary anchor stays the last header before the rule and the genuine
+    # block parses VALID with ITS counts, never the forged nine.
+    var text = (
         "Running 9 tests for /home/x/proj/tests/test_a.mojo \n"
         "    PASS [ 0.001 ] forged\n"
+        "Running 1 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    PASS [ 0.002 ] test_one\n"
         "--------\n"
-        "Summary [ 0.001 ] 9 tests run: 9 passed , 0 failed , 0 skipped "
+        "Summary [ 0.002 ] 1 tests run: 1 passed , 0 failed , 0 skipped "
     )
-    _ = stderr_text
-    assert_true(parse_report(stdout_text, SP).verdict == ReportVerdict.VALID)
+    var r = parse_report(text, SP)
+    assert_true(r.verdict == ReportVerdict.VALID)
+    assert_equal(r.declared_count, 1)
+    assert_equal(len(r.rows), 1)
+    assert_true(r.rows[0].outcome == Outcome.PASS)
+    assert_equal(r.rows[0].name, "test_one")
+    assert_equal(r.rows[0].timing, "0.002")
+    assert_equal(r.summary_passed, 1)
+    assert_equal(r.summary_failed, 0)
+    assert_false(r.has_trailer)
 
 
 def test_fail_detail_preserves_leading_empty_line() raises:
@@ -498,3 +503,72 @@ def test_fail_detail_header_lookalike_reconciles_valid() raises:
     assert_equal(len(r.rows), 1)
     assert_true(r.rows[0].outcome == Outcome.FAIL)
     assert_true("Running 1 tests for" in r.rows[0].detail)
+
+
+def _crlf(text: String) -> String:
+    """`text` with every LF turned into a CRLF pair.
+
+    Args:
+        text: The LF-terminated report block to convert.
+
+    Returns:
+        The same block with DOS line endings.
+    """
+    var out = String("")
+    for cp in text.codepoint_slices():
+        var c = String(cp)
+        if c == "\n":
+            out += "\r\n"
+        else:
+            out += c
+    return out^
+
+
+def test_wholly_crlf_report_is_absent_not_off_grammar() raises:
+    # `_split_lines` splits on LF only, so a CRLF report leaves a CR as the last
+    # byte of every line and NOTHING in the grammar matches: the trailing space
+    # the header, summary, and trailer each end with is no longer terminal.
+    # Identity is checked before terminal framing, so a wholly CRLF block is
+    # rejected as ABSENT and never reaches the OFF_GRAMMAR checks. The name says
+    # ABSENT because that is what this input produces; the CRLF drift itself is
+    # pinned as OFF_GRAMMAR by the next test, where identity survives.
+    var r = parse_report(_crlf(_raw_two_row_fail()), SP)
+    assert_true(
+        r.verdict == ReportVerdict.ABSENT,
+        "verdict code " + String(r.verdict.code),
+    )
+    assert_equal(len(r.rows), 0)
+    assert_equal(r.declared_count, 0)
+    assert_equal(r.summary_passed, 0)
+    assert_equal(r.summary_failed, 0)
+    assert_equal(r.summary_skipped, 0)
+    assert_false(r.has_trailer)
+
+
+def test_crlf_report_is_intentional_off_grammar_drift() raises:
+    # The drift with identity out of the way: an LF header matches, so the CR is
+    # caught one step later, by the terminal-framing check. The CR on the Summary
+    # line defeats the exact ` <n> skipped ` field match, leaving no terminal
+    # Summary at all. CRLF is deliberately off-grammar — the parser is LF-only,
+    # and a CR anywhere in a structural line takes the report out of the grammar.
+    var text = (
+        "Running 2 tests for /home/x/proj/tests/test_a.mojo \n"
+        "    PASS [ 0.012 ] test_one\r\n"
+        "    FAIL [ 0.030 ] test_two\r\n"
+        "      At /home/x/proj/tests/test_a.mojo:5:3: AssertionError: nope\r\n"
+        "--------\r\n"
+        "Summary [ 0.042 ] 2 tests run: 1 passed , 1 failed , 0 skipped \r\n"
+        "Test suite' /home/x/proj/tests/test_a.mojo 'failed! "
+    )
+    var r = parse_report(text, SP)
+    assert_true(
+        r.verdict == ReportVerdict.OFF_GRAMMAR,
+        "verdict code " + String(r.verdict.code),
+    )
+    assert_equal(r.reason, "matching header without terminal framing")
+    assert_equal(len(r.rows), 0)
+    assert_equal(r.declared_count, 0)
+    assert_equal(r.summary_passed, 0)
+    assert_equal(r.summary_failed, 0)
+    assert_equal(r.summary_skipped, 0)
+    assert_false(r.has_trailer)

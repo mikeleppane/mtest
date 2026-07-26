@@ -15,17 +15,22 @@ HARNESS_CHECK_MODULES = (
     "scripts.tests.test_process_watchdog",
     "scripts.tests.test_format",
     "scripts.tests.test_dogfood",
+    "scripts.tests.test_package_consumption",
     "scripts.tests.test_classified",
     "scripts.tests.test_e2e",
     "scripts.tests.test_e2e_json",
     "scripts.tests.test_contract",
     "scripts.tests.test_pty_capture",
     "scripts.tests.test_transcript_compare",
+    "scripts.tests.test_readme_help",
+    "scripts.tests.test_coverage_capability",
     "scripts.tests.test_layout",
     "scripts.checks.layout",
     "scripts.tests.test_ci_topology",
     "scripts.checks.ci_topology",
 )
+
+COVERAGE_CAPABILITY_COMMAND = "python -m scripts.checks.coverage_capability"
 
 CI_PREFLIGHT_TASKS = [
     "version-check",
@@ -36,15 +41,17 @@ CI_PREFLIGHT_TASKS = [
     "native-check",
     "junit-check",
     "build",
+    "readme-help-check",
     "junit-render-check",
     "transcripts-check",
 ]
-CI_TASKS = ["ci-preflight", "test", "dogfood-check", "e2e"]
+CI_TASKS = ["ci-preflight", "test", "dogfood-check", "e2e", "contract-check-strict"]
 CI_FLOOR_TASKS = {
     *CI_PREFLIGHT_TASKS,
     "test",
     "dogfood-check",
     "e2e",
+    "contract-check-strict",
 }
 
 LINUX_MATRIX_ROWS = [
@@ -70,6 +77,15 @@ LINUX_MATRIX_ROWS = [
         "runner": "ubuntu-24.04",
         "lane": "end-to-end tests",
         "task": "e2e",
+        "libc_debug": "false",
+        "safety_artifact": "false",
+        "artifact_name": "none",
+        "artifact_path": "none",
+    },
+    {
+        "runner": "ubuntu-24.04",
+        "lane": "strict contract",
+        "task": "contract-check-strict",
         "libc_debug": "false",
         "safety_artifact": "false",
         "artifact_name": "none",
@@ -117,6 +133,15 @@ MACOS_MATRIX_ROWS = [
         "runner": "macos-15",
         "lane": "end-to-end tests",
         "task": "e2e",
+        "libc_debug": "false",
+        "safety_artifact": "false",
+        "artifact_name": "none",
+        "artifact_path": "none",
+    },
+    {
+        "runner": "macos-15",
+        "lane": "strict contract",
+        "task": "contract-check-strict",
         "libc_debug": "false",
         "safety_artifact": "false",
         "artifact_name": "none",
@@ -266,6 +291,16 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
             "dogfood-check task mismatch: "
             f"expected={expected_dogfood!r}, actual={tasks.get('dogfood-check')!r}"
         )
+    expected_readme_help = {
+        "cmd": "python -m scripts.checks.readme_help",
+        "depends-on": ["build-bin"],
+    }
+    if tasks.get("readme-help-check") != expected_readme_help:
+        raise AssertionError(
+            "readme-help-check task mismatch: "
+            f"expected={expected_readme_help!r}, "
+            f"actual={tasks.get('readme-help-check')!r}"
+        )
     preflight = _task_dependencies(tasks, "ci-preflight")
     if preflight != CI_PREFLIGHT_TASKS:
         raise AssertionError(
@@ -277,7 +312,12 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
         raise AssertionError(
             f"ci membership/order mismatch: expected={CI_TASKS}, actual={ci}"
         )
-    expected_preflight_closure = {"ci-preflight", *CI_PREFLIGHT_TASKS}
+    expected_preflight_closure = {
+        "ci-preflight",
+        "build-bin",
+        "build-native",
+        *CI_PREFLIGHT_TASKS,
+    }
     preflight_closure = _transitive_tasks(tasks, "ci-preflight")
     if preflight_closure != expected_preflight_closure:
         raise AssertionError(
@@ -314,6 +354,16 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
             raise AssertionError(
                 f"{name} no longer runs its exact negative-control harness"
             )
+    # The coverage-capability probe is diagnostic, so nothing in the `ci`
+    # closure depends on it and nothing else would notice it disappearing.
+    # Pin its exact command here: it is the one thing standing between a
+    # toolchain upgrade and an unreviewed coverage number.
+    if tasks.get("coverage-capability") != COVERAGE_CAPABILITY_COMMAND:
+        raise AssertionError(
+            "coverage-capability task mismatch: "
+            f"expected={COVERAGE_CAPABILITY_COMMAND!r}, "
+            f"actual={tasks.get('coverage-capability')!r}"
+        )
 
 
 def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
@@ -338,6 +388,7 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
         "package",
         "macos-preflight",
         "macos-test-matrix",
+        "macos-package",
     ]
     if jobs != expected_jobs:
         raise AssertionError(
@@ -350,6 +401,7 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
         "package": None,
         "macos-preflight": None,
         "macos-test-matrix": "macos-preflight",
+        "macos-package": "macos-preflight",
     }
     for name, expected in expected_needs.items():
         if re.search(r"^    if:", job_blocks[name], re.MULTILINE):
@@ -438,18 +490,43 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
             f"expected={expected_macos_commands}, actual={macos_commands}"
         )
 
-    package_commands = re.findall(
-        r"^        run: (.+)$", job_blocks["package"], re.MULTILINE
-    )
+    # Both gated platforms consume the installed artifact, and both do it with
+    # the same task. The Linux job's `package` key and `Linux / packaged
+    # artifact` display name are externally configured required checks: renaming
+    # either silently drops branch protection, so both are pinned here.
     expected_package_commands = [
         "pixi run mojo-version",
         "pixi run package-check",
     ]
-    if package_commands != expected_package_commands:
-        raise AssertionError(
-            "independent package command mismatch: "
-            f"expected={expected_package_commands}, actual={package_commands}"
+    expected_package_runners = {
+        "package": "ubuntu-24.04",
+        "macos-package": "macos-15",
+    }
+    expected_package_names = {
+        "package": "Linux / packaged artifact",
+        "macos-package": "macOS arm64 / packaged artifact",
+    }
+    for name, expected_runner in expected_package_runners.items():
+        package_commands = re.findall(
+            r"^        run: (.+)$", job_blocks[name], re.MULTILINE
         )
+        if package_commands != expected_package_commands:
+            raise AssertionError(
+                f"{name} package command mismatch: "
+                f"expected={expected_package_commands}, actual={package_commands}"
+            )
+        runs_on = re.findall(r"^    runs-on: (.+)$", job_blocks[name], re.MULTILINE)
+        if runs_on != [expected_runner]:
+            raise AssertionError(
+                f"{name} package runner mismatch: "
+                f"expected={[expected_runner]}, actual={runs_on}"
+            )
+        display = re.findall(r"^    name: (.+)$", job_blocks[name], re.MULTILINE)
+        if display != [expected_package_names[name]]:
+            raise AssertionError(
+                f"{name} package display name mismatch: "
+                f"expected={[expected_package_names[name]]}, actual={display}"
+            )
 
     linux_matrix = job_blocks["linux-test-matrix"]
     expected_linux_steps = {

@@ -35,9 +35,11 @@ loop with one binary and four commitments:
 - **Loud over silent.** Every excluded file, retry attempt, and timeout is
   reported visibly. A run that skipped something never looks like a run that
   passed everything.
-- **CI is the customer.** Deterministic, path-sorted output, a hermetic
-  build with no third-party runtime dependencies, sharding for CI matrices,
-  and machine-readable reports are all first-class.
+- **CI is the customer.** Deterministic, path-sorted output, a hermetic build
+  with zero runtime dependencies, sharding for CI matrices, and
+  machine-readable reports are all first-class. Product logic is pure Mojo;
+  project configuration is parsed natively by the pinned, vendored
+  `mojo-toml` source.
 
 ## Features
 
@@ -70,6 +72,16 @@ loop with one binary and four commitments:
   (`--gh-annotations`).
 - A clean interrupt: Ctrl-C tears down the in-flight process group, prints a
   partial summary with NOT-RUN accounting, and exits `2`.
+- Project configuration in `mtest.toml`: a closed schema resolved per key as
+  defaults < file < `MTEST_MOJO` < command line, with per-file `[[override]]`
+  tables, and `mtest config show` to render the resolved values with the layer
+  each one came from.
+- Failure re-selection from the last completed run: `--lf` narrows to what
+  failed, `--ff` runs those files first. Both are soft filters — a stale entry
+  is dropped loudly, never fatally.
+- `mtest doctor`: ten read-only environment checks — toolchain identity,
+  configuration, last-run state, temp, report destinations — without building
+  or running a test.
 - Gate files (`--gate`), precompiled package dependencies (`--precompile`),
   a slowest-files list (`--durations`), quiet and verbose modes, and color
   control (`--color`, `NO_COLOR`).
@@ -80,9 +92,10 @@ mtest ships as a conda package built **from source** by
 [rattler-build](https://prefix-dev.github.io/rattler-build/) from
 [`recipe/recipe.yaml`](recipe/recipe.yaml), inside an isolated build
 environment pinned to the same toolchain this repo builds against
-(`mojo ==1.0.0b2`, `clang ==18.1.8`). The binary links against the Mojo
-runtime, so the package declares a single conda run dependency,
-`mojo-compiler ==1.0.0b2`, instead of vendoring those libraries.
+(`mojo ==1.0.0b2`, `clang ==18.1.8`). The binary links against the Mojo runtime,
+so the package declares `mojo-compiler ==1.0.0b2` as its sole conda run
+dependency. The native TOML parser is compiled into the shipped binary from
+the pinned vendored source.
 
 The package is not published to a public channel. `package-build` produces
 it into a local channel; `package-check` is a verifier that installs the
@@ -95,12 +108,14 @@ $ pixi run package-check   # verify: install into a scratch env, run the binary
 
 To use the package in an environment of your own, install `mtest` from
 `build/conda-channel` alongside the Modular and conda-forge channels, so
-the `mojo-compiler` run dependency resolves.
+the declared Mojo run dependency resolves.
 
-linux-64 is the gated platform: a CI job builds the package, installs it
-into a fresh environment carrying only the declared run dependency, and
-exercises the installed binary. osx-arm64 is declared in the recipe and the
-channels solve for it, but no CI runner executes the packaged artifact there.
+linux-64 and osx-arm64 are both gated: each has its own blocking CI job that
+builds the package, installs the exact artifact it just built into a fresh
+environment carrying only the declared run dependencies, and exercises the
+installed binary — including running a known-failing fixture through it, so
+the installed package is proven to report failures truthfully, not just
+successes.
 
 To run mtest straight from a checkout instead, see
 [Developing](#developing).
@@ -154,7 +169,7 @@ A file without that `main()` does not build as a standalone program.
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/suite/test_passing.mojo'
-mtest 0.5.0 (mojo)
+mtest 0.6.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 PASS           e2e/suite/test_passing.mojo  0.07s
@@ -174,7 +189,7 @@ against. One directory exercises most of the outcome model at once:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/suite'
-mtest 0.5.0 (mojo)
+mtest 0.6.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 7 files   excluded: 0
 
 PASS           e2e/suite/nested/test_nested.mojo  0.07s
@@ -186,18 +201,18 @@ PASS           e2e/suite/test_passing.mojo  0.02s
 NO-TESTS       e2e/suite/test_zero.mojo   0.07s
 
 --- COMPILE-ERROR e2e/suite/test_compile_error.mojo — mojo build said: ---
-/home/mikko/dev/mtest/e2e/suite/test_compile_error.mojo:12:17: error: use of unknown declaration 'this_symbol_is_never_defined_anywhere'
-    var value = this_symbol_is_never_defined_anywhere()
-                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-mojo: error: failed to parse the provided Mojo source module
+    | /home/mikko/dev/mtest/e2e/suite/test_compile_error.mojo:12:17: error: use of unknown declaration 'this_symbol_is_never_defined_anywhere'
+    |     var value = this_symbol_is_never_defined_anywhere()
+    |                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    | mojo: error: failed to parse the provided Mojo source module
 reproduce: mojo build e2e/suite/test_compile_error.mojo -o build/bin/e2e_ssuite_stest_ucompile_uerror
 
 [...CRASH detail with its captured stack trace omitted...]
 
 --- FAIL e2e/suite/test_failing.mojo::test_second_fails ---
-At e2e/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:
-   left: 1
-  right: 2
+    | At e2e/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:
+    |    left: 1
+    |   right: 2
 reproduce: mtest e2e/suite/test_failing.mojo::test_second_fails
 
 [...file-scoped captured output omitted...]
@@ -220,7 +235,7 @@ zero tests ran. A session that collects nothing but NO-TESTS files exits `5`.
 
 ```console
 $ pixi run bash -c 'build/mtest -k one e2e/matrix'
-mtest 0.5.0 (mojo)
+mtest 0.6.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
 
 PASS           e2e/matrix/test_alpha.mojo 0.02s
@@ -233,7 +248,7 @@ A node-id operand selects exactly one test:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/matrix/test_alpha.mojo::test_alpha_two'
-mtest 0.5.0 (mojo)
+mtest 0.6.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 PASS           e2e/matrix/test_alpha.mojo 0.03s
@@ -285,7 +300,7 @@ attribution pass:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/attribution/test_deterministic_crasher.mojo'
-mtest 0.5.0 (mojo)
+mtest 0.6.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 CRASH          e2e/attribution/test_deterministic_crasher.mojo  1.12s  (signal 4 — SIGILL, illegal instruction)
@@ -314,7 +329,7 @@ force-killed, and the verdict line says so in words:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/stubborn/test_stubborn.mojo --timeout 1 --retries 0'
-mtest 0.5.0 (mojo)
+mtest 0.6.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 TIMEOUT        e2e/stubborn/test_stubborn.mojo 1.31s  (timed out after 1s, escalated to SIGKILL)
@@ -366,7 +381,7 @@ The three reporters compose with the console and with each other.
 ```console
 $ pixi run bash -c 'build/mtest --json - --gh-annotations off e2e/matrix' 1>/tmp/stream.ndjson
 $ head -n 4 /tmp/stream.ndjson
-{"event":"stream","version":1,"generator":"mtest 0.5.0"}
+{"event":"stream","version":1,"generator":"mtest 0.6.0"}
 {"event":"session_started","root":"/home/mikko/dev/mtest","toolchain":"mojo","selected_count":2,"excluded_count":0,"shard_label":"","sharded_out_count":0,"workers":1}
 {"event":"file_started","path":"e2e/matrix/test_alpha.mojo"}
 {"event":"test_reported","path":"e2e/matrix/test_alpha.mojo","name":"test_alpha_one","outcome":"pass","detail":"","detail_omitted_bytes":0,"timing":"0.001"}
@@ -404,6 +419,298 @@ Inside GitHub Actions (`GITHUB_ACTIONS=true`), every echoed region of
 captured child output is wrapped in a per-run `::stop-commands::` fence, so
 a test's own output can never forge a workflow command.
 
+### Project configuration: `mtest.toml`
+
+When `mtest.toml` sits at the invocation root, mtest loads it automatically;
+absence is silent. `--config PATH` selects a different file, `--no-config`
+suppresses discovery entirely, and the two are mutually exclusive. The schema
+is closed: an unknown table, an unknown key, a wrong type, or an invalid value
+is a usage error caught before anything is built.
+
+This is the file the rest of this section runs against:
+
+```toml
+[run]
+paths = ["e2e/matrix"]
+workers = "auto"
+retries = 1
+timeout = 120
+
+[build]
+include = ["build"]
+compile-timeout = 300
+
+[report]
+durations = 2
+show-output = "none"
+
+[[override]]
+files = ["e2e/matrix/test_beta.mojo"]
+timeout = 30
+serial = true
+```
+
+`[run] paths` supplies the operands when the command line has none, so a bare
+`mtest` runs the project's suite the project's way:
+
+```console
+$ pixi run bash -c 'build/mtest'
+mtest 0.6.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0   workers: 16
+
+PASS           e2e/matrix/test_alpha.mojo      0.02s
+PASS           e2e/matrix/test_beta.mojo       0.02s  SERIAL
+
+===== 5 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 0.9s =====
+
+slowest 2 files:
+  e2e/matrix/test_alpha.mojo  0.02s
+  e2e/matrix/test_beta.mojo  0.02s
+$ echo $?
+0
+```
+
+Resolution is per key: built-in defaults, then `mtest.toml`, then a non-empty
+`MTEST_MOJO`, then the command line. A layer that sets a key replaces the whole
+value from below it, lists included, and positional operands replace configured
+`paths`. Color is the deliberate exception — `NO_COLOR` is not a layer value,
+it is consulted only once the winning `color` is `auto`.
+
+Each `[[override]]` table carries per-file `timeout`, `compile-timeout`,
+`retries`, and `serial = true`, keyed by glob. For each scalar the first
+matching table wins, unless the command line supplied that scalar globally.
+Serial membership is a union instead: any matching `serial = true` pins the
+file, which is why `test_beta.mojo` above carries the `SERIAL` tag.
+
+A configuration problem names the file, the table, the key, and what was
+expected, and stops the run before a single build starts — here with the same
+file, but `retries = "two"` where an integer belongs:
+
+```console
+$ pixi run bash -c 'build/mtest e2e/matrix'
+config: mtest.toml: [run] key 'retries': expected integer >= 0; got 'two'
+$ echo $?
+4
+```
+
+[§25 of the CLI contract](docs/cli-contract.md#25-project-configuration) is the
+full closed schema and the whole resolution rule.
+
+### Seeing what a configuration resolves to
+
+`mtest config show` accepts the full `run` grammar and answers one question:
+what would this invocation actually use? It resolves and renders, nothing else
+— it never discovers, builds, runs, opens a reporter, or reads last-run state.
+The output is copy-pasteable TOML, and every set key carries the layer it came
+from:
+
+```console
+$ pixi run bash -c 'build/mtest config show'
+[run]
+paths = ["e2e/matrix"]  # (mtest.toml)
+exclude = []  # (default)
+gates = []  # (default)
+serial = []  # (default)
+workers = "auto"  # (mtest.toml)
+timeout = 120  # (mtest.toml)
+retries = 1  # (mtest.toml)
+maxfail = 0  # (default)
+state = true  # (default)
+
+[build]
+mojo = "mojo"  # (default)
+include = ["build"]  # (mtest.toml)
+build-args = []  # (default)
+precompile = []  # (default)
+compile-timeout = 300  # (mtest.toml)
+
+[report]
+color = "auto"  # (default)
+show-output = "none"  # (mtest.toml)
+verbosity = "normal"  # (default)
+durations = 2  # (mtest.toml)
+# junit-xml = (unset)
+# json = (unset)
+gh-annotations = "auto"  # (default)
+
+[[override]]
+files = "e2e/matrix/test_beta.mojo"  # (mtest.toml)
+timeout = 30  # (mtest.toml)
+serial = true  # (mtest.toml)
+
+# config file: mtest.toml
+# state file: .mtest-cache/lastrun (present)
+# selection flags are per invocation and are not rendered
+$ echo $?
+0
+```
+
+Flags resolve into the same rendering, so `config show` also answers "what does
+this command line change?" — while per-invocation selection flags such as `-k`
+are accepted and deliberately not rendered:
+
+```console
+$ pixi run bash -c 'build/mtest config show --timeout 30 -n 4 -k alpha'
+[run]
+paths = ["e2e/matrix"]  # (mtest.toml)
+exclude = []  # (default)
+gates = []  # (default)
+serial = []  # (default)
+workers = 4  # (cli)
+timeout = 30  # (cli)
+retries = 1  # (mtest.toml)
+[...the remaining tables and trailers as above...]
+```
+
+The state trailer reports only whether `.mtest-cache/lastrun` exists; the
+command never reads it.
+
+### Re-running just the failures: `--lf` and `--ff`
+
+A completed run remembers what failed, in `.mtest-cache/lastrun` under the
+invocation root. That directory is mtest's working state, not a build product
+you want in review — ignore it:
+
+```gitignore
+# mtest's in-session build cache and its last-run state
+.mtest-cache/
+```
+
+The file is deterministic text, sorted and root-relative, readable without
+mtest. This is what a run over `e2e/matrix` and `e2e/suite/test_failing.mojo`
+leaves behind — two passing files and one failing test:
+
+```console
+$ cat .mtest-cache/lastrun
+mtest-lastrun v1
+test	e2e/suite/test_failing.mojo::test_second_fails
+```
+
+`--lf` (`--last-failed`) narrows the next run to what that state remembers, so
+you read one failure instead of scrolling past the whole suite. It narrows what
+*executes*, not what is built: the filter applies after each file has been
+compiled and probed for its test names, so the compile cost of the selection is
+unchanged. `--lf` also runs on a single worker, ignoring `-n`:
+
+```console
+$ pixi run bash -c 'build/mtest --lf e2e/matrix e2e/suite/test_failing.mojo'
+mtest 0.6.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0
+
+FAIL           e2e/suite/test_failing.mojo     0.02s
+
+--- FAIL e2e/suite/test_failing.mojo::test_second_fails ---
+    | At e2e/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:
+    |    left: 1
+    |   right: 2
+reproduce: mtest e2e/suite/test_failing.mojo::test_second_fails
+
+[...file-scoped captured output omitted...]
+
+===== 0 passed, 1 failed, 0 skipped (0 excluded, 2 not run, 7 deselected) in 1.3s =====
+$ echo $?
+1
+```
+
+`--ff` (`--failed-first`) keeps the whole selection but moves the remembered
+files to the front, so a rerun fails fast without giving up coverage:
+
+```console
+$ pixi run bash -c 'build/mtest --ff --show-output none e2e/matrix e2e/suite/test_failing.mojo'
+mtest 0.6.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0
+
+FAIL           e2e/suite/test_failing.mojo     0.02s
+PASS           e2e/matrix/test_alpha.mojo      0.02s
+PASS           e2e/matrix/test_beta.mojo       0.02s
+
+===== 7 passed, 1 failed, 0 skipped (0 excluded, 0 not run) in 1.2s =====
+$ echo $?
+1
+```
+
+Both are soft filters, never gates. A remembered id this selection does not
+reach — deleted, renamed, or simply out of scope — is dropped with a line
+naming it, and a state file that intersects nothing runs the ordinary full
+selection rather than exiting `5`:
+
+```console
+$ pixi run bash -c 'build/mtest --lf e2e/matrix'
+mtest 0.6.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
+
+lf: previously-failing e2e/suite/test_failing.mojo::test_second_fails no longer exists — dropped
+lf: no previously-failing tests match this selection — running the full selection
+PASS           e2e/matrix/test_alpha.mojo      0.02s
+PASS           e2e/matrix/test_beta.mojo       0.03s
+
+===== 5 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 0.9s =====
+$ echo $?
+0
+```
+
+Gates are never filtered or reordered by either mode: they always run first.
+`--lf` with `--ff`, and either with `--shard`, are usage errors; under
+`collect` both are refused. State is written only after the final exit code
+resolves to `0` or `1`, so an interrupt, an internal error, a usage error, or
+an empty session leaves the previous file untouched, as do `collect`, sharded
+runs, and `[run] state = false`.
+[§26 of the CLI contract](docs/cli-contract.md#26-last-run-state-and-failure-re-selection)
+specifies the format, the outcome-to-record mapping, and the merge rule that
+preserves a failure you have not retested yet.
+
+### Diagnosing the environment: `mtest doctor`
+
+`mtest doctor` answers "is this machine set up to run tests?" without running
+one. It performs ten read-only checks and prints exactly one `PASS`, `WARN`, or
+`FAIL` line for each, in a fixed order — the inventory never shrinks, because a
+missing line would be the one you needed:
+
+```console
+$ pixi run bash -c 'build/mtest doctor'
+PASS version: mtest 0.6.0
+PASS platform: Linux x86_64 supported
+PASS root: /home/mikko/dev/mtest
+PASS exec: runtime acquired
+PASS toolchain: 'mojo' from PATH default: Mojo 1.0.0b2 (2cf4d08a)
+PASS config: valid 'mtest.toml'
+PASS config-semantics: resolved values valid
+PASS state: cache and lastrun usable
+PASS temp: invocation root and system temp usable
+PASS report-destinations: none
+$ echo $?
+0
+```
+
+Every check body is guarded on its own, so a broken environment still produces
+the whole report: the failing check says what broke, dependent checks say which
+capability they were missing, and the rest still run.
+
+```console
+$ pixi run bash -c 'MTEST_MOJO=/opt/nonexistent/mojo build/mtest doctor --no-config'
+PASS version: mtest 0.6.0
+PASS platform: Linux x86_64 supported
+PASS root: /home/mikko/dev/mtest
+PASS exec: runtime acquired
+FAIL toolchain: '/opt/nonexistent/mojo' from MTEST_MOJO: could not execute
+PASS config: none
+PASS config-semantics: resolved values valid
+PASS state: cache and lastrun usable
+PASS temp: invocation root and system temp usable
+PASS report-destinations: none
+$ echo $?
+1
+```
+
+The `toolchain` check is deliberately strict: a `PASS` requires the exact
+pinned identity `Mojo 1.0.0b2 (2cf4d08a)`, because a different toolchain is a
+different `TestSuite` report format. `doctor` also treats a broken
+configuration differently from every other command on purpose — a missing or
+malformed selected config is a `FAIL`ed check and exit `1`, not the usage
+error `run` and `config show` raise, because a diagnostic tool that refuses to
+diagnose is useless. Its exit domain is `{0, 1, 2, 4}`, and `WARN` never fails
+the command.
+
 ## CLI reference
 
 This section is generated against `build/mtest --help` and is not allowed to
@@ -413,8 +720,59 @@ drift from that output:
 mtest — a pytest-like test runner for Mojo
 
 usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]
+       mtest config show [PATHS...] [flags] [-- BUILD-ARGS...]
+       mtest doctor [--config PATH | --no-config] [--color WHEN] [-q | -v]
 
-This build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo, -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v, --color, -k, --maxfail, --durations, --shard, -n/--workers, --serial, --retries, --json, --junit-xml, --gh-annotations, collect/--collect-only, --help, --version
+Subcommands:
+  run [PATHS...] [flags]      Run tests (the default subcommand).
+  collect [PATHS...] [flags]  List node ids without running tests.
+  config show [PATHS...]      Show resolved configuration.
+  doctor [flags]              Diagnose the environment without running tests.
+  help                        Show this help and exit.
+  version                     Show the version and exit.
+
+Selection:
+  --exclude GLOB              Exclude matching files (repeatable).
+  -k STR                      Select node ids containing STR.
+  --gate PATH                 Run PATH before ordinary files (repeatable).
+  --shard [hash:|slice:]M/N   Run only the selected shard.
+
+Execution:
+  -x, --exitfirst             Stop after the first failing file.
+  --maxfail N                 Stop after N failed tests (0 disables).
+  --timeout SECS              Set per-file run timeout (0 disables).
+  --retries N                 Retry crash-class outcomes N times.
+  -n, --workers N|auto        Set worker count (default: 1).
+  --serial GLOB               Run matching files serially (repeatable).
+
+Building:
+  -I PATH                     Add a Mojo include path (repeatable).
+  --build-arg ARG             Forward one argument to mojo build (repeatable).
+  --precompile SRC[:OUT]      Precompile package before builds (repeatable).
+  --mojo PATH                 Use this Mojo executable.
+  --compile-timeout SECS      Set per-file build timeout (0 disables).
+
+Reporting:
+  -s                          Show captured output for all files.
+  --show-output MODE          Choose failures|all|none captured output.
+  --durations N               Show N slowest file durations (0 disables).
+  -q                          Suppress passing file rows.
+  -v                          Show build commands and step timings.
+  --color WHEN                Choose auto|always|never color output.
+  --json PATH|-               Write NDJSON events to PATH or stdout.
+  --junit-xml PATH            Write a JUnit XML report.
+  --gh-annotations MODE       Choose off|on|auto GitHub annotations.
+
+Session state:
+  --config PATH               Use this project configuration file.
+  --no-config                 Disable project configuration discovery.
+  --lf, --last-failed         Run only entries from the last-failed state.
+  --ff, --failed-first        Run last-failed entries before the rest.
+
+General:
+  --collect-only              List node ids without running tests.
+  -h, --help                  Show this help and exit.
+  --version                   Show the version and exit.
 ```
 
 | Flag | Meaning |
@@ -427,6 +785,11 @@ This build serves: paths, --exclude, -I, --build-arg, --gate, --precompile, --mo
 | `--gate PATH` | (repeatable) files that must pass first; a gate failure aborts the whole session |
 | `--precompile SRC[:OUT]` | (repeatable) `mojo precompile` a package before any test build; its output directory is auto-added to `-I` |
 | `--mojo PATH` | override the `mojo` toolchain resolved from `PATH` (or `MTEST_MOJO`) |
+| `--config PATH`, `--no-config` | select one project config or disable config discovery |
+| `config show [PATHS...] [flags]` | render the fully resolved configuration without running tests |
+| `doctor [flags]` | run ten contained environment checks without starting a test session |
+| `--lf`, `--last-failed` | run only tests recorded as failed in the last completed state |
+| `--ff`, `--failed-first` | run last-failed tests first, then the remaining selection |
 | `-x`, `--exitfirst` | stop scheduling new files after the first failing file |
 | `--maxfail N` | stop scheduling once `N` tests have failed (`0`, the default, means no limit); checked between files, not mid-file |
 | `--timeout SECS` | bound a single file's run (default `300`, `0` disables); exceeding it yields TIMEOUT |
@@ -454,7 +817,7 @@ parallelism:
 
 ```console
 $ pixi run bash -c 'build/mtest -n 2 e2e/matrix'
-mtest 0.5.0 (mojo)
+mtest 0.6.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0   workers: 2
 
 PASS           e2e/matrix/test_beta.mojo       0.02s
@@ -469,7 +832,7 @@ machine with its peers. Pinned files carry a `SERIAL` tag:
 
 ```console
 $ pixi run bash -c "build/mtest -n 2 --serial 'e2e/matrix/test_alpha.mojo' e2e/matrix"
-mtest 0.5.0 (mojo)
+mtest 0.6.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0   workers: 2
 
 PASS           e2e/matrix/test_beta.mojo       0.02s
@@ -481,9 +844,11 @@ PASS           e2e/matrix/test_alpha.mojo      0.03s  SERIAL
 The default is `-n 1`: a single worker on the sequential path, byte-for-byte
 the same run and output as before the pool existed.
 
-### Exit codes
+### Run and collect exit codes
 
-Frozen, mirroring pytest:
+These codes are frozen for `run` and `collect`, mirroring pytest. `config show`
+and `doctor` have command-specific exit domains in
+[§27 of the CLI contract](docs/cli-contract.md#27-inspection-subcommands):
 
 | Code | Meaning |
 |------|---------|
@@ -494,9 +859,9 @@ Frozen, mirroring pytest:
 | `4` | CLI usage error, detected before any test runs |
 | `5` | no tests collected (empty walk, `-k` matched nothing, everything excluded) |
 
-When outcomes mix: a usage error aborts with `4` before the run; otherwise
-an interrupt dominates, then an internal error, then any failing outcome,
-then nothing-collected.
+When run/collect outcomes mix: a usage error aborts with `4` before the run;
+otherwise an interrupt dominates, then an internal error, then any failing
+outcome, then nothing-collected.
 
 The full contract, every flag, the node-id grammar, and the outcome
 vocabulary live in [docs/cli-contract.md](docs/cli-contract.md).
@@ -578,6 +943,21 @@ Facts about this build worth knowing before you rely on it:
 - **Captured output is file-scoped.** `TestSuite` does not attribute a
   file's stdout/stderr to individual tests, so mtest cannot either. Parsed
   FAIL assertion details are per-test; the raw captured block is per-file.
+- **The console shows child text, it does not execute it.** Every string a
+  child or the compiler produced is neutralized before it is printed for a
+  human: control characters become visible escapes (`\x1B`, `\x00`, `\u009B`)
+  and multi-line blocks are fenced behind a `    | ` gutter, so a test cannot
+  repaint your terminal or forge a line that reads as mtest's own. The GitHub
+  annotation tail prints to the same destination and gets the same treatment,
+  on top of its own `%25`/`%0A`/`%0D` workflow encoding. `mtest doctor`,
+  `mtest config show`, and the configuration diagnostics neutralize the same
+  set of code points in their own output's escape spelling — the set is defined
+  once and shared, so it cannot drift between them. The JUnit report and the
+  `--json` stream are written elsewhere and are unaffected \u2014 they still carry
+  the raw text under their own escaping, as does `mtest collect`, whose node-id
+  listing is specified byte-exact for tooling to consume. This stops the child
+  *doing* things, not *looking* like things: bidi overrides and homoglyphs pass
+  through, so a test name can still be visually misleading.
 - **`--maxfail` is checked between files.** A file already in flight always
   finishes, so a file with several failing tests can push the count past
   `N` before scheduling stops.
@@ -588,11 +968,10 @@ Facts about this build worth knowing before you rely on it:
   see the slowest individual test inside a fast file.
 - **The SLOW annotation is a fixed 60s threshold**, informational only; it
   never changes a verdict or the exit code.
-- **Memory analysis and packaging are Linux-only.** macOS arm64 CI is a
-  blocking check too: it audits the native adapter, links the binary, and
-  runs the direct, dogfood, and end-to-end suites. ASan/LSan, Valgrind, and
-  the conda package build and consumption run only on linux-64; no runner
-  executes the packaged artifact on macOS.
+- **Memory analysis is Linux-only; packaging is not.** macOS arm64 CI is a
+  blocking check too: it audits the native adapter, links the binary, runs the
+  direct, dogfood, and end-to-end suites, and consumes the installed conda
+  artifact in its own job. ASan/LSan and Valgrind run only on linux-64.
 - **GitHub annotations are capped and root-relative.** GitHub's
   workflow-step limits allow 10 error and 10 warning annotations per step
   (past the cap, one aggregate line accounts for the rest), and every
@@ -601,6 +980,22 @@ Facts about this build worth knowing before you rely on it:
   schema; every report is validated against the committed
   `scripts/schemas/junit-10.xsd`, which is a conformance claim about that
   schema, not about every consumer in the wild.
+- **A configured key cannot be cleared per key from the command line.** A CLI
+  value replaces a configured one, and positional operands replace configured
+  `paths`, but there is no spelling that empties a configured list or reverses
+  a configured `serial = true`, `state = false`, or `precompile` entry.
+  `--no-config` is the all-or-nothing escape.
+- **`config show` output is for humans.** It is valid, copy-pasteable TOML,
+  but its layout and its `# (source)` comments are informal and may change; a
+  machine-readable configuration format is reserved, not shipped.
+- **The build cache does not survive the process.** Within one session each
+  file is built once and reused (`collect` and `run` share the binary), but
+  `.mtest-cache/` carries no cross-invocation build reuse in this build: only
+  the `lastrun` state persists.
+- **Last-run state is one file, last writer wins.** Two sessions running
+  concurrently in one invocation root both write it, and the one that finishes
+  last is the state the next `--lf` reads. A write failure is one stderr
+  diagnostic that preserves the previous file; it never changes the exit code.
 
 ## Developing
 
@@ -668,9 +1063,9 @@ Three properties of the test setup are worth knowing up front:
   belongs upstream.
 - **A TestSuite replacement.** mtest orchestrates the standard library's
   harness and depends on its per-file protocol.
-- **Runtime dependencies.** The runner is pure Mojo plus one statically
-  linked C adapter. Python appears only in build and test tooling, never at
-  runtime.
+- **Third-party runtime dependencies.** mtest has none. Product logic is pure
+  Mojo plus one statically linked C adapter and the pinned native TOML parser
+  compiled into the shipped binary.
 
 ## License
 

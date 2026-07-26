@@ -4,16 +4,29 @@ from __future__ import annotations
 
 import inspect
 import os
+from pathlib import Path
 import shutil
 import signal
-import time
+import tempfile
 
+from scripts.checks.reports import junit as junit_check
 from scripts.e2e import main_open
 from scripts.e2e.assertions import (
+    HARD_KILL_GUARD_SECONDS,
+    INTERRUPT_TIMEOUT,
+    SLOW_BLOCKED_FILE,
+    SLOW_NOT_RUN_FILES,
+    SLOW_PASSING_FILE,
+    SLOW_TREE,
     SUMMARY_RE,
+    arm_slow_tree,
+    arm_stubborn_compile,
     expect,
     expect_accounting,
     expect_exit,
+    expect_report,
+    junit_not_run_files,
+    stream_files,
     summary,
     verdict_line,
     verdict_paths_in_order,
@@ -22,10 +35,12 @@ from scripts.e2e.runner import (
     FAKE_CRASH_MOJO,
     FAKE_RETRY_CRASH_MOJO,
     FAKE_SLOW_MOJO,
+    FAKE_STUBBORN_MOJO,
     REPO_ROOT,
     SHORT_TIMEOUT,
     ScenarioContext,
     ScenarioError,
+    expect_group_gone,
 )
 
 
@@ -924,34 +939,214 @@ def s_runtime_open_failure(context: ScenarioContext) -> str:
         raise ScenarioError(str(error)) from error
 
 
-def s_interrupt(context: ScenarioContext) -> str:
-    """Spawn mtest against slow/ in its OWN process group, wait until it has
-    clearly started (its header appears), let it enter the hang, then SIGINT the
-    group. Assert exit 2, a partial summary with NOT-RUN accounting, and that the
-    process group is gone (no orphan). Hard-guarded so it can never hang CI."""
-    run, pgid = context.runner.run_mtest_signaled(
-        ["e2e/slow"],
-        signal_number=signal.SIGINT,
-        delay=8.0,
-        timeout=60.0,
-    )
-    expect(
-        run.returncode == 2,
-        f"expected exit 2 on interrupt, got {run.returncode}\n"
-        f"{run.stdout}\n{run.stderr}",
-    )
-    combined = run.combined
-    m = SUMMARY_RE.search(combined)
-    expect(m is not None, f"no partial summary after interrupt:\n{combined}")
-    not_run = int(m.group("not_run"))
-    expect(not_run >= 1, f"interrupt summary showed no NOT-RUN accounting (not_run={not_run})")
+def _interrupted_slow_walk(
+    context: ScenarioContext,
+    *,
+    signal_number: int,
+    second_signal: int | None = None,
+) -> str:
+    """Walk slow/ to its armed blocked child, signal mtest, and assert the lot.
 
-    # The process group must be gone — no orphaned children.
-    time.sleep(0.5)
-    orphan = True
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        orphan = False
-    expect(not orphan, f"process group {pgid} still alive after mtest exit (orphan)")
-    return f"exit 2; partial summary with {not_run} NOT-RUN; no orphaned process group"
+    The signal goes to the mtest leader only, and only once one file has PASSED
+    and the next child has announced that it is blocked and armed. What mtest
+    then owes is exact and stated three times over — console band, `--json`
+    stream, JUnit report — plus the process-group obligation.
+
+    The single-interrupt cases block in the RUN step, where the blocked child is
+    the slow/ fixture that ignores SIGTERM. The double-interrupt case blocks the
+    same file's COMPILE instead, through the stubborn `--mojo` stand-in: only
+    that actor can witness mtest's polite SIGTERM and live to report it, which is
+    what makes the second signal land during teardown rather than at a guess. The
+    accounting is identical either way — the file before it still passes for
+    real, and the blocked file plus everything behind it is still NOT-RUN — so
+    the same assertions cover both.
+
+    The compile slot's 5 s grace is also what makes hard termination MEASURABLE:
+    every accounting assertion here holds just as well for a product that
+    ignored the second interrupt and let that grace expire, so the double case
+    additionally bounds the interval from the second signal to the exit.
+
+    Args:
+        context: The scenario context.
+        signal_number: The interrupt delivered to the leader once armed.
+        second_signal: A second interrupt delivered once the blocked actor has
+            observed mtest's polite teardown SIGTERM, or None for the single
+            interrupt case.
+
+    Returns:
+        The scenario detail line.
+
+    Raises:
+        ScenarioError: On any deviation from the exact accounting.
+    """
+    with tempfile.TemporaryDirectory(prefix="mtest-interrupt-") as raw:
+        tmp = Path(raw)
+        slow = arm_slow_tree(tmp)
+        stubborn = arm_stubborn_compile(tmp, SLOW_BLOCKED_FILE)
+        stream_path = os.fspath(tmp / "stream.ndjson")
+        junit_path = os.fspath(tmp / "report.xml")
+        args = [
+            SLOW_TREE,
+            "--json",
+            stream_path,
+            "--junit-xml",
+            junit_path,
+            "--color",
+            "never",
+            "--gh-annotations",
+            "off",
+        ]
+        env = dict(slow.env)
+        if second_signal is None:
+            ready_files = slow.ready_files
+            owned_pgid_files = slow.owned_pgid_files
+            teardown_ready_files: tuple[str, ...] = ()
+        else:
+            args += ["--mojo", FAKE_STUBBORN_MOJO]
+            env.update(stubborn.env)
+            ready_files = (slow.passed_file, *stubborn.ready_files)
+            owned_pgid_files = stubborn.owned_pgid_files
+            teardown_ready_files = stubborn.teardown_ready_files
+        run, pgid = context.runner.run_mtest_signaled(
+            args,
+            signal_number=signal_number,
+            timeout=INTERRUPT_TIMEOUT,
+            ready_files=ready_files,
+            owned_pgid_files=owned_pgid_files,
+            second_signal=second_signal,
+            teardown_ready_files=teardown_ready_files,
+            env_overrides=env,
+        )
+        expect_exit(run, 2)
+
+        # (1) The console band: one partial summary, exact counts, and the one
+        # completed file as the ONLY verdict line. A killed child is NOT-RUN, so
+        # a TIMEOUT verdict here would be mtest's own kill misreported as a
+        # deadline casualty.
+        bands = SUMMARY_RE.findall(run.combined)
+        expect(
+            len(bands) == 1,
+            f"an interrupted run must print exactly one terminal summary band, "
+            f"got {len(bands)}:\n{run.combined}",
+        )
+        summ = expect_accounting(run)
+        expect(
+            (summ.passed, summ.not_run) == (1, len(SLOW_NOT_RUN_FILES)),
+            f"interrupt accounting was ({summ.passed} passed, {summ.not_run} not "
+            f"run), want (1, {len(SLOW_NOT_RUN_FILES)}):\n{run.combined}",
+        )
+        expect(
+            (summ.failed, summ.crashed, summ.timed_out, summ.compile_error)
+            == (0, 0, 0, 0),
+            f"an interrupt invented a failing outcome: {summ}\n{run.combined}",
+        )
+        expect(
+            verdict_paths_in_order(run) == [SLOW_PASSING_FILE],
+            f"the only verdict an interrupted walk may print is the completed "
+            f"file's, got {verdict_paths_in_order(run)}",
+        )
+        expect(
+            verdict_line(run, "TIMEOUT", SLOW_BLOCKED_FILE) is None,
+            f"the interrupted child was narrated as a TIMEOUT casualty:\n"
+            f"{run.stdout}",
+        )
+
+        # (2) The machine stream states the same identities by presence and
+        # absence: the blocked child started and never finished, and no file
+        # behind it was ever announced at all.
+        stream = stream_files(Path(stream_path).read_text(encoding="utf-8"))
+        expect(
+            stream.has_terminal and stream.exit_code == 2,
+            f"the interrupted stream's terminal record was "
+            f"{stream.exit_code!r} (terminal={stream.has_terminal})",
+        )
+        expect(
+            stream.started == (SLOW_PASSING_FILE, SLOW_BLOCKED_FILE),
+            f"the stream announced {stream.started}, want exactly the completed "
+            f"file then the blocked one",
+        )
+        expect(
+            stream.finished == {SLOW_PASSING_FILE: "pass"},
+            f"the stream finished {stream.finished}, want only the completed "
+            f"file's pass",
+        )
+        expect(
+            stream.summary.get("not_run") == len(SLOW_NOT_RUN_FILES)
+            and stream.summary.get("pass") == 1,
+            f"the terminal summary disagreed with the console band: "
+            f"{stream.summary}",
+        )
+
+        # (3) The JUnit report names every NOT-RUN file, exactly and in order.
+        report = expect_report(run, junit_path, "the interrupted run's junit")
+        junit_check.check_artifact(report)
+        not_run_rows = junit_not_run_files(report)
+        expect(
+            not_run_rows == SLOW_NOT_RUN_FILES,
+            f"the junit [not-run] rows were {not_run_rows}, want "
+            f"{SLOW_NOT_RUN_FILES}",
+        )
+
+        # (4) Hard termination. Everything above is equally true of a product
+        # that ignored the second interrupt and simply waited out the blocked
+        # slot's 5 s grace, so the interval from that signal to the exit is the
+        # only thing that separates the two.
+        if second_signal is not None:
+            expect(
+                run.second_signal_wall is not None
+                and run.second_signal_wall < HARD_KILL_GUARD_SECONDS,
+                f"the second interrupt took {run.second_signal_wall}s to end the "
+                f"run, over the {HARD_KILL_GUARD_SECONDS}s bound — the blocked "
+                f"group was left to its 5s grace instead of being hard-killed",
+            )
+
+        # (5) No survivor. The child group the actor recorded was already proven
+        # gone by the runner; mtest's own group must be gone too.
+        expect_group_gone(pgid, "mtest's own group after the interrupt")
+        if second_signal is None:
+            timing = ""
+        else:
+            timing = (
+                f"; hard-killed {run.second_signal_wall:.2f}s after the second "
+                f"interrupt (bound {HARD_KILL_GUARD_SECONDS}s, grace 5s)"
+            )
+        return (
+            f"exit 2; 1 passed + {len(SLOW_NOT_RUN_FILES)} NOT-RUN named "
+            f"identically in the console, stream, and junit; one summary band; "
+            f"no surviving process group{timing}"
+        )
+
+
+def s_interrupt(context: ScenarioContext) -> str:
+    """A SIGINT during work exits 2 with exact completed/NOT-RUN accounting."""
+    detail = _interrupted_slow_walk(context, signal_number=signal.SIGINT)
+    return f"SIGINT: {detail}"
+
+
+def s_interrupt_sigterm(context: ScenarioContext) -> str:
+    """SIGTERM is the same contract as SIGINT: same exit, same accounting.
+
+    The two signals share one latch, so the only thing that can distinguish them
+    is a regression that handles one and not the other. Asserting the identical
+    accounting for both is what keeps them tied together.
+    """
+    detail = _interrupted_slow_walk(context, signal_number=signal.SIGTERM)
+    return f"SIGTERM: {detail}"
+
+
+def s_interrupt_double(context: ScenarioContext) -> str:
+    """A second interrupt during teardown hard-kills without corrupting exit 2.
+
+    The blocked actor here is the stubborn `--mojo` stand-in holding the same
+    file's compile open. It CATCHES mtest's polite teardown SIGTERM and refuses
+    to die on it, and announcing that arrival is how the harness knows teardown
+    has actually begun before it delivers the second interrupt — rather than
+    guessing a moment. Two things must then hold at once: the second interrupt
+    hard-kills the blocked group instead of leaving it to its 5 s grace, and the
+    escalation costs mtest nothing — the same single partial summary, the same
+    NOT-RUN identities, exit 2, and no surviving process group.
+    """
+    detail = _interrupted_slow_walk(
+        context, signal_number=signal.SIGINT, second_signal=signal.SIGINT
+    )
+    return f"SIGINT during work then SIGINT during teardown: {detail}"

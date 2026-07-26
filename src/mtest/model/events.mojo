@@ -56,6 +56,13 @@ struct EventKind(Equatable, ImplicitlyCopyable, Movable):
     comptime CRASH_ATTRIBUTION = Self(10)
     comptime PROGRESS = Self(11)
 
+    comptime COUNT = 12
+    """The number of distinct kinds in the vocabulary.
+
+    Every exhaustive proof over the event set — the composite fan-out, the
+    distinctness table — is anchored to this, so adding a kind without
+    extending those proofs fails loudly instead of narrowing them in silence."""
+
     def __eq__(self, other: Self) -> Bool:
         """Two kinds are equal iff their discriminants match."""
         return self.value == other.value
@@ -138,6 +145,8 @@ struct SessionStartedPayload(EventPayload):
     """How many selected files this shard handed off to other shards."""
     var workers: Int
     """The resolved worker count for the run; 1 for a sequential run."""
+    var config_file: String
+    """The normalized project-config path, or empty when none was loaded."""
 
 
 @fieldwise_init
@@ -486,6 +495,7 @@ struct Event(Copyable, Movable):
         shard_label: String = "",
         sharded_out_count: Int = 0,
         workers: Int = 1,
+        config_file: String = "",
     ) -> Event:
         """The run began.
 
@@ -500,6 +510,8 @@ struct Event(Copyable, Movable):
                 other shards.
             workers: The resolved worker count for the run; 1 for a sequential
                 run.
+            config_file: The normalized project-config path, or empty when no
+                file was loaded.
 
         Returns:
             A SESSION_STARTED event.
@@ -513,6 +525,7 @@ struct Event(Copyable, Movable):
                 shard_label,
                 sharded_out_count,
                 workers,
+                config_file,
             )
         )
 

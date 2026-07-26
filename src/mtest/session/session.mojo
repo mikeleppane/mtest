@@ -9,10 +9,9 @@ reconciles a `--only` selection run against its `--skip-all` collection
 universe, and maps every termination to an `Outcome` — emitting events to the
 composed reporter and resolving the process exit code. Execution is sequential
 by contract: no parallelism. Two retry mechanisms exist. The bounded stale-name
-recover-once reprobes a file whose `--only` names vanished from the suite, and
-the `--retries` budget runs up to `config.retries + 1` attempts on a
-crash-class ending — applied to precompile steps, whole run files, and selected
-subsets alike.
+recover-once reprobes a file whose `--only` names vanished from the suite.
+Crash-class file runs spend one initial attempt plus their effective per-file
+retries, while precompile steps retain the resolved global retry budget.
 
 The session emits events and nothing else; the reporter formats, and pre-session
 CLI usage errors belong to main. Only two failures propagate out of
@@ -35,7 +34,7 @@ from std.sys import num_logical_cores
 from std.time import perf_counter_ns
 
 from mtest.cache import BuildRegistry
-from mtest.config import RunnerConfig
+from mtest.config import ResolvedConfig, RunnerConfig, StateDelta
 from mtest.discover import discover
 from mtest.exec import ExecRuntime, interrupt_requested
 from mtest.model import (
@@ -51,10 +50,19 @@ from mtest.report import ReportCoordinator
 from mtest.select import NamedTarget, parse_operands, selection_active
 from mtest.session.attempt import _run_one
 from mtest.session.attribution_run import _run_crash_attribution
+from mtest.session.effective_settings import (
+    _compat_resolved_config,
+    effective_file_settings,
+)
 from mtest.session.file_result import _CrashFile, _failing_count
+from mtest.select.failure_selection import (
+    missing_file_identifiers,
+    order_failed_first,
+    remembered_file_matches,
+)
 from mtest.session.pipeline import PipelineHalt, RunPipeline
 from mtest.session.pool import _run_pool_batch, resolve_worker_plan
-from mtest.session.pool_plan import partition_serial, stale_serials
+from mtest.session.pool_plan import partition_effective_serial, stale_serials
 from mtest.session.precompile import _run_precompile
 from mtest.session.selection import _run_selection
 from mtest.session.shard import partition
@@ -88,11 +96,22 @@ def _flush_console[
     print(chunk, end="", file=FileDescriptor(console_fd), flush=True)
 
 
+@fieldwise_init
+struct SessionResult(Copyable, Movable):
+    """The resolved session code and its live last-run verdict delta."""
+
+    var code: Int
+    """The resolved exit code."""
+
+    var state_delta: StateDelta
+    """The fresh observations folded from emitted verdict events."""
+
+
 def run_session[
     C: ReportCoordinator
 ](
     mut runtime: ExecRuntime,
-    config: RunnerConfig,
+    resolved: ResolvedConfig,
     root: String,
     mut reporter: C,
     console_fd: Int = -1,
@@ -121,7 +140,7 @@ def run_session[
 
     Args:
         runtime: Exclusive owner of process-global exec and signal state.
-        config: Every knob the run reads.
+        resolved: Layered global configuration and per-file override tables.
         root: The invocation root; built binaries and paths are relative to it.
         reporter: The coordinator the session fans every event to.
         console_fd: A borrowed console descriptor the session flushes rendered
@@ -144,10 +163,12 @@ def run_session[
             names an unknown test. Main maps both to exit 4. Every other
             failure is caught and resolved to exit 3.
     """
+    var config = resolved.config.copy()
     var started_ns = perf_counter_ns()
 
     # Discovery. A discover: usage error propagates to main (exit 4).
     var disc = discover(config, root)
+    reporter.configure_state_gates(disc.gate_files)
 
     # Sharding partitions the discovered RUN files (never the gates): keep only
     # the subset this shard owns so every downstream count, casualty, run loop,
@@ -178,6 +199,23 @@ def run_session[
     # and `--serial` stays a consistent no-op (the selection run is already
     # one file at a time).
     var sel_active = selection_active(config.paths, config.keyword)
+    if config.last_failed:
+        sel_active = True
+    var state_files = disc.gate_files.copy()
+    state_files.extend(disc.run_files.copy())
+    var ff_has_match = (
+        config.failed_first
+        and resolved.state
+        and remembered_file_matches(state_files, resolved.last_run_state)
+    )
+    if config.failed_first and ff_has_match and sel_active:
+        var ordered = order_failed_first(
+            disc.gate_files,
+            disc.run_files,
+            [],
+            resolved.last_run_state,
+        )
+        disc.run_files = ordered.parallel.copy()
     var resolved_workers = 1
     var worker_clamp_note = String("")
     var worker_env_error = False
@@ -202,8 +240,67 @@ def run_session[
             shard_label=shard_label,
             sharded_out_count=sharded_out_count,
             workers=resolved_workers,
+            config_file=resolved.config_file,
         )
     )
+    for warning in resolved.state_warnings:
+        reporter.handle(Event.warning("state-malformed-line", warning))
+    if config.last_failed:
+        if not resolved.state:
+            reporter.handle(
+                Event.warning(
+                    "lf-empty",
+                    (
+                        "lf: state disabled by mtest.toml — running the full"
+                        " selection"
+                    ),
+                )
+            )
+        elif len(resolved.last_run_state.records) == 0:
+            reporter.handle(
+                Event.warning(
+                    "lf-empty",
+                    (
+                        "lf: no previously-failing tests match this"
+                        " selection — running the full selection"
+                    ),
+                )
+            )
+    if config.failed_first:
+        if not resolved.state:
+            reporter.handle(
+                Event.warning(
+                    "lf-empty",
+                    (
+                        "lf: state disabled by mtest.toml — running the full"
+                        " selection"
+                    ),
+                )
+            )
+        else:
+            for identifier in missing_file_identifiers(
+                state_files, resolved.last_run_state
+            ):
+                reporter.handle(
+                    Event.warning(
+                        "lf-stale",
+                        (
+                            "lf: previously-failing "
+                            + identifier
+                            + " no longer exists — dropped"
+                        ),
+                    )
+                )
+            if not ff_has_match:
+                reporter.handle(
+                    Event.warning(
+                        "lf-empty",
+                        (
+                            "lf: no previously-failing tests match this"
+                            " selection — running the full selection"
+                        ),
+                    )
+                )
     if worker_clamp_note != "":
         reporter.handle(Event.warning("worker-clamp", worker_clamp_note))
 
@@ -326,15 +423,20 @@ def run_session[
     # policy runs through the same `RunPipeline` kernel the selection and plain
     # run paths use — a gate is always exit-first, so a failing gate latches
     # `LIMIT_REACHED` and aborts scheduling, exactly as before.
-    var gate_pipeline = RunPipeline(
-        len(disc.gate_files), config.retries, True, 0
+    var gate_retry_budgets = List[Int]()
+    for gate_file in disc.gate_files:
+        gate_retry_budgets.append(
+            effective_file_settings(resolved, gate_file).retries
+        )
+    var gate_pipeline = RunPipeline.from_retry_budgets(
+        gate_retry_budgets^, True, 0
     )
     # The parallel pool runs the gates as their own batch, aborting the run on
     # the first failing or drifting gate exactly as the sequential loop does.
     if proceed and resolved_workers > 1:
         var gb = _run_pool_batch(
             runtime,
-            config,
+            resolved,
             root,
             disc.gate_files,
             includes,
@@ -369,8 +471,16 @@ def run_session[
                 break
             reporter.handle(Event.file_started(disc.gate_files[gi]))
             try:
+                var settings = effective_file_settings(
+                    resolved, disc.gate_files[gi]
+                )
                 var fr = _run_one(
-                    runtime, config, root, disc.gate_files[gi], includes
+                    runtime,
+                    config,
+                    settings,
+                    root,
+                    disc.gate_files[gi],
+                    includes,
                 )
                 if fr.interrupted:
                     interrupted = True
@@ -438,7 +548,15 @@ def run_session[
     if proceed_runs and sel_active:
         var plan = parse_operands(config.paths)
         var sel = _run_selection(
-            runtime, config, root, disc, includes, plan, reporter, summary, reg
+            runtime,
+            resolved,
+            root,
+            disc,
+            includes,
+            plan,
+            reporter,
+            summary,
+            reg,
         )
         run_outcomes.extend(sel.run_outcomes.copy())
         test_totals.passed += sel.test_totals.passed
@@ -465,10 +583,19 @@ def run_session[
         # the files actually dispatched (post-shard, post-selection), so nothing
         # discover counts or shards is disturbed; each sub-list keeps the
         # dispatched order.
-        var split = partition_serial(disc.run_files, config.serial_globs)
+        var split = partition_effective_serial(disc.run_files, resolved)
+        if config.failed_first and ff_has_match:
+            var ordered = order_failed_first(
+                disc.gate_files,
+                split.parallel,
+                split.serial,
+                resolved.last_run_state,
+            )
+            split.parallel = ordered.parallel.copy()
+            split.serial = ordered.serial.copy()
         var rb = _run_pool_batch(
             runtime,
-            config,
+            resolved,
             root,
             split.parallel,
             includes,
@@ -509,7 +636,7 @@ def run_session[
         if len(split.serial) > 0 and not stop_serial:
             var sb = _run_pool_batch(
                 runtime,
-                config,
+                resolved,
                 root,
                 split.serial,
                 includes,
@@ -536,13 +663,25 @@ def run_session[
                 drift = True
             crash_files.extend(sb.crash_files.copy())
     elif proceed_runs:
+        if config.failed_first and ff_has_match:
+            var ordered = order_failed_first(
+                disc.gate_files,
+                disc.run_files,
+                [],
+                resolved.last_run_state,
+            )
+            disc.run_files = ordered.parallel.copy()
         # The plain run path settles each file build-then-run through `_run_one`
         # and routes its `-x`/`--maxfail` stop policy through the same
         # `RunPipeline` kernel the selection and gate paths use, rather than
         # re-deciding the limits inline.
-        var run_pipeline = RunPipeline(
-            len(disc.run_files),
-            config.retries,
+        var run_retry_budgets = List[Int]()
+        for run_file in disc.run_files:
+            run_retry_budgets.append(
+                effective_file_settings(resolved, run_file).retries
+            )
+        var run_pipeline = RunPipeline.from_retry_budgets(
+            run_retry_budgets^,
             config.exitfirst,
             config.maxfail,
         )
@@ -555,8 +694,16 @@ def run_session[
                 break
             reporter.handle(Event.file_started(disc.run_files[ri]))
             try:
+                var settings = effective_file_settings(
+                    resolved, disc.run_files[ri]
+                )
                 var fr = _run_one(
-                    runtime, config, root, disc.run_files[ri], includes
+                    runtime,
+                    config,
+                    settings,
+                    root,
+                    disc.run_files[ri],
+                    includes,
                 )
                 if fr.interrupted:
                     interrupted = True
@@ -588,7 +735,10 @@ def run_session[
                     # an attribution candidate: an empty selected set.
                     crash_files.append(
                         _CrashFile(
-                            disc.run_files[ri], fr.binary_path, List[String]()
+                            disc.run_files[ri],
+                            settings,
+                            fr.binary_path,
+                            List[String](),
                         )
                     )
                 run_pipeline.record_verdict(
@@ -643,9 +793,7 @@ def run_session[
     # settled accounting.
     if not interrupted and not stream_dead:
         try:
-            _run_crash_attribution(
-                runtime, config, root, crash_files, reg, reporter
-            )
+            _run_crash_attribution(runtime, root, crash_files, reg, reporter)
         except:
             pass
 
@@ -746,6 +894,59 @@ def run_session[
     return code
 
 
+def run_session_with_state[
+    C: ReportCoordinator
+](
+    mut runtime: ExecRuntime,
+    resolved: ResolvedConfig,
+    root: String,
+    mut reporter: C,
+    console_fd: Int = -1,
+) raises -> SessionResult:
+    """Run one layered session and return its code plus live state delta.
+
+    Args:
+        runtime: Exclusive owner of process-global exec and signal state.
+        resolved: Layered global configuration and override tables.
+        root: The invocation root.
+        reporter: The coordinator receiving the event stream.
+        console_fd: The borrowed console descriptor, or negative for none.
+
+    Returns:
+        The session's resolved code and fresh verdict observations.
+
+    Raises:
+        Error: The same pre-session usage errors as `run_session`.
+    """
+    var code = run_session(runtime, resolved, root, reporter, console_fd)
+    return SessionResult(code, reporter.state_delta())
+
+
+def run_session[
+    C: ReportCoordinator
+](
+    mut runtime: ExecRuntime,
+    config: RunnerConfig,
+    root: String,
+    mut reporter: C,
+    console_fd: Int = -1,
+) raises -> Int:
+    """Run from the legacy config with no per-file override tables.
+
+    Args:
+        runtime: Exclusive owner of process-global exec and signal state.
+        config: The legacy resolved runner configuration.
+        root: The invocation root; built binaries and paths are relative to it.
+        reporter: The coordinator the session fans every event to.
+        console_fd: The borrowed console destination, or negative for none.
+
+    Returns:
+        The resolved exit code from the layered primary overload.
+    """
+    var resolved = _compat_resolved_config(config)
+    return run_session(runtime, resolved, root, reporter, console_fd)
+
+
 def run_session[
     C: ReportCoordinator
 ](config: RunnerConfig, root: String, mut reporter: C) raises -> Int:
@@ -777,6 +978,38 @@ def run_session[
     try:
         runtime.open()
         var code = run_session(runtime, config, root, reporter)
+        runtime.close()
+        return code
+    except error:
+        var primary = String(error)
+        try:
+            runtime.close()
+        except cleanup_error:
+            raise Error(primary + "; " + String(cleanup_error))
+        raise Error(primary)
+
+
+def run_session[
+    C: ReportCoordinator
+](resolved: ResolvedConfig, root: String, mut reporter: C) raises -> Int:
+    """Run a session from layered configuration for direct library callers.
+
+    Args:
+        resolved: Layered values, provenance, and per-file override tables.
+        root: The invocation root; built binaries and paths are relative to it.
+        reporter: The coordinator the session fans every event to.
+
+    Returns:
+        The resolved exit code, as the primary overload defines it.
+
+    Raises:
+        Error: If the runtime cannot be opened or closed, or if the primary
+            overload raises.
+    """
+    var runtime = ExecRuntime()
+    try:
+        runtime.open()
+        var code = run_session(runtime, resolved, root, reporter)
         runtime.close()
         return code
     except error:

@@ -17,7 +17,7 @@ from std.os.path import exists
 from std.time import perf_counter_ns
 
 from mtest.cache import BuildRegistry
-from mtest.config import RunnerConfig, lossy_utf8
+from mtest.config import lossy_utf8
 from mtest.exec import (
     ExecRuntime,
     ProcessResult,
@@ -32,6 +32,7 @@ from mtest.report import ReportCoordinator
 from mtest.session.attribution import attribution_step, isolation_timeout_secs
 from mtest.session.classify import resolve_report
 from mtest.session.file_result import _CrashFile
+from mtest.session.effective_settings import EffectiveFileSettings
 from mtest.session.names import _select_names
 
 
@@ -69,7 +70,7 @@ struct _AttributionListing(Copyable, Movable):
 
 def _attribution_probe(
     mut runtime: ExecRuntime,
-    config: RunnerConfig,
+    settings: EffectiveFileSettings,
     root: String,
     rel: String,
     binary: String,
@@ -90,7 +91,8 @@ def _attribution_probe(
 
     Args:
         runtime: The exec runtime supervising the probe spawn.
-        config: The resolved runner configuration, for the isolation deadline.
+        settings: The crashed file's effective settings; its run deadline is
+            capped for attribution isolation.
         root: The invocation root the probe runs in.
         rel: The root-relative path of the crashed file.
         binary: The binary that crashed, re-probed here.
@@ -107,7 +109,7 @@ def _attribution_probe(
     var pres = run_supervised(
         runtime,
         ProcessSpec.command_in(
-            argv^, root, isolation_timeout_secs(config.timeout_secs) * 1000
+            argv^, root, isolation_timeout_secs(settings.timeout_secs) * 1000
         ),
     )
     var term = pres.termination
@@ -129,7 +131,7 @@ def _attribution_probe(
 
 def _attribution_listing(
     mut runtime: ExecRuntime,
-    config: RunnerConfig,
+    settings: EffectiveFileSettings,
     root: String,
     rel: String,
     binary: String,
@@ -161,7 +163,8 @@ def _attribution_listing(
 
     Args:
         runtime: The exec runtime supervising a fallback probe spawn.
-        config: The resolved runner configuration, for the isolation deadline.
+        settings: The crashed file's effective settings; its run deadline is
+            capped for attribution isolation.
         root: The invocation root the probe runs in.
         rel: The root-relative path of the crashed file.
         binary: The binary that crashed.
@@ -183,14 +186,14 @@ def _attribution_listing(
             for node_id in bp.listing:
                 names.append(String(node_id.removeprefix(prefix)))
             return _AttributionListing(True, binary, names^)
-    return _attribution_probe(runtime, config, root, rel, binary)
+    return _attribution_probe(runtime, settings, root, rel, binary)
 
 
 def _attribute_one[
     C: ReportCoordinator
 ](
     mut runtime: ExecRuntime,
-    config: RunnerConfig,
+    settings: EffectiveFileSettings,
     root: String,
     rel: String,
     binary: String,
@@ -227,7 +230,8 @@ def _attribute_one[
 
     Args:
         runtime: The exec runtime supervising the listing probe and the reruns.
-        config: The resolved runner configuration, for the isolation deadline.
+        settings: The crashed file's effective settings; its run deadline is
+            capped for attribution isolation.
         root: The invocation root the reruns happen in.
         rel: The root-relative path of the crashed file.
         binary: The binary its crashed run executed.
@@ -264,7 +268,9 @@ def _attribute_one[
 
     var listing: _AttributionListing
     try:
-        listing = _attribution_listing(runtime, config, root, rel, binary, reg)
+        listing = _attribution_listing(
+            runtime, settings, root, rel, binary, reg
+        )
     except:
         listing = _AttributionListing(False, "", List[String]())
     if interrupt_requested():
@@ -286,7 +292,7 @@ def _attribute_one[
     # run never invoked. An empty selection (the plain run path) keeps them all.
     var names = _select_names(listing.names, selected)
 
-    var timeout_ms = isolation_timeout_secs(config.timeout_secs) * 1000
+    var timeout_ms = isolation_timeout_secs(settings.timeout_secs) * 1000
     var runs = 0
     var index = 0
     while True:
@@ -372,7 +378,6 @@ def _run_crash_attribution[
     C: ReportCoordinator
 ](
     mut runtime: ExecRuntime,
-    config: RunnerConfig,
     root: String,
     crash_files: List[_CrashFile],
     reg: BuildRegistry,
@@ -397,7 +402,6 @@ def _run_crash_attribution[
 
     Args:
         runtime: The exec runtime supervising the probes and reruns.
-        config: The resolved runner configuration, for the isolation deadline.
         root: The invocation root the reruns happen in.
         crash_files: The crashed files to attribute, in discovery order.
         reg: The build registry consulted for existing listings.
@@ -422,7 +426,7 @@ def _run_crash_attribution[
     for cf in crash_files:
         if not _attribute_one(
             runtime,
-            config,
+            cf.settings,
             root,
             cf.rel,
             cf.binary,

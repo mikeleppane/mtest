@@ -3,9 +3,11 @@
 **Status: DRAFT.** This document specifies the v1 command-line interface of
 `mtest`. It is the public API of the tool. Until the v1.0 release it may change;
 at v1.0 the surfaces marked **FROZEN** below are frozen and any later change to
-them requires a major version bump. The exit-code model is already frozen — it
-mirrors pytest's — and will not change. Everything above describes the full v1
-target; for what the *current build* actually implements today, see
+them requires a major version bump. Each subcommand's exit domain and
+precedence are already frozen. The enumerated usage-error triggers grow only
+when a newly served surface adds an argv syntax or applicability error.
+Everything above describes the full v1 target; for what the *current build*
+actually implements today, see
 [§24, Availability status (this build)](#24-availability-status-this-build).
 
 `mtest` is an orchestrator layered on top of Mojo's standard-library
@@ -22,12 +24,15 @@ means `mtest`.
 ```text
 mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]   # run is the default subcommand
 mtest collect [PATHS...] [flags]                    # list node ids, one per line
+mtest config show [PATHS...] [flags]                # render resolved configuration
+mtest doctor [--config PATH | --no-config] [--color WHEN] [-q | -v]
 mtest version
 mtest --help | mtest help
 ```
 
 `run` is the default: `mtest tests/` means `mtest run tests/`. A leading token
 that is not a known subcommand is treated as a path or flag for `run`.
+`config show` is the sole two-token subcommand.
 
 ---
 
@@ -43,6 +48,9 @@ single **invocation root**. In v1 the root is the **current working directory**.
   reserved for a future release.
 - An operand (path or node id) that resolves **outside** the root is a usage
   error (exit 4). This keeps every reported path root-relative and portable.
+- Paths supplied by `mtest.toml` are resolved from the invocation root too,
+  regardless of where an explicitly selected config file lives. The config
+  file's directory never becomes a second root.
 
 ---
 
@@ -60,6 +68,9 @@ single **invocation root**. In v1 the root is the **current working directory**.
   `--serial`) may appear multiple times; each occurrence is one value. Values
   containing spaces are preserved exactly (the runner never re-splits a flag
   value on spaces).
+- `--config PATH` selects one project-config file; a relative PATH is resolved
+  from the invocation root. `--no-config` disables project-config discovery and
+  parsing. They are mutually exclusive.
 - An unknown flag, a missing required value, or a malformed value is a usage
   error (exit 4), detected before any test runs.
 
@@ -67,36 +78,58 @@ single **invocation root**. In v1 the root is the **current working directory**.
 
 ## 4. Subcommands and flag applicability
 
-| Flag | `run` | `collect` |
-|------|:-----:|:---------:|
-| `PATHS...` | ✓ | ✓ |
-| `-k STR` | ✓ | ✓ |
-| `--exclude GLOB` | ✓ | ✓ |
-| `-I PATH` | ✓ | ✓ |
-| `--build-arg ARG`, `-- ARGS` | ✓ | ✓ |
-| `--precompile SRC[:OUT]` | ✓ | ✓ |
-| `--mojo PATH` | ✓ | ✓ |
-| `-x`, `--maxfail N` | ✓ | — |
-| `-n, --workers N\|auto` | ✓ | ✓ |
-| `--shard M/N` | ✓ | ✓ |
-| `--serial GLOB` | ✓ | — |
-| `--timeout`, `--compile-timeout` | ✓ | ✓ (compile only) |
-| `--retries N` | ✓ | — |
-| `--gate PATH` | ✓ | — |
-| `-s`, `--show-output MODE` | ✓ | — |
-| `--durations N` | ✓ | — |
-| `--junit-xml PATH`, `--gh-annotations` | ✓ | — |
-| `--json PATH\|-` | ✓ | — |
-| `-q`, `-v`, `--color WHEN` | ✓ | ✓ |
-| `--collect-only` | ✓ (→ behaves as `collect`) | n/a |
+| Flag | `run` | `collect` | `doctor` |
+|------|:-----:|:---------:|:--------:|
+| `PATHS...` | ✓ | ✓ | — |
+| `--config PATH`, `--no-config` | ✓ | ✓ | ✓ |
+| `-k STR` | ✓ | ✓ | — |
+| `--exclude GLOB` | ✓ | ✓ | — |
+| `-I PATH` | ✓ | ✓ | — |
+| `--build-arg ARG`, `-- ARGS` | ✓ | ✓ | — |
+| `--precompile SRC[:OUT]` | ✓ | ✓ | — |
+| `--mojo PATH` | ✓ | ✓ | — |
+| `-x`, `--maxfail N` | ✓ | — | — |
+| `-n, --workers N\|auto` | ✓ | accepted, inert | — |
+| `--shard M/N` | ✓ | ✓ | — |
+| `--lf`, `--last-failed`, `--ff`, `--failed-first` | ✓ | — | — |
+| `--serial GLOB` | ✓ | — | — |
+| `--timeout`, `--compile-timeout` | ✓ | ✓ (compile only) | — |
+| `--retries N` | ✓ | — | — |
+| `--gate PATH` | ✓ | — | — |
+| `-s`, `--show-output MODE` | ✓ | — | — |
+| `--durations N` | ✓ | — | — |
+| `--junit-xml PATH`, `--gh-annotations` | ✓ | — | — |
+| `--json PATH\|-` | ✓ | — | — |
+| `-q`, `-v`, `--color WHEN` | ✓ | ✓ | ✓ |
+| `--collect-only` | ✓ (→ behaves as `collect`) | n/a | — |
 
 `collect` compiles files to enumerate their tests, so it honors the build and
 selection flags; it does not schedule test execution, so run-time flags
-(`-x`, `--maxfail`, `--retries`, `--durations`, `--serial`, reporters) do not
-apply. `--timeout` is the one exception: unlike the other run-only flags above,
-it is applicable in `collect` mode too, because it also bounds each file's
-`--skip-all` collection probe (§5, §6) — a probe is a real process spawn with
-the same hang risk as a run.
+(`-x`, `--maxfail`, `--retries`, `--durations`, `--serial`, `--lf`, `--ff`,
+reporters) do not apply. The failure-selection flags are refused based on CLI
+presence under either `collect` spelling. `--timeout` is the one exception:
+unlike the other run-only flags above, it is applicable in `collect` mode too,
+because it also bounds each file's `--skip-all` collection probe (§5, §6) — a
+probe is a real process spawn with the same hang risk as a run.
+
+`-n`/`--workers` is marked **accepted, inert** under `collect` because that is
+what this build does: the flag parses and is not refused, but collection probes
+files one at a time, so the value changes nothing. It is recorded rather than
+turned into a refusal because refusing a flag that earlier builds accepted
+would break invocations that pass a uniform flag set to both subcommands.
+Parallel collection is not reserved — it is simply not implemented yet, and
+whichever way it is resolved, this row moves with it.
+
+`config show` accepts the full `run` grammar, including selection and
+per-invocation flags. It resolves the same default, project-file, environment,
+and CLI layers as `run`, then renders and exits without discovery, builds,
+execution, reporter setup, or state parsing or writes.
+
+`doctor` accepts only the configuration controls and ordinary human-output
+controls shown in the table. A path operand, passthrough token, or any other
+run, build, selection, state, or reporter flag is an argv applicability error
+(exit 4). Malformed values, unknown flags, `-q` with `-v`, and `--config` with
+`--no-config` retain their ordinary usage refusals.
 
 ---
 
@@ -110,7 +143,9 @@ the same hang risk as a run.
   pattern gates directory walks only) — so `mtest path/to/my_checks.mojo` works.
 - A **node id** has the form `<path>::<test_name>` and selects a single test.
   `::` in a file path is unsupported.
-- Default path when no PATHS are given: `tests/` if it exists, else `.`.
+- Positional PATHS replace `[run] paths` as a whole. With no positional PATHS,
+  configured paths are used when present; otherwise the default is `tests/` if
+  it exists, else `.`. Configured paths are files or directories, not node ids.
 
 **Node-id canonicalization.** Every node id is canonicalized to **root-relative**
 form. That canonical form is the single basis for `-k` matching, `collect`
@@ -174,9 +209,9 @@ error.
 The runner invokes a Mojo toolchain to build and (for `collect`) enumerate.
 
 - Default: `mojo` resolved from `PATH` (the pixi-environment pattern).
-- `MTEST_MOJO=/path/to/mojo` overrides the default.
-- `--mojo /path/to/mojo` overrides both. The flag wins over the environment
-  variable.
+- `[build] mojo` in `mtest.toml` overrides that default.
+- A non-empty `MTEST_MOJO=/path/to/mojo` overrides the project file.
+- `--mojo /path/to/mojo` overrides every lower layer.
 
 A runner must be able to serve projects pinned to different Mojo installs, so
 the toolchain is never hard-coded.
@@ -244,17 +279,21 @@ that is the runner's flag, not a forwarded user argument.
 
 ---
 
-## 9. Exit codes
+## 9. Run and collect exit codes
 
-Mirrors pytest, and is **FROZEN**:
+Exit domains are per subcommand. This table and precedence govern `run` and
+`collect`; §27 defines the narrower domains for `config show` and `doctor`.
+The meanings and precedence within each command domain are **FROZEN**.
+Exit-4's enumerated run/collect triggers grow only as served pre-run surfaces
+grow:
 
 | Code | Meaning |
 |------|---------|
 | 0 | the session ran; every selected test's outcome is PASS or SKIP (exclusions allowed) |
 | 1 | at least one selected outcome is FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, or PRECOMPILE-ERROR |
 | 2 | interrupted (SIGINT/SIGTERM); a partial summary is printed |
-| 3 | internal `mtest` error — including protocol drift (a report present but off-grammar), and an environment/I-O failure such as a runtime report-destination open/write failure (a `--json` destination that cannot be opened at session start, or whose stream write later fails — a fatal abort; or a `--junit-xml` target that cannot be created at session start, or whose report cannot be finalized and renamed onto PATH) |
-| 4 | CLI usage error (unknown flag, bad value, nonexistent path, unknown node id, forbidden build argument, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, or the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout) — detected **before any test runs** |
+| 3 | internal `mtest` error — including protocol drift (a report present but off-grammar) and an environment/I-O failure such as a runtime report-destination open/write failure (a `--json` destination that cannot be opened at session start, or whose stream write later fails — a fatal abort; or a `--junit-xml` target that cannot be created at session start, or whose report cannot be finalized and renamed onto PATH) |
+| 4 | pre-run usage error (unknown flag, bad value, nonexistent path, unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, or the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout) — detected **before any test runs** |
 | 5 | no tests collected (empty walk, `-k` matched nothing, everything excluded) |
 
 **Precedence** when outcomes mix. A usage error aborts before the run with 4.
@@ -386,10 +425,8 @@ rebuilt.
   **FLAKY** and, being a pass, exits 0 and by default passes CI
   (`--fail-on-flaky` is reserved).
 
-Retries apply to precompile, build, and run steps. In this build the full
-build-and-run retry is wired on the default (non-selection) run path; crash-class
-**run** retries also apply under selection (`-k` or a node id), but build-side
-retries under selection are not yet wired (§24.3).
+Retries apply to precompile, build, and run steps on both ordinary and
+selection (`-k` or node-id) paths.
 
 ---
 
@@ -411,9 +448,12 @@ Child stdout and stderr are captured separately and byte-exactly.
 ### 15.1 Console
 
 `-q` (quiet: files plus summary) and `-v` (verbose) are mutually exclusive.
-`--color WHEN` is `auto|always|never`; `NO_COLOR` is respected, and the flag
-wins over it. The console summary is ordered deterministically (§17), not by
-completion order. Console text layout and color are **informal** and may change.
+`--color WHEN` is `auto|always|never`. A resolved `always` or `never` is
+absolute, whether it came from the project file or CLI. A resolved `auto` from
+either source first disables color when `NO_COLOR` is set, then otherwise uses
+the resolved console destination's terminal-ness. The console summary is ordered
+deterministically (§17), not by completion order. Console text layout and color
+are **informal** and may change.
 
 **Console destination.** The console writes to **stdout** by default, and to
 **stderr** when `--json -` owns stdout for the byte-pure event stream (§15.4) —
@@ -421,6 +461,79 @@ one resolved destination through which every console byte flows, so a `--json -`
 run's stdout carries only stream lines. `--color auto` decides against that
 **resolved** destination: stdout's terminal-ness normally, stderr's when the
 console is relocated there.
+
+**Terminal text safety.** Every string the console learns from a child process
+or from user input — paths, node ids, test names, patterns, program names,
+reproduce arguments, warnings, captured stdout and stderr, failure detail, and
+compiler diagnostics — is neutralized before it is printed, so no child can emit
+bytes a terminal emulator executes. Two modes:
+
+| Code point | Scalar fields | Multiline fields |
+| --- | --- | --- |
+| `U+0000`..`U+0008`, `U+000B`..`U+001F` | `\xHH` | `\xHH` |
+| `U+0009` (Tab) | `\x09` | literal Tab |
+| `U+000A` (LF) | `\x0A` | literal LF |
+| `U+000D` (CR) | `\x0D` | `\x0D` |
+| `U+007F` (DEL) | `\x7F` | `\x7F` |
+| `U+0080`..`U+009F` (C1) | `\u00HH` | `\u00HH` |
+| everything else | unchanged | unchanged |
+
+`HH` is always two **uppercase** hexadecimal digits. **Scalar** fields are the
+ones that occupy exactly one console line: paths, node ids, test names,
+patterns, program names, the toolchain label, warning text, and every token of a
+reproduce or build command line (each token is neutralized before it is
+shell-quoted, so the quoting covers the text actually shown). **Multiline**
+fields are the blocks whose line and tab structure is real: captured stdout and
+stderr, per-test failure detail, and compiler output.
+
+Every multiline field is additionally **line-prefixed**: each logical line is
+printed behind a four-space `| ` gutter (`"    | "`). A trailing LF closes the
+last line rather than opening an empty one, an empty logical line still gets its
+gutter, and every printed line is LF-terminated. The gutter is what separates
+the child's text from mtest's own, since a child can print a perfectly ordinary
+line that looks exactly like a verdict row or a summary band.
+
+mtest's own labels, separators, and ANSI color are applied **after** escaping
+and are never escaped, so `--color always` still paints mtest's lines while a
+child's `ESC [ 3 1 m` shows up as the literal text `\x1B[31m`.
+
+The same neutralization applies to the **GitHub annotation tail** (§15.3), which
+mtest prints to this same resolved console destination and which is therefore a
+terminal surface as well as a workflow one.
+
+Three further surfaces print untrusted text to a terminal and neutralize the
+same set of code points, in the escape spelling their own output format
+requires: `mtest doctor` (§23), which quotes the toolchain's own `--version`
+output; `mtest config show` (§25), whose values come from `mtest.toml` and which
+uses TOML's `\u00HH` form because a TOML basic string has no `\xHH` escape at
+all; and the configuration diagnostics, which quote an offending key or value
+back from that same file. That last one matters more than it looks: TOML forbids
+a raw C0 control inside a basic string, so the parser rejects an ESC before it
+can be quoted, but C1 is a legal TOML string character — a hostile `mtest.toml`
+could otherwise drive the terminal through the very message that rejects it.
+**Which** code points are neutralized is one definition shared by all of these
+surfaces; only the spelling differs.
+
+The `--collect` listing (§16) is the one terminal-reachable output that is
+**not** escaped, deliberately: it is a byte-exact machine listing of node ids,
+specified for tooling to consume, and escaping it would break that contract.
+
+This boundary is **display-only**. It does not change what mtest captures, what
+its parser reads, or what the JUnit report (§15.2) or the machine event stream
+(§15.4) contain: those are written to their own destinations and carry the raw
+text under their own formats' escaping rules. Console text layout remains
+**informal** (§20); the guarantee that no child-controlled control character
+reaches the terminal unescaped is not.
+
+**Explicit non-goal: visual spoofing.** The boundary answers "can the child
+drive the terminal", not "can the child mislead the reader". Code points that
+reorder or disguise text while executing nothing — the bidi overrides and
+isolates (`U+202A`..`U+202E`, `U+2066`..`U+2069`), zero-width characters, and
+confusable homoglyphs — are passed through **unchanged, by design**. They are a
+rendering-layer concern with no single correct answer for a terminal, and
+escaping them would corrupt legitimate right-to-left test names and assertion
+text. A test name can therefore still *look* like something it is not; it can no
+longer *do* anything.
 
 A **live progress counter** — a running `completed/total` line naming the files
 currently in flight — is drawn during a parallel run (`-n`/`--workers` > 1). It is
@@ -569,7 +682,15 @@ make per-kind grouping the deterministic, unambiguous form.
 CR→`%0D`, LF→`%0A`) and each `file=` value via the property escaper (adds
 `:`→`%3A`, `,`→`%2C`); user-controlled paths, names, and assertion text are never
 interpolated raw into a workflow command, and an escaped-away CR/LF means a
-would-be forged second command line can never form. Each message is bounded to
+would-be forged second command line can never form. Both escapers then apply the
+console's terminal-safety mapping (§15.1) to what remains, because mtest prints
+this tail to the **console destination**, which may be a terminal: every C0
+control other than the already-encoded CR/LF, plus DEL and the C1 controls,
+becomes visible `\xHH`/`\u00HH` text. Tab rides through literally — it is legal
+in a workflow command and addresses nothing. The order is load-bearing: the
+workflow encoding runs first, so `%0D` and `%0A` survive as GitHub's own
+line-folding rather than being rewritten into visible escapes. Each message is
+bounded to
 **4096 escaped bytes** (measured after escaping), with a truncation marker when
 cut. The **per-run per-STEP caps are 10 errors and 10 warnings** (a workflow STEP
 is capped at 10 error and 10 warning annotations; the "50" some readers conflate
@@ -598,9 +719,9 @@ step; its casualties appear as JUnit rows, not per-file annotations).
 which the annotation tail cannot share. Beside `--json -`, annotations must be
 **explicitly `off`** — the only combination that runs. Both an explicit
 `--gh-annotations on` and the **default `auto`** are usage errors (exit 4, §9),
-detected at parse time, and the message names both fixes (drop `--json -`, or set
-`--gh-annotations off`). `--json PATH` does not own stdout, so annotations may
-ride alongside it.
+detected by pre-run resolved validation, and the message names both fixes (drop
+`--json -`, or set `--gh-annotations off`). `--json PATH` does not own stdout,
+so annotations may ride alongside it.
 
 ### 15.4 Machine event stream — `--json PATH|-`
 
@@ -807,6 +928,9 @@ file's result line carries an informal `SERIAL` marker (§15.1).
 
 - `mtest --help`, `mtest -h`, and `mtest help` print usage to **stdout** and exit
   **0**.
+- The grouped option help is generated from the parser's flag inventory. Every
+  option or combined alias row is value-labelled, aligned to one help-text
+  column, rendered on one physical line, and no help line exceeds 78 columns.
 - `mtest version` and `mtest --version` print the version to **stdout** and exit
   **0**.
 - A usage **error** prints to **stderr** and exits **4**.
@@ -816,15 +940,18 @@ file's result line carries an informal `SERIAL` marker (§15.1).
 ## 20. Stability tiers
 
 - **FROZEN at v1.0** — subcommands; flag names and semantics; exit codes; the
-  node-id grammar; the JUnit mapping; the annotation shapes; the `--json` event
-  stream schema (§15.4; normatively `docs/json-stream.md`) — its framing,
-  header, event and field names, and token vocabularies, frozen at stream
-  `version` 1 and growing only additively (new fields and kinds; a removal or a
-  meaning-change bumps the header version); the `collect` format; the
-  test-module contract.
+  node-id grammar; `mtest.toml` key names and semantics (§25);
+  `--lf`/`--last-failed` and `--ff`/`--failed-first` semantics (§26); the JUnit
+  mapping; the annotation shapes; the `--json` event stream schema (§15.4;
+  normatively `docs/json-stream.md`) — its framing, header, event and field
+  names, and token vocabularies, frozen at stream `version` 1 and growing only
+  additively (new fields and kinds; a removal or a meaning-change bumps the
+  header version); the `collect` format; the test-module contract.
 - **STABLE-INTENT** — default values (timeouts, `auto` worker sizing) may be
-  tuned in minor versions.
-- **INFORMAL** — console text layout and colors.
+  tuned in minor versions; the self-versioned `.mtest-cache/lastrun` format
+  (§26), whose incompatible changes require a new format version.
+- **INFORMAL** — console text layout and colors; the human-facing
+  `config show` TOML output (§27.1).
 - TestSuite invocation details are an internal seam, never public API.
 
 ---
@@ -835,19 +962,19 @@ The following are out of scope for v1 and reserved for a later major version
 (vNext); each is either unrecognized by the parser, or recognized-but-refused
 as noted:
 
-`--root`; `--lf`/`--ff` (last/failed-first); boolean `-k` expressions; a config
-file (TOML subset or argfile); `--pattern`; a **per-test** granularity for
+`--root`; boolean `-k` expressions; `--pattern`; a **per-test** granularity for
 `--durations` (the slowest individual *tests*, not just files — blocked on the
 same upstream per-test timing gap that blocks per-test attribution elsewhere;
 the file-level `--durations N` is itself served now, §15.1); markers /
 `xfail`; `--asan`; `--shuffle` (file-order randomization to surface order
 dependencies); `--fail-on-flaky`; watch mode; and a **persistent**
-build/collection cache (`--cache-dir`/`--no-cache`). Within one session the runner builds each file
-once and reuses it (`collect` and `run` share the binary), but nothing
-persists across invocations in v1: a trustworthy-verdict tool does not ship
-"fast but possibly stale", and a correct cache key (transitive source closure,
-environment inputs, target triple, schema version, concurrent-writer safety)
-is its own deliverable.
+build/collection cache (`--cache-dir`/`--no-cache`); and a machine-readable
+`config show` format (the served TOML display is informal human output,
+§27.1). Within one session the runner builds each file once and reuses it
+(`collect` and `run` share the binary), but nothing persists across invocations
+in v1: a trustworthy-verdict tool does not ship "fast but possibly stale", and
+a correct cache key (transitive source closure, environment inputs, target
+triple, schema version, concurrent-writer safety) is its own deliverable.
 
 ---
 
@@ -870,10 +997,11 @@ preserves that logical floor while overlapping independent work: a Linux
 preflight releases separate direct, dogfood, end-to-end, ASan/LSan, and
 Valgrind cells; a macOS preflight independently releases separate direct,
 dogfood, and end-to-end cells. The Linux packaged-artifact job starts
-independently. Memory-safety cells run for every pull request, configured
-`main`/`master` push, and manual unified-CI invocation; there is no scheduled
-memory-safety workflow. Protocol transcripts, sanitizers, and packaged-artifact
-consumption remain Linux-only.
+independently; the macOS packaged-artifact job waits on the macOS preflight.
+Memory-safety cells run for every pull request, configured `main`/`master`
+push, and manual unified-CI invocation; there is no scheduled memory-safety
+workflow. Protocol transcripts and sanitizers remain Linux-only;
+packaged-artifact consumption is blocking on both linux-64 and osx-arm64.
 
 **The packaged artifact.** The distribution recipe builds `mtest` **in-env from
 source**, inside an isolated build environment pinned to the same
@@ -881,20 +1009,27 @@ source**, inside an isolated build environment pinned to the same
 branch (repackaging an already-linked executable) is **not** taken. The
 installed binary is not loader-clean: it carries a direct link dependency on
 the Mojo runtime's shared libraries, whose transitive closure is owned by the
-`mojo-compiler` conda package, so the recipe declares `mojo-compiler ==1.0.0b2`
-as a **conda run dependency** rather than vendoring those libraries — a fresh
-environment carrying only that declared dependency (not the full build
-toolchain) is proven sufficient to load and run the installed binary.
-**linux-64 is the gated platform**: a dedicated CI job builds the package into
-a local channel, installs it into a scratch environment from that channel, and
-exercises the installed binary. **osx-arm64 packaged-artifact consumption is
-declared, not gated**: it matches the recipe's and the build tool's platform
-list and the package channels solve for it, but no CI runner builds or installs
-the conda artifact there. This is a packaging ceiling only: the source-checkout
-workflow now requires full direct, dogfood, and end-to-end macOS cells, whose
-first hosted green is still pending as stated above. Runtime supervision from
-the installed macOS conda artifact remains a documented ceiling, not a proven
-target.
+`mojo-compiler` conda package. The recipe therefore declares
+`mojo-compiler ==1.0.0b2` as its sole **conda run dependency**. Project
+configuration is parsed natively by a pinned vendored Mojo parser compiled
+into the binary. A fresh environment carrying only the declared dependency
+(not the full build toolchain) is proven sufficient to load and run the
+installed binary.
+**linux-64 and osx-arm64 are both gated**: each platform has its own dedicated
+blocking CI job that builds the package into a local channel, installs it into
+a scratch environment from that channel, and exercises the installed binary.
+The install is pinned to the exact version AND build string that job just
+produced, and the installed `conda-meta` record's SHA-256 and subdir are
+compared against the built artifact's, so a same-version package solved from a
+remote channel fails the gate instead of standing in for it. Installed-binary
+evidence covers `--version`, `--help`, a config-present parse, the focused
+dogfood probes, and a known-failing fixture that must exit 1 with exactly one
+FAIL row and no PASS row — the installed package is proven to report failure,
+not only success. The gate itself is parameterized by an immutable platform
+descriptor (subdir, loader-inspection command, loader environment variables);
+an unsupported host stops the gate rather than borrowing another platform's
+answers. The first hosted green for the macOS package job is pending as stated
+above.
 
 ---
 
@@ -927,6 +1062,231 @@ mtest --json report.ndjson tests/
 
 # List node ids without running anything.
 mtest collect tests/
+
+# Show what this invocation resolves to, and which layer supplied each value.
+mtest config show
+
+# Re-run only what failed last time; or run everything, remembered failures
+# first.
+mtest --lf tests/
+mtest --ff tests/
+
+# Diagnose the environment without building or running a test.
+mtest doctor
+```
+
+### 23.1 A configured project, end to end
+
+The transcripts below were executed against this repository's own trees with
+the built binary. Environment-dependent values appear as captured: the absolute
+invocation root, the wall-clock timings, and the worker count `workers = "auto"`
+resolved to on the capturing machine.
+
+They do not all share one setup, and each block's own output says which it had.
+The configuration example, `config show`, the invalid-configuration refusal, and
+the healthy `doctor` block were captured with the `mtest.toml` below in place —
+`doctor` reporting `PASS config: valid 'mtest.toml'` is that file being seen.
+The `--lf` and soft-filter transcripts were captured without it, which is why
+they carry no `slowest N files:` block despite the configuration setting
+`durations`. In the two failing `doctor` blocks, `config: none` comes from the
+explicit `--no-config`, not from the file's absence. Each transcript states its
+own command, and none is a continuation of the one before it.
+
+`mtest.toml` at the invocation root:
+
+```toml
+[run]
+paths = ["e2e/matrix"]
+workers = "auto"
+retries = 1
+timeout = 120
+
+[build]
+include = ["build"]
+compile-timeout = 300
+
+[report]
+durations = 2
+show-output = "none"
+
+[[override]]
+files = ["e2e/matrix/test_beta.mojo"]
+timeout = 30
+serial = true
+```
+
+`[run] paths` supplies the operands, `workers = "auto"` resolves the pool, the
+`[[override]]` table pins one file serial, and `[report] durations` adds the
+slowest-files list:
+
+```text
+$ mtest
+mtest 0.6.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0   workers: 16
+
+PASS           e2e/matrix/test_alpha.mojo      0.02s
+PASS           e2e/matrix/test_beta.mojo       0.02s  SERIAL
+
+===== 5 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 0.9s =====
+
+slowest 2 files:
+  e2e/matrix/test_alpha.mojo  0.02s
+  e2e/matrix/test_beta.mojo  0.02s
+$ echo $?
+0
+```
+
+`config show` renders the resolved values with the supplying layer, and a
+command-line value overrides the file in the same rendering (`-k` is accepted
+and, being per-invocation selection, not rendered):
+
+```text
+$ mtest config show --timeout 30 -n 4 -k alpha
+[run]
+paths = ["e2e/matrix"]  # (mtest.toml)
+exclude = []  # (default)
+gates = []  # (default)
+serial = []  # (default)
+workers = 4  # (cli)
+timeout = 30  # (cli)
+retries = 1  # (mtest.toml)
+maxfail = 0  # (default)
+state = true  # (default)
+
+[build]
+mojo = "mojo"  # (default)
+include = ["build"]  # (mtest.toml)
+build-args = []  # (default)
+precompile = []  # (default)
+compile-timeout = 300  # (mtest.toml)
+
+[report]
+color = "auto"  # (default)
+show-output = "none"  # (mtest.toml)
+verbosity = "normal"  # (default)
+durations = 2  # (mtest.toml)
+# junit-xml = (unset)
+# json = (unset)
+gh-annotations = "auto"  # (default)
+
+[[override]]
+files = "e2e/matrix/test_beta.mojo"  # (mtest.toml)
+timeout = 30  # (mtest.toml)
+serial = true  # (mtest.toml)
+
+# config file: mtest.toml
+# state file: .mtest-cache/lastrun (present)
+# selection flags are per invocation and are not rendered
+$ echo $?
+0
+```
+
+An invalid configuration is refused before any build, with the file, table,
+key, and expectation named:
+
+```text
+$ mtest e2e/matrix
+config: mtest.toml: [run] key 'retries': expected integer >= 0; got 'two'
+$ echo $?
+4
+```
+
+The `--lf` iteration loop, over a selection whose one failure was recorded by
+the preceding run:
+
+```text
+$ cat .mtest-cache/lastrun
+mtest-lastrun v1
+test	e2e/suite/test_failing.mojo::test_second_fails
+
+$ mtest --lf e2e/matrix e2e/suite/test_failing.mojo
+mtest 0.6.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0
+
+FAIL           e2e/suite/test_failing.mojo     0.02s
+
+--- FAIL e2e/suite/test_failing.mojo::test_second_fails ---
+    | At e2e/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:
+    |    left: 1
+    |   right: 2
+reproduce: mtest e2e/suite/test_failing.mojo::test_second_fails
+
+[...file-scoped captured output omitted...]
+
+===== 0 passed, 1 failed, 0 skipped (0 excluded, 2 not run, 7 deselected) in 1.3s =====
+$ echo $?
+1
+```
+
+The soft-filter guarantee, on a selection the persisted records do not
+intersect: both diagnostics are emitted and the ordinary full selection runs
+rather than exiting 5:
+
+```text
+$ mtest --lf e2e/matrix
+mtest 0.6.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
+
+lf: previously-failing e2e/suite/test_failing.mojo::test_second_fails no longer exists — dropped
+lf: no previously-failing tests match this selection — running the full selection
+PASS           e2e/matrix/test_alpha.mojo      0.02s
+PASS           e2e/matrix/test_beta.mojo       0.03s
+
+===== 5 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 0.9s =====
+$ echo $?
+0
+```
+
+`doctor`, healthy and with one contained failure. The failing check names what
+broke; every other check still runs:
+
+```text
+$ mtest doctor
+PASS version: mtest 0.6.0
+PASS platform: Linux x86_64 supported
+PASS root: /home/mikko/dev/mtest
+PASS exec: runtime acquired
+PASS toolchain: 'mojo' from PATH default: Mojo 1.0.0b2 (2cf4d08a)
+PASS config: valid 'mtest.toml'
+PASS config-semantics: resolved values valid
+PASS state: cache and lastrun usable
+PASS temp: invocation root and system temp usable
+PASS report-destinations: none
+$ echo $?
+0
+
+$ MTEST_MOJO=/opt/nonexistent/mojo mtest doctor --no-config
+PASS version: mtest 0.6.0
+PASS platform: Linux x86_64 supported
+PASS root: /home/mikko/dev/mtest
+PASS exec: runtime acquired
+FAIL toolchain: '/opt/nonexistent/mojo' from MTEST_MOJO: could not execute
+PASS config: none
+PASS config-semantics: resolved values valid
+PASS state: cache and lastrun usable
+PASS temp: invocation root and system temp usable
+PASS report-destinations: none
+$ echo $?
+1
+```
+
+A selected-config failure is a `FAIL`ed check and exit 1 under `doctor`, where
+`run` and `config show` refuse it as a usage error and exit 4 (§27.2):
+
+```text
+$ mtest doctor --config ci/mtest.toml
+PASS version: mtest 0.6.0
+PASS platform: Linux x86_64 supported
+PASS root: /home/mikko/dev/mtest
+PASS exec: runtime acquired
+FAIL toolchain: dependency config unavailable
+FAIL config: ci/mtest.toml: configuration file does not exist
+FAIL config-semantics: dependency config unavailable
+PASS state: cache and lastrun usable
+PASS temp: invocation root and system temp usable
+FAIL report-destinations: dependency config unavailable
+$ echo $?
+1
 ```
 
 ---
@@ -943,24 +1303,30 @@ above — it only reports which of those surfaces are wired up yet.
 ### 24.1 Flags and subcommands
 
 **Served** (parsed into real behavior): positional `PATHS`, `-k`, `--exclude`,
-`-I`, `--build-arg` (and post-`--` passthrough), `--precompile`, `--mojo`,
+`--config`, `--no-config`, `-I`, `--build-arg` (and post-`--` passthrough),
+`--precompile`, `--mojo`,
 `-x`/`--exitfirst`, `--maxfail`, `--timeout`, `--compile-timeout`, `--retries`,
-`--shard`, `-n`/`--workers`, `--serial`, `--gate`, `-s`/`--show-output`,
+`--shard`, `--lf`/`--last-failed`, `--ff`/`--failed-first`,
+`-n`/`--workers`, `--serial`, `--gate`, `-s`/`--show-output`,
 `--durations`, `-q`/`-v`, `--color`,
-`-h`/`--help`, `--version`, and the `run`, `collect`, `version`, and `help`
-subcommands (`--collect-only` too, as an alias that behaves as `collect`).
+`-h`/`--help`, `--version`, and the `run`, `collect`, `config show`, `doctor`,
+`version`, and `help` subcommands (`--collect-only` too, as an alias that
+behaves as `collect`).
 `--shard` applies under both `run` and `collect`. `--json` (the machine event
 stream, §15.4), `--junit-xml` (the JUnit report, §15.2), and `--gh-annotations`
 (the CI annotation tail, §15.3) are served too — see §24.2 for how they are now
 reached.
 
 Every flag and subcommand in the frozen contract above is now served: nothing is
-refused for being unavailable, so exit 4 covers exactly its frozen §9 causes.
+refused for being unavailable. For `run` and `collect`, exit 4 therefore covers
+exactly the frozen §9 causes. `Config show` and `doctor` use the applicability
+rules and command-specific exit domains in §27.
 
-### 24.2 Exit codes reachable in this build
+### 24.2 Run and collect exit codes reachable in this build
 
-Semantics are unchanged from §9; this states which paths to each code exist
-today.
+Run/collect semantics are unchanged from §9; this states which paths to each
+code exist today. Section 27 separately covers the reachable `config show` and
+`doctor` exits.
 
 - **0** — reachable: every run outcome is PASS or SKIP (exclusions allowed).
 - **1** — reachable for FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT,
@@ -974,49 +1340,49 @@ today.
   immediate hard kill of every group, leaving no survivor. The exit is 2
   regardless of any failing outcome already accounted.
 - **3** — reachable via a spawn failure (the runner could not spawn `mojo` or
-  a built binary), via protocol drift (a report present but off-grammar,
-  §6) in both `run` and `collect`, and via a runtime `--json`
-  report-destination failure (§9): the destination could not be opened at
-  session start, or a stream write later failed (a dead `--json -` pipe, a full
-  or unwritable file) and the run was fatally aborted.
-- **4** — reachable for every frozen cause in §9 — now including a syntactically
-  invalid `--json` destination (an empty value or a nonexistent parent
-  directory), detected pre-run.
+  a built binary), via protocol drift (a report present but off-grammar, §6)
+  in both `run` and `collect`, and via runtime `--json` or `--junit-xml`
+  report-destination failures (§9).
+- **4** — reachable under `run` and `collect` for every served cause in §9 —
+  including mutually exclusive config controls; a selected config that is
+  missing, unreadable, malformed, or invalid; a syntactically invalid `--json`
+  or `--junit-xml` destination; and the `--json -`/annotations stdout conflict,
+  all detected pre-run.
 
 **`--json` reachability.** `--json PATH|-` is served (§15.4): it is parsed into a
 live event-stream reporter composed beside the console. Its destination is
-validated syntactically at parse time (exit 4 on an empty value or a nonexistent
-parent directory) and opened at session start (exit 3 on a runtime open failure);
-a stream write that fails mid-run is a fatal abort to exit 3. The §9 causes are
-cited here, never restated.
+validated syntactically by pre-run resolved validation (exit 4 on an empty value
+or a nonexistent parent directory) and opened at session start (exit 3 on a
+runtime open failure); a stream write that fails mid-run is a fatal abort to exit
+3. The §9 causes are cited here, never restated.
 
 **`--junit-xml` reachability.** `--junit-xml PATH` is served (§15.2): it is
 parsed into a JUnit report reporter composed beside the console and the stream.
-Its destination is validated syntactically at parse time (exit 4 on an empty
-value or a nonexistent parent directory) and a unique temp is created in the
-target directory at session start to prove it writable (exit 3 on a runtime
-creation failure). Unlike the stream, a spool failure never aborts mid-run; it
-surfaces at finalization, where the report is assembled and renamed atomically
-onto PATH (exit 3 on a finalization failure, with the prior report never
-truncated). The §9 causes are cited here, never restated.
+Its destination is validated syntactically by pre-run resolved validation (exit
+4 on an empty value or a nonexistent parent directory) and a unique temp is
+created in the target directory at session start to prove it writable (exit 3
+on a runtime creation failure). Unlike the stream, a spool failure never aborts
+mid-run; it surfaces at finalization, where the report is assembled and renamed
+atomically onto PATH (exit 3 on a finalization failure, with the prior report
+never truncated). The §9 causes are cited here, never restated.
 
 **`--gh-annotations` reachability.** `--gh-annotations off|on|auto` is served
 (§15.3): it is parsed into a self-gating annotations reporter composed beside the
 console, the stream, and the JUnit report. `auto` (the default) resolves on iff
 `GITHUB_ACTIONS=true`; the tail renders to stdout after the console band only when
 resolved-on. Beside `--json -` it must be explicitly `off` — the default `auto`
-and an explicit `on` are usage errors (exit 4) detected at parse time (§9). The
-stop-commands fencing of echoed child output is active whenever
+and an explicit `on` are usage errors (exit 4) detected by pre-run resolved
+validation (§9). The stop-commands fencing of echoed child output is active whenever
 `GITHUB_ACTIONS=true`, independent of the mode.
 - **5** — reachable via an empty walk, via the everything-excluded case, and
   via deselection (`-k` matched nothing, §9).
 
 ### 24.3 Selection and parsing deviations in this build
 
-A few surfaces behave more permissively, or cover less ground, today than the
-frozen contract above describes. Each is stated here so shipped behavior can be
-told from target behavior; none changes a flag semantic, exit code, or the
-node-id grammar, and all converge to the contract as the runner matures.
+Two surfaces behave more permissively, or cover less ground, today than the
+frozen contract above describes. They are stated here so shipped behavior can
+be told from target behavior; neither changes a flag semantic, exit code, or
+the node-id grammar, and both converge to the contract as the runner matures.
 
 - **`collect` does not narrow by per-test selection yet.** §4 lists `-k` as
   applicable to `collect`, and §16 says `collect` honors the selection flags.
@@ -1033,18 +1399,305 @@ node-id grammar, and all converge to the contract as the runner matures.
   repeatable flags (`--exclude`, `--gate`, `--build-arg`, `-I`, `--precompile`,
   `--serial`); every other flag is single-valued. The frozen intent is
   at-most-one — e.g. §5 says "at most one `-k` is accepted in v1". This build
-  does not yet reject a repeated single-valued flag (`-k`, `-n`/`--workers`,
-  `--maxfail`, `--timeout`, `--color`, `--show-output`, `--durations`,
-  `--mojo`): it silently
-  uses the **last** occurrence (so `-k a -k b` filters by `b`, not `a or b`).
-  Until the at-most-one check is enforced (a usage error, exit 4), do not rely on
+  does not yet reject a repeated single-valued option (`-k`, `--shard`,
+  `--maxfail`, `--timeout`, `--retries`, `-n`/`--workers`, `--mojo`,
+  `--compile-timeout`, `-s`/`--show-output`, `--durations`, `--color`,
+  `--json`, `--junit-xml`, `--gh-annotations`, `--config`): it silently uses
+  the **last** occurrence (so `-k a -k b` filters by `b`, not `a or b`). Until
+  the at-most-one check is enforced (a usage error, exit 4), do not rely on
   repeating these flags. The mutually-exclusive `-q`/`-v` pair is already
-  rejected as a usage error; the single-valued-flag check follows the same shape.
-- **`--retries` does not rebuild under selection yet.** On the default
-  (non-selection) run path, `--retries` (§13) retries the full step chain — a
-  crash-class **build** or **precompile** kill is rebuilt, and a crash-class
-  **run** is re-run. Under selection (`-k` or a node id), only crash-class
-  **run** retries are wired: a run that dies by signal or a deadline is re-run
-  against the already-built binary, but a build-side crash-class failure is not
-  retried on the selection path. The classification and FLAKY reporting are
-  otherwise identical; only the build-side retry under selection is deferred.
+  rejected as a usage error; the single-valued-flag check follows the same
+  shape.
+
+---
+
+## 25. Project configuration
+
+At the invocation root, `mtest` automatically loads `mtest.toml` when that file
+exists. Absence is silent. `--config PATH` selects a different file, including
+one outside the root; `--no-config` suppresses both automatic discovery and
+parsing. The two controls are mutually exclusive. A selected file inside the root is identified
+root-relatively in `session_started.config_file`; an outside file is identified
+by its normalized absolute path; absence is the empty string.
+
+The file is TOML parsed natively by the pinned, vendored `mojo-toml` source.
+Only the following closed schema is accepted; unknown tables or keys, wrong
+types, and invalid values are exit-4 usage errors:
+
+```toml
+[run]
+paths = ["tests"]                 # replaces the default path list
+exclude = ["tests/generated_*"]  # replaces --exclude's lower layer
+gates = ["tests/test_smoke.mojo"]
+serial = ["tests/gpu_*"]
+workers = "auto"                 # or an integer >= 1
+timeout = 300                    # integer seconds >= 0
+retries = 0                      # integer >= 0
+maxfail = 0                      # integer >= 0
+state = true
+
+[build]
+mojo = "mojo"
+include = ["vendor"]
+build-args = ["-DDEBUG"]
+precompile = ["src/lib.mojo", "src/gpu.mojo:build/gpu.mojopkg"]
+compile-timeout = 600            # integer seconds >= 0
+
+[report]
+color = "auto"                   # auto | always | never
+show-output = "failures"         # failures | all | none
+verbosity = "normal"             # quiet | normal | verbose
+durations = 0                    # integer >= 0
+junit-xml = "reports/junit.xml"
+json = "reports/events.ndjson"   # PATH or "-"
+gh-annotations = "auto"          # off | on | auto
+
+[[override]]
+files = ["tests/gpu_*"]          # or one non-empty string
+timeout = 60
+compile-timeout = 900
+retries = 1
+serial = true
+```
+
+A document must also fit the parser's work budgets, which exist so hostile
+input cannot make parsing unbounded: at most 4 MiB of source, 64 levels of
+structural nesting, 16,384 structural nodes (`[`, `{`, `=`, `,`), 512
+top-level table headers and assignments, and 1 MiB in any single scalar
+or comment.
+Exceeding one is an exit-4 usage error whose diagnostic names the budget and
+its limit. The budgets are sized above anything this schema can express — an
+exclude list of a thousand globs and dozens of `[[override]]` tables are both
+well inside them — so a configuration that is valid by the rules above is
+never refused for size. They are a ceiling on abuse, not a documented capacity.
+
+Within a table, a key/value pair ends at the end of its line, as TOML 1.0
+requires: `timeout = 1 state = false` on one line is a parse error, not two
+settings.
+
+Resolution is per key: built-in defaults < `mtest.toml` < non-empty
+`MTEST_MOJO` < CLI. `MTEST_MOJO` affects only `mojo`; `NO_COLOR` is consulted
+only after the resolved color is `auto` (§15.1). A supplied list replaces the
+lower list, including when it is empty; positional PATHS replace configured
+`paths`. Configured path values and override globs are interpreted from the
+invocation root, never from the config file's directory.
+
+Run consumes every schema key. Collect consumes only paths, exclusions, both
+timeouts, and build keys; run-only scheduling, state, and report values remain
+inactive and cannot cause collect-only cross-value failures. Each matching
+`[[override]]` table may supply per-file `timeout`, `compile-timeout`, `retries`,
+and `serial = true`. For each scalar, the first matching table that supplies it
+wins unless CLI supplied that scalar globally. Serial matching is a union:
+global serial globs and every matching `serial = true` table pin the file.
+
+There is no generic config environment overlay and no command that clears one
+file key. Use a CLI value to replace a scalar/list, positional PATHS to replace
+configured paths, or `--no-config` to suppress the whole file.
+
+---
+
+## 26. Last-run state and failure re-selection
+
+When `[run] state` is true (the default), an unsharded run reads
+`.mtest-cache/lastrun` and merges fresh verdict observations into its preserved
+failure records. Collection never reads or writes it. Sharded runs may read the
+state but never write it, because one shard cannot authoritatively replace the
+whole suite's result.
+
+The internal v1 text format is deterministic:
+
+```text
+mtest-lastrun v1
+file<TAB>tests/broken_file.mojo
+test<TAB>tests/test_math.mojo::test_divide
+```
+
+Record lines are sorted, deduplicated, root-relative, and end with one newline.
+`file` records represent terminal file-level failures; `test` records represent
+individual failing tests. A malformed header rejects the old contents and a
+malformed record is dropped independently; both produce contained, nonfatal
+`state-malformed-line` warnings after `session_started`.
+
+The state file is read through the same guarded bounded reader the selected
+configuration uses: opened nonblocking and close-on-exec, then checked to be a
+regular file before any payload is consumed, so a FIFO, device, or directory at
+the state path can never block the run, and a payload above the 1 MiB ceiling is
+refused rather than buffered. An unusable state file — unreadable, not a regular
+file, or oversized — is ignored, the session proceeds with no previous records,
+and the fact is reported through the same contained `state-malformed-line`
+channel. State is an accelerator, never a verdict input: no state condition is
+an exit cause.
+
+Persistence happens only after reporter finalization and resource close have
+established the final exit code, and only for final code 0 or 1. Codes 2, 3, 4,
+and 5 leave prior bytes untouched, as do collect, `state = false`, and sharded
+runs. The writer creates a PID-qualified temp beside the target, closes it, and
+atomically renames it onto `lastrun`. A create, write, close, or rename failure
+prints one state diagnostic to stderr, preserves the prior file, and never
+changes the session exit or emits a post-terminal event.
+
+`--lf`/`--last-failed` and `--ff`/`--failed-first` are CLI-only run modes; they
+are not project-config keys. Both consume state only when `[run] state` is true.
+With `state = false`, no state read occurs and either mode prints exactly
+`lf: state disabled by mtest.toml — running the full selection` before running
+the ordinary selection.
+
+Under `--lf`, persisted records are a soft filter applied after ordinary
+discovery and per-file name collection. A `file` record selects the discovered
+file while retaining any ordinary `-k` or node-id subset. A `test` record
+selects its test only when the file and collected name still exist. Persisted
+ids never enter the qualified CLI-selection lookup, so stale state never causes
+exit 4. Each missing file or missing test is dropped nonfatally with one line:
+`lf: previously-failing <id> no longer exists — dropped`. The identifier is
+escaped so hostile state bytes cannot create another physical line.
+
+Missing, empty, malformed/unknown-version, all-stale, or empty-intersection
+state prints exactly
+`lf: no previously-failing tests match this selection — running the full selection`
+and runs the ordinary full selection instead of exiting 5. Codec diagnostics
+for malformed input remain separate `state-malformed-line` warnings.
+
+Known state-disabled or empty-state fallback is emitted immediately after the
+session starts, before a gate can fail. Collection-dependent stale and
+empty-intersection diagnostics remain at the post-gate collection barrier.
+
+`--lf` narrows to surviving remembered failures and preserves discovery order;
+it does not reorder that subset. A stale-name recovery intersects its fresh
+ordinary selection with the effective `--lf` subset and never widens it.
+`--ff` never narrows or validates persisted test names: file and test records
+both mark their discovered file at file granularity. It moves those
+remembered-failing files before the rest while preserving discovery order
+inside each half. In pooled execution this stable partition is applied
+independently to the parallel and serial bands, so serial membership never
+changes. Gate records are live state but gates themselves remain untouched.
+With `-k` or node-id operands, the truthful one-worker selection path uses one
+post-gate band; `-n 2` still reports one worker and `--serial` is a no-op there.
+
+`--lf` takes that same selection path, because its filter is applied at the
+post-gate collection barrier, so it too resolves to one worker whatever `-n` or
+`[run] workers` asked for, and `--serial` is a no-op under it. The header
+reports the resolved count, so a `--lf` run simply shows no worker field.
+`--ff` is unaffected and keeps the pool it was given. `--lf` also narrows only
+what runs: every discovered file is still built and probed for its names before
+the barrier the filter applies at, so it reduces executed tests and reported
+output, not compilation.
+
+Gates are never filtered or reordered by either mode: they always run first.
+`--lf` and `--ff` together are a usage error. Either mode combined with
+`--shard` is also a usage error. Either mode under `collect` or
+`--collect-only` is refused as run-only based on CLI presence.
+
+---
+
+## 27. Inspection subcommands
+
+### 27.1 Resolved configuration display
+
+`mtest config show` accepts the full `run` grammar and applies the ordinary
+resolution order: built-in defaults, `mtest.toml`, non-empty `MTEST_MOJO`, then
+CLI. It performs resolution only. It does not discover, build, execute, set up
+reporters, read or parse last-run state, or write state. `--config` and
+`--no-config` keep their ordinary meanings; a missing, unreadable, malformed,
+or invalid selected config produces the same exit 4 and byte-identical stderr
+diagnostic as `run`.
+
+The human-facing output is valid, copy-pasteable TOML in fixed `[run]`,
+`[build]`, `[report]`, then ordered `[[override]]` table order. Every set
+configuration key carries one trailing source label: `default`, `mtest.toml`,
+`env MTEST_MOJO`, or `cli`. Unset optional destinations are comments.
+`workers = "auto"` represents the automatic worker sentinel. Strings and
+arrays are TOML basic strings, precompile entries use canonical `SRC` or
+`SRC:OUT` form, and enum values use their accepted lowercase spellings.
+`NO_COLOR` adds an environment qualifier only when the resolved color remains
+`auto`.
+
+Trailers identify the selected config file, report only whether
+`.mtest-cache/lastrun` is present, and explain that selection flags are
+per-invocation and therefore omitted. Plain path operands remain
+config-eligible and render in `[run] paths` with CLI provenance. Node ids,
+`-k`, `--shard`, `--lf`, and other run-only non-configuration flags are
+accepted but never rendered. When node-id operands displaced a configured path
+list, a further trailer says so, because the empty `[run] paths` they leave
+behind would otherwise read as a claim that the command line resolved paths to
+nothing. The state presence probe never reads the file, so
+malformed state contents have no effect. With no selected config, the command
+does not initialize the native TOML parser.
+
+The `config show` text is informal human output. A machine-readable
+configuration-display format is reserved.
+
+Its exit domain is `{0, 3, 4}`: 0 after successful rendering, 3 when
+invocation-root acquisition itself fails, and 4 for argv or selected-config
+usage failures.
+
+### 27.2 Environment doctor
+
+`mtest doctor` performs a read-only diagnosis and renders exactly one
+human-facing `PASS`, `WARN`, or `FAIL` physical line for each check, in this
+fixed order:
+
+1. `version` — the mtest version/build identity.
+2. `platform` — the Linux/macOS support posture in §22. Linux x86_64 is a
+   `PASS`; macOS arm64 is a `WARN` while hosted runtime evidence remains
+   pending.
+3. `root` — guarded current-working-directory acquisition.
+4. `exec` — the guarded exec-runtime acquisition performed before check 1,
+   plus its eventual restoration status.
+5. `toolchain` — the resolved Mojo path and supplying layer, checked by a
+   bounded `mojo --version` probe under the ordinary supervision substrate.
+   A pass requires the exact pinned identity
+   `Mojo 1.0.0b2 (2cf4d08a)`.
+6. `config` — the selected file, `none`, or its normalized parse/read failure.
+   `--no-config` is root-independent. An absolute explicit config remains
+   checkable without a root; discovery and relative explicit paths require the
+   root.
+7. `config-semantics` — resolved-layer validation using the same diagnostic a
+   run would issue.
+8. `state` — `.mtest-cache/` usability and an absent or parseable v1 `lastrun`,
+   including removal of any directory doctor created.
+9. `temp` — invocation-root and system-temp writability.
+10. `report-destinations` — usability of configured JUnit/JSON parent
+    directories without opening, creating, or truncating the configured files.
+    No configured destination is root-independent, as is an absolute parent;
+    relative parents require the root.
+
+Every check body is guarded independently. An unexpected error becomes that
+check's contained `FAIL` line, with control characters escaped; later checks
+still run. Dependent checks say which earlier capability is unavailable.
+Doctor closes an acquired exec runtime on every path. It never discovers,
+builds, or runs tests; opens reporters; reads or writes session results; writes
+last-run state; or overwrites a predictable path. A probe or created state
+directory that cannot be removed makes its check `FAIL`; the diagnostic names
+the affected path. A unique probe or doctor-created state directory may remain
+only when the filesystem refuses cleanup.
+
+The exec runtime is acquired before the first check, so its interrupt handlers
+cover ordinary check execution. Doctor samples the interrupt latch immediately
+before runtime restoration begins and immediately after restoration returns,
+then renders the complete ten-line block with one stdout write. Runtime close
+restores signal dispositions in sequence, so the unavoidable handoff window
+begins as soon as a disposition is restored, before close necessarily returns,
+and continues through process exit. A signal arriving in that window may
+follow the restored disposition rather than being guaranteed a doctor exit
+code; the post-close sample observes only signals that reached the latch.
+
+For exits resolved by doctor within the guarded lifecycle, the exit domain is
+exactly `{0, 1, 2, 4}`. Termination under a restored disposition during the
+disclosed handoff is outside doctor's resolved exit domain:
+
+- **0** — no check emitted `FAIL`; `WARN` is allowed.
+- **1** — at least one check emitted `FAIL`, including a missing or unreadable
+  explicit config, malformed or invalid selected config, unavailable
+  toolchain, unusable state/temp/report parent, or runtime-close failure.
+- **2** — SIGINT or SIGTERM latched during guarded doctor execution or either
+  close-adjacent sample; cleanup still runs.
+- **4** — argv syntax or doctor-flag applicability error only.
+
+Selected-config failures deliberately differ from `run` and `config show`:
+doctor reports them as check failures, continues later checks, and exits 1;
+the other commands refuse them as usage errors and exit 4.
+
+`--color`, `-q`, and `-v` are accepted for command-line consistency, but the
+fixed inventory is completeness-critical: these controls never suppress,
+duplicate, or add check lines. Doctor output is uncolored; verbosity does not
+alter its one-line details.

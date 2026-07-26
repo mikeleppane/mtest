@@ -160,13 +160,13 @@ def test_a_stale_name_buys_exactly_one_rebuild_and_reprobe() raises:
     assert_true(p.admit_stale_name_recovery(0))
     assert_equal(p.stage_of(0).code, FileStage.NEEDS_REBUILD.code)
     var rebuild = p.next_step()
-    _expect(rebuild, StepKind.BUILD_FILE, 0)
+    _expect(rebuild, StepKind.BUILD_FILE, 0, attempt=1)
     assert_true(rebuild.recovering)
 
     p.record_build_ready(0)
     assert_equal(p.stage_of(0).code, FileStage.NEEDS_REPROBE.code)
     var reprobe = p.next_step()
-    _expect(reprobe, StepKind.PROBE_FILE, 0)
+    _expect(reprobe, StepKind.PROBE_FILE, 0, attempt=1)
     assert_true(reprobe.recovering)
 
     p.record_probe_qualified(0, False)
@@ -269,6 +269,23 @@ def test_the_two_recovery_budgets_are_independent() raises:
     p.record_probe_qualified(0, False)
     assert_true(p.admit_crash_retry(0))
     _expect(p.next_step(), StepKind.RUN_SELECTION, 0, attempt=2)
+
+
+def test_stale_recovery_steps_retain_the_current_retry_attempt() raises:
+    """A retry's recovery build and probe remain part of that same attempt."""
+    var p = RunPipeline(1, 1, False, 0)
+    _collect_one(p, 0)
+    p.record_collection_announced()
+    assert_true(p.admit_crash_retry(0))
+    _expect(p.next_step(), StepKind.RUN_SELECTION, 0, attempt=2)
+    assert_true(p.admit_stale_name_recovery(0))
+    var rebuild = p.next_step()
+    _expect(rebuild, StepKind.BUILD_FILE, 0, attempt=2)
+    assert_true(rebuild.recovering)
+    p.record_build_ready(0)
+    var reprobe = p.next_step()
+    _expect(reprobe, StepKind.PROBE_FILE, 0, attempt=2)
+    assert_true(reprobe.recovering)
 
 
 # --- the stop policy --------------------------------------------------------

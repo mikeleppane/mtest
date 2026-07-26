@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import tempfile
 import tomllib
 import unittest
@@ -33,7 +34,18 @@ class CiTopologyTests(unittest.TestCase):
         )
         self.assertEqual(
             tasks.get("ci", {}).get("depends-on"),
-            ["ci-preflight", "test", "dogfood-check", "e2e"],
+            ["ci-preflight", "test", "dogfood-check", "e2e", "contract-check-strict"],
+        )
+        self.assertEqual(
+            tasks.get("readme-help-check"),
+            {
+                "cmd": "python -m scripts.checks.readme_help",
+                "depends-on": ["build-bin"],
+            },
+        )
+        self.assertEqual(
+            tasks.get("ci-preflight", {}).get("depends-on"),
+            ci_topology.CI_PREFLIGHT_TASKS,
         )
 
     def test_contributor_workflow_is_documented_without_legacy_aliases(self) -> None:
@@ -92,6 +104,34 @@ class CiTopologyTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "membership/order"):
                 ci_topology.check_ci_task_graph(repo)
 
+    def test_readme_help_gate_removal_is_rejected(self) -> None:
+        source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
+        mutated = source.replace(
+            '    "readme-help-check",\n',
+            "",
+            1,
+        )
+        self.assertNotEqual(mutated, source)
+        with tempfile.TemporaryDirectory(prefix="mtest-ci-topology-") as raw_tmp:
+            repo = Path(raw_tmp)
+            (repo / "pixi.toml").write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "membership/order"):
+                ci_topology.check_ci_task_graph(repo)
+
+    def test_readme_help_gate_command_mutation_is_rejected(self) -> None:
+        source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
+        mutated = source.replace(
+            'cmd = "python -m scripts.checks.readme_help"',
+            'cmd = "python -m scripts.checks.layout"',
+            1,
+        )
+        self.assertNotEqual(mutated, source)
+        with tempfile.TemporaryDirectory(prefix="mtest-ci-topology-") as raw_tmp:
+            repo = Path(raw_tmp)
+            (repo / "pixi.toml").write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "readme-help-check"):
+                ci_topology.check_ci_task_graph(repo)
+
     def test_harness_owner_removal_is_rejected(self) -> None:
         source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
         mutated = source.replace(
@@ -120,6 +160,81 @@ class CiTopologyTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "classified task"):
                 ci_topology.check_ci_task_graph(repo)
 
+    def test_contract_row_appears_in_both_platform_matrices(self) -> None:
+        expected_row = {
+            "lane": "strict contract",
+            "task": "contract-check-strict",
+            "libc_debug": "false",
+            "safety_artifact": "false",
+            "artifact_name": "none",
+            "artifact_path": "none",
+        }
+        for runner, rows in (
+            ("ubuntu-24.04", ci_topology.LINUX_MATRIX_ROWS),
+            ("macos-15", ci_topology.MACOS_MATRIX_ROWS),
+        ):
+            matches = [row for row in rows if row.get("task") == "contract-check-strict"]
+            self.assertEqual(len(matches), 1, rows)
+            self.assertEqual(matches[0], {"runner": runner, **expected_row})
+
+    def test_contract_row_runs_after_e2e_in_declared_order(self) -> None:
+        linux_tasks = [row["task"] for row in ci_topology.LINUX_MATRIX_ROWS]
+        macos_tasks = [row["task"] for row in ci_topology.MACOS_MATRIX_ROWS]
+        self.assertEqual(
+            linux_tasks,
+            ["test", "dogfood-check", "e2e", "contract-check-strict", "asan-check", "valgrind-check"],
+        )
+        self.assertEqual(
+            macos_tasks,
+            ["test", "dogfood-check", "e2e", "contract-check-strict"],
+        )
+
+    def test_contract_row_job_depends_on_its_platform_preflight_job(self) -> None:
+        # Each matrix job's OWN `needs:` (not a per-row field) is what makes
+        # the strict-contract row depend on that platform's preflight job —
+        # a fresh checkout runs preflight first, then this job's `build-bin`
+        # produces the binary the row's `--no-rebuild` validates.
+        workflow = (
+            ci_topology.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+        for job_name, preflight_job in (
+            ("linux-test-matrix", "linux-preflight"),
+            ("macos-test-matrix", "macos-preflight"),
+        ):
+            job = ci_topology._yaml_block(workflow, f"  {job_name}:")
+            needs = re.findall(r"^    needs:(.*)$", job, re.MULTILINE)
+            self.assertEqual(needs, [f" {preflight_job}"], job_name)
+            rows = [
+                row
+                for row in ci_topology._matrix_rows(job)
+                if row.get("task") == "contract-check-strict"
+            ]
+            self.assertEqual(len(rows), 1, job_name)
+
+    def test_contract_row_removal_is_rejected(self) -> None:
+        workflow = (
+            ci_topology.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+        mutated = workflow.replace(
+            "          - runner: ubuntu-24.04\n"
+            "            lane: strict contract\n"
+            "            task: contract-check-strict\n"
+            "            libc_debug: false\n"
+            "            safety_artifact: false\n"
+            "            artifact_name: none\n"
+            "            artifact_path: none\n",
+            "",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        with tempfile.TemporaryDirectory(prefix="mtest-ci-topology-") as raw_tmp:
+            repo = Path(raw_tmp)
+            workflow_path = repo / ".github" / "workflows" / "ci.yml"
+            workflow_path.parent.mkdir(parents=True)
+            workflow_path.write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "matrix mismatch"):
+                ci_topology.check_ci_workflow(repo)
+
     def test_matrix_role_mutation_is_rejected_by_fixed_oracle(self) -> None:
         workflow = (
             ci_topology.REPO_ROOT / ".github" / "workflows" / "ci.yml"
@@ -147,6 +262,165 @@ class CiTopologyTests(unittest.TestCase):
             workflow_path.write_text(mutated, encoding="utf-8")
             with self.assertRaisesRegex(AssertionError, "matrix mismatch"):
                 ci_topology.check_ci_workflow(repo)
+
+    def _workflow(self) -> str:
+        """Return the live CI workflow text."""
+        return (
+            ci_topology.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+
+    def _reject(self, mutated: str, pattern: str) -> None:
+        """Require the topology oracle to reject one mutated workflow.
+
+        Args:
+            mutated: Workflow text differing from the live one.
+            pattern: Regex the rejection message must match.
+        """
+        self.assertNotEqual(mutated, self._workflow())
+        with tempfile.TemporaryDirectory(prefix="mtest-ci-topology-") as raw_tmp:
+            repo = Path(raw_tmp)
+            workflow_path = repo / ".github" / "workflows" / "ci.yml"
+            workflow_path.parent.mkdir(parents=True)
+            workflow_path.write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, pattern):
+                ci_topology.check_ci_workflow(repo)
+
+    def test_both_platforms_own_a_blocking_package_job(self) -> None:
+        workflow = self._workflow()
+        for job_name, display, runner in (
+            ("package", "Linux / packaged artifact", "ubuntu-24.04"),
+            ("macos-package", "macOS arm64 / packaged artifact", "macos-15"),
+        ):
+            job = ci_topology._yaml_block(workflow, f"  {job_name}:")
+            self.assertEqual(
+                re.findall(r"^    name: (.+)$", job, re.MULTILINE), [display]
+            )
+            self.assertEqual(
+                re.findall(r"^    runs-on: (.+)$", job, re.MULTILINE), [runner]
+            )
+            self.assertEqual(
+                re.findall(r"^        run: (.+)$", job, re.MULTILINE),
+                ["pixi run mojo-version", "pixi run package-check"],
+            )
+
+    def test_macos_package_job_removal_is_rejected(self) -> None:
+        workflow = self._workflow()
+        mutated = workflow.split("  macos-package:")[0]
+        self._reject(mutated, "job membership mismatch")
+
+    def test_macos_package_job_on_a_linux_runner_is_rejected(self) -> None:
+        workflow = self._workflow()
+        head, _, tail = workflow.partition("  macos-package:")
+        mutated = head + "  macos-package:" + tail.replace(
+            "    runs-on: macos-15", "    runs-on: ubuntu-24.04", 1
+        )
+        self._reject(mutated, "package runner mismatch")
+
+    def test_macos_package_job_without_its_preflight_dependency_is_rejected(
+        self,
+    ) -> None:
+        workflow = self._workflow()
+        mutated = workflow.replace(
+            "    name: macOS arm64 / packaged artifact\n    needs: macos-preflight\n",
+            "    name: macOS arm64 / packaged artifact\n",
+            1,
+        )
+        self._reject(mutated, "needs mismatch")
+
+    def test_macos_package_job_running_another_task_is_rejected(self) -> None:
+        workflow = self._workflow()
+        head, _, tail = workflow.partition("  macos-package:")
+        mutated = head + "  macos-package:" + tail.replace(
+            "        run: pixi run package-check",
+            "        run: pixi run package-build",
+            1,
+        )
+        self._reject(mutated, "package command mismatch")
+
+    def test_linux_package_job_display_name_mutation_is_rejected(self) -> None:
+        # The Linux display name is an externally configured required check.
+        workflow = self._workflow()
+        mutated = workflow.replace(
+            "    name: Linux / packaged artifact",
+            "    name: Linux / conda package",
+            1,
+        )
+        self._reject(mutated, "package display name mismatch")
+
+    def test_linux_package_job_removal_is_rejected(self) -> None:
+        workflow = self._workflow()
+        head, _, tail = workflow.partition("  package:\n")
+        mutated = head + tail.partition("  macos-preflight:\n")[1] + (
+            tail.partition("  macos-preflight:\n")[2]
+        )
+        self._reject(mutated, "job membership mismatch")
+
+    def test_coverage_capability_module_owns_a_harness_check_slot(self) -> None:
+        # The probe itself is diagnostic, but the branch logic that decides
+        # between "no facility, exit 0" and "facility found, exit nonzero" is
+        # blocking: it rides the cheap serial chain.
+        self.assertIn(
+            "scripts.tests.test_coverage_capability",
+            ci_topology.HARNESS_CHECK_MODULES,
+        )
+
+    def test_coverage_capability_task_command_mutation_is_rejected(self) -> None:
+        source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
+        mutated = source.replace(
+            'coverage-capability = "python -m scripts.checks.coverage_capability"',
+            'coverage-capability = "python -m scripts.checks.version"',
+            1,
+        )
+        self.assertNotEqual(mutated, source)
+        with tempfile.TemporaryDirectory(prefix="mtest-ci-topology-") as raw_tmp:
+            repo = Path(raw_tmp)
+            (repo / "pixi.toml").write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "coverage-capability task"):
+                ci_topology.check_ci_task_graph(repo)
+
+    def test_coverage_capability_task_removal_is_rejected(self) -> None:
+        source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
+        mutated = source.replace(
+            'coverage-capability = "python -m scripts.checks.coverage_capability"\n',
+            "",
+            1,
+        )
+        self.assertNotEqual(mutated, source)
+        with tempfile.TemporaryDirectory(prefix="mtest-ci-topology-") as raw_tmp:
+            repo = Path(raw_tmp)
+            (repo / "pixi.toml").write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "coverage-capability task"):
+                ci_topology.check_ci_task_graph(repo)
+
+    def test_coverage_capability_stays_outside_the_ci_floor(self) -> None:
+        # It shells out to the real compiler, and it is a diagnostic rather
+        # than a release gate. The exact `ci` list and the pinned transitive
+        # closure are what keep it out; this test names the reason.
+        self.assertNotIn("coverage-capability", ci_topology.CI_TASKS)
+        self.assertNotIn("coverage-capability", ci_topology.CI_PREFLIGHT_TASKS)
+        self.assertNotIn("coverage-capability", ci_topology.CI_FLOOR_TASKS)
+
+    def test_coverage_capability_entering_the_ci_floor_is_rejected(self) -> None:
+        source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
+        mutated = source.replace(
+            '    "contract-check-strict",\n]',
+            '    "contract-check-strict",\n    "coverage-capability",\n]',
+            1,
+        )
+        self.assertNotEqual(mutated, source)
+        with tempfile.TemporaryDirectory(prefix="mtest-ci-topology-") as raw_tmp:
+            repo = Path(raw_tmp)
+            (repo / "pixi.toml").write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "ci membership/order"):
+                ci_topology.check_ci_task_graph(repo)
+
+    def test_package_test_module_owns_a_harness_check_slot(self) -> None:
+        # The package gate's oracles are unit-tested in the cheap serial chain,
+        # not only inside the expensive packaging job.
+        self.assertIn(
+            "scripts.tests.test_package_consumption",
+            ci_topology.HARNESS_CHECK_MODULES,
+        )
 
 
 if __name__ == "__main__":

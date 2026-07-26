@@ -3,14 +3,23 @@
 
 from __future__ import annotations
 
+import ast
+import contextlib
 import inspect
 from dataclasses import FrozenInstanceError
+import io
 import os
 from pathlib import Path
+import re
+import resource
+import signal
 import stat
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from scripts.checks import layout
 from scripts.e2e import __main__ as e2e_main
@@ -24,6 +33,70 @@ def _write_executable(path: Path, source: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
+# A stand-in leader: it forks ONE child into its own process group, has that
+# child record the group's real id and announce readiness, and then waits. This
+# is the shape `run_mtest_signaled` must reason about — a leader whose children
+# live in groups of their own — reduced to something that starts instantly.
+_FAKE_LEADER = """import os
+import signal
+import subprocess
+import sys
+import time
+
+pgid_file, ready_file, answers = sys.argv[1], sys.argv[2], sys.argv[3]
+child = subprocess.Popen(
+    [
+        sys.executable,
+        "-c",
+        (
+            "import os, sys, time\\n"
+            "open(sys.argv[1], 'w').write(str(os.getpgrp()) + chr(10))\\n"
+            "open(sys.argv[2], 'w').write('ready' + chr(10))\\n"
+            "time.sleep(300)\\n"
+        ),
+        pgid_file,
+        ready_file,
+    ],
+    start_new_session=True,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+
+
+def _teardown(signum, frame):
+    if answers == "yes":
+        os.killpg(os.getpgid(child.pid), signal.SIGKILL)
+        child.wait()
+        sys.exit(2)
+
+
+signal.signal(signal.SIGINT, _teardown)
+signal.signal(signal.SIGTERM, _teardown)
+time.sleep(300)
+"""
+
+
+@contextlib.contextmanager
+def _recorded_signals():
+    """Record every `os.kill`/`os.killpg` the runner issues, in order."""
+    calls: list[tuple[str, int, int]] = []
+    real_kill, real_killpg = runner.os.kill, runner.os.killpg
+
+    def kill(pid: int, sig: int) -> None:
+        calls.append(("kill", pid, sig))
+        real_kill(pid, sig)
+
+    def killpg(pgid: int, sig: int) -> None:
+        calls.append(("killpg", pgid, sig))
+        real_killpg(pgid, sig)
+
+    runner.os.kill, runner.os.killpg = kill, killpg
+    try:
+        yield calls
+    finally:
+        runner.os.kill, runner.os.killpg = real_kill, real_killpg
+
+
 
 
 
@@ -32,6 +105,8 @@ CORE_SCENARIOS = (
     "manifest-completeness",
     "default-suite",
     "hostile",
+    "hostile-console",
+    "hostile-reporters",
     "single-pass",
     "exitfirst",
     "maxfail",
@@ -57,6 +132,7 @@ SELECTION_SCENARIOS = (
     "selection-chameleon",
     "single-build",
     "stale-recovery-two-builds",
+    "mojo-executable-precedence",
     "collect",
 )
 RESILIENCE_SCENARIOS = (
@@ -75,6 +151,8 @@ RESILIENCE_SCENARIOS = (
     "internal-error",
     "runtime-open-failure",
     "interrupt",
+    "interrupt-sigterm",
+    "interrupt-double",
 )
 JSON_SCENARIOS = (
     "json-forward-compat",
@@ -113,7 +191,16 @@ PARALLEL_SCENARIOS = (
     "parallel-progress-tty",
     "parallel-serial-noverlap",
     "parallel-serial-stale-glob",
+    "parallel-fd-clamp",
 )
+CONFIG_SCENARIOS = (
+    "config-resolution",
+    "config-diagnostics",
+    "config-state",
+    "failure-reselection",
+    "config-overrides",
+)
+CONFIG_SHOW_SCENARIOS = ("config-show",)
 
 
 
@@ -128,8 +215,14 @@ class E2EFaultTopologyTests(unittest.TestCase):
     def test_master_registry_has_exact_pinned_order_and_unique_names(self) -> None:
         names = tuple(name for name, _scenario in e2e_main.SCENARIOS)
 
+        # No literal total appears here, and NOT because a length assertion
+        # would be redundant with the membership comparison below — it would
+        # not be: adding a scenario to both SCENARIOS and E2E_SCENARIO_NAMES
+        # keeps the comparison green and moves the length. The literal lives in
+        # `layout.check_e2e_layout` instead (`len(scenario_names) != 91`),
+        # which is its own blocking link in the harness-check chain, so a copy
+        # here would be a second hand-maintained number guarding nothing new.
         self.assertEqual(names, layout.E2E_SCENARIO_NAMES)
-        self.assertEqual(len(names), 72)
         self.assertEqual(len(set(names)), len(names))
 
     def test_core_scenarios_have_one_feature_owner(self) -> None:
@@ -205,6 +298,26 @@ class E2EFaultTopologyTests(unittest.TestCase):
         )
         self.assertEqual(owned, PARALLEL_SCENARIOS)
 
+    def test_config_scenarios_have_one_feature_owner(self) -> None:
+        from scripts.e2e.scenarios import config_file
+
+        owned = tuple(
+            name
+            for name, scenario in e2e_main.SCENARIOS
+            if scenario.__module__ == config_file.__name__
+        )
+        self.assertEqual(owned, CONFIG_SCENARIOS)
+
+    def test_config_show_scenarios_have_one_feature_owner(self) -> None:
+        from scripts.e2e.scenarios import config_show
+
+        owned = tuple(
+            name
+            for name, scenario in e2e_main.SCENARIOS
+            if scenario.__module__ == config_show.__name__
+        )
+        self.assertEqual(owned, CONFIG_SHOW_SCENARIOS)
+
     def test_runner_owns_results_manifest_access_and_hard_timeouts(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-e2e-runner-") as raw_tmp:
             tmp = Path(raw_tmp)
@@ -248,6 +361,180 @@ class E2EFaultTopologyTests(unittest.TestCase):
             set(runner.load_manifest()["tests"]),
             runner.discovered_test_files(),
         )
+
+    def _signalled_run(
+        self, tmp: Path, *, answers: bool, signal_number: int
+    ) -> tuple[list[tuple[str, int, int]], int, int, int]:
+        """Drive one `run_mtest_signaled` against the fake leader.
+
+        Args:
+            tmp: A scratch directory this call owns.
+            answers: Whether the fake leader cleans its child group up and exits,
+                as a live mtest does for a managed interrupt.
+            signal_number: The signal delivered to the leader.
+
+        Returns:
+            The recorded signal calls, the run's exit code, the leader's pgid,
+            and the child group's real pgid.
+        """
+        leader = tmp / "fake-leader"
+        _write_executable(leader, f"#!{sys.executable}\n" + _FAKE_LEADER)
+        pgid_file = tmp / "child.pgid"
+        ready_file = tmp / "child.ready"
+        process_runner = runner.E2ERunner(repo_root=tmp, mtest=leader)
+        with _recorded_signals() as calls:
+            run, pgid = process_runner.run_mtest_signaled(
+                [os.fspath(pgid_file), os.fspath(ready_file), "yes" if answers else "no"],
+                signal_number=signal_number,
+                timeout=30.0,
+                ready_files=(os.fspath(ready_file),),
+                owned_pgid_files=(os.fspath(pgid_file),),
+            )
+        child_pgid = int(pgid_file.read_text(encoding="utf-8").strip())
+        return list(calls), run.returncode, pgid, child_pgid
+
+    def test_a_managed_interrupt_signals_only_the_leader(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-signal-topology-") as raw:
+            calls, returncode, pgid, child_pgid = self._signalled_run(
+                Path(raw), answers=True, signal_number=signal.SIGINT
+            )
+
+        self.assertEqual(returncode, 2)
+        self.assertNotEqual(child_pgid, pgid)
+        # `os.kill(leader)` and `os.killpg(leader_group)` carry the same number,
+        # so WHICH call was made is the whole distinction: forwarding the signal
+        # to the group is the product's job, and a harness that did it itself
+        # would pass even against a product that forwarded nothing.
+        terminating = [call for call in calls if call[2] != 0]
+        self.assertEqual(terminating, [("kill", pgid, int(signal.SIGINT))])
+        self.assertTrue(
+            all(call[2] == 0 for call in calls if call[0] == "killpg"),
+            f"a managed interrupt used killpg for more than existence: {calls}",
+        )
+
+    def test_a_fatal_signal_sweeps_recorded_groups_after_the_leader(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-signal-fatal-") as raw:
+            calls, _returncode, pgid, child_pgid = self._signalled_run(
+                Path(raw), answers=False, signal_number=signal.SIGKILL
+            )
+
+        self.assertNotEqual(child_pgid, pgid)
+        terminating = [call for call in calls if call[2] != 0]
+        # The leader is signalled first, alone. Only then — mtest cannot clean up
+        # after its own death — does the harness sweep the group it recorded.
+        self.assertEqual(terminating[0], ("kill", pgid, int(signal.SIGKILL)))
+        self.assertTrue(terminating[1:], "the orphaned child group was never swept")
+        for name, target, _sig in terminating[1:]:
+            self.assertEqual(name, "killpg")
+            self.assertEqual(target, child_pgid)
+        self.assertFalse(
+            runner.group_alive(child_pgid),
+            f"child group {child_pgid} survived the harness sweep",
+        )
+
+    def test_group_sweep_reads_eperm_as_a_gone_group(self) -> None:
+        """Darwin reports EPERM, not ESRCH, for a zombie-only process group."""
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time\ntime.sleep(30)\n"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        pgid = os.getpgid(proc.pid)
+        attempts: list[tuple[int, int]] = []
+        real_killpg = runner.os.killpg
+
+        def killpg(target: int, sig: int) -> None:
+            attempts.append((target, sig))
+            raise PermissionError(1, "Operation not permitted")
+
+        runner.os.killpg = killpg
+        try:
+            # Escaping here would replace the caller's own diagnosis with an
+            # unrelated exception raised from cleanup.
+            runner.E2ERunner.kill_group(proc)
+        finally:
+            runner.os.killpg = real_killpg
+            real_killpg(pgid, signal.SIGKILL)
+            proc.wait()
+        self.assertEqual(
+            attempts,
+            [(pgid, int(signal.SIGTERM))],
+            f"EPERM did not end the group sweep: {attempts}",
+        )
+
+    def test_signalled_runs_reject_ambiguous_arming(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-signal-arming-") as raw:
+            tmp = Path(raw)
+            leader = tmp / "fake-leader"
+            _write_executable(leader, f"#!{sys.executable}\nimport time\ntime.sleep(30)\n")
+            process_runner = runner.E2ERunner(repo_root=tmp, mtest=leader)
+            for kwargs in (
+                {},
+                {"ready_files": (os.fspath(tmp / "x"),), "delay": 1.0},
+            ):
+                with self.subTest(arming=sorted(kwargs)):
+                    with self.assertRaisesRegex(
+                        runner.ScenarioError, "exactly one arming input"
+                    ):
+                        process_runner.run_mtest_signaled(
+                            [],
+                            signal_number=signal.SIGINT,
+                            timeout=1.0,
+                            **kwargs,
+                        )
+
+    def test_a_half_armed_barrier_still_sweeps_the_live_actor(self) -> None:
+        # The failure path that is supposed to clean up must not be the one that
+        # strands a process: an actor that armed before the barrier expired lives
+        # in a process group of its own, which killing the leader's group cannot
+        # reach, and the e2e actors hold for an hour.
+        with tempfile.TemporaryDirectory(prefix="mtest-signal-halfarmed-") as raw:
+            tmp = Path(raw)
+            leader = tmp / "fake-leader"
+            _write_executable(leader, f"#!{sys.executable}\n" + _FAKE_LEADER)
+            pgid_file = tmp / "child.pgid"
+            ready_file = tmp / "child.ready"
+            never = tmp / "second-actor.ready"
+            process_runner = runner.E2ERunner(repo_root=tmp, mtest=leader)
+
+            with self.assertRaisesRegex(
+                runner.ScenarioError, "readiness barrier never appeared"
+            ):
+                process_runner.run_mtest_signaled(
+                    [os.fspath(pgid_file), os.fspath(ready_file), "no"],
+                    signal_number=signal.SIGINT,
+                    timeout=5.0,
+                    ready_files=(os.fspath(ready_file), os.fspath(never)),
+                    owned_pgid_files=(os.fspath(pgid_file),),
+                )
+
+            child_pgid = int(pgid_file.read_text(encoding="utf-8").strip())
+            self.assertFalse(
+                runner.group_alive(child_pgid),
+                f"the armed actor's group {child_pgid} survived a barrier "
+                "expiry — it would sleep on the host for an hour",
+            )
+
+    def test_a_readiness_barrier_fails_instead_of_proceeding(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-signal-barrier-") as raw:
+            tmp = Path(raw)
+            leader = tmp / "fake-leader"
+            _write_executable(
+                leader, f"#!{sys.executable}\nimport time\ntime.sleep(30)\n"
+            )
+            process_runner = runner.E2ERunner(repo_root=tmp, mtest=leader)
+            started = time.monotonic()
+            with self.assertRaisesRegex(
+                runner.ScenarioError, "readiness barrier never appeared"
+            ):
+                process_runner.run_mtest_signaled(
+                    [],
+                    signal_number=signal.SIGINT,
+                    timeout=0.5,
+                    ready_files=(os.fspath(tmp / "never-written"),),
+                )
+            self.assertLess(time.monotonic() - started, 10.0)
 
     def test_main_open_has_one_package_owner(self) -> None:
         self.assertEqual(main_open.__name__, "scripts.e2e.main_open")
@@ -323,12 +610,20 @@ class E2EFaultTopologyTests(unittest.TestCase):
                 Path(runner.FAKE_SLOW_MOJO),
                 Path(runner.FAKE_CRASH_MOJO),
                 Path(runner.FAKE_RETRY_CRASH_MOJO),
+                Path(runner.FAKE_STUBBORN_MOJO),
+                Path(runner.FAKE_FD_MOJO),
+                Path(runner.FAKE_HOSTILE_MOJO),
+                Path(runner.PATH_MOJO),
             ),
             (
                 fixture_root / "logging_mojo.py",
                 fixture_root / "fake_slow_mojo.py",
                 fixture_root / "fake_crash_mojo.py",
                 fixture_root / "fake_retry_crash_mojo.py",
+                fixture_root / "fake_stubborn_mojo.py",
+                fixture_root / "fake_fd_mojo.py",
+                fixture_root / "fake_hostile_mojo.py",
+                fixture_root / "path_mojo.py",
             ),
         )
         self.assertEqual(Path(fake_retry_crash_mojo.REPO_ROOT), root)
@@ -343,9 +638,185 @@ class E2EFaultTopologyTests(unittest.TestCase):
             runner.FAKE_SLOW_MOJO,
             runner.FAKE_CRASH_MOJO,
             runner.FAKE_RETRY_CRASH_MOJO,
+            runner.FAKE_STUBBORN_MOJO,
+            runner.FAKE_FD_MOJO,
+            runner.FAKE_HOSTILE_MOJO,
+            runner.PATH_MOJO,
         ):
             with self.subTest(fixture=fixture):
                 self.assertTrue(os.access(fixture, os.X_OK))
+
+
+class ScenarioTotalIsRegistryDerivedTests(unittest.TestCase):
+    """The gate's headline number must be counted, never remembered.
+
+    `=== <passed>/<total> scenarios passed ===` is the line a reader treats as
+    the E2E result. If the total were a constant, it would keep reading as
+    proof after the registry moved underneath it, so these tests drive `main`
+    with a substituted registry and read the banner back.
+    """
+
+    # "91 scenarios", "1,053 classified tests", "72 end-to-end scenarios" —
+    # a bare integer standing in front of a countable noun, with room for the
+    # adjectives such claims usually carry.
+    _COUNT_CLAIM = re.compile(
+        r"\b\d[\d,_]*\s+(?:[A-Za-z-]+\s+){0,2}"
+        r"(?:scenarios?|tests?|suites?|checks?|cases?|files?|modules?)\b",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _passing(detail: str):
+        def scenario(_context) -> str:
+            return detail
+
+        return scenario
+
+    def _banner(self, registry) -> str:
+        buffer = io.StringIO()
+        with mock.patch.object(e2e_main, "SCENARIOS", registry), mock.patch.object(
+            e2e_main.os.path, "exists", return_value=True
+        ), mock.patch.object(e2e_main, "load_manifest", return_value={}):
+            with contextlib.redirect_stdout(buffer):
+                code = e2e_main.main()
+        self.assertEqual(code, 0, buffer.getvalue())
+        return buffer.getvalue()
+
+    def test_the_banner_total_counts_the_registry_it_was_given(self) -> None:
+        for size in (1, 3, 7):
+            with self.subTest(size=size):
+                registry = tuple(
+                    (f"s{index}", self._passing("")) for index in range(size)
+                )
+
+                self.assertIn(f"=== {size}/{size} scenarios passed ===",
+                              self._banner(registry))
+
+    def test_the_banner_total_is_not_the_committed_registry_length(self) -> None:
+        # Guards the shape where a "derived" total is really `len(SCENARIOS)`
+        # read from module scope while a different registry is executed.
+        banner = self._banner((("only-one", self._passing("")),))
+
+        self.assertNotIn(
+            f"/{len(e2e_main.SCENARIOS)} scenarios passed", banner
+        )
+
+    def test_a_failing_scenario_is_excluded_from_the_passed_count(self) -> None:
+        def failing(_context) -> str:
+            raise runner.ScenarioError("deliberate")
+
+        buffer = io.StringIO()
+        registry = (("ok", self._passing("")), ("bad", failing))
+        with mock.patch.object(e2e_main, "SCENARIOS", registry), mock.patch.object(
+            e2e_main.os.path, "exists", return_value=True
+        ), mock.patch.object(e2e_main, "load_manifest", return_value={}):
+            with contextlib.redirect_stdout(buffer):
+                code = e2e_main.main()
+
+        self.assertEqual(code, 1)
+        self.assertIn("=== 1/2 scenarios passed ===", buffer.getvalue())
+
+    def test_no_e2e_docstring_hard_codes_a_count(self) -> None:
+        harness_root = Path(runner.REPO_ROOT) / "scripts" / "e2e"
+        sources = sorted(harness_root.rglob("*.py"))
+        self.assertTrue(sources)
+
+        offenders: list[str] = []
+        for source in sources:
+            tree = ast.parse(source.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(
+                    node,
+                    (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+                ):
+                    continue
+                text = ast.get_docstring(node, clean=False)
+                if text is None:
+                    continue
+                owner = getattr(node, "name", "<module>")
+                offenders.extend(
+                    f"{source.relative_to(runner.REPO_ROOT)}:{owner}: "
+                    f"{match.group(0)!r}"
+                    for match in self._COUNT_CLAIM.finditer(text)
+                )
+
+        self.assertEqual(
+            offenders,
+            [],
+            "an E2E docstring states a total that nothing recomputes; describe "
+            "the registry instead of counting it",
+        )
+
+
+@unittest.skipUnless(
+    hasattr(resource, "RLIMIT_NOFILE"),
+    "this platform has no RLIMIT_NOFILE to lower",
+)
+class LimitNofileTests(unittest.TestCase):
+    """`runner.limit_nofile` must change the CHILD, not merely be accepted.
+
+    Every assertion here reads a limit the spawned process observed for itself
+    and printed back, because a `preexec_fn` that was constructed, passed, and
+    silently ignored would satisfy any check made on this side of the fork.
+    """
+
+    _REPORT_SOFT = (
+        "import resource, sys;"
+        "sys.stdout.write(str(resource.getrlimit(resource.RLIMIT_NOFILE)[0]))"
+    )
+    """A child that prints the soft `RLIMIT_NOFILE` the kernel gave it."""
+
+    def _child_soft_limit(self, preexec) -> int:
+        """The soft limit a child observes when spawned under `preexec`."""
+        completed = subprocess.run(
+            [sys.executable, "-c", self._REPORT_SOFT],
+            capture_output=True,
+            text=True,
+            check=True,
+            preexec_fn=preexec,
+        )
+        return int(completed.stdout.strip())
+
+    def test_the_child_observes_the_lowered_soft_limit(self) -> None:
+        parent_soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = 76
+        if hard != resource.RLIM_INFINITY and hard < target:
+            self.skipTest(f"the host's hard RLIMIT_NOFILE {hard} is below {target}")
+
+        self.assertEqual(self._child_soft_limit(runner.limit_nofile(target)), target)
+        # The parent is untouched: the limit is applied between the fork and the
+        # exec, so lowering a child's ceiling must not lower this process's.
+        self.assertEqual(
+            resource.getrlimit(resource.RLIMIT_NOFILE), (parent_soft, hard)
+        )
+
+    def test_an_unlimited_child_keeps_this_process_limit(self) -> None:
+        parent_soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+
+        # The control that makes the test above evidence rather than a tautology:
+        # without the preexec_fn the child inherits, so 76 can only have come
+        # from `limit_nofile`.
+        self.assertEqual(self._child_soft_limit(None), parent_soft)
+
+    def test_the_hard_limit_is_carried_through_unchanged(self) -> None:
+        _parent_soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = 76
+        if hard != resource.RLIM_INFINITY and hard < target:
+            self.skipTest(f"the host's hard RLIMIT_NOFILE {hard} is below {target}")
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import resource, sys;"
+                "sys.stdout.write(str(resource.getrlimit(resource.RLIMIT_NOFILE)))",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            preexec_fn=runner.limit_nofile(target),
+        )
+        self.assertEqual(completed.stdout.strip(), str((target, hard)))
 
 
 

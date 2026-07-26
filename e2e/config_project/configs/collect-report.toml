@@ -1,0 +1,6 @@
+[run]
+paths = ["tests/test_other.mojo"]
+
+[report]
+json = "-"
+gh-annotations = "auto"

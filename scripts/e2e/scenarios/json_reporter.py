@@ -8,24 +8,310 @@ import signal
 import subprocess
 import sys
 import tempfile
-import time
 
 from scripts.checks.reports import json_stream as json_stream_check
-from scripts.e2e.assertions import SUMMARY_RE, expect, expect_exit
+from scripts.e2e.assertions import (
+    ELISION,
+    INTERRUPT_TIMEOUT,
+    SLOW_TREE,
+    SUMMARY_RE,
+    HostileStreams,
+    arm_slow_tree,
+    expect,
+    expect_exit,
+    expect_report,
+    hostile_actor,
+)
 from scripts.e2e.runner import (
     DEFAULT_TIMEOUT,
     E2ERunner,
     JSON_TERMINAL_WRITE_FAULT,
     REPO_ROOT,
     SHORT_TIMEOUT,
+    Run,
     ScenarioContext,
     ScenarioError,
+    expect_group_gone,
 )
 
 
 def _looks_like_stream_line(line: str) -> bool:
     """Whether a line is an NDJSON event record (starts a JSON object)."""
     return line.startswith('{"event":')
+
+
+def _strict_parse(text: str, what: str) -> json_stream_check.StreamReport:
+    """Consume `text` through the strict oracle, or fail naming `what`.
+
+    The oracle raises `StreamError`, which is not the harness's failure channel;
+    a rejection has to arrive as a scenario failure that says which artifact was
+    rejected and why.
+
+    Args:
+        text: The NDJSON stream to consume.
+        what: How to name this stream in a failure.
+
+    Returns:
+        The parsed report.
+
+    Raises:
+        ScenarioError: If the strict consumer rejected the stream.
+    """
+    try:
+        return json_stream_check.parse_stream(text)
+    except json_stream_check.StreamError as error:
+        raise ScenarioError(f"the strict consumer rejected {what}: {error}") from error
+
+
+def _expect_strict_rejection(line: str, header: str, what: str) -> None:
+    """Assert the strict consumer rejects a forged variant of a real record.
+
+    The forgery is derived from the run's OWN record, so this proves strictness
+    against the stream under test rather than against a synthetic fixture.
+
+    Args:
+        line: The forged record line, without its terminator.
+        header: The stream's real header line, so the forgery is judged inside a
+            well-formed stream and can only be rejected on its own merits.
+        what: What the forgery does, named for the failure message.
+
+    Raises:
+        ScenarioError: If the strict consumer accepted the forgery.
+    """
+    try:
+        json_stream_check.parse_stream(f"{header}\n{line}\n")
+    except json_stream_check.StreamError:
+        return
+    raise ScenarioError(
+        f"the strict consumer ACCEPTED a record with {what}; the hostile stream "
+        f"is being judged by a permissive parser:\n{line[:400]}"
+    )
+
+
+def assert_hostile_json_stream(
+    run: Run, stream_path: str | Path, streams: HostileStreams, rel_path: str
+) -> str:
+    """Judge the NDJSON stream of the one hostile-actor invocation.
+
+    Every value asserted here is predicted from the actor's own payload and the
+    documented bounds, never read back from the artifact under test: the whole
+    captured value, the retained and omitted byte counts, and the per-test
+    detail. The stream's contract is JSON escaping, not terminal escaping, so
+    the controls the console renders as visible text are asserted to survive
+    here as real control characters — a reporter that quietly adopted the
+    console's mapping would fail this, not pass it.
+
+    Args:
+        run: The completed run, for diagnostics on a missing artifact.
+        stream_path: Where the run was told to write the stream.
+        streams: The predicted child streams for this run.
+        rel_path: The repo-relative source path under test.
+
+    Returns:
+        A one-line summary of what the stream proved.
+
+    Raises:
+        ScenarioError: On any mismatch.
+    """
+    actor = hostile_actor()
+    path = expect_report(run, stream_path, "the hostile --json stream")
+    raw = path.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ScenarioError(
+            f"the --json stream at {path} is not valid UTF-8 ({error}); the "
+            "reporter emitted an undecoded child byte"
+        ) from error
+    report = _strict_parse(text, "the hostile --json stream")
+    expect(
+        report.exit_code == 1,
+        f"the hostile stream's terminal exit_code was {report.exit_code}, want 1",
+    )
+    expect(not report.torn_tail, "the completed hostile run left a torn JSON tail")
+
+    finished = [r for r in report.records if r.get("event") == "file_finished"]
+    expect(
+        len(finished) == 1,
+        f"expected exactly one file_finished record, got {len(finished)}",
+    )
+    record = finished[0]
+    expect(
+        record.get("path") == rel_path and record.get("outcome") == "fail",
+        f"the hostile file_finished record is not this file's FAIL: "
+        f"path={record.get('path')!r} outcome={record.get('outcome')!r}",
+    )
+    # The false report block never became the selected one: the counts and the
+    # disposition are the genuine block's, not the orphan header's.
+    expect(
+        record.get("parse_disposition") == "parsed",
+        f"the truncated capture did not resolve to a parsed report: "
+        f"{record.get('parse_disposition')!r} (the genuine block was in the "
+        "retained tail, so this is not a capture overflow)",
+    )
+    expect(
+        (record.get("passed_tests"), record.get("failed_tests")) == (0, 1),
+        f"the orphan report header reached the verdict: passed_tests="
+        f"{record.get('passed_tests')!r} failed_tests="
+        f"{record.get('failed_tests')!r}, want 0 and 1",
+    )
+
+    # Exact accounting: what the capture bound retained, and what the stream's
+    # own head+tail window then dropped from it.
+    expect(
+        record.get("stdout_capture_bytes") == len(streams.stdout.retained),
+        f"stdout_capture_bytes={record.get('stdout_capture_bytes')!r}, want "
+        f"{len(streams.stdout.retained)} (head+marker+tail of a "
+        f"{len(streams.stdout.raw)}-byte stream)",
+    )
+    expect(
+        record.get("stderr_capture_bytes") == len(streams.stderr.retained),
+        f"stderr_capture_bytes={record.get('stderr_capture_bytes')!r}, want "
+        f"{len(streams.stderr.retained)}",
+    )
+    expect(
+        record.get("stdout_stream_omitted_bytes") == streams.stdout.reporter_omitted,
+        f"stdout_stream_omitted_bytes="
+        f"{record.get('stdout_stream_omitted_bytes')!r}, want "
+        f"{streams.stdout.reporter_omitted}",
+    )
+    expect(
+        record.get("stderr_stream_omitted_bytes") == streams.stderr.reporter_omitted,
+        f"stderr_stream_omitted_bytes="
+        f"{record.get('stderr_stream_omitted_bytes')!r}, want "
+        f"{streams.stderr.reporter_omitted}",
+    )
+    expect(
+        record.get("stdout_truncated") is streams.stdout.truncated,
+        f"stdout_truncated={record.get('stdout_truncated')!r}, want "
+        f"{streams.stdout.truncated}",
+    )
+    expect(
+        record.get("stderr_truncated") is streams.stderr.truncated,
+        f"stderr_truncated={record.get('stderr_truncated')!r}, want "
+        f"{streams.stderr.truncated}",
+    )
+
+    # The whole captured value, character for character.
+    _expect_same_text(
+        record.get("captured_stdout"),
+        streams.stdout.reporter_text,
+        "captured_stdout",
+    )
+    _expect_same_text(
+        record.get("captured_stderr"),
+        streams.stderr.reporter_text,
+        "captured_stderr",
+    )
+    expect(
+        str(record.get("captured_stdout")).count(ELISION) == 1,
+        "the bounded captured_stdout carries no single elision marker",
+    )
+    expect(
+        ELISION not in str(record.get("captured_stderr")),
+        "the unbounded captured_stderr was elided anyway",
+    )
+
+    reported = [r for r in report.records if r.get("event") == "test_reported"]
+    expect(
+        len(reported) == 1 and reported[0].get("name") == actor.TEST_NAME,
+        f"expected one test_reported row named {actor.TEST_NAME!r}, got "
+        f"{[r.get('name') for r in reported]!r}",
+    )
+    _expect_same_text(reported[0].get("detail"), streams.detail, "the test detail")
+    expect(
+        reported[0].get("detail_omitted_bytes") == 0,
+        f"the short failure detail reported "
+        f"{reported[0].get('detail_omitted_bytes')!r} omitted bytes, want 0",
+    )
+
+    # The stream's contract is JSON escaping ALONE. The controls are carried as
+    # real characters, and the console's visible-escape spelling is absent.
+    detail = str(reported[0].get("detail"))
+    expect(
+        "\x1b[2J" in detail,
+        "the NDJSON detail lost the child's raw ESC; the stream carries JSON "
+        "escaping, not the console's terminal escaping",
+    )
+    expect(
+        "\\x1B" not in detail,
+        "the console's visible escape spelling reached the NDJSON detail; the "
+        "machine stream must not be terminal-escaped",
+    )
+
+    # Strictness is live against THIS stream's own records.
+    header = text.split("\n", 1)[0]
+    line = _record_line(text, '{"event":"file_finished"')
+    _expect_strict_rejection(
+        line[:-1] + ',"stdout_truncated":false}', header, "a duplicate key"
+    )
+    _expect_strict_rejection(
+        line.replace(
+            f'"stdout_capture_bytes":{len(streams.stdout.retained)}',
+            '"stdout_capture_bytes":NaN',
+            1,
+        ),
+        header,
+        "a non-finite number",
+    )
+    return (
+        f"ndjson: {len(streams.stdout.retained)} retained / "
+        f"{streams.stdout.reporter_omitted} elided stdout bytes, exact captured "
+        f"values and detail, strict consumer live"
+    )
+
+
+def _record_line(text: str, prefix: str) -> str:
+    """The one stream line beginning with `prefix`.
+
+    Args:
+        text: The whole stream.
+        prefix: The record opening to look for.
+
+    Returns:
+        The matching line, without its terminator.
+
+    Raises:
+        ScenarioError: If the stream holds no such line.
+    """
+    # split("\n"), never splitlines(): the hostile payload contains U+0085 and
+    # other characters Python treats as line boundaries but NDJSON does not.
+    for line in text.split("\n"):
+        if line.startswith(prefix):
+            return line
+    raise ScenarioError(f"no stream record beginning {prefix!r}")
+
+
+def _expect_same_text(actual: object, expected: str, what: str) -> None:
+    """Assert one whole field equals its predicted value, reporting where not.
+
+    The values are up to 128 KiB, so a plain equality failure would be unusable;
+    this reports the first differing offset with a window either side.
+
+    Args:
+        actual: The value read from the artifact.
+        expected: The value predicted from the actor's payload.
+        what: The field's name, for the failure message.
+
+    Raises:
+        ScenarioError: If the values differ.
+    """
+    if actual == expected:
+        return
+    if not isinstance(actual, str):
+        raise ScenarioError(f"{what} is {type(actual).__name__}, want a string")
+    for index in range(min(len(actual), len(expected))):
+        if actual[index] != expected[index]:
+            raise ScenarioError(
+                f"{what} differs at offset {index} (lengths {len(actual)} vs "
+                f"{len(expected)}):\n"
+                f"  got      {actual[max(index - 60, 0):index + 60]!r}\n"
+                f"  expected {expected[max(index - 60, 0):index + 60]!r}"
+            )
+    raise ScenarioError(
+        f"{what} has length {len(actual)}, want {len(expected)}; the shorter "
+        f"value is a prefix of the longer one"
+    )
 
 
 def s_json_forward_compat(context: ScenarioContext) -> str:
@@ -87,7 +373,7 @@ def s_json_color_on_relocated_stderr(context: ScenarioContext) -> str:
     console lives on stderr, so color renders on STDERR (the tty-probe's
     PTY-positive oracle) while the byte-pure stream on stdout stays free of ANSI.
     """
-    _returncode, stream_bytes, console_bytes = context.runner.run_mtest_split_pty(
+    returncode, stream_bytes, console_bytes = context.runner.run_mtest_split_pty(
         [
             "e2e/suite/test_failing.mojo",
             "--json",
@@ -99,6 +385,17 @@ def s_json_color_on_relocated_stderr(context: ScenarioContext) -> str:
         ],
         env_overrides={"NO_COLOR": None, "GITHUB_ACTIONS": ""},
         timeout=SHORT_TIMEOUT,
+    )
+    # The exit code first, and it is not incidental. Colour presence alone is
+    # satisfied by a run that died early after painting one banner: the ANSI is
+    # on stderr, the stream header parses, and the scenario would report a pass
+    # for a run that never reached a verdict. test_failing.mojo is a
+    # known-outcome fixture, so exit 1 is part of what this case asserts.
+    expect(
+        returncode == 1,
+        f"expected exit 1 from the known-failing fixture, got {returncode}; "
+        "the colour assertions below cannot tell an incomplete run from a "
+        "complete one",
     )
     esc = b"\x1b["
     expect(
@@ -115,6 +412,12 @@ def s_json_color_on_relocated_stderr(context: ScenarioContext) -> str:
         stream_bytes.decode("utf-8", "replace")
     )
     expect(report.version == 1, "the stream header regressed under the color case")
+    # A terminal record, not merely a parseable header: the run reached its end.
+    expect(
+        report.exit_code == returncode,
+        f"stream exit_code {report.exit_code} != process exit {returncode}",
+    )
+    expect(not report.torn_tail, "the colour case produced a torn stream")
     return "color renders on the relocated stderr; stream on stdout stays ANSI-free"
 
 
@@ -150,43 +453,65 @@ def s_json_truncation_interrupt(context: ScenarioContext) -> str:
     """Truncation trio (1/3): an INTERRUPTED run ends the stream WITH its terminal
     record and exit_code 2. The session fires SessionFinished on interrupt; the
     file destination is alive, so the terminal record is committed."""
-    stream_path = os.path.join(tempfile.mkdtemp(), "interrupt.ndjson")
-    run, _pgid = context.runner.run_mtest_signaled(
-        ["e2e/slow", "--json", stream_path],
-        signal_number=signal.SIGINT,
-        delay=8.0,
-        timeout=60.0,
-    )
-    expect(run.returncode == 2, f"expected exit 2 on interrupt, got {run.returncode}")
-    text = Path(stream_path).read_text()
-    report = json_stream_check.parse_stream(text)
-    expect(report.terminal is not None, "interrupted stream carried no terminal record")
-    expect(
-        report.exit_code == 2,
-        f"interrupted terminal exit_code was {report.exit_code}, want 2",
-    )
+    with tempfile.TemporaryDirectory(prefix="mtest-json-interrupt-") as raw:
+        tmp = Path(raw)
+        arming = arm_slow_tree(tmp)
+        stream_path = os.fspath(tmp / "interrupt.ndjson")
+        run, _pgid = context.runner.run_mtest_signaled(
+            [SLOW_TREE, "--json", stream_path],
+            signal_number=signal.SIGINT,
+            timeout=INTERRUPT_TIMEOUT,
+            ready_files=arming.ready_files,
+            owned_pgid_files=arming.owned_pgid_files,
+            env_overrides=arming.env,
+        )
+        expect(
+            run.returncode == 2, f"expected exit 2 on interrupt, got {run.returncode}"
+        )
+        text = Path(stream_path).read_text()
+        report = json_stream_check.parse_stream(text)
+        expect(
+            report.terminal is not None,
+            "interrupted stream carried no terminal record",
+        )
+        expect(
+            report.exit_code == 2,
+            f"interrupted terminal exit_code was {report.exit_code}, want 2",
+        )
     return "interrupt: stream ends WITH terminal record, exit_code 2"
 
 
 def s_json_truncation_sigkill(context: ScenarioContext) -> str:
     """Truncation trio (2/3): a SIGKILLed mtest leaves COMPLETE lines and at most
     one torn tail — never corruption — and NO terminal record. The absence of the
-    terminal is the truncation signal."""
-    stream_path = os.path.join(tempfile.mkdtemp(), "sigkill.ndjson")
-    context.runner.run_mtest_signaled(
-        ["e2e/slow", "--json", stream_path],
-        signal_number=signal.SIGKILL,
-        delay=8.0,
-        timeout=38.0,
-    )
-    text = Path(stream_path).read_text()
-    # parse_stream RAISES on corruption; a clean parse proves complete lines +
-    # at most one torn tail.
-    report = json_stream_check.parse_stream(text)
-    expect(
-        report.terminal is None,
-        "a SIGKILLed run produced a terminal record — it could not have finalized",
-    )
+    terminal is the truncation signal.
+
+    SIGKILL is the one signal mtest cannot answer, so it is also the one case
+    where the harness owns the cleanup: the blocked child records its real PGID
+    before announcing readiness, and the runner tears that orphaned group down —
+    after the torn stream is already on disk — and proves it gone.
+    """
+    with tempfile.TemporaryDirectory(prefix="mtest-json-sigkill-") as raw:
+        tmp = Path(raw)
+        arming = arm_slow_tree(tmp)
+        stream_path = os.fspath(tmp / "sigkill.ndjson")
+        context.runner.run_mtest_signaled(
+            [SLOW_TREE, "--json", stream_path],
+            signal_number=signal.SIGKILL,
+            timeout=INTERRUPT_TIMEOUT,
+            ready_files=arming.ready_files,
+            owned_pgid_files=arming.owned_pgid_files,
+            env_overrides=arming.env,
+        )
+        text = Path(stream_path).read_text()
+        # parse_stream RAISES on corruption; a clean parse proves complete lines +
+        # at most one torn tail.
+        report = json_stream_check.parse_stream(text)
+        expect(
+            report.terminal is None,
+            "a SIGKILLed run produced a terminal record — it could not have "
+            "finalized",
+        )
     return "sigkill: complete lines + at most one torn tail; no terminal record"
 
 
@@ -209,13 +534,7 @@ def s_json_truncation_dead_pipe(context: ScenarioContext) -> str:
     # What the reader received parses as complete lines + at most one torn tail.
     json_stream_check.parse_stream(got.decode("utf-8", "replace"), require_header=False)
     # No orphaned process group.
-    time.sleep(0.5)
-    orphan = True
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        orphan = False
-    expect(not orphan, f"process group {pgid} still alive after fatal abort (orphan)")
+    expect_group_gone(pgid, "mtest's own group after the fatal abort")
     return "dead pipe: fatal abort exit 3 (not 141), no orphan, clean partial stream"
 
 
@@ -366,15 +685,8 @@ def s_json_terminal_write_failure(context: ScenarioContext) -> str:
             f"pre-terminal file result was not the clean PASS: {file_finishes[0]}",
         )
         expect(not report.torn_tail, "the deterministic failure left a torn JSON tail")
-        time.sleep(0.5)
-        orphan = True
         assert run.pgid is not None
-        try:
-            os.killpg(run.pgid, 0)
-        except ProcessLookupError:
-            orphan = False
-        expect(
-            not orphan,
-            f"process group {run.pgid} still alive after terminal-write abort (orphan)",
+        expect_group_gone(
+            run.pgid, "mtest's own group after the terminal-write abort"
         )
         return "terminal write fault: clean PASS escalates 0 -> 3, no orphan"

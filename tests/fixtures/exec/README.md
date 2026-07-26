@@ -16,6 +16,24 @@ Each script uses only the Python standard library and blocks "forever" with a
 long enough that a supervisor bug (a hang, a missed kill) shows up as a stalled
 test rather than a passing one.
 
+`tagged_streams.py` blocks on a file barrier rather than a sleep: it writes its
+tag-owned payloads, creates a ready marker, and waits for the test to create a
+release marker. That lets a test choose the completion order of two live slots
+and prove one slot's capture overflow never reaches its neighbor. Its wait is
+bounded by its own deadline and exits 70 on expiry, so a supervision bug is a
+loud nonzero exit rather than a hang.
+
+`hostile_report_actor.py` is the odd one out: nothing in `exec` runs it, and it
+tests no supervision invariant. It is a subject for the CONSOLE, driven from the
+end-to-end gate through the build stand-in
+`scripts/fixtures/toolchain/fake_hostile_mojo.py`, which writes an executable
+copy with the canonical source path substituted in. It writes terminal control
+sequences, invalid UTF-8, and lines shaped like mtest's own console rows, then a
+genuine reconciling report block, so the run reaches a real FAIL verdict with
+real captured output and a real per-test failure section. It lives here because
+this is where the repository keeps test-only subprocess actors, and because it
+is exactly that: a child process whose bytes are chosen to be hostile.
+
 `escaped_pipe_holder.py` is deliberately different: its descendant calls
 `setsid()`, so it is outside the process group mtest owns. It self-expires after
 ten seconds and also provides a bounded cooperative cleanup mode. Cleanup

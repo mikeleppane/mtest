@@ -1,6 +1,6 @@
 [workspace]
 name = "mtest"
-version = "0.5.0"
+version = "0.6.0"
 description = "A pytest-like test runner for Mojo that orchestrates the stdlib's per-file TestSuite"
 channels = ["https://conda.modular.com/max/", "conda-forge"]
 # Linux and macOS are gate targets and share the POSIX process surface the
@@ -16,10 +16,8 @@ platforms = ["linux-64", "osx-arm64"]
 # silently change valid syntax AND the pinned protocol — regenerate transcripts
 # and read the diff as the changelog). See AGENTS.md.
 mojo = "==1.0.0b2,<2"
-# Python is a BUILD-TIME tool only — the transcript generator and check scripts
-# live under scripts/ and use nothing but the standard library. The runner
-# itself is pure Mojo with ZERO runtime dependencies; there is no
-# [pypi-dependencies] section on purpose.
+# Python serves build/check tooling only. Product code and project-config
+# parsing are native Mojo, and the shipped package has no Python dependency.
 python = "3.12.*"
 # The POSIX adapter is a build-time C object linked into Mojo executables. Pin
 # one compiler on both supported targets so its ABI and sanitizer behavior are
@@ -71,26 +69,37 @@ build-bin = { cmd = "bash scripts/build/production_build.sh link", depends-on = 
     "build-native",
 ] }
 
+# Keep README's committed CLI reference byte-identical to the real binary.
+# The checker owns a build-bin dependency so standalone use cannot read a stale
+# or missing executable.
+readme-help-check = { cmd = "python -m scripts.checks.readme_help", depends-on = [
+    "build-bin",
+] }
+
 # Build recipe/recipe.yaml into a LOCAL conda channel: rattler-build solves an
 # isolated build env (mojo ==1.0.0b2 + the C toolchain, from the modular +
 # conda-forge channels), builds mtest FROM SOURCE inside that sandbox (mirroring
 # build -> build-native -> build-bin), and writes the resulting .conda under
-# build/conda-channel — a plain directory with repodata.json, nothing uploaded
-# or published anywhere. Not wired into `pixi run ci`; the dedicated Linux
-# package job runs independently from both platform test chains.
+# build/conda-channel/<subdir> — a plain directory with repodata.json, nothing
+# uploaded or published anywhere. The subdir is the host's: linux-64 and
+# osx-arm64 are both gated. Not wired into `pixi run ci`; each platform's
+# dedicated package job runs independently from the test chains.
 package-build = "rattler-build build --recipe recipe/recipe.yaml -c https://conda.modular.com/max/ -c conda-forge --output-dir build/conda-channel"
 
-# The packaged-artifact consumption GATE: build -> install the .conda into a
-# FRESH scratch env from the local channel (proving it pulls mojo-compiler
-# ==1.0.0b2) -> a loader-clean probe on the INSTALLED binary (dev pixi env
-# absent from PATH, empty LD_LIBRARY_PATH) -> focused dogfood probes run through
-# that installed binary with the toolchain threaded so its build children can
-# still resolve mojo -> a tar-bz2 fallback-format install + smoke-run. Depends
-# on build + build-native (not build-bin) so this repo's own build/mtest.mojopkg
-# and the test-variant native object exist for the probe run — the binary under
-# test is the INSTALLED one, never build/mtest. Standalone: NOT wired into
-# `pixi run ci`; its dedicated Linux CI job is independent. Nothing uploads or
-# publishes anywhere.
+# The packaged-artifact consumption GATE, identical on both gated platforms:
+# build -> install THAT EXACT artifact (version + build string, checked against
+# the installed conda-meta SHA-256) into a FRESH scratch env from the local
+# channel, proving it pulls mojo-compiler ==1.0.0b2 -> a loader-clean probe on
+# the INSTALLED binary (dev pixi env absent from PATH, this platform's loader
+# search path — LD_LIBRARY_PATH on linux-64, DYLD_LIBRARY_PATH on osx-arm64 —
+# empty) -> focused dogfood probes run through that installed binary with the
+# toolchain threaded so its build children can still resolve mojo -> the
+# known-failing fixture through the same binary, which must exit 1 -> a tar-bz2
+# fallback-format install + smoke-run. Depends on build + build-native (not
+# build-bin) so this repo's own build/mtest.mojopkg and the test-variant native
+# object exist for the probe run — the binary under test is the INSTALLED one,
+# never build/mtest. Standalone: NOT wired into `pixi run ci`; each platform's
+# CI package job is independent. Nothing uploads or publishes anywhere.
 package-check = { cmd = "python -m scripts.build.package_consumption", depends-on = [
     "build",
     "build-native",
@@ -166,12 +175,24 @@ transcripts = "python -m scripts.gen_transcripts"
 # diff after a mojo re-pin is the protocol changelog. Hermetic.
 transcripts-check = "python -m scripts.checks.protocol_snapshots"
 
-# Manually run the exhaustive CLI contract oracle against an external throwaway
-# project. This intentionally remains outside ci/ci-preflight and hosted CI: the
-# committed E2E corpus owns the ordinary gate, while this task is release QA.
-# Pixi forwards arguments after `--`, for example:
-# `pixi run contract-check -- --strict`.
+# Contributor-friendly entry point for the exhaustive CLI contract oracle
+# against an external throwaway project: rebuild-if-stale, filterable, and
+# not strict by default. Pixi forwards arguments after `--`, for example:
+# `pixi run contract-check -- --strict`. `contract-check-strict` below is the
+# blocking gate; this task stays for local iteration (`-k`, `--keep`, `-v`).
 contract-check = "python -m scripts.qa.contract"
+
+# The blocking release-floor gate: every documented exit, stream, and
+# environment behavior in docs/cli-contract.md, asserted --strict (a SKIP
+# fails) against the binary this exact Pixi invocation's `build-bin`
+# dependency just produced, with the checker itself forbidden from starting
+# another build (`--no-rebuild`). The `build-bin` task edge — not this
+# checker's own mtime probe — is what proves the binary under test came from
+# THIS tree; see BINARY_INPUT_PATHS in scripts/qa/contract.py for what the
+# probe actually covers as a fail-closed backstop.
+contract-check-strict = { cmd = "python -m scripts.qa.contract --strict --no-rebuild", depends-on = [
+    "build-bin",
+] }
 
 # Measure how the parallel scheduler scales with the worker count, to keep the
 # `auto` sizing honest against a real machine. Drives the built binary over a
@@ -196,14 +217,27 @@ test-file = "python -m scripts.harness.classified"
 # Fast self-tests for repository harness behavior. Uses disposable test inputs
 # and a fake compiler to prove deterministic aggregate generation, one-build
 # execution, timeout handling, and exact hosted-CI topology.
-harness-check = "python -m scripts.tests.test_aggregate && python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_format && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_classified && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_contract && python -m scripts.tests.test_pty_capture && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_ci_topology && python -m scripts.checks.ci_topology"
+harness-check = "python -m scripts.tests.test_aggregate && python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_format && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_classified && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_contract && python -m scripts.tests.test_pty_capture && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_ci_topology && python -m scripts.checks.ci_topology"
+
+# DIAGNOSTIC, not a gate in `ci`: ask the pinned toolchain whether it has grown
+# a source-coverage facility. Mojo 1.0.0b2 has none — neither `mojo build
+# --help` nor `mojo --help` names a coverage, profile, or instrumentation flag
+# — which is why notes/test-confidence-map.md maps release confidence to
+# behavioral and mutation oracles instead of to a line percentage. The task is
+# fail-closed and asymmetric on purpose: absence is the quiet exit 0, and
+# DISCOVERING a facility (or drifting off the recorded toolchain pin, or being
+# unable to run the probe) exits nonzero so an upgrade cannot silently start
+# publishing an unreviewed number. Its branch logic is unit-tested in
+# harness-check above; this task needs a real `mojo` on PATH.
+coverage-capability = "python -m scripts.checks.coverage_capability"
 
 # DOGFOOD gate: run three focused executable probes through the built mtest
 # binary. This exercises mtest's real discover/build/run/parse/report path and
 # checks exact header/PASS-row membership independently of mtest. The exhaustive
-# 913-test inventory belongs to test's single aggregate binary; compiling
-# all source files separately here would duplicate compiler work without adding
-# behavioral coverage.
+# classified inventory belongs to test's single aggregate binary — see
+# CLASSIFIED_TEST_COUNT in scripts/checks/layout.py for the one authoritative
+# figure; compiling all source files separately here would duplicate compiler
+# work without adding behavioral coverage.
 [tasks.dogfood-check]
 cmd = "python -m scripts.harness.dogfood"
 depends-on = ["build-bin"]
@@ -232,6 +266,7 @@ depends-on = [
     "native-check",
     "junit-check",
     "build",
+    "readme-help-check",
     "junit-render-check",
     "transcripts-check",
 ]
@@ -239,12 +274,22 @@ depends-on = [
 # The canonical serial local floor. Hosted CI runs the exact preflight above,
 # then gives each independent behavioral gate a fresh parallel matrix cell;
 # local development keeps one ordered aggregate for reproducible handoff.
+# contract-check-strict's position here is a readability choice, not a
+# freshness one: `build-bin` is a single shared Pixi task node, and `test`,
+# `dogfood-check`, `e2e`, and `ci-preflight`'s `readme-help-check` already
+# depend on it, so Pixi has already run it once for this invocation well
+# before this entry — running contract-check-strict earlier would not
+# trigger a second link, and running it last does not avoid one. Its actual
+# provenance guarantee is that shared `build-bin` task edge existing at all
+# within THIS invocation; last is just where the broadest, slowest gate
+# reads best in the list.
 [tasks.ci]
 depends-on = [
     "ci-preflight",
     "test",
     "dogfood-check",
     "e2e",
+    "contract-check-strict",
 ]
 
 [target.linux-64.dependencies]

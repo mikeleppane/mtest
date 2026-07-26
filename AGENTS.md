@@ -18,8 +18,8 @@ reporting for CI.
 Non-goals: not an assertion library, not a property-testing framework, not a
 TestSuite replacement. Zero runtime dependencies: product logic under `src/` is
 pure Mojo; the exec-private POSIX adapter under `native/` is compiled and
-statically linked at build time; Python appears only in build-time tooling
-under `scripts/` and test-only subprocess actors under `tests/fixtures/exec/`.
+statically linked at build time; Python appears only in build-time tooling under
+`scripts/` and test-only subprocess actors under `tests/fixtures/exec/`.
 
 ## Product principles
 
@@ -99,8 +99,10 @@ driver today and pinned by `tests/unit/test_session_pipeline.mojo`.
 
 ## Mojo, not Python
 
-`src/` is pure Mojo. All platform and foreign-ABI knowledge lives in exactly
-two audited boundaries; no layer above `exec` carries a raw platform call:
+`src/` is pure Mojo. Selected project configuration is parsed by the pinned,
+vendored native `mojo-toml` parser. All platform and foreign-ABI knowledge
+lives in exactly two audited boundaries; no layer above `exec` carries a raw
+platform call:
 
 - **`src/mtest/platform`** (Layer 0): the small per-call libc operations a
   Mojo caller needs directly, each an in-Mojo `external_call` with its own
@@ -117,9 +119,10 @@ two audited boundaries; no layer above `exec` carries a raw platform call:
 
 A new foreign call belongs in `platform`, unless it is native-adapter
 machinery, in which case it belongs in `native/` behind the ABI. Python lives
-only under `scripts/` and `tests/fixtures/exec/`. Follow the global
-`mojo-syntax` skill for all syntax; training data is stale. Docstrings are
-Google-style, triple-quoted, and mandatory on public entities.
+only under `scripts/` and
+`tests/fixtures/exec/`. Follow the global `mojo-syntax` skill for all syntax;
+training data is stale. Docstrings are Google-style, triple-quoted, and
+mandatory on public entities.
 
 ## Unsafe Mojo requires a local proof
 
@@ -166,10 +169,10 @@ The source, test, and memory-analysis lanes touch the network once for the
 locked `pixi install`; everything after is offline, with one exception: the
 Linux Valgrind cell may install exactly the `libc6-dbg` version matching the
 runner's `libc6`, logging apt provenance and failing on any mismatch. The
-independent Linux package-consumption job has a separate approved network
-contract (rattler-build solves against the pinned Modular and conda-forge
-channels; nothing uploads or authenticates). Do not describe that job as
-hermetic or collapse it into the Valgrind exception.
+independent package-consumption jobs — one per gated platform — have a separate
+approved network contract (rattler-build solves against the pinned Modular and
+conda-forge channels; nothing uploads or authenticates). Do not describe those
+jobs as hermetic or collapse them into the Valgrind exception.
 
 ## Toolchain and the quality floor
 
@@ -184,6 +187,7 @@ pixi run postfork-check    # audit production/testing post-fork call graphs
 pixi run native-check      # verify native ABI/layout/exports and lifecycle
 pixi run junit-check       # validate the committed JUnit oracle and checker
 pixi run build             # the package-compiles gate
+pixi run readme-help-check # compare README help with the real binary
 pixi run junit-render-check  # validate bytes emitted by the real JUnit reporter
 pixi run transcripts-check # regenerate to a temp dir and diff byte-for-byte
 pixi run test              # compile the classified inventory into one direct-run binary
@@ -191,20 +195,55 @@ pixi run dogfood-check     # run three focused probes through the built mtest bi
 pixi run e2e               # exact CLI exits and output against e2e/manifest.json
 ```
 
+`fmt-check` is `format-all` AND `git diff --exit-code`, so it fails on ANY
+unstaged change, including one made after a long CI run started. Stage the work
+first, then gate; a result produced against different bytes than you commit is
+not a result. The same applies to reading outcomes: a background wrapper's exit
+status is the wrapper's, not the gate's — read the gate's own marker.
+
 `pixi run ci-preflight` chains `version-check -> fmt-check -> harness-check ->
 safety-check -> postfork-check -> native-check -> junit-check -> build ->
-junit-render-check -> transcripts-check` in that exact fail-fast order; the
+readme-help-check -> junit-render-check -> transcripts-check` in that exact
+fail-fast order; the
 canonical local `pixi run ci` is serial: `ci-preflight ->
-test -> dogfood-check -> e2e`. Hosted CI runs the same logical floor as two
-platform-local chains: Linux preflight releases fail-fast `test`,
-`dogfood-check`, `e2e`, ASan, and Valgrind cells; macOS preflight releases
-`test`, `dogfood-check`, and `e2e` cells with `fail-fast: false`. Every lane
-is a blocking check; memory safety runs on every pull request and configured
-main-branch push, not on a schedule. Transcripts, ASan/Valgrind, and
-packaged-artifact consumption remain Linux-only. The matrix lane display names
-`direct tests` and `self-hosted tests` are externally configured required
-check names and must stay stable. `native-check` depends on `postfork-check`,
-so the native gate alone cannot skip the child call-graph audit.
+test -> dogfood-check -> e2e -> contract-check-strict`. Hosted CI runs the
+same logical floor as two platform-local chains: Linux preflight releases
+fail-fast `test`, `dogfood-check`, `e2e`, strict contract, ASan, and Valgrind
+cells; macOS preflight releases `test`, `dogfood-check`, `e2e`, and strict
+contract cells with `fail-fast: false`. The strict contract cell runs
+`contract-check-strict` (`python -m scripts.qa.contract --strict --no-rebuild`)
+against the binary that job's own `build-bin` dependency just produced in that
+fresh checkout — every documented exit, stream, and environment behavior in
+`docs/cli-contract.md` is a blocking release-floor assertion, not manual QA;
+`pixi run contract-check` remains the contributor-friendly, non-strict,
+rebuild-if-stale entry point for local iteration. Every lane is a blocking
+check; memory safety runs on every pull request and configured main-branch
+push, not on a schedule. Transcripts and ASan/Valgrind remain Linux-only;
+packaged-artifact consumption is blocking on both linux-64 and osx-arm64, one
+job per platform, both running `pixi run package-check`. The matrix lane
+display names `direct tests` and `self-hosted tests`, and the package job
+display name `Linux / packaged artifact`, are externally configured required
+check names and must stay stable. `native-check` depends on `postfork-check`, so the native
+gate alone cannot skip the child call-graph audit.
+
+The whole local floor compiles for the host target only, so it is blind to a
+macOS-only compile failure: a `comptime` branch, `external_call` signature, or
+struct-layout offset that is wrong for Darwin passes every Linux gate and reds
+the hosted macOS preflight instead, before any test runs. A change that touches
+`CompilationTarget` branching, `external_call`, or a hand-computed struct
+offset therefore cross-compiles the product for macOS BEFORE commit:
+
+```text
+mojo build --target-triple arm64-apple-macosx14.0.0 --emit=asm \
+  -I src -I vendor/mojo-toml src/main.mojo -o /dev/null
+```
+
+That frontend-compiles every Darwin `comptime` branch in about four seconds;
+`--emit=asm` stops before linking, so no Darwin SDK and no native object are
+needed. The reverse direction — `x86_64-unknown-linux-gnu` from a macOS
+checkout — holds equally. Cross-compiling is a local pre-commit check, not a
+gate: it is absent from `ci-preflight` because the hosted macOS lane compiles
+natively and owns that verdict.
 
 Classified modules under `tests/unit/` and `tests/integration/` are
 import-only: they declare `test_*` functions and MUST NOT declare `main()`.
@@ -227,6 +266,12 @@ Pins are provenance, not preference.
   flags corrupt values with spaces); wrapping it was rejected too. Revisit
   trigger: prism ships native post-`--` pass-through. Until then the parser is
   hand-rolled.
+- **A vendored dependency records three digests, not one**: the authorized
+  upstream release, upstream `main` at adoption, and — separately — every
+  retained file AFTER the local patches, recomputed by the harness. Only the
+  third tells you whether the bytes you compile are the bytes you reviewed, and
+  it is the one that goes stale the moment you touch the vendored source again.
+  Every local change is enumerated in the vendor README in the same commit.
 
 **Ask first** before: bumping the Mojo pin; changing the CLI contract after it
 freezes; adding any dependency (or reaching for Python where native Mojo would
@@ -301,6 +346,11 @@ trap and its correct move.
 - `mojo build` bakes the ABSOLUTE canonicalized source path into every
   location line, even when built with a relative path; transcript portability
   requires normalizing the repo-root prefix to `<REPO>`.
+- `mojo format` and `mojo build` do not accept the same source. `where` is a
+  keyword the FORMATTER rejects as an identifier while the COMPILER accepts it,
+  so a green build is not evidence the file is well-formed. Never discard a
+  gate's output to keep a log tidy: `pixi run fmt` failed silently for several
+  commits this way, and only `fmt-check` in CI surfaced it.
 - Discovery order is SOURCE order (`__functions_in_module()` yields source
   order); the fixtures pin this deliberately with non-alphabetical functions.
 - TestSuite buffers its whole report and flushes it at the end; on failure it
@@ -436,6 +486,12 @@ trap and its correct move.
   reach is legitimate only for a test driver pulling its own recorder out of
   a pack it composed; session-level reporter lifecycle goes through the
   `ReportCoordinator` named methods.
+- A `comptime if` guard confines only its own block. Statements AFTER the
+  block compile for every target, so a `comptime if CompilationTarget
+  .is_macos():` that returns inside the branch, followed by a bare
+  `comptime assert CompilationTarget.is_linux()`, fails to instantiate on
+  macOS and takes the whole binary with it. Every platform branch carries an
+  explicit `else`, holding that target's asserts AND its return.
 - A raw `external_call["isatty", ...]` link-conflicts with
   `std.io.FileDescriptor`'s own declaration once imported next to TestSuite;
   delegate to the std wrapper. The same discipline governs `write`.
@@ -454,6 +510,13 @@ trap and its correct move.
 - The harness gates enforce explicit membership (`scripts/checks/layout.py`
   pins exact suite/fixture sets and counts); register a new suite, fixture,
   snapshot, or e2e file in the SAME commit that adds it.
+- `mojo precompile` REJECTS `--target-triple`, so a cross-target check cannot
+  reuse the host-target packages under `-I build`; compile from sources with
+  `-I src -I vendor/mojo-toml`. Cross-compiling the test aggregate needs
+  `-I . -I tests/support` on top of those (generate the entrypoint first, about
+  eighty seconds); omitting an include prints bogus `statement indentation must
+  match the rest of the block` errors in files that parse fine — resolve the
+  module, never the indentation.
 - Never run two builds against the shared `build/` tree at once; a racing
   build corrupted `build/mtest.mojopkg` mid-write and looked exactly like a
   real regression. Builds run one at a time, full stop.
@@ -467,6 +530,36 @@ trap and its correct move.
   Mojo unit tests in-process.
 - Multibyte UTF-8 anywhere in `native/*.c` (comments included) misaligns
   `postfork.py`'s byte-offset AST slicing. Keep `native/` strictly ASCII.
+- A `DYLD_INSERT_LIBRARIES` interposer must NOT reach the real function through
+  `dlsym(RTLD_NEXT, name)`. Under dyld that returns the interposer's own
+  address, so every passthrough re-enters the library forever; a probe on
+  macos-15 arm64 shows identical pointers for both `open` and `close`. Call the
+  real function directly by name instead — dyld does not apply interposing
+  tuples to the image that declares them — and keep `dlfcn.h` inside the
+  non-Apple branch so the wrong mechanism is unreachable. `LD_PRELOAD` is the
+  opposite: there `dlsym(RTLD_NEXT, ...)` is the correct idiom. Confine the
+  split to a passthrough layer so the fault logic stays single-sourced.
+- That self-recursion presents as TWO unrelated-looking bugs, because the
+  symptom depends on whether the compiler can elide the frame. A wrapper that
+  uses `va_start` cannot be tail-called, so it overflows the stack and dies with
+  SIGSEGV and no output; a fixed-arity wrapper tail-calls itself, reuses one
+  frame, and spins until the harness timeout. A segfault and a hang in the same
+  subsystem can share one cause — check for a common mechanism before splitting
+  the investigation.
+- Mojo's `CodepointSliceIter` aborts inside its own `__next__`
+  (`Optional.value() called on empty Optional`) on macOS arm64 while working on
+  Linux x86_64. Scanning sites over known-ASCII tokens walk bytes with
+  `s[byte=i]` over `byte_length()`; reserve codepoint iteration for input that
+  genuinely is not ASCII. `vendor/mojo-toml` documents each converted site.
+- Darwin's `killpg` reports EPERM, not ESRCH, for a process group holding only
+  zombies. Group sweeps treat EPERM as "already gone"; reading it as a real
+  permission error turns a finished scenario into a spurious harness failure and
+  destroys the diagnosis it was supposed to produce.
+- A test whose expected outcome is "the operation fails" CANNOT refute a
+  hypothesis that the mechanism is broken — it passes either way. Retiring a
+  theory needs a probe whose pass and fail differ under that theory. Prefer
+  reporting the disputed value directly (addresses, errnos, flags) over
+  inferring it from a scenario verdict.
 - A tool that COMMITS captured program output containing filesystem paths
   must rewrite the ephemeral run root to a stable placeholder before writing
   (both the literal and realpath spellings), the way

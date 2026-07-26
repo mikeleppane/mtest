@@ -68,6 +68,7 @@ def test_session_started_payload() raises:
     # Shard fields default so existing callers are unaffected (unsharded run).
     assert_equal(p.shard_label, "")
     assert_equal(p.sharded_out_count, 0)
+    assert_equal(p.config_file, "")
 
 
 def test_session_started_carries_shard_fields_when_given() raises:
@@ -91,6 +92,15 @@ def test_session_started_threads_workers() raises:
     assert_equal(seq.data[SessionStartedPayload].workers, 1)
     var par = Event.session_started("tests", "mojo", 4, 0, workers=4)
     assert_equal(par.data[SessionStartedPayload].workers, 4)
+
+
+def test_session_started_threads_config_file() raises:
+    var event = Event.session_started(
+        "tests", "mojo", 1, 0, config_file="../shared/mtest.toml"
+    )
+    assert_equal(
+        event.data[SessionStartedPayload].config_file, "../shared/mtest.toml"
+    )
 
 
 def test_progress_payload() raises:
@@ -503,6 +513,10 @@ def test_event_kinds_are_distinct() raises:
         EventKind.CRASH_ATTRIBUTION,
         EventKind.PROGRESS,
     ]
+    # Anchor the hand-written table to the model's own count, so a kind added
+    # without extending this list fails here rather than being tested by a
+    # table that silently stopped covering the vocabulary.
+    assert_equal(len(kinds), EventKind.COUNT)
     for i in range(len(kinds)):
         for j in range(len(kinds)):
             if i == j:

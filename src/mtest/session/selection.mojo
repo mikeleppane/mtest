@@ -29,7 +29,7 @@ below `session`, which folds its summary into the run accounting.
 from std.os.path import isdir
 
 from mtest.cache import BuildRegistry
-from mtest.config import RunnerConfig, lossy_utf8
+from mtest.config import ResolvedConfig, lossy_utf8
 from mtest.discover import normalize_operand, normalize_root
 from mtest.discover.result import DiscoveryResult
 from mtest.exec import (
@@ -61,11 +61,19 @@ from mtest.session.build import (
     _probe_file,
 )
 from mtest.session.classify import classify, resolve_report
+from mtest.session.effective_settings import (
+    EffectiveFileSettings,
+    effective_file_settings,
+)
 from mtest.session.file_result import (
     FileResult,
     _CrashFile,
     _failing_count,
     _prepend_events,
+)
+from mtest.select.failure_selection import (
+    CollectedNames,
+    resolve_last_failed,
 )
 from mtest.session.names import _same_set, _str_in
 from mtest.session.pipeline import (
@@ -166,6 +174,7 @@ struct _Collected(Copyable, Movable):
     """
 
     var rel: String
+    var settings: EffectiveFileSettings
     var terminal: Bool
     var terminal_result: FileResult
     var universe: List[String]
@@ -193,17 +202,21 @@ struct _Collected(Copyable, Movable):
     to FLAKY."""
 
 
-def _blank_collected(rel: String) -> _Collected:
+def _blank_collected(
+    rel: String, settings: EffectiveFileSettings
+) -> _Collected:
     """An admitted-but-untouched run file, before its build step runs.
 
     Args:
         rel: The root-relative path of the discovered file.
+        settings: The file's effective deadlines and retry/serial policy.
 
     Returns:
         The file's initial payload. Allocates its empty lists.
     """
     return _Collected(
         rel,
+        settings,
         False,
         _blank_file_result(),
         List[String](),
@@ -255,7 +268,7 @@ def _selected_view(
 
 
 def _reconcile_and_classify(
-    config: RunnerConfig,
+    settings: EffectiveFileSettings,
     rel: String,
     term: ProcessResult,
     universe: List[String],
@@ -277,7 +290,7 @@ def _reconcile_and_classify(
     the verdict through the classifier.
 
     Args:
-        config: The resolved runner configuration, for the run deadline.
+        settings: The file's effective deadlines and retry/serial policy.
         rel: The root-relative path of the file.
         term: The completed run's process result.
         universe: The test names collected by the probe.
@@ -325,7 +338,7 @@ def _reconcile_and_classify(
             rdur,
             term,
             len(deselected),
-            timeout_seconds=config.timeout_secs,
+            timeout_seconds=settings.timeout_secs,
             attempts_used=attempts_used,
             escalated=rterm.escalated,
         )
@@ -709,7 +722,7 @@ def _run_selection[
     C: ReportCoordinator
 ](
     mut runtime: ExecRuntime,
-    config: RunnerConfig,
+    resolved: ResolvedConfig,
     root: String,
     disc: DiscoveryResult,
     include_paths: List[String],
@@ -734,7 +747,7 @@ def _run_selection[
 
     Args:
         runtime: The exec runtime supervising every build, probe, and run.
-        config: The resolved runner configuration.
+        resolved: Layered global configuration and per-file override tables.
         root: The invocation root the children run in.
         disc: The discovery result, supplying the run files and exclusions.
         include_paths: Directories passed to the compiler as `-I`.
@@ -750,6 +763,7 @@ def _run_selection[
         Error: If selection names an unknown test, a `select:` usage error
             which main maps to exit 4.
     """
+    var config = resolved.config.copy()
     var nroot = normalize_root(root)
 
     # --exclude beats a node id: a node-id file that was excluded is dropped
@@ -775,13 +789,15 @@ def _run_selection[
                 break
 
     var collected = List[_Collected]()
+    var retry_budgets = List[Int]()
     for ri in range(len(disc.run_files)):
-        collected.append(_blank_collected(disc.run_files[ri]))
+        var settings = effective_file_settings(resolved, disc.run_files[ri])
+        retry_budgets.append(settings.retries)
+        collected.append(_blank_collected(disc.run_files[ri], settings))
 
-    var pipeline = RunPipeline(
-        len(disc.run_files), config.retries, config.exitfirst, config.maxfail
+    var pipeline = RunPipeline.from_retry_budgets(
+        retry_budgets^, config.exitfirst, config.maxfail
     )
-    var attempts_planned = config.retries + 1
 
     var announced = False
     var run_outcomes = List[Outcome]()
@@ -796,6 +812,124 @@ def _run_selection[
             break
 
         if step.kind == StepKind.ANNOUNCE_COLLECTION:
+            if config.last_failed:
+                if resolved.state and len(resolved.last_run_state.records) > 0:
+                    var collected_names = List[CollectedNames]()
+                    for item in collected:
+                        collected_names.append(
+                            CollectedNames(
+                                item.rel,
+                                item.universe.copy(),
+                                item.selected.copy(),
+                            )
+                        )
+                    var soft = resolve_last_failed(
+                        disc.run_files,
+                        collected_names,
+                        resolved.last_run_state,
+                        disc.gate_files,
+                    )
+                    for identifier in soft.stale_ids:
+                        reporter.handle(
+                            Event.warning(
+                                "lf-stale",
+                                (
+                                    "lf: previously-failing "
+                                    + identifier
+                                    + " no longer exists — dropped"
+                                ),
+                            )
+                        )
+                    var has_final_match = False
+                    if soft.matched:
+                        for ci in range(len(collected)):
+                            var found = False
+                            for chosen in soft.files:
+                                if chosen.path != collected[ci].rel:
+                                    continue
+                                found = True
+                                if collected[ci].terminal:
+                                    has_final_match = True
+                                    break
+                                if chosen.whole_file:
+                                    collected[ci].selected = collected[
+                                        ci
+                                    ].orig_selected.copy()
+                                else:
+                                    collected[ci].selected = chosen.names.copy()
+                                if len(collected[ci].selected) > 0:
+                                    has_final_match = True
+                                break
+                            if collected[ci].terminal:
+                                continue
+                            if not found:
+                                collected[ci].selected = []
+                            var deselected = List[String]()
+                            for name in collected[ci].universe:
+                                if not _str_in(collected[ci].selected, name):
+                                    deselected.append(name)
+                            collected[ci].deselected = deselected^
+                            pipeline.replace_selection_empty(
+                                ci, len(collected[ci].selected) == 0
+                            )
+                    # A state file whose only live records name gates matched
+                    # everything it remembered: gates always run, so the
+                    # remembered failure is already being re-run and there is
+                    # nothing left to narrow. Widening back to the full suite
+                    # would run precisely what --lf exists to skip, and saying
+                    # nothing matched would be false.
+                    if (
+                        not soft.matched
+                        and not has_final_match
+                        and soft.gate_matched
+                    ):
+                        reporter.handle(
+                            Event.warning(
+                                "lf-gates-only",
+                                (
+                                    "lf: every previously-failing entry is a"
+                                    " gate — running the gates only"
+                                ),
+                            )
+                        )
+                        for ci in range(len(collected)):
+                            if collected[ci].terminal:
+                                continue
+                            collected[ci].selected = []
+                            collected[ci].deselected = collected[
+                                ci
+                            ].universe.copy()
+                            pipeline.replace_selection_empty(ci, True)
+                    elif not soft.matched or not has_final_match:
+                        reporter.handle(
+                            Event.warning(
+                                "lf-empty",
+                                (
+                                    "lf: no previously-failing tests match this"
+                                    " selection — running the full selection"
+                                ),
+                            )
+                        )
+                        for ci in range(len(collected)):
+                            if collected[ci].terminal:
+                                continue
+                            collected[ci].selected = collected[
+                                ci
+                            ].orig_selected.copy()
+                            var deselected = List[String]()
+                            for name in collected[ci].universe:
+                                if not _str_in(collected[ci].selected, name):
+                                    deselected.append(name)
+                            collected[ci].deselected = deselected^
+                            pipeline.replace_selection_empty(
+                                ci, len(collected[ci].selected) == 0
+                            )
+                    else:
+                        for ci in range(len(collected)):
+                            if not collected[ci].terminal:
+                                collected[ci].orig_selected = collected[
+                                    ci
+                                ].selected.copy()
             # Collection is known: emit the run-wide totals before any body
             # runs. A file that never became runnable contributes neither.
             var sel_total = 0
@@ -821,7 +955,14 @@ def _run_selection[
             var bo: _BuildOutcome
             try:
                 bo = _build_for_selection(
-                    runtime, config, root, collected[i].rel, include_paths, reg
+                    runtime,
+                    config,
+                    collected[i].settings,
+                    root,
+                    collected[i].rel,
+                    include_paths,
+                    reg,
+                    attempts_used=step.attempt if step.recovering else 1,
                 )
             except:
                 reporter.handle(
@@ -883,7 +1024,7 @@ def _run_selection[
             try:
                 po = _probe_file(
                     runtime,
-                    config,
+                    collected[i].settings,
                     root,
                     collected[i].rel,
                     collected[i].binary,
@@ -891,6 +1032,7 @@ def _run_selection[
                     collected[i].build_argv,
                     collected[i].bdur,
                     reg,
+                    attempts_used=step.attempt if step.recovering else 1,
                 )
             except:
                 reporter.handle(
@@ -932,6 +1074,7 @@ def _run_selection[
                         crash_files.append(
                             _CrashFile(
                                 collected[i].rel,
+                                collected[i].settings,
                                 collected[i].binary,
                                 collected[i].orig_selected.copy(),
                             )
@@ -957,15 +1100,33 @@ def _run_selection[
                 collected[i].intent,
                 config.keyword,
             )
-            collected[i].selected = sr.selected.copy()
             if not step.recovering:
-                # Pin the original selection once, at the first probe. A
-                # recovery re-probe re-selects `selected` (which the run then
-                # executes, exactly as before), but must NOT move the set a
-                # crash is attributed against — see `_Collected.orig_selected`.
+                collected[i].selected = sr.selected.copy()
+                # Pin the ordinary CLI selection once. The persisted soft
+                # filter intersects this set later and never enters
+                # `select_from`, so user-supplied unknown names remain usage
+                # errors while stale state never becomes one.
                 collected[i].orig_selected = sr.selected.copy()
-            collected[i].deselected = sr.deselected.copy()
-            pipeline.record_probe_qualified(i, len(sr.selected) == 0)
+                collected[i].deselected = sr.deselected.copy()
+            elif config.last_failed:
+                # A stale-name rebuild may change the fresh universe, but it
+                # cannot widen the effective post-`--lf` selection. Preserve
+                # source order from the fresh ordinary selection while
+                # intersecting it with the names the original run admitted.
+                var recovered = List[String]()
+                for name in sr.selected:
+                    if _str_in(collected[i].orig_selected, name):
+                        recovered.append(name)
+                collected[i].selected = recovered^
+                var deselected = List[String]()
+                for name in collected[i].universe:
+                    if not _str_in(collected[i].selected, name):
+                        deselected.append(name)
+                collected[i].deselected = deselected^
+            else:
+                collected[i].selected = sr.selected.copy()
+                collected[i].deselected = sr.deselected.copy()
+            pipeline.record_probe_qualified(i, len(collected[i].selected) == 0)
             continue
 
         # --- the run pass: replay, skip, or run one file --------------------
@@ -996,6 +1157,7 @@ def _run_selection[
                 crash_files.append(
                     _CrashFile(
                         collected[i].rel,
+                        collected[i].settings,
                         collected[i].binary,
                         collected[i].orig_selected.copy(),
                     )
@@ -1034,7 +1196,9 @@ def _run_selection[
             rres = run_supervised(
                 runtime,
                 ProcessSpec.command_in(
-                    run_argv^, root, config.timeout_secs * 1000
+                    run_argv^,
+                    root,
+                    collected[i].settings.timeout_secs * 1000,
                 ),
             )
         except:
@@ -1103,12 +1267,12 @@ def _run_selection[
                         rc,
                         att,
                         step.attempt,
-                        attempts_planned,
+                        collected[i].settings.retries + 1,
                     )
                 )
                 continue
             fr = _reconcile_and_classify(
-                config,
+                collected[i].settings,
                 collected[i].rel,
                 rres,
                 collected[i].universe,
@@ -1140,6 +1304,7 @@ def _run_selection[
             crash_files.append(
                 _CrashFile(
                     collected[i].rel,
+                    collected[i].settings,
                     collected[i].binary,
                     collected[i].orig_selected.copy(),
                 )

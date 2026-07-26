@@ -18,18 +18,30 @@ Design (hardened after adversarial review):
     green summary. So the oracle asserts the EXACT collected node-id set and
     EXACT counts, and uses POISON probes: a test that would FAIL/CRASH if it ran,
     so a broken selection/exclusion/early-stop flips the frozen exit code.
-  * No false green. A stale binary is rebuilt before validating; a run that
-    selects zero checks, or SKIPs a safety-critical check under --strict, exits
-    non-zero. Setup failures exit 2 (distinct from a contract failure's 1).
+  * No false green. A run that selects zero checks, that SKIPs any check
+    under --strict, or that did not perform every check on
+    EXPECTED_CHECK_NAMES, exits non-zero. The roster exists because
+    deleting a check's call site is otherwise invisible: the remaining
+    checks keep `ran > 0` and the gate prints "0 failed, 0 skipped".
+    Setup failures exit 2 (distinct from a contract failure's 1). Freshness of the binary
+    under test is enforced, not just warned: `pixi run contract-check`
+    rebuilds a missing-or-stale `build/mtest` before validating; the
+    blocking `pixi run contract-check-strict` gate instead runs
+    `--no-rebuild` against the binary its own Pixi `build-bin` dependency
+    JUST produced, and fails closed (exit 2) if that binary is missing or
+    looks stale rather than silently building one of its own.
 
 Usage:
     pixi run contract-check --                          # rebuild-if-stale, run all
     pixi run contract-check -- -k selection             # filter by check name
     pixi run contract-check -- --strict                 # SKIP -> failure
     pixi run contract-check -- --keep --no-rebuild -v
+    pixi run contract-check-strict                      # the blocking release-floor gate
 
-Exit: 0 all passed; 1 a contract check failed (or --strict skip / zero checks);
-2 setup failure (no toolchain, binary won't build). CI-usable.
+Exit: 0 all passed; 1 a contract check failed (or a --strict skip); 2 setup
+failure (no toolchain, binary won't build, --no-rebuild found a missing/stale
+binary, zero checks ran, or the roster of performed checks was incomplete).
+CI-usable.
 """
 from __future__ import annotations
 
@@ -41,6 +53,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -88,36 +101,273 @@ def pixi_env() -> dict[str, str]:
     return env
 
 
-def _newest_mtime(dirs: list[Path]) -> float:
+# Every input whose change can change the bytes of build/mtest: the Mojo
+# sources, the private native adapter, the two build scripts that produce it,
+# the pinned strict-compile flag list, and the two manifests that pin the
+# toolchain building it. This list is a fail-closed HEURISTIC for staleness,
+# NOT a content-identity proof — mtimes can agree by coincidence and a
+# touched-but-unchanged file looks "newer" without changing a single byte.
+# The actual provenance guarantee for a strict run is the Pixi
+# `contract-check-strict -> build-bin` task edge: that edge always rebuilds
+# build/mtest from this exact tree immediately before this checker runs with
+# `--no-rebuild`. This scan exists only to fail closed if that edge was
+# bypassed (a bare `--no-rebuild` invocation against a stale or missing
+# binary left over from something else).
+BINARY_INPUT_PATHS = [
+    REPO / "src",
+    REPO / "native",
+    REPO / "scripts" / "build" / "production_build.sh",
+    REPO / "scripts" / "build" / "native.py",
+    REPO / "scripts" / "build" / "native_strict_flags.txt",
+    REPO / "pixi.toml",
+    REPO / "pixi.lock",
+]
+
+
+def _newest_mtime(paths: list[Path]) -> float:
     m = 0.0
-    for d in dirs:
-        if d.is_dir():
-            for f in d.rglob("*"):
+    for p in paths:
+        if p.is_dir():
+            for f in p.rglob("*"):
                 if f.is_file():
                     m = max(m, f.stat().st_mtime)
+        elif p.is_file():
+            m = max(m, p.stat().st_mtime)
     return m
 
 
-def ensure_binary(env: dict[str, str], rebuild: bool, allow_rebuild: bool) -> None:
-    """Build `build/mtest`, and REBUILD it when older than any source file.
+def _run_build_bin(env: dict[str, str]) -> subprocess.CompletedProcess:
+    return subprocess.run(["pixi", "run", "build-bin"], cwd=REPO, env=env)
 
-    A stale binary validates the *old* code and reports a false green — this bit
-    the project during its own QA pass. Freshness is enforced, not just warned.
+
+def ensure_binary(
+    binary: Path,
+    input_paths: list[Path],
+    env: dict[str, str],
+    rebuild: bool,
+    allow_rebuild: bool,
+    build: Callable[[dict[str, str]], subprocess.CompletedProcess] | None = None,
+) -> None:
+    """Build `binary`, and REBUILD it when missing or older than any input.
+
+    A stale binary validates the *old* code and reports a false green — this
+    bit the project during its own QA pass. Freshness is enforced, not just
+    warned: with `--no-rebuild` (`allow_rebuild=False`), a missing or stale
+    binary is a setup failure (exit 2) — this checker never silently
+    validates old or absent bytes, and it never starts a build of its own
+    when the caller explicitly forbade one.
     """
-    stale = MTEST.is_file() and MTEST.stat().st_mtime < _newest_mtime(
-        [REPO / "src", REPO / "native"]
-    )
-    if MTEST.is_file() and not rebuild and not stale:
+    if build is None:
+        build = _run_build_bin
+    missing = not binary.is_file()
+    stale = not missing and binary.stat().st_mtime < _newest_mtime(input_paths)
+    if not allow_rebuild:
+        if missing:
+            _die(f"{binary} is missing and --no-rebuild is set — this checker "
+                 "does not build on its own; run `pixi run build-bin` first "
+                 "(the contract-check-strict Pixi task does this for you)")
+        if stale:
+            _die(f"{binary} is older than a binary input (src/, native/, the "
+                 "build scripts, pixi.toml, or pixi.lock) and --no-rebuild is "
+                 "set — refusing to validate stale bytes")
         return
-    if not allow_rebuild and MTEST.is_file():
-        print("warning: build/mtest is STALE vs src/ but --no-rebuild set — "
-              "validating possibly-old code", file=sys.stderr)
+    if not missing and not rebuild and not stale:
         return
-    why = "missing" if not MTEST.is_file() else ("forced" if rebuild else "stale")
-    print(f"setup: building build/mtest ({why}) ...", flush=True)
-    r = subprocess.run(["pixi", "run", "build-bin"], cwd=REPO, env=env)
-    if r.returncode != 0 or not MTEST.is_file():
-        _die("could not build build/mtest")
+    why = "missing" if missing else ("forced" if rebuild else "stale")
+    print(f"setup: building {binary} ({why}) ...", flush=True)
+    r = build(env)
+    if r.returncode != 0 or not binary.is_file():
+        _die(f"could not build {binary}")
+
+
+def wait_until(
+    predicate: Callable[[], bool], deadline: float, poll_interval: float = 0.2
+) -> bool:
+    """Bounded poll: True as soon as `predicate()` is true, False once
+    `deadline` (a `time.time()`-comparable epoch) passes first.
+
+    A genuine readiness/absence barrier, never a fixed sleep: the caller
+    decides the acceptable bound via `deadline`, and gets an answer as soon
+    as the condition is met instead of always waiting out a guessed
+    duration.
+    """
+    while True:
+        if predicate():
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(poll_interval)
+
+
+# --------------------------------------------------------------------------- #
+# Exact-process identification for the SIGINT probe. `mtest` builds each test
+# file with `mojo build <file> -o build/bin/<mangled-name> ...`, so a plain
+# `pgrep -f <mangled-name>` scan matches BOTH the exec'd test binary AND, for
+# as long as it is still running, its own COMPILER — the compiler's command
+# line mentions the same string as its `-o` target. These helpers resolve
+# that ambiguity by argv[0] (the process's own executable path), which only
+# the exec'd binary itself ends with, never the compiler invoking it.
+# --------------------------------------------------------------------------- #
+def matching_pids(pattern: str) -> list[str]:
+    """PIDs whose full command line contains `pattern` (`pgrep -f`).
+
+    Raises `RuntimeError` if this platform's process inspection (`pgrep`) is
+    unavailable or misbehaves — callers route that through
+    `_skip_or_fail_result`, so missing support is a strict failure under
+    `--strict`, never a silent pass.
+    """
+    try:
+        r = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"pgrep unavailable: {e}") from e
+    if r.returncode not in (0, 1):  # 1 == "no match", not an error
+        raise RuntimeError(f"pgrep exited {r.returncode}: {r.stderr.strip()}")
+    return [p for p in r.stdout.split() if p]
+
+
+def process_argv0(pid: str) -> str:
+    """The first whitespace-separated token of `pid`'s full command line.
+
+    Deliberately `ps -o args=`, never `ps -o comm=`: Linux truncates `comm`
+    to 15 characters, and a mangled test-binary name can be longer
+    (`irq_stest_u1hang` is 16), so a `comm`-based comparison would silently
+    fail to match the exact binary this probe must identify. Returns "" if
+    the process has already exited.
+    """
+    try:
+        r = subprocess.run(["ps", "-o", "args=", "-p", pid], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"ps unavailable: {e}") from e
+    args = r.stdout.strip()
+    return args.split(None, 1)[0] if args else ""
+
+
+def process_state(pid: str) -> str:
+    """`pid`'s one-letter process state (`ps -o state=`), or "" if gone."""
+    try:
+        r = subprocess.run(["ps", "-o", "state=", "-p", pid], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"ps unavailable: {e}") from e
+    return r.stdout.strip()[:1]
+
+
+def exact_process_pid(mangled_name: str) -> str | None:
+    """The PID of the process whose OWN executable is `mangled_name`, never
+    a `mojo build` compiler that merely mentions it as an `-o` argument.
+    `None` if no such process is currently running.
+    """
+    for pid in matching_pids(mangled_name):
+        argv0 = process_argv0(pid)
+        if argv0 and argv0.endswith(mangled_name):
+            return pid
+    return None
+
+
+# The mangled binary name (see `mtest.session.scratch._mangle`) for the one
+# file `check_interrupt` needs to still be hanging when it sends SIGINT:
+# `irq/test_1hang.mojo` -> strip `.mojo`, escape `/` as `_s` and `_` as `_u`.
+HANG_MANGLED_NAME = "irq_stest_u1hang"
+
+
+def _default_killtree(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        pass
+
+
+def _skip_or_fail_result(strict: bool, detail: str) -> tuple[str, str]:
+    if strict:
+        return FAIL, detail + " (--strict: counted as failure)"
+    return SKIP, detail
+
+
+def run_interrupt_probe(
+    spawn: Callable[[], subprocess.Popen],
+    hang_ready: Callable[[], bool],
+    hang_present: Callable[[], bool],
+    strict: bool,
+    outer_deadline: float,
+    orphan_timeout: float = 10.0,
+    poll_interval: float = 0.2,
+    killtree: Callable[[subprocess.Popen], None] | None = None,
+    send_sigint: Callable[[int], None] | None = None,
+) -> tuple[str, str]:
+    """Drive one SIGINT-frees-the-owned-child-group probe attempt.
+
+    Returns `(status, detail)` with `status` one of the module's `PASS`,
+    `FAIL`, `SKIP` constants. This is the EXACT code path
+    `Runner.check_interrupt` runs against the real `mtest` binary — it is
+    free of `Runner`/`self` specifically so the negative controls in
+    `scripts/tests/test_contract.py` can drive it directly with a fake
+    `spawn`, fake `hang_ready`/`hang_present` predicates, and a fake
+    `send_sigint` (never a real `os.kill` against a fabricated PID) instead
+    of re-implementing this logic in the test.
+
+    `hang_ready`/`hang_present` may raise `RuntimeError` (missing platform
+    process inspection); that is routed through `_skip_or_fail_result`, so
+    it is a FAIL under `--strict` and a SKIP otherwise — never a silent
+    pass. `SIGINT` is sent to `spawn()`'s process only after `hang_ready()`
+    reports true (readiness), never on a fixed sleep. The readiness wait
+    also exits early — before `outer_deadline` — if the spawned process
+    itself has already exited: a dead supervisor will never spawn the hang
+    child, so waiting out the full deadline would only stall this
+    now-blocking gate for no benefit.
+    """
+    if killtree is None:
+        killtree = _default_killtree
+    if send_sigint is None:
+        send_sigint = lambda pid: os.kill(pid, signal.SIGINT)  # noqa: E731
+    try:
+        proc = spawn()
+    except OSError as e:
+        return _skip_or_fail_result(strict, f"could not spawn: {e}")
+    try:
+        ready = False
+        while True:
+            try:
+                if hang_ready():
+                    ready = True
+                    break
+            except RuntimeError as e:
+                proc.kill()
+                return _skip_or_fail_result(strict, str(e))
+            if proc.poll() is not None:
+                break  # the supervisor already exited; it will never spawn
+                       # the hang child now — stop waiting for it.
+            if time.time() >= outer_deadline:
+                break
+            time.sleep(poll_interval)
+        if not ready:
+            killtree(proc)
+            return _skip_or_fail_result(strict, "child never became ready")
+        send_sigint(proc.pid)  # ONLY the supervisor — teardown must free the child; SIGINT only after readiness
+        try:
+            out, _ = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            killtree(proc)
+            return FAIL, "did not exit within 30s of SIGINT"
+        try:
+            gone = wait_until(
+                lambda: not hang_present(), time.time() + orphan_timeout, poll_interval=poll_interval
+            )
+        except RuntimeError as e:
+            killtree(proc)
+            return _skip_or_fail_result(strict, str(e))
+        orphan = not gone
+        ok = proc.returncode == 2 and "not run" in out and not orphan
+        if ok:
+            return PASS, ""
+        detail = f"exit {proc.returncode} (want 2); orphaned_child={orphan}"
+        if orphan:
+            detail += "; child survived cleanup"
+        return FAIL, detail
+    finally:
+        killtree(proc)
 
 
 # --------------------------------------------------------------------------- #
@@ -240,7 +490,127 @@ class Check:
 
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
-CRITICAL = {"interrupt: SIGINT frees the owned process group"}  # skip-sensitive under --strict
+
+EXPECTED_CHECK_NAMES: tuple[str, ...] = (
+    "help: version prints the version",
+    "outcome: passing tests/ -> 0, exact count",
+    "outcome: FAIL -> 1",
+    "outcome: CRASH is not a FAIL -> 1",
+    "outcome: COMPILE-ERROR -> 1",
+    "outcome: MALFORMED-SUITE -> 1",
+    "outcome: NO-TESTS-only session -> 5",
+    "outcome: TIMEOUT -> 1",
+    "discover: nonexistent path -> 4 (stderr)",
+    "discover: empty dir -> 5",
+    "discover: explicit non-test_ file bypasses pattern",
+    "discover: operand escaping root -> 4 (stderr)",
+    "select: node id runs exactly one; sibling poison must NOT run",
+    "select: -k selects the matching set",
+    "select: -k case-insensitive",
+    "select: -k matches nothing -> 5",
+    "select: unknown test in a real file -> 4",
+    "select: node id whose path is a DIRECTORY -> 4",
+    "exclude: pattern truly removes a would-crash file (exit stays 0)",
+    "exclude: stale pattern warns loudly",
+    "exclude: everything excluded -> 5",
+    "stop: -x stops scheduling; poison sibling stays NOT-RUN",
+    "stop: --maxfail 1 stops; poison sibling stays NOT-RUN",
+    "stop: failing --gate aborts the whole run (exact not-run)",
+    "collect: --durations rejected in collect -> 4",
+    "collect: --maxfail rejected in collect -> 4",
+    "collect: --retries rejected in collect -> 4",
+    "collect: --json rejected in collect -> 4",
+    "collect: --junit-xml rejected in collect -> 4",
+    "collect: --gh-annotations rejected in collect -> 4 (even off)",
+    "collect: -k ignored with a loud notice (\u00a724.3 deviation)",
+    "collect: node-id operand lists whole file (\u00a724.3 deviation)",
+    "build-arg: -o forbidden -> 4, and the test never ran (pre-run, \u00a79)",
+    "build-arg: --emit forbidden -> 4",
+    "build-arg: extra source after -- forbidden -> 4",
+    "exit-3: bad --mojo (spawn failure) -> 3",
+    "exit-3: off-grammar report (drift) -> 3, never a verdict",
+    "value: --durations negative -> 4",
+    "value: --timeout non-integer -> 4",
+    "value: --show-output bad mode -> 4",
+    "value: --color bad mode -> 4",
+    "value: -q and -v mutually exclusive -> 4",
+    "precompile: failure -> PRECOMPILE-ERROR, casualties listed, exit 1",
+    "served: -n accepted (not exit 4)",
+    "served: --workers accepted (not exit 4)",
+    "served: --serial accepted (not exit 4)",
+    "served: --retries accepted (not exit 4)",
+    "served: --compile-timeout accepted (not exit 4)",
+    "served: --junit-xml accepted (not exit 4)",
+    "served: --gh-annotations accepted (not exit 4)",
+    "served: --json accepted (not exit 4)",
+    "served: collect --shard partitions (not exit 4)",
+    "collect: exact node-id set for tests/",
+    "determinism: collect byte-identical",
+    "help: --help -> stdout, exit 0",
+    "usage error: -V -> stderr, exit 4",
+    "collect: streams split, listing continues past a bad probe",
+    "color: --color always beats NO_COLOR",
+    "precompile: success path resolves import (auto -I)",
+    "interrupt: SIGINT frees the owned process group",
+)
+"""Every check `main` must perform, in order, on an unfiltered run.
+
+An independent origin, never derived from `build_matrix` or from the bespoke
+dispatch below. That is the whole point: the gate previously had no way to
+notice that a check it advertises did not run. Deleting
+`runner.check_interrupt(args.strict)` left every unit test green, made
+`ran > 0` true from the other checks, and let both blocking
+`contract-check-strict` lanes print "0 failed, 0 skipped" and exit 0 with the
+SIGINT clause never tested. Same shape as `package_consumption.GATE_STAGE_IDS`
+against its stage ledger.
+
+Two entries come from one dispatch: `check_help_stream` records both the
+`--help` and the `-V` clause, so they are adjacent here and move together.
+"""
+
+
+class ContractRosterError(Exception):
+    """The gate did not perform the checks it reports."""
+
+
+def verify_every_check_ran(
+    performed: tuple[str, ...], filtered: bool
+) -> None:
+    """Refuse to report a verdict unless the rostered checks actually ran.
+
+    Args:
+        performed: The check names `main` recorded, in the order recorded.
+        filtered: Whether `--filter` narrowed the run. A filtered run cannot
+            be complete, so it is held only to the weaker property that what
+            ran is a subset of the roster in roster order — enough to catch a
+            renamed or duplicated check, not enough to catch a deleted one.
+            The blocking `contract-check-strict` task passes no filter, and
+            `test_pixi_task_uses_the_package_entry_point` pins that.
+
+    Raises:
+        ContractRosterError: A rostered check did not run, an unrostered check
+            ran, or checks ran out of their declared order.
+    """
+    unknown = [name for name in performed if name not in EXPECTED_CHECK_NAMES]
+    if unknown:
+        raise ContractRosterError(
+            f"contract gate ran checks that are not on its roster: {unknown}"
+        )
+    if not filtered:
+        if performed != EXPECTED_CHECK_NAMES:
+            missing = [n for n in EXPECTED_CHECK_NAMES if n not in performed]
+            raise ContractRosterError(
+                "the contract gate did not perform every check it reports: "
+                f"ran {len(performed)} of {len(EXPECTED_CHECK_NAMES)}"
+                + (f", missing {missing}" if missing else " in that order")
+            )
+        return
+    expected_order = [n for n in EXPECTED_CHECK_NAMES if n in performed]
+    if list(performed) != expected_order:
+        raise ContractRosterError(
+            "the contract gate ran a filtered subset out of roster order or "
+            f"more than once: {list(performed)}"
+        )
 
 
 class Runner:
@@ -335,7 +705,12 @@ class Runner:
         ref = "§15.1 --color never/always; the flag wins over NO_COLOR"
         name = "color: --color always beats NO_COLOR"
 
-        def esc(mode: str, no_color: bool) -> int:
+        # The ANSI count alone is not an oracle: a run that died early after
+        # emitting one colored banner satisfies "always > 0" while never
+        # reaching a verdict. tests/test_reverse.mojo is an all-passing
+        # fixture, so exit 0 is part of what "color did not change behavior"
+        # means, and each run is held to it.
+        def esc(mode: str, no_color: bool) -> tuple[int, int]:
             e = dict(self.env)
             if no_color:
                 e["NO_COLOR"] = "1"
@@ -344,14 +719,16 @@ class Runner:
             r = subprocess.run(
                 [str(MTEST), "-I", "build", "--color", mode, "tests/test_reverse.mojo"],
                 cwd=self.root, env=e, capture_output=True, text=True)
-            return r.stdout.count("\x1b[")
+            return r.stdout.count("\x1b["), r.returncode
 
-        never = esc("never", False)
-        always = esc("always", False)
-        wins = esc("always", True)  # flag must beat NO_COLOR (§15.1)
-        ok = never == 0 and always > 0 and wins > 0
+        never, never_rc = esc("never", False)
+        always, always_rc = esc("always", False)
+        wins, wins_rc = esc("always", True)  # flag must beat NO_COLOR (§15.1)
+        exits = (never_rc, always_rc, wins_rc)
+        ok = never == 0 and always > 0 and wins > 0 and exits == (0, 0, 0)
         self.record(PASS if ok else FAIL, name, ref,
-                    "" if ok else f"never={never}(0?) always={always}(>0?) NO_COLOR+always={wins}(>0?)")
+                    "" if ok else f"never={never}(0?) always={always}(>0?) "
+                                  f"NO_COLOR+always={wins}(>0?) exits={exits}(all 0?)")
 
     def check_precompile_success(self):
         # §8.3: a successful --precompile builds the pkg and auto-adds its -I so a
@@ -375,66 +752,24 @@ class Runner:
         (self.root / "irq" / "test_2pass.mojo").write_text(
             HEAD + "def test_p() raises:\n    assert_equal(1, 1)\n" + MAIN)
 
-        def pgrep_hang() -> bool:
-            try:
-                return subprocess.run(["pgrep", "-f", "irq_stest_"],
-                                      capture_output=True).returncode == 0
-            except OSError:
-                raise RuntimeError("pgrep unavailable")
-
-        try:
-            proc = subprocess.Popen(
+        def spawn() -> subprocess.Popen:
+            return subprocess.Popen(
                 [str(MTEST), "-I", "build", "--timeout", "0", "irq"],
                 cwd=self.root, env=self.env, text=True,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 start_new_session=True)
-        except OSError as e:
-            return self._skip_or_fail(strict, name, ref, f"could not spawn: {e}")
-        try:
-            deadline = time.time() + 120
-            running = False
-            while time.time() < deadline:
-                try:
-                    if pgrep_hang():
-                        running = True
-                        break
-                except RuntimeError as e:
-                    proc.kill()
-                    return self._skip_or_fail(strict, name, ref, str(e))
-                if proc.poll() is not None:
-                    break
-                time.sleep(0.2)
-            if not running:
-                self._killtree(proc)
-                return self._skip_or_fail(strict, name, ref, "hang binary never observed")
-            time.sleep(1.0)
-            os.kill(proc.pid, signal.SIGINT)  # ONLY mtest — teardown must free the child
-            try:
-                out, _ = proc.communicate(timeout=30)
-            except subprocess.TimeoutExpired:
-                self._killtree(proc)
-                return self.record(FAIL, name, ref, "did not exit within 30s of SIGINT")
-            time.sleep(0.5)
-            orphan = pgrep_hang()
-            ok = proc.returncode == 2 and "not run" in out and not orphan
-            self.record(PASS if ok else FAIL, name, ref,
-                        "" if ok else f"exit {proc.returncode} (want 2); orphaned_child={orphan}")
-        finally:
-            self._killtree(proc)
 
-    def _killtree(self, proc):
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (OSError, ProcessLookupError):
-            pass
-        try:
-            proc.wait(timeout=5)
-        except Exception:
-            pass
+        def hang_present() -> bool:
+            return exact_process_pid(HANG_MANGLED_NAME) is not None
 
-    def _skip_or_fail(self, strict, name, ref, detail):
-        self.record(FAIL if strict else SKIP, name, ref,
-                    detail + (" (--strict: counted as failure)" if strict else ""))
+        def hang_ready() -> bool:
+            pid = exact_process_pid(HANG_MANGLED_NAME)
+            return pid is not None and process_state(pid) == "S"
+
+        status, detail = run_interrupt_probe(
+            spawn, hang_ready, hang_present, strict, time.time() + 120
+        )
+        self.record(status, name, ref, detail)
 
 
 # --------------------------------------------------------------------------- #
@@ -466,7 +801,7 @@ def build_matrix() -> list[Check]:
     ]
     checks = [
         # Version identity (§19) — discriminating, not a bare "mtest".
-        Check("help: version prints the version", "§19", ["version"], 0, out_has=["mtest 0.5.0"]),
+        Check("help: version prints the version", "§19", ["version"], 0, out_has=["mtest 0.6.0"]),
         # Outcomes + FROZEN exit codes (§9,§10). CRASH must stay distinct from FAIL (§10).
         Check("outcome: passing tests/ -> 0, exact count", "§9,§10", I + ["tests"], 0,
               any_has=["4 passed", "NO-TESTS"]),
@@ -581,7 +916,7 @@ def main() -> int:
     args = ap.parse_args()
 
     env = pixi_env()
-    ensure_binary(env, args.rebuild, allow_rebuild=not args.no_rebuild)
+    ensure_binary(MTEST, BINARY_INPUT_PATHS, env, args.rebuild, allow_rebuild=not args.no_rebuild)
 
     root = Path(tempfile.mkdtemp(prefix="mtest-validate-"))
     try:
@@ -616,8 +951,29 @@ def main() -> int:
             runner.check_color()
         if wanted("precompile: success path resolves import (auto -I)"):
             runner.check_precompile_success()
-        if not args.no_interrupt and wanted("interrupt: SIGINT frees the owned process group"):
-            runner.check_interrupt(args.strict)
+        if wanted("interrupt: SIGINT frees the owned process group"):
+            if args.no_interrupt:
+                # Recorded, not bypassed. Testing --no-interrupt BEFORE
+                # wanted() gated the check off before --strict could observe
+                # a SKIP, so the one skip-sensitive clause could be dropped
+                # from a blocking lane without leaving a trace.
+                runner.record(
+                    SKIP,
+                    "interrupt: SIGINT frees the owned process group",
+                    "§9/§24.2 SIGINT -> exit 2, partial summary, owned child group freed",
+                    "skipped by --no-interrupt",
+                )
+            else:
+                runner.check_interrupt(args.strict)
+
+        try:
+            verify_every_check_ran(
+                tuple(name for _, name, _, _ in runner.results),
+                filtered=bool(args.filter),
+            )
+        except ContractRosterError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
 
         n_pass = sum(1 for s, *_ in runner.results if s == PASS)
         n_fail = sum(1 for s, *_ in runner.results if s == FAIL)
@@ -634,7 +990,10 @@ def main() -> int:
         if ran == 0:
             print("error: no checks ran (filter matched nothing) — not a pass", file=sys.stderr)
             return 2
-        return 1 if n_fail else 0
+        # The NOTE above promises this. It used to be true only of the one
+        # check that converted its own skip to a failure internally, which
+        # left `--strict --no-interrupt` reporting an all-green run.
+        return 1 if (n_fail or (args.strict and n_skip)) else 0
     finally:
         if args.keep:
             print(f"\n(kept scaffold at {root})")

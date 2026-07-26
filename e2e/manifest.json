@@ -17,6 +17,54 @@
     "CAPTURE_OVERFLOW": "output truncated with no valid report surviving in the tail"
   },
   "tests": {
+    "e2e/config_project/tests/test_stateful.mojo": {
+      "verdict": "FAIL",
+      "exit_class": 1,
+      "in_default_suite": false,
+      "reached_only_by": [
+        "config-state"
+      ],
+      "disposition": "PARSED",
+      "per_test": {
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0
+      },
+      "rationale": "The config/state fixture fails while its project marker is absent and passes after the scenario creates it, proving one exact test record is persisted and then cleared."
+    },
+    "e2e/config_project/tests/test_other.mojo": {
+      "verdict": "PASS",
+      "exit_class": 0,
+      "in_default_suite": false,
+      "reached_only_by": [
+        "config-resolution",
+        "config-diagnostics",
+        "config-state"
+      ],
+      "disposition": "PARSED",
+      "per_test": {
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0
+      },
+      "rationale": "A single passing file selected by explicit config files and CLI path replacement."
+    },
+    "e2e/config_project/tests/test_zero.mojo": {
+      "verdict": "PASS",
+      "exit_class": 0,
+      "in_default_suite": false,
+      "reached_only_by": [
+        "config-state"
+      ],
+      "disposition": "PARSED",
+      "zero_tests": true,
+      "per_test": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0
+      },
+      "rationale": "A zero-test file used to prove exit 5 never promotes last-run state."
+    },
     "e2e/collect/test_probe_ok.mojo": {
       "verdict": "PASS",
       "exit_class": 0,
@@ -162,23 +210,58 @@
       "disposition": "CAPTURE_OVERFLOW",
       "rationale": "Floods stdout past the 8 MiB capture bound and exits 0 with no report surviving in the retained tail -> CAPTURE-OVERFLOW -> FAIL. A truncated capture never yields a successful verdict, never a PASS, never a drift."
     },
+    "e2e/slow/test_first_pass.mojo": {
+      "verdict": "PASS",
+      "exit_class": 0,
+      "in_default_suite": false,
+      "reached_only_by": [
+        "interrupt",
+        "interrupt-sigterm",
+        "interrupt-double",
+        "json-truncation-interrupt",
+        "json-truncation-sigkill",
+        "junit-finalization-and-interrupt"
+      ],
+      "disposition": "PARSED",
+      "per_test": {
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0
+      },
+      "rationale": "The passing file that sorts first under slow/. A sequential walk completes it before the next child blocks, so the interrupt scenarios can assert an exact `1 passed` beside their NOT-RUN accounting instead of an inequality. Writes its completion marker only when the harness arms one."
+    },
+    "e2e/slow/test_grace_stubborn.mojo": {
+      "verdict": "TIMEOUT",
+      "exit_class": 1,
+      "in_default_suite": false,
+      "reached_only_by": [
+        "interrupt",
+        "interrupt-sigterm",
+        "interrupt-double",
+        "json-truncation-interrupt",
+        "json-truncation-sigkill",
+        "junit-finalization-and-interrupt"
+      ],
+      "disposition": "NO_REPORT",
+      "rationale": "Blocks forever with SIGTERM IGNORED, so mtest's polite teardown cannot end it and the run-step escalation to SIGKILL is forced. It records its own process-group id and announces readiness once armed, which is what makes every interrupt scenario a barrier rather than a sleep. Interrupted before it reaches a verdict, so it is accounted NOT-RUN; in the double-interrupt scenario its COMPILE is what blocks instead, through the stubborn --mojo stand-in. Reached only by the interrupt scenarios, never by a default walk."
+    },
     "e2e/slow/test_hanging.mojo": {
       "verdict": "TIMEOUT",
       "exit_class": 1,
       "in_default_suite": false,
       "reached_only_by": [
         "--timeout",
-        "interrupt"
+        "config-overrides"
       ],
       "disposition": "NO_REPORT",
-      "rationale": "Sleeps forever. Reached ONLY under --timeout (killed and reported TIMEOUT) or the interrupt scenario. No default scenario walks slow/, so it can never hang the gate."
+      "rationale": "Sleeps forever. Reached ONLY under --timeout (killed and reported TIMEOUT) or by the config-overrides scenario's per-file timeout. Under the interrupt scenarios it sorts behind test_grace_stubborn.mojo and stays unscheduled, so it appears in the NOT-RUN accounting. No default scenario walks slow/, so it can never hang the gate."
     },
     "e2e/slow/test_slow_pass_a.mojo": {
       "verdict": "PASS",
       "exit_class": 0,
       "in_default_suite": false,
       "disposition": "PARSED",
-      "rationale": "A passing sibling of the hanging file that sorts after it; in the interrupt scenario it stays unscheduled and appears in the NOT-RUN accounting."
+      "rationale": "A passing sibling that sorts after the blocked file; in the interrupt scenarios it stays unscheduled and is one of the named NOT-RUN files."
     },
     "e2e/slow/test_slow_pass_b.mojo": {
       "verdict": "PASS",
@@ -322,7 +405,8 @@
       "exit_class": 0,
       "in_default_suite": false,
       "reached_only_by": [
-        "selection"
+        "selection",
+        "mojo-executable-precedence"
       ],
       "disposition": "PARSED",
       "per_test": {
@@ -380,7 +464,8 @@
         "collect-parallel",
         "parallel-auto-smoke",
         "parallel-json-workers",
-        "parallel-serial-noverlap"
+        "parallel-serial-noverlap",
+        "config-overrides"
       ],
       "disposition": "PARSED",
       "per_test": {
@@ -400,7 +485,8 @@
         "parallel-interrupt",
         "collect-parallel",
         "parallel-auto-smoke",
-        "parallel-json-workers"
+        "parallel-json-workers",
+        "config-overrides"
       ],
       "disposition": "PARSED",
       "per_test": {
@@ -419,7 +505,8 @@
         "parallel-interrupt",
         "collect-parallel",
         "parallel-auto-smoke",
-        "parallel-json-workers"
+        "parallel-json-workers",
+        "config-overrides"
       ],
       "disposition": "PARSED",
       "per_test": {
@@ -462,6 +549,18 @@
     }
   },
   "support_files": {
+    "e2e/config_project/mtest.toml": {
+      "rationale": "The automatically discovered project configuration for config-file E2E coverage."
+    },
+    "e2e/config_project/configs/inside.toml": {
+      "rationale": "An explicit configuration inside the invocation root."
+    },
+    "e2e/config_project/configs/collect-report.toml": {
+      "rationale": "A collect-mode oracle whose inactive report conflict must be ignored."
+    },
+    "e2e/config_shared/shared.toml": {
+      "rationale": "An explicit configuration outside the config-project invocation root."
+    },
     "e2e/pkg/mathlib/__init__.mojo": {
       "rationale": "The importable package precompiled by the --precompile success scenario."
     },

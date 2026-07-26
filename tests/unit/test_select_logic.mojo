@@ -54,13 +54,29 @@ def test_named_subset_selects_only_those_names() raises:
     assert_equal(r.deselected[0], "test_b")
 
 
-def test_named_selecting_none_leaves_empty_selection() raises:
+def test_named_single_operand_selects_only_that_one_member() raises:
     var u = _u("test_a", "test_b", "test_c")
     var one = List[String]()
     one.append("test_b")
     var r = select_from(u, "f.mojo", FileIntent.named(one^), "")
     assert_equal(len(r.selected), 1)
+    assert_equal(r.selected[0], "test_b")
     assert_equal(len(r.deselected), 2)
+    assert_equal(r.deselected[0], "test_a")
+    assert_equal(r.deselected[1], "test_c")
+
+
+def test_named_with_no_operands_selects_nothing_at_all() raises:
+    # The genuinely empty case: an intent that names nothing keeps nothing, and
+    # the whole universe lands in `deselected` in universe order.
+    var u = _u("test_a", "test_b", "test_c")
+    var none = List[String]()
+    var r = select_from(u, "f.mojo", FileIntent.named(none^), "")
+    assert_equal(len(r.selected), 0)
+    assert_equal(len(r.deselected), 3)
+    assert_equal(r.deselected[0], "test_a")
+    assert_equal(r.deselected[1], "test_b")
+    assert_equal(r.deselected[2], "test_c")
 
 
 def test_keyword_intersects_a_whole_file() raises:

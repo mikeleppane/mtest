@@ -11,26 +11,37 @@ proves the parallel teardown leaves no survivor.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import resource
+import shutil
 import signal
 import tempfile
 from pathlib import Path
 
 from scripts.checks.reports import json_stream as json_stream_check
+from scripts.checks.reports import junit as junit_check
 from scripts.checks.reports import junit_canonicalize
 from scripts.e2e.assertions import (
+    INTERRUPT_TIMEOUT,
     SUMMARY_RE,
     expect,
+    expect_accounting,
     expect_exit,
+    expect_report,
+    junit_not_run_files,
+    stream_files,
     verdict_paths_in_order,
 )
 from scripts.e2e.runner import (
+    FAKE_FD_MOJO,
     FAKE_WINDOW_MOJO,
     LOGGING_MOJO,
     REPO_ROOT,
     ScenarioContext,
     ScenarioError,
+    expect_group_gone,
 )
 
 
@@ -300,46 +311,147 @@ def s_parallel_window_overlap(context: ScenarioContext) -> str:
     return "-n 2: build windows overlap AND run windows overlap"
 
 
-def s_parallel_interrupt(context: ScenarioContext) -> str:
-    """A SIGINT at `-n 2` mid-run exits 2, accounts unstarted files NOT-RUN, and
-    leaves no surviving process group.
+_DISPATCHED = ("a", "b")
+"""The two window files `-n 2` can hold in flight, in discovery order."""
+_UNDISPATCHED = "c"
+"""The window file that must never be dispatched behind the two blocked ones."""
+_IN_FLIGHT_FILES = (
+    "e2e/parallel/test_window_a.mojo",
+    "e2e/parallel/test_window_b.mojo",
+)
+"""The two identities `-n 2` holds when the interrupt arrives."""
+_PARALLEL_NOT_RUN_FILES = (
+    *_IN_FLIGHT_FILES,
+    "e2e/parallel/test_window_c.mojo",
+)
+"""Every file a `-n 2` interrupt leaves without a verdict: both in-flight
+identities and the one that was never scheduled."""
 
-    Two workers pin the two run-blocked files (each fixture sleeps far past the
-    signal once its run log is armed), so a third file can never be dispatched and
-    is deterministically NOT-RUN. The interrupt must be what ends the run — a
-    harness timeout would raise instead — and the whole process group must be gone
-    afterward, proving the parallel teardown left no orphan.
+
+def s_parallel_interrupt(context: ScenarioContext) -> str:
+    """A SIGINT at `-n 2` exits 2 with exact NOT-RUN identities and no survivor.
+
+    Two workers pin the two run-blocked files: each announces its own process
+    group and its readiness once its run window is open, so the signal is sent
+    on an observed state rather than a wall-clock guess. The third file cannot be
+    dispatched behind them, and the run log proves it never was — a pool that
+    scheduled one more file after observing the interrupt would leave a third
+    record there. Both in-flight identities and the undispatched one are NOT-RUN
+    in the console band, in the `--json` stream, and in the JUnit report, and
+    every process group the run owned is gone afterwards.
     """
-    run_log = _log_path("mtest_interrupt_run_")
-    run, pgid = context.runner.run_mtest_signaled(
-        [PARALLEL_TREE, "-n", "2", "--gh-annotations", "off"],
-        signal_number=signal.SIGINT,
-        delay=20.0,
-        timeout=90.0,
-        env_overrides={
-            "MTEST_WINDOW_RUN_LOG": run_log,
-            "MTEST_WINDOW_RUN_FLOOR": "3600",
-        },
-    )
-    expect(
-        run.returncode == 2,
-        f"expected exit 2 on parallel interrupt, got {run.returncode}\n"
-        f"{run.stdout}\n{run.stderr}",
-    )
-    match = SUMMARY_RE.search(run.combined)
-    expect(match is not None, f"no partial summary after interrupt:\n{run.combined}")
-    not_run = int(match.group("not_run"))
-    expect(
-        not_run >= 1,
-        f"interrupt summary showed no NOT-RUN accounting (not_run={not_run})",
-    )
-    orphan = True
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        orphan = False
-    expect(not orphan, f"process group {pgid} survived the parallel interrupt")
-    return f"-n 2 SIGINT: exit 2, {not_run} NOT-RUN, no surviving process group"
+    with tempfile.TemporaryDirectory(prefix="mtest-parallel-interrupt-") as raw:
+        tmp = Path(raw)
+        ready_dir = tmp / "arming"
+        ready_dir.mkdir()
+        run_log = _log_path("mtest_interrupt_run_")
+        stream_path = os.fspath(tmp / "stream.ndjson")
+        junit_path = os.fspath(tmp / "report.xml")
+        run, pgid = context.runner.run_mtest_signaled(
+            [
+                PARALLEL_TREE,
+                "-n",
+                "2",
+                "--json",
+                stream_path,
+                "--junit-xml",
+                junit_path,
+                "--color",
+                "never",
+                "--gh-annotations",
+                "off",
+            ],
+            signal_number=signal.SIGINT,
+            timeout=INTERRUPT_TIMEOUT,
+            ready_files=tuple(
+                os.fspath(ready_dir / f"{name}.ready") for name in _DISPATCHED
+            ),
+            owned_pgid_files=tuple(
+                os.fspath(ready_dir / f"{name}.pgid") for name in _DISPATCHED
+            ),
+            env_overrides={
+                "MTEST_WINDOW_RUN_LOG": run_log,
+                "MTEST_WINDOW_RUN_FLOOR": "3600",
+                "MTEST_WINDOW_READY_DIR": os.fspath(ready_dir),
+            },
+        )
+        expect_exit(run, 2)
+
+        # No fourth dispatch: the run log carries exactly one start record for
+        # each of the two files a `-n 2` pool can hold, and nothing for the third.
+        dispatched = [
+            line.split("\t")[1]
+            for line in _log_lines(run_log)
+            if line.split("\t")[0] == "run"
+        ]
+        # Sorted, because which of two concurrent workers stamps its start first
+        # is not a product guarantee — the exact MULTISET is.
+        expect(
+            sorted(dispatched) == list(_DISPATCHED),
+            f"the run log recorded dispatches {sorted(dispatched)}, want exactly "
+            f"{list(_DISPATCHED)} — a file was scheduled after the interrupt",
+        )
+        expect(
+            not os.path.exists(ready_dir / f"{_UNDISPATCHED}.ready"),
+            f"e2e/parallel/test_window_{_UNDISPATCHED}.mojo announced a run it "
+            "was never supposed to be dispatched for",
+        )
+
+        bands = SUMMARY_RE.findall(run.combined)
+        expect(
+            len(bands) == 1,
+            f"an interrupted pool must print exactly one terminal summary band, "
+            f"got {len(bands)}:\n{run.combined}",
+        )
+        summ = expect_accounting(run)
+        expect(
+            (summ.passed, summ.not_run) == (0, len(_PARALLEL_NOT_RUN_FILES)),
+            f"parallel interrupt accounting was ({summ.passed} passed, "
+            f"{summ.not_run} not run), want (0, {len(_PARALLEL_NOT_RUN_FILES)})"
+            f":\n{run.combined}",
+        )
+        expect(
+            not verdict_paths_in_order(run),
+            f"an interrupted pool printed verdicts: {verdict_paths_in_order(run)}",
+        )
+
+        stream = stream_files(Path(stream_path).read_text(encoding="utf-8"))
+        expect(
+            stream.has_terminal and stream.exit_code == 2,
+            f"the interrupted pool's terminal record was {stream.exit_code!r} "
+            f"(terminal={stream.has_terminal})",
+        )
+        expect(
+            sorted(stream.started) == sorted(_IN_FLIGHT_FILES),
+            f"the stream announced {stream.started}, want exactly the two "
+            f"in-flight files",
+        )
+        expect(
+            stream.finished == {},
+            f"the stream finished {stream.finished}; no file reached a verdict",
+        )
+        expect(
+            stream.summary.get("not_run") == len(_PARALLEL_NOT_RUN_FILES)
+            and stream.summary.get("pass") == 0,
+            f"the terminal summary disagreed with the console band: "
+            f"{stream.summary}",
+        )
+
+        report = expect_report(run, junit_path, "the interrupted pool's junit")
+        junit_check.check_artifact(report)
+        rows = junit_not_run_files(report)
+        expect(
+            rows == _PARALLEL_NOT_RUN_FILES,
+            f"the junit [not-run] rows were {rows}, want "
+            f"{_PARALLEL_NOT_RUN_FILES}",
+        )
+
+        expect_group_gone(pgid, "mtest's own group after the parallel interrupt")
+        return (
+            f"-n 2 SIGINT: exit 2, both in-flight identities and the "
+            f"undispatched one NOT-RUN in console/stream/junit, no fourth "
+            f"dispatch in the run log, no surviving process group"
+        )
 
 
 def s_parallel_shard_disjoint(context: ScenarioContext) -> str:
@@ -694,3 +806,284 @@ def s_parallel_serial_stale_glob(context: ScenarioContext) -> str:
         f"the stale-serial warning did not explain itself:\n{run.stdout}",
     )
     return "an unmatched --serial glob -> loud stale-serial warning, exit 0"
+
+
+FD_CLAMP_SOFT_LIMIT = 76
+"""The child's soft `RLIMIT_NOFILE` for the live clamp.
+
+Chosen so the exec layer's own arithmetic — `min(64, (soft - 64 - 3) // 3)`,
+64 descriptors of reserved headroom and 3 per supervised child — lands on
+exactly three workers: `(76 - 64 - 3) // 3 == 3`. It is also comfortably above
+the layer's `_MIN_SOFT_FD` (70), so the run clamps rather than raising the
+hard environment fault a ceiling too small for even one child would raise."""
+
+FD_CLAMP_REQUEST = 16
+"""The worker count the clamped run asks for: far above the cap, and not a
+number the cap arithmetic could ever produce by coincidence."""
+
+FD_CLAMP_CAP = 3
+"""The cap `FD_CLAMP_SOFT_LIMIT` yields, asserted as an exact resolved count."""
+
+FD_CLAMP_CONTROL_MIN_SOFT = 115
+"""The ambient soft `RLIMIT_NOFILE` the CONTROL run needs to stay unclamped.
+
+The control asserts the full 16 workers, which the same arithmetic reaches only
+from `(115 - 64 - 3) // 3 == 16`. A host below this clamps the control too, and
+the scenario would fail describing the product when the cause is the host — so
+the requirement is asserted up front, beside the hard-limit check, rather than
+left for the next reader to derive from an attribution failure."""
+
+FD_CLAMP_TREE = "build/e2e-scratch/fd-clamp"
+"""Repo-relative home of this scenario's GENERATED sources.
+
+Deliberately outside `e2e/`. mtest names each build product after the source
+path (`/` -> `_s`, `_` -> `_u`), so sources here compile to
+`build/bin/build_se2e-scratch_sfd-clamp_...` — a prefix the real compiler never
+produces for a committed fixture. That matters because the stand-in writes
+Python scripts, not ELF binaries: pointed at a committed fixture it would leave
+a `#!`-headed script sitting under the exact name a real `mojo build` produces,
+where a later scenario expecting a prebuilt binary, or a `build/` cleanliness
+check, would trip over it. `build/` is also gitignored and never walked by the
+manifest-completeness oracle, so these files join no committed inventory."""
+
+FD_CLAMP_NAMES = ("test_fd_alpha", "test_fd_beta", "test_fd_gamma", "test_fd_delta")
+"""The four generated modules. More files than workers, so the clamped pool has
+to recycle a slot to finish the set."""
+
+FD_CLAMP_FILES = tuple(f"{FD_CLAMP_TREE}/{name}.mojo" for name in FD_CLAMP_NAMES)
+"""The four generated sources, in the order they are written."""
+
+FD_CLAMP_SOURCE = '''"""Generated all-pass fixture for the live descriptor-clamp scenario."""
+from std.testing import assert_equal, TestSuite
+
+
+def {test_name}() raises:
+    assert_equal(1, 1)
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()
+'''
+"""One generated module's whole source.
+
+Exactly ONE test per file, so the summary band's per-TEST total is 4 — the
+number the contract names — while per-FILE identity is pinned separately and
+exactly by the console PASS set and the stream's finished map. Generating the
+files rather than borrowing committed fixtures also makes that test count a
+property of this scenario instead of an assumption about four unrelated files.
+Real `TestSuite` shape, so the fixture genuinely compiles and passes under the
+actual compiler even though this scenario always hands it to the stand-in."""
+
+FD_CLAMP_WARNING = (
+    f"worker-clamp: requested {FD_CLAMP_REQUEST} workers but the environment's"
+    f" file-descriptor ceiling caps concurrency at {FD_CLAMP_CAP}; running with"
+    f" {FD_CLAMP_CAP}"
+)
+"""The exact console warning, naming request, cap, and resolved count.
+
+Pinned whole rather than by fragments: three separate `in` checks for the
+request and the cap would also pass against a warning that named those numbers
+in any other roles, and this scenario exists to prove which number is which.
+Interpolated from the constants above so the sentence and the counts this
+scenario asserts elsewhere can never drift apart."""
+
+
+def _write_fd_clamp_tree() -> None:
+    """Generate this scenario's four all-pass sources, replacing any residue.
+
+    Raises:
+        OSError: The scratch tree could not be created or written.
+    """
+    root = os.path.join(REPO_ROOT, FD_CLAMP_TREE)
+    os.makedirs(root, exist_ok=True)
+    for name in FD_CLAMP_NAMES:
+        with open(os.path.join(root, f"{name}.mojo"), "w", encoding="utf-8") as f:
+            f.write(FD_CLAMP_SOURCE.format(test_name=f"{name}_passes"))
+
+
+def _remove_fd_clamp_artifacts() -> None:
+    """Delete the generated sources and the products the stand-in fabricated.
+
+    The fabricated products are Python scripts under compiler-shaped names, so
+    they are removed on every path — success or failure — rather than left for
+    a later scenario to find. Best-effort: a missing artifact is the intended
+    state, and a cleanup failure must never replace a scenario's own diagnosis.
+    """
+    shutil.rmtree(os.path.join(REPO_ROOT, FD_CLAMP_TREE), ignore_errors=True)
+    # A hand-mirror of the product's `_mangle` (src/mtest/session/scratch.mojo),
+    # which cannot be imported from Python. Two sequential replaces match its
+    # single pass only while `FD_CLAMP_TREE` holds no `_` and `FD_CLAMP_NAMES`
+    # hold no `/`; introduce either and the passes interfere, the reconstructed
+    # name stops matching, and the products below go silently uncollected.
+    assert "_" not in FD_CLAMP_TREE, FD_CLAMP_TREE
+    assert not any("/" in name for name in FD_CLAMP_NAMES), FD_CLAMP_NAMES
+    mangled = FD_CLAMP_TREE.replace("_", "_u").replace("/", "_s")
+    for name in FD_CLAMP_NAMES:
+        product = os.path.join(
+            REPO_ROOT,
+            "build",
+            "bin",
+            f"{mangled}_s{name.replace('_', '_u')}",
+        )
+        with contextlib.suppress(OSError):
+            os.remove(product)
+
+
+def s_parallel_fd_clamp(context: ScenarioContext) -> str:
+    """A real low `RLIMIT_NOFILE` clamps `-n 16` to 3 loudly and still runs all 4.
+
+    The limit is genuine: the harness lowers the soft descriptor limit of the
+    mtest CHILD ONLY, through a `preexec_fn` between the fork and the exec, so
+    the kernel — not a stub, a mock, or an environment variable — is what the
+    exec layer's `query_effective_cap` reads.
+
+    Because 76 descriptors cannot link a real Mojo binary, the compiler is
+    `fake_fd_mojo.py`, which fabricates directly executable pass actors instead
+    of calling LLVM. That keeps the ceiling where the scenario claims it is —
+    on mtest's native pool and scheduler — rather than moving the failure into
+    the toolchain, where it would prove nothing about worker sizing.
+
+    The four sources are GENERATED under `build/e2e-scratch/`, not borrowed from
+    the committed tree, for two reasons: the per-file test count becomes a
+    property of this scenario rather than an assumption about other fixtures,
+    and the stand-in's Python-script products land under a `build_s...` name no
+    real `mojo build` ever produces, so they can neither be mistaken for nor
+    overwrite compiler output. Both the sources and those products are removed
+    on every exit path.
+
+    The clamp is attributed, not merely observed. A CONTROL run with the same
+    argv and no fd limit must resolve the full 16 workers and print no clamp
+    warning at all, so the only difference between the two runs is the real
+    kernel limit, and three workers cannot be credited to the request, the file
+    count, the machine's cores, or the stand-in compiler.
+    """
+    if not hasattr(resource, "RLIMIT_NOFILE"):
+        # Neither supported platform reaches this: Linux and macOS both define
+        # RLIMIT_NOFILE, so this is a statement about portability, not a
+        # tolerance that could quietly disarm the scenario on a supported host.
+        return "skipped: this platform has no RLIMIT_NOFILE to lower"
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    expect(
+        hard == resource.RLIM_INFINITY or hard >= FD_CLAMP_SOFT_LIMIT,
+        f"the host's hard RLIMIT_NOFILE is {hard}, below the {FD_CLAMP_SOFT_LIMIT} "
+        "this scenario lowers the child to — the run could not even start",
+    )
+    # The control run inherits THIS process's soft limit, so the host has to be
+    # able to reach the full request for the control to mean anything. Stated
+    # here, next to the hard-limit precondition, so a hardened host is named as
+    # the cause up front rather than surfacing later as an attribution failure.
+    expect(
+        soft == resource.RLIM_INFINITY or soft >= FD_CLAMP_CONTROL_MIN_SOFT,
+        f"the host's own soft RLIMIT_NOFILE is {soft}, below the "
+        f"{FD_CLAMP_CONTROL_MIN_SOFT} the unlimited CONTROL run needs to resolve "
+        f"the full {FD_CLAMP_REQUEST} workers — on this host the control would "
+        "clamp too, and the scenario could not attribute the clamp to the limit "
+        "it imposes",
+    )
+
+    args = [
+        *FD_CLAMP_FILES,
+        "-n",
+        str(FD_CLAMP_REQUEST),
+        "--json",
+        "-",
+        "--mojo",
+        FAKE_FD_MOJO,
+        "--gh-annotations",
+        "off",
+    ]
+    # Inside the `try`, not before it: writing the tree is itself a loop over
+    # four files, so a failure partway through leaves sources behind unless the
+    # `finally` already owns them.
+    try:
+        _write_fd_clamp_tree()
+        run = context.runner.run_mtest(
+            args, timeout=240.0, fd_limit=FD_CLAMP_SOFT_LIMIT
+        )
+        expect_exit(run, 0)
+
+        expect(
+            FD_CLAMP_WARNING in run.stderr,
+            f"the clamped run did not print the exact worker-clamp warning "
+            f"{FD_CLAMP_WARNING!r}:\n--- stderr ---\n{run.stderr}",
+        )
+        workers = _workers_in_stream(run.stdout)
+        expect(
+            workers == FD_CLAMP_CAP,
+            f"session_started.workers was {workers}, want exactly {FD_CLAMP_CAP} "
+            f"under a soft RLIMIT_NOFILE of {FD_CLAMP_SOFT_LIMIT}",
+        )
+
+        # `--json -` owns stdout, so the human console — verdict rows included —
+        # is on stderr for this run.
+        console_passes = sorted(
+            line.split()[1]
+            for line in run.stderr.splitlines()
+            if line.startswith("PASS ") and len(line.split()) > 1
+        )
+        expect(
+            console_passes == sorted(FD_CLAMP_FILES),
+            f"the clamped console reported PASS for {console_passes}, want exactly "
+            f"{sorted(FD_CLAMP_FILES)}:\n{run.stderr}",
+        )
+        stream = stream_files(run.stdout)
+        expect(
+            stream.finished == {path: "pass" for path in FD_CLAMP_FILES},
+            f"the clamped stream finished {stream.finished}, want all four files "
+            "pass",
+        )
+
+        summ = expect_accounting(run)
+        actual = (
+            summ.passed,
+            summ.failed,
+            summ.skipped,
+            summ.crashed,
+            summ.timed_out,
+            summ.compile_error,
+            summ.malformed,
+            summ.excluded,
+            summ.not_run,
+        )
+        expect(
+            actual == (len(FD_CLAMP_FILES), 0, 0, 0, 0, 0, 0, 0, 0),
+            f"the clamped run's summary band was {actual}, want "
+            f"({len(FD_CLAMP_FILES)}, 0, 0, 0, 0, 0, 0, 0, 0):\n{run.combined}",
+        )
+        expect(
+            stream.summary.get("pass") == len(FD_CLAMP_FILES)
+            and stream.summary.get("not_run") == 0,
+            f"the machine summary disagreed with the console band: {stream.summary}",
+        )
+        expect(
+            "INTERNAL-ERROR" not in run.combined and "EMFILE" not in run.combined,
+            "a descriptor exhaustion or internal error surfaced under the clamp:\n"
+            f"{run.combined}",
+        )
+
+        # The CONTROL: same argv, no fd limit. Its full 16 workers and silent
+        # console are what make the clamp above attributable to the kernel limit.
+        control = context.runner.run_mtest(args, timeout=240.0)
+        expect_exit(control, 0)
+        control_workers = _workers_in_stream(control.stdout)
+        expect(
+            control_workers == FD_CLAMP_REQUEST,
+            f"without the fd limit the same argv resolved {control_workers} workers, "
+            f"want the full {FD_CLAMP_REQUEST} — the clamp above cannot be "
+            "attributed to RLIMIT_NOFILE unless this run is unclamped. This "
+            f"host's own soft RLIMIT_NOFILE is {soft}, which the precondition "
+            f"above required to be at least {FD_CLAMP_CONTROL_MIN_SOFT}",
+        )
+        expect(
+            "worker-clamp" not in control.combined,
+            f"the unlimited control run printed a worker-clamp warning:\n"
+            f"{control.combined}",
+        )
+    finally:
+        _remove_fd_clamp_artifacts()
+    return (
+        f"soft RLIMIT_NOFILE {FD_CLAMP_SOFT_LIMIT}: -n {FD_CLAMP_REQUEST} clamps "
+        f"loudly to {FD_CLAMP_CAP} workers, all {len(FD_CLAMP_FILES)} files PASS, "
+        f"exit 0; the same argv unlimited resolves {FD_CLAMP_REQUEST} and warns "
+        "nothing"
+    )

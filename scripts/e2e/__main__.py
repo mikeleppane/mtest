@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Run mtest's guarded 59-scenario end-to-end gate.
+"""Run mtest's guarded end-to-end gate.
 
 The harness drives the real ``build/mtest`` binary against the committed
 known-outcome tree under ``e2e/``. Expectations come from
 ``e2e/manifest.json``, and every child process is guarded by the shared runner.
+
+The closing ``<passed>/<total> scenarios passed`` banner is computed from the
+results this run actually produced, and the registry it iterates is the
+``SCENARIOS`` tuple below. No scenario total is written down anywhere in this
+package: a hand-maintained count would keep reading as proof long after it
+stopped being true, so ``scripts/tests/test_e2e.py`` fails if a docstring here
+starts carrying one.
 
 Usage: ``python -m scripts.e2e``
 """
@@ -26,7 +33,10 @@ from scripts.e2e.runner import (
 )
 from scripts.e2e.scenarios import (
     annotations,
+    config_file,
+    config_show,
     core,
+    doctor,
     json_reporter,
     junit_reporter,
     parallel,
@@ -77,6 +87,8 @@ SCENARIOS: ScenarioRegistry = (
     ("resilience-matrix", resilience.s_resilience_matrix),
     ("default-suite", core.s_default_suite),
     ("hostile", core.s_hostile),
+    ("hostile-console", core.s_hostile_console),
+    ("hostile-reporters", core.s_hostile_reporters),
     ("single-pass", core.s_single_pass),
     ("exitfirst", core.s_exitfirst),
     ("maxfail", core.s_maxfail),
@@ -102,6 +114,19 @@ SCENARIOS: ScenarioRegistry = (
     ("show-output", core.s_show_output),
     ("durations", core.s_durations),
     ("color", core.s_color),
+    ("config-resolution", config_file.s_config_resolution),
+    ("config-diagnostics", config_file.s_config_diagnostics),
+    ("config-state", config_file.s_config_state),
+    ("failure-reselection", config_file.s_failure_reselection),
+    ("config-overrides", config_file.s_config_overrides),
+    ("config-show", config_show.s_config_show),
+    ("doctor-healthy", doctor.s_healthy),
+    ("doctor-malformed-config", doctor.s_malformed_config),
+    ("doctor-missing-config", doctor.s_missing_explicit_config),
+    ("doctor-missing-toolchain", doctor.s_missing_toolchain),
+    ("doctor-unwritable-state", doctor.s_unwritable_state),
+    ("doctor-interrupt", doctor.s_interrupt_toolchain),
+    ("doctor-config-free", doctor.s_config_free_without_python),
     ("usage-refusals", selection.s_usage_refusals),
     ("selection-keyword", selection.s_selection_keyword),
     ("selection-node-id", selection.s_selection_node_id),
@@ -115,12 +140,15 @@ SCENARIOS: ScenarioRegistry = (
     ("selection-chameleon", selection.s_selection_chameleon),
     ("single-build", selection.s_single_build),
     ("stale-recovery-two-builds", selection.s_stale_recovery_two_builds),
+    ("mojo-executable-precedence", selection.s_mojo_executable_precedence),
     ("collect", selection.s_collect),
     ("passthrough+forbidden", core.s_passthrough_and_forbidden),
     ("out-of-root", core.s_out_of_root),
     ("internal-error", resilience.s_internal_error),
     ("runtime-open-failure", resilience.s_runtime_open_failure),
     ("interrupt", resilience.s_interrupt),
+    ("interrupt-sigterm", resilience.s_interrupt_sigterm),
+    ("interrupt-double", resilience.s_interrupt_double),
     ("json-forward-compat", json_reporter.s_json_forward_compat),
     ("json-purity", json_reporter.s_json_purity),
     (
@@ -160,6 +188,7 @@ SCENARIOS: ScenarioRegistry = (
     ("parallel-progress-tty", parallel.s_parallel_progress_tty),
     ("parallel-serial-noverlap", parallel.s_parallel_serial_noverlap),
     ("parallel-serial-stale-glob", parallel.s_parallel_serial_stale_glob),
+    ("parallel-fd-clamp", parallel.s_parallel_fd_clamp),
 )
 
 

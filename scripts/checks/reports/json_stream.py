@@ -175,6 +175,24 @@ def _selftest() -> int:
         any(r.get("event") == "quantum_flux" for r in report.records),
         "unknown kind was dropped",
     )
+    started = next(
+        (r for r in report.records if r.get("event") == "session_started"),
+        None,
+    )
+    check(
+        "forward_compat.config_file",
+        started is not None and started.get("config_file") == "mtest.toml",
+        repr(started),
+    )
+    check(
+        "forward_compat.open_warning_kind",
+        any(
+            r.get("event") == "warning"
+            and r.get("warning_kind") == "future-warning-kind"
+            for r in report.records
+        ),
+        "unknown warning_kind was rejected or dropped",
+    )
     check("forward_compat.not_torn", not report.torn_tail, "unexpected torn tail")
 
     # A killed run: complete lines plus one torn, unterminated tail; no terminal.

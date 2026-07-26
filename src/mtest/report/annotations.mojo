@@ -431,11 +431,11 @@ def _notice_message(e: SessionFinishedPayload) -> String:
 def _bound_escaped(escaped: String, max_bytes: Int) -> String:
     """`escaped` cut to at most `max_bytes`, with a marker when it was cut.
 
-    `escaped` is already valid UTF-8, since the GitHub escapers only ever
-    replace single ASCII bytes with ASCII escape sequences and never touch a
-    multi-byte sequence. The cut therefore walks whole codepoints via
-    `codepoint_slices()`; a plain byte-offset cut could split one in half and
-    produce invalid UTF-8.
+    `escaped` is already valid UTF-8: the GitHub escapers replace whole code
+    points — single ASCII bytes with ASCII escape sequences, and a two-byte C1
+    control with its six-byte `\\u00HH` rendering — and never split a multi-byte
+    sequence. The cut therefore walks whole codepoints via `codepoint_slices()`;
+    a plain byte-offset cut could split one in half and produce invalid UTF-8.
     """
     if escaped.byte_length() <= max_bytes:
         return escaped.copy()

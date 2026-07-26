@@ -3,19 +3,25 @@
 
 from __future__ import annotations
 
+import io
 import math
 import os
 from pathlib import Path
+import resource
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
+from scripts.harness import watchdog
 from scripts.harness.watchdog import (
     Cancelled,
+    DRAIN_SETTLE_SECONDS,
     Exited,
     HarnessError,
+    MarkerRetention,
     Signaled,
     TimedOut,
     TIMEOUT_EXIT_CODE,
@@ -26,6 +32,32 @@ from scripts.harness.watchdog import (
 PYTHON = sys.executable
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WATCHDOG_COMMAND = [PYTHON, "-m", "scripts.harness.watchdog"]
+
+# One 64 KiB pipe buffer is the capacity a single blocking write can fill; the
+# flooding actor writes eight of them before its marker, so an undrained pipe
+# would deadlock the child long before it ever reached the line under test.
+FLOOD_LINE = "x" * 127 + "\n"
+FLOOD_LINE_COUNT = 4096
+MARKER_PREFIX = "==> "
+FLOOD_MARKERS = (
+    "==> tests/unit/test_first.mojo\n",
+    "==> tests/unit/test_crashing.mojo\n",
+)
+# Every flooding case must finish well inside this guard: the longest is the
+# timeout case at one second of deadline plus the five-second sweep grace.
+FLOOD_GUARD_SECONDS = 30.0
+# What a leaked descendant emits after the supervisor has already returned, and
+# the supervisor's own verdict that must remain the caller stream's last word.
+LATE_LINE = "LATE-DESCENDANT-BYTES\n"
+LATE_MARKER = "==> tests/unit/test_never_reached.mojo\n"
+VERDICT_LINE = "FAILED: aggregate suite (run exit 1)\n"
+# The `select()` descriptor ceiling CPython inherits from FD_SETSIZE. A pipe at
+# or above it must still drain, so the probe pads the descriptor table past it.
+FD_SELECT_CEILING = 1024
+# A caller whose stdout consumer has stopped must not outlive its own SIGTERM.
+# The supervisor's bounded work after a signal is the group grace plus the drain
+# settle plus the seal, well inside this guard.
+BLOCKED_GUARD_SECONDS = 30.0
 
 
 def _wait_for_paths(paths: tuple[Path, ...], timeout_seconds: float = 3.0) -> None:
@@ -567,6 +599,771 @@ def test_cancellation_wins_when_spawn_then_raises() -> None:
             raise AssertionError("spawn cancellation left the deadline sentinel")
 
 
+class _TextOverBytes:
+    """A stdout/stderr stand-in exposing the byte buffer the watchdog tees to."""
+
+    def __init__(self, handle: object) -> None:
+        self.buffer = handle
+
+    def write(self, text: str) -> int:
+        """Encode one diagnostic string onto the captured byte buffer."""
+        return self.buffer.write(text.encode("utf-8"))
+
+    def flush(self) -> None:
+        """Flush the captured byte buffer."""
+        self.buffer.flush()
+
+
+def _flooding_marker_actor(tmp: Path) -> Path:
+    """Write an actor that floods past the pipe capacity before its markers."""
+    actor = tmp / "flooding_marker_actor.py"
+    actor.write_text(
+        "\n".join(
+            [
+                "import os",
+                "import signal",
+                "import sys",
+                "import time",
+                "mode = sys.argv[1]",
+                f"sys.stdout.write({FLOOD_LINE!r} * {FLOOD_LINE_COUNT})",
+                f"sys.stdout.write({FLOOD_MARKERS[0]!r})",
+                f"sys.stdout.write({FLOOD_MARKERS[1]!r})",
+                "sys.stdout.flush()",
+                "if mode == 'ordinary':",
+                "    raise SystemExit(5)",
+                "if mode == 'signal':",
+                "    os.kill(os.getpid(), signal.SIGTERM)",
+                "time.sleep(60)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return actor
+
+
+def test_flooding_child_is_drained_teed_and_marked() -> None:
+    """Every ending drains the flood, tees it whole, and keeps the last marker."""
+    expected_terminations = {
+        "ordinary": Exited(5),
+        "signal": Signaled(signal.SIGTERM),
+        "timeout": TimedOut(),
+    }
+    expected_output = (
+        FLOOD_LINE * FLOOD_LINE_COUNT + FLOOD_MARKERS[0] + FLOOD_MARKERS[1]
+    ).encode("utf-8")
+    for mode, expected in expected_terminations.items():
+        with tempfile.TemporaryDirectory(prefix="mtest-watchdog-flood-") as raw_tmp:
+            tmp = Path(raw_tmp)
+            actor = _flooding_marker_actor(tmp)
+            sentinel = tmp / "deadline-sentinel"
+            sentinel.touch()
+            retention = MarkerRetention(MARKER_PREFIX)
+            teed = tmp / "teed-stdout"
+            diagnostics = tmp / "teed-stderr"
+            original_stdout = sys.stdout
+            original_stderr = sys.stderr
+            started = time.monotonic()
+            with teed.open("wb") as stdout_handle:
+                with diagnostics.open("wb") as stderr_handle:
+                    sys.stdout = _TextOverBytes(stdout_handle)
+                    sys.stderr = _TextOverBytes(stderr_handle)
+                    try:
+                        termination = run_command(
+                            [PYTHON, str(actor), mode],
+                            source="tests/unit/test_watchdog.mojo",
+                            step="run",
+                            timeout_seconds=1.0,
+                            deadline_sentinel=sentinel,
+                            marker_retention=retention,
+                        )
+                    finally:
+                        sys.stdout = original_stdout
+                        sys.stderr = original_stderr
+            elapsed = time.monotonic() - started
+            if termination != expected:
+                raise AssertionError(
+                    f"flooding {mode} returned {termination!r}, expected {expected!r}"
+                )
+            if elapsed >= FLOOD_GUARD_SECONDS:
+                raise AssertionError(
+                    f"flooding {mode} took {elapsed:.1f}s, past the outer guard"
+                )
+            actual = teed.read_bytes()
+            if actual != expected_output:
+                raise AssertionError(
+                    f"flooding {mode} teed {len(actual)} bytes, "
+                    f"expected {len(expected_output)}"
+                )
+            if retention.text != FLOOD_MARKERS[1]:
+                raise AssertionError(
+                    f"flooding {mode} retained {retention.text!r}, "
+                    f"expected {FLOOD_MARKERS[1]!r}"
+                )
+
+
+def _retaining_watchdog_argv(
+    tmp: Path, sentinel: Path, *, timeout_seconds: float
+) -> list[str]:
+    """Return argv for a supervisor process that captures its child's marker.
+
+    The watchdog's own command line never opts into capture, so a test that
+    needs to signal a capturing supervisor drives `run_command` through this
+    thin wrapper instead.
+
+    Args:
+        tmp: Directory the wrapper source is written into.
+        sentinel: Deadline sentinel the supervised step must reconcile.
+        timeout_seconds: Wall-clock ceiling handed to the supervised step.
+
+    Returns:
+        The argv prefix; append the supervised command to it.
+    """
+    wrapper = tmp / "retaining_watchdog.py"
+    wrapper.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "import sys",
+                "sys.path.insert(0, sys.argv[1])",
+                "from scripts.harness import watchdog",
+                "retention = watchdog.MarkerRetention(sys.argv[2])",
+                "termination = watchdog.run_command(",
+                "    sys.argv[5:],",
+                "    source='tests/unit/test_watchdog.mojo',",
+                "    step='run',",
+                "    timeout_seconds=float(sys.argv[4]),",
+                "    deadline_sentinel=Path(sys.argv[3]),",
+                "    marker_retention=retention,",
+                ")",
+                "raise SystemExit(watchdog._exit_with_termination(termination))",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return [
+        PYTHON,
+        str(wrapper),
+        str(REPO_ROOT),
+        MARKER_PREFIX,
+        str(sentinel),
+        str(timeout_seconds),
+    ]
+
+
+def test_a_blocked_caller_stream_cannot_swallow_a_caller_signal() -> None:
+    """A caller stdout nobody drains must never make the supervisor unkillable."""
+    with tempfile.TemporaryDirectory(prefix="mtest-watchdog-block-") as raw_tmp:
+        tmp = Path(raw_tmp)
+        sentinel = tmp / "deadline-sentinel"
+        sentinel.touch()
+        ready = tmp / "child-ready"
+        actor = tmp / "blocked_consumer_actor.py"
+        actor.write_text(
+            "\n".join(
+                [
+                    "from pathlib import Path",
+                    "import sys",
+                    "import time",
+                    "Path(sys.argv[1]).write_text('ready')",
+                    f"sys.stdout.write({FLOOD_LINE!r} * {FLOOD_LINE_COUNT})",
+                    "sys.stdout.flush()",
+                    "time.sleep(120)",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        supervisor = subprocess.Popen(
+            [
+                *_retaining_watchdog_argv(tmp, sentinel, timeout_seconds=120.0),
+                PYTHON,
+                str(actor),
+                str(ready),
+            ],
+            # Deliberately never read: this is a caller whose own stdout consumer
+            # has stopped, which is what terminal flow control looks like.
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        status: int | None = None
+        diagnostic = b""
+        try:
+            _wait_for_paths((ready,))
+            # Let both the child's pipe and the unread caller pipe fill, so the
+            # stdout drainer is parked inside a write that will never return.
+            time.sleep(1.0)
+            os.kill(supervisor.pid, signal.SIGTERM)
+            try:
+                status = supervisor.wait(timeout=BLOCKED_GUARD_SECONDS)
+            except subprocess.TimeoutExpired:
+                status = None
+        finally:
+            if supervisor.poll() is None:
+                supervisor.kill()
+                supervisor.wait()
+            assert supervisor.stderr is not None
+            diagnostic = supervisor.stderr.read()
+            for stream in (supervisor.stdout, supervisor.stderr):
+                if stream is not None:
+                    stream.close()
+        if status is None:
+            raise AssertionError(
+                "a blocked caller stream made the supervisor unkillable: it "
+                f"outlived SIGTERM by {BLOCKED_GUARD_SECONDS:g}s"
+            )
+        if status != -signal.SIGTERM:
+            raise AssertionError(
+                f"blocked caller stream exited {status}, "
+                f"expected {-signal.SIGTERM}:\n{diagnostic.decode(errors='replace')}"
+            )
+        if b"Traceback" in diagnostic:
+            raise AssertionError(
+                "blocked caller stream escaped cleanup:\n"
+                f"{diagnostic.decode(errors='replace')}"
+            )
+
+
+def test_high_numbered_pipe_descriptors_do_not_lose_output() -> None:
+    """A pipe above the select() ceiling drains instead of vanishing silently."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    ceiling = FD_SELECT_CEILING + 32
+    if hard != resource.RLIM_INFINITY and hard < ceiling:
+        raise AssertionError(
+            f"harness cannot raise RLIMIT_NOFILE to {ceiling}: hard limit {hard}"
+        )
+    padding: list[int] = []
+    resource.setrlimit(resource.RLIMIT_NOFILE, (ceiling, hard))
+    try:
+        while True:
+            descriptor = os.open(os.devnull, os.O_RDONLY)
+            padding.append(descriptor)
+            if descriptor >= FD_SELECT_CEILING:
+                break
+        with tempfile.TemporaryDirectory(prefix="mtest-watchdog-highfd-") as raw:
+            tmp = Path(raw)
+            sentinel = tmp / "deadline-sentinel"
+            sentinel.touch()
+            retention = MarkerRetention(MARKER_PREFIX)
+            teed = tmp / "teed-stdout"
+            expected = (
+                FLOOD_LINE * FLOOD_LINE_COUNT + FLOOD_MARKERS[1]
+            ).encode("utf-8")
+            original_stdout = sys.stdout
+            with teed.open("wb") as handle:
+                sys.stdout = _TextOverBytes(handle)
+                try:
+                    termination = run_command(
+                        [
+                            PYTHON,
+                            "-c",
+                            "import sys; "
+                            f"sys.stdout.write({FLOOD_LINE!r} * "
+                            f"{FLOOD_LINE_COUNT}); "
+                            f"sys.stdout.write({FLOOD_MARKERS[1]!r})",
+                        ],
+                        source="tests/unit/test_watchdog.mojo",
+                        step="run",
+                        timeout_seconds=30.0,
+                        deadline_sentinel=sentinel,
+                        marker_retention=retention,
+                    )
+                finally:
+                    sys.stdout = original_stdout
+            if termination != Exited(0):
+                raise AssertionError(f"high-fd child returned {termination!r}")
+            actual = teed.read_bytes()
+            if actual != expected:
+                raise AssertionError(
+                    f"high-fd drain teed {len(actual)} bytes, "
+                    f"expected {len(expected)}"
+                )
+            if retention.text != FLOOD_MARKERS[1]:
+                raise AssertionError(
+                    f"high-fd drain retained {retention.text!r}, "
+                    f"expected {FLOOD_MARKERS[1]!r}"
+                )
+    finally:
+        for descriptor in padding:
+            os.close(descriptor)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+def test_a_frozen_marker_capture_refuses_later_writes() -> None:
+    """Freezing the capture ends the drainer's claim on the retained marker."""
+    retention = MarkerRetention(MARKER_PREFIX)
+    retention.record(FLOOD_MARKERS[0])
+    retention.record(FLOOD_MARKERS[1])
+    if retention.text != FLOOD_MARKERS[1]:
+        raise AssertionError(
+            f"open capture retained {retention.text!r}, "
+            f"expected {FLOOD_MARKERS[1]!r}"
+        )
+    retention.freeze()
+    retention.record(LATE_MARKER)
+    if retention.text != FLOOD_MARKERS[1]:
+        raise AssertionError(
+            f"frozen capture accepted a later marker: {retention.text!r}"
+        )
+
+
+def test_the_seal_freezes_the_capture_before_it_seals_any_tee() -> None:
+    """Order matters: a tee sealed first can drop bytes whose marker still lands.
+
+    A drainer already past its stop check reads one more chunk. If the tees are
+    sealed before the capture is frozen, that chunk's bytes are dropped from
+    the caller's stream while its marker is still recorded, and the run reports
+    a last module the user never saw. The window widens to the seal's bounded
+    acquire whenever an earlier tee's seal has to wait out a write in flight,
+    so the ordering is asserted directly rather than raced for.
+    """
+    order: list[str] = []
+
+    class _OrderingTee(watchdog._StreamTee):
+        def seal(self) -> bool:
+            order.append("seal")
+            return super().seal()
+
+    class _OrderingRetention(MarkerRetention):
+        def freeze(self) -> None:
+            order.append("freeze")
+            super().freeze()
+
+    state = watchdog._DrainState(
+        threads=(),
+        tees=(_OrderingTee(io.StringIO()), _OrderingTee(io.StringIO())),
+        stop=threading.Event(),
+        retention=_OrderingRetention(MARKER_PREFIX),
+        sources=(),
+    )
+    watchdog._seal_drainers(state)
+    if order != ["freeze", "seal", "seal"]:
+        raise AssertionError(
+            f"seal ordering was {order}, expected the freeze first"
+        )
+    if not state.stop.is_set():
+        raise AssertionError("sealing left the drainers' stop flag clear")
+
+
+def test_a_drainer_cannot_write_through_a_frozen_capture() -> None:
+    """The drain site records through the capture, so a freeze really binds it."""
+    read_descriptor, write_descriptor = os.pipe()
+    os.write(write_descriptor, LATE_MARKER.encode("utf-8"))
+    os.close(write_descriptor)
+    retention = MarkerRetention(MARKER_PREFIX)
+    retention.record(FLOOD_MARKERS[1])
+    retention.freeze()
+    sink = io.StringIO()
+    with os.fdopen(read_descriptor, "rb") as source:
+        watchdog._tee_stream(
+            source,
+            watchdog._StreamTee(sink),
+            retention,
+            threading.Event(),
+        )
+    if sink.getvalue() != LATE_MARKER:
+        raise AssertionError(
+            f"the drain lost its tee: {sink.getvalue()!r}"
+        )
+    if retention.text != FLOOD_MARKERS[1]:
+        raise AssertionError(
+            f"a drainer wrote through a frozen capture: {retention.text!r}"
+        )
+
+
+def test_a_cancelled_timeout_settle_seals_before_the_timeout_diagnostic() -> None:
+    """Aborting the timeout drain must not leave a tee live past the FATAL line."""
+    with tempfile.TemporaryDirectory(prefix="mtest-watchdog-tmoseal-") as raw_tmp:
+        tmp = Path(raw_tmp)
+        sentinel = tmp / "deadline-sentinel"
+        sentinel.touch()
+        retention = MarkerRetention(MARKER_PREFIX)
+        states: list[watchdog._DrainState] = []
+        sealed_at_diagnostic: list[bool] = []
+        original_start = watchdog._start_drainers
+        original_settle = watchdog._settle_drainers
+        original_notify = watchdog._notify_timeout
+
+        def recording_start(
+            process: object, marker: MarkerRetention
+        ) -> watchdog._DrainState:
+            """Capture the live drainers so the diagnostic can be inspected."""
+            state = original_start(process, marker)
+            states.append(state)
+            return state
+
+        def cancelling_settle(_state: watchdog._DrainState | None) -> None:
+            """Stand in for a caller signal delivered inside the drain settle."""
+            raise watchdog._WatchdogCancellation(signal.SIGTERM)
+
+        def observing_notify(
+            source: str, step: str, timeout_seconds: float
+        ) -> None:
+            """Record whether every tee was already shut when FATAL was printed."""
+            sealed_at_diagnostic.append(
+                bool(states) and all(tee.sealed for tee in states[-1].tees)
+            )
+            original_notify(source, step, timeout_seconds)
+
+        watchdog._start_drainers = recording_start
+        watchdog._settle_drainers = cancelling_settle
+        watchdog._notify_timeout = observing_notify
+        try:
+            termination = run_command(
+                [PYTHON, "-c", "import time; time.sleep(120)"],
+                source="tests/unit/test_watchdog.mojo",
+                step="run",
+                timeout_seconds=0.2,
+                deadline_sentinel=sentinel,
+                marker_retention=retention,
+            )
+        finally:
+            watchdog._start_drainers = original_start
+            watchdog._settle_drainers = original_settle
+            watchdog._notify_timeout = original_notify
+        if not isinstance(termination, TimedOut):
+            raise AssertionError(
+                f"cancelled timeout settle returned {termination!r}"
+            )
+        if sealed_at_diagnostic != [True]:
+            raise AssertionError(
+                "the timeout diagnostic was printed with a live drainer: "
+                f"{sealed_at_diagnostic}"
+            )
+
+
+def _leaking_actor(tmp: Path) -> Path:
+    """Write a leader that leaves a descendant holding the inherited stdout."""
+    descendant = tmp / "late_descendant.py"
+    descendant.write_text(
+        "\n".join(
+            [
+                "import sys",
+                "import time",
+                "time.sleep(float(sys.argv[1]))",
+                f"sys.stdout.write({LATE_LINE!r})",
+                "sys.stdout.flush()",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    actor = tmp / "leaking_marker_actor.py"
+    actor.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "import subprocess",
+                "import sys",
+                "leader_done, late_seconds = sys.argv[1], sys.argv[2]",
+                "subprocess.Popen(",
+                f"    [sys.executable, {str(descendant)!r}, late_seconds]",
+                ")",
+                f"sys.stdout.write({FLOOD_MARKERS[1]!r})",
+                "sys.stdout.flush()",
+                "Path(leader_done).write_text('done')",
+                "raise SystemExit(0)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return actor
+
+
+def test_leaked_descendant_bounds_the_drain_and_seals_the_tee() -> None:
+    """A leaked pipe holder cannot stall the drain nor write past the verdict."""
+    with tempfile.TemporaryDirectory(prefix="mtest-watchdog-leak-") as raw_tmp:
+        tmp = Path(raw_tmp)
+        late_seconds = DRAIN_SETTLE_SECONDS + 3.0
+        actor = _leaking_actor(tmp)
+        leader_done = tmp / "leader-done"
+        sentinel = tmp / "deadline-sentinel"
+        sentinel.touch()
+        retention = MarkerRetention(MARKER_PREFIX)
+        teed = tmp / "teed-stdout"
+        diagnostics = tmp / "teed-stderr"
+        original_stdout = sys.stdout
+        original_stderr = sys.stderr
+        # The caller's stream stays open across the descendant's late write, so
+        # an unsealed drainer would genuinely append to it here.
+        with teed.open("wb") as stdout_handle:
+            with diagnostics.open("wb") as stderr_handle:
+                sys.stdout = _TextOverBytes(stdout_handle)
+                sys.stderr = _TextOverBytes(stderr_handle)
+                try:
+                    started = time.monotonic()
+                    termination = run_command(
+                        [
+                            PYTHON,
+                            str(actor),
+                            str(leader_done),
+                            str(late_seconds),
+                        ],
+                        source="tests/unit/test_watchdog.mojo",
+                        step="run",
+                        timeout_seconds=30.0,
+                        deadline_sentinel=sentinel,
+                        marker_retention=retention,
+                    )
+                    elapsed = time.monotonic() - started
+                    # The supervisor's own verdict, written after the drain has
+                    # been sealed. Nothing the child group emits later may
+                    # follow it.
+                    stdout_handle.write(VERDICT_LINE.encode("utf-8"))
+                    stdout_handle.flush()
+                finally:
+                    sys.stdout = original_stdout
+                    sys.stderr = original_stderr
+            # Outlive the descendant's write before reading the stream back.
+            time.sleep(max(late_seconds - elapsed, 0.0) + 1.0)
+            stdout_handle.flush()
+            tail = teed.read_bytes()
+        if termination != Exited(0):
+            raise AssertionError(f"leaking actor returned {termination!r}")
+        if not leader_done.exists():
+            raise AssertionError("leader never reached its marker")
+        if retention.text != FLOOD_MARKERS[1]:
+            raise AssertionError(
+                f"leaking actor retained {retention.text!r}, "
+                f"expected {FLOOD_MARKERS[1]!r}"
+            )
+        # Stand in for a straggling drainer: the supervisor has returned, so the
+        # capture must already be closed against a later marker.
+        retention.record(LATE_MARKER)
+        if retention.text != FLOOD_MARKERS[1]:
+            raise AssertionError(
+                "the seal left the marker capture open after returning: "
+                f"{retention.text!r}"
+            )
+        if elapsed >= DRAIN_SETTLE_SECONDS + 2.0:
+            raise AssertionError(
+                f"leaked descendant stalled the drain for {elapsed:.1f}s"
+            )
+        if sentinel.exists():
+            raise AssertionError("leaking actor left its deadline sentinel")
+        if not tail.endswith(VERDICT_LINE.encode("utf-8")):
+            raise AssertionError(
+                f"a drainer wrote past the sealed verdict: {tail[-120:]!r}"
+            )
+
+
+def test_a_caller_stream_without_a_byte_buffer_still_receives_the_tee() -> None:
+    """A redirected text stream is written to, never silently discarded."""
+    with tempfile.TemporaryDirectory(prefix="mtest-watchdog-text-") as raw_tmp:
+        tmp = Path(raw_tmp)
+        sentinel = tmp / "deadline-sentinel"
+        sentinel.touch()
+        retention = MarkerRetention(MARKER_PREFIX)
+        captured = io.StringIO()
+        original_stdout = sys.stdout
+        sys.stdout = captured
+        try:
+            termination = run_command(
+                [
+                    PYTHON,
+                    "-c",
+                    f"import sys; sys.stdout.write({FLOOD_MARKERS[1]!r})",
+                ],
+                source="tests/unit/test_watchdog.mojo",
+                step="run",
+                timeout_seconds=10.0,
+                deadline_sentinel=sentinel,
+                marker_retention=retention,
+            )
+        finally:
+            sys.stdout = original_stdout
+        if termination != Exited(0):
+            raise AssertionError(f"text-stream tee returned {termination!r}")
+        if captured.getvalue() != FLOOD_MARKERS[1]:
+            raise AssertionError(
+                f"text-stream tee wrote {captured.getvalue()!r}, "
+                f"expected {FLOOD_MARKERS[1]!r}"
+            )
+        if retention.text != FLOOD_MARKERS[1]:
+            raise AssertionError(
+                f"text-stream tee retained {retention.text!r}, "
+                f"expected {FLOOD_MARKERS[1]!r}"
+            )
+
+
+def test_cancellation_during_the_drain_settle_stays_cancelled() -> None:
+    """A caller signal in the post-exit drain is Cancelled, never a traceback."""
+    with tempfile.TemporaryDirectory(prefix="mtest-watchdog-cancel-") as raw_tmp:
+        tmp = Path(raw_tmp)
+        actor = _leaking_actor(tmp)
+        leader_done = tmp / "leader-done"
+        sentinel = tmp / "deadline-sentinel"
+        sentinel.touch()
+        supervisor = subprocess.Popen(
+            [
+                *_retaining_watchdog_argv(tmp, sentinel, timeout_seconds=30.0),
+                PYTHON,
+                str(actor),
+                str(leader_done),
+                str(DRAIN_SETTLE_SECONDS + 30.0),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            _wait_for_paths((leader_done,))
+            # The leader has exited, so the supervisor is past `wait` and inside
+            # the bounded drain that the leaked descendant is holding open.
+            time.sleep(DRAIN_SETTLE_SECONDS / 4.0)
+            os.kill(supervisor.pid, signal.SIGTERM)
+            status = supervisor.wait(timeout=30.0)
+            assert supervisor.stderr is not None
+            diagnostic = supervisor.stderr.read()
+        finally:
+            if supervisor.poll() is None:
+                supervisor.kill()
+                supervisor.wait()
+        if status != -signal.SIGTERM:
+            raise AssertionError(
+                f"cancellation during the drain exited {status}, "
+                f"expected {-signal.SIGTERM}:\n{diagnostic}"
+            )
+        if "Traceback" in diagnostic:
+            raise AssertionError(
+                f"cancellation during the drain escaped cleanup:\n{diagnostic}"
+            )
+        if sentinel.exists():
+            raise AssertionError(
+                "cancellation during the drain left the deadline sentinel"
+            )
+
+
+def test_a_zombie_only_group_reports_gone_on_both_spellings() -> None:
+    """Darwin spells "every member is a zombie" EPERM, not ESRCH.
+
+    Treating that as an error let a Ctrl-C racing the child's exit replace a
+    truthful Cancelled or Signaled with HarnessError, so the classified harness
+    returned internal exit 70 for a cancellation that in fact completed. This
+    supervisor owns every member of the group it signals, so EPERM cannot mean
+    a permission boundary.
+    """
+    for error in (ProcessLookupError(), PermissionError()):
+        def refuse(pid: int, signum: int, exc=error) -> None:
+            raise exc
+
+        original = watchdog.os.killpg
+        watchdog.os.killpg = refuse
+        try:
+            if watchdog._signal_group(1234, 0):
+                raise AssertionError(
+                    f"{type(error).__name__} was not treated as a gone group"
+                )
+        finally:
+            watchdog.os.killpg = original
+
+    delivered: list[tuple[int, int]] = []
+
+    def accept(pid: int, signum: int) -> None:
+        delivered.append((pid, signum))
+
+    original = watchdog.os.killpg
+    watchdog.os.killpg = accept
+    try:
+        if not watchdog._signal_group(99, 15):
+            raise AssertionError("a live group was reported gone")
+    finally:
+        watchdog.os.killpg = original
+    if delivered != [(99, 15)]:
+        raise AssertionError(f"signal not forwarded verbatim: {delivered}")
+
+
+def test_forwarding_a_signal_survives_a_zombie_only_group() -> None:
+    """The whole cleanup path, not just the helper, must tolerate EPERM."""
+
+    class _Reaped:
+        pid = 4321
+
+        def __init__(self) -> None:
+            self.waited = 0
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self) -> None:
+            self.waited += 1
+
+    def zombie_only(pid: int, signum: int) -> None:
+        raise PermissionError()
+
+    process = _Reaped()
+    original = watchdog.os.killpg
+    watchdog.os.killpg = zombie_only
+    try:
+        watchdog._forward_signal_and_cleanup(process, 2)
+        watchdog._terminate_process_group(process)
+    finally:
+        watchdog.os.killpg = original
+    if process.waited != 2:
+        raise AssertionError(
+            f"cleanup did not reap the leader on both paths: {process.waited}"
+        )
+
+
+def test_an_unsealable_tee_releases_its_drainer_source() -> None:
+    """A stalled caller stream must not leak a thread and a descriptor.
+
+    `seal` returns False when a drainer is parked in a write nobody is
+    reading. Ignoring that left the thread blocked forever holding the child's
+    pipe, so a caller running `run_command` in a loop exhausted both.
+    """
+
+    class _UnsealableTee:
+        def seal(self) -> bool:
+            return False
+
+    class _Source:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    source = _Source()
+    state = watchdog._DrainState(
+        threads=(),
+        tees=(_UnsealableTee(),),
+        stop=threading.Event(),
+        retention=None,
+        sources=(source,),
+    )
+    watchdog._seal_drainers(state)
+    if not source.closed:
+        raise AssertionError(
+            "an unsealable tee left its drainer holding the child pipe"
+        )
+
+
+def test_a_sealable_tee_keeps_its_source_for_the_drainer_to_close() -> None:
+    """The normal path is unchanged: `_tee_stream` closes its own source."""
+
+    class _SealableTee:
+        def seal(self) -> bool:
+            return True
+
+    class _Source:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    source = _Source()
+    watchdog._seal_drainers(
+        watchdog._DrainState(
+            threads=(),
+            tees=(_SealableTee(),),
+            stop=threading.Event(),
+            retention=None,
+            sources=(source,),
+        )
+    )
+    if source.closed:
+        raise AssertionError("a cleanly sealed tee closed its source twice")
+
+
 def main() -> int:
     """Run every watchdog invariant without an external test framework."""
     for test in (
@@ -587,6 +1384,20 @@ def main() -> int:
         test_sigint_is_forwarded_to_the_process_group,
         test_first_signal_wins_during_forced_cleanup,
         test_cancellation_wins_when_spawn_then_raises,
+        test_flooding_child_is_drained_teed_and_marked,
+        test_leaked_descendant_bounds_the_drain_and_seals_the_tee,
+        test_a_caller_stream_without_a_byte_buffer_still_receives_the_tee,
+        test_cancellation_during_the_drain_settle_stays_cancelled,
+        test_a_blocked_caller_stream_cannot_swallow_a_caller_signal,
+        test_high_numbered_pipe_descriptors_do_not_lose_output,
+        test_a_zombie_only_group_reports_gone_on_both_spellings,
+        test_forwarding_a_signal_survives_a_zombie_only_group,
+        test_an_unsealable_tee_releases_its_drainer_source,
+        test_a_sealable_tee_keeps_its_source_for_the_drainer_to_close,
+        test_a_frozen_marker_capture_refuses_later_writes,
+        test_the_seal_freezes_the_capture_before_it_seals_any_tee,
+        test_a_drainer_cannot_write_through_a_frozen_capture,
+        test_a_cancelled_timeout_settle_seals_before_the_timeout_diagnostic,
     ):
         test()
     print("process-watchdog: OK")

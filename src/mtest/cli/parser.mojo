@@ -1,10 +1,8 @@
 """The hand-rolled full-contract argument parser.
 
-`parse_args` turns an argument vector into a `ParseResult` — a configured run
-or a help/version directive — or raises a `cli:`-prefixed usage error. It parses
-the whole v1 grammar: flags this build does not yet serve are still recognized,
-then refused with a message naming the milestone that brings them, so later work
-only flips an availability bit rather than teaching the parser a new token.
+`parse_args` turns an argument vector into a `ParseResult` — a configured run,
+a resolved-config display request, a doctor request, or a help/version
+directive — or raises a `cli:`-prefixed usage error.
 
 Every raise names the offending token, states the expected form, and points at
 `mtest --help`. This layer never prints and never exits; `main` prints help and
@@ -13,30 +11,37 @@ version to stdout with exit 0, and prints a usage error to stderr with exit 4.
 from std.os import getenv
 from std.os.path import dirname, isdir
 
-from mtest.cli.flag_spec import FlagId, FlagSpec, flag_specs
+from mtest.cli.flag_spec import (
+    FlagId,
+    FlagSpec,
+    flag_group_name,
+    flag_specs,
+)
 from mtest.cli.parse_result import ParseResult
 from mtest.config import (
     AnnotationsMode,
+    CliOverlay,
     ColorWhen,
     Precompile,
     RunnerConfig,
     ShardMode,
     ShowOutput,
     Verbosity,
+    build_arg_rejection,
+    parse_annotations_value,
+    parse_color_value,
+    parse_nonnegative_decimal,
+    parse_precompile_value,
+    parse_show_output_value,
+    parse_worker_count,
     resolve_mojo_path,
+    safe_path_label,
 )
 
-comptime MTEST_VERSION = "0.5.0"
+comptime MTEST_VERSION = "0.6.0"
 """The single source of the version string; `main` reuses this exact value."""
 
-comptime SUPPORTED_SUMMARY = (
-    "paths, --exclude, -I, --build-arg, --gate, --precompile, --mojo,"
-    " -x/--exitfirst, --timeout, --compile-timeout, -s/--show-output, -q, -v,"
-    " --color, -k, --maxfail, --durations, --shard, -n/--workers, --serial,"
-    " --retries, --json, --junit-xml, --gh-annotations, collect/--collect-only,"
-    " --help, --version"
-)
-"""A stable one-line list of what this build serves, quoted in refusals."""
+comptime _HELP_COLUMN = 30
 
 
 def version_text() -> String:
@@ -44,15 +49,64 @@ def version_text() -> String:
     return "mtest " + MTEST_VERSION
 
 
+def _help_row(label: String, detail: String) -> String:
+    """Render one aligned, single-line help row."""
+    var row = "  " + label
+    for _ in range(_HELP_COLUMN - row.count_codepoints()):
+        row += " "
+    return row + detail + "\n"
+
+
 def help_text() -> String:
-    """The usage text `main` prints for `--help` / `-h` / `help`."""
-    return String(
+    """Build grouped usage text from the flag-spec table.
+
+    Returns:
+        The freshly allocated text printed for `--help`, `-h`, and `help`.
+    """
+    var rendered = String(
         "mtest — a pytest-like test runner for Mojo\n\n",
-        "usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]\n\n",
-        "This build serves: ",
-        SUPPORTED_SUMMARY,
-        "\n",
+        "usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]\n",
+        "       mtest config show [PATHS...] [flags] [-- BUILD-ARGS...]\n",
+        (
+            "       mtest doctor [--config PATH | --no-config]"
+            " [--color WHEN] [-q | -v]\n\n"
+        ),
+        "Subcommands:\n",
     )
+    rendered += _help_row(
+        "run [PATHS...] [flags]", "Run tests (the default subcommand)."
+    )
+    rendered += _help_row(
+        "collect [PATHS...] [flags]", "List node ids without running tests."
+    )
+    rendered += _help_row(
+        "config show [PATHS...]",
+        "Show resolved configuration.",
+    )
+    rendered += _help_row(
+        "doctor [flags]", "Diagnose the environment without running tests."
+    )
+    rendered += _help_row("help", "Show this help and exit.")
+    rendered += _help_row("version", "Show the version and exit.")
+
+    var current_group = -1
+    var specs = flag_specs()
+    var index = 0
+    while index < len(specs):
+        var spec = specs[index].copy()
+        if spec.group != current_group:
+            rendered += "\n" + flag_group_name(spec.group) + ":\n"
+            current_group = spec.group
+        var label = spec.spelling.copy()
+        var next_index = index + 1
+        while next_index < len(specs) and specs[next_index].id == spec.id:
+            label += ", " + specs[next_index].spelling
+            next_index += 1
+        if spec.value_name != "":
+            label += " " + spec.value_name
+        rendered += _help_row(label^, spec.help)
+        index = next_index
+    return rendered^
 
 
 # --- error builders (every message is `cli:`-prefixed and points at help) ---
@@ -63,60 +117,39 @@ def _err(body: String) -> Error:
     return Error("cli: " + body + " (see mtest --help)")
 
 
-def _refuse(spec: FlagSpec) -> Error:
-    """The refusal for a flag in the contract but not served by this build."""
-    return Error(
-        "cli: '"
-        + spec.spelling
-        + "' is part of the mtest v1 contract but is not available in this"
-        + " build (it arrives with "
-        + spec.arrives_with
-        + "); this build serves: "
-        + SUPPORTED_SUMMARY
-        + " (see mtest --help)"
-    )
-
-
 # --- value validation ---
-
-
-def _all_digits(s: String) -> Bool:
-    """Whether `s` is one or more ASCII decimal digits and nothing else."""
-    if s.byte_length() == 0:
-        return False
-    for cp in s.codepoints():
-        var v = Int(cp)
-        if v < 48 or v > 57:
-            return False
-    return True
 
 
 def _parse_timeout(value: String) raises -> Int:
     """Parse a `--timeout` value: a non-negative integer (`0` disables)."""
-    if not _all_digits(value):
+    var parsed = parse_nonnegative_decimal(value)
+    if not parsed:
         raise _err("'--timeout' wants an integer >= 0, got '" + value + "'")
-    return atol(value)
+    return parsed.value()
 
 
 def _parse_maxfail(value: String) raises -> Int:
     """Parse a `--maxfail` value: a non-negative integer (`0` disables)."""
-    if not _all_digits(value):
+    var parsed = parse_nonnegative_decimal(value)
+    if not parsed:
         raise _err("'--maxfail' wants an integer >= 0, got '" + value + "'")
-    return atol(value)
+    return parsed.value()
 
 
 def _parse_durations(value: String) raises -> Int:
     """Parse a `--durations` value: a non-negative integer (`0` disables)."""
-    if not _all_digits(value):
+    var parsed = parse_nonnegative_decimal(value)
+    if not parsed:
         raise _err("'--durations' wants an integer >= 0, got '" + value + "'")
-    return atol(value)
+    return parsed.value()
 
 
 def _parse_retries(value: String) raises -> Int:
     """Parse a `--retries` value: a non-negative integer (`0` disables)."""
-    if not _all_digits(value):
+    var parsed = parse_nonnegative_decimal(value)
+    if not parsed:
         raise _err("'--retries' wants an integer >= 0, got '" + value + "'")
-    return atol(value)
+    return parsed.value()
 
 
 def _parse_workers(value: String) raises -> Int:
@@ -135,57 +168,50 @@ def _parse_workers(value: String) raises -> Int:
         A usage error (exit 4) when the value is neither `auto` nor a positive
         integer — `0`, a negative, or any non-digit spelling.
     """
-    if value == "auto":
-        return 0
-    if not _all_digits(value):
+    var parsed = parse_worker_count(value)
+    if not parsed:
         raise _err(
             "'-n'/'--workers' wants a positive integer or 'auto', got '"
             + value
             + "'"
         )
-    var n = atol(value)
-    if n < 1:
-        raise _err(
-            "'-n'/'--workers' wants a positive integer or 'auto', got '"
-            + value
-            + "'"
-        )
-    return n
+    return parsed.value()
 
 
 def _parse_compile_timeout(value: String) raises -> Int:
     """Parse `--compile-timeout`: a non-negative integer, `0` disables."""
-    if not _all_digits(value):
+    var parsed = parse_nonnegative_decimal(value)
+    if not parsed:
         raise _err(
             "'--compile-timeout' wants an integer >= 0, got '" + value + "'"
         )
-    return atol(value)
+    return parsed.value()
 
 
 def _parse_show_output(value: String) raises -> ShowOutput:
     """Parse a `--show-output` mode: `failures`, `all`, or `none`."""
-    if value == "failures":
-        return ShowOutput.FAILURES
-    if value == "all":
-        return ShowOutput.ALL
-    if value == "none":
-        return ShowOutput.NONE
-    raise _err(
-        "'--show-output' wants one of failures|all|none, got '" + value + "'"
-    )
+    var parsed = parse_show_output_value(value)
+    if not parsed:
+        raise _err(
+            "'--show-output' wants one of failures|all|none, got '"
+            + value
+            + "'"
+        )
+    return parsed.value()
 
 
-def _validate_json_dest(value: String) raises -> String:
+def _validate_json_dest(value: String, validate_parent: Bool) raises -> String:
     """Syntactically validate a `--json` destination; return it unchanged.
 
     `-` names the stdout stream and is always valid. Any other value is a
-    filesystem path: it must be non-empty and its parent directory (when it
-    names one) must already exist.
+    filesystem path and must be non-empty. When `validate_parent` is True, its
+    parent directory (when it names one) must already exist.
 
-    This is the parse-time check only. An empty value or a missing parent is a
-    usage error (exit 4) raised before any build or run; a runtime open failure
-    such as a permissions problem or descriptor exhaustion is the session's to
-    detect, under a different exit code.
+    This is the parse-time check only. An empty value is always a usage error
+    (exit 4); a missing parent is also a usage error for a run, but resolution-
+    only config display skips that filesystem check. A runtime open failure,
+    such as a permissions problem or descriptor exhaustion, is the session's
+    to detect under a different exit code.
     """
     if value == "-":
         return value
@@ -193,78 +219,70 @@ def _validate_json_dest(value: String) raises -> String:
         raise _err(
             "'--json' wants a destination PATH or '-', got an empty value"
         )
-    var parent = String(dirname(value))
-    if parent != "" and not isdir(parent):
-        raise _err(
-            "'--json' destination parent directory does not exist: '"
-            + parent
-            + "'"
-        )
+    if validate_parent:
+        var parent = String(dirname(value))
+        if parent != "" and not isdir(parent):
+            raise _err(
+                "'--json' destination parent directory does not exist: '"
+                + safe_path_label(parent)
+                + "'"
+            )
     return value
 
 
-def _validate_junit_dest(value: String) raises -> String:
+def _validate_junit_dest(value: String, validate_parent: Bool) raises -> String:
     """Syntactically validate a `--junit-xml` destination; return it unchanged.
 
     The value is always a filesystem path. There is no `-` stdout form, because
     a JUnit document is assembled and renamed atomically rather than streamed
-    live. It must be non-empty and its parent directory (when it names one) must
-    already exist.
+    live. It must be non-empty. When `validate_parent` is True, its parent
+    directory (when it names one) must already exist.
 
-    This is the parse-time check only. An empty value or a missing parent is a
-    usage error (exit 4) raised before any build or run; a runtime creation
+    This is the parse-time check only. An empty value is always a usage error
+    (exit 4); a missing parent is also a usage error for a run, but resolution-
+    only config display skips that filesystem check. A runtime creation
     failure, including the target directory being removed after this check, is
-    the session's to detect, under a different exit code.
+    the session's to detect under a different exit code.
     """
     if value.byte_length() == 0:
         raise _err("'--junit-xml' wants a destination PATH, got an empty value")
-    var parent = String(dirname(value))
-    if parent != "" and not isdir(parent):
-        raise _err(
-            "'--junit-xml' destination parent directory does not exist: '"
-            + parent
-            + "'"
-        )
+    if validate_parent:
+        var parent = String(dirname(value))
+        if parent != "" and not isdir(parent):
+            raise _err(
+                "'--junit-xml' destination parent directory does not exist: '"
+                + safe_path_label(parent)
+                + "'"
+            )
     return value
 
 
 def _parse_annotations(value: String) raises -> AnnotationsMode:
     """Parse a `--gh-annotations` mode: `off`, `on`, or `auto`."""
-    if value == "off":
-        return AnnotationsMode.OFF
-    if value == "on":
-        return AnnotationsMode.ON
-    if value == "auto":
-        return AnnotationsMode.AUTO
-    raise _err(
-        "'--gh-annotations' wants one of off|on|auto, got '" + value + "'"
-    )
+    var parsed = parse_annotations_value(value)
+    if not parsed:
+        raise _err(
+            "'--gh-annotations' wants one of off|on|auto, got '" + value + "'"
+        )
+    return parsed.value()
 
 
 def _parse_color(value: String) raises -> ColorWhen:
     """Parse a `--color` mode: `auto`, `always`, or `never`."""
-    if value == "auto":
-        return ColorWhen.AUTO
-    if value == "always":
-        return ColorWhen.ALWAYS
-    if value == "never":
-        return ColorWhen.NEVER
-    raise _err("'--color' wants one of auto|always|never, got '" + value + "'")
+    var parsed = parse_color_value(value)
+    if not parsed:
+        raise _err(
+            "'--color' wants one of auto|always|never, got '" + value + "'"
+        )
+    return parsed.value()
 
 
 def _parse_precompile(value: String) raises -> Precompile:
     """Parse a `--precompile SRC[:OUT]` value into its two parts."""
-    var colon = value.find(":")
-    if colon == -1:
-        if value.byte_length() == 0:
-            raise _err("'--precompile' wants SRC[:OUT], got '" + value + "'")
-        return Precompile(src=value, out=Optional[String](None))
-    var parts = value.split(":", 1)
-    var src = String(parts[0])
-    var out = String(parts[1])
-    if src.byte_length() == 0 or out.byte_length() == 0:
+    var parsed = parse_precompile_value(value)
+    if not parsed:
         raise _err("'--precompile' wants SRC[:OUT], got '" + value + "'")
-    return Precompile(src=src, out=Optional[String](out))
+    return parsed.value().copy()
 
 
 def _parse_shard(value: String) raises -> Tuple[ShardMode, Int, Int]:
@@ -292,10 +310,12 @@ def _parse_shard(value: String) raises -> Tuple[ShardMode, Int, Int]:
     var mn = rest.split("/", 1)
     var ms = String(mn[0])
     var ns = String(mn[1])
-    if not _all_digits(ms) or not _all_digits(ns):
+    var parsed_m = parse_nonnegative_decimal(ms)
+    var parsed_n = parse_nonnegative_decimal(ns)
+    if not parsed_m or not parsed_n:
         raise _err_shard(value)
-    var m = atol(ms)
-    var n = atol(ns)
+    var m = parsed_m.value()
+    var n = parsed_n.value()
     if n < 1 or m < 1 or m > n:
         raise _err_shard(value)
     return (mode, m, n)
@@ -317,36 +337,9 @@ def _check_build_arg(tok: String) raises:
     positional that would reach `mojo build`. A bare value that is not a source
     file, such as a forwarded flag's value, passes.
     """
-    if tok == "-o" or tok.startswith("-o="):
-        raise _err(
-            "forbidden build argument '"
-            + tok
-            + "': mtest owns output selection"
-        )
-    if tok == "--emit" or tok.startswith("--emit="):
-        raise _err(
-            "forbidden build argument '"
-            + tok
-            + "': mtest owns emit-type selection"
-        )
-    if (
-        tok == "-j"
-        or tok.startswith("-j=")
-        or tok == "--num-threads"
-        or tok.startswith("--num-threads=")
-    ):
-        raise _err(
-            "forbidden build argument '"
-            + tok
-            + "': mtest owns build parallelism (set the worker count with"
-            " -n/--workers)"
-        )
-    if not tok.startswith("-") and (
-        tok.endswith(".mojo") or tok.endswith(".🔥")
-    ):
-        raise _err(
-            "forbidden build argument '" + tok + "': mtest owns the source list"
-        )
+    var rejection = build_arg_rejection(tok)
+    if rejection:
+        raise _err(rejection.value())
 
 
 def _env_mojo() -> Optional[String]:
@@ -366,31 +359,34 @@ def _lookup(name: String) -> Optional[FlagSpec]:
 
 
 def parse_args(argv: List[String]) raises -> ParseResult:
-    """Parse `argv` into a run config or a help/version directive.
+    """Parse `argv` into a run, config-display, doctor, help, or version result.
 
     A leading `help` or `version` token returns that directive immediately. A
     leading `run` or `collect` token is consumed as a subcommand, with `collect`
-    equivalent to `--collect-only`. Any other first token is left to the
-    general token loop, which reads it as a flag when it starts with `-` (a
-    bare `-` excepted) and as a path operand otherwise, so an argument vector
-    may open with a flag. Everything after a bare `--` is forwarded as a build
-    argument.
+    equivalent to `--collect-only`. A leading `config show` pair requests
+    resolution-only display while reusing the run grammar. Any other first
+    token is left to the general token loop, which reads it as a flag when it
+    starts with `-` (a bare `-` excepted) and as a path operand otherwise, so
+    an argument vector may open with a flag. Everything after a bare `--` is
+    forwarded as a build argument.
 
     Args:
         argv: The argument tokens, excluding the program name.
 
     Returns:
-        A `ParseResult`: a configured run, or a help/version directive.
+        A configured run, config-display request, or help/version directive.
 
     Raises:
         Error: A `cli:`-prefixed usage error, raised for an unknown flag, a
             missing or malformed value, a forbidden build argument, a bundled
             short-flag group, `-q` and `-v` together, a run-only flag combined
             with collect mode, `--json -` alongside an annotation tail that is
-            not explicitly off, or a flag this build does not yet serve.
+            not explicitly off.
     """
     var start = 0
     var collect = False
+    var config_show = False
+    var doctor = False
     if len(argv) > 0:
         var head = argv[0]
         if head == "version":
@@ -404,19 +400,40 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             start = 1
         if head == "run":
             start = 1
+        if head == "doctor":
+            doctor = True
+            start = 1
+        if head == "config":
+            if len(argv) < 2 or argv[1] != "show":
+                raise _err(
+                    "'config' requires the two-token subcommand 'config show'"
+                )
+            config_show = True
+            start = 2
 
     var paths = List[String]()
+    var saw_paths = False
     var excludes = List[String]()
+    var saw_excludes = False
     var serials = List[String]()
+    var saw_serial = False
     var gates = List[String]()
+    var saw_gates = False
     var precompiles = List[Precompile]()
+    var saw_precompile = False
     var build_args = List[String]()
+    var saw_build_args = False
     var include_paths = List[String]()
+    var saw_include = False
     var mojo_flag = Optional[String](None)
+    var saw_mojo = False
     var timeout_secs = 300
+    var saw_timeout = False
     var compile_timeout_secs = 600
+    var saw_compile_timeout = False
     var show_output = ShowOutput.FAILURES
     var color = ColorWhen.AUTO
+    var saw_color = False
     var exitfirst = False
     var keyword = String("")
     var maxfail = 0
@@ -431,6 +448,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     # One worker is the sequential default: no flag runs files in order and
     # leaves the build argv byte-identical to a single-worker build.
     var workers = 1
+    var saw_workers = False
     var json_dest = String("")
     var saw_json = False
     var junit_dest = String("")
@@ -440,6 +458,14 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var saw_show_output = False
     var saw_quiet = False
     var saw_verbose = False
+    var config_path = String("")
+    var saw_config = False
+    var no_config = False
+    var last_failed = False
+    var failed_first = False
+    var saw_select = False
+    var saw_shard = False
+    var saw_passthrough = False
 
     var passthrough = False
     var i = start
@@ -449,16 +475,19 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         if passthrough:
             _check_build_arg(tok)
             build_args.append(tok)
+            saw_build_args = True
             i += 1
             continue
 
         if tok == "--":
             passthrough = True
+            saw_passthrough = True
             i += 1
             continue
 
         if not tok.startswith("-") or tok == "-":
             paths.append(tok)
+            saw_paths = True
             i += 1
             continue
 
@@ -488,8 +517,6 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         if not spec:
             raise _err("unknown flag '" + name + "'")
         var s = spec.value().copy()
-        if not s.available:
-            raise _refuse(s)
 
         if s.arity == 0:
             if has_inline:
@@ -515,6 +542,12 @@ def parse_args(argv: List[String]) raises -> ParseResult:
                 saw_verbose = True
             elif s.id == FlagId.COLLECT_ONLY:
                 collect = True
+            elif s.id == FlagId.NO_CONFIG:
+                no_config = True
+            elif s.id == FlagId.LAST_FAILED:
+                last_failed = True
+            elif s.id == FlagId.FAILED_FIRST:
+                failed_first = True
             i += 1
             continue
 
@@ -531,31 +564,42 @@ def parse_args(argv: List[String]) raises -> ParseResult:
 
         if s.id == FlagId.EXCLUDE:
             excludes.append(value)
+            saw_excludes = True
         elif s.id == FlagId.SERIAL:
             serials.append(value)
+            saw_serial = True
         elif s.id == FlagId.INCLUDE:
             _check_build_arg(value)
             include_paths.append(value)
+            saw_include = True
         elif s.id == FlagId.BUILD_ARG:
             _check_build_arg(value)
             build_args.append(value)
+            saw_build_args = True
         elif s.id == FlagId.GATE:
             gates.append(value)
+            saw_gates = True
         elif s.id == FlagId.PRECOMPILE:
             precompiles.append(_parse_precompile(value))
+            saw_precompile = True
         elif s.id == FlagId.MOJO:
             mojo_flag = value
+            saw_mojo = True
         elif s.id == FlagId.TIMEOUT:
             timeout_secs = _parse_timeout(value)
+            saw_timeout = True
         elif s.id == FlagId.COMPILE_TIMEOUT:
             compile_timeout_secs = _parse_compile_timeout(value)
+            saw_compile_timeout = True
         elif s.id == FlagId.SHOW_OUTPUT:
             show_output = _parse_show_output(value)
             saw_show_output = True
         elif s.id == FlagId.COLOR:
             color = _parse_color(value)
+            saw_color = True
         elif s.id == FlagId.SELECT:
             keyword = value
+            saw_select = True
         elif s.id == FlagId.MAXFAIL:
             maxfail = _parse_maxfail(value)
             saw_maxfail = True
@@ -567,26 +611,162 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             shard_mode = parsed[0]
             shard_m = parsed[1]
             shard_n = parsed[2]
+            saw_shard = True
         elif s.id == FlagId.RETRIES:
             retries = _parse_retries(value)
             saw_retries = True
         elif s.id == FlagId.WORKERS:
             workers = _parse_workers(value)
+            saw_workers = True
         elif s.id == FlagId.JSON:
-            json_dest = _validate_json_dest(value)
+            json_dest = _validate_json_dest(
+                value, not config_show and not doctor
+            )
             saw_json = True
         elif s.id == FlagId.JUNIT_XML:
-            junit_dest = _validate_junit_dest(value)
+            junit_dest = _validate_junit_dest(
+                value, not config_show and not doctor
+            )
             saw_junit = True
         elif s.id == FlagId.GH_ANNOTATIONS:
             gh_annotations = _parse_annotations(value)
             saw_annotations = True
+        elif s.id == FlagId.CONFIG:
+            if value == "":
+                raise _err("'--config' requires a non-empty path")
+            config_path = value
+            saw_config = True
+
+    if saw_config and no_config:
+        raise _err("'--config' and '--no-config' are mutually exclusive")
+    if last_failed and failed_first:
+        raise _err(
+            "'--lf'/'--last-failed' and '--ff'/'--failed-first' are mutually"
+            " exclusive"
+        )
+    if (last_failed or failed_first) and shard_n > 0:
+        raise _err(
+            "'--lf'/'--last-failed' and '--ff'/'--failed-first' cannot be"
+            " combined with '--shard'"
+        )
+
+    if doctor:
+        if saw_paths:
+            raise _err("path operands cannot be combined with doctor")
+        if saw_passthrough:
+            raise _err(
+                "build-argument passthrough cannot be combined with doctor"
+            )
+        if saw_select:
+            raise _err(
+                "'-k' is a run/collect flag and cannot be combined with doctor"
+            )
+        if last_failed or failed_first:
+            raise _err(
+                "'--lf'/'--last-failed' and '--ff'/'--failed-first' are state"
+                " selection flags and cannot be combined with doctor"
+            )
+        if collect:
+            raise _err(
+                "'--collect-only' is a run/collect flag and cannot be combined"
+                " with doctor"
+            )
+        if exitfirst:
+            raise _err(
+                "'-x'/'--exitfirst' is a run flag and cannot be combined with"
+                " doctor"
+            )
+        if saw_timeout:
+            raise _err(
+                "'--timeout' is a run flag and cannot be combined with doctor"
+            )
+        if saw_maxfail:
+            raise _err(
+                "'--maxfail' is a run flag and cannot be combined with doctor"
+            )
+        if saw_durations:
+            raise _err(
+                "'--durations' is a run flag and cannot be combined with doctor"
+            )
+        if saw_retries:
+            raise _err(
+                "'--retries' is a run flag and cannot be combined with doctor"
+            )
+        if saw_workers:
+            raise _err(
+                "'-n'/'--workers' is a run flag and cannot be combined with"
+                " doctor"
+            )
+        if saw_shard:
+            raise _err(
+                "'--shard' is a run flag and cannot be combined with doctor"
+            )
+        if saw_excludes:
+            raise _err(
+                "'--exclude' is a selection flag and cannot be combined with"
+                " doctor"
+            )
+        if saw_serial:
+            raise _err(
+                "'--serial' is a run flag and cannot be combined with doctor"
+            )
+        if saw_gates:
+            raise _err(
+                "'--gate' is a run flag and cannot be combined with doctor"
+            )
+        if saw_show_output:
+            raise _err(
+                "'-s'/'--show-output' is a run flag and cannot be combined with"
+                " doctor"
+            )
+        if saw_mojo:
+            raise _err(
+                "'--mojo' is a build flag and cannot be combined with doctor"
+            )
+        if saw_include:
+            raise _err(
+                "'-I' is a build flag and cannot be combined with doctor"
+            )
+        if saw_build_args:
+            raise _err(
+                "'--build-arg' is a build flag and cannot be combined with"
+                " doctor"
+            )
+        if saw_precompile:
+            raise _err(
+                "'--precompile' is a build flag and cannot be combined with"
+                " doctor"
+            )
+        if saw_compile_timeout:
+            raise _err(
+                "'--compile-timeout' is a build flag and cannot be combined"
+                " with doctor"
+            )
+        if saw_json:
+            raise _err(
+                "'--json' is a reporter flag and cannot be combined with doctor"
+            )
+        if saw_junit:
+            raise _err(
+                "'--junit-xml' is a reporter flag and cannot be combined with"
+                " doctor"
+            )
+        if saw_annotations:
+            raise _err(
+                "'--gh-annotations' is a reporter flag and cannot be combined"
+                " with doctor"
+            )
 
     # Collect mode is a listing, not a run: the run-only knobs that shape which
     # tests execute or when to stop scheduling are meaningless against it and are
     # refused loudly. `--timeout` is NOT refused — it bounds the collection
     # probes exactly as it bounds a run (a hanging probe is a TIMEOUT).
     if collect:
+        if last_failed or failed_first:
+            raise _err(
+                "'--lf'/'--last-failed' and '--ff'/'--failed-first' are"
+                " run-only flags and cannot be combined with collect mode"
+            )
         if exitfirst:
             raise _err(
                 "'-x'/'--exitfirst' is a run-only flag and cannot be combined"
@@ -641,46 +821,66 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     elif saw_verbose:
         verbosity = Verbosity.VERBOSE
 
-    # `--json -` owns stdout for the byte-pure event stream, so nothing else may
-    # write there. The annotation tail renders to stdout too, so the ONLY way the
-    # two combine is with annotations EXPLICITLY off. The default `auto` and an
-    # explicit `on` are BOTH usage errors here, detected at parse time; the
-    # message names both fixes so a reader can resolve it either way.
-    if json_dest == "-" and gh_annotations != AnnotationsMode.OFF:
-        raise _err(
-            "'--json -' streams machine output to stdout, which the"
-            " '--gh-annotations' tail cannot share; drop '--json -' (use"
-            " '--json PATH'), or set '--gh-annotations off'"
-        )
-
-    var mojo_path = resolve_mojo_path(mojo_flag, _env_mojo())
-
-    var cfg = RunnerConfig(
+    var overlay_mojo = String("mojo")
+    if mojo_flag:
+        overlay_mojo = mojo_flag.value()
+    var overlay = CliOverlay(
         paths=paths^,
+        saw_paths=saw_paths,
         excludes=excludes^,
+        saw_excludes=saw_excludes,
         serial_globs=serials^,
+        saw_serial=saw_serial,
         gates=gates^,
-        precompiles=precompiles^,
-        build_args=build_args^,
-        include_paths=include_paths^,
-        mojo_path=mojo_path,
-        timeout_secs=timeout_secs,
-        show_output=show_output,
-        verbosity=verbosity,
-        color=color,
-        exitfirst=exitfirst,
-        keyword=keyword^,
-        maxfail=maxfail,
-        durations=durations,
-        collect=collect,
-        shard_mode=shard_mode,
-        shard_m=shard_m,
-        shard_n=shard_n,
-        retries=retries,
+        saw_gates=saw_gates,
         workers=workers,
+        saw_workers=saw_workers,
+        timeout_secs=timeout_secs,
+        saw_timeout=saw_timeout,
+        retries=retries,
+        saw_retries=saw_retries,
+        maxfail=maxfail,
+        saw_maxfail=saw_maxfail,
+        state=True,
+        saw_state=False,
+        mojo_path=overlay_mojo^,
+        saw_mojo=saw_mojo,
+        include_paths=include_paths^,
+        saw_include=saw_include,
+        build_args=build_args^,
+        saw_build_args=saw_build_args,
+        precompiles=precompiles^,
+        saw_precompile=saw_precompile,
         compile_timeout_secs=compile_timeout_secs,
-        json_dest=json_dest^,
-        gh_annotations=gh_annotations,
+        saw_compile_timeout=saw_compile_timeout,
+        color=color,
+        saw_color=saw_color,
+        show_output=show_output,
+        saw_show_output=saw_show_output,
+        verbosity=verbosity,
+        saw_verbosity=saw_quiet or saw_verbose,
+        durations=durations,
+        saw_durations=saw_durations,
         junit_dest=junit_dest^,
+        saw_junit_xml=saw_junit,
+        json_dest=json_dest^,
+        saw_json=saw_json,
+        gh_annotations=gh_annotations,
+        saw_gh_annotations=saw_annotations,
     )
-    return ParseResult.run(cfg^)
+    var defaults = RunnerConfig.default()
+    defaults.mojo_path = resolve_mojo_path(Optional[String](None), _env_mojo())
+    defaults.exitfirst = exitfirst
+    defaults.keyword = keyword^
+    defaults.collect = collect
+    defaults.last_failed = last_failed
+    defaults.failed_first = failed_first
+    defaults.shard_mode = shard_mode
+    defaults.shard_m = shard_m
+    defaults.shard_n = shard_n
+    var cfg = overlay.fold(defaults)
+    if doctor:
+        return ParseResult.doctor(cfg^, overlay^, config_path^, no_config)
+    if config_show:
+        return ParseResult.config_show(cfg^, overlay^, config_path^, no_config)
+    return ParseResult.run(cfg^, overlay^, config_path^, no_config)

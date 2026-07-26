@@ -8,6 +8,7 @@ from contextlib import redirect_stderr
 from io import StringIO
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
@@ -131,8 +132,17 @@ out.chmod(out.stat().st_mode | stat.S_IXUSR)
             roots[index] + "/test_same_name.mojo" for index in range(2)
         ]
         generated = record["generated"]
+        prefix_match = re.search(
+            r'print\("(==> [0-9a-f]{16} )', generated
+        )
+        if prefix_match is None:
+            raise AssertionError(
+                "generated aggregate carries no nonced module marker:\n"
+                f"{generated}"
+            )
+        nonced = prefix_match.group(1)
         markers = [
-            generated.index(f'print("==> {path}", flush=True)')
+            generated.index(f'print("{nonced}{path}", flush=True)')
             for path in expected_paths
         ]
         if markers != sorted(markers):
@@ -155,9 +165,9 @@ def test_root_modes_discover_focused_unit_integration_and_full_inventory() -> No
     """Every contributor root mode reaches its deterministic classified inventory."""
     cases = (
         (("tests/unit/test_model_outcome.mojo",), 1, "tests/unit/"),
-        (("tests/unit",), 51, "tests/unit/"),
-        (("tests/integration",), 33, "tests/integration/"),
-        ((), 84, "tests/"),
+        (("tests/unit",), 64, "tests/unit/"),
+        (("tests/integration",), 35, "tests/integration/"),
+        ((), 99, "tests/"),
     )
     for arguments, expected_count, prefix in cases:
         roots = classified._normalized_roots(REPO_ROOT, arguments)
@@ -475,7 +485,11 @@ step = os.environ["MTEST_DIRECT_FAILURE_STEP"]
 exit_code = int(os.environ["MTEST_DIRECT_FAILURE_EXIT"])
 signum = int(os.environ["MTEST_DIRECT_FAILURE_SIGNAL"])
 if args[0] == "precompile":
-    if mode == "spawn" and step == "build":
+    if (
+        mode == "spawn"
+        and step == "build"
+        and "src/mtest" in args
+    ):
         Path(sys.argv[0]).unlink()
     raise SystemExit(0)
 if args[0] != "build":
@@ -520,8 +534,9 @@ out.chmod(out.stat().st_mode | stat.S_IXUSR)
         if mode == "timeout":
             env["MTEST_TEST_ALL_TIMEOUT_SECONDS"] = "0.1"
         if mode == "spawn" and step == "build":
-            # `precompile` removes the fake `mojo`; retain only system tools so
-            # the suite build cannot fall through to Pixi's real compiler.
+            # The final package `precompile` removes the fake `mojo`; retain
+            # only system tools so the suite build cannot fall through to
+            # Pixi's real compiler.
             cc = shutil.which("clang")
             nm = shutil.which("nm")
             if cc is None or nm is None:
@@ -659,6 +674,210 @@ def test_direct_runner_spawn_failure_is_not_a_timeout() -> None:
         if sentinel_exists:
             raise AssertionError(f"spawn failure left its {step} deadline sentinel")
 
+MARKER_MODULES = (
+    "tests/unit/test_first.mojo",
+    "tests/unit/test_crashing.mojo",
+)
+MARKER_UNREACHED_MODULE = "tests/unit/test_never_reached.mojo"
+
+
+MARKER_TEST_PREFIX = "==> 0123456789abcdef "
+
+
+def test_last_module_reads_only_complete_markers() -> None:
+    """The marker reader takes the last whole line and ignores a torn tail."""
+    p = MARKER_TEST_PREFIX
+    cases = (
+        ("", None),
+        (f"{p}tests/unit/test_first.mojo\n", "tests/unit/test_first.mojo"),
+        (
+            f"{p}tests/unit/test_first.mojo\n{p}tests/unit/test_crashing.mojo\n",
+            "tests/unit/test_crashing.mojo",
+        ),
+        (f"{p}tests/unit/test_first.mojo", None),
+        (
+            f"{p}tests/unit/test_first.mojo\n{p}tests/unit/test_cra",
+            "tests/unit/test_first.mojo",
+        ),
+        (f"{p}building aggregate test binary\n", None),
+    )
+    for output, expected in cases:
+        actual = classified._last_module(output, p)
+        if actual != expected:
+            raise AssertionError(
+                f"_last_module({output!r}) returned {actual!r}, expected {expected!r}"
+            )
+
+
+def test_a_test_body_cannot_forge_a_module_marker() -> None:
+    """The marker is only authoritative because the child cannot write it.
+
+    Everything on the aggregate's stdout except the generated marker was
+    printed by a test body, so a crashing test that emitted a marker-shaped
+    line had the crash attributed to a module that was never running.
+    """
+    forged = (
+        f"{MARKER_TEST_PREFIX}tests/unit/test_real.mojo\n"
+        "==> tests/unit/test_innocent.mojo\n"
+        "==> deadbeefdeadbeef tests/unit/test_also_innocent.mojo\n"
+    )
+    actual = classified._last_module(forged, MARKER_TEST_PREFIX)
+    if actual != "tests/unit/test_real.mojo":
+        raise AssertionError(
+            f"a forged marker changed the attribution to {actual!r}"
+        )
+
+
+def test_each_run_mints_a_fresh_unguessable_marker_prefix() -> None:
+    """A nonce reused across runs would be readable from an earlier log."""
+    first, second = classified._marker_prefix(), classified._marker_prefix()
+    if first == second:
+        raise AssertionError("two runs shared one marker nonce")
+    for prefix in (first, second):
+        if not prefix.startswith(classified.MODULE_MARKER_PREFIX):
+            raise AssertionError(f"marker prefix lost its introducer: {prefix!r}")
+        nonce = prefix[len(classified.MODULE_MARKER_PREFIX) :].rstrip()
+        if len(nonce) != classified.MARKER_NONCE_BYTES * 2:
+            raise AssertionError(f"marker nonce is not full width: {nonce!r}")
+        if not prefix.endswith(" "):
+            raise AssertionError(
+                f"marker prefix does not separate the path: {prefix!r}"
+            )
+
+
+def _run_aggregate_marker_failure(
+    mode: str,
+) -> subprocess.CompletedProcess[str]:
+    """Run a fake aggregate that reaches the second marker, then ends at `mode`."""
+    if mode not in {"ordinary", "signal", "timeout"}:
+        raise AssertionError(f"unknown aggregate marker failure mode: {mode}")
+    tests_dir = REPO_ROOT / "tests"
+    with tempfile.TemporaryDirectory(
+        prefix="_harness_check_", dir=tests_dir
+    ) as raw_tmp:
+        tmp = Path(raw_tmp)
+        root = tmp / f"marker_{mode}"
+        root.mkdir()
+        suite = root / "test_failure.mojo"
+        suite.write_text("def test_failure():\n    pass\n", encoding="utf-8")
+
+        tools_dir = tmp / "tools"
+        tools_dir.mkdir()
+        _write_executable(
+            tools_dir / "python",
+            f"#!/bin/sh\nexec {sys.executable} \"$@\"\n",
+        )
+        _write_executable(
+            tools_dir / "mojo",
+            """#!/usr/bin/env python3
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+args = sys.argv[1:]
+if args[0] == "precompile":
+    raise SystemExit(0)
+if args[0] != "build":
+    raise SystemExit(f"unexpected fake mojo command: {args}")
+out = Path(args[args.index("-o") + 1])
+out.parent.mkdir(parents=True, exist_ok=True)
+# The real generator mints a fresh marker nonce per run, so the fake
+# aggregate has to learn it the only way a real one could: from the source
+# it was asked to compile.
+source = Path([a for a in args if a.endswith(".mojo")][0]).read_text(
+    encoding="utf-8"
+)
+found = re.search(r'print\\("(==> [0-9a-f]+ )', source)
+if found is None:
+    raise SystemExit(f"no nonced marker in {source}")
+out.write_text(
+    os.environ["MTEST_MARKER_PROGRAM"].replace("@@PREFIX@@", found.group(1)),
+    encoding="utf-8",
+)
+out.chmod(out.stat().st_mode | stat.S_IXUSR)
+""",
+        )
+        program = "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import os",
+                "import signal",
+                "import sys",
+                "import time",
+                f"for path in {MARKER_MODULES!r}:",
+                "    sys.stdout.write('@@PREFIX@@' + path + '\\n')",
+                "sys.stdout.flush()",
+                "mode = os.environ['MTEST_MARKER_MODE']",
+                "if mode == 'ordinary':",
+                "    raise SystemExit(3)",
+                "if mode == 'signal':",
+                "    os.kill(os.getpid(), signal.SIGTERM)",
+                "time.sleep(60)",
+                f"sys.stdout.write('@@PREFIX@@{MARKER_UNREACHED_MODULE}\\n')",
+                "",
+            ]
+        )
+        env = os.environ.copy()
+        env["PATH"] = f"{tools_dir}{os.pathsep}{env['PATH']}"
+        env["MTEST_MARKER_MODE"] = mode
+        env["MTEST_MARKER_PROGRAM"] = program
+        if mode == "timeout":
+            env["MTEST_TEST_ALL_TIMEOUT_SECONDS"] = "2"
+        return subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "scripts.harness.classified",
+                os.path.relpath(root, REPO_ROOT),
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=60,
+            check=False,
+        )
+
+
+def test_aggregate_failures_name_the_last_module_reached() -> None:
+    """Exit, signal, and timeout endings all identify the module they died in."""
+    expected_status = {
+        "ordinary": 1,
+        "signal": -signal.SIGTERM,
+        "timeout": watchdog.TIMEOUT_EXIT_CODE,
+    }
+    for mode, status in expected_status.items():
+        result = _run_aggregate_marker_failure(mode)
+        if result.returncode != status:
+            raise AssertionError(
+                f"aggregate marker {mode} exited {result.returncode}, "
+                f"expected {status}\n{result.stdout}"
+            )
+        if f"last module: {MARKER_MODULES[1]}" not in result.stdout:
+            raise AssertionError(
+                f"aggregate marker {mode} lost its failure provenance:\n"
+                f"{result.stdout}"
+            )
+        if MARKER_UNREACHED_MODULE in result.stdout:
+            raise AssertionError(
+                f"aggregate marker {mode} named a module it never reached:\n"
+                f"{result.stdout}"
+            )
+        for module in MARKER_MODULES:
+            if not re.search(
+                rf"^==> [0-9a-f]{{16}} {re.escape(module)}$",
+                result.stdout,
+                re.MULTILINE,
+            ):
+                raise AssertionError(
+                    f"aggregate marker {mode} did not tee {module}:\n"
+                    f"{result.stdout}"
+                )
+
+
 def main() -> int:
     """Run every classified-harness behavior test serially."""
     for test in (
@@ -676,6 +895,10 @@ def main() -> int:
         test_direct_runner_signal_deaths_are_re_raised,
         test_direct_runner_timeout_stops_before_following_suite,
         test_direct_runner_spawn_failure_is_not_a_timeout,
+        test_last_module_reads_only_complete_markers,
+        test_a_test_body_cannot_forge_a_module_marker,
+        test_each_run_mints_a_fresh_unguessable_marker_prefix,
+        test_aggregate_failures_name_the_last_module_reached,
     ):
         test()
     print("classified-harness: OK")

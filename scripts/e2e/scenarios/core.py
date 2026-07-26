@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
@@ -10,20 +11,29 @@ import sys
 import tempfile
 
 from scripts.e2e.assertions import (
+    CAPTURE_BOUND_BYTES,
     VERDICT_TO_BUCKET,
+    HostileStreams,
     expect,
     expect_accounting,
     expect_exit,
+    hostile_actor,
+    hostile_streams,
     verdict_line,
     verdict_paths_in_order,
 )
 from scripts.e2e.runner import (
     E2E_ROOT,
+    FAKE_HOSTILE_MOJO,
     REPO_ROOT,
     SHORT_TIMEOUT,
+    Run,
     ScenarioContext,
+    ScenarioError,
     discovered_test_files,
 )
+from scripts.e2e.scenarios.json_reporter import assert_hostile_json_stream
+from scripts.e2e.scenarios.junit_reporter import assert_hostile_junit_report
 
 
 def s_manifest_completeness(context: ScenarioContext) -> str:
@@ -275,6 +285,456 @@ def s_hostile(context: ScenarioContext) -> str:
         f"overflow flood did not report FAIL:\n{run.stdout}",
     )
     return "silent/forger MALFORMED-SUITE, liar DRIFT exit 3, overflow FAIL"
+
+
+HOSTILE_CONSOLE_TREE = "build/e2e-scratch/hostile-console"
+"""Repo-relative home of this scenario's GENERATED source.
+
+Deliberately outside `e2e/`, for the same reasons the descriptor-clamp scenario
+generates its tree: the stand-in compiler writes a Python script, not an ELF
+binary, so pointing it at a committed fixture would leave a `#!`-headed file
+under the exact name a real `mojo build` produces. `build/` is gitignored and is
+never walked by the manifest-completeness oracle, so nothing here joins a
+committed inventory."""
+
+HOSTILE_CONSOLE_NAME = "test_hostile_console"
+"""The single generated module, and the stem of the file mtest is asked for.
+
+Deliberately NOT the row name: the actor's `TEST_NAME` is a hostile row name
+that no filesystem should have to hold, and nothing in mtest requires the two to
+agree — the file is never really compiled, and the report's identity is its
+header path, not its row names. Every assertion about the row reads
+`hostile_actor().TEST_NAME`, so the two cannot silently drift into agreement."""
+
+HOSTILE_CONSOLE_FILE = f"{HOSTILE_CONSOLE_TREE}/{HOSTILE_CONSOLE_NAME}.mojo"
+"""The generated source, as mtest is asked for it."""
+
+HOSTILE_CONSOLE_SOURCE = '''"""Generated source for the console text-safety scenario.
+
+Never actually compiled: the scenario hands it to a stand-in that fabricates a
+hostile report actor instead. Real `TestSuite` shape all the same, so the file
+is a genuine test module rather than a shape only this scenario accepts.
+"""
+from std.testing import assert_equal, TestSuite
+
+
+def test_hostile_console() raises:
+    assert_equal(1, 2)
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()
+'''
+
+HOSTILE_CONSOLE_RAW_BYTES = (
+    ("ESC", "\x1b"),
+    ("NUL", "\x00"),
+    ("BEL", "\x07"),
+    ("BS", "\x08"),
+    ("VT", "\x0b"),
+    ("FF", "\x0c"),
+    ("DEL", "\x7f"),
+    ("C1 CSI", "\u009b"),
+    ("C1 NEL", "\u0085"),
+    ("C1 ST", "\u009c"),
+)
+"""Every control the actor writes that this harness can actually observe, by
+name. Not one may survive anywhere in the run's output: the console runs with
+`--color never`, so mtest emits no ESC of its own either and a single occurrence
+is a child byte that got through.
+
+CR is deliberately ABSENT even though the actor writes one. `run_mtest` captures
+with `text=True`, so Python's universal-newline translation rewrites a surviving
+CR to LF before any assertion could see it \u2014 a `("CR", "\\r")` row here could
+never fail and would be a guard in name only. A PTY capture does not rescue it
+either: the tty's own ONLCR translation injects CR on output, so the byte stops
+being attributable to the child. CR stays pinned where it is provable: exactly,
+as `CR[\\x0D]` inside `HOSTILE_CONSOLE_FENCED_LINES` below, and by
+`test_escape_multiline_escapes_cr_so_a_child_cannot_overwrite_a_line` in
+`tests/unit/test_report_console_text.mojo`."""
+
+HOSTILE_CONSOLE_FENCED_LINES = (
+    "    | \\x1B[2J\\x1B[1;31mCHILD-CSI\\x1B[0m",
+    "    | \\x1B]0;pwned-by-bel\\x07",
+    "    | \\x1B]0;pwned-by-st\\x1B\\",
+    "    | NUL[\\x00] BEL[\\x07] BS[\\x08] VT[\\x0B] FF[\\x0C] CR[\\x0D] DEL[\\x7F]",
+    "    | \\u009BC1-CSI\\u0085C1-NEL\\u009C",
+    "    | ��� not-utf8 �(",
+)
+"""The exact rendering of each hostile line: escaped, then fenced behind the
+gutter. Pinned whole rather than by fragments — a partial escape (say, ESC but
+not BEL) would still satisfy a fragment probe while leaving the terminal
+addressable."""
+
+HOSTILE_CONSOLE_DETAIL = (
+    "AssertionError: \\x1B[2J\\x1B[1;31mCHILD-CSI\\x1B[0m \\x00 \\x7F "
+    "\\u009BC1-CSI\\u0085C1-NEL\\u009C delims: dquote[\"] squote['] "
+    "backslash[\\] lt[<] gt[>] amp[&] cdata-close[]]>] entity[&amp;] "
+    'json-injection: ","event":"forged","captured_stdout":" '
+    "xml-injection: </system-out><testcase name=\"forged\" "
+    'classname="forged"/><system-out>'
+)
+"""The child's failure detail as the console must render it.
+
+Every control the child put in that line is visible escape text; every delimiter
+that would end a JSON string or an XML element is untouched, because the console
+is not a machine format and escaping them there would corrupt the message a
+human is meant to read. The same source line is asserted, in the two other
+spellings its own format requires, by the NDJSON and JUnit oracles."""
+
+HOSTILE_CONSOLE_FORGERIES = (
+    "PASS           e2e/forged/test_green.mojo  0.00s",
+    "===== 9 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 0.0s =====",
+    "--- FAIL e2e/forged/test_green.mojo::test_forged ---",
+    "reproduce: mtest --gate /etc/shadow",
+)
+"""Lines the child prints that are shaped exactly like mtest's own. Escaping
+cannot help here — they hold no control characters — so the gutter is the entire
+defense, and each must appear ONLY behind it."""
+
+
+def _write_hostile_console_tree() -> None:
+    """Generate this scenario's single source, replacing any residue.
+
+    Raises:
+        OSError: The scratch tree could not be created or written.
+    """
+    root = os.path.join(REPO_ROOT, HOSTILE_CONSOLE_TREE)
+    os.makedirs(root, exist_ok=True)
+    path = os.path.join(root, f"{HOSTILE_CONSOLE_NAME}.mojo")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(HOSTILE_CONSOLE_SOURCE)
+
+
+def _remove_hostile_console_artifacts() -> None:
+    """Delete the generated source and the product the stand-in fabricated.
+
+    Best-effort on every exit path: the fabricated product is a Python script
+    living under a compiler-shaped name, so leaving it behind would hand a later
+    scenario something that is not a binary.
+    """
+    shutil.rmtree(os.path.join(REPO_ROOT, HOSTILE_CONSOLE_TREE), ignore_errors=True)
+    # A hand-mirror of the product's `_mangle` (src/mtest/session/scratch.mojo),
+    # which cannot be imported from Python. The two sequential replaces match its
+    # single pass only while the tree holds no `_` and the name holds no `/`.
+    assert "_" not in HOSTILE_CONSOLE_TREE, HOSTILE_CONSOLE_TREE
+    assert "/" not in HOSTILE_CONSOLE_NAME, HOSTILE_CONSOLE_NAME
+    mangled = HOSTILE_CONSOLE_TREE.replace("_", "_u").replace("/", "_s")
+    product = os.path.join(
+        REPO_ROOT,
+        "build",
+        "bin",
+        f"{mangled}_s{HOSTILE_CONSOLE_NAME.replace('_', '_u')}",
+    )
+    with contextlib.suppress(OSError):
+        os.remove(product)
+
+
+def s_hostile_console(context: ScenarioContext) -> str:
+    """A child that writes terminal control sequences cannot drive the terminal.
+
+    The producer is real: `fake_hostile_mojo.py` fabricates a direct bytes actor
+    that writes invalid UTF-8, NUL, DEL, CSI, OSC closed by both BEL and ST, C1
+    controls, report-lookalike noise, and lines shaped exactly like mtest's own
+    verdict rows — and then a genuine reconciling report so the file lands on a
+    real FAIL with a real per-test failure section. Every console surface the
+    boundary covers is therefore rendered from bytes the child chose.
+
+    Two independent claims are asserted. First, NO raw control byte survives
+    anywhere in the run's output: the run is `--color never`, so mtest writes no
+    ESC of its own and one occurrence would be the child's. Second, the escaped
+    text lands in the exact fenced shape the contract documents, and every
+    console-shaped forgery appears only behind the gutter, never as a line of
+    its own where a reader — or a log scraper — would take it for mtest's voice.
+
+    One pinned line is deliberately about the raw side: the invalid-UTF-8 line
+    is asserted with its exact U+FFFD spelling, so a change that moved the lossy
+    decoder while "fixing" the display would fail here rather than pass quietly.
+    """
+    args = [
+        HOSTILE_CONSOLE_FILE,
+        "--mojo",
+        FAKE_HOSTILE_MOJO,
+        "--color",
+        "never",
+    ]
+    try:
+        _write_hostile_console_tree()
+        run = context.runner.run_mtest(args, timeout=SHORT_TIMEOUT)
+        expect_exit(run, 1)
+
+        # (1) The verdict itself: the hostile file is a real FAIL, not a
+        # MALFORMED-SUITE, so the framed sections below were actually rendered.
+        expect(
+            verdict_line(run, "FAIL", HOSTILE_CONSOLE_FILE) is not None,
+            f"the hostile file did not report FAIL:\n{run.stdout}",
+        )
+
+        # (2) Not one raw control byte anywhere in the run's output.
+        for name, byte in HOSTILE_CONSOLE_RAW_BYTES:
+            expect(
+                byte not in run.combined,
+                f"a raw {name} byte ({byte!r}) reached the console: the child "
+                f"can still address the terminal",
+            )
+
+        # (3) The exact escaped-and-fenced rendering of each hostile line.
+        for line in HOSTILE_CONSOLE_FENCED_LINES:
+            expect(
+                f"\n{line}\n" in run.stdout,
+                f"the console did not render the fenced line {line!r}:\n{run.stdout}",
+            )
+
+        # (4) Every console-shaped forgery is fenced, and none of them stands
+        # alone as a line. This is the claim escaping alone cannot make.
+        stdout_lines = run.stdout.split("\n")
+        for forgery in HOSTILE_CONSOLE_FORGERIES:
+            expect(
+                f"\n    | {forgery}\n" in run.stdout,
+                f"the forged console line {forgery!r} was not fenced behind the "
+                f"gutter:\n{run.stdout}",
+            )
+            expect(
+                forgery not in stdout_lines,
+                f"the forged console line {forgery!r} stood alone as a console "
+                f"line and reads as mtest's own voice:\n{run.stdout}",
+            )
+
+        # (5) The per-test failure section rendered the child's detail through
+        # the same boundary, so the failure story is neither lost nor
+        # executable, and the reproduce line stays exactly one console line.
+        node = f"{HOSTILE_CONSOLE_FILE}::{hostile_actor().TEST_NAME}"
+        expect(
+            f"--- FAIL {node} ---" in stdout_lines,
+            f"no framed per-test FAIL section for {node}:\n{run.stdout}",
+        )
+        # The node id ends in shell metacharacters, so the repro line has to
+        # single-quote it: pasted unquoted, `"/><testcase/>` would redirect and
+        # the reader would run something the child composed. `'` itself is
+        # absent from the name, so one pair of single quotes is the whole
+        # quoting.
+        expect(
+            f"reproduce: mtest --mojo {FAKE_HOSTILE_MOJO} '{node}'" in stdout_lines,
+            f"no exact, shell-quoted reproduce line for {node}:\n{run.stdout}",
+        )
+        detail = f"    | At {HOSTILE_CONSOLE_FILE}:1:1: {HOSTILE_CONSOLE_DETAIL}"
+        expect(
+            detail in stdout_lines,
+            f"the per-test failure detail was not dedented, root-relativized, "
+            f"escaped and fenced as expected:\n{run.stdout}",
+        )
+    finally:
+        _remove_hostile_console_artifacts()
+    return (
+        f"hostile actor: FAIL verdict, no raw control byte survives, "
+        f"{len(HOSTILE_CONSOLE_FENCED_LINES)} exact fenced lines, "
+        f"{len(HOSTILE_CONSOLE_FORGERIES)} forgeries fenced"
+    )
+
+
+HOSTILE_CAPTURE_HEADER_SUFFIX = (
+    " — captured output (file-scoped; TestSuite does not attribute output to"
+    " individual tests) ---"
+)
+"""The exact tail of the console's file-scoped captured-output header line."""
+
+HOSTILE_CAPTURE_STDERR_HEADER = "--- captured stderr ---"
+"""The exact console line that separates the two captured streams."""
+
+HOSTILE_GUTTER = "    | "
+"""The gutter `prefix_lines` fences every captured logical line behind."""
+
+
+def _logical_lines(text: str) -> int:
+    """How many logical lines a captured block holds.
+
+    A logical line is a run of text up to and including its terminating LF, and
+    a trailing LF closes the last line rather than opening an empty one — the
+    same rule `prefix_lines` fences by, so this is exactly how many gutter lines
+    the console must print.
+
+    Args:
+        text: The lossy-decoded captured stream.
+
+    Returns:
+        The logical line count; `0` for empty text.
+    """
+    if text == "":
+        return 0
+    return text.count("\n") + (0 if text.endswith("\n") else 1)
+
+
+def _fenced_capture_regions(run: Run) -> tuple[list[str], list[str]]:
+    """The two fenced console regions of the file-scoped captured-output block.
+
+    Args:
+        run: The completed run.
+
+    Returns:
+        The stdout region's console lines and the stderr region's, in order.
+
+    Raises:
+        ScenarioError: If the block is missing or not framed exactly once.
+    """
+    # split("\n"), never splitlines(): the payload carries U+0085 and friends,
+    # which Python treats as line boundaries and a console reader does not.
+    lines = run.stdout.split("\n")
+    headers = [
+        index
+        for index, line in enumerate(lines)
+        if line.endswith(HOSTILE_CAPTURE_HEADER_SUFFIX)
+    ]
+    expect(
+        len(headers) == 1,
+        f"expected exactly one file-scoped captured-output header, got "
+        f"{len(headers)}",
+    )
+    separators = [
+        index
+        for index, line in enumerate(lines)
+        if line == HOSTILE_CAPTURE_STDERR_HEADER
+    ]
+    expect(
+        len(separators) == 1 and separators[0] > headers[0],
+        f"expected exactly one captured-stderr header after the block header, "
+        f"got indices {separators} for a header at {headers[0]}",
+    )
+    stdout_region = lines[headers[0] + 1 : separators[0]]
+    stderr_region: list[str] = []
+    for line in lines[separators[0] + 1 :]:
+        # Every fenced line carries the gutter, so it is never empty: the first
+        # empty line is the console's own blank after the block.
+        if line == "":
+            break
+        stderr_region.append(line)
+    return stdout_region, stderr_region
+
+
+def s_hostile_reporters(context: ScenarioContext) -> str:
+    """One hostile child, three reporters, one contract each.
+
+    The same actor the console scenario uses is run ONCE more — armed with a
+    stdout flood exactly the size of the capture bound, so the run overruns that
+    bound by precisely the hostile payload it must not lose — with the console,
+    the NDJSON stream, and the JUnit report all live. That is the point: every
+    escaping helper mtest owns already has passing unit tests, so what is left
+    to prove is that each reporter's call sites actually route through them, on
+    the same bytes, in the same run.
+
+    The three formats must NOT agree on their output, and each disagreement is
+    asserted where it belongs:
+
+    - the console escapes controls to visible text and fences every line behind
+      a gutter, because its consumer is a terminal that would execute them;
+    - the NDJSON stream JSON-escapes them and carries them through as real
+      control characters, because its consumer is a parser;
+    - the JUnit report replaces the ones XML 1.0 cannot represent with U+FFFD
+      and entity-escapes its delimiters, because its consumer is an XML parser
+      and an XSD.
+
+    What they must agree on is the accounting: the same retained capture, the
+    same truncation flags, the same verdict, and — against a child that wrote a
+    complete report header for this very file with no Summary to close it — the
+    same genuine report block.
+    """
+    actor = hostile_actor()
+    flood_lines = CAPTURE_BOUND_BYTES // len(actor.FLOOD_LINE)
+    args = [
+        HOSTILE_CONSOLE_FILE,
+        "--mojo",
+        FAKE_HOSTILE_MOJO,
+        "--color",
+        "never",
+        "--show-output",
+        "all",
+        "--gh-annotations",
+        "off",
+    ]
+    with tempfile.TemporaryDirectory(prefix="mtest-hostile-reporters-") as tmp:
+        stream_path = os.path.join(tmp, "hostile.ndjson")
+        report_path = os.path.join(tmp, "hostile.xml")
+        try:
+            _write_hostile_console_tree()
+            # The path the build stand-in resolves and embeds in the actor, which
+            # the report header must byte-equal for the block to be this file's.
+            canonical = os.path.realpath(
+                os.path.join(REPO_ROOT, HOSTILE_CONSOLE_FILE)
+            )
+            streams = hostile_streams(canonical, flood_lines)
+            run = context.runner.run_mtest(
+                [*args, "--json", stream_path, "--junit-xml", report_path],
+                timeout=SHORT_TIMEOUT,
+                env_overrides={actor.FLOOD_ENV: str(flood_lines)},
+            )
+            expect_exit(run, 1)
+            expect(
+                verdict_line(run, "FAIL", HOSTILE_CONSOLE_FILE) is not None,
+                f"the hostile file did not report FAIL:\n{run.stdout[:4000]}",
+            )
+            console_detail = _assert_hostile_console(run, streams)
+            stream_detail = assert_hostile_json_stream(
+                run, stream_path, streams, HOSTILE_CONSOLE_FILE
+            )
+            report_detail = assert_hostile_junit_report(
+                run, report_path, streams, HOSTILE_CONSOLE_FILE
+            )
+        finally:
+            _remove_hostile_console_artifacts()
+    return f"{console_detail}; {stream_detail}; {report_detail}"
+
+
+def _assert_hostile_console(run: Run, streams: HostileStreams) -> str:
+    """Judge the console rendering of the hostile run.
+
+    Args:
+        run: The completed run.
+        streams: The predicted child streams for this run.
+
+    Returns:
+        A one-line summary of what the console proved.
+
+    Raises:
+        ScenarioError: On any mismatch.
+    """
+    # Every observable control, not just ESC and NUL. Two of these — VT and FF,
+    # and U+0085 among the C1 rows — are also line boundaries to Python's
+    # `str.splitlines()`, which `verdict_line` above uses on this very output.
+    # Pinning them here keeps that helper's safety argument local to the
+    # scenario that depends on it rather than borrowed from another one.
+    for name, byte in HOSTILE_CONSOLE_RAW_BYTES:
+        expect(
+            byte not in run.combined,
+            f"a raw {name} byte ({byte!r}) reached the console: the child can "
+            f"still address the terminal",
+        )
+    for line in HOSTILE_CONSOLE_FENCED_LINES:
+        expect(
+            f"\n{line}\n" in run.stdout,
+            f"the console did not render the fenced line {line!r}",
+        )
+    stdout_region, stderr_region = _fenced_capture_regions(run)
+    for label, region, text in (
+        ("stdout", stdout_region, streams.stdout.retained),
+        ("stderr", stderr_region, streams.stderr.retained),
+    ):
+        decoded = text.decode("utf-8", "replace")
+        expected = _logical_lines(decoded)
+        expect(
+            len(region) == expected,
+            f"the console fenced {len(region)} captured {label} lines, want "
+            f"{expected} — one per logical line of the retained capture",
+        )
+        for index, line in enumerate(region):
+            if not line.startswith(HOSTILE_GUTTER):
+                raise ScenarioError(
+                    f"captured {label} console line {index} escaped the gutter "
+                    f"and reads as mtest's own voice: {line[:200]!r}"
+                )
+    return (
+        f"console: {len(stdout_region)} + {len(stderr_region)} fenced lines, "
+        f"none of {len(HOSTILE_CONSOLE_RAW_BYTES)} raw controls survives, exact "
+        f"escape tokens"
+    )
 
 
 def s_single_pass(context: ScenarioContext) -> str:

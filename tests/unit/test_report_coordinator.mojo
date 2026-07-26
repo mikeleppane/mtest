@@ -11,7 +11,15 @@ byte-identical to the composite fan-out it replaces.
 from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.config import ColorWhen, ShowOutput, Verbosity
-from mtest.model import Event, EventKind, Outcome, Summary, TestCounts
+from mtest.model import (
+    Event,
+    EventKind,
+    NodeId,
+    Outcome,
+    Summary,
+    TestCounts,
+    TestResult,
+)
 from mtest.report import (
     AnnotationsReporter,
     CompositeReporter,
@@ -28,7 +36,7 @@ from mtest.report import (
 def _console() -> ConsoleReporter:
     """A console reporter with every rendering knob fixed, for byte equality."""
     return ConsoleReporter(
-        "0.5.0",
+        "0.6.0",
         ColorWhen.NEVER,
         is_tty=False,
         no_color=False,
@@ -245,3 +253,169 @@ def test_recording_coordinator_wires_a_real_annotations_reporter() raises:
         tail[len(tail) - 1].startswith("::notice::"),
         "the single notice is not last",
     )
+
+
+def test_coordinator_folds_live_state_delta_from_events() raises:
+    var coord = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    coord.configure_state_gates(
+        ["tests/test_gate.mojo", "tests/test_gate_pass.mojo"]
+    )
+    coord.handle(
+        Event.test_reported(
+            TestResult(
+                NodeId("tests/test_run.mojo", "test_bad"),
+                Outcome.FAIL,
+                "boom",
+                "",
+            )
+        )
+    )
+    coord.handle(
+        Event.file_finished(
+            "tests/test_run.mojo",
+            Outcome.FAIL,
+            0.1,
+            List[String](),
+            0.0,
+            List[UInt8](),
+            List[UInt8](),
+            failed_tests=1,
+        )
+    )
+    coord.handle(
+        Event.test_reported(
+            TestResult(
+                NodeId("tests/test_gate.mojo", "test_gate"),
+                Outcome.FAIL,
+                "boom",
+                "",
+            )
+        )
+    )
+    coord.handle(
+        Event.file_finished(
+            "tests/test_gate.mojo",
+            Outcome.FAIL,
+            0.1,
+            List[String](),
+            0.0,
+            List[UInt8](),
+            List[UInt8](),
+            failed_tests=1,
+        )
+    )
+    coord.handle(
+        Event.precompile_failed(
+            "precompile",
+            "boom",
+            1,
+            casualties=["tests/test_casualty.mojo"],
+        )
+    )
+    coord.handle(
+        Event.test_reported(
+            TestResult(
+                NodeId("tests/test_partial.mojo", "test_selected"),
+                Outcome.PASS,
+                "",
+                "",
+            )
+        )
+    )
+    coord.handle(
+        Event.file_finished(
+            "tests/test_partial.mojo",
+            Outcome.PASS,
+            0.1,
+            List[String](),
+            0.0,
+            List[UInt8](),
+            List[UInt8](),
+            passed_tests=1,
+            deselected_tests=1,
+        )
+    )
+    coord.handle(
+        Event.file_finished(
+            "tests/test_crash.mojo",
+            Outcome.CRASH,
+            0.1,
+            List[String](),
+            0.0,
+            List[UInt8](),
+            List[UInt8](),
+            signal_number=11,
+        )
+    )
+    coord.handle(
+        Event.test_reported(
+            TestResult(
+                NodeId("tests/test_gate_pass.mojo", "test_gate"),
+                Outcome.PASS,
+                "",
+                "",
+            )
+        )
+    )
+    coord.handle(
+        Event.file_finished(
+            "tests/test_gate_pass.mojo",
+            Outcome.PASS,
+            0.1,
+            List[String](),
+            0.0,
+            List[UInt8](),
+            List[UInt8](),
+            passed_tests=1,
+        )
+    )
+    coord.handle(
+        Event.file_finished(
+            "tests/test_not_run.mojo",
+            Outcome.NOT_RUN,
+            0.0,
+            List[String](),
+            0.0,
+            List[UInt8](),
+            List[UInt8](),
+        )
+    )
+    coord.handle(
+        Event.file_finished(
+            "tests/test_excluded.mojo",
+            Outcome.EXCLUDED,
+            0.0,
+            List[String](),
+            0.0,
+            List[UInt8](),
+            List[UInt8](),
+        )
+    )
+
+    var delta = coord.state_delta()
+    assert_equal(len(delta.failures), 4)
+    assert_equal(delta.failures[0].identifier, "tests/test_run.mojo::test_bad")
+    assert_equal(delta.failures[1].identifier, "tests/test_gate.mojo")
+    assert_equal(delta.failures[2].identifier, "tests/test_casualty.mojo")
+    assert_equal(delta.failures[3].identifier, "tests/test_crash.mojo")
+    assert_equal(len(delta.observed_tests), 2)
+    assert_equal(delta.observed_tests[0], "tests/test_run.mojo::test_bad")
+    assert_equal(
+        delta.observed_tests[1], "tests/test_partial.mojo::test_selected"
+    )
+    assert_equal(len(delta.observed_files), 6)
+    assert_equal(delta.observed_files[0], "tests/test_run.mojo")
+    assert_equal(delta.observed_files[1], "tests/test_gate.mojo")
+    assert_equal(delta.observed_files[2], "tests/test_casualty.mojo")
+    assert_equal(delta.observed_files[3], "tests/test_partial.mojo")
+    assert_equal(delta.observed_files[4], "tests/test_crash.mojo")
+    assert_equal(delta.observed_files[5], "tests/test_gate_pass.mojo")
+    assert_equal(len(delta.fully_observed_files), 2)
+    assert_equal(delta.fully_observed_files[0], "tests/test_run.mojo")
+    assert_equal(delta.fully_observed_files[1], "tests/test_gate_pass.mojo")
+    assert_equal(len(delta.terminal_files), 3)
+    assert_equal(delta.terminal_files[0], "tests/test_gate.mojo")
+    assert_equal(delta.terminal_files[1], "tests/test_casualty.mojo")
+    assert_equal(delta.terminal_files[2], "tests/test_crash.mojo")

@@ -98,18 +98,21 @@ def test_stream_header_escapes_version() raises:
 
 
 def test_session_started_exact() raises:
-    var e = Event.session_started("root/dir", "mojo 1.0", 3, 1, "2/5", 4)
+    var e = Event.session_started(
+        "root/dir", "mojo 1.0", 3, 1, "2/5", 4, config_file="mtest.toml"
+    )
     assert_equal(
         serialize_event(e),
         '{"event":"session_started","root":"root/dir","toolchain":"mojo'
         + ' 1.0","selected_count":3,"excluded_count":1,"shard_label":"2/5",'
-        + '"sharded_out_count":4,"workers":1}',
+        + '"sharded_out_count":4,"workers":1,"config_file":"mtest.toml"}',
     )
 
 
 def test_session_started_escapes_strings() raises:
-    var e = Event.session_started('a"b', "t", 0, 0)
+    var e = Event.session_started('a"b', "t", 0, 0, config_file='c"x.toml')
     assert_true('"root":"a\\"b"' in serialize_event(e))
+    assert_true('"config_file":"c\\"x.toml"' in serialize_event(e))
 
 
 def test_warning_exact() raises:
