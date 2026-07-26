@@ -65,6 +65,7 @@ API_TESTS = {
     "test_opaque_dictionary_projection_reports_truncation_truthfully",
     "test_opaque_dictionary_fallback_is_insertion_order_independent",
     "test_equal_dictionary_with_oversized_key_returns_without_rendering",
+    "test_equal_oversized_dictionary_key_does_not_hide_short_change",
     "test_dictionary_specializer_renders_only_eight_changed_values",
 }
 

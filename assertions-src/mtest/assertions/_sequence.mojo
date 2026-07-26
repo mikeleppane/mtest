@@ -3,10 +3,11 @@
 from mtest.assertions._display import (
     _render_projection,
     _render_unequal_pair,
-    BODY_BYTE_CAP,
     BoundedWriter,
     DISPLAY_LIMIT,
 )
+
+comptime _LIST_LAYOUT_BYTE_BUDGET = 512
 
 
 @fieldwise_init
@@ -19,8 +20,8 @@ struct _RenderedListSlice(Movable):
 
 def _render_list_slice[
     T: Copyable & ImplicitlyDestructible & Equatable & Writable
-](values: List[T], start: Int, stop: Int,) -> _RenderedListSlice:
-    var output = BoundedWriter(BODY_BYTE_CAP)
+](values: List[T], start: Int, stop: Int, byte_cap: Int,) -> _RenderedListSlice:
+    var output = BoundedWriter(byte_cap)
     output.write_trusted("[")
     var shown = 0
     var truncated = stop - start > DISPLAY_LIMIT
@@ -57,9 +58,14 @@ def _write_list_span[
     var expected_stop = len(expected) - suffix
     var actual_count = actual_stop - prefix
     var expected_count = expected_stop - prefix
-    var actual_projection = _render_list_slice(actual, prefix, actual_stop)
+    # Reserve room for both labels and the fixed summary before dividing the
+    # caller's remaining diagnostic budget equally between the operands.
+    var side_byte_cap = (output.max_bytes - _LIST_LAYOUT_BYTE_BUDGET) // 2
+    var actual_projection = _render_list_slice(
+        actual, prefix, actual_stop, side_byte_cap
+    )
     var expected_projection = _render_list_slice(
-        expected, prefix, expected_stop
+        expected, prefix, expected_stop, side_byte_cap
     )
     output.write_trusted(
         "list span at index "

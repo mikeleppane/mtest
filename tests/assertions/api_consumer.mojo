@@ -692,6 +692,8 @@ def test_list_values_are_individually_bounded_before_body_assembly() raises:
         + "expected omitted by entry limit: 0"
         in capped
     )
+    testing.assert_true("\n  actual: [" in capped)
+    testing.assert_true("\n  expected: [" in capped)
     testing.assert_true(capped.endswith("... [truncated]"))
 
 
@@ -942,6 +944,20 @@ def test_dictionary_key_cap_boundary_and_opaque_fallback() raises:
         "structural key display exceeds 1024 bytes" in escaped_opaque
     )
     testing.assert_false("\\U000e0041" in escaped_opaque)
+
+
+def test_equal_oversized_dictionary_key_does_not_hide_short_change() raises:
+    var oversized = _repeated("k", 1025)
+    var actual = Dict[String, Int]()
+    var expected = Dict[String, Int]()
+    _put(actual, oversized, 1)
+    _put(expected, oversized, 1)
+    _put(actual, "changed", 2)
+    _put(expected, "changed", 3)
+
+    var detail = _dictionary_failure(actual, expected)
+    testing.assert_true('"changed": "2" != "3"' in detail)
+    testing.assert_false("structural key display exceeds" in detail)
 
 
 def test_opaque_dictionary_projection_reports_truncation_truthfully() raises:

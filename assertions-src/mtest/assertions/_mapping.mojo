@@ -145,11 +145,14 @@ def write_dictionary_difference[
         return True
 
     if not oversized_key:
-        for entry in expected.items():
-            if not _key_projection_fits(entry.key):
+        for key in missing.keys:
+            if not _key_projection_fits(key):
                 oversized_key = True
-        for entry in actual.items():
-            if not _key_projection_fits(entry.key):
+        for key in unexpected.keys:
+            if not _key_projection_fits(key):
+                oversized_key = True
+        for key in changed.keys:
+            if not _key_projection_fits(key):
                 oversized_key = True
     if oversized_key:
         _write_opaque_dictionary_detail(output, actual, expected)
