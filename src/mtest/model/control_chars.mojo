@@ -1,19 +1,30 @@
 """Which code points a terminal emulator interprets rather than displays.
 
-Three surfaces render untrusted, child-controlled text to a terminal and must
+Four surfaces render untrusted, child-controlled text to a terminal and must
 neutralize it first: the console reporter (`report/console_text.mojo`), the
-`doctor` diagnostic lines (`cli/doctor.mojo`), and the `config show` TOML
-rendering (`config/show.mojo`). They cannot share their *escape text* — the
-console emits `\\xHH` and `\\u00HH` in uppercase hex, `doctor` emits lowercase
-`\\xHH`, and `config show` must emit `\\u00HH` because it is producing TOML,
-whose basic strings have a `\\uXXXX` escape and no `\\xHH` escape at all.
+`doctor` diagnostic lines (`cli/doctor.mojo`), the `config show` TOML rendering
+(`config/show.mojo`), and the configuration diagnostics that quote an offending
+key or value back from `mtest.toml` (`config/toml_bridge.mojo`). They cannot
+share their *escape text* — the console emits `\\xHH` and `\\u00HH` in uppercase
+hex, `doctor` and the TOML diagnostics emit lowercase `\\xHH`, and `config show`
+must emit `\\u00HH` because it is producing TOML, whose basic strings have a
+`\\uXXXX` escape and no `\\xHH` escape at all.
 
 What they can and must share is the *classification*: the set of code points a
 terminal treats as instructions. That set is defined once, here, so extending
 it reaches every surface at once instead of leaving one of them behind. This
-module lives in `model` because it is the only layer all three may import from:
+module lives in `model` because it is the only layer all four may import from:
 `config` may not import `report`, which is exactly how the second and third
 copies of this policy came to exist.
+
+**Bound on that promise: the set must stay within `U+0000..U+00FF`.** Every
+consuming surface renders exactly two hex digits from the low byte, so a code
+point above `U+00FF` would be spelled wrongly rather than escaped — silently in
+the console (its assembler masks the value) and as an out-of-range index in the
+other three. Adding a code point inside Latin-1 reaches all four surfaces for
+free; adding one above it requires widening each surface's escape assembler
+first. The candidates named as non-goals below all lie above `U+00FF`, so this
+is the bound the next extension will meet.
 
 The set is:
 

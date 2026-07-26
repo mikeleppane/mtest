@@ -612,5 +612,50 @@ class LeakRecordParseTests(unittest.TestCase):
             )
 
 
+class LeakRecordsCallSiteTests(unittest.TestCase):
+    """Pin that both leak scans route through the fail-closed helper.
+
+    `leak_records` failing closed protects nothing if a caller reverts to a
+    bare `re.findall`, which returns `[]` on drifted wording and skips the
+    record loop silently — reinstating exactly the hole the helper closed.
+    The helper's own tests cannot see that: they call it directly. These two
+    drive the real callers with the helper replaced by a recorder, so
+    reverting either call site leaves a named test red.
+    """
+
+    REACHABLE_LOG = (
+        "==1== 78,596 bytes in 10 blocks are still reachable in loss record 1 of 1\n"
+        "==1==    at 0x1: malloc (vg_replace_malloc.c:1)\n"
+        "==1==    by 0x2: runtime_init (libmojo.so)\n"
+        "==1== LEAK SUMMARY:\n"
+        "==1==    still reachable: 78,596 bytes in 10 blocks\n"
+    )
+
+    def test_parse_reachable_routes_through_leak_records(self) -> None:
+        seen: list[str] = []
+
+        def _recorder(log: str, kinds: str, label: str) -> list[str]:
+            seen.append(label)
+            return []
+
+        source = Path("tests/unit/test_example.mojo")
+        with patch.object(valgrind_check, "leak_records", _recorder):
+            valgrind_check.parse_reachable(self.REACHABLE_LOG, source)
+        self.assertEqual(seen, [source.name])
+
+    def test_cli_provenance_routes_through_leak_records(self) -> None:
+        seen: list[str] = []
+
+        def _recorder(log: str, kinds: str, label: str) -> list[str]:
+            seen.append(label)
+            return []
+
+        with patch.object(valgrind_check, "leak_records", _recorder):
+            valgrind_check.check_cli_provenance(
+                valgrind_check.CLI_PROBE_EXIT, ValgrindCliProvenanceTests.CLEAN
+            )
+        self.assertEqual(seen, ["CLI artifact probe"])
+
+
 if __name__ == "__main__":
     unittest.main()

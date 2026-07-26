@@ -70,12 +70,19 @@ def _last_module(output: str, marker_prefix: str) -> str | None:
         marker_prefix: The per-run introducer from `_marker_prefix`. Only a
             line carrying this exact prefix is a marker; the retention that
             produced `output` filters on it too, so a forged line is dropped
-            before it reaches here as well as rejected here.
+            before it reaches here as well as rejected here. An empty prefix
+            is rejected rather than matched: `str.startswith("")` is true of
+            every line, so treating it as a prefix would accept any
+            `tests/….mojo` line a test body printed and reinstate exactly the
+            forgery this check exists to stop.
 
     Returns:
         The module path from the last complete marker line, or None when the
-        text carries no complete module marker.
+        text carries no complete module marker, or None when `marker_prefix`
+        is empty and no line can be authenticated.
     """
+    if not marker_prefix:
+        return None
     last: str | None = None
     for line in output.split("\n")[:-1]:
         if not line.startswith(marker_prefix):
