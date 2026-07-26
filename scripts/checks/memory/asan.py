@@ -17,10 +17,10 @@ import shutil
 import subprocess
 import sys
 
-from scripts.harness import aggregate
 from scripts.checks import native_abi as native_abi_check
 from scripts.checks.reports import json_stream as json_stream_oracle
 from scripts.checks.reports import junit as junit_oracle
+from scripts.harness import aggregate
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -70,7 +70,9 @@ VENDORED_TOML_INCLUDE = ROOT / "vendor" / "mojo-toml"
 precompiled `build/toml.mojopkg`, so the TOML parsing the probe drives is
 instrumented too."""
 
-HOSTILE_BUILD_STANDIN = ROOT / "scripts" / "fixtures" / "toolchain" / "fake_hostile_mojo.py"
+HOSTILE_BUILD_STANDIN = (
+    ROOT / "scripts" / "fixtures" / "toolchain" / "fake_hostile_mojo.py"
+)
 """The strict `--mojo` stand-in that fabricates the hostile report actor.
 
 It is a Python script the CLI `execve`s, so it and the actor it writes run
@@ -572,7 +574,9 @@ def compile_and_run_test(source: Path, env: dict[str, str]) -> None:
             str(NATIVE_OBJECT),
         ]
     )
-    require(compiled.returncode == 0, f"build failed for {source.name}:\n{compiled.stdout}")
+    require(
+        compiled.returncode == 0, f"build failed for {source.name}:\n{compiled.stdout}"
+    )
     symbols = run([os.environ.get("NM", "nm"), "-u", str(binary)])
     require(symbols.returncode == 0, f"nm failed for {source.name}:\n{symbols.stdout}")
     require("__asan_" in symbols.stdout, f"{source.name} is not ASan-instrumented")
@@ -585,12 +589,18 @@ def compile_and_run_test(source: Path, env: dict[str, str]) -> None:
         executed.returncode == 0,
         f"{source.name} exited {executed.returncode}:\n{executed.stdout}",
     )
-    require(sentinel in executed.stdout, f"{source.name} missed completion sentinel {sentinel!r}")
+    require(
+        sentinel in executed.stdout,
+        f"{source.name} missed completion sentinel {sentinel!r}",
+    )
     require(
         "ERROR: AddressSanitizer" not in executed.stdout,
         f"{source.name} reported an ASan error",
     )
-    require("LeakSanitizer: detected" not in executed.stdout, f"{source.name} reported a leak")
+    require(
+        "LeakSanitizer: detected" not in executed.stdout,
+        f"{source.name} reported a leak",
+    )
     print(f"asan-test: {source.name}: {expected}/{expected} passed")
 
 

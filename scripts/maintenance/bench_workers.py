@@ -37,15 +37,16 @@ load-specific by nature; the table's shape is fixed, its numbers are not.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import os
+from pathlib import Path
 import shutil
 import statistics
 import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
-from pathlib import Path
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MTEST = REPO_ROOT / "build" / "mtest"
@@ -185,9 +186,7 @@ def run_once(
     for i, slice_names in enumerate(slices):
         cache = cache_root / f"off-{i}"
         cache.mkdir(parents=True, exist_ok=True)
-        procs.append(
-            _spawn([str(MTEST), "-n", "1", *slice_names], tree, cache)
-        )
+        procs.append(_spawn([str(MTEST), "-n", "1", *slice_names], tree, cache))
     _await(procs)
     return time.monotonic() - start
 
@@ -221,15 +220,11 @@ def measure_cell(
             run_once(tree, names, workers, tokens, Path(warm_root))
         for _ in range(reps):
             if temp == "warm":
-                samples.append(
-                    run_once(tree, names, workers, tokens, Path(warm_root))
-                )
+                samples.append(run_once(tree, names, workers, tokens, Path(warm_root)))
                 continue
             cold_dir = tempfile.mkdtemp(prefix="mtest-bench-cold-")
             try:
-                samples.append(
-                    run_once(tree, names, workers, tokens, Path(cold_dir))
-                )
+                samples.append(run_once(tree, names, workers, tokens, Path(cold_dir)))
             finally:
                 shutil.rmtree(cold_dir, ignore_errors=True)
     return Cell(workers, tokens, temp, statistics.median(samples))
@@ -291,8 +286,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default="",
         help=(
-            "comma-separated worker counts to override the default "
-            "{1,2,4,cores} ladder"
+            "comma-separated worker counts to override the default {1,2,4,cores} ladder"
         ),
     )
     return parser.parse_args(argv)
@@ -321,9 +315,7 @@ def main(argv: list[str] | None = None) -> int:
             for workers in ladder:
                 token_modes = ["on"] if workers == 1 else ["on", "off"]
                 for tokens in token_modes:
-                    cell = measure_cell(
-                        tree, names, workers, tokens, temp, args.reps
-                    )
+                    cell = measure_cell(tree, names, workers, tokens, temp, args.reps)
                     cells.append(cell)
                     print(
                         f"bench-workers: measured n={workers} tokens={tokens} "

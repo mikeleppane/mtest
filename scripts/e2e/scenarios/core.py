@@ -42,7 +42,10 @@ def s_manifest_completeness(context: ScenarioContext) -> str:
     disk = discovered_test_files()
     missing_rows = disk - rows
     stale_rows = rows - disk
-    expect(not missing_rows, f"discovered files with no manifest row: {sorted(missing_rows)}")
+    expect(
+        not missing_rows,
+        f"discovered files with no manifest row: {sorted(missing_rows)}",
+    )
     expect(not stale_rows, f"manifest rows with no file on disk: {sorted(stale_rows)}")
     for rel in rows:
         expect(
@@ -97,7 +100,9 @@ def s_default_suite(context: ScenarioContext) -> str:
     # SIGILL (signal 4) on linux-64/x86_64, SIGTRAP (signal 5) on osx-arm64.
     # Require the exact number/name association on the verdict line, so neither a
     # changed death signal nor lost word-name can hide behind a generic CRASH.
-    expect(len(crash_lines) == 1, f"expected exactly one CRASH fixture, got {crash_lines}")
+    expect(
+        len(crash_lines) == 1, f"expected exactly one CRASH fixture, got {crash_lines}"
+    )
     target = (sys.platform.lower(), os.uname().machine.lower())
     abort_expectations = {
         ("linux", "x86_64"): (int(signal.SIGILL), "SIGILL"),
@@ -243,7 +248,8 @@ def s_hostile(context: ScenarioContext) -> str:
     flood) -> CAPTURE-OVERFLOW FAIL (exit 1). These files are NOT in the default
     suite — the liar alone forces exit 3, which would swamp a whole-suite run —
     so each is driven on its own here. The verdict tokens and exit codes come
-    straight from the manifest rows for e2e/hostile/*."""
+    straight from the manifest rows for e2e/hostile/*.
+    """
     hostile = {
         rel: row
         for rel, row in context.manifest["tests"].items()
@@ -371,7 +377,7 @@ HOSTILE_CONSOLE_DETAIL = (
     "\\u009BC1-CSI\\u0085C1-NEL\\u009C delims: dquote[\"] squote['] "
     "backslash[\\] lt[<] gt[>] amp[&] cdata-close[]]>] entity[&amp;] "
     'json-injection: ","event":"forged","captured_stdout":" '
-    "xml-injection: </system-out><testcase name=\"forged\" "
+    'xml-injection: </system-out><testcase name="forged" '
     'classname="forged"/><system-out>'
 )
 """The child's failure detail as the console must render it.
@@ -586,8 +592,7 @@ def _fenced_capture_regions(run: Run) -> tuple[list[str], list[str]]:
     ]
     expect(
         len(headers) == 1,
-        f"expected exactly one file-scoped captured-output header, got "
-        f"{len(headers)}",
+        f"expected exactly one file-scoped captured-output header, got {len(headers)}",
     )
     separators = [
         index
@@ -657,9 +662,7 @@ def s_hostile_reporters(context: ScenarioContext) -> str:
             _write_hostile_console_tree()
             # The path the build stand-in resolves and embeds in the actor, which
             # the report header must byte-equal for the block to be this file's.
-            canonical = os.path.realpath(
-                os.path.join(REPO_ROOT, HOSTILE_CONSOLE_FILE)
-            )
+            canonical = os.path.realpath(os.path.join(REPO_ROOT, HOSTILE_CONSOLE_FILE))
             streams = hostile_streams(canonical, flood_lines)
             run = context.runner.run_mtest(
                 [*args, "--json", stream_path, "--junit-xml", report_path],
@@ -759,7 +762,8 @@ def s_maxfail(context: ScenarioContext) -> str:
 
     e2e/maxfail/ sorts test_a_fail, test_b_fail, test_c_pass; each failing
     file contributes exactly one failing test. `--maxfail 1` must stop right
-    after test_a_fail, leaving the other two NOT-RUN."""
+    after test_a_fail, leaving the other two NOT-RUN.
+    """
     run = context.runner.run_mtest(["e2e/maxfail", "--maxfail", "1"])
     expect_exit(run, 1)
     summ = expect_accounting(run)
@@ -879,7 +883,8 @@ DURATIONS_ROW_RE = re.compile(r"^  (\S+)\s+([\d.]+)s\s*$")
 def s_durations(context: ScenarioContext) -> str:
     """`--durations N` renders a file-level slowest-files list, INFORMAL tier:
     structure only (presence, size, order, `-q` survival) — never exact
-    timings."""
+    timings.
+    """
     suite = _suite_tests(context.manifest)
     files_run = sum(1 for row in suite.values() if row["verdict"] != "COMPILE-ERROR")
     cerr_rel = next(
@@ -987,7 +992,9 @@ def s_passthrough_and_forbidden(context: ScenarioContext) -> str:
     rel = "e2e/suite/test_passing.mojo"
     good = context.runner.run_mtest([rel, "--", "--no-optimization"])
     expect_exit(good, 0)
-    expect(verdict_line(good, "PASS", rel) is not None, "forwarded build arg broke the run")
+    expect(
+        verdict_line(good, "PASS", rel) is not None, "forwarded build arg broke the run"
+    )
 
     forbidden = [
         [rel, "--", "-o", "/tmp/x"],
@@ -997,7 +1004,10 @@ def s_passthrough_and_forbidden(context: ScenarioContext) -> str:
     for args in forbidden:
         run = context.runner.run_mtest(args, timeout=SHORT_TIMEOUT)
         expect_exit(run, 4)
-        expect(run.stderr.strip() != "", f"forbidden build arg {args} wrote nothing to stderr")
+        expect(
+            run.stderr.strip() != "",
+            f"forbidden build arg {args} wrote nothing to stderr",
+        )
     return "passthrough build arg works; -o/--emit/extra-source each exit 4"
 
 

@@ -30,11 +30,11 @@ import contextlib
 import dataclasses
 import io
 import json
+from pathlib import Path
 import stat
 import subprocess
 import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
 from scripts.build import package_consumption
@@ -43,8 +43,8 @@ from scripts.build.package_consumption import (
     PackageCheckError,
     check_failing_fixture_consumption,
     package_platform,
-    scrubbed_probe_env,
     scratch_manifest_text,
+    scrubbed_probe_env,
     verify_installed_artifact_identity,
 )
 
@@ -345,7 +345,7 @@ class FailingFixtureConsumptionTests(unittest.TestCase):
         self.assertIn("not run", str(caught.exception))
 
     def test_missing_summary_band_is_rejected(self) -> None:
-        transcript = TRUTHFUL_TRANSCRIPT.split("=====")[0]
+        transcript = TRUTHFUL_TRANSCRIPT.split("=====", maxsplit=1)[0]
         with self.assertRaises(PackageCheckError):
             self._check(transcript)
 
@@ -511,9 +511,8 @@ class CallSiteTests(unittest.TestCase):
                 side_effect=lambda *a, **k: (self._install_prefix(env_dir), 0)[1]
             ),
             verify_installed_artifact_identity=identity,
-        ):
-            with contextlib.redirect_stdout(io.StringIO()):
-                package_consumption.stage_install_from_local_channel(self.artifact)
+        ), contextlib.redirect_stdout(io.StringIO()):
+            package_consumption.stage_install_from_local_channel(self.artifact)
         identity.assert_called_once_with(prefix, self.artifact)
 
     def test_tarball_stage_calls_the_artifact_identity_proof(self) -> None:
@@ -545,17 +544,14 @@ class CallSiteTests(unittest.TestCase):
             TARBALL_ENV_DIR=env_dir,
             _run_streamed=mock.Mock(side_effect=build_or_install),
             verify_installed_artifact_identity=identity,
-        ):
-            with mock.patch.object(package_consumption.subprocess, "run", smoke):
-                with contextlib.redirect_stdout(io.StringIO()):
-                    package_consumption.stage_tarball_fallback_smoke(
-                        package_platform("linux", "x86_64")
-                    )
+        ), mock.patch.object(package_consumption.subprocess, "run", smoke):
+            with contextlib.redirect_stdout(io.StringIO()):
+                package_consumption.stage_tarball_fallback_smoke(
+                    package_platform("linux", "x86_64")
+                )
         self.assertEqual(len(identity.call_args_list), 1)
         self.assertEqual(identity.call_args_list[0].args[0], prefix)
-        self.assertEqual(
-            identity.call_args_list[0].args[1].path.name, artifact_name
-        )
+        self.assertEqual(identity.call_args_list[0].args[1].path.name, artifact_name)
 
     def test_loader_clean_stage_calls_the_probe_roster_check(self) -> None:
         roster = mock.Mock()
@@ -570,23 +566,19 @@ class CallSiteTests(unittest.TestCase):
                 )
             if "--help" in argv:
                 return subprocess.CompletedProcess(argv, 0, "usage: mtest\n", "")
-            return subprocess.CompletedProcess(
-                argv, 4, "", "discover: no such file\n"
-            )
+            return subprocess.CompletedProcess(argv, 4, "", "discover: no such file\n")
 
         with mock.patch.multiple(
             package_consumption,
             LOADER_PROBE_CWD=self.root / "loader-probe-cwd",
             verify_loader_probe_roster=roster,
-        ):
-            with mock.patch.object(
-                package_consumption.subprocess, "run", side_effect=fake_run
-            ):
-                with contextlib.redirect_stdout(io.StringIO()):
-                    package_consumption.stage_loader_clean_probe(
-                        self.root / "bin" / "mtest",
-                        package_platform("linux", "x86_64"),
-                    )
+        ), mock.patch.object(
+            package_consumption.subprocess, "run", side_effect=fake_run
+        ), contextlib.redirect_stdout(io.StringIO()):
+            package_consumption.stage_loader_clean_probe(
+                self.root / "bin" / "mtest",
+                package_platform("linux", "x86_64"),
+            )
         roster.assert_called_once_with(package_consumption.LOADER_PROBE_FLAGS)
 
     def test_dogfood_stage_drives_the_installed_binary_through_the_probes(
@@ -615,12 +607,9 @@ class CallSiteTests(unittest.TestCase):
             package_consumption,
             MOJOPKG_INCLUDE_DIR=include,
             NATIVE_TEST_OBJECT=native,
-        ):
-            with mock.patch.object(package_consumption.dogfood, "verify", verify):
-                with contextlib.redirect_stdout(io.StringIO()):
-                    package_consumption.stage_suite_run_with_installed_binary(
-                        installed
-                    )
+        ), mock.patch.object(package_consumption.dogfood, "verify", verify):
+            with contextlib.redirect_stdout(io.StringIO()):
+                package_consumption.stage_suite_run_with_installed_binary(installed)
 
         verify.assert_called_once_with(str(installed), str(native))
         self.assertIn("dogfood", package_consumption.completed_stages())
@@ -639,15 +628,13 @@ class CallSiteTests(unittest.TestCase):
             package_consumption,
             MOJOPKG_INCLUDE_DIR=include,
             NATIVE_TEST_OBJECT=native,
-        ):
-            with mock.patch.object(
-                package_consumption.dogfood, "verify", mock.Mock(return_value=1)
-            ):
-                with contextlib.redirect_stdout(io.StringIO()):
-                    with self.assertRaises(package_consumption.PackageCheckError):
-                        package_consumption.stage_suite_run_with_installed_binary(
-                            installed
-                        )
+        ), mock.patch.object(
+            package_consumption.dogfood, "verify", mock.Mock(return_value=1)
+        ), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(package_consumption.PackageCheckError):
+                package_consumption.stage_suite_run_with_installed_binary(
+                    installed
+                )
 
         self.assertNotIn("dogfood", package_consumption.completed_stages())
 
@@ -675,9 +662,7 @@ class CallSiteTests(unittest.TestCase):
         install_result = self.root / "prefix" / "bin" / "mtest"
         self._patches = mock.patch.multiple(
             package_consumption,
-            host_platform=mock.Mock(
-                return_value=package_platform("linux", "x86_64")
-            ),
+            host_platform=mock.Mock(return_value=package_platform("linux", "x86_64")),
             stage_build_local_channel=mock.Mock(
                 side_effect=stage("build", self.artifact)
             ),
@@ -711,11 +696,11 @@ class CallSiteTests(unittest.TestCase):
     def test_main_reports_the_stages_it_actually_performed(self) -> None:
         self._patched_main()
         out = io.StringIO()
-        with self._patches:
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(
-                io.StringIO()
-            ):
-                package_consumption.main()
+        with (
+            self._patches, contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            package_consumption.main()
         self.assertIn(
             f"stages performed: {list(package_consumption.GATE_STAGE_IDS)}",
             out.getvalue(),

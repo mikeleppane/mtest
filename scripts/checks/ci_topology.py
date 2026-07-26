@@ -302,13 +302,9 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
     if "test-direct" in tasks:
         raise AssertionError("obsolete test-direct Pixi alias still exists")
     expected_classified_tasks = {
-        "test": (
-            "python -m scripts.harness.classified tests/unit tests/integration"
-        ),
+        "test": ("python -m scripts.harness.classified tests/unit tests/integration"),
         "test-unit": "python -m scripts.harness.classified tests/unit",
-        "test-integration": (
-            "python -m scripts.harness.classified tests/integration"
-        ),
+        "test-integration": ("python -m scripts.harness.classified tests/integration"),
         "test-file": "python -m scripts.harness.classified",
     }
     for name, command in expected_classified_tasks.items():
@@ -376,8 +372,7 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
         )
     exact_safety_tasks = {
         "asan-check": (
-            "python -m scripts.tests.test_asan && "
-            "python -m scripts.checks.memory.asan"
+            "python -m scripts.tests.test_asan && python -m scripts.checks.memory.asan"
         ),
         "valgrind-check": (
             "python -m scripts.tests.test_valgrind && "
@@ -531,7 +526,7 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
     # together, and this equality is what refuses to let the local floor gain a
     # member the hosted matrix silently never runs.
     behavioral_floor = [task for task in CI_TASKS[1:] if task != "ci-memory"]
-    if CI_TASKS != ["ci-preflight", *behavioral_floor, "ci-memory"]:
+    if ["ci-preflight", *behavioral_floor, "ci-memory"] != CI_TASKS:
         raise AssertionError(
             "the local floor no longer ends with the memory aggregate; the "
             f"hosted matrix expansion below is derived from it: {CI_TASKS}"

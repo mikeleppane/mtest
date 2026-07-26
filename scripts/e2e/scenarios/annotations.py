@@ -9,7 +9,7 @@ from scripts.e2e.runner import ScenarioContext
 
 
 def _annotation_lines(stdout: str) -> list[str]:
-    """mtest's OWN annotation tail: annotation lines outside every fence."""
+    """Mtest's OWN annotation tail: annotation lines outside every fence."""
     return annotations_check.annotation_tail_outside_fences(stdout)
 
 
@@ -18,7 +18,8 @@ def s_annotations_modes(context: ScenarioContext) -> str:
     GITHUB_ACTIONS; `off` never renders even under Actions.
 
     The tail is the node-id-sorted `::error` block then the single `::notice`,
-    printed to stdout AFTER the console summary band, only when resolved-on."""
+    printed to stdout AFTER the console summary band, only when resolved-on.
+    """
     fail = "e2e/annotations/test_many_fail.mojo"
 
     # `on`: the tail renders regardless of GITHUB_ACTIONS.
@@ -66,7 +67,8 @@ def s_annotations_modes(context: ScenarioContext) -> str:
 
 def s_annotations_caps(context: ScenarioContext) -> str:
     """The 10-error per-STEP cap: twelve failures render nine node-id-sorted
-    rows plus ONE `... and 3 more errors` aggregate — never eleven lines."""
+    rows plus ONE `... and 3 more errors` aggregate — never eleven lines.
+    """
     run = context.runner.run_mtest(
         ["e2e/annotations/test_many_fail.mojo", "--gh-annotations", "on"]
     )
@@ -90,9 +92,12 @@ def s_annotations_conflict(context: ScenarioContext) -> str:
 
     `--json - --gh-annotations on` and the default `auto` beside `--json -` are
     each usage errors (exit 4) naming both fixes; only explicit `off` runs, and
-    then stdout is the byte-pure stream with no annotation line."""
+    then stdout is the byte-pure stream with no annotation line.
+    """
     # (1) explicit `on` conflicts: exit 4, message names both fixes.
-    run = context.runner.run_mtest(["e2e/suite", "--json", "-", "--gh-annotations", "on"])
+    run = context.runner.run_mtest(
+        ["e2e/suite", "--json", "-", "--gh-annotations", "on"]
+    )
     expect_exit(run, 4)
     expect(
         "gh-annotations off" in run.stderr and "--json PATH" in run.stderr,
@@ -130,7 +135,8 @@ def s_annotations_fencing(context: ScenarioContext) -> str:
     seeded token never equals the real token, every fence is terminated (the
     always-runs epilogue restores commands before mtest's own tail), and two runs
     mint DISTINCT tokens (per-run-unique). Fencing is active even when the child
-    CRASHES (an error path)."""
+    CRASHES (an error path).
+    """
     forger = "e2e/annotations/test_console_forger.mojo"
     seeded = "deadbeefdeadbeefdeadbeefdeadbeef"
 
@@ -166,12 +172,17 @@ def s_annotations_fencing(context: ScenarioContext) -> str:
     # restores commands (no unterminated fence), even though it never FAILs
     # cleanly — the always-runs epilogue guarantees the resume delimiter.
     crash = context.runner.run_mtest(
-        ["e2e/suite/test_crashing.mojo", "--gh-annotations", "on", "--show-output", "all"],
+        [
+            "e2e/suite/test_crashing.mojo",
+            "--gh-annotations",
+            "on",
+            "--show-output",
+            "all",
+        ],
         env_overrides={"GITHUB_ACTIONS": "true"},
     )
     _fences, dangling = annotations_check.scan_fences(crash.stdout)
     expect(not dangling, "a crash-path run left a fence unterminated")
     return (
-        "forge sealed; seeded!=real; per-run-unique tokens; crash-path fence"
-        " terminated"
+        "forge sealed; seeded!=real; per-run-unique tokens; crash-path fence terminated"
     )

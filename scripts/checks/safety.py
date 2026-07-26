@@ -8,10 +8,10 @@ SAFETY argument is correct; that remains a code-review responsibility.
 from __future__ import annotations
 
 import argparse
-import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+import re
 
 
 MAX_COVERAGE_LINES = 8
@@ -55,9 +55,7 @@ _POSSIBLE_ARITHMETIC = re.compile(
     r"\b([a-z_][A-Za-z0-9_]*)\s*\+\s*(?:[a-z_][A-Za-z0-9_]*|\d+)"
 )
 _POSSIBLE_DEREFERENCE = re.compile(r"\b([a-z_][A-Za-z0-9_]*)\s*\[[^\]\n]+\]")
-_DERIVED_POINTER_ARITHMETIC = re.compile(
-    r"\)\s*\+\s*(?:[a-z_][A-Za-z0-9_]*|\d+)"
-)
+_DERIVED_POINTER_ARITHMETIC = re.compile(r"\)\s*\+\s*(?:[a-z_][A-Za-z0-9_]*|\d+)")
 _DERIVED_POINTER_DEREFERENCE = re.compile(r"\)\s*\[[^\]\n]+\]")
 _NON_POINTER_BRACKETS = {
     "alloc",
@@ -127,9 +125,7 @@ def _sanitize(source: str) -> str:
 
 
 def _delimiter_delta(line: str) -> int:
-    return sum(line.count(ch) for ch in "([{") - sum(
-        line.count(ch) for ch in ")]}"
-    )
+    return sum(line.count(ch) for ch in "([{") - sum(line.count(ch) for ch in ")]}")
 
 
 def _has_candidate(line: str) -> bool:
@@ -152,7 +148,11 @@ def _covered_lines(source: str, sanitized: str) -> set[int]:
             depth += _delimiter_delta(code_lines[index])
         end = index
         statements.append(
-            (start, end, any(_has_candidate(line) for line in code_lines[start : end + 1]))
+            (
+                start,
+                end,
+                any(_has_candidate(line) for line in code_lines[start : end + 1]),
+            )
         )
         index += 1
 
@@ -182,9 +182,7 @@ def _covered_lines(source: str, sanitized: str) -> set[int]:
                 for line in range(previous_end + 1, block_start)
             ):
                 break
-            coverage_end = min(
-                block_end + 2, first_line + MAX_COVERAGE_LINES + 1
-            )
+            coverage_end = min(block_end + 2, first_line + MAX_COVERAGE_LINES + 1)
             covered.update(range(block_start + 1, coverage_end))
             previous_end = block_end
 
@@ -219,9 +217,7 @@ def _manual_inventory(path: Path, lines: list[str]) -> list[InventoryItem]:
         if (
             dereference and dereference.group(1) in names
         ) or _DERIVED_POINTER_DEREFERENCE.search(line):
-            items.append(
-                InventoryItem(path, line_number, "possible typed dereference")
-            )
+            items.append(InventoryItem(path, line_number, "possible typed dereference"))
     return items
 
 
@@ -270,9 +266,7 @@ def main(argv: list[str] | None = None) -> int:
         inventory.extend(current_inventory)
 
     for finding in findings:
-        print(
-            f"{finding.path}:{finding.line}: missing SAFETY: {finding.family}"
-        )
+        print(f"{finding.path}:{finding.line}: missing SAFETY: {finding.family}")
     print("Manual-review inventory (non-gating lexical hints):")
     if inventory:
         for item in inventory:

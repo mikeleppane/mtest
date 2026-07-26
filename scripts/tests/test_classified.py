@@ -8,8 +8,8 @@ from contextlib import redirect_stderr
 from io import StringIO
 import json
 import os
-import re
 from pathlib import Path
+import re
 import shutil
 import signal
 import stat
@@ -19,9 +19,7 @@ import tempfile
 import threading
 import time
 
-from scripts.harness import aggregate
-from scripts.harness import classified
-from scripts.harness import watchdog
+from scripts.harness import aggregate, classified, watchdog
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -125,20 +123,14 @@ out.chmod(out.stat().st_mode | stat.S_IXUSR)
         record = records[0]
         if record["source"] != "build/tests/aggregate_main.mojo":
             raise AssertionError(
-                "direct runner compiled an unexpected source: "
-                f"{record['source']}"
+                f"direct runner compiled an unexpected source: {record['source']}"
             )
-        expected_paths = [
-            roots[index] + "/test_same_name.mojo" for index in range(2)
-        ]
+        expected_paths = [roots[index] + "/test_same_name.mojo" for index in range(2)]
         generated = record["generated"]
-        prefix_match = re.search(
-            r'print\("(==> [0-9a-f]{16} )', generated
-        )
+        prefix_match = re.search(r'print\("(==> [0-9a-f]{16} )', generated)
         if prefix_match is None:
             raise AssertionError(
-                "generated aggregate carries no nonced module marker:\n"
-                f"{generated}"
+                f"generated aggregate carries no nonced module marker:\n{generated}"
             )
         nonced = prefix_match.group(1)
         markers = [
@@ -335,9 +327,7 @@ def test_cancelled_results_re_raise_the_caller_signal() -> None:
             check=False,
         )
         if completed.returncode != -signum:
-            raise AssertionError(
-                f"Cancelled({signum}) exited {completed.returncode}"
-            )
+            raise AssertionError(f"Cancelled({signum}) exited {completed.returncode}")
 
 
 def test_cancellation_outranks_a_racing_spawn_failure() -> None:
@@ -438,7 +428,6 @@ def test_timeout_kills_the_aggregate_process_group() -> None:
             raise AssertionError("aggregate grandchild survived process-group cleanup")
 
 
-
 def _run_direct_runner_failure(
     mode: str,
     step: str,
@@ -466,7 +455,7 @@ def _run_direct_runner_failure(
         log_path = tmp / "mojo-build-log"
         _write_executable(
             tools_dir / "python",
-            f"#!/bin/sh\nexec {sys.executable} \"$@\"\n",
+            f'#!/bin/sh\nexec {sys.executable} "$@"\n',
         )
         fake_mojo = tools_dir / "mojo"
         _write_executable(
@@ -658,8 +647,7 @@ def test_direct_runner_spawn_failure_is_not_a_timeout() -> None:
             )
         if f"timed-out aggregate {step}" in result.stdout:
             raise AssertionError(
-                "direct-runner spawn failure claimed timeout:\n"
-                f"{result.stdout}"
+                f"direct-runner spawn failure claimed timeout:\n{result.stdout}"
             )
         if "watchdog/internal failure" not in result.stdout:
             raise AssertionError(
@@ -673,6 +661,7 @@ def test_direct_runner_spawn_failure_is_not_a_timeout() -> None:
             )
         if sentinel_exists:
             raise AssertionError(f"spawn failure left its {step} deadline sentinel")
+
 
 MARKER_MODULES = (
     "tests/unit/test_first.mojo",
@@ -723,9 +712,7 @@ def test_a_test_body_cannot_forge_a_module_marker() -> None:
     )
     actual = classified._last_module(forged, MARKER_TEST_PREFIX)
     if actual != "tests/unit/test_real.mojo":
-        raise AssertionError(
-            f"a forged marker changed the attribution to {actual!r}"
-        )
+        raise AssertionError(f"a forged marker changed the attribution to {actual!r}")
 
 
 def test_each_run_mints_a_fresh_unguessable_marker_prefix() -> None:
@@ -765,7 +752,7 @@ def _run_aggregate_marker_failure(
         tools_dir.mkdir()
         _write_executable(
             tools_dir / "python",
-            f"#!/bin/sh\nexec {sys.executable} \"$@\"\n",
+            f'#!/bin/sh\nexec {sys.executable} "$@"\n',
         )
         _write_executable(
             tools_dir / "mojo",
@@ -858,8 +845,7 @@ def test_aggregate_failures_name_the_last_module_reached() -> None:
             )
         if f"last module: {MARKER_MODULES[1]}" not in result.stdout:
             raise AssertionError(
-                f"aggregate marker {mode} lost its failure provenance:\n"
-                f"{result.stdout}"
+                f"aggregate marker {mode} lost its failure provenance:\n{result.stdout}"
             )
         if MARKER_UNREACHED_MODULE in result.stdout:
             raise AssertionError(
@@ -873,8 +859,7 @@ def test_aggregate_failures_name_the_last_module_reached() -> None:
                 re.MULTILINE,
             ):
                 raise AssertionError(
-                    f"aggregate marker {mode} did not tee {module}:\n"
-                    f"{result.stdout}"
+                    f"aggregate marker {mode} did not tee {module}:\n{result.stdout}"
                 )
 
 

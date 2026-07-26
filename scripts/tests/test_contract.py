@@ -77,8 +77,12 @@ class EnsureBinaryFailsClosedTests(unittest.TestCase):
     def test_missing_binary_with_no_rebuild_dies_closed(self) -> None:
         with self.assertRaises(SystemExit) as ctx:
             contract.ensure_binary(
-                self.binary, self.input_paths, {}, rebuild=False,
-                allow_rebuild=False, build=self._fake_build,
+                self.binary,
+                self.input_paths,
+                {},
+                rebuild=False,
+                allow_rebuild=False,
+                build=self._fake_build,
             )
         self.assertEqual(ctx.exception.code, 2)
         self.assertEqual(self.build_calls, [])
@@ -91,8 +95,12 @@ class EnsureBinaryFailsClosedTests(unittest.TestCase):
 
         with self.assertRaises(SystemExit) as ctx:
             contract.ensure_binary(
-                self.binary, self.input_paths, {}, rebuild=False,
-                allow_rebuild=False, build=self._fake_build,
+                self.binary,
+                self.input_paths,
+                {},
+                rebuild=False,
+                allow_rebuild=False,
+                build=self._fake_build,
             )
         self.assertEqual(ctx.exception.code, 2)
         self.assertEqual(self.build_calls, [])
@@ -115,8 +123,12 @@ class EnsureBinaryFailsClosedTests(unittest.TestCase):
 
         with self.assertRaises(SystemExit) as ctx:
             contract.ensure_binary(
-                self.binary, [self.src, pixi_lock], {}, rebuild=False,
-                allow_rebuild=False, build=self._fake_build,
+                self.binary,
+                [self.src, pixi_lock],
+                {},
+                rebuild=False,
+                allow_rebuild=False,
+                build=self._fake_build,
             )
         self.assertEqual(ctx.exception.code, 2)
         self.assertEqual(self.build_calls, [])
@@ -126,15 +138,23 @@ class EnsureBinaryFailsClosedTests(unittest.TestCase):
         self.binary.write_text("built")  # written after the source -> fresh
 
         contract.ensure_binary(
-            self.binary, self.input_paths, {}, rebuild=False,
-            allow_rebuild=False, build=self._fake_build,
+            self.binary,
+            self.input_paths,
+            {},
+            rebuild=False,
+            allow_rebuild=False,
+            build=self._fake_build,
         )
         self.assertEqual(self.build_calls, [])
 
     def test_missing_binary_with_rebuild_allowed_builds_once(self) -> None:
         contract.ensure_binary(
-            self.binary, self.input_paths, {}, rebuild=False,
-            allow_rebuild=True, build=self._fake_build,
+            self.binary,
+            self.input_paths,
+            {},
+            rebuild=False,
+            allow_rebuild=True,
+            build=self._fake_build,
         )
         self.assertEqual(len(self.build_calls), 1)
         self.assertTrue(self.binary.is_file())
@@ -146,8 +166,12 @@ class EnsureBinaryFailsClosedTests(unittest.TestCase):
 
         with self.assertRaises(SystemExit) as ctx:
             contract.ensure_binary(
-                self.binary, self.input_paths, {}, rebuild=False,
-                allow_rebuild=True, build=failing_build,
+                self.binary,
+                self.input_paths,
+                {},
+                rebuild=False,
+                allow_rebuild=True,
+                build=failing_build,
             )
         self.assertEqual(ctx.exception.code, 2)
         self.assertEqual(len(self.build_calls), 1)
@@ -211,7 +235,9 @@ class WaitUntilBoundedPollTests(unittest.TestCase):
             calls["n"] += 1
             return calls["n"] >= 2
 
-        ok = contract.wait_until(ready_after_two_polls, deadline=time.time() + 5, poll_interval=0.01)
+        ok = contract.wait_until(
+            ready_after_two_polls, deadline=time.time() + 5, poll_interval=0.01
+        )
 
         self.assertTrue(ok)
         self.assertEqual(calls["n"], 2)
@@ -251,14 +277,21 @@ class ExactProcessIdentificationTests(unittest.TestCase):
         self.procs.append(p)
         return p
 
-    def test_exact_process_pid_ignores_a_compiler_mentioning_the_same_name(self) -> None:
+    def test_exact_process_pid_ignores_a_compiler_mentioning_the_same_name(
+        self,
+    ) -> None:
         # The decoy stands in for `mojo build irq/test_1hang.mojo -o
         # build/bin/<mangled> ...`: its full command line CONTAINS the
         # mangled name (as `-o`'s value would), but argv[0] is the
         # compiler driver, not that name.
         decoy = self._spawn(
-            ["python3", "-c", "import time; time.sleep(300)",
-             "-o", f"build/bin/{self.MANGLED}"]
+            [
+                "python3",
+                "-c",
+                "import time; time.sleep(300)",
+                "-o",
+                f"build/bin/{self.MANGLED}",
+            ]
         )
         # The "binary" stands in for the exec'd test binary: a real ELF
         # executable (a copy of /bin/sleep — NOT a `#!`-script, whose
@@ -272,7 +305,8 @@ class ExactProcessIdentificationTests(unittest.TestCase):
         try:
             pid = contract.wait_until(
                 lambda: contract.exact_process_pid(self.MANGLED) is not None,
-                deadline=time.time() + 10, poll_interval=0.05,
+                deadline=time.time() + 10,
+                poll_interval=0.05,
             )
             self.assertTrue(pid, "the real binary was never identified")
             found = contract.exact_process_pid(self.MANGLED)
@@ -296,14 +330,16 @@ class ExactProcessIdentificationTests(unittest.TestCase):
 
         ready = contract.wait_until(
             lambda: contract.exact_process_pid(self.MANGLED) is not None,
-            deadline=time.time() + 10, poll_interval=0.05,
+            deadline=time.time() + 10,
+            poll_interval=0.05,
         )
         self.assertTrue(ready)
         pid = contract.exact_process_pid(self.MANGLED)
         self.assertEqual(int(pid), real.pid)
         state = contract.wait_until(
             lambda: contract.process_state(pid) == "S",
-            deadline=time.time() + 10, poll_interval=0.05,
+            deadline=time.time() + 10,
+            poll_interval=0.05,
         )
         self.assertTrue(state, f"pid {pid} never reported state S")
 
@@ -313,7 +349,7 @@ class FakeSupervisor:
 
     def __init__(self, exit_code: int = 2, out: str = "1 not run\n"):
         self.pid = 999999  # never sent a REAL signal; run_interrupt_probe's
-                            # `send_sigint` is always overridden in these tests
+        # `send_sigint` is always overridden in these tests
         self.returncode: int | None = None
         self._exit_code = exit_code
         self._out = out
@@ -361,7 +397,9 @@ class InterruptProbeProductionPathTests(unittest.TestCase):
 
     def test_child_never_ready_is_skip_when_not_strict(self) -> None:
         status, detail, proc, sigint_calls, _ = self._run(
-            hang_ready=lambda: False, strict=False, outer_deadline=time.time() + 0.2,
+            hang_ready=lambda: False,
+            strict=False,
+            outer_deadline=time.time() + 0.2,
         )
         self.assertEqual(status, contract.SKIP)
         self.assertIn("child never became ready", detail)
@@ -369,7 +407,9 @@ class InterruptProbeProductionPathTests(unittest.TestCase):
 
     def test_child_never_ready_is_fail_when_strict(self) -> None:
         status, detail, proc, sigint_calls, _ = self._run(
-            hang_ready=lambda: False, strict=True, outer_deadline=time.time() + 0.2,
+            hang_ready=lambda: False,
+            strict=True,
+            outer_deadline=time.time() + 0.2,
         )
         self.assertEqual(status, contract.FAIL)
         self.assertIn("child never became ready", detail)
@@ -385,7 +425,9 @@ class InterruptProbeProductionPathTests(unittest.TestCase):
         proc.returncode = 137  # already exited before the probe even started
         start = time.time()
         status, detail, _, sigint_calls, _ = self._run(
-            proc=proc, hang_ready=lambda: False, outer_deadline=time.time() + 5,
+            proc=proc,
+            hang_ready=lambda: False,
+            outer_deadline=time.time() + 5,
         )
         elapsed = time.time() - start
         self.assertEqual(status, contract.SKIP)
@@ -397,7 +439,9 @@ class InterruptProbeProductionPathTests(unittest.TestCase):
         def raises():
             raise RuntimeError("pgrep unavailable: [Errno 2] no such file")
 
-        status, detail, proc, sigint_calls, _ = self._run(hang_ready=raises, strict=False)
+        status, detail, proc, sigint_calls, _ = self._run(
+            hang_ready=raises, strict=False
+        )
         self.assertEqual(status, contract.SKIP)
         self.assertIn("pgrep unavailable", detail)
         self.assertTrue(proc.killed)
@@ -407,7 +451,9 @@ class InterruptProbeProductionPathTests(unittest.TestCase):
         def raises():
             raise RuntimeError("ps unavailable: [Errno 2] no such file")
 
-        status, detail, proc, sigint_calls, _ = self._run(hang_ready=raises, strict=True)
+        status, detail, proc, sigint_calls, _ = self._run(
+            hang_ready=raises, strict=True
+        )
         self.assertEqual(status, contract.FAIL)
         self.assertIn("ps unavailable", detail)
         self.assertIn("--strict", detail)
@@ -415,7 +461,8 @@ class InterruptProbeProductionPathTests(unittest.TestCase):
 
     def test_child_survived_cleanup_is_named_in_the_failure_detail(self) -> None:
         status, detail, proc, sigint_calls, killtree_calls = self._run(
-            hang_ready=lambda: True, hang_present=lambda: True,  # never leaves
+            hang_ready=lambda: True,
+            hang_present=lambda: True,  # never leaves
         )
         self.assertEqual(status, contract.FAIL)
         self.assertIn("orphaned_child=True", detail)
@@ -425,7 +472,8 @@ class InterruptProbeProductionPathTests(unittest.TestCase):
 
     def test_clean_pass_when_child_gone_and_supervisor_reports_not_run(self) -> None:
         status, detail, proc, sigint_calls, _ = self._run(
-            hang_ready=lambda: True, hang_present=lambda: False,
+            hang_ready=lambda: True,
+            hang_present=lambda: False,
         )
         self.assertEqual(status, contract.PASS)
         self.assertEqual(detail, "")
@@ -462,15 +510,11 @@ class CheckRosterTests(unittest.TestCase):
         )
 
     def test_complete_unfiltered_run_is_accepted(self) -> None:
-        contract.verify_every_check_ran(
-            contract.EXPECTED_CHECK_NAMES, filtered=False
-        )
+        contract.verify_every_check_ran(contract.EXPECTED_CHECK_NAMES, filtered=False)
 
     def test_one_missing_check_is_refused(self) -> None:
         without_interrupt = tuple(
-            n
-            for n in contract.EXPECTED_CHECK_NAMES
-            if not n.startswith("interrupt:")
+            n for n in contract.EXPECTED_CHECK_NAMES if not n.startswith("interrupt:")
         )
         with self.assertRaises(contract.ContractRosterError) as caught:
             contract.verify_every_check_ran(without_interrupt, filtered=False)
@@ -537,14 +581,10 @@ class CheckRosterTests(unittest.TestCase):
                 self._perform("color: --color always beats NO_COLOR")
 
             def check_precompile_success(self) -> None:
-                self._perform(
-                    "precompile: success path resolves import (auto -I)"
-                )
+                self._perform("precompile: success path resolves import (auto -I)")
 
             def check_interrupt(self, strict: bool) -> None:
-                self._perform(
-                    "interrupt: SIGINT frees the owned process group"
-                )
+                self._perform("interrupt: SIGINT frees the owned process group")
 
         ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
         out, err = io.StringIO(), io.StringIO()
@@ -554,21 +594,18 @@ class CheckRosterTests(unittest.TestCase):
             pixi_env=mock.Mock(return_value={}),
             ensure_binary=mock.Mock(),
             scaffold=mock.Mock(),
-        ):
-            with mock.patch.object(contract.subprocess, "run", return_value=ok):
-                with mock.patch.object(sys, "argv", ["contract.py", *argv]):
-                    with contextlib.redirect_stdout(out):
-                        with contextlib.redirect_stderr(err):
-                            code = contract.main()
+        ), mock.patch.object(contract.subprocess, "run", return_value=ok):
+            with mock.patch.object(sys, "argv", ["contract.py", *argv]):
+                with contextlib.redirect_stdout(out):
+                    with contextlib.redirect_stderr(err):
+                        code = contract.main()
         self.performed = recorded
         return code, out.getvalue(), err.getvalue()
 
     def test_main_performs_every_rostered_check_in_order(self) -> None:
         code, out, err = self._main_over_a_fake_runner([])
         self.assertEqual(code, 0, err)
-        self.assertEqual(
-            tuple(self.performed), contract.EXPECTED_CHECK_NAMES
-        )
+        self.assertEqual(tuple(self.performed), contract.EXPECTED_CHECK_NAMES)
         self.assertIn("0 failed, 0 skipped", out)
 
     def test_main_refuses_a_verdict_when_a_call_site_recorded_nothing(self) -> None:
@@ -587,9 +624,7 @@ class CheckRosterTests(unittest.TestCase):
         self.assertIn("1 skipped", out)
 
     def test_strict_fails_on_a_skip_including_no_interrupt(self) -> None:
-        code, out, _err = self._main_over_a_fake_runner(
-            ["--strict", "--no-interrupt"]
-        )
+        code, out, _err = self._main_over_a_fake_runner(["--strict", "--no-interrupt"])
         self.assertEqual(code, 1)
         self.assertIn("1 skipped", out)
 

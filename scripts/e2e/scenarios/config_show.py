@@ -73,8 +73,7 @@ def s_config_show(context: ScenarioContext) -> str:
             f"precompile values did not round-trip:\n{shown.stdout}",
         )
         expect(
-            document["override"]
-            == [{"files": "tests/gpu_*", "timeout": 3}],
+            document["override"] == [{"files": "tests/gpu_*", "timeout": 3}],
             f"override did not round-trip:\n{shown.stdout}",
         )
         for fragment in (
@@ -130,8 +129,7 @@ def s_config_show(context: ScenarioContext) -> str:
         expect_exit(report_only, 0)
         expect(
             'json = "missing/events.ndjson"  # (cli)' in report_only.stdout
-            and 'junit-xml = "missing/junit.xml"  # (cli)'
-            in report_only.stdout,
+            and 'junit-xml = "missing/junit.xml"  # (cli)' in report_only.stdout,
             f"missing-parent report paths did not render:\n{report_only.stdout}",
         )
         expect(

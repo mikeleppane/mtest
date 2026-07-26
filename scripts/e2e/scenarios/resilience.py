@@ -123,7 +123,8 @@ def s_retries_flaky(context: ScenarioContext) -> str:
         reported FLAKY, and the process exits 0;
       * --retries 0 -> the first crash stands as CRASH and the process exits 1.
     Structure is asserted (a TRY line and a FLAKY token are present), never the
-    exact console bytes."""
+    exact console bytes.
+    """
     rel = "e2e/flaky/test_flaky.mojo"
     scratch = os.path.join(REPO_ROOT, "build", "e2e-scratch")
     marker = os.path.join(scratch, "flaky_marker")
@@ -199,7 +200,8 @@ def s_crash_attribution(context: ScenarioContext) -> str:
     be indistinguishable in everything a verdict is made of. That equality —
     exit 1, a CRASH verdict line, and a byte-equal summary accounting tuple — is
     asserted between the two runs, not merely against the manifest. Structure
-    only; never console bytes."""
+    only; never console bytes.
+    """
     attributed_rel = "e2e/attribution/test_deterministic_crasher.mojo"
     unattributed_rel = "e2e/attribution/test_order_dependent_crasher.mojo"
 
@@ -336,7 +338,8 @@ def s_attribution_reruns_the_binary_that_crashed(context: ScenarioContext) -> st
     (crash-class -> retried), and its second writes a working binary at the
     retry's fresh `.attempt-2` path. So `build/bin/<mangled>` exists but is
     non-runnable, and only `.attempt-2` can answer a probe. ATTRIBUTED naming
-    test_boom is therefore reachable ONLY by rerunning the binary that ran."""
+    test_boom is therefore reachable ONLY by rerunning the binary that ran.
+    """
     rel = "e2e/attribution/test_deterministic_crasher.mojo"
     scratch = os.path.join(REPO_ROOT, "build", "e2e-scratch")
     marker = os.path.join(scratch, "retry_crash_build_marker")
@@ -369,8 +372,7 @@ def s_attribution_reruns_the_binary_that_crashed(context: ScenarioContext) -> st
         )
         expect(
             verdict_line(run, "CRASH", rel) is not None,
-            f"the rebuilt binary's runtime crash was not reported CRASH:\n"
-            f"{run.stdout}",
+            f"the rebuilt binary's runtime crash was not reported CRASH:\n{run.stdout}",
         )
         line = verdict_line(run, "ATTRIBUTION", rel)
         expect(
@@ -410,7 +412,8 @@ def s_compile_timeout(context: ScenarioContext) -> str:
         against a fresh module cache), then the retry times out too and the file
         is still COMPILE-TIMEOUT at exit 1.
 
-    Structure is asserted, never the exact console bytes."""
+    Structure is asserted, never the exact console bytes.
+    """
     rel = "e2e/suite/test_passing.mojo"
 
     # --compile-timeout 1: one bounded build, killed at the deadline.
@@ -491,13 +494,16 @@ def s_compile_crash_signature(context: ScenarioContext) -> str:
     is what makes that impossible. Delete the `has_crash_signature(...)` condition
     from `retry_classify` (or force it true) and (b) fails on the TRY line.
 
-    Structure is asserted, never the exact console bytes."""
+    Structure is asserted, never the exact console bytes.
+    """
     rel = "e2e/suite/test_passing.mojo"
     argv = ["--mojo", FAKE_CRASH_MOJO, rel, "--retries", "1"]
 
     # (a) nonzero exit WITH the ICE banner -> crash-class -> retried.
     sig = context.runner.run_mtest(
-        argv, timeout=SHORT_TIMEOUT, env_overrides={"MTEST_FAKE_BUILD_CRASH": "signature"}
+        argv,
+        timeout=SHORT_TIMEOUT,
+        env_overrides={"MTEST_FAKE_BUILD_CRASH": "signature"},
     )
     expect_exit(sig, 1)
     expect(
@@ -602,7 +608,9 @@ def s_timeout_escalation(context: ScenarioContext) -> str:
     rel = "e2e/stubborn/test_stubborn.mojo"
 
     # --retries 0: the verdict line alone carries the story.
-    run0 = context.runner.run_mtest([rel, "--timeout", "1", "--retries", "0"], timeout=SHORT_TIMEOUT)
+    run0 = context.runner.run_mtest(
+        [rel, "--timeout", "1", "--retries", "0"], timeout=SHORT_TIMEOUT
+    )
     expect_exit(run0, 1)
     summ0 = expect_accounting(run0)
     expect(summ0.timed_out == 1, f"expected 1 timed out, got {summ0.timed_out}")
@@ -623,7 +631,9 @@ def s_timeout_escalation(context: ScenarioContext) -> str:
     )
 
     # --retries 1: the TRY line tells the same story, and so does the verdict.
-    run = context.runner.run_mtest([rel, "--timeout", "1", "--retries", "1"], timeout=SHORT_TIMEOUT)
+    run = context.runner.run_mtest(
+        [rel, "--timeout", "1", "--retries", "1"], timeout=SHORT_TIMEOUT
+    )
     expect_exit(run, 1)
     summ = expect_accounting(run)
     expect(summ.timed_out == 1, f"expected 1 timed out, got {summ.timed_out}")
@@ -689,7 +699,8 @@ def s_precompile_timeout(context: ScenarioContext) -> str:
     "the compiler rejected the code", which read identically at exit 1 unless the
     banner says which one happened.
 
-    Structure is asserted, never the exact console bytes."""
+    Structure is asserted, never the exact console bytes.
+    """
     rel = "e2e/pkg/test_uses_pkg.mojo"
     run = context.runner.run_mtest(
         [
@@ -799,7 +810,8 @@ def s_precompile_promotion(context: ScenarioContext) -> str:
     on failure deletes) its output. Point mtest at eager promotion — build to OUT
     directly — and every assertion below fails, because the shim then destroys the
     sentinel exactly as the real compiler would. The sentinel survives ONLY
-    because mtest never let the compiler near OUT."""
+    because mtest never let the compiler near OUT.
+    """
     rel = "e2e/pkg/test_uses_pkg.mojo"
     out_dir = os.path.join(REPO_ROOT, "build", "e2e-promotion")
     out_rel = "build/e2e-promotion/mathlib.mojopkg"
@@ -807,9 +819,7 @@ def s_precompile_promotion(context: ScenarioContext) -> str:
     sentinel = b"SENTINEL-PACKAGE-BYTES\n"
 
     def _litter() -> list[str]:
-        return sorted(
-            name for name in os.listdir(out_dir) if name.endswith(".tmp")
-        )
+        return sorted(name for name in os.listdir(out_dir) if name.endswith(".tmp"))
 
     try:
         for label, mojo_shim, extra in (
@@ -866,7 +876,8 @@ def s_internal_error(context: ScenarioContext) -> str:
     with ENOENT before any file can be built. Assert exit 3, an INTERNAL-ERROR
     banner naming the build step, the missing program, and the errno; that NO
     false PASS/verdict line appears for the file; and that the file is accounted
-    NOT-RUN in the summary."""
+    NOT-RUN in the summary.
+    """
     rel = "e2e/suite/test_passing.mojo"
     missing = "/no/such/mojo/compiler"
     run = context.runner.run_mtest(["--mojo", missing, rel], timeout=SHORT_TIMEOUT)
@@ -1047,8 +1058,7 @@ def _interrupted_slow_walk(
         )
         expect(
             verdict_line(run, "TIMEOUT", SLOW_BLOCKED_FILE) is None,
-            f"the interrupted child was narrated as a TIMEOUT casualty:\n"
-            f"{run.stdout}",
+            f"the interrupted child was narrated as a TIMEOUT casualty:\n{run.stdout}",
         )
 
         # (2) The machine stream states the same identities by presence and
@@ -1073,8 +1083,7 @@ def _interrupted_slow_walk(
         expect(
             stream.summary.get("not_run") == len(SLOW_NOT_RUN_FILES)
             and stream.summary.get("pass") == 1,
-            f"the terminal summary disagreed with the console band: "
-            f"{stream.summary}",
+            f"the terminal summary disagreed with the console band: {stream.summary}",
         )
 
         # (3) The JUnit report names every NOT-RUN file, exactly and in order.
@@ -1083,8 +1092,7 @@ def _interrupted_slow_walk(
         not_run_rows = junit_not_run_files(report)
         expect(
             not_run_rows == SLOW_NOT_RUN_FILES,
-            f"the junit [not-run] rows were {not_run_rows}, want "
-            f"{SLOW_NOT_RUN_FILES}",
+            f"the junit [not-run] rows were {not_run_rows}, want {SLOW_NOT_RUN_FILES}",
         )
 
         # (4) Hard termination. Everything above is equally true of a product

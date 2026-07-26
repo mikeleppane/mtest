@@ -26,9 +26,7 @@ def mojo_sources(repo_root: Path = REPO_ROOT) -> list[Path]:
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
             current = Path(dirpath)
             dirnames[:] = [
-                name
-                for name in dirnames
-                if not (current / name).is_symlink()
+                name for name in dirnames if not (current / name).is_symlink()
             ]
             for name in filenames:
                 path = current / name

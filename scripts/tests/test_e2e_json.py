@@ -71,9 +71,7 @@ def _check_e2e_interposer_source_policy(source: str) -> None:
 
     def active_source(branch: str) -> str:
         without_blocks = re.sub(r"/\*.*?\*/", "", branch, flags=re.DOTALL)
-        return "\n".join(
-            line.split("//", 1)[0] for line in without_blocks.splitlines()
-        )
+        return "\n".join(line.split("//", 1)[0] for line in without_blocks.splitlines())
 
     active_apple = active_source(apple_branch)
     active_other = active_source(other_branch)
@@ -98,8 +96,7 @@ def _check_e2e_interposer_source_policy(source: str) -> None:
     )
     if not apple_required.issubset(active_apple_lines):
         raise AssertionError(
-            "Darwin E2E interposer must use DYLD_INTERPOSE and writev "
-            "forwarding"
+            "Darwin E2E interposer must use DYLD_INTERPOSE and writev forwarding"
         )
     if any(fragment in active_apple for fragment in apple_forbidden):
         raise AssertionError(
@@ -223,9 +220,7 @@ def check_e2e_interposer_command_topology() -> None:
         platform="linux",
         platform_driver="/unused/platform/driver",
     )
-    expected_linux_library = os.path.join(
-        directory, "libmtest_json_terminal_fault.so"
-    )
+    expected_linux_library = os.path.join(directory, "libmtest_json_terminal_fault.so")
     expected_linux_steps = [
         ("compile", common_compile),
         (

@@ -18,10 +18,10 @@ import shutil
 import subprocess
 import sys
 
-from scripts.harness import aggregate
 from scripts.checks import native_abi as native_abi_check
 from scripts.checks.reports import json_stream as json_stream_oracle
 from scripts.checks.reports import junit as junit_oracle
+from scripts.harness import aggregate
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -88,9 +88,11 @@ evidence through the real-CLI probe below, which drives `open_json_fd`,
 The ASan lane runs this suite unchanged: LeakSanitizer does not track
 descriptors, so the deliberate `EBADF` calls are inert there."""
 
-TESTS = tuple(sorted(EXEC_TEST_ROOT.glob("test_exec_*.mojo"))) + (
-    CONFIG_TEST,
-) + REPORT_TESTS
+TESTS = (
+    tuple(sorted(EXEC_TEST_ROOT.glob("test_exec_*.mojo")))
+    + (CONFIG_TEST,)
+    + REPORT_TESTS
+)
 VALGRIND_FLAGS = (
     "--tool=memcheck",
     "--leak-check=full",
@@ -163,7 +165,9 @@ CLI_HOME = OUT / "cli-home"
 """The probe's `HOME`. Separate from `clean_environment`'s, because the CLI
 writes below its invocation root and a shared empty home would mix the two."""
 
-HOSTILE_BUILD_STANDIN = ROOT / "scripts" / "fixtures" / "toolchain" / "fake_hostile_mojo.py"
+HOSTILE_BUILD_STANDIN = (
+    ROOT / "scripts" / "fixtures" / "toolchain" / "fake_hostile_mojo.py"
+)
 """The strict `--mojo` stand-in that fabricates the hostile report actor.
 
 Both it and the actor are children the CLI `execve`s, and this lane runs with
@@ -374,7 +378,14 @@ def compile_inputs(cc: str, env: dict[str, str]) -> None:
         f"production native compile failed:\n{production.stdout}",
     )
     linked = run(
-        [cc, *flags, str(NATIVE_SOURCE), str(CONTROL_SOURCE), "-o", str(CONTROL_BINARY)],
+        [
+            cc,
+            *flags,
+            str(NATIVE_SOURCE),
+            str(CONTROL_SOURCE),
+            "-o",
+            str(CONTROL_BINARY),
+        ],
         env=env,
     )
     require(linked.returncode == 0, f"control link failed:\n{linked.stdout}")
@@ -438,7 +449,10 @@ def check_controls(env: dict[str, str]) -> None:
         (OUT / f"control-{case}.log").write_text(result.stdout)
         require(marker in result.stdout, f"negative control {case} missed {marker!r}")
         if case == "mem-fd":
-            require(result.returncode == 99, f"fd control exited {result.returncode}, expected 99")
+            require(
+                result.returncode == 99,
+                f"fd control exited {result.returncode}, expected 99",
+            )
             require(
                 "FILE DESCRIPTORS: 4 open (3 inherited)" in result.stdout,
                 "fd control did not expose the extra descriptor",
@@ -457,8 +471,13 @@ def check_controls(env: dict[str, str]) -> None:
         flags=POSTFORK_FLAGS,
     )
     (OUT / "control-mem-child-invalid.log").write_text(child.stdout)
-    require(child.returncode == 0, f"child-memory control parent exited {child.returncode}")
-    require("Invalid read" in child.stdout, "child-memory control hid the fork-child finding")
+    require(
+        child.returncode == 0, f"child-memory control parent exited {child.returncode}"
+    )
+    require(
+        "Invalid read" in child.stdout,
+        "child-memory control hid the fork-child finding",
+    )
     summaries = [
         int(value)
         for value in re.findall(r"ERROR SUMMARY: ([0-9,]+) errors", child.stdout)
@@ -476,7 +495,10 @@ def check_native_tests(env: dict[str, str]) -> None:
         binary = OUT / source.stem
         full = valgrind([str(binary)], env, quiet_child=True)
         (OUT / f"{source.stem}.log").write_text(full.stdout)
-        require(full.returncode == 0, f"{source.name} exited {full.returncode}:\n{full.stdout}")
+        require(
+            full.returncode == 0,
+            f"{source.name} exited {full.returncode}:\n{full.stdout}",
+        )
         require(sentinel in full.stdout, f"{source.name} missed {sentinel!r}")
         require(
             "ERROR SUMMARY: 0 errors from 0 contexts" in full.stdout,
@@ -491,15 +513,16 @@ def check_native_tests(env: dict[str, str]) -> None:
             f"{source.name} has a nonstandard fd count",
         )
 
-        postfork = valgrind(
-            [str(binary)], env, quiet_child=False, flags=POSTFORK_FLAGS
-        )
+        postfork = valgrind([str(binary)], env, quiet_child=False, flags=POSTFORK_FLAGS)
         (OUT / f"{source.stem}.postfork.log").write_text(postfork.stdout)
         require(
             postfork.returncode == 0,
             f"{source.name} post-fork audit exited {postfork.returncode}",
         )
-        require(sentinel in postfork.stdout, f"{source.name} post-fork audit missed {sentinel!r}")
+        require(
+            sentinel in postfork.stdout,
+            f"{source.name} post-fork audit missed {sentinel!r}",
+        )
         summaries = [
             int(value.replace(",", ""))
             for value in re.findall(r"ERROR SUMMARY: ([0-9,]+) errors", postfork.stdout)
@@ -566,21 +589,34 @@ def parse_reachable(output: str, source: Path) -> None:
             "native/mtest_exec_native.c" not in record,
             f"{source.name} retains a native-adapter allocation",
         )
-        require("src/mtest/" not in record, f"{source.name} retains a product allocation")
+        require(
+            "src/mtest/" not in record, f"{source.name} retains a product allocation"
+        )
 
 
-def check_product_output(result: subprocess.CompletedProcess[str], source: Path) -> None:
+def check_product_output(
+    result: subprocess.CompletedProcess[str], source: Path
+) -> None:
     """Verify client completion, Memcheck findings, leaks, and fd hygiene."""
     expected = test_count(source)
     sentinel = f"{expected} tests run: {expected} passed"
-    require(result.returncode == 0, f"{source.name} exited {result.returncode}:\n{result.stdout}")
-    require(sentinel in result.stdout, f"{source.name} missed completion sentinel {sentinel!r}")
+    require(
+        result.returncode == 0,
+        f"{source.name} exited {result.returncode}:\n{result.stdout}",
+    )
+    require(
+        sentinel in result.stdout,
+        f"{source.name} missed completion sentinel {sentinel!r}",
+    )
     require(
         "ERROR SUMMARY: 0 errors from 0 contexts" in result.stdout,
         f"{source.name} has Memcheck errors",
     )
     for kind in ("definitely lost", "indirectly lost", "possibly lost"):
-        require(f"{kind}: 0 bytes in 0 blocks" in result.stdout, f"{source.name} has {kind} memory")
+        require(
+            f"{kind}: 0 bytes in 0 blocks" in result.stdout,
+            f"{source.name} has {kind} memory",
+        )
     require(
         "suppressed: 0 bytes in 0 blocks" in result.stdout,
         f"{source.name} unexpectedly used a suppression",
@@ -596,7 +632,9 @@ def check_product_output(result: subprocess.CompletedProcess[str], source: Path)
     parse_reachable(result.stdout, source)
 
 
-def check_postfork_output(result: subprocess.CompletedProcess[str], source: Path) -> None:
+def check_postfork_output(
+    result: subprocess.CompletedProcess[str], source: Path
+) -> None:
     """Reject invalid/undefined accesses from the unsilenced pre-exec child."""
     expected = test_count(source)
     sentinel = f"{expected} tests run: {expected} passed"
@@ -604,12 +642,12 @@ def check_postfork_output(result: subprocess.CompletedProcess[str], source: Path
         result.returncode == 0,
         f"{source.name} post-fork audit exited {result.returncode}:\n{result.stdout}",
     )
-    require(sentinel in result.stdout, f"{source.name} post-fork audit missed {sentinel!r}")
+    require(
+        sentinel in result.stdout, f"{source.name} post-fork audit missed {sentinel!r}"
+    )
     summaries = [
         int(value.replace(",", ""))
-        for value in re.findall(
-            r"ERROR SUMMARY: ([0-9,]+) errors", result.stdout
-        )
+        for value in re.findall(r"ERROR SUMMARY: ([0-9,]+) errors", result.stdout)
     ]
     require(summaries, f"{source.name} post-fork audit has no Memcheck summary")
     require(
@@ -711,9 +749,7 @@ def check_cli_provenance(returncode: int, log: str) -> None:
         "suppressed: 0 bytes in 0 blocks" in log,
         "CLI artifact probe unexpectedly used a suppression",
     )
-    records = leak_records(
-        log, "possibly lost|still reachable", "CLI artifact probe"
-    )
+    records = leak_records(log, "possibly lost|still reachable", "CLI artifact probe")
     for record in records:
         require(
             "native/mtest_exec_native.c" not in record,
@@ -883,13 +919,13 @@ def compile_and_run_test(source: Path, env: dict[str, str]) -> None:
         ],
         env=env,
     )
-    require(compiled.returncode == 0, f"build failed for {source.name}:\n{compiled.stdout}")
+    require(
+        compiled.returncode == 0, f"build failed for {source.name}:\n{compiled.stdout}"
+    )
     result = valgrind([str(binary)], env, quiet_child=True)
     (OUT / f"{source.stem}.log").write_text(result.stdout)
     check_product_output(result, source)
-    postfork = valgrind(
-        [str(binary)], env, quiet_child=False, flags=POSTFORK_FLAGS
-    )
+    postfork = valgrind([str(binary)], env, quiet_child=False, flags=POSTFORK_FLAGS)
     (OUT / f"{source.stem}.postfork.log").write_text(postfork.stdout)
     check_postfork_output(postfork, source)
     expected = test_count(source)
@@ -906,7 +942,9 @@ def main() -> int:
     prepare_test_scratch()
     env = clean_environment()
     version = run(["valgrind", "--version"], env=env)
-    require(version.returncode == 0, f"cannot execute locked Valgrind:\n{version.stdout}")
+    require(
+        version.returncode == 0, f"cannot execute locked Valgrind:\n{version.stdout}"
+    )
     require(
         version.stdout.strip() == "valgrind-3.27.1",
         f"wrong Valgrind: {version.stdout.strip()}",
@@ -929,8 +967,7 @@ def main() -> int:
         "Project/native reachable records: 0\n"
     )
     print(
-        f"valgrind-check: OK -- {len(TESTS)} source-built suites "
-        "+ 1 CLI reporter run"
+        f"valgrind-check: OK -- {len(TESTS)} source-built suites + 1 CLI reporter run"
     )
     return 0
 

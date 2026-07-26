@@ -7,6 +7,7 @@ window — before any SIGKILL escalation. The final status is therefore
 `Exited(0)`, yet the outcome must LATCH to `TimedOut` (escalated=False): a clean
 exit provoked by our own deadline kill is still a timeout, never a pass.
 """
+
 import signal
 import sys
 import time

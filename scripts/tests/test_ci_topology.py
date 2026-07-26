@@ -80,9 +80,7 @@ class CiTopologyTests(unittest.TestCase):
             ".agents/skills/improve-architecture/SKILL.md",
             ".agents/skills/validating-mtest/SKILL.md",
         ):
-            contents = (ci_topology.REPO_ROOT / relative).read_text(
-                encoding="utf-8"
-            )
+            contents = (ci_topology.REPO_ROOT / relative).read_text(encoding="utf-8")
             self.assertNotIn("test-direct", contents, relative)
 
     def test_obsolete_test_alias_mutation_is_rejected(self) -> None:
@@ -183,7 +181,9 @@ class CiTopologyTests(unittest.TestCase):
             ("ubuntu-24.04", ci_topology.LINUX_MATRIX_ROWS),
             ("macos-15", ci_topology.MACOS_MATRIX_ROWS),
         ):
-            matches = [row for row in rows if row.get("task") == "contract-check-strict"]
+            matches = [
+                row for row in rows if row.get("task") == "contract-check-strict"
+            ]
             self.assertEqual(len(matches), 1, rows)
             self.assertEqual(matches[0], {"runner": runner, **expected_row})
 
@@ -192,7 +192,14 @@ class CiTopologyTests(unittest.TestCase):
         macos_tasks = [row["task"] for row in ci_topology.MACOS_MATRIX_ROWS]
         self.assertEqual(
             linux_tasks,
-            ["test", "dogfood-check", "e2e", "contract-check-strict", "asan-check", "valgrind-check"],
+            [
+                "test",
+                "dogfood-check",
+                "e2e",
+                "contract-check-strict",
+                "asan-check",
+                "valgrind-check",
+            ],
         )
         self.assertEqual(
             macos_tasks,
@@ -275,9 +282,9 @@ class CiTopologyTests(unittest.TestCase):
 
     def _workflow(self) -> str:
         """Return the live CI workflow text."""
-        return (
-            ci_topology.REPO_ROOT / ".github" / "workflows" / "ci.yml"
-        ).read_text(encoding="utf-8")
+        return (ci_topology.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
 
     def _reject(self, mutated: str, pattern: str) -> None:
         """Require the topology oracle to reject one mutated workflow.
@@ -321,8 +328,10 @@ class CiTopologyTests(unittest.TestCase):
     def test_macos_package_job_on_a_linux_runner_is_rejected(self) -> None:
         workflow = self._workflow()
         head, _, tail = workflow.partition("  macos-package:")
-        mutated = head + "  macos-package:" + tail.replace(
-            "    runs-on: macos-15", "    runs-on: ubuntu-24.04", 1
+        mutated = (
+            head
+            + "  macos-package:"
+            + tail.replace("    runs-on: macos-15", "    runs-on: ubuntu-24.04", 1)
         )
         self._reject(mutated, "package runner mismatch")
 
@@ -340,10 +349,14 @@ class CiTopologyTests(unittest.TestCase):
     def test_macos_package_job_running_another_task_is_rejected(self) -> None:
         workflow = self._workflow()
         head, _, tail = workflow.partition("  macos-package:")
-        mutated = head + "  macos-package:" + tail.replace(
-            "        run: pixi run package-check",
-            "        run: pixi run package-build",
-            1,
+        mutated = (
+            head
+            + "  macos-package:"
+            + tail.replace(
+                "        run: pixi run package-check",
+                "        run: pixi run package-build",
+                1,
+            )
         )
         self._reject(mutated, "package command mismatch")
 
@@ -360,8 +373,10 @@ class CiTopologyTests(unittest.TestCase):
     def test_linux_package_job_removal_is_rejected(self) -> None:
         workflow = self._workflow()
         head, _, tail = workflow.partition("  package:\n")
-        mutated = head + tail.partition("  macos-preflight:\n")[1] + (
-            tail.partition("  macos-preflight:\n")[2]
+        mutated = (
+            head
+            + tail.partition("  macos-preflight:\n")[1]
+            + (tail.partition("  macos-preflight:\n")[2])
         )
         self._reject(mutated, "job membership mismatch")
 
@@ -475,7 +490,6 @@ class CiTopologyTests(unittest.TestCase):
             (repo / "pixi.toml").write_text(mutated, encoding="utf-8")
             with self.assertRaisesRegex(AssertionError, pattern):
                 ci_topology.check_ci_task_graph(repo)
-
 
     def test_package_test_module_owns_a_harness_check_slot(self) -> None:
         # The package gate's oracles are unit-tested in the cheap serial chain,

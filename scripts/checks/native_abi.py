@@ -69,6 +69,7 @@ TEST_ONLY_SYMBOLS = {
     "mtest_exec_test_reset_interrupt",
 }
 
+
 def _load_strict_flags(path: Path) -> tuple[str, ...]:
     """Return the shared strict production flag inventory read from `path`.
 
@@ -81,9 +82,7 @@ def _load_strict_flags(path: Path) -> tuple[str, ...]:
         if (stripped := line.strip()) and not stripped.startswith("#")
     )
     if not flags:
-        raise SystemExit(
-            f"native-abi-check: strict flag inventory is empty: {path}"
-        )
+        raise SystemExit(f"native-abi-check: strict flag inventory is empty: {path}")
     return flags
 
 
@@ -140,12 +139,16 @@ def compile_variant(cc: str, output: Path, *, testing: bool) -> None:
 def defined_symbols(object_path: Path) -> set[str]:
     """Return normalized externally visible definitions on Linux or Darwin."""
     nm = os.environ.get("NM", "nm")
-    command = [nm, "-gU", str(object_path)] if sys.platform == "darwin" else [
-        nm,
-        "-g",
-        "--defined-only",
-        str(object_path),
-    ]
+    command = (
+        [nm, "-gU", str(object_path)]
+        if sys.platform == "darwin"
+        else [
+            nm,
+            "-g",
+            "--defined-only",
+            str(object_path),
+        ]
+    )
     proc = run(command)
     require(proc.returncode == 0, f"nm failed for {object_path}:\n{proc.stdout}")
     symbols: set[str] = set()

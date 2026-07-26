@@ -4,17 +4,17 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 from dataclasses import dataclass
 import math
 import os
+from pathlib import Path
 import select
 import signal
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Sequence
-from pathlib import Path
 from typing import IO
 
 
@@ -357,9 +357,7 @@ def _start_drainers(
         threads.append(thread)
         tees.append(tee)
         sources.append(source)
-    return _DrainState(
-        tuple(threads), tuple(tees), stop, retention, tuple(sources)
-    )
+    return _DrainState(tuple(threads), tuple(tees), stop, retention, tuple(sources))
 
 
 def _settle_drainers(state: _DrainState | None) -> None:
@@ -486,9 +484,7 @@ def _terminate_process_group(process: subprocess.Popen[object]) -> None:
     process.wait()
 
 
-def _forward_signal_and_cleanup(
-    process: subprocess.Popen[object], signum: int
-) -> None:
+def _forward_signal_and_cleanup(process: subprocess.Popen[object], signum: int) -> None:
     """Forward caller cancellation, then force-reap the complete child group."""
     if not _signal_group(process.pid, signum):
         process.wait()
@@ -729,9 +725,7 @@ def run_command(
                 _terminate_process_group(process)
             except Exception as cleanup_exc:
                 detail += f"; process-group cleanup failed: {cleanup_exc}"
-        return _clear_non_timeout_sentinel(
-            HarnessError(detail), deadline_sentinel
-        )
+        return _clear_non_timeout_sentinel(HarnessError(detail), deadline_sentinel)
     finally:
         # Restore the caller's dispositions before the backstop seal. A managed
         # handler that outlived its `try` would raise `_WatchdogCancellation`

@@ -20,7 +20,9 @@ class NativeCheckCommandTests(unittest.TestCase):
     def test_source_inventory_is_nonempty_and_exact(self) -> None:
         root = Path(__file__).resolve().parents[2]
         self.assertEqual(
-            tuple(path.relative_to(root).as_posix() for path in native_check.TEST_SOURCES),
+            tuple(
+                path.relative_to(root).as_posix() for path in native_check.TEST_SOURCES
+            ),
             (
                 "tests/native/test_exec_native.c",
                 "tests/native/test_exec_native_signals.c",

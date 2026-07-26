@@ -41,6 +41,7 @@ import signal
 import sys
 import time
 
+
 TARGET_ENV_VAR = "MTEST_STUBBORN_TARGET"
 """The repo-relative source path whose compile blocks instead of building."""
 PGID_ENV_VAR = "MTEST_STUBBORN_PGID_FILE"

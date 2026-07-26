@@ -64,9 +64,7 @@ def parse_annotation(line: str) -> Annotation | None:
 
 def _is_aggregate(message: str, kind: str) -> bool:
     """Whether `message` is the cap-minus-one rollup line for this kind."""
-    return message.startswith("... and ") and message.endswith(
-        "more " + kind + "s"
-    )
+    return message.startswith("... and ") and message.endswith("more " + kind + "s")
 
 
 def _node_id_key(message: str) -> str:
@@ -257,7 +255,7 @@ def extract_fence_tokens(text: str) -> list[str]:
 
 
 def annotation_tail_outside_fences(text: str) -> list[str]:
-    """mtest's OWN annotation tail: annotation lines NOT sealed in any fence.
+    """Mtest's OWN annotation tail: annotation lines NOT sealed in any fence.
 
     A `::error`/`::warning`/`::notice` line inside a stop-commands fence is echoed
     child output (inert to GitHub), not part of mtest's tail. This returns only

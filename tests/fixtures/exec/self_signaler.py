@@ -7,7 +7,9 @@ report `Signaled(6)`, never `Exited(...)`. SIGABRT is chosen because it is far
 from the supervisor's own SIGTERM (15) / SIGKILL (9), so a decode confusion
 cannot hide behind a matching number.
 """
+
 import os
 import signal
+
 
 os.kill(os.getpid(), signal.SIGABRT)

@@ -22,6 +22,7 @@ Usage:
     python -m scripts.gen_transcripts              # write into tests/snapshots/protocol/
     python -m scripts.gen_transcripts --out DIR    # write into DIR (check harness)
 """
+
 from __future__ import annotations
 
 import argparse
@@ -31,6 +32,7 @@ import re
 import subprocess
 import sys
 import tempfile
+
 
 NORMALIZER_VERSION = "v1"
 REPO_ROOT = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
@@ -58,7 +60,11 @@ MATRIX = [
     ("skip-one", "mixed", ["--skip", "test_second_fails"]),
     ("skip-unknown", "passing", ["--skip", "test_missing"]),
     ("flag-unknown", "passing", ["--bogus-flag"]),
-    ("no-compose", "passing", ["--only", "test_zeta_passes", "--skip", "test_alpha_passes"]),
+    (
+        "no-compose",
+        "passing",
+        ["--only", "test_zeta_passes", "--skip", "test_alpha_passes"],
+    ),
     ("skip-all-args", "passing", ["--skip-all", "--only", "x"]),
     # Conditional: only because 1.0.0b2's TestSuite exposes an in-code skip API.
     ("default", "skipped", []),
@@ -159,9 +165,7 @@ def normalize(raw: bytes, *, is_crash_stream: bool) -> str:
     if summary_idxs:
         last_summary = summary_idxs[-1]
         running_before = [
-            i
-            for i, ln in enumerate(lines)
-            if RUNNING_RE.match(ln) and i < last_summary
+            i for i, ln in enumerate(lines) if RUNNING_RE.match(ln) and i < last_summary
         ]
         if running_before:
             anchor = running_before[-1]
@@ -296,9 +300,7 @@ def verify_scenario(fixture, scenario, out_norm, err_norm, returncode, transcrip
         names = [n for (r, n) in _report_result_lines(out_norm) if r == "SKIP"]
         expected = ["test_zeta_passes", "test_alpha_passes", "test_mid_passes"]
         if names != expected:
-            raise GenError(
-                f"skip-all listing {names} != fixture test names {expected}"
-            )
+            raise GenError(f"skip-all listing {names} != fixture test names {expected}")
 
     # native-skip skip-all collection: BOTH names are listed as SKIP, in source
     # (discovery) order — pins that a natively skipped test is not omitted or
@@ -307,9 +309,7 @@ def verify_scenario(fixture, scenario, out_norm, err_norm, returncode, transcrip
         names = [n for (r, n) in _report_result_lines(out_norm) if r == "SKIP"]
         expected = ["test_runs_normally", "test_natively_skipped"]
         if names != expected:
-            raise GenError(
-                f"skip-all listing {names} != fixture test names {expected}"
-            )
+            raise GenError(f"skip-all listing {names} != fixture test names {expected}")
 
     # native-skip survives explicit selection: --only the natively-skipped test
     # still reports it as SKIP, not PASS — the native skip is not overridden by
@@ -326,9 +326,7 @@ def verify_scenario(fixture, scenario, out_norm, err_norm, returncode, transcrip
             ("SKIP", "test_natively_skipped"),
         ]
         if rows != expected_rows:
-            raise GenError(
-                f"only-native rows {rows} != expected {expected_rows}"
-            )
+            raise GenError(f"only-native rows {rows} != expected {expected_rows}")
 
     # noisy: the report-lookalike and timing-lookalike user lines must survive
     # byte-exact (NOT normalized to [ T ]).
@@ -416,9 +414,13 @@ def main() -> int:
 
     os.makedirs(args.out, exist_ok=True)
     for name in expected_names:
-        with open(os.path.join(args.out, name), "w", encoding="utf-8", newline="\n") as fh:
+        with open(
+            os.path.join(args.out, name), "w", encoding="utf-8", newline="\n"
+        ) as fh:
             fh.write(first[name])
-    with open(os.path.join(args.out, "MANIFEST.txt"), "w", encoding="utf-8", newline="\n") as fh:
+    with open(
+        os.path.join(args.out, "MANIFEST.txt"), "w", encoding="utf-8", newline="\n"
+    ) as fh:
         fh.write("\n".join(expected_names) + "\n")
 
     print(f"wrote {len(expected_names)} transcripts + MANIFEST.txt to {args.out}")

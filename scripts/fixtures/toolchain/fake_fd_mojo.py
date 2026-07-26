@@ -42,6 +42,7 @@ import re
 import stat
 import sys
 
+
 TEST_DEF_RE = re.compile(r"^def[ \t]+(test_[A-Za-z0-9_]*)[ \t]*\(", re.MULTILINE)
 """Matches a module-level `def test_...(` — the shape `TestSuite.discover_tests`
 collects, anchored at column zero so a nested or commented definition cannot

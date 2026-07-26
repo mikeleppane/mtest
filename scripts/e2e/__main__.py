@@ -17,10 +17,10 @@ Usage: ``python -m scripts.e2e``
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import os
 import sys
 import traceback
-from dataclasses import dataclass, field
 
 from scripts.e2e.runner import (
     MTEST,

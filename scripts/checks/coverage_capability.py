@@ -70,8 +70,7 @@ _FLAG = re.compile(r"--[A-Za-z0-9][A-Za-z0-9-]*")
 MINIMUM_HELP_BYTES = 200
 
 UNAVAILABLE_MESSAGE = (
-    f"Mojo source coverage unavailable at {PINNED_MOJO_VERSION}; "
-    "behavioral map applies"
+    f"Mojo source coverage unavailable at {PINNED_MOJO_VERSION}; behavioral map applies"
 )
 DISCOVERY_INSTRUCTION = (
     "Evaluate each item above and gate it explicitly before this task can pass "

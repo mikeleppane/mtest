@@ -13,8 +13,7 @@ import shutil
 import signal
 import sys
 
-from scripts.harness import aggregate
-from scripts.harness import watchdog
+from scripts.harness import aggregate, watchdog
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -103,19 +102,13 @@ def _normalized_roots(repo_root: Path, paths: Sequence[str]) -> list[Path]:
             root = root[2:]
         root = root.rstrip("/")
         candidate = Path(root)
-        if (
-            not root
-            or candidate.is_absolute()
-            or ".." in candidate.parts
-        ):
+        if not root or candidate.is_absolute() or ".." in candidate.parts:
             raise ValueError(f"unsafe suite root: {root or '<empty>'}")
         if candidate != Path("tests") and candidate.parts[:1] != ("tests",):
             raise ValueError(f"suite root must be tests/ or below: {root}")
         absolute = repo_root / candidate
         if not absolute.exists() or absolute.is_symlink():
-            raise ValueError(
-                f"suite root is not a real file or directory: {root}"
-            )
+            raise ValueError(f"suite root is not a real file or directory: {root}")
         normalized.append(candidate)
     return normalized
 
@@ -213,9 +206,7 @@ def _run_step(
         requested, the last classified module the step had started.
     """
     retention = (
-        None
-        if marker_prefix is None
-        else watchdog.MarkerRetention(marker_prefix)
+        None if marker_prefix is None else watchdog.MarkerRetention(marker_prefix)
     )
     sentinel = repo_root / _sentinel_for(source, step)
     try:
@@ -327,9 +318,7 @@ def run_pipeline(
         flush=True,
     )
 
-    resolved_environment = (
-        dict(os.environ) if environment is None else environment
-    )
+    resolved_environment = dict(os.environ) if environment is None else environment
     timeout_seconds = _timeout_seconds(resolved_environment)
     debug_symbols = _debug_symbols_requested(resolved_environment)
     for source, command in _build_commands(debug_symbols=debug_symbols):

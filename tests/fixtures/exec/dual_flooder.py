@@ -8,8 +8,10 @@ the unread pipe fills its ~64 KiB kernel buffer; concurrent draining does not.
 The single-character streams make separate, byte-exact capture checkable: every
 stdout byte must be 'o' and every stderr byte 'e', with the exact counts.
 """
+
 import os
 import sys
+
 
 CHUNK = 4096
 TOTAL = 256 * 1024  # 262144 bytes per stream

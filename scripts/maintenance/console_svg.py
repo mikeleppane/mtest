@@ -25,7 +25,9 @@ expected and is exactly why these are documentation, not wired into any check.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import os
+from pathlib import Path
 import pty
 import re
 import select
@@ -33,8 +35,7 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
-from pathlib import Path
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MTEST = REPO_ROOT / "build" / "mtest"

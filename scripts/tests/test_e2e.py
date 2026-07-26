@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import ast
 import contextlib
-import inspect
 from dataclasses import FrozenInstanceError
+import inspect
 import io
 import os
 from pathlib import Path
@@ -23,8 +23,7 @@ from unittest import mock
 
 from scripts.checks import layout
 from scripts.e2e import __main__ as e2e_main
-from scripts.e2e import main_open
-from scripts.e2e import runner
+from scripts.e2e import main_open, runner
 from scripts.fixtures.toolchain import fake_retry_crash_mojo
 
 
@@ -95,10 +94,6 @@ def _recorded_signals():
         yield calls
     finally:
         runner.os.kill, runner.os.killpg = real_kill, real_killpg
-
-
-
-
 
 
 CORE_SCENARIOS = (
@@ -201,14 +196,6 @@ CONFIG_SCENARIOS = (
     "config-overrides",
 )
 CONFIG_SHOW_SCENARIOS = ("config-show",)
-
-
-
-
-
-
-
-
 
 
 class E2EFaultTopologyTests(unittest.TestCase):
@@ -384,7 +371,11 @@ class E2EFaultTopologyTests(unittest.TestCase):
         process_runner = runner.E2ERunner(repo_root=tmp, mtest=leader)
         with _recorded_signals() as calls:
             run, pgid = process_runner.run_mtest_signaled(
-                [os.fspath(pgid_file), os.fspath(ready_file), "yes" if answers else "no"],
+                [
+                    os.fspath(pgid_file),
+                    os.fspath(ready_file),
+                    "yes" if answers else "no",
+                ],
                 signal_number=signal_number,
                 timeout=30.0,
                 ready_files=(os.fspath(ready_file),),
@@ -467,7 +458,9 @@ class E2EFaultTopologyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="mtest-signal-arming-") as raw:
             tmp = Path(raw)
             leader = tmp / "fake-leader"
-            _write_executable(leader, f"#!{sys.executable}\nimport time\ntime.sleep(30)\n")
+            _write_executable(
+                leader, f"#!{sys.executable}\nimport time\ntime.sleep(30)\n"
+            )
             process_runner = runner.E2ERunner(repo_root=tmp, mtest=leader)
             for kwargs in (
                 {},
@@ -555,9 +548,7 @@ class E2EFaultTopologyTests(unittest.TestCase):
 
     def test_harness_passes_the_context_and_contains_later_scenarios(self) -> None:
         registry = ()
-        context = runner.ScenarioContext(
-            manifest={"sentinel": 42}, registry=registry
-        )
+        context = runner.ScenarioContext(manifest={"sentinel": 42}, registry=registry)
         harness = e2e_main.Harness(context)
         received: list[runner.ScenarioContext] = []
 
@@ -674,9 +665,11 @@ class ScenarioTotalIsRegistryDerivedTests(unittest.TestCase):
 
     def _banner(self, registry) -> str:
         buffer = io.StringIO()
-        with mock.patch.object(e2e_main, "SCENARIOS", registry), mock.patch.object(
-            e2e_main.os.path, "exists", return_value=True
-        ), mock.patch.object(e2e_main, "load_manifest", return_value={}):
+        with (
+            mock.patch.object(e2e_main, "SCENARIOS", registry),
+            mock.patch.object(e2e_main.os.path, "exists", return_value=True),
+            mock.patch.object(e2e_main, "load_manifest", return_value={}),
+        ):
             with contextlib.redirect_stdout(buffer):
                 code = e2e_main.main()
         self.assertEqual(code, 0, buffer.getvalue())
@@ -689,17 +682,16 @@ class ScenarioTotalIsRegistryDerivedTests(unittest.TestCase):
                     (f"s{index}", self._passing("")) for index in range(size)
                 )
 
-                self.assertIn(f"=== {size}/{size} scenarios passed ===",
-                              self._banner(registry))
+                self.assertIn(
+                    f"=== {size}/{size} scenarios passed ===", self._banner(registry)
+                )
 
     def test_the_banner_total_is_not_the_committed_registry_length(self) -> None:
         # Guards the shape where a "derived" total is really `len(SCENARIOS)`
         # read from module scope while a different registry is executed.
         banner = self._banner((("only-one", self._passing("")),))
 
-        self.assertNotIn(
-            f"/{len(e2e_main.SCENARIOS)} scenarios passed", banner
-        )
+        self.assertNotIn(f"/{len(e2e_main.SCENARIOS)} scenarios passed", banner)
 
     def test_a_failing_scenario_is_excluded_from_the_passed_count(self) -> None:
         def failing(_context) -> str:
@@ -707,9 +699,11 @@ class ScenarioTotalIsRegistryDerivedTests(unittest.TestCase):
 
         buffer = io.StringIO()
         registry = (("ok", self._passing("")), ("bad", failing))
-        with mock.patch.object(e2e_main, "SCENARIOS", registry), mock.patch.object(
-            e2e_main.os.path, "exists", return_value=True
-        ), mock.patch.object(e2e_main, "load_manifest", return_value={}):
+        with (
+            mock.patch.object(e2e_main, "SCENARIOS", registry),
+            mock.patch.object(e2e_main.os.path, "exists", return_value=True),
+            mock.patch.object(e2e_main, "load_manifest", return_value={}),
+        ):
             with contextlib.redirect_stdout(buffer):
                 code = e2e_main.main()
 
@@ -817,9 +811,6 @@ class LimitNofileTests(unittest.TestCase):
             preexec_fn=runner.limit_nofile(target),
         )
         self.assertEqual(completed.stdout.strip(), str((target, hard)))
-
-
-
 
 
 if __name__ == "__main__":

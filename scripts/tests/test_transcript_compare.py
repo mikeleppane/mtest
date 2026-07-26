@@ -41,9 +41,7 @@ def test_transcript_comparator() -> None:
                 f"{relocated.errors}"
             )
 
-        (after / "case.txt").write_bytes(
-            b"source: " + new + b"passing.mojo\nFAIL\n"
-        )
+        (after / "case.txt").write_bytes(b"source: " + new + b"passing.mojo\nFAIL\n")
         mutated = compare_directories(before, after, replacement=(old, new))
         if mutated.ok or not any(
             "expected/case.txt" in error and "actual/case.txt" in error
@@ -56,7 +54,9 @@ def test_transcript_comparator() -> None:
         (after / "case.txt").write_bytes((before / "case.txt").read_bytes())
         exact = compare_directories(before, after)
         if not exact.ok:
-            raise AssertionError(f"exact snapshot comparator rejected equality: {exact.errors}")
+            raise AssertionError(
+                f"exact snapshot comparator rejected equality: {exact.errors}"
+            )
         (after / "extra.txt").write_bytes(b"unexpected\n")
         extra = compare_directories(before, after)
         if extra.ok or "unexpected snapshot files: ['extra.txt']" not in extra.errors:
@@ -101,9 +101,7 @@ def test_protocol_snapshot_check_mutations() -> None:
     with tempfile.TemporaryDirectory(prefix="mtest-protocol-check-test-") as raw_tmp:
         expected = Path(raw_tmp) / "expected"
         _snapshot_tree(expected)
-        expected_before = {
-            path.name: path.read_bytes() for path in expected.iterdir()
-        }
+        expected_before = {path.name: path.read_bytes() for path in expected.iterdir()}
 
         added, added_root = _check_with_mutation(
             expected,
@@ -131,9 +129,7 @@ def test_protocol_snapshot_check_mutations() -> None:
 
         if any(path.exists() for path in (added_root, removed_root, modified_root)):
             raise AssertionError("check mode leaked a generated temporary directory")
-        expected_after = {
-            path.name: path.read_bytes() for path in expected.iterdir()
-        }
+        expected_after = {path.name: path.read_bytes() for path in expected.iterdir()}
         if expected_after != expected_before:
             raise AssertionError("check mode changed the committed-tree stand-in")
 
@@ -171,9 +167,8 @@ def test_protocol_snapshot_failure_retains_lifecycle_warning() -> None:
         protocol_snapshots,
         "check_snapshots",
         return_value=result,
-    ):
-        with redirect_stderr(stderr):
-            returncode = protocol_snapshots.main()
+    ), redirect_stderr(stderr):
+        returncode = protocol_snapshots.main()
 
     message = stderr.getvalue()
     if returncode != 1:
@@ -187,7 +182,6 @@ def test_protocol_snapshot_failure_retains_lifecycle_warning() -> None:
     ):
         if expected not in message:
             raise AssertionError(f"lifecycle warning omitted {expected!r}")
-
 
 
 def main() -> int:

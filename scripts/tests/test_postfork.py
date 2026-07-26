@@ -66,13 +66,9 @@ class PostforkCheckTests(unittest.TestCase):
         marker = "static void mtest_child_exec(\n"
         self.assertEqual(source.count(marker), 1)
         source = source.replace(marker, definition + "\n\n" + marker)
-        call_site = (
-            "    if (mtest_fail_if_requested(MTEST_EXEC_OP_CHILD_SETPGID) ||\n"
-        )
+        call_site = "    if (mtest_fail_if_requested(MTEST_EXEC_OP_CHILD_SETPGID) ||\n"
         self.assertEqual(source.count(call_site), 1)
-        return source.replace(
-            call_site, "    mtest_child_mutant();\n" + call_site
-        )
+        return source.replace(call_site, "    mtest_child_mutant();\n" + call_site)
 
     def assert_forbidden(self, source: str, callee: str) -> None:
         with self.assertRaises(postfork_check.AuditFailure) as raised:
@@ -157,17 +153,14 @@ class PostforkCheckTests(unittest.TestCase):
                 "static pid_t mtest_child_mutant(void *memory, pid_t child) {\n"
                 "    free(memory);\n"
                 "    return child;\n"
-                "}\n\n"
-                + definition_marker
+                "}\n\n" + definition_marker
             ),
         )
         fork_marker = "        leader = fork();\n"
         self.assertEqual(mutated.count(fork_marker), 1)
         mutated = mutated.replace(
             fork_marker,
-            (
-                "        leader = mtest_child_mutant(malloc(1), fork());\n"
-            ),
+            ("        leader = mtest_child_mutant(malloc(1), fork());\n"),
         )
         with self.assertRaises(postfork_check.AuditFailure) as raised:
             self.audit_text(mutated)
@@ -302,7 +295,7 @@ class PostforkCheckTests(unittest.TestCase):
         )
         mutated = self.add_wrapper(
             "static void mtest_child_mutant(void) {\n"
-            "    (void)dprintf(STDERR_FILENO, \"%s\", \"bad\");\n"
+            '    (void)dprintf(STDERR_FILENO, "%s", "bad");\n'
             "}",
             source,
         )
@@ -324,7 +317,7 @@ class PostforkCheckTests(unittest.TestCase):
     def test_path_search_execvp_is_rejected(self) -> None:
         source = self.add_wrapper(
             "static void mtest_child_mutant(void) {\n"
-            "    char *const args[] = {\"/bin/true\", NULL};\n"
+            '    char *const args[] = {"/bin/true", NULL};\n'
             "    (void)execvp(args[0], args);\n"
             "}"
         )
@@ -379,8 +372,7 @@ class PostforkCheckTests(unittest.TestCase):
             source,
         )
         expected_line = (
-            mutated[: mutated.index("(void)mtest_child_inline")].count("\n")
-            + 1
+            mutated[: mutated.index("(void)mtest_child_inline")].count("\n") + 1
         )
         with self.assertRaises(postfork_check.AuditFailure) as raised:
             self.audit_text(
@@ -400,9 +392,7 @@ class PostforkCheckTests(unittest.TestCase):
 
     def test_unresolved_call_is_rejected_fail_closed(self) -> None:
         source = self.add_wrapper(
-            "static void mtest_child_mutant(void) {\n"
-            "    mtest_unknown_child_call();\n"
-            "}"
+            "static void mtest_child_mutant(void) {\n    mtest_unknown_child_call();\n}"
         )
         with self.assertRaises(postfork_check.AuditFailure) as raised:
             self.audit_text(source)

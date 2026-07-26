@@ -45,8 +45,7 @@ def generate_into(output_dir: Path) -> None:
     )
     if completed.returncode != 0:
         raise SnapshotGenerationError(
-            "scripts.gen_transcripts failed with exit "
-            f"{completed.returncode}"
+            f"scripts.gen_transcripts failed with exit {completed.returncode}"
         )
 
 

@@ -10,8 +10,8 @@ mock is accepted.
 
 from __future__ import annotations
 
-import unittest
 from pathlib import Path
+import unittest
 from xml.etree import ElementTree as ET
 
 from scripts.checks.reports import junit as junit_check

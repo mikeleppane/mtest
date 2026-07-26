@@ -112,9 +112,7 @@ def main() -> int:
             args.replace_new.encode("utf-8"),
         )
 
-    result = compare_directories(
-        args.expected, args.actual, replacement=replacement
-    )
+    result = compare_directories(args.expected, args.actual, replacement=replacement)
     errors = list(result.errors)
     if args.require_change and not result.changed_files:
         errors.append("the approved replacement changed no snapshot file")

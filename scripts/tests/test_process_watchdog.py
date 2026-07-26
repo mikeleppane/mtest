@@ -17,14 +17,13 @@ import time
 
 from scripts.harness import watchdog
 from scripts.harness.watchdog import (
-    Cancelled,
     DRAIN_SETTLE_SECONDS,
+    TIMEOUT_EXIT_CODE,
     Exited,
     HarnessError,
     MarkerRetention,
     Signaled,
     TimedOut,
-    TIMEOUT_EXIT_CODE,
     run_command,
 )
 
@@ -298,7 +297,9 @@ def test_spawn_failure_is_not_a_timeout() -> None:
             deadline_sentinel=sentinel,
         )
         if result.returncode != 70:
-            raise AssertionError(f"spawn failure exited {result.returncode}, expected 70")
+            raise AssertionError(
+                f"spawn failure exited {result.returncode}, expected 70"
+            )
         if "exceeded" in result.stderr or "timed out" in result.stderr:
             raise AssertionError(f"spawn failure claimed timeout:\n{result.stderr}")
         if sentinel.exists():
@@ -307,6 +308,7 @@ def test_spawn_failure_is_not_a_timeout() -> None:
 
 def test_broken_timeout_diagnostic_leaves_the_deadline_sentinel() -> None:
     """A notification write failure cannot bypass cleanup or make the shell pass."""
+
     class BrokenStderr:
         """A pipe-like stderr that rejects the watchdog's timeout diagnostic."""
 
@@ -334,7 +336,9 @@ def test_broken_timeout_diagnostic_leaves_the_deadline_sentinel() -> None:
         if not isinstance(termination, TimedOut):
             raise AssertionError(f"expected TimedOut, got {termination!r}")
         if not sentinel.exists():
-            raise AssertionError("broken timeout diagnostic cleared the deadline sentinel")
+            raise AssertionError(
+                "broken timeout diagnostic cleared the deadline sentinel"
+            )
 
 
 def test_timeout_terminates_the_whole_process_group() -> None:
@@ -388,12 +392,19 @@ def test_timeout_terminates_the_whole_process_group() -> None:
                 f"expected timeout exit {TIMEOUT_EXIT_CODE}, got {result.returncode}"
             )
         diagnostic = result.stderr
-        if "tests/unit/test_watchdog.mojo" not in diagnostic or ": run " not in diagnostic:
-            raise AssertionError(f"timeout diagnostic lost its source or step: {diagnostic}")
+        if (
+            "tests/unit/test_watchdog.mojo" not in diagnostic
+            or ": run " not in diagnostic
+        ):
+            raise AssertionError(
+                f"timeout diagnostic lost its source or step: {diagnostic}"
+            )
         if not deadline_sentinel.exists():
             raise AssertionError("actual timeout removed its deadline sentinel")
         if not ready.exists():
-            raise AssertionError("timeout raced before the SIGTERM-ignoring child was ready")
+            raise AssertionError(
+                "timeout raced before the SIGTERM-ignoring child was ready"
+            )
         # `_run` captures the watchdog's inherited stdout/stderr. It cannot
         # return until the descendant closes those inherited pipe ends; then
         # this delayed marker separately proves the descendant did not survive
@@ -519,7 +530,9 @@ def _assert_cancellation_reaches_process_group(
                 watchdog.wait()
             if leader_pid.exists():
                 try:
-                    os.killpg(int(leader_pid.read_text(encoding="utf-8")), signal.SIGKILL)
+                    os.killpg(
+                        int(leader_pid.read_text(encoding="utf-8")), signal.SIGKILL
+                    )
                 except ProcessLookupError:
                     pass
 
@@ -844,9 +857,9 @@ def test_high_numbered_pipe_descriptors_do_not_lose_output() -> None:
             sentinel.touch()
             retention = MarkerRetention(MARKER_PREFIX)
             teed = tmp / "teed-stdout"
-            expected = (
-                FLOOD_LINE * FLOOD_LINE_COUNT + FLOOD_MARKERS[1]
-            ).encode("utf-8")
+            expected = (FLOOD_LINE * FLOOD_LINE_COUNT + FLOOD_MARKERS[1]).encode(
+                "utf-8"
+            )
             original_stdout = sys.stdout
             with teed.open("wb") as handle:
                 sys.stdout = _TextOverBytes(handle)
@@ -873,8 +886,7 @@ def test_high_numbered_pipe_descriptors_do_not_lose_output() -> None:
             actual = teed.read_bytes()
             if actual != expected:
                 raise AssertionError(
-                    f"high-fd drain teed {len(actual)} bytes, "
-                    f"expected {len(expected)}"
+                    f"high-fd drain teed {len(actual)} bytes, expected {len(expected)}"
                 )
             if retention.text != FLOOD_MARKERS[1]:
                 raise AssertionError(
@@ -894,8 +906,7 @@ def test_a_frozen_marker_capture_refuses_later_writes() -> None:
     retention.record(FLOOD_MARKERS[1])
     if retention.text != FLOOD_MARKERS[1]:
         raise AssertionError(
-            f"open capture retained {retention.text!r}, "
-            f"expected {FLOOD_MARKERS[1]!r}"
+            f"open capture retained {retention.text!r}, expected {FLOOD_MARKERS[1]!r}"
         )
     retention.freeze()
     retention.record(LATE_MARKER)
@@ -936,9 +947,7 @@ def test_the_seal_freezes_the_capture_before_it_seals_any_tee() -> None:
     )
     watchdog._seal_drainers(state)
     if order != ["freeze", "seal", "seal"]:
-        raise AssertionError(
-            f"seal ordering was {order}, expected the freeze first"
-        )
+        raise AssertionError(f"seal ordering was {order}, expected the freeze first")
     if not state.stop.is_set():
         raise AssertionError("sealing left the drainers' stop flag clear")
 
@@ -960,9 +969,7 @@ def test_a_drainer_cannot_write_through_a_frozen_capture() -> None:
             threading.Event(),
         )
     if sink.getvalue() != LATE_MARKER:
-        raise AssertionError(
-            f"the drain lost its tee: {sink.getvalue()!r}"
-        )
+        raise AssertionError(f"the drain lost its tee: {sink.getvalue()!r}")
     if retention.text != FLOOD_MARKERS[1]:
         raise AssertionError(
             f"a drainer wrote through a frozen capture: {retention.text!r}"
@@ -994,9 +1001,7 @@ def test_a_cancelled_timeout_settle_seals_before_the_timeout_diagnostic() -> Non
             """Stand in for a caller signal delivered inside the drain settle."""
             raise watchdog._WatchdogCancellation(signal.SIGTERM)
 
-        def observing_notify(
-            source: str, step: str, timeout_seconds: float
-        ) -> None:
+        def observing_notify(source: str, step: str, timeout_seconds: float) -> None:
             """Record whether every tee was already shut when FATAL was printed."""
             sealed_at_diagnostic.append(
                 bool(states) and all(tee.sealed for tee in states[-1].tees)
@@ -1020,9 +1025,7 @@ def test_a_cancelled_timeout_settle_seals_before_the_timeout_diagnostic() -> Non
             watchdog._settle_drainers = original_settle
             watchdog._notify_timeout = original_notify
         if not isinstance(termination, TimedOut):
-            raise AssertionError(
-                f"cancelled timeout settle returned {termination!r}"
-            )
+            raise AssertionError(f"cancelled timeout settle returned {termination!r}")
         if sealed_at_diagnostic != [True]:
             raise AssertionError(
                 "the timeout diagnostic was printed with a live drainer: "
@@ -1241,6 +1244,7 @@ def test_a_zombie_only_group_reports_gone_on_both_spellings() -> None:
     a permission boundary.
     """
     for error in (ProcessLookupError(), PermissionError()):
+
         def refuse(pid: int, signum: int, exc=error) -> None:
             raise exc
 
@@ -1286,7 +1290,7 @@ def test_forwarding_a_signal_survives_a_zombie_only_group() -> None:
             self.waited += 1
 
     def zombie_only(pid: int, signum: int) -> None:
-        raise PermissionError()
+        raise PermissionError
 
     process = _Reaped()
     original = watchdog.os.killpg

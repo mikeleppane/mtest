@@ -26,9 +26,7 @@ import time
 REPO_ROOT_PATH = Path(__file__).resolve().parents[2]
 REPO_ROOT = str(REPO_ROOT_PATH)
 MTEST = str(REPO_ROOT_PATH / "build" / "mtest")
-NATIVE_OBJECT = str(
-    REPO_ROOT_PATH / "build" / "native" / "mtest_exec_native_test.o"
-)
+NATIVE_OBJECT = str(REPO_ROOT_PATH / "build" / "native" / "mtest_exec_native_test.o")
 DOGFOOD_TEST_FILES = (
     "tests/dogfood/exec_probe.mojo",
     "tests/dogfood/model_probe.mojo",
@@ -54,10 +52,7 @@ PASS_ROW_RE = re.compile(
 def dogfood_test_files(repo_root: Path = REPO_ROOT_PATH) -> list[str]:
     """Return the exact declared dogfood inventory, independently of mtest."""
     dogfood_dir = repo_root / "tests" / "dogfood"
-    actual = {
-        str(path.relative_to(repo_root))
-        for path in dogfood_dir.glob("*.mojo")
-    }
+    actual = {str(path.relative_to(repo_root)) for path in dogfood_dir.glob("*.mojo")}
     expected = set(DOGFOOD_TEST_FILES)
     if actual != expected:
         raise RuntimeError(

@@ -24,10 +24,10 @@ from scripts.e2e.assertions import (
 )
 from scripts.e2e.runner import (
     DEFAULT_TIMEOUT,
-    E2ERunner,
     JSON_TERMINAL_WRITE_FAULT,
     REPO_ROOT,
     SHORT_TIMEOUT,
+    E2ERunner,
     Run,
     ScenarioContext,
     ScenarioError,
@@ -305,8 +305,8 @@ def _expect_same_text(actual: object, expected: str, what: str) -> None:
             raise ScenarioError(
                 f"{what} differs at offset {index} (lengths {len(actual)} vs "
                 f"{len(expected)}):\n"
-                f"  got      {actual[max(index - 60, 0):index + 60]!r}\n"
-                f"  expected {expected[max(index - 60, 0):index + 60]!r}"
+                f"  got      {actual[max(index - 60, 0) : index + 60]!r}\n"
+                f"  expected {expected[max(index - 60, 0) : index + 60]!r}"
             )
     raise ScenarioError(
         f"{what} has length {len(actual)}, want {len(expected)}; the shorter "
@@ -340,8 +340,11 @@ def s_json_purity(context: ScenarioContext) -> str:
     console to stderr. Every stdout byte is a stream line the strict consumer
     accepts (header first, exactly one terminal, exit_code == the real exit); the
     human summary band lives on stderr, and NOT one stream line leaks to stderr
-    nor one console byte to stdout."""
-    run = context.runner.run_mtest(["e2e/suite", "--json", "-", "--gh-annotations", "off"])
+    nor one console byte to stdout.
+    """
+    run = context.runner.run_mtest(
+        ["e2e/suite", "--json", "-", "--gh-annotations", "off"]
+    )
     # stdout is the stream: strictly consumable, header + single terminal.
     report = json_stream_check.parse_stream(run.stdout)
     expect(report.version == 1, "stream header version was not 1 on stdout")
@@ -364,7 +367,7 @@ def s_json_purity(context: ScenarioContext) -> str:
     # No stream line leaked to stderr.
     stray = [ln for ln in run.stderr.splitlines() if _looks_like_stream_line(ln)]
     expect(not stray, f"stream lines leaked onto stderr (console fd): {stray[:2]}")
-    return f"stdout byte-pure ({report.line_count if hasattr(report,'line_count') else len(report.records)} records); console on stderr; exit {run.returncode}"
+    return f"stdout byte-pure ({report.line_count if hasattr(report, 'line_count') else len(report.records)} records); console on stderr; exit {run.returncode}"
 
 
 def s_json_color_on_relocated_stderr(context: ScenarioContext) -> str:
@@ -408,9 +411,7 @@ def s_json_color_on_relocated_stderr(context: ScenarioContext) -> str:
         "ANSI color leaked onto the byte-pure --json - stream (stdout)",
     )
     # The stream is still strictly consumable (decoded lenient of the final tail).
-    report = json_stream_check.parse_stream(
-        stream_bytes.decode("utf-8", "replace")
-    )
+    report = json_stream_check.parse_stream(stream_bytes.decode("utf-8", "replace"))
     expect(report.version == 1, "the stream header regressed under the color case")
     # A terminal record, not merely a parseable header: the run reached its end.
     expect(
@@ -425,14 +426,17 @@ def s_json_destination_taxonomy(context: ScenarioContext) -> str:
     """The destination taxonomy split. A SYNTACTIC badness is a parse-time usage
     error (exit 4) BEFORE any build: an empty value, and a nonexistent parent
     directory. A RUNTIME open failure (the path is an existing directory, so
-    open fails EISDIR at session start) is a pre-run internal error (exit 3)."""
+    open fails EISDIR at session start) is a pre-run internal error (exit 3).
+    """
     empty = context.runner.run_mtest(["e2e/suite", "--json", ""])
     expect_exit(empty, 4)
     expect(
         "--json" in empty.stderr,
         f"empty --json value did not name the flag:\n{empty.stderr}",
     )
-    bad_parent = context.runner.run_mtest(["e2e/suite", "--json", "/no/such/dir/out.ndjson"])
+    bad_parent = context.runner.run_mtest(
+        ["e2e/suite", "--json", "/no/such/dir/out.ndjson"]
+    )
     expect_exit(bad_parent, 4)
     # Exit 4 is decided BEFORE any build: no verdict/summary band was produced.
     expect(
@@ -452,7 +456,8 @@ def s_json_destination_taxonomy(context: ScenarioContext) -> str:
 def s_json_truncation_interrupt(context: ScenarioContext) -> str:
     """Truncation trio (1/3): an INTERRUPTED run ends the stream WITH its terminal
     record and exit_code 2. The session fires SessionFinished on interrupt; the
-    file destination is alive, so the terminal record is committed."""
+    file destination is alive, so the terminal record is committed.
+    """
     with tempfile.TemporaryDirectory(prefix="mtest-json-interrupt-") as raw:
         tmp = Path(raw)
         arming = arm_slow_tree(tmp)
@@ -509,8 +514,7 @@ def s_json_truncation_sigkill(context: ScenarioContext) -> str:
         report = json_stream_check.parse_stream(text)
         expect(
             report.terminal is None,
-            "a SIGKILLed run produced a terminal record — it could not have "
-            "finalized",
+            "a SIGKILLed run produced a terminal record — it could not have finalized",
         )
     return "sigkill: complete lines + at most one torn tail; no terminal record"
 
@@ -520,7 +524,8 @@ def s_json_truncation_dead_pipe(context: ScenarioContext) -> str:
     pipe early. SIGPIPE is ignored, so the reporter's write returns EPIPE and
     latches a FATAL ABORT: mtest neither dies at 141 nor runs to completion — it
     exits 3, with no orphaned children. What the reader DID get is complete lines
-    plus at most one torn tail."""
+    plus at most one torn tail.
+    """
     returncode, got, pgid = context.runner.run_mtest_dead_pipe(
         ["e2e/suite", "--json", "-", "--gh-annotations", "off"],
         read_size=64,
@@ -664,7 +669,9 @@ def s_json_terminal_write_failure(context: ScenarioContext) -> str:
         )
         text = Path(stream_path).read_text(encoding="utf-8")
         report = json_stream_check.parse_stream(text)
-        expect(report.terminal is None, "the rejected terminal record reached the stream")
+        expect(
+            report.terminal is None, "the rejected terminal record reached the stream"
+        )
         file_finishes = [
             record
             for record in report.records
@@ -686,7 +693,5 @@ def s_json_terminal_write_failure(context: ScenarioContext) -> str:
         )
         expect(not report.torn_tail, "the deterministic failure left a torn JSON tail")
         assert run.pgid is not None
-        expect_group_gone(
-            run.pgid, "mtest's own group after the terminal-write abort"
-        )
+        expect_group_gone(run.pgid, "mtest's own group after the terminal-write abort")
         return "terminal write fault: clean PASS escalates 0 -> 3, no orphan"

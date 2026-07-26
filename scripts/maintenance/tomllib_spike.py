@@ -15,26 +15,23 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import os
+from pathlib import Path
 import shlex
 import statistics
 import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
-from pathlib import Path
 
 from scripts.build import package_consumption
 
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROBE_SOURCE = REPO_ROOT / "scripts" / "maintenance" / "tomllib_spike_probe.mojo"
-BRIDGE_SOURCE = (
-    REPO_ROOT / "scripts" / "maintenance" / "tomllib_spike_bridge.mojo"
-)
-PACKAGE_PROBE_BUILD = (
-    package_consumption.SCRATCH_ROOT / "tomllib-spike-build" / "probe"
-)
+BRIDGE_SOURCE = REPO_ROOT / "scripts" / "maintenance" / "tomllib_spike_bridge.mojo"
+PACKAGE_PROBE_BUILD = package_consumption.SCRATCH_ROOT / "tomllib-spike-build" / "probe"
 PACKAGE_PROBE_INSTALL_NAME = "mtest-tomllib-spike"
 
 BUILD_TIMEOUT = 300.0
@@ -278,9 +275,7 @@ def _timed_config_run(probe: ProbeEnvironment) -> float:
     return elapsed
 
 
-def verify_probe(
-    probe: ProbeEnvironment, *, warm_runs: int
-) -> StartupMeasurements:
+def verify_probe(probe: ProbeEnvironment, *, warm_runs: int) -> StartupMeasurements:
     """Verify laziness and interop, then measure cold and warm startup."""
     expected_maps = _expected_maps_stdout()
 

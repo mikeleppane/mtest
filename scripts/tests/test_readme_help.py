@@ -12,12 +12,7 @@ from scripts.checks import readme_help
 
 
 VALID_README = (
-    b"# mtest\n\n"
-    b"## CLI reference\n\n"
-    b"```text\n"
-    b"generated help\n"
-    b"```\n\n"
-    b"## Next section\n"
+    b"# mtest\n\n## CLI reference\n\n```text\ngenerated help\n```\n\n## Next section\n"
 )
 
 
@@ -89,9 +84,8 @@ class ReadmeHelpSubprocessTests(unittest.TestCase):
                 readme_help.subprocess,
                 "run",
                 side_effect=timeout,
-            ):
-                with self.assertRaisesRegex(AssertionError, "exceeded 30 seconds"):
-                    readme_help.check_readme_help(self._repo(raw_tmp))
+            ), self.assertRaisesRegex(AssertionError, "exceeded 30 seconds"):
+                readme_help.check_readme_help(self._repo(raw_tmp))
 
     def test_rejects_missing_binary(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-readme-help-") as raw_tmp:

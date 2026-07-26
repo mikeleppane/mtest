@@ -7,8 +7,10 @@ at EOF" as "child done" and issues a blocking wait hangs here forever. The
 correct supervisor keeps enforcing the deadline after EOF and kills this process
 when the timeout fires.
 """
+
 import os
 import time
+
 
 os.close(1)
 os.close(2)

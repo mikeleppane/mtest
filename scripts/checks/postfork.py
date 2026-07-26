@@ -12,12 +12,12 @@ allowlist entries; their bodies are traversed.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 import json
 from pathlib import Path
 import subprocess
 import sys
-from typing import Iterator
 
 from scripts.checks import native_abi as native_abi_check
 
@@ -146,9 +146,7 @@ def _direct_callee(call: dict[str, object]) -> tuple[str | None, str]:
     expression = inner[0]
     while expression.get("kind") in _TRANSPARENT_CALLEE_NODES:
         children = [
-            child
-            for child in expression.get("inner", [])
-            if isinstance(child, dict)
+            child for child in expression.get("inner", []) if isinstance(child, dict)
         ]
         if len(children) != 1:
             return None, "<indirect-call>"
@@ -264,10 +262,7 @@ def audit_source(source: Path, *, testing: bool, cc: str) -> AuditResult:
     for node in _walk(open_function):
         if node.get("kind") != "IfStmt":
             continue
-        if any(
-            call.callee_name == ROOT_FUNCTION
-            for call in _calls(node, source_text)
-        ):
+        if any(call.callee_name == ROOT_FUNCTION for call in _calls(node, source_text)):
             branch_candidates.append(node)
     if len(branch_candidates) != 1:
         raise AuditFailure(
@@ -314,9 +309,7 @@ def audit_source(source: Path, *, testing: bool, cc: str) -> AuditResult:
                 f"{' -> '.join(current_path)}"
             )
 
-    def visit_calls(
-        node: dict[str, object], current_path: tuple[str, ...]
-    ) -> None:
+    def visit_calls(node: dict[str, object], current_path: tuple[str, ...]) -> None:
         reject_implicit_cleanup(node, current_path)
         visit_call_sequence(_calls(node, source_text), current_path)
 
@@ -348,8 +341,7 @@ def audit_source(source: Path, *, testing: bool, cc: str) -> AuditResult:
     fork_calls = [
         node
         for node in _walk(open_function)
-        if node.get("kind") == "CallExpr"
-        and _direct_callee(node)[1] == "fork"
+        if node.get("kind") == "CallExpr" and _direct_callee(node)[1] == "fork"
     ]
     if len(fork_calls) != 1:
         raise AuditFailure(
@@ -393,9 +385,7 @@ def audit_source(source: Path, *, testing: bool, cc: str) -> AuditResult:
     for statement in body_statements[fork_index + 1 : branch_index]:
         if statement.get("kind") == "IfStmt":
             children = [
-                child
-                for child in statement.get("inner", [])
-                if isinstance(child, dict)
+                child for child in statement.get("inner", []) if isinstance(child, dict)
             ]
             condition = children[0] if children else None
             compact_condition = (
@@ -429,18 +419,13 @@ def audit_source(source: Path, *, testing: bool, cc: str) -> AuditResult:
             f"MTEST_EXEC_TESTING={int(testing)}: post-fork child branch must "
             "be guarded by leader == 0"
         )
-    if (
-        len(child_parts) != 2
-        or child_parts[1].get("kind") != "CompoundStmt"
-    ):
+    if len(child_parts) != 2 or child_parts[1].get("kind") != "CompoundStmt":
         raise AuditFailure(
             f"MTEST_EXEC_TESTING={int(testing)}: post-fork child branch must "
             "have exactly one body and no else"
         )
     child_statements = [
-        child
-        for child in child_parts[1].get("inner", [])
-        if isinstance(child, dict)
+        child for child in child_parts[1].get("inner", []) if isinstance(child, dict)
     ]
     terminal = child_statements[-1] if child_statements else None
     if (

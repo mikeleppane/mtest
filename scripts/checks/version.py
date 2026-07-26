@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import sys
 
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PARSER_PATH = REPO_ROOT / "src" / "mtest" / "cli" / "parser.mojo"
 PIXI_PATH = REPO_ROOT / "pixi.toml"

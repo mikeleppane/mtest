@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass, field
 import json
 import os
+from pathlib import Path
 import pty
 import select
 import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
-from pathlib import Path
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -28,9 +28,7 @@ FAKE_STUBBORN_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_stubborn_mojo.py")
 FAKE_FD_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_fd_mojo.py")
 FAKE_HOSTILE_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_hostile_mojo.py")
 PATH_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "path_mojo.py")
-FAKE_RETRY_CRASH_MOJO = os.path.join(
-    TOOLCHAIN_FIXTURES, "fake_retry_crash_mojo.py"
-)
+FAKE_RETRY_CRASH_MOJO = os.path.join(TOOLCHAIN_FIXTURES, "fake_retry_crash_mojo.py")
 JSON_TERMINAL_WRITE_FAULT = os.path.join(
     REPO_ROOT, "tests", "native", "e2e_json_terminal_write_fault.c"
 )
@@ -678,15 +676,12 @@ class E2ERunner:
             os.close(stdout_read)
             os.close(stderr_master)
         try:
-            returncode = proc.wait(
-                timeout=max(0.0, deadline - time.monotonic())
-            )
+            returncode = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             self.kill_group(proc)
             proc.wait(timeout=5)
             raise ScenarioError(
-                f"mtest closed split capture streams but never exited for argv "
-                f"{argv}"
+                f"mtest closed split capture streams but never exited for argv {argv}"
             )
         return returncode, bytes(stdout), bytes(stderr)
 
@@ -739,9 +734,7 @@ class E2ERunner:
                 captured.extend(chunk)
             proc.stdout.close()
             try:
-                returncode = proc.wait(
-                    timeout=max(0.0, deadline - time.monotonic())
-                )
+                returncode = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
                 self.kill_group(proc)
                 proc.wait(timeout=5)

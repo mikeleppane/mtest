@@ -14,12 +14,12 @@ that actor wrote and on what the runner's capture bound retained of it.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import functools
 import importlib.util
 import os
-import re
-from dataclasses import dataclass
 from pathlib import Path
+import re
 from types import ModuleType
 from xml.etree import ElementTree
 
@@ -50,7 +50,9 @@ VERDICT_TO_BUCKET = {
 }
 VERDICT_LINE_TOKENS = list(VERDICT_TO_BUCKET) + ["NO-TESTS"]
 VERDICT_LINE_RE = re.compile(
-    r"^(?:" + "|".join(re.escape(token) for token in VERDICT_LINE_TOKENS) + r")\s+(\S+)",
+    r"^(?:"
+    + "|".join(re.escape(token) for token in VERDICT_LINE_TOKENS)
+    + r")\s+(\S+)",
     re.MULTILINE,
 )
 
@@ -433,7 +435,7 @@ def capture_marker(omitted: int) -> bytes:
     return (
         f"\n[mtest: output truncated — {omitted} bytes omitted, "
         f"limit {CAPTURE_BOUND_BYTES} bytes]\n"
-    ).encode("utf-8")
+    ).encode()
 
 
 @dataclass(frozen=True)

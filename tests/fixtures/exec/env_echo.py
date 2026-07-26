@@ -8,7 +8,9 @@ back precisely what the C adapter handed the child at `execve`: an injected extr
 must appear, the full inherited environment must survive, and a key an extra
 replaces must appear exactly once with the new value (no inherited duplicate).
 """
+
 import os
+
 
 out = os.fdopen(1, "wb", buffering=0)
 

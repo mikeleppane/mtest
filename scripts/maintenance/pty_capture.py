@@ -226,7 +226,9 @@ def main() -> int:
             dest = OUTPUT_DIR / f"{name}.ansi"
             dest.write_bytes(clean_bytes)
             results.append((name, code, len(clean_bytes)))
-            print(f"pty-capture: wrote {dest.relative_to(REPO_ROOT)} (exit {code}, {len(clean_bytes)} bytes)")
+            print(
+                f"pty-capture: wrote {dest.relative_to(REPO_ROOT)} (exit {code}, {len(clean_bytes)} bytes)"
+            )
 
     print("pty-capture: OK -- " + ", ".join(n for n, _, _ in results))
     return 0

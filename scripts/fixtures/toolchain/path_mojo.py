@@ -39,6 +39,7 @@ import json
 import os
 import sys
 
+
 REAL_MOJO_ENV_VAR = "MTEST_REAL_MOJO"
 """The absolute real compiler, resolved once by the e2e parent."""
 LOG_ENV_PREFIX = "MTEST_PATH_MOJO_LOG_"

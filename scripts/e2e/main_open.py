@@ -47,9 +47,7 @@ def _run(command: list[str], *, timeout: float) -> subprocess.CompletedProcess[s
             time.sleep(0.1)
         stdout, stderr = process.communicate()
         raise MainOpenCheckError(
-            f"command timed out after {timeout:.0f}s: {command}\n"
-            + stdout
-            + stderr
+            f"command timed out after {timeout:.0f}s: {command}\n" + stdout + stderr
         ) from error
     return subprocess.CompletedProcess(
         command,

@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import contextlib
 import os
+from pathlib import Path
 import re
 import resource
 import shutil
 import signal
 import tempfile
-from pathlib import Path
 
 from scripts.checks.reports import json_stream as json_stream_check
 from scripts.checks.reports import junit as junit_check
@@ -124,9 +124,7 @@ def _project_stream(text: str) -> dict:
         "terminal": terminal,
         "exit_code": report.exit_code,
         "per_file": {path: per_file[path] for path in sorted(per_file)},
-        "has_progress": any(
-            r.get("event") == "progress" for r in report.records
-        ),
+        "has_progress": any(r.get("event") == "progress" for r in report.records),
     }
 
 
@@ -433,8 +431,7 @@ def s_parallel_interrupt(context: ScenarioContext) -> str:
         expect(
             stream.summary.get("not_run") == len(_PARALLEL_NOT_RUN_FILES)
             and stream.summary.get("pass") == 0,
-            f"the terminal summary disagreed with the console band: "
-            f"{stream.summary}",
+            f"the terminal summary disagreed with the console band: {stream.summary}",
         )
 
         report = expect_report(run, junit_path, "the interrupted pool's junit")
@@ -442,15 +439,14 @@ def s_parallel_interrupt(context: ScenarioContext) -> str:
         rows = junit_not_run_files(report)
         expect(
             rows == _PARALLEL_NOT_RUN_FILES,
-            f"the junit [not-run] rows were {rows}, want "
-            f"{_PARALLEL_NOT_RUN_FILES}",
+            f"the junit [not-run] rows were {rows}, want {_PARALLEL_NOT_RUN_FILES}",
         )
 
         expect_group_gone(pgid, "mtest's own group after the parallel interrupt")
         return (
-            f"-n 2 SIGINT: exit 2, both in-flight identities and the "
-            f"undispatched one NOT-RUN in console/stream/junit, no fourth "
-            f"dispatch in the run log, no surviving process group"
+            "-n 2 SIGINT: exit 2, both in-flight identities and the "
+            "undispatched one NOT-RUN in console/stream/junit, no fourth "
+            "dispatch in the run log, no surviving process group"
         )
 
 
@@ -589,7 +585,7 @@ def s_parallel_j_rejected(context: ScenarioContext) -> str:
     return "--build-arg -j and --num-threads both rejected exit 4 (name -n/--workers)"
 
 
-_PROGRESS_MARKER = "▸".encode("utf-8")
+_PROGRESS_MARKER = "▸".encode()
 
 
 def s_parallel_progress_tty(context: ScenarioContext) -> str:
@@ -1028,9 +1024,8 @@ def s_parallel_fd_clamp(context: ScenarioContext) -> str:
         )
         stream = stream_files(run.stdout)
         expect(
-            stream.finished == {path: "pass" for path in FD_CLAMP_FILES},
-            f"the clamped stream finished {stream.finished}, want all four files "
-            "pass",
+            stream.finished == dict.fromkeys(FD_CLAMP_FILES, "pass"),
+            f"the clamped stream finished {stream.finished}, want all four files pass",
         )
 
         summ = expect_accounting(run)

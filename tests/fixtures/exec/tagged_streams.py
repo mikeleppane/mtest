@@ -44,7 +44,7 @@ def payload(tag: str, stream: str, size: int) -> bytes:
     body = bytearray()
     while len(body) < size - 1:
         body += token
-    del body[size - 1:]
+    del body[size - 1 :]
     body += b"\n"
     return bytes(body)
 

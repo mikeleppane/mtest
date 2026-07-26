@@ -42,6 +42,7 @@ import signal
 import sys
 import time
 
+
 # Longer than any deadline the e2e sets, and longer than the harness's own
 # per-scenario timeout: the build must never complete by racing the clock, or
 # the scenario would silently stop testing the timeout at all.
@@ -80,7 +81,9 @@ def _slow_compile(subcommand: str, args: list[str]) -> int:
     _clobber_output(args)
     # Emit BEFORE sleeping and flush: the bytes must already be in mtest's
     # capture pipe when the deadline fires, so the banner can show them.
-    sys.stderr.write(f"fake_slow_mojo.py: {subcommand}: lowering module (this will not finish)\n")
+    sys.stderr.write(
+        f"fake_slow_mojo.py: {subcommand}: lowering module (this will not finish)\n"
+    )
     sys.stderr.flush()
     time.sleep(SLEEP_SECONDS)
     # Only reachable if nothing ever killed us — i.e. the deadline did not fire.

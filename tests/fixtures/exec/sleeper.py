@@ -6,6 +6,8 @@ SIGTERM, whose default action terminates this process, so the final status is
 `Signaled(15)` — but the outcome must still latch to `TimedOut`, because the
 death was our deadline's doing, not the program's.
 """
+
 import time
+
 
 time.sleep(300)

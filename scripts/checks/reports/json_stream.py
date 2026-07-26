@@ -29,12 +29,14 @@ LENIENT (the forward-compatibility obligation)
 Run directly (`python -m scripts.checks.reports.json_stream`) to self-test against the
 forward-compatibility and truncation fixtures under `scripts/fixtures/`.
 """
+
 from __future__ import annotations
 
-import json
-import sys
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
+import sys
+
 
 STREAM_VERSION = 1
 """The frozen v1 stream version carried on the header line."""
@@ -130,8 +132,7 @@ def parse_stream(text: str, *, require_header: bool = True) -> StreamReport:
         header = report.records[0]
         if header.get("event") != "stream":
             raise StreamError(
-                f"first record is not the stream header: event="
-                f"{header.get('event')!r}"
+                f"first record is not the stream header: event={header.get('event')!r}"
             )
         version = header.get("version")
         if not isinstance(version, int):
@@ -167,7 +168,9 @@ def _selftest() -> int:
     # kind are ACCEPTED; the terminal and version still read cleanly.
     fc = (FIXTURE_DIR / "forward_compat.ndjson").read_text(encoding="utf-8")
     report = parse_stream(fc)
-    check("forward_compat.version", report.version == STREAM_VERSION, str(report.version))
+    check(
+        "forward_compat.version", report.version == STREAM_VERSION, str(report.version)
+    )
     check("forward_compat.terminal", report.terminal is not None, "no terminal")
     check("forward_compat.exit_code", report.exit_code == 0, str(report.exit_code))
     check(

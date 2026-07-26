@@ -14,9 +14,11 @@ leave the grandchild to create it. Both the direct child and the grandchild
 sleep far past any deadline so the supervisor's kill is the only thing that ends
 this tree.
 """
+
 import os
 import sys
 import time
+
 
 sentinel = sys.argv[1]
 

@@ -131,9 +131,7 @@ class AbsentFacilityBranchTests(unittest.TestCase):
 class DiscoveredFacilityBranchTests(unittest.TestCase):
     def test_discovered_flags_are_extracted_exactly(self) -> None:
         self.assertEqual(
-            coverage_capability.discover_coverage_flags(
-                MOJO_BUILD_HELP_WITH_COVERAGE
-            ),
+            coverage_capability.discover_coverage_flags(MOJO_BUILD_HELP_WITH_COVERAGE),
             ("--coverage", "--profile-instr-generate"),
         )
 
@@ -194,11 +192,10 @@ class ProbeExecutionTests(unittest.TestCase):
     def test_a_missing_compiler_is_a_probe_failure_not_an_absence(self) -> None:
         with mock.patch.object(
             coverage_capability.subprocess, "run", side_effect=FileNotFoundError
+        ), self.assertRaisesRegex(
+            coverage_capability.ProbeError, "executable not found"
         ):
-            with self.assertRaisesRegex(
-                coverage_capability.ProbeError, "executable not found"
-            ):
-                coverage_capability.collect_help_text()
+            coverage_capability.collect_help_text()
 
     def test_a_nonzero_help_exit_is_a_probe_failure(self) -> None:
         failed = subprocess.CompletedProcess(
@@ -206,17 +203,15 @@ class ProbeExecutionTests(unittest.TestCase):
         )
         with mock.patch.object(
             coverage_capability.subprocess, "run", return_value=failed
-        ):
-            with self.assertRaisesRegex(coverage_capability.ProbeError, "exited 2"):
-                coverage_capability.collect_help_text()
+        ), self.assertRaisesRegex(coverage_capability.ProbeError, "exited 2"):
+            coverage_capability.collect_help_text()
 
     def test_a_hung_help_invocation_is_a_probe_failure(self) -> None:
         expired = subprocess.TimeoutExpired(cmd=["mojo"], timeout=60)
         with mock.patch.object(
             coverage_capability.subprocess, "run", side_effect=expired
-        ):
-            with self.assertRaisesRegex(coverage_capability.ProbeError, "exceeded"):
-                coverage_capability.collect_help_text()
+        ), self.assertRaisesRegex(coverage_capability.ProbeError, "exceeded"):
+            coverage_capability.collect_help_text()
 
     def test_the_probe_passes_argv_lists_and_never_a_shell(self) -> None:
         with mock.patch.object(
@@ -251,9 +246,8 @@ class MainInvokesItsOwnProbeTests(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(
             coverage_capability.subprocess, "run", side_effect=fake_run
-        ):
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                code = coverage_capability.main()
+        ), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = coverage_capability.main()
         self.assertEqual(tuple(calls), coverage_capability.PROBE_COMMANDS)
         return code, out.getvalue(), err.getvalue()
 
@@ -276,9 +270,7 @@ class MainInvokesItsOwnProbeTests(unittest.TestCase):
             "check_version_pin",
             side_effect=coverage_capability.ProbeError("pin moved for the test"),
         ) as pin:
-            with mock.patch.object(
-                coverage_capability, "collect_help_text"
-            ) as collect:
+            with mock.patch.object(coverage_capability, "collect_help_text") as collect:
                 err = io.StringIO()
                 with contextlib.redirect_stderr(err):
                     code = coverage_capability.main()

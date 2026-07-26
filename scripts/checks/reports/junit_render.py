@@ -19,11 +19,11 @@ renderer's structure and the event->fragment mapping directly.
 
 from __future__ import annotations
 
+from pathlib import Path
 import re
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
 
 from scripts.checks.reports import junit as junit_check
 
@@ -57,9 +57,7 @@ def _build_emitter(out_binary: Path) -> None:
         check=False,
     )
     if result.returncode != 0:
-        raise RenderCheckError(
-            f"building {EMITTER_SRC.name} failed:\n{result.stdout}"
-        )
+        raise RenderCheckError(f"building {EMITTER_SRC.name} failed:\n{result.stdout}")
 
 
 def _emit_document(binary: Path) -> str:
@@ -73,9 +71,7 @@ def _emit_document(binary: Path) -> str:
         check=False,
     )
     if result.returncode != 0:
-        raise RenderCheckError(
-            f"emitter exited {result.returncode}:\n{result.stderr}"
-        )
+        raise RenderCheckError(f"emitter exited {result.returncode}:\n{result.stderr}")
     if "<testsuites" not in result.stdout:
         raise RenderCheckError(
             f"emitter produced no <testsuites> document:\n{result.stdout!r}"
