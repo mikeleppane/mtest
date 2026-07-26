@@ -134,7 +134,7 @@ def _count_scalar(text: String, value: Int) -> Int:
 
 def _assertion_body_byte_length(detail: String, marker: String) raises -> Int:
     testing.assert_true(detail.startswith("At "))
-    var body_at = detail.find(marker)
+    var body_at = detail.rfind(marker)
     testing.assert_true(body_at >= 0)
     return detail.byte_length() - body_at
 
@@ -311,6 +311,13 @@ def test_identical_opaque_projections_report_whether_they_were_truncated() raise
 
 
 def test_many_small_formatter_writes_and_body_are_bounded() raises:
+    testing.assert_equal(
+        _assertion_body_byte_length(
+            "At /tmp/text differs/repo/test.mojo:1:2: text differs body",
+            "text differs",
+        ),
+        String("text differs body").byte_length(),
+    )
     testing.assert_equal(VALUE_BYTE_CAP, 1024)
     testing.assert_equal(TEXT_CONTEXT_BYTE_CAP, 4096)
     testing.assert_equal(BODY_BYTE_CAP, 16384)
