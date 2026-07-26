@@ -12,10 +12,66 @@ from std.os import listdir, makedirs, remove, rmdir
 from std.os.path import basename, dirname, exists, isdir, islink, join
 
 from mtest.platform import process_id
+from mtest.session.shard import fnv1a64
+
+comptime _MANGLE_BUDGET = 150
+"""Maximum bytes a mangled name may occupy, well under a 255-byte `NAME_MAX`.
+
+The mangled name is never used bare: callers decorate it into a wider single
+component, the widest being
+`.mtest-precompile-<mangled>.inv-<pid>.attempt-<n>.tmp`. That decoration costs
+roughly 45 bytes, so budgeting 150 leaves ample headroom for every form to stay
+a legal filename.
+"""
+
+comptime _MANGLE_DIGEST_HEX = 16
+"""Hex digits of the 64-bit digest a bounded name carries."""
+
+
+def _hex64(value: UInt64) -> String:
+    """Return `value` as exactly 16 lowercase zero-padded hex digits."""
+    comptime DIGITS = "0123456789abcdef"
+    var out = String("")
+    for i in range(_MANGLE_DIGEST_HEX):
+        var shift = UInt64((_MANGLE_DIGEST_HEX - 1 - i) * 4)
+        var nibble = Int((value >> shift) & 0xF)
+        out += String(DIGITS[byte=nibble])
+    return out^
+
+
+def _bounded(full: String) -> String:
+    """Shorten an over-budget mangled name, keeping it identifying and readable.
+
+    Prefixes a 64-bit digest of the WHOLE mangled name, then appends as much of
+    the tail as the budget allows. The tail is kept rather than the head
+    because it ends in the test file's own name, which is what a human reading
+    `build/bin/` needs; the digest carries the identity the truncation drops.
+
+    Truncation walks codepoints, never bytes, so a multi-byte character is
+    never cut in half.
+    """
+    var digest = _hex64(fnv1a64(full))
+    var room = _MANGLE_BUDGET - _MANGLE_DIGEST_HEX - 1  # the "-" separator
+    var slices = List[String]()
+    for cp in full.codepoint_slices():
+        slices.append(String(cp))
+    # Walk backwards while the tail still fits, then emit it in order.
+    var start = len(slices)
+    var used = 0
+    while start > 0:
+        var width = slices[start - 1].byte_length()
+        if used + width > room:
+            break
+        used += width
+        start -= 1
+    var tail = String("")
+    for i in range(start, len(slices)):
+        tail += slices[i]
+    return digest + "-" + tail^
 
 
 def _mangle(rel: String) -> String:
-    """Return the injective binary name for a root-relative file path.
+    """Return the binary name for a root-relative file path.
 
     Strips the `.mojo` suffix, then escapes every `_` as `_u` and every `/` as
     `_s`, passing all other characters through, so `tests/sub/test_a.mojo`
@@ -25,11 +81,26 @@ def _mangle(rel: String) -> String:
     therefore never mangle to the same name, unlike a naive `/`-to-`__`
     replacement, which collides `a/b.mojo` with the file `a__b.mojo`.
 
+    Because the escaping flattens a whole path into ONE filename, source depth
+    becomes name length, and a path well inside `PATH_MAX` whose every
+    component is well inside `NAME_MAX` could still mangle past `NAME_MAX`. The
+    kernel then refused the build output, and the build failure was reported as
+    the user's COMPILE-ERROR even though the source was fine. Names above
+    `_MANGLE_BUDGET` are therefore folded to a digest-plus-tail form.
+
+    Injectivity is exact and unchanged for every name within budget — which is
+    every name any working tree has produced, since an over-budget name did not
+    build at all. A bounded name necessarily discards information, so it
+    identifies its source by a 64-bit digest instead: collisions become
+    negligible rather than impossible, only for paths that are unbuildable
+    today.
+
     Args:
         rel: Root-relative path to the test file.
 
     Returns:
-        The mangled binary name.
+        The mangled binary name, at most `_MANGLE_BUDGET` bytes and always a
+        single path component.
     """
     var noext = String(rel.removesuffix(".mojo"))
     var out = String("")
@@ -40,7 +111,9 @@ def _mangle(rel: String) -> String:
             out += "_s"
         else:
             out += String(cp)
-    return out
+    if out.byte_length() > _MANGLE_BUDGET:
+        return _bounded(out)
+    return out^
 
 
 def _ensure_dir(path: String) raises:
