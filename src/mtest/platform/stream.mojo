@@ -369,19 +369,29 @@ def _clear_nonblocking(fd: Int):
     drain loop would surface as a write error rather than silently losing
     output, so there is nothing safer to do than proceed.
     """
-    # SAFETY: libc `fcntl` has ABI `int fcntl(int, int, ...)`. Both guarded
-    # commands take a plain scalar third argument, never a pointer, so nothing
-    # is aliased, borrowed, kept live, or freed. `fd` is live and owned by the
-    # caller across both calls, which retain nothing past their return. Both
-    # sites pass three arguments: `F_GETFL` ignores the third, and one arity per
-    # symbol is required because a single external declaration is emitted for
-    # `fcntl` across the whole module.
+    # SAFETY: libc `fcntl` has ABI `int fcntl(int, int, ...)`. `F_GETFL` takes
+    # no third argument and ignores the one supplied; it is passed anyway
+    # because a single external declaration is emitted per symbol, so both
+    # sites in this module must agree on arity. Every argument is a plain
+    # scalar, never a pointer, so nothing is aliased, borrowed, kept live, or
+    # freed. `fd` is live and owned by the caller across the call, which
+    # retains nothing past its return and writes no memory this process owns.
+    # The result is a plain scalar; a negative value owns no resource and is
+    # handled on the next line.
     var flags = external_call["fcntl", Int32](
         Int32(fd), Int32(_F_GETFL), Int32(0)
     )
     if flags < 0:
         return
     var cleared = flags & ~_o_nonblock_bit()
+    # SAFETY: the same `int fcntl(int, int, ...)` ABI and the same three-scalar
+    # arity as the `F_GETFL` call above. `F_SETFL` does consume its third
+    # argument, and `cleared` is a plain status-flag scalar derived from the
+    # value `F_GETFL` just returned, so no pointer is supplied, aliased, or
+    # retained. `fd` remains live and caller-owned; the call writes no memory
+    # this process owns. The result is discarded deliberately: this helper is
+    # documented best-effort, and a failure leaves the descriptor non-blocking,
+    # which the drain loop surfaces as a write error rather than lost output.
     _ = external_call["fcntl", Int32](Int32(fd), Int32(_F_SETFL), cleared)
 
 
