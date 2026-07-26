@@ -22,9 +22,9 @@ from mtest.exec import (
     ExecRuntime,
     ProcessResult,
     ProcessSpec,
-    canonicalize,
     interrupt_requested,
     run_supervised,
+    source_identity_key,
 )
 from mtest.model import AttributionDisposition, Event
 from mtest.protocol import collection_disqualifier, collection_names
@@ -116,7 +116,7 @@ def _attribution_probe(
     if not term.is_exited():
         # Signaled, timed out, or unspawnable: no listing to be had.
         return _AttributionListing(False, binary, List[String]())
-    var canonical = canonicalize(root + "/" + rel)
+    var canonical = source_identity_key(root, rel)
     var trusted = resolve_report(
         lossy_utf8(pres.stdout_bytes), canonical, pres.stdout_truncated
     )

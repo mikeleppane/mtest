@@ -692,6 +692,10 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "collect: streams split, listing continues past a bad probe",
     "color: --color always beats NO_COLOR",
     "precompile: success path resolves import (auto -I)",
+    "symlink: a symlinked test file is collected and run, never dropped",
+    "value: 2^63 refused for every non-negative integer flag",
+    "report: --json to a readerless FIFO fails fast, never blocks",
+    "path: a long-but-legal path builds, never a false COMPILE-ERROR",
     "interrupt: SIGINT frees the owned process group",
 )
 """Every check `main` must perform, in order, on an unfiltered run.
@@ -1018,6 +1022,192 @@ class Runner:
         )
         self.record(
             PASS if ok else FAIL, name, ref, "" if ok else f"exit {r.returncode}"
+        )
+
+    def check_symlinked_test_file(self) -> None:
+        """Assert a symlinked test file is neither dropped nor called malformed.
+
+        Two failures met here, and they contradicted each other: a directory
+        walk skipped every symlink, so the linked tests silently did not run
+        while the summary still read `0 excluded, 0 not run`; and naming the
+        link directly reported MALFORMED-SUITE, blaming a conforming module
+        for the runner's own identity mismatch (the key was `realpath`, the
+        child's report names the lexical path).
+
+        The link points at a POISON file whose test FAILS, so a walk that
+        silently drops it again flips the frozen exit code from 1 to 0 rather
+        than merely changing text.
+        """
+        ref = "§2/§5/§6 a symlinked test file is discovered, run, and honestly judged"
+        name = "symlink: a symlinked test file is collected and run, never dropped"
+        d = self.root / "symlinked"
+        d.mkdir(exist_ok=True)
+        (d / "real").mkdir(exist_ok=True)
+        (d / "real" / "test_target.mojo").write_text(
+            HEAD + "def test_linked_ok() raises:\n"
+            '    assert_equal(reverse("ab"), "ba")\n\n\n'
+            "def test_linked_poison() raises:\n"
+            "    assert_equal(1, 2)  # POISON: a dropped link would hide this\n" + MAIN
+        )
+        (d / "suite").mkdir(exist_ok=True)
+        (d / "suite" / "test_plain.mojo").write_text(
+            HEAD + "def test_plain_ok() raises:\n    assert_equal(1, 1)\n" + MAIN
+        )
+        link = d / "suite" / "test_linked.mojo"
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to("../real/test_target.mojo")
+
+        # The walk must LIST the link's own node ids, under the link's path.
+        c = self.mtest(["collect", "-I", "build", "symlinked/suite"])
+        listed = sorted(line.strip() for line in c.stdout.splitlines() if "::" in line)
+        want = [
+            "symlinked/suite/test_linked.mojo::test_linked_ok",
+            "symlinked/suite/test_linked.mojo::test_linked_poison",
+            "symlinked/suite/test_plain.mojo::test_plain_ok",
+        ]
+        collected_exactly = c.returncode == 0 and listed == want
+
+        # The poison test must actually RUN: exit 1, and never MALFORMED-SUITE.
+        r = self.mtest(["-I", "build", "symlinked/suite"])
+        ran_poison = r.returncode == 1
+        not_malformed = "MALFORMED" not in (r.stdout + r.stderr).upper()
+
+        # Naming the link directly must judge it honestly too.
+        one = self.mtest(["-I", "build", "symlinked/suite/test_linked.mojo"])
+        direct_ok = (
+            one.returncode == 1 and "MALFORMED" not in (one.stdout + one.stderr).upper()
+        )
+
+        ok = collected_exactly and ran_poison and not_malformed and direct_ok
+        self.record(
+            PASS if ok else FAIL,
+            name,
+            ref,
+            ""
+            if ok
+            else f"collect exit {c.returncode} listed={listed}; "
+            f"walk exit {r.returncode} (1 = the linked poison ran); "
+            f"not-malformed={not_malformed}; direct-operand-ok={direct_ok}",
+        )
+
+    def check_integer_overflow_values(self) -> None:
+        """Assert the decimal values `atol` wraps are refused, not accepted.
+
+        `atol` does not raise across the whole out-of-range domain: at exactly
+        `2^63` and `2^63 + 1` it wraps to `Int.MIN`. Every one of these flags
+        treats its value as non-negative, so a wrapped value silently disabled
+        `--timeout` and defeated `--maxfail` while the run still exited 0.
+        Refusal is a §3 usage error, detected before any test runs.
+        """
+        ref = "§3 an out-of-range integer is a usage error (exit 4), pre-run"
+        name = "value: 2^63 refused for every non-negative integer flag"
+        bad = []
+        for flag in (
+            "--timeout",
+            "--compile-timeout",
+            "--maxfail",
+            "--retries",
+            "--durations",
+        ):
+            for value in ("9223372036854775808", "9223372036854775809"):
+                r = self.mtest(["-I", "build", flag, value, "tests/"])
+                if r.returncode != 4:
+                    bad.append(f"{flag} {value} -> exit {r.returncode}")
+        # The neighbour below the wrap must still be ACCEPTED: the guard must
+        # reject what wraps, not simply narrow the legal domain.
+        edge = self.mtest(["-I", "build", "--timeout", "9223372036854775807", "tests/"])
+        if edge.returncode == 4:
+            bad.append("--timeout 2^63-1 wrongly refused")
+        ok = not bad
+        self.record(PASS if ok else FAIL, name, ref, "" if ok else "; ".join(bad))
+
+    def check_json_fifo_does_not_block(self) -> None:
+        """Assert a readerless FIFO destination fails fast instead of hanging.
+
+        A plain write-open of a FIFO with no reader blocks forever, and it
+        happens before the session starts, so `--timeout` cannot bound it: the
+        run produced no output, no diagnostic, and no exit code until something
+        external killed it. §9 gives a runtime report-destination failure
+        exit 3; a hang is not an exit code at all.
+
+        A generous timeout separates a true block from mere slowness, and
+        `TimeoutExpired` is recorded as a FAIL, never allowed to pass.
+        """
+        ref = "§9/§15.4 a report destination must resolve, never wedge the run"
+        name = "report: --json to a readerless FIFO fails fast, never blocks"
+        fifo = self.root / "readerless.fifo"
+        if fifo.exists() or fifo.is_symlink():
+            fifo.unlink()
+        try:
+            os.mkfifo(fifo)
+        except (OSError, AttributeError) as e:  # no FIFO support on this host
+            self.record(SKIP, name, ref, f"mkfifo unavailable: {e}")
+            return
+        try:
+            r = self.mtest(
+                ["-I", "build", "--json", str(fifo), "tests/test_palindrome.mojo"],
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            self.record(FAIL, name, ref, "mtest blocked on open(FIFO); killed at 60s")
+            return
+        finally:
+            fifo.unlink(missing_ok=True)
+        ok = r.returncode == 3
+        self.record(
+            PASS if ok else FAIL,
+            name,
+            ref,
+            "" if ok else f"exit {r.returncode} (want 3); stderr={r.stderr[:200]!r}",
+        )
+
+    def check_long_path_builds(self) -> None:
+        """Assert a legal-but-deep path builds instead of blaming the source.
+
+        The binary name is the whole source path flattened into ONE component,
+        so depth becomes filename length. `PATH_MAX` (4096) caps a path but
+        `NAME_MAX` (255) caps a component, so a path well inside both limits
+        could still mangle past `NAME_MAX`. The build then failed and was
+        reported COMPILE-ERROR — §6 fault attribution inverted, since the
+        source compiles and mtest's own output name was the illegal thing.
+        """
+        ref = "§5/§6 a legal source path builds; COMPILE-ERROR means the module's fault"
+        name = "path: a long-but-legal path builds, never a false COMPILE-ERROR"
+        deep = self.root / "deep"
+        # The trigger is the RELATIVE path, since that is what becomes one
+        # component: 20 x 16 bytes puts it past NAME_MAX (255) while the
+        # absolute path stays near 450, which matters because macOS caps
+        # PATH_MAX at 1024, not Linux's 4096 — the first draft of this check
+        # built a ~1040-byte path and died with ENAMETOOLONG on Darwin before
+        # it could assert anything.
+        for i in range(20):
+            deep = deep / f"d{i:02d}abcdefghijkl"
+        deep.mkdir(parents=True, exist_ok=True)
+        (deep / "test_deep.mojo").write_text(
+            HEAD
+            + 'def test_deep_ok() raises:\n    assert_equal(reverse("ab"), "ba")\n'
+            + MAIN
+        )
+        rel = (deep / "test_deep.mojo").relative_to(self.root).as_posix()
+        if len(rel) <= 255:  # the geometry drifted and no longer probes anything
+            self.record(
+                FAIL,
+                name,
+                ref,
+                f"probe is inert: rel is {len(rel)} bytes, needs > 255 (NAME_MAX)",
+            )
+            return
+        r = self.mtest(["-I", "build", "deep"])
+        ok = r.returncode == 0 and "COMPILE-ERROR" not in (r.stdout + r.stderr)
+        self.record(
+            PASS if ok else FAIL,
+            name,
+            ref,
+            ""
+            if ok
+            else f"exit {r.returncode} for a {len(rel)}-byte path "
+            f"(PATH_MAX 4096); stderr={r.stderr[:200]!r}",
         )
 
     # -- interrupt: signal ONLY mtest so the child's survival tests mtest's own
@@ -1524,6 +1714,14 @@ def main() -> int:
             runner.check_color()
         if wanted("precompile: success path resolves import (auto -I)"):
             runner.check_precompile_success()
+        if wanted("symlink: a symlinked test file is collected and run, never dropped"):
+            runner.check_symlinked_test_file()
+        if wanted("value: 2^63 refused for every non-negative integer flag"):
+            runner.check_integer_overflow_values()
+        if wanted("report: --json to a readerless FIFO fails fast, never blocks"):
+            runner.check_json_fifo_does_not_block()
+        if wanted("path: a long-but-legal path builds, never a false COMPILE-ERROR"):
+            runner.check_long_path_builds()
         if wanted("interrupt: SIGINT frees the owned process group"):
             if args.no_interrupt:
                 # Recorded, not bypassed. Testing --no-interrupt BEFORE

@@ -1,18 +1,25 @@
 """Boundary tests for the terminal-control classification (Layer 0).
 
 `control_chars` is the one definition of which code points a terminal
-interprets rather than displays. Three surfaces consult it — the console
-reporter, `doctor`, and `config show` — and they spell their escapes three
-different ways, so the classification is the only thing they can share and the
-only thing that must never drift.
+interprets rather than displays. Several surfaces consult it — the console
+reporter, `doctor`, `config show`, and the TOML bridge — and they spell their
+escapes different ways, so the classification is the only thing they can share
+and the only thing that must never drift.
+
+It also owns `escape_one_line`, the shared rendering for the case where the
+spelling does not vary: an untrusted path, node id, or pattern interpolated
+into a one-line diagnostic. Discovery and `collect` route through it, because
+a `\\n` inside a path emitted raw splits one diagnostic into two physical
+lines and lets input forge a second record.
 
 Every range boundary is pinned with a literal code point rather than derived
 from the predicate under test, so an edit that widens or narrows a range shows
 up as a failure here rather than being restated by the test.
 """
-from std.testing import assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true
 
 from mtest.model.control_chars import (
+    escape_one_line,
     is_c0_control,
     is_c1_control,
     is_interpreted_control,
@@ -96,3 +103,58 @@ def test_code_points_above_latin_1_are_never_interpreted() raises:
     assert_false(is_interpreted_control(0x2066, preserve_lf_tab=False))
     assert_false(is_interpreted_control(0xFFFD, preserve_lf_tab=False))
     assert_false(is_interpreted_control(0x1F600, preserve_lf_tab=False))
+
+
+# --- escape_one_line: user input must never forge a diagnostic's structure ---
+
+
+def test_escape_one_line_neutralizes_a_newline() raises:
+    """The regression: an LF in a path split one diagnostic into two lines.
+
+    A consumer reading stderr line-wise saw a second, bogus record.
+    """
+    assert_equal(
+        escape_one_line("paths/line\nbreak/test_a.mojo"),
+        "paths/line\\nbreak/test_a.mojo",
+    )
+
+
+def test_escape_one_line_neutralizes_cr_and_tab() raises:
+    assert_equal(escape_one_line("a\rb\tc"), "a\\rb\\tc")
+
+
+def test_escape_one_line_hex_escapes_esc_and_the_rest_of_c0() raises:
+    """A bare ESC would otherwise drive the reader's terminal."""
+    assert_equal(
+        escape_one_line(String("a") + chr(0x1B) + "[31mb"), "a\\x1b[31mb"
+    )
+    assert_equal(escape_one_line(String("a") + chr(0x00) + "b"), "a\\x00b")
+    assert_equal(escape_one_line(String("a") + chr(0x7F) + "b"), "a\\x7fb")
+
+
+def test_escape_one_line_hex_escapes_c1_which_needs_no_esc_byte() raises:
+    """U+009B is CSI in single-code-point form: interpreted with no ESC.
+
+    Two hex digits cover it, and every other interpreted control, because the
+    set tops out at U+009F.
+    """
+    assert_equal(escape_one_line(String("a") + chr(0x9B) + "b"), "a\\x9bb")
+    assert_equal(escape_one_line(String("a") + chr(0x9F) + "b"), "a\\x9fb")
+
+
+def test_escape_one_line_passes_ordinary_text_through() raises:
+    assert_equal(escape_one_line("tests/test_a.mojo"), "tests/test_a.mojo")
+
+
+def test_escape_one_line_keeps_unicode_legible() raises:
+    """Non-controls pass through, so a Unicode filename stays readable."""
+    assert_equal(
+        escape_one_line("tests/test_ünïcødé_🎉.mojo"),
+        "tests/test_ünïcødé_🎉.mojo",
+    )
+
+
+def test_escape_one_line_output_spans_exactly_one_physical_line() raises:
+    var got = escape_one_line("a\nb\r\nc\n")
+    assert_true("\n" not in got, got)
+    assert_true("\r" not in got, got)

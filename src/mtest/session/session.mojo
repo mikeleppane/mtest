@@ -328,6 +328,12 @@ def run_session[
         summary.counts[Outcome.EXCLUDED.code] += 1
     for pat in disc.stale_excludes:
         reporter.handle(Event.warning("stale-exclusion", pat))
+    # A symlink the walk refused is a selection the user believes is running.
+    # A symlinked directory is not descended (cycle safety) and a dangling
+    # `test_*.mojo` link cannot be built; either way the set actually run is
+    # smaller than the tree suggests, so say so rather than exit 0 in silence.
+    for link in disc.skipped_links:
+        reporter.handle(Event.warning("skipped-symlink", link))
     # A `--serial` glob matching no discovered run file is stale for the same
     # reason a `--exclude` glob is: the pattern names nothing, so the caller
     # almost certainly mistyped it. This is about the glob, not the worker count,

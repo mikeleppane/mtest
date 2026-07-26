@@ -29,7 +29,7 @@ from std.builtin.sort import sort
 from std.os.path import exists, isdir, isfile
 
 from mtest.config import RunnerConfig
-from mtest.model import split_node_token
+from mtest.model import escape_one_line, split_node_token
 from mtest.discover.fnmatch import fnmatch
 from mtest.discover.normalize import normalize_operand, normalize_root
 from mtest.discover.result import DiscoveryResult, ExcludedEntry
@@ -64,7 +64,7 @@ def _malformed_node_id_error(op: String) -> Error:
     """The exit-4 usage error for an operand with more than one `::`."""
     return Error(
         "discover: malformed node id '"
-        + op
+        + escape_one_line(op)
         + "': a node id is PATH::TEST with a single '::' (see mtest --help)"
     )
 
@@ -78,20 +78,29 @@ def _node_id_names_directory_error(op: String, dir_part: String) -> Error:
     """
     return Error(
         "discover: malformed node id '"
-        + op
+        + escape_one_line(op)
         + "': '"
-        + dir_part
+        + escape_one_line(dir_part)
         + "' is a directory, but a node id is FILE::TEST (see mtest --help)"
     )
 
 
-def _classify(op: String, nroot: String, mut into: List[String]) raises:
+def _classify(
+    op: String,
+    nroot: String,
+    mut into: List[String],
+    mut skipped: List[String],
+) raises:
     """Resolve one operand into `into` (walked files, or one explicit file).
 
     A node id (`PATH::TEST`) resolves to its file part; per-test name selection
     is applied later by the session. More than one `::`, or a node id whose
     path is a directory, is a malformed node id. Also raises for a nonexistent
     path or an operand escaping the root. Every raise is the exit-4 class.
+
+    Any symlink a walk refused is appended to `skipped` for the caller to warn
+    about. An explicitly named operand is never refused for being a symlink:
+    naming a file is a direct selection, and `exists` already accepted it.
     """
     var split = split_node_token(op)
     if split.sep_count > 1:
@@ -101,16 +110,19 @@ def _classify(op: String, nroot: String, mut into: List[String]) raises:
     var rel = normalize_operand(file_op, nroot)  # raises on root escape
     var fpath = _abs_of(nroot, rel)
     if not exists(fpath):
-        raise Error("discover: no such path '" + file_op + "'")
+        raise Error("discover: no such path '" + escape_one_line(file_op) + "'")
     if isdir(fpath):
         if is_node_id:
             raise _node_id_names_directory_error(op, file_op)
-        for f in walk_dir(fpath, rel):
+        var walked = walk_dir(fpath, rel)
+        for f in walked.files:
             into.append(f)
+        for s in walked.skipped_links:
+            skipped.append(s)
     elif isfile(fpath):
         into.append(rel)
     else:
-        raise Error("discover: no such path '" + file_op + "'")
+        raise Error("discover: no such path '" + escape_one_line(file_op) + "'")
 
 
 def _apply_excludes(
@@ -190,12 +202,14 @@ def discover(config: RunnerConfig, root: String) raises -> DiscoveryResult:
             operands.append(String(p))
 
     # Stage 2: normalize + classify operands and gates into raw file lists.
+    # Refused symlinks accumulate across every operand and gate walk.
+    var skipped_links = List[String]()
     var run_raw = List[String]()
     for op in operands:
-        _classify(op, nroot, run_raw)
+        _classify(op, nroot, run_raw, skipped_links)
     var gate_raw = List[String]()
     for g in config.gates:
-        _classify(g, nroot, gate_raw)
+        _classify(g, nroot, gate_raw, skipped_links)
 
     # Stage 3: dedup; a gate that also appears in a walk stays a gate only.
     var gate_files = _dedup_preserve(gate_raw)
@@ -218,13 +232,17 @@ def discover(config: RunnerConfig, root: String) raises -> DiscoveryResult:
         if not matched[pi]:
             stale.append(String(patterns[pi]))
 
-    # Stage 5: order the outputs.
+    # Stage 5: order the outputs. Overlapping operands can walk the same
+    # subtree twice, so refused links are deduped before they are warned about.
     sort(run_kept)
     _sort_excluded(excluded)
+    var links = _dedup_preserve(skipped_links)
+    sort(links)
 
     return DiscoveryResult(
         gate_files=gate_kept^,
         run_files=run_kept^,
         excluded=excluded^,
         stale_excludes=stale^,
+        skipped_links=links^,
     )

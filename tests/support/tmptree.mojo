@@ -117,8 +117,23 @@ def touch(root: String, rel: String) raises:
 
 
 def link_dir(root: String, target_rel: String, link_rel: String) raises:
-    """Create a symlink at `root/link_rel` pointing at `root/target_rel`."""
+    """Create a symlink at `root/link_rel` pointing at `root/target_rel`.
+
+    The target may be a directory or a file; nothing here inspects it, so the
+    same helper builds a symlinked test file and a symlinked subtree. The
+    link's parent directory must already exist.
+    """
     symlink(root + "/" + target_rel, root + "/" + link_rel)
+
+
+def link_broken(root: String, link_rel: String) raises:
+    """Create a DANGLING symlink at `root/link_rel`.
+
+    The target never exists, so `isfile`/`isdir` both report False while
+    `islink` reports True — the shape a renamed or removed link target leaves
+    behind, which discovery must not silently drop.
+    """
+    symlink(root + "/__no_such_target__.mojo", root + "/" + link_rel)
 
 
 def remove_tree(path: String) raises:

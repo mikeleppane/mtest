@@ -114,3 +114,63 @@ def is_interpreted_control(code: Int, preserve_lf_tab: Bool) -> Bool:
     if preserve_lf_tab and (code == 0x0A or code == 0x09):
         return False
     return is_c0_control(code) or is_c1_control(code)
+
+
+def _hex_escape(code: Int) -> String:
+    """Render one interpreted control as `\\xNN`.
+
+    Two hex digits always suffice: `is_interpreted_control` is True only for
+    C0, DEL, and C1, so the widest value it ever passes here is `U+009F`.
+    """
+    comptime DIGITS = "0123456789abcdef"
+    return (
+        String("\\x")
+        + String(DIGITS[byte=(code >> 4) & 0xF])
+        + String(DIGITS[byte=code & 0xF])
+    )
+
+
+def escape_one_line(text: String) -> String:
+    """Render `text` on exactly ONE physical line, with no terminal control.
+
+    A path, node id, or pattern is user-controlled input that mtest echoes back
+    in diagnostics. Emitted raw, a `\\n` inside one splits a single diagnostic
+    into two physical lines — a consumer parsing stderr line-wise reads a bogus
+    second record — and an ESC or C1 byte drives the reader's terminal. Both
+    are input smuggling a diagnostic's structure, so every interpolation of
+    untrusted text into a one-line message goes through here.
+
+    LF, CR, and Tab get named short forms because a reader recognizes them;
+    every other interpreted control becomes a hex escape. Non-control code
+    points, including all non-ASCII text, pass through unchanged, so a legible
+    Unicode filename stays legible.
+
+    Args:
+        text: Untrusted display text, already valid UTF-8.
+
+    Returns:
+        A single-line, control-free rendering of `text`.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import escape_one_line
+
+    # A newline in a path can no longer forge a second diagnostic line.
+    var safe = escape_one_line("paths/line\\nbreak/test_a.mojo")
+    ```
+    """
+    var escaped = String("")
+    for cp in text.codepoints():
+        var value = Int(cp)
+        if value == 0x0A:
+            escaped += "\\n"
+        elif value == 0x0D:
+            escaped += "\\r"
+        elif value == 0x09:
+            escaped += "\\t"
+        elif is_interpreted_control(value, preserve_lf_tab=False):
+            escaped += _hex_escape(value)
+        else:
+            escaped += String(cp)
+    return escaped^

@@ -80,6 +80,7 @@ UNIT_SUITES = {
     "test_config_show.mojo",
     "test_config_state.mojo",
     "test_config_toml_adversarial.mojo",
+    "test_config_value_validation.mojo",
     "test_discover_fnmatch.mojo",
     "test_discover_normalize.mojo",
     "test_exec_pool_policy.mojo",
@@ -119,6 +120,7 @@ UNIT_SUITES = {
     "test_session_detail.mojo",
     "test_session_effective_settings.mojo",
     "test_session_mangle.mojo",
+    "test_session_mangle_bounds.mojo",
     "test_session_pipeline.mojo",
     "test_session_pool_plan.mojo",
     "test_session_pool_progress.mojo",
@@ -218,6 +220,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_config_show.mojo",
     "tests/unit/test_config_state.mojo",
     "tests/unit/test_config_toml_adversarial.mojo",
+    "tests/unit/test_config_value_validation.mojo",
     "tests/unit/test_discover_fnmatch.mojo",
     "tests/unit/test_discover_normalize.mojo",
     "tests/unit/test_exec_pool_policy.mojo",
@@ -257,6 +260,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_detail.mojo",
     "tests/unit/test_session_effective_settings.mojo",
     "tests/unit/test_session_mangle.mojo",
+    "tests/unit/test_session_mangle_bounds.mojo",
     "tests/unit/test_session_pipeline.mojo",
     "tests/unit/test_session_pool_plan.mojo",
     "tests/unit/test_session_pool_progress.mojo",
@@ -266,7 +270,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 1300
+CLASSIFIED_TEST_COUNT = 1342
 CLASSIFIED_ROOTS = (
     Path("tests/unit"),
     Path("tests/integration"),

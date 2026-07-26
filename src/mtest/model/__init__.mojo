@@ -46,6 +46,7 @@ from mtest.model.exit_code import (
 )
 from mtest.model.slow import SLOW_THRESHOLD_SECONDS, is_slow, slow_step_label
 from mtest.model.control_chars import (
+    escape_one_line,
     is_c0_control,
     is_c1_control,
     is_interpreted_control,

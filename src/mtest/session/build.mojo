@@ -18,9 +18,9 @@ from mtest.exec import (
     ExecRuntime,
     ProcessResult,
     ProcessSpec,
-    canonicalize,
     interrupt_requested,
     run_supervised,
+    source_identity_key,
 )
 from mtest.model import Event, Outcome, ParseDisposition, TestCounts, is_slow
 from mtest.protocol import (
@@ -193,7 +193,7 @@ def _build_for_selection(
             True,
             FileResult.ran_with(ev^, bsignal),
         )
-    var canonical = canonicalize(root + "/" + rel)
+    var canonical = source_identity_key(root, rel)
     reg.record_build(BuildProduct.built(rel, out_bin, canonical))
     return _BuildOutcome(
         True, out_bin, canonical, build_argv^, bdur, False, _blank_file_result()

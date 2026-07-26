@@ -446,8 +446,11 @@ fields that legitimately vary run to run.
 
 **Excluded** (vary run to run; do NOT compare):
 
-- every **measured** `*_us` duration: `duration_us`, `build_duration_us`,
-  `wall_time_us`, `attribution_us`;
+- every **measured** duration: the `*_us` fields `duration_us`,
+  `build_duration_us`, `wall_time_us`, and `attribution_us`, and
+  `test_reported.timing` — the per-test wall clock the suite itself reported,
+  carried verbatim as the decimal-seconds string it was parsed from and so the
+  one measured duration that is not spelled `*_us`;
 - every byte-payload field and its omission metadata: `captured_stdout`,
   `captured_stderr`, `compiler_output`, `detail`, together with
   `stdout_capture_bytes`, `stderr_capture_bytes`, `stdout_stream_omitted_bytes`,
