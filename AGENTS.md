@@ -179,7 +179,9 @@ jobs as hermetic or collapse them into the Valgrind exception.
 The floor before any change is done, all green, in this order:
 
 ```text
-pixi run fmt               # format in place (run locally before committing)
+pixi run fmt               # format Mojo in place (run locally before committing)
+pixi run py-fmt            # format Python in place, plus ruff's safe lint fixes
+pixi run py-check          # ruff format/lint and mypy --strict over every .py
 pixi run version-check     # manifest, CLI, and shipped-version identity
 pixi run harness-check     # validate exact harness/CI membership and invariants
 pixi run safety-check      # inventory every unsafe Mojo operation and local proof
