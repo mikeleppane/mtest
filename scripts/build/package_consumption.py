@@ -295,6 +295,8 @@ GATE_STAGE_IDS = (
     "build",
     "install",
     "loader-clean",
+    "assertion-source",
+    "assertion-example",
     "dogfood",
     "failing-fixture",
     "tarball",
@@ -527,7 +529,12 @@ def require_warning_free_assertion_compile(
         )
 
 
-def stage_assertion_source_probe(env_prefix: Path, label: str) -> None:
+def stage_assertion_source_probe(
+    env_prefix: Path,
+    label: str,
+    *,
+    completion_id: str | None = None,
+) -> None:
     """Compile and run public-source probes from one installed package form."""
     _banner(f"installed assertion source probe -- {label}")
     source_root = validate_assertion_install(
@@ -656,6 +663,8 @@ def stage_assertion_source_probe(env_prefix: Path, label: str) -> None:
         "runner imports and helper facade exports unavailable",
         flush=True,
     )
+    if completion_id is not None:
+        record_completed_stage(completion_id)
 
 
 def _readme_assertion_fence(
@@ -737,10 +746,18 @@ def _normalize_assertion_times(output: str) -> str:
         r"\1<TIME>\2",
         normalized,
     )
-    return re.sub(r"(?m)^(\s+\|.*\S) +$", r"\1", normalized).replace(
-        "    | \n",
-        "    |\n",
-    )
+    for unstable_line in (
+        "    | Unhandled exception caught during execution: ",
+        "    | Running 2 tests for <REPO>/examples/assertions/test_diagnostics.mojo ",
+        "    | Summary [ <TIME> ] 2 tests run: 1 passed , 1 failed , 0 skipped ",
+        "    | Test suite' <REPO>/examples/assertions/test_diagnostics.mojo 'failed! ",
+        "    | ",
+    ):
+        normalized = normalized.replace(
+            unstable_line + "\n",
+            unstable_line.rstrip() + "\n",
+        )
+    return normalized
 
 
 def stage_assertion_example(
@@ -748,6 +765,7 @@ def stage_assertion_example(
     mtest_bin: Path,
     *,
     allow_installer_group_write: bool = False,
+    completion_id: str | None = None,
 ) -> None:
     """Run the committed diagnostic example through the installed artifact."""
     _banner("installed assertion README example")
@@ -834,6 +852,8 @@ def stage_assertion_example(
         f"package-check: captured normalized README output at {capture}",
         flush=True,
     )
+    if completion_id is not None:
+        record_completed_stage(completion_id)
 
 
 def _banner(label: str) -> None:
@@ -1610,8 +1630,16 @@ def main() -> int:
         artifact = stage_build_local_channel(target)
         mtest_bin = stage_install_from_local_channel(artifact)
         stage_loader_clean_probe(mtest_bin, target)
-        stage_assertion_source_probe(mtest_bin.parents[1], "conda")
-        stage_assertion_example(mtest_bin.parents[1], mtest_bin)
+        stage_assertion_source_probe(
+            mtest_bin.parents[1],
+            "conda",
+            completion_id="assertion-source",
+        )
+        stage_assertion_example(
+            mtest_bin.parents[1],
+            mtest_bin,
+            completion_id="assertion-example",
+        )
         stage_suite_run_with_installed_binary(mtest_bin)
         stage_failing_fixture_consumption(mtest_bin, artifact.version)
         stage_tarball_fallback_smoke(target)

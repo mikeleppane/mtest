@@ -705,8 +705,10 @@ class CallSiteTests(unittest.TestCase):
                 side_effect=stage("install", install_result)
             ),
             stage_loader_clean_probe=mock.Mock(side_effect=stage("loader-clean")),
-            stage_assertion_source_probe=mock.Mock(),
-            stage_assertion_example=mock.Mock(),
+            stage_assertion_source_probe=mock.Mock(
+                side_effect=stage("assertion-source")
+            ),
+            stage_assertion_example=mock.Mock(side_effect=stage("assertion-example")),
             stage_suite_run_with_installed_binary=mock.Mock(
                 side_effect=stage("dogfood")
             ),
@@ -749,17 +751,23 @@ class CallSiteTests(unittest.TestCase):
 
     def test_main_refuses_to_report_ok_when_a_stage_did_not_happen(self) -> None:
         # The banner must not be able to claim a proof the run never performed.
-        self._patched_main(skip_recording="failing-fixture")
-        out, err = io.StringIO(), io.StringIO()
-        with (
-            self._patches,
-            contextlib.redirect_stdout(out),
-            contextlib.redirect_stderr(err),
+        for missing_stage in (
+            "assertion-source",
+            "assertion-example",
+            "failing-fixture",
         ):
-            code = package_consumption.main()
-        self.assertEqual(code, 1)
-        self.assertNotIn("package-check: OK (", out.getvalue())
-        self.assertIn("failing-fixture", err.getvalue())
+            with self.subTest(missing_stage=missing_stage):
+                self._patched_main(skip_recording=missing_stage)
+                out, err = io.StringIO(), io.StringIO()
+                with (
+                    self._patches,
+                    contextlib.redirect_stdout(out),
+                    contextlib.redirect_stderr(err),
+                ):
+                    code = package_consumption.main()
+                self.assertEqual(code, 1)
+                self.assertNotIn("package-check: OK (", out.getvalue())
+                self.assertIn(missing_stage, err.getvalue())
 
 
 class FixtureInventoryTests(unittest.TestCase):
@@ -895,7 +903,9 @@ class AssertionReadmeExampleTests(unittest.TestCase):
             "detail /prefix/share/mtest/assertions-src\n"
             "    |     PASS [ 0.001 ] test_pass\n"
             "    |     FAIL [ 0.082 ] test_fail\n"
-            "    | Summary [ 0.083 ] 2 tests run: 1 passed , 1 failed \n"
+            "    | Summary [ 0.083 ] 2 tests run: 1 passed , 1 failed , "
+            "0 skipped \n"
+            "    | diagnostic payload keeps its trailing space \n"
             "    | \n"
             "===== 1 passed, 1 failed in 2.2s =====\n"
         )
@@ -910,7 +920,9 @@ class AssertionReadmeExampleTests(unittest.TestCase):
             "detail <PREFIX>/share/mtest/assertions-src\n"
             "    |     PASS [ <TIME> ] test_pass\n"
             "    |     FAIL [ <TIME> ] test_fail\n"
-            "    | Summary [ <TIME> ] 2 tests run: 1 passed , 1 failed\n"
+            "    | Summary [ <TIME> ] 2 tests run: 1 passed , 1 failed , "
+            "0 skipped\n"
+            "    | diagnostic payload keeps its trailing space \n"
             "    |\n"
             "===== 1 passed, 1 failed in <TIME> =====\n",
         )
