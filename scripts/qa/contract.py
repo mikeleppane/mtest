@@ -1175,9 +1175,13 @@ class Runner:
         ref = "§5/§6 a legal source path builds; COMPILE-ERROR means the module's fault"
         name = "path: a long-but-legal path builds, never a false COMPILE-ERROR"
         deep = self.root / "deep"
-        # 60 x 15 bytes mangles to ~1000 bytes: far under PATH_MAX, far over
-        # NAME_MAX, and every individual component is tiny.
-        for i in range(60):
+        # The trigger is the RELATIVE path, since that is what becomes one
+        # component: 20 x 16 bytes puts it past NAME_MAX (255) while the
+        # absolute path stays near 450, which matters because macOS caps
+        # PATH_MAX at 1024, not Linux's 4096 — the first draft of this check
+        # built a ~1040-byte path and died with ENAMETOOLONG on Darwin before
+        # it could assert anything.
+        for i in range(20):
             deep = deep / f"d{i:02d}abcdefghijkl"
         deep.mkdir(parents=True, exist_ok=True)
         (deep / "test_deep.mojo").write_text(
@@ -1186,6 +1190,14 @@ class Runner:
             + MAIN
         )
         rel = (deep / "test_deep.mojo").relative_to(self.root).as_posix()
+        if len(rel) <= 255:  # the geometry drifted and no longer probes anything
+            self.record(
+                FAIL,
+                name,
+                ref,
+                f"probe is inert: rel is {len(rel)} bytes, needs > 255 (NAME_MAX)",
+            )
+            return
         r = self.mtest(["-I", "build", "deep"])
         ok = r.returncode == 0 and "COMPILE-ERROR" not in (r.stdout + r.stderr)
         self.record(
