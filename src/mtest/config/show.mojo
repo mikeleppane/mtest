@@ -6,6 +6,7 @@ from mtest.config.provenance import Provenance
 from mtest.config.resolve import ResolvedConfig
 from mtest.config.show_output import ShowOutput
 from mtest.config.verbosity import Verbosity
+from mtest.model.control_chars import is_interpreted_control
 
 
 def _source(source: Provenance) -> String:
@@ -24,10 +25,46 @@ def _comment(source: Provenance) -> String:
     return "  # (" + _source(source) + ")\n"
 
 
-def _toml_string(value: String) -> String:
-    """Render `value` as one TOML basic string with control bytes escaped."""
-    var rendered = String('"')
+def _u00_escape(code: Int) -> String:
+    """Render one interpreted control as `\\u00HH` in lowercase hex.
+
+    The single place this module's escape text is assembled, so the C0/DEL and
+    C1 forms cannot drift apart in width or letter case. The `\\u` form is not
+    a stylistic choice: this module emits TOML, and a TOML basic string has a
+    `\\uXXXX` escape and no `\\xHH` escape at all, so the console reporter's
+    spelling would produce a document TOML cannot read back.
+
+    Args:
+        code: The code point being escaped. Only its low byte is rendered,
+            which is exact for every code point this module escapes: they all
+            lie in `U+0000..U+009F`.
+
+    Returns:
+        A `\\u00` introducer followed by exactly two lowercase hex digits.
+    """
     comptime HEX = "0123456789abcdef"
+    return "\\u00" + String(HEX[byte=code // 16]) + String(HEX[byte=code % 16])
+
+
+def _toml_string(value: String) -> String:
+    """Render `value` as one TOML basic string with every control escaped.
+
+    `config show` prints `mtest.toml` string values to a terminal, so the
+    escaping covers every code point `mtest.model.control_chars` classifies as
+    a terminal instruction: the C0 controls `U+0000..U+001F`, DEL `U+007F`, and
+    the C1 controls `U+0080..U+009F`. C1 is not optional — `U+009B` is CSI,
+    `U+009D` is OSC and `U+009C` is ST in their single-code-point form, so a
+    config file could otherwise drive a terminal with no ESC byte anywhere in
+    it. The classification is shared with the console reporter and `doctor`;
+    only the spelling is this module's own.
+
+    Args:
+        value: The untrusted string to render, already valid UTF-8.
+
+    Returns:
+        `value` wrapped in double quotes as one TOML basic string.
+    """
+    var rendered = String('"')
     for cp in value.codepoints():
         var code = Int(cp)
         if code == 8:
@@ -44,10 +81,8 @@ def _toml_string(value: String) -> String:
             rendered += '\\"'
         elif code == 92:
             rendered += "\\\\"
-        elif (code >= 0 and code < 32) or code == 127:
-            rendered += "\\u00"
-            rendered += String(HEX[byte=code // 16])
-            rendered += String(HEX[byte=code % 16])
+        elif is_interpreted_control(code, preserve_lf_tab=False):
+            rendered += _u00_escape(code)
         else:
             rendered += String(cp)
     return rendered + '"'
@@ -134,9 +169,19 @@ def _annotations(value: AnnotationsMode) -> String:
 
 
 def _comment_text(value: String) -> String:
-    """Escape physical-line controls in a user-controlled trailer comment."""
+    """Escape every terminal-interpreted control in a user-controlled comment.
+
+    Consults the same classification `_toml_string` does — C0, DEL, and the C1
+    controls `U+0080..U+009F` — because this trailer reaches the same terminal
+    and carries the same untrusted config text.
+
+    Args:
+        value: The untrusted comment text, already valid UTF-8.
+
+    Returns:
+        `value` with every interpreted control replaced by its escape text.
+    """
     var rendered = String("")
-    comptime HEX = "0123456789abcdef"
     for cp in value.codepoints():
         var code = Int(cp)
         if code == 9:
@@ -145,10 +190,8 @@ def _comment_text(value: String) -> String:
             rendered += "\\n"
         elif code == 13:
             rendered += "\\r"
-        elif (code >= 0 and code < 32) or code == 127:
-            rendered += "\\u00"
-            rendered += String(HEX[byte=code // 16])
-            rendered += String(HEX[byte=code % 16])
+        elif is_interpreted_control(code, preserve_lf_tab=False):
+            rendered += _u00_escape(code)
         else:
             rendered += String(cp)
     return rendered^

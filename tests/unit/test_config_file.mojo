@@ -685,6 +685,30 @@ def test_offending_value_controls_cannot_forge_a_line() raises:
         assert_false("\x02" in hostile)
 
 
+def test_offending_value_c1_controls_cannot_drive_the_terminal() raises:
+    """C1 is the control class TOML lets straight through to the diagnostic.
+
+    TOML forbids a raw C0 control inside a basic string, so ESC never survives
+    to be quoted back — but `U+0080..U+009F` are legal string characters, and
+    `U+009B` is CSI, `U+009D` is OSC and `U+009C` is ST in their
+    single-code-point form. `main` prints this diagnostic to stderr, so an
+    unescaped C1 lets a hostile `mtest.toml` repaint the terminal through the
+    very message that rejects it, with no ESC byte anywhere in the file.
+    """
+    var rejected_value = _failure(
+        '[run]\nmojo = "csi\\u009B2J\\u009D0;pwned\\u009C"\n'
+    ).render()
+    assert_true("\\x9b2J\\x9d0;pwned\\x9c" in rejected_value)
+
+    var rejected_key = _failure('[run]\n"osc\\u009D0;pwned" = 1\n').render()
+    assert_true("\\x9d0;pwned" in rejected_key)
+
+    for rendered in [rejected_value, rejected_key]:
+        assert_equal(len(rendered.split("\n")), 1)
+        for cp in rendered.codepoints():
+            assert_false(Int(cp) >= 128 and Int(cp) <= 159)
+
+
 def test_public_parse_contains_representative_hostile_input() raises:
     var cases: List[HostileCase] = [
         HostileCase(

@@ -10,6 +10,7 @@ from mtest.cli.doctor import (
     _doctor_exit_code,
     _doctor_platform_probe,
     _doctor_root_dependency_probe,
+    _has_control,
     _safe_text,
     _toolchain_identity_is_pinned,
 )
@@ -219,6 +220,37 @@ def test_doctor_detail_over_the_bound_is_truncated_not_dropped() raises:
     var escaped = _safe_text(_repeated("\n", 200))
     assert_equal(escaped.count_codepoints(), 240)
     assert_true(escaped.endswith("..."))
+
+
+def test_doctor_escaper_neutralizes_c1_controls() raises:
+    """A C1 payload drives a terminal with no ESC byte anywhere in it.
+
+    `U+009B` is CSI, `U+009D` is OSC and `U+009C` is ST in their
+    single-code-point form, so a `--version` probe whose output doctor
+    interpolates could repaint the screen or set the title through an escaper
+    that only ever looked for ESC and the rest of C0.
+    """
+    assert_equal(_safe_text(chr(0x9B) + "2J"), "\\x9b2J")
+    assert_equal(
+        _safe_text(chr(0x9D) + "0;pwned" + chr(0x9C)), "\\x9d0;pwned\\x9c"
+    )
+    assert_equal(_safe_text(chr(0x80) + chr(0x9F)), "\\x80\\x9f")
+    # Either side of the C1 block is ordinary text and rides through verbatim.
+    assert_equal(_safe_text("~" + chr(0xA0) + "e"), "~" + chr(0xA0) + "e")
+
+
+def test_doctor_control_probe_rejects_a_c1_only_identity() raises:
+    """A toolchain identity made of C1 controls is unusable, not comparable.
+
+    `_has_control` is the guard that stops such an identity being echoed back
+    in the mismatch diagnostic at all, so it must cover exactly the range
+    `_safe_text` escapes.
+    """
+    assert_true(_has_control(chr(0x9B)))
+    assert_true(_has_control("mojo " + chr(0x9D) + "0;x"))
+    assert_true(_has_control("mojo\x1b[31m"))
+    assert_false(_has_control("mojo 1.0.0b2 (release)"))
+    assert_false(_has_control("caf" + chr(0xE9) + chr(0xA0)))
 
 
 def test_doctor_platform_lines_cover_both_supported_targets() raises:

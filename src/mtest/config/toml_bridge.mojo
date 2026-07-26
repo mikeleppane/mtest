@@ -8,6 +8,7 @@ from toml import TomlValue, parse
 
 from mtest.config.file_config import FileConfig, OverrideRule
 from mtest.config.precompile import Precompile
+from mtest.model.control_chars import is_interpreted_control
 from mtest.config.value_validation import (
     build_arg_rejection,
     parse_annotations_value,
@@ -82,7 +83,7 @@ struct ConfigDiagnostic(Copyable, Movable):
         return 4
 
     def render(self) -> String:
-        """Render owned framing with at most one C0-escaped detail line."""
+        """Render owned framing with at most one control-escaped detail line."""
         if self.detail.byte_length() == 0:
             return self.framing.copy()
         return (
@@ -109,7 +110,29 @@ struct TomlParseResult(Copyable, Movable):
     """The failure, or an empty placeholder on success."""
 
 
-def _escape_c0(text: String) -> String:
+def _escape_controls(text: String) -> String:
+    """Neutralize every terminal-interpreted control in one diagnostic.
+
+    A config diagnostic quotes `mtest.toml`'s own bytes — the source label, an
+    offending key, a rejected value — and `main` prints it to stderr, so it is
+    a terminal surface carrying text from a file the user may not have written.
+    The set escaped is `mtest.model.control_chars`'s: the C0 controls, DEL, and
+    the C1 controls `U+0080..U+009F`.
+
+    C1 matters most here. TOML forbids a raw C0 control inside a basic string,
+    so the parser rejects ESC before it reaches a diagnostic — but C1 is a legal
+    TOML string character, and `U+009B` is CSI, `U+009D` is OSC and `U+009C` is
+    ST in their single-code-point form. A hostile `mtest.toml` therefore drives
+    the terminal through the very message that rejects it, with no ESC byte
+    anywhere in the file.
+
+    Args:
+        text: Untrusted diagnostic text, already valid UTF-8.
+
+    Returns:
+        `text` with every interpreted control replaced by visible escape text,
+        rendering it single-line so a value cannot forge a diagnostic line.
+    """
     var escaped = String("")
     comptime HEX = "0123456789abcdef"
     for cp in text.codepoints():
@@ -120,7 +143,7 @@ def _escape_c0(text: String) -> String:
             escaped += "\\r"
         elif value == 9:
             escaped += "\\t"
-        elif value >= 0 and value < 32:
+        elif is_interpreted_control(value, preserve_lf_tab=False):
             escaped += "\\x"
             escaped += String(HEX[byte=value // 16])
             escaped += String(HEX[byte=value % 16])
@@ -130,7 +153,7 @@ def _escape_c0(text: String) -> String:
 
 
 def _safe_repr(representation: String) -> String:
-    var escaped = _escape_c0(representation)
+    var escaped = _escape_controls(representation)
     if escaped.count_codepoints() <= 240:
         return escaped
     var shortened = String("")
@@ -314,7 +337,10 @@ def _diagnostic(
 ) -> ConfigDiagnostic:
     return ConfigDiagnostic(
         kind,
-        "config: " + _escape_c0(source) + ": " + _escape_c0(summary),
+        "config: "
+        + _escape_controls(source)
+        + ": "
+        + _escape_controls(summary),
         _safe_repr(detail) if detail.byte_length() > 0 else String(""),
     )
 
@@ -355,7 +381,7 @@ def _unknown(
             ConfigFailureKind.DOCUMENT,
             location
             + " key '"
-            + _escape_c0(key)
+            + _escape_controls(key)
             + "': unknown key; expected "
             + expected
             + "; got "
@@ -446,7 +472,7 @@ def _convert_document(
                     source,
                     ConfigFailureKind.DOCUMENT,
                     "unknown top-level table '"
-                    + _escape_c0(key)
+                    + _escape_controls(key)
                     + "'; expected [run], [build], [report], or [[override]]",
                 )
             )

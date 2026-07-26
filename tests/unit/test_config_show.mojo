@@ -241,6 +241,39 @@ def test_config_show_escapes_strings_and_renders_precompile_canonically() raises
     )
 
 
+def test_config_show_escapes_c1_controls_in_values_and_the_file_comment() raises:
+    """`config show` prints untrusted `mtest.toml` text to a terminal.
+
+    The C1 controls `U+0080..U+009F` are single-code-point forms of sequences
+    that would otherwise need ESC — `U+009B` is CSI, `U+009D` is OSC,
+    `U+009C` is ST — so a config file can drive a terminal with no ESC byte
+    anywhere in it. Both the value renderer and the trailing config-file
+    comment carry that text, so both must escape it.
+    """
+    var overlay = CliOverlay.default()
+    overlay.paths = [
+        "csi" + chr(0x9B) + "2J",
+        chr(0x9D) + "0;pwned" + chr(0x9C),
+    ]
+    overlay.saw_paths = True
+    var resolved = resolve_config(
+        RunnerConfig.default(),
+        FileConfig.empty(),
+        ConfigEnvironment.empty(),
+        overlay,
+    )
+    resolved.config_file = "osc" + chr(0x9D) + "0;pwned" + chr(0x9C)
+    var rendered = render_config_show(resolved, state_present=False)
+
+    assert_true(
+        'paths = ["csi\\u009b2J", "\\u009d0;pwned\\u009c"]  # (cli)' in rendered
+    )
+    assert_true("# config file: osc\\u009d0;pwned\\u009c" in rendered)
+    # No raw C1 code point survives anywhere in the rendered document.
+    for cp in rendered.codepoints():
+        assert_false(Int(cp) >= 128 and Int(cp) <= 159)
+
+
 def test_config_show_keeps_ordered_overrides_and_present_keys_only() raises:
     var first = OverrideRule.empty()
     first.files = ["tests/gpu_*"]

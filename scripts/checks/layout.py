@@ -86,6 +86,7 @@ UNIT_SUITES = {
     "test_exec_pool_policy.mojo",
     "test_exec_spec.mojo",
     "test_exec_tty.mojo",
+    "test_model_control_chars.mojo",
     "test_model_events.mojo",
     "test_model_exit_code.mojo",
     "test_model_node_id.mojo",
@@ -223,6 +224,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_exec_pool_policy.mojo",
     "tests/unit/test_exec_spec.mojo",
     "tests/unit/test_exec_tty.mojo",
+    "tests/unit/test_model_control_chars.mojo",
     "tests/unit/test_model_events.mojo",
     "tests/unit/test_model_exit_code.mojo",
     "tests/unit/test_model_node_id.mojo",
@@ -265,7 +267,7 @@ CLASSIFIED_PATHS = (
     "tests/unit/test_session_shard.mojo",
     "tests/unit/test_session_verdict.mojo",
 )
-CLASSIFIED_TEST_COUNT = 1287
+CLASSIFIED_TEST_COUNT = 1300
 CLASSIFIED_ROOTS = (
     Path("tests/unit"),
     Path("tests/integration"),

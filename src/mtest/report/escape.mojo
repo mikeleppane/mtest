@@ -22,8 +22,10 @@ into GitHub Actions safely lives beside these escapers in `fencing.mojo`.
 One of the three streams is not purely machine-consumed: the annotation tail is
 printed to the console's own descriptor, which may be a terminal. The GitHub
 escapers therefore finish by running their result through `console_text`, the
-runner's single terminal-safety mapping, rather than growing a second copy of
-that policy here. The XML and JSON escapers do not: their documents are never
+runner's console escaper, rather than growing a second copy of that policy
+here. `console_text` in turn takes its classification of which code points a
+terminal interprets from `mtest.model.control_chars`, the one definition every
+terminal-facing surface in the runner shares. The XML and JSON escapers do not: their documents are never
 handed to a terminal, and both already have a total answer for every control
 code point under their own format's rules.
 """

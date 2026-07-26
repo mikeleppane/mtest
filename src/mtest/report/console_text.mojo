@@ -25,12 +25,25 @@ or split. Their input is a Mojo `String`, valid UTF-8 by construction; raw child
 bytes reach that form through `lossy_utf8` first, exactly as the machine
 reporters require.
 
-Two surfaces use it, because two surfaces reach a terminal. The console renderer
-is the obvious one. The other is the GitHub annotation tail: mtest prints its
-workflow commands to the console's own descriptor, so `gh_escape_message` in
-`escape.mojo` finishes by running its result through `escape_multiline`. Sharing
-this mapping rather than copying it is deliberate — one policy, one place to
-mutation-test.
+**Which** code points are interpreted is not decided here: that classification
+lives in `mtest.model.control_chars` because mtest has more than one terminal
+surface and `config` may not import `report`. This module decides only how an
+interpreted code point is *spelled* on the console — `\\xHH` for C0 and DEL,
+`\\u00HH` for C1, uppercase hex throughout. `cli/doctor.mojo` and
+`config/show.mojo` consult the same classification and spell their own output
+their own way, the latter because it is emitting TOML, which has no `\\xHH`
+escape.
+
+Two surfaces use this module, though five reach a terminal. The console
+renderer is the obvious one. The other is the GitHub annotation tail: mtest
+prints its workflow commands to the console's own descriptor, so
+`gh_escape_message` in `escape.mojo` finishes by running its result through
+`escape_multiline`. Sharing this mapping rather than copying it is deliberate —
+one policy, one place to mutation-test. The remaining three terminal surfaces
+are `doctor` and `config show`, which share the classification but not the
+spelling, and the `--collect` listing, which is deliberately left raw: it is a
+byte-exact machine listing of node ids, consumed by tooling rather than read as
+prose, and escaping it would break that contract.
 
 The escaped result is for display only. Nothing here runs upstream of parsing,
 capture, the NDJSON stream, or the JUnit report: those keep their own raw
@@ -45,6 +58,7 @@ homoglyphs — pass through unchanged by design. They are a rendering-layer
 concern with no single correct answer for a terminal, and escaping them would
 corrupt legitimate right-to-left test names and assertion text.
 """
+from mtest.model.control_chars import is_c1_control, is_interpreted_control
 
 
 def _hex_digit(value: Int) -> String:
@@ -82,12 +96,18 @@ def _byte_escape(prefix: String, value: Int) -> String:
 def _escape_controls(text: String, preserve_lf_tab: Bool) -> String:
     """The shared escaping mechanism behind the two policy functions.
 
-    Walks `text` by code point and rewrites exactly the three ranges a terminal
-    interprets: the C0 controls `U+0000..U+001F`, DEL `U+007F`, and the C1
+    Walks `text` by code point and rewrites exactly what
+    `mtest.model.control_chars.is_interpreted_control` classifies as terminal
+    instructions: the C0 controls `U+0000..U+001F`, DEL `U+007F`, and the C1
     controls `U+0080..U+009F`. Every other code point — printable ASCII,
     accented Latin, CJK, emoji, and the U+FFFD a lossy decode produced — is
     copied through unchanged, so the only difference between the input and the
     output is a control the terminal would have executed.
+
+    The classification is shared with `doctor` and `config show`; the spelling
+    is this module's own. C1 takes the `\\u00HH` form rather than `\\xHH`
+    because a C1 control is a code point, not a byte, and the console has room
+    to say so.
 
     The single policy point is `preserve_lf_tab`; `escape_scalar` and
     `escape_multiline` name the two settings, and no other caller may.
@@ -103,19 +123,12 @@ def _escape_controls(text: String, preserve_lf_tab: Bool) -> String:
     var out = String("")
     for cp in text.codepoints():
         var value = Int(cp)
-        if value == 0x0A or value == 0x09:
-            if preserve_lf_tab:
-                out += String(cp)
-            else:
-                out += _byte_escape("\\x", value)
-        elif value < 0x20:
-            out += _byte_escape("\\x", value)
-        elif value == 0x7F:
-            out += _byte_escape("\\x", value)
-        elif value >= 0x80 and value <= 0x9F:
+        if not is_interpreted_control(value, preserve_lf_tab):
+            out += String(cp)
+        elif is_c1_control(value):
             out += _byte_escape("\\u00", value)
         else:
-            out += String(cp)
+            out += _byte_escape("\\x", value)
     return out^
 
 
