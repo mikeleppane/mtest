@@ -435,7 +435,6 @@ LIVE_COMMAND_FIXED_PATHS = (
     Path("README.md"),
     Path("AGENTS.md"),
     Path("pixi.toml"),
-    Path("notes/console-captures/README.md"),
 )
 LIVE_COMMAND_GLOBS = (
     "scripts/**/*.py",
@@ -464,7 +463,13 @@ README_SCAN_EXCLUDED_DIRS = {
     ".git",
     ".pixi",
     "build",
+    # untracked working notes, and linked worktrees holding other branches'
+    # checkouts. Both are present locally and absent in a fresh clone, so
+    # walking them would make this gate read a different file set on a
+    # contributor's machine than on CI, and a README from an unrelated branch
+    # could red it.
     "notes",
+    ".worktrees",
 }
 
 

@@ -397,7 +397,6 @@ class DirectInvocationPolicyTests(unittest.TestCase):
                 Path(".github/workflows/ci.yml"),
                 Path("recipe/build.sh"),
                 Path(".agents/skills/example/SKILL.md"),
-                Path("notes/console-captures/README.md"),
             )
             for index, relative in enumerate(relative_paths):
                 path = repo / relative

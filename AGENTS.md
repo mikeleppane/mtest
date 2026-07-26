@@ -341,7 +341,6 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `transcripts` | protocol snapshots plus `scripts/gen_transcripts.py` and `scripts/checks/{protocol_snapshots,transcript_compare}.py` |
 | `spec` | `docs/cli-contract.md` |
 | `agents` | `AGENTS.md` |
-| `notes` | `notes/` |
 | `readme` | `README.md` |
 | `model` | `src/mtest/model` (outcomes, node ids, events, exit codes) |
 | `platform` | `src/mtest/platform` (the narrow platform-I/O boundary) |
