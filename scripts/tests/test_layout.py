@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -26,6 +27,10 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
             ("INTEGRATION_SUITES", layout.check_suite_layout),
             ("CLASSIFIED_PATHS", layout.check_suite_layout),
             ("CLASSIFIED_ROOTS", layout.check_suite_layout),
+            (
+                "FORBIDDEN_CLASSIFIED_PACKAGE_MARKERS",
+                layout.check_classified_roots_are_not_precompilable_packages,
+            ),
             ("SUPPORT_MODULES", layout.check_suite_layout),
             ("EXEC_FIXTURES", layout.check_exec_fixture_layout),
             ("E2E_NATIVE_FIXTURES", layout.check_e2e_native_fixture_layout),
@@ -402,6 +407,69 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
             layout.check_suite_layout()
 
         self.assertEqual(roots, [layout.REPO_ROOT])
+
+
+class ClassifiedPackagePrecompileGuardTests(unittest.TestCase):
+    """Reintroducing a package marker over main()-declaring tests must fail."""
+
+    def test_a_reintroduced_marker_is_rejected_without_touching_mojo(self) -> None:
+        # The structural pre-check must fire before any subprocess is spawned,
+        # so this proves the failure even with `mojo` unresolvable.
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            marker = repo / "tests" / "unit" / "__init__.mojo"
+            marker.parent.mkdir(parents=True)
+            marker.write_text("", encoding="utf-8")
+
+            with (
+                mock.patch.object(shutil, "which", return_value=None),
+                self.assertRaisesRegex(AssertionError, "package marker reintroduced"),
+            ):
+                layout.check_classified_roots_are_not_precompilable_packages(repo)
+
+    def test_mojo_missing_from_path_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            with (
+                mock.patch.object(shutil, "which", return_value=None),
+                self.assertRaisesRegex(AssertionError, "mojo is not available on PATH"),
+            ):
+                layout.check_classified_roots_are_not_precompilable_packages(repo)
+
+    def test_a_failed_precompile_is_surfaced_with_its_stderr(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            failed = subprocess.CompletedProcess(
+                args=["mojo", "precompile"],
+                returncode=1,
+                stdout="",
+                stderr="error: 'main()' is not supported within packages\n",
+            )
+            with (
+                mock.patch.object(shutil, "which", return_value="/bin/mojo"),
+                mock.patch.object(subprocess, "run", return_value=failed),
+                self.assertRaisesRegex(
+                    AssertionError,
+                    r"mojo precompile tests/ failed \(rc=1\).*not supported "
+                    r"within packages",
+                ),
+            ):
+                layout.check_classified_roots_are_not_precompilable_packages(repo)
+
+    def test_absent_markers_and_a_clean_precompile_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            ok = subprocess.CompletedProcess(
+                args=["mojo", "precompile"], returncode=0, stdout="", stderr=""
+            )
+            with (
+                mock.patch.object(shutil, "which", return_value="/bin/mojo"),
+                mock.patch.object(subprocess, "run", return_value=ok) as run,
+            ):
+                layout.check_classified_roots_are_not_precompilable_packages(repo)
+
+            self.assertEqual(run.call_args.kwargs["cwd"], repo)
+            self.assertIn("tests/", run.call_args.args[0])
 
 
 class AggregateMembershipOracleTests(unittest.TestCase):
