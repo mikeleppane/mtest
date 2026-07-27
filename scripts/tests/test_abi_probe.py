@@ -143,6 +143,59 @@ class ClassifiedSourcesTests(unittest.TestCase):
     def test_real_search_roots_are_nonempty(self) -> None:
         self.assertGreater(len(abi_probe.classified_sources()), 0)
 
+    def test_the_real_tree_has_no_cross_root_stem_collision(self) -> None:
+        """The live tree must satisfy the property, not just the fixtures."""
+        stems = [path.stem for path in abi_probe.classified_sources()]
+        self.assertEqual(len(stems), len(set(stems)))
+
+    def test_a_cross_root_stem_collision_is_rejected(self) -> None:
+        """Two roots holding the same stem must fail, not silently shadow.
+
+        `-I tests/unit` precedes `-I tests/integration` and Mojo resolves a
+        bare stem against the first match with no ambiguity error, so the
+        second module would never be compiled by the probe at all. A drift
+        declared only in the shadowed twin would co-link clean.
+
+        Note this is checked over the whole classified universe, not over one
+        co-link list: shadowing needs only ONE twin in the list, so
+        `render_entrypoint`'s within-list check cannot see this case.
+        """
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            unit = root / "unit"
+            integration = root / "integration"
+            unit.mkdir()
+            integration.mkdir()
+            for directory in (unit, integration):
+                (directory / "test_twin.mojo").write_text(
+                    "def test_one():\n    pass\n", encoding="utf-8"
+                )
+
+            with (
+                patch.object(abi_probe, "SEARCH_ROOTS", (unit, integration)),
+                patch.object(abi_probe, "ROOT", root),
+                self.assertRaisesRegex(SystemExit, "share a stem"),
+            ):
+                abi_probe.classified_sources()
+
+    def test_distinct_stems_across_roots_are_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            unit = root / "unit"
+            integration = root / "integration"
+            unit.mkdir()
+            integration.mkdir()
+            (unit / "test_alpha.mojo").write_text("", encoding="utf-8")
+            (integration / "test_beta.mojo").write_text("", encoding="utf-8")
+
+            with (
+                patch.object(abi_probe, "SEARCH_ROOTS", (unit, integration)),
+                patch.object(abi_probe, "ROOT", root),
+            ):
+                found = abi_probe.classified_sources()
+
+        self.assertEqual([path.stem for path in found], ["test_alpha", "test_beta"])
+
 
 class SharedSymbolFilesTests(unittest.TestCase):
     def test_a_symbol_declared_once_is_excluded(self) -> None:

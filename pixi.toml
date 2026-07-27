@@ -317,10 +317,11 @@ coverage-capability = "python -m scripts.checks.coverage_capability"
 # DOGFOOD gate: run three focused executable probes through the built mtest
 # binary. This exercises mtest's real discover/build/run/parse/report path and
 # checks exact header/PASS-row membership independently of mtest. The exhaustive
-# classified inventory belongs to test's single aggregate binary — see
-# CLASSIFIED_TEST_COUNT in scripts/checks/layout.py for the one authoritative
-# figure; compiling all source files separately here would duplicate compiler
-# work without adding behavioral coverage.
+# classified inventory belongs to the `test` task, which runs
+# scripts/harness/selfhost.py and derives its own inventory from the sources on
+# disk — there is no committed figure to keep in step. Compiling all classified
+# sources again here would duplicate compiler work without adding behavioral
+# coverage.
 [tasks.dogfood-check]
 cmd = "python -m scripts.harness.dogfood"
 depends-on = ["build-bin"]

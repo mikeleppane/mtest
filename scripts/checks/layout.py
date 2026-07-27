@@ -404,14 +404,11 @@ def check_classified_mojo_inventory(root: Path) -> None:
     Nothing here is declared. The expectation is derived entirely from the
     disk and from the runner's own glob (`CLASSIFIED_TEST_GLOB`), so adding a
     test file costs zero edits in this repository -- the same rule
-    `scripts/harness/selfhost.py`'s oracle lives by. There is deliberately no
-    path list and no test count to update: `selfhost.py` reconciles mtest's
-    report against a source-derived inventory per file and per individual test
-    name on every `pixi run test`, which is a far stronger statement than a
-    committed list could make, and it makes one.
+    `scripts/harness/selfhost.py`'s oracle lives by, and the reason the
+    committed `CLASSIFIED_PATHS`/`CLASSIFIED_TEST_COUNT` ledgers are gone.
 
-    What a committed list did buy, and what this reproduces from disk, is the
-    class of files that silently never run at all -- the ones no oracle can
+    Part of what a committed list bought is reproduced here from disk: the
+    class of files that silently never run at all, which no oracle can
     reconcile because they never reach the runner:
 
     - a symlinked entry, which discovery refuses to follow;
@@ -422,6 +419,17 @@ def check_classified_mojo_inventory(root: Path) -> None:
 
     It is also fail-closed on emptiness: a classified root that holds no test
     file at all is a finding, not a vacuous pass.
+
+    Part of it is NOT reproduced, and cannot be. A committed path list and a
+    committed test count were the only artifacts that went red when a test
+    file or a test function was REMOVED from source. A bad merge that drops
+    `tests/unit/test_x.mojo`, or a `test_foo` renamed to `foo`, now leaves
+    disk, oracle and every gate in agreement -- so long as the file keeps at
+    least one test. That is the unavoidable price of the zero-ledger-edits
+    rule: the two properties are mutually exclusive, and this repository has
+    deliberately chosen the one that makes adding a test free.
+    `scripts/harness/selfhost.py`'s module docstring says the same thing about
+    its own oracle. Do not describe either as replacing the ledgers outright.
 
     Args:
         root: The repository root the classified suite directories live under.

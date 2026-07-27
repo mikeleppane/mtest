@@ -43,10 +43,18 @@ package containing one (`error: 'main()' is not supported within packages`).
 The two spellings are strictly exclusive, measured on this checkout: with a
 marker present, `-I tests/unit` + `import test_foo` fails with "unable to
 locate module"; with it absent, `-I .` + `import tests.unit.test_foo` fails
-with "'unit' does not refer to a nested package". Two modules sharing a stem
-would make one of them silently unreachable through an include path, so
-`render_entrypoint` rejects that rather than quietly co-linking fewer modules
-than it was asked to.
+with "'unit' does not refer to a nested package".
+
+Resolving by stem has one sharp edge. `-I tests/unit` precedes
+`-I tests/integration`, and Mojo takes the first include path that matches
+without reporting any ambiguity, so two classified modules sharing a stem
+would make one silently shadow the other: `import test_foo` would compile the
+`tests/unit` twin while this probe's own output named the `tests/integration`
+one. An arity drift declared only in the shadowed twin would then co-link
+clean and this gate would print OK. `classified_sources` therefore requires
+every stem across BOTH roots to be distinct, over the whole classified
+universe rather than over one co-link list -- shadowing needs only ONE twin
+in the list and the other merely present on disk.
 
 A declaration is matched over its complete bracketed span
 (`external_call[...]`), not one line: the symbol name legitimately sits on a
@@ -183,10 +191,28 @@ def declared_symbols(source: Path) -> set[str]:
 def classified_sources() -> list[Path]:
     """Return every classified `test_*.mojo` module, bytewise sorted.
 
+    Also enforces that every classified module across BOTH roots has a
+    distinct stem, because the generated entrypoint imports by stem off an
+    include path and `-I tests/unit` precedes `-I tests/integration`. Mojo
+    resolves a bare stem against the first include path that matches and
+    raises no ambiguity error, so a cross-root collision means
+    `import test_foo` silently compiles `tests/unit/test_foo.mojo` while the
+    probe's own output names `tests/integration/test_foo.mojo`. A drift
+    declared only in the shadowed twin then co-links clean and the gate
+    reports OK -- reproduced end to end: a shadowed build returned 0 on real
+    injected arity drift where the unshadowed control returned nonzero.
+
+    This is checked over the whole classified universe rather than over one
+    co-link list, because shadowing does not require both twins to be in the
+    list: one twin declaring the shared symbol is enough, and the other need
+    only exist on disk ahead of it on the include path.
+
     Raises:
-        SystemExit: Neither search root has a single classified module. That
+        SystemExit: Neither search root has a single classified module -- that
             would mean the tree has moved out from under this probe, not that
-            there is genuinely nothing to guard.
+            there is genuinely nothing to guard -- or two classified modules
+            share a stem, which would make this probe's coverage silently
+            narrower than the report it prints.
     """
     found = [
         path
@@ -194,6 +220,20 @@ def classified_sources() -> list[Path]:
         for path in sorted(root.glob("test_*.mojo"), key=lambda p: p.name)
     ]
     require(bool(found), "no classified test_*.mojo modules found")
+    by_stem: dict[str, list[Path]] = {}
+    for path in found:
+        by_stem.setdefault(path.stem, []).append(path)
+    collisions = {stem: paths for stem, paths in by_stem.items() if len(paths) > 1}
+    require(
+        not collisions,
+        "classified modules share a stem, so an include-path import resolves "
+        "to whichever comes first and silently shadows the other(s); this "
+        "probe cannot co-link the shadowed module at all: "
+        + "; ".join(
+            f"{stem}: {[path.relative_to(ROOT).as_posix() for path in paths]}"
+            for stem, paths in sorted(collisions.items())
+        ),
+    )
     return found
 
 
@@ -286,11 +326,15 @@ def render_entrypoint(sources: list[Path]) -> str:
         The complete Mojo source of the entrypoint.
 
     Raises:
-        SystemExit: Two sources share a stem, or a stem is not importable. A
-            shared stem is fatal rather than tolerated: both modules would be
-            imported under one name off the include path, so one of them would
-            silently not be co-linked at all and the probe would quietly guard
-            less than its own output claims.
+        SystemExit: A stem is not importable, or two sources IN THIS LIST
+            share a stem. Note what this second check does NOT cover: it sees
+            only the modules handed to it, and stem shadowing does not need
+            both twins in the list -- a twin that merely exists on disk
+            earlier on the include path shadows a co-linked module just as
+            effectively. `classified_sources` enforces stem uniqueness across
+            the whole classified universe and is what actually closes that
+            hole; this one is a local invariant on the rendered source, not
+            the guard.
         OSError: A source could not be read.
     """
     names = [_module_name(source) for source in sources]
