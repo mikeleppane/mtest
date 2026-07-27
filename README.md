@@ -209,13 +209,16 @@ deterministic; opaque values retain their own `Writable` formatting, including
 any ordering it chooses.
 
 Finalized opaque-value projections are at most 1024 bytes, text context is at
-most 4096 bytes, and a complete assertion body is at most 16384 bytes. Each cap
-includes a complete `... [truncated]` marker at the point where that projection
-or body omitted bytes; later detail can follow a per-operand marker. Equality is
-exact; a passing assertion formats nothing, while a failing assertion formats
-each displayed operand once. These limits bound bytes finalized and emitted by
-the companion, not private work performed inside user-defined equality or
-formatting code. A present reason retains bounded space at the end even when
+most 4096 bytes, and a complete assertion body is at most 16384 bytes. Text
+context shows the differing line and at most two lines on either side;
+`... [cropped]` marks omitted context outside that window or before a retained
+line. Each byte cap includes a complete `... [truncated]` marker at the point
+where that projection or body omitted bytes; later detail can follow a
+per-operand marker. Equality is exact; a passing assertion formats nothing,
+while a failing assertion formats each displayed operand once. These limits
+bound bytes finalized and emitted by the companion, not private work performed
+inside user-defined equality or formatting code. A present reason retains
+bounded space at the end even when
 mismatch detail is truncated.
 
 `<PREFIX>/share/mtest/assertions-src` is one complete source package named

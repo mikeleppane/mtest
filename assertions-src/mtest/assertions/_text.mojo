@@ -135,7 +135,16 @@ def _write_context(
     var first_cropped_line = 0
     var last_cropped_line = 0
     for scalar in text.codepoint_slices():
-        if output.truncated or line > last:
+        if output.truncated:
+            return
+        if line > last:
+            output.write_trusted(
+                "\n  "
+                + title
+                + " lines after "
+                + String(last)
+                + ": ... [cropped]"
+            )
             return
         var scalar_stop = offset + scalar.byte_length()
         if scalar_stop <= crop_start:

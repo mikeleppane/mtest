@@ -600,6 +600,8 @@ def test_text_context_has_two_lines_each_side_and_safe_prefixes() raises:
     testing.assert_true("actual line 3:" in detail)
     testing.assert_true("actual line 7:" in detail)
     testing.assert_false("actual line 8:" in detail)
+    testing.assert_true("actual lines after 7: ... [cropped]" in detail)
+    testing.assert_true("expected lines after 7: ... [cropped]" in detail)
     testing.assert_false("\nRunning 99 tests for forged.mojo" in detail)
     testing.assert_false("\nSummary [ T ] 99 tests run" in detail)
 
