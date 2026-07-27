@@ -17,7 +17,7 @@ import tomllib
 
 from scripts.build import package_consumption
 from scripts.e2e import __main__ as e2e_main
-from scripts.harness import aggregate, dogfood
+from scripts.harness import dogfood, selfhost
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -82,219 +82,21 @@ VENDORED_TOML_LOCAL_CHECKSUM_PATHS = {
     "toml/lexer.mojo",
     "toml/parser.mojo",
 }
-UNIT_SUITES = {
-    "test_cache_registry.mojo",
-    "test_cli_arity.mojo",
-    "test_cli_arity0.mojo",
-    "test_cli_build_flags.mojo",
-    "test_cli_collect.mojo",
-    "test_cli_doctor.mojo",
-    "test_cli_grammar.mojo",
-    "test_cli_inventory.mojo",
-    "test_cli_overlay.mojo",
-    "test_cli_parse.mojo",
-    "test_config.mojo",
-    "test_config_file.mojo",
-    "test_config_lossy_utf8.mojo",
-    "test_config_resolve.mojo",
-    "test_config_show.mojo",
-    "test_config_state.mojo",
-    "test_config_toml_adversarial.mojo",
-    "test_config_value_validation.mojo",
-    "test_discover_fnmatch.mojo",
-    "test_discover_normalize.mojo",
-    "test_exec_pool_policy.mojo",
-    "test_exec_spec.mojo",
-    "test_exec_tty.mojo",
-    "test_model_control_chars.mojo",
-    "test_model_events.mojo",
-    "test_model_exit_code.mojo",
-    "test_model_node_id.mojo",
-    "test_model_outcome.mojo",
-    "test_model_parse_disposition.mojo",
-    "test_model_slow.mojo",
-    "test_model_test_counts.mojo",
-    "test_model_test_result.mojo",
-    "test_platform_temp_file.mojo",
-    "test_protocol_corruption.mojo",
-    "test_protocol_matrix.mojo",
-    "test_report_annotations.mojo",
-    "test_report_composite.mojo",
-    "test_report_console.mojo",
-    "test_report_console_text.mojo",
-    "test_report_coordinator.mojo",
-    "test_report_escape.mojo",
-    "test_report_json_reporter.mojo",
-    "test_report_json_stream.mojo",
-    "test_report_junit.mojo",
-    "test_report_junit_finalize.mojo",
-    "test_report_junit_reporter.mojo",
-    "test_report_recording.mojo",
-    "test_report_signals.mojo",
-    "test_select_failure_selection.mojo",
-    "test_select_logic.mojo",
-    "test_select_operands.mojo",
-    "test_session_attribution.mojo",
-    "test_session_clamp.mojo",
-    "test_session_classify.mojo",
-    "test_session_detail.mojo",
-    "test_session_effective_settings.mojo",
-    "test_session_mangle.mojo",
-    "test_session_mangle_bounds.mojo",
-    "test_session_pipeline.mojo",
-    "test_session_pool_plan.mojo",
-    "test_session_pool_progress.mojo",
-    "test_session_precompile_paths.mojo",
-    "test_session_resilience.mojo",
-    "test_session_retry_class.mojo",
-    "test_session_shard.mojo",
-    "test_session_verdict.mojo",
-}
-INTEGRATION_SUITES = {
-    "test_discover_pipeline.mojo",
-    "test_discover_walk.mojo",
-    "test_exec_capture.mojo",
-    "test_exec_decode.mojo",
-    "test_exec_env.mojo",
-    "test_exec_etxtbsy.mojo",
-    "test_exec_fdhygiene.mojo",
-    "test_exec_flood.mojo",
-    "test_exec_interrupt.mojo",
-    "test_exec_paths.mojo",
-    "test_exec_pool.mojo",
-    "test_exec_prestart.mojo",
-    "test_exec_reap.mojo",
-    "test_exec_sweep.mojo",
-    "test_exec_timeout.mojo",
-    "test_protocol_collection.mojo",
-    "test_protocol_report.mojo",
-    "test_session_annotations.mojo",
-    "test_session_collect.mojo",
-    "test_session_exit_codes.mojo",
-    "test_session_flow.mojo",
-    "test_session_gates.mojo",
-    "test_session_handshake.mojo",
-    "test_session_interrupt.mojo",
-    "test_session_json_stream.mojo",
-    "test_session_junit.mojo",
-    "test_session_maxfail.mojo",
-    "test_session_outcomes.mojo",
-    "test_session_overrides.mojo",
-    "test_session_pool_faults.mojo",
-    "test_session_precompile.mojo",
-    "test_session_rmtree.mojo",
-    "test_session_schedule.mojo",
-    "test_session_selection.mojo",
-    "test_transcripts_smoke.mojo",
-}
-CLASSIFIED_PATHS = (
-    "tests/integration/test_discover_pipeline.mojo",
-    "tests/integration/test_discover_walk.mojo",
-    "tests/integration/test_exec_capture.mojo",
-    "tests/integration/test_exec_decode.mojo",
-    "tests/integration/test_exec_env.mojo",
-    "tests/integration/test_exec_etxtbsy.mojo",
-    "tests/integration/test_exec_fdhygiene.mojo",
-    "tests/integration/test_exec_flood.mojo",
-    "tests/integration/test_exec_interrupt.mojo",
-    "tests/integration/test_exec_paths.mojo",
-    "tests/integration/test_exec_pool.mojo",
-    "tests/integration/test_exec_prestart.mojo",
-    "tests/integration/test_exec_reap.mojo",
-    "tests/integration/test_exec_sweep.mojo",
-    "tests/integration/test_exec_timeout.mojo",
-    "tests/integration/test_protocol_collection.mojo",
-    "tests/integration/test_protocol_report.mojo",
-    "tests/integration/test_session_annotations.mojo",
-    "tests/integration/test_session_collect.mojo",
-    "tests/integration/test_session_exit_codes.mojo",
-    "tests/integration/test_session_flow.mojo",
-    "tests/integration/test_session_gates.mojo",
-    "tests/integration/test_session_handshake.mojo",
-    "tests/integration/test_session_interrupt.mojo",
-    "tests/integration/test_session_json_stream.mojo",
-    "tests/integration/test_session_junit.mojo",
-    "tests/integration/test_session_maxfail.mojo",
-    "tests/integration/test_session_outcomes.mojo",
-    "tests/integration/test_session_overrides.mojo",
-    "tests/integration/test_session_pool_faults.mojo",
-    "tests/integration/test_session_precompile.mojo",
-    "tests/integration/test_session_rmtree.mojo",
-    "tests/integration/test_session_schedule.mojo",
-    "tests/integration/test_session_selection.mojo",
-    "tests/integration/test_transcripts_smoke.mojo",
-    "tests/unit/test_cache_registry.mojo",
-    "tests/unit/test_cli_arity.mojo",
-    "tests/unit/test_cli_arity0.mojo",
-    "tests/unit/test_cli_build_flags.mojo",
-    "tests/unit/test_cli_collect.mojo",
-    "tests/unit/test_cli_doctor.mojo",
-    "tests/unit/test_cli_grammar.mojo",
-    "tests/unit/test_cli_inventory.mojo",
-    "tests/unit/test_cli_overlay.mojo",
-    "tests/unit/test_cli_parse.mojo",
-    "tests/unit/test_config.mojo",
-    "tests/unit/test_config_file.mojo",
-    "tests/unit/test_config_lossy_utf8.mojo",
-    "tests/unit/test_config_resolve.mojo",
-    "tests/unit/test_config_show.mojo",
-    "tests/unit/test_config_state.mojo",
-    "tests/unit/test_config_toml_adversarial.mojo",
-    "tests/unit/test_config_value_validation.mojo",
-    "tests/unit/test_discover_fnmatch.mojo",
-    "tests/unit/test_discover_normalize.mojo",
-    "tests/unit/test_exec_pool_policy.mojo",
-    "tests/unit/test_exec_spec.mojo",
-    "tests/unit/test_exec_tty.mojo",
-    "tests/unit/test_model_control_chars.mojo",
-    "tests/unit/test_model_events.mojo",
-    "tests/unit/test_model_exit_code.mojo",
-    "tests/unit/test_model_node_id.mojo",
-    "tests/unit/test_model_outcome.mojo",
-    "tests/unit/test_model_parse_disposition.mojo",
-    "tests/unit/test_model_slow.mojo",
-    "tests/unit/test_model_test_counts.mojo",
-    "tests/unit/test_model_test_result.mojo",
-    "tests/unit/test_platform_temp_file.mojo",
-    "tests/unit/test_protocol_corruption.mojo",
-    "tests/unit/test_protocol_matrix.mojo",
-    "tests/unit/test_report_annotations.mojo",
-    "tests/unit/test_report_composite.mojo",
-    "tests/unit/test_report_console.mojo",
-    "tests/unit/test_report_console_text.mojo",
-    "tests/unit/test_report_coordinator.mojo",
-    "tests/unit/test_report_escape.mojo",
-    "tests/unit/test_report_json_reporter.mojo",
-    "tests/unit/test_report_json_stream.mojo",
-    "tests/unit/test_report_junit.mojo",
-    "tests/unit/test_report_junit_finalize.mojo",
-    "tests/unit/test_report_junit_reporter.mojo",
-    "tests/unit/test_report_recording.mojo",
-    "tests/unit/test_report_signals.mojo",
-    "tests/unit/test_select_failure_selection.mojo",
-    "tests/unit/test_select_logic.mojo",
-    "tests/unit/test_select_operands.mojo",
-    "tests/unit/test_session_attribution.mojo",
-    "tests/unit/test_session_clamp.mojo",
-    "tests/unit/test_session_classify.mojo",
-    "tests/unit/test_session_detail.mojo",
-    "tests/unit/test_session_effective_settings.mojo",
-    "tests/unit/test_session_mangle.mojo",
-    "tests/unit/test_session_mangle_bounds.mojo",
-    "tests/unit/test_session_pipeline.mojo",
-    "tests/unit/test_session_pool_plan.mojo",
-    "tests/unit/test_session_pool_progress.mojo",
-    "tests/unit/test_session_precompile_paths.mojo",
-    "tests/unit/test_session_resilience.mojo",
-    "tests/unit/test_session_retry_class.mojo",
-    "tests/unit/test_session_shard.mojo",
-    "tests/unit/test_session_verdict.mojo",
-)
-CLASSIFIED_TEST_COUNT = 1342
-CLASSIFIED_ROOTS = (
-    Path("tests/unit"),
-    Path("tests/integration"),
-)
+CLASSIFIED_ROOTS = selfhost.DEFAULT_ROOTS
+"""The classified suite roots, taken from the runner rather than restated.
+
+`scripts/harness/selfhost.py` is what `pixi run test` executes, so these are
+the directories whose contents actually run. Re-declaring them here would
+create a second list that can disagree with the first; borrowing the runner's
+own is what makes a drift impossible rather than merely detectable.
+"""
+CLASSIFIED_TEST_GLOB = selfhost.TEST_FILE_GLOB
+"""The runner's test-file glob, borrowed for the same reason as the roots.
+
+A Mojo file under a classified root that this pattern does not match never
+runs. That is the whole property `check_classified_mojo_inventory` exists to
+catch, so it has to test the runner's real pattern, not a copy of it.
+"""
 CLASSIFIED_PACKAGE_MARKERS = {
     Path("tests/unit/__init__.mojo"),
     Path("tests/integration/__init__.mojo"),
@@ -483,10 +285,6 @@ LIVE_COMMAND_GLOBS = (
 )
 PYTHON_EXECUTABLE_RE = re.compile(r"python(?:\d+(?:\.\d+)*)?")
 DIRECT_SCRIPT_RE = re.compile(r"scripts/[A-Za-z0-9_./-]+\.py")
-REGISTRATION_RE = re.compile(
-    r"^    suite_(\d+)\.test\[_mtest_module_(\d+)\."
-    r"(test_[A-Za-z0-9_]+)\]\(\)$"
-)
 README_SCAN_EXCLUDED_DIRS = {
     ".git",
     ".pixi",
@@ -515,105 +313,6 @@ def check_top_level_script_layout(repo_root: Path = REPO_ROOT) -> None:
         raise AssertionError(
             "top-level scripts membership mismatch: "
             f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
-        )
-
-
-def _independent_test_function_names(source: str) -> tuple[str, ...]:
-    """Parse top-level test declarations without aggregate helpers."""
-    names: list[str] = []
-    for line in source.splitlines():
-        if not line.startswith("def "):
-            continue
-        declaration = line.removeprefix("def ")
-        opening = declaration.find("(")
-        if opening == -1:
-            continue
-        prefix = declaration[:opening]
-        name = prefix.rstrip()
-        if prefix[len(name) :] and not prefix[len(name) :].isspace():
-            continue
-        if not name.startswith("test_") or len(name) == len("test_"):
-            continue
-        if not name or any(
-            not (character.isascii() and (character.isalnum() or character == "_"))
-            for character in name
-        ):
-            continue
-        names.append(name)
-    if not names:
-        raise AssertionError("independent oracle found no test_* functions")
-    if len(names) != len(set(names)):
-        raise AssertionError("independent oracle found duplicate test function names")
-    return tuple(names)
-
-
-def independent_registration_membership(
-    repo_root: Path, paths: tuple[str, ...]
-) -> tuple[tuple[str, str], ...]:
-    """Return ordered path/function membership from an independent source parser."""
-    membership: list[tuple[str, str]] = []
-    for relative in paths:
-        source = (repo_root / relative).read_text(encoding="utf-8")
-        membership.extend(
-            (relative, function)
-            for function in _independent_test_function_names(source)
-        )
-    return tuple(membership)
-
-
-def check_classified_entrypoint(
-    repo_root: Path,
-    paths: tuple[str, ...],
-    *,
-    expected_count: int,
-) -> None:
-    """Check generated imports and registrations against independent source truth."""
-    expected_membership = independent_registration_membership(repo_root, paths)
-    if len(expected_membership) != expected_count:
-        raise AssertionError(
-            "classified test count mismatch: "
-            f"expected={expected_count}, actual={len(expected_membership)}"
-        )
-
-    modules = aggregate.load_modules(repo_root, [Path(path) for path in paths])
-    generated_lines = aggregate.render_entrypoint(modules).splitlines()
-    expected_imports = [
-        f"import {path.removesuffix('.mojo').replace('/', '.')} "
-        f"as _mtest_module_{index}"
-        for index, path in enumerate(paths)
-    ]
-    actual_imports = [
-        line for line in generated_lines if line.startswith("import tests.")
-    ]
-    if actual_imports != expected_imports:
-        raise AssertionError("aggregate entrypoint import membership/order drifted")
-
-    expected_markers = [f'    print("==> {path}", flush=True)' for path in paths]
-    actual_markers = [
-        line for line in generated_lines if line.startswith('    print("==> tests/')
-    ]
-    if actual_markers != expected_markers:
-        raise AssertionError("aggregate entrypoint marker membership/order drifted")
-
-    actual_membership: list[tuple[str, str]] = []
-    for line in generated_lines:
-        if not line.startswith("    suite_") or ".test[" not in line:
-            continue
-        match = REGISTRATION_RE.fullmatch(line)
-        if match is None:
-            raise AssertionError(
-                f"aggregate entrypoint test registration syntax drifted: {line!r}"
-            )
-        suite_index = int(match.group(1))
-        module_index = int(match.group(2))
-        if suite_index != module_index or module_index >= len(paths):
-            raise AssertionError(
-                f"aggregate entrypoint test registration alias drifted: {line!r}"
-            )
-        actual_membership.append((paths[module_index], match.group(3)))
-    if tuple(actual_membership) != expected_membership:
-        raise AssertionError(
-            "aggregate entrypoint test registration membership/order drifted"
         )
 
 
@@ -687,15 +386,38 @@ def classified_mojo_universe(root: Path) -> tuple[set[Path], set[Path]]:
 
 
 def check_classified_mojo_inventory(root: Path) -> None:
-    """Require the classified roots to hold exactly the registered Mojo files.
+    """Require every Mojo file under a classified root to be one the runner runs.
+
+    Nothing here is declared. The expectation is derived entirely from the
+    disk and from the runner's own glob (`CLASSIFIED_TEST_GLOB`), so adding a
+    test file costs zero edits in this repository -- the same rule
+    `scripts/harness/selfhost.py`'s oracle lives by. There is deliberately no
+    path list and no test count to update: `selfhost.py` reconciles mtest's
+    report against a source-derived inventory per file and per individual test
+    name on every `pixi run test`, which is a far stronger statement than a
+    committed list could make, and it makes one.
+
+    What a committed list did buy, and what this reproduces from disk, is the
+    class of files that silently never run at all -- the ones no oracle can
+    reconcile because they never reach the runner:
+
+    - a symlinked entry, which discovery refuses to follow;
+    - a file parked as `.mojo.disabled` or otherwise named so the runner's
+      glob skips it;
+    - a misnamed Mojo module (`session_shard_test.mojo`, `helper.mojo`) that
+      looks like a suite to a reader and is invisible to the runner.
+
+    It is also fail-closed on emptiness: a classified root that holds no test
+    file at all is a finding, not a vacuous pass.
 
     Args:
         root: The repository root the classified suite directories live under.
 
     Raises:
-        AssertionError: A symlink sits under a classified root, or the Mojo
-            universe there differs from the registered suites plus the two
-            package markers in either direction.
+        AssertionError: A symlink sits under a classified root, a Mojo file
+            there is named so the runner would skip it, or a classified root
+            holds no test file at all.
+        OSError: A directory beneath a classified root could not be listed.
     """
     regular, symlinked = classified_mojo_universe(root)
     if symlinked:
@@ -703,85 +425,42 @@ def check_classified_mojo_inventory(root: Path) -> None:
             "symlinked classified path: "
             f"{sorted(path.as_posix() for path in symlinked)}"
         )
-    expected = {Path(path) for path in CLASSIFIED_PATHS} | CLASSIFIED_PACKAGE_MARKERS
-    unexpected = regular - expected
-    if unexpected:
+    candidates = regular - CLASSIFIED_PACKAGE_MARKERS
+    discovered = {path for path in candidates if path.match(CLASSIFIED_TEST_GLOB)}
+    skipped = candidates - discovered
+    if skipped:
         raise AssertionError(
-            "unexpected classified Mojo file: "
-            f"{sorted(path.as_posix() for path in unexpected)}"
+            "classified Mojo file the runner's "
+            f"{CLASSIFIED_TEST_GLOB} discovery would silently skip: "
+            f"{sorted(path.as_posix() for path in skipped)}"
         )
-    missing = expected - regular
-    if missing:
-        raise AssertionError(
-            "missing classified Mojo file: "
-            f"{sorted(path.as_posix() for path in missing)}"
-        )
+    for classified_root in CLASSIFIED_ROOTS:
+        if not any(path.parent == classified_root for path in discovered):
+            raise AssertionError(
+                f"classified root holds no {CLASSIFIED_TEST_GLOB} test file: "
+                f"{classified_root.as_posix()}"
+            )
 
 
 def check_suite_layout() -> None:
-    """Every aggregate module and support module has its classified home."""
-    _require_nonempty("unit suite", UNIT_SUITES)
-    _require_nonempty("integration suite", INTEGRATION_SUITES)
-    _require_nonempty("classified path", CLASSIFIED_PATHS)
+    """Every classified module and support module has its documented home."""
     _require_nonempty("classified root", CLASSIFIED_ROOTS)
     _require_nonempty("classified package marker", CLASSIFIED_PACKAGE_MARKERS)
     _require_nonempty("support module", SUPPORT_MODULES)
     check_classified_mojo_inventory(REPO_ROOT)
     tests_dir = REPO_ROOT / "tests"
-    actual_unit = {path.name for path in (tests_dir / "unit").glob("test_*.mojo")}
-    actual_integration = {
-        path.name for path in (tests_dir / "integration").glob("test_*.mojo")
+    stray = {
+        path.relative_to(REPO_ROOT)
+        for path in tests_dir.rglob(CLASSIFIED_TEST_GLOB)
+        if path.is_file() and path.parent.relative_to(REPO_ROOT) not in CLASSIFIED_ROOTS
     }
-    if actual_unit != UNIT_SUITES:
-        raise AssertionError(
-            "unit suite membership mismatch: "
-            f"missing={sorted(UNIT_SUITES - actual_unit)}, "
-            f"extra={sorted(actual_unit - UNIT_SUITES)}"
-        )
-    if actual_integration != INTEGRATION_SUITES:
-        raise AssertionError(
-            "integration suite membership mismatch: "
-            f"missing={sorted(INTEGRATION_SUITES - actual_integration)}, "
-            f"extra={sorted(actual_integration - INTEGRATION_SUITES)}"
-        )
-    all_suites = {
-        path.relative_to(tests_dir)
-        for path in tests_dir.rglob("test_*.mojo")
-        if path.is_file()
-    }
-    classified = {
-        *(Path("unit") / name for name in UNIT_SUITES),
-        *(Path("integration") / name for name in INTEGRATION_SUITES),
-    }
-    if all_suites != classified:
+    if stray:
         raise AssertionError(
             "tests/ contains a test module outside unit/integration: "
-            f"{sorted(str(path) for path in all_suites - classified)}"
+            f"{sorted(str(path) for path in stray)}"
         )
-    discovered = aggregate.discover_test_files(
-        REPO_ROOT,
-        [Path("tests/unit"), Path("tests/integration")],
-    )
-    actual_paths = tuple(path.as_posix() for path in discovered)
-    if actual_paths != CLASSIFIED_PATHS:
-        raise AssertionError(
-            "classified path ordering/membership mismatch: "
-            f"expected={list(CLASSIFIED_PATHS)}, actual={list(actual_paths)}"
-        )
-    check_classified_entrypoint(
-        REPO_ROOT,
-        CLASSIFIED_PATHS,
-        expected_count=CLASSIFIED_TEST_COUNT,
-    )
-    for package in (tests_dir, tests_dir / "unit", tests_dir / "integration"):
-        if not (package / "__init__.mojo").is_file():
-            raise AssertionError(f"aggregate package marker missing: {package}")
-    for relative in sorted(classified, key=lambda path: os.fsencode(str(path))):
-        source = (tests_dir / relative).read_text(encoding="utf-8")
-        try:
-            aggregate.test_function_names(source)
-        except ValueError as exc:
-            raise AssertionError(f"invalid aggregate module {relative}: {exc}") from exc
+    if not (tests_dir / "__init__.mojo").is_file():
+        raise AssertionError(f"tests package marker missing: {tests_dir}")
     try:
         dogfood.dogfood_test_files(REPO_ROOT)
     except RuntimeError as exc:

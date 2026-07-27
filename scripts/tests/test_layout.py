@@ -12,7 +12,6 @@ from unittest import mock
 
 from scripts.build import package_consumption
 from scripts.checks import layout
-from scripts.harness import aggregate
 
 
 class LayoutInventoryPolicyTests(unittest.TestCase):
@@ -22,9 +21,6 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
     def test_every_intended_inventory_fails_closed_when_empty(self) -> None:
         cases = (
             ("TOP_LEVEL_SCRIPT_FILES", layout.check_top_level_script_layout),
-            ("UNIT_SUITES", layout.check_suite_layout),
-            ("INTEGRATION_SUITES", layout.check_suite_layout),
-            ("CLASSIFIED_PATHS", layout.check_suite_layout),
             ("CLASSIFIED_ROOTS", layout.check_suite_layout),
             ("CLASSIFIED_PACKAGE_MARKERS", layout.check_suite_layout),
             ("SUPPORT_MODULES", layout.check_suite_layout),
@@ -238,16 +234,22 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
 
 
 class ClassifiedMojoUniverseTests(unittest.TestCase):
-    """The classified roots hold exactly the registered Mojo files, and no links."""
+    """Every Mojo file under a classified root is one the runner actually runs.
+
+    The expectation is derived from disk and from the runner's own glob, so
+    these fixtures never register anything: a tree is accepted or rejected on
+    what it contains, not on what some list says it should contain.
+    """
 
     SOLE_SUITE = "tests/unit/test_probe.mojo"
 
     def _accepted_tree(self, repo: Path) -> None:
-        """Create both package markers plus the one registered classified suite."""
+        """Create both package markers plus one discoverable suite per root."""
         for relative in (
             "tests/unit/__init__.mojo",
             "tests/integration/__init__.mojo",
             self.SOLE_SUITE,
+            "tests/integration/test_flow.mojo",
         ):
             path = repo / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -280,6 +282,7 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
                 Path("tests/unit/session_shard_test.mojo"),
                 Path("tests/unit/helper.mojo"),
                 Path("tests/integration/__init__.mojo"),
+                Path("tests/integration/test_flow.mojo"),
                 Path("tests/integration/test_probe.mojo.disabled"),
             },
         )
@@ -288,15 +291,38 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
             {Path("tests/unit/test_link.mojo"), Path("tests/unit/linked")},
         )
 
-    def test_registered_suites_and_package_markers_are_accepted(self) -> None:
+    def test_a_discoverable_tree_is_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp)
             self._accepted_tree(repo)
 
-            with mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)):
-                layout.check_classified_mojo_inventory(repo)
+            layout.check_classified_mojo_inventory(repo)
 
-    def test_every_unregistered_mojo_name_is_rejected(self) -> None:
+    def test_a_new_test_file_needs_no_ledger_edit(self) -> None:
+        """Adding a suite must cost zero edits anywhere in this repository.
+
+        This is the property the deleted `CLASSIFIED_PATHS`/`UNIT_SUITES`
+        ledgers cost on every single new test file, and the reason they are
+        gone. If this test ever needs a companion edit to pass, the derivation
+        has regressed back into a list.
+        """
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            self._accepted_tree(repo)
+            (repo / "tests" / "unit" / "test_brand_new.mojo").write_text(
+                "def test_new():\n    pass\n", encoding="utf-8"
+            )
+
+            layout.check_classified_mojo_inventory(repo)
+
+    def test_every_name_the_runner_would_skip_is_rejected(self) -> None:
+        """A Mojo file the discovery glob misses never runs, and no oracle sees it.
+
+        `selfhost.py` reconciles what mtest reported against what it found on
+        disk, so it can only speak for files discovery reached. A parked
+        `.mojo.disabled` or a misnamed module is invisible to both, which is
+        exactly the gap this check exists to close.
+        """
         cases = (
             "tests/unit/session_shard_test.mojo",
             "tests/integration/test_probe.mojo.disabled",
@@ -311,11 +337,8 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
                 self._accepted_tree(repo)
                 (repo / relative).write_text("", encoding="utf-8")
 
-                with (
-                    mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)),
-                    self.assertRaisesRegex(
-                        AssertionError, "unexpected classified Mojo file"
-                    ),
+                with self.assertRaisesRegex(
+                    AssertionError, "discovery would silently skip"
                 ):
                     layout.check_classified_mojo_inventory(repo)
 
@@ -334,9 +357,8 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
                 (repo / "outside.mojo").write_text("", encoding="utf-8")
                 os.symlink(repo / target, repo / relative)
 
-                with (
-                    mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)),
-                    self.assertRaisesRegex(AssertionError, "symlinked classified path"),
+                with self.assertRaisesRegex(
+                    AssertionError, "symlinked classified path"
                 ):
                     layout.check_classified_mojo_inventory(repo)
 
@@ -355,10 +377,7 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
             try:
                 with self.assertRaises(PermissionError):
                     layout.classified_mojo_universe(repo)
-                with (
-                    mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)),
-                    self.assertRaises(PermissionError),
-                ):
+                with self.assertRaises(PermissionError):
                     layout.check_classified_mojo_inventory(repo)
             finally:
                 hidden.chmod(0o700)
@@ -374,21 +393,23 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
             _regular, symlinked = layout.classified_mojo_universe(repo)
             self.assertEqual(symlinked, {Path("tests/unit")})
 
-            with (
-                mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)),
-                self.assertRaisesRegex(AssertionError, "symlinked classified path"),
-            ):
+            with self.assertRaisesRegex(AssertionError, "symlinked classified path"):
                 layout.check_classified_mojo_inventory(repo)
 
-    def test_a_registered_suite_that_vanished_is_rejected(self) -> None:
+    def test_a_classified_root_with_no_test_file_is_rejected(self) -> None:
+        """Emptiness fails closed; a derived expectation must not become vacuous.
+
+        Without this, a root that lost every suite -- or a glob that stopped
+        matching anything -- would satisfy a check that only ever asks
+        "is everything present named correctly?".
+        """
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp)
             self._accepted_tree(repo)
             (repo / self.SOLE_SUITE).unlink()
 
-            with (
-                mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)),
-                self.assertRaisesRegex(AssertionError, "missing classified Mojo file"),
+            with self.assertRaisesRegex(
+                AssertionError, "classified root holds no .* test file: tests/unit"
             ):
                 layout.check_classified_mojo_inventory(repo)
 
@@ -404,68 +425,6 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
             layout.check_suite_layout()
 
         self.assertEqual(roots, [layout.REPO_ROOT])
-
-
-class AggregateMembershipOracleTests(unittest.TestCase):
-    def _fixture(self, repo: Path) -> tuple[str, ...]:
-        relative = "tests/unit/test_probe.mojo"
-        source = repo / relative
-        source.parent.mkdir(parents=True)
-        source.write_text(
-            "def test_alpha():\n    pass\n\ndef test_beta() raises:\n    pass\n",
-            encoding="utf-8",
-        )
-        return (relative,)
-
-    def test_oracle_reads_source_without_aggregate_parser(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_tmp:
-            repo = Path(raw_tmp)
-            paths = self._fixture(repo)
-
-            with mock.patch.object(
-                aggregate,
-                "test_function_names",
-                return_value=["test_wrong_a", "test_wrong_b"],
-            ):
-                membership = layout.independent_registration_membership(repo, paths)
-
-        self.assertEqual(
-            membership,
-            (
-                ("tests/unit/test_probe.mojo", "test_alpha"),
-                ("tests/unit/test_probe.mojo", "test_beta"),
-            ),
-        )
-
-    def test_same_count_loader_substitution_is_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_tmp:
-            repo = Path(raw_tmp)
-            paths = self._fixture(repo)
-
-            with (
-                mock.patch.object(
-                    aggregate,
-                    "test_function_names",
-                    return_value=["test_alpha", "test_gamma"],
-                ),
-                self.assertRaisesRegex(AssertionError, "registration membership/order"),
-            ):
-                layout.check_classified_entrypoint(repo, paths, expected_count=2)
-
-    def test_same_count_loader_reordering_is_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_tmp:
-            repo = Path(raw_tmp)
-            paths = self._fixture(repo)
-
-            with (
-                mock.patch.object(
-                    aggregate,
-                    "test_function_names",
-                    return_value=["test_beta", "test_alpha"],
-                ),
-                self.assertRaisesRegex(AssertionError, "registration membership/order"),
-            ):
-                layout.check_classified_entrypoint(repo, paths, expected_count=2)
 
 
 class DirectInvocationPolicyTests(unittest.TestCase):
