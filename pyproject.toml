@@ -90,7 +90,7 @@ ignore = [
     # non-executable and EXE001 is reading them as something they are not.
     "EXE001",
     # Every one of these modules is a console checker whose entire output
-    # contract is what it prints. Loud over silent is a product principle here.
+    # contract is what it prints, and this repo reports rather than suppresses.
     "T201",
     "T203",
     # The exception-message rules want the message hoisted into a local before
