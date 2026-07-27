@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import json
 import os
@@ -176,46 +175,15 @@ E2E_HARNESS_PATHS = {
     Path("scripts/e2e/scenarios/selection.py"),
 }
 
-LIVE_COMMAND_FIXED_PATHS = (
-    Path("README.md"),
-    Path("CONTRIBUTING.md"),
-    Path("SECURITY.md"),
-    Path("docs/releasing.md"),
-    Path("AGENTS.md"),
-    Path(".agents/lessons.md"),
-    Path("pixi.toml"),
+DIRECT_SCRIPT_COMMAND_RE = re.compile(
+    # An interpreter word, optionally path-qualified and version-suffixed, its
+    # options, and then a repository-relative `.py` operand instead of `-m`.
+    # `-m scripts.checks.layout` cannot match: the operand after the options
+    # has to end in `.py`, and a dotted module name does not.
+    r"(?<![\w./-])(?:[\w./-]*/)?python[0-9.]*"
+    r"(?:\s+-\S+)*"
+    r"\s+(?:\./)?(scripts/[\w./-]+\.py)"
 )
-LIVE_COMMAND_GLOBS = (
-    "scripts/**/*.py",
-    "scripts/**/*.sh",
-    "src/**/*.mojo",
-    "tests/**/*.mojo",
-    "tests/**/*.py",
-    "tests/**/*.sh",
-    "e2e/**/*.mojo",
-    "e2e/**/*.py",
-    "e2e/**/*.sh",
-    "native/**/*.c",
-    "native/**/*.h",
-    ".github/workflows/**/*.yml",
-    ".github/workflows/**/*.yaml",
-    "recipe/**/*",
-    ".agents/skills/**/SKILL.md",
-)
-PYTHON_EXECUTABLE_RE = re.compile(r"python(?:\d+(?:\.\d+)*)?")
-DIRECT_SCRIPT_RE = re.compile(r"scripts/[A-Za-z0-9_./-]+\.py")
-README_SCAN_EXCLUDED_DIRS = {
-    ".git",
-    ".pixi",
-    "build",
-    # untracked working notes, and linked worktrees holding other branches'
-    # checkouts. Both are present locally and absent in a fresh clone, so
-    # walking them would make this gate read a different file set on a
-    # contributor's machine than on CI, and a README from an unrelated branch
-    # could red it.
-    "notes",
-    ".worktrees",
-}
 
 
 def check_top_level_script_layout(repo_root: Path = REPO_ROOT) -> None:
@@ -601,45 +569,79 @@ def check_e2e_layout() -> None:
         raise AssertionError("obsolete testdata/ root still exists")
 
 
-def live_command_files(repo_root: Path) -> tuple[Path, ...]:
-    """Return live source and command surfaces, excluding historical notes."""
-    candidates = {
-        relative
-        for relative in LIVE_COMMAND_FIXED_PATHS
-        if (repo_root / relative).is_file()
-    }
-    for pattern in LIVE_COMMAND_GLOBS:
-        candidates.update(
-            path.relative_to(repo_root)
-            for path in repo_root.glob(pattern)
-            if path.is_file()
+def direct_script_invocations(repo_root: Path = REPO_ROOT) -> tuple[str, ...]:
+    """Return every by-path Python script command written into a tracked file.
+
+    The scanned set is whatever `git ls-files` reports, so it is derived
+    rather than declared: a new document, workflow or shell script is covered
+    the moment it is tracked, and untracked working notes or a linked worktree
+    holding another branch's checkout cannot make this read one file set on a
+    contributor's machine and a different one on CI.
+
+    Args:
+        repo_root: Repository root whose tracked files are scanned.
+
+    Returns:
+        One `path:line: operand` finding per invocation, in `git ls-files`
+        order.
+
+    Raises:
+        AssertionError: `git ls-files` failed, or reported nothing to scan.
+    """
+    listed = subprocess.run(
+        ["git", "-C", str(repo_root), "ls-files", "-z"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if listed.returncode != 0:
+        raise AssertionError(
+            f"could not list tracked files to scan: {listed.stderr.strip()}"
         )
-    for directory, dirnames, filenames in os.walk(repo_root, followlinks=False):
-        dirnames[:] = [
-            name for name in dirnames if name not in README_SCAN_EXCLUDED_DIRS
-        ]
-        if "README.md" not in filenames:
+    tracked = [name for name in listed.stdout.split("\0") if name]
+    if not tracked:
+        raise AssertionError("git reported no tracked file to scan")
+    findings: list[str] = []
+    for name in tracked:
+        try:
+            contents = (repo_root / name).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            # A binary asset, or a path in the index with no work-tree file.
+            # Neither can carry a command line a reader would copy, and a
+            # missing work-tree file is already someone else's loud failure.
             continue
-        path = Path(directory) / "README.md"
-        candidates.add(path.relative_to(repo_root))
-    return tuple(sorted(candidates, key=lambda path: os.fsencode(str(path))))
+        findings.extend(
+            f"{name}:{number}: {match.group(1)}"
+            for number, line in enumerate(contents.splitlines(), start=1)
+            for match in DIRECT_SCRIPT_COMMAND_RE.finditer(line)
+        )
+    return tuple(findings)
 
 
-def _normalized_shell_word(word: str) -> str:
-    """Strip presentation punctuation without changing command path content."""
-    return word.strip("`'\"[]{}(),:")
+def check_python_package_invocation(repo_root: Path = REPO_ROOT) -> None:
+    """Documented script commands name a module, never a file path.
 
+    A script actually executed by path fails loudly on its own: it cannot
+    resolve `from scripts.checks import ...`. Prose is the gap this closes.
+    A command written into a README, a comment or a workflow is never run, so
+    nothing else in the repository ever contradicts it, and a contributor who
+    copies it gets an import traceback instead of the check they asked for.
 
-def _is_python_executable(word: str) -> bool:
-    """Return whether a shell word names a Python interpreter executable."""
-    normalized = _normalized_shell_word(word)
-    return PYTHON_EXECUTABLE_RE.fullmatch(Path(normalized).name.lower()) is not None
+    Args:
+        repo_root: Repository root to scan.
 
-
-def _is_direct_script(word: str) -> bool:
-    """Return whether a shell word is a repository-relative Python script."""
-    normalized = _normalized_shell_word(word).removeprefix("./")
-    return DIRECT_SCRIPT_RE.fullmatch(normalized) is not None
+    Raises:
+        AssertionError: The `scripts` package marker is gone, or a tracked
+            file spells a script command as an interpreter plus a path.
+    """
+    if not (repo_root / "scripts" / "__init__.py").is_file():
+        raise AssertionError("scripts package marker is missing")
+    findings = direct_script_invocations(repo_root)
+    if findings:
+        raise AssertionError(
+            f"script commands written as an interpreter plus a path, which "
+            f"cannot resolve this repository's imports: {list(findings)}"
+        )
 
 
 def _shell_words(text: str) -> list[str]:
@@ -658,125 +660,6 @@ def _shell_words(text: str) -> list[str]:
         else:
             expanded.append(word)
     return expanded
-
-
-def _argv_has_direct_script(words: list[str]) -> bool:
-    """Detect a script operand after an interpreter and its options."""
-    option_takes_value = {"-W", "-X", "--check-hash-based-pycs"}
-    for interpreter_index, word in enumerate(words):
-        if not _is_python_executable(word):
-            continue
-        index = interpreter_index + 1
-        while index < len(words):
-            candidate = _normalized_shell_word(words[index])
-            if candidate in {";", "&&", "||", "|", "(", ")"}:
-                break
-            if candidate in {"-m", "-c"}:
-                break
-            if candidate.startswith("-"):
-                consumes_value = candidate in option_takes_value
-                index += 2 if consumes_value else 1
-                continue
-            if _is_direct_script(candidate):
-                return True
-            break
-    return False
-
-
-def _ast_argv_has_direct_script(node: ast.AST) -> bool:
-    """Detect a literal argv headed by sys.executable or a Python path."""
-    if not isinstance(node, (ast.List, ast.Tuple)) or not node.elts:
-        return False
-    first = node.elts[0]
-    if (
-        isinstance(first, ast.Attribute)
-        and isinstance(first.value, ast.Name)
-        and first.value.id == "sys"
-        and first.attr == "executable"
-    ):
-        words = ["python"]
-    elif isinstance(first, ast.Constant) and isinstance(first.value, str):
-        if not _is_python_executable(first.value):
-            return False
-        words = [first.value]
-    else:
-        return False
-    for element in node.elts[1:]:
-        if not isinstance(element, ast.Constant) or not isinstance(element.value, str):
-            return False
-        words.append(element.value)
-    return _argv_has_direct_script(words)
-
-
-def direct_script_invocations(path: Path, contents: str) -> tuple[str, ...]:
-    """Return direct Python-script command forms found in one live surface."""
-    findings: set[str] = set()
-    for line_number, line in enumerate(contents.splitlines(), start=1):
-        if _argv_has_direct_script(_shell_words(line)):
-            findings.add(f"{path.as_posix()}:{line_number}: direct command")
-    if path.suffix == ".py":
-        try:
-            tree = ast.parse(contents, filename=str(path))
-        except SyntaxError:
-            tree = None
-        if tree is not None:
-            for node in ast.walk(tree):
-                # The helper matches only a literal list/tuple, both of which
-                # are expressions; restating that here is what establishes that
-                # `node.lineno` exists on the matched node.
-                if isinstance(
-                    node, (ast.List, ast.Tuple)
-                ) and _ast_argv_has_direct_script(node):
-                    findings.add(f"{path.as_posix()}:{node.lineno}: direct argv")
-    return tuple(sorted(findings))
-
-
-def live_direct_invocations(repo_root: Path) -> tuple[str, ...]:
-    """Return direct script invocations from live repository command surfaces."""
-    findings: list[str] = []
-    for relative in live_command_files(repo_root):
-        path = repo_root / relative
-        try:
-            contents = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            raise AssertionError(
-                f"could not inspect live file {relative}: {exc}"
-            ) from exc
-        findings.extend(direct_script_invocations(relative, contents))
-    return tuple(findings)
-
-
-def check_python_package_invocation() -> None:
-    """Python harnesses use package imports and repository-root module commands."""
-    scripts_dir = REPO_ROOT / "scripts"
-    if not (scripts_dir / "__init__.py").is_file():
-        raise AssertionError("scripts package marker is missing")
-
-    module_names = {path.stem for path in scripts_dir.glob("*.py")}
-    flat_imports: list[str] = []
-    for path in sorted(scripts_dir.glob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                flat_imports.extend(
-                    f"{path.relative_to(REPO_ROOT)}:{node.lineno}: "
-                    f"import {imported.name}"
-                    for imported in node.names
-                    if imported.name in module_names
-                )
-            elif isinstance(node, ast.ImportFrom) and node.module in module_names:
-                flat_imports.append(
-                    f"{path.relative_to(REPO_ROOT)}:{node.lineno}: "
-                    f"from {node.module} import ..."
-                )
-    if flat_imports:
-        raise AssertionError(f"flat scripts imports remain: {flat_imports}")
-
-    direct_invocations = live_direct_invocations(REPO_ROOT)
-    if direct_invocations:
-        raise AssertionError(
-            f"direct Python script invocations remain: {list(direct_invocations)}"
-        )
 
 
 def check_build_source_visibility(repo_root: Path = REPO_ROOT) -> None:

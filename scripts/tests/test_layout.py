@@ -495,116 +495,86 @@ class ClassifiedPackagePrecompileGuardTests(unittest.TestCase):
 
 
 class DirectInvocationPolicyTests(unittest.TestCase):
+    """A script command spelled as a path must be rejected wherever it is written.
+
+    The forms are built by concatenation so this file cannot match its own
+    scanner, and the fixture repository is a real `git init` because the file
+    set under test is `git ls-files` -- an untracked file must be invisible to
+    the scan, which is what keeps working notes and a linked worktree from
+    reddening one machine and not another.
+    """
+
     SCRIPT_PATH = "scripts" + "/probe.py"
+    MODULE_COMMAND = "python -u -m scripts.probe"
 
-    def test_optioned_and_absolute_interpreters_are_rejected(self) -> None:
+    def _repo(self, root: Path) -> None:
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        (root / "scripts").mkdir()
+        (root / "scripts" / "__init__.py").write_text("", encoding="utf-8")
+
+    def _track(self, root: Path, relative: str, contents: str) -> None:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "add", relative], check=True)
+
+    def test_every_by_path_spelling_is_rejected(self) -> None:
         forms = (
-            f"python -u {self.SCRIPT_PATH}",
-            f"/usr/bin/python {self.SCRIPT_PATH}",
+            "python " + self.SCRIPT_PATH,
+            "python -u " + self.SCRIPT_PATH,
+            "python3.12 " + self.SCRIPT_PATH,
+            "/usr/bin/python " + self.SCRIPT_PATH,
+            "python ./" + self.SCRIPT_PATH,
+            "run `python -u " + self.SCRIPT_PATH + "` to regenerate",
         )
-
         for form in forms:
-            with self.subTest(form=form):
-                self.assertTrue(
-                    layout.direct_script_invocations(Path("README.md"), form)
-                )
+            with (
+                self.subTest(form=form),
+                tempfile.TemporaryDirectory() as raw_tmp,
+            ):
+                repo = Path(raw_tmp)
+                self._repo(repo)
+                self._track(repo, "README.md", form + "\n")
 
-    def test_sys_executable_argv_is_rejected(self) -> None:
-        source = (
-            "import subprocess\n"
-            "import sys\n"
-            "subprocess.run([sys.executable, " + repr(self.SCRIPT_PATH) + "])\n"
-        )
+                with self.assertRaisesRegex(AssertionError, "interpreter plus a path"):
+                    layout.check_python_package_invocation(repo)
 
-        self.assertTrue(
-            layout.direct_script_invocations(Path("scripts/caller.py"), source)
-        )
-
-    def test_dot_relative_script_operands_are_rejected(self) -> None:
-        operand = "./" + self.SCRIPT_PATH
-        cases = (
-            (Path("README.md"), f"python {operand}"),
-            (
-                Path("scripts/caller.py"),
-                "import subprocess\n"
-                "import sys\n"
-                "subprocess.run([sys.executable, " + repr(operand) + "])\n",
-            ),
-        )
-
-        for path, contents in cases:
-            with self.subTest(path=path):
-                self.assertTrue(layout.direct_script_invocations(path, contents))
-
-    def test_module_invocation_is_accepted(self) -> None:
-        self.assertFalse(
-            layout.direct_script_invocations(
-                Path("README.md"), "python -u -m scripts.probe"
-            )
-        )
-
-    def test_live_scope_excludes_historical_notes(self) -> None:
+    def test_the_module_form_and_untracked_files_are_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp)
-            live = repo / "README.md"
-            historical = repo / "notes" / "phase-00-history.md"
-            historical.parent.mkdir(parents=True)
-            live.write_text("python -m scripts.probe\n", encoding="utf-8")
-            historical.write_text(f"python -u {self.SCRIPT_PATH}\n", encoding="utf-8")
+            self._repo(repo)
+            self._track(repo, "README.md", self.MODULE_COMMAND + "\n")
+            # Present in the checkout, absent from the index: the scan must not
+            # see it, or a contributor's scratch file reds a gate CI passes.
+            (repo / "scratch.md").write_text(
+                "python -u " + self.SCRIPT_PATH + "\n", encoding="utf-8"
+            )
 
-            files = layout.live_command_files(repo)
-            violations = layout.live_direct_invocations(repo)
+            self.assertEqual(layout.direct_script_invocations(repo), ())
+            layout.check_python_package_invocation(repo)
 
-        self.assertEqual(files, (Path("README.md"),))
-        self.assertEqual(violations, ())
-
-    def test_each_live_surface_is_checked(self) -> None:
-        self.assertEqual(
-            layout.LIVE_COMMAND_FIXED_PATHS,
-            (
-                Path("README.md"),
-                Path("CONTRIBUTING.md"),
-                Path("SECURITY.md"),
-                Path("docs/releasing.md"),
-                Path("AGENTS.md"),
-                Path(".agents/lessons.md"),
-                Path("pixi.toml"),
-            ),
-        )
+    def test_a_finding_names_its_file_line_and_operand(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp)
-            relative_paths = (
-                Path("README.md"),
-                Path("CONTRIBUTING.md"),
-                Path("SECURITY.md"),
-                Path("docs/releasing.md"),
-                Path("AGENTS.md"),
-                Path("pixi.toml"),
-                Path("scripts/probe.py"),
-                Path("src/probe.mojo"),
-                Path("tests/probe.mojo"),
-                Path("e2e/probe.mojo"),
-                Path("native/probe.c"),
-                Path(".github/workflows/ci.yml"),
-                Path("recipe/build.sh"),
-                Path(".agents/skills/example/SKILL.md"),
+            self._repo(repo)
+            self._track(
+                repo,
+                "docs/guide.md",
+                self.MODULE_COMMAND + "\npython -u " + self.SCRIPT_PATH + "\n",
             )
-            for index, relative in enumerate(relative_paths):
-                path = repo / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                command = f"/usr/bin/python -u {self.SCRIPT_PATH}"
-                if relative.suffix == ".py":
-                    command = "# " + command
-                path.write_text(command + f" # {index}\n", encoding="utf-8")
 
-            files = layout.live_command_files(repo)
-            violations = layout.live_direct_invocations(repo)
+            self.assertEqual(
+                layout.direct_script_invocations(repo),
+                (f"docs/guide.md:2: {self.SCRIPT_PATH}",),
+            )
 
-        self.assertEqual(set(files), set(relative_paths))
-        self.assertEqual(
-            {violation.split(":", 1)[0] for violation in violations},
-            {path.as_posix() for path in relative_paths},
-        )
+    def test_an_empty_index_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            self._repo(repo)
+
+            with self.assertRaisesRegex(AssertionError, "no tracked file"):
+                layout.direct_script_invocations(repo)
 
 
 class BuildSourceVisibilityTests(unittest.TestCase):
