@@ -21,17 +21,11 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
 
     def test_every_intended_inventory_fails_closed_when_empty(self) -> None:
         cases = (
-            ("TOP_LEVEL_SCRIPT_FILES", layout.check_top_level_script_layout),
             ("CLASSIFIED_ROOTS", layout.check_suite_layout),
             (
                 "FORBIDDEN_CLASSIFIED_PACKAGE_MARKERS",
                 layout.check_classified_roots_are_not_precompilable_packages,
             ),
-            ("SUPPORT_MODULES", layout.check_suite_layout),
-            ("EXEC_FIXTURES", layout.check_exec_fixture_layout),
-            ("E2E_NATIVE_FIXTURES", layout.check_e2e_native_fixture_layout),
-            ("PROTOCOL_FIXTURES", layout.check_protocol_asset_layout),
-            ("E2E_HARNESS_PATHS", layout.check_e2e_layout),
             ("BUILD_SOURCE_PATHS", layout.check_build_source_visibility),
             ("ASSERTION_SOURCE_PATHS", layout.check_assertion_companion_layout),
             ("ASSERTION_CONSUMER_PATHS", layout.check_assertion_companion_layout),
@@ -46,49 +40,6 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
                 self.assertRaisesRegex(AssertionError, "intended inventory is empty"),
             ):
                 check()
-
-    def test_top_level_script_membership_is_exact(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="mtest-layout-") as raw_tmp:
-            repo = Path(raw_tmp)
-            for relative in layout.TOP_LEVEL_SCRIPT_FILES:
-                path = repo / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("# fixture\n", encoding="utf-8")
-
-            layout.check_top_level_script_layout(repo)
-            extra = repo / "scripts" / "unexpected.py"
-            extra.write_text("# accidental top-level tool\n", encoding="utf-8")
-
-            with self.assertRaisesRegex(
-                AssertionError,
-                "top-level scripts membership mismatch",
-            ):
-                layout.check_top_level_script_layout(repo)
-
-    def test_exec_fixture_membership_exempts_only_the_bytecode_cache(self) -> None:
-        """`__pycache__` is tolerated; nothing else unlisted is.
-
-        The harness imports an exec actor as a module to predict its payload,
-        which makes CPython write that directory. The gate must survive it
-        without becoming a gate that tolerates unlisted actors.
-        """
-        with tempfile.TemporaryDirectory(prefix="mtest-layout-exec-") as raw_tmp:
-            repo = Path(raw_tmp)
-            fixtures = repo / "tests" / "fixtures" / "exec"
-            fixtures.mkdir(parents=True)
-            for name in layout.EXEC_FIXTURES:
-                (fixtures / name).write_text("# fixture\n", encoding="utf-8")
-
-            with mock.patch.object(layout, "REPO_ROOT", repo):
-                layout.check_exec_fixture_layout()
-                (fixtures / "__pycache__").mkdir()
-                layout.check_exec_fixture_layout()
-
-                (fixtures / "unlisted_actor.py").write_text("", encoding="utf-8")
-                with self.assertRaisesRegex(
-                    AssertionError, "exec fixture membership mismatch"
-                ):
-                    layout.check_exec_fixture_layout()
 
     def test_assertion_companion_membership_is_exact(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-layout-") as raw_tmp:

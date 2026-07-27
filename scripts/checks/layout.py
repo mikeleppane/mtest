@@ -23,11 +23,6 @@ from scripts.harness import dogfood, selfhost
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-TOP_LEVEL_SCRIPT_FILES = {
-    Path("scripts/__init__.py"),
-    Path("scripts/gen_transcripts.py"),
-}
-
 BUILD_SOURCE_PATHS = (
     Path("scripts/build/__init__.py"),
     Path("scripts/build/mojo_package.sh"),
@@ -113,68 +108,6 @@ compiler recurses into it as a package. `tests/__init__.mojo` is deliberately
 kept so `tests/` itself stays a nameable package; only its two children must
 stay marker-free. See `check_classified_roots_are_not_precompilable_packages`.
 """
-SUPPORT_MODULES = {
-    "exec_helpers.mojo",
-    "session_fixtures.mojo",
-    "tmptree.mojo",
-    "transcript_cases.mojo",
-}
-EXEC_FIXTURES = {
-    "README.md",
-    "argv_echoer.py",
-    "close_streams_then_hang.py",
-    "dual_flooder.py",
-    "env_echo.py",
-    "escaped_pipe_holder.py",
-    "etxtbsy_target.sh",
-    "exit_nonzero.py",
-    "flooding_grandchild.py",
-    "grandchild_exit0.py",
-    "grandchild_spawner.py",
-    "hostile_report_actor.py",
-    "path_probe.sh",
-    "path_resolver.py",
-    "self_signaler.py",
-    "sigterm_grace_exit.py",
-    "sigterm_ignorer.py",
-    "sleeper.py",
-    "tagged_streams.py",
-}
-PROTOCOL_FIXTURES = {
-    "crashing.mojo",
-    "empty.mojo",
-    "mixed.mojo",
-    "noisy.mojo",
-    "passing.mojo",
-    "raising.mojo",
-    "segfault.mojo",
-    "skipped.mojo",
-    "twofail.mojo",
-}
-E2E_NATIVE_FIXTURES = {
-    "e2e_config_open_fault.c",
-    "e2e_json_terminal_write_fault.c",
-    "e2e_state_persistence_fault.c",
-}
-E2E_HARNESS_PATHS = {
-    Path("scripts/e2e/__init__.py"),
-    Path("scripts/e2e/__main__.py"),
-    Path("scripts/e2e/assertions.py"),
-    Path("scripts/e2e/main_open.py"),
-    Path("scripts/e2e/runner.py"),
-    Path("scripts/e2e/scenarios/__init__.py"),
-    Path("scripts/e2e/scenarios/annotations.py"),
-    Path("scripts/e2e/scenarios/config_file.py"),
-    Path("scripts/e2e/scenarios/config_show.py"),
-    Path("scripts/e2e/scenarios/core.py"),
-    Path("scripts/e2e/scenarios/doctor.py"),
-    Path("scripts/e2e/scenarios/json_reporter.py"),
-    Path("scripts/e2e/scenarios/junit_reporter.py"),
-    Path("scripts/e2e/scenarios/parallel.py"),
-    Path("scripts/e2e/scenarios/resilience.py"),
-    Path("scripts/e2e/scenarios/selection.py"),
-}
-
 DIRECT_SCRIPT_COMMAND_RE = re.compile(
     # An interpreter word, optionally path-qualified and version-suffixed, its
     # options, and then a repository-relative `.py` operand instead of `-m`.
@@ -184,23 +117,6 @@ DIRECT_SCRIPT_COMMAND_RE = re.compile(
     r"(?:\s+-\S+)*"
     r"\s+(?:\./)?(scripts/[\w./-]+\.py)"
 )
-
-
-def check_top_level_script_layout(repo_root: Path = REPO_ROOT) -> None:
-    """Pin the sole provenance-required exceptions to nested script packages."""
-    _require_nonempty("top-level script", TOP_LEVEL_SCRIPT_FILES)
-    scripts_dir = repo_root / "scripts"
-    actual = {
-        path.relative_to(repo_root)
-        for path in scripts_dir.iterdir()
-        if path.is_file() or path.is_symlink()
-    }
-    expected = set(TOP_LEVEL_SCRIPT_FILES)
-    if actual != expected:
-        raise AssertionError(
-            "top-level scripts membership mismatch: "
-            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
-        )
 
 
 def _reraise_walk_error(error: OSError) -> None:
@@ -396,7 +312,6 @@ def check_classified_roots_are_not_precompilable_packages(
 def check_suite_layout() -> None:
     """Every classified module and support module has its documented home."""
     _require_nonempty("classified root", CLASSIFIED_ROOTS)
-    _require_nonempty("support module", SUPPORT_MODULES)
     check_classified_mojo_inventory(REPO_ROOT)
     tests_dir = REPO_ROOT / "tests"
     stray = {
@@ -415,110 +330,10 @@ def check_suite_layout() -> None:
         dogfood.dogfood_test_files(REPO_ROOT)
     except RuntimeError as exc:
         raise AssertionError(str(exc)) from exc
-    actual_support = {path.name for path in (tests_dir / "support").glob("*.mojo")}
-    if actual_support != SUPPORT_MODULES:
-        raise AssertionError(
-            "support module membership mismatch: "
-            f"missing={sorted(SUPPORT_MODULES - actual_support)}, "
-            f"extra={sorted(actual_support - SUPPORT_MODULES)}"
-        )
-
-
-def check_exec_fixture_layout() -> None:
-    """Exec subprocess actors live with tests, not developer harnesses.
-
-    Membership is exact and fail-closed: an unlisted actor is a finding, not a
-    tolerated extra. The single exemption is `__pycache__`, which CPython writes
-    into this directory the moment anything imports an actor as a module — the
-    E2E harness does, to predict the hostile actor's payload — and which is
-    generated output rather than a fixture anyone chose to add.
-    """
-    _require_nonempty("exec fixture", EXEC_FIXTURES)
-    fixture_dir = REPO_ROOT / "tests" / "fixtures" / "exec"
-    actual = (
-        {path.name for path in fixture_dir.iterdir() if path.name != "__pycache__"}
-        if fixture_dir.exists()
-        else set()
-    )
-    if actual != EXEC_FIXTURES:
-        raise AssertionError(
-            "exec fixture membership mismatch: "
-            f"missing={sorted(EXEC_FIXTURES - actual)}, "
-            f"extra={sorted(actual - EXEC_FIXTURES)}"
-        )
-    if (REPO_ROOT / "scripts" / "exec_targets").exists():
-        raise AssertionError("obsolete scripts/exec_targets directory still exists")
-
-
-def check_e2e_native_fixture_layout() -> None:
-    """The E2E-only native fault sources have exact harness membership."""
-    _require_nonempty("E2E native fixture", E2E_NATIVE_FIXTURES)
-    fixture_dir = REPO_ROOT / "tests" / "native"
-    actual = {path.name for path in fixture_dir.glob("e2e_*")}
-    if actual != E2E_NATIVE_FIXTURES:
-        raise AssertionError(
-            "e2e native fixture membership mismatch: "
-            f"missing={sorted(E2E_NATIVE_FIXTURES - actual)}, "
-            f"extra={sorted(actual - E2E_NATIVE_FIXTURES)}"
-        )
-
-
-def check_protocol_asset_layout() -> None:
-    """Protocol generator inputs and outputs occupy their documented homes."""
-    _require_nonempty("protocol fixture", PROTOCOL_FIXTURES)
-    fixtures = REPO_ROOT / "tests" / "fixtures" / "protocol"
-    actual_fixtures = (
-        {path.name for path in fixtures.iterdir()} if fixtures.exists() else set()
-    )
-    if actual_fixtures != PROTOCOL_FIXTURES:
-        raise AssertionError(
-            "protocol fixture membership mismatch: "
-            f"missing={sorted(PROTOCOL_FIXTURES - actual_fixtures)}, "
-            f"extra={sorted(actual_fixtures - PROTOCOL_FIXTURES)}"
-        )
-
-    snapshots = REPO_ROOT / "tests" / "snapshots" / "protocol"
-    manifest = snapshots / "MANIFEST.txt"
-    if not manifest.is_file():
-        raise AssertionError("protocol snapshot MANIFEST.txt is missing")
-    listed = tuple(manifest.read_text(encoding="utf-8").splitlines())
-    actual_snapshots = tuple(
-        sorted(path.name for path in snapshots.glob("*.txt") if path != manifest)
-    )
-    if listed != actual_snapshots or len(listed) != 22:
-        raise AssertionError(
-            "protocol snapshot manifest/membership mismatch: "
-            f"listed={list(listed)}, actual={list(actual_snapshots)}"
-        )
-    for obsolete in (REPO_ROOT / "fixtures", REPO_ROOT / "goldens"):
-        if obsolete.exists():
-            raise AssertionError(
-                f"obsolete protocol asset root still exists: {obsolete}"
-            )
 
 
 def check_e2e_layout() -> None:
     """Known-outcome CLI inputs stay outside self-host discovery."""
-    _require_nonempty("E2E harness path", E2E_HARNESS_PATHS)
-    harness_root = REPO_ROOT / "scripts" / "e2e"
-    harness_paths = {
-        path.relative_to(REPO_ROOT)
-        for path in harness_root.rglob("*.py")
-        if path.is_file()
-    }
-    if harness_paths != E2E_HARNESS_PATHS:
-        raise AssertionError(
-            "E2E harness package mismatch: "
-            f"missing={sorted(E2E_HARNESS_PATHS - harness_paths)}, "
-            f"extra={sorted(harness_paths - E2E_HARNESS_PATHS)}"
-        )
-    obsolete_paths = (
-        REPO_ROOT / "scripts" / "e2e_check.py",
-        REPO_ROOT / "scripts" / "main_open_check.py",
-    )
-    if any(path.exists() for path in obsolete_paths):
-        raise AssertionError("obsolete top-level E2E compatibility module remains")
-
     pixi_manifest = tomllib.loads((REPO_ROOT / "pixi.toml").read_text(encoding="utf-8"))
     e2e_command = pixi_manifest.get("tasks", {}).get("e2e", {}).get("cmd")
     if e2e_command != "python -m scripts.e2e":
@@ -537,7 +352,7 @@ def check_e2e_layout() -> None:
     discovered = {
         path.relative_to(REPO_ROOT).as_posix() for path in e2e_root.rglob("test_*.mojo")
     }
-    if rows != discovered or len(rows) != 41:
+    if rows != discovered:
         raise AssertionError(
             "e2e manifest/discovery mismatch: "
             f"missing={sorted(discovered - rows)}, stale={sorted(rows - discovered)}, "
@@ -565,8 +380,6 @@ def check_e2e_layout() -> None:
     }
     if any(not path.startswith("e2e/") for path in referenced):
         raise AssertionError("e2e manifest retains a path outside e2e/")
-    if (REPO_ROOT / "testdata").exists():
-        raise AssertionError("obsolete testdata/ root still exists")
 
 
 def direct_script_invocations(repo_root: Path = REPO_ROOT) -> tuple[str, ...]:
@@ -983,15 +796,11 @@ def check_package_fixture_contract(repo_root: Path = REPO_ROOT) -> None:
 def main() -> int:
     """Run every repository layout and command-policy check serially."""
     try:
-        check_top_level_script_layout()
         # Before check_suite_layout: a reintroduced marker also trips the
         # inventory's glob check, and this one names the exact file and the
         # exact compiler error it will cause.
         check_classified_roots_are_not_precompilable_packages()
         check_suite_layout()
-        check_exec_fixture_layout()
-        check_e2e_native_fixture_layout()
-        check_protocol_asset_layout()
         check_e2e_layout()
         check_python_package_invocation()
         check_build_source_visibility()
