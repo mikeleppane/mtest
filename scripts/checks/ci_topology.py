@@ -10,6 +10,17 @@ import tomllib
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+WORKFLOW_PATHS = {
+    Path(".github/workflows/ci.yml"),
+    Path(".github/workflows/codeql.yml"),
+}
+"""Every hosted workflow tracked by the repository."""
+
+CHECKOUT_ACTION_SHA = "11bd71901bbe5b1630ceea73d27597364c9af683"
+SETUP_PIXI_ACTION_SHA = "a09b6247153796b190642a2b53fac4241043cf6f"
+CODEQL_ACTION_SHA = "4187e74d05793876e9989daffde9c3e66b4acd07"
+"""Reviewed immutable action revisions used by the CodeQL workflow."""
+
 HARNESS_CHECK_MODULES = (
     "scripts.tests.test_aggregate",
     "scripts.tests.test_process_watchdog",
@@ -280,6 +291,192 @@ def _step_attributes(job: str, name: str) -> dict[str, str]:
             raise AssertionError(f"workflow step {name!r} repeats {key!r}")
         attributes[key] = match.group(2)
     return attributes
+
+
+def check_workflow_inventory(repo_root: Path = REPO_ROOT) -> None:
+    """Require the exact, regular-file workflow set."""
+    workflow_root = repo_root / ".github" / "workflows"
+    actual = {
+        path.relative_to(repo_root)
+        for pattern in ("*.yml", "*.yaml")
+        for path in workflow_root.glob(pattern)
+    }
+    if actual != WORKFLOW_PATHS:
+        raise AssertionError(
+            "workflow inventory mismatch: "
+            f"expected={sorted(map(str, WORKFLOW_PATHS))}, "
+            f"actual={sorted(map(str, actual))}"
+        )
+    symlinks = sorted(
+        str(path.relative_to(repo_root))
+        for path in workflow_root.iterdir()
+        if path.is_symlink()
+    )
+    if symlinks:
+        raise AssertionError(f"workflow inventory contains symlinks: {symlinks}")
+
+
+def check_codeql_workflow(repo_root: Path = REPO_ROOT) -> None:
+    """Pin CodeQL triggers, permissions, jobs, builds, and action revisions."""
+    workflow_path = repo_root / ".github" / "workflows" / "codeql.yml"
+    workflow = workflow_path.read_text(encoding="utf-8")
+    if not workflow.startswith("name: CodeQL\n"):
+        raise AssertionError("CodeQL workflow name mismatch")
+    if "continue-on-error:" in workflow:
+        raise AssertionError("CodeQL workflow must not contain continue-on-error")
+    if "autobuild" in workflow.lower():
+        raise AssertionError("CodeQL workflow must not use autobuild")
+
+    trigger_block = _yaml_block(workflow, "on:")
+    expected_triggers = ["push", "pull_request", "schedule", "workflow_dispatch"]
+    triggers = _yaml_mapping_keys(trigger_block, 2)
+    if triggers != expected_triggers:
+        raise AssertionError(
+            f"CodeQL trigger mismatch: expected={expected_triggers}, actual={triggers}"
+        )
+    for trigger in ("push", "pull_request"):
+        block = _yaml_block(workflow, f"  {trigger}:")
+        if block.strip() != "branches: [main]":
+            raise AssertionError(
+                f"CodeQL trigger mismatch: {trigger} must target only main"
+            )
+    schedule = _yaml_block(workflow, "  schedule:")
+    if schedule.strip() != '- cron: "23 4 * * 1"':
+        raise AssertionError("CodeQL trigger mismatch: weekly schedule changed")
+    if _yaml_block(workflow, "  workflow_dispatch:").strip():
+        raise AssertionError("CodeQL trigger mismatch: workflow_dispatch has inputs")
+
+    permission_block = _yaml_block(workflow, "permissions:")
+    expected_permissions = {
+        "contents": "read",
+        "actions": "read",
+        "security-events": "write",
+    }
+    permissions = dict(
+        re.findall(r"^  ([a-z-]+): (read|write|none)$", permission_block, re.MULTILINE)
+    )
+    if permissions != expected_permissions or _yaml_mapping_keys(
+        permission_block, 2
+    ) != list(expected_permissions):
+        raise AssertionError(
+            "CodeQL permission mismatch: "
+            f"expected={expected_permissions}, actual={permissions}"
+        )
+
+    jobs = _yaml_mapping_keys(_yaml_block(workflow, "jobs:"), 2)
+    expected_jobs = ["c-cpp", "python"]
+    if jobs != expected_jobs:
+        raise AssertionError(
+            f"CodeQL job membership mismatch: expected={expected_jobs}, actual={jobs}"
+        )
+    job_blocks = {name: _yaml_block(workflow, f"  {name}:") for name in jobs}
+    expected_names = {"c-cpp": "C and C++", "python": "Python"}
+    for name, job in job_blocks.items():
+        display = re.findall(r"^    name: (.+)$", job, re.MULTILINE)
+        if display != [expected_names[name]]:
+            raise AssertionError(
+                f"CodeQL job {name!r} display mismatch: actual={display}"
+            )
+        runners = re.findall(r"^    runs-on: (.+)$", job, re.MULTILINE)
+        if runners != ["ubuntu-24.04"]:
+            raise AssertionError(
+                f"CodeQL job {name!r} runner mismatch: actual={runners}"
+            )
+        if re.search(r"^    (if|needs):", job, re.MULTILINE):
+            raise AssertionError(f"CodeQL job {name!r} must run independently")
+
+    expected_uses = {
+        "c-cpp": [
+            f"actions/checkout@{CHECKOUT_ACTION_SHA}",
+            f"prefix-dev/setup-pixi@{SETUP_PIXI_ACTION_SHA}",
+            f"github/codeql-action/init@{CODEQL_ACTION_SHA}",
+            f"github/codeql-action/analyze@{CODEQL_ACTION_SHA}",
+        ],
+        "python": [
+            f"actions/checkout@{CHECKOUT_ACTION_SHA}",
+            f"github/codeql-action/init@{CODEQL_ACTION_SHA}",
+            f"github/codeql-action/analyze@{CODEQL_ACTION_SHA}",
+        ],
+    }
+    expected_pin_lines = {
+        f"        uses: actions/checkout@{CHECKOUT_ACTION_SHA} # v4.2.2",
+        f"        uses: prefix-dev/setup-pixi@{SETUP_PIXI_ACTION_SHA} # v0.10.0",
+        f"        uses: github/codeql-action/init@{CODEQL_ACTION_SHA} # v3.37.3",
+        f"        uses: github/codeql-action/analyze@{CODEQL_ACTION_SHA} # v3.37.3",
+    }
+    for name, job in job_blocks.items():
+        uses = re.findall(r"^        uses: ([^ ]+)(?: # .*)?$", job, re.MULTILINE)
+        if uses != expected_uses[name]:
+            raise AssertionError(
+                f"CodeQL action pin mismatch in {name!r}: "
+                f"expected={expected_uses[name]}, actual={uses}"
+            )
+        actual_pin_lines = {
+            line for line in job.splitlines() if line.lstrip().startswith("uses:")
+        }
+        required_pin_lines = {
+            line
+            for line in expected_pin_lines
+            if line.split("uses: ", 1)[1].split("@", 1)[0]
+            in {use.split("@", 1)[0] for use in expected_uses[name]}
+        }
+        if actual_pin_lines != required_pin_lines:
+            raise AssertionError(f"CodeQL action version comments mismatch in {name!r}")
+
+    native = job_blocks["c-cpp"]
+    native_runs = re.findall(r"^        run: (.+)$", native, re.MULTILINE)
+    if native_runs != ["pixi run build-native"]:
+        raise AssertionError(
+            "CodeQL native manual build mismatch: "
+            f"expected=['pixi run build-native'], actual={native_runs}"
+        )
+    if "          locked: true" not in native or "          cache: true" not in native:
+        raise AssertionError("CodeQL native job lacks locked cached Pixi setup")
+    native_language = re.findall(
+        r"^          languages: (.+)$",
+        _yaml_block(native, "      - name: Initialize CodeQL"),
+        re.MULTILINE,
+    )
+    if native_language != ["c-cpp"]:
+        raise AssertionError(
+            f"CodeQL native language mismatch: actual={native_language}"
+        )
+    native_category = re.findall(
+        r"^          category: (.+)$",
+        _yaml_block(native, "      - name: Analyze C and C++"),
+        re.MULTILINE,
+    )
+    if native_category != ['"/language:c-cpp"']:
+        raise AssertionError(
+            f"CodeQL native analysis category mismatch: actual={native_category}"
+        )
+    init_index = native.index("      - name: Initialize CodeQL")
+    build_index = native.index("      - name: Build native adapter")
+    analyze_index = native.index("      - name: Analyze C and C++")
+    if not init_index < build_index < analyze_index:
+        raise AssertionError("CodeQL native init/build/analyze order mismatch")
+
+    python = job_blocks["python"]
+    if re.search(r"^        run:", python, re.MULTILINE):
+        raise AssertionError("CodeQL Python job must not run shell commands")
+    python_language = re.findall(
+        r"^          languages: (.+)$",
+        _yaml_block(python, "      - name: Initialize CodeQL"),
+        re.MULTILINE,
+    )
+    if python_language != ["python"]:
+        raise AssertionError(
+            f"CodeQL Python language mismatch: actual={python_language}"
+        )
+    python_category = re.findall(
+        r"^          category: (.+)$",
+        _yaml_block(python, "      - name: Analyze Python"),
+        re.MULTILINE,
+    )
+    if python_category != ['"/language:python"']:
+        raise AssertionError(
+            f"CodeQL Python analysis category mismatch: actual={python_category}"
+        )
 
 
 def _task_dependencies(tasks: dict[str, object], name: str) -> list[str]:
@@ -820,8 +1017,10 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
 def main() -> int:
     """Run the independent exact CI topology oracles."""
     try:
+        check_workflow_inventory()
         check_ci_task_graph()
         check_ci_workflow()
+        check_codeql_workflow()
     except (AssertionError, OSError) as exc:
         print(f"ci-topology-check: FAIL: {exc}", file=sys.stderr)
         return 1

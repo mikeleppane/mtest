@@ -5,6 +5,7 @@
 # mtest
 
 [![CI](https://github.com/mikeleppane/mtest/actions/workflows/ci.yml/badge.svg)](https://github.com/mikeleppane/mtest/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/mikeleppane/mtest/actions/workflows/codeql.yml/badge.svg)](https://github.com/mikeleppane/mtest/actions/workflows/codeql.yml)
 
 A pytest-like test runner for [Mojo](https://www.modular.com/mojo).
 

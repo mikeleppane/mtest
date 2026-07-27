@@ -523,6 +523,154 @@ class CiTopologyTests(unittest.TestCase):
         )
 
 
+class CodeQLWorkflowTests(unittest.TestCase):
+    """Fail-closed policy for the independently triggered CodeQL workflow."""
+
+    def _workflow(self) -> str:
+        """Return the live CodeQL workflow text."""
+        return (
+            ci_topology.REPO_ROOT / ".github" / "workflows" / "codeql.yml"
+        ).read_text(encoding="utf-8")
+
+    def _reject(self, mutated: str, pattern: str) -> None:
+        """Require the CodeQL oracle to reject one mutated workflow."""
+        self.assertNotEqual(mutated, self._workflow())
+        with tempfile.TemporaryDirectory(prefix="mtest-codeql-topology-") as raw_tmp:
+            repo = Path(raw_tmp)
+            workflow_path = repo / ".github" / "workflows" / "codeql.yml"
+            workflow_path.parent.mkdir(parents=True)
+            workflow_path.write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, pattern):
+                ci_topology.check_codeql_workflow(repo)
+
+    def _write_inventory(self, root: Path) -> Path:
+        """Create the exact expected workflow inventory in a temporary repo."""
+        workflow_root = root / ".github" / "workflows"
+        workflow_root.mkdir(parents=True)
+        for name in ("ci.yml", "codeql.yml"):
+            source = ci_topology.REPO_ROOT / ".github" / "workflows" / name
+            (workflow_root / name).write_text(
+                source.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+        return workflow_root
+
+    def test_repository_workflow_inventory_is_exact(self) -> None:
+        self.assertEqual(
+            ci_topology.WORKFLOW_PATHS,
+            {
+                Path(".github/workflows/ci.yml"),
+                Path(".github/workflows/codeql.yml"),
+            },
+        )
+        ci_topology.check_workflow_inventory()
+
+    def test_missing_workflow_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-workflow-inventory-") as raw_tmp:
+            repo = Path(raw_tmp)
+            workflow_root = self._write_inventory(repo)
+            (workflow_root / "codeql.yml").unlink()
+            with self.assertRaisesRegex(AssertionError, "inventory mismatch"):
+                ci_topology.check_workflow_inventory(repo)
+
+    def test_extra_yaml_workflow_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-workflow-inventory-") as raw_tmp:
+            repo = Path(raw_tmp)
+            workflow_root = self._write_inventory(repo)
+            (workflow_root / "surprise.yaml").write_text(
+                "name: Surprise\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, "inventory mismatch"):
+                ci_topology.check_workflow_inventory(repo)
+
+    def test_symlinked_workflow_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-workflow-inventory-") as raw_tmp:
+            repo = Path(raw_tmp)
+            workflow_root = self._write_inventory(repo)
+            (workflow_root / "codeql.yml").unlink()
+            (workflow_root / "codeql.yml").symlink_to("ci.yml")
+            with self.assertRaisesRegex(AssertionError, "symlink"):
+                ci_topology.check_workflow_inventory(repo)
+
+    def test_all_required_triggers_are_pinned(self) -> None:
+        workflow = self._workflow()
+        mutations = {
+            "push": workflow.replace(
+                "  push:\n    branches: [main]\n",
+                "",
+                1,
+            ),
+            "pull_request": workflow.replace(
+                "  pull_request:\n    branches: [main]\n",
+                "",
+                1,
+            ),
+            "schedule": workflow.replace(
+                '  schedule:\n    - cron: "23 4 * * 1"\n',
+                "",
+                1,
+            ),
+            "workflow_dispatch": workflow.replace("  workflow_dispatch:\n", "", 1),
+        }
+        for trigger, mutated in mutations.items():
+            with self.subTest(trigger=trigger):
+                self._reject(mutated, "trigger mismatch")
+
+    def test_security_event_write_permission_is_required(self) -> None:
+        self._reject(
+            self._workflow().replace(
+                "  security-events: write",
+                "  security-events: read",
+                1,
+            ),
+            "permission mismatch",
+        )
+
+    def test_codeql_autobuild_is_rejected(self) -> None:
+        workflow = self._workflow()
+        marker = "      - name: Analyze C and C++\n"
+        mutated = workflow.replace(
+            marker,
+            "      - name: Autobuild\n"
+            "        uses: github/codeql-action/autobuild@"
+            f"{ci_topology.CODEQL_ACTION_SHA}"
+            " # v3.37.3\n\n" + marker,
+            1,
+        )
+        self._reject(mutated, "autobuild")
+
+    def test_native_job_requires_the_real_manual_build(self) -> None:
+        self._reject(
+            self._workflow().replace(
+                "        run: pixi run build-native",
+                "        run: true",
+                1,
+            ),
+            "manual build",
+        )
+
+    def test_python_job_must_not_build_the_product(self) -> None:
+        workflow = self._workflow()
+        marker = "      - name: Analyze Python\n"
+        mutated = workflow.replace(
+            marker,
+            "      - name: Build product\n        run: pixi run build\n\n" + marker,
+            1,
+        )
+        self._reject(mutated, "Python job must not run shell commands")
+
+    def test_action_tag_in_place_of_commit_is_rejected(self) -> None:
+        self._reject(
+            self._workflow().replace(
+                f"github/codeql-action/init@{ci_topology.CODEQL_ACTION_SHA}",
+                "github/codeql-action/init@v3",
+                1,
+            ),
+            "action pin mismatch",
+        )
+
+
 class MemoryHostSupportTests(unittest.TestCase):
     """Behavior of the command `ci-memory` runs off linux-64.
 
