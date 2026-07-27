@@ -26,6 +26,7 @@ Usage:  python -m unittest scripts.tests.test_package_consumption
 
 from __future__ import annotations
 
+import configparser
 import contextlib
 import dataclasses
 import inspect
@@ -1148,10 +1149,25 @@ class AssertionPackageLayoutTests(unittest.TestCase):
         config.write_text(
             "[max]\n"
             f"package_root = {prefix}\n"
+            f"cache_dir = {prefix}/share/max/.max_cache\n"
+            f"path = {prefix}\n"
             "[mojo-max]\n"
             f"package_root = {prefix}\n"
+            f"compilerrt_path = {prefix}/lib/libKGENCompilerRTShared.so\n"
+            f"mgprt_path = {prefix}/lib/libMGPRT.so\n"
+            f"shared_libs = {prefix}/lib/libAsyncRTMojoBindings.so,"
+            f"-Xlinker,-rpath,-Xlinker,{prefix}/lib;\n"
             f"driver_path = {prefix}/bin/mojo\n"
-            f"import_path = {prefix}/lib/mojo\n",
+            f"import_path = {prefix}/lib/mojo\n"
+            f"jupyter_path = {prefix}/lib/libMojoJupyter.so\n"
+            f"lldb_path = {prefix}/bin/mojo-lldb\n"
+            f"lldb_plugin_path = {prefix}/lib/libMojoLLDB.so\n"
+            f"lldb_visualizers_path = {prefix}/lib/lldb-visualizers\n"
+            f"lldb_vscode_path = {prefix}/bin/mojo-lldb-dap\n"
+            f"lsp_server_path = {prefix}/bin/mojo-lsp-server\n"
+            f"mblack_path = {prefix}/bin/mblack\n"
+            f"repl_entry_point = {prefix}/lib/mojo-repl-entry-point\n"
+            f"lld_path = {prefix}/bin/lld;\n",
             encoding="utf-8",
         )
         return prefix
@@ -1420,6 +1436,26 @@ class AssertionPackageLayoutTests(unittest.TestCase):
                 "modular.cfg",
             ):
                 package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_compiler_runtime_paths_from_another_prefix(self) -> None:
+        options = ("compilerrt_path", "mgprt_path", "shared_libs", "lld_path")
+        for option in options:
+            with (
+                self.subTest(option=option),
+                tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw,
+            ):
+                prefix = self._valid_prefix(Path(raw))
+                config = prefix / "share" / "max" / "modular.cfg"
+                parser = configparser.ConfigParser(interpolation=None)
+                parser.read(config, encoding="utf-8")
+                parser.set("mojo-max", option, f"/developer/pixi/{option}")
+                with config.open("w", encoding="utf-8") as stream:
+                    parser.write(stream)
+                with self.assertRaisesRegex(
+                    package_consumption.PackageCheckError,
+                    "modular.cfg",
+                ):
+                    package_consumption.validate_assertion_install(prefix)
 
     def test_rejects_commented_or_extended_toolchain_assignments(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:

@@ -562,6 +562,21 @@ def _validate_modular_config(config: Path, prefix: Path) -> None:
         ("mojo-max", "driver_path"): str(prefix / "bin" / "mojo"),
         ("mojo-max", "import_path"): str(prefix / "lib" / "mojo"),
     }
+    required_prefix_paths = (
+        ("max", "cache_dir"),
+        ("max", "path"),
+        ("mojo-max", "compilerrt_path"),
+        ("mojo-max", "mgprt_path"),
+        ("mojo-max", "jupyter_path"),
+        ("mojo-max", "lldb_path"),
+        ("mojo-max", "lldb_plugin_path"),
+        ("mojo-max", "lldb_visualizers_path"),
+        ("mojo-max", "lldb_vscode_path"),
+        ("mojo-max", "lsp_server_path"),
+        ("mojo-max", "mblack_path"),
+        ("mojo-max", "repl_entry_point"),
+        ("mojo-max", "lld_path"),
+    )
     mismatches: list[str] = []
     for (section, option), expected_value in expected.items():
         observed = parser.get(section, option, raw=True, fallback=None)
@@ -569,6 +584,34 @@ def _validate_modular_config(config: Path, prefix: Path) -> None:
             mismatches.append(
                 f"[{section}] {option}: expected {expected_value!r}, got {observed!r}"
             )
+    for section, option in required_prefix_paths:
+        observed = parser.get(section, option, raw=True, fallback=None)
+        if observed is None:
+            mismatches.append(f"[{section}] {option}: missing")
+            continue
+        candidate = Path(observed.removesuffix(";")).resolve()
+        if not candidate.is_relative_to(prefix):
+            mismatches.append(
+                f"[{section}] {option}: path escapes prefix: {observed!r}"
+            )
+    shared_libs = parser.get("mojo-max", "shared_libs", raw=True, fallback=None)
+    if shared_libs is None:
+        mismatches.append("[mojo-max] shared_libs: missing")
+    else:
+        shared_paths = [
+            Path(token.removesuffix(";")).resolve()
+            for token in shared_libs.split(",")
+            if token.startswith("/")
+        ]
+        if len(shared_paths) < 2:
+            mismatches.append(
+                "[mojo-max] shared_libs: expected library and rpath prefix paths"
+            )
+        mismatches.extend(
+            ("[mojo-max] shared_libs: path escapes prefix: " + repr(str(shared_path)))
+            for shared_path in shared_paths
+            if not shared_path.is_relative_to(prefix)
+        )
     if mismatches:
         raise PackageCheckError(
             "installed modular.cfg does not name its own prefix exactly: "
