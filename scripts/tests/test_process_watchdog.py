@@ -1040,6 +1040,7 @@ def _leaking_actor(tmp: Path) -> Path:
                 "time.sleep(float(sys.argv[1]))",
                 f"sys.stdout.write({LATE_LINE!r})",
                 "sys.stdout.flush()",
+                "time.sleep(120)",
             ]
         ),
         encoding="utf-8",
@@ -1051,13 +1052,14 @@ def _leaking_actor(tmp: Path) -> Path:
                 "from pathlib import Path",
                 "import subprocess",
                 "import sys",
+                "import os",
                 "leader_done, late_seconds = sys.argv[1], sys.argv[2]",
                 "subprocess.Popen(",
                 f"    [sys.executable, {str(descendant)!r}, late_seconds]",
                 ")",
                 f"sys.stdout.write({FLOOD_MARKERS[1]!r})",
                 "sys.stdout.flush()",
-                "Path(leader_done).write_text('done')",
+                "Path(leader_done).write_text(str(os.getpid()))",
                 "raise SystemExit(0)",
             ]
         ),
@@ -1104,11 +1106,10 @@ def _persistent_leaking_actor(tmp: Path) -> Path:
     return actor
 
 
-def test_leaked_descendant_bounds_the_drain_and_seals_the_tee() -> None:
-    """A leaked pipe holder cannot stall the drain nor write past the verdict."""
+def test_leaked_descendant_output_precedes_cleanup_verdict() -> None:
+    """Output before the bounded survivor sweep is retained before the verdict."""
     with tempfile.TemporaryDirectory(prefix="mtest-watchdog-leak-") as raw_tmp:
         tmp = Path(raw_tmp)
-        late_seconds = DRAIN_SETTLE_SECONDS + 3.0
         actor = _leaking_actor(tmp)
         leader_done = tmp / "leader-done"
         sentinel = tmp / "deadline-sentinel"
@@ -1118,8 +1119,6 @@ def test_leaked_descendant_bounds_the_drain_and_seals_the_tee() -> None:
         diagnostics = tmp / "teed-stderr"
         original_stdout = sys.stdout
         original_stderr = sys.stderr
-        # The caller's stream stays open across the descendant's late write, so
-        # an unsealed drainer would genuinely append to it here.
         with teed.open("wb") as stdout_handle:
             with diagnostics.open("wb") as stderr_handle:
                 sys.stdout = _TextOverBytes(stdout_handle)
@@ -1131,7 +1130,7 @@ def test_leaked_descendant_bounds_the_drain_and_seals_the_tee() -> None:
                             PYTHON,
                             str(actor),
                             str(leader_done),
-                            str(late_seconds),
+                            "0.1",
                         ],
                         source="tests/unit/test_watchdog.mojo",
                         step="run",
@@ -1140,16 +1139,11 @@ def test_leaked_descendant_bounds_the_drain_and_seals_the_tee() -> None:
                         marker_retention=retention,
                     )
                     elapsed = time.monotonic() - started
-                    # The supervisor's own verdict, written after the drain has
-                    # been sealed. Nothing the child group emits later may
-                    # follow it.
                     stdout_handle.write(VERDICT_LINE.encode("utf-8"))
                     stdout_handle.flush()
                 finally:
                     sys.stdout = original_stdout
                     sys.stderr = original_stderr
-            # Outlive the descendant's write before reading the stream back.
-            time.sleep(max(late_seconds - elapsed, 0.0) + 1.0)
             stdout_handle.flush()
             tail = teed.read_bytes()
         if termination != Exited(0):
@@ -1161,13 +1155,20 @@ def test_leaked_descendant_bounds_the_drain_and_seals_the_tee() -> None:
                 f"leaking actor retained {retention.text!r}, "
                 f"expected {FLOOD_MARKERS[1]!r}"
             )
-        # Stand in for a straggling drainer: the supervisor has returned, so the
-        # capture must already be closed against a later marker.
-        retention.record(LATE_MARKER)
-        if retention.text != FLOOD_MARKERS[1]:
+        if retention.capture_complete:
+            raise AssertionError("survivor sweep reported complete capture")
+        if LATE_LINE.encode("utf-8") not in tail:
+            raise AssertionError("descendant output before the sweep was lost")
+        if not tail.endswith(VERDICT_LINE.encode("utf-8")):
             raise AssertionError(
-                "the seal left the marker capture open after returning: "
-                f"{retention.text!r}"
+                f"child output did not precede the caller verdict: {tail[-120:]!r}"
+            )
+        leader_pid = int(leader_done.read_text(encoding="utf-8"))
+        if watchdog._signal_group(leader_pid, 0):
+            raise AssertionError("survivor process group remained after return")
+        if elapsed < DRAIN_SETTLE_SECONDS - 0.2:
+            raise AssertionError(
+                f"survivor drain was not given its bounded window: {elapsed:.1f}s"
             )
         if elapsed >= DRAIN_SETTLE_SECONDS + 2.0:
             raise AssertionError(
@@ -1175,10 +1176,6 @@ def test_leaked_descendant_bounds_the_drain_and_seals_the_tee() -> None:
             )
         if sentinel.exists():
             raise AssertionError("leaking actor left its deadline sentinel")
-        if not tail.endswith(VERDICT_LINE.encode("utf-8")):
-            raise AssertionError(
-                f"a drainer wrote past the sealed verdict: {tail[-120:]!r}"
-            )
 
 
 def test_captured_command_marks_a_forced_drain_incomplete() -> None:
@@ -1218,23 +1215,19 @@ def test_read_error_cannot_report_capture_complete() -> None:
     reached_eof = threading.Event()
     retention = MarkerRetention(MARKER_PREFIX)
     sink = io.StringIO()
-    original_read = os.read
 
     def fail_read(_descriptor: int, _size: int) -> bytes:
         raise OSError("injected read failure")
 
-    os.read = fail_read
-    try:
-        with os.fdopen(read_descriptor, "rb") as source:
-            watchdog._tee_stream(
-                source,
-                watchdog._StreamTee(sink),
-                retention,
-                threading.Event(),
-                reached_eof,
-            )
-    finally:
-        os.read = original_read
+    with os.fdopen(read_descriptor, "rb") as source:
+        watchdog._tee_stream(
+            source,
+            watchdog._StreamTee(sink),
+            retention,
+            threading.Event(),
+            reached_eof,
+            read_chunk=fail_read,
+        )
     state = watchdog._DrainState(
         threads=(),
         tees=(),
@@ -1285,6 +1278,27 @@ def test_ordinary_exit_kills_survivors_before_drain_settlement() -> None:
     expected = [f"signal-{signal.SIGKILL}", "settle", "settle"]
     if order != expected:
         raise AssertionError(f"ordinary cleanup order was {order}, expected {expected}")
+
+
+def test_exit_observation_does_not_reap_the_group_leader() -> None:
+    """Exit readiness leaves the leader PID pinned until group cleanup."""
+    process = subprocess.Popen(
+        [PYTHON, "-c", "raise SystemExit(0)"],
+        start_new_session=True,
+    )
+    try:
+        if not watchdog._wait_for_exit_without_reaping(process, 10.0):
+            raise AssertionError("ordinary child exit was not observed")
+        if process.returncode is not None:
+            raise AssertionError("exit observation reaped the process-group leader")
+        watchdog._signal_group(process.pid, signal.SIGKILL)
+        if process.wait() != 0:
+            raise AssertionError("post-observation wait lost the original exit status")
+    finally:
+        if process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
 
 
 def test_a_caller_stream_without_a_byte_buffer_still_receives_the_tee() -> None:
@@ -1576,10 +1590,11 @@ def main() -> int:
         test_first_signal_wins_during_forced_cleanup,
         test_cancellation_wins_when_spawn_then_raises,
         test_flooding_child_is_drained_teed_and_marked,
-        test_leaked_descendant_bounds_the_drain_and_seals_the_tee,
+        test_leaked_descendant_output_precedes_cleanup_verdict,
         test_captured_command_marks_a_forced_drain_incomplete,
         test_read_error_cannot_report_capture_complete,
         test_ordinary_exit_kills_survivors_before_drain_settlement,
+        test_exit_observation_does_not_reap_the_group_leader,
         test_a_caller_stream_without_a_byte_buffer_still_receives_the_tee,
         test_cancellation_during_the_drain_settle_stays_cancelled,
         test_a_blocked_caller_stream_cannot_swallow_a_caller_signal,

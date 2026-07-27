@@ -339,6 +339,7 @@ def _tee_stream(
     retention: MarkerRetention | None,
     stop: threading.Event,
     reached_eof: threading.Event | None = None,
+    read_chunk: Callable[[int, int], bytes] = os.read,
 ) -> None:
     """Drain one captured pipe onto a caller stream, retaining a marker.
 
@@ -351,6 +352,7 @@ def _tee_stream(
         retention: Marker state to update in place, or None to only tee.
         stop: Shared flag that ends the drain without waiting for end of file.
         reached_eof: Optional proof set only after a zero-length pipe read.
+        read_chunk: Pipe-read operation, injectable for an error-path proof.
     """
     prefix = b"" if retention is None else retention.prefix.encode("utf-8")
     pending = b""
@@ -376,7 +378,7 @@ def _tee_stream(
             if not events:
                 continue
             try:
-                chunk = os.read(descriptor, _PIPE_CHUNK_BYTES)
+                chunk = read_chunk(descriptor, _PIPE_CHUNK_BYTES)
             except InterruptedError:
                 continue
             except (OSError, ValueError):
@@ -462,6 +464,19 @@ def _start_drainers(
     )
 
 
+def _await_drainer_eof(state: _DrainState | None) -> bool:
+    """Give every drainer a bounded opportunity to observe end of file."""
+    if state is None:
+        return True
+    deadline = time.monotonic() + DRAIN_SETTLE_SECONDS
+    for thread in state.threads:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        thread.join(remaining)
+    return all(reached_eof.is_set() for reached_eof in state.eof_events)
+
+
 def _settle_drainers(state: _DrainState | None) -> None:
     """Finish the drain within a fixed budget, then seal both caller streams.
 
@@ -474,14 +489,7 @@ def _settle_drainers(state: _DrainState | None) -> None:
     Args:
         state: The live drainers, or None when the child was not captured.
     """
-    if state is None:
-        return
-    deadline = time.monotonic() + DRAIN_SETTLE_SECONDS
-    for thread in state.threads:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        thread.join(remaining)
+    _await_drainer_eof(state)
     _seal_drainers(state)
 
 
@@ -576,6 +584,63 @@ def _signal_group(pid: int, signum: int) -> bool:
     return True
 
 
+def _wait_for_exit_without_reaping(
+    process: subprocess.Popen[bytes],
+    timeout_seconds: float,
+) -> bool:
+    """Observe leader exit while retaining its PID as process-group ownership.
+
+    Linux `waitid(WNOWAIT)` and Darwin kqueue process events report exit
+    readiness without reaping. The leader therefore remains a zombie and pins
+    both its PID and process-group ID until this supervisor sweeps descendants.
+
+    Args:
+        process: Live child whose session and process group this caller owns.
+        timeout_seconds: Maximum wait for an exit notification.
+
+    Returns:
+        True when the leader exited, False when the timeout elapsed first.
+    """
+    platform_name = os.uname().sysname
+    if platform_name == "Linux":
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            result = os.waitid(
+                os.P_PID,
+                process.pid,
+                os.WEXITED | os.WNOHANG | os.WNOWAIT,
+            )
+            if result is not None:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.01, remaining))
+    if platform_name == "Darwin":
+        queue = select.kqueue()  # type: ignore[attr-defined]
+        try:
+            event = select.kevent(  # type: ignore[attr-defined]
+                process.pid,
+                filter=select.KQ_FILTER_PROC,  # type: ignore[attr-defined]
+                flags=select.KQ_EV_ADD  # type: ignore[attr-defined]
+                | select.KQ_EV_ONESHOT,  # type: ignore[attr-defined]
+                fflags=select.KQ_NOTE_EXIT,  # type: ignore[attr-defined]
+            )
+            deadline = time.monotonic() + timeout_seconds
+            changes = [event]
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                try:
+                    return bool(queue.control(changes, 1, remaining))
+                except InterruptedError:
+                    changes = []
+        finally:
+            queue.close()
+    raise RuntimeError(f"unsupported watchdog platform: {platform_name}")
+
+
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
     """Terminate a timed-out process group and wait for its leader."""
     if not _signal_group(process.pid, signal.SIGTERM):
@@ -591,30 +656,15 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
     process.wait()
 
 
-def _kill_surviving_group(process: subprocess.Popen[bytes]) -> bool:
-    """Sweep descendants immediately after their group leader was reaped."""
-    delivered = _signal_group(process.pid, signal.SIGKILL)
-    process.wait()
-    return delivered
-
-
 def _forward_signal_and_cleanup(process: subprocess.Popen[bytes], signum: int) -> bool:
     """Forward a signal, force-reap the group, and report whether it existed."""
     if not _signal_group(process.pid, signum):
         process.wait()
         return False
 
-    deadline = time.monotonic() + TERMINATION_GRACE_SECONDS
-    while time.monotonic() < deadline:
-        # Reap the leader as soon as it exits. Descendants can keep the process
-        # group alive after that point, so group existence remains the cleanup
-        # condition rather than leader status alone.
-        process.poll()
-        if not _signal_group(process.pid, 0):
-            process.wait()
-            return True
-        time.sleep(0.01)
-
+    _wait_for_exit_without_reaping(process, TERMINATION_GRACE_SECONDS)
+    # Whether the leader exited or ignored the forwarded signal, it still pins
+    # the group ID here: no wait operation above made that ID reusable.
     _signal_group(process.pid, signal.SIGKILL)
     process.wait()
     return True
@@ -739,6 +789,7 @@ def run_command(
 
     process: subprocess.Popen[bytes] | None = None
     process_group_cleaned = False
+    cleanup_in_progress = False
     pending_signum: int | None = None
     previous_handlers: dict[signal.Signals, _SignalHandler] = {}
     drain_state: _DrainState | None = None
@@ -754,12 +805,7 @@ def run_command(
         if pending_signum is not None:
             return
         pending_signum = signum
-        if process is None:
-            return
-        if process.returncode is not None and not process_group_cleaned:
-            # `wait` has reaped the leader, so its numeric pid is no longer a
-            # safe process-group handle. Record cancellation but let the
-            # immediate, single-syscall survivor sweep finish before raising.
+        if process is None or cleanup_in_progress:
             return
         raise _WatchdogCancellation(signum)
 
@@ -800,11 +846,13 @@ def run_command(
                 # path, caught by the arm that closes this try. Abstracting it
                 # into an inner function would only hide the control flow.
                 raise _WatchdogCancellation(pending_signum)  # noqa: TRY301
-            try:
-                status = process.wait(timeout=timeout_seconds)
-            except subprocess.TimeoutExpired:
-                _terminate_process_group(process)
-                process_group_cleaned = True
+            if not _wait_for_exit_without_reaping(process, timeout_seconds):
+                cleanup_in_progress = True
+                try:
+                    _terminate_process_group(process)
+                    process_group_cleaned = True
+                finally:
+                    cleanup_in_progress = False
                 try:
                     _settle_drainers(drain_state)
                 except _WatchdogCancellation:
@@ -818,25 +866,21 @@ def run_command(
                     _seal_drainers(drain_state)
                 _notify_timeout(source, step, timeout_seconds)
                 return validate_deadline_proof(TimedOut(), deadline_sentinel)
-            termination: Termination
-            if status < 0:
-                # The leader is already reaped, but descendants may still own
-                # its process group. Kill them in one immediate syscall: once
-                # the leader is gone, a delayed numeric group-id probe could
-                # target an unrelated group that reused the id.
-                _kill_surviving_group(process)
+            capture_complete_before_sweep = _await_drainer_eof(drain_state)
+            # The unreaped leader still pins this process-group ID. Sweep now,
+            # before the wait below releases ownership and allows PID reuse.
+            cleanup_in_progress = True
+            try:
+                _signal_group(process.pid, signal.SIGKILL)
                 process_group_cleaned = True
-                termination = Signaled(-status)
-            else:
-                termination = Exited(status)
-                # Kill any surviving group immediately after reaping the
-                # leader. This is deliberately one syscall with no grace-period
-                # probe: the numeric group id stops being owned proof as soon as
-                # its leader has been reaped.
-                had_survivors = _kill_surviving_group(process)
-                process_group_cleaned = True
-                if had_survivors and marker_retention is not None:
-                    marker_retention.mark_capture_incomplete()
+                status = process.wait()
+            finally:
+                cleanup_in_progress = False
+            termination: Termination = (
+                Signaled(-status) if status < 0 else Exited(status)
+            )
+            if not capture_complete_before_sweep and marker_retention is not None:
+                marker_retention.mark_capture_incomplete()
             if pending_signum is not None:
                 raise _WatchdogCancellation(pending_signum)  # noqa: TRY301
             # Settle inside this try, never in the `finally`: the drain can wait
