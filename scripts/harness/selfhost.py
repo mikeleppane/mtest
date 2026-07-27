@@ -85,7 +85,7 @@ whole-process-group deadline. mtest's own `--timeout`/`--compile-timeout` cover
 a hung *child*; they cannot cover a hang in mtest's own scheduler, pool or
 reaper, which is precisely the code this lane exercises.
 
-Usage:  python -m scripts.harness.selfhost [ROOT ...]
+Usage:  python -m scripts.harness.selfhost [-n WORKERS] [ROOT ...]
 """
 
 from __future__ import annotations
@@ -121,6 +121,14 @@ TEST_FILE_GLOB = "test_*.mojo"
 
 DEFAULT_WORKERS = "auto"
 """Provisional worker policy. A later task measures and pins this value."""
+
+WORKER_FLAGS = ("-n", "--workers")
+"""Command-line spellings of the worker-count override.
+
+The pinned `DEFAULT_WORKERS` is the policy every pixi task runs under; this
+override exists so the value can be re-measured on a differently sized host
+without editing the module or the tasks that share it.
+"""
 
 TIMEOUT_ENV = "MTEST_SELFHOST_TIMEOUT_SECONDS"
 DEFAULT_TIMEOUT_SECONDS = 1800.0
@@ -496,6 +504,74 @@ def _test_files_under(root_absolute: Path, label: str) -> list[Path]:
                 )
             found.append(candidate)
     return sorted(found)
+
+
+@dataclass(frozen=True)
+class Request:
+    """One parsed self-host command line."""
+
+    workers: str
+    """The `-n` value to hand mtest: `auto` or a positive integer, as text."""
+    roots: tuple[str, ...]
+    """The requested suite roots; empty means the default classified roots."""
+
+
+def parse_request(
+    argv: Sequence[str], *, default_workers: str = DEFAULT_WORKERS
+) -> Request:
+    """Split a self-host command line into a worker count and suite roots.
+
+    Hand-rolled rather than `argparse` for one reason: `argparse` treats an
+    operand beginning with `-` as an unknown option and exits the process
+    itself, which would turn a mistyped root into a bare `SystemExit(2)` with no
+    `FATAL: selfhost:` line. Every rejection here is a `ValueError` that `main`
+    reports in the harness's own voice.
+
+    The worker value is validated rather than forwarded blind, so a typo
+    (`-n atuo`, `-n 0`) fails here instead of reaching mtest, where a
+    non-positive count silently means `auto` -- exactly the pinned-value bypass
+    a measured policy must not have.
+
+    Args:
+        argv: The command line after the program name.
+        default_workers: The `-n` value used when the flag is absent.
+
+    Returns:
+        The parsed request.
+
+    Raises:
+        ValueError: If the worker flag is repeated, carries no value, or carries
+            anything other than `auto` or a positive integer.
+    """
+    workers: str | None = None
+    roots: list[str] = []
+    pending_flag: str | None = None
+    for argument in argv:
+        if pending_flag is not None:
+            value, pending_flag = argument, None
+        elif argument in WORKER_FLAGS:
+            pending_flag = argument
+            continue
+        else:
+            matched = next(
+                (flag for flag in WORKER_FLAGS if argument.startswith(f"{flag}=")), None
+            )
+            if matched is None:
+                roots.append(argument)
+                continue
+            value = argument[len(matched) + 1 :]
+        if workers is not None:
+            raise ValueError("the worker count was given more than once")
+        if value != "auto" and not (
+            value.isascii() and value.isdecimal() and int(value) > 0
+        ):
+            raise ValueError(
+                f"worker count must be 'auto' or a positive integer: {value!r}"
+            )
+        workers = value
+    if pending_flag is not None:
+        raise ValueError(f"{pending_flag} needs a worker count")
+    return Request(default_workers if workers is None else workers, tuple(roots))
 
 
 def normalized_roots(repo_root: Path, paths: Sequence[str]) -> list[Path]:
@@ -1384,14 +1460,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run the requested classified roots through mtest and check the report.
 
     Args:
-        argv: Requested roots, or None to read them from `sys.argv`.
+        argv: The command line after the program name, or None to read it from
+            `sys.argv`.
 
     Returns:
         `verify`'s exit code, or 2 when the request itself was rejected.
     """
-    paths = list(sys.argv[1:] if argv is None else argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
     try:
-        return verify(paths)
+        request = parse_request(raw)
+        return verify(request.roots, workers=request.workers)
     except (AssertionError, OSError, ValueError) as exc:
         print(f"FATAL: selfhost: {exc}", file=sys.stderr)
         return 2

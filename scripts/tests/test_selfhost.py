@@ -482,6 +482,54 @@ class CommandTests(unittest.TestCase):
         )
 
 
+class RequestParsingTests(unittest.TestCase):
+    """The worker override must reach mtest, and a typo must never mean `auto`.
+
+    mtest reads a non-positive `-n` as `auto`, so an unvalidated value is not an
+    error but a silent policy change: the measured count the pixi tasks run
+    under would be replaced by cores/2 with nothing said. These prove the parse
+    rejects that rather than forwarding it.
+    """
+
+    def test_roots_alone_carry_the_pinned_default(self) -> None:
+        request = selfhost.parse_request(["tests/unit", "tests/integration"])
+
+        self.assertEqual(request.workers, selfhost.DEFAULT_WORKERS)
+        self.assertEqual(request.roots, ("tests/unit", "tests/integration"))
+
+    def test_both_flag_spellings_override_the_default(self) -> None:
+        for argv in (
+            ["-n", "8", "tests/unit"],
+            ["-n=8", "tests/unit"],
+            ["--workers", "8", "tests/unit"],
+            ["--workers=8", "tests/unit"],
+            ["tests/unit", "-n", "8"],
+        ):
+            with self.subTest(argv=argv):
+                request = selfhost.parse_request(argv)
+
+                self.assertEqual(request.workers, "8")
+                self.assertEqual(request.roots, ("tests/unit",))
+
+    def test_a_nonpositive_or_misspelled_count_is_rejected(self) -> None:
+        for value in ("0", "-1", "atuo", "", "4.0", "1e3"):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(
+                    ValueError, "must be 'auto' or a positive integer"
+                ),
+            ):
+                selfhost.parse_request([f"-n={value}", "tests/unit"])
+
+    def test_a_flag_without_a_value_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "needs a worker count"):
+            selfhost.parse_request(["tests/unit", "-n"])
+
+    def test_a_repeated_count_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "given more than once"):
+            selfhost.parse_request(["-n", "4", "-n", "8"])
+
+
 class TimeoutPolicyTests(unittest.TestCase):
     def test_the_default_ceiling_clears_the_slowest_measured_run_twice_over(
         self,
