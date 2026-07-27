@@ -126,8 +126,22 @@ class QualityWiringTests(unittest.TestCase):
         # means `uv` is a contributor's own install rather than something the
         # gate may assume. Keeping py-check out of `ci` is what stops a green
         # floor from depending on a tool the environment does not pin.
+        #
+        # `ci-memory` is a plain command string in the base [tasks] table and
+        # only gains its real `depends-on` (the asan/valgrind lanes) under
+        # [target.linux-64.tasks], which silently replaces the base entry for
+        # that one platform. Walking the base table alone stops at
+        # `ci-memory` and never reaches the memory lanes at all — so this
+        # merges the linux-64 override over the base table first, the same
+        # way the deleted `ci_topology._platform_tasks` did, before walking
+        # the closure. Skipping instead of raising on a dependency shape this
+        # module does not expect (Pixi also allows table-form dependency
+        # entries) would make the closure shrink quietly; raise instead.
         with (python_quality.REPO_ROOT / "pixi.toml").open("rb") as handle:
-            tasks = tomllib.load(handle)["tasks"]
+            manifest = tomllib.load(handle)
+        base_tasks = manifest["tasks"]
+        linux_overrides = manifest["target"]["linux-64"]["tasks"]
+        tasks = {**base_tasks, **linux_overrides}
         closure: set[str] = set()
         pending = ["ci"]
         while pending:
@@ -138,12 +152,14 @@ class QualityWiringTests(unittest.TestCase):
             task = tasks.get(name)
             if isinstance(task, dict):
                 dependencies = task.get("depends-on", [])
-                if isinstance(dependencies, list):
-                    pending.extend(
-                        dependency
-                        for dependency in dependencies
-                        if isinstance(dependency, str)
+                if not isinstance(dependencies, list) or not all(
+                    isinstance(dependency, str) for dependency in dependencies
+                ):
+                    raise AssertionError(
+                        f"pixi task {name!r} has a dependency list this test "
+                        f"does not understand: {dependencies!r}"
                     )
+                pending.extend(dependencies)
         self.assertNotIn("py-check", closure)
         self.assertNotIn("py-fmt", closure)
         workflow = (
