@@ -77,8 +77,8 @@ The inventory is derived, never declared. There is no committed path list, no
 committed test count, and nothing a human edits when adding a test file or a
 test function -- see `derive_inventory` and `independent_test_function_names`.
 The parser is a deliberate port rather than an import: it must not share a
-regex or a helper with `scripts/harness/aggregate.py`, because independence
-from the generator is the property being relied on.
+regex or a helper with anything that also produces the report it reconciles,
+because that independence is the property being relied on.
 
 The whole run is supervised by `scripts/harness/watchdog.py` under a
 whole-process-group deadline. mtest's own `--timeout`/`--compile-timeout` cover
@@ -443,13 +443,11 @@ class _TeeCapture:
 def independent_test_function_names(source: str, origin: str) -> tuple[str, ...]:
     """Parse top-level ``def test_*`` declarations with no shared helper.
 
-    A deliberate port of `scripts/checks/layout.py`'s oracle parser rather than
-    an import of it: a later task deletes most of that module's classified
-    ledgers, and this oracle must not be coupled to a module being gutted. It
-    uses no regular expression and touches nothing that
-    `scripts/harness/aggregate.py` uses, because independence from the
-    generator is the entire property being relied on. Do not "simplify" it into
-    sharing a parser with anything else.
+    A deliberate port rather than an import of any other parser in this
+    repository: it uses no regular expression and shares no helper with the
+    code paths that produce the report it is checking, because that
+    independence is the entire property being relied on. Do not "simplify" it
+    into sharing a parser with anything else.
 
     Args:
         source: The complete text of one Mojo test file.
@@ -769,9 +767,8 @@ def run_mtest(
 ) -> SupervisedRun:
     """Run one mtest command under a whole-process-group deadline.
 
-    Follows `scripts/harness/classified.py`'s `_run_step` pattern: a sentinel
-    file is created before the spawn and removed by the supervisor on every
-    non-timeout ending, then reconciled here. That makes "this timed out" a
+    A sentinel file is created before the spawn and removed by the supervisor
+    on every non-timeout ending, then reconciled here. That makes "this timed out" a
     claim confirmed against filesystem state rather than one taken on the
     supervisor's word.
 

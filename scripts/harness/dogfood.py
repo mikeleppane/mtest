@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Run focused self-host probes through mtest and verify exact membership.
 
-The exhaustive unit/integration inventory is compiled once by
-``scripts/harness/classified.py``. This independent dogfood gate instead sends three
-small executable probes through the real ``build/mtest`` binary. That keeps
-coverage of mtest's discover/build/run/parse/report path without asking mtest
-to compile the exhaustive suite one source file at a time.
+The exhaustive unit/integration inventory is run by
+``scripts/harness/selfhost.py``, through mtest itself. This independent
+dogfood gate instead sends three small executable probes through the real
+``build/mtest`` binary. That keeps coverage of mtest's
+discover/build/run/parse/report path in a check that does not depend on the
+self-hosted lane being green.
 
 Usage:  pixi run dogfood-check
         python -m scripts.harness.dogfood
