@@ -5,7 +5,7 @@
 `mojo-compiler ==1.0.0b2` run dependency (see `pixi run package-build`). That
 proves the recipe *solves*; it does not prove the artifact it produces is
 actually consumable by someone who only has the package, not this repo's dev
-toolchain. This script is that proof, run in six ordered stages:
+toolchain. This script is that proof, with ten ordered completion records:
 
   1. Build the package into a LOCAL channel (`pixi run package-build`,
      unmodified -- this script reuses that exact task rather than duplicating
@@ -32,22 +32,25 @@ toolchain. This script is that proof, run in six ordered stages:
      expected discovery refusal. A loader failure here is a recipe
      run-dependency gap, not a retry-able flake -- this script stops and
      reports it.
-  4. Toolchain-threaded dogfood run: three focused executable probes, run
+  4. Compile and run the installed assertion source at `-O0` and `-O3` with
+     the exact compiler installed as the package's run dependency.
+  5. Run the committed assertion example through the installed binary and
+     compare its normalized output byte-for-byte with the README.
+  6. Toolchain-threaded dogfood run: three focused executable probes, run
      through the INSTALLED binary (never `build/mtest`). Unlike stage 3, this
      stage does NOT scrub the environment -- the probes' compiler children need
      `mojo` on PATH. Reuses dogfood's exact-membership gate, parameterized onto
      the installed binary.
-  5. Known-failing fixture run through the INSTALLED binary. A green dogfood
+  7. Known-failing fixture run through the INSTALLED binary. A green dogfood
      run only proves the package can report success; this stage proves it
      reports FAILURE truthfully -- exact exit 1, exactly one FAIL verdict row
      naming the fixture, no PASS verdict row, and a summary carrying the
      fixture's one failure with nothing left unrun.
-  6. Tarball fallback smoke-run: build the SAME recipe in the classic tar-bz2
+  8-10. Tarball fallback: build the SAME recipe in the classic tar-bz2
      package format into its own local channel, install it into a second
      scratch env (again pinned to that build's exact build string and verified
-     against its recorded SHA-256), and run `--version` -- proving the fallback
-     distribution form is installable and runnable too, not just the primary
-     `.conda` form.
+     against its recorded SHA-256), run `--version`, then repeat the installed
+     assertion-source and README-example proofs.
 
 Both gated platforms run this identical gate: the subdir, the loader-inspection
 command, and the loader environment variables come from one immutable
@@ -63,7 +66,9 @@ Usage:  pixi run package-check
 
 from __future__ import annotations
 
+import configparser
 from dataclasses import dataclass
+import difflib
 import glob
 import hashlib
 import json
@@ -72,21 +77,22 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 
-from scripts.harness import dogfood
+from scripts.harness import dogfood, watchdog
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PIXI_TOML = REPO_ROOT / "pixi.toml"
 RECIPE_PATH = REPO_ROOT / "recipe" / "recipe.yaml"
 
-# Where `pixi run package-build` (invoked unmodified by stage 1) writes the
+# Where `pixi run package-build` (invoked unmodified by `build`) writes the
 # primary `.conda` local channel -- must match that task's `--output-dir` in
-# pixi.toml exactly, since stage 2 solves against it.
+# pixi.toml exactly, since `install` solves against it.
 CONDA_CHANNEL_DIR = REPO_ROOT / "build" / "conda-channel"
-# This script's own local channel for the tar-bz2 fallback form (stage 6) --
+# This script's own local channel for the tar-bz2 fallback form --
 # kept separate from CONDA_CHANNEL_DIR so the two package formats never mix in
 # one repodata.
 TARBALL_CHANNEL_DIR = REPO_ROOT / "build" / "conda-channel-tarball"
@@ -101,7 +107,7 @@ LOADER_PROBE_CWD = SCRATCH_ROOT / "loader-probe-cwd"
 MODULAR_CHANNEL = "https://conda.modular.com/max/"
 CONDA_FORGE_CHANNEL = "conda-forge"
 
-# The known-failing fixture stage 5 drives through the installed binary. It is
+# The known-failing fixture stage drives through the installed binary. It is
 # an e2e fixture with a declared, manifest-pinned outcome (verdict FAIL, exit
 # class 1, two passing and one failing test); scripts/checks/layout.py fails the
 # cheap harness gate if that declaration and these constants ever disagree.
@@ -203,7 +209,7 @@ class BuiltArtifact:
     subdir: str
 
 
-# Artifacts stage 4 needs from THIS repo checkout (not from the isolated
+# Artifacts dogfood needs from THIS repo checkout (not from the isolated
 # rattler-build sandbox): the precompiled package the probes import against,
 # and the test-variant native object linked into each probe build -- the exact
 # pair scripts/harness/dogfood.py uses for `pixi run dogfood-check`.
@@ -216,6 +222,8 @@ BUILD_TIMEOUT = 600.0
 INSTALL_TIMEOUT = 300.0
 PROBE_TIMEOUT = 30.0
 SMOKE_TIMEOUT = 60.0
+ASSERTION_COMPILE_TIMEOUT = 120.0
+ASSERTION_EXAMPLE_TIMEOUT = 300.0
 # The fixture stage compiles one file through the installed binary. Generous for
 # the same reason dogfood's ceiling is: a hosted runner may have a cold Mojo
 # compiler cache, and the limit exists only to catch a genuine hang.
@@ -236,6 +244,54 @@ SUMMARY_RE = re.compile(
     re.MULTILINE,
 )
 
+INSTALLED_ASSERTION_FILES = {
+    Path("mtest/__init__.mojo"),
+    Path("mtest/assertions/__init__.mojo"),
+    Path("mtest/assertions/_display.mojo"),
+    Path("mtest/assertions/_mapping.mojo"),
+    Path("mtest/assertions/_sequence.mojo"),
+    Path("mtest/assertions/_text.mojo"),
+}
+INSTALLED_ASSERTION_DIRECTORIES = {
+    Path("."),
+    Path("mtest"),
+    Path("mtest/assertions"),
+}
+ASSERTION_PROBE_SOURCE = """\
+from mtest.assertions import assert_equal
+
+
+def main() raises:
+    assert_equal(1, 1)
+    assert_equal([1, 2], [1, 2])
+    assert_equal({"key": 1}, {"key": 1})
+    var detail = String("")
+    try:
+        assert_equal("left", "right")
+    except error:
+        detail = String(error)
+    if "text differs at scalar 0" not in detail:
+        raise Error("installed assertion diagnostic was not selected")
+"""
+PRIVATE_IMPORT_PROBE_SOURCE = """\
+from mtest.session import run_session
+
+
+def main():
+    pass
+"""
+PRIVATE_HELPER_PROBE_SOURCE = """\
+from mtest.assertions import BoundedWriter
+
+
+def main():
+    _ = BoundedWriter(16)
+"""
+ASSERTION_EXAMPLE = REPO_ROOT / "examples" / "assertions" / "test_diagnostics.mojo"
+ASSERTION_README_SECTION = "## Assertion diagnostics\n"
+ASSERTION_MOJO_FENCE = "```mojo\n"
+ASSERTION_CONSOLE_FENCE = "```console\n"
+
 
 # The exact roster of stages one full gate run must perform, in order. The
 # closing summary is DERIVED from what actually ran (see `completed_stages`),
@@ -245,14 +301,27 @@ GATE_STAGE_IDS = (
     "build",
     "install",
     "loader-clean",
+    "assertion-source",
+    "assertion-example",
     "dogfood",
     "failing-fixture",
+    "tarball-assertion-source",
+    "tarball-assertion-example",
     "tarball",
 )
 
-# The probes stage 3 must run on the installed binary, in order. Its closing
+# The loader-clean probes must run on the installed binary, in order. Its closing
 # line is derived from these and checked against them, for the same reason.
 LOADER_PROBE_FLAGS = ("--version", "--help", "--config")
+ASSERTION_OPTIMIZATIONS = (("-O0", "o0"), ("-O3", "o3"))
+
+# Pixi 0.72.0 installs the legacy tar-bz2 artifact into its disposable prefix
+# with the prefix's group-write policy (664 files and 775 directories), while
+# the .conda artifact retains the recipe's 644/755 modes. Both non-world-
+# writable forms are accepted so the gate validates installed bytes instead of
+# rewriting installer-owned modes before compilation.
+PRIMARY_ASSERTION_FILE_MODES = (0o644,)
+TARBALL_ASSERTION_FILE_MODES = (0o644, 0o664)
 
 _COMPLETED_STAGES: list[str] = []
 
@@ -300,6 +369,755 @@ def verify_every_stage_ran() -> None:
             f"{list(completed_stages())}, expected {list(GATE_STAGE_IDS)}"
             + (f", missing {missing}" if missing else " in that order")
         )
+
+
+def verify_assertion_optimization_roster(performed: tuple[str, ...]) -> None:
+    """Refuse to summarize assertion compiles that skipped an optimization."""
+    expected = tuple(optimization for optimization, _suffix in ASSERTION_OPTIMIZATIONS)
+    if performed != expected:
+        missing = [item for item in expected if item not in performed]
+        raise PackageCheckError(
+            "assertion optimization roster mismatch: "
+            f"ran {list(performed)}, expected {list(expected)}, missing {missing}"
+        )
+
+
+def assertion_compile_command(
+    env_prefix: Path,
+    source: Path,
+    output: Path,
+    optimization: str,
+) -> list[str]:
+    """Build one probe with absolute installed compiler and source paths."""
+    return [
+        str((env_prefix / "bin" / "mojo").resolve()),
+        "build",
+        optimization,
+        "-I",
+        str((env_prefix / "share" / "mtest" / "assertions-src").resolve()),
+        str(source.resolve()),
+        "-o",
+        str(output.resolve()),
+    ]
+
+
+def assertion_probe_environment(
+    env_prefix: Path,
+    target: PackagePlatform | None = None,
+    *,
+    scope: str = "probe",
+) -> dict[str, str]:
+    """Return a compiler environment isolated onto one installed prefix."""
+    prefix = env_prefix.resolve()
+    selected = target or host_platform()
+    environment_root = SCRATCH_ROOT / "assertion-environments" / scope
+    if environment_root.exists():
+        shutil.rmtree(environment_root)
+    home = environment_root / "home"
+    cache = environment_root / "cache"
+    home.mkdir(parents=True)
+    cache.mkdir()
+    environment = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(home),
+        "MODULAR_CACHE_DIR": str(cache),
+        "MODULAR_HOME": str(prefix / "share" / "max"),
+    }
+    environment.update(dict.fromkeys(selected.loader_env_names, str(prefix / "lib")))
+    return environment
+
+
+def validate_assertion_install(
+    env_prefix: Path,
+    *,
+    allow_installer_group_write: bool = False,
+) -> Path:
+    """Require the exact public source files, safe modes, and compiler provenance."""
+    prefix = env_prefix.resolve()
+    source_root = prefix / "share" / "mtest" / "assertions-src"
+    for relative in (
+        Path("."),
+        Path("share"),
+        Path("share/mtest"),
+        Path("share/mtest/assertions-src"),
+    ):
+        component = prefix / relative
+        try:
+            component_mode = component.lstat().st_mode
+        except FileNotFoundError as exc:
+            raise PackageCheckError(
+                f"installed assertion path component is missing: {relative}"
+            ) from exc
+        if stat.S_ISLNK(component_mode) or not stat.S_ISDIR(component_mode):
+            raise PackageCheckError(
+                "installed assertion path component must be a real directory: "
+                f"{relative}"
+            )
+        _require_safe_assertion_directory(
+            component,
+            relative,
+        )
+    entries = list(source_root.rglob("*"))
+    symbolic_links = [
+        path.relative_to(source_root) for path in entries if path.is_symlink()
+    ]
+    if symbolic_links:
+        raise PackageCheckError(
+            f"installed assertion source contains a symbolic link: "
+            f"{sorted(symbolic_links)}"
+        )
+    actual_entries = {path.relative_to(source_root) for path in entries}
+    expected_entries = INSTALLED_ASSERTION_FILES | (
+        INSTALLED_ASSERTION_DIRECTORIES - {Path(".")}
+    )
+    if actual_entries != expected_entries:
+        raise PackageCheckError(
+            "installed assertion entry set differs: "
+            f"missing={sorted(expected_entries - actual_entries)}, "
+            f"extra={sorted(actual_entries - expected_entries)}"
+        )
+    actual_files = {
+        path.relative_to(source_root)
+        for path in entries
+        if stat.S_ISREG(path.lstat().st_mode)
+    }
+    if actual_files != INSTALLED_ASSERTION_FILES:
+        raise PackageCheckError(
+            "installed assertion file set differs: "
+            f"missing={sorted(INSTALLED_ASSERTION_FILES - actual_files)}, "
+            f"extra={sorted(actual_files - INSTALLED_ASSERTION_FILES)}"
+        )
+    for relative in sorted(INSTALLED_ASSERTION_FILES):
+        source = source_root / relative
+        source_mode = source.lstat().st_mode
+        if not stat.S_ISREG(source_mode):
+            raise PackageCheckError(
+                f"installed assertion source must be a regular file: {relative}"
+            )
+        mode = stat.S_IMODE(source_mode)
+        allowed_modes = (
+            TARBALL_ASSERTION_FILE_MODES
+            if allow_installer_group_write
+            else PRIMARY_ASSERTION_FILE_MODES
+        )
+        if mode not in allowed_modes:
+            requirement = (
+                "mode 644 or installer-normalized 664"
+                if allow_installer_group_write
+                else "exact mode 644"
+            )
+            raise PackageCheckError(
+                f"installed assertion source must have {requirement}: "
+                f"{relative} has {mode:o}"
+            )
+        checkout_source = REPO_ROOT / "assertions-src" / relative
+        if source.read_bytes() != checkout_source.read_bytes():
+            raise PackageCheckError(
+                f"installed assertion source bytes differ: {relative}"
+            )
+    for relative in sorted(INSTALLED_ASSERTION_DIRECTORIES):
+        directory = source_root / relative
+        _require_safe_assertion_directory(
+            directory,
+            Path("share/mtest/assertions-src") / relative,
+        )
+    if list(source_root.rglob("*.mojopkg")):
+        raise PackageCheckError("installed assertion source contains a mojopkg")
+
+    bin_directory = prefix / "bin"
+    try:
+        bin_mode = bin_directory.lstat().st_mode
+    except FileNotFoundError as exc:
+        raise PackageCheckError(
+            f"installed compiler directory is missing: {bin_directory}"
+        ) from exc
+    if stat.S_ISLNK(bin_mode) or not stat.S_ISDIR(bin_mode):
+        raise PackageCheckError(
+            f"installed compiler directory must be a real directory: {bin_directory}"
+        )
+    mojo = bin_directory / "mojo"
+    try:
+        mojo_mode = mojo.lstat().st_mode
+    except FileNotFoundError as exc:
+        raise PackageCheckError(f"installed compiler is missing: {mojo}") from exc
+    if (
+        stat.S_ISLNK(mojo_mode)
+        or not stat.S_ISREG(mojo_mode)
+        or not os.access(mojo, os.X_OK)
+    ):
+        raise PackageCheckError(
+            f"installed compiler must be an executable real regular file: {mojo}"
+        )
+    config = prefix / "share" / "max" / "modular.cfg"
+    if not config.is_file():
+        raise PackageCheckError(f"installed modular.cfg is missing: {config}")
+    _validate_modular_config(config, prefix)
+    return source_root
+
+
+def _validate_modular_config(config: Path, prefix: Path) -> None:
+    """Require unique, exact compiler-root assignments in installed config."""
+    parser = configparser.ConfigParser(interpolation=None, strict=True)
+    try:
+        with config.open(encoding="utf-8") as stream:
+            parser.read_file(stream)
+    except (configparser.Error, UnicodeError) as exc:
+        raise PackageCheckError(
+            f"installed modular.cfg is invalid or contains a duplicate: {exc}"
+        ) from exc
+    expected = {
+        ("max", "package_root"): str(prefix),
+        ("mojo-max", "package_root"): str(prefix),
+        ("mojo-max", "driver_path"): str(prefix / "bin" / "mojo"),
+        ("mojo-max", "import_path"): str(prefix / "lib" / "mojo"),
+    }
+    expected_options = {
+        "max": {
+            "package_root",
+            "cache_dir",
+            "enable_model_ir_cache",
+            "name",
+            "path",
+            "version",
+        },
+        "mojo-max": {
+            "package_root",
+            "compilerrt_path",
+            "mgprt_path",
+            "shared_libs",
+            "driver_path",
+            "import_path",
+            "jupyter_path",
+            "lldb_path",
+            "lldb_plugin_path",
+            "lldb_visualizers_path",
+            "lldb_vscode_path",
+            "lsp_server_path",
+            "mblack_path",
+            "repl_entry_point",
+            "lld_path",
+        },
+    }
+    required_prefix_paths = (
+        ("max", "cache_dir"),
+        ("max", "path"),
+        ("mojo-max", "compilerrt_path"),
+        ("mojo-max", "mgprt_path"),
+        ("mojo-max", "jupyter_path"),
+        ("mojo-max", "lldb_path"),
+        ("mojo-max", "lldb_plugin_path"),
+        ("mojo-max", "lldb_visualizers_path"),
+        ("mojo-max", "lldb_vscode_path"),
+        ("mojo-max", "lsp_server_path"),
+        ("mojo-max", "mblack_path"),
+        ("mojo-max", "repl_entry_point"),
+        ("mojo-max", "lld_path"),
+    )
+    mismatches: list[str] = []
+    if set(parser.sections()) != set(expected_options):
+        mismatches.append(
+            "sections differ: expected "
+            + repr(sorted(expected_options))
+            + ", got "
+            + repr(sorted(parser.sections()))
+        )
+    for section, options in expected_options.items():
+        observed_options = (
+            set(parser[section]) if parser.has_section(section) else set()
+        )
+        if observed_options != options:
+            mismatches.append(
+                f"[{section}] options differ: expected {sorted(options)!r}, "
+                f"got {sorted(observed_options)!r}"
+            )
+    for (section, option), expected_value in expected.items():
+        observed = parser.get(section, option, raw=True, fallback=None)
+        if observed != expected_value:
+            mismatches.append(
+                f"[{section}] {option}: expected {expected_value!r}, got {observed!r}"
+            )
+    import_path = prefix / "lib" / "mojo"
+    try:
+        resolved_import_path = import_path.resolve(strict=True)
+    except OSError as exc:
+        mismatches.append(f"[mojo-max] import_path: cannot resolve: {exc}")
+    else:
+        if (
+            not resolved_import_path.is_relative_to(prefix)
+            or not resolved_import_path.is_dir()
+        ):
+            mismatches.append(
+                "[mojo-max] import_path: must resolve to a directory inside prefix"
+            )
+    for section, option in required_prefix_paths:
+        observed = parser.get(section, option, raw=True, fallback=None)
+        if observed is None:
+            mismatches.append(f"[{section}] {option}: missing")
+            continue
+        candidate = Path(observed.removesuffix(";")).resolve()
+        if not candidate.is_relative_to(prefix):
+            mismatches.append(
+                f"[{section}] {option}: path escapes prefix: {observed!r}"
+            )
+    shared_libs = parser.get("mojo-max", "shared_libs", raw=True, fallback=None)
+    if shared_libs is None:
+        mismatches.append("[mojo-max] shared_libs: missing")
+    else:
+        library_suffix = ".dylib" if sys.platform == "darwin" else ".so"
+        expected_shared_libs = (
+            str(prefix / "lib" / f"libAsyncRTMojoBindings{library_suffix}")
+            + ",-Xlinker,-rpath,-Xlinker,"
+            + str(prefix / "lib")
+            + ";"
+        )
+        if shared_libs != expected_shared_libs:
+            mismatches.append(
+                "[mojo-max] shared_libs: expected "
+                + repr(expected_shared_libs)
+                + ", got "
+                + repr(shared_libs)
+            )
+        runtime_library = prefix / "lib" / (f"libAsyncRTMojoBindings{library_suffix}")
+        try:
+            resolved_runtime_library = runtime_library.resolve(strict=True)
+        except OSError as exc:
+            mismatches.append(f"[mojo-max] shared_libs: cannot resolve: {exc}")
+        else:
+            if (
+                not resolved_runtime_library.is_relative_to(prefix)
+                or not resolved_runtime_library.is_file()
+            ):
+                mismatches.append(
+                    "[mojo-max] shared_libs: runtime library must resolve to "
+                    "a regular file inside prefix"
+                )
+    if mismatches:
+        raise PackageCheckError(
+            "installed modular.cfg does not name its own prefix exactly: "
+            + "; ".join(mismatches)
+        )
+
+
+def _require_safe_assertion_directory(
+    directory: Path,
+    relative: Path,
+) -> None:
+    """Require one installed source path to retain safe directory permissions."""
+    mode = stat.S_IMODE(directory.stat().st_mode)
+    if mode & 0o002 or mode & 0o500 != 0o500 or mode & 0o7000:
+        raise PackageCheckError(
+            "installed assertion directory must be owner-readable and "
+            "traversable, not world-writable, and carry no special bits: "
+            f"{relative} has {mode:o}"
+        )
+
+
+def require_missing_runner_module(diagnostic: str) -> None:
+    """Require the semantic rejection for the runner-private module."""
+    if "error: unable to locate module 'session'" not in diagnostic:
+        raise PackageCheckError(
+            "private runner import failed for the wrong reason: " + diagnostic
+        )
+
+
+def require_missing_facade_export(diagnostic: str, helper: str) -> None:
+    """Require the semantic rejection for one package-facade helper."""
+    expected = f"package 'assertions' does not contain '{helper}'"
+    if expected not in diagnostic:
+        raise PackageCheckError(
+            f"{helper} facade probe failed for the wrong reason: " + diagnostic
+        )
+
+
+def require_warning_free_assertion_compile(
+    transcript: str,
+    label: str,
+    optimization: str,
+) -> None:
+    """Reject warnings from an installed assertion-source consumer compile."""
+    if watchdog.CAPTURE_TRUNCATION_MARKER in transcript:
+        raise PackageCheckError(
+            f"{label} assertion compiler output was truncated at {optimization}"
+        )
+    if "warning:" in transcript:
+        raise PackageCheckError(
+            f"{label} assertion compiler warning at {optimization}: {transcript}"
+        )
+
+
+def _run_assertion_process(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    """Run one package assertion probe with bounded process-group supervision."""
+    captured = watchdog.run_captured_command(
+        command,
+        source=command[0] if command else "<empty>",
+        step="package assertion probe",
+        timeout_seconds=timeout,
+        cwd=cwd,
+        env=env,
+    )
+    termination = captured.termination
+    if isinstance(termination, watchdog.Exited):
+        if not captured.capture_complete:
+            raise PackageCheckError(
+                "assertion process capture was incomplete: " + " ".join(command)
+            )
+        if watchdog.CAPTURE_TRUNCATION_MARKER in captured.stdout + captured.stderr:
+            raise PackageCheckError(
+                "assertion process output was truncated: " + " ".join(command)
+            )
+        return subprocess.CompletedProcess(
+            command,
+            termination.code,
+            captured.stdout,
+            captured.stderr,
+        )
+    if isinstance(termination, watchdog.Signaled):
+        raise PackageCheckError(
+            f"assertion process died by signal {termination.signo}: "
+            + " ".join(command)
+        )
+    rendered = " ".join(command)
+    if isinstance(termination, watchdog.TimedOut):
+        raise PackageCheckError(
+            f"assertion process exceeded {timeout} seconds: {rendered}"
+        )
+    if isinstance(termination, watchdog.Cancelled):
+        raise PackageCheckError(
+            f"assertion process cancelled by signal {termination.signo}: {rendered}"
+        )
+    raise PackageCheckError(
+        f"assertion process supervision failed: {termination.detail}: {rendered}"
+    )
+
+
+def stage_assertion_source_probe(
+    env_prefix: Path,
+    label: str,
+    *,
+    completion_id: str | None = None,
+) -> None:
+    """Compile and run public-source probes from one installed package form."""
+    _banner(f"stage {completion_id or 'assertion-source'} -- {label}")
+    source_root = validate_assertion_install(
+        env_prefix,
+        allow_installer_group_write=label == "tarball",
+    )
+    probe_root = SCRATCH_ROOT / f"assertion-probe-{label}"
+    if probe_root.exists():
+        shutil.rmtree(probe_root)
+    probe_root.mkdir(parents=True)
+    positive = probe_root / "consumer.mojo"
+    negative = probe_root / "private_import.mojo"
+    private_helper = probe_root / "private_helper.mojo"
+    positive.write_text(ASSERTION_PROBE_SOURCE, encoding="utf-8")
+    negative.write_text(PRIVATE_IMPORT_PROBE_SOURCE, encoding="utf-8")
+    private_helper.write_text(PRIVATE_HELPER_PROBE_SOURCE, encoding="utf-8")
+    environment = assertion_probe_environment(
+        env_prefix,
+        scope=f"{label}-source",
+    )
+    checkout_source = str((REPO_ROOT / "assertions-src").resolve())
+
+    performed_optimizations: list[str] = []
+    for optimization, suffix in ASSERTION_OPTIMIZATIONS:
+        binary = probe_root / f"consumer-{suffix}"
+        command = assertion_compile_command(
+            env_prefix,
+            positive,
+            binary,
+            optimization,
+        )
+        if checkout_source in " ".join(command):
+            raise PackageCheckError(
+                "installed assertion compile command leaked checkout source"
+            )
+        build = _run_assertion_process(
+            command,
+            cwd=probe_root,
+            env=environment,
+            timeout=ASSERTION_COMPILE_TIMEOUT,
+        )
+        transcript = build.stdout + build.stderr
+        if checkout_source in transcript:
+            raise PackageCheckError(
+                "installed assertion compiler output leaked checkout source"
+            )
+        if build.returncode != 0 or not binary.is_file():
+            raise PackageCheckError(
+                f"{label} assertion probe compile failed at {optimization}: "
+                f"{transcript}"
+            )
+        require_warning_free_assertion_compile(
+            transcript,
+            label,
+            optimization,
+        )
+        run = _run_assertion_process(
+            [str(binary)],
+            cwd=probe_root,
+            env=environment,
+            timeout=PROBE_TIMEOUT,
+        )
+        if run.returncode != 0:
+            raise PackageCheckError(
+                f"{label} assertion probe exited {run.returncode} at "
+                f"{optimization}: {run.stdout}{run.stderr}"
+            )
+        performed_optimizations.append(optimization)
+    verify_assertion_optimization_roster(tuple(performed_optimizations))
+
+    negative_binary = probe_root / "private-import"
+    negative_command = assertion_compile_command(
+        env_prefix,
+        negative,
+        negative_binary,
+        "-O0",
+    )
+    rejected = _run_assertion_process(
+        negative_command,
+        cwd=probe_root,
+        env=environment,
+        timeout=ASSERTION_COMPILE_TIMEOUT,
+    )
+    rejection = rejected.stdout + rejected.stderr
+    if rejected.returncode == 0 or negative_binary.exists():
+        raise PackageCheckError(
+            f"{label} public source unexpectedly exposed mtest.session"
+        )
+    require_missing_runner_module(rejection)
+    if checkout_source in rejection:
+        raise PackageCheckError(
+            "installed assertion negative probe leaked checkout source"
+        )
+
+    helper_binary = probe_root / "private-helper"
+    helper_rejected = _run_assertion_process(
+        assertion_compile_command(
+            env_prefix,
+            private_helper,
+            helper_binary,
+            "-O0",
+        ),
+        cwd=probe_root,
+        env=environment,
+        timeout=ASSERTION_COMPILE_TIMEOUT,
+    )
+    helper_rejection = helper_rejected.stdout + helper_rejected.stderr
+    if helper_rejected.returncode == 0 or helper_binary.exists():
+        raise PackageCheckError(
+            f"{label} public source unexpectedly exposed BoundedWriter"
+        )
+    require_missing_facade_export(helper_rejection, "BoundedWriter")
+    if checkout_source in helper_rejection:
+        raise PackageCheckError(
+            "installed assertion helper probe leaked checkout source"
+        )
+    print(
+        f"package-check: OK -- {label} installed {len(INSTALLED_ASSERTION_FILES)} "
+        f"source files at {source_root}, compiled at "
+        f"{'/'.join(performed_optimizations)}, and kept "
+        "runner imports and helper facade exports unavailable",
+        flush=True,
+    )
+    if completion_id is not None:
+        record_completed_stage(completion_id)
+
+
+def _readme_assertion_fence(
+    contents: str,
+    fence: str,
+    label: str,
+) -> str:
+    if contents.count(ASSERTION_README_SECTION) != 1:
+        raise PackageCheckError(
+            "README must contain exactly one assertion-diagnostics section"
+        )
+    section_start = contents.index(ASSERTION_README_SECTION) + len(
+        ASSERTION_README_SECTION
+    )
+    section_end = contents.find("\n## ", section_start)
+    if section_end == -1:
+        section_end = len(contents)
+    section = contents[section_start:section_end]
+    if section.count(fence) != 1:
+        raise PackageCheckError(
+            f"assertion-diagnostics section must contain exactly one {label} fence"
+        )
+    block_start = section.index(fence) + len(fence)
+    block_end = section.find("\n```", block_start)
+    if block_end == -1:
+        raise PackageCheckError(f"assertion-diagnostics {label} fence is not closed")
+    return section[block_start : block_end + 1]
+
+
+def readme_assertion_example_block(contents: str) -> str:
+    """Extract the sole console fence from the assertion-diagnostics section."""
+    return _readme_assertion_fence(
+        contents,
+        ASSERTION_CONSOLE_FENCE,
+        "console",
+    )
+
+
+def readme_assertion_source_block(contents: str) -> str:
+    """Extract the sole Mojo fence from the assertion-diagnostics section."""
+    return _readme_assertion_fence(
+        contents,
+        ASSERTION_MOJO_FENCE,
+        "Mojo",
+    )
+
+
+def normalize_assertion_example(
+    output: str,
+    prefix: Path,
+    repo_root: Path,
+) -> str:
+    """Normalize only installed paths and nondeterministic elapsed times."""
+    normalized = output.replace(str(prefix.resolve()), "<PREFIX>").replace(
+        str(repo_root.resolve()),
+        "<REPO>",
+    )
+    return _normalize_assertion_times(normalized)
+
+
+def _normalize_assertion_times(output: str) -> str:
+    normalized = re.sub(
+        r"(?m)^(FAIL\s+.+?)\s+\d+(?:\.\d+)?s$",
+        r"\1  <TIME>",
+        output,
+    )
+    normalized = re.sub(
+        r"(?m)(^===== .+ in )\d+(?:\.\d+)?s( =====$)",
+        r"\1<TIME>\2",
+        normalized,
+    )
+    normalized = re.sub(
+        r"(?m)^(\s+\|\s+(?:PASS|FAIL) \[ )\d+(?:\.\d+)?( \] .+)$",
+        r"\1<TIME>\2",
+        normalized,
+    )
+    normalized = re.sub(
+        r"(?m)^(\s+\| Summary \[ )\d+(?:\.\d+)?( \] .+)$",
+        r"\1<TIME>\2",
+        normalized,
+    )
+    for unstable_line in (
+        "    | Unhandled exception caught during execution: ",
+        "    | Running 2 tests for <REPO>/examples/assertions/test_diagnostics.mojo ",
+        "    | Summary [ <TIME> ] 2 tests run: 1 passed , 1 failed , 0 skipped ",
+        "    | Test suite' <REPO>/examples/assertions/test_diagnostics.mojo 'failed! ",
+        "    | ",
+    ):
+        normalized = normalized.replace(
+            unstable_line + "\n",
+            unstable_line.rstrip() + "\n",
+        )
+    return normalized
+
+
+def stage_assertion_example(
+    env_prefix: Path,
+    mtest_bin: Path,
+    *,
+    allow_installer_group_write: bool = False,
+    completion_id: str | None = None,
+) -> None:
+    """Run the committed diagnostic example through the installed artifact."""
+    _banner(f"stage {completion_id or 'assertion-example'}")
+    prefix = env_prefix.resolve()
+    source_root = validate_assertion_install(
+        prefix,
+        allow_installer_group_write=allow_installer_group_write,
+    )
+    environment = assertion_probe_environment(
+        prefix,
+        scope=completion_id or "assertion-example",
+    )
+    environment["PATH"] = str(prefix / "bin") + ":/usr/bin:/bin"
+    command = [
+        str(mtest_bin.resolve()),
+        "--no-config",
+        "--show-output",
+        "failures",
+        "-I",
+        str(source_root),
+        str(ASSERTION_EXAMPLE.parent.relative_to(REPO_ROOT)),
+    ]
+    result = _run_assertion_process(
+        command,
+        cwd=REPO_ROOT,
+        env=environment,
+        timeout=ASSERTION_EXAMPLE_TIMEOUT,
+    )
+    if result.returncode != 1 or result.stderr:
+        raise PackageCheckError(
+            "installed assertion example did not produce one ordinary failure: "
+            f"exit={result.returncode}, stdout={result.stdout!r}, "
+            f"stderr={result.stderr!r}"
+        )
+    required = (
+        "1 passed, 1 failed, 0 skipped",
+        "text differs at scalar 6",
+        "actual: U+0062 'b'",
+        "expected: U+0042 'B'",
+        "reason: configuration text changed",
+    )
+    missing = [text for text in required if text not in result.stdout]
+    if missing:
+        raise PackageCheckError(
+            f"installed assertion example output is incomplete: {missing}"
+        )
+    normalized = normalize_assertion_example(result.stdout, prefix, REPO_ROOT)
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    documented_source = readme_assertion_source_block(readme)
+    example_source = ASSERTION_EXAMPLE.read_text(encoding="utf-8")
+    if documented_source != example_source:
+        diff = "".join(
+            difflib.unified_diff(
+                documented_source.splitlines(keepends=True),
+                example_source.splitlines(keepends=True),
+                fromfile="README.md assertion Mojo fence",
+                tofile=str(ASSERTION_EXAMPLE.relative_to(REPO_ROOT)),
+            )
+        )
+        raise PackageCheckError(
+            "README assertion source differs from the executed example:\n" + diff
+        )
+    documented = readme_assertion_example_block(readme)
+    actual = (
+        "$ mtest --no-config --show-output failures -I "
+        "<PREFIX>/share/mtest/assertions-src examples/assertions\n" + normalized
+    )
+    normalized_documented = _normalize_assertion_times(documented)
+    if normalized_documented != actual:
+        diff = "".join(
+            difflib.unified_diff(
+                normalized_documented.splitlines(keepends=True),
+                actual.splitlines(keepends=True),
+                fromfile="README.md assertion console fence",
+                tofile="installed assertion example",
+            )
+        )
+        raise PackageCheckError(
+            "README assertion example differs from installed output:\n" + diff
+        )
+    capture_name = f"{completion_id or 'assertion-example'}-output.txt"
+    capture = SCRATCH_ROOT / capture_name
+    capture.write_text(actual, encoding="utf-8")
+    print(actual, end="", flush=True)
+    print(
+        f"package-check: captured normalized README output at {capture}",
+        flush=True,
+    )
+    if completion_id is not None:
+        record_completed_stage(completion_id)
 
 
 def _banner(label: str) -> None:
@@ -403,7 +1221,7 @@ def sole_built_artifact(
 
 
 def stage_build_local_channel(target: PackagePlatform | None = None) -> BuiltArtifact:
-    """Stage 1: build the recipe into the LOCAL channel.
+    """Build the recipe into the LOCAL channel.
 
     Goes through the unmodified `package-build` pixi task, and wipes any prior
     channel dir first so this run's artifact can never be mistaken for a stale
@@ -419,7 +1237,7 @@ def stage_build_local_channel(target: PackagePlatform | None = None) -> BuiltArt
         PackageCheckError: The build failed or produced no unique artifact.
     """
     resolved = host_platform() if target is None else target
-    _banner(f"stage 1/6 -- build the package into a LOCAL channel ({resolved.subdir})")
+    _banner(f"stage build -- package into a LOCAL channel ({resolved.subdir})")
     if CONDA_CHANNEL_DIR.exists():
         shutil.rmtree(CONDA_CHANNEL_DIR)
 
@@ -552,14 +1370,14 @@ def verify_installed_artifact_identity(
 
 
 def stage_install_from_local_channel(artifact: BuiltArtifact) -> Path:
-    """Stage 2: install the just-built package into a FRESH scratch pixi env.
+    """Install the just-built package into a FRESH scratch pixi env.
 
     Solves from CONDA_CHANNEL_DIR (+ modular/conda-forge), proves the installed
     package IS that artifact, and confirms the solve pulled
     `mojo-compiler ==1.0.0b2` as a run dependency.
 
     Args:
-        artifact: The artifact stage 1 produced.
+        artifact: The artifact the build stage produced.
 
     Returns:
         The absolute path to the installed `mtest` binary.
@@ -568,7 +1386,7 @@ def stage_install_from_local_channel(artifact: BuiltArtifact) -> Path:
         PackageCheckError: The install failed, installed a different package,
             or did not pull the declared run dependency.
     """
-    _banner("stage 2/6 -- install into a fresh scratch env from the LOCAL channel")
+    _banner("stage install -- fresh scratch env from the LOCAL channel")
     if SCRATCH_ROOT.exists():
         shutil.rmtree(SCRATCH_ROOT)
 
@@ -610,7 +1428,7 @@ def stage_install_from_local_channel(artifact: BuiltArtifact) -> Path:
 def verify_loader_probe_roster(performed: tuple[str, ...]) -> None:
     """Refuse to summarize the loader-clean stage as more than it ran.
 
-    Stage 3's closing line names several probes in one sentence, so it must be
+    The closing line names several probes in one sentence, so it must be
     derived from the probes that actually executed rather than written as prose.
 
     Args:
@@ -650,7 +1468,7 @@ def scrubbed_probe_env(target: PackagePlatform) -> dict[str, str]:
 
 
 def stage_loader_clean_probe(mtest_bin: Path, target: PackagePlatform) -> None:
-    """Stage 3: run the INSTALLED binary under a loader-clean child environment.
+    """Run the INSTALLED binary under a loader-clean child environment.
 
     Probes `--version` and `--help` with our own child environment scrubbed
     clean of the dev pixi env (PATH) and of this platform's loader search paths.
@@ -669,7 +1487,7 @@ def stage_loader_clean_probe(mtest_bin: Path, target: PackagePlatform) -> None:
         PackageCheckError: The installed binary failed to load or run, or its
             output did not carry the expected version, help, or refusal.
     """
-    _banner("stage 3/6 -- LOADER-CLEAN PROBE on the installed binary")
+    _banner("stage loader-clean -- installed binary")
     LOADER_PROBE_CWD.mkdir(parents=True, exist_ok=True)
 
     scrubbed_env = scrubbed_probe_env(target)
@@ -778,9 +1596,9 @@ def stage_loader_clean_probe(mtest_bin: Path, target: PackagePlatform) -> None:
 
 
 def stage_suite_run_with_installed_binary(mtest_bin: Path) -> None:
-    """Stage 4: run focused dogfood probes through the INSTALLED binary.
+    """Run focused dogfood probes through the INSTALLED binary.
 
-    The environment is fully inherited (unlike stage 3) so probe compiler
+    The environment is fully inherited (unlike loader-clean) so probe compiler
     children can resolve `mojo` on PATH.
 
     Reuses dogfood's membership-and-completeness gate, which
@@ -794,7 +1612,7 @@ def stage_suite_run_with_installed_binary(mtest_bin: Path) -> None:
         PackageCheckError: A build input is missing or the probes were not
             all selected and green.
     """
-    _banner("stage 4/6 -- toolchain-threaded suite run with the INSTALLED binary")
+    _banner("stage dogfood -- toolchain-threaded run with the INSTALLED binary")
     if not MOJOPKG_INCLUDE_DIR.joinpath("mtest.mojopkg").is_file():
         raise PackageCheckError(
             f"{MOJOPKG_INCLUDE_DIR / 'mtest.mojopkg'} missing -- run `pixi run build` "
@@ -906,11 +1724,11 @@ def check_failing_fixture_consumption(
 
 
 def stage_failing_fixture_consumption(mtest_bin: Path, version: str) -> None:
-    """Stage 5: drive the known-failing fixture through the INSTALLED binary.
+    """Drive the known-failing fixture through the INSTALLED binary.
 
-    Stage 4 proves the package can report success. This stage proves it reports
+    Dogfood proves the package can report success. This stage proves it reports
     FAILURE truthfully, which is the half a consuming CI actually depends on.
-    The environment is inherited (as in stage 4) so the fixture's compiler child
+    The environment is inherited (as in dogfood) so the fixture's compiler child
     can resolve `mojo`; project configuration is disabled so the verdict comes
     from the fixture alone.
 
@@ -921,7 +1739,7 @@ def stage_failing_fixture_consumption(mtest_bin: Path, version: str) -> None:
     Raises:
         PackageCheckError: The run did not produce truthful failure evidence.
     """
-    _banner("stage 5/6 -- known-failing fixture through the INSTALLED binary")
+    _banner("stage failing-fixture -- installed binary")
     argv = [
         str(mtest_bin),
         "--no-config",
@@ -960,11 +1778,11 @@ def stage_failing_fixture_consumption(mtest_bin: Path, version: str) -> None:
 
 
 def stage_tarball_fallback_smoke(target: PackagePlatform | None = None) -> None:
-    """Stage 6: smoke-run the classic tar-bz2 package format.
+    """Smoke-run the classic tar-bz2 package format.
 
     Builds the SAME recipe into its own local channel, installs it into a second
-    scratch env, and runs `--version` -- the fallback distribution form must
-    work too.
+    scratch env, runs `--version`, and repeats the source and README assertion
+    proofs.
 
     Args:
         target: Platform descriptor to build for; the host's when omitted.
@@ -973,7 +1791,7 @@ def stage_tarball_fallback_smoke(target: PackagePlatform | None = None) -> None:
         PackageCheckError: The fallback form did not build, install, or run.
     """
     resolved = host_platform() if target is None else target
-    _banner("stage 6/6 -- tarball fallback smoke-run")
+    _banner("stage tarball -- fallback build, install, and smoke-run")
     if TARBALL_CHANNEL_DIR.exists():
         shutil.rmtree(TARBALL_CHANNEL_DIR)
 
@@ -1044,6 +1862,18 @@ def stage_tarball_fallback_smoke(target: PackagePlatform | None = None) -> None:
             f"(expected 0 and {expected!r} in stdout): {result.stdout!r}"
         )
 
+    stage_assertion_source_probe(
+        mtest_bin.parents[1],
+        "tarball",
+        completion_id="tarball-assertion-source",
+    )
+    stage_assertion_example(
+        mtest_bin.parents[1],
+        mtest_bin,
+        allow_installer_group_write=True,
+        completion_id="tarball-assertion-example",
+    )
+
     print(
         "package-check: OK -- tar-bz2 fallback form installed and ran "
         f"{expected!r} cleanly",
@@ -1069,6 +1899,16 @@ def main() -> int:
         artifact = stage_build_local_channel(target)
         mtest_bin = stage_install_from_local_channel(artifact)
         stage_loader_clean_probe(mtest_bin, target)
+        stage_assertion_source_probe(
+            mtest_bin.parents[1],
+            "conda",
+            completion_id="assertion-source",
+        )
+        stage_assertion_example(
+            mtest_bin.parents[1],
+            mtest_bin,
+            completion_id="assertion-example",
+        )
         stage_suite_run_with_installed_binary(mtest_bin)
         stage_failing_fixture_consumption(mtest_bin, artifact.version)
         stage_tarball_fallback_smoke(target)
@@ -1081,9 +1921,10 @@ def main() -> int:
         f"\npackage-check: OK ({target.subdir}) -- built, installed from the "
         "local channel as the exact artifact this run produced (Mojo run "
         "dependency confirmed), loader-clean on the installed binary, "
-        "installed binary passed the focused dogfood probes and reported the "
-        "known-failing fixture as a failure, and the tar-bz2 fallback form "
-        "installed and ran cleanly. Nothing uploaded or published.\n"
+        "both package forms compiled the isolated assertion source, installed "
+        "binary passed the focused dogfood probes and reported the known-failing "
+        "fixture as a failure, and the tar-bz2 fallback form installed and ran "
+        "cleanly. Nothing uploaded or published.\n"
         f"package-check: stages performed: {list(completed_stages())}",
         flush=True,
     )

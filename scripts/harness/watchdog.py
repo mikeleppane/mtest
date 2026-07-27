@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import contextlib
 from dataclasses import dataclass
+import errno
 import math
 import os
 from pathlib import Path
@@ -13,13 +15,14 @@ import select
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import IO, TYPE_CHECKING, cast
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from types import FrameType
 
     # Exactly what `signal.getsignal` hands back and `signal.signal` accepts:
@@ -33,6 +36,8 @@ if TYPE_CHECKING:
 # legitimate run needs well over five minutes, so the ceiling sits at fifteen to
 # leave headroom above the real workload while still catching a genuine hang.
 DEFAULT_TIMEOUT_SECONDS = 900.0
+DEFAULT_CAPTURE_LIMIT_BYTES = 1024 * 1024
+CAPTURE_TRUNCATION_MARKER = "\n[mtest-check: output truncated]\n"
 TERMINATION_GRACE_SECONDS = 5.0
 TIMEOUT_EXIT_CODE = 124
 _FORWARDED_SIGNALS = (signal.SIGINT, signal.SIGTERM)
@@ -100,6 +105,68 @@ class HarnessError:
 Termination = Exited | Signaled | TimedOut | Cancelled | HarnessError
 
 
+def _safe_exception_text(error: BaseException) -> str:
+    """Name an exception without executing user-defined rendering code."""
+    return type(error).__name__
+
+
+@dataclass(frozen=True)
+class CapturedCommand:
+    """One supervised command's structured termination and bounded output."""
+
+    termination: Termination
+    stdout: str
+    stderr: str
+    capture_complete: bool = True
+    """Whether both child pipes reached EOF before bounded drain settlement."""
+
+
+class _BoundedTextCapture:
+    """Collect a fixed-size UTF-8 prefix from one drained child stream."""
+
+    def __init__(self, limit_bytes: int) -> None:
+        """Open one bounded capture.
+
+        Args:
+            limit_bytes: Maximum child-output bytes retained before the marker.
+        """
+        self._limit_bytes = limit_bytes
+        self._retained = bytearray()
+        self._retained_bytes = 0
+        self._truncated = False
+
+    @property
+    def buffer(self) -> _BoundedTextCapture:
+        """Expose this byte sink so pipe chunks are decoded only after capture."""
+        return self
+
+    def write(self, value: str | bytes) -> int:
+        """Retain only the byte prefix that fits and report the full write accepted."""
+        encoded = (
+            value.encode("utf-8", errors="replace") if isinstance(value, str) else value
+        )
+        remaining = self._limit_bytes - self._retained_bytes
+        retained = encoded[: max(0, remaining)]
+        if retained:
+            self._retained.extend(retained)
+            self._retained_bytes += len(retained)
+        if len(encoded) > len(retained):
+            self._truncated = True
+        return len(value)
+
+    def flush(self) -> None:
+        """Match the text-stream interface; capture needs no flushing."""
+
+    def finish(self) -> str:
+        """Return retained text plus one explicit marker when bytes were omitted."""
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        # When the byte cap cut through a scalar, `final=False` leaves only that
+        # incomplete terminal sequence buffered instead of inventing U+FFFD.
+        # Internal invalid byte sequences are still represented explicitly.
+        text = decoder.decode(bytes(self._retained), final=not self._truncated)
+        return text + (CAPTURE_TRUNCATION_MARKER if self._truncated else "")
+
+
 class MarkerRetention:
     """Bounded retention of one marker line drained from a child's stdout.
 
@@ -122,6 +189,7 @@ class MarkerRetention:
         """The last complete matching line, newline included; empty when none."""
         self._lock = threading.Lock()
         self._frozen = False
+        self._capture_complete = True
 
     def record(self, line: str) -> None:
         """Retain one complete marker line unless the capture is already frozen.
@@ -140,6 +208,17 @@ class MarkerRetention:
         """Close the capture so `text` can be read without racing a drainer."""
         with self._lock:
             self._frozen = True
+
+    def mark_capture_incomplete(self) -> None:
+        """Record that at least one child pipe did not reach end of file."""
+        with self._lock:
+            self._capture_complete = False
+
+    @property
+    def capture_complete(self) -> bool:
+        """Whether every child pipe reached end of file before capture closed."""
+        with self._lock:
+            return self._capture_complete
 
 
 class _WatchdogCancellation(BaseException):
@@ -247,7 +326,7 @@ class _DrainState:
     """The live drainers for one captured child, and how to stop them."""
 
     threads: tuple[threading.Thread, ...]
-    """The started drainer threads, in stdout-then-stderr order."""
+    """The prepared drainer threads, in stdout-then-stderr order."""
     tees: tuple[_StreamTee, ...]
     """The caller-stream writers those drainers own, in the same order."""
     stop: threading.Event
@@ -261,6 +340,8 @@ class _DrainState:
     can still be released: closing its source makes its next read fail, so the
     thread ends as soon as that write returns instead of living forever.
     """
+    eof_events: tuple[threading.Event, ...] = ()
+    """Per-stream proof that the drainer observed end of file."""
 
 
 def _tee_stream(
@@ -268,6 +349,8 @@ def _tee_stream(
     tee: _StreamTee,
     retention: MarkerRetention | None,
     stop: threading.Event,
+    reached_eof: threading.Event | None = None,
+    read_chunk: Callable[[int, int], bytes] = os.read,
 ) -> None:
     """Drain one captured pipe onto a caller stream, retaining a marker.
 
@@ -279,6 +362,8 @@ def _tee_stream(
         tee: The caller-stream writer this pipe's bytes are forwarded to.
         retention: Marker state to update in place, or None to only tee.
         stop: Shared flag that ends the drain without waiting for end of file.
+        reached_eof: Optional proof set only after a zero-length pipe read.
+        read_chunk: Pipe-read operation, injectable for an error-path proof.
     """
     prefix = b"" if retention is None else retention.prefix.encode("utf-8")
     pending = b""
@@ -304,12 +389,14 @@ def _tee_stream(
             if not events:
                 continue
             try:
-                chunk = os.read(descriptor, _PIPE_CHUNK_BYTES)
+                chunk = read_chunk(descriptor, _PIPE_CHUNK_BYTES)
             except InterruptedError:
                 continue
             except (OSError, ValueError):
                 break
             if not chunk:
+                if reached_eof is not None:
+                    reached_eof.set()
                 break
             # Each stream is drained by its own thread, so the interleaving of
             # stdout against stderr at a shared terminal is now decided by
@@ -341,18 +428,18 @@ def _tee_stream(
             source.close()
 
 
-def _start_drainers(
+def _prepare_drainers(
     process: subprocess.Popen[bytes],
     retention: MarkerRetention,
 ) -> _DrainState:
-    """Start one drainer per captured pipe, before any blocking child wait.
+    """Prepare one drainer per captured pipe without starting a thread.
 
     Args:
         process: The freshly spawned child owning both captured pipes.
         retention: Marker state the stdout drainer updates in place.
 
     Returns:
-        The started drainers, their caller-stream writers, and their stop flag.
+        The prepared drainers, their caller-stream writers, and their stop flag.
     """
     stop = threading.Event()
     targets = (
@@ -362,20 +449,50 @@ def _start_drainers(
     threads: list[threading.Thread] = []
     tees: list[_StreamTee] = []
     sources: list[IO[bytes]] = []
+    eof_events: list[threading.Event] = []
     for source, stream, marker in targets:
         if source is None:
             continue
         tee = _StreamTee(stream)
+        reached_eof = threading.Event()
         thread = threading.Thread(
             target=_tee_stream,
-            args=(source, tee, marker, stop),
+            args=(source, tee, marker, stop, reached_eof),
             daemon=True,
         )
-        thread.start()
         threads.append(thread)
         tees.append(tee)
         sources.append(source)
-    return _DrainState(tuple(threads), tuple(tees), stop, retention, tuple(sources))
+        eof_events.append(reached_eof)
+    return _DrainState(
+        tuple(threads),
+        tuple(tees),
+        stop,
+        retention,
+        tuple(sources),
+        tuple(eof_events),
+    )
+
+
+def _start_drainers(state: _DrainState) -> None:
+    """Start every prepared drainer after its state is caller-owned."""
+    for thread in state.threads:
+        thread.start()
+
+
+def _await_drainer_eof(state: _DrainState | None) -> bool:
+    """Give every drainer a bounded opportunity to observe end of file."""
+    if state is None:
+        return True
+    deadline = time.monotonic() + DRAIN_SETTLE_SECONDS
+    for thread in state.threads:
+        if thread.ident is None:
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        thread.join(remaining)
+    return all(reached_eof.is_set() for reached_eof in state.eof_events)
 
 
 def _settle_drainers(state: _DrainState | None) -> None:
@@ -390,14 +507,7 @@ def _settle_drainers(state: _DrainState | None) -> None:
     Args:
         state: The live drainers, or None when the child was not captured.
     """
-    if state is None:
-        return
-    deadline = time.monotonic() + DRAIN_SETTLE_SECONDS
-    for thread in state.threads:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        thread.join(remaining)
+    _await_drainer_eof(state)
     _seal_drainers(state)
 
 
@@ -427,6 +537,13 @@ def _seal_drainers(state: _DrainState | None) -> None:
     """
     if state is None:
         return
+    if state.retention is not None and not all(
+        reached_eof.is_set() for reached_eof in state.eof_events
+    ):
+        # Only an observed zero-length read proves a pipe complete. A live
+        # drainer, a poll/read error, or forced settlement can all omit bytes;
+        # semantic callers must know that and fail closed.
+        state.retention.mark_capture_incomplete()
     state.stop.set()
     # Freeze BEFORE sealing the tees, not after. A drainer already past its
     # stop check reads one more chunk; sealing first means that chunk's bytes
@@ -439,18 +556,19 @@ def _seal_drainers(state: _DrainState | None) -> None:
     if state.retention is not None:
         state.retention.freeze()
     for index, tee in enumerate(state.tees):
-        if tee.seal():
+        thread_started = state.threads[index].ident is not None
+        if tee.seal() and thread_started:
             continue
         # This drainer is parked in a write to a caller stream that is not
         # draining. Release the resources it holds rather than abandoning them.
-        if index < len(state.sources):
-            with contextlib.suppress(OSError, ValueError):
-                state.sources[index].close()
+        with contextlib.suppress(OSError, ValueError):
+            state.sources[index].close()
     # A brief, bounded join so a drainer that has already finished is reaped
     # here rather than left for the interpreter. Threads still parked in a
     # write fall through untouched; the supervisor never waits on them.
     for thread in state.threads:
-        thread.join(_SEAL_JOIN_SECONDS)
+        if thread.ident is not None:
+            thread.join(_SEAL_JOIN_SECONDS)
 
 
 def _signal_group(pid: int, signum: int) -> bool:
@@ -485,6 +603,75 @@ def _signal_group(pid: int, signum: int) -> bool:
     return True
 
 
+def _wait_for_exit_without_reaping(
+    process: subprocess.Popen[bytes],
+    timeout_seconds: float,
+) -> bool:
+    """Observe leader exit while retaining its PID as process-group ownership.
+
+    Linux `waitid(WNOWAIT)` and Darwin kqueue process events report exit
+    readiness without reaping. The leader therefore remains a zombie and pins
+    both its PID and process-group ID until this supervisor sweeps descendants.
+
+    Args:
+        process: Live child whose session and process group this caller owns.
+        timeout_seconds: Maximum wait for an exit notification.
+
+    Returns:
+        True when the leader exited, False when the timeout elapsed first.
+    """
+    platform_name = os.uname().sysname
+    if platform_name == "Linux":
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            result = os.waitid(
+                os.P_PID,
+                process.pid,
+                os.WEXITED | os.WNOHANG | os.WNOWAIT,
+            )
+            if result is not None:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.01, remaining))
+    if platform_name == "Darwin":
+        queue = select.kqueue()  # type: ignore[attr-defined]
+        try:
+            event = select.kevent(  # type: ignore[attr-defined]
+                process.pid,
+                filter=select.KQ_FILTER_PROC,  # type: ignore[attr-defined]
+                flags=select.KQ_EV_ADD  # type: ignore[attr-defined]
+                | select.KQ_EV_ONESHOT,  # type: ignore[attr-defined]
+                fflags=select.KQ_NOTE_EXIT,  # type: ignore[attr-defined]
+            )
+            deadline = time.monotonic() + timeout_seconds
+            changes = [event]
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                try:
+                    events = queue.control(changes, 1, remaining)
+                except InterruptedError:
+                    continue
+                changes = []
+                if not events:
+                    continue
+                observed = events[0]
+                if observed.flags & select.KQ_EV_ERROR:  # type: ignore[attr-defined]
+                    error_number = observed.data
+                    if error_number == errno.ESRCH:
+                        return True
+                    raise OSError(error_number, os.strerror(error_number))
+                if observed.fflags & select.KQ_NOTE_EXIT:  # type: ignore[attr-defined]
+                    return True
+                raise RuntimeError("Darwin process event did not report exit")
+        finally:
+            queue.close()
+    raise RuntimeError(f"unsupported watchdog platform: {platform_name}")
+
+
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
     """Terminate a timed-out process group and wait for its leader."""
     if not _signal_group(process.pid, signal.SIGTERM):
@@ -501,24 +688,32 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
 
 
 def _forward_signal_and_cleanup(process: subprocess.Popen[bytes], signum: int) -> None:
-    """Forward caller cancellation, then force-reap the complete child group."""
+    """Forward a signal, force-reap the process group, and its leader."""
     if not _signal_group(process.pid, signum):
         process.wait()
         return
 
-    deadline = time.monotonic() + TERMINATION_GRACE_SECONDS
-    while time.monotonic() < deadline:
-        # Reap the leader as soon as it exits. Descendants can keep the process
-        # group alive after that point, so group existence remains the cleanup
-        # condition rather than leader status alone.
-        process.poll()
-        if not _signal_group(process.pid, 0):
-            process.wait()
-            return
-        time.sleep(0.01)
-
+    _wait_for_exit_without_reaping(process, TERMINATION_GRACE_SECONDS)
+    # Whether the leader exited or ignored the forwarded signal, it still pins
+    # the group ID here: no wait operation above made that ID reusable.
     _signal_group(process.pid, signal.SIGKILL)
     process.wait()
+
+
+def _force_process_group_cleanup(
+    process: subprocess.Popen[bytes],
+) -> Exception | None:
+    """Retry a direct SIGKILL sweep and leader reap after cleanup failed."""
+    failure: Exception | None = None
+    for _ in range(3):
+        try:
+            _signal_group(process.pid, signal.SIGKILL)
+            process.wait()
+        except Exception as exc:  # noqa: BLE001
+            failure = exc
+        else:
+            return None
+    return failure
 
 
 def _validate_deadline_sentinel(deadline_sentinel: Path | None) -> None:
@@ -545,11 +740,20 @@ def _validate_timeout_seconds(timeout_seconds: float) -> None:
 
 def _notify_timeout(source: str, step: str, timeout_seconds: float) -> None:
     """Best-effort timeout diagnostic after process-group cleanup."""
-    with contextlib.suppress(BrokenPipeError, OSError):
+    with contextlib.suppress(BrokenPipeError, OSError, ValueError):
         print(
-            "FATAL: classified: "
-            f"{source}: {step} exceeded {timeout_seconds:g}s; "
+            f"FATAL: {source}: {step} exceeded {timeout_seconds:g}s; "
             "terminating its process group",
+            file=sys.stderr,
+        )
+
+
+def _notify_deferred_signal(source: str, signum: int, result: str) -> None:
+    """Report a managed signal recorded after terminal-result precedence."""
+    with contextlib.suppress(BrokenPipeError, OSError, ValueError):
+        print(
+            f"WARNING: {source}: received signal {signum} during cleanup; "
+            f"{result} result retained",
             file=sys.stderr,
         )
 
@@ -603,6 +807,7 @@ def run_command(
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     deadline_sentinel: Path | None = None,
     cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
     marker_retention: MarkerRetention | None = None,
 ) -> Termination:
     """Run ``command`` and return structured, signal-truthful termination.
@@ -614,6 +819,7 @@ def run_command(
         timeout_seconds: Positive wall-clock ceiling for the command.
         deadline_sentinel: Pre-created file removed only after non-timeout exit.
         cwd: Optional child working directory.
+        env: Optional complete child environment.
         marker_retention: When given, both child streams become pipes that
             concurrent drainers tee to the caller's own stdout and stderr while
             retaining the last complete marker line. Updated in place.
@@ -637,6 +843,8 @@ def run_command(
         )
 
     process: subprocess.Popen[bytes] | None = None
+    process_group_cleaned = False
+    cleanup_in_progress = False
     pending_signum: int | None = None
     previous_handlers: dict[signal.Signals, _SignalHandler] = {}
     drain_state: _DrainState | None = None
@@ -652,9 +860,17 @@ def run_command(
         if pending_signum is not None:
             return
         pending_signum = signum
-        if process is None:
+        # An exception already being handled will reach the supervisor's
+        # backstop without help. Raising through that handler could skip the
+        # cleanup it is about to perform, including in the small interval
+        # before `cleanup_in_progress` can be set.
+        if process is None or cleanup_in_progress or sys.exception() is not None:
             return
         raise _WatchdogCancellation(signum)
+
+    def recorded_signal() -> int | None:
+        """Reload signal state that asynchronous callbacks can mutate."""
+        return pending_signum
 
     try:
         for signum in _FORWARDED_SIGNALS:
@@ -665,6 +881,7 @@ def run_command(
                 process = subprocess.Popen(
                     command,
                     cwd=cwd,
+                    env=env,
                     start_new_session=True,
                     stdout=captured,
                     stderr=captured,
@@ -686,42 +903,63 @@ def run_command(
                 # Both pipes must be draining before any blocking wait: a child
                 # that outruns a 64 KiB pipe buffer would otherwise block on
                 # write while the supervisor blocks on wait.
-                drain_state = _start_drainers(process, marker_retention)
+                drain_state = _prepare_drainers(process, marker_retention)
+                _start_drainers(drain_state)
             if pending_signum is not None:
                 # TRY301 is suppressed here: this raise IS the cancellation
                 # path, caught by the arm that closes this try. Abstracting it
                 # into an inner function would only hide the control flow.
                 raise _WatchdogCancellation(pending_signum)  # noqa: TRY301
-            try:
-                status = process.wait(timeout=timeout_seconds)
-            except subprocess.TimeoutExpired:
-                _terminate_process_group(process)
+            if not _wait_for_exit_without_reaping(process, timeout_seconds):
+                cleanup_in_progress = True
                 try:
+                    _terminate_process_group(process)
+                    process_group_cleaned = True
+                    # The managed handler records but cannot raise while cleanup
+                    # is in progress, so this drain cannot replace the deadline.
                     _settle_drainers(drain_state)
-                except _WatchdogCancellation:
-                    # The group is already swept and the deadline sentinel is
-                    # the timeout's standing proof, so a cancellation arriving
-                    # in the final drain cannot un-time-out an ended child.
-                    # First-signal precedence is already recorded either way.
-                    # Seal explicitly: the aborted settle never reached its own
-                    # seal, and the diagnostic below must not be overtaken by a
-                    # drainer that is still live.
-                    _seal_drainers(drain_state)
-                _notify_timeout(source, step, timeout_seconds)
-                return validate_deadline_proof(TimedOut(), deadline_sentinel)
-            termination: Termination
-            if status < 0:
-                # The leader is already reaped, but descendants may still own
-                # its process group. Sweep them before exposing the signal.
-                _terminate_process_group(process)
-                termination = Signaled(-status)
-            else:
-                termination = Exited(status)
+                    _notify_timeout(source, step, timeout_seconds)
+                    timeout_result = validate_deadline_proof(
+                        TimedOut(), deadline_sentinel
+                    )
+                    deferred_signum = recorded_signal()
+                    if deferred_signum is not None:
+                        _notify_deferred_signal(
+                            source,
+                            deferred_signum,
+                            "timeout",
+                        )
+                    return timeout_result
+                finally:
+                    # Keep deadline attribution atomic through its diagnostic
+                    # and proof validation. Managed signals are recorded during
+                    # this interval but cannot replace a timeout already proven.
+                    cleanup_in_progress = False
+            capture_complete_before_sweep = _await_drainer_eof(drain_state)
+            # The unreaped leader still pins this process-group ID. Sweep now,
+            # before the wait below releases ownership and allows PID reuse.
+            cleanup_in_progress = True
+            try:
+                _signal_group(process.pid, signal.SIGKILL)
+                status = process.wait()
+                process_group_cleaned = True
+            finally:
+                cleanup_in_progress = False
+            termination: Termination = (
+                Signaled(-status) if status < 0 else Exited(status)
+            )
+            if not capture_complete_before_sweep and marker_retention is not None:
+                marker_retention.mark_capture_incomplete()
+            settled_signum = recorded_signal()
+            if settled_signum is not None:
+                raise _WatchdogCancellation(settled_signum)  # noqa: TRY301
             # Settle inside this try, never in the `finally`: the drain can wait
             # seconds on a leaked descendant, and a caller signal in that window
             # must reach the cancellation arm below rather than escaping as an
             # unhandled BaseException past the caller's own except clauses.
             _settle_drainers(drain_state)
+            if pending_signum is not None:
+                raise _WatchdogCancellation(pending_signum)  # noqa: TRY301
             return _clear_non_timeout_sentinel(termination, deadline_sentinel)
         except _WatchdogCancellation as cancellation:
             # The first callback already recorded precedence. Keep the handlers
@@ -738,9 +976,11 @@ def run_command(
             # without adding a branch; if it were ever violated the attribute
             # access inside would still fall to the internal-failure arm below,
             # exactly as it does today.
-            _forward_signal_and_cleanup(
-                cast("subprocess.Popen[bytes]", process), cancellation.signum
-            )
+            if not process_group_cleaned:
+                _forward_signal_and_cleanup(
+                    cast("subprocess.Popen[bytes]", process), cancellation.signum
+                )
+                process_group_cleaned = True
             _settle_drainers(drain_state)
             return _clear_non_timeout_sentinel(
                 Cancelled(cancellation.signum), deadline_sentinel
@@ -750,12 +990,30 @@ def run_command(
     # it, so every exception must become a HarnessError, and a failure inside
     # cleanup must not replace the detail that caused it.
     except Exception as exc:  # noqa: BLE001
-        detail = f"watchdog internal failure: {exc}"
-        if process is not None and process.poll() is None:
+        cleanup_failures: list[Exception] = []
+        if process is not None and not process_group_cleaned:
+            cleanup_in_progress = True
             try:
                 _terminate_process_group(process)
+                process_group_cleaned = True
             except Exception as cleanup_exc:  # noqa: BLE001
-                detail += f"; process-group cleanup failed: {cleanup_exc}"
+                cleanup_failures.append(cleanup_exc)
+                forced_failure = _force_process_group_cleanup(process)
+                if forced_failure is None:
+                    process_group_cleaned = True
+                else:
+                    cleanup_failures.append(forced_failure)
+            finally:
+                cleanup_in_progress = False
+        detail = "watchdog internal failure: " + _safe_exception_text(exc)
+        if cleanup_failures:
+            detail += "; process-group cleanup failed: " + ", then ".join(
+                _safe_exception_text(failure) for failure in cleanup_failures
+            )
+        if not process_group_cleaned and process is not None:
+            detail += "; process-group cleanup remains unproved"
+        if pending_signum is not None:
+            detail += f"; caller signal {pending_signum} received during cleanup"
         return _clear_non_timeout_sentinel(HarnessError(detail), deadline_sentinel)
     finally:
         # Restore the caller's dispositions before the backstop seal. A managed
@@ -768,6 +1026,63 @@ def run_command(
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
         _seal_drainers(drain_state)
+
+
+def run_captured_command(
+    command: Sequence[str],
+    *,
+    source: str,
+    step: str,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    capture_limit_bytes: int = DEFAULT_CAPTURE_LIMIT_BYTES,
+) -> CapturedCommand:
+    """Run one process group and retain only bounded stdout and stderr prefixes.
+
+    Args:
+        command: Direct executable argv, without shell interpretation.
+        source: Source label displayed if the command times out.
+        step: Work label displayed if the command times out.
+        timeout_seconds: Positive wall-clock ceiling for the process group.
+        cwd: Optional child working directory.
+        env: Optional complete child environment.
+        capture_limit_bytes: Maximum retained bytes for each child stream.
+
+    Returns:
+        Structured termination plus bounded stdout and stderr.
+
+    Raises:
+        ValueError: If ``capture_limit_bytes`` is not positive.
+    """
+    if capture_limit_bytes <= 0:
+        raise ValueError("capture limit must be greater than zero")
+    stdout = _BoundedTextCapture(capture_limit_bytes)
+    stderr = _BoundedTextCapture(capture_limit_bytes)
+    retention = MarkerRetention("\0mtest-captured-command-no-marker")
+    with tempfile.TemporaryDirectory(prefix="mtest-command-watchdog-") as raw:
+        sentinel = Path(raw) / "deadline"
+        sentinel.touch()
+        with (
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            termination = run_command(
+                command,
+                source=source,
+                step=step,
+                timeout_seconds=timeout_seconds,
+                deadline_sentinel=sentinel,
+                cwd=cwd,
+                env=env,
+                marker_retention=retention,
+            )
+    return CapturedCommand(
+        termination,
+        stdout.finish(),
+        stderr.finish(),
+        capture_complete=retention.capture_complete,
+    )
 
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:

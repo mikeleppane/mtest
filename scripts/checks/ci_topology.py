@@ -23,6 +23,7 @@ HARNESS_CHECK_MODULES = (
     "scripts.tests.test_pty_capture",
     "scripts.tests.test_transcript_compare",
     "scripts.tests.test_readme_help",
+    "scripts.tests.test_assertions",
     "scripts.tests.test_coverage_capability",
     "scripts.tests.test_layout",
     "scripts.checks.layout",
@@ -50,6 +51,7 @@ CI_PREFLIGHT_TASKS = [
 CI_TASKS = [
     "ci-preflight",
     "test",
+    "assertions-check",
     "dogfood-check",
     "e2e",
     "contract-check-strict",
@@ -58,6 +60,7 @@ CI_TASKS = [
 CI_FLOOR_TASKS = {
     *CI_PREFLIGHT_TASKS,
     "test",
+    "assertions-check",
     "dogfood-check",
     "e2e",
     "contract-check-strict",
@@ -81,6 +84,15 @@ LINUX_MATRIX_ROWS = [
         "runner": "ubuntu-24.04",
         "lane": "direct tests",
         "task": "test",
+        "libc_debug": "false",
+        "safety_artifact": "false",
+        "artifact_name": "none",
+        "artifact_path": "none",
+    },
+    {
+        "runner": "ubuntu-24.04",
+        "lane": "assertions",
+        "task": "assertions-check",
         "libc_debug": "false",
         "safety_artifact": "false",
         "artifact_name": "none",
@@ -137,6 +149,15 @@ MACOS_MATRIX_ROWS = [
         "runner": "macos-15",
         "lane": "direct tests",
         "task": "test",
+        "libc_debug": "false",
+        "safety_artifact": "false",
+        "artifact_name": "none",
+        "artifact_path": "none",
+    },
+    {
+        "runner": "macos-15",
+        "lane": "assertions",
+        "task": "assertions-check",
         "libc_debug": "false",
         "safety_artifact": "false",
         "artifact_name": "none",
@@ -382,6 +403,15 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
         raise AssertionError(
             "dogfood-check task mismatch: "
             f"expected={expected_dogfood!r}, actual={tasks.get('dogfood-check')!r}"
+        )
+    expected_assertions = (
+        "python -m scripts.tests.test_assertions && python -m scripts.checks.assertions"
+    )
+    if tasks.get("assertions-check") != expected_assertions:
+        raise AssertionError(
+            "assertions-check task mismatch: "
+            f"expected={expected_assertions!r}, "
+            f"actual={tasks.get('assertions-check')!r}"
         )
     expected_readme_help = {
         "cmd": "python -m scripts.checks.readme_help",

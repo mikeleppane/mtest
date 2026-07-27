@@ -40,6 +40,7 @@ class CiTopologyTests(unittest.TestCase):
             [
                 "ci-preflight",
                 "test",
+                "assertions-check",
                 "dogfood-check",
                 "e2e",
                 "contract-check-strict",
@@ -195,6 +196,7 @@ class CiTopologyTests(unittest.TestCase):
             linux_tasks,
             [
                 "test",
+                "assertions-check",
                 "dogfood-check",
                 "e2e",
                 "contract-check-strict",
@@ -204,7 +206,13 @@ class CiTopologyTests(unittest.TestCase):
         )
         self.assertEqual(
             macos_tasks,
-            ["test", "dogfood-check", "e2e", "contract-check-strict"],
+            [
+                "test",
+                "assertions-check",
+                "dogfood-check",
+                "e2e",
+                "contract-check-strict",
+            ],
         )
 
     def test_contract_row_job_depends_on_its_platform_preflight_job(self) -> None:

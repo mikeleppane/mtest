@@ -120,6 +120,119 @@ successes.
 To run mtest straight from a checkout instead, see
 [Developing](#developing).
 
+## Assertion diagnostics
+
+The package includes an optional source-only
+`mtest.assertions.assert_equal`. It still raises an ordinary error inside
+`TestSuite`; the runner, report format, and exit code do not change. Add the
+installed source root to both the test compiler and mtest:
+
+```mojo
+"""Executable example for the optional source-only assertion companion."""
+
+import mtest.assertions as assertions
+import std.testing as testing
+from std.testing import TestSuite
+
+
+def test_standard_assertion_still_coexists() raises:
+    testing.assert_equal(2 + 2, 4)
+
+
+def test_text_difference_has_scalar_and_context() raises:
+    assertions.assert_equal(
+        "alpha\nbeta\ngamma",
+        "alpha\nBETa\ngamma",
+        msg="configuration text changed",
+    )
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()
+```
+
+```console
+$ mtest --no-config --show-output failures -I <PREFIX>/share/mtest/assertions-src examples/assertions
+mtest 0.6.0 (mojo)
+root: <REPO>   selected: 1 files   excluded: 0
+
+FAIL           examples/assertions/test_diagnostics.mojo  <TIME>
+
+--- FAIL examples/assertions/test_diagnostics.mojo::test_text_difference_has_scalar_and_context ---
+    | At examples/assertions/test_diagnostics.mojo:13:28: text differs at scalar 6
+    |   actual: U+0062 'b'
+    |   expected: U+0042 'B'
+    |   actual line 1: alpha\n
+    |   actual line 2: beta\n
+    |   actual line 3: gamma
+    |   expected line 1: alpha\n
+    |   expected line 2: BETa\n
+    |   expected line 3: gamma
+    |   reason: configuration text changed
+reproduce: mtest -I <PREFIX>/share/mtest/assertions-src examples/assertions/test_diagnostics.mojo::test_text_difference_has_scalar_and_context
+
+--- FAIL examples/assertions/test_diagnostics.mojo (exit 1) — captured output (file-scoped; TestSuite does not attribute output to individual tests) ---
+    | Unhandled exception caught during execution:
+    | Running 2 tests for <REPO>/examples/assertions/test_diagnostics.mojo
+    |     PASS [ <TIME> ] test_standard_assertion_still_coexists
+    |     FAIL [ <TIME> ] test_text_difference_has_scalar_and_context
+    |       At <REPO>/examples/assertions/test_diagnostics.mojo:13:28: text differs at scalar 6
+    |         actual: U+0062 'b'
+    |         expected: U+0042 'B'
+    |         actual line 1: alpha\n
+    |         actual line 2: beta\n
+    |         actual line 3: gamma
+    |         expected line 1: alpha\n
+    |         expected line 2: BETa\n
+    |         expected line 3: gamma
+    |         reason: configuration text changed
+    | --------
+    | Summary [ <TIME> ] 2 tests run: 1 passed , 1 failed , 0 skipped
+    | Test suite' <REPO>/examples/assertions/test_diagnostics.mojo 'failed!
+    |
+--- captured stderr ---
+
+
+===== 1 passed, 1 failed, 0 skipped (0 excluded, 0 not run) in <TIME> =====
+```
+
+That output was captured from the installed `.conda` artifact. The companion
+specializes only top-level `String`, `List[T]`, and `Dict[String, V]`; nested
+containers and custom values are displayed opaquely. List details show at most
+eight entries per side, and dictionary details show at most eight entries in
+each of the missing, unexpected, and changed categories. Their `omitted by
+entry limit` counts describe that eight-entry selection. Dictionary keys whose
+escaped display would exceed 1024 bytes are omitted from structural rows and
+counted separately by `omitted by key display limit`; category totals and
+displayable short-key details remain. Structural key and category order is
+deterministic; opaque values retain their own `Writable` formatting, including
+any ordering it chooses.
+
+Finalized opaque-value projections are at most 1024 bytes, text context is at
+most 4096 bytes, and a complete assertion body is at most 16384 bytes. Text
+context shows the differing line and at most two lines on either side;
+`... [cropped]` marks omitted whole lines outside that window. A bare leading
+`... ` marks bytes cropped from the start of a retained long line. Each byte
+cap includes a complete `... [truncated]` marker at the point where that
+projection or body omitted bytes; later detail can follow a per-operand marker.
+Equality is exact; a passing assertion formats nothing, while a failing
+assertion formats each displayed operand once. These limits bound bytes
+finalized and emitted by the companion, not private work performed inside
+user-defined equality or formatting code. A present reason retains bounded
+space at the end even when mismatch detail is truncated.
+
+`<PREFIX>/share/mtest/assertions-src` is one complete source package named
+`mtest`, not an extension merged into another `mtest` package. Put it before
+any other include root that provides `mtest`. The runner never injects this
+path automatically, and Mojo does not merge it with the runner-private
+precompiled package. Source-file permissions follow the environment's prefix
+policy; shared-prefix installs may therefore be group-writable but are never
+accepted as world-writable by the package verifier.
+
+Only `mtest.assertions.assert_equal` is supported. The shipped underscore
+modules are source implementation details, even though Mojo can import an
+explicit source-module path.
+
 ## Usage
 
 mtest spawns a `mojo build` child per file, so `mojo` must be on that
@@ -1029,10 +1142,11 @@ The tasks:
 | `pixi run build-bin` | link the runnable binary at `build/mtest` |
 | `pixi run test` | compile every classified unit and integration module into one aggregate binary and execute it directly |
 | `pixi run test-file -- PATH` | the same, focused on one module |
+| `pixi run assertions-check` | compile and directly execute the source-only assertion consumers at `-O0` and `-O3` |
 | `pixi run dogfood-check` | run three focused probes through the built `mtest` binary itself |
 | `pixi run e2e` | drive `build/mtest` against the committed known-outcome tree under `e2e/` and assert exact exit codes and output structure |
 | `pixi run transcripts-check` | regenerate the `TestSuite` protocol snapshots to a temp dir and diff byte-for-byte |
-| `pixi run ci` | the canonical serial floor: preflight checks, then `test`, `dogfood-check`, `e2e`, the strict contract, and the memory lanes |
+| `pixi run ci` | the canonical serial floor: preflight checks, then `test`, `assertions-check`, `dogfood-check`, `e2e`, the strict contract, and the memory lanes |
 | `pixi run asan-check` | Linux: build and run the highest-risk exec suites under ASan/LSan |
 | `pixi run valgrind-check` | Linux: run the exec/native coverage under Memcheck |
 | `pixi run ci-memory` | Linux: both memory lanes together, the way `ci` runs them |
@@ -1044,9 +1158,9 @@ JUnit oracle, build, rendered-JUnit, and transcript checks) and closes with
 it. On Linux that is ASan/LSan then Memcheck, roughly four minutes together;
 elsewhere it reports the two lanes as uncovered and names the Linux cells that
 own them. Hosted CI runs
-the behavioral floor (`test`, `dogfood-check`, `e2e`) as parallel cells on
-both Linux and macOS; the full preflight chain and the memory-safety cells
-run on Linux, on every pull request.
+the behavioral floor (`test`, `assertions-check`, `dogfood-check`, `e2e`) as
+parallel cells on both Linux and macOS; the full preflight chain and the
+memory-safety cells run on Linux, on every pull request.
 
 Three properties of the test setup are worth knowing up front:
 
@@ -1065,11 +1179,10 @@ Three properties of the test setup are worth knowing up front:
 
 ## Non-goals
 
-- **An assertion library.** Assertions come from `std.testing`
-  (`assert_equal`, `assert_raises`, and friends); property testing likewise
-  belongs upstream.
 - **A TestSuite replacement.** mtest orchestrates the standard library's
-  harness and depends on its per-file protocol.
+  harness and depends on its per-file protocol. Its optional source-only
+  `assert_equal` companion only improves mismatch detail; it still reports an
+  ordinary TestSuite failure. Property testing belongs upstream.
 - **Third-party runtime dependencies.** mtest has none. Product logic is pure
   Mojo plus one statically linked C adapter and the pinned native TOML parser
   compiled into the shipped binary.

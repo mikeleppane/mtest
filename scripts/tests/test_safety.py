@@ -135,7 +135,32 @@ class SafetyCheckTests(unittest.TestCase):
         )
 
     def test_default_roots_are_exact(self) -> None:
-        self.assertEqual(safety_check.DEFAULT_ROOTS, ("src", "tests", "e2e"))
+        self.assertEqual(
+            safety_check.DEFAULT_ROOTS,
+            ("src", "assertions-src", "tests", "e2e", "examples"),
+        )
+
+    def test_assertion_source_root_is_scanned(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            source = repo / "assertions-src" / "mtest" / "assertions" / "__init__.mojo"
+            source.parent.mkdir(parents=True)
+            source.write_text("var pointer = alloc[Int](1)\n", encoding="utf-8")
+            paths = safety_check.mojo_files(
+                [repo / root for root in safety_check.DEFAULT_ROOTS]
+            )
+            self.assertEqual(paths, [source])
+
+    def test_example_root_is_scanned(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            source = repo / "examples" / "assertions" / "test_example.mojo"
+            source.parent.mkdir(parents=True)
+            source.write_text("var pointer = alloc[Int](1)\n", encoding="utf-8")
+            paths = safety_check.mojo_files(
+                [repo / root for root in safety_check.DEFAULT_ROOTS]
+            )
+            self.assertEqual(paths, [source])
 
     def test_repository_inventory_is_nonempty(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

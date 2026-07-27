@@ -26,13 +26,17 @@ Usage:  python -m unittest scripts.tests.test_package_consumption
 
 from __future__ import annotations
 
+import configparser
 import contextlib
 import dataclasses
+import inspect
 import io
 import json
+import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
 import tempfile
 from typing import TYPE_CHECKING, override
 import unittest
@@ -48,7 +52,7 @@ from scripts.build.package_consumption import (
     scrubbed_probe_env,
     verify_installed_artifact_identity,
 )
-from scripts.harness import dogfood
+from scripts.harness import dogfood, watchdog
 
 
 if TYPE_CHECKING:
@@ -431,6 +435,23 @@ class StageLedgerTests(unittest.TestCase):
     def test_completed_stages_start_empty(self) -> None:
         self.assertEqual(package_consumption.completed_stages(), ())
 
+    def test_stage_roster_names_both_package_forms_assertion_proofs(self) -> None:
+        self.assertEqual(
+            package_consumption.GATE_STAGE_IDS,
+            (
+                "build",
+                "install",
+                "loader-clean",
+                "assertion-source",
+                "assertion-example",
+                "dogfood",
+                "failing-fixture",
+                "tarball-assertion-source",
+                "tarball-assertion-example",
+                "tarball",
+            ),
+        )
+
     def test_recording_an_unknown_stage_is_rejected(self) -> None:
         with self.assertRaises(PackageCheckError):
             package_consumption.record_completed_stage("polish-the-badge")
@@ -469,6 +490,17 @@ class StageLedgerTests(unittest.TestCase):
                 with self.assertRaises(PackageCheckError) as caught:
                     package_consumption.verify_loader_probe_roster(performed)
                 self.assertIn(skipped, str(caught.exception))
+
+    def test_a_skipped_assertion_optimization_is_named(self) -> None:
+        with self.assertRaises(PackageCheckError) as caught:
+            package_consumption.verify_assertion_optimization_roster(("-O0",))
+        self.assertIn("-O3", str(caught.exception))
+
+    def test_assertion_optimization_roster_is_exact(self) -> None:
+        self.assertEqual(
+            package_consumption.ASSERTION_OPTIMIZATIONS,
+            (("-O0", "o0"), ("-O3", "o3")),
+        )
 
 
 class CallSiteTests(unittest.TestCase):
@@ -546,6 +578,8 @@ class CallSiteTests(unittest.TestCase):
             return 0
 
         identity = mock.Mock()
+        assertion_probe = mock.Mock()
+        assertion_example = mock.Mock()
         smoke = mock.Mock(
             return_value=subprocess.CompletedProcess(
                 args=[], returncode=0, stdout=f"mtest {self.version}\n", stderr=""
@@ -559,6 +593,8 @@ class CallSiteTests(unittest.TestCase):
                 TARBALL_ENV_DIR=env_dir,
                 _run_streamed=mock.Mock(side_effect=build_or_install),
                 verify_installed_artifact_identity=identity,
+                stage_assertion_source_probe=assertion_probe,
+                stage_assertion_example=assertion_example,
             ),
             mock.patch.object(subprocess, "run", smoke),
             contextlib.redirect_stdout(io.StringIO()),
@@ -569,6 +605,17 @@ class CallSiteTests(unittest.TestCase):
         self.assertEqual(len(identity.call_args_list), 1)
         self.assertEqual(identity.call_args_list[0].args[0], prefix)
         self.assertEqual(identity.call_args_list[0].args[1].path.name, artifact_name)
+        assertion_probe.assert_called_once_with(
+            prefix,
+            "tarball",
+            completion_id="tarball-assertion-source",
+        )
+        assertion_example.assert_called_once_with(
+            prefix,
+            prefix / "bin" / "mtest",
+            allow_installer_group_write=True,
+            completion_id="tarball-assertion-example",
+        )
 
     def test_loader_clean_stage_calls_the_probe_roster_check(self) -> None:
         roster = mock.Mock()
@@ -694,13 +741,23 @@ class CallSiteTests(unittest.TestCase):
                 side_effect=stage("install", install_result)
             ),
             stage_loader_clean_probe=mock.Mock(side_effect=stage("loader-clean")),
+            stage_assertion_source_probe=mock.Mock(
+                side_effect=stage("assertion-source")
+            ),
+            stage_assertion_example=mock.Mock(side_effect=stage("assertion-example")),
             stage_suite_run_with_installed_binary=mock.Mock(
                 side_effect=stage("dogfood")
             ),
             stage_failing_fixture_consumption=mock.Mock(
                 side_effect=stage("failing-fixture")
             ),
-            stage_tarball_fallback_smoke=mock.Mock(side_effect=stage("tarball")),
+            stage_tarball_fallback_smoke=mock.Mock(
+                side_effect=lambda *_args, **_kwargs: (
+                    stage("tarball-assertion-source")(),
+                    stage("tarball-assertion-example")(),
+                    stage("tarball")(),
+                )[-1]
+            ),
         )
         return parent
 
@@ -736,17 +793,25 @@ class CallSiteTests(unittest.TestCase):
 
     def test_main_refuses_to_report_ok_when_a_stage_did_not_happen(self) -> None:
         # The banner must not be able to claim a proof the run never performed.
-        self._patched_main(skip_recording="failing-fixture")
-        out, err = io.StringIO(), io.StringIO()
-        with (
-            self._patches,
-            contextlib.redirect_stdout(out),
-            contextlib.redirect_stderr(err),
+        for missing_stage in (
+            "assertion-source",
+            "assertion-example",
+            "failing-fixture",
+            "tarball-assertion-source",
+            "tarball-assertion-example",
         ):
-            code = package_consumption.main()
-        self.assertEqual(code, 1)
-        self.assertNotIn("package-check: OK (", out.getvalue())
-        self.assertIn("failing-fixture", err.getvalue())
+            with self.subTest(missing_stage=missing_stage):
+                self._patched_main(skip_recording=missing_stage)
+                out, err = io.StringIO(), io.StringIO()
+                with (
+                    self._patches,
+                    contextlib.redirect_stdout(out),
+                    contextlib.redirect_stderr(err),
+                ):
+                    code = package_consumption.main()
+                self.assertEqual(code, 1)
+                self.assertNotIn("package-check: OK (", out.getvalue())
+                self.assertIn(missing_stage, err.getvalue())
 
 
 class FixtureInventoryTests(unittest.TestCase):
@@ -772,6 +837,827 @@ class FixtureInventoryTests(unittest.TestCase):
         self.assertEqual(
             row["per_test"]["failed"], package_consumption.FAILING_FIXTURE_FAILED
         )
+
+
+class AssertionPackageCommandTests(unittest.TestCase):
+    def test_assertion_stages_use_only_the_supervised_process_helper(self) -> None:
+        expected_calls = (
+            (package_consumption.stage_assertion_source_probe, 4),
+            (package_consumption.stage_assertion_example, 1),
+        )
+        for stage, count in expected_calls:
+            with self.subTest(stage=stage.__name__):
+                source = inspect.getsource(stage)
+                self.assertNotIn("subprocess.run(", source)
+                self.assertEqual(source.count("_run_assertion_process("), count)
+
+    def test_assertion_example_disables_project_configuration(self) -> None:
+        prefix = Path("/prefix")
+        stopped = package_consumption.PackageCheckError("stop after argv capture")
+        with (
+            mock.patch.object(
+                package_consumption,
+                "validate_assertion_install",
+                return_value=prefix / "share/mtest/assertions-src",
+            ),
+            mock.patch.object(
+                package_consumption,
+                "assertion_probe_environment",
+                return_value={"PATH": "/prefix/bin"},
+            ),
+            mock.patch.object(
+                package_consumption,
+                "_run_assertion_process",
+                side_effect=stopped,
+            ) as run,
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "stop after argv capture",
+            ),
+        ):
+            package_consumption.stage_assertion_example(
+                prefix,
+                prefix / "bin/mtest",
+            )
+        self.assertEqual(
+            run.call_args.args[0][:4],
+            ["/prefix/bin/mtest", "--no-config", "--show-output", "failures"],
+        )
+
+    def test_assertion_process_helper_delegates_environment_and_timeout(
+        self,
+    ) -> None:
+        command = ["/prefix/bin/mojo", "build"]
+        cwd = Path("/scratch/probe")
+        environment = {"PATH": "/prefix/bin:/usr/bin"}
+        captured = watchdog.CapturedCommand(
+            watchdog.Exited(7),
+            "bounded stdout",
+            "bounded stderr",
+        )
+        with mock.patch.object(
+            watchdog,
+            "run_captured_command",
+            return_value=captured,
+        ) as run:
+            result = package_consumption._run_assertion_process(
+                command,
+                cwd=cwd,
+                env=environment,
+                timeout=12.5,
+            )
+
+        self.assertEqual(result.args, command)
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(result.stdout, "bounded stdout")
+        self.assertEqual(result.stderr, "bounded stderr")
+        run.assert_called_once_with(
+            command,
+            source="/prefix/bin/mojo",
+            step="package assertion probe",
+            timeout_seconds=12.5,
+            cwd=cwd,
+            env=environment,
+        )
+
+    def test_assertion_process_helper_rejects_a_watchdog_timeout(self) -> None:
+        captured = watchdog.CapturedCommand(
+            watchdog.TimedOut(),
+            "",
+            "",
+        )
+        with (
+            mock.patch.object(
+                watchdog,
+                "run_captured_command",
+                return_value=captured,
+            ),
+            self.assertRaisesRegex(PackageCheckError, "exceeded 3.0 seconds"),
+        ):
+            package_consumption._run_assertion_process(
+                ["/prefix/bin/mojo", "build"],
+                cwd=Path("/scratch/probe"),
+                env={},
+                timeout=3.0,
+            )
+
+    def test_assertion_process_helper_rejects_signal_death(self) -> None:
+        captured = watchdog.CapturedCommand(
+            watchdog.Signaled(11),
+            "expected semantic diagnostic",
+            "",
+        )
+        with (
+            mock.patch.object(
+                watchdog,
+                "run_captured_command",
+                return_value=captured,
+            ),
+            self.assertRaisesRegex(PackageCheckError, "signal 11"),
+        ):
+            package_consumption._run_assertion_process(
+                ["/prefix/bin/mojo", "build"],
+                cwd=Path("/scratch/probe"),
+                env={},
+                timeout=3.0,
+            )
+
+    def test_assertion_process_helper_rejects_incomplete_pipe_drain(self) -> None:
+        captured = watchdog.CapturedCommand(
+            watchdog.Exited(0),
+            "",
+            "",
+            capture_complete=False,
+        )
+        with (
+            mock.patch.object(
+                watchdog,
+                "run_captured_command",
+                return_value=captured,
+            ),
+            self.assertRaisesRegex(PackageCheckError, "capture was incomplete"),
+        ):
+            package_consumption._run_assertion_process(
+                ["/prefix/bin/mojo", "build"],
+                cwd=Path("/scratch/probe"),
+                env={},
+                timeout=3.0,
+            )
+
+    def test_assertion_process_helper_rejects_truncated_output(self) -> None:
+        captured = watchdog.CapturedCommand(
+            watchdog.Exited(0),
+            watchdog.CAPTURE_TRUNCATION_MARKER,
+            "",
+        )
+        with (
+            mock.patch.object(
+                watchdog,
+                "run_captured_command",
+                return_value=captured,
+            ),
+            self.assertRaisesRegex(PackageCheckError, "output was truncated"),
+        ):
+            package_consumption._run_assertion_process(
+                ["/prefix/bin/mojo", "build"],
+                cwd=Path("/scratch/probe"),
+                env={},
+                timeout=3.0,
+            )
+
+    def test_installed_probe_instantiates_every_public_overload(self) -> None:
+        source = package_consumption.ASSERTION_PROBE_SOURCE
+        self.assertIn('assert_equal("left", "right")', source)
+        self.assertIn("assert_equal([1, 2], [1, 2])", source)
+        self.assertIn(
+            'assert_equal({"key": 1}, {"key": 1})',
+            source,
+        )
+        self.assertIn("assert_equal(1, 1)", source)
+
+    def test_compile_command_uses_absolute_installed_paths(self) -> None:
+        prefix = Path("/scratch/prefix")
+        self.assertEqual(
+            package_consumption.assertion_compile_command(
+                prefix,
+                Path("/scratch/probe.mojo"),
+                Path("/scratch/probe-o0"),
+                "-O0",
+            ),
+            [
+                "/scratch/prefix/bin/mojo",
+                "build",
+                "-O0",
+                "-I",
+                "/scratch/prefix/share/mtest/assertions-src",
+                "/scratch/probe.mojo",
+                "-o",
+                "/scratch/probe-o0",
+            ],
+        )
+
+    def test_probe_environment_pins_modular_home_to_installed_prefix(self) -> None:
+        prefix = Path("/scratch/prefix")
+        environment = package_consumption.assertion_probe_environment(
+            prefix,
+            package_platform("linux", "x86_64"),
+        )
+        self.assertEqual(environment["PATH"], "/usr/bin:/bin")
+        self.assertEqual(
+            environment["MODULAR_HOME"],
+            "/scratch/prefix/share/max",
+        )
+        self.assertEqual(
+            environment["LD_LIBRARY_PATH"],
+            "/scratch/prefix/lib",
+        )
+        self.assertEqual(
+            environment["HOME"],
+            str(
+                package_consumption.SCRATCH_ROOT
+                / "assertion-environments"
+                / "probe"
+                / "home"
+            ),
+        )
+        self.assertEqual(
+            environment["MODULAR_CACHE_DIR"],
+            str(
+                package_consumption.SCRATCH_ROOT
+                / "assertion-environments"
+                / "probe"
+                / "cache"
+            ),
+        )
+        self.assertTrue(Path(environment["HOME"]).is_dir())
+        self.assertTrue(Path(environment["MODULAR_CACHE_DIR"]).is_dir())
+        dev_prefix = str(package_consumption.REPO_ROOT / ".pixi")
+        self.assertFalse(any(dev_prefix in value for value in environment.values()))
+
+    def test_probe_environment_uses_the_platform_loader_variable(self) -> None:
+        prefix = Path("/scratch/prefix")
+        environment = package_consumption.assertion_probe_environment(
+            prefix,
+            package_platform("darwin", "arm64"),
+        )
+        self.assertEqual(
+            environment["DYLD_LIBRARY_PATH"],
+            "/scratch/prefix/lib",
+        )
+        self.assertNotIn("LD_LIBRARY_PATH", environment)
+
+    def test_installed_consumer_compile_rejects_warnings(self) -> None:
+        with self.assertRaisesRegex(
+            package_consumption.PackageCheckError,
+            "compiler warning",
+        ):
+            package_consumption.require_warning_free_assertion_compile(
+                "consumer.mojo:1:1: warning: shipped warning\n",
+                "conda",
+                "-O0",
+            )
+
+    def test_installed_consumer_compile_rejects_truncated_capture(self) -> None:
+        with self.assertRaisesRegex(
+            package_consumption.PackageCheckError,
+            "output was truncated",
+        ):
+            package_consumption.require_warning_free_assertion_compile(
+                watchdog.CAPTURE_TRUNCATION_MARKER,
+                "conda",
+                "-O0",
+            )
+
+
+class AssertionReadmeExampleTests(unittest.TestCase):
+    def test_extracts_the_only_console_fence_from_assertion_section(self) -> None:
+        contents = (
+            "# mtest\n\n"
+            "## Assertion diagnostics\n\n"
+            "```mojo\nassert_equal(1, 2)\n```\n\n"
+            "```console\n$ mtest examples/assertions\noutput\n```\n\n"
+            "## Usage\n"
+        )
+        self.assertEqual(
+            package_consumption.readme_assertion_example_block(contents),
+            "$ mtest examples/assertions\noutput\n",
+        )
+
+    def test_extracts_the_only_mojo_fence_from_assertion_section(self) -> None:
+        contents = (
+            "# mtest\n\n"
+            "## Assertion diagnostics\n\n"
+            "```mojo\nassert_equal(1, 2)\n```\n\n"
+            "```console\n$ mtest examples/assertions\noutput\n```\n\n"
+            "## Usage\n"
+        )
+        self.assertEqual(
+            package_consumption.readme_assertion_source_block(contents),
+            "assert_equal(1, 2)\n",
+        )
+
+    def test_normalizes_only_paths_and_elapsed_times(self) -> None:
+        output = (
+            "root: /checkout\n"
+            "FAIL           examples/assertions/test.mojo  0.07s\n"
+            "detail /prefix/share/mtest/assertions-src\n"
+            "    |     PASS [ 0.001 ] test_pass\n"
+            "    |     FAIL [ 0.082 ] test_fail\n"
+            "    | Summary [ 0.083 ] 2 tests run: 1 passed , 1 failed , "
+            "0 skipped \n"
+            "    | diagnostic payload keeps its trailing space \n"
+            "    | \n"
+            "===== 1 passed, 1 failed in 2.2s =====\n"
+        )
+        self.assertEqual(
+            package_consumption.normalize_assertion_example(
+                output,
+                Path("/prefix"),
+                Path("/checkout"),
+            ),
+            "root: <REPO>\n"
+            "FAIL           examples/assertions/test.mojo  <TIME>\n"
+            "detail <PREFIX>/share/mtest/assertions-src\n"
+            "    |     PASS [ <TIME> ] test_pass\n"
+            "    |     FAIL [ <TIME> ] test_fail\n"
+            "    | Summary [ <TIME> ] 2 tests run: 1 passed , 1 failed , "
+            "0 skipped\n"
+            "    | diagnostic payload keeps its trailing space \n"
+            "    |\n"
+            "===== 1 passed, 1 failed in <TIME> =====\n",
+        )
+
+
+class AssertionPackageLayoutTests(unittest.TestCase):
+    def test_assertion_file_mode_policies_are_exact(self) -> None:
+        self.assertEqual(
+            package_consumption.PRIMARY_ASSERTION_FILE_MODES,
+            (0o644,),
+        )
+        self.assertEqual(
+            package_consumption.TARBALL_ASSERTION_FILE_MODES,
+            (0o644, 0o664),
+        )
+
+    def _valid_prefix(self, root: Path) -> Path:
+        prefix = root.resolve() / "prefix"
+        library_suffix = ".dylib" if sys.platform == "darwin" else ".so"
+        for relative in package_consumption.INSTALLED_ASSERTION_FILES:
+            path = prefix / "share" / "mtest" / "assertions-src" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            checkout = package_consumption.REPO_ROOT / "assertions-src" / relative
+            path.write_bytes(checkout.read_bytes())
+            path.chmod(0o644)
+        for directory_name in (
+            "share/mtest",
+            "share/mtest/assertions-src",
+            "share/mtest/assertions-src/mtest",
+            "share/mtest/assertions-src/mtest/assertions",
+        ):
+            (prefix / directory_name).chmod(0o755)
+        mojo = prefix / "bin" / "mojo"
+        mojo.parent.mkdir(parents=True)
+        mojo.write_text("#!/bin/sh\n", encoding="utf-8")
+        mojo.chmod(0o755)
+        (prefix / "lib" / "mojo").mkdir(parents=True)
+        (prefix / "lib" / f"libAsyncRTMojoBindings{library_suffix}").write_bytes(
+            b"runtime"
+        )
+        config = prefix / "share" / "max" / "modular.cfg"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            "[max]\n"
+            f"package_root = {prefix}\n"
+            f"cache_dir = {prefix}/share/max/.max_cache\n"
+            "enable_model_ir_cache = true\n"
+            "name = MAX Platform\n"
+            f"path = {prefix}\n"
+            "version = 1.0.0b2\n"
+            "[mojo-max]\n"
+            f"package_root = {prefix}\n"
+            f"compilerrt_path = {prefix}/lib/libKGENCompilerRTShared{library_suffix}\n"
+            f"mgprt_path = {prefix}/lib/libMGPRT{library_suffix}\n"
+            f"shared_libs = {prefix}/lib/libAsyncRTMojoBindings{library_suffix},"
+            f"-Xlinker,-rpath,-Xlinker,{prefix}/lib;\n"
+            f"driver_path = {prefix}/bin/mojo\n"
+            f"import_path = {prefix}/lib/mojo\n"
+            f"jupyter_path = {prefix}/lib/libMojoJupyter{library_suffix}\n"
+            f"lldb_path = {prefix}/bin/mojo-lldb\n"
+            f"lldb_plugin_path = {prefix}/lib/libMojoLLDB{library_suffix}\n"
+            f"lldb_visualizers_path = {prefix}/lib/lldb-visualizers\n"
+            f"lldb_vscode_path = {prefix}/bin/mojo-lldb-dap\n"
+            f"lsp_server_path = {prefix}/bin/mojo-lsp-server\n"
+            f"mblack_path = {prefix}/bin/mblack\n"
+            f"repl_entry_point = {prefix}/lib/mojo-repl-entry-point\n"
+            f"lld_path = {prefix}/bin/lld;\n",
+            encoding="utf-8",
+        )
+        return prefix
+
+    def test_rejects_changed_installed_source_bytes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            source = (
+                prefix
+                / "share"
+                / "mtest"
+                / "assertions-src"
+                / "mtest"
+                / "assertions"
+                / "_mapping.mojo"
+            )
+            source.write_text("# changed installed bytes\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "source bytes differ",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_accepts_owner_only_prefix_and_share_directories(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            prefix.chmod(0o700)
+            (prefix / "share").chmod(0o700)
+            package_consumption.validate_assertion_install(prefix)
+
+    def test_valid_prefix_uses_the_darwin_runtime_library_suffix(self) -> None:
+        with (
+            tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw,
+            mock.patch.object(sys, "platform", "darwin"),
+        ):
+            prefix = self._valid_prefix(Path(raw))
+            package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_a_symlinked_installed_compiler(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            root = Path(raw)
+            prefix = self._valid_prefix(root)
+            external = root / "external-mojo"
+            external.write_text("#!/bin/sh\n", encoding="utf-8")
+            external.chmod(0o755)
+            mojo = prefix / "bin" / "mojo"
+            mojo.unlink()
+            mojo.symlink_to(external)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "real regular file",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO requires POSIX")
+    def test_rejects_a_non_regular_extra_entry(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            fifo = prefix / "share" / "mtest" / "assertions-src" / "unexpected-fifo"
+            os.mkfifo(fifo)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "installed assertion entry set",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_tarball_accepts_installer_normalized_group_write(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            source = (
+                prefix
+                / "share"
+                / "mtest"
+                / "assertions-src"
+                / "mtest"
+                / "__init__.mojo"
+            )
+            source.chmod(0o664)
+            (
+                prefix / "share" / "mtest" / "assertions-src" / "mtest" / "assertions"
+            ).chmod(0o775)
+            package_consumption.validate_assertion_install(
+                prefix,
+                allow_installer_group_write=True,
+            )
+
+    def test_primary_package_rejects_group_writable_source(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            source = (
+                prefix
+                / "share"
+                / "mtest"
+                / "assertions-src"
+                / "mtest"
+                / "__init__.mojo"
+            )
+            source.chmod(0o664)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "exact mode 644",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_primary_package_accepts_installer_normalized_directories(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            for relative in (
+                "share/mtest",
+                "share/mtest/assertions-src",
+                "share/mtest/assertions-src/mtest",
+                "share/mtest/assertions-src/mtest/assertions",
+            ):
+                (prefix / relative).chmod(0o775)
+            package_consumption.validate_assertion_install(prefix)
+
+    def test_private_probe_diagnostics_require_semantic_rejections(self) -> None:
+        with self.assertRaisesRegex(
+            package_consumption.PackageCheckError,
+            "wrong reason",
+        ):
+            package_consumption.require_missing_facade_export(
+                "unable to locate module 'mtest'\n"
+                "from mtest.assertions import BoundedWriter\n",
+                "BoundedWriter",
+            )
+        package_consumption.require_missing_facade_export(
+            "package 'assertions' does not contain 'BoundedWriter'",
+            "BoundedWriter",
+        )
+        with self.assertRaisesRegex(
+            package_consumption.PackageCheckError,
+            "wrong reason",
+        ):
+            package_consumption.require_missing_runner_module(
+                "unable to locate module 'mtest'\n"
+                "from mtest.session import run_session\n"
+            )
+        package_consumption.require_missing_runner_module(
+            "error: unable to locate module 'session'"
+        )
+
+    def test_rejects_an_extra_public_mojopkg(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            extra = prefix / "share" / "mtest" / "assertions-src" / "mtest.mojopkg"
+            extra.write_text("opaque", encoding="utf-8")
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "installed assertion entry set",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_a_world_writable_source_file(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            source = (
+                prefix
+                / "share"
+                / "mtest"
+                / "assertions-src"
+                / "mtest"
+                / "__init__.mojo"
+            )
+            source.chmod(0o666)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "exact mode 644",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_an_executable_source_file(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            source = (
+                prefix
+                / "share"
+                / "mtest"
+                / "assertions-src"
+                / "mtest"
+                / "__init__.mojo"
+            )
+            source.chmod(0o744)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "exact mode 644",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_a_world_writable_source_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            directory = (
+                prefix / "share" / "mtest" / "assertions-src" / "mtest" / "assertions"
+            )
+            directory.chmod(0o777)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "not world-writable",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_a_world_writable_share_ancestor(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            (prefix / "share").chmod(0o777)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "not world-writable",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_a_world_writable_prefix(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            prefix.chmod(0o777)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "not world-writable",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_tarball_policy_rejects_unsafe_source_modes(self) -> None:
+        for mode in (0o666, 0o744):
+            with (
+                self.subTest(mode=oct(mode)),
+                tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw,
+            ):
+                prefix = self._valid_prefix(Path(raw))
+                source = (
+                    prefix
+                    / "share"
+                    / "mtest"
+                    / "assertions-src"
+                    / "mtest"
+                    / "__init__.mojo"
+                )
+                source.chmod(mode)
+                with self.assertRaisesRegex(
+                    package_consumption.PackageCheckError,
+                    "mode 644 or installer-normalized 664",
+                ):
+                    package_consumption.validate_assertion_install(
+                        prefix,
+                        allow_installer_group_write=True,
+                    )
+
+    def test_tarball_policy_rejects_world_writable_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            directory = prefix / "share" / "mtest" / "assertions-src" / "mtest"
+            directory.chmod(0o777)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "not world-writable",
+            ):
+                package_consumption.validate_assertion_install(
+                    prefix,
+                    allow_installer_group_write=True,
+                )
+
+    def test_rejects_toolchain_provenance_from_another_prefix(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            config = prefix / "share" / "max" / "modular.cfg"
+            config.write_text(
+                "[max]\npackage_root = /developer/pixi\n"
+                "[mojo-max]\nimport_path = /developer/pixi/lib/mojo\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "modular.cfg",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_compiler_runtime_paths_from_another_prefix(self) -> None:
+        options = ("compilerrt_path", "mgprt_path", "shared_libs", "lld_path")
+        for option in options:
+            with (
+                self.subTest(option=option),
+                tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw,
+            ):
+                prefix = self._valid_prefix(Path(raw))
+                config = prefix / "share" / "max" / "modular.cfg"
+                parser = configparser.ConfigParser(interpolation=None)
+                parser.read(config, encoding="utf-8")
+                parser.set("mojo-max", option, f"/developer/pixi/{option}")
+                with config.open("w", encoding="utf-8") as stream:
+                    parser.write(stream)
+                with self.assertRaisesRegex(
+                    package_consumption.PackageCheckError,
+                    "modular.cfg",
+                ):
+                    package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_an_import_path_symlink_that_escapes_the_prefix(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            root = Path(raw)
+            prefix = self._valid_prefix(root)
+            external = root / "external-imports"
+            external.mkdir()
+            import_path = prefix / "lib" / "mojo"
+            import_path.rmdir()
+            import_path.symlink_to(external, target_is_directory=True)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "import_path.*inside prefix",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_a_runtime_library_symlink_that_escapes_the_prefix(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            root = Path(raw)
+            prefix = self._valid_prefix(root)
+            library_suffix = ".dylib" if sys.platform == "darwin" else ".so"
+            external = root / f"external-runtime{library_suffix}"
+            external.write_bytes(b"foreign runtime")
+            runtime = prefix / "lib" / (f"libAsyncRTMojoBindings{library_suffix}")
+            runtime.unlink()
+            runtime.symlink_to(external)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "runtime library.*inside prefix",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_flag_encoded_shared_library_search_paths(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            config = prefix / "share" / "max" / "modular.cfg"
+            parser = configparser.ConfigParser(interpolation=None)
+            parser.read(config, encoding="utf-8")
+            parser.set(
+                "mojo-max",
+                "shared_libs",
+                parser.get("mojo-max", "shared_libs") + ",-L/developer/pixi/lib",
+            )
+            with config.open("w", encoding="utf-8") as stream:
+                parser.write(stream)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "modular.cfg",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_in_prefix_wrong_shared_library_paths(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            config = prefix / "share" / "max" / "modular.cfg"
+            parser = configparser.ConfigParser(interpolation=None)
+            parser.read(config, encoding="utf-8")
+            parser.set(
+                "mojo-max",
+                "shared_libs",
+                f"{prefix}/lib/libWrong.so,-Xlinker,-rpath,-Xlinker,{prefix}/share;",
+            )
+            with config.open("w", encoding="utf-8") as stream:
+                parser.write(stream)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "shared_libs",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_an_unknown_toolchain_config_option(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            config = prefix / "share" / "max" / "modular.cfg"
+            parser = configparser.ConfigParser(interpolation=None)
+            parser.read(config, encoding="utf-8")
+            parser.set(
+                "mojo-max",
+                "sanitizer_rt_path",
+                "/developer/pixi/lib/libSanitizerRT.so",
+            )
+            with config.open("w", encoding="utf-8") as stream:
+                parser.write(stream)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "modular.cfg",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_assertion_package_timeouts_cover_cold_compiles(self) -> None:
+        self.assertEqual(package_consumption.ASSERTION_COMPILE_TIMEOUT, 120.0)
+        self.assertEqual(package_consumption.ASSERTION_EXAMPLE_TIMEOUT, 300.0)
+
+    def test_rejects_commented_or_extended_toolchain_assignments(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            config = prefix / "share" / "max" / "modular.cfg"
+            config.write_text(
+                "[max]\n"
+                f"# package_root = {prefix}\n"
+                f"package_root_extra = {prefix}\n"
+                "[mojo-max]\n"
+                f"package_root = {prefix}/foreign\n"
+                f"driver_path = {prefix}/bin/mojo-foreign\n"
+                f"import_path = {prefix}/lib/mojo-foreign\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "modular.cfg",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_duplicate_toolchain_assignments(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            config = prefix / "share" / "max" / "modular.cfg"
+            config.write_text(
+                "[max]\n"
+                f"package_root = {prefix}\n"
+                f"package_root = {prefix}/foreign\n"
+                "[mojo-max]\n"
+                f"package_root = {prefix}\n"
+                f"driver_path = {prefix}/bin/mojo\n"
+                f"import_path = {prefix}/lib/mojo\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "duplicate",
+            ):
+                package_consumption.validate_assertion_install(prefix)
 
 
 def main() -> int:

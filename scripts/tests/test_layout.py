@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from scripts.build import package_consumption
 from scripts.checks import layout
 from scripts.harness import aggregate
 
@@ -33,6 +34,10 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
             ("E2E_SCENARIO_NAMES", layout.check_e2e_layout),
             ("E2E_HARNESS_PATHS", layout.check_e2e_layout),
             ("BUILD_SOURCE_PATHS", layout.check_build_source_visibility),
+            ("ASSERTION_SOURCE_PATHS", layout.check_assertion_companion_layout),
+            ("ASSERTION_CONSUMER_PATHS", layout.check_assertion_companion_layout),
+            ("ASSERTION_CHECK_PATHS", layout.check_assertion_companion_layout),
+            ("ASSERTION_EXAMPLE_PATHS", layout.check_assertion_companion_layout),
             ("VENDORED_TOML_PATHS", layout.check_vendored_toml_layout),
         )
         for name, check in cases:
@@ -85,6 +90,66 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
                     AssertionError, "exec fixture membership mismatch"
                 ):
                     layout.check_exec_fixture_layout()
+
+    def test_assertion_companion_membership_is_exact(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-layout-") as raw_tmp:
+            repo = Path(raw_tmp)
+            for relative in (
+                *layout.ASSERTION_SOURCE_PATHS,
+                *layout.ASSERTION_CONSUMER_PATHS,
+                *layout.ASSERTION_CHECK_PATHS,
+                *layout.ASSERTION_EXAMPLE_PATHS,
+            ):
+                path = repo / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# fixture\n", encoding="utf-8")
+            for script_name in ("scripts/build/production_build.sh",):
+                path = repo / script_name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# no assertion precompile\n", encoding="utf-8")
+            recipe = repo / "recipe" / "build.sh"
+            recipe.parent.mkdir(parents=True, exist_ok=True)
+            recipe.write_text(
+                "# no assertion precompile\n"
+                + "".join(
+                    f"install -m 644 {relative} destination\n"
+                    for relative in layout.ASSERTION_SOURCE_PATHS
+                ),
+                encoding="utf-8",
+            )
+
+            layout.check_assertion_companion_layout(repo)
+            unregistered_example = repo / "examples" / "perf" / "bench.mojo"
+            unregistered_example.parent.mkdir(parents=True)
+            unregistered_example.write_text("# accidental example\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                AssertionError,
+                "assertion example membership mismatch",
+            ):
+                layout.check_assertion_companion_layout(repo)
+            unregistered_example.unlink()
+
+            with (
+                mock.patch.object(
+                    package_consumption,
+                    "INSTALLED_ASSERTION_FILES",
+                    {Path("mtest/__init__.mojo")},
+                ),
+                self.assertRaisesRegex(
+                    AssertionError,
+                    "assertion package-check membership mismatch",
+                ),
+            ):
+                layout.check_assertion_companion_layout(repo)
+
+            extra = repo / "assertions-src" / "mtest" / "assertions" / "unexpected.mojo"
+            extra.write_text("# accidental public module\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                AssertionError,
+                "assertion source membership mismatch",
+            ):
+                layout.check_assertion_companion_layout(repo)
 
 
 class ClassifiedMojoUniverseTests(unittest.TestCase):

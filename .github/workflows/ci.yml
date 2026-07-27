@@ -52,6 +52,13 @@ jobs:
             artifact_name: none
             artifact_path: none
           - runner: ubuntu-24.04
+            lane: assertions
+            task: assertions-check
+            libc_debug: false
+            safety_artifact: false
+            artifact_name: none
+            artifact_path: none
+          - runner: ubuntu-24.04
             lane: self-hosted tests
             task: dogfood-check
             libc_debug: false
@@ -208,6 +215,13 @@ jobs:
           - runner: macos-15
             lane: direct tests
             task: test
+            libc_debug: false
+            safety_artifact: false
+            artifact_name: none
+            artifact_path: none
+          - runner: macos-15
+            lane: assertions
+            task: assertions-check
             libc_debug: false
             safety_artifact: false
             artifact_name: none
