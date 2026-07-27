@@ -1065,6 +1065,44 @@ def _leaking_actor(tmp: Path) -> Path:
     return actor
 
 
+def _persistent_leaking_actor(tmp: Path) -> Path:
+    """Write a leader that leaves one indefinitely sleeping descendant."""
+    descendant = tmp / "persistent_descendant.py"
+    descendant.write_text(
+        "from pathlib import Path\n"
+        "import os\n"
+        "import sys\n"
+        "import time\n"
+        "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "time.sleep(120)",
+        encoding="utf-8",
+    )
+    actor = tmp / "persistent_leader.py"
+    actor.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "import os",
+                "import subprocess",
+                "import sys",
+                "import time",
+                "leader_pid, descendant_pid = sys.argv[1], sys.argv[2]",
+                "Path(leader_pid).write_text(str(os.getpid()))",
+                "subprocess.Popen(",
+                f"    [sys.executable, {str(descendant)!r}, descendant_pid]",
+                ")",
+                "while not Path(descendant_pid).exists():",
+                "    time.sleep(0.01)",
+                f"sys.stdout.write({FLOOD_MARKERS[1]!r})",
+                "sys.stdout.flush()",
+                "raise SystemExit(0)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return actor
+
+
 def test_leaked_descendant_bounds_the_drain_and_seals_the_tee() -> None:
     """A leaked pipe holder cannot stall the drain nor write past the verdict."""
     with tempfile.TemporaryDirectory(prefix="mtest-watchdog-leak-") as raw_tmp:
@@ -1143,14 +1181,14 @@ def test_leaked_descendant_bounds_the_drain_and_seals_the_tee() -> None:
 
 
 def test_captured_command_marks_a_forced_drain_incomplete() -> None:
-    """A leaked pipe holder must make bounded capture fail closed."""
+    """A leaked pipe holder makes capture incomplete and is swept."""
     with tempfile.TemporaryDirectory(prefix="mtest-watchdog-capture-leak-") as raw_tmp:
         tmp = Path(raw_tmp)
-        late_seconds = DRAIN_SETTLE_SECONDS + 0.5
-        actor = _leaking_actor(tmp)
-        leader_done = tmp / "leader-done"
+        actor = _persistent_leaking_actor(tmp)
+        leader_pid_path = tmp / "leader-pid"
+        descendant_pid_path = tmp / "descendant-pid"
         captured = watchdog.run_captured_command(
-            [PYTHON, str(actor), str(leader_done), str(late_seconds)],
+            [PYTHON, str(actor), str(leader_pid_path), str(descendant_pid_path)],
             source="tests/unit/test_watchdog.mojo",
             step="run",
             timeout_seconds=30.0,
@@ -1161,9 +1199,52 @@ def test_captured_command_marks_a_forced_drain_incomplete() -> None:
             )
         if captured.capture_complete:
             raise AssertionError("forced drain settlement reported complete capture")
-        # Let the descendant close its inherited pipe before its temporary
-        # source directory is removed.
-        time.sleep(late_seconds - DRAIN_SETTLE_SECONDS + 0.5)
+        leader_pid = int(leader_pid_path.read_text(encoding="utf-8"))
+        group_alive = watchdog._signal_group(leader_pid, 0)
+        if group_alive:
+            # Keep the red regression from leaking its actor before the
+            # production cleanup exists.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(leader_pid, signal.SIGKILL)
+            raise AssertionError("ordinary leader exit left its process group alive")
+
+
+def test_read_error_cannot_report_capture_complete() -> None:
+    """A drainer error is not end of file and must fail capture closed."""
+    read_descriptor, write_descriptor = os.pipe()
+    os.write(write_descriptor, b"unread output")
+    os.close(write_descriptor)
+    reached_eof = threading.Event()
+    retention = MarkerRetention(MARKER_PREFIX)
+    sink = io.StringIO()
+    original_read = os.read
+
+    def fail_read(_descriptor: int, _size: int) -> bytes:
+        raise OSError("injected read failure")
+
+    os.read = fail_read
+    try:
+        with os.fdopen(read_descriptor, "rb") as source:
+            watchdog._tee_stream(
+                source,
+                watchdog._StreamTee(sink),
+                retention,
+                threading.Event(),
+                reached_eof,
+            )
+    finally:
+        os.read = original_read
+    state = watchdog._DrainState(
+        threads=(),
+        tees=(),
+        stop=threading.Event(),
+        retention=retention,
+        sources=(),
+        eof_events=(reached_eof,),
+    )
+    watchdog._seal_drainers(state)
+    if retention.capture_complete:
+        raise AssertionError("read failure was reported as complete capture")
 
 
 def test_a_caller_stream_without_a_byte_buffer_still_receives_the_tee() -> None:
@@ -1428,6 +1509,7 @@ def main() -> int:
         test_flooding_child_is_drained_teed_and_marked,
         test_leaked_descendant_bounds_the_drain_and_seals_the_tee,
         test_captured_command_marks_a_forced_drain_incomplete,
+        test_read_error_cannot_report_capture_complete,
         test_a_caller_stream_without_a_byte_buffer_still_receives_the_tee,
         test_cancellation_during_the_drain_settle_stays_cancelled,
         test_a_blocked_caller_stream_cannot_swallow_a_caller_signal,

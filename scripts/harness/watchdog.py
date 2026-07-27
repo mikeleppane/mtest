@@ -329,6 +329,8 @@ class _DrainState:
     can still be released: closing its source makes its next read fail, so the
     thread ends as soon as that write returns instead of living forever.
     """
+    eof_events: tuple[threading.Event, ...] = ()
+    """Per-stream proof that the drainer observed end of file."""
 
 
 def _tee_stream(
@@ -336,6 +338,7 @@ def _tee_stream(
     tee: _StreamTee,
     retention: MarkerRetention | None,
     stop: threading.Event,
+    reached_eof: threading.Event | None = None,
 ) -> None:
     """Drain one captured pipe onto a caller stream, retaining a marker.
 
@@ -347,6 +350,7 @@ def _tee_stream(
         tee: The caller-stream writer this pipe's bytes are forwarded to.
         retention: Marker state to update in place, or None to only tee.
         stop: Shared flag that ends the drain without waiting for end of file.
+        reached_eof: Optional proof set only after a zero-length pipe read.
     """
     prefix = b"" if retention is None else retention.prefix.encode("utf-8")
     pending = b""
@@ -378,6 +382,8 @@ def _tee_stream(
             except (OSError, ValueError):
                 break
             if not chunk:
+                if reached_eof is not None:
+                    reached_eof.set()
                 break
             # Each stream is drained by its own thread, so the interleaving of
             # stdout against stderr at a shared terminal is now decided by
@@ -430,20 +436,30 @@ def _start_drainers(
     threads: list[threading.Thread] = []
     tees: list[_StreamTee] = []
     sources: list[IO[bytes]] = []
+    eof_events: list[threading.Event] = []
     for source, stream, marker in targets:
         if source is None:
             continue
         tee = _StreamTee(stream)
+        reached_eof = threading.Event()
         thread = threading.Thread(
             target=_tee_stream,
-            args=(source, tee, marker, stop),
+            args=(source, tee, marker, stop, reached_eof),
             daemon=True,
         )
         thread.start()
         threads.append(thread)
         tees.append(tee)
         sources.append(source)
-    return _DrainState(tuple(threads), tuple(tees), stop, retention, tuple(sources))
+        eof_events.append(reached_eof)
+    return _DrainState(
+        tuple(threads),
+        tuple(tees),
+        stop,
+        retention,
+        tuple(sources),
+        tuple(eof_events),
+    )
 
 
 def _settle_drainers(state: _DrainState | None) -> None:
@@ -495,12 +511,12 @@ def _seal_drainers(state: _DrainState | None) -> None:
     """
     if state is None:
         return
-    if state.retention is not None and any(
-        thread.is_alive() for thread in state.threads
+    if state.retention is not None and not all(
+        reached_eof.is_set() for reached_eof in state.eof_events
     ):
-        # A live drainer at forced settlement means its pipe never reached EOF.
-        # The bounded return is still required, but semantic callers must know
-        # that unseen descendant output may exist and fail closed.
+        # Only an observed zero-length read proves a pipe complete. A live
+        # drainer, a poll/read error, or forced settlement can all omit bytes;
+        # semantic callers must know that and fail closed.
         state.retention.mark_capture_incomplete()
     state.stop.set()
     # Freeze BEFORE sealing the tees, not after. A drainer already past its
@@ -800,6 +816,14 @@ def run_command(
             # must reach the cancellation arm below rather than escaping as an
             # unhandled BaseException past the caller's own except clauses.
             _settle_drainers(drain_state)
+            # A successful leader can still leave background descendants in
+            # the session it created. Settle first so caller cancellation keeps
+            # its established precedence during that bounded window, then mark
+            # the transcript incomplete and sweep any surviving owned group.
+            if isinstance(termination, Exited) and _signal_group(process.pid, 0):
+                if marker_retention is not None:
+                    marker_retention.mark_capture_incomplete()
+                _forward_signal_and_cleanup(process, signal.SIGTERM)
             return _clear_non_timeout_sentinel(termination, deadline_sentinel)
         except _WatchdogCancellation as cancellation:
             # The first callback already recorded precedence. Keep the handlers
