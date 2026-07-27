@@ -128,6 +128,28 @@ class CiTopologyTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "fmt-check task mismatch"):
                 ci_topology.check_ci_task_graph(repo)
 
+    def test_recipe_checks_are_owned_by_the_cheap_serial_gate(self) -> None:
+        with (ci_topology.REPO_ROOT / "pixi.toml").open("rb") as manifest:
+            tasks = tomllib.load(manifest)["tasks"]
+
+        self.assertEqual(
+            tasks.get("recipe-check"),
+            "python -m scripts.tests.test_community_recipe && "
+            "python -m scripts.checks.community_recipe",
+        )
+        self.assertIn(
+            "scripts.tests.test_community_recipe",
+            ci_topology.HARNESS_CHECK_MODULES,
+        )
+        self.assertIn(
+            "scripts.checks.community_recipe",
+            ci_topology.HARNESS_CHECK_MODULES,
+        )
+        self.assertIn(
+            "find -P src companions tests e2e recipe",
+            ci_topology.FORMAT_COMMAND,
+        )
+
     def test_readme_help_gate_removal_is_rejected(self) -> None:
         source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
         mutated = source.replace(

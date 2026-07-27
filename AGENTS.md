@@ -198,6 +198,7 @@ pixi run junit-render-check  # validate bytes emitted by the real JUnit reporter
 pixi run transcripts-check # regenerate to a temp dir and diff byte-for-byte
 pixi run test              # compile the classified inventory into one direct-run binary
 pixi run assertions-check  # direct-run public assertion consumers at O0 and O3
+pixi run recipe-check      # render and compare the community submission recipe
 pixi run dogfood-check     # run three focused probes through the built mtest binary
 pixi run e2e               # exact CLI exits and output against e2e/manifest.json
 pixi run ci-memory         # Linux: both memory lanes, ASan/LSan then Memcheck

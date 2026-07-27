@@ -142,7 +142,7 @@ class SafetyCheckTests(unittest.TestCase):
     def test_default_roots_are_exact(self) -> None:
         self.assertEqual(
             safety_check.DEFAULT_ROOTS,
-            ("src", "companions", "tests", "e2e"),
+            ("src", "companions", "tests", "e2e", "recipe"),
         )
 
     def test_assertion_source_root_is_scanned(self) -> None:

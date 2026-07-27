@@ -34,6 +34,8 @@ HARNESS_CHECK_MODULES = (
     "scripts.tests.test_transcript_compare",
     "scripts.tests.test_readme_help",
     "scripts.tests.test_assertions",
+    "scripts.tests.test_community_recipe",
+    "scripts.checks.community_recipe",
     "scripts.tests.test_coverage_capability",
     "scripts.tests.test_layout",
     "scripts.checks.layout",
@@ -48,7 +50,7 @@ set -eu
 source_list="$(mktemp "${TMPDIR:-/tmp}/mtest-format.XXXXXX")"
 sorted_list="${source_list}.sorted"
 trap "rm -f \"$source_list\" \"$sorted_list\"" EXIT HUP INT TERM
-find -P src companions tests e2e -type f -name "*.mojo" -print > "$source_list"
+find -P src companions tests e2e recipe -type f -name "*.mojo" -print > "$source_list"
 LC_ALL=C sort "$source_list" > "$sorted_list"
 mv "$sorted_list" "$source_list"
 if [ ! -s "$source_list" ]; then
@@ -1003,9 +1005,7 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
 
     for name, job in job_blocks.items():
         if job.count(f"uses: actions/checkout@{CHECKOUT_ACTION_SHA}") != 1:
-            raise AssertionError(
-                f"CI job {name!r} does not pin checkout v7.0.1 once"
-            )
+            raise AssertionError(f"CI job {name!r} does not pin checkout v7.0.1 once")
         if job.count(f"uses: prefix-dev/setup-pixi@{SETUP_PIXI_ACTION_SHA}") != 1:
             raise AssertionError(f"CI job {name!r} does not pin setup-pixi once")
         if "          locked: true" not in job or "          cache: true" not in job:
