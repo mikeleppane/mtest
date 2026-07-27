@@ -106,14 +106,8 @@ Termination = Exited | Signaled | TimedOut | Cancelled | HarnessError
 
 
 def _safe_exception_text(error: BaseException) -> str:
-    """Render an exception without trusting user-defined ``__str__`` code."""
-    try:
-        return str(error)
-    except BaseException as rendering_error:  # noqa: BLE001
-        return (
-            f"<{type(error).__name__} could not be rendered "
-            f"({type(rendering_error).__name__})>"
-        )
+    """Name an exception without executing user-defined rendering code."""
+    return type(error).__name__
 
 
 @dataclass(frozen=True)
@@ -562,16 +556,13 @@ def _seal_drainers(state: _DrainState | None) -> None:
     if state.retention is not None:
         state.retention.freeze()
     for index, tee in enumerate(state.tees):
-        thread_started = (
-            index >= len(state.threads) or state.threads[index].ident is not None
-        )
+        thread_started = state.threads[index].ident is not None
         if tee.seal() and thread_started:
             continue
         # This drainer is parked in a write to a caller stream that is not
         # draining. Release the resources it holds rather than abandoning them.
-        if index < len(state.sources):
-            with contextlib.suppress(OSError, ValueError):
-                state.sources[index].close()
+        with contextlib.suppress(OSError, ValueError):
+            state.sources[index].close()
     # A brief, bounded join so a drainer that has already finished is reaped
     # here rather than left for the interpreter. Threads still parked in a
     # write fall through untouched; the supervisor never waits on them.
@@ -709,6 +700,22 @@ def _forward_signal_and_cleanup(process: subprocess.Popen[bytes], signum: int) -
     process.wait()
 
 
+def _force_process_group_cleanup(
+    process: subprocess.Popen[bytes],
+) -> Exception | None:
+    """Retry a direct SIGKILL sweep and leader reap after cleanup failed."""
+    failure: Exception | None = None
+    for _ in range(3):
+        try:
+            _signal_group(process.pid, signal.SIGKILL)
+            process.wait()
+        except Exception as exc:  # noqa: BLE001
+            failure = exc
+        else:
+            return None
+    return failure
+
+
 def _validate_deadline_sentinel(deadline_sentinel: Path | None) -> None:
     """Fail before spawn unless the caller supplied a regular deadline sentinel."""
     if deadline_sentinel is None:
@@ -737,6 +744,16 @@ def _notify_timeout(source: str, step: str, timeout_seconds: float) -> None:
         print(
             f"FATAL: {source}: {step} exceeded {timeout_seconds:g}s; "
             "terminating its process group",
+            file=sys.stderr,
+        )
+
+
+def _notify_deferred_signal(source: str, signum: int, result: str) -> None:
+    """Report a managed signal recorded after terminal-result precedence."""
+    with contextlib.suppress(BrokenPipeError, OSError, ValueError):
+        print(
+            f"WARNING: {source}: received signal {signum} during cleanup; "
+            f"{result} result retained",
             file=sys.stderr,
         )
 
@@ -851,6 +868,10 @@ def run_command(
             return
         raise _WatchdogCancellation(signum)
 
+    def recorded_signal() -> int | None:
+        """Reload signal state that asynchronous callbacks can mutate."""
+        return pending_signum
+
     try:
         for signum in _FORWARDED_SIGNALS:
             previous_handlers[signum] = signal.getsignal(signum)
@@ -894,15 +915,21 @@ def run_command(
                 try:
                     _terminate_process_group(process)
                     process_group_cleaned = True
-                    try:
-                        _settle_drainers(drain_state)
-                    except _WatchdogCancellation:
-                        # The group is already swept and the deadline sentinel
-                        # is the timeout's standing proof, so a cancellation in
-                        # the final drain cannot un-time-out an ended child.
-                        _seal_drainers(drain_state)
+                    # The managed handler records but cannot raise while cleanup
+                    # is in progress, so this drain cannot replace the deadline.
+                    _settle_drainers(drain_state)
                     _notify_timeout(source, step, timeout_seconds)
-                    return validate_deadline_proof(TimedOut(), deadline_sentinel)
+                    timeout_result = validate_deadline_proof(
+                        TimedOut(), deadline_sentinel
+                    )
+                    deferred_signum = recorded_signal()
+                    if deferred_signum is not None:
+                        _notify_deferred_signal(
+                            source,
+                            deferred_signum,
+                            "timeout",
+                        )
+                    return timeout_result
                 finally:
                     # Keep deadline attribution atomic through its diagnostic
                     # and proof validation. Managed signals are recorded during
@@ -923,13 +950,16 @@ def run_command(
             )
             if not capture_complete_before_sweep and marker_retention is not None:
                 marker_retention.mark_capture_incomplete()
-            if pending_signum is not None:
-                raise _WatchdogCancellation(pending_signum)  # noqa: TRY301
+            settled_signum = recorded_signal()
+            if settled_signum is not None:
+                raise _WatchdogCancellation(settled_signum)  # noqa: TRY301
             # Settle inside this try, never in the `finally`: the drain can wait
             # seconds on a leaked descendant, and a caller signal in that window
             # must reach the cancellation arm below rather than escaping as an
             # unhandled BaseException past the caller's own except clauses.
             _settle_drainers(drain_state)
+            if pending_signum is not None:
+                raise _WatchdogCancellation(pending_signum)  # noqa: TRY301
             return _clear_non_timeout_sentinel(termination, deadline_sentinel)
         except _WatchdogCancellation as cancellation:
             # The first callback already recorded precedence. Keep the handlers
@@ -960,21 +990,30 @@ def run_command(
     # it, so every exception must become a HarnessError, and a failure inside
     # cleanup must not replace the detail that caused it.
     except Exception as exc:  # noqa: BLE001
-        cleanup_failure: Exception | None = None
+        cleanup_failures: list[Exception] = []
         if process is not None and not process_group_cleaned:
             cleanup_in_progress = True
             try:
                 _terminate_process_group(process)
                 process_group_cleaned = True
             except Exception as cleanup_exc:  # noqa: BLE001
-                cleanup_failure = cleanup_exc
+                cleanup_failures.append(cleanup_exc)
+                forced_failure = _force_process_group_cleanup(process)
+                if forced_failure is None:
+                    process_group_cleaned = True
+                else:
+                    cleanup_failures.append(forced_failure)
             finally:
                 cleanup_in_progress = False
         detail = "watchdog internal failure: " + _safe_exception_text(exc)
-        if cleanup_failure is not None:
-            detail += "; process-group cleanup failed: " + _safe_exception_text(
-                cleanup_failure
+        if cleanup_failures:
+            detail += "; process-group cleanup failed: " + ", then ".join(
+                _safe_exception_text(failure) for failure in cleanup_failures
             )
+        if not process_group_cleaned and process is not None:
+            detail += "; process-group cleanup remains unproved"
+        if pending_signum is not None:
+            detail += f"; caller signal {pending_signum} received during cleanup"
         return _clear_non_timeout_sentinel(HarnessError(detail), deadline_sentinel)
     finally:
         # Restore the caller's dispositions before the backstop seal. A managed

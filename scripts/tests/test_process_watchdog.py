@@ -969,8 +969,14 @@ def test_the_seal_freezes_the_capture_before_it_seals_any_tee() -> None:
             order.append("freeze")
             super().freeze()
 
+    first_thread = threading.Thread()
+    second_thread = threading.Thread()
+    first_thread.start()
+    second_thread.start()
+    first_thread.join()
+    second_thread.join()
     state = watchdog._DrainState(
-        threads=(),
+        threads=(first_thread, second_thread),
         tees=(_OrderingTee(io.StringIO()), _OrderingTee(io.StringIO())),
         stop=threading.Event(),
         retention=_OrderingRetention(MARKER_PREFIX),
@@ -1007,8 +1013,8 @@ def test_a_drainer_cannot_write_through_a_frozen_capture() -> None:
         )
 
 
-def test_a_cancelled_timeout_settle_seals_before_the_timeout_diagnostic() -> None:
-    """Aborting the timeout drain must not leave a tee live past the FATAL line."""
+def test_a_signal_during_timeout_settle_seals_before_the_diagnostic() -> None:
+    """A recorded timeout-drain signal must not leave a tee past the FATAL line."""
     with tempfile.TemporaryDirectory(prefix="mtest-watchdog-tmoseal-") as raw_tmp:
         tmp = Path(raw_tmp)
         sentinel = tmp / "deadline-sentinel"
@@ -1028,13 +1034,14 @@ def test_a_cancelled_timeout_settle_seals_before_the_timeout_diagnostic() -> Non
             states.append(state)
             return state
 
-        def cancelling_settle(
+        def interrupting_settle(
             # ARG001: the name and type must match `_settle_drainers` for this
             # stand-in to be a type-compatible replacement for it.
-            state: watchdog._DrainState | None,  # noqa: ARG001
+            state: watchdog._DrainState | None,
         ) -> None:
             """Stand in for a caller signal delivered inside the drain settle."""
-            raise watchdog._WatchdogCancellation(signal.SIGTERM)
+            os.kill(os.getpid(), signal.SIGTERM)
+            original_settle(state)
 
         def observing_notify(source: str, step: str, timeout_seconds: float) -> None:
             """Record whether every tee was already shut when FATAL was printed."""
@@ -1044,7 +1051,7 @@ def test_a_cancelled_timeout_settle_seals_before_the_timeout_diagnostic() -> Non
             original_notify(source, step, timeout_seconds)
 
         watchdog._prepare_drainers = recording_prepare
-        watchdog._settle_drainers = cancelling_settle
+        watchdog._settle_drainers = interrupting_settle
         watchdog._notify_timeout = observing_notify
         try:
             termination = run_command(
@@ -1074,12 +1081,18 @@ def test_a_signal_during_timeout_diagnostic_keeps_deadline_precedence() -> None:
         sentinel = Path(raw_tmp) / "deadline-sentinel"
         sentinel.touch()
         original_notify = watchdog._notify_timeout
+        deferred: list[tuple[str, int, str]] = []
+
+        def recording_deferred(source: str, signum: int, result: str) -> None:
+            deferred.append((source, signum, result))
 
         def interrupting_notify(source: str, step: str, timeout_seconds: float) -> None:
             os.kill(os.getpid(), signal.SIGINT)
             original_notify(source, step, timeout_seconds)
 
         watchdog._notify_timeout = interrupting_notify
+        original_deferred = watchdog._notify_deferred_signal
+        watchdog._notify_deferred_signal = recording_deferred
         try:
             termination = run_command(
                 [PYTHON, "-c", "import time; time.sleep(120)"],
@@ -1090,10 +1103,13 @@ def test_a_signal_during_timeout_diagnostic_keeps_deadline_precedence() -> None:
             )
         finally:
             watchdog._notify_timeout = original_notify
+            watchdog._notify_deferred_signal = original_deferred
         if not isinstance(termination, TimedOut):
             raise AssertionError(f"signal changed proven timeout into {termination!r}")
         if not sentinel.exists():
             raise AssertionError("signal during timeout removed deadline proof")
+        if deferred != [("tests/unit/test_watchdog.mojo", signal.SIGINT, "timeout")]:
+            raise AssertionError(f"timeout cleanup silently lost signal: {deferred}")
 
 
 def test_partial_drainer_start_is_published_before_cancellation() -> None:
@@ -1604,16 +1620,18 @@ def test_signal_during_internal_failure_cleanup_cannot_escape() -> None:
         raise AssertionError(f"cleanup signal escaped as {termination!r}")
 
 
-def test_signal_while_formatting_internal_failure_still_cleans_group() -> None:
-    """A managed signal before the backstop flag cannot escape group cleanup."""
+def test_internal_failure_never_renders_untrusted_exception() -> None:
+    """Backstop cleanup and diagnostics never execute exception rendering."""
     original_wait_for_exit = watchdog._wait_for_exit_without_reaping
     original_terminate = watchdog._terminate_process_group
     terminate_calls = 0
+    render_calls = 0
 
     class _InterruptingError(RuntimeError):
         @override
         def __str__(self) -> str:
-            os.kill(os.getpid(), signal.SIGTERM)
+            nonlocal render_calls
+            render_calls += 1
             raise RuntimeError("injected formatting failure")
 
     def injected_failure(
@@ -1630,17 +1648,12 @@ def test_signal_while_formatting_internal_failure_still_cleans_group() -> None:
     watchdog._wait_for_exit_without_reaping = injected_failure
     watchdog._terminate_process_group = recording_terminate
     try:
-        try:
-            termination = run_command(
-                [PYTHON, "-c", "import time; time.sleep(0.5)"],
-                source="tests/unit/test_watchdog.mojo",
-                step="run",
-                timeout_seconds=10.0,
-            )
-        except watchdog._WatchdogCancellation as exc:
-            raise AssertionError(
-                "managed signal escaped while formatting internal failure"
-            ) from exc
+        termination = run_command(
+            [PYTHON, "-c", "import time; time.sleep(0.5)"],
+            source="tests/unit/test_watchdog.mojo",
+            step="run",
+            timeout_seconds=10.0,
+        )
     finally:
         watchdog._wait_for_exit_without_reaping = original_wait_for_exit
         watchdog._terminate_process_group = original_terminate
@@ -1650,10 +1663,83 @@ def test_signal_while_formatting_internal_failure_still_cleans_group() -> None:
         raise AssertionError(
             f"backstop swept the child group {terminate_calls} times, expected once"
         )
-    if "_InterruptingError could not be rendered" not in termination.detail:
+    if "watchdog internal failure: _InterruptingError" not in termination.detail:
         raise AssertionError(
-            f"unrenderable failure lost its stable fallback: {termination.detail!r}"
+            f"untrusted failure lost its stable type: {termination.detail!r}"
         )
+    if render_calls:
+        raise AssertionError("watchdog executed untrusted exception rendering")
+
+
+def test_signal_suppressed_inside_settlement_stays_cancelled() -> None:
+    """A signal recorded inside exception handling is rechecked after settling."""
+    original_settle = watchdog._settle_drainers
+
+    def fail_during_settlement() -> None:
+        raise RuntimeError("injected close failure")
+
+    def interrupting_settle(state: watchdog._DrainState | None) -> None:
+        try:
+            fail_during_settlement()
+        except RuntimeError:
+            os.kill(os.getpid(), signal.SIGTERM)
+        original_settle(state)
+
+    watchdog._settle_drainers = interrupting_settle
+    try:
+        termination = run_command(
+            [PYTHON, "-c", "raise SystemExit(0)"],
+            source="tests/unit/test_watchdog.mojo",
+            step="run",
+            timeout_seconds=10.0,
+        )
+    finally:
+        watchdog._settle_drainers = original_settle
+    if termination != Cancelled(signal.SIGTERM):
+        raise AssertionError(f"settlement signal returned {termination!r}")
+
+
+def test_failed_backstop_cleanup_retries_kill_and_reap() -> None:
+    """A failed polite cleanup falls through to an independent hard sweep."""
+    original_wait_for_exit = watchdog._wait_for_exit_without_reaping
+    original_terminate = watchdog._terminate_process_group
+    original_force = watchdog._force_process_group_cleanup
+    force_calls = 0
+
+    def injected_failure(
+        process: subprocess.Popen[bytes],  # noqa: ARG001
+        timeout_seconds: float,  # noqa: ARG001
+    ) -> bool:
+        raise RuntimeError("injected supervisor failure")
+
+    def failed_cleanup(process: subprocess.Popen[bytes]) -> None:  # noqa: ARG001
+        raise OSError("injected cleanup failure")
+
+    def recording_force(process: subprocess.Popen[bytes]) -> Exception | None:
+        nonlocal force_calls
+        force_calls += 1
+        return original_force(process)
+
+    watchdog._wait_for_exit_without_reaping = injected_failure
+    watchdog._terminate_process_group = failed_cleanup
+    watchdog._force_process_group_cleanup = recording_force
+    try:
+        termination = run_command(
+            [PYTHON, "-c", "import time; time.sleep(120)"],
+            source="tests/unit/test_watchdog.mojo",
+            step="run",
+            timeout_seconds=10.0,
+        )
+    finally:
+        watchdog._wait_for_exit_without_reaping = original_wait_for_exit
+        watchdog._terminate_process_group = original_terminate
+        watchdog._force_process_group_cleanup = original_force
+    if not isinstance(termination, HarnessError):
+        raise AssertionError(f"cleanup retry returned {termination!r}")
+    if force_calls != 1:
+        raise AssertionError(f"hard cleanup ran {force_calls} times, expected once")
+    if "cleanup remains unproved" in termination.detail:
+        raise AssertionError(f"successful retry stayed unproved: {termination.detail}")
 
 
 def test_failed_leader_wait_keeps_backstop_cleanup_armed() -> None:
@@ -1937,8 +2023,11 @@ def test_an_unsealable_tee_releases_its_drainer_source() -> None:
             self.closed = True
 
     source = _Source()
+    thread = threading.Thread()
+    thread.start()
+    thread.join()
     state = watchdog._DrainState(
-        threads=(),
+        threads=(thread,),
         # Duck-typed stand-ins for the only two members `_seal_drainers`
         # touches; the casts state that without changing what is passed.
         tees=cast("tuple[watchdog._StreamTee, ...]", (_UnsealableTee(),)),
@@ -1968,9 +2057,12 @@ def test_a_sealable_tee_keeps_its_source_for_the_drainer_to_close() -> None:
             self.closed = True
 
     source = _Source()
+    thread = threading.Thread()
+    thread.start()
+    thread.join()
     watchdog._seal_drainers(
         watchdog._DrainState(
-            threads=(),
+            threads=(thread,),
             # Duck-typed stand-ins, as in the unsealable case above.
             tees=cast("tuple[watchdog._StreamTee, ...]", (_SealableTee(),)),
             stop=threading.Event(),
@@ -2033,7 +2125,9 @@ def main() -> int:
         test_darwin_exit_observation_rejects_registration_errors,
         test_internal_failure_cleans_an_exited_unreaped_group,
         test_signal_during_internal_failure_cleanup_cannot_escape,
-        test_signal_while_formatting_internal_failure_still_cleans_group,
+        test_internal_failure_never_renders_untrusted_exception,
+        test_signal_suppressed_inside_settlement_stays_cancelled,
+        test_failed_backstop_cleanup_retries_kill_and_reap,
         test_failed_leader_wait_keeps_backstop_cleanup_armed,
         test_timeout_diagnostic_uses_the_callers_source,
         test_a_caller_stream_without_a_byte_buffer_still_receives_the_tee,
@@ -2049,7 +2143,7 @@ def main() -> int:
         test_a_frozen_marker_capture_refuses_later_writes,
         test_the_seal_freezes_the_capture_before_it_seals_any_tee,
         test_a_drainer_cannot_write_through_a_frozen_capture,
-        test_a_cancelled_timeout_settle_seals_before_the_timeout_diagnostic,
+        test_a_signal_during_timeout_settle_seals_before_the_diagnostic,
         test_a_signal_during_timeout_diagnostic_keeps_deadline_precedence,
         test_partial_drainer_start_is_published_before_cancellation,
     ):
