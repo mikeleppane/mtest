@@ -237,8 +237,8 @@ class EntrypointRenderingTests(unittest.TestCase):
     """The generated entrypoint imports each module and references every test."""
 
     def _module(self, root: Path, name: str, functions: tuple[str, ...]) -> Path:
-        """Write one fixture module under a fake repository root's `tests/unit`."""
-        source = root / "tests" / "unit" / f"{name}.mojo"
+        """Write one fixture module under a disposable classified root."""
+        source = root / f"{name}.mojo"
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_text(
             "".join(
@@ -248,14 +248,21 @@ class EntrypointRenderingTests(unittest.TestCase):
         )
         return source
 
-    def test_each_module_is_imported_and_all_its_tests_registered(self) -> None:
+    def test_modules_are_imported_by_stem_not_by_package_path(self) -> None:
+        """`tests/unit` is not a Mojo package and cannot be imported as one.
+
+        Every classified module declares `main()`, which Mojo 1.0.0b2 refuses
+        to package, so `tests/unit/__init__.mojo` cannot exist and
+        `import tests.unit.test_alpha` cannot resolve. The include-path
+        spelling is what keeps the probe working over a marker-free tree.
+        """
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp).resolve()
             source = self._module(root, "test_alpha", ("test_one", "test_two"))
-            with patch.object(abi_probe, "ROOT", root):
-                rendered = abi_probe.render_entrypoint([source])
+            rendered = abi_probe.render_entrypoint([source])
 
-        self.assertIn("import tests.unit.test_alpha as _mtest_module_0", rendered)
+        self.assertIn("import test_alpha as _mtest_module_0", rendered)
+        self.assertNotIn("import tests.", rendered)
         self.assertIn("    suite_0.test[_mtest_module_0.test_one]()", rendered)
         self.assertIn("    suite_0.test[_mtest_module_0.test_two]()", rendered)
 
@@ -264,33 +271,36 @@ class EntrypointRenderingTests(unittest.TestCase):
             root = Path(raw_tmp).resolve()
             first = self._module(root, "test_alpha", ("test_one",))
             second = self._module(root, "test_beta", ("test_two",))
-            with patch.object(abi_probe, "ROOT", root):
-                rendered = abi_probe.render_entrypoint([first, second])
+            rendered = abi_probe.render_entrypoint([first, second])
 
-        self.assertIn("import tests.unit.test_beta as _mtest_module_1", rendered)
+        self.assertIn("import test_beta as _mtest_module_1", rendered)
         self.assertIn("    suite_1.test[_mtest_module_1.test_two]()", rendered)
 
-    def test_a_module_outside_the_repository_is_rejected(self) -> None:
+    def test_two_modules_sharing_a_stem_are_rejected(self) -> None:
+        """A shared stem would silently drop one module from the co-link.
+
+        Both would resolve to one name off the include path, so the probe
+        would guard fewer modules than its own output claims -- the exact
+        silent narrowing this gate exists to prevent.
+        """
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp).resolve()
-            outside = root / "test_outside.mojo"
-            outside.write_text("def test_one():\n    pass\n", encoding="utf-8")
+            unit = root / "unit"
+            integration = root / "integration"
+            unit.mkdir()
+            integration.mkdir()
+            first = self._module(unit, "test_clash", ("test_one",))
+            second = self._module(integration, "test_clash", ("test_two",))
 
-            with (
-                patch.object(abi_probe, "ROOT", root / "repository"),
-                self.assertRaisesRegex(SystemExit, "outside the repository"),
-            ):
-                abi_probe.render_entrypoint([outside])
+            with self.assertRaisesRegex(SystemExit, "share an importable name"):
+                abi_probe.render_entrypoint([first, second])
 
     def test_an_unimportable_module_name_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp).resolve()
             source = self._module(root, "test-dashed", ("test_one",))
 
-            with (
-                patch.object(abi_probe, "ROOT", root),
-                self.assertRaisesRegex(SystemExit, "not an importable Mojo module"),
-            ):
+            with self.assertRaisesRegex(SystemExit, "not an importable Mojo module"):
                 abi_probe.render_entrypoint([source])
 
     def test_declared_main_is_not_mistaken_for_a_test(self) -> None:
@@ -320,10 +330,14 @@ class BuildProbeCommandTests(unittest.TestCase):
             self.assertIn("build", command)
             self.assertIn("tests/support", command)
             self.assertIn(str(abi_probe.NATIVE_TEST_OBJECT), command)
+            # Both classified roots must be on the include path, or a module
+            # imported by its bare stem cannot be resolved at all.
+            for root in abi_probe.SEARCH_ROOTS:
+                self.assertIn(str(root), command)
             entrypoint = out / "abi_probe_main.mojo"
             self.assertTrue(entrypoint.is_file())
             self.assertIn(
-                "import tests.unit.test_config as _mtest_module_0",
+                "import test_config as _mtest_module_0",
                 entrypoint.read_text(encoding="utf-8"),
             )
 

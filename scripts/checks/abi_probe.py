@@ -32,6 +32,22 @@ nothing to say about runtime behavior.
 The entrypoint generator lives here rather than in a shared harness module
 because this probe is its only consumer.
 
+The generated entrypoint imports each module by its bare stem off an include
+path (`-I tests/unit -I tests/integration`, then `import test_foo`), the same
+way the classified suites themselves import `exec_helpers` and
+`session_fixtures` off `-I tests/support`. It cannot import them as
+`tests.unit.test_foo`: that spelling requires `tests/unit` to be a Mojo
+package, and `tests/unit/__init__.mojo` cannot exist, because every classified
+module declares `main()` and Mojo 1.0.0b2 refuses to `mojo precompile` a
+package containing one (`error: 'main()' is not supported within packages`).
+The two spellings are strictly exclusive, measured on this checkout: with a
+marker present, `-I tests/unit` + `import test_foo` fails with "unable to
+locate module"; with it absent, `-I .` + `import tests.unit.test_foo` fails
+with "'unit' does not refer to a nested package". Two modules sharing a stem
+would make one of them silently unreachable through an include path, so
+`render_entrypoint` rejects that rather than quietly co-linking fewer modules
+than it was asked to.
+
 A declaration is matched over its complete bracketed span
 (`external_call[...]`), not one line: the symbol name legitimately sits on a
 continuation line in this codebase (`external_call[\n    "sym", Int32\n]`),
@@ -235,34 +251,29 @@ def test_function_names(source: str) -> list[str]:
 
 
 def _module_name(source: Path) -> str:
-    """Return the dotted Mojo module name for one classified source.
+    """Return the include-path module name for one classified source.
 
-    The generated entrypoint is built with `-I .` from the repository root,
-    so a module is named by its repository-relative path with separators
-    turned into dots: `tests/unit/test_config.mojo` is `tests.unit.test_config`.
+    The generated entrypoint is built with each classified root on the include
+    path, so a module is named by its bare stem: `tests/unit/test_config.mojo`
+    is `test_config`. See this module's docstring for why the dotted package
+    spelling is not available.
 
     Args:
-        source: A classified `test_*.mojo` module, inside the repository.
+        source: A classified `test_*.mojo` module.
 
     Returns:
-        The dotted module name an `import` statement can name.
+        The file stem, which is how the module is named off an include path.
 
     Raises:
-        SystemExit: The path lies outside the repository, or a path component
-            is not a legal Mojo identifier, so no import could name it.
+        SystemExit: The stem is not a legal Mojo identifier, so no import
+            statement could name it.
     """
-    try:
-        relative = source.resolve().relative_to(ROOT)
-    except ValueError:
-        raise SystemExit(
-            f"abi-probe-check: classified module outside the repository: {source}"
-        ) from None
-    parts = relative.with_suffix("").parts
+    stem = source.stem
     require(
-        all(_MODULE_NAME_RE.fullmatch(part) for part in parts),
-        f"not an importable Mojo module path: {relative}",
+        _MODULE_NAME_RE.fullmatch(stem) is not None,
+        f"not an importable Mojo module name: {source}",
     )
-    return ".".join(parts)
+    return stem
 
 
 def render_entrypoint(sources: list[Path]) -> str:
@@ -275,11 +286,19 @@ def render_entrypoint(sources: list[Path]) -> str:
         The complete Mojo source of the entrypoint.
 
     Raises:
-        SystemExit: A source is not an importable Mojo module; see
-            `_module_name`.
+        SystemExit: Two sources share a stem, or a stem is not importable. A
+            shared stem is fatal rather than tolerated: both modules would be
+            imported under one name off the include path, so one of them would
+            silently not be co-linked at all and the probe would quietly guard
+            less than its own output claims.
         OSError: A source could not be read.
     """
     names = [_module_name(source) for source in sources]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    require(
+        not duplicates,
+        f"two classified modules share an importable name: {duplicates}",
+    )
     lines = [
         '"""Generated ABI co-link probe; edit scripts/checks/abi_probe.py."""',
         "",
@@ -367,6 +386,7 @@ def build_probe(sources_to_colink: list[Path]) -> subprocess.CompletedProcess[st
             "build",
             "-I",
             "tests/support",
+            *(argument for root in SEARCH_ROOTS for argument in ("-I", str(root))),
             str(entrypoint),
             "-o",
             str(binary),

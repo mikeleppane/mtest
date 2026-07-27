@@ -10,9 +10,11 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import tomllib
 
 from scripts.build import package_consumption
@@ -97,10 +99,21 @@ A Mojo file under a classified root that this pattern does not match never
 runs. That is the whole property `check_classified_mojo_inventory` exists to
 catch, so it has to test the runner's real pattern, not a copy of it.
 """
-CLASSIFIED_PACKAGE_MARKERS = {
+FORBIDDEN_CLASSIFIED_PACKAGE_MARKERS = {
     Path("tests/unit/__init__.mojo"),
     Path("tests/integration/__init__.mojo"),
 }
+"""Package markers that must never reappear under the classified roots.
+
+Every module beneath `tests/unit` and `tests/integration` declares `main()`
+(mtest's classified runner requires it). Mojo 1.0.0b2 refuses to
+`mojo precompile` a package containing a module that declares `main()` --
+`error: 'main()' is not supported within packages` -- so re-adding either
+child marker would make `mojo precompile tests/` fail again the moment the
+compiler recurses into it as a package. `tests/__init__.mojo` is deliberately
+kept so `tests/` itself stays a nameable package; only its two children must
+stay marker-free. See `check_classified_roots_are_not_precompilable_packages`.
+"""
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",
@@ -425,9 +438,8 @@ def check_classified_mojo_inventory(root: Path) -> None:
             "symlinked classified path: "
             f"{sorted(path.as_posix() for path in symlinked)}"
         )
-    candidates = regular - CLASSIFIED_PACKAGE_MARKERS
-    discovered = {path for path in candidates if path.match(CLASSIFIED_TEST_GLOB)}
-    skipped = candidates - discovered
+    discovered = {path for path in regular if path.match(CLASSIFIED_TEST_GLOB)}
+    skipped = regular - discovered
     if skipped:
         raise AssertionError(
             "classified Mojo file the runner's "
@@ -442,10 +454,66 @@ def check_classified_mojo_inventory(root: Path) -> None:
             )
 
 
+def check_classified_roots_are_not_precompilable_packages(
+    repo_root: Path = REPO_ROOT,
+) -> None:
+    """Guard against packaging a classified root that still declares `main()`.
+
+    Two-part, cheapest-check-first: a structural pre-check names the exact
+    marker that reappeared without needing `mojo` on PATH at all; only once
+    that passes does this pay for the real `mojo precompile tests/`
+    invocation, which tests the actual property rather than a proxy for it.
+    That real invocation is cheap here -- measured under half a second on
+    this checkout -- because a marker-free `tests/unit` and
+    `tests/integration` mean the compiler never recurses into either as a
+    package; it only compiles the one-line `tests/__init__.mojo` docstring
+    module. See `FORBIDDEN_CLASSIFIED_PACKAGE_MARKERS` for why this matters.
+
+    Args:
+        repo_root: Repository root `tests/` lives under.
+
+    Raises:
+        AssertionError: A forbidden package marker exists, `mojo` is not on
+            PATH, or a real `mojo precompile tests/` invocation fails.
+    """
+    _require_nonempty(
+        "forbidden classified package marker",
+        FORBIDDEN_CLASSIFIED_PACKAGE_MARKERS,
+    )
+    present = sorted(
+        path.as_posix()
+        for path in FORBIDDEN_CLASSIFIED_PACKAGE_MARKERS
+        if (repo_root / path).is_file()
+    )
+    if present:
+        raise AssertionError(
+            "package marker reintroduced over a main()-declaring classified "
+            "root; mojo precompile tests/ will fail with \"'main()' is not "
+            f'supported within packages": {present}'
+        )
+    mojo = shutil.which("mojo")
+    if mojo is None:
+        raise AssertionError("mojo is not available on PATH")
+    with tempfile.TemporaryDirectory(prefix="mtest-precompile-guard-") as raw_tmp:
+        output = Path(raw_tmp) / "tests.mojopkg"
+        completed = subprocess.run(
+            [mojo, "precompile", "-o", str(output), "tests/"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    if completed.returncode != 0:
+        raise AssertionError(
+            "mojo precompile tests/ failed "
+            f"(rc={completed.returncode}): {completed.stderr.strip()[-2000:]}"
+        )
+
+
 def check_suite_layout() -> None:
     """Every classified module and support module has its documented home."""
     _require_nonempty("classified root", CLASSIFIED_ROOTS)
-    _require_nonempty("classified package marker", CLASSIFIED_PACKAGE_MARKERS)
     _require_nonempty("support module", SUPPORT_MODULES)
     check_classified_mojo_inventory(REPO_ROOT)
     tests_dir = REPO_ROOT / "tests"
@@ -1115,6 +1183,10 @@ def main() -> int:
     """Run every repository layout and command-policy check serially."""
     try:
         check_top_level_script_layout()
+        # Before check_suite_layout: a reintroduced marker also trips the
+        # inventory's glob check, and this one names the exact file and the
+        # exact compiler error it will cause.
+        check_classified_roots_are_not_precompilable_packages()
         check_suite_layout()
         check_exec_fixture_layout()
         check_e2e_native_fixture_layout()
