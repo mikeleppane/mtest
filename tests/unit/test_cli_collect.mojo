@@ -8,7 +8,7 @@ usage error — the reporters and `--retries` on PROVISION, so even
 `--gh-annotations off` is refused; `--timeout` is NOT refused — it bounds the
 collection probes. Operands (paths, node ids) and `-k` remain allowed.
 """
-from std.testing import assert_equal, assert_raises, assert_true
+from std.testing import assert_equal, assert_raises, assert_true, TestSuite
 
 from mtest.cli import parse_args
 
@@ -141,3 +141,8 @@ def test_keyword_with_collect_is_allowed() raises:
     var r = parse_args(argv)
     assert_true(r.config.collect)
     assert_equal(r.config.keyword, "add")
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

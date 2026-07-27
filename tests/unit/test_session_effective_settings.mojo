@@ -5,7 +5,7 @@ tests pin the session's root-relative lookup: scalars use first-supplier wins,
 CLI provenance suppresses only the corresponding scalar, and serial pinning is
 a monotonic union across global globs and every matching table.
 """
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.config import (
     CliOverlay,
@@ -208,3 +208,8 @@ def test_pipeline_admits_each_files_effective_retry_budget() raises:
     assert_true(pipeline.admit_crash_retry(1))
     assert_true(pipeline.admit_crash_retry(1))
     assert_false(pipeline.admit_crash_retry(1))
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

@@ -1,5 +1,11 @@
 """Tests for the `config show` parser directive and pure TOML renderer."""
-from std.testing import assert_equal, assert_false, assert_raises, assert_true
+from std.testing import (
+    assert_equal,
+    assert_false,
+    assert_raises,
+    assert_true,
+    TestSuite,
+)
 
 from mtest.cli import ParseResult, parse_args
 from mtest.config import (
@@ -307,3 +313,8 @@ def test_config_show_keeps_ordered_overrides_and_present_keys_only() raises:
         "retries = 2  # (mtest.toml)\n"
     )
     assert_true(expected in rendered)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

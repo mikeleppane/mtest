@@ -10,7 +10,7 @@ nothing at all.
 """
 from std.os import getenv, remove
 from std.os.path import exists
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.model import Event, Summary
 from mtest.report import JsonStreamReporter, close_json_fd, open_json_fd
@@ -155,3 +155,8 @@ def test_close_json_fd_reports_failure_on_a_dead_descriptor() raises:
     assert_true(
         close_json_fd(fd), "closing an already-closed fd reports failure"
     )
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

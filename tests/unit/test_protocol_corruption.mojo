@@ -8,7 +8,7 @@ not match). The corruption pins then plant one defect at a time and assert which
 of OFF_GRAMMAR / AMBIGUOUS it lands in: a structural break a user cannot fake is
 OFF_GRAMMAR; a pattern a test's own stdout CAN produce is AMBIGUOUS.
 """
-from std.testing import assert_equal, assert_true, assert_false
+from std.testing import assert_equal, assert_true, assert_false, TestSuite
 
 from mtest.model import Outcome
 from mtest.protocol import ReportVerdict, parse_report
@@ -572,3 +572,8 @@ def test_crlf_report_is_intentional_off_grammar_drift() raises:
     assert_equal(r.summary_failed, 0)
     assert_equal(r.summary_skipped, 0)
     assert_false(r.has_trailer)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

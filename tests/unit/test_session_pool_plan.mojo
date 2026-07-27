@@ -6,7 +6,7 @@ core count and returns, so the whole decision table pins deterministically. The
 budget (including the `workers == 1` value the sequential path never emits and
 the `-n 64` oversubscription the token gate must bound) all live here.
 """
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.session.pool_plan import (
     build_tokens,
@@ -150,3 +150,8 @@ def test_stale_serials_empty_when_all_match() raises:
     var globs: List[String] = ["*x*", "*y*"]
     var stale = stale_serials(files, globs)
     assert_equal(len(stale), 0)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

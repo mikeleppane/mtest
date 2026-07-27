@@ -12,7 +12,7 @@ present — because this is the product contract, and an exit code is right or i
 is a lie. The named tests beside the table pin each individual rule at literal
 values, so the table's expectation ladder is never the only witness.
 """
-from std.testing import assert_equal
+from std.testing import assert_equal, TestSuite
 
 from mtest.model import (
     Outcome,
@@ -296,3 +296,8 @@ def test_delivery_precedence_reapplied_to_an_already_resolved_code() raises:
     assert_equal(_resolved(False, False, False, False, 5, True), 3)
     assert_equal(_resolved(False, False, False, False, 2, True), 2)
     assert_equal(_resolved(False, False, False, False, 3, True), 3)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

@@ -7,6 +7,7 @@ name absent from the universe raises the exit-4 unknown-test error. `selected`
 and `deselected` partition the universe and preserve its order.
 """
 from std.testing import (
+    TestSuite,
     assert_equal,
     assert_false,
     assert_true,
@@ -138,3 +139,8 @@ def test_contains_ci_basic() raises:
     assert_true(contains_ci("test_add", "ADD"))
     assert_false(contains_ci("test_add", "sub"))
     assert_true(contains_ci("anything", ""))
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

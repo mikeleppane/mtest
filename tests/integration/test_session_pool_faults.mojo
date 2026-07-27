@@ -17,7 +17,7 @@ boundary.
 """
 from std.ffi import external_call
 from std.os.path import exists
-from std.testing import assert_equal, assert_true
+from std.testing import assert_equal, assert_true, TestSuite
 
 from mtest.exec import ExecRuntime
 from mtest.exec.signals import _reset_interrupt
@@ -554,3 +554,8 @@ def test_interrupt_cleanup_fault_still_resolves_to_exit_2() raises:
     assert_equal(fin.exit_code, 2)
     assert_equal(fin.summary.count_of(Outcome.NOT_RUN), 2)
     assert_equal(fin.summary.count_of(Outcome.PASS), 0)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

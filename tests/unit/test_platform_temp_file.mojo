@@ -1,7 +1,13 @@
 """Exclusive same-directory temporary-file regressions."""
 from std.os import link, listdir, remove, symlink
 from std.os.path import exists, islink
-from std.testing import assert_equal, assert_false, assert_raises, assert_true
+from std.testing import (
+    assert_equal,
+    assert_false,
+    assert_raises,
+    assert_true,
+    TestSuite,
+)
 
 from mtest.platform import (
     close_checked_fd,
@@ -104,3 +110,8 @@ def test_bounded_read_validates_the_opened_regular_file() raises:
         assert_equal(directory.text, "")
     finally:
         remove_tree(root)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

@@ -8,7 +8,7 @@ accumulated stream renders the deterministic per-kind-grouped tail
 `::notice`); an inert reporter renders nothing; and the tail's `::notice` carries
 the same exit-independent summary the console band does.
 """
-from std.testing import assert_equal, assert_true
+from std.testing import assert_equal, assert_true, TestSuite
 
 from mtest.report import (
     AnnotationsReporter,
@@ -98,3 +98,8 @@ def test_annotation_tail_empty_when_no_reporter_is_composed() raises:
     assert_equal(code, 0, "a passing suite resolves to exit 0")
     # No annotations reporter composed: the channel answers inertly.
     assert_equal(len(comp.annotation_tail()), 0)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

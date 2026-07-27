@@ -15,7 +15,7 @@ recover the listing fails the file), so they are pinned where they are decided â
 the console rendering in `tests/unit/test_report_console.mojo` and the e2e honesty
 pair.
 """
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.model import AttributionDisposition
 from mtest.session import (
@@ -120,3 +120,8 @@ def test_a_time_budget_beats_the_run_cap() raises:
     var s = attribution_step(5, ISOLATION_RUN_CAP, 200.0, 700.0)
     assert_true(s.should_stop)
     assert_true(s.disposition == AttributionDisposition.TIME_BUDGET)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

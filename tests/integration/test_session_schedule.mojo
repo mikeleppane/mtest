@@ -15,7 +15,7 @@ PROGRESS events are ephemeral: they appear in the recording stream but carry no
 verdict, so every count assertion here filters by event kind rather than by raw
 stream position.
 """
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.exec import ExecRuntime, interrupt_requested
 from mtest.exec.signals import _raise_self, _reset_interrupt
@@ -458,3 +458,8 @@ def test_interrupt_in_parallel_batch_never_starts_the_serial_pass() raises:
                 "serial" in rec.path_at(i),
                 "no serial file may start after a parallel-batch interrupt",
             )
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

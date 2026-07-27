@@ -8,6 +8,7 @@ collision-proof stop-commands fencing helper (forced collision + regeneration,
 and the always-emitted resume delimiter).
 """
 from std.testing import (
+    TestSuite,
     assert_equal,
     assert_false,
     assert_raises,
@@ -328,3 +329,8 @@ def test_fence_region_epilogue_present_even_with_hostile_region() raises:
     var out = fence_region("realtoken", hostile)
     assert_true(out.endswith("::realtoken::"))
     assert_true(hostile in out)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

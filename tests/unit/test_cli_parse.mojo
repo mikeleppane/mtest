@@ -7,7 +7,13 @@ non-error directives. Grammar edges (passthrough, forbidden args, arity errors,
 and the frozen inventory) live in sibling files to keep each module's test
 count modest.
 """
-from std.testing import assert_equal, assert_false, assert_raises, assert_true
+from std.testing import (
+    assert_equal,
+    assert_false,
+    assert_raises,
+    assert_true,
+    TestSuite,
+)
 
 from mtest.cli import (
     ParseResult,
@@ -290,3 +296,8 @@ def test_help_renders_exactly_the_flag_spec_option_set() raises:
             if spec.spelling == spelling:
                 declared = True
         assert_true(declared, "help renders an unknown option: " + spelling)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

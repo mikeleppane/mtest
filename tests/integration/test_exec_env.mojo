@@ -16,7 +16,7 @@ that only resolves when a `PATH=` override points at its directory:
 Count 0 keeps the inherited snapshot untouched, so a spec with no extras is the
 unchanged baseline.
 """
-from std.testing import assert_equal, assert_true, assert_false
+from std.testing import assert_equal, assert_true, assert_false, TestSuite
 
 from mtest.exec import (
     ExecRuntime,
@@ -158,3 +158,8 @@ def test_bare_probe_unresolvable_without_path_override() raises:
     argv.append("path_probe.sh")
     var r = _run(_cmd_spec(argv^, List[String]()))
     assert_true(r.termination.is_spawn_failed(), String(r.termination))
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

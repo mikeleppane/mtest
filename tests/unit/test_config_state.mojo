@@ -3,7 +3,7 @@
 The state layer is pure: hostile text becomes typed diagnostics, normalized
 verdict facts become a delta, and unobserved failures survive the merge.
 """
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.config import (
     LastRunRecord,
@@ -562,3 +562,8 @@ def test_passing_gate_clears_its_previous_failure() raises:
     delta.observe_gate("tests/gate.mojo", failed=False)
     var merged = merge_last_run_state(previous, delta)
     assert_equal(len(merged.records), 0)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

@@ -21,7 +21,7 @@ and the terminal record is NOT written to the dead stream even though it is
 still dispatched through the seam.
 """
 from std.os.path import exists
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.model import Event, EventKind, Outcome, SessionFinishedPayload
 from mtest.report import (
@@ -274,3 +274,8 @@ def test_mid_batch_stream_death_stops_dispatch_and_writes_no_terminal_record() r
         "a file that was never dispatched has no stream identity",
     )
     assert_false('"path":"tests/test_d.mojo"' in written)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

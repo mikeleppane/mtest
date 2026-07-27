@@ -6,7 +6,13 @@ Supervisor's fixed observation-order rule (deadline evaluated before interrupt)
 as a pure decision table. Pinning both here keeps the numeric formula, its every
 edge, and the ordering independent of any live process.
 """
-from std.testing import assert_equal, assert_true, assert_false, assert_raises
+from std.testing import (
+    assert_equal,
+    assert_true,
+    assert_false,
+    assert_raises,
+    TestSuite,
+)
 
 from mtest.exec import (
     effective_cap,
@@ -92,3 +98,8 @@ def test_kill_cause_equality_and_render() raises:
     assert_true(KillCause.deadline() != KillCause.interrupt())
     assert_equal(String(KillCause.deadline()), "KillCause.DEADLINE")
     assert_equal(String(KillCause.interrupt()), "KillCause.INTERRUPT")
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

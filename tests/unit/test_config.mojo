@@ -16,7 +16,7 @@ shell-behavior assertion and would run the very tokens the set neutralizes.
 The newline and tab rows record today's raw representation, in which the quoted
 token still carries a literal newline or tab and so still spans physical lines.
 """
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.cli import build_flags_string
 from mtest.config import (
@@ -307,3 +307,8 @@ def test_build_flags_string_quotes_control_characters_verbatim() raises:
             " --build-arg 'single'\\''quote'"
         ),
     )
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

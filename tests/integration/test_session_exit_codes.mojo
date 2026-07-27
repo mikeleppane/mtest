@@ -5,7 +5,7 @@ them end to end: 0 (all ran and passed), 5 (nothing was runnable), and 1 via a
 failing file. Also pins -x: after the first failing file the session stops
 scheduling and every remaining run file becomes NOT_RUN.
 """
-from std.testing import assert_equal, assert_true
+from std.testing import assert_equal, assert_true, TestSuite
 
 from mtest.model import (
     EventKind,
@@ -128,3 +128,8 @@ def test_spawn_failure_is_exit_3() raises:
         ),
         0,
     )
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

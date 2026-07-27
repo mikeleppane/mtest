@@ -5,7 +5,7 @@ every run file becomes NOT_RUN and nothing else is scheduled. A passing gate
 lets the run files proceed. These tests pin both, asserting the event stream and
 the summary tally over a real build+run of tiny fixtures.
 """
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.model import EventKind, Outcome, SessionFinishedPayload
 from mtest.report import (
@@ -123,3 +123,8 @@ def test_passing_gate_lets_run_files_proceed() raises:
         last.data[SessionFinishedPayload].summary.count_of(Outcome.NOT_RUN), 0
     )
     assert_equal(last.data[SessionFinishedPayload].test_counts.passed, 2)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

@@ -1,5 +1,5 @@
 """Pure last-failed filtering and failed-first admission-order tests."""
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.config import LastRunRecord, LastRunState
 from mtest.model import NodeId
@@ -211,3 +211,8 @@ def test_failed_first_recognizes_a_remembered_gate_as_live() raises:
     ]
     var state = LastRunState([_test("g/failing.mojo", "test_gate")])
     assert_true(remembered_file_matches(all_discovered, state))
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

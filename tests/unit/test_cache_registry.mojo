@@ -7,6 +7,7 @@ compile-error entry short-circuits, a probe attaches to an existing entry, and t
 check-then-record pattern yields exactly ONE build (and one probe) per file.
 """
 from std.testing import (
+    TestSuite,
     assert_equal,
     assert_true,
     assert_false,
@@ -126,3 +127,8 @@ def test_once_probed_check_then_record_yields_one_probe() raises:
             probes += 1
             reg.record_probe("q.mojo", True, _listing("q::t1", "q::t2"))
     assert_equal(probes, 1)  # exactly one probe across four passes
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

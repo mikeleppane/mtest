@@ -11,7 +11,7 @@ never spooled a real one.
 """
 from std.os import makedirs
 from std.os.path import exists
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.model.events import Event
 from mtest.model.node_id import NodeId
@@ -165,3 +165,8 @@ def test_note_not_run_synthesizes_only_for_unspooled_files() raises:
     assert_equal(doc.count("[not-run]"), 2)
     assert_true("skipped_a" in doc)
     assert_true("skipped_b" in doc)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

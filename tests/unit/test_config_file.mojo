@@ -4,7 +4,7 @@ The corpus exercises every accepted table and key family, rejects unknown or
 mistyped input, pins presence separately from explicit empty values, and proves
 native-parser detail text cannot forge another diagnostic line.
 """
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.config import (
     AnnotationsMode,
@@ -883,3 +883,8 @@ def test_deep_nesting_is_rejected_before_parser_recursion() raises:
     var result = parse_toml("[run]\npaths = " + value + "\n", "deep.toml")
     assert_false(result.is_ok)
     assert_true("nesting limit" in result.failure.render())
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

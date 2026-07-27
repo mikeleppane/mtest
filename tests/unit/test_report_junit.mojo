@@ -12,7 +12,7 @@ run over the REAL rendered output of these same cells by the
 `scripts/checks/reports/junit_render.py` CI gate; here the shapes and counts are pinned
 directly so a regression names itself.
 """
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.report.junit import (
     JunitCase,
@@ -412,3 +412,8 @@ def test_suite_level_capture_shape() raises:
     assert_true("<system-out>" in r.body)
     assert_true("<system-err>" in r.body)
     assert_true("captured &lt;stdout&gt; &amp; more" in r.body)  # escaped
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

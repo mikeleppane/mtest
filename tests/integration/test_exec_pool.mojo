@@ -16,7 +16,7 @@ from std.ffi import external_call
 from std.os import listdir, remove, rmdir
 from std.os.path import exists
 from std.sys.info import CompilationTarget
-from std.testing import assert_equal, assert_true, assert_false
+from std.testing import assert_equal, assert_true, assert_false, TestSuite
 from std.time import perf_counter_ns, sleep
 
 from mtest.exec import (
@@ -856,3 +856,8 @@ def _open_fd_count() raises -> Int:
         for _ in listdir("/proc/self/fd"):
             n += 1
     return n
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()
