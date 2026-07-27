@@ -16,7 +16,8 @@ import sys
 import tempfile
 import threading
 import time
-from typing import IO, cast, override
+from typing import IO, TYPE_CHECKING, cast, override
+from unittest import mock
 
 from scripts.harness import watchdog
 from scripts.harness.watchdog import (
@@ -30,6 +31,10 @@ from scripts.harness.watchdog import (
     TimedOut,
     run_command,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 PYTHON = sys.executable
@@ -345,6 +350,39 @@ def test_broken_timeout_diagnostic_leaves_the_deadline_sentinel() -> None:
             raise AssertionError(
                 "broken timeout diagnostic cleared the deadline sentinel"
             )
+
+
+def test_closed_timeout_diagnostic_preserves_the_deadline_result() -> None:
+    """A closed stderr cannot replace a proven timeout with an internal error."""
+
+    class ClosedStderr:
+        """A stderr stand-in with the error produced by a closed text stream."""
+
+        def write(self, _text: str) -> int:
+            raise ValueError("I/O operation on closed file")
+
+        def flush(self) -> None:
+            return None
+
+    with tempfile.TemporaryDirectory(prefix="mtest-watchdog-") as raw_tmp:
+        sentinel = Path(raw_tmp) / "deadline-sentinel"
+        sentinel.touch()
+        original_stderr = sys.stderr
+        sys.stderr = ClosedStderr()
+        try:
+            termination = run_command(
+                [PYTHON, "-c", "import time; time.sleep(60)"],
+                source="tests/unit/test_watchdog.mojo",
+                step="run",
+                timeout_seconds=0.1,
+                deadline_sentinel=sentinel,
+            )
+        finally:
+            sys.stderr = original_stderr
+        if not isinstance(termination, TimedOut):
+            raise AssertionError(f"expected TimedOut, got {termination!r}")
+        if not sentinel.exists():
+            raise AssertionError("closed timeout diagnostic cleared deadline proof")
 
 
 def test_timeout_terminates_the_whole_process_group() -> None:
@@ -1576,7 +1614,7 @@ def test_signal_while_formatting_internal_failure_still_cleans_group() -> None:
         @override
         def __str__(self) -> str:
             os.kill(os.getpid(), signal.SIGTERM)
-            return "injected formatting failure"
+            raise RuntimeError("injected formatting failure")
 
     def injected_failure(
         process: subprocess.Popen[bytes],  # noqa: ARG001
@@ -1594,7 +1632,7 @@ def test_signal_while_formatting_internal_failure_still_cleans_group() -> None:
     try:
         try:
             termination = run_command(
-                [PYTHON, "-c", "import time; time.sleep(120)"],
+                [PYTHON, "-c", "import time; time.sleep(0.5)"],
                 source="tests/unit/test_watchdog.mojo",
                 step="run",
                 timeout_seconds=10.0,
@@ -1611,6 +1649,62 @@ def test_signal_while_formatting_internal_failure_still_cleans_group() -> None:
     if terminate_calls != 1:
         raise AssertionError(
             f"backstop swept the child group {terminate_calls} times, expected once"
+        )
+    if "_InterruptingError could not be rendered" not in termination.detail:
+        raise AssertionError(
+            f"unrenderable failure lost its stable fallback: {termination.detail!r}"
+        )
+
+
+def test_failed_leader_wait_keeps_backstop_cleanup_armed() -> None:
+    """A failed reap cannot mark the process group fully cleaned."""
+    original_wait = cast(
+        "Callable[[subprocess.Popen[bytes], float | None], int]",
+        subprocess.Popen.wait,
+    )
+    failed_wait = False
+    waited_processes: list[subprocess.Popen[bytes]] = []
+    terminate_calls = 0
+
+    def failing_first_wait(
+        process: subprocess.Popen[bytes],
+        timeout: float | None = None,
+    ) -> int:
+        nonlocal failed_wait
+        waited_processes.append(process)
+        if not failed_wait:
+            failed_wait = True
+            raise RuntimeError("injected leader reap failure")
+        return original_wait(process, timeout)
+
+    def recording_terminate(process: subprocess.Popen[bytes]) -> None:
+        nonlocal terminate_calls
+        terminate_calls += 1
+        original_wait(process, None)
+
+    try:
+        with (
+            mock.patch.object(subprocess.Popen, "wait", failing_first_wait),
+            mock.patch.object(
+                watchdog,
+                "_terminate_process_group",
+                recording_terminate,
+            ),
+        ):
+            termination = run_command(
+                [PYTHON, "-c", "raise SystemExit(0)"],
+                source="tests/unit/test_watchdog.mojo",
+                step="run",
+                timeout_seconds=10.0,
+            )
+    finally:
+        for process in waited_processes:
+            original_wait(process, None)
+    if not isinstance(termination, HarnessError):
+        raise AssertionError(f"failed wait returned {termination!r}")
+    if terminate_calls != 1:
+        raise AssertionError(
+            f"backstop cleanup ran {terminate_calls} times, expected once"
         )
 
 
@@ -1897,6 +1991,17 @@ def test_bounded_capture_preserves_a_scalar_split_across_byte_writes() -> None:
         raise AssertionError("bounded capture decoded UTF-8 byte chunks separately")
 
 
+def test_bounded_capture_drops_a_scalar_split_by_the_byte_cap() -> None:
+    """The retention cap must not manufacture replacement text."""
+    capture = watchdog._BoundedTextCapture(2)
+    capture.buffer.write(b"a\xc3\xa9")
+    expected = "a" + watchdog.CAPTURE_TRUNCATION_MARKER
+    if capture.finish() != expected:
+        raise AssertionError(
+            f"byte cap manufactured text: {capture.finish()!r}, expected {expected!r}"
+        )
+
+
 def main() -> int:
     """Run every watchdog invariant without an external test framework."""
     for test in (
@@ -1912,6 +2017,7 @@ def main() -> int:
         test_parser_rejects_invalid_timeouts_before_payload_start,
         test_spawn_failure_is_not_a_timeout,
         test_broken_timeout_diagnostic_leaves_the_deadline_sentinel,
+        test_closed_timeout_diagnostic_preserves_the_deadline_result,
         test_timeout_terminates_the_whole_process_group,
         test_sigterm_is_forwarded_to_the_process_group,
         test_sigint_is_forwarded_to_the_process_group,
@@ -1928,6 +2034,7 @@ def main() -> int:
         test_internal_failure_cleans_an_exited_unreaped_group,
         test_signal_during_internal_failure_cleanup_cannot_escape,
         test_signal_while_formatting_internal_failure_still_cleans_group,
+        test_failed_leader_wait_keeps_backstop_cleanup_armed,
         test_timeout_diagnostic_uses_the_callers_source,
         test_a_caller_stream_without_a_byte_buffer_still_receives_the_tee,
         test_cancellation_during_the_drain_settle_stays_cancelled,
@@ -1938,6 +2045,7 @@ def main() -> int:
         test_an_unsealable_tee_releases_its_drainer_source,
         test_a_sealable_tee_keeps_its_source_for_the_drainer_to_close,
         test_bounded_capture_preserves_a_scalar_split_across_byte_writes,
+        test_bounded_capture_drops_a_scalar_split_by_the_byte_cap,
         test_a_frozen_marker_capture_refuses_later_writes,
         test_the_seal_freezes_the_capture_before_it_seals_any_tee,
         test_a_drainer_cannot_write_through_a_frozen_capture,

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import contextlib
 from dataclasses import dataclass
 import errno
@@ -104,6 +105,17 @@ class HarnessError:
 Termination = Exited | Signaled | TimedOut | Cancelled | HarnessError
 
 
+def _safe_exception_text(error: BaseException) -> str:
+    """Render an exception without trusting user-defined ``__str__`` code."""
+    try:
+        return str(error)
+    except BaseException as rendering_error:  # noqa: BLE001
+        return (
+            f"<{type(error).__name__} could not be rendered "
+            f"({type(rendering_error).__name__})>"
+        )
+
+
 @dataclass(frozen=True)
 class CapturedCommand:
     """One supervised command's structured termination and bounded output."""
@@ -153,7 +165,11 @@ class _BoundedTextCapture:
 
     def finish(self) -> str:
         """Return retained text plus one explicit marker when bytes were omitted."""
-        text = self._retained.decode("utf-8", errors="replace")
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        # When the byte cap cut through a scalar, `final=False` leaves only that
+        # incomplete terminal sequence buffered instead of inventing U+FFFD.
+        # Internal invalid byte sequences are still represented explicitly.
+        text = decoder.decode(bytes(self._retained), final=not self._truncated)
         return text + (CAPTURE_TRUNCATION_MARKER if self._truncated else "")
 
 
@@ -717,7 +733,7 @@ def _validate_timeout_seconds(timeout_seconds: float) -> None:
 
 def _notify_timeout(source: str, step: str, timeout_seconds: float) -> None:
     """Best-effort timeout diagnostic after process-group cleanup."""
-    with contextlib.suppress(BrokenPipeError, OSError):
+    with contextlib.suppress(BrokenPipeError, OSError, ValueError):
         print(
             f"FATAL: {source}: {step} exceeded {timeout_seconds:g}s; "
             "terminating its process group",
@@ -898,8 +914,8 @@ def run_command(
             cleanup_in_progress = True
             try:
                 _signal_group(process.pid, signal.SIGKILL)
-                process_group_cleaned = True
                 status = process.wait()
+                process_group_cleaned = True
             finally:
                 cleanup_in_progress = False
             termination: Termination = (
@@ -944,16 +960,21 @@ def run_command(
     # it, so every exception must become a HarnessError, and a failure inside
     # cleanup must not replace the detail that caused it.
     except Exception as exc:  # noqa: BLE001
-        detail = f"watchdog internal failure: {exc}"
+        cleanup_failure: Exception | None = None
         if process is not None and not process_group_cleaned:
             cleanup_in_progress = True
             try:
                 _terminate_process_group(process)
                 process_group_cleaned = True
             except Exception as cleanup_exc:  # noqa: BLE001
-                detail += f"; process-group cleanup failed: {cleanup_exc}"
+                cleanup_failure = cleanup_exc
             finally:
                 cleanup_in_progress = False
+        detail = "watchdog internal failure: " + _safe_exception_text(exc)
+        if cleanup_failure is not None:
+            detail += "; process-group cleanup failed: " + _safe_exception_text(
+                cleanup_failure
+            )
         return _clear_non_timeout_sentinel(HarnessError(detail), deadline_sentinel)
     finally:
         # Restore the caller's dispositions before the backstop seal. A managed
