@@ -285,7 +285,22 @@ recipe-check = "python -m scripts.tests.test_community_recipe && python -m scrip
 # Fast self-tests for repository harness behavior. Uses disposable test inputs
 # and a fake compiler to prove deterministic aggregate generation, one-build
 # execution, timeout handling, and exact hosted-CI topology.
-harness-check = "python -m scripts.tests.test_aggregate && python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_classified && python -m scripts.tests.test_selfhost && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_contract && python -m scripts.tests.test_pty_capture && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_assertions && python -m scripts.tests.test_community_recipe && python -m scripts.checks.community_recipe && python -m scripts.tests.test_release_attestations && python -m scripts.tests.test_github_release && python -m scripts.tests.test_community_publication && python -m scripts.tests.test_public_verify && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_workflow_security && python -m scripts.checks.workflow_security && python -m scripts.tests.test_python_quality && python -m scripts.tests.test_annotations_oracle"
+harness-check = "python -m scripts.tests.test_aggregate && python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_classified && python -m scripts.tests.test_selfhost && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_contract && python -m scripts.tests.test_pty_capture && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_assertions && python -m scripts.tests.test_community_recipe && python -m scripts.checks.community_recipe && python -m scripts.tests.test_release_attestations && python -m scripts.tests.test_github_release && python -m scripts.tests.test_community_publication && python -m scripts.tests.test_public_verify && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_workflow_security && python -m scripts.checks.workflow_security && python -m scripts.tests.test_python_quality && python -m scripts.tests.test_annotations_oracle && python -m scripts.tests.test_abi_probe"
+
+# Re-creates, for exactly the modules that need it, the cross-module
+# external_call ABI check the old 101-module aggregate binary provided for
+# free: any two classified test_*.mojo modules that declare the same
+# external_call symbol are co-linked into one throwaway binary, so a
+# signature or arity drift between their declarations is an archive-time
+# compiler error instead of silent garbage at the ABI boundary once each
+# module builds alone. Its pure-Python scan/grouping logic is unit-tested in
+# harness-check above (test_abi_probe, fully mocked); this task needs a real
+# `mojo` on PATH and the precompiled package plus native test object, hence
+# the explicit dependency edge rather than folding it into harness-check.
+abi-probe-check = { cmd = "python -m scripts.checks.abi_probe", depends-on = [
+    "build",
+    "build-native",
+] }
 
 # DIAGNOSTIC, not a gate in `ci`: ask the pinned toolchain whether it has grown
 # a source-coverage facility. Mojo 1.0.0b2 has none — neither `mojo build
@@ -337,6 +352,7 @@ depends-on = [
     "readme-help-check",
     "junit-render-check",
     "transcripts-check",
+    "abi-probe-check",
 ]
 
 # The complete serial local mirror. Hosted CI runs the exact preflight above,
