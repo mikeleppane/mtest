@@ -244,16 +244,33 @@ contract-check-strict = { cmd = "python -m scripts.qa.contract --strict --no-reb
 # resolve `mojo`; build the binary first (`pixi run build-bin`).
 bench-workers = "python -m scripts.maintenance.bench_workers"
 
-# The conventional exhaustive test gate: generates one explicit entrypoint for every
-# unit/integration test function, builds it once, and executes that aggregate
-# binary directly with no mtest involved. `mojo run` never appears in the gate
-# because it masks crash exit codes to 1. A focused path can be passed through
+# The conventional exhaustive test gate: runs mtest's own classified suite
+# THROUGH `build/mtest` itself -- one real invocation of the runner under test,
+# supervised by a whole-process-group watchdog, with its own report reconciled
+# against a source-derived inventory rather than trusted (scripts/harness/
+# selfhost.py). `mojo run` never appears in the gate because it masks crash
+# exit codes to 1; the classified modules are built and executed directly by
+# `build/mtest`. Depends on `build-bin`, which supplies everything a self-hosted
+# run needs: `build/mtest` itself (via `build` + the link step) and
+# `build/native/mtest_exec_native_test.o` (via `build-native`, which always
+# emits both the production and test-variant objects). The worker count is left
+# at the module's `auto` default here on purpose -- see DEFAULT_WORKERS in
+# scripts/harness/selfhost.py for why a fixed integer belongs in CI's workflow
+# instead of here. A focused path can be passed through
 # `pixi run test-file -- tests/unit/test_model_outcome.mojo` when investigating
 # a failure.
-test = "python -m scripts.harness.classified tests/unit tests/integration"
-test-unit = "python -m scripts.harness.classified tests/unit"
-test-integration = "python -m scripts.harness.classified tests/integration"
-test-file = "python -m scripts.harness.classified"
+test = { cmd = "python -m scripts.harness.selfhost tests/unit tests/integration", depends-on = [
+    "build-bin",
+] }
+test-unit = { cmd = "python -m scripts.harness.selfhost tests/unit", depends-on = [
+    "build-bin",
+] }
+test-integration = { cmd = "python -m scripts.harness.selfhost tests/integration", depends-on = [
+    "build-bin",
+] }
+test-file = { cmd = "python -m scripts.harness.selfhost", depends-on = [
+    "build-bin",
+] }
 
 # Compile and directly execute the public source-only assertion consumers at
 # both optimization levels. The task owns its checker self-tests so stale
