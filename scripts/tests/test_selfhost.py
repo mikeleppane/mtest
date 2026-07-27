@@ -13,13 +13,16 @@ oracle at a *fake* mtest through the real watchdog and the real reconciliation,
 and proves the oracle goes red:
 
 - `SelfhostOmittedFileTests` -- 100 files reported of 101 that exist.
-- `SelfhostOmittedTestsTests` -- every file reported PASS, total short by a
-  module's worth of tests. This is the zero-collection shape.
+- `SelfhostOmittedTestsTests` -- every file reported PASS, one module collecting
+  zero tests. This is the D1 zero-collection shape.
 - `SelfhostFalseSuccessTests` -- exit 0 with correct counts and a path set that
   differs by one name.
 - `SelfhostHangTests` -- a child that ignores SIGTERM and never exits, with a
   descendant in its process group. Proves the deadline fires, the whole group
   is swept, and the harness reports a timeout instead of blocking forever.
+- `SelfhostDistributionTests` -- the right grand total behind the wrong per-file
+  distribution, in both its shapes. This is the proof that reconciling per file
+  and per test NAME buys something a total cannot.
 """
 
 from __future__ import annotations
@@ -34,12 +37,13 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from scripts.harness import selfhost, watchdog
 
 
 FAKE_SOURCE = '''\
-"""A fake mtest that prints one canned report and exits."""
+"""A fake mtest that prints one canned report and writes one canned stream."""
 
 import json
 import os
@@ -50,6 +54,7 @@ import sys
 import time
 
 SPEC = json.loads(Path(sys.argv[0] + ".spec.json").read_text(encoding="utf-8"))
+JSON_PATH = sys.argv[sys.argv.index("--json") + 1] if "--json" in sys.argv else ""
 
 if SPEC["hang"]:
     # Ignore the polite signal on purpose. Only a process-group SIGKILL can end
@@ -70,14 +75,88 @@ if SPEC["hang"]:
     while True:
         time.sleep(3600)
 
+if JSON_PATH:
+    # Mirror mtest's real v1 stream: header, session_started, one test_reported
+    # per named test, one file_finished per reported file carrying its OWN
+    # counts, then the single session_finished terminal.
+    lines = [{"event": "stream", "version": 1, "generator": "mtest 0.0.0-fake"}]
+    lines.append(
+        {
+            "event": "session_started",
+            "root": os.getcwd(),
+            "toolchain": "mojo",
+            "selected_count": SPEC["selected"],
+            "excluded_count": SPEC["excluded_files"],
+            "workers": 4,
+        }
+    )
+    for entry in SPEC["files"]:
+        for name in entry["names"]:
+            lines.append(
+                {
+                    "event": "test_reported",
+                    "path": entry["path"],
+                    "name": name,
+                    "outcome": "pass",
+                }
+            )
+        lines.append(
+            {
+                "event": "file_finished",
+                "path": entry["path"],
+                "outcome": "pass",
+                "parse_disposition": "parsed",
+                "passed_tests": entry["passed_tests"],
+                "failed_tests": 0,
+                "skipped_tests": 0,
+                "deselected_tests": 0,
+                "attempts_used": 1,
+                "flaky": False,
+                "exit_status": 0,
+                "signal_number": 0,
+            }
+        )
+    lines.append(
+        {
+            "event": "session_finished",
+            "summary": {
+                "pass": len(SPEC["files"]),
+                "fail": 0,
+                "skip": 0,
+                "crash": 0,
+                "timeout": 0,
+                "compile_error": 0,
+                "compile_timeout": 0,
+                "malformed_suite": 0,
+                "precompile_error": 0,
+                "flaky": 0,
+                "deselected": 0,
+                "excluded": SPEC["excluded_tests"],
+                "not_run": SPEC["not_run"],
+            },
+            "wall_time_us": 100000,
+            "exit_code": SPEC["exit_code"],
+            "test_counts": {
+                "passed": SPEC["passed"],
+                "failed": SPEC["failed"],
+                "skipped": SPEC["skipped"],
+                "deselected": 0,
+            },
+            "flaky_files": 0,
+        }
+    )
+    Path(JSON_PATH).write_text(
+        "".join(json.dumps(line) + "\\n" for line in lines), encoding="utf-8"
+    )
+
 print("mtest 0.0.0-fake (mojo)")
 print(
     "root: %s   selected: %d files   excluded: %d   workers: 4"
     % (os.getcwd(), SPEC["selected"], SPEC["excluded_files"])
 )
 print()
-for path in SPEC["pass_rows"]:
-    print("PASS           %s  0.01s" % path)
+for entry in SPEC["files"]:
+    print("PASS           %s  0.01s" % entry["path"])
 print()
 print(
     "===== %d passed, %d failed, %d skipped (%d excluded, %d not run) in 0.1s ====="
@@ -94,8 +173,10 @@ sys.exit(SPEC["exit_code"])
 '''
 
 
-def write_suite(repo_root: Path, files: int, tests_per_file: int) -> list[str]:
-    """Write a fake classified tree and return its repository-relative paths.
+def write_suite(
+    repo_root: Path, files: int, tests_per_file: int
+) -> dict[str, list[str]]:
+    """Write a fake classified tree and return what it declares.
 
     Args:
         repo_root: The temporary repository root to write under.
@@ -103,20 +184,46 @@ def write_suite(repo_root: Path, files: int, tests_per_file: int) -> list[str]:
         tests_per_file: How many top-level `def test_*` declarations each holds.
 
     Returns:
-        The repository-relative paths written, in sorted order.
+        Repository-relative path to the test function names it declares, in
+        sorted path order. Built from what this function wrote, never by
+        re-parsing it, so a fixture cannot inherit the oracle's own reading.
     """
     unit = repo_root / "tests" / "unit"
     unit.mkdir(parents=True, exist_ok=True)
-    written: list[str] = []
+    declared: dict[str, list[str]] = {}
     for index in range(files):
         path = unit / f"test_probe{index:03d}.mojo"
-        body = "".join(
-            f"def test_probe{index:03d}_case{case}():\n    pass\n\n\n"
-            for case in range(tests_per_file)
-        )
+        names = [f"test_probe{index:03d}_case{case}" for case in range(tests_per_file)]
+        body = "".join(f"def {name}():\n    pass\n\n\n" for name in names)
         path.write_text(f"{body}def main():\n    pass\n", encoding="utf-8")
-        written.append(str(path.relative_to(repo_root)))
-    return sorted(written)
+        declared[str(path.relative_to(repo_root))] = names
+    return dict(sorted(declared.items()))
+
+
+def faithful_spec(declared: dict[str, list[str]]) -> dict[str, object]:
+    """Build the report a correct mtest would produce for one written suite.
+
+    Args:
+        declared: The suite as `write_suite` returned it.
+
+    Returns:
+        A spec for `write_fake_mtest` that agrees with the sources completely.
+        Every mutation proof starts from this and breaks exactly one thing.
+    """
+    return {
+        "selected": len(declared),
+        "excluded_files": 0,
+        "files": [
+            {"path": path, "names": list(names), "passed_tests": len(names)}
+            for path, names in declared.items()
+        ],
+        "passed": sum(len(names) for names in declared.values()),
+        "failed": 0,
+        "skipped": 0,
+        "excluded_tests": 0,
+        "not_run": 0,
+        "exit_code": 0,
+    }
 
 
 def write_fake_mtest(directory: Path, spec: dict[str, object]) -> str:
@@ -124,7 +231,8 @@ def write_fake_mtest(directory: Path, spec: dict[str, object]) -> str:
 
     Args:
         directory: Where to place the fake and its spec file.
-        spec: The report the fake prints and the status it exits with.
+        spec: The report the fake prints, the stream it writes, and the status
+            it exits with.
 
     Returns:
         The absolute path of the executable fake.
@@ -228,6 +336,18 @@ class DerivedInventoryTests(unittest.TestCase):
         self.assertEqual(before.total_tests, 6)
         self.assertEqual(after.total_tests, 7)
 
+    def test_the_inventory_records_each_files_own_test_names(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp).resolve()
+            declared = write_suite(repo, files=2, tests_per_file=2)
+
+            inventory = selfhost.derive_inventory(repo, [Path("tests/unit")])
+
+        self.assertEqual(
+            {path: list(names) for path, names in inventory.tests_by_path.items()},
+            declared,
+        )
+
     def test_a_single_file_root_is_an_inventory_of_one(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp).resolve()
@@ -249,9 +369,9 @@ class DerivedInventoryTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
-    def test_command_carries_include_paths_and_the_linked_native_object(self) -> None:
+    def test_command_carries_include_paths_native_object_and_the_stream(self) -> None:
         command = selfhost.mtest_argv(
-            "/tmp/mtest", "/tmp/native.o", [Path("tests/unit")], "auto"
+            "/tmp/mtest", "/tmp/native.o", [Path("tests/unit")], "auto", "/tmp/s.ndjson"
         )
 
         self.assertEqual(
@@ -267,15 +387,29 @@ class CommandTests(unittest.TestCase):
                 "--build-arg=/tmp/native.o",
                 "-n",
                 "auto",
+                "--json",
+                "/tmp/s.ndjson",
                 "tests/unit",
             ],
         )
 
 
 class TimeoutPolicyTests(unittest.TestCase):
-    def test_the_default_ceiling_clears_the_slowest_measured_run(self) -> None:
-        # The full self-hosted run measured ~629s on four cores.
-        self.assertGreater(selfhost.timeout_seconds({}), 629.0)
+    def test_the_default_ceiling_clears_the_slowest_measured_run_twice_over(
+        self,
+    ) -> None:
+        # Pinned to four cores with both Mojo caches cleared, the full run was
+        # still going at 600s with 13 of 101 files outstanding. A ceiling that
+        # merely clears the slow case is not enough: a false rc=124 on a
+        # merely-slow host reads exactly like the hang this lane looks for.
+        slowest_measured_seconds = 600.0
+
+        self.assertGreaterEqual(
+            selfhost.timeout_seconds({}), 2 * slowest_measured_seconds
+        )
+        # ...and the watchdog must actually accept the default this lane asks
+        # for. Before the default/maximum split it would have refused it.
+        self.assertLessEqual(selfhost.timeout_seconds({}), watchdog.MAX_TIMEOUT_SECONDS)
 
     def test_the_override_lowers_the_ceiling(self) -> None:
         seconds = selfhost.timeout_seconds({selfhost.TIMEOUT_ENV: "30"})
@@ -284,33 +418,42 @@ class TimeoutPolicyTests(unittest.TestCase):
 
     def test_an_override_above_the_watchdog_ceiling_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "must be finite and between"):
-            selfhost.timeout_seconds({selfhost.TIMEOUT_ENV: "100000"})
+            selfhost.timeout_seconds(
+                {selfhost.TIMEOUT_ENV: str(watchdog.MAX_TIMEOUT_SECONDS + 1)}
+            )
 
 
 class SelfhostAgreementTests(unittest.TestCase):
     def test_a_faithful_report_is_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp).resolve()
-            paths = write_suite(repo, files=5, tests_per_file=3)
-            fake = write_fake_mtest(
-                repo,
-                {
-                    "selected": 5,
-                    "excluded_files": 0,
-                    "pass_rows": paths,
-                    "passed": 15,
-                    "failed": 0,
-                    "skipped": 0,
-                    "excluded_tests": 0,
-                    "not_run": 0,
-                    "exit_code": 0,
-                },
-            )
+            declared = write_suite(repo, files=5, tests_per_file=3)
+            fake = write_fake_mtest(repo, faithful_spec(declared))
 
             code, out, err = run_oracle(repo, fake)
 
         self.assertEqual(code, 0, msg=f"stdout={out!r} stderr={err!r}")
         self.assertIn("selfhost: OK", out)
+
+    def test_a_run_that_wrote_no_stream_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp).resolve()
+            declared = write_suite(repo, files=3, tests_per_file=2)
+            spec = faithful_spec(declared)
+            fake = write_fake_mtest(repo, spec)
+            # A stale stream from an earlier run must never stand in for this
+            # run's: the harness removes it before every spawn.
+            stale = repo / selfhost.JSON_STREAM
+            stale.parent.mkdir(parents=True, exist_ok=True)
+            stale.write_text('{"event":"stream","version":1}\n', encoding="utf-8")
+
+            with mock.patch.object(
+                selfhost, "mtest_argv", return_value=[fake, "--no-json-please"]
+            ):
+                code, _out, err = run_oracle(repo, fake)
+
+        self.assertEqual(code, 1)
+        self.assertIn("wrote no machine event stream", err)
 
 
 class SelfhostOmittedFileTests(unittest.TestCase):
@@ -319,50 +462,33 @@ class SelfhostOmittedFileTests(unittest.TestCase):
     def test_a_report_that_omits_a_file_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp).resolve()
-            paths = write_suite(repo, files=101, tests_per_file=3)
-            fake = write_fake_mtest(
-                repo,
-                {
-                    "selected": 100,
-                    "excluded_files": 0,
-                    "pass_rows": paths[:100],
-                    "passed": 300,
-                    "failed": 0,
-                    "skipped": 0,
-                    "excluded_tests": 0,
-                    "not_run": 0,
-                    "exit_code": 0,
-                },
-            )
+            declared = write_suite(repo, files=101, tests_per_file=3)
+            spec = faithful_spec(declared)
+            spec["selected"] = 100
+            spec["files"] = spec["files"][:100]  # type: ignore[index]
+            spec["passed"] = 300
+            fake = write_fake_mtest(repo, spec)
 
             code, _out, err = run_oracle(repo, fake)
 
         self.assertEqual(code, 1)
-        self.assertIn("selected file count mismatch", err)
+        self.assertIn("[json] file_finished membership mismatch", err)
+        self.assertIn("[console] selected file count mismatch", err)
         self.assertIn("mtest selected 100 file(s), the sources declare 101", err)
-        self.assertIn("exact path membership mismatch", err)
-        self.assertIn(paths[100], err)
+        self.assertIn("[console] exact path membership mismatch", err)
+        self.assertIn("tests/unit/test_probe100.mojo", err)
 
     def test_a_report_truncated_at_the_exec_slot_ceiling_is_rejected(self) -> None:
         # The 64-of-101 shape: the exec supervision cap is 64 in both layers,
         # and a defect conflating it with a total-file cap looks like this.
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp).resolve()
-            paths = write_suite(repo, files=101, tests_per_file=3)
-            fake = write_fake_mtest(
-                repo,
-                {
-                    "selected": 64,
-                    "excluded_files": 0,
-                    "pass_rows": paths[:64],
-                    "passed": 192,
-                    "failed": 0,
-                    "skipped": 0,
-                    "excluded_tests": 0,
-                    "not_run": 0,
-                    "exit_code": 0,
-                },
-            )
+            declared = write_suite(repo, files=101, tests_per_file=3)
+            spec = faithful_spec(declared)
+            spec["selected"] = 64
+            spec["files"] = spec["files"][:64]  # type: ignore[index]
+            spec["passed"] = 192
+            fake = write_fake_mtest(repo, spec)
 
             code, _out, err = run_oracle(repo, fake)
 
@@ -374,33 +500,30 @@ class SelfhostOmittedFileTests(unittest.TestCase):
 class SelfhostOmittedTestsTests(unittest.TestCase):
     """Mutation 2: correct file membership, a module that collected nothing."""
 
-    def test_a_report_short_by_one_modules_tests_is_rejected(self) -> None:
+    def test_a_module_that_collected_nothing_is_named_and_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp).resolve()
-            paths = write_suite(repo, files=101, tests_per_file=3)
-            fake = write_fake_mtest(
-                repo,
-                {
-                    "selected": 101,
-                    "excluded_files": 0,
-                    "pass_rows": paths,
-                    # One module built, ran, collected zero tests, and passed.
-                    "passed": 300,
-                    "failed": 0,
-                    "skipped": 0,
-                    "excluded_tests": 0,
-                    "not_run": 0,
-                    "exit_code": 0,
-                },
-            )
+            declared = write_suite(repo, files=101, tests_per_file=3)
+            spec = faithful_spec(declared)
+            # One module built, ran, collected zero tests, and passed anyway.
+            entries: list[dict[str, object]] = spec["files"]  # type: ignore[assignment]
+            entries[7]["names"] = []
+            entries[7]["passed_tests"] = 0
+            spec["passed"] = 300
+            fake = write_fake_mtest(repo, spec)
 
             code, _out, err = run_oracle(repo, fake)
 
         self.assertEqual(code, 1)
-        self.assertIn("exact test-total mismatch", err)
-        self.assertIn("mtest reported 300 passed, the sources declare 303", err)
-        self.assertIn("a module that collected nothing looks exactly like this", err)
-        self.assertNotIn("exact path membership mismatch", err)
+        # The stream names the FILE, not just an unexplained shortfall.
+        self.assertIn(
+            "[json] tests/unit/test_probe007.mojo: passed_tests=0 but the source "
+            "declares 3 test function(s)",
+            err,
+        )
+        self.assertIn("declared but never reported: ['test_probe007_case0'", err)
+        self.assertIn("[console] exact test-total mismatch", err)
+        self.assertNotIn("membership mismatch", err)
 
 
 class SelfhostFalseSuccessTests(unittest.TestCase):
@@ -411,31 +534,86 @@ class SelfhostFalseSuccessTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp).resolve()
-            paths = write_suite(repo, files=101, tests_per_file=3)
-            rows = [*paths[:-1], "tests/unit/test_ghost.mojo"]
-            fake = write_fake_mtest(
-                repo,
-                {
-                    "selected": 101,
-                    "excluded_files": 0,
-                    "pass_rows": rows,
-                    "passed": 303,
-                    "failed": 0,
-                    "skipped": 0,
-                    "excluded_tests": 0,
-                    "not_run": 0,
-                    "exit_code": 0,
-                },
-            )
+            declared = write_suite(repo, files=101, tests_per_file=3)
+            spec = faithful_spec(declared)
+            entries: list[dict[str, object]] = spec["files"]  # type: ignore[assignment]
+            entries[-1]["path"] = "tests/unit/test_ghost.mojo"
+            fake = write_fake_mtest(repo, spec)
 
             code, _out, err = run_oracle(repo, fake)
 
         self.assertEqual(code, 1)
-        self.assertIn("exact path membership mismatch", err)
+        self.assertIn("[json] file_finished membership mismatch", err)
+        self.assertIn("[console] exact path membership mismatch", err)
         self.assertIn("tests/unit/test_ghost.mojo", err)
-        self.assertIn(paths[-1], err)
-        self.assertNotIn("exact test-total mismatch", err)
-        self.assertNotIn("selected file count mismatch", err)
+        self.assertIn("tests/unit/test_probe100.mojo", err)
+        self.assertNotIn("[console] exact test-total mismatch", err)
+        self.assertNotIn("[console] selected file count mismatch", err)
+
+
+class SelfhostDistributionTests(unittest.TestCase):
+    """Mutation 5: the right grand total behind the wrong distribution.
+
+    Both shapes here satisfy every total the console report states -- the
+    selected count, the PASS row set, and `303 passed` -- and both are the
+    reason per-file and per-name reconciliation exists.
+    """
+
+    def test_a_correct_total_over_a_wrong_per_file_count_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp).resolve()
+            declared = write_suite(repo, files=101, tests_per_file=3)
+            spec = faithful_spec(declared)
+            entries: list[dict[str, object]] = spec["files"]  # type: ignore[assignment]
+            # File A ran two extra, file B ran two fewer. 303 either way.
+            entries[3]["passed_tests"] = 5
+            entries[9]["passed_tests"] = 1
+            fake = write_fake_mtest(repo, spec)
+
+            code, _out, err = run_oracle(repo, fake)
+
+        self.assertEqual(code, 1)
+        self.assertIn(
+            "[json] tests/unit/test_probe003.mojo: passed_tests=5 but the source "
+            "declares 3 test function(s)",
+            err,
+        )
+        self.assertIn(
+            "[json] tests/unit/test_probe009.mojo: passed_tests=1 but the source "
+            "declares 3 test function(s)",
+            err,
+        )
+        # Every console-level check is satisfied. Only the per-file view sees it.
+        self.assertNotIn("[console]", err)
+
+    def test_a_correct_count_over_permuted_test_names_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp).resolve()
+            declared = write_suite(repo, files=101, tests_per_file=3)
+            spec = faithful_spec(declared)
+            entries: list[dict[str, object]] = spec["files"]  # type: ignore[assignment]
+            # Swap one test between two files. Every count in the run is right:
+            # per-file passed_tests, the grand total, the file set, the exit
+            # code. Only the reported NAMES are wrong.
+            first: list[str] = entries[3]["names"]  # type: ignore[assignment]
+            second: list[str] = entries[9]["names"]  # type: ignore[assignment]
+            first[0], second[0] = second[0], first[0]
+            fake = write_fake_mtest(repo, spec)
+
+            code, _out, err = run_oracle(repo, fake)
+
+        self.assertEqual(code, 1)
+        self.assertIn(
+            "[json] tests/unit/test_probe003.mojo: reported test names differ", err
+        )
+        self.assertIn(
+            "[json] tests/unit/test_probe009.mojo: reported test names differ", err
+        )
+        self.assertIn("declared but never reported: ['test_probe003_case0']", err)
+        self.assertIn("reported but not declared: ['test_probe009_case0']", err)
+        # No count anywhere in the run disagrees. Names are the only witness.
+        self.assertNotIn("passed_tests=", err)
+        self.assertNotIn("[console]", err)
 
 
 def _process_alive(pid: int) -> bool:
@@ -466,24 +644,12 @@ class SelfhostHangTests(unittest.TestCase):
     def test_a_hung_run_is_killed_by_group_and_reported_as_a_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp).resolve()
-            write_suite(repo, files=3, tests_per_file=2)
+            declared = write_suite(repo, files=3, tests_per_file=2)
             pid_file = repo / "hung.pids"
-            fake = write_fake_mtest(
-                repo,
-                {
-                    "hang": True,
-                    "pid_file": str(pid_file),
-                    "selected": 0,
-                    "excluded_files": 0,
-                    "pass_rows": [],
-                    "passed": 0,
-                    "failed": 0,
-                    "skipped": 0,
-                    "excluded_tests": 0,
-                    "not_run": 0,
-                    "exit_code": 0,
-                },
-            )
+            spec = faithful_spec(declared)
+            spec["hang"] = True
+            spec["pid_file"] = str(pid_file)
+            fake = write_fake_mtest(repo, spec)
 
             started = time.monotonic()
             code, _out, err = run_oracle(

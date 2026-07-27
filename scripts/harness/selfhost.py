@@ -23,11 +23,23 @@ well-formed report and still exits 0. Two concrete holes make that concrete:
   up there.
 
 So this harness derives the truth independently, from the test sources on disk,
-and reconciles four things against mtest's console report: the exit code, the
-selected/excluded file counts, the exact set of file paths that reported PASS,
-and the exact per-test total. Any disagreement is a loud failure naming both
-sides. mtest is never asked what it ran; it is only checked against what the
-sources say it must have run.
+and reconciles mtest's own reports against it. Two artifacts from one run are
+read by two independent parsers:
+
+- **`--json` machine event stream (primary).** Per file, `file_finished` states
+  that file's own `passed_tests`, `parse_disposition` and outcome, and
+  `test_reported` NAMES every test it ran. So the oracle asserts the strongest
+  available statement: every file ran exactly the tests its own source declares,
+  by name. A grand total alone cannot say that -- one module running a test
+  twice while another runs none nets to the same number.
+- **Console report (cross-check).** The session header's selected/excluded
+  counts, the exact set of paths in the PASS rows, and the summary band's
+  totals. A different grammar read by a different parser over the same run, so
+  the two disagreeing is itself a signal worth having.
+
+Plus the process exit code. Any disagreement is a loud failure naming both
+sides and tagged with which parse objected. mtest is never asked what it ran; it
+is only checked against what the sources say it must have run.
 
 The inventory is derived, never declared. There is no committed path list, no
 committed test count, and nothing a human edits when adding a test file or a
@@ -63,6 +75,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from typing import IO
 
+from scripts.checks.reports import json_stream
 from scripts.harness import watchdog
 
 
@@ -76,16 +89,36 @@ DEFAULT_WORKERS = "auto"
 """Provisional worker policy. A later task measures and pins this value."""
 
 TIMEOUT_ENV = "MTEST_SELFHOST_TIMEOUT_SECONDS"
-DEFAULT_TIMEOUT_SECONDS = watchdog.DEFAULT_TIMEOUT_SECONDS
+DEFAULT_TIMEOUT_SECONDS = 1800.0
 """Whole-process-group ceiling for the self-hosted run, in seconds.
 
-The measured full run is roughly 135s on 32 cores and 629s on 4, so the ceiling
-has to clear the slow machine with room for a cold Mojo compiler cache. 900s is
-both comfortably above that and the largest value the watchdog accepts
-(`watchdog._validate_timeout_seconds` rejects anything above its own default),
-so this is the widest honest ceiling available. `MTEST_SELFHOST_TIMEOUT_SECONDS`
-lowers it; nothing can raise it.
+Measured on one 32-core host: ~134s warm, ~136s cold. The Mojo compiler cache
+barely matters there, because compilation of 101 files across sixteen workers
+hides under the ~69s critical path of the slowest integration file. Core count
+is what dominates: pinned to four cores with both caches cleared, the same run
+was still going at 600s with 13 of 101 files outstanding.
+
+So the honest slow-host figure is several times the fast one, and it lands close
+enough to the watchdog's old 900s limit that a hosted runner would have produced
+false timeouts. Thirty minutes is chosen to be wrong in the safe direction: a
+genuine hang wastes half an hour of CI once, whereas a false `rc=124` on a
+merely-slow run looks exactly like the scheduler hang this lane exists to
+detect, and would be debugged as one.
+
+`MTEST_SELFHOST_TIMEOUT_SECONDS` moves it in either direction, up to
+`watchdog.MAX_TIMEOUT_SECONDS`.
 """
+
+JSON_STREAM = Path("build/tests/selfhost.ndjson")
+"""Where mtest's machine event stream is written for this run.
+
+Kept at a fixed repository path rather than a temporary one so a failed run
+leaves the evidence behind for the next person to read. Removed before every
+spawn, so a run that never wrote it can never be reconciled against a stale one.
+"""
+
+JSON_STREAM_LIMIT_BYTES = 64 * 1024 * 1024
+"""Refusal ceiling for the event stream, ~140x the ~460KB a green run writes."""
 
 DEADLINE_SENTINEL = Path("build/tests/selfhost.run-deadline")
 """Pre-created file the supervisor removes on every non-timeout ending.
@@ -94,6 +127,9 @@ Reconciled after the run by `watchdog.validate_deadline_proof`, so a timeout is
 confirmed against filesystem state rather than trusted from the supervisor's
 own clock.
 """
+
+REPORTED_FAILURE_LIMIT = 40
+"""How many findings are printed before the rest are counted rather than shown."""
 
 CAPTURE_LIMIT_BYTES = 16 * 1024 * 1024
 CAPTURE_TRUNCATION_MARKER = "\n[selfhost: capture limit reached; output truncated]\n"
@@ -421,6 +457,7 @@ def mtest_argv(
     native_object: str,
     roots: Sequence[Path],
     workers: str = DEFAULT_WORKERS,
+    json_path: str = str(JSON_STREAM),
 ) -> list[str]:
     """Build the self-hosted run command for one set of roots.
 
@@ -430,11 +467,17 @@ def mtest_argv(
     (`-Xlinker <obj>`) because a bare object path is not a positional --
     `mojo build src.mojo obj.o` fails with "too many input files".
 
+    `--json` is what makes the per-file reconciliation possible: the console
+    report states one grand total, but the event stream states each file's own
+    `passed_tests` and names every test it reported. A total can be right while
+    the distribution behind it is wrong.
+
     Args:
         mtest_path: The mtest binary to run.
         native_object: The compiled native test adapter to link into each file.
         roots: Repository-relative roots to hand mtest.
         workers: The `-n` value. Provisional; a later task pins it.
+        json_path: Where mtest writes its machine event stream.
 
     Returns:
         The complete argv, without shell interpretation.
@@ -450,6 +493,8 @@ def mtest_argv(
         f"--build-arg={native_object}",
         "-n",
         workers,
+        "--json",
+        json_path,
         *[str(root) for root in roots],
     ]
 
@@ -462,12 +507,12 @@ def timeout_seconds(environment: Mapping[str, str]) -> float:
 
     Returns:
         The ceiling in seconds: `DEFAULT_TIMEOUT_SECONDS` unless
-        `MTEST_SELFHOST_TIMEOUT_SECONDS` lowers it.
+        `MTEST_SELFHOST_TIMEOUT_SECONDS` overrides it.
 
     Raises:
         ValueError: If the override is not a finite number in
-            `(0, DEFAULT_TIMEOUT_SECONDS]`, so a typo cannot quietly disarm or
-            uselessly shorten the deadline.
+            `(0, watchdog.MAX_TIMEOUT_SECONDS]`, so a typo cannot quietly
+            disarm the deadline or uselessly shorten it.
     """
     raw = environment.get(TIMEOUT_ENV)
     if raw is None:
@@ -476,10 +521,10 @@ def timeout_seconds(environment: Mapping[str, str]) -> float:
         seconds = float(raw)
     except ValueError as exc:
         raise ValueError(f"{TIMEOUT_ENV} must be a number: {raw!r}") from exc
-    if not math.isfinite(seconds) or not (0 < seconds <= DEFAULT_TIMEOUT_SECONDS):
+    if not math.isfinite(seconds) or not (0 < seconds <= watchdog.MAX_TIMEOUT_SECONDS):
         raise ValueError(
             f"{TIMEOUT_ENV} must be finite and between 0 and "
-            f"{DEFAULT_TIMEOUT_SECONDS:g} seconds: {raw!r}"
+            f"{watchdog.MAX_TIMEOUT_SECONDS:g} seconds: {raw!r}"
         )
     return seconds
 
@@ -569,7 +614,7 @@ def _reconcile_header(
     headers = HEADER_RE.findall(output)
     if len(headers) != 1:
         failures.append(
-            "no single session header -- found "
+            "[console] no single session header -- found "
             f"{len(headers)} 'root: ... selected: N files excluded: M' line(s); "
             "cannot reconcile file membership"
         )
@@ -577,7 +622,7 @@ def _reconcile_header(
     reported_root, raw_selected, raw_excluded = headers[0]
     if reported_root != str(repo_root):
         failures.append(
-            "session root mismatch -- mtest reported root "
+            "[console] session root mismatch -- mtest reported root "
             f"{reported_root!r}, harness ran it in {str(repo_root)!r}; "
             "reported paths are not comparable to the derived inventory"
         )
@@ -585,12 +630,13 @@ def _reconcile_header(
     excluded = int(raw_excluded)
     if selected != len(inventory.paths):
         failures.append(
-            "selected file count mismatch -- mtest selected "
+            "[console] selected file count mismatch -- mtest selected "
             f"{selected} file(s), the sources declare {len(inventory.paths)}"
         )
     if excluded != 0:
         failures.append(
-            f"mtest excluded {excluded} file(s); the self-hosted lane must exclude none"
+            f"[console] mtest excluded {excluded} file(s); the self-hosted "
+            "lane must exclude none"
         )
 
 
@@ -601,7 +647,7 @@ def _reconcile_paths(output: str, inventory: Inventory, failures: list[str]) -> 
     other = sorted({(verdict, path) for verdict, path in rows if verdict != "PASS"})
     if other:
         failures.append(
-            "mtest reported non-PASS verdict row(s): "
+            "[console] mtest reported non-PASS verdict row(s): "
             + ", ".join(f"{verdict} {path}" for verdict, path in other)
         )
     expected = inventory.path_set
@@ -609,7 +655,7 @@ def _reconcile_paths(output: str, inventory: Inventory, failures: list[str]) -> 
         missing = sorted(expected - passed)
         extra = sorted(passed - expected)
         failures.append(
-            "exact path membership mismatch -- "
+            "[console] exact path membership mismatch -- "
             f"mtest reported PASS for {len(passed)} file(s), the sources declare "
             f"{len(expected)}; "
             f"never reported: {missing}; reported but not on disk: {extra}"
@@ -621,7 +667,7 @@ def _reconcile_totals(output: str, inventory: Inventory, failures: list[str]) ->
     matches = list(SUMMARY_RE.finditer(output))
     if len(matches) != 1:
         failures.append(
-            f"no single summary band -- found {len(matches)} "
+            f"[console] no single summary band -- found {len(matches)} "
             "'===== N passed, ... =====' line(s); cannot reconcile test totals"
         )
         return
@@ -630,7 +676,7 @@ def _reconcile_totals(output: str, inventory: Inventory, failures: list[str]) ->
     reported_passed = int(summary.group("passed"))
     if reported_passed != expected_total:
         failures.append(
-            "exact test-total mismatch -- mtest reported "
+            "[console] exact test-total mismatch -- mtest reported "
             f"{reported_passed} passed, the sources declare {expected_total} "
             f"test function(s) across {len(inventory.paths)} file(s); a module "
             "that collected nothing looks exactly like this"
@@ -639,16 +685,328 @@ def _reconcile_totals(output: str, inventory: Inventory, failures: list[str]) ->
         raw = summary.group(group)
         if raw is not None and int(raw) != 0:
             label = group.replace("_", " ")
-            failures.append(f"mtest reported {raw} {label}; must be 0")
+            failures.append(f"[console] mtest reported {raw} {label}; must be 0")
     deselected = summary.group("deselected")
     if deselected is not None and int(deselected) != 0:
-        failures.append(f"mtest reported {deselected} deselected; must be 0")
+        failures.append(f"[console] mtest reported {deselected} deselected; must be 0")
     abnormal = summary.group("abnormal").strip()
     if abnormal:
         failures.append(
-            f"mtest's summary carries abnormal file counts: {abnormal!r}; "
+            f"[console] mtest's summary carries abnormal file counts: {abnormal!r}; "
             "the self-hosted lane must report none"
         )
+
+
+def _int_field(record: Mapping[str, object], key: str) -> int | None:
+    """Return one integer field, or None when it is absent or not an integer.
+
+    Args:
+        record: One decoded stream record.
+        key: The field name to read.
+
+    Returns:
+        The integer value. `bool` is rejected: it is an `int` subclass in
+        Python, and reading a forged `true` as `1` is exactly the silent
+        coercion this oracle exists to refuse.
+    """
+    value = record.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _str_field(record: Mapping[str, object], key: str) -> str | None:
+    """Return one string field, or None when it is absent or not a string."""
+    value = record.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _file_record_problems(
+    record: Mapping[str, object], declared: tuple[str, ...]
+) -> list[str]:
+    """Return every disagreement between one `file_finished` record and source.
+
+    Args:
+        record: One decoded `file_finished` record.
+        declared: The test function names the file's source declares.
+
+    Returns:
+        One message per disagreement, each naming both sides.
+    """
+    problems: list[str] = []
+    outcome = _str_field(record, "outcome")
+    if outcome != "pass":
+        problems.append(f"outcome={outcome!r} (must be 'pass')")
+    # A file whose report mtest could not parse is precisely a silent-loss
+    # case: the run happened, the output was not understood, and the counts
+    # behind it mean nothing.
+    disposition = _str_field(record, "parse_disposition")
+    if disposition != "parsed":
+        problems.append(f"parse_disposition={disposition!r} (must be 'parsed')")
+    passed = _int_field(record, "passed_tests")
+    if passed != len(declared):
+        problems.append(
+            f"passed_tests={passed} but the source declares {len(declared)} "
+            "test function(s)"
+        )
+    for key in ("failed_tests", "skipped_tests", "deselected_tests"):
+        value = _int_field(record, key)
+        if value != 0:
+            problems.append(f"{key}={value} (must be 0)")
+    for key in ("exit_status", "signal_number"):
+        value = _int_field(record, key)
+        if value != 0:
+            problems.append(f"{key}={value} (must be 0)")
+    attempts = _int_field(record, "attempts_used")
+    if attempts != 1:
+        problems.append(f"attempts_used={attempts} (must be 1; a retry hides a flake)")
+    if record.get("flaky") is not False:
+        problems.append(f"flaky={record.get('flaky')!r} (must be false)")
+    return problems
+
+
+def _reconcile_file_records(
+    records: Sequence[Mapping[str, object]],
+    inventory: Inventory,
+    failures: list[str],
+) -> frozenset[str]:
+    """Reconcile every `file_finished` record against that file's own source.
+
+    Args:
+        records: Every decoded `file_finished` record.
+        inventory: The source-derived truth for the roots that were run.
+        failures: Accumulator appended to, one message per disagreement.
+
+    Returns:
+        The set of paths the stream reported a `file_finished` record for.
+    """
+    by_path: dict[str, Mapping[str, object]] = {}
+    for record in records:
+        path = _str_field(record, "path")
+        if path is None:
+            failures.append("[json] a file_finished record carries no string path")
+            continue
+        if path in by_path:
+            failures.append(f"[json] duplicate file_finished record for {path}")
+            continue
+        by_path[path] = record
+
+    reported = frozenset(by_path)
+    if reported != inventory.path_set:
+        failures.append(
+            "[json] file_finished membership mismatch -- "
+            f"the stream reports {len(reported)} file(s), the sources declare "
+            f"{len(inventory.path_set)}; never reported: "
+            f"{sorted(inventory.path_set - reported)}; reported but not on disk: "
+            f"{sorted(reported - inventory.path_set)}"
+        )
+
+    for path, declared in sorted(inventory.tests_by_path.items()):
+        finished = by_path.get(path)
+        if finished is None:
+            continue
+        problems = _file_record_problems(finished, declared)
+        if problems:
+            failures.append(f"[json] {path}: " + "; ".join(problems))
+    return reported
+
+
+def _reconcile_test_records(
+    records: Sequence[Mapping[str, object]],
+    inventory: Inventory,
+    mentioned: frozenset[str],
+    failures: list[str],
+) -> None:
+    """Reconcile the exact set of reported test names against each file's source.
+
+    This is the strongest statement the oracle makes. A per-file count can still
+    be satisfied by running the wrong tests; a set equality on names cannot.
+
+    Args:
+        records: Every decoded `test_reported` record.
+        inventory: The source-derived truth for the roots that were run.
+        mentioned: Paths the stream named in a `file_finished` record. A file
+            the stream never mentioned at all is already reported once by the
+            membership check; restating it per file would bury that finding and
+            the console cross-check under one message per missing file.
+        failures: Accumulator appended to, one message per disagreement.
+    """
+    by_path: dict[str, list[str]] = {}
+    for record in records:
+        path = _str_field(record, "path")
+        name = _str_field(record, "name")
+        if path is None or name is None:
+            failures.append(
+                "[json] a test_reported record carries no string path/name pair"
+            )
+            continue
+        outcome = _str_field(record, "outcome")
+        if outcome != "pass":
+            failures.append(
+                f"[json] {path}::{name} outcome={outcome!r} (must be 'pass')"
+            )
+        by_path.setdefault(path, []).append(name)
+
+    for path, declared in sorted(inventory.tests_by_path.items()):
+        reported = by_path.pop(path, [])
+        if path not in mentioned and not reported:
+            continue
+        duplicates = sorted({name for name in reported if reported.count(name) > 1})
+        if duplicates:
+            failures.append(
+                f"[json] {path}: test(s) reported more than once: {duplicates}"
+            )
+        expected = frozenset(declared)
+        actual = frozenset(reported)
+        if actual != expected:
+            failures.append(
+                f"[json] {path}: reported test names differ from the source -- "
+                f"declared but never reported: {sorted(expected - actual)}; "
+                f"reported but not declared: {sorted(actual - expected)}"
+            )
+    for path, names in sorted(by_path.items()):
+        failures.append(
+            f"[json] {path}: reported {len(names)} test(s) for a file the sources "
+            "do not declare at all"
+        )
+
+
+def _reconcile_stream_totals(
+    terminal: Mapping[str, object], inventory: Inventory, failures: list[str]
+) -> None:
+    """Reconcile the terminal `session_finished` record against the sources."""
+    exit_code = _int_field(terminal, "exit_code")
+    if exit_code != 0:
+        failures.append(f"[json] session_finished exit_code={exit_code} (must be 0)")
+    counts = terminal.get("test_counts")
+    if not isinstance(counts, dict):
+        failures.append("[json] session_finished carries no test_counts object")
+    else:
+        passed = _int_field(counts, "passed")
+        if passed != inventory.total_tests:
+            failures.append(
+                f"[json] session_finished test_counts.passed={passed}, the "
+                f"sources declare {inventory.total_tests}"
+            )
+        for key in ("failed", "skipped", "deselected"):
+            value = _int_field(counts, key)
+            if value != 0:
+                failures.append(f"[json] session_finished test_counts.{key}={value}")
+    summary = terminal.get("summary")
+    if not isinstance(summary, dict):
+        failures.append("[json] session_finished carries no summary object")
+        return
+    if _int_field(summary, "pass") != len(inventory.path_set):
+        failures.append(
+            f"[json] session_finished summary.pass={summary.get('pass')!r}, the "
+            f"sources declare {len(inventory.path_set)} file(s)"
+        )
+    nonzero = sorted(
+        (key, value)
+        for key, value in summary.items()
+        if key != "pass" and _int_field(summary, key) != 0
+    )
+    if nonzero:
+        failures.append(
+            "[json] session_finished summary carries nonzero non-pass bucket(s): "
+            f"{nonzero}"
+        )
+
+
+def reconcile_stream(
+    stream_text: str, inventory: Inventory, repo_root: Path, failures: list[str]
+) -> None:
+    """Reconcile mtest's `--json` event stream against the derived inventory.
+
+    The stream is the primary source of truth. Unlike the console report it
+    states each file's own result, so "the grand total is right" stops being
+    enough: every file must have run exactly the tests its own source declares.
+
+    Args:
+        stream_text: The complete newline-delimited event stream.
+        inventory: The source-derived truth for the roots that were run.
+        repo_root: The directory mtest ran in, checked against `session_started`.
+        failures: Accumulator appended to, one message per disagreement.
+    """
+    try:
+        report = json_stream.parse_stream(stream_text)
+    except json_stream.StreamError as exc:
+        failures.append(f"[json] mtest's event stream is not a valid v1 stream: {exc}")
+        return
+    if report.torn_tail:
+        failures.append(
+            "[json] mtest's event stream ends in an unterminated fragment: the "
+            "writer died mid-line, so the run was cut short"
+        )
+    if report.terminal is None:
+        failures.append(
+            "[json] mtest's event stream carries no session_finished record: the "
+            "run never reached its terminal event"
+        )
+
+    started = [r for r in report.records if r.get("event") == "session_started"]
+    if len(started) != 1:
+        failures.append(
+            f"[json] found {len(started)} session_started record(s); expected 1"
+        )
+    else:
+        root = _str_field(started[0], "root")
+        if root != str(repo_root):
+            failures.append(
+                f"[json] session_started root={root!r}, harness ran mtest in "
+                f"{str(repo_root)!r}; reported paths are not comparable"
+            )
+        selected = _int_field(started[0], "selected_count")
+        if selected != len(inventory.path_set):
+            failures.append(
+                f"[json] session_started selected_count={selected}, the sources "
+                f"declare {len(inventory.path_set)} file(s)"
+            )
+        excluded = _int_field(started[0], "excluded_count")
+        if excluded != 0:
+            failures.append(f"[json] session_started excluded_count={excluded}")
+
+    mentioned = _reconcile_file_records(
+        [r for r in report.records if r.get("event") == "file_finished"],
+        inventory,
+        failures,
+    )
+    _reconcile_test_records(
+        [r for r in report.records if r.get("event") == "test_reported"],
+        inventory,
+        mentioned,
+        failures,
+    )
+    if report.terminal is not None:
+        _reconcile_stream_totals(report.terminal, inventory, failures)
+
+
+def read_stream(path: Path) -> str:
+    """Read one event stream, refusing a file too large to be a real report.
+
+    Args:
+        path: Where mtest was asked to write its machine event stream.
+
+    Returns:
+        The stream text.
+
+    Raises:
+        ValueError: If the file is absent, or larger than
+            `JSON_STREAM_LIMIT_BYTES`.
+        OSError: If the file cannot be read.
+    """
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(
+            f"mtest wrote no machine event stream at {path}; the run cannot be "
+            "reconciled per file"
+        )
+    size = path.stat().st_size
+    if size > JSON_STREAM_LIMIT_BYTES:
+        raise ValueError(
+            f"mtest's event stream at {path} is {size} bytes, above the "
+            f"{JSON_STREAM_LIMIT_BYTES}-byte ceiling; refusing to parse it"
+        )
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def reconcile(
@@ -657,35 +1015,44 @@ def reconcile(
     inventory: Inventory,
     repo_root: Path,
     exit_code: int,
+    stream_text: str,
     truncated: bool = False,
 ) -> list[str]:
     """Reconcile mtest's report against the source-derived inventory.
 
-    Four independent comparisons, all evaluated even when an earlier one has
-    already failed, so one run names every disagreement instead of the first:
-    the exit code, the selected/excluded file counts, the exact PASS path set,
-    and the exact per-test totals.
+    Two independent parses of two independent artifacts, all comparisons
+    evaluated even when an earlier one has already failed, so one run names
+    every disagreement instead of the first.
+
+    The `--json` event stream is the primary source of truth, because it states
+    each file's own result: every file must report exactly the tests its own
+    source declares, by name. The console report is retained as a cross-check
+    over the same run -- it is a different grammar read by a different parser,
+    so the two disagreeing is itself a signal worth having. Messages are tagged
+    `[json]` or `[console]` so a reader can tell which parse objected.
 
     Args:
         output: mtest's captured console output.
         inventory: The source-derived truth for the roots that were run.
         repo_root: The directory mtest was run in, checked against its header.
         exit_code: mtest's real exit status.
+        stream_text: mtest's `--json` machine event stream.
         truncated: Whether the capture dropped bytes; a truncated report cannot
             be reconciled and is reported as its own failure.
 
     Returns:
-        One message per disagreement, each naming both sides. Empty means the
-        report and the sources agree completely.
+        One message per disagreement, each naming both sides. Empty means both
+        reports and the sources agree completely.
     """
     failures: list[str] = []
     if exit_code != 0:
         failures.append(f"mtest exited {exit_code} (must be 0)")
     if truncated:
         failures.append(
-            f"mtest's output exceeded the {CAPTURE_LIMIT_BYTES}-byte capture "
-            "limit; the report below is incomplete and cannot be reconciled"
+            f"[console] mtest's output exceeded the {CAPTURE_LIMIT_BYTES}-byte "
+            "capture limit; the report is incomplete and cannot be reconciled"
         )
+    reconcile_stream(stream_text, inventory, repo_root, failures)
     _reconcile_header(output, inventory, repo_root, failures)
     _reconcile_paths(output, inventory, failures)
     _reconcile_totals(output, inventory, failures)
@@ -753,7 +1120,16 @@ def verify(
         )
         return 1
 
-    command = mtest_argv(mtest_path, native_object, resolved_roots, workers)
+    stream_path = repo_root / JSON_STREAM
+    # Remove any stream a previous run left behind BEFORE the spawn. A run that
+    # wrote none would otherwise be reconciled against a stale one and could
+    # pass on evidence it never produced.
+    stream_path.parent.mkdir(parents=True, exist_ok=True)
+    stream_path.unlink(missing_ok=True)
+
+    command = mtest_argv(
+        mtest_path, native_object, resolved_roots, workers, str(stream_path)
+    )
     print(f"selfhost: running {' '.join(command)}", flush=True)
     run = run_mtest(
         command, repo_root=repo_root, seconds=seconds, supervisor=supervisor
@@ -782,11 +1158,18 @@ def verify(
         )
         return _raise_signal(termination.signo)
 
+    try:
+        stream_text = read_stream(stream_path)
+    except (OSError, ValueError) as exc:
+        print(f"FATAL: selfhost: {exc}", file=sys.stderr)
+        return 1
+
     failures = reconcile(
         output=run.stdout,
         inventory=inventory,
         repo_root=repo_root,
         exit_code=termination.code,
+        stream_text=stream_text,
         truncated=run.truncated,
     )
     if failures:
@@ -796,15 +1179,24 @@ def verify(
             "its own completeness; the sources are the oracle.",
             file=sys.stderr,
         )
-        for failure in failures:
+        for failure in failures[:REPORTED_FAILURE_LIMIT]:
             print(f"FATAL: selfhost: {failure}", file=sys.stderr)
+        # A per-file oracle over 101 files can produce hundreds of findings from
+        # one defect. Show enough to diagnose it and say how many were held back,
+        # rather than burying the first (and usually most explanatory) one.
+        if len(failures) > REPORTED_FAILURE_LIMIT:
+            print(
+                f"FATAL: selfhost: ... and {len(failures) - REPORTED_FAILURE_LIMIT} "
+                "further finding(s) not shown",
+                file=sys.stderr,
+            )
         return 1
 
     print(
         f"selfhost: OK -- mtest ({mtest_path}) selected and passed all "
         f"{len(inventory.paths)} classified file(s) and all "
-        f"{inventory.total_tests} test(s); exact paths and exact totals match "
-        "the sources"
+        f"{inventory.total_tests} test(s); every file reported exactly the "
+        "test names its own source declares"
     )
     return 0
 
