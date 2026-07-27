@@ -36,6 +36,7 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
 import tempfile
 from typing import TYPE_CHECKING, override
 import unittest
@@ -1127,6 +1128,7 @@ class AssertionPackageLayoutTests(unittest.TestCase):
 
     def _valid_prefix(self, root: Path) -> Path:
         prefix = root / "prefix"
+        library_suffix = ".dylib" if sys.platform == "darwin" else ".so"
         for relative in package_consumption.INSTALLED_ASSERTION_FILES:
             path = prefix / "share" / "mtest" / "assertions-src" / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -1156,15 +1158,15 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             "version = 1.0.0b2\n"
             "[mojo-max]\n"
             f"package_root = {prefix}\n"
-            f"compilerrt_path = {prefix}/lib/libKGENCompilerRTShared.so\n"
-            f"mgprt_path = {prefix}/lib/libMGPRT.so\n"
-            f"shared_libs = {prefix}/lib/libAsyncRTMojoBindings.so,"
+            f"compilerrt_path = {prefix}/lib/libKGENCompilerRTShared{library_suffix}\n"
+            f"mgprt_path = {prefix}/lib/libMGPRT{library_suffix}\n"
+            f"shared_libs = {prefix}/lib/libAsyncRTMojoBindings{library_suffix},"
             f"-Xlinker,-rpath,-Xlinker,{prefix}/lib;\n"
             f"driver_path = {prefix}/bin/mojo\n"
             f"import_path = {prefix}/lib/mojo\n"
-            f"jupyter_path = {prefix}/lib/libMojoJupyter.so\n"
+            f"jupyter_path = {prefix}/lib/libMojoJupyter{library_suffix}\n"
             f"lldb_path = {prefix}/bin/mojo-lldb\n"
-            f"lldb_plugin_path = {prefix}/lib/libMojoLLDB.so\n"
+            f"lldb_plugin_path = {prefix}/lib/libMojoLLDB{library_suffix}\n"
             f"lldb_visualizers_path = {prefix}/lib/lldb-visualizers\n"
             f"lldb_vscode_path = {prefix}/bin/mojo-lldb-dap\n"
             f"lsp_server_path = {prefix}/bin/mojo-lsp-server\n"
@@ -1199,6 +1201,14 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             prefix = self._valid_prefix(Path(raw))
             prefix.chmod(0o700)
             (prefix / "share").chmod(0o700)
+            package_consumption.validate_assertion_install(prefix)
+
+    def test_valid_prefix_uses_the_darwin_runtime_library_suffix(self) -> None:
+        with (
+            tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw,
+            mock.patch.object(sys, "platform", "darwin"),
+        ):
+            prefix = self._valid_prefix(Path(raw))
             package_consumption.validate_assertion_install(prefix)
 
     def test_rejects_a_symlinked_installed_compiler(self) -> None:
