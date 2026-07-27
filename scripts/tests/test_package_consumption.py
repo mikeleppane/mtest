@@ -55,6 +55,12 @@ from scripts.build.package_consumption import (
 from scripts.harness import dogfood, watchdog
 
 
+CHECKOUT_COMPANION_ROOT = Path("companions/assertions")
+CHECKOUT_ASSERTION_SOURCE_ROOT = CHECKOUT_COMPANION_ROOT / "src"
+CHECKOUT_ASSERTION_EXAMPLE_ROOT = CHECKOUT_COMPANION_ROOT / "examples"
+INSTALLED_ASSERTION_SOURCE_ROOT = Path("share/mtest/companions/assertions/src")
+
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -858,7 +864,7 @@ class AssertionPackageCommandTests(unittest.TestCase):
             mock.patch.object(
                 package_consumption,
                 "validate_assertion_install",
-                return_value=prefix / "share/mtest/assertions-src",
+                return_value=prefix / INSTALLED_ASSERTION_SOURCE_ROOT,
             ),
             mock.patch.object(
                 package_consumption,
@@ -1030,7 +1036,7 @@ class AssertionPackageCommandTests(unittest.TestCase):
                 "build",
                 "-O0",
                 "-I",
-                "/scratch/prefix/share/mtest/assertions-src",
+                "/scratch/prefix/share/mtest/companions/assertions/src",
                 "/scratch/probe.mojo",
                 "-o",
                 "/scratch/probe-o0",
@@ -1116,12 +1122,12 @@ class AssertionReadmeExampleTests(unittest.TestCase):
             "# mtest\n\n"
             "## Assertion diagnostics\n\n"
             "```mojo\nassert_equal(1, 2)\n```\n\n"
-            "```console\n$ mtest examples/assertions\noutput\n```\n\n"
+            "```console\n$ mtest companions/assertions/examples\noutput\n```\n\n"
             "## Usage\n"
         )
         self.assertEqual(
             package_consumption.readme_assertion_example_block(contents),
-            "$ mtest examples/assertions\noutput\n",
+            "$ mtest companions/assertions/examples\noutput\n",
         )
 
     def test_extracts_the_only_mojo_fence_from_assertion_section(self) -> None:
@@ -1129,7 +1135,7 @@ class AssertionReadmeExampleTests(unittest.TestCase):
             "# mtest\n\n"
             "## Assertion diagnostics\n\n"
             "```mojo\nassert_equal(1, 2)\n```\n\n"
-            "```console\n$ mtest examples/assertions\noutput\n```\n\n"
+            "```console\n$ mtest companions/assertions/examples\noutput\n```\n\n"
             "## Usage\n"
         )
         self.assertEqual(
@@ -1140,8 +1146,8 @@ class AssertionReadmeExampleTests(unittest.TestCase):
     def test_normalizes_only_paths_and_elapsed_times(self) -> None:
         output = (
             "root: /checkout\n"
-            "FAIL           examples/assertions/test.mojo  0.07s\n"
-            "detail /prefix/share/mtest/assertions-src\n"
+            "FAIL           companions/assertions/examples/test.mojo  0.07s\n"
+            "detail /prefix/share/mtest/companions/assertions/src\n"
             "    |     PASS [ 0.001 ] test_pass\n"
             "    |     FAIL [ 0.082 ] test_fail\n"
             "    | Summary [ 0.083 ] 2 tests run: 1 passed , 1 failed , "
@@ -1157,8 +1163,8 @@ class AssertionReadmeExampleTests(unittest.TestCase):
                 Path("/checkout"),
             ),
             "root: <REPO>\n"
-            "FAIL           examples/assertions/test.mojo  <TIME>\n"
-            "detail <PREFIX>/share/mtest/assertions-src\n"
+            "FAIL           companions/assertions/examples/test.mojo  <TIME>\n"
+            "detail <PREFIX>/share/mtest/companions/assertions/src\n"
             "    |     PASS [ <TIME> ] test_pass\n"
             "    |     FAIL [ <TIME> ] test_fail\n"
             "    | Summary [ <TIME> ] 2 tests run: 1 passed , 1 failed , "
@@ -1184,16 +1190,20 @@ class AssertionPackageLayoutTests(unittest.TestCase):
         prefix = root.resolve() / "prefix"
         library_suffix = ".dylib" if sys.platform == "darwin" else ".so"
         for relative in package_consumption.INSTALLED_ASSERTION_FILES:
-            path = prefix / "share" / "mtest" / "assertions-src" / relative
+            path = prefix / INSTALLED_ASSERTION_SOURCE_ROOT / relative
             path.parent.mkdir(parents=True, exist_ok=True)
-            checkout = package_consumption.REPO_ROOT / "assertions-src" / relative
+            checkout = (
+                package_consumption.REPO_ROOT
+                / CHECKOUT_ASSERTION_SOURCE_ROOT
+                / relative
+            )
             path.write_bytes(checkout.read_bytes())
             path.chmod(0o644)
         for directory_name in (
             "share/mtest",
-            "share/mtest/assertions-src",
-            "share/mtest/assertions-src/mtest",
-            "share/mtest/assertions-src/mtest/assertions",
+            str(INSTALLED_ASSERTION_SOURCE_ROOT),
+            f"{INSTALLED_ASSERTION_SOURCE_ROOT}/mtest",
+            f"{INSTALLED_ASSERTION_SOURCE_ROOT}/mtest/assertions",
         ):
             (prefix / directory_name).chmod(0o755)
         mojo = prefix / "bin" / "mojo"
@@ -1240,9 +1250,7 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             prefix = self._valid_prefix(Path(raw))
             source = (
                 prefix
-                / "share"
-                / "mtest"
-                / "assertions-src"
+                / INSTALLED_ASSERTION_SOURCE_ROOT
                 / "mtest"
                 / "assertions"
                 / "_mapping.mojo"
@@ -1289,7 +1297,7 @@ class AssertionPackageLayoutTests(unittest.TestCase):
     def test_rejects_a_non_regular_extra_entry(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
             prefix = self._valid_prefix(Path(raw))
-            fifo = prefix / "share" / "mtest" / "assertions-src" / "unexpected-fifo"
+            fifo = prefix / INSTALLED_ASSERTION_SOURCE_ROOT / "unexpected-fifo"
             os.mkfifo(fifo)
             with self.assertRaisesRegex(
                 package_consumption.PackageCheckError,
@@ -1300,18 +1308,9 @@ class AssertionPackageLayoutTests(unittest.TestCase):
     def test_tarball_accepts_installer_normalized_group_write(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
             prefix = self._valid_prefix(Path(raw))
-            source = (
-                prefix
-                / "share"
-                / "mtest"
-                / "assertions-src"
-                / "mtest"
-                / "__init__.mojo"
-            )
+            source = prefix / INSTALLED_ASSERTION_SOURCE_ROOT / "mtest/__init__.mojo"
             source.chmod(0o664)
-            (
-                prefix / "share" / "mtest" / "assertions-src" / "mtest" / "assertions"
-            ).chmod(0o775)
+            (prefix / INSTALLED_ASSERTION_SOURCE_ROOT / "mtest/assertions").chmod(0o775)
             package_consumption.validate_assertion_install(
                 prefix,
                 allow_installer_group_write=True,
@@ -1320,14 +1319,7 @@ class AssertionPackageLayoutTests(unittest.TestCase):
     def test_primary_package_rejects_group_writable_source(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
             prefix = self._valid_prefix(Path(raw))
-            source = (
-                prefix
-                / "share"
-                / "mtest"
-                / "assertions-src"
-                / "mtest"
-                / "__init__.mojo"
-            )
+            source = prefix / INSTALLED_ASSERTION_SOURCE_ROOT / "mtest/__init__.mojo"
             source.chmod(0o664)
             with self.assertRaisesRegex(
                 package_consumption.PackageCheckError,
@@ -1340,9 +1332,9 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             prefix = self._valid_prefix(Path(raw))
             for relative in (
                 "share/mtest",
-                "share/mtest/assertions-src",
-                "share/mtest/assertions-src/mtest",
-                "share/mtest/assertions-src/mtest/assertions",
+                str(INSTALLED_ASSERTION_SOURCE_ROOT),
+                f"{INSTALLED_ASSERTION_SOURCE_ROOT}/mtest",
+                f"{INSTALLED_ASSERTION_SOURCE_ROOT}/mtest/assertions",
             ):
                 (prefix / relative).chmod(0o775)
             package_consumption.validate_assertion_install(prefix)
@@ -1376,7 +1368,7 @@ class AssertionPackageLayoutTests(unittest.TestCase):
     def test_rejects_an_extra_public_mojopkg(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
             prefix = self._valid_prefix(Path(raw))
-            extra = prefix / "share" / "mtest" / "assertions-src" / "mtest.mojopkg"
+            extra = prefix / INSTALLED_ASSERTION_SOURCE_ROOT / "mtest.mojopkg"
             extra.write_text("opaque", encoding="utf-8")
             with self.assertRaisesRegex(
                 package_consumption.PackageCheckError,
@@ -1387,14 +1379,7 @@ class AssertionPackageLayoutTests(unittest.TestCase):
     def test_rejects_a_world_writable_source_file(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
             prefix = self._valid_prefix(Path(raw))
-            source = (
-                prefix
-                / "share"
-                / "mtest"
-                / "assertions-src"
-                / "mtest"
-                / "__init__.mojo"
-            )
+            source = prefix / INSTALLED_ASSERTION_SOURCE_ROOT / "mtest/__init__.mojo"
             source.chmod(0o666)
             with self.assertRaisesRegex(
                 package_consumption.PackageCheckError,
@@ -1405,14 +1390,7 @@ class AssertionPackageLayoutTests(unittest.TestCase):
     def test_rejects_an_executable_source_file(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
             prefix = self._valid_prefix(Path(raw))
-            source = (
-                prefix
-                / "share"
-                / "mtest"
-                / "assertions-src"
-                / "mtest"
-                / "__init__.mojo"
-            )
+            source = prefix / INSTALLED_ASSERTION_SOURCE_ROOT / "mtest/__init__.mojo"
             source.chmod(0o744)
             with self.assertRaisesRegex(
                 package_consumption.PackageCheckError,
@@ -1423,9 +1401,7 @@ class AssertionPackageLayoutTests(unittest.TestCase):
     def test_rejects_a_world_writable_source_directory(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
             prefix = self._valid_prefix(Path(raw))
-            directory = (
-                prefix / "share" / "mtest" / "assertions-src" / "mtest" / "assertions"
-            )
+            directory = prefix / INSTALLED_ASSERTION_SOURCE_ROOT / "mtest/assertions"
             directory.chmod(0o777)
             with self.assertRaisesRegex(
                 package_consumption.PackageCheckError,
@@ -1461,12 +1437,7 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             ):
                 prefix = self._valid_prefix(Path(raw))
                 source = (
-                    prefix
-                    / "share"
-                    / "mtest"
-                    / "assertions-src"
-                    / "mtest"
-                    / "__init__.mojo"
+                    prefix / INSTALLED_ASSERTION_SOURCE_ROOT / "mtest/__init__.mojo"
                 )
                 source.chmod(mode)
                 with self.assertRaisesRegex(
@@ -1481,7 +1452,7 @@ class AssertionPackageLayoutTests(unittest.TestCase):
     def test_tarball_policy_rejects_world_writable_directory(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
             prefix = self._valid_prefix(Path(raw))
-            directory = prefix / "share" / "mtest" / "assertions-src" / "mtest"
+            directory = prefix / INSTALLED_ASSERTION_SOURCE_ROOT / "mtest"
             directory.chmod(0o777)
             with self.assertRaisesRegex(
                 package_consumption.PackageCheckError,

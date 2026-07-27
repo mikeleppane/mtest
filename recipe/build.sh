@@ -24,20 +24,22 @@ mkdir -p "$PREFIX/bin"
 install -m 755 build/mtest "$PREFIX/bin/mtest"
 
 echo "==> installing source-only assertion companion"
-assertion_root="$PREFIX/share/mtest/assertions-src/mtest"
+assertion_root="$PREFIX/share/mtest/companions/assertions/src/mtest"
 install -d -m 755 "$PREFIX/share/mtest"
-install -d -m 755 "$PREFIX/share/mtest/assertions-src"
+install -d -m 755 "$PREFIX/share/mtest/companions"
+install -d -m 755 "$PREFIX/share/mtest/companions/assertions"
+install -d -m 755 "$PREFIX/share/mtest/companions/assertions/src"
 install -d -m 755 "$assertion_root"
 install -d -m 755 "$assertion_root/assertions"
-install -m 644 assertions-src/mtest/__init__.mojo \
+install -m 644 companions/assertions/src/mtest/__init__.mojo \
   "$assertion_root/__init__.mojo"
-install -m 644 assertions-src/mtest/assertions/__init__.mojo \
+install -m 644 companions/assertions/src/mtest/assertions/__init__.mojo \
   "$assertion_root/assertions/__init__.mojo"
-install -m 644 assertions-src/mtest/assertions/_display.mojo \
+install -m 644 companions/assertions/src/mtest/assertions/_display.mojo \
   "$assertion_root/assertions/_display.mojo"
-install -m 644 assertions-src/mtest/assertions/_mapping.mojo \
+install -m 644 companions/assertions/src/mtest/assertions/_mapping.mojo \
   "$assertion_root/assertions/_mapping.mojo"
-install -m 644 assertions-src/mtest/assertions/_sequence.mojo \
+install -m 644 companions/assertions/src/mtest/assertions/_sequence.mojo \
   "$assertion_root/assertions/_sequence.mojo"
-install -m 644 assertions-src/mtest/assertions/_text.mojo \
+install -m 644 companions/assertions/src/mtest/assertions/_text.mojo \
   "$assertion_root/assertions/_text.mojo"

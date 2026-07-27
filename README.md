@@ -152,14 +152,16 @@ def main() raises:
 ```
 
 ```console
-$ mtest --no-config --show-output failures -I <PREFIX>/share/mtest/assertions-src examples/assertions
+$ mtest --no-config --show-output failures \
+    -I <PREFIX>/share/mtest/companions/assertions/src \
+    companions/assertions/examples
 mtest 0.6.0 (mojo)
 root: <REPO>   selected: 1 files   excluded: 0
 
-FAIL           examples/assertions/test_diagnostics.mojo  <TIME>
+FAIL           companions/assertions/examples/test_diagnostics.mojo  <TIME>
 
---- FAIL examples/assertions/test_diagnostics.mojo::test_text_difference_has_scalar_and_context ---
-    | At examples/assertions/test_diagnostics.mojo:13:28: text differs at scalar 6
+--- FAIL companions/assertions/examples/test_diagnostics.mojo::test_text_difference_has_scalar_and_context ---
+    | At companions/assertions/examples/test_diagnostics.mojo:13:28: text differs at scalar 6
     |   actual: U+0062 'b'
     |   expected: U+0042 'B'
     |   actual line 1: alpha\n
@@ -169,14 +171,14 @@ FAIL           examples/assertions/test_diagnostics.mojo  <TIME>
     |   expected line 2: BETa\n
     |   expected line 3: gamma
     |   reason: configuration text changed
-reproduce: mtest -I <PREFIX>/share/mtest/assertions-src examples/assertions/test_diagnostics.mojo::test_text_difference_has_scalar_and_context
+reproduce: mtest -I <PREFIX>/share/mtest/companions/assertions/src companions/assertions/examples/test_diagnostics.mojo::test_text_difference_has_scalar_and_context
 
---- FAIL examples/assertions/test_diagnostics.mojo (exit 1) — captured output (file-scoped; TestSuite does not attribute output to individual tests) ---
+--- FAIL companions/assertions/examples/test_diagnostics.mojo (exit 1) — captured output (file-scoped; TestSuite does not attribute output to individual tests) ---
     | Unhandled exception caught during execution:
-    | Running 2 tests for <REPO>/examples/assertions/test_diagnostics.mojo
+    | Running 2 tests for <REPO>/companions/assertions/examples/test_diagnostics.mojo
     |     PASS [ <TIME> ] test_standard_assertion_still_coexists
     |     FAIL [ <TIME> ] test_text_difference_has_scalar_and_context
-    |       At <REPO>/examples/assertions/test_diagnostics.mojo:13:28: text differs at scalar 6
+    |       At <REPO>/companions/assertions/examples/test_diagnostics.mojo:13:28: text differs at scalar 6
     |         actual: U+0062 'b'
     |         expected: U+0042 'B'
     |         actual line 1: alpha\n
@@ -188,7 +190,7 @@ reproduce: mtest -I <PREFIX>/share/mtest/assertions-src examples/assertions/test
     |         reason: configuration text changed
     | --------
     | Summary [ <TIME> ] 2 tests run: 1 passed , 1 failed , 0 skipped
-    | Test suite' <REPO>/examples/assertions/test_diagnostics.mojo 'failed!
+    | Test suite' <REPO>/companions/assertions/examples/test_diagnostics.mojo 'failed!
     |
 --- captured stderr ---
 
@@ -221,7 +223,7 @@ finalized and emitted by the companion, not private work performed inside
 user-defined equality or formatting code. A present reason retains bounded
 space at the end even when mismatch detail is truncated.
 
-`<PREFIX>/share/mtest/assertions-src` is one complete source package named
+`<PREFIX>/share/mtest/companions/assertions/src` is one complete source package named
 `mtest`, not an extension merged into another `mtest` package. Put it before
 any other include root that provides `mtest`. The runner never injects this
 path automatically, and Mojo does not merge it with the runner-private

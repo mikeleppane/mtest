@@ -17,10 +17,11 @@ from scripts.harness import watchdog
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUILD_ROOT = REPO_ROOT / "build" / "assertions-check"
-ASSERTION_SOURCE_ROOT = REPO_ROOT / "assertions-src"
+COMPANION_ROOT = REPO_ROOT / "companions" / "assertions"
+ASSERTION_SOURCE_ROOT = COMPANION_ROOT / "src"
 API_CONSUMER = REPO_ROOT / "tests" / "assertions" / "api_consumer.mojo"
 LOCATION_CONSUMER = REPO_ROOT / "tests" / "assertions" / "location_consumer.mojo"
-EXAMPLE_CONSUMER = REPO_ROOT / "examples" / "assertions" / "test_diagnostics.mojo"
+EXAMPLE_CONSUMER = COMPANION_ROOT / "examples" / "test_diagnostics.mojo"
 COMPILE_TIMEOUT_SECONDS = 120
 RUN_TIMEOUT_SECONDS = 30
 PROCESS_CAPTURE_BYTE_CAP = watchdog.DEFAULT_CAPTURE_LIMIT_BYTES
@@ -284,7 +285,7 @@ def compile_command(
         "build",
         optimization,
         "-I",
-        str(repo_root / "assertions-src"),
+        str(repo_root / "companions/assertions/src"),
         str(source),
         "-o",
         str(output),
@@ -372,7 +373,7 @@ def validate_location_run(
     if summary not in run.stdout:
         raise AssertionError(f"location consumer summary differs: want {summary!r}")
 
-    provider_root = source.parents[2] / "assertions-src" / "mtest" / "assertions"
+    provider_root = source.parents[2] / "companions/assertions/src/mtest/assertions"
     if f"At {provider_root}" in run.stdout:
         raise AssertionError("location consumer exposed a provider coordinate")
 

@@ -28,9 +28,9 @@ class FormatInventoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp)
             expected = [
-                Path("assertions-src/mtest/assertions/__init__.mojo"),
+                Path("companions/assertions/examples/test_diagnostics.mojo"),
+                Path("companions/assertions/src/mtest/assertions/__init__.mojo"),
                 Path("e2e/test_z.mojo"),
-                Path("examples/assertions/test_diagnostics.mojo"),
                 Path("src/a.mojo"),
                 Path("tests/nested/test_b.mojo"),
             ]
@@ -49,7 +49,7 @@ class FormatInventoryTests(unittest.TestCase):
     def test_default_roots_are_exact(self) -> None:
         self.assertEqual(
             format_check.FORMAT_ROOTS,
-            ("src", "assertions-src", "tests", "e2e", "examples"),
+            ("src", "companions", "tests", "e2e"),
         )
 
     def test_repository_root_is_exact(self) -> None:

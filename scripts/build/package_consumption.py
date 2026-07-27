@@ -87,6 +87,8 @@ from scripts.harness import dogfood, watchdog
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PIXI_TOML = REPO_ROOT / "pixi.toml"
 RECIPE_PATH = REPO_ROOT / "recipe" / "recipe.yaml"
+CHECKOUT_ASSERTION_SOURCE_ROOT = REPO_ROOT / "companions" / "assertions" / "src"
+INSTALLED_ASSERTION_SOURCE_RELATIVE = Path("share/mtest/companions/assertions/src")
 
 # Where `pixi run package-build` (invoked unmodified by `build`) writes the
 # primary `.conda` local channel -- must match that task's `--output-dir` in
@@ -287,7 +289,9 @@ from mtest.assertions import BoundedWriter
 def main():
     _ = BoundedWriter(16)
 """
-ASSERTION_EXAMPLE = REPO_ROOT / "examples" / "assertions" / "test_diagnostics.mojo"
+ASSERTION_EXAMPLE = (
+    REPO_ROOT / "companions" / "assertions" / "examples" / "test_diagnostics.mojo"
+)
 ASSERTION_README_SECTION = "## Assertion diagnostics\n"
 ASSERTION_MOJO_FENCE = "```mojo\n"
 ASSERTION_CONSOLE_FENCE = "```console\n"
@@ -394,7 +398,7 @@ def assertion_compile_command(
         "build",
         optimization,
         "-I",
-        str((env_prefix / "share" / "mtest" / "assertions-src").resolve()),
+        str((env_prefix / INSTALLED_ASSERTION_SOURCE_RELATIVE).resolve()),
         str(source.resolve()),
         "-o",
         str(output.resolve()),
@@ -434,12 +438,10 @@ def validate_assertion_install(
 ) -> Path:
     """Require the exact public source files, safe modes, and compiler provenance."""
     prefix = env_prefix.resolve()
-    source_root = prefix / "share" / "mtest" / "assertions-src"
+    source_root = prefix / INSTALLED_ASSERTION_SOURCE_RELATIVE
     for relative in (
-        Path("."),
-        Path("share"),
-        Path("share/mtest"),
-        Path("share/mtest/assertions-src"),
+        *reversed(INSTALLED_ASSERTION_SOURCE_RELATIVE.parents),
+        INSTALLED_ASSERTION_SOURCE_RELATIVE,
     ):
         component = prefix / relative
         try:
@@ -510,7 +512,7 @@ def validate_assertion_install(
                 f"installed assertion source must have {requirement}: "
                 f"{relative} has {mode:o}"
             )
-        checkout_source = REPO_ROOT / "assertions-src" / relative
+        checkout_source = CHECKOUT_ASSERTION_SOURCE_ROOT / relative
         if source.read_bytes() != checkout_source.read_bytes():
             raise PackageCheckError(
                 f"installed assertion source bytes differ: {relative}"
@@ -519,7 +521,7 @@ def validate_assertion_install(
         directory = source_root / relative
         _require_safe_assertion_directory(
             directory,
-            Path("share/mtest/assertions-src") / relative,
+            INSTALLED_ASSERTION_SOURCE_RELATIVE / relative,
         )
     if list(source_root.rglob("*.mojopkg")):
         raise PackageCheckError("installed assertion source contains a mojopkg")
@@ -822,7 +824,7 @@ def stage_assertion_source_probe(
         env_prefix,
         scope=f"{label}-source",
     )
-    checkout_source = str((REPO_ROOT / "assertions-src").resolve())
+    checkout_source = str(CHECKOUT_ASSERTION_SOURCE_ROOT.resolve())
 
     performed_optimizations: list[str] = []
     for optimization, suffix in ASSERTION_OPTIMIZATIONS:
@@ -1010,9 +1012,15 @@ def _normalize_assertion_times(output: str) -> str:
     )
     for unstable_line in (
         "    | Unhandled exception caught during execution: ",
-        "    | Running 2 tests for <REPO>/examples/assertions/test_diagnostics.mojo ",
+        (
+            "    | Running 2 tests for "
+            "<REPO>/companions/assertions/examples/test_diagnostics.mojo "
+        ),
         "    | Summary [ <TIME> ] 2 tests run: 1 passed , 1 failed , 0 skipped ",
-        "    | Test suite' <REPO>/examples/assertions/test_diagnostics.mojo 'failed! ",
+        (
+            "    | Test suite' "
+            "<REPO>/companions/assertions/examples/test_diagnostics.mojo 'failed! "
+        ),
         "    | ",
     ):
         normalized = normalized.replace(
@@ -1092,8 +1100,9 @@ def stage_assertion_example(
         )
     documented = readme_assertion_example_block(readme)
     actual = (
-        "$ mtest --no-config --show-output failures -I "
-        "<PREFIX>/share/mtest/assertions-src examples/assertions\n" + normalized
+        "$ mtest --no-config --show-output failures \\\n"
+        "    -I <PREFIX>/share/mtest/companions/assertions/src \\\n"
+        "    companions/assertions/examples\n" + normalized
     )
     normalized_documented = _normalize_assertion_times(documented)
     if normalized_documented != actual:

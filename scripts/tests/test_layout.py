@@ -15,6 +15,11 @@ from scripts.checks import layout
 from scripts.harness import aggregate
 
 
+CHECKOUT_COMPANION_ROOT = Path("companions/assertions")
+CHECKOUT_ASSERTION_SOURCE_ROOT = CHECKOUT_COMPANION_ROOT / "src"
+CHECKOUT_ASSERTION_EXAMPLE_ROOT = CHECKOUT_COMPANION_ROOT / "examples"
+
+
 class LayoutInventoryPolicyTests(unittest.TestCase):
     def test_repository_root_tracks_the_nested_checker(self) -> None:
         self.assertEqual(layout.REPO_ROOT, Path(__file__).resolve().parents[2])
@@ -109,25 +114,48 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
                 path.write_text("# no assertion precompile\n", encoding="utf-8")
             recipe = repo / "recipe" / "build.sh"
             recipe.parent.mkdir(parents=True, exist_ok=True)
-            recipe.write_text(
-                "# no assertion precompile\n"
-                + "".join(
-                    f"install -m 644 {relative} destination\n"
-                    for relative in layout.ASSERTION_SOURCE_PATHS
-                ),
-                encoding="utf-8",
+            recipe_contents = "# no assertion precompile\n" + "".join(
+                f"install -m 644 {relative} destination\n"
+                for relative in layout.ASSERTION_SOURCE_PATHS
             )
+            recipe.write_text(recipe_contents, encoding="utf-8")
 
             layout.check_assertion_companion_layout(repo)
-            unregistered_example = repo / "examples" / "perf" / "bench.mojo"
-            unregistered_example.parent.mkdir(parents=True)
+            unregistered_example = repo / CHECKOUT_COMPANION_ROOT / "unexpected.mojo"
+            unregistered_example.parent.mkdir(parents=True, exist_ok=True)
             unregistered_example.write_text("# accidental example\n", encoding="utf-8")
             with self.assertRaisesRegex(
                 AssertionError,
-                "assertion example membership mismatch",
+                "assertion companion membership mismatch",
             ):
                 layout.check_assertion_companion_layout(repo)
             unregistered_example.unlink()
+
+            recipe.write_text(
+                recipe_contents
+                + "mojo precompile companions/assertions/src/mtest/__init__.mojo\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, "precompiles"):
+                layout.check_assertion_companion_layout(repo)
+
+            recipe.write_text(
+                recipe_contents + "cp -r companions/assertions destination\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, "recursive source copy"):
+                layout.check_assertion_companion_layout(repo)
+
+            missing_install = next(iter(layout.ASSERTION_SOURCE_PATHS))
+            recipe.write_text(
+                recipe_contents.replace(
+                    f"install -m 644 {missing_install} destination\n", ""
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, "recipe install membership"):
+                layout.check_assertion_companion_layout(repo)
+            recipe.write_text(recipe_contents, encoding="utf-8")
 
             with (
                 mock.patch.object(
@@ -142,12 +170,18 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
             ):
                 layout.check_assertion_companion_layout(repo)
 
-            extra = repo / "assertions-src" / "mtest" / "assertions" / "unexpected.mojo"
+            extra = (
+                repo
+                / CHECKOUT_ASSERTION_SOURCE_ROOT
+                / "mtest"
+                / "assertions"
+                / "unexpected.mojo"
+            )
             extra.write_text("# accidental public module\n", encoding="utf-8")
 
             with self.assertRaisesRegex(
                 AssertionError,
-                "assertion source membership mismatch",
+                "assertion companion membership mismatch",
             ):
                 layout.check_assertion_companion_layout(repo)
 

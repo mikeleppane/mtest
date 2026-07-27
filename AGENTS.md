@@ -19,7 +19,7 @@ Non-goals: not a property-testing framework and not a TestSuite replacement.
 The optional source-only `mtest.assertions` companion improves failure detail;
 it still raises ordinary errors inside TestSuite and owns no discovery, report
 framing, or runner outcome. Zero runtime dependencies: runner logic under
-`src/` and companion logic under `assertions-src/` are pure Mojo; the
+`src/` and companion logic under `companions/assertions/src/` are pure Mojo; the
 exec-private POSIX adapter under `native/` is compiled and statically linked at
 build time; Python appears only in build-time tooling under `scripts/` and
 test-only subprocess actors under `tests/fixtures/exec/`.
@@ -358,7 +358,7 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `exec` | `src/mtest/exec` (the POSIX process adapter) |
 | `session` | `src/mtest/session` (orchestration) |
 | `report` | `src/mtest/report` (event consumers, reporters) |
-| `assertions` | source-only companion under `assertions-src/mtest/assertions` |
+| `assertions` | source-only companion under `companions/assertions/src/mtest/assertions` |
 | `cli` | `src/mtest/cli` (arg parsing, main) |
 | `cache` | in-session build/collection reuse |
 | `test` | test infrastructure (`scripts/harness/{classified,dogfood}.py`, `scripts/build/mojo_package.sh`, shared helpers) |
