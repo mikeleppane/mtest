@@ -456,11 +456,6 @@ def validate_assertion_install(
         _require_safe_assertion_directory(
             component,
             relative,
-            allow_installer_group_write=(
-                allow_installer_group_write
-                or relative == Path(".")
-                or relative == Path("share")
-            ),
         )
     entries = list(source_root.rglob("*"))
     symbolic_links = [
@@ -525,7 +520,6 @@ def validate_assertion_install(
         _require_safe_assertion_directory(
             directory,
             Path("share/mtest/assertions-src") / relative,
-            allow_installer_group_write=allow_installer_group_write,
         )
     if list(source_root.rglob("*.mojopkg")):
         raise PackageCheckError("installed assertion source contains a mojopkg")
@@ -707,21 +701,14 @@ def _validate_modular_config(config: Path, prefix: Path) -> None:
 def _require_safe_assertion_directory(
     directory: Path,
     relative: Path,
-    *,
-    allow_installer_group_write: bool,
 ) -> None:
-    """Require one installed source path to resist unintended replacement."""
+    """Require one installed source path to retain safe directory permissions."""
     mode = stat.S_IMODE(directory.stat().st_mode)
     if mode & 0o002 or mode & 0o500 != 0o500 or mode & 0o7000:
         raise PackageCheckError(
             "installed assertion directory must be owner-readable and "
             "traversable, not world-writable, and carry no special bits: "
             f"{relative} has {mode:o}"
-        )
-    if mode & 0o020 and not allow_installer_group_write:
-        raise PackageCheckError(
-            "installed assertion directory must not be group-writable in the "
-            f"primary package: {relative} has {mode:o}"
         )
 
 

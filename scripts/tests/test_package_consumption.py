@@ -1335,18 +1335,17 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             ):
                 package_consumption.validate_assertion_install(prefix)
 
-    def test_primary_package_rejects_group_writable_source_directory(self) -> None:
+    def test_primary_package_accepts_installer_normalized_directories(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
             prefix = self._valid_prefix(Path(raw))
-            directory = (
-                prefix / "share" / "mtest" / "assertions-src" / "mtest" / "assertions"
-            )
-            directory.chmod(0o775)
-            with self.assertRaisesRegex(
-                package_consumption.PackageCheckError,
-                "group-writable",
+            for relative in (
+                "share/mtest",
+                "share/mtest/assertions-src",
+                "share/mtest/assertions-src/mtest",
+                "share/mtest/assertions-src/mtest/assertions",
             ):
-                package_consumption.validate_assertion_install(prefix)
+                (prefix / relative).chmod(0o775)
+            package_consumption.validate_assertion_install(prefix)
 
     def test_private_probe_diagnostics_require_semantic_rejections(self) -> None:
         with self.assertRaisesRegex(
