@@ -404,13 +404,23 @@ def assertion_compile_command(
 def assertion_probe_environment(
     env_prefix: Path,
     target: PackagePlatform | None = None,
+    *,
+    scope: str = "probe",
 ) -> dict[str, str]:
     """Return a compiler environment isolated onto one installed prefix."""
     prefix = env_prefix.resolve()
     selected = target or host_platform()
+    environment_root = SCRATCH_ROOT / "assertion-environments" / scope
+    if environment_root.exists():
+        shutil.rmtree(environment_root)
+    home = environment_root / "home"
+    cache = environment_root / "cache"
+    home.mkdir(parents=True)
+    cache.mkdir()
     environment = {
         "PATH": "/usr/bin:/bin",
-        "HOME": os.environ.get("HOME", "/tmp"),
+        "HOME": str(home),
+        "MODULAR_CACHE_DIR": str(cache),
         "MODULAR_HOME": str(prefix / "share" / "max"),
     }
     environment.update(dict.fromkeys(selected.loader_env_names, str(prefix / "lib")))
@@ -632,6 +642,19 @@ def _validate_modular_config(config: Path, prefix: Path) -> None:
             mismatches.append(
                 f"[{section}] {option}: expected {expected_value!r}, got {observed!r}"
             )
+    import_path = prefix / "lib" / "mojo"
+    try:
+        resolved_import_path = import_path.resolve(strict=True)
+    except OSError as exc:
+        mismatches.append(f"[mojo-max] import_path: cannot resolve: {exc}")
+    else:
+        if (
+            not resolved_import_path.is_relative_to(prefix)
+            or not resolved_import_path.is_dir()
+        ):
+            mismatches.append(
+                "[mojo-max] import_path: must resolve to a directory inside prefix"
+            )
     for section, option in required_prefix_paths:
         observed = parser.get(section, option, raw=True, fallback=None)
         if observed is None:
@@ -660,6 +683,20 @@ def _validate_modular_config(config: Path, prefix: Path) -> None:
                 + ", got "
                 + repr(shared_libs)
             )
+        runtime_library = prefix / "lib" / (f"libAsyncRTMojoBindings{library_suffix}")
+        try:
+            resolved_runtime_library = runtime_library.resolve(strict=True)
+        except OSError as exc:
+            mismatches.append(f"[mojo-max] shared_libs: cannot resolve: {exc}")
+        else:
+            if (
+                not resolved_runtime_library.is_relative_to(prefix)
+                or not resolved_runtime_library.is_file()
+            ):
+                mismatches.append(
+                    "[mojo-max] shared_libs: runtime library must resolve to "
+                    "a regular file inside prefix"
+                )
     if mismatches:
         raise PackageCheckError(
             "installed modular.cfg does not name its own prefix exactly: "
@@ -794,7 +831,10 @@ def stage_assertion_source_probe(
     positive.write_text(ASSERTION_PROBE_SOURCE, encoding="utf-8")
     negative.write_text(PRIVATE_IMPORT_PROBE_SOURCE, encoding="utf-8")
     private_helper.write_text(PRIVATE_HELPER_PROBE_SOURCE, encoding="utf-8")
-    environment = assertion_probe_environment(env_prefix)
+    environment = assertion_probe_environment(
+        env_prefix,
+        scope=f"{label}-source",
+    )
     checkout_source = str((REPO_ROOT / "assertions-src").resolve())
 
     performed_optimizations: list[str] = []
@@ -1009,7 +1049,10 @@ def stage_assertion_example(
         prefix,
         allow_installer_group_write=allow_installer_group_write,
     )
-    environment = assertion_probe_environment(prefix)
+    environment = assertion_probe_environment(
+        prefix,
+        scope=completion_id or "assertion-example",
+    )
     environment["PATH"] = str(prefix / "bin") + ":/usr/bin:/bin"
     command = [
         str(mtest_bin.resolve()),
@@ -1078,7 +1121,8 @@ def stage_assertion_example(
         raise PackageCheckError(
             "README assertion example differs from installed output:\n" + diff
         )
-    capture = SCRATCH_ROOT / "assertion-example-output.txt"
+    capture_name = f"{completion_id or 'assertion-example'}-output.txt"
+    capture = SCRATCH_ROOT / capture_name
     capture.write_text(actual, encoding="utf-8")
     print(actual, end="", flush=True)
     print(

@@ -1052,6 +1052,26 @@ class AssertionPackageCommandTests(unittest.TestCase):
             environment["LD_LIBRARY_PATH"],
             "/scratch/prefix/lib",
         )
+        self.assertEqual(
+            environment["HOME"],
+            str(
+                package_consumption.SCRATCH_ROOT
+                / "assertion-environments"
+                / "probe"
+                / "home"
+            ),
+        )
+        self.assertEqual(
+            environment["MODULAR_CACHE_DIR"],
+            str(
+                package_consumption.SCRATCH_ROOT
+                / "assertion-environments"
+                / "probe"
+                / "cache"
+            ),
+        )
+        self.assertTrue(Path(environment["HOME"]).is_dir())
+        self.assertTrue(Path(environment["MODULAR_CACHE_DIR"]).is_dir())
         dev_prefix = str(package_consumption.REPO_ROOT / ".pixi")
         self.assertFalse(any(dev_prefix in value for value in environment.values()))
 
@@ -1180,6 +1200,10 @@ class AssertionPackageLayoutTests(unittest.TestCase):
         mojo.parent.mkdir(parents=True)
         mojo.write_text("#!/bin/sh\n", encoding="utf-8")
         mojo.chmod(0o755)
+        (prefix / "lib" / "mojo").mkdir(parents=True)
+        (prefix / "lib" / f"libAsyncRTMojoBindings{library_suffix}").write_bytes(
+            b"runtime"
+        )
         config = prefix / "share" / "max" / "modular.cfg"
         config.parent.mkdir(parents=True)
         config.write_text(
@@ -1503,6 +1527,37 @@ class AssertionPackageLayoutTests(unittest.TestCase):
                     "modular.cfg",
                 ):
                     package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_an_import_path_symlink_that_escapes_the_prefix(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            root = Path(raw)
+            prefix = self._valid_prefix(root)
+            external = root / "external-imports"
+            external.mkdir()
+            import_path = prefix / "lib" / "mojo"
+            import_path.rmdir()
+            import_path.symlink_to(external, target_is_directory=True)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "import_path.*inside prefix",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_a_runtime_library_symlink_that_escapes_the_prefix(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            root = Path(raw)
+            prefix = self._valid_prefix(root)
+            library_suffix = ".dylib" if sys.platform == "darwin" else ".so"
+            external = root / f"external-runtime{library_suffix}"
+            external.write_bytes(b"foreign runtime")
+            runtime = prefix / "lib" / (f"libAsyncRTMojoBindings{library_suffix}")
+            runtime.unlink()
+            runtime.symlink_to(external)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "runtime library.*inside prefix",
+            ):
+                package_consumption.validate_assertion_install(prefix)
 
     def test_rejects_flag_encoded_shared_library_search_paths(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
