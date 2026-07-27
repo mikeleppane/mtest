@@ -26,7 +26,7 @@ Treat commits as save points, branches as sandboxes, history as documentation.
 **Working pattern:**
 
 ```text
-implement one slice → pixi run fmt → pixi run ci → commit → next slice
+implement one slice → format → focused checks → commit → next slice
 ```
 
 Not `implement everything → hope it works → one giant commit`. Each green
@@ -137,12 +137,13 @@ man page) is fine.
 
 ## Atomic commits
 
-One logical change per commit, each passing the floor (`pixi run fmt`, `pixi run
-ci`). If the subject needs "and", split. Aim for ~100 lines; ~300 is fine for one
-logical change; ~1000+ is two changes in a trench coat — split. Don't mix
-formatter churn with behavior; don't mix a refactor with a feature. (Committing a
-freshly regenerated transcript set alongside the fixture or pin change that
-legitimately required it is one logical change, not two.)
+One logical change per commit, each passing formatting, static checks, and the
+smallest focused gates that cover the diff. Hosted required checks own the
+complete floor. If the subject needs "and", split. Aim for ~100 lines; ~300 is
+fine for one logical change; ~1000+ is two changes in a trench coat — split.
+Don't mix formatter churn with behavior; don't mix a refactor with a feature.
+(Committing a freshly regenerated transcript set alongside the fixture or pin
+change that legitimately required it is one logical change, not two.)
 
 ## Breaking changes
 
@@ -159,7 +160,9 @@ the transcript format, and the frozen CLI contract are **Ask-first** boundaries
 ## Commit workflow
 
 1. **Review staged changes** — `git diff --staged`. One logical change? If not, split.
-2. **Floor** — `pixi run fmt` (leaves no changes), then `pixi run ci` (green).
+2. **Local verification** — format the changed languages, run their static
+   checks, then run the smallest focused gates that cover the diff. Do not run
+   `pixi run ci` routinely; required hosted checks own the exhaustive verdict.
 3. **Never-commit paths** — `.pixi/`, `build/`, `*.mojopkg`, `.mtest-cache/`,
    `__pycache__/`, `docs/plans/`. These are gitignored; keep them out.
 4. **Quick secret scan** — `git diff --staged | grep -iE "password|secret|api[_-]?key|-----BEGIN [A-Z ]*PRIVATE KEY|AKIA[0-9A-Z]{16}"`.
@@ -205,5 +208,6 @@ contract change).
 - [ ] Regenerated transcripts name the oracle-side reason
 - [ ] Breaking changes carry `!` and a `BREAKING CHANGE:` footer
 - [ ] **No AI/assistant attribution anywhere**
-- [ ] `pixi run fmt` leaves no changes; `pixi run ci` passes
+- [ ] Formatting leaves no changes; affected static and focused gates pass
+- [ ] After push, required hosted checks provide the exhaustive merge verdict
 - [ ] No never-commit paths (`.pixi/`, `build/`, `*.mojopkg`, `.mtest-cache/`, `docs/plans/`)

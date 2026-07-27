@@ -167,8 +167,9 @@ native-check = { cmd = "python -m scripts.tests.test_native && python -m scripts
 # the compiler instrumentation and fail-closed harness remain effective.
 asan-check = "python -m scripts.tests.test_asan && python -m scripts.checks.memory.asan"
 
-# The memory-safety aggregate the local floor runs, and the standalone entry
-# point for running just the two lanes. On linux-64 the platform-scoped
+# The memory-safety aggregate the complete local mirror runs, and the
+# standalone entry point for running just the two lanes. On linux-64 the
+# platform-scoped
 # override below replaces this command with the real dependency edge onto
 # `asan-check` and `valgrind-check`; this base definition is what every other
 # platform executes, and it reports the uncovered lanes loudly instead of
@@ -316,9 +317,10 @@ depends-on = [
     "transcripts-check",
 ]
 
-# The canonical serial local floor. Hosted CI runs the exact preflight above,
-# then gives each independent behavioral gate a fresh parallel matrix cell;
-# local development keeps one ordered aggregate for reproducible handoff.
+# The complete serial local mirror. Hosted CI runs the exact preflight above,
+# then gives each independent behavioral gate a fresh parallel matrix cell.
+# Local agents use focused tasks during iteration; this aggregate is for an
+# explicit exhaustive run, hosted failure reproduction, or release rehearsal.
 # contract-check-strict's position here is a readability choice, not a
 # freshness one: `build-bin` is a single shared Pixi task node, and `test`,
 # `dogfood-check`, `e2e`, and `ci-preflight`'s `readme-help-check` already
@@ -344,10 +346,11 @@ valgrind = "==3.27.1"
 
 # On linux-64 the memory aggregate IS the two lanes. Hosted CI gives each one
 # its own matrix cell and never invokes `pixi run ci`, so this edge exists to
-# close the gap that made a green local floor say nothing about memory safety:
-# before it, both lanes were reachable only by naming them, which meant in
-# practice they ran hosted or not at all. It sits last in `ci` because it is
-# the broadest and slowest member. It needs nothing from the earlier members:
+# close the gap that made a green complete local mirror say nothing about
+# memory safety: before it, both lanes were reachable only by naming them,
+# which meant in practice they ran hosted or not at all. It sits last in `ci`
+# because it is the broadest and slowest member. It needs nothing from the
+# earlier members:
 # both lanes compile the suites and the CLI from source with `-I src` so every
 # frame is instrumented, and neither reads `build/mtest.mojopkg` or
 # `build/mtest`. `pixi run ci-memory` standalone is therefore identical to how

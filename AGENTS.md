@@ -177,9 +177,9 @@ approved network contract (rattler-build solves against the pinned Modular and
 conda-forge channels; nothing uploads or authenticates). Do not describe those
 jobs as hermetic or collapse them into the Valgrind exception.
 
-## Toolchain and the quality floor
+## Toolchain and verification
 
-The floor before any change is done, all green, in this order:
+The complete repository verification catalog is:
 
 ```text
 pixi run fmt               # format Mojo in place (run locally before committing)
@@ -203,10 +203,35 @@ pixi run e2e               # exact CLI exits and output against e2e/manifest.jso
 pixi run ci-memory         # Linux: both memory lanes, ASan/LSan then Memcheck
 ```
 
+Hosted GitHub required checks enforce the applicable platform and product
+lanes described below. `py-check` remains a local requirement when Python
+changes because its pinned tools are intentionally absent from hosted CI.
+
+### Local agentic development loop
+
+Do not run the complete serial floor before every local commit. It is too slow
+for iterative agentic work and duplicates the required hosted checks.
+
+Before a local commit:
+
+1. Run `pixi run fmt` for Mojo changes and `pixi run py-fmt` plus
+   `pixi run py-check` for Python changes.
+2. Run the smallest checker and focused test modules that directly cover the
+   diff. A product-facing change also runs its affected product gate:
+   `assertions-check`, `dogfood-check`, `e2e`, `contract-check`,
+   `package-check`, or a memory checker as applicable.
+3. Stage the exact bytes, run the selected gates against that staged state, and
+   record each gate's own exit status.
+
+`pixi run ci` remains the complete serial local mirror for an explicit release
+rehearsal, hosted failure reproduction, or a human-requested exhaustive run. It
+is not a routine per-commit requirement. The required GitHub checks are the
+authoritative exhaustive merge verdict.
+
 `fmt-check` formats each real Mojo source under `src`, `companions`, `tests`,
 and `e2e` in a separate deterministic, no-symlink-following invocation, then
 runs `git diff --exit-code`, so it fails on ANY unstaged change, including one
-made after a long CI run started. Stage the work first, then gate; a result
+made after a long check started. Stage the work first, then gate; a result
 produced against different bytes than you commit is not a result. The same
 applies to reading outcomes: a background wrapper's exit status is the wrapper's,
 not the gate's — read the gate's own marker.
@@ -215,7 +240,7 @@ not the gate's — read the gate's own marker.
 safety-check -> postfork-check -> native-check -> junit-check -> build ->
 readme-help-check -> junit-render-check -> transcripts-check` in that exact
 fail-fast order; the
-canonical local `pixi run ci` is serial: `ci-preflight ->
+complete local `pixi run ci` mirror is serial: `ci-preflight ->
 test -> assertions-check -> dogfood-check -> e2e -> contract-check-strict ->
 ci-memory`.
 
@@ -231,7 +256,7 @@ in the tree. It covers `scripts/` and `tests/fixtures/exec/`, which is every
 Python file the repo tracks. `pyproject.toml` holds the config and no
 `[project]`/`[build-system]`, because this repo is not a Python package.
 
-`ci-memory` is how the local floor covers memory safety. On linux-64 a
+`ci-memory` is how the complete local mirror covers memory safety. On linux-64 a
 `[target.linux-64.tasks]` override makes it `asan-check` then
 `valgrind-check`; measured against clean main those cost about 90 seconds and
 about 3 minutes, which is why they belong in the ordinary floor rather than in
@@ -265,7 +290,7 @@ configured required check names and must stay stable. `native-check` depends
 on `postfork-check`, so the native gate alone cannot skip the child call-graph
 audit.
 
-The whole local floor compiles for the host target only, so it is blind to a
+The complete local mirror compiles for the host target only, so it is blind to a
 macOS-only compile failure: a `comptime` branch, `external_call` signature, or
 struct-layout offset that is wrong for Darwin passes every Linux gate and reds
 the hosted macOS preflight instead, before any test runs. A change that touches

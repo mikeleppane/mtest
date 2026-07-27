@@ -1148,15 +1148,17 @@ The tasks:
 | `pixi run dogfood-check` | run three focused probes through the built `mtest` binary itself |
 | `pixi run e2e` | drive `build/mtest` against the committed known-outcome tree under `e2e/` and assert exact exit codes and output structure |
 | `pixi run transcripts-check` | regenerate the `TestSuite` protocol snapshots to a temp dir and diff byte-for-byte |
-| `pixi run ci` | the canonical serial floor: preflight checks, then `test`, `assertions-check`, `dogfood-check`, `e2e`, the strict contract, and the memory lanes |
+| `pixi run ci` | the complete serial local mirror: preflight checks, then `test`, `assertions-check`, `dogfood-check`, `e2e`, the strict contract, and the memory lanes |
 | `pixi run asan-check` | Linux: build and run the highest-risk exec suites under ASan/LSan |
 | `pixi run valgrind-check` | Linux: run the exec/native coverage under Memcheck |
 | `pixi run ci-memory` | Linux: both memory lanes together, the way `ci` runs them |
 
-`pixi run ci` opens with a fail-fast preflight (version, formatting,
+`pixi run ci` is available for an explicit exhaustive local run. Routine
+development uses the focused tasks above; required hosted checks are the merge
+verdict. The complete mirror opens with a fail-fast preflight (version, formatting,
 harness membership, unsafe-Mojo inventory, post-fork audit, native ABI,
 JUnit oracle, build, rendered-JUnit, and transcript checks) and closes with
-`ci-memory`, so a green local floor covers memory safety rather than deferring
+`ci-memory`, so a green complete local run covers memory safety rather than deferring
 it. On Linux that is ASan/LSan then Memcheck, roughly four minutes together;
 elsewhere it reports the two lanes as uncovered and names the Linux cells that
 own them. Hosted CI runs

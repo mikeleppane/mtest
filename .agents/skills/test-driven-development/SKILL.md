@@ -279,9 +279,12 @@ float legitimately appears is a timing number under `bench` — those are
    binaries for `exec`, the known-outcome tree for `session`) instead of
    re-deriving expected output by hand — those are already the oracle,
    self-verified at generation time.
-5. **Run the floor** — `pixi run fmt`, the exhaustive `pixi run test`, and any
-   affected product-level gate (`pixi run dogfood-check` or `pixi run e2e`), or
-   use `pixi run ci` for the complete chain including `transcripts-check`.
+5. **Run focused local verification** — format the changed languages, run the
+   exact test module that proved the behavior, and add each affected
+   product-level gate (`dogfood-check`, `e2e`, `assertions-check`,
+   `package-check`, or another direct consumer). Required hosted checks own the
+   exhaustive floor; use `pixi run ci` locally only when explicitly requested
+   or reproducing a hosted failure.
 
 ---
 

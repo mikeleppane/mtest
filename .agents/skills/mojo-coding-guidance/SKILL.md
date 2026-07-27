@@ -46,17 +46,20 @@ Before any Mojo change is done:
 ```bash
 pixi run fmt                 # mojo format — never hand-format
 pixi run test-file -- PATH  # focused classified module while coding
-pixi run test                # every classified unit + integration test
+pixi run test                # when a Mojo change spans classified modules
 pixi run e2e                 # after CLI/session/exec/reporter behavior changes
-pixi run ci                  # complete fail-fast floor before a PR
+pixi run ci                  # explicit complete local mirror, not per-commit
 ```
 
 `mojo format` is the arbiter of layout. Don't argue with it in review — if it
-reformats your code, that's the house style. Remember tests run against the
-**precompiled package**: after a `src/` edit, `pixi run build` before running a
-single test file by hand, or the test exercises stale code. `dogfood-check` is
-the separate three-probe real-pipeline gate; unit/integration tasks remain
-useful maintainer diagnostics rather than mandatory sequential phases.
+reformats your code, that's the house style. Required hosted checks own the
+exhaustive pre-merge and memory-safety verdict; local agents run the smallest
+focused checks and product gates that cover their diff. Remember tests run
+against the **precompiled package**: after a `src/` edit, `pixi run build`
+before running a single test file by hand, or the test exercises stale code.
+`dogfood-check` is the separate three-probe real-pipeline gate;
+unit/integration tasks remain useful maintainer diagnostics rather than
+mandatory sequential phases.
 
 ---
 
@@ -452,7 +455,9 @@ recur in FFI/subprocess/parser code:
 
 ## Review checklist for a Mojo change
 
-- [ ] `pixi run fmt` clean, `pixi run ci` green (fmt + build + transcripts + tests)
+- [ ] `pixi run fmt` clean; affected focused and product gates green
+- [ ] Required hosted checks own the complete build, transcript, test, and
+      memory verdict
 - [ ] Every public function states what it does + mutate/allocate/raise
 - [ ] Binaries are build-then-executed; `mojo run` appears nowhere
 - [ ] Crash ≠ fail preserved: `Signaled` never collapsed to `Exited`; status decoded structurally (never 128+N); a deadline kill is a distinct `TimedOut`
