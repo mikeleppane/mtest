@@ -22,7 +22,6 @@ from typing import NoReturn
 from scripts.checks import native_abi as native_abi_check
 from scripts.checks.reports import json_stream as json_stream_oracle
 from scripts.checks.reports import junit as junit_oracle
-from scripts.harness import aggregate
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -909,10 +908,19 @@ def check_cli(env: dict[str, str]) -> None:
 
 
 def compile_and_run_test(source: Path, env: dict[str, str]) -> None:
-    """Build one suite from product sources, then execute it directly in Memcheck."""
+    """Build one suite from product sources, then execute it directly in Memcheck.
+
+    Every classified module under `tests/unit` and `tests/integration` now
+    declares its own `main()`, so the source itself is a complete, directly
+    buildable entrypoint. There is no generated `*_main.mojo` wrapper to bolt
+    on: `mojo build` runs straight on `source`. `-I .` is dropped too -- it
+    existed only so a generated wrapper's `import tests.unit.<module>` could
+    resolve the repo-root-relative module path; a source file built directly
+    never spells that import (verified: no `tests/unit/*.mojo` or
+    `tests/integration/*.mojo` file imports another via the `tests.*` package
+    path), so the include has nothing left to resolve.
+    """
     binary = OUT / source.stem
-    entrypoint = OUT / f"{source.stem}_main.mojo"
-    aggregate.write_entrypoint(ROOT, entrypoint, [source])
     compiled = run(
         [
             "mojo",
@@ -921,12 +929,10 @@ def compile_and_run_test(source: Path, env: dict[str, str]) -> None:
             "--target-cpu",
             VALGRIND_TARGET_CPU,
             "-I",
-            ".",
-            "-I",
             "src",
             "-I",
             "tests/support",
-            str(entrypoint),
+            str(source.relative_to(ROOT)),
             "-o",
             str(binary),
             "-Xlinker",
