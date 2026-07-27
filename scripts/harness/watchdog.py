@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 from dataclasses import dataclass
+import errno
 import math
 import os
 from pathlib import Path
@@ -315,7 +316,7 @@ class _DrainState:
     """The live drainers for one captured child, and how to stop them."""
 
     threads: tuple[threading.Thread, ...]
-    """The started drainer threads, in stdout-then-stderr order."""
+    """The prepared drainer threads, in stdout-then-stderr order."""
     tees: tuple[_StreamTee, ...]
     """The caller-stream writers those drainers own, in the same order."""
     stop: threading.Event
@@ -417,18 +418,18 @@ def _tee_stream(
             source.close()
 
 
-def _start_drainers(
+def _prepare_drainers(
     process: subprocess.Popen[bytes],
     retention: MarkerRetention,
 ) -> _DrainState:
-    """Start one drainer per captured pipe, before any blocking child wait.
+    """Prepare one drainer per captured pipe without starting a thread.
 
     Args:
         process: The freshly spawned child owning both captured pipes.
         retention: Marker state the stdout drainer updates in place.
 
     Returns:
-        The started drainers, their caller-stream writers, and their stop flag.
+        The prepared drainers, their caller-stream writers, and their stop flag.
     """
     stop = threading.Event()
     targets = (
@@ -449,7 +450,6 @@ def _start_drainers(
             args=(source, tee, marker, stop, reached_eof),
             daemon=True,
         )
-        thread.start()
         threads.append(thread)
         tees.append(tee)
         sources.append(source)
@@ -464,12 +464,20 @@ def _start_drainers(
     )
 
 
+def _start_drainers(state: _DrainState) -> None:
+    """Start every prepared drainer after its state is caller-owned."""
+    for thread in state.threads:
+        thread.start()
+
+
 def _await_drainer_eof(state: _DrainState | None) -> bool:
     """Give every drainer a bounded opportunity to observe end of file."""
     if state is None:
         return True
     deadline = time.monotonic() + DRAIN_SETTLE_SECONDS
     for thread in state.threads:
+        if thread.ident is None:
+            continue
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
@@ -538,7 +546,10 @@ def _seal_drainers(state: _DrainState | None) -> None:
     if state.retention is not None:
         state.retention.freeze()
     for index, tee in enumerate(state.tees):
-        if tee.seal():
+        thread_started = (
+            index >= len(state.threads) or state.threads[index].ident is not None
+        )
+        if tee.seal() and thread_started:
             continue
         # This drainer is parked in a write to a caller stream that is not
         # draining. Release the resources it holds rather than abandoning them.
@@ -549,7 +560,8 @@ def _seal_drainers(state: _DrainState | None) -> None:
     # here rather than left for the interpreter. Threads still parked in a
     # write fall through untouched; the supervisor never waits on them.
     for thread in state.threads:
-        thread.join(_SEAL_JOIN_SECONDS)
+        if thread.ident is not None:
+            thread.join(_SEAL_JOIN_SECONDS)
 
 
 def _signal_group(pid: int, signum: int) -> bool:
@@ -633,9 +645,21 @@ def _wait_for_exit_without_reaping(
                 if remaining <= 0:
                     return False
                 try:
-                    return bool(queue.control(changes, 1, remaining))
+                    events = queue.control(changes, 1, remaining)
                 except InterruptedError:
-                    changes = []
+                    continue
+                changes = []
+                if not events:
+                    continue
+                observed = events[0]
+                if observed.flags & select.KQ_EV_ERROR:  # type: ignore[attr-defined]
+                    error_number = observed.data
+                    if error_number == errno.ESRCH:
+                        return True
+                    raise OSError(error_number, os.strerror(error_number))
+                if observed.fflags & select.KQ_NOTE_EXIT:  # type: ignore[attr-defined]
+                    return True
+                raise RuntimeError("Darwin process event did not report exit")
         finally:
             queue.close()
     raise RuntimeError(f"unsupported watchdog platform: {platform_name}")
@@ -840,7 +864,8 @@ def run_command(
                 # Both pipes must be draining before any blocking wait: a child
                 # that outruns a 64 KiB pipe buffer would otherwise block on
                 # write while the supervisor blocks on wait.
-                drain_state = _start_drainers(process, marker_retention)
+                drain_state = _prepare_drainers(process, marker_retention)
+                _start_drainers(drain_state)
             if pending_signum is not None:
                 # TRY301 is suppressed here: this raise IS the cancellation
                 # path, caught by the arm that closes this try. Abstracting it
@@ -851,21 +876,20 @@ def run_command(
                 try:
                     _terminate_process_group(process)
                     process_group_cleaned = True
+                    try:
+                        _settle_drainers(drain_state)
+                    except _WatchdogCancellation:
+                        # The group is already swept and the deadline sentinel
+                        # is the timeout's standing proof, so a cancellation in
+                        # the final drain cannot un-time-out an ended child.
+                        _seal_drainers(drain_state)
+                    _notify_timeout(source, step, timeout_seconds)
+                    return validate_deadline_proof(TimedOut(), deadline_sentinel)
                 finally:
+                    # Keep deadline attribution atomic through its diagnostic
+                    # and proof validation. Managed signals are recorded during
+                    # this interval but cannot replace a timeout already proven.
                     cleanup_in_progress = False
-                try:
-                    _settle_drainers(drain_state)
-                except _WatchdogCancellation:
-                    # The group is already swept and the deadline sentinel is
-                    # the timeout's standing proof, so a cancellation arriving
-                    # in the final drain cannot un-time-out an ended child.
-                    # First-signal precedence is already recorded either way.
-                    # Seal explicitly: the aborted settle never reached its own
-                    # seal, and the diagnostic below must not be overtaken by a
-                    # drainer that is still live.
-                    _seal_drainers(drain_state)
-                _notify_timeout(source, step, timeout_seconds)
-                return validate_deadline_proof(TimedOut(), deadline_sentinel)
             capture_complete_before_sweep = _await_drainer_eof(drain_state)
             # The unreaped leader still pins this process-group ID. Sweep now,
             # before the wait below releases ownership and allows PID reuse.
@@ -919,11 +943,15 @@ def run_command(
     # cleanup must not replace the detail that caused it.
     except Exception as exc:  # noqa: BLE001
         detail = f"watchdog internal failure: {exc}"
-        if process is not None and process.poll() is None:
+        if process is not None and not process_group_cleaned:
+            cleanup_in_progress = True
             try:
                 _terminate_process_group(process)
+                process_group_cleaned = True
             except Exception as cleanup_exc:  # noqa: BLE001
                 detail += f"; process-group cleanup failed: {cleanup_exc}"
+            finally:
+                cleanup_in_progress = False
         return _clear_non_timeout_sentinel(HarnessError(detail), deadline_sentinel)
     finally:
         # Restore the caller's dispositions before the backstop seal. A managed
