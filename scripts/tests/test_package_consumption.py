@@ -1150,7 +1150,10 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             "[max]\n"
             f"package_root = {prefix}\n"
             f"cache_dir = {prefix}/share/max/.max_cache\n"
+            "enable_model_ir_cache = true\n"
+            "name = MAX Platform\n"
             f"path = {prefix}\n"
+            "version = 1.0.0b2\n"
             "[mojo-max]\n"
             f"package_root = {prefix}\n"
             f"compilerrt_path = {prefix}/lib/libKGENCompilerRTShared.so\n"
@@ -1456,6 +1459,48 @@ class AssertionPackageLayoutTests(unittest.TestCase):
                     "modular.cfg",
                 ):
                     package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_flag_encoded_shared_library_search_paths(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            config = prefix / "share" / "max" / "modular.cfg"
+            parser = configparser.ConfigParser(interpolation=None)
+            parser.read(config, encoding="utf-8")
+            parser.set(
+                "mojo-max",
+                "shared_libs",
+                parser.get("mojo-max", "shared_libs") + ",-L/developer/pixi/lib",
+            )
+            with config.open("w", encoding="utf-8") as stream:
+                parser.write(stream)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "modular.cfg",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_rejects_an_unknown_toolchain_config_option(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            config = prefix / "share" / "max" / "modular.cfg"
+            parser = configparser.ConfigParser(interpolation=None)
+            parser.read(config, encoding="utf-8")
+            parser.set(
+                "mojo-max",
+                "sanitizer_rt_path",
+                "/developer/pixi/lib/libSanitizerRT.so",
+            )
+            with config.open("w", encoding="utf-8") as stream:
+                parser.write(stream)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "modular.cfg",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
+    def test_assertion_package_timeouts_cover_cold_compiles(self) -> None:
+        self.assertEqual(package_consumption.ASSERTION_COMPILE_TIMEOUT, 120.0)
+        self.assertEqual(package_consumption.ASSERTION_EXAMPLE_TIMEOUT, 300.0)
 
     def test_rejects_commented_or_extended_toolchain_assignments(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:

@@ -219,6 +219,8 @@ BUILD_TIMEOUT = 600.0
 INSTALL_TIMEOUT = 300.0
 PROBE_TIMEOUT = 30.0
 SMOKE_TIMEOUT = 60.0
+ASSERTION_COMPILE_TIMEOUT = 120.0
+ASSERTION_EXAMPLE_TIMEOUT = 300.0
 # The fixture stage compiles one file through the installed binary. Generous for
 # the same reason dogfood's ceiling is: a hosted runner may have a cold Mojo
 # compiler cache, and the limit exists only to catch a genuine hang.
@@ -562,6 +564,33 @@ def _validate_modular_config(config: Path, prefix: Path) -> None:
         ("mojo-max", "driver_path"): str(prefix / "bin" / "mojo"),
         ("mojo-max", "import_path"): str(prefix / "lib" / "mojo"),
     }
+    expected_options = {
+        "max": {
+            "package_root",
+            "cache_dir",
+            "enable_model_ir_cache",
+            "name",
+            "path",
+            "version",
+        },
+        "mojo-max": {
+            "package_root",
+            "compilerrt_path",
+            "mgprt_path",
+            "shared_libs",
+            "driver_path",
+            "import_path",
+            "jupyter_path",
+            "lldb_path",
+            "lldb_plugin_path",
+            "lldb_visualizers_path",
+            "lldb_vscode_path",
+            "lsp_server_path",
+            "mblack_path",
+            "repl_entry_point",
+            "lld_path",
+        },
+    }
     required_prefix_paths = (
         ("max", "cache_dir"),
         ("max", "path"),
@@ -578,6 +607,22 @@ def _validate_modular_config(config: Path, prefix: Path) -> None:
         ("mojo-max", "lld_path"),
     )
     mismatches: list[str] = []
+    if set(parser.sections()) != set(expected_options):
+        mismatches.append(
+            "sections differ: expected "
+            + repr(sorted(expected_options))
+            + ", got "
+            + repr(sorted(parser.sections()))
+        )
+    for section, options in expected_options.items():
+        observed_options = (
+            set(parser[section]) if parser.has_section(section) else set()
+        )
+        if observed_options != options:
+            mismatches.append(
+                f"[{section}] options differ: expected {sorted(options)!r}, "
+                f"got {sorted(observed_options)!r}"
+            )
     for (section, option), expected_value in expected.items():
         observed = parser.get(section, option, raw=True, fallback=None)
         if observed != expected_value:
@@ -598,20 +643,28 @@ def _validate_modular_config(config: Path, prefix: Path) -> None:
     if shared_libs is None:
         mismatches.append("[mojo-max] shared_libs: missing")
     else:
-        shared_paths = [
-            Path(token.removesuffix(";")).resolve()
-            for token in shared_libs.split(",")
-            if token.startswith("/")
-        ]
-        if len(shared_paths) < 2:
+        shared_tokens = shared_libs.split(",")
+        if (
+            len(shared_tokens) != 5
+            or shared_tokens[1:4] != ["-Xlinker", "-rpath", "-Xlinker"]
+            or not shared_tokens[4].endswith(";")
+        ):
             mismatches.append(
-                "[mojo-max] shared_libs: expected library and rpath prefix paths"
+                "[mojo-max] shared_libs: expected exact library and rpath grammar"
             )
-        mismatches.extend(
-            ("[mojo-max] shared_libs: path escapes prefix: " + repr(str(shared_path)))
-            for shared_path in shared_paths
-            if not shared_path.is_relative_to(prefix)
-        )
+        else:
+            shared_paths = (
+                Path(shared_tokens[0]).resolve(),
+                Path(shared_tokens[4].removesuffix(";")).resolve(),
+            )
+            mismatches.extend(
+                (
+                    "[mojo-max] shared_libs: path escapes prefix: "
+                    + repr(str(shared_path))
+                )
+                for shared_path in shared_paths
+                if not shared_path.is_relative_to(prefix)
+            )
     if mismatches:
         raise PackageCheckError(
             "installed modular.cfg does not name its own prefix exactly: "
@@ -766,7 +819,7 @@ def stage_assertion_source_probe(
             command,
             cwd=probe_root,
             env=environment,
-            timeout=SMOKE_TIMEOUT,
+            timeout=ASSERTION_COMPILE_TIMEOUT,
         )
         transcript = build.stdout + build.stderr
         if checkout_source in transcript:
@@ -787,7 +840,7 @@ def stage_assertion_source_probe(
             [str(binary)],
             cwd=probe_root,
             env=environment,
-            timeout=SMOKE_TIMEOUT,
+            timeout=PROBE_TIMEOUT,
         )
         if run.returncode != 0:
             raise PackageCheckError(
@@ -808,7 +861,7 @@ def stage_assertion_source_probe(
         negative_command,
         cwd=probe_root,
         env=environment,
-        timeout=SMOKE_TIMEOUT,
+        timeout=ASSERTION_COMPILE_TIMEOUT,
     )
     rejection = rejected.stdout + rejected.stderr
     if rejected.returncode == 0 or negative_binary.exists():
@@ -831,7 +884,7 @@ def stage_assertion_source_probe(
         ),
         cwd=probe_root,
         env=environment,
-        timeout=SMOKE_TIMEOUT,
+        timeout=ASSERTION_COMPILE_TIMEOUT,
     )
     helper_rejection = helper_rejected.stdout + helper_rejected.stderr
     if helper_rejected.returncode == 0 or helper_binary.exists():
@@ -975,7 +1028,7 @@ def stage_assertion_example(
         command,
         cwd=REPO_ROOT,
         env=environment,
-        timeout=SMOKE_TIMEOUT,
+        timeout=ASSERTION_EXAMPLE_TIMEOUT,
     )
     if result.returncode != 1 or result.stderr:
         raise PackageCheckError(
