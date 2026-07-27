@@ -102,7 +102,7 @@ ignore = [
     "EM103",
     "TRY003",
     # Complexity thresholds flag the checkers that are long because they pin
-    # long exact inventories (layout.py, ci_topology.py). Splitting a fixed
+    # long exact inventories (layout.py, workflow_security.py). Splitting a fixed
     # membership list to satisfy a counter would scatter the pin, not simplify
     # it. Genuine complexity is a review question, not a lint gate.
     "C901",

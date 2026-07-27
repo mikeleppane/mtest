@@ -267,9 +267,13 @@ and exits 0 — Memcheck is pinned for linux-64 alone and the ASan controls are
 pinned against the Linux toolchain, so no other host can compute that verdict.
 That module fails closed if it is ever reached ON Linux, because arriving there
 means the override was deleted. Hosted CI never invokes `pixi run ci`: it gives
-each lane its own matrix cell, and `scripts/checks/ci_topology.py` pins both
-views plus the linux-64 task closure, so a lane cannot quietly leave either
-one. Hosted CI runs the
+each lane its own matrix cell. `pixi.toml` and `.github/workflows/ci.yml` are
+the only sources of truth for that topology now — a tampered task graph or
+matrix row is visible in the PR diff, so nothing mirrors it in Python.
+`scripts/checks/workflow_security.py` instead pins the properties a diff
+cannot show: every external action resolves to a reviewed commit SHA, and the
+CodeQL and release/publication workflows keep their reviewed job permissions
+and forbid `continue-on-error:`. Hosted CI runs the
 same logical floor as two platform-local chains: Linux preflight releases
 fail-fast `test`, `assertions-check`, `dogfood-check`, `e2e`, strict contract,
 ASan, and Valgrind cells; macOS preflight releases `test`,

@@ -126,12 +126,26 @@ class QualityWiringTests(unittest.TestCase):
         # means `uv` is a contributor's own install rather than something the
         # gate may assume. Keeping py-check out of `ci` is what stops a green
         # floor from depending on a tool the environment does not pin.
-        from scripts.checks import ci_topology
-
-        self.assertNotIn("py-check", ci_topology.CI_TASKS)
-        self.assertNotIn("py-check", ci_topology.CI_PREFLIGHT_TASKS)
-        self.assertNotIn("py-check", ci_topology.LINUX_CI_FLOOR_TASKS)
-        self.assertNotIn("py-fmt", ci_topology.LINUX_CI_FLOOR_TASKS)
+        with (python_quality.REPO_ROOT / "pixi.toml").open("rb") as handle:
+            tasks = tomllib.load(handle)["tasks"]
+        closure: set[str] = set()
+        pending = ["ci"]
+        while pending:
+            name = pending.pop()
+            if name in closure:
+                continue
+            closure.add(name)
+            task = tasks.get(name)
+            if isinstance(task, dict):
+                dependencies = task.get("depends-on", [])
+                if isinstance(dependencies, list):
+                    pending.extend(
+                        dependency
+                        for dependency in dependencies
+                        if isinstance(dependency, str)
+                    )
+        self.assertNotIn("py-check", closure)
+        self.assertNotIn("py-fmt", closure)
         workflow = (
             python_quality.REPO_ROOT / ".github" / "workflows" / "ci.yml"
         ).read_text(encoding="utf-8")
@@ -162,7 +176,7 @@ class QualityWiringTests(unittest.TestCase):
         #
         # Pinning the set means adding OR removing an ignore reds this test until
         # the change is made here too, deliberately, in the same commit. That is
-        # the same exact-membership idiom layout.py and ci_topology.py use.
+        # the same exact-membership idiom layout.py and workflow_security.py use.
         expected = {
             # formatter owns trailing commas
             "COM812",
