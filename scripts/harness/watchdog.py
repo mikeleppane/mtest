@@ -30,12 +30,36 @@ if TYPE_CHECKING:
     _SignalHandler = Callable[[int, FrameType | None], object] | int | None
 
 
-# The per-step wall-clock ceiling. It bounds a single classified build or run so
+# The per-step wall-clock DEFAULT. It bounds a single classified build or run so
 # a hang is terminated rather than stalling CI. The integration aggregate compiles
 # and runs many worker-pool files in one binary; on a slow, contended CI host that
-# legitimate run needs well over five minutes, so the ceiling sits at fifteen to
+# legitimate run needs well over five minutes, so the default sits at fifteen to
 # leave headroom above the real workload while still catching a genuine hang.
 DEFAULT_TIMEOUT_SECONDS = 900.0
+
+# The largest ceiling a caller may ASK FOR. This is a separate question from the
+# default above, and conflating the two was a real constraint: until this split,
+# `DEFAULT_TIMEOUT_SECONDS` served as both, so no caller could request more than
+# fifteen minutes however well justified.
+#
+# The self-hosted lane (`scripts/harness/selfhost.py`) compiles and runs 101 test
+# files through the real binary, and it is what forced the question. Measured on
+# one 32-core host: ~134s warm and ~136s cold — the compiler cache barely matters
+# at sixteen workers because compilation hides under the ~69s critical path of
+# the slowest integration file. Pinned to four cores with both caches cleared,
+# the same run was still going at 600s with 13 of 101 files outstanding. So the
+# realistic slow-host figure is minutes away from the old 900s limit, and a
+# merely-slow hosted runner would have reported a false timeout — which reads
+# exactly like the scheduler hang that lane exists to detect.
+#
+# This is a widened guard, not a removed one. Its job is to stop a typo or a
+# mis-parsed environment variable from making supervision meaningless, and an
+# hour still bounds every process group: a wedged run cannot outlive it, and
+# nan/inf/negative/zero are still rejected before spawn. Nothing that existed
+# before this split changed its own timeout — every caller either passes an
+# explicit value below the old limit or takes `DEFAULT_TIMEOUT_SECONDS`, which is
+# unchanged. Widening the accepted RANGE is the entire behavioral difference.
+MAX_TIMEOUT_SECONDS = 3600.0
 DEFAULT_CAPTURE_LIMIT_BYTES = 1024 * 1024
 CAPTURE_TRUNCATION_MARKER = "\n[mtest-check: output truncated]\n"
 TERMINATION_GRACE_SECONDS = 5.0
@@ -728,13 +752,19 @@ def _validate_deadline_sentinel(deadline_sentinel: Path | None) -> None:
 
 
 def _validate_timeout_seconds(timeout_seconds: float) -> None:
-    """Reject non-finite or out-of-policy watchdog ceilings before spawn."""
+    """Reject non-finite or out-of-policy watchdog ceilings before spawn.
+
+    Validated against `MAX_TIMEOUT_SECONDS`, not against the default: the
+    default is what a caller gets for saying nothing, while this is the largest
+    thing a caller may deliberately ask for. A rejection happens before the
+    spawn, so an invalid ceiling can never leave an unsupervised child behind.
+    """
     if not math.isfinite(timeout_seconds) or not (
-        0 < timeout_seconds <= DEFAULT_TIMEOUT_SECONDS
+        0 < timeout_seconds <= MAX_TIMEOUT_SECONDS
     ):
         raise ValueError(
             "watchdog timeout must be finite and between 0 and "
-            f"{DEFAULT_TIMEOUT_SECONDS:g} seconds"
+            f"{MAX_TIMEOUT_SECONDS:g} seconds"
         )
 
 
