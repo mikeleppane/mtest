@@ -3,16 +3,22 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from typing import TYPE_CHECKING
 import unittest
 from unittest import mock
 
 from scripts.build import package_consumption
 from scripts.checks import layout
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 class LayoutInventoryPolicyTests(unittest.TestCase):
@@ -27,10 +33,6 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
                 layout.check_classified_roots_are_not_precompilable_packages,
             ),
             ("BUILD_SOURCE_PATHS", layout.check_build_source_visibility),
-            ("ASSERTION_SOURCE_PATHS", layout.check_assertion_companion_layout),
-            ("ASSERTION_CONSUMER_PATHS", layout.check_assertion_companion_layout),
-            ("ASSERTION_CHECK_PATHS", layout.check_assertion_companion_layout),
-            ("ASSERTION_EXAMPLE_PATHS", layout.check_assertion_companion_layout),
             ("VENDORED_TOML_PATHS", layout.check_vendored_toml_layout),
         )
         for name, check in cases:
@@ -41,150 +43,203 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
             ):
                 check()
 
-    def test_assertion_companion_membership_is_exact(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="mtest-layout-") as raw_tmp:
+
+class AssertionCompanionLayoutTests(unittest.TestCase):
+    """The companion contract is reconciled from disk, never from a list.
+
+    Every fixture here is built by writing files, and the expectation is
+    whatever those files are. `SOURCES` names the tree this fixture happens to
+    contain -- it is not a copy of the repository's companion membership, and
+    `test_a_new_companion_source_needs_no_ledger_edit` is what holds that
+    distinction honest.
+    """
+
+    SOURCES = (
+        "mtest/__init__.mojo",
+        "mtest/assertions/__init__.mojo",
+    )
+
+    def _repo(self, root: Path, sources: tuple[str, ...]) -> None:
+        """Write a companion tree, a recipe that installs it, and a build."""
+        for relative in sources:
+            path = root / layout.COMPANION_SOURCE_ROOT / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# fixture\n", encoding="utf-8")
+        example = root / layout.COMPANION_ROOT / "examples" / "test_diagnostics.mojo"
+        example.parent.mkdir(parents=True, exist_ok=True)
+        example.write_text("# example\n", encoding="utf-8")
+        production = root / "scripts" / "build" / "production_build.sh"
+        production.parent.mkdir(parents=True, exist_ok=True)
+        production.write_text("# no assertion precompile\n", encoding="utf-8")
+        recipe = root / "recipe" / "build.sh"
+        recipe.parent.mkdir(parents=True, exist_ok=True)
+        recipe.write_text(self._recipe(sources), encoding="utf-8")
+
+    @staticmethod
+    def _recipe(sources: tuple[str, ...], suffix: str = "") -> str:
+        return (
+            "# no assertion precompile\n"
+            + "".join(
+                f"install -m 644 "
+                f"{(layout.COMPANION_SOURCE_ROOT / relative).as_posix()} dest\n"
+                for relative in sources
+            )
+            + suffix
+        )
+
+    @contextlib.contextmanager
+    def _fixture(self, sources: tuple[str, ...] = SOURCES) -> Iterator[Path]:
+        """Yield a repository whose companion contract already holds."""
+        with (
+            tempfile.TemporaryDirectory(prefix="mtest-companion-") as raw_tmp,
+            mock.patch.object(
+                package_consumption,
+                "INSTALLED_ASSERTION_FILES",
+                {Path(relative) for relative in sources},
+            ),
+        ):
             repo = Path(raw_tmp)
-            for relative in (
-                *layout.ASSERTION_SOURCE_PATHS,
-                *layout.ASSERTION_CONSUMER_PATHS,
-                *layout.ASSERTION_CHECK_PATHS,
-                *layout.ASSERTION_EXAMPLE_PATHS,
-            ):
-                path = repo / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("# fixture\n", encoding="utf-8")
-            for script_name in ("scripts/build/production_build.sh",):
-                path = repo / script_name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("# no assertion precompile\n", encoding="utf-8")
-            recipe = repo / "recipe" / "build.sh"
-            recipe.parent.mkdir(parents=True, exist_ok=True)
-            recipe_contents = "# no assertion precompile\n" + "".join(
-                f"install -m 644 {relative} destination\n"
-                for relative in layout.ASSERTION_SOURCE_PATHS
-            )
-            recipe.write_text(recipe_contents, encoding="utf-8")
-
+            self._repo(repo, sources)
             layout.check_assertion_companion_layout(repo)
-            expected_leaf = repo / next(iter(layout.ASSERTION_SOURCE_PATHS))
-            expected_leaf.unlink()
-            expected_leaf.mkdir()
-            with self.assertRaisesRegex(
-                AssertionError,
-                "assertion companion leaf is not a regular file",
-            ):
-                layout.check_assertion_companion_layout(repo)
-            expected_leaf.rmdir()
-            expected_leaf.write_text("# fixture\n", encoding="utf-8")
+            yield repo
 
-            unregistered_example = repo / "companions/assertions/unexpected.mojo"
-            unregistered_example.parent.mkdir(parents=True, exist_ok=True)
-            unregistered_example.write_text("# accidental example\n", encoding="utf-8")
-            with self.assertRaisesRegex(
-                AssertionError,
-                "assertion companion membership mismatch",
-            ):
-                layout.check_assertion_companion_layout(repo)
-            unregistered_example.unlink()
+    def test_a_new_companion_source_needs_no_ledger_edit(self) -> None:
+        """Adding a module costs the recipe and the shipped list, nothing more.
 
-            unregistered_consumer = repo / "tests/assertions/unexpected.mojo"
-            unregistered_consumer.write_text(
-                "# accidental consumer\n", encoding="utf-8"
-            )
-            with self.assertRaisesRegex(
-                AssertionError,
-                "assertion consumer membership mismatch",
-            ):
-                layout.check_assertion_companion_layout(repo)
-            unregistered_consumer.unlink()
+        The recipe line is the install the package needs and the shipped list
+        is what `public_verify` cannot derive; if this check ever needs a third
+        edit, the derivation has regressed back into a list of its own.
+        """
+        with self._fixture((*self.SOURCES, "mtest/assertions/_brand_new.mojo")):
+            pass
 
-            companion_target = repo / "outside-companion.mojo"
-            companion_target.write_text("# external\n", encoding="utf-8")
-            expected_leaf.unlink()
-            expected_leaf.symlink_to(companion_target)
-            with self.assertRaisesRegex(AssertionError, "contains symlinks"):
-                layout.check_assertion_companion_layout(repo)
-            expected_leaf.unlink()
-            expected_leaf.write_text("# fixture\n", encoding="utf-8")
+    def test_a_source_without_its_install_line_is_rejected(self) -> None:
+        """The load-bearing case: a shipped module the package never installs.
 
-            expected_consumer = repo / next(iter(layout.ASSERTION_CONSUMER_PATHS))
-            consumer_target = repo / "outside-consumer.mojo"
-            consumer_target.write_text("# external\n", encoding="utf-8")
-            expected_consumer.unlink()
-            expected_consumer.symlink_to(consumer_target)
-            with self.assertRaisesRegex(AssertionError, "contains symlinks"):
-                layout.check_assertion_companion_layout(repo)
-            expected_consumer.unlink()
-            expected_consumer.write_text("# fixture\n", encoding="utf-8")
-
-            recipe.write_text(
-                recipe_contents
-                + "mojo precompile companions/assertions/src/mtest/__init__.mojo\n",
-                encoding="utf-8",
-            )
-            with self.assertRaisesRegex(AssertionError, "precompiles"):
-                layout.check_assertion_companion_layout(repo)
-
-            for recursive_copy in (
-                "cp -r companions/assertions destination\n",
-                "cp\t-R companions/assertions destination\n",
-                "cp -pr companions/assertions destination\n",
-                "cp -aR companions/assertions destination\n",
-                "cp --recursive companions/assertions destination\n",
-            ):
-                with self.subTest(recursive_copy=recursive_copy):
-                    recipe.write_text(
-                        recipe_contents + recursive_copy,
-                        encoding="utf-8",
-                    )
-                    with self.assertRaisesRegex(
-                        AssertionError, "recursive source copy"
-                    ):
-                        layout.check_assertion_companion_layout(repo)
-            recipe.write_text(
-                recipe_contents + "scp -r companions/assertions destination\n",
-                encoding="utf-8",
-            )
-            layout.check_assertion_companion_layout(repo)
-
-            missing_install = next(iter(layout.ASSERTION_SOURCE_PATHS))
-            recipe.write_text(
-                recipe_contents.replace(
-                    f"install -m 644 {missing_install} destination\n", ""
-                ),
-                encoding="utf-8",
-            )
-            with self.assertRaisesRegex(AssertionError, "recipe install membership"):
-                layout.check_assertion_companion_layout(repo)
-            recipe.write_text(recipe_contents, encoding="utf-8")
+        The shipped membership is advanced alongside disk so the earlier
+        equality passes, which leaves the recipe as the only disagreement --
+        exactly the state that produces a broken package and is otherwise
+        invisible until a full package build runs.
+        """
+        with self._fixture() as repo:
+            orphan = repo / layout.COMPANION_SOURCE_ROOT / "mtest" / "orphan.mojo"
+            orphan.write_text("# unshipped\n", encoding="utf-8")
 
             with (
                 mock.patch.object(
                     package_consumption,
                     "INSTALLED_ASSERTION_FILES",
-                    {Path("mtest/__init__.mojo")},
+                    {Path(relative) for relative in self.SOURCES}
+                    | {Path("mtest/orphan.mojo")},
                 ),
                 self.assertRaisesRegex(
-                    AssertionError,
-                    "assertion package-check membership mismatch",
+                    AssertionError, "recipe install membership mismatch"
                 ),
             ):
                 layout.check_assertion_companion_layout(repo)
 
-            extra = (
-                repo
-                / "companions/assertions/src"
-                / "mtest"
-                / "assertions"
-                / "unexpected.mojo"
+    def test_an_install_line_without_its_source_is_rejected(self) -> None:
+        with self._fixture() as repo:
+            (repo / "recipe" / "build.sh").write_text(
+                self._recipe((*self.SOURCES, "mtest/ghost.mojo")), encoding="utf-8"
             )
-            extra.write_text("# accidental public module\n", encoding="utf-8")
 
             with self.assertRaisesRegex(
-                AssertionError,
-                "assertion companion membership mismatch",
+                AssertionError, "recipe install membership mismatch"
             ):
                 layout.check_assertion_companion_layout(repo)
+
+    def test_a_shipped_membership_that_disagrees_with_disk_is_rejected(self) -> None:
+        with (
+            self._fixture() as repo,
+            mock.patch.object(
+                package_consumption,
+                "INSTALLED_ASSERTION_FILES",
+                {Path("mtest/__init__.mojo")},
+            ),
+            self.assertRaisesRegex(
+                AssertionError, "assertion package-check membership mismatch"
+            ),
+        ):
+            layout.check_assertion_companion_layout(repo)
+
+    def test_an_empty_companion_tree_fails_closed(self) -> None:
+        with self._fixture() as repo:
+            for relative in self.SOURCES:
+                (repo / layout.COMPANION_SOURCE_ROOT / relative).unlink()
+
+            with self.assertRaisesRegex(AssertionError, "has no source file"):
+                layout.check_assertion_companion_layout(repo)
+
+    def test_a_symlinked_companion_entry_is_rejected(self) -> None:
+        with self._fixture() as repo:
+            outside = repo / "outside.mojo"
+            outside.write_text("# external\n", encoding="utf-8")
+            leaf = repo / layout.COMPANION_SOURCE_ROOT / self.SOURCES[0]
+            leaf.unlink()
+            leaf.symlink_to(outside)
+
+            with self.assertRaisesRegex(AssertionError, "contains symlinks"):
+                layout.check_assertion_companion_layout(repo)
+
+    def test_a_non_regular_companion_entry_is_rejected(self) -> None:
+        with self._fixture() as repo:
+            os.mkfifo(repo / layout.COMPANION_ROOT / "pipe")
+
+            with self.assertRaisesRegex(AssertionError, "not a regular file"):
+                layout.check_assertion_companion_layout(repo)
+
+    def test_a_leak_into_the_private_package_is_rejected(self) -> None:
+        with self._fixture() as repo:
+            (repo / "src" / "mtest" / "assertions").mkdir(parents=True)
+
+            with self.assertRaisesRegex(AssertionError, "leaked into private"):
+                layout.check_assertion_companion_layout(repo)
+
+    def test_precompiling_the_public_source_is_rejected(self) -> None:
+        cases = (
+            ("scripts/build/production_build.sh", "production build"),
+            ("recipe/build.sh", "recipe build"),
+        )
+        for relative, label in cases:
+            with self.subTest(script=relative), self._fixture() as repo:
+                path = repo / relative
+                path.write_text(
+                    path.read_text(encoding="utf-8")
+                    + "mojo precompile companions/assertions/src/mtest\n",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(AssertionError, f"{label} precompiles"):
+                    layout.check_assertion_companion_layout(repo)
+
+    def test_a_recursive_copy_of_the_public_source_is_rejected(self) -> None:
+        recursive_copies = (
+            "cp -r companions/assertions destination\n",
+            "cp\t-R companions/assertions destination\n",
+            "cp -pr companions/assertions destination\n",
+            "cp -aR companions/assertions destination\n",
+            "cp --recursive companions/assertions destination\n",
+        )
+        for recursive_copy in recursive_copies:
+            with self.subTest(copy=recursive_copy), self._fixture() as repo:
+                (repo / "recipe" / "build.sh").write_text(
+                    self._recipe(self.SOURCES, recursive_copy), encoding="utf-8"
+                )
+
+                with self.assertRaisesRegex(AssertionError, "recursive source copy"):
+                    layout.check_assertion_companion_layout(repo)
+
+    def test_a_non_recursive_lookalike_command_is_accepted(self) -> None:
+        with self._fixture() as repo:
+            (repo / "recipe" / "build.sh").write_text(
+                self._recipe(
+                    self.SOURCES, "scp -r companions/assertions destination\n"
+                ),
+                encoding="utf-8",
+            )
+
+            layout.check_assertion_companion_layout(repo)
 
 
 class ClassifiedMojoUniverseTests(unittest.TestCase):

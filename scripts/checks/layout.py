@@ -31,25 +31,8 @@ BUILD_SOURCE_PATHS = (
     Path("scripts/build/package_consumption.py"),
     Path("scripts/build/production_build.sh"),
 )
-ASSERTION_SOURCE_PATHS = {
-    Path("companions/assertions/src/mtest/__init__.mojo"),
-    Path("companions/assertions/src/mtest/assertions/__init__.mojo"),
-    Path("companions/assertions/src/mtest/assertions/_display.mojo"),
-    Path("companions/assertions/src/mtest/assertions/_mapping.mojo"),
-    Path("companions/assertions/src/mtest/assertions/_sequence.mojo"),
-    Path("companions/assertions/src/mtest/assertions/_text.mojo"),
-}
-ASSERTION_CONSUMER_PATHS = {
-    Path("tests/assertions/api_consumer.mojo"),
-    Path("tests/assertions/location_consumer.mojo"),
-}
-ASSERTION_CHECK_PATHS = {
-    Path("scripts/checks/assertions.py"),
-    Path("scripts/tests/test_assertions.py"),
-}
-ASSERTION_EXAMPLE_PATHS = {
-    Path("companions/assertions/examples/test_diagnostics.mojo"),
-}
+COMPANION_ROOT = Path("companions/assertions")
+COMPANION_SOURCE_ROOT = COMPANION_ROOT / "src"
 VENDORED_TOML_PATHS = {
     Path("vendor/mojo-toml/CHECKSUMS.json"),
     Path("vendor/mojo-toml/LICENSE"),
@@ -525,93 +508,90 @@ def check_build_source_visibility(repo_root: Path = REPO_ROOT) -> None:
         raise AssertionError("scripts/build source is untracked")
 
 
+def companion_source_files(repo_root: Path = REPO_ROOT) -> set[Path]:
+    """Return the public assertion companion's source files, read from disk.
+
+    Nothing is declared. Adding a module to the shipped companion has to cost
+    an edit in `recipe/build.sh` -- that is the install line the package needs
+    -- and in `scripts/release/public_verify.py`, which cannot derive; it must
+    not additionally cost an edit here, or this check would be pinning a list
+    to a list instead of pinning what ships to what exists.
+
+    Args:
+        repo_root: Repository root the companion tree lives under.
+
+    Returns:
+        Repository-relative paths of every regular file under the companion's
+        source root.
+    """
+    root = repo_root / COMPANION_SOURCE_ROOT
+    if not root.is_dir():
+        return set()
+    return {
+        path.relative_to(repo_root)
+        for path in root.rglob("*")
+        if not path.is_symlink() and path.is_file()
+    }
+
+
 def check_assertion_companion_layout(repo_root: Path = REPO_ROOT) -> None:
-    """Pin the public assertion source, consumers, and namespace isolation."""
-    _require_nonempty("assertion source", ASSERTION_SOURCE_PATHS)
-    _require_nonempty("assertion example", ASSERTION_EXAMPLE_PATHS)
-    companion_paths = ASSERTION_SOURCE_PATHS | ASSERTION_EXAMPLE_PATHS
-    expected_companion_entries = companion_paths | {
-        parent
-        for path in companion_paths
-        for parent in path.parents
-        if parent not in (Path("."), Path("companions"))
-    }
+    """The shipped public companion is exactly what the recipe installs.
+
+    A companion source file added without its `install -m 644` line ships a
+    broken package, and that is invisible until the full `package-check`
+    build runs, so it is reconciled here from disk against the recipe and
+    against the installed-membership constant the package and public-channel
+    gates share. The source-only shipping model is pinned the same way:
+    neither build entrypoint may `mojo precompile` the companion, and the
+    recipe may not sweep it in with a recursive copy, because either would
+    quietly ship compiled artifacts in place of readable source.
+
+    Args:
+        repo_root: Repository root holding `companions/`, the build scripts
+            and the recipe.
+
+    Raises:
+        AssertionError: The companion tree holds a symlink or a non-regular
+            file, holds no source at all, leaked into the private package,
+            disagrees with the recipe's install lines or with the installed
+            membership, or is precompiled or recursively copied by a build.
+    """
     companions = repo_root / "companions"
-    actual_companion_entries = (
-        {path.relative_to(repo_root) for path in companions.rglob("*")}
-        if companions.is_dir()
-        else set()
-    )
-    if actual_companion_entries != expected_companion_entries:
-        raise AssertionError(
-            "assertion companion membership mismatch: "
-            f"missing={sorted(expected_companion_entries - actual_companion_entries)}, "
-            f"extra={sorted(actual_companion_entries - expected_companion_entries)}"
-        )
-    linked = [
-        path.relative_to(repo_root)
-        for path in companions.rglob("*")
-        if path.is_symlink()
-    ]
+    entries = sorted(companions.rglob("*")) if companions.is_dir() else []
+    linked = [path.relative_to(repo_root) for path in entries if path.is_symlink()]
     if linked:
-        raise AssertionError(f"assertion companion contains symlinks: {sorted(linked)}")
-    non_regular_companion_leaves = [
-        path
-        for path in sorted(companion_paths)
-        if not stat.S_ISREG((repo_root / path).lstat().st_mode)
-    ]
-    if non_regular_companion_leaves:
-        raise AssertionError(
-            "assertion companion leaf is not a regular file: "
-            f"{non_regular_companion_leaves}"
-        )
-
-    _require_nonempty("assertion consumer", ASSERTION_CONSUMER_PATHS)
-    consumer_root = repo_root / "tests" / "assertions"
-    actual_consumers = (
-        {
-            path.relative_to(repo_root)
-            for path in consumer_root.rglob("*")
-            if path.is_file()
-        }
-        if consumer_root.is_dir()
-        else set()
-    )
-    if actual_consumers != ASSERTION_CONSUMER_PATHS:
-        raise AssertionError(
-            "assertion consumer membership mismatch: "
-            f"missing={sorted(ASSERTION_CONSUMER_PATHS - actual_consumers)}, "
-            f"extra={sorted(actual_consumers - ASSERTION_CONSUMER_PATHS)}"
-        )
-    linked_consumers = [
+        raise AssertionError(f"assertion companion contains symlinks: {linked}")
+    irregular = [
         path.relative_to(repo_root)
-        for path in consumer_root.rglob("*")
-        if path.is_symlink()
+        for path in entries
+        if not stat.S_ISDIR(path.lstat().st_mode)
+        and not stat.S_ISREG(path.lstat().st_mode)
     ]
-    if linked_consumers:
+    if irregular:
         raise AssertionError(
-            f"assertion consumer contains symlinks: {sorted(linked_consumers)}"
+            f"assertion companion entry is not a regular file: {irregular}"
         )
 
-    _require_nonempty("assertion check", ASSERTION_CHECK_PATHS)
-    missing_checks = {
-        path for path in ASSERTION_CHECK_PATHS if not (repo_root / path).is_file()
-    }
-    if missing_checks:
+    sources = companion_source_files(repo_root)
+    if not sources:
+        # Fail closed. Every comparison below is an equality against this set,
+        # so an empty one would make all of them vacuously true.
         raise AssertionError(
-            f"assertion check membership missing: {sorted(missing_checks)}"
+            f"the public assertion companion has no source file under "
+            f"{COMPANION_SOURCE_ROOT.as_posix()}"
         )
     if (repo_root / "src" / "mtest" / "assertions").exists():
         raise AssertionError("assertion companion leaked into private src/mtest")
+
     packaged_sources = {
-        Path("companions/assertions/src") / path
+        COMPANION_SOURCE_ROOT / path
         for path in package_consumption.INSTALLED_ASSERTION_FILES
     }
-    if packaged_sources != ASSERTION_SOURCE_PATHS:
+    if packaged_sources != sources:
         raise AssertionError(
             "assertion package-check membership mismatch: "
-            f"missing={sorted(ASSERTION_SOURCE_PATHS - packaged_sources)}, "
-            f"extra={sorted(packaged_sources - ASSERTION_SOURCE_PATHS)}"
+            f"missing={sorted(sources - packaged_sources)}, "
+            f"extra={sorted(packaged_sources - sources)}"
         )
 
     production = (repo_root / "scripts" / "build" / "production_build.sh").read_text(
@@ -630,11 +610,11 @@ def check_assertion_companion_layout(repo_root: Path = REPO_ROOT) -> None:
             r"(?m)^\s*install -m 644 (companions/assertions/src/\S+)", recipe
         )
     }
-    if installed_sources != ASSERTION_SOURCE_PATHS:
+    if installed_sources != sources:
         raise AssertionError(
             "assertion recipe install membership mismatch: "
-            f"missing={sorted(ASSERTION_SOURCE_PATHS - installed_sources)}, "
-            f"extra={sorted(installed_sources - ASSERTION_SOURCE_PATHS)}"
+            f"missing={sorted(sources - installed_sources)}, "
+            f"extra={sorted(installed_sources - sources)}"
         )
     if _recipe_recursively_copies_assertion_source(recipe):
         raise AssertionError("assertion recipe uses a recursive source copy")
