@@ -244,12 +244,6 @@ struct BoundedWriter(Movable, Writer):
         return prefix + String(TRUNCATION_MARKER)
 
 
-def render_value[T: Writable](value: T) -> String:
-    """Render one opaque value once into a bounded escaped projection."""
-    var projection = _render_projection(value)
-    return projection.text.copy()
-
-
 def _render_unequal_pair[T: Writable](actual: T, expected: T) -> String:
     """Render one truthful structural description of an unequal value pair."""
     var actual_projection = _render_projection(actual)

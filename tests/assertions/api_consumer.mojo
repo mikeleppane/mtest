@@ -10,7 +10,6 @@ from mtest.assertions._display import (
     BODY_BYTE_CAP,
     TEXT_CONTEXT_BYTE_CAP,
     VALUE_BYTE_CAP,
-    render_value,
 )
 
 
@@ -89,11 +88,18 @@ struct ObservedValue(Copyable, Equatable, Writable):
 
 
 @fieldwise_init
-struct ManyWritesProbe(Writable):
+struct ManyWritesProbe(Copyable, Equatable, Writable):
     """Formatter that emits a caller-selected volume through small writes."""
 
+    var identity: Int
     var writes: Int
     var chunk: String
+
+    def __eq__(self, other: Self) -> Bool:
+        return self.identity == other.identity
+
+    def __ne__(self, other: Self) -> Bool:
+        return not (self == other)
 
     def write_to(self, mut writer: Some[Writer]):
         for _ in range(self.writes):
@@ -143,6 +149,15 @@ def _text_failure(actual: String, expected: String, msg: String = "") -> String:
     var detail = String("")
     try:
         assert_equal(actual, expected, msg=msg)
+    except error:
+        detail = String(error)
+    return detail^
+
+
+def _opaque_failure(actual: RenderIdentity, expected: RenderIdentity) -> String:
+    var detail = String("")
+    try:
+        assert_equal(actual, expected)
     except error:
         detail = String(error)
     return detail^
@@ -263,27 +278,62 @@ def test_failure_compares_once_and_renders_each_operand_once() raises:
 
 
 def test_opaque_render_caps_apply_after_escaping() raises:
-    var under = render_value(_repeated("a", VALUE_BYTE_CAP - 1))
-    var exact = render_value(_repeated("a", VALUE_BYTE_CAP))
-    var over = render_value(_repeated("a", VALUE_BYTE_CAP + 1))
-    testing.assert_equal(under.byte_length(), VALUE_BYTE_CAP - 1)
-    testing.assert_false(under.endswith("... [truncated]"))
-    testing.assert_equal(exact.byte_length(), VALUE_BYTE_CAP)
-    testing.assert_false(exact.endswith("... [truncated]"))
-    testing.assert_equal(over.byte_length(), VALUE_BYTE_CAP)
-    testing.assert_true(over.endswith("... [truncated]"))
+    var under = _repeated("a", VALUE_BYTE_CAP - 1)
+    var exact = _repeated("a", VALUE_BYTE_CAP)
+    var over_prefix = _repeated(
+        "a", VALUE_BYTE_CAP - String("... [truncated]").byte_length()
+    )
+    testing.assert_true(
+        ("render identically\n  actual: " + under + "\n  expected: " + under)
+        in _opaque_failure(RenderIdentity(1, under), RenderIdentity(2, under))
+    )
+    testing.assert_true(
+        ("render identically\n  actual: " + exact + "\n  expected: " + exact)
+        in _opaque_failure(RenderIdentity(1, exact), RenderIdentity(2, exact))
+    )
+    testing.assert_true(
+        (
+            "identical after truncation\n  actual: "
+            + over_prefix
+            + String("... [truncated]\n  expected: ")
+            + over_prefix
+            + String("... [truncated]")
+        )
+        in _opaque_failure(
+            RenderIdentity(1, exact + "a"),
+            RenderIdentity(2, exact + "a"),
+        )
+    )
 
-    var multibyte = render_value(_repeated("é", VALUE_BYTE_CAP))
-    testing.assert_true(multibyte.byte_length() <= VALUE_BYTE_CAP)
-    testing.assert_true(multibyte.endswith("... [truncated]"))
-    var controls = render_value("\n\u202e")
-    testing.assert_equal(controls, "\\n\\u202e")
-    var atomic_escape = render_value(
+    var multibyte = _opaque_failure(
+        RenderIdentity(1, _repeated("é", VALUE_BYTE_CAP)),
+        RenderIdentity(2, _repeated("é", VALUE_BYTE_CAP)),
+    )
+    testing.assert_true("identical after truncation" in multibyte)
+    testing.assert_true("... [truncated]" in multibyte)
+    testing.assert_true(
+        "render identically\n  actual: \\n\\u202e\n  expected: \\n\\u202e"
+        in _opaque_failure(
+            RenderIdentity(1, "\n\u202e"),
+            RenderIdentity(2, "\n\u202e"),
+        )
+    )
+    var atomic_input = (
         _repeated("a", VALUE_BYTE_CAP - 16) + "\U000E0041" + _repeated("z", 10)
     )
-    testing.assert_equal(
-        atomic_escape,
-        _repeated("a", VALUE_BYTE_CAP - 16) + String("... [truncated]"),
+    var atomic_expected = (
+        "identical after truncation\n  actual: "
+        + _repeated("a", VALUE_BYTE_CAP - 16)
+        + String("... [truncated]\n  expected: ")
+        + _repeated("a", VALUE_BYTE_CAP - 16)
+        + String("... [truncated]")
+    )
+    testing.assert_true(
+        atomic_expected
+        in _opaque_failure(
+            RenderIdentity(1, atomic_input),
+            RenderIdentity(2, atomic_input),
+        )
     )
 
 
@@ -321,9 +371,16 @@ def test_many_small_formatter_writes_and_body_are_bounded() raises:
     testing.assert_equal(VALUE_BYTE_CAP, 1024)
     testing.assert_equal(TEXT_CONTEXT_BYTE_CAP, 4096)
     testing.assert_equal(BODY_BYTE_CAP, 16384)
-    var rendered = render_value(ManyWritesProbe(32_768, "abcdefgh"))
-    testing.assert_equal(rendered.byte_length(), VALUE_BYTE_CAP)
-    testing.assert_true(rendered.endswith("... [truncated]"))
+    var many_writes = String("")
+    try:
+        assert_equal(
+            ManyWritesProbe(1, 32_768, "abcdefgh"),
+            ManyWritesProbe(2, 32_768, "abcdefgh"),
+        )
+    except error:
+        many_writes = String(error)
+    testing.assert_true("identical after truncation" in many_writes)
+    testing.assert_true(many_writes.endswith("... [truncated]"))
     var detail = String("")
     try:
         assert_equal("left", "right", msg=_repeated("m", 4 * 1024 * 1024))
@@ -563,8 +620,10 @@ def test_text_crop_marker_requires_an_elided_line_prefix() raises:
         "\né" + _repeated("a", 127) + "Y",
     )
     testing.assert_true("actual line 2: é" in multibyte_boundary)
+    testing.assert_false("actual line 1: ... [cropped]" in multibyte_boundary)
     testing.assert_false("actual line 2: ... " in multibyte_boundary)
     testing.assert_true("expected line 2: é" in multibyte_boundary)
+    testing.assert_false("expected line 1: ... [cropped]" in multibyte_boundary)
     testing.assert_false("expected line 2: ... " in multibyte_boundary)
     var cropped_prefix = _text_failure(
         _repeated("a", 200) + "X",

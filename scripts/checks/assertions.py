@@ -263,7 +263,6 @@ def validate_dictionary_selection_bound(source: str) -> None:
         or projection_reject_at > retain_at
         or projection_retain_at < retain_at
         or function.count("_render_projection(key)") != 1
-        or "render_value(key)" in source
     ):
         raise AssertionError(
             "dictionary key selection can leave an unbounded or repeated "

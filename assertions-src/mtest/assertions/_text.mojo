@@ -131,23 +131,33 @@ def _write_context(
     var offset = 0
     var header_written = False
     var first_header = True
+    var cropped_line_has_content = False
+    var first_cropped_line = 0
+    var last_cropped_line = 0
     for scalar in text.codepoint_slices():
         if output.truncated or line > last:
             return
         var scalar_stop = offset + scalar.byte_length()
         if scalar_stop <= crop_start:
             if Int(ord(scalar)) == 10:
+                if cropped_line_has_content:
+                    if not first_cropped_line:
+                        first_cropped_line = line
+                    last_cropped_line = line
+                cropped_line_has_content = False
                 line += 1
+            elif line >= first and line <= last:
+                cropped_line_has_content = True
             offset = scalar_stop
             continue
         if line >= first and line <= last and not header_written:
-            if first_header and line > first:
-                if line == first + 1:
+            if first_header and first_cropped_line:
+                if first_cropped_line == last_cropped_line:
                     output.write_trusted(
                         "\n  "
                         + title
                         + " line "
-                        + String(first)
+                        + String(first_cropped_line)
                         + ": ... [cropped]"
                     )
                 else:
@@ -155,9 +165,9 @@ def _write_context(
                         "\n  "
                         + title
                         + " lines "
-                        + String(first)
+                        + String(first_cropped_line)
                         + "-"
-                        + String(line - 1)
+                        + String(last_cropped_line)
                         + ": ... [cropped]"
                     )
             output.write_trusted(
