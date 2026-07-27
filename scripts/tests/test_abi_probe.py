@@ -61,6 +61,55 @@ class DeclaredSymbolsTests(unittest.TestCase):
             )
             self.assertEqual(abi_probe.declared_symbols(source), set())
 
+    def test_multiline_declaration_symbol_on_a_continuation_line_is_counted(
+        self,
+    ) -> None:
+        """A real declaration may wrap across lines, symbol and all.
+
+        `external_call[` need not share a line with its symbol.
+        `tests/integration/test_exec_etxtbsy.mojo` genuinely writes
+        `mtest_exec_test_monotonic_wait_configure` this way. A scanner that
+        requires `external_call["sym"` on one physical line never sees it:
+        the opening line has no quote at all, and the symbol's own line has
+        no `external_call[` on it -- each line individually looks unmatched.
+        """
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            source = Path(raw_tmp) / "test_example.mojo"
+            source.write_text(
+                "def test_wraps() raises:\n"
+                "    var status = external_call[\n"
+                '        "mtest_exec_test_monotonic_wait_configure", Int32\n'
+                "    ](UInt32(1), UInt32(2))\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                abi_probe.declared_symbols(source),
+                {"mtest_exec_test_monotonic_wait_configure"},
+            )
+
+    def test_multiline_fixture_literal_span_is_still_excluded(self) -> None:
+        """A wrapped fixture declaration must stay excluded too.
+
+        This codebase's fixture-generation convention writes every physical
+        line of a throwaway generated source as its own quoted string
+        literal -- including, here, the line that would otherwise OPEN a
+        real `external_call[` span. Checking only that opening line is
+        enough to exclude the whole multi-line fixture span, however many
+        lines it happens to spread across.
+        """
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            source = Path(raw_tmp) / "test_example.mojo"
+            source.write_text(
+                "def test_generates_fixture() raises:\n"
+                "    var fixture = (\n"
+                "        '        var status = external_call[\\n'\n"
+                "        '            \"mtest_exec_test_fixture_only\", Int32\\n'\n"
+                "        '        ](args)\\n'\n"
+                "    )\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(abi_probe.declared_symbols(source), set())
+
     def test_mixed_real_and_literal_lines_keep_only_the_real_one(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             source = Path(raw_tmp) / "test_example.mojo"
@@ -135,7 +184,17 @@ class MainTests(unittest.TestCase):
         ):
             abi_probe.main()
 
-    def test_a_failed_colinked_build_is_reported_as_abi_drift(self) -> None:
+    def test_a_failed_colinked_build_is_reported_without_overclaiming_cause(
+        self,
+    ) -> None:
+        """The failure message must state what was observed, not diagnose it.
+
+        `main` cannot tell a real shared-symbol arity/signature disagreement
+        apart from an unrelated compile error in one of the co-linked
+        modules -- both look like the same nonzero `mojo build` exit. The
+        message must say the build failed and name the shared symbols
+        involved, without asserting a cause it cannot actually distinguish.
+        """
         a = abi_probe.ROOT / "tests" / "integration" / "a.mojo"
         b = abi_probe.ROOT / "tests" / "integration" / "b.mojo"
         failed = subprocess.CompletedProcess(
@@ -147,10 +206,18 @@ class MainTests(unittest.TestCase):
                 abi_probe, "shared_symbol_files", return_value={"shared_sym": [a, b]}
             ),
             patch.object(abi_probe, "build_probe", return_value=failed) as mocked_build,
-            self.assertRaisesRegex(SystemExit, "ABI drift"),
+            self.assertRaises(SystemExit) as raised,
         ):
             abi_probe.main()
         mocked_build.assert_called_once_with([a, b])
+        message = str(raised.exception)
+        self.assertIn("failed to build", message)
+        self.assertIn("shared_sym", message)
+        # Must not assert a certainty this function cannot have: an unrelated
+        # compile error in a co-linked module produces the identical nonzero
+        # exit, so the wording has to hedge rather than flatly diagnose the
+        # cause as a symbol disagreement.
+        self.assertIn("unrelated compile error", message)
 
     def test_a_clean_colinked_build_passes(self) -> None:
         a = abi_probe.ROOT / "tests" / "integration" / "a.mojo"

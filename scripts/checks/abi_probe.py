@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Catch cross-module `external_call` arity/signature drift at build time.
+r"""Catch cross-module `external_call` arity/signature drift at build time.
 
 Splitting the 101 classified modules under `tests/unit` and `tests/integration`
 into 101 independently built binaries lost a property the old single aggregate
@@ -28,13 +28,22 @@ fails with a specific, compiler-authored diagnostic naming the conflict. The
 binary is never executed -- the archive-time link is the whole proof, and this
 probe has nothing to say about runtime behavior.
 
-A source line is counted as a real declaration only if it is not itself string
-data: several classified suites embed generated Mojo source as line-by-line
-string literals to write out and compile as a throwaway fixture elsewhere (the
-same pattern `asan.py`/`valgrind.py`'s own `CLI_PROBE_SOURCE` uses). A naive
-text search over `external_call["sym"` matches those lines too, but they are
-never compiled as part of the module that contains them, so co-linking on
-their account would prove nothing. See `_is_string_literal_line`.
+A declaration is matched over its complete bracketed span
+(`external_call[...]`), not one line: the symbol name legitimately sits on a
+continuation line in this codebase (`external_call[\n    "sym", Int32\n]`),
+and a scan that required the symbol on the same line as `external_call[`
+would silently miss it. A span is counted as a real declaration only if the
+line that OPENS it is not itself string data: several classified suites embed
+generated Mojo source as line-by-line string literals to write out and
+compile as a throwaway fixture elsewhere (the same pattern
+`asan.py`/`valgrind.py`'s own `CLI_PROBE_SOURCE` uses), and by that same
+convention every physical line of such a fixture is its own quoted literal --
+including the line that would otherwise open a real span -- so checking only
+the opening line is sufficient to exclude the whole fixture span, however
+many lines it happens to spread across. A naive text search over
+`external_call["sym"` matches those lines too, but they are never compiled as
+part of the module that contains them, so co-linking on their account would
+prove nothing. See `_is_string_literal_line` and `_bracket_span`.
 """
 
 from __future__ import annotations
@@ -53,7 +62,8 @@ OUT = ROOT / "build" / "safety" / "abi_probe"
 NATIVE_TEST_OBJECT = ROOT / "build" / "native" / "mtest_exec_native_test.o"
 SEARCH_ROOTS = (ROOT / "tests" / "unit", ROOT / "tests" / "integration")
 
-_SYMBOL_RE = re.compile(r'external_call\["([A-Za-z0-9_]+)"')
+_EXTERNAL_CALL_OPEN_RE = re.compile(r"external_call\[")
+_SYMBOL_IN_SPAN_RE = re.compile(r'"([A-Za-z0-9_]+)"')
 
 
 def require(condition: bool, message: str) -> None:
@@ -62,40 +72,91 @@ def require(condition: bool, message: str) -> None:
         raise SystemExit(f"abi-probe-check: {message}")
 
 
-def _is_string_literal_line(stripped_line: str) -> bool:
-    """Whether `stripped_line` opens with a quote -- string data, not code.
+def _is_string_literal_line(line: str) -> bool:
+    """Whether `line` opens (once stripped) with a quote -- string data, not code.
 
-    A real `external_call` invocation's line always starts with code:
+    A real `external_call` invocation's opening line always starts with code:
     `_ = external_call[...]`, `var x = external_call[...]`, and
     `return external_call[...]` are the three shapes this project uses, and
     none of them opens with a quote character. A line that IS one fragment of
     a hand-built string literal (used elsewhere to write out a throwaway
     fixture source) opens with the quote that starts or continues the
-    literal. This is a per-line heuristic, not a parser, and it is only asked
-    to distinguish these two shapes -- it is not a general Mojo string
-    detector.
+    literal -- and, by that same fixture-writing convention, so does every
+    other physical line the fixture spans, which is why checking only the
+    line that opens an `external_call[` span is enough. This is a per-line
+    heuristic, not a parser, and it is only asked to distinguish these two
+    shapes -- it is not a general Mojo string detector.
     """
-    return stripped_line[:1] in ("'", '"')
+    return line.strip()[:1] in ("'", '"')
+
+
+def _opening_line(text: str, index: int) -> str:
+    """Return the complete physical line of `text` containing offset `index`."""
+    line_start = text.rfind("\n", 0, index) + 1
+    line_end = text.find("\n", index)
+    if line_end == -1:
+        line_end = len(text)
+    return text[line_start:line_end]
+
+
+def _bracket_span(text: str, open_index: int) -> str:
+    """Return the bracketed span of `text` starting at `text[open_index] == "["`.
+
+    Depth-counts `[`/`]` rather than stopping at the first `]`, so a nested
+    bracket inside the parameter list (a generic return type, say) does not
+    truncate the scan before the declaration's own closing bracket.
+
+    Args:
+        text: The complete file text.
+        open_index: The offset of one `external_call[`'s opening `[`.
+
+    Returns:
+        The substring from `open_index` through its matching `]`, inclusive
+        -- regardless of how many physical lines it spans.
+
+    Raises:
+        ValueError: No matching `]` appears before EOF. An unbalanced
+            declaration is a source-file defect worth failing loudly on, not
+            silently scanning past.
+    """
+    depth = 0
+    for offset in range(open_index, len(text)):
+        char = text[offset]
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth == 0:
+                return text[open_index : offset + 1]
+    raise ValueError(f"unbalanced external_call[ at offset {open_index}")
 
 
 def declared_symbols(source: Path) -> set[str]:
-    """Return every symbol `source` declares as a real `external_call` site.
+    r"""Return every symbol `source` declares as a real `external_call` site.
+
+    Matches over each occurrence's complete bracketed span rather than one
+    line, so a declaration whose symbol sits on a continuation line --
+    `external_call[\\n    "sym", Int32\\n](...)`, a real, legitimate shape in
+    this codebase -- is still found. Only the line that OPENS the span is
+    checked for string-literal exclusion; see `_is_string_literal_line`.
 
     Args:
         source: A classified `test_*.mojo` module.
 
     Returns:
         The distinct `external_call["symbol", ...]` names invoked as real
-        code in `source`, excluding any match inside a string-literal line.
+        code in `source`, excluding any span whose opening line is itself
+        string-literal fixture data.
     """
+    text = source.read_text(encoding="utf-8")
     symbols: set[str] = set()
-    for line in source.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if _is_string_literal_line(stripped):
+    for match in _EXTERNAL_CALL_OPEN_RE.finditer(text):
+        if _is_string_literal_line(_opening_line(text, match.start())):
             continue
-        match = _SYMBOL_RE.search(line)
-        if match is not None:
-            symbols.add(match.group(1))
+        span = _bracket_span(text, match.end() - 1)
+        symbol_match = _SYMBOL_IN_SPAN_RE.search(span)
+        if symbol_match is not None:
+            symbols.add(symbol_match.group(1))
     return symbols
 
 
@@ -220,9 +281,12 @@ def main() -> int:
     compiled = build_probe(sources_to_colink)
     require(
         compiled.returncode == 0,
-        "cross-module external_call ABI drift: co-linking "
-        f"{len(sources_to_colink)} module(s) that share a symbol declaration "
-        f"failed to build -- two declarations of the same symbol disagree:\n"
+        f"co-linking {len(sources_to_colink)} module(s) that share an "
+        f"external_call declaration ({', '.join(sorted(shared))}) failed to "
+        "build. This is what the probe watches for when two declarations of "
+        "the same shared symbol disagree in arity or parameter type -- but "
+        "the failure below could also be an unrelated compile error in one "
+        "of the co-linked modules; read the compiler output to tell which:\n"
         f"{compiled.stdout}",
     )
 
