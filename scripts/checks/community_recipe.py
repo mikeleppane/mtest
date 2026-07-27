@@ -8,19 +8,12 @@ from pathlib import Path
 import re
 import sys
 
+from scripts.release.public_verify import COMPANION_FILES
 from scripts.release.recipe import RenderRequest, render_recipe
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ZERO_SHA = "0" * 40
-COMPANION_FILES = (
-    "mtest/__init__.mojo",
-    "mtest/assertions/__init__.mojo",
-    "mtest/assertions/_display.mojo",
-    "mtest/assertions/_mapping.mojo",
-    "mtest/assertions/_sequence.mojo",
-    "mtest/assertions/_text.mojo",
-)
 
 
 @dataclass(frozen=True)

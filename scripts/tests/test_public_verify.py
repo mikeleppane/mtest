@@ -12,6 +12,7 @@ from unittest import mock
 
 from scripts.release import public_verify
 from scripts.release.public_verify import (
+    COMPANION_FILES,
     CommandResult,
     PublicVerifyError,
     install_manifest,
@@ -22,14 +23,6 @@ from scripts.release.public_verify import (
 
 VERSION = "1.0.0"
 BUILD_NUMBER = 0
-COMPANION_FILES = (
-    "mtest/__init__.mojo",
-    "mtest/assertions/__init__.mojo",
-    "mtest/assertions/_display.mojo",
-    "mtest/assertions/_mapping.mojo",
-    "mtest/assertions/_sequence.mojo",
-    "mtest/assertions/_text.mojo",
-)
 
 
 class FakeRunner:

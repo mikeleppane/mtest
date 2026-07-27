@@ -82,6 +82,7 @@ import subprocess
 import sys
 
 from scripts.harness import dogfood, watchdog
+from scripts.release.public_verify import COMPANION_FILES
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -246,19 +247,19 @@ SUMMARY_RE = re.compile(
     re.MULTILINE,
 )
 
-INSTALLED_ASSERTION_FILES = {
-    Path("mtest/__init__.mojo"),
-    Path("mtest/assertions/__init__.mojo"),
-    Path("mtest/assertions/_display.mojo"),
-    Path("mtest/assertions/_mapping.mojo"),
-    Path("mtest/assertions/_sequence.mojo"),
-    Path("mtest/assertions/_text.mojo"),
-}
+INSTALLED_ASSERTION_FILES = {Path(name) for name in COMPANION_FILES}
+"""What a correct install of the assertion companion contains, borrowed.
+
+`scripts/release/public_verify.py` owns this membership because it is the one
+place that cannot derive it -- see the reason recorded there. Restating it
+here would create a second list that can disagree with the first, and the
+gate would then be pinning the copies to each other rather than to what
+ships.
+"""
 INSTALLED_ASSERTION_DIRECTORIES = {
-    Path("."),
-    Path("mtest"),
-    Path("mtest/assertions"),
+    parent for path in INSTALLED_ASSERTION_FILES for parent in path.parents
 }
+"""The directories those files imply, computed rather than listed."""
 ASSERTION_PROBE_SOURCE = """\
 from mtest.assertions import assert_equal
 
