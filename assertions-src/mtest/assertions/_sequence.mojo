@@ -115,7 +115,59 @@ def write_list_difference[
             if not equal:
                 break
             suffix += 1
-        _write_list_span(output, actual, expected, prefix, suffix)
+
+        var actual_count = len(actual) - suffix - prefix
+        var expected_count = len(expected) - suffix - prefix
+        var aligned_count = min(actual_count, expected_count)
+        var mismatch_total = 0
+        var mismatch_indices = List[Int]()
+        if aligned_count:
+            # The maximal-prefix scan already compared this boundary pair and
+            # stopped because it differs. Count that known mismatch instead of
+            # invoking caller equality a second time.
+            mismatch_total = 1
+            mismatch_indices.append(prefix)
+        var equal_after_mismatch = False
+        for offset in range(1, aligned_count):
+            var index = prefix + offset
+            var equal: Bool
+            if len(actual) > len(expected):
+                equal = actual[index] == expected[index]
+            else:
+                equal = expected[index] == actual[index]
+            if equal:
+                if mismatch_total:
+                    equal_after_mismatch = True
+            else:
+                mismatch_total += 1
+                if len(mismatch_indices) < DISPLAY_LIMIT:
+                    mismatch_indices.append(index)
+
+        if not equal_after_mismatch:
+            _write_list_span(output, actual, expected, prefix, suffix)
+            return False
+
+        output.write_trusted(
+            "list mismatches: "
+            + String(mismatch_total)
+            + " total, "
+            + String(max(0, mismatch_total - DISPLAY_LIMIT))
+            + " omitted by entry limit"
+            + "\n  unaligned remainder: actual "
+            + String(actual_count - aligned_count)
+            + " item(s), expected "
+            + String(expected_count - aligned_count)
+            + " item(s)"
+        )
+        for index in mismatch_indices:
+            output.write_trusted(
+                "\n  ["
+                + String(index)
+                + "] "
+                + _render_unequal_pair(actual[index], expected[index])
+            )
+            if output.truncated:
+                break
         return False
 
     var prefix = shared

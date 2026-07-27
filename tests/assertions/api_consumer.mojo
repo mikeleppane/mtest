@@ -698,15 +698,28 @@ def test_list_replacement_and_insertions_are_clear_spans() raises:
         "list span at index 2: actual 1 item(s), expected 0 item(s)"
         in _list_failure([1, 2, 9], [1, 2])
     )
+    testing.assert_true(
+        "list span at index 1: actual 0 item(s), expected 1 item(s)"
+        in _list_failure([1, 2], [1, 9, 2])
+    )
+    testing.assert_true(
+        "list span at index 2: actual 0 item(s), expected 1 item(s)"
+        in _list_failure([1, 2], [1, 2, 9])
+    )
 
 
 def test_list_changed_content_and_lengths_have_exact_facts() raises:
     var detail = _list_failure([0, 8, 2, 7, 4, 6], [0, 1, 2, 3, 4])
     testing.assert_true(
-        "list span at index 1: actual 5 item(s), expected 4 item(s)" in detail
+        "list mismatches: 2 total, 0 omitted by entry limit" in detail
     )
-    testing.assert_true('actual: ["8", "2", "7", "4", "6"]' in detail)
-    testing.assert_true('expected: ["1", "2", "3", "4"]' in detail)
+    testing.assert_true(
+        "unaligned remainder: actual 1 item(s), expected 0 item(s)" in detail
+    )
+    testing.assert_true('[1] "8" != "1"' in detail)
+    testing.assert_true('[3] "7" != "3"' in detail)
+    testing.assert_false('[2] "2"' in detail)
+    testing.assert_false('[4] "4"' in detail)
 
 
 def test_list_displays_eight_mismatches_and_counts_omitted_first() raises:
@@ -896,6 +909,38 @@ def test_unequal_list_suffix_does_not_repeat_the_aligned_scan() raises:
         "list span at index 0: actual 1 item(s), expected 0 item(s)" in detail
     )
     testing.assert_equal(counters.read(0), 11)
+    testing.assert_equal(counters.read(1), 0)
+
+
+def test_unequal_list_exact_scan_compares_each_actual_receiver_once() raises:
+    var counters = CounterOwner()
+    var actual = List[ObservedValue]()
+    var expected = List[ObservedValue]()
+    var actual_identities = [0, 8, 2, 7, 4, 6]
+    var expected_identities = [0, 1, 2, 3, 4]
+    for identity in actual_identities:
+        actual.append(
+            ObservedValue(
+                identity,
+                "actual-" + String(identity),
+                counters.actual_equality.copy(),
+                counters.actual_render.copy(),
+            )
+        )
+    for identity in expected_identities:
+        expected.append(
+            ObservedValue(
+                identity,
+                "expected-" + String(identity),
+                counters.expected_equality.copy(),
+                counters.expected_render.copy(),
+            )
+        )
+    var detail = _list_failure(actual, expected)
+    testing.assert_true(
+        "list mismatches: 2 total, 0 omitted by entry limit" in detail
+    )
+    testing.assert_equal(counters.read(0), 6)
     testing.assert_equal(counters.read(1), 0)
 
 

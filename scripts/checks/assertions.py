@@ -76,6 +76,7 @@ API_TESTS = {
     "test_nested_lists_are_opaque_and_user_message_is_last",
     "test_list_specializer_renders_zero_on_pass_and_eight_on_failure",
     "test_unequal_list_suffix_does_not_repeat_the_aligned_scan",
+    "test_unequal_list_exact_scan_compares_each_actual_receiver_once",
     "test_expected_front_insertion_compares_each_receiver_once",
     "test_dictionary_categories_are_distinct_and_ordered",
     "test_dictionary_order_is_full_unsigned_utf8_not_insertion_order",
