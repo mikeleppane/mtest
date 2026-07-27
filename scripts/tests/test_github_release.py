@@ -14,6 +14,7 @@ from scripts.release.github_release import (
     ReleaseSnapshot,
     classify_release,
     dereference_tag,
+    main,
 )
 
 
@@ -23,7 +24,7 @@ COMMIT = "0123456789abcdef0123456789abcdef01234567"
 def snapshot(**changes: object) -> ReleaseSnapshot:
     base = ReleaseSnapshot(
         tag_commit=COMMIT,
-        release_target_commit=COMMIT,
+        release_exists=True,
         draft=False,
         prerelease=False,
         immutable=True,
@@ -35,7 +36,7 @@ class ReleaseStateTests(unittest.TestCase):
     def test_absent_tag_and_release_are_created_together(self) -> None:
         self.assertEqual(
             classify_release(
-                ReleaseSnapshot(None, None, None, None, None),
+                ReleaseSnapshot(None, False, None, None, None),
                 COMMIT,
             ),
             ReleaseAction.CREATE_TAG_AND_RELEASE,
@@ -44,7 +45,7 @@ class ReleaseStateTests(unittest.TestCase):
     def test_exact_tag_without_release_creates_only_release(self) -> None:
         self.assertEqual(
             classify_release(
-                ReleaseSnapshot(COMMIT, None, None, None, None),
+                ReleaseSnapshot(COMMIT, False, None, None, None),
                 COMMIT,
             ),
             ReleaseAction.CREATE_RELEASE,
@@ -58,9 +59,10 @@ class ReleaseStateTests(unittest.TestCase):
 
     def test_conflicting_or_mutable_states_are_rejected(self) -> None:
         conflicts = (
-            ReleaseSnapshot(None, COMMIT, False, False, True),
+            ReleaseSnapshot(None, True, False, False, True),
             snapshot(tag_commit="1" * 40),
-            snapshot(release_target_commit="1" * 40),
+            snapshot(release_exists=1),
+            snapshot(release_exists=False, draft=False),
             snapshot(draft=True),
             snapshot(prerelease=True),
             snapshot(immutable=False),
@@ -121,6 +123,37 @@ class TagDereferenceTests(unittest.TestCase):
             self._repository(repo)
             with self.assertRaises(ValueError):
                 dereference_tag(repo, "v1.0.0")
+
+
+class ReleaseCliTests(unittest.TestCase):
+    def test_classify_writes_only_the_action(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-release-cli-") as raw_tmp:
+            root = Path(raw_tmp)
+            snapshot_path = root / "snapshot.json"
+            output_path = root / "action.txt"
+            snapshot_path.write_text(
+                (
+                    '{"draft":false,"immutable":true,"prerelease":false,'
+                    '"release_exists":true,'
+                    f'"tag_commit":"{COMMIT}"}}\n'
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                main(
+                    [
+                        "classify",
+                        "--snapshot",
+                        str(snapshot_path),
+                        "--expected-commit",
+                        COMMIT,
+                        "--output",
+                        str(output_path),
+                    ]
+                ),
+                0,
+            )
+            self.assertEqual(output_path.read_text(encoding="utf-8"), "noop\n")
 
 
 if __name__ == "__main__":

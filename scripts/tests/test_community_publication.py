@@ -4,13 +4,18 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
+import tempfile
 import unittest
 
+from scripts.release import community as community_release
 from scripts.release.community import (
     PublicationAction,
     PublicationDecision,
     branch_name,
     classify_publication,
+    main,
+    validate_archive_license,
     validate_credential,
 )
 
@@ -40,6 +45,10 @@ def pull_request(**changes: object) -> dict[str, object]:
             "label": f"{OWNER}:mtest-{VERSION}-build-{BUILD_NUMBER}",
             "ref": f"mtest-{VERSION}-build-{BUILD_NUMBER}",
             "user": {"login": OWNER},
+        },
+        "base": {
+            "ref": "main",
+            "repo": {"full_name": "modular/modular-community"},
         },
     }
     result.update(changes)
@@ -118,6 +127,22 @@ class PublicationStateTests(unittest.TestCase):
             [pull_request(maintainer_can_modify=True)],
             [pull_request(), pull_request()],
             [wrong_head],
+            [
+                pull_request(
+                    base={
+                        "ref": "other",
+                        "repo": {"full_name": "modular/modular-community"},
+                    }
+                )
+            ],
+            [
+                pull_request(
+                    base={
+                        "ref": "main",
+                        "repo": {"full_name": "other/repository"},
+                    }
+                )
+            ],
             [pull_request(state="closed", merged_at=None)],
         )
         for pull_requests in conflicts:
@@ -182,6 +207,93 @@ class CredentialTests(unittest.TestCase):
                 self.assertRaises(ValueError),
             ):
                 validate_credential(headers, user, OWNER, NOW)
+
+    def test_credential_rejects_classic_token_scopes(self) -> None:
+        headers = (
+            "github-authentication-token-expiration: 2026-07-28 12:00:00 UTC\n"
+            "x-oauth-scopes: repo\n"
+        )
+        with self.assertRaisesRegex(ValueError, "classic"):
+            validate_credential(headers, {"login": OWNER}, OWNER, NOW)
+
+    def test_fork_repository_is_the_expected_writable_upstream_fork(self) -> None:
+        repository = {
+            "full_name": f"{OWNER}/modular-community",
+            "fork": True,
+            "parent": {"full_name": "modular/modular-community"},
+            "permissions": {"push": True},
+        }
+        community_release.validate_fork_repository(repository, OWNER)
+        mutations = (
+            {**repository, "full_name": "other/modular-community"},
+            {**repository, "fork": False},
+            {**repository, "parent": {"full_name": "other/repository"}},
+            {**repository, "permissions": {"push": False}},
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                community_release.validate_fork_repository(mutation, OWNER)
+
+
+class CommunityCliTests(unittest.TestCase):
+    def test_archive_license_requires_one_exact_listing_entry(self) -> None:
+        validate_archive_license(
+            "info/index.json  \ninfo/licenses/LICENSE \r\n",
+            "info/licenses/LICENSE",
+        )
+        for listing in (
+            "info/licenses/LICENSE.extra\n",
+            "prefix/info/licenses/LICENSE\n",
+            "info/licenses/LICENSE\ninfo/licenses/LICENSE\n",
+        ):
+            with self.subTest(listing=listing), self.assertRaises(ValueError):
+                validate_archive_license(listing, "info/licenses/LICENSE")
+
+    def test_branch_command_writes_the_validated_name(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-community-cli-") as raw_tmp:
+            output = Path(raw_tmp) / "branch.txt"
+            self.assertEqual(
+                main(
+                    [
+                        "branch",
+                        "--version",
+                        VERSION,
+                        "--build-number",
+                        str(BUILD_NUMBER),
+                        "--output",
+                        str(output),
+                    ]
+                ),
+                0,
+            )
+            self.assertEqual(
+                output.read_text(encoding="utf-8"),
+                "mtest-1.0.0-build-0\n",
+            )
+
+    def test_fork_command_validates_the_authenticated_repository(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-community-fork-") as raw_tmp:
+            repository = Path(raw_tmp) / "repository.json"
+            repository.write_text(
+                (
+                    '{"full_name":"mikeleppane/modular-community","fork":true,'
+                    '"parent":{"full_name":"modular/modular-community"},'
+                    '"permissions":{"push":true}}\n'
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                main(
+                    [
+                        "fork",
+                        "--repository",
+                        str(repository),
+                        "--expected-owner",
+                        OWNER,
+                    ]
+                ),
+                0,
+            )
 
 
 if __name__ == "__main__":

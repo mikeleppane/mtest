@@ -1,0 +1,649 @@
+name: Community Publish
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Validate only or prepare the fork branch
+        type: choice
+        options: [dry-run, prepare]
+        default: dry-run
+      tag:
+        description: Required for prepare; omit for current-main dry run
+        required: false
+        type: string
+      build_number:
+        description: modular-community build number
+        required: true
+        default: "0"
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  resolve:
+    name: Resolve trusted source
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    outputs:
+      active: ${{ steps.resolve.outputs.active }}
+      mode: ${{ steps.resolve.outputs.mode }}
+      version: ${{ steps.resolve.outputs.version }}
+      build_number: ${{ steps.resolve.outputs.build_number }}
+      source_rev: ${{ steps.resolve.outputs.source_rev }}
+      upstream_commit: ${{ steps.resolve.outputs.upstream_commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
+        with:
+          locked: true
+          cache: true
+          run-install: false
+
+      - name: Download triggering release evidence
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-result
+          path: build/release-result
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Resolve exact source, mode, and upstream
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WORKFLOW_RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_RUN_EVENT: ${{ github.event.workflow_run.event }}
+          WORKFLOW_RUN_WORKFLOW_ID: ${{ github.event.workflow_run.workflow_id }}
+          WORKFLOW_RUN_PATH: ${{ github.event.workflow_run.path }}
+          WORKFLOW_DEFINITION_SHA: ${{ github.sha }}
+          INPUT_MODE: ${{ inputs.mode }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_BUILD_NUMBER: ${{ inputs.build_number }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          active=true
+          if test "$EVENT_NAME" = "workflow_run"; then
+            test "$WORKFLOW_RUN_CONCLUSION" = "success"
+            test "$WORKFLOW_RUN_BRANCH" = "main"
+            test "$WORKFLOW_RUN_EVENT" = "workflow_dispatch"
+            [[ "$WORKFLOW_RUN_PATH" == ".github/workflows/release.yml@"* ]]
+            release_workflow_id="$(
+              gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml" \
+                --jq .id
+            )"
+            test "$WORKFLOW_RUN_WORKFLOW_ID" = "$release_workflow_id"
+            test "$WORKFLOW_DEFINITION_SHA" = "$WORKFLOW_RUN_SHA"
+            test "$DEFAULT_BRANCH" = "main"
+            evidence=build/release-result/release-result.json
+            pixi run python -m scripts.release.attestations release validate \
+              --input "$evidence"
+            tag="$(jq -r .tag "$evidence")"
+            source_rev="$(jq -r .commit "$evidence")"
+            version="${tag#v}"
+            build_number=0
+            mode=prepare
+            if test "$(jq -r .created "$evidence")" = "false"; then
+              active=false
+            fi
+            test "$source_rev" = "$WORKFLOW_RUN_SHA"
+          else
+            mode="$INPUT_MODE"
+            tag="$INPUT_TAG"
+            build_number="$INPUT_BUILD_NUMBER"
+            [[ "$build_number" =~ ^(0|[1-9][0-9]*)$ ]]
+            test "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH"
+            test "$DEFAULT_BRANCH" = "main"
+            main_sha="$(
+              gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha
+            )"
+            test "$GITHUB_SHA" = "$main_sha"
+            gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&branch=main&status=completed&head_sha=$GITHUB_SHA&per_page=100" \
+              > "$RUNNER_TEMP/ci-runs.json"
+            jq -e --arg sha "$GITHUB_SHA" '
+              any(
+                .workflow_runs[];
+                .event == "push" and
+                .head_branch == "main" and
+                .head_sha == $sha and
+                .conclusion == "success"
+              )
+            ' "$RUNNER_TEMP/ci-runs.json" >/dev/null
+            if test "$mode" = "prepare"; then
+              test -n "$tag"
+            fi
+            if test -n "$tag"; then
+              [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+              git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
+              source_rev="$(
+                pixi run python -m scripts.release.github_release dereference \
+                  --repo . --tag "$tag"
+              )"
+              git checkout --detach "$source_rev"
+              release="$RUNNER_TEMP/release.json"
+              gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" > "$release"
+              jq -e --arg tag "$tag" '
+                .tag_name == $tag and
+                .draft == false and
+                .prerelease == false and
+                .immutable == true
+              ' "$release" >/dev/null
+              version="${tag#v}"
+            else
+              test "$mode" = "dry-run"
+              source_rev="$GITHUB_SHA"
+              version="$(
+                pixi run python -c \
+                  'import tomllib; print(tomllib.load(open("pixi.toml", "rb"))["workspace"]["version"])'
+              )"
+            fi
+          fi
+
+          [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test "$(git rev-parse HEAD)" = "$source_rev"
+          if test -n "$tag"; then
+            git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
+            test "$(
+              pixi run python -m scripts.release.github_release dereference \
+                --repo . --tag "$tag"
+            )" = "$source_rev"
+            release="$RUNNER_TEMP/resolved-release.json"
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" > "$release"
+            jq -e --arg tag "$tag" '
+              .tag_name == $tag and
+              .draft == false and
+              .prerelease == false and
+              .immutable == true
+            ' "$release" >/dev/null
+          fi
+          upstream_commit="$(
+            gh api repos/modular/modular-community/commits/main --jq .sha
+          )"
+          [[ "$upstream_commit" =~ ^[0-9a-f]{40}$ ]]
+          {
+            echo "active=$active"
+            echo "mode=$mode"
+            echo "version=$version"
+            echo "build_number=$build_number"
+            echo "source_rev=$source_rev"
+            echo "upstream_commit=$upstream_commit"
+          } >> "$GITHUB_OUTPUT"
+
+  render:
+    name: Render community recipe
+    needs: resolve
+    if: needs.resolve.outputs.active == 'true'
+    runs-on: ubuntu-24.04
+    outputs:
+      directory_digest: ${{ steps.render.outputs.directory_digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.source_rev }}
+
+      - name: Render and attest exact recipe
+        id: render
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          SOURCE_REV: ${{ needs.resolve.outputs.source_rev }}
+          BUILD_NUMBER: ${{ needs.resolve.outputs.build_number }}
+        run: |
+          set -euo pipefail
+          digest="$(
+            python3 -m scripts.release.recipe render \
+              --version "$VERSION" \
+              --source-rev "$SOURCE_REV" \
+              --build-number "$BUILD_NUMBER" \
+              --output build/community-render/recipes/mtest
+          )"
+          python3 -m scripts.release.recipe verify-manifest \
+            --root build/community-render/recipes/mtest \
+            --manifest build/community-render/manifest.json \
+            --expected-digest "$digest"
+          echo "directory_digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Upload immutable rendered recipe
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: community-recipe-${{ github.run_id }}
+          path: build/community-render
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 30
+
+  validate:
+    name: ${{ matrix.name }} community build
+    needs: [resolve, render]
+    if: needs.resolve.outputs.active == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            name: Linux
+          - runner: macos-15
+            name: macOS arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out mtest
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.source_rev }}
+          path: mtest
+          persist-credentials: false
+
+      - name: Download rendered recipe
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: community-recipe-${{ github.run_id }}
+          path: candidate
+
+      - name: Check out exact upstream revision
+        env:
+          UPSTREAM_COMMIT: ${{ needs.resolve.outputs.upstream_commit }}
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none https://github.com/modular/modular-community.git upstream
+          git -C upstream checkout --detach "$UPSTREAM_COMMIT"
+          test "$(git -C upstream rev-parse HEAD)" = "$UPSTREAM_COMMIT"
+
+      - name: Set up upstream pixi
+        uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11 # v0.9.6
+        with:
+          pixi-version: v0.63.2
+          run-install: false
+
+      - name: Verify, stage, lint, and build
+        env:
+          DIRECTORY_DIGEST: ${{ needs.render.outputs.directory_digest }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          PYTHONPATH=mtest python3 -m scripts.release.recipe verify-manifest \
+            --root candidate/recipes/mtest \
+            --manifest candidate/manifest.json \
+            --expected-digest "$DIRECTORY_DIGEST"
+          python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          platforms = tomllib.loads(
+              Path("upstream/pixi.toml").read_text(encoding="utf-8")
+          )["workspace"]["platforms"]
+          expected = ["linux-64", "linux-aarch64", "osx-arm64"]
+          if platforms != expected:
+              raise SystemExit(
+                  f"FATAL: upstream platform roster changed: {platforms!r}"
+              )
+          PY
+          PYTHONPATH=mtest python3 -m scripts.release.recipe stage \
+            --source candidate/recipes/mtest \
+            --upstream-checkout upstream
+          cd upstream
+          pixi install --locked
+          test "$(pixi run rattler-build --version)" = "rattler-build 0.30.0"
+          pixi run lint
+          pixi run build-all
+          find output -type f -name "mtest-${VERSION}-*.conda" -print \
+            > "$RUNNER_TEMP/mtest-artifacts.txt"
+          test "$(wc -l < "$RUNNER_TEMP/mtest-artifacts.txt" | tr -d ' ')" -eq 1
+          artifact="$(sed -n '1p' "$RUNNER_TEMP/mtest-artifacts.txt")"
+          pixi run cph list "$artifact" \
+            > "$RUNNER_TEMP/mtest-package-contents.txt"
+          PYTHONPATH="$GITHUB_WORKSPACE/mtest" pixi run python \
+            -m scripts.release.community \
+            archive-license \
+            --listing "$RUNNER_TEMP/mtest-package-contents.txt" \
+            --expected info/licenses/LICENSE
+
+  validate-selector:
+    name: Linux aarch64 selector
+    needs: [resolve, render]
+    if: needs.resolve.outputs.active == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out mtest
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.source_rev }}
+          path: mtest
+          persist-credentials: false
+
+      - name: Download rendered recipe
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: community-recipe-${{ github.run_id }}
+          path: candidate
+
+      - name: Check out exact upstream revision
+        env:
+          UPSTREAM_COMMIT: ${{ needs.resolve.outputs.upstream_commit }}
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none https://github.com/modular/modular-community.git upstream
+          git -C upstream checkout --detach "$UPSTREAM_COMMIT"
+          test "$(git -C upstream rev-parse HEAD)" = "$UPSTREAM_COMMIT"
+
+      - name: Set up upstream pixi
+        uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11 # v0.9.6
+        with:
+          pixi-version: v0.63.2
+          run-install: false
+
+      - name: Prove unsupported target is skipped
+        env:
+          DIRECTORY_DIGEST: ${{ needs.render.outputs.directory_digest }}
+        run: |
+          set -euo pipefail
+          PYTHONPATH=mtest python3 -m scripts.release.recipe verify-manifest \
+            --root candidate/recipes/mtest \
+            --manifest candidate/manifest.json \
+            --expected-digest "$DIRECTORY_DIGEST"
+          PYTHONPATH=mtest python3 -m scripts.release.recipe stage \
+            --source candidate/recipes/mtest \
+            --upstream-checkout upstream
+          cd upstream
+          pixi install --locked
+          test "$(pixi run rattler-build --version)" = "rattler-build 0.30.0"
+          pixi run rattler-build build \
+            --recipe recipes/mtest/recipe.yaml \
+            --variant-config variants/variants.yaml \
+            --target-platform linux-aarch64 \
+            --render-only \
+            --log-style json \
+            --output-dir output-aarch64 \
+            > "$RUNNER_TEMP/submitted-stdout.json" \
+            2> "$RUNNER_TEMP/submitted-stderr.jsonl"
+          test "$(tr -d '[:space:]' < "$RUNNER_TEMP/submitted-stdout.json")" = "[]"
+          grep -q '"mtest"' "$RUNNER_TEMP/submitted-stderr.jsonl"
+          grep -qi 'skip' "$RUNNER_TEMP/submitted-stderr.jsonl"
+          test -z "$(find output-aarch64 -type f -name '*.conda' -print 2>/dev/null)"
+
+          cp -R recipes/mtest "$RUNNER_TEMP/mtest-control"
+          CONTROL="$RUNNER_TEMP/mtest-control/recipe.yaml" pixi run python - <<'PY'
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["CONTROL"])
+          text = path.read_text(encoding="utf-8")
+          selector = "  skip:\n    - linux and aarch64\n"
+          if text.count(selector) != 1:
+              raise SystemExit("FATAL: exact unsupported-target selector changed")
+          path.write_text(text.replace(selector, "", 1), encoding="utf-8")
+          PY
+          pixi run rattler-build build \
+            --recipe "$RUNNER_TEMP/mtest-control/recipe.yaml" \
+            --variant-config variants/variants.yaml \
+            --target-platform linux-aarch64 \
+            --render-only \
+            --log-style json \
+            --output-dir output-aarch64-control \
+            > "$RUNNER_TEMP/control-stdout.json" \
+            2> "$RUNNER_TEMP/control-stderr.jsonl"
+          test "$(tr -d '[:space:]' < "$RUNNER_TEMP/control-stdout.json")" != "[]"
+          grep -q '"mtest"' "$RUNNER_TEMP/control-stdout.json"
+
+  candidate-result:
+    name: Record candidate evidence
+    needs: [resolve, render, validate, validate-selector]
+    if: needs.resolve.outputs.active == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.source_rev }}
+
+      - name: Download rendered recipe
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: community-recipe-${{ github.run_id }}
+          path: build/community-render
+
+      - name: Write canonical candidate evidence
+        env:
+          MODE: ${{ needs.resolve.outputs.mode }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          BUILD_NUMBER: ${{ needs.resolve.outputs.build_number }}
+          SOURCE_REV: ${{ needs.resolve.outputs.source_rev }}
+          UPSTREAM_COMMIT: ${{ needs.resolve.outputs.upstream_commit }}
+          DIRECTORY_DIGEST: ${{ needs.render.outputs.directory_digest }}
+        run: |
+          set -euo pipefail
+          python3 -m scripts.release.recipe verify-manifest \
+            --root build/community-render/recipes/mtest \
+            --manifest build/community-render/manifest.json \
+            --expected-digest "$DIRECTORY_DIGEST"
+          python3 -m scripts.release.attestations candidate write \
+            --output build/candidate-result.json \
+            --mode "$MODE" \
+            --version "$VERSION" \
+            --commit "$SOURCE_REV" \
+            --build-number "$BUILD_NUMBER" \
+            --upstream-commit "$UPSTREAM_COMMIT" \
+            --directory-digest "$DIRECTORY_DIGEST" \
+            --rattler-build-version 0.30.0 \
+            --linux-validated \
+            --macos-validated \
+            --linux-aarch64-skipped
+
+      - name: Upload candidate evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-result
+          path: build/candidate-result.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+
+  prepare:
+    name: Prepare maintainer fork branch
+    needs: [resolve, render, validate, validate-selector, candidate-result]
+    if: >-
+      needs.resolve.outputs.active == 'true' &&
+      needs.resolve.outputs.mode == 'prepare'
+    runs-on: ubuntu-24.04
+    environment: community-publish
+    concurrency:
+      group: community-publish-${{ needs.resolve.outputs.version }}-${{ needs.resolve.outputs.build_number }}
+      cancel-in-progress: false
+    steps:
+      - name: Validate protected environment
+        env:
+          ENVIRONMENT_CONFIGURED: ${{ vars.COMMUNITY_ENVIRONMENT_CONFIGURED }}
+          FORK_OWNER: ${{ vars.COMMUNITY_FORK_OWNER }}
+        run: |
+          set -euo pipefail
+          test "$ENVIRONMENT_CONFIGURED" = "true"
+          test -n "$FORK_OWNER"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.source_rev }}
+          path: mtest
+          persist-credentials: false
+
+      - name: Download rendered recipe
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: community-recipe-${{ github.run_id }}
+          path: candidate
+
+      - name: Revalidate protected inputs and credential
+        env:
+          DIRECTORY_DIGEST: ${{ needs.render.outputs.directory_digest }}
+          UPSTREAM_COMMIT: ${{ needs.resolve.outputs.upstream_commit }}
+          FORK_OWNER: ${{ vars.COMMUNITY_FORK_OWNER }}
+          COMMUNITY_FORK_TOKEN: ${{ secrets.COMMUNITY_FORK_TOKEN }}
+        run: |
+          set -euo pipefail
+          PYTHONPATH=mtest python3 -m scripts.release.recipe verify-manifest \
+            --root candidate/recipes/mtest \
+            --manifest candidate/manifest.json \
+            --expected-digest "$DIRECTORY_DIGEST"
+          current_upstream="$(
+            curl --fail --silent --show-error \
+              https://api.github.com/repos/modular/modular-community/commits/main |
+              jq -r .sha
+          )"
+          test "$current_upstream" = "$UPSTREAM_COMMIT"
+          test -n "$COMMUNITY_FORK_TOKEN"
+          curl --fail --silent --show-error \
+            --dump-header "$RUNNER_TEMP/token-headers.txt" \
+            --header "Authorization: Bearer $COMMUNITY_FORK_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            https://api.github.com/user > "$RUNNER_TEMP/token-user.json"
+          curl --fail --silent --show-error \
+            --header "Authorization: Bearer $COMMUNITY_FORK_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$FORK_OWNER/modular-community" \
+            > "$RUNNER_TEMP/fork-repository.json"
+          PYTHONPATH=mtest python3 -m scripts.release.community credential \
+            --headers "$RUNNER_TEMP/token-headers.txt" \
+            --user "$RUNNER_TEMP/token-user.json" \
+            --expected-login "$FORK_OWNER" \
+            --output "$RUNNER_TEMP/token-expiration.txt"
+          PYTHONPATH=mtest python3 -m scripts.release.community fork \
+            --repository "$RUNNER_TEMP/fork-repository.json" \
+            --expected-owner "$FORK_OWNER"
+
+      - name: Reclassify publication and prepare exact fork branch
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          BUILD_NUMBER: ${{ needs.resolve.outputs.build_number }}
+          SOURCE_REV: ${{ needs.resolve.outputs.source_rev }}
+          UPSTREAM_COMMIT: ${{ needs.resolve.outputs.upstream_commit }}
+          DIRECTORY_DIGEST: ${{ needs.render.outputs.directory_digest }}
+          FORK_OWNER: ${{ vars.COMMUNITY_FORK_OWNER }}
+          COMMUNITY_FORK_TOKEN: ${{ secrets.COMMUNITY_FORK_TOKEN }}
+          GH_TOKEN: ${{ secrets.COMMUNITY_FORK_TOKEN }}
+        run: |
+          set -euo pipefail
+          PYTHONPATH=mtest python3 -m scripts.release.community branch \
+            --version "$VERSION" \
+            --build-number "$BUILD_NUMBER" \
+            --output "$RUNNER_TEMP/branch.txt"
+          branch="$(tr -d '\r\n' < "$RUNNER_TEMP/branch.txt")"
+
+          for platform in linux-64 osx-arm64; do
+            curl --fail --silent --show-error \
+              "https://repo.prefix.dev/modular-community/$platform/repodata.json" \
+              > "$RUNNER_TEMP/$platform-repodata.json"
+            PLATFORM="$platform" VERSION="$VERSION" BUILD_NUMBER="$BUILD_NUMBER" \
+              INPUT="$RUNNER_TEMP/$platform-repodata.json" \
+              OUTPUT="$RUNNER_TEMP/$platform-records.json" \
+              python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          document = json.loads(Path(os.environ["INPUT"]).read_bytes())
+          records = []
+          for section in ("packages", "packages.conda"):
+              for item in document.get(section, {}).values():
+                  if (
+                      item.get("name") == "mtest"
+                      and item.get("version") == os.environ["VERSION"]
+                      and item.get("build_number") == int(os.environ["BUILD_NUMBER"])
+                  ):
+                      records.append(
+                          {
+                              "name": item["name"],
+                              "version": item["version"],
+                              "build_number": item["build_number"],
+                              "subdir": os.environ["PLATFORM"],
+                          }
+                      )
+          Path(os.environ["OUTPUT"]).write_text(
+              json.dumps(records, separators=(",", ":"), sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          done
+
+          gh api \
+            "repos/modular/modular-community/pulls?state=all&head=$FORK_OWNER:$branch&per_page=100" \
+            > "$RUNNER_TEMP/pull-request-list.json"
+          pull_count="$(jq 'length' "$RUNNER_TEMP/pull-request-list.json")"
+          if test "$pull_count" -eq 0; then
+            printf '[]\n' > "$RUNNER_TEMP/pull-requests.json"
+          elif test "$pull_count" -eq 1; then
+            pull_number="$(
+              jq -r '.[0].number' "$RUNNER_TEMP/pull-request-list.json"
+            )"
+            gh api \
+              "repos/modular/modular-community/pulls/$pull_number" |
+              jq -s '.' > "$RUNNER_TEMP/pull-requests.json"
+          else
+            cp "$RUNNER_TEMP/pull-request-list.json" \
+              "$RUNNER_TEMP/pull-requests.json"
+          fi
+          PYTHONPATH=mtest python3 -m scripts.release.community classify \
+            --linux-records "$RUNNER_TEMP/linux-64-records.json" \
+            --macos-records "$RUNNER_TEMP/osx-arm64-records.json" \
+            --pull-requests "$RUNNER_TEMP/pull-requests.json" \
+            --owner "$FORK_OWNER" \
+            --version "$VERSION" \
+            --build-number "$BUILD_NUMBER" \
+            --output "$RUNNER_TEMP/publication.json"
+          action="$(jq -r .action "$RUNNER_TEMP/publication.json")"
+          if test "$action" = "published-noop" || test "$action" = "merged-waiting"; then
+            echo "Community publication is already $action; no fork mutation performed." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          git clone https://github.com/modular/modular-community.git fork-work
+          git -C fork-work checkout --detach "$UPSTREAM_COMMIT"
+          git -C fork-work switch -c "$branch"
+          PYTHONPATH=mtest python3 -m scripts.release.recipe stage-target \
+            --source candidate/recipes/mtest \
+            --upstream-checkout fork-work
+          git -C fork-work add recipes/mtest
+          git -C fork-work config user.name "$FORK_OWNER"
+          git -C fork-work config user.email "$FORK_OWNER@users.noreply.github.com"
+          git -C fork-work commit -m "Add mtest $VERSION build $BUILD_NUMBER"
+          gh auth setup-git
+          git -C fork-work remote add fork \
+            "https://github.com/$FORK_OWNER/modular-community.git"
+          expected_fork_sha="$(
+            git -C fork-work ls-remote fork "refs/heads/$branch" |
+              awk '{print $1}'
+          )"
+          git -C fork-work push \
+            --force-with-lease="refs/heads/$branch:$expected_fork_sha" \
+            fork "HEAD:refs/heads/$branch"
+
+          compare_url="https://github.com/modular/modular-community/compare/main...$FORK_OWNER:$branch?expand=1"
+          {
+            echo "## Branch prepared; not submitted or published"
+            echo
+            echo "Open: $compare_url"
+            echo
+            echo "Title: Add mtest $VERSION build $BUILD_NUMBER"
+            echo
+            echo "Disable **Allow edits from maintainers** before submission."
+            echo "The upstream \`OK to test\` label is required before CI runs."
+            echo
+            echo "Validated source: \`$SOURCE_REV\`"
+            echo "Upstream base: \`$UPSTREAM_COMMIT\`"
+            echo "Recipe digest: \`$DIRECTORY_DIGEST\`"
+            echo "Platforms: linux-64, osx-arm64; linux-aarch64 skipped"
+          } >> "$GITHUB_STEP_SUMMARY"

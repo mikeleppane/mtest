@@ -1,0 +1,419 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable version without a leading v
+        required: true
+        type: string
+      candidate_run_id:
+        description: Successful Community Publish dry-run ID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: github-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release evidence
+    runs-on: ubuntu-24.04
+    outputs:
+      commit: ${{ steps.state.outputs.commit }}
+      tag: ${{ steps.state.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
+        with:
+          locked: true
+          cache: true
+          run-install: false
+
+      - name: Validate input and source identity
+        env:
+          VERSION: ${{ inputs.version }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          test "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH"
+          test "$DEFAULT_BRANCH" = "main"
+          main_sha="$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)"
+          test "$main_sha" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          pixi run ci-preflight
+          manifest_version="$(
+            pixi run python -c \
+              'import tomllib; print(tomllib.load(open("pixi.toml", "rb"))["workspace"]["version"])'
+          )"
+          test "$manifest_version" = "$VERSION"
+
+      - name: Validate successful exact-SHA CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&branch=main&status=completed&head_sha=$GITHUB_SHA&per_page=100" \
+            > "$RUNNER_TEMP/ci-runs.json"
+          jq -e --arg sha "$GITHUB_SHA" '
+            any(
+              .workflow_runs[];
+              .event == "push" and
+              .head_branch == "main" and
+              .head_sha == $sha and
+              .conclusion == "success"
+            )
+          ' "$RUNNER_TEMP/ci-runs.json" >/dev/null
+
+      - name: Validate candidate run identity
+        env:
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          candidate_workflow_id="$(
+            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/community-publish.yml" \
+              --jq .id
+          )"
+          [[ "$candidate_workflow_id" =~ ^[1-9][0-9]*$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" \
+            > "$RUNNER_TEMP/candidate-run.json"
+          jq -e \
+            --arg sha "$GITHUB_SHA" \
+            --argjson workflow_id "$candidate_workflow_id" '
+            .workflow_id == $workflow_id and
+            (.path | startswith(".github/workflows/community-publish.yml@")) and
+            .event == "workflow_dispatch" and
+            .head_branch == "main" and
+            .head_sha == $sha and
+            .status == "completed" and
+            .conclusion == "success"
+          ' "$RUNNER_TEMP/candidate-run.json" >/dev/null
+
+      - name: Download candidate evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: candidate-result
+          path: build/candidate-result
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Validate candidate and classify release state
+        id: state
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          candidate=build/candidate-result/candidate-result.json
+          pixi run python -m scripts.release.attestations candidate validate \
+            --input "$candidate"
+          jq -e --arg version "$VERSION" --arg commit "$GITHUB_SHA" '
+            .version == $version and
+            .commit == $commit and
+            .mode == "dry-run" and
+            .build_number == 0
+          ' "$candidate" >/dev/null
+
+          tag="v$VERSION"
+          tag_commit=""
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
+            tag_commit="$(
+              pixi run python -m scripts.release.github_release dereference \
+                --repo . --tag "$tag"
+            )"
+          fi
+          release_file="$RUNNER_TEMP/release.json"
+          status="$(
+            curl --silent --show-error \
+              --output "$release_file" \
+              --write-out '%{http_code}' \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$tag"
+          )"
+          if test "$status" = "404"; then
+            : > "$release_file"
+          else
+            test "$status" = "200"
+          fi
+          TAG_COMMIT="$tag_commit" RELEASE_FILE="$release_file" \
+            pixi run python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          release_path = Path(os.environ["RELEASE_FILE"])
+          release = json.loads(release_path.read_bytes()) if release_path.stat().st_size else None
+          snapshot = {
+              "tag_commit": os.environ["TAG_COMMIT"] or None,
+              "release_exists": release is not None,
+              "draft": None if release is None else release["draft"],
+              "prerelease": None if release is None else release["prerelease"],
+              "immutable": None if release is None else release.get("immutable"),
+          }
+          Path("build").mkdir(exist_ok=True)
+          Path("build/release-snapshot.json").write_text(
+              json.dumps(snapshot, separators=(",", ":"), sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          pixi run python -m scripts.release.github_release classify \
+            --snapshot build/release-snapshot.json \
+            --expected-commit "$GITHUB_SHA" \
+            --output build/release-action.txt
+          {
+            echo "commit=$GITHUB_SHA"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Publish immutable GitHub release
+    needs: validate
+    runs-on: ubuntu-24.04
+    environment: github-release
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Validate protected environment
+        env:
+          ENVIRONMENT_CONFIGURED: ${{ vars.RELEASE_ENVIRONMENT_CONFIGURED }}
+          IMMUTABILITY_CONFIGURED: ${{ vars.RELEASE_IMMUTABILITY_CONFIGURED }}
+        run: |
+          set -euo pipefail
+          test "$ENVIRONMENT_CONFIGURED" = "true"
+          test "$IMMUTABILITY_CONFIGURED" = "true"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
+        with:
+          locked: true
+          cache: true
+          run-install: false
+
+      - name: Download candidate evidence again
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: candidate-result
+          path: build/candidate-result
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Revalidate all trusted state after approval
+        env:
+          VERSION: ${{ inputs.version }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          VALIDATED_SHA: ${{ needs.validate.outputs.commit }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH"
+          test "$DEFAULT_BRANCH" = "main"
+          test "$(git rev-parse HEAD)" = "$VALIDATED_SHA"
+          main_sha="$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)"
+          test "$main_sha" = "$VALIDATED_SHA"
+
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&branch=main&status=completed&head_sha=$VALIDATED_SHA&per_page=100" \
+            > "$RUNNER_TEMP/ci-runs.json"
+          jq -e --arg sha "$VALIDATED_SHA" '
+            any(
+              .workflow_runs[];
+              .event == "push" and
+              .head_branch == "main" and
+              .head_sha == $sha and
+              .conclusion == "success"
+            )
+          ' "$RUNNER_TEMP/ci-runs.json" >/dev/null
+
+          candidate_workflow_id="$(
+            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/community-publish.yml" \
+              --jq .id
+          )"
+          [[ "$candidate_workflow_id" =~ ^[1-9][0-9]*$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" \
+            > "$RUNNER_TEMP/candidate-run.json"
+          jq -e \
+            --arg sha "$VALIDATED_SHA" \
+            --argjson workflow_id "$candidate_workflow_id" '
+            .workflow_id == $workflow_id and
+            (.path | startswith(".github/workflows/community-publish.yml@")) and
+            .event == "workflow_dispatch" and
+            .head_branch == "main" and
+            .head_sha == $sha and
+            .status == "completed" and
+            .conclusion == "success"
+          ' "$RUNNER_TEMP/candidate-run.json" >/dev/null
+          candidate=build/candidate-result/candidate-result.json
+          pixi run python -m scripts.release.attestations candidate validate \
+            --input "$candidate"
+          jq -e --arg version "$VERSION" --arg commit "$VALIDATED_SHA" '
+            .version == $version and
+            .commit == $commit and
+            .mode == "dry-run" and
+            .build_number == 0
+          ' "$candidate" >/dev/null
+
+          tag_commit=""
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+            tag_commit="$(
+              pixi run python -m scripts.release.github_release dereference \
+                --repo . --tag "$TAG"
+            )"
+          fi
+          release_file="$RUNNER_TEMP/release.json"
+          status="$(
+            curl --silent --show-error \
+              --output "$release_file" \
+              --write-out '%{http_code}' \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$TAG"
+          )"
+          if test "$status" = "404"; then
+            : > "$release_file"
+          else
+            test "$status" = "200"
+          fi
+          TAG_COMMIT="$tag_commit" RELEASE_FILE="$release_file" \
+            pixi run python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          release_path = Path(os.environ["RELEASE_FILE"])
+          release = json.loads(release_path.read_bytes()) if release_path.stat().st_size else None
+          snapshot = {
+              "tag_commit": os.environ["TAG_COMMIT"] or None,
+              "release_exists": release is not None,
+              "draft": None if release is None else release["draft"],
+              "prerelease": None if release is None else release["prerelease"],
+              "immutable": None if release is None else release.get("immutable"),
+          }
+          Path("build/release-snapshot.json").write_text(
+              json.dumps(snapshot, separators=(",", ":"), sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          pixi run python -m scripts.release.github_release classify \
+            --snapshot build/release-snapshot.json \
+            --expected-commit "$VALIDATED_SHA" \
+            --output build/release-action.txt
+
+      - name: Create or reuse the stable release
+        env:
+          VERSION: ${{ inputs.version }}
+          VALIDATED_SHA: ${{ needs.validate.outputs.commit }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          action="$(tr -d '\r\n' < build/release-action.txt)"
+          created=false
+          if test "$action" = "create-tag-and-release"; then
+            if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$TAG" -f sha="$VALIDATED_SHA" \
+              > "$RUNNER_TEMP/tag-create.json" 2> "$RUNNER_TEMP/tag-create.err"; then
+              git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+              actual="$(
+                pixi run python -m scripts.release.github_release dereference \
+                  --repo . --tag "$TAG"
+              )"
+              test "$actual" = "$VALIDATED_SHA"
+            fi
+            git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+            test "$(
+              pixi run python -m scripts.release.github_release dereference \
+                --repo . --tag "$TAG"
+            )" = "$VALIDATED_SHA"
+          elif test "$action" = "create-release"; then
+            git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+            test "$(
+              pixi run python -m scripts.release.github_release dereference \
+                --repo . --tag "$TAG"
+            )" = "$VALIDATED_SHA"
+          elif test "$action" != "noop"; then
+            echo "FATAL: unknown release action: $action" >&2
+            exit 1
+          fi
+
+          if test "$action" != "noop"; then
+            jq -n \
+              --arg tag "$TAG" \
+              --arg commit "$VALIDATED_SHA" \
+              --arg name "mtest $VERSION" \
+              '{
+                tag_name: $tag,
+                target_commitish: $commit,
+                name: $name,
+                draft: false,
+                prerelease: false,
+                generate_release_notes: true
+              }' > "$RUNNER_TEMP/release-create.json"
+            gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+              --input "$RUNNER_TEMP/release-create.json" \
+              > "$RUNNER_TEMP/release-created.json"
+            created=true
+          fi
+
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+            > "$RUNNER_TEMP/release-final.json"
+          jq -e --arg tag "$TAG" '
+            .tag_name == $tag and
+            .draft == false and
+            .prerelease == false and
+            .immutable == true
+          ' "$RUNNER_TEMP/release-final.json" >/dev/null
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          test "$(
+            pixi run python -m scripts.release.github_release dereference \
+              --repo . --tag "$TAG"
+          )" = "$VALIDATED_SHA"
+
+          mkdir -p build
+          args=(
+            release write
+            --output build/release-result.json
+            --tag "$TAG"
+            --commit "$VALIDATED_SHA"
+            --immutable
+          )
+          if test "$created" = true; then
+            args+=(--created)
+          fi
+          pixi run python -m scripts.release.attestations "${args[@]}"
+
+      - name: Upload release evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-result
+          path: build/release-result.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90

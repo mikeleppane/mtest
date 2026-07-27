@@ -11,6 +11,7 @@ import tempfile
 import unittest
 
 from scripts.checks.community_recipe import check_recipe_drift
+from scripts.release import recipe as release_recipe
 from scripts.release.recipe import (
     ManifestEntry,
     RenderRequest,
@@ -285,6 +286,53 @@ class StageRecipeTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "boundary|link"):
                 stage_recipe(source, checkout)
+
+    def test_stage_target_replaces_only_the_mtest_recipe(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-recipe-target-") as raw_tmp:
+            root = Path(raw_tmp)
+            source = self._source(root)
+            checkout = root / "upstream"
+            other = checkout / "recipes" / "other-package"
+            other.mkdir(parents=True)
+            (other / "recipe.yaml").write_text("other\n", encoding="utf-8")
+            target = checkout / "recipes" / "mtest"
+            target.mkdir()
+            (target / "stale.txt").write_text("stale\n", encoding="utf-8")
+
+            release_recipe.stage_recipe_target(source, checkout)
+
+            self.assertEqual(
+                sorted(path.name for path in (checkout / "recipes").iterdir()),
+                ["mtest", "other-package"],
+            )
+            self.assertEqual(
+                sorted(path.name for path in target.iterdir()),
+                ["recipe.yaml", "test_smoke.mojo"],
+            )
+            self.assertEqual(build_manifest(target), build_manifest(source))
+
+    def test_stage_target_cli_uses_the_exact_target_mode(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-recipe-target-cli-") as raw_tmp:
+            root = Path(raw_tmp)
+            source = self._source(root)
+            checkout = root / "upstream"
+            (checkout / "recipes").mkdir(parents=True)
+
+            status = release_recipe.main(
+                [
+                    "stage-target",
+                    "--source",
+                    str(source),
+                    "--upstream-checkout",
+                    str(checkout),
+                ]
+            )
+
+            self.assertEqual(status, 0)
+            self.assertEqual(
+                build_manifest(checkout / "recipes" / "mtest"),
+                build_manifest(source),
+            )
 
 
 class CommunityRecipeDriftTests(unittest.TestCase):

@@ -1,0 +1,81 @@
+name: Community Verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable GitHub tag
+        required: true
+        type: string
+      build_number:
+        description: modular-community build number
+        required: true
+        default: "0"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ${{ matrix.name }} public package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            name: Linux
+          - runner: macos-15
+            name: macOS arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Validate requested public release
+        env:
+          TAG: ${{ inputs.tag }}
+          BUILD_NUMBER: ${{ inputs.build_number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$BUILD_NUMBER" =~ ^(0|[1-9][0-9]*)$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+            > "$RUNNER_TEMP/release.json"
+          jq -e --arg tag "$TAG" '
+            .tag_name == $tag and
+            .draft == false and
+            .prerelease == false and
+            .immutable == true
+          ' "$RUNNER_TEMP/release.json" >/dev/null
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
+        with:
+          locked: true
+          cache: true
+          run-install: false
+
+      - name: Validate checked-out release tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag_commit="$(
+            pixi run python -m scripts.release.github_release dereference \
+              --repo . --tag "$TAG"
+          )"
+          test "$tag_commit" = "$(git rev-parse HEAD)"
+
+      - name: Verify installed public package
+        env:
+          TAG: ${{ inputs.tag }}
+          BUILD_NUMBER: ${{ inputs.build_number }}
+        run: |
+          set -euo pipefail
+          pixi run python -m scripts.release.public_verify \
+            --version "${TAG#v}" \
+            --build-number "$BUILD_NUMBER"

@@ -91,11 +91,15 @@ def install_manifest(version: str, target_platform: str) -> str:
         f'platforms = ["{target_platform}"]\n\n'
         "[dependencies]\n"
         f'mtest = "=={version}"\n'
-        'mojo = "==1.0.0b2"\n'
     )
 
 
-def _metadata(prefix: Path, version: str, build_number: int) -> None:
+def _metadata(
+    prefix: Path,
+    version: str,
+    build_number: int,
+    target_platform: str,
+) -> None:
     records = tuple((prefix / "conda-meta").glob("mtest-*.json"))
     if len(records) != 1 or records[0].is_symlink():
         raise PublicVerifyError(
@@ -109,6 +113,7 @@ def _metadata(prefix: Path, version: str, build_number: int) -> None:
         "name": "mtest",
         "version": version,
         "build_number": build_number,
+        "subdir": target_platform,
     }
     actual = (
         {key: document.get(key) for key in expected}
@@ -121,6 +126,15 @@ def _metadata(prefix: Path, version: str, build_number: int) -> None:
     ):
         raise PublicVerifyError(
             f"installed package identity mismatch: expected={expected}, actual={actual}"
+        )
+    url = document.get("url") if isinstance(document, dict) else None
+    expected_url_prefix = (
+        f"https://repo.prefix.dev/modular-community/{target_platform}/"
+    )
+    if not isinstance(url, str) or not url.startswith(expected_url_prefix):
+        raise PublicVerifyError(
+            "installed mtest did not come from modular-community: "
+            f"expected URL prefix={expected_url_prefix!r}, actual={url!r}"
         )
 
 
@@ -221,6 +235,7 @@ def verify_installed_package(
     workspace: Path,
     version: str,
     build_number: int,
+    target_platform: str,
     runner: CommandRunner,
     environment: dict[str, str],
 ) -> None:
@@ -230,7 +245,11 @@ def verify_installed_package(
     build: object = build_number
     if isinstance(build, bool) or not isinstance(build, int) or build < 0:
         raise PublicVerifyError(f"invalid public build number: {build!r}")
-    _metadata(prefix, version, build_number)
+    if target_platform not in SUPPORTED_PLATFORMS:
+        raise PublicVerifyError(
+            f"unsupported installed package platform: {target_platform!r}"
+        )
+    _metadata(prefix, version, build_number, target_platform)
     source = _companion(prefix)
     mtest = prefix / "bin" / "mtest"
     mojo = prefix / "bin" / "mojo"
@@ -300,6 +319,20 @@ def _host_platform() -> str:
     raise PublicVerifyError(f"unsupported public verification host: {system}/{machine}")
 
 
+def _acceptance_environment(prefix: Path, workspace: Path) -> dict[str, str]:
+    home = workspace / "home"
+    temporary = workspace / "tmp"
+    cache = workspace / "modular-cache"
+    for path in (home, temporary, cache):
+        path.mkdir()
+    return {
+        "HOME": str(home),
+        "MODULAR_CACHE_DIR": str(cache),
+        "PATH": os.pathsep.join((str(prefix / "bin"), os.defpath)),
+        "TMPDIR": str(temporary),
+    }
+
+
 def verify_public_package(version: str, build_number: int) -> None:
     """Install from public channels into a clean prefix and run acceptance."""
     target = _host_platform()
@@ -309,10 +342,10 @@ def verify_public_package(version: str, build_number: int) -> None:
         workspace = Path(raw_tmp)
         manifest = workspace / "pixi.toml"
         manifest.write_text(install_manifest(version, target), encoding="utf-8")
-        environment = dict(os.environ)
+        install_environment = dict(os.environ)
         install = _run(
             ("pixi", "install", "--manifest-path", str(manifest)),
-            environment,
+            install_environment,
         )
         if install.returncode != 0:
             raise PublicVerifyError(
@@ -320,21 +353,20 @@ def verify_public_package(version: str, build_number: int) -> None:
                 f"stdout={install.stdout!r}, stderr={install.stderr!r}"
             )
         prefix = workspace / ".pixi" / "envs" / "default"
-        environment["PATH"] = os.pathsep.join(
-            (str(prefix / "bin"), environment.get("PATH", ""))
-        )
+        environment = _acceptance_environment(prefix, workspace)
         verify_installed_package(
             prefix,
             workspace,
             version,
             build_number,
+            target,
             _run,
             environment,
         )
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--version", required=True)
     parser.add_argument("--build-number", required=True)
     return parser

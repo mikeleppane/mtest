@@ -186,27 +186,89 @@ def write_release(path: Path, result: ReleaseResult) -> str:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     domain = parser.add_subparsers(dest="domain", required=True)
-    for name in ("candidate", "release"):
-        subject = domain.add_parser(name)
-        operation = subject.add_subparsers(dest="operation", required=True)
-        validate = operation.add_parser("validate")
-        validate.add_argument("--input", type=Path, required=True)
+    candidate = domain.add_parser("candidate", allow_abbrev=False)
+    candidate_operation = candidate.add_subparsers(dest="operation", required=True)
+    candidate_validate = candidate_operation.add_parser(
+        "validate",
+        allow_abbrev=False,
+    )
+    candidate_validate.add_argument("--input", type=Path, required=True)
+    candidate_write = candidate_operation.add_parser("write", allow_abbrev=False)
+    candidate_write.add_argument("--output", type=Path, required=True)
+    candidate_write.add_argument(
+        "--mode",
+        choices=("dry-run", "prepare"),
+        required=True,
+    )
+    candidate_write.add_argument("--version", required=True)
+    candidate_write.add_argument("--commit", required=True)
+    candidate_write.add_argument("--build-number", type=int, required=True)
+    candidate_write.add_argument("--upstream-commit", required=True)
+    candidate_write.add_argument("--directory-digest", required=True)
+    candidate_write.add_argument(
+        "--rattler-build-version",
+        default="0.30.0",
+    )
+    candidate_write.add_argument("--linux-validated", action="store_true")
+    candidate_write.add_argument("--macos-validated", action="store_true")
+    candidate_write.add_argument("--linux-aarch64-skipped", action="store_true")
+
+    release = domain.add_parser("release", allow_abbrev=False)
+    release_operation = release.add_subparsers(dest="operation", required=True)
+    release_validate = release_operation.add_parser("validate", allow_abbrev=False)
+    release_validate.add_argument("--input", type=Path, required=True)
+    release_write = release_operation.add_parser("write", allow_abbrev=False)
+    release_write.add_argument("--output", type=Path, required=True)
+    release_write.add_argument("--tag", required=True)
+    release_write.add_argument("--commit", required=True)
+    release_write.add_argument("--created", action="store_true")
+    release_write.add_argument("--immutable", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Validate a canonical candidate or release attestation."""
+    """Write or validate a canonical candidate or release attestation."""
     args = _parser().parse_args(argv)
     try:
-        encoded = args.input.read_bytes()
-        if args.domain == "candidate":
-            result = load_candidate(encoded)
-            if args.operation == "validate":
+        if args.operation == "validate":
+            encoded = args.input.read_bytes()
+            if args.domain == "candidate":
+                result = load_candidate(encoded)
                 validate_release_candidate(result)
+            else:
+                load_release(encoded)
+        elif args.domain == "candidate":
+            write_candidate(
+                args.output,
+                CandidateResult(
+                    schema=1,
+                    mode=args.mode,
+                    version=args.version,
+                    commit=args.commit,
+                    build_number=args.build_number,
+                    upstream_commit=args.upstream_commit,
+                    directory_digest=args.directory_digest,
+                    rattler_build_version=args.rattler_build_version,
+                    linux_validated=args.linux_validated,
+                    macos_validated=args.macos_validated,
+                    linux_aarch64_skipped=args.linux_aarch64_skipped,
+                ),
+            )
         else:
-            load_release(encoded)
+            write_release(
+                args.output,
+                ReleaseResult(
+                    schema=1,
+                    tag=args.tag,
+                    commit=args.commit,
+                    created=args.created,
+                    draft=False,
+                    prerelease=False,
+                    immutable=args.immutable,
+                ),
+            )
     except (OSError, TypeError, ValueError) as exc:
         print(f"release-attestation: FAIL: {exc}", file=sys.stderr)
         return 1

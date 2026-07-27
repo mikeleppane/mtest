@@ -13,6 +13,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATHS = {
     Path(".github/workflows/ci.yml"),
     Path(".github/workflows/codeql.yml"),
+    Path(".github/workflows/community-publish.yml"),
+    Path(".github/workflows/community-verify.yml"),
+    Path(".github/workflows/release.yml"),
 }
 """Every hosted workflow tracked by the repository."""
 
@@ -20,6 +23,31 @@ CHECKOUT_ACTION_SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1"
 SETUP_PIXI_ACTION_SHA = "a09b6247153796b190642a2b53fac4241043cf6f"
 CODEQL_ACTION_SHA = "e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81"
 """Reviewed immutable action revisions used by the CodeQL workflow."""
+
+UPLOAD_ARTIFACT_ACTION_SHA = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+"""Reviewed immutable actions/upload-artifact v7.0.1 revision."""
+
+DOWNLOAD_ARTIFACT_ACTION_SHA = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+UPSTREAM_SETUP_PIXI_ACTION_SHA = "5185adfbffb4bd703da3010310260805d89ebb11"
+
+ACTION_USE_RE = re.compile(
+    r"^\s*(?:-\s*)?uses:\s*"
+    r"(?P<action>[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+)"
+    r"@(?P<sha>[0-9a-f]{40})\s+#\s*(?P<version>\S+)\s*$"
+)
+"""An external action pinned by commit with a human-readable version."""
+
+REVIEWED_ACTION_PINS = {
+    "actions/checkout": {(CHECKOUT_ACTION_SHA, "v7.0.1")},
+    "actions/download-artifact": {(DOWNLOAD_ARTIFACT_ACTION_SHA, "v8.0.1")},
+    "actions/upload-artifact": {(UPLOAD_ARTIFACT_ACTION_SHA, "v7.0.1")},
+    "github/codeql-action/analyze": {(CODEQL_ACTION_SHA, "v4.37.3")},
+    "github/codeql-action/init": {(CODEQL_ACTION_SHA, "v4.37.3")},
+    "prefix-dev/setup-pixi": {
+        (SETUP_PIXI_ACTION_SHA, "v0.10.0"),
+        (UPSTREAM_SETUP_PIXI_ACTION_SHA, "v0.9.6"),
+    },
+}
 
 HARNESS_CHECK_MODULES = (
     "scripts.tests.test_aggregate",
@@ -320,6 +348,36 @@ def check_workflow_inventory(repo_root: Path = REPO_ROOT) -> None:
     )
     if symlinks:
         raise AssertionError(f"workflow inventory contains symlinks: {symlinks}")
+
+
+def check_action_pins(repo_root: Path = REPO_ROOT) -> None:
+    """Require immutable revisions and version comments for external actions."""
+    workflow_root = repo_root / ".github" / "workflows"
+    for pattern in ("*.yml", "*.yaml"):
+        for path in sorted(workflow_root.glob(pattern)):
+            for line_number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(),
+                start=1,
+            ):
+                if not re.match(r"^\s*(?:-\s*)?uses:", line):
+                    continue
+                value = line.split("uses:", 1)[1].strip()
+                if value.startswith("./"):
+                    continue
+                match = ACTION_USE_RE.fullmatch(line)
+                if match is None:
+                    relative = path.relative_to(repo_root)
+                    raise AssertionError(
+                        "action pin must use a full commit SHA and version "
+                        f"comment: {relative}:{line_number}: {line.strip()}"
+                    )
+                pin = (match.group("sha"), match.group("version"))
+                if pin not in REVIEWED_ACTION_PINS.get(match.group("action"), set()):
+                    relative = path.relative_to(repo_root)
+                    raise AssertionError(
+                        "reviewed action pin mismatch: "
+                        f"{relative}:{line_number}: {line.strip()}"
+                    )
 
 
 def check_codeql_workflow(repo_root: Path = REPO_ROOT) -> None:
@@ -958,7 +1016,7 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
         },
         "Upload safety logs": {
             "if": "${{ always() && matrix.safety_artifact }}",
-            "uses": "actions/upload-artifact@v4",
+            "uses": (f"actions/upload-artifact@{UPLOAD_ARTIFACT_ACTION_SHA} # v7.0.1"),
         },
     }
     for name, expected_step in expected_linux_steps.items():
@@ -1020,13 +1078,222 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
         raise AssertionError("legacy scheduled memory-safety workflow still exists")
 
 
+def check_release_workflows(repo_root: Path = REPO_ROOT) -> None:
+    """Pin publication authority, evidence, platform, and no-op boundaries."""
+    workflow_root = repo_root / ".github" / "workflows"
+    release = (workflow_root / "release.yml").read_text(encoding="utf-8")
+    community = (workflow_root / "community-publish.yml").read_text(encoding="utf-8")
+    verify = (workflow_root / "community-verify.yml").read_text(encoding="utf-8")
+
+    expected_names = {
+        "release.yml": "name: Release\n",
+        "community-publish.yml": "name: Community Publish\n",
+        "community-verify.yml": "name: Community Verify\n",
+    }
+    for name, prefix in expected_names.items():
+        text = {
+            "release.yml": release,
+            "community-publish.yml": community,
+            "community-verify.yml": verify,
+        }[name]
+        if not text.startswith(prefix):
+            raise AssertionError(f"{name} workflow name mismatch")
+        if "continue-on-error:" in text:
+            raise AssertionError(f"{name} must not contain continue-on-error")
+
+    def require_permissions(
+        text: str,
+        header: str,
+        expected: tuple[str, ...],
+        label: str,
+    ) -> None:
+        actual = tuple(
+            line.strip()
+            for line in _yaml_block(text, header).splitlines()
+            if line.strip()
+        )
+        if actual != expected:
+            raise AssertionError(
+                f"{label} permission mismatch: expected={expected}, actual={actual}"
+            )
+
+    require_permissions(
+        release,
+        "permissions:",
+        ("contents: read", "actions: read"),
+        "release workflow",
+    )
+    require_permissions(
+        community,
+        "permissions:",
+        ("contents: read", "actions: read"),
+        "community workflow",
+    )
+    require_permissions(
+        verify,
+        "permissions:",
+        ("contents: read",),
+        "community verification workflow",
+    )
+    if re.findall(r"^    permissions:$", release, re.MULTILINE) != ["    permissions:"]:
+        raise AssertionError("release job permission override membership changed")
+    if re.search(r"^    permissions:$", community + verify, re.MULTILINE):
+        raise AssertionError("read-only publication jobs must not override permissions")
+
+    release_jobs = _yaml_mapping_keys(_yaml_block(release, "jobs:"), 2)
+    if release_jobs != ["validate", "release"]:
+        raise AssertionError(f"release job membership mismatch: {release_jobs}")
+    release_job = _yaml_block(release, "  release:")
+    validate_job = _yaml_block(release, "  validate:")
+    if "    environment: github-release\n" not in release_job:
+        raise AssertionError("release job must use github-release environment")
+    if "environment:" in validate_job or "contents: write" in validate_job:
+        raise AssertionError("release validation must remain unprivileged")
+    if "      contents: write\n" not in release_job:
+        raise AssertionError("only protected release may receive contents write")
+    if release_job.count("          persist-credentials: false") != 1:
+        raise AssertionError("protected release must not persist its write credential")
+    require_permissions(
+        release_job,
+        "    permissions:",
+        ("contents: write", "actions: read"),
+        "protected release job",
+    )
+    if release.count("contents: write") != 1:
+        raise AssertionError("release contents write authority is not isolated")
+    sentinels = (
+        "vars.RELEASE_ENVIRONMENT_CONFIGURED",
+        "vars.RELEASE_IMMUTABILITY_CONFIGURED",
+    )
+    if any(release_job.count(sentinel) != 1 for sentinel in sentinels):
+        raise AssertionError("release protected-environment sentinel mismatch")
+    evidence_counts = {
+        "actions/workflows/ci.yml/runs?": 2,
+        ".immutable == true": 1,
+        "scripts.release.attestations candidate validate": 2,
+        "scripts.release.github_release classify": 2,
+        "repos/$GITHUB_REPOSITORY/branches/main": 2,
+    }
+    for marker, expected in evidence_counts.items():
+        if release.count(marker) != expected:
+            raise AssertionError(
+                "release evidence check count mismatch: "
+                f"marker={marker!r}, expected={expected}, "
+                f"actual={release.count(marker)}"
+            )
+    if (
+        release.count(".workflow_id == $workflow_id") != 2
+        or release.count(
+            '(.path | startswith(".github/workflows/community-publish.yml@"))'
+        )
+        != 2
+    ):
+        raise AssertionError("candidate workflow identity is not revalidated exactly")
+    forbidden_release_mutations = ("git push", "git tag", "git reset")
+    if any(command in release for command in forbidden_release_mutations):
+        raise AssertionError("release must mutate tags only through the GitHub API")
+
+    community_jobs = _yaml_mapping_keys(_yaml_block(community, "jobs:"), 2)
+    expected_community_jobs = [
+        "resolve",
+        "render",
+        "validate",
+        "validate-selector",
+        "candidate-result",
+        "prepare",
+    ]
+    if community_jobs != expected_community_jobs:
+        raise AssertionError(
+            "community job membership mismatch: "
+            f"expected={expected_community_jobs}, actual={community_jobs}"
+        )
+    prepare = _yaml_block(community, "  prepare:")
+    if "    environment: community-publish\n" not in prepare:
+        raise AssertionError("prepare job must use community-publish environment")
+    if community.count("secrets.COMMUNITY_FORK_TOKEN") != prepare.count(
+        "secrets.COMMUNITY_FORK_TOKEN"
+    ):
+        raise AssertionError("fork token reference escaped the prepare job")
+    if "vars.COMMUNITY_ENVIRONMENT_CONFIGURED" not in prepare:
+        raise AssertionError("community protected-environment sentinel is missing")
+    created_false_noop = (
+        'if test "$(jq -r .created "$evidence")" = "false"; then\n'
+        "              active=false\n"
+        "            fi"
+    )
+    if created_false_noop not in community:
+        raise AssertionError("created false release must be an explicit no-op")
+    if (
+        community.count(
+            '[[ "$WORKFLOW_RUN_PATH" == ".github/workflows/release.yml@"* ]]'
+        )
+        != 1
+        or community.count(
+            'gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml"'
+        )
+        != 1
+        or community.count('test "$WORKFLOW_RUN_WORKFLOW_ID" = "$release_workflow_id"')
+        != 1
+        or community.count('test "$WORKFLOW_DEFINITION_SHA" = "$WORKFLOW_RUN_SHA"') != 1
+    ):
+        raise AssertionError("triggering release workflow identity is not exact")
+    required_community_markers = (
+        "github.event.workflow_run.conclusion == 'success'",
+        'test "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH"',
+        "actions/workflows/ci.yml/runs?",
+        "repos/$GITHUB_REPOSITORY/branches/main",
+        "repos/modular/modular-community/commits/main",
+        "pixi run lint",
+        "pixi run build-all",
+        "pulls/$pull_number",
+        "api.github.com/repos/$FORK_OWNER/modular-community",
+        "scripts.release.community fork",
+        "scripts.release.recipe stage-target",
+        "--target-platform linux-aarch64",
+        "--force-with-lease=",
+        "if-no-files-found: error",
+    )
+    for marker in required_community_markers:
+        if marker not in community:
+            raise AssertionError(f"community publication check missing: {marker}")
+    if "--skip-existing" in community:
+        raise AssertionError("skip-existing output cannot prove package creation")
+    if "target_commitish ==" in release + community + verify:
+        raise AssertionError("release identity must come from dereferenced tags")
+    for runner in ("ubuntu-24.04", "macos-15"):
+        if community.count(f"runner: {runner}") != 1:
+            raise AssertionError(f"community supported-platform matrix lost {runner}")
+    if 'test -n "$tag"' not in community:
+        raise AssertionError("manual prepare must require a stable release tag")
+
+    verify_jobs = _yaml_mapping_keys(_yaml_block(verify, "jobs:"), 2)
+    if verify_jobs != ["verify"]:
+        raise AssertionError(f"community verification job mismatch: {verify_jobs}")
+    if (
+        "contents: write" in verify
+        or "secrets." in verify
+        or re.search(r"^    environment:", verify, re.MULTILINE)
+        or "community-publish.yml" in verify
+    ):
+        raise AssertionError("community verification must remain read-only")
+    if (
+        verify.count("runner: ubuntu-24.04") != 1
+        or verify.count("runner: macos-15") != 1
+    ):
+        raise AssertionError("community verification platform matrix mismatch")
+    if "scripts.release.public_verify" not in verify:
+        raise AssertionError("community verification must call the public verifier")
+
+
 def main() -> int:
     """Run the independent exact CI topology oracles."""
     try:
         check_workflow_inventory()
+        check_action_pins()
         check_ci_task_graph()
         check_ci_workflow()
         check_codeql_workflow()
+        check_release_workflows()
     except (AssertionError, OSError) as exc:
         print(f"ci-topology-check: FAIL: {exc}", file=sys.stderr)
         return 1

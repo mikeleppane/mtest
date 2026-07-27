@@ -459,6 +459,7 @@ LIVE_COMMAND_FIXED_PATHS = (
     Path("README.md"),
     Path("CONTRIBUTING.md"),
     Path("SECURITY.md"),
+    Path("docs/releasing.md"),
     Path("AGENTS.md"),
     Path("pixi.toml"),
 )

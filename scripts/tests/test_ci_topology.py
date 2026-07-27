@@ -580,9 +580,9 @@ class CodeQLWorkflowTests(unittest.TestCase):
         """Create the exact expected workflow inventory in a temporary repo."""
         workflow_root = root / ".github" / "workflows"
         workflow_root.mkdir(parents=True)
-        for name in ("ci.yml", "codeql.yml"):
-            source = ci_topology.REPO_ROOT / ".github" / "workflows" / name
-            (workflow_root / name).write_text(
+        for relative in ci_topology.WORKFLOW_PATHS:
+            source = ci_topology.REPO_ROOT / relative
+            (workflow_root / relative.name).write_text(
                 source.read_text(encoding="utf-8"),
                 encoding="utf-8",
             )
@@ -594,6 +594,9 @@ class CodeQLWorkflowTests(unittest.TestCase):
             {
                 Path(".github/workflows/ci.yml"),
                 Path(".github/workflows/codeql.yml"),
+                Path(".github/workflows/community-publish.yml"),
+                Path(".github/workflows/community-verify.yml"),
+                Path(".github/workflows/release.yml"),
             },
         )
         ci_topology.check_workflow_inventory()
@@ -607,10 +610,9 @@ class CodeQLWorkflowTests(unittest.TestCase):
             ci_topology.CODEQL_ACTION_SHA,
             "e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81",
         )
-        for name in ("ci.yml", "codeql.yml"):
-            workflow = (
-                ci_topology.REPO_ROOT / ".github" / "workflows" / name
-            ).read_text(encoding="utf-8")
+        for path in ci_topology.WORKFLOW_PATHS:
+            name = path.name
+            workflow = (ci_topology.REPO_ROOT / path).read_text(encoding="utf-8")
             self.assertNotIn("actions/checkout@v4", workflow, name)
             self.assertNotIn(
                 "11bd71901bbe5b1630ceea73d27597364c9af683",
@@ -628,6 +630,35 @@ class CodeQLWorkflowTests(unittest.TestCase):
                 "",
             ),
         )
+
+    def test_every_external_action_has_an_immutable_pin_and_version_comment(
+        self,
+    ) -> None:
+        ci_topology.check_action_pins()
+        workflow = self._workflow()
+        mutations = (
+            workflow.replace(
+                f"actions/checkout@{ci_topology.CHECKOUT_ACTION_SHA} # v7.0.1",
+                "actions/checkout@v7",
+                1,
+            ),
+            workflow.replace(
+                f"github/codeql-action/init@{ci_topology.CODEQL_ACTION_SHA} # v4.37.3",
+                f"github/codeql-action/init@{ci_topology.CODEQL_ACTION_SHA}",
+                1,
+            ),
+        )
+        for mutated in mutations:
+            with tempfile.TemporaryDirectory(prefix="mtest-action-pins-") as raw_tmp:
+                repo = Path(raw_tmp)
+                workflow_root = repo / ".github" / "workflows"
+                workflow_root.mkdir(parents=True)
+                (workflow_root / "codeql.yml").write_text(
+                    mutated,
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(AssertionError, "action pin"):
+                    ci_topology.check_action_pins(repo)
 
     def test_missing_workflow_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-workflow-inventory-") as raw_tmp:
@@ -732,6 +763,200 @@ class CodeQLWorkflowTests(unittest.TestCase):
                 1,
             ),
             "action pin mismatch",
+        )
+
+
+class ReleaseWorkflowTests(unittest.TestCase):
+    """Fail-closed publication workflow authority and evidence boundaries."""
+
+    def _workflow(self, name: str) -> str:
+        return (ci_topology.REPO_ROOT / ".github" / "workflows" / name).read_text(
+            encoding="utf-8"
+        )
+
+    def _reject(self, name: str, mutated: str, pattern: str) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-release-topology-") as raw_tmp:
+            repo = Path(raw_tmp)
+            workflow_root = repo / ".github" / "workflows"
+            workflow_root.mkdir(parents=True)
+            for workflow_name in (
+                "release.yml",
+                "community-publish.yml",
+                "community-verify.yml",
+            ):
+                text = (
+                    mutated if workflow_name == name else self._workflow(workflow_name)
+                )
+                (workflow_root / workflow_name).write_text(text, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, pattern):
+                ci_topology.check_release_workflows(repo)
+
+    def test_live_publication_workflows_have_closed_authority(self) -> None:
+        ci_topology.check_release_workflows()
+
+    def test_protected_environments_cannot_be_removed(self) -> None:
+        self._reject(
+            "release.yml",
+            self._workflow("release.yml").replace(
+                "    environment: github-release\n",
+                "",
+                1,
+            ),
+            "github-release",
+        )
+        self._reject(
+            "community-publish.yml",
+            self._workflow("community-publish.yml").replace(
+                "    environment: community-publish\n",
+                "",
+                1,
+            ),
+            "community-publish",
+        )
+
+    def test_fork_token_cannot_escape_prepare_job(self) -> None:
+        workflow = self._workflow("community-publish.yml")
+        marker = "    runs-on: ubuntu-24.04\n"
+        self._reject(
+            "community-publish.yml",
+            workflow.replace(
+                marker,
+                marker + "    env: ${{ secrets.COMMUNITY_FORK_TOKEN }}\n",
+                1,
+            ),
+            "fork token",
+        )
+
+    def test_release_requires_exact_ci_candidate_and_immutable_state(self) -> None:
+        for needle in (".immutable == true",):
+            with self.subTest(needle=needle):
+                self._reject(
+                    "release.yml",
+                    self._workflow("release.yml").replace(needle, "false", 1),
+                    "release evidence",
+                )
+
+    def test_publication_evidence_is_bound_to_canonical_workflow_files(self) -> None:
+        release = self._workflow("release.yml")
+        community = self._workflow("community-publish.yml")
+        ci_endpoint = "actions/workflows/ci.yml/runs?"
+        self.assertEqual(release.count(ci_endpoint), 2)
+        self.assertEqual(community.count(ci_endpoint), 1)
+        self.assertNotIn('.name == "CI"', release + community)
+        self.assertEqual(release.count(".workflow_id == $workflow_id"), 2)
+        self.assertEqual(
+            release.count(
+                '(.path | startswith(".github/workflows/community-publish.yml@"))'
+            ),
+            2,
+        )
+        self.assertIn(
+            '[[ "$WORKFLOW_RUN_PATH" == ".github/workflows/release.yml@"* ]]',
+            community,
+        )
+        self.assertIn(
+            'test "$WORKFLOW_RUN_WORKFLOW_ID" = "$release_workflow_id"',
+            community,
+        )
+        self.assertIn(
+            'test "$WORKFLOW_DEFINITION_SHA" = "$WORKFLOW_RUN_SHA"',
+            community,
+        )
+        self.assertIn("scripts.release.recipe stage-target", community)
+        self.assertIn(
+            "api.github.com/repos/$FORK_OWNER/modular-community",
+            community,
+        )
+        self.assertIn("scripts.release.community fork", community)
+
+    def test_candidate_workflow_identity_tautology_is_rejected(self) -> None:
+        self._reject(
+            "release.yml",
+            self._workflow("release.yml").replace(
+                ".workflow_id == $workflow_id",
+                ".workflow_id == .workflow_id",
+                1,
+            ),
+            "candidate workflow identity",
+        )
+
+    def test_triggering_workflow_definition_mismatch_is_rejected(self) -> None:
+        self._reject(
+            "community-publish.yml",
+            self._workflow("community-publish.yml").replace(
+                'test "$WORKFLOW_RUN_WORKFLOW_ID" = "$release_workflow_id"',
+                'test "$WORKFLOW_RUN_WORKFLOW_ID" = "$WORKFLOW_RUN_WORKFLOW_ID"',
+                1,
+            ),
+            "triggering release workflow",
+        )
+
+    def test_exact_fork_recipe_staging_cannot_regress_to_overlay_copy(self) -> None:
+        self._reject(
+            "community-publish.yml",
+            self._workflow("community-publish.yml").replace(
+                "scripts.release.recipe stage-target",
+                "scripts.release.recipe stage",
+                1,
+            ),
+            "stage-target",
+        )
+
+    def test_publication_workflows_cannot_gain_oidc_authority(self) -> None:
+        self._reject(
+            "release.yml",
+            self._workflow("release.yml").replace(
+                "  actions: read\n",
+                "  actions: read\n  id-token: write\n",
+                1,
+            ),
+            "permission",
+        )
+        self._reject(
+            "community-publish.yml",
+            self._workflow("community-publish.yml").replace(
+                "    environment: community-publish\n",
+                "    environment: community-publish\n"
+                "    permissions:\n"
+                "      id-token: write\n",
+                1,
+            ),
+            "permission",
+        )
+
+    def test_reviewed_action_cannot_move_to_an_arbitrary_full_sha(self) -> None:
+        workflow = self._workflow("release.yml").replace(
+            ci_topology.CHECKOUT_ACTION_SHA,
+            "0" * 40,
+            1,
+        )
+        with tempfile.TemporaryDirectory(prefix="mtest-action-pin-") as raw_tmp:
+            repo = Path(raw_tmp)
+            workflow_root = repo / ".github" / "workflows"
+            workflow_root.mkdir(parents=True)
+            (workflow_root / "release.yml").write_text(workflow, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "reviewed action pin"):
+                ci_topology.check_action_pins(repo)
+
+    def test_created_false_workflow_run_must_be_a_noop(self) -> None:
+        self._reject(
+            "community-publish.yml",
+            self._workflow("community-publish.yml").replace(
+                '            if test "$(jq -r .created "$evidence")" = "false"; then\n'
+                "              active=false\n"
+                "            fi\n",
+                "",
+                1,
+            ),
+            "created false",
+        )
+
+    def test_public_verification_cannot_gain_mutation_authority(self) -> None:
+        workflow = self._workflow("community-verify.yml")
+        self._reject(
+            "community-verify.yml",
+            workflow.replace("  contents: read\n", "  contents: write\n", 1),
+            "permission",
         )
 
 

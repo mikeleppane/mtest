@@ -1116,7 +1116,9 @@ Facts about this build worth knowing before you rely on it:
 ## Developing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor workflow and
-[SECURITY.md](SECURITY.md) for private vulnerability reporting.
+[SECURITY.md](SECURITY.md) for private vulnerability reporting. Maintainers
+use [docs/releasing.md](docs/releasing.md) for the GitHub and
+modular-community publication procedure.
 
 Requires [pixi](https://pixi.sh). The toolchain (Mojo `1.0.0b2`) and all
 tasks are pinned in [pixi.toml](pixi.toml); re-pinning on a Modular release

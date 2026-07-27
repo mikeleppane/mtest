@@ -3,17 +3,27 @@
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import replace
+import io
 from pathlib import Path
 import tempfile
 import unittest
 
+from scripts.release import (
+    attestations,
+    community,
+    github_release,
+    public_verify,
+    recipe,
+)
 from scripts.release.attestations import (
     CandidateResult,
     ReleaseResult,
     candidate_bytes,
     load_candidate,
     load_release,
+    main,
     release_bytes,
     validate_release_candidate,
     write_candidate,
@@ -54,6 +64,67 @@ def release(**changes: object) -> ReleaseResult:
         immutable=True,
     )
     return replace(base, **changes)  # type: ignore[arg-type]
+
+
+class ReleaseCliPolicyTests(unittest.TestCase):
+    def test_release_helpers_reject_abbreviated_options(self) -> None:
+        cases = (
+            (
+                attestations._parser,
+                [
+                    "release",
+                    "write",
+                    "--out",
+                    "out",
+                    "--tag",
+                    "v1.0.0",
+                    "--commit",
+                    COMMIT,
+                    "--immutable",
+                ],
+            ),
+            (
+                community._parser,
+                [
+                    "branch",
+                    "--ver",
+                    "1.0.0",
+                    "--build-number",
+                    "0",
+                    "--output",
+                    "out",
+                ],
+            ),
+            (
+                github_release._parser,
+                ["dereference", "--rep", ".", "--tag", "v1.0.0"],
+            ),
+            (
+                public_verify._parser,
+                ["--ver", "1.0.0", "--build-number", "0"],
+            ),
+            (
+                recipe._parser,
+                [
+                    "render",
+                    "--ver",
+                    "1.0.0",
+                    "--source-rev",
+                    COMMIT,
+                    "--build-number",
+                    "0",
+                    "--output",
+                    "out",
+                ],
+            ),
+        )
+        for parser_factory, arguments in cases:
+            with (
+                self.subTest(parser=parser_factory.__module__),
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                parser_factory().parse_args(arguments)
 
 
 class CandidateAttestationTests(unittest.TestCase):
@@ -173,6 +244,59 @@ class ReleaseAttestationTests(unittest.TestCase):
         for payload in cases:
             with self.subTest(payload=payload), self.assertRaises(ValueError):
                 load_release(payload)
+
+
+class AttestationCliTests(unittest.TestCase):
+    def test_candidate_and_release_write_commands_emit_canonical_files(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-attestation-cli-") as raw_tmp:
+            root = Path(raw_tmp)
+            candidate_path = root / "candidate.json"
+            release_path = root / "release.json"
+            self.assertEqual(
+                main(
+                    [
+                        "candidate",
+                        "write",
+                        "--output",
+                        str(candidate_path),
+                        "--mode",
+                        "dry-run",
+                        "--version",
+                        "1.0.0",
+                        "--commit",
+                        COMMIT,
+                        "--build-number",
+                        "0",
+                        "--upstream-commit",
+                        UPSTREAM_COMMIT,
+                        "--directory-digest",
+                        DIGEST,
+                        "--linux-validated",
+                        "--macos-validated",
+                        "--linux-aarch64-skipped",
+                    ]
+                ),
+                0,
+            )
+            self.assertEqual(candidate_path.read_bytes(), candidate_bytes(candidate()))
+            self.assertEqual(
+                main(
+                    [
+                        "release",
+                        "write",
+                        "--output",
+                        str(release_path),
+                        "--tag",
+                        "v1.0.0",
+                        "--commit",
+                        COMMIT,
+                        "--created",
+                        "--immutable",
+                    ]
+                ),
+                0,
+            )
+            self.assertEqual(release_path.read_bytes(), release_bytes(release()))
 
 
 if __name__ == "__main__":

@@ -4,15 +4,19 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
+from scripts.release import public_verify
 from scripts.release.public_verify import (
     CommandResult,
     PublicVerifyError,
     install_manifest,
     verify_installed_package,
+    verify_public_package,
 )
 
 
@@ -73,7 +77,6 @@ class ManifestTests(unittest.TestCase):
                 'platforms = ["linux-64"]\n\n'
                 "[dependencies]\n"
                 'mtest = "==1.0.0"\n'
-                'mojo = "==1.0.0b2"\n'
             ),
         )
 
@@ -100,6 +103,11 @@ class InstalledPackageTests(unittest.TestCase):
                     "name": "mtest",
                     "version": VERSION,
                     "build_number": BUILD_NUMBER,
+                    "subdir": "linux-64",
+                    "url": (
+                        "https://repo.prefix.dev/modular-community/linux-64/"
+                        "mtest-1.0.0-0.conda"
+                    ),
                 }
             ),
             encoding="utf-8",
@@ -127,6 +135,7 @@ class InstalledPackageTests(unittest.TestCase):
                 workspace,
                 VERSION,
                 BUILD_NUMBER,
+                "linux-64",
                 runner,
                 {"PATH": str(prefix / "bin")},
             )
@@ -156,7 +165,7 @@ class InstalledPackageTests(unittest.TestCase):
             prefix = self._prefix(workspace)
             metadata = next((prefix / "conda-meta").glob("mtest-*.json"))
             source = prefix / "share" / "mtest" / "companions" / "assertions" / "src"
-            for index, kind in enumerate(("metadata", "extra", "missing")):
+            for index, kind in enumerate(("metadata", "channel", "extra", "missing")):
                 with self.subTest(kind=kind):
                     prefix = self._prefix(workspace / str(index))
                     metadata = next((prefix / "conda-meta").glob("mtest-*.json"))
@@ -166,6 +175,16 @@ class InstalledPackageTests(unittest.TestCase):
                     if kind == "metadata":
                         metadata.write_text(
                             '{"name":"mtest","version":"1.0.1","build_number":0}',
+                            encoding="utf-8",
+                        )
+                    elif kind == "channel":
+                        document = json.loads(metadata.read_text(encoding="utf-8"))
+                        document["url"] = (
+                            "https://conda.anaconda.org/conda-forge/linux-64/"
+                            "mtest-1.0.0-0.conda"
+                        )
+                        metadata.write_text(
+                            json.dumps(document),
                             encoding="utf-8",
                         )
                     elif kind == "extra":
@@ -181,6 +200,7 @@ class InstalledPackageTests(unittest.TestCase):
                             workspace / str(index),
                             VERSION,
                             BUILD_NUMBER,
+                            "linux-64",
                             FakeRunner(),
                             {"PATH": str(prefix / "bin")},
                         )
@@ -199,9 +219,65 @@ class InstalledPackageTests(unittest.TestCase):
                     workspace,
                     VERSION,
                     BUILD_NUMBER,
+                    "linux-64",
                     FakeRunner(),
                     {"PATH": str(prefix / "bin")},
                 )
+
+    def test_public_acceptance_commands_do_not_inherit_development_injection(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-public-clean-") as raw_tmp:
+            root = Path(raw_tmp)
+            observed: list[tuple[tuple[str, ...], dict[str, str]]] = []
+            acceptance = FakeRunner()
+
+            def run(
+                command: tuple[str, ...],
+                environment: dict[str, str],
+            ) -> CommandResult:
+                observed.append((command, dict(environment)))
+                if command[0] == "pixi":
+                    workspace = Path(command[-1]).parent
+                    generated = self._prefix(workspace)
+                    prefix = workspace / ".pixi" / "envs" / "default"
+                    prefix.parent.mkdir(parents=True)
+                    generated.rename(prefix)
+                    return CommandResult(0, "", "")
+                return acceptance(command, environment)
+
+            polluted = {
+                "HOME": str(root),
+                "PATH": "/development/bin",
+                "PYTHONPATH": "/development/python",
+                "LD_PRELOAD": "/development/inject.so",
+                "DYLD_INSERT_LIBRARIES": "/development/inject.dylib",
+            }
+            with (
+                mock.patch.dict(os.environ, polluted, clear=True),
+                mock.patch.object(public_verify, "REPO_ROOT", root),
+                mock.patch.object(
+                    public_verify,
+                    "_host_platform",
+                    return_value="linux-64",
+                ),
+                mock.patch.object(public_verify, "_run", side_effect=run),
+            ):
+                verify_public_package(VERSION, BUILD_NUMBER)
+
+        self.assertGreater(len(observed), 1)
+        prefix_bin = str(
+            Path(observed[0][0][-1]).parent / ".pixi" / "envs" / "default" / "bin"
+        )
+        for _, environment in observed[1:]:
+            self.assertEqual(
+                environment["PATH"],
+                os.pathsep.join((prefix_bin, os.defpath)),
+            )
+            self.assertNotEqual(environment["HOME"], polluted["HOME"])
+            self.assertNotIn("PYTHONPATH", environment)
+            self.assertNotIn("LD_PRELOAD", environment)
+            self.assertNotIn("DYLD_INSERT_LIBRARIES", environment)
 
 
 if __name__ == "__main__":

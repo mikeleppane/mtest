@@ -213,28 +213,56 @@ def stage_recipe(source: Path, destination: Path) -> None:
         shutil.copy2(source / name, target / name, follow_symlinks=False)
 
 
+def stage_recipe_target(source: Path, destination: Path) -> None:
+    """Replace only recipes/mtest in an upstream checkout."""
+    build_manifest(source)
+    if destination.is_symlink() or not destination.is_dir():
+        raise ValueError(f"upstream checkout is not a regular directory: {destination}")
+    checkout = destination.resolve(strict=True)
+    recipes = destination / "recipes"
+    if recipes.is_symlink() or not recipes.is_dir():
+        raise ValueError("upstream recipes boundary must be a regular directory")
+    resolved_recipes = recipes.resolve(strict=True)
+    if resolved_recipes.parent != checkout:
+        raise ValueError("upstream recipes boundary escapes the checkout")
+    target = recipes / "mtest"
+    if target.is_symlink():
+        raise ValueError("upstream mtest recipe boundary must not be a link")
+    if target.exists():
+        resolved_target = target.resolve(strict=True)
+        if resolved_target.parent != resolved_recipes or not resolved_target.is_dir():
+            raise ValueError("upstream mtest recipe boundary is invalid")
+        shutil.rmtree(resolved_target)
+    target.mkdir()
+    for name in RECIPE_FILES:
+        shutil.copy2(source / name, target / name, follow_symlinks=False)
+
+
 def _fail(message: str) -> NoReturn:
     raise ValueError(message)
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True)
 
-    render = commands.add_parser("render")
+    render = commands.add_parser("render", allow_abbrev=False)
     render.add_argument("--version", required=True)
     render.add_argument("--source-rev", required=True)
     render.add_argument("--build-number", required=True)
     render.add_argument("--output", type=Path, required=True)
 
-    verify = commands.add_parser("verify-manifest")
+    verify = commands.add_parser("verify-manifest", allow_abbrev=False)
     verify.add_argument("--root", type=Path, required=True)
     verify.add_argument("--manifest", type=Path, required=True)
     verify.add_argument("--expected-digest", required=True)
 
-    stage = commands.add_parser("stage")
+    stage = commands.add_parser("stage", allow_abbrev=False)
     stage.add_argument("--source", type=Path, required=True)
     stage.add_argument("--upstream-checkout", type=Path, required=True)
+    stage_target = commands.add_parser("stage-target", allow_abbrev=False)
+    stage_target.add_argument("--source", type=Path, required=True)
+    stage_target.add_argument("--upstream-checkout", type=Path, required=True)
     return parser
 
 
@@ -278,6 +306,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "stage":
             stage_recipe(args.source, args.upstream_checkout)
+        elif args.command == "stage-target":
+            stage_recipe_target(args.source, args.upstream_checkout)
         else:
             _fail(f"unknown command: {args.command!r}")
     except (OSError, ValueError) as exc:
