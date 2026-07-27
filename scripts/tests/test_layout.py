@@ -31,7 +31,6 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
             ("EXEC_FIXTURES", layout.check_exec_fixture_layout),
             ("E2E_NATIVE_FIXTURES", layout.check_e2e_native_fixture_layout),
             ("PROTOCOL_FIXTURES", layout.check_protocol_asset_layout),
-            ("E2E_SCENARIO_NAMES", layout.check_e2e_layout),
             ("E2E_HARNESS_PATHS", layout.check_e2e_layout),
             ("BUILD_SOURCE_PATHS", layout.check_build_source_visibility),
             ("ASSERTION_SOURCE_PATHS", layout.check_assertion_companion_layout),

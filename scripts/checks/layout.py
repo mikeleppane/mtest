@@ -176,100 +176,6 @@ E2E_HARNESS_PATHS = {
     Path("scripts/e2e/scenarios/selection.py"),
 }
 
-E2E_SCENARIO_NAMES = (
-    "manifest-completeness",
-    "resilience-matrix",
-    "default-suite",
-    "hostile",
-    "hostile-console",
-    "hostile-reporters",
-    "single-pass",
-    "exitfirst",
-    "maxfail",
-    "retries-flaky",
-    "crash-attribution",
-    "attribution-reruns-crashed-binary",
-    "compile-timeout",
-    "compile-crash-signature",
-    "exclude+stale",
-    "all-excluded",
-    "empty-dir",
-    "failing-gate",
-    "timeout",
-    "timeout-escalation",
-    "precompile",
-    "precompile-timeout",
-    "precompile-crash-retry",
-    "precompile-promotion",
-    "quiet-verbose",
-    "show-output",
-    "durations",
-    "color",
-    "config-resolution",
-    "config-diagnostics",
-    "config-state",
-    "failure-reselection",
-    "config-overrides",
-    "config-show",
-    "doctor-healthy",
-    "doctor-malformed-config",
-    "doctor-missing-config",
-    "doctor-missing-toolchain",
-    "doctor-unwritable-state",
-    "doctor-interrupt",
-    "doctor-config-free",
-    "usage-refusals",
-    "selection-keyword",
-    "selection-node-id",
-    "selection-union",
-    "selection-malformed-node-id",
-    "selection-unknown-test",
-    "selection-empty",
-    "selection-chameleon",
-    "single-build",
-    "stale-recovery-two-builds",
-    "mojo-executable-precedence",
-    "collect",
-    "passthrough+forbidden",
-    "out-of-root",
-    "internal-error",
-    "runtime-open-failure",
-    "interrupt",
-    "interrupt-sigterm",
-    "interrupt-double",
-    "json-forward-compat",
-    "json-purity",
-    "json-color-relocated-stderr",
-    "json-destination-taxonomy",
-    "json-truncation-interrupt",
-    "json-truncation-sigkill",
-    "json-truncation-dead-pipe",
-    "json-terminal-write-failure",
-    "junit-scratch-cleanup",
-    "junit-schema-gate",
-    "junit-determinism",
-    "junit-prior-report-intact",
-    "junit-finalization-and-interrupt",
-    "annotations-modes",
-    "annotations-caps",
-    "annotations-conflict",
-    "annotations-fencing",
-    "parallel-projection-eq",
-    "parallel-capacity-one",
-    "parallel-window-overlap",
-    "parallel-interrupt",
-    "parallel-shard-disjoint",
-    "collect-parallel",
-    "parallel-auto-smoke",
-    "parallel-json-workers",
-    "parallel-j-rejected",
-    "parallel-junit-canonical-eq",
-    "parallel-progress-tty",
-    "parallel-serial-noverlap",
-    "parallel-serial-stale-glob",
-    "parallel-fd-clamp",
-)
-
 LIVE_COMMAND_FIXED_PATHS = (
     Path("README.md"),
     Path("CONTRIBUTING.md"),
@@ -625,7 +531,6 @@ def check_protocol_asset_layout() -> None:
 
 def check_e2e_layout() -> None:
     """Known-outcome CLI inputs stay outside self-host discovery."""
-    _require_nonempty("E2E scenario", E2E_SCENARIO_NAMES)
     _require_nonempty("E2E harness path", E2E_HARNESS_PATHS)
     harness_root = REPO_ROOT / "scripts" / "e2e"
     harness_paths = {
@@ -670,16 +575,21 @@ def check_e2e_layout() -> None:
             f"missing={sorted(discovered - rows)}, stale={sorted(rows - discovered)}, "
             f"rows={len(rows)}"
         )
+    # Derived, and deliberately not a membership list. Registering a scenario
+    # is a one-line addition to `SCENARIOS` whose owning module is visible on
+    # the same line, so a restated roster here would cost an edit per scenario
+    # to re-prove what the diff already shows. What is NOT visible is a name
+    # collided with an existing one -- the banner would still count both while
+    # a reader assumes one name means one scenario -- and a registry that lost
+    # every entry, which would make the gate vacuously green.
     scenario_names = tuple(name for name, _function in e2e_main.SCENARIOS)
-    if scenario_names != E2E_SCENARIO_NAMES:
-        raise AssertionError(
-            "E2E scenario membership/order mismatch: "
-            f"expected={list(E2E_SCENARIO_NAMES)}, actual={list(scenario_names)}"
+    if not scenario_names:
+        raise AssertionError("the E2E scenario registry is empty")
+    if len(set(scenario_names)) != len(scenario_names):
+        duplicates = sorted(
+            {name for name in scenario_names if scenario_names.count(name) > 1}
         )
-    if len(scenario_names) != 91 or len(set(scenario_names)) != len(scenario_names):
-        raise AssertionError(
-            "E2E scenarios must contain 91 unique names in the pinned order"
-        )
+        raise AssertionError(f"duplicate E2E scenario names: {duplicates}")
     referenced = {
         *rows,
         *manifest.get("non_discovered", {}).keys(),

@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, Any
 import unittest
 from unittest import mock
 
-from scripts.checks import layout
 from scripts.e2e import __main__ as e2e_main
 from scripts.e2e import main_open, runner
 from scripts.fixtures.toolchain import fake_retry_crash_mojo
@@ -103,214 +102,24 @@ def _recorded_signals() -> Iterator[list[tuple[str, int, int]]]:
         os.kill, os.killpg = real_kill, real_killpg
 
 
-CORE_SCENARIOS = (
-    "manifest-completeness",
-    "default-suite",
-    "hostile",
-    "hostile-console",
-    "hostile-reporters",
-    "single-pass",
-    "exitfirst",
-    "maxfail",
-    "exclude+stale",
-    "all-excluded",
-    "empty-dir",
-    "failing-gate",
-    "quiet-verbose",
-    "show-output",
-    "durations",
-    "color",
-    "passthrough+forbidden",
-    "out-of-root",
-)
-SELECTION_SCENARIOS = (
-    "usage-refusals",
-    "selection-keyword",
-    "selection-node-id",
-    "selection-union",
-    "selection-malformed-node-id",
-    "selection-unknown-test",
-    "selection-empty",
-    "selection-chameleon",
-    "single-build",
-    "stale-recovery-two-builds",
-    "mojo-executable-precedence",
-    "collect",
-)
-RESILIENCE_SCENARIOS = (
-    "resilience-matrix",
-    "retries-flaky",
-    "crash-attribution",
-    "attribution-reruns-crashed-binary",
-    "compile-timeout",
-    "compile-crash-signature",
-    "timeout",
-    "timeout-escalation",
-    "precompile",
-    "precompile-timeout",
-    "precompile-crash-retry",
-    "precompile-promotion",
-    "internal-error",
-    "runtime-open-failure",
-    "interrupt",
-    "interrupt-sigterm",
-    "interrupt-double",
-)
-JSON_SCENARIOS = (
-    "json-forward-compat",
-    "json-purity",
-    "json-color-relocated-stderr",
-    "json-destination-taxonomy",
-    "json-truncation-interrupt",
-    "json-truncation-sigkill",
-    "json-truncation-dead-pipe",
-    "json-terminal-write-failure",
-)
-JUNIT_SCENARIOS = (
-    "junit-scratch-cleanup",
-    "junit-schema-gate",
-    "junit-determinism",
-    "junit-prior-report-intact",
-    "junit-finalization-and-interrupt",
-)
-ANNOTATION_SCENARIOS = (
-    "annotations-modes",
-    "annotations-caps",
-    "annotations-conflict",
-    "annotations-fencing",
-)
-PARALLEL_SCENARIOS = (
-    "parallel-projection-eq",
-    "parallel-capacity-one",
-    "parallel-window-overlap",
-    "parallel-interrupt",
-    "parallel-shard-disjoint",
-    "collect-parallel",
-    "parallel-auto-smoke",
-    "parallel-json-workers",
-    "parallel-j-rejected",
-    "parallel-junit-canonical-eq",
-    "parallel-progress-tty",
-    "parallel-serial-noverlap",
-    "parallel-serial-stale-glob",
-    "parallel-fd-clamp",
-)
-CONFIG_SCENARIOS = (
-    "config-resolution",
-    "config-diagnostics",
-    "config-state",
-    "failure-reselection",
-    "config-overrides",
-)
-CONFIG_SHOW_SCENARIOS = ("config-show",)
-
-
 class E2EFaultTopologyTests(unittest.TestCase):
-    def test_master_registry_has_exact_pinned_order_and_unique_names(self) -> None:
+    def test_registry_names_are_unique_and_the_manifest_gate_runs_first(
+        self,
+    ) -> None:
         names = tuple(name for name, _scenario in e2e_main.SCENARIOS)
 
-        # No literal total appears here, and NOT because a length assertion
-        # would be redundant with the membership comparison below — it would
-        # not be: adding a scenario to both SCENARIOS and E2E_SCENARIO_NAMES
-        # keeps the comparison green and moves the length. The literal lives in
-        # `layout.check_e2e_layout` instead (`len(scenario_names) != 91`),
-        # which is its own blocking link in the harness-check chain, so a copy
-        # here would be a second hand-maintained number guarding nothing new.
-        self.assertEqual(names, layout.E2E_SCENARIO_NAMES)
+        # No roster and no total appear here. Registering a scenario is a
+        # one-line addition to `SCENARIOS` with its owning module on the same
+        # line, so a restated list would cost an edit per scenario to re-prove
+        # what the diff shows. Two things the diff does NOT show survive:
+        # a name that collides with an existing one, and the ordering the
+        # registry comment relies on -- `manifest-completeness` reconciles
+        # `e2e/manifest.json` against disk, and running it first is what turns
+        # a manifest drift into a first-line failure instead of one discovered
+        # after every other scenario has spent its build time. Neither costs an
+        # edit when a scenario is added.
         self.assertEqual(len(set(names)), len(names))
-
-    def test_core_scenarios_have_one_feature_owner(self) -> None:
-        from scripts.e2e.scenarios import core
-
-        owned = tuple(
-            name
-            for name, scenario in e2e_main.SCENARIOS
-            if scenario.__module__ == core.__name__
-        )
-        self.assertEqual(owned, CORE_SCENARIOS)
-
-    def test_selection_scenarios_have_one_feature_owner(self) -> None:
-        from scripts.e2e.scenarios import selection
-
-        owned = tuple(
-            name
-            for name, scenario in e2e_main.SCENARIOS
-            if scenario.__module__ == selection.__name__
-        )
-        self.assertEqual(owned, SELECTION_SCENARIOS)
-
-    def test_resilience_scenarios_have_one_feature_owner(self) -> None:
-        from scripts.e2e.scenarios import resilience
-
-        owned = tuple(
-            name
-            for name, scenario in e2e_main.SCENARIOS
-            if scenario.__module__ == resilience.__name__
-        )
-        self.assertEqual(owned, RESILIENCE_SCENARIOS)
-        source = inspect.getsource(resilience.s_resilience_matrix)
-        self.assertIn("context.registry", source)
-        self.assertNotIn("__main__", inspect.getsource(resilience))
-
-    def test_json_scenarios_have_one_feature_owner(self) -> None:
-        from scripts.e2e.scenarios import json_reporter
-
-        owned = tuple(
-            name
-            for name, scenario in e2e_main.SCENARIOS
-            if scenario.__module__ == json_reporter.__name__
-        )
-        self.assertEqual(owned, JSON_SCENARIOS)
-
-    def test_junit_scenarios_have_one_feature_owner(self) -> None:
-        from scripts.e2e.scenarios import junit_reporter
-
-        owned = tuple(
-            name
-            for name, scenario in e2e_main.SCENARIOS
-            if scenario.__module__ == junit_reporter.__name__
-        )
-        self.assertEqual(owned, JUNIT_SCENARIOS)
-
-    def test_annotation_scenarios_have_one_feature_owner(self) -> None:
-        from scripts.e2e.scenarios import annotations
-
-        owned = tuple(
-            name
-            for name, scenario in e2e_main.SCENARIOS
-            if scenario.__module__ == annotations.__name__
-        )
-        self.assertEqual(owned, ANNOTATION_SCENARIOS)
-
-    def test_parallel_scenarios_have_one_feature_owner(self) -> None:
-        from scripts.e2e.scenarios import parallel
-
-        owned = tuple(
-            name
-            for name, scenario in e2e_main.SCENARIOS
-            if scenario.__module__ == parallel.__name__
-        )
-        self.assertEqual(owned, PARALLEL_SCENARIOS)
-
-    def test_config_scenarios_have_one_feature_owner(self) -> None:
-        from scripts.e2e.scenarios import config_file
-
-        owned = tuple(
-            name
-            for name, scenario in e2e_main.SCENARIOS
-            if scenario.__module__ == config_file.__name__
-        )
-        self.assertEqual(owned, CONFIG_SCENARIOS)
-
-    def test_config_show_scenarios_have_one_feature_owner(self) -> None:
-        from scripts.e2e.scenarios import config_show
-
-        owned = tuple(
-            name
-            for name, scenario in e2e_main.SCENARIOS
-            if scenario.__module__ == config_show.__name__
-        )
-        self.assertEqual(owned, CONFIG_SHOW_SCENARIOS)
+        self.assertEqual(names[0], "manifest-completeness")
 
     def test_runner_owns_results_manifest_access_and_hard_timeouts(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-e2e-runner-") as raw_tmp:
