@@ -13,7 +13,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 HARNESS_CHECK_MODULES = (
     "scripts.tests.test_aggregate",
     "scripts.tests.test_process_watchdog",
-    "scripts.tests.test_format",
     "scripts.tests.test_dogfood",
     "scripts.tests.test_package_consumption",
     "scripts.tests.test_classified",
@@ -32,6 +31,28 @@ HARNESS_CHECK_MODULES = (
     "scripts.tests.test_python_quality",
     "scripts.tests.test_annotations_oracle",
 )
+
+FORMAT_COMMAND = r"""sh -c '
+set -eu
+source_list="$(mktemp "${TMPDIR:-/tmp}/mtest-format.XXXXXX")"
+sorted_list="${source_list}.sorted"
+trap "rm -f \"$source_list\" \"$sorted_list\"" EXIT HUP INT TERM
+find -P src companions tests e2e -type f -name "*.mojo" -print > "$source_list"
+LC_ALL=C sort "$source_list" > "$sorted_list"
+mv "$sorted_list" "$source_list"
+if [ ! -s "$source_list" ]; then
+    echo "FATAL: fmt: no Mojo sources found" >&2
+    exit 1
+fi
+while IFS= read -r source; do
+    mojo format --quiet "$source"
+done < "$source_list"
+'
+"""
+"""The exact portable, per-source Mojo formatter command."""
+
+FORMAT_CHECK_TASK = {"cmd": "git diff --exit-code", "depends-on": ["fmt"]}
+"""The formatter check must run the formatter before inspecting the diff."""
 
 COVERAGE_CAPABILITY_COMMAND = "python -m scripts.checks.coverage_capability"
 
@@ -381,6 +402,16 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
             f"expected={expected_harness_command!r}, "
             f"actual={tasks.get('harness-check')!r}"
         )
+    if tasks.get("fmt") != FORMAT_COMMAND:
+        raise AssertionError(
+            "fmt task mismatch: "
+            f"expected={FORMAT_COMMAND!r}, actual={tasks.get('fmt')!r}"
+        )
+    if tasks.get("fmt-check") != FORMAT_CHECK_TASK:
+        raise AssertionError(
+            "fmt-check task mismatch: "
+            f"expected={FORMAT_CHECK_TASK!r}, actual={tasks.get('fmt-check')!r}"
+        )
     if "test-direct" in tasks:
         raise AssertionError("obsolete test-direct Pixi alias still exists")
     expected_classified_tasks = {
@@ -436,6 +467,7 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
         )
     expected_preflight_closure = {
         "ci-preflight",
+        "fmt",
         "build-bin",
         "build-native",
         *CI_PREFLIGHT_TASKS,
@@ -450,6 +482,7 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
     expected_ci_closure = {
         "ci",
         "ci-preflight",
+        "fmt",
         "build-bin",
         "build-native",
         *CI_FLOOR_TASKS,
@@ -497,6 +530,7 @@ def check_ci_task_graph(repo_root: Path = REPO_ROOT) -> None:
     expected_linux_closure = {
         "ci",
         "ci-preflight",
+        "fmt",
         "build-bin",
         "build-native",
         *LINUX_CI_FLOOR_TASKS,

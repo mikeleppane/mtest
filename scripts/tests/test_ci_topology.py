@@ -114,6 +114,20 @@ class CiTopologyTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "membership/order"):
                 ci_topology.check_ci_task_graph(repo)
 
+    def test_formatter_command_mutation_is_rejected(self) -> None:
+        source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
+        mutated = source.replace(
+            'fmt-check = { cmd = "git diff --exit-code", depends-on = ["fmt"] }',
+            'fmt-check = "mojo format src companions tests e2e"',
+            1,
+        )
+        self.assertNotEqual(mutated, source)
+        with tempfile.TemporaryDirectory(prefix="mtest-ci-topology-") as raw_tmp:
+            repo = Path(raw_tmp)
+            (repo / "pixi.toml").write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "fmt-check task mismatch"):
+                ci_topology.check_ci_task_graph(repo)
+
     def test_readme_help_gate_removal_is_rejected(self) -> None:
         source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
         mutated = source.replace(

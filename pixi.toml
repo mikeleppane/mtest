@@ -118,13 +118,30 @@ py-fmt = "python -m scripts.checks.python_quality --fix"
 # scripts/checks/python_quality.py for why the versions are pinned exactly.
 py-check = "python -m scripts.checks.python_quality"
 
-# Rewrite Mojo files in place — run locally before committing. Protocol fixtures
-# live beneath tests/, so this covers the runner, fixtures, and suites.
-fmt = "python -m scripts.checks.format"
+# Rewrite every real Mojo file in its own invocation — run locally before
+# committing. Mojo 1.0.0b2 can stall when one formatter invocation spans several
+# paths. `find -P` does not traverse symlinks; the C-locale sort fixes ordering.
+fmt = '''sh -c '
+set -eu
+source_list="$(mktemp "${TMPDIR:-/tmp}/mtest-format.XXXXXX")"
+sorted_list="${source_list}.sorted"
+trap "rm -f \"$source_list\" \"$sorted_list\"" EXIT HUP INT TERM
+find -P src companions tests e2e -type f -name "*.mojo" -print > "$source_list"
+LC_ALL=C sort "$source_list" > "$sorted_list"
+mv "$sorted_list" "$source_list"
+if [ ! -s "$source_list" ]; then
+    echo "FATAL: fmt: no Mojo sources found" >&2
+    exit 1
+fi
+while IFS= read -r source; do
+    mojo format --quiet "$source"
+done < "$source_list"
+'
+'''
 # CI gate: format, then fail if anything changed (never edits in CI). A format
 # that shifts a fixture's `At <path>:<line>:<col>` coordinates is an oracle-side
 # change — regenerate transcripts, do not fight the gate.
-fmt-check = "python -m scripts.checks.format && git diff --exit-code"
+fmt-check = { cmd = "git diff --exit-code", depends-on = ["fmt"] }
 
 # Stdlib-only unsafe-operation inventory. Mutation tests pin every syntax family
 # and string/comment exclusion; the complete product/test inventory must remain
@@ -245,7 +262,7 @@ assertions-check = "python -m scripts.tests.test_assertions && python -m scripts
 # Fast self-tests for repository harness behavior. Uses disposable test inputs
 # and a fake compiler to prove deterministic aggregate generation, one-build
 # execution, timeout handling, and exact hosted-CI topology.
-harness-check = "python -m scripts.tests.test_aggregate && python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_format && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_classified && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_contract && python -m scripts.tests.test_pty_capture && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_assertions && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_ci_topology && python -m scripts.checks.ci_topology && python -m scripts.tests.test_python_quality && python -m scripts.tests.test_annotations_oracle"
+harness-check = "python -m scripts.tests.test_aggregate && python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_classified && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_contract && python -m scripts.tests.test_pty_capture && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_assertions && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_ci_topology && python -m scripts.checks.ci_topology && python -m scripts.tests.test_python_quality && python -m scripts.tests.test_annotations_oracle"
 
 # DIAGNOSTIC, not a gate in `ci`: ask the pinned toolchain whether it has grown
 # a source-coverage facility. Mojo 1.0.0b2 has none — neither `mojo build

@@ -203,11 +203,13 @@ pixi run e2e               # exact CLI exits and output against e2e/manifest.jso
 pixi run ci-memory         # Linux: both memory lanes, ASan/LSan then Memcheck
 ```
 
-`fmt-check` is `format-all` AND `git diff --exit-code`, so it fails on ANY
-unstaged change, including one made after a long CI run started. Stage the work
-first, then gate; a result produced against different bytes than you commit is
-not a result. The same applies to reading outcomes: a background wrapper's exit
-status is the wrapper's, not the gate's — read the gate's own marker.
+`fmt-check` formats each real Mojo source under `src`, `companions`, `tests`,
+and `e2e` in a separate deterministic, no-symlink-following invocation, then
+runs `git diff --exit-code`, so it fails on ANY unstaged change, including one
+made after a long CI run started. Stage the work first, then gate; a result
+produced against different bytes than you commit is not a result. The same
+applies to reading outcomes: a background wrapper's exit status is the wrapper's,
+not the gate's — read the gate's own marker.
 
 `pixi run ci-preflight` chains `version-check -> fmt-check -> harness-check ->
 safety-check -> postfork-check -> native-check -> junit-check -> build ->
