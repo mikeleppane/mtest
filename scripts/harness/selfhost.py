@@ -120,7 +120,34 @@ DEFAULT_ROOTS = (Path("tests/unit"), Path("tests/integration"))
 TEST_FILE_GLOB = "test_*.mojo"
 
 DEFAULT_WORKERS = "auto"
-"""Provisional worker policy. A later task measures and pins this value."""
+"""The worker policy every pixi task runs under, absent an explicit override.
+
+Pinned deliberately to `"auto"` -- `max(1, cores // 2)`
+(`src/mtest/session/pool_plan.mojo:79-95`), which also honours CPU affinity --
+rather than to a fixed integer. A fixed integer sized for a small hosted CI
+runner would be wrong here: `-n 4` on a 32-core development host would use an
+eighth of the machine and throw away the local speedup that motivates running
+the classified suite through mtest at all (measured: 135.0s at auto/16 workers
+on 32 cores, vs. still running at 600s pinned to 4 cores with `auto` giving
+only 2 workers). `auto` scales with whatever machine actually runs it, so it
+stays correct across arbitrary local hardware without anyone re-measuring it.
+
+This is deliberately NOT overridden for hosted CI here, where `auto`
+underserves small runners -- a standard 4-vCPU GitHub-hosted Linux runner gets
+2 workers, a standard 3-vCPU macOS runner gets only 1 (fully serial). Pinning a
+small integer in THIS module to fix that would make every local invocation
+inherit it too, which is exactly the wrong trade this docstring just argued
+against. Instead `.github/workflows/ci.yml` passes an explicit `-n` override on
+the `test` lane only, sized to each hosted runner's actual core count (`-n 4`
+Linux, `-n 3` macOS) -- the pixi task and the CI workflow are separate places
+that legitimately want different values, and the override travels with the
+runner it was sized for instead of living in the shared default every local
+run would also inherit.
+
+Read the hosted `test` lane's own reported wall-clock on both platforms after
+this lands: that is the real validation this number needs, not a local sweep
+against a proxy machine.
+"""
 
 WORKER_FLAGS = ("-n", "--workers")
 """Command-line spellings of the worker-count override.

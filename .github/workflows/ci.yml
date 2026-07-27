@@ -44,9 +44,18 @@ jobs:
       fail-fast: true
       matrix:
         include:
+          # This runner is dedicated to the job for its duration, unlike a
+          # shared local machine, so `pixi run test`'s `auto` default (half the
+          # cores, src/mtest/session/pool_plan.mojo) is the wrong call here: a
+          # standard public-repo ubuntu-24.04 runner has 4 vCPUs, so `auto`
+          # would use only 2. `workers` carries an explicit override sized to
+          # this runner's real core count; see DEFAULT_WORKERS in
+          # scripts/harness/selfhost.py for the full reasoning and why this
+          # lives here instead of in pixi.toml.
           - runner: ubuntu-24.04
             lane: direct tests
             task: test
+            workers: "4"
             libc_debug: false
             safety_artifact: false
             artifact_name: none
@@ -155,8 +164,10 @@ jobs:
         if: ${{ matrix.safety_artifact }}
         run: pixi run build
 
+      # `matrix.workers` is set only on the `test` lane's row above; every
+      # other lane leaves it unset, so this appends nothing for them.
       - name: Run ${{ matrix.lane }}
-        run: pixi run ${{ matrix.task }}
+        run: pixi run ${{ matrix.task }}${{ matrix.workers && format(' -- -n {0}', matrix.workers) || '' }}
 
       - name: Upload safety logs
         if: ${{ always() && matrix.safety_artifact }}
@@ -228,9 +239,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Same reasoning as the Linux matrix's `test` row above, sized to
+          # this platform's runner: a standard macos-15 (arm64) runner has 3
+          # vCPUs, so `auto` (cores // 2) would give exactly 1 worker -- fully
+          # serial. See DEFAULT_WORKERS in scripts/harness/selfhost.py.
           - runner: macos-15
             lane: direct tests
             task: test
+            workers: "3"
             libc_debug: false
             safety_artifact: false
             artifact_name: none
@@ -278,8 +294,10 @@ jobs:
           pixi run mojo-version
           pixi run clang --version
 
+      # `matrix.workers` is set only on the `test` lane's row above; every
+      # other lane leaves it unset, so this appends nothing for them.
       - name: Run ${{ matrix.lane }}
-        run: pixi run ${{ matrix.task }}
+        run: pixi run ${{ matrix.task }}${{ matrix.workers && format(' -- -n {0}', matrix.workers) || '' }}
 
   macos-package:
     name: macOS arm64 / packaged artifact
