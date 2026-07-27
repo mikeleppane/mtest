@@ -52,15 +52,15 @@ replace the two-model gate, they prepare for it.
 
 ## Before reading a line
 
-1. **Reproduce the floor.** Run `pixi run ci`, the canonical fail-fast chain:
-   preflight, exhaustive `test`, the three-probe `dogfood-check`, then `e2e`
-   (AGENTS.md defines the exact membership). Use `pixi run test-file -- PATH`
-   only as the focused reproducer while investigating. A red gate is finding #1
-   — stop and report it, and name *which* stage went red (a
-   byte diff in `transcripts-check` and a test failure indict different things —
-   see axes 2 and 1). *Exception:* for a **docs-only diff** (Markdown,
-   docstrings, comments — nothing under `src/`, `tests/`, or `scripts/`), a
-   `fmt-check` and a read are enough.
+1. **Reproduce the affected behavior.** Run formatting, static checks, and the
+   smallest focused gates that cover the diff. Use `pixi run test-file -- PATH`
+   for a classified reproducer and add the affected product gate when behavior
+   crosses a public boundary. Do not routinely run the complete serial
+   `pixi run ci` locally; inspect the required hosted checks for the exhaustive
+   merge verdict. A red gate is finding #1 — stop and report it, and name
+   *which* stage went red (a byte diff in `transcripts-check` and a test failure
+   indict different things — see axes 2 and 1). For a docs-only diff, a read and
+   the relevant documentation/static checks are enough.
 2. **Read the diff with its commit messages.** Does each commit do one thing with
    an honest scope and a *why* body? Does a `refactor` commit actually preserve
    behavior (transcripts untouched, no test weakened)? Does a `perf` commit cite

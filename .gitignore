@@ -17,5 +17,6 @@ __pycache__/
 # internal working plans, notes, and review outputs — never committed or published
 docs/plans/
 docs/superpowers/plans/
+docs/superpowers/specs/2026-07-27-release-publication-automation-design.md
 notes/
 .superpowers

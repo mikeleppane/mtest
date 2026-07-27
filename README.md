@@ -5,6 +5,7 @@
 # mtest
 
 [![CI](https://github.com/mikeleppane/mtest/actions/workflows/ci.yml/badge.svg)](https://github.com/mikeleppane/mtest/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/mikeleppane/mtest/actions/workflows/codeql.yml/badge.svg)](https://github.com/mikeleppane/mtest/actions/workflows/codeql.yml)
 
 A pytest-like test runner for [Mojo](https://www.modular.com/mojo).
 
@@ -152,14 +153,16 @@ def main() raises:
 ```
 
 ```console
-$ mtest --no-config --show-output failures -I <PREFIX>/share/mtest/assertions-src examples/assertions
+$ mtest --no-config --show-output failures \
+    -I <PREFIX>/share/mtest/companions/assertions/src \
+    companions/assertions/examples
 mtest 0.6.0 (mojo)
 root: <REPO>   selected: 1 files   excluded: 0
 
-FAIL           examples/assertions/test_diagnostics.mojo  <TIME>
+FAIL           companions/assertions/examples/test_diagnostics.mojo  <TIME>
 
---- FAIL examples/assertions/test_diagnostics.mojo::test_text_difference_has_scalar_and_context ---
-    | At examples/assertions/test_diagnostics.mojo:13:28: text differs at scalar 6
+--- FAIL companions/assertions/examples/test_diagnostics.mojo::test_text_difference_has_scalar_and_context ---
+    | At companions/assertions/examples/test_diagnostics.mojo:13:28: text differs at scalar 6
     |   actual: U+0062 'b'
     |   expected: U+0042 'B'
     |   actual line 1: alpha\n
@@ -169,14 +172,14 @@ FAIL           examples/assertions/test_diagnostics.mojo  <TIME>
     |   expected line 2: BETa\n
     |   expected line 3: gamma
     |   reason: configuration text changed
-reproduce: mtest -I <PREFIX>/share/mtest/assertions-src examples/assertions/test_diagnostics.mojo::test_text_difference_has_scalar_and_context
+reproduce: mtest -I <PREFIX>/share/mtest/companions/assertions/src companions/assertions/examples/test_diagnostics.mojo::test_text_difference_has_scalar_and_context
 
---- FAIL examples/assertions/test_diagnostics.mojo (exit 1) — captured output (file-scoped; TestSuite does not attribute output to individual tests) ---
+--- FAIL companions/assertions/examples/test_diagnostics.mojo (exit 1) — captured output (file-scoped; TestSuite does not attribute output to individual tests) ---
     | Unhandled exception caught during execution:
-    | Running 2 tests for <REPO>/examples/assertions/test_diagnostics.mojo
+    | Running 2 tests for <REPO>/companions/assertions/examples/test_diagnostics.mojo
     |     PASS [ <TIME> ] test_standard_assertion_still_coexists
     |     FAIL [ <TIME> ] test_text_difference_has_scalar_and_context
-    |       At <REPO>/examples/assertions/test_diagnostics.mojo:13:28: text differs at scalar 6
+    |       At <REPO>/companions/assertions/examples/test_diagnostics.mojo:13:28: text differs at scalar 6
     |         actual: U+0062 'b'
     |         expected: U+0042 'B'
     |         actual line 1: alpha\n
@@ -188,7 +191,7 @@ reproduce: mtest -I <PREFIX>/share/mtest/assertions-src examples/assertions/test
     |         reason: configuration text changed
     | --------
     | Summary [ <TIME> ] 2 tests run: 1 passed , 1 failed , 0 skipped
-    | Test suite' <REPO>/examples/assertions/test_diagnostics.mojo 'failed!
+    | Test suite' <REPO>/companions/assertions/examples/test_diagnostics.mojo 'failed!
     |
 --- captured stderr ---
 
@@ -221,7 +224,7 @@ finalized and emitted by the companion, not private work performed inside
 user-defined equality or formatting code. A present reason retains bounded
 space at the end even when mismatch detail is truncated.
 
-`<PREFIX>/share/mtest/assertions-src` is one complete source package named
+`<PREFIX>/share/mtest/companions/assertions/src` is one complete source package named
 `mtest`, not an extension merged into another `mtest` package. Put it before
 any other include root that provides `mtest`. The runner never injects this
 path automatically, and Mojo does not merge it with the runner-private
@@ -1112,6 +1115,11 @@ Facts about this build worth knowing before you rely on it:
 
 ## Developing
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor workflow and
+[SECURITY.md](SECURITY.md) for private vulnerability reporting. Maintainers
+use [docs/releasing.md](docs/releasing.md) for the GitHub and
+modular-community publication procedure.
+
 Requires [pixi](https://pixi.sh). The toolchain (Mojo `1.0.0b2`) and all
 tasks are pinned in [pixi.toml](pixi.toml); re-pinning on a Modular release
 regenerates the protocol transcripts so the diff is the changelog.
@@ -1146,15 +1154,17 @@ The tasks:
 | `pixi run dogfood-check` | run three focused probes through the built `mtest` binary itself |
 | `pixi run e2e` | drive `build/mtest` against the committed known-outcome tree under `e2e/` and assert exact exit codes and output structure |
 | `pixi run transcripts-check` | regenerate the `TestSuite` protocol snapshots to a temp dir and diff byte-for-byte |
-| `pixi run ci` | the canonical serial floor: preflight checks, then `test`, `assertions-check`, `dogfood-check`, `e2e`, the strict contract, and the memory lanes |
+| `pixi run ci` | the complete serial local mirror: preflight checks, then `test`, `assertions-check`, `dogfood-check`, `e2e`, the strict contract, and the memory lanes |
 | `pixi run asan-check` | Linux: build and run the highest-risk exec suites under ASan/LSan |
 | `pixi run valgrind-check` | Linux: run the exec/native coverage under Memcheck |
 | `pixi run ci-memory` | Linux: both memory lanes together, the way `ci` runs them |
 
-`pixi run ci` opens with a fail-fast preflight (version, formatting,
+`pixi run ci` is available for an explicit exhaustive local run. Routine
+development uses the focused tasks above; required hosted checks are the merge
+verdict. The complete mirror opens with a fail-fast preflight (version, formatting,
 harness membership, unsafe-Mojo inventory, post-fork audit, native ABI,
 JUnit oracle, build, rendered-JUnit, and transcript checks) and closes with
-`ci-memory`, so a green local floor covers memory safety rather than deferring
+`ci-memory`, so a green complete local run covers memory safety rather than deferring
 it. On Linux that is ASan/LSan then Memcheck, roughly four minutes together;
 elsewhere it reports the two lanes as uncovered and names the Linux cells that
 own them. Hosted CI runs

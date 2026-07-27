@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 
 MAX_COVERAGE_LINES = 8
-DEFAULT_ROOTS = ("src", "assertions-src", "tests", "e2e", "examples")
+DEFAULT_ROOTS = ("src", "companions", "tests", "e2e", "recipe")
 
 
 @dataclass(frozen=True)

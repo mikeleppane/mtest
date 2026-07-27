@@ -64,7 +64,7 @@ class AssertionCommandTests(unittest.TestCase):
                 "build",
                 "-O0",
                 "-I",
-                "/checkout/assertions-src",
+                "/checkout/companions/assertions/src",
                 "/checkout/tests/assertions/api_consumer.mojo",
                 "-o",
                 "/checkout/build/assertions-check/api-o0",
@@ -600,7 +600,8 @@ class AssertionLocationValidationTests(unittest.TestCase):
     def test_rejects_provider_coordinates(self) -> None:
         output = self.valid_output.replace(
             "At /checkout/tests/assertions/location_consumer.mojo:12:18",
-            "At /checkout/assertions-src/mtest/assertions/__init__.mojo:12:18",
+            "At /checkout/companions/assertions/src/mtest/assertions/"
+            "__init__.mojo:12:18",
         )
         with self.assertRaisesRegex(AssertionError, "provider coordinate"):
             assertions.validate_location_run(

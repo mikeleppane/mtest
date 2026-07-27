@@ -19,7 +19,7 @@ Non-goals: not a property-testing framework and not a TestSuite replacement.
 The optional source-only `mtest.assertions` companion improves failure detail;
 it still raises ordinary errors inside TestSuite and owns no discovery, report
 framing, or runner outcome. Zero runtime dependencies: runner logic under
-`src/` and companion logic under `assertions-src/` are pure Mojo; the
+`src/` and companion logic under `companions/assertions/src/` are pure Mojo; the
 exec-private POSIX adapter under `native/` is compiled and statically linked at
 build time; Python appears only in build-time tooling under `scripts/` and
 test-only subprocess actors under `tests/fixtures/exec/`.
@@ -177,9 +177,9 @@ approved network contract (rattler-build solves against the pinned Modular and
 conda-forge channels; nothing uploads or authenticates). Do not describe those
 jobs as hermetic or collapse them into the Valgrind exception.
 
-## Toolchain and the quality floor
+## Toolchain and verification
 
-The floor before any change is done, all green, in this order:
+The complete repository verification catalog is:
 
 ```text
 pixi run fmt               # format Mojo in place (run locally before committing)
@@ -198,22 +198,50 @@ pixi run junit-render-check  # validate bytes emitted by the real JUnit reporter
 pixi run transcripts-check # regenerate to a temp dir and diff byte-for-byte
 pixi run test              # compile the classified inventory into one direct-run binary
 pixi run assertions-check  # direct-run public assertion consumers at O0 and O3
+pixi run recipe-check      # render and compare the community submission recipe
 pixi run dogfood-check     # run three focused probes through the built mtest binary
 pixi run e2e               # exact CLI exits and output against e2e/manifest.json
 pixi run ci-memory         # Linux: both memory lanes, ASan/LSan then Memcheck
 ```
 
-`fmt-check` is `format-all` AND `git diff --exit-code`, so it fails on ANY
-unstaged change, including one made after a long CI run started. Stage the work
-first, then gate; a result produced against different bytes than you commit is
-not a result. The same applies to reading outcomes: a background wrapper's exit
-status is the wrapper's, not the gate's — read the gate's own marker.
+Hosted GitHub required checks enforce the applicable platform and product
+lanes described below. `py-check` remains a local requirement when Python
+changes because its pinned tools are intentionally absent from hosted CI.
+
+### Local agentic development loop
+
+Do not run the complete serial floor before every local commit. It is too slow
+for iterative agentic work and duplicates the required hosted checks.
+
+Before a local commit:
+
+1. Run `pixi run fmt` for Mojo changes and `pixi run py-fmt` plus
+   `pixi run py-check` for Python changes.
+2. Run the smallest checker and focused test modules that directly cover the
+   diff. A product-facing change also runs its affected product gate:
+   `assertions-check`, `dogfood-check`, `e2e`, `contract-check`,
+   `package-check`, or a memory checker as applicable.
+3. Stage the exact bytes, run the selected gates against that staged state, and
+   record each gate's own exit status.
+
+`pixi run ci` remains the complete serial local mirror for an explicit release
+rehearsal, hosted failure reproduction, or a human-requested exhaustive run. It
+is not a routine per-commit requirement. The required GitHub checks are the
+authoritative exhaustive merge verdict.
+
+`fmt-check` formats each real Mojo source under `src`, `companions`, `tests`,
+and `e2e` in a separate deterministic, no-symlink-following invocation, then
+runs `git diff --exit-code`, so it fails on ANY unstaged change, including one
+made after a long check started. Stage the work first, then gate; a result
+produced against different bytes than you commit is not a result. The same
+applies to reading outcomes: a background wrapper's exit status is the wrapper's,
+not the gate's — read the gate's own marker.
 
 `pixi run ci-preflight` chains `version-check -> fmt-check -> harness-check ->
 safety-check -> postfork-check -> native-check -> junit-check -> build ->
 readme-help-check -> junit-render-check -> transcripts-check` in that exact
 fail-fast order; the
-canonical local `pixi run ci` is serial: `ci-preflight ->
+complete local `pixi run ci` mirror is serial: `ci-preflight ->
 test -> assertions-check -> dogfood-check -> e2e -> contract-check-strict ->
 ci-memory`.
 
@@ -229,7 +257,7 @@ in the tree. It covers `scripts/` and `tests/fixtures/exec/`, which is every
 Python file the repo tracks. `pyproject.toml` holds the config and no
 `[project]`/`[build-system]`, because this repo is not a Python package.
 
-`ci-memory` is how the local floor covers memory safety. On linux-64 a
+`ci-memory` is how the complete local mirror covers memory safety. On linux-64 a
 `[target.linux-64.tasks]` override makes it `asan-check` then
 `valgrind-check`; measured against clean main those cost about 90 seconds and
 about 3 minutes, which is why they belong in the ordinary floor rather than in
@@ -263,7 +291,7 @@ configured required check names and must stay stable. `native-check` depends
 on `postfork-check`, so the native gate alone cannot skip the child call-graph
 audit.
 
-The whole local floor compiles for the host target only, so it is blind to a
+The complete local mirror compiles for the host target only, so it is blind to a
 macOS-only compile failure: a `comptime` branch, `external_call` signature, or
 struct-layout offset that is wrong for Darwin passes every Linux gate and reds
 the hosted macOS preflight instead, before any test runs. A change that touches
@@ -358,7 +386,7 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `exec` | `src/mtest/exec` (the POSIX process adapter) |
 | `session` | `src/mtest/session` (orchestration) |
 | `report` | `src/mtest/report` (event consumers, reporters) |
-| `assertions` | source-only companion under `assertions-src/mtest/assertions` |
+| `assertions` | source-only companion under `companions/assertions/src/mtest/assertions` |
 | `cli` | `src/mtest/cli` (arg parsing, main) |
 | `cache` | in-session build/collection reuse |
 | `test` | test infrastructure (`scripts/harness/{classified,dogfood}.py`, `scripts/build/mojo_package.sh`, shared helpers) |

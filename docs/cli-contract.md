@@ -992,12 +992,14 @@ there remains unverified. Platform divergence in crash reporting is absorbed by
 the structured termination model (a terminating signal is recorded as a signal,
 never as a shell-encoded `128+N`).
 
-The canonical local `pixi run ci` floor is serial and fail-fast. Hosted CI
-preserves that logical floor while overlapping independent work: a Linux
-preflight releases separate direct, dogfood, end-to-end, ASan/LSan, and
-Valgrind cells; a macOS preflight independently releases separate direct,
-dogfood, and end-to-end cells. The Linux packaged-artifact job starts
-independently; the macOS packaged-artifact job waits on the macOS preflight.
+The complete local `pixi run ci` mirror is serial and fail-fast; it is an
+optional exhaustive local command. Required hosted CI is the authoritative
+merge verdict and preserves that logical floor while overlapping independent
+work: a Linux preflight releases separate direct, dogfood, end-to-end,
+ASan/LSan, and Valgrind cells; a macOS preflight independently releases
+separate direct, dogfood, and end-to-end cells. The Linux packaged-artifact job
+starts independently; the macOS packaged-artifact job waits on the macOS
+preflight.
 Memory-safety cells run for every pull request, configured `main`/`master`
 push, and manual unified-CI invocation; there is no scheduled memory-safety
 workflow. Protocol transcripts and sanitizers remain Linux-only;

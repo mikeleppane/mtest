@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tomllib
@@ -35,12 +36,12 @@ BUILD_SOURCE_PATHS = (
     Path("scripts/build/production_build.sh"),
 )
 ASSERTION_SOURCE_PATHS = {
-    Path("assertions-src/mtest/__init__.mojo"),
-    Path("assertions-src/mtest/assertions/__init__.mojo"),
-    Path("assertions-src/mtest/assertions/_display.mojo"),
-    Path("assertions-src/mtest/assertions/_mapping.mojo"),
-    Path("assertions-src/mtest/assertions/_sequence.mojo"),
-    Path("assertions-src/mtest/assertions/_text.mojo"),
+    Path("companions/assertions/src/mtest/__init__.mojo"),
+    Path("companions/assertions/src/mtest/assertions/__init__.mojo"),
+    Path("companions/assertions/src/mtest/assertions/_display.mojo"),
+    Path("companions/assertions/src/mtest/assertions/_mapping.mojo"),
+    Path("companions/assertions/src/mtest/assertions/_sequence.mojo"),
+    Path("companions/assertions/src/mtest/assertions/_text.mojo"),
 }
 ASSERTION_CONSUMER_PATHS = {
     Path("tests/assertions/api_consumer.mojo"),
@@ -51,7 +52,7 @@ ASSERTION_CHECK_PATHS = {
     Path("scripts/tests/test_assertions.py"),
 }
 ASSERTION_EXAMPLE_PATHS = {
-    Path("examples/assertions/test_diagnostics.mojo"),
+    Path("companions/assertions/examples/test_diagnostics.mojo"),
 }
 VENDORED_TOML_PATHS = {
     Path("vendor/mojo-toml/CHECKSUMS.json"),
@@ -456,6 +457,9 @@ E2E_SCENARIO_NAMES = (
 
 LIVE_COMMAND_FIXED_PATHS = (
     Path("README.md"),
+    Path("CONTRIBUTING.md"),
+    Path("SECURITY.md"),
+    Path("docs/releasing.md"),
     Path("AGENTS.md"),
     Path("pixi.toml"),
 )
@@ -1161,35 +1165,71 @@ def check_build_source_visibility(repo_root: Path = REPO_ROOT) -> None:
 
 def check_assertion_companion_layout(repo_root: Path = REPO_ROOT) -> None:
     """Pin the public assertion source, consumers, and namespace isolation."""
-    for name, expected, root in (
-        ("assertion source", ASSERTION_SOURCE_PATHS, "assertions-src"),
-        ("assertion consumer", ASSERTION_CONSUMER_PATHS, "tests/assertions"),
-        ("assertion example", ASSERTION_EXAMPLE_PATHS, "examples"),
-    ):
-        _require_nonempty(name, expected)
-        base = repo_root / root
-        actual = (
-            {path.relative_to(repo_root) for path in base.rglob("*") if path.is_file()}
-            if base.is_dir()
-            else set()
+    _require_nonempty("assertion source", ASSERTION_SOURCE_PATHS)
+    _require_nonempty("assertion example", ASSERTION_EXAMPLE_PATHS)
+    companion_paths = ASSERTION_SOURCE_PATHS | ASSERTION_EXAMPLE_PATHS
+    expected_companion_entries = companion_paths | {
+        parent
+        for path in companion_paths
+        for parent in path.parents
+        if parent not in (Path("."), Path("companions"))
+    }
+    companions = repo_root / "companions"
+    actual_companion_entries = (
+        {path.relative_to(repo_root) for path in companions.rglob("*")}
+        if companions.is_dir()
+        else set()
+    )
+    if actual_companion_entries != expected_companion_entries:
+        raise AssertionError(
+            "assertion companion membership mismatch: "
+            f"missing={sorted(expected_companion_entries - actual_companion_entries)}, "
+            f"extra={sorted(actual_companion_entries - expected_companion_entries)}"
         )
-        if actual != expected:
-            raise AssertionError(
-                f"{name} membership mismatch: "
-                f"missing={sorted(expected - actual)}, "
-                f"extra={sorted(actual - expected)}"
-            )
-        linked = (
-            [
-                path.relative_to(repo_root)
-                for path in base.rglob("*")
-                if path.is_symlink()
-            ]
-            if base.is_dir()
-            else []
+    linked = [
+        path.relative_to(repo_root)
+        for path in companions.rglob("*")
+        if path.is_symlink()
+    ]
+    if linked:
+        raise AssertionError(f"assertion companion contains symlinks: {sorted(linked)}")
+    non_regular_companion_leaves = [
+        path
+        for path in sorted(companion_paths)
+        if not stat.S_ISREG((repo_root / path).lstat().st_mode)
+    ]
+    if non_regular_companion_leaves:
+        raise AssertionError(
+            "assertion companion leaf is not a regular file: "
+            f"{non_regular_companion_leaves}"
         )
-        if linked:
-            raise AssertionError(f"{name} contains symlinks: {sorted(linked)}")
+
+    _require_nonempty("assertion consumer", ASSERTION_CONSUMER_PATHS)
+    consumer_root = repo_root / "tests" / "assertions"
+    actual_consumers = (
+        {
+            path.relative_to(repo_root)
+            for path in consumer_root.rglob("*")
+            if path.is_file()
+        }
+        if consumer_root.is_dir()
+        else set()
+    )
+    if actual_consumers != ASSERTION_CONSUMER_PATHS:
+        raise AssertionError(
+            "assertion consumer membership mismatch: "
+            f"missing={sorted(ASSERTION_CONSUMER_PATHS - actual_consumers)}, "
+            f"extra={sorted(actual_consumers - ASSERTION_CONSUMER_PATHS)}"
+        )
+    linked_consumers = [
+        path.relative_to(repo_root)
+        for path in consumer_root.rglob("*")
+        if path.is_symlink()
+    ]
+    if linked_consumers:
+        raise AssertionError(
+            f"assertion consumer contains symlinks: {sorted(linked_consumers)}"
+        )
 
     _require_nonempty("assertion check", ASSERTION_CHECK_PATHS)
     missing_checks = {
@@ -1202,7 +1242,7 @@ def check_assertion_companion_layout(repo_root: Path = REPO_ROOT) -> None:
     if (repo_root / "src" / "mtest" / "assertions").exists():
         raise AssertionError("assertion companion leaked into private src/mtest")
     packaged_sources = {
-        Path("assertions-src") / path
+        Path("companions/assertions/src") / path
         for path in package_consumption.INSTALLED_ASSERTION_FILES
     }
     if packaged_sources != ASSERTION_SOURCE_PATHS:
@@ -1220,11 +1260,13 @@ def check_assertion_companion_layout(repo_root: Path = REPO_ROOT) -> None:
         ("production build", production),
         ("recipe build", recipe),
     ):
-        if re.search(r"mojo\s+precompile[^\n]*assertions-src", contents):
+        if re.search(r"mojo\s+precompile[^\n]*companions/assertions", contents):
             raise AssertionError(f"{name} precompiles the public assertion source")
     installed_sources = {
         Path(match)
-        for match in re.findall(r"(?m)^\s*install -m 644 (assertions-src/\S+)", recipe)
+        for match in re.findall(
+            r"(?m)^\s*install -m 644 (companions/assertions/src/\S+)", recipe
+        )
     }
     if installed_sources != ASSERTION_SOURCE_PATHS:
         raise AssertionError(
@@ -1232,8 +1274,32 @@ def check_assertion_companion_layout(repo_root: Path = REPO_ROOT) -> None:
             f"missing={sorted(ASSERTION_SOURCE_PATHS - installed_sources)}, "
             f"extra={sorted(installed_sources - ASSERTION_SOURCE_PATHS)}"
         )
-    if re.search(r"\bcp\s+-[A-Za-z]*r[A-Za-z]*[^\n]*assertions-src", recipe):
+    if _recipe_recursively_copies_assertion_source(recipe):
         raise AssertionError("assertion recipe uses a recursive source copy")
+
+
+def _recipe_recursively_copies_assertion_source(recipe: str) -> bool:
+    """Return whether a `cp` command recursively copies the public source."""
+    for line in recipe.splitlines():
+        words = _shell_words(line)
+        if not words or words[0] != "cp":
+            continue
+        recursive = any(
+            word == "--recursive"
+            or (
+                word.startswith("-")
+                and not word.startswith("--")
+                and "r" in word[1:].lower()
+            )
+            for word in words[1:]
+        )
+        source = any(
+            word == "companions/assertions" or word.startswith("companions/assertions/")
+            for word in words[1:]
+        )
+        if recursive and source:
+            return True
+    return False
 
 
 def check_vendored_toml_layout(repo_root: Path = REPO_ROOT) -> None:
