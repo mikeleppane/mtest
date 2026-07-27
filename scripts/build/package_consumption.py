@@ -643,27 +643,19 @@ def _validate_modular_config(config: Path, prefix: Path) -> None:
     if shared_libs is None:
         mismatches.append("[mojo-max] shared_libs: missing")
     else:
-        shared_tokens = shared_libs.split(",")
-        if (
-            len(shared_tokens) != 5
-            or shared_tokens[1:4] != ["-Xlinker", "-rpath", "-Xlinker"]
-            or not shared_tokens[4].endswith(";")
-        ):
+        library_suffix = ".dylib" if sys.platform == "darwin" else ".so"
+        expected_shared_libs = (
+            str(prefix / "lib" / f"libAsyncRTMojoBindings{library_suffix}")
+            + ",-Xlinker,-rpath,-Xlinker,"
+            + str(prefix / "lib")
+            + ";"
+        )
+        if shared_libs != expected_shared_libs:
             mismatches.append(
-                "[mojo-max] shared_libs: expected exact library and rpath grammar"
-            )
-        else:
-            shared_paths = (
-                Path(shared_tokens[0]).resolve(),
-                Path(shared_tokens[4].removesuffix(";")).resolve(),
-            )
-            mismatches.extend(
-                (
-                    "[mojo-max] shared_libs: path escapes prefix: "
-                    + repr(str(shared_path))
-                )
-                for shared_path in shared_paths
-                if not shared_path.is_relative_to(prefix)
+                "[mojo-max] shared_libs: expected "
+                + repr(expected_shared_libs)
+                + ", got "
+                + repr(shared_libs)
             )
     if mismatches:
         raise PackageCheckError(

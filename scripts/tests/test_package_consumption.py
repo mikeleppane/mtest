@@ -1479,6 +1479,25 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             ):
                 package_consumption.validate_assertion_install(prefix)
 
+    def test_rejects_in_prefix_wrong_shared_library_paths(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
+            prefix = self._valid_prefix(Path(raw))
+            config = prefix / "share" / "max" / "modular.cfg"
+            parser = configparser.ConfigParser(interpolation=None)
+            parser.read(config, encoding="utf-8")
+            parser.set(
+                "mojo-max",
+                "shared_libs",
+                f"{prefix}/lib/libWrong.so,-Xlinker,-rpath,-Xlinker,{prefix}/share;",
+            )
+            with config.open("w", encoding="utf-8") as stream:
+                parser.write(stream)
+            with self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "shared_libs",
+            ):
+                package_consumption.validate_assertion_install(prefix)
+
     def test_rejects_an_unknown_toolchain_config_option(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
             prefix = self._valid_prefix(Path(raw))
