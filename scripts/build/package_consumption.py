@@ -1010,17 +1010,12 @@ def _normalize_assertion_times(output: str) -> str:
         r"\1<TIME>\2",
         normalized,
     )
+    example_path = ASSERTION_EXAMPLE.relative_to(REPO_ROOT).as_posix()
     for unstable_line in (
         "    | Unhandled exception caught during execution: ",
-        (
-            "    | Running 2 tests for "
-            "<REPO>/companions/assertions/examples/test_diagnostics.mojo "
-        ),
+        f"    | Running 2 tests for <REPO>/{example_path} ",
         "    | Summary [ <TIME> ] 2 tests run: 1 passed , 1 failed , 0 skipped ",
-        (
-            "    | Test suite' "
-            "<REPO>/companions/assertions/examples/test_diagnostics.mojo 'failed! "
-        ),
+        f"    | Test suite' <REPO>/{example_path} 'failed! ",
         "    | ",
     ):
         normalized = normalized.replace(
@@ -1028,6 +1023,17 @@ def _normalize_assertion_times(output: str) -> str:
             unstable_line.rstrip() + "\n",
         )
     return normalized
+
+
+def assertion_readme_command_prefix() -> str:
+    """Return the documented command prefix for the installed example run."""
+    installed_source = INSTALLED_ASSERTION_SOURCE_RELATIVE.as_posix()
+    example_directory = ASSERTION_EXAMPLE.parent.relative_to(REPO_ROOT).as_posix()
+    return (
+        "$ mtest --no-config --show-output failures \\\n"
+        f"    -I <PREFIX>/{installed_source} \\\n"
+        f"    {example_directory}\n"
+    )
 
 
 def stage_assertion_example(
@@ -1099,11 +1105,7 @@ def stage_assertion_example(
             "README assertion source differs from the executed example:\n" + diff
         )
     documented = readme_assertion_example_block(readme)
-    actual = (
-        "$ mtest --no-config --show-output failures \\\n"
-        "    -I <PREFIX>/share/mtest/companions/assertions/src \\\n"
-        "    companions/assertions/examples\n" + normalized
-    )
+    actual = assertion_readme_command_prefix() + normalized
     normalized_documented = _normalize_assertion_times(documented)
     if normalized_documented != actual:
         diff = "".join(

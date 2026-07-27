@@ -15,11 +15,6 @@ from scripts.checks import layout
 from scripts.harness import aggregate
 
 
-CHECKOUT_COMPANION_ROOT = Path("companions/assertions")
-CHECKOUT_ASSERTION_SOURCE_ROOT = CHECKOUT_COMPANION_ROOT / "src"
-CHECKOUT_ASSERTION_EXAMPLE_ROOT = CHECKOUT_COMPANION_ROOT / "examples"
-
-
 class LayoutInventoryPolicyTests(unittest.TestCase):
     def test_repository_root_tracks_the_nested_checker(self) -> None:
         self.assertEqual(layout.REPO_ROOT, Path(__file__).resolve().parents[2])
@@ -121,7 +116,18 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
             recipe.write_text(recipe_contents, encoding="utf-8")
 
             layout.check_assertion_companion_layout(repo)
-            unregistered_example = repo / CHECKOUT_COMPANION_ROOT / "unexpected.mojo"
+            expected_leaf = repo / next(iter(layout.ASSERTION_SOURCE_PATHS))
+            expected_leaf.unlink()
+            expected_leaf.mkdir()
+            with self.assertRaisesRegex(
+                AssertionError,
+                "assertion companion leaf is not a regular file",
+            ):
+                layout.check_assertion_companion_layout(repo)
+            expected_leaf.rmdir()
+            expected_leaf.write_text("# fixture\n", encoding="utf-8")
+
+            unregistered_example = repo / "companions/assertions/unexpected.mojo"
             unregistered_example.parent.mkdir(parents=True, exist_ok=True)
             unregistered_example.write_text("# accidental example\n", encoding="utf-8")
             with self.assertRaisesRegex(
@@ -131,6 +137,36 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
                 layout.check_assertion_companion_layout(repo)
             unregistered_example.unlink()
 
+            unregistered_consumer = repo / "tests/assertions/unexpected.mojo"
+            unregistered_consumer.write_text(
+                "# accidental consumer\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                AssertionError,
+                "assertion consumer membership mismatch",
+            ):
+                layout.check_assertion_companion_layout(repo)
+            unregistered_consumer.unlink()
+
+            companion_target = repo / "outside-companion.mojo"
+            companion_target.write_text("# external\n", encoding="utf-8")
+            expected_leaf.unlink()
+            expected_leaf.symlink_to(companion_target)
+            with self.assertRaisesRegex(AssertionError, "contains symlinks"):
+                layout.check_assertion_companion_layout(repo)
+            expected_leaf.unlink()
+            expected_leaf.write_text("# fixture\n", encoding="utf-8")
+
+            expected_consumer = repo / next(iter(layout.ASSERTION_CONSUMER_PATHS))
+            consumer_target = repo / "outside-consumer.mojo"
+            consumer_target.write_text("# external\n", encoding="utf-8")
+            expected_consumer.unlink()
+            expected_consumer.symlink_to(consumer_target)
+            with self.assertRaisesRegex(AssertionError, "contains symlinks"):
+                layout.check_assertion_companion_layout(repo)
+            expected_consumer.unlink()
+            expected_consumer.write_text("# fixture\n", encoding="utf-8")
+
             recipe.write_text(
                 recipe_contents
                 + "mojo precompile companions/assertions/src/mtest/__init__.mojo\n",
@@ -139,12 +175,27 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "precompiles"):
                 layout.check_assertion_companion_layout(repo)
 
+            for recursive_copy in (
+                "cp -r companions/assertions destination\n",
+                "cp\t-R companions/assertions destination\n",
+                "cp -pr companions/assertions destination\n",
+                "cp -aR companions/assertions destination\n",
+                "cp --recursive companions/assertions destination\n",
+            ):
+                with self.subTest(recursive_copy=recursive_copy):
+                    recipe.write_text(
+                        recipe_contents + recursive_copy,
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(
+                        AssertionError, "recursive source copy"
+                    ):
+                        layout.check_assertion_companion_layout(repo)
             recipe.write_text(
-                recipe_contents + "cp -r companions/assertions destination\n",
+                recipe_contents + "scp -r companions/assertions destination\n",
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(AssertionError, "recursive source copy"):
-                layout.check_assertion_companion_layout(repo)
+            layout.check_assertion_companion_layout(repo)
 
             missing_install = next(iter(layout.ASSERTION_SOURCE_PATHS))
             recipe.write_text(
@@ -172,7 +223,7 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
 
             extra = (
                 repo
-                / CHECKOUT_ASSERTION_SOURCE_ROOT
+                / "companions/assertions/src"
                 / "mtest"
                 / "assertions"
                 / "unexpected.mojo"

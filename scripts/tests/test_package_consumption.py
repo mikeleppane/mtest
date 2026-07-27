@@ -55,9 +55,6 @@ from scripts.build.package_consumption import (
 from scripts.harness import dogfood, watchdog
 
 
-CHECKOUT_COMPANION_ROOT = Path("companions/assertions")
-CHECKOUT_ASSERTION_SOURCE_ROOT = CHECKOUT_COMPANION_ROOT / "src"
-CHECKOUT_ASSERTION_EXAMPLE_ROOT = CHECKOUT_COMPANION_ROOT / "examples"
 INSTALLED_ASSERTION_SOURCE_ROOT = Path("share/mtest/companions/assertions/src")
 
 
@@ -1156,6 +1153,7 @@ class AssertionReadmeExampleTests(unittest.TestCase):
             "    | \n"
             "===== 1 passed, 1 failed in 2.2s =====\n"
         )
+
         self.assertEqual(
             package_consumption.normalize_assertion_example(
                 output,
@@ -1172,6 +1170,20 @@ class AssertionReadmeExampleTests(unittest.TestCase):
             "    | diagnostic payload keeps its trailing space \n"
             "    |\n"
             "===== 1 passed, 1 failed in <TIME> =====\n",
+        )
+
+    def test_readme_command_prefix_derives_public_paths(self) -> None:
+        installed_source = (
+            package_consumption.INSTALLED_ASSERTION_SOURCE_RELATIVE.as_posix()
+        )
+        example_directory = package_consumption.ASSERTION_EXAMPLE.parent.relative_to(
+            package_consumption.REPO_ROOT
+        ).as_posix()
+        self.assertEqual(
+            package_consumption.assertion_readme_command_prefix(),
+            "$ mtest --no-config --show-output failures \\\n"
+            f"    -I <PREFIX>/{installed_source} \\\n"
+            f"    {example_directory}\n",
         )
 
 
@@ -1194,7 +1206,9 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             checkout = (
                 package_consumption.REPO_ROOT
-                / CHECKOUT_ASSERTION_SOURCE_ROOT
+                / package_consumption.CHECKOUT_ASSERTION_SOURCE_ROOT.relative_to(
+                    package_consumption.REPO_ROOT
+                )
                 / relative
             )
             path.write_bytes(checkout.read_bytes())

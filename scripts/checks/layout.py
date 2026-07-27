@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tomllib
@@ -1189,6 +1190,16 @@ def check_assertion_companion_layout(repo_root: Path = REPO_ROOT) -> None:
     ]
     if linked:
         raise AssertionError(f"assertion companion contains symlinks: {sorted(linked)}")
+    non_regular_companion_leaves = [
+        path
+        for path in sorted(companion_paths)
+        if not stat.S_ISREG((repo_root / path).lstat().st_mode)
+    ]
+    if non_regular_companion_leaves:
+        raise AssertionError(
+            "assertion companion leaf is not a regular file: "
+            f"{non_regular_companion_leaves}"
+        )
 
     _require_nonempty("assertion consumer", ASSERTION_CONSUMER_PATHS)
     consumer_root = repo_root / "tests" / "assertions"
@@ -1260,8 +1271,32 @@ def check_assertion_companion_layout(repo_root: Path = REPO_ROOT) -> None:
             f"missing={sorted(ASSERTION_SOURCE_PATHS - installed_sources)}, "
             f"extra={sorted(installed_sources - ASSERTION_SOURCE_PATHS)}"
         )
-    if re.search(r"cp -r[^\n]*companions/assertions", recipe):
+    if _recipe_recursively_copies_assertion_source(recipe):
         raise AssertionError("assertion recipe uses a recursive source copy")
+
+
+def _recipe_recursively_copies_assertion_source(recipe: str) -> bool:
+    """Return whether a `cp` command recursively copies the public source."""
+    for line in recipe.splitlines():
+        words = _shell_words(line)
+        if not words or words[0] != "cp":
+            continue
+        recursive = any(
+            word == "--recursive"
+            or (
+                word.startswith("-")
+                and not word.startswith("--")
+                and "r" in word[1:].lower()
+            )
+            for word in words[1:]
+        )
+        source = any(
+            word == "companions/assertions" or word.startswith("companions/assertions/")
+            for word in words[1:]
+        )
+        if recursive and source:
+            return True
+    return False
 
 
 def check_vendored_toml_layout(repo_root: Path = REPO_ROOT) -> None:

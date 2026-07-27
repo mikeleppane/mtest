@@ -15,11 +15,6 @@ from scripts.checks import assertions
 from scripts.harness import watchdog
 
 
-CHECKOUT_COMPANION_ROOT = Path("companions/assertions")
-CHECKOUT_ASSERTION_SOURCE_ROOT = CHECKOUT_COMPANION_ROOT / "src"
-CHECKOUT_ASSERTION_EXAMPLE_ROOT = CHECKOUT_COMPANION_ROOT / "examples"
-
-
 class AssertionCommandTests(unittest.TestCase):
     def test_assertion_execution_roster_is_exact(self) -> None:
         self.assertEqual(
