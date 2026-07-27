@@ -461,6 +461,7 @@ LIVE_COMMAND_FIXED_PATHS = (
     Path("SECURITY.md"),
     Path("docs/releasing.md"),
     Path("AGENTS.md"),
+    Path(".agents/lessons.md"),
     Path("pixi.toml"),
 )
 LIVE_COMMAND_GLOBS = (

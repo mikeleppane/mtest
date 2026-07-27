@@ -541,6 +541,7 @@ class DirectInvocationPolicyTests(unittest.TestCase):
                 Path("SECURITY.md"),
                 Path("docs/releasing.md"),
                 Path("AGENTS.md"),
+                Path(".agents/lessons.md"),
                 Path("pixi.toml"),
             ),
         )
