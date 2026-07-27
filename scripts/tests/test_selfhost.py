@@ -33,6 +33,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -149,6 +150,21 @@ if JSON_PATH:
         "".join(json.dumps(line) + "\\n" for line in lines), encoding="utf-8"
     )
 
+if SPEC["barrier_dir"]:
+    # Announce that this run's stream is on disk, then wait for every peer's.
+    # That forces the interleaving the per-invocation paths exist to survive:
+    # every concurrent stream coexists before any harness reads one. Under a
+    # shared fixed path the last writer would win and at least one harness
+    # would reconcile a run that was not its own.
+    barrier = Path(SPEC["barrier_dir"])
+    barrier.mkdir(parents=True, exist_ok=True)
+    (barrier / (SPEC["tag"] + ".ready")).write_text("ready", encoding="utf-8")
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        if len(list(barrier.glob("*.ready"))) >= SPEC["peers"]:
+            break
+        time.sleep(0.02)
+
 print("mtest 0.0.0-fake (mojo)")
 print(
     "root: %s   selected: %d files   excluded: %d   workers: 4"
@@ -226,24 +242,96 @@ def faithful_spec(declared: dict[str, list[str]]) -> dict[str, object]:
     }
 
 
-def write_fake_mtest(directory: Path, spec: dict[str, object]) -> str:
+def write_fake_mtest(
+    directory: Path, spec: dict[str, object], name: str = "fake_mtest"
+) -> str:
     """Write an executable fake mtest driven by one canned report spec.
 
     Args:
         directory: Where to place the fake and its spec file.
         spec: The report the fake prints, the stream it writes, and the status
             it exits with.
+        name: The fake's filename, so one directory can hold several.
 
     Returns:
         The absolute path of the executable fake.
     """
-    script = directory / "fake_mtest"
+    script = directory / name
     script.write_text(f"#!{sys.executable}\n{FAKE_SOURCE}", encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    (directory / "fake_mtest.spec.json").write_text(
-        json.dumps({"hang": False, "pid_file": "", **spec}), encoding="utf-8"
+    (directory / f"{name}.spec.json").write_text(
+        json.dumps(
+            {
+                "hang": False,
+                "pid_file": "",
+                "barrier_dir": "",
+                "tag": name,
+                "peers": 1,
+                **spec,
+            }
+        ),
+        encoding="utf-8",
     )
     return str(script)
+
+
+def _faithful_stream_records(
+    repo_root: Path, declared: dict[str, list[str]]
+) -> list[dict[str, object]]:
+    """Build a complete, correct v1 event stream for one written suite.
+
+    Args:
+        repo_root: The repository root the run would report.
+        declared: The suite as `write_suite` returned it.
+
+    Returns:
+        Records that would reconcile cleanly, used to prove that a stream at the
+        stable evidence path is not read even when it would have passed.
+    """
+    records: list[dict[str, object]] = [
+        {"event": "stream", "version": 1, "generator": "mtest 0.0.0-fake"},
+        {
+            "event": "session_started",
+            "root": str(repo_root),
+            "selected_count": len(declared),
+            "excluded_count": 0,
+        },
+    ]
+    for path, names in declared.items():
+        records.extend(
+            {"event": "test_reported", "path": path, "name": name, "outcome": "pass"}
+            for name in names
+        )
+        records.append(
+            {
+                "event": "file_finished",
+                "path": path,
+                "outcome": "pass",
+                "parse_disposition": "parsed",
+                "passed_tests": len(names),
+                "failed_tests": 0,
+                "skipped_tests": 0,
+                "deselected_tests": 0,
+                "attempts_used": 1,
+                "flaky": False,
+                "exit_status": 0,
+                "signal_number": 0,
+            }
+        )
+    records.append(
+        {
+            "event": "session_finished",
+            "summary": {"pass": len(declared), "excluded": 0, "not_run": 0},
+            "exit_code": 0,
+            "test_counts": {
+                "passed": sum(len(names) for names in declared.values()),
+                "failed": 0,
+                "skipped": 0,
+                "deselected": 0,
+            },
+        }
+    )
+    return records
 
 
 def run_oracle(
@@ -441,11 +529,19 @@ class SelfhostAgreementTests(unittest.TestCase):
             declared = write_suite(repo, files=3, tests_per_file=2)
             spec = faithful_spec(declared)
             fake = write_fake_mtest(repo, spec)
-            # A stale stream from an earlier run must never stand in for this
-            # run's: the harness removes it before every spawn.
-            stale = repo / selfhost.JSON_STREAM
+            # A faithful-looking stream at the stable evidence path must never
+            # stand in for this run's. That path is written for humans and is
+            # never read back; reconciliation only ever touches the
+            # per-invocation stream, which this run does not produce.
+            stale = repo / selfhost.LATEST_JSON_STREAM
             stale.parent.mkdir(parents=True, exist_ok=True)
-            stale.write_text('{"event":"stream","version":1}\n', encoding="utf-8")
+            stale.write_text(
+                "".join(
+                    json.dumps(record) + "\n"
+                    for record in _faithful_stream_records(repo, declared)
+                ),
+                encoding="utf-8",
+            )
 
             with mock.patch.object(
                 selfhost, "mtest_argv", return_value=[fake, "--no-json-please"]
@@ -454,6 +550,101 @@ class SelfhostAgreementTests(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertIn("wrote no machine event stream", err)
+
+
+DRIVER_SOURCE = '''\
+"""Drive one `selfhost.verify` against a temporary repository, in its own process."""
+
+from pathlib import Path
+import sys
+
+from scripts.harness import selfhost
+
+sys.exit(
+    selfhost.verify(
+        ("tests/unit",),
+        repo_root=Path(sys.argv[1]),
+        mtest_path=sys.argv[2],
+        native_object=sys.argv[3],
+        environment={},
+    )
+)
+'''
+
+
+class ConcurrentInvocationTests(unittest.TestCase):
+    """Two invocations on one checkout must never read each other's stream.
+
+    The next task points four pixi tasks (`test`, `test-unit`,
+    `test-integration`, `test-file`) at this harness, so two runs sharing a
+    checkout is ordinary. With a fixed stream path, run B could reconcile run
+    A's stream -- A can recreate the file between B's pre-spawn unlink and B's
+    read -- and B's per-file and per-test-name verdict would then be describing
+    someone else's run.
+    """
+
+    def test_artifact_paths_are_unique_per_invocation(self) -> None:
+        repo = Path("/repo")
+
+        first = selfhost.run_artifacts(repo)
+        second = selfhost.run_artifacts(repo)
+
+        self.assertNotEqual(first.stream, second.stream)
+        self.assertNotEqual(first.sentinel, second.sentinel)
+        for artifact in (first.stream, first.sentinel):
+            self.assertEqual(artifact.parent, repo / selfhost.ARTIFACT_DIR)
+
+    def test_two_concurrent_runs_keep_their_own_verdicts(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp).resolve()
+            declared = write_suite(repo, files=6, tests_per_file=3)
+            barrier = repo / "barrier"
+
+            good = faithful_spec(declared)
+            good.update({"barrier_dir": str(barrier), "tag": "good", "peers": 2})
+            bad = faithful_spec(declared)
+            # Same grand total, wrong per-file distribution: caught ONLY by the
+            # per-file stream check, which is exactly the check a shared stream
+            # path would corrupt.
+            files: list[dict[str, object]] = bad["files"]  # type: ignore[assignment]
+            files[1]["passed_tests"] = 5
+            files[4]["passed_tests"] = 1
+            bad.update({"barrier_dir": str(barrier), "tag": "bad", "peers": 2})
+
+            good_path = write_fake_mtest(repo, good, "fake_good")
+            bad_path = write_fake_mtest(repo, bad, "fake_bad")
+            driver = repo / "driver.py"
+            driver.write_text(DRIVER_SOURCE, encoding="utf-8")
+
+            environment = dict(os.environ)
+            environment["PYTHONPATH"] = str(Path(selfhost.__file__).parents[2])
+            processes = [
+                subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(driver),
+                        str(repo),
+                        fake,
+                        str(repo / "build" / "native" / "fake.o"),
+                    ],
+                    cwd=repo,
+                    env=environment,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                for fake in (good_path, bad_path)
+            ]
+            results = [process.communicate(timeout=180) for process in processes]
+            codes = [process.returncode for process in processes]
+
+        # The faithful run passes and the corrupted run fails, every time. Under
+        # a shared stream path the last writer would win and both harnesses
+        # would reconcile one stream, flipping one of these verdicts.
+        self.assertEqual(codes[0], 0, msg=f"faithful run failed: {results[0][1]!r}")
+        self.assertEqual(codes[1], 1, msg=f"corrupted run passed: {results[1][1]!r}")
+        self.assertIn("passed_tests=5 but the source declares 3", results[1][1])
+        self.assertNotIn("passed_tests=", results[0][1])
 
 
 class SelfhostOmittedFileTests(unittest.TestCase):

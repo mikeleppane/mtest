@@ -41,6 +41,38 @@ Plus the process exit code. Any disagreement is a loud failure naming both
 sides and tagged with which parse objected. mtest is never asked what it ran; it
 is only checked against what the sources say it must have run.
 
+**What this oracle does NOT prove, stated plainly.** It proves mtest ran every
+test the sources declare *right now*. It cannot prove the sources still declare
+every test they used to. The inventory is derived from the tree on each run, so
+if a test function is deleted -- or renamed off its `test_` prefix, or moved
+into a `struct` where it is no longer a top-level `def` -- the expected count
+moves down with it and a faithful mtest run agrees with the smaller number and
+exits 0. Verified: take a 3-test file, move one `def test_*` into a struct, and
+the lane stays green while the total silently drops.
+
+That is inherent to a derived oracle, and it is the correct trade. The only
+thing that would catch a partial removal is a committed expected count, which is
+exactly the hand-maintained ledger this design exists to eliminate -- a number
+someone updates to make CI green is worse than no number, because it converts a
+loud failure into a diff nobody reads. Losing a test to a source edit is a
+reviewable diff; losing one to a runner defect is not, and it is the second that
+this lane is here for.
+
+The boundary is sharp and worth knowing before you rely on it:
+
+- **Loud:** a file that reaches ZERO top-level `def test_*`. The independent
+  parser refuses to produce an empty inventory for a file
+  (`independent_test_function_names` raises and names the path), so a module
+  emptied by a refactor or a bad merge fails the run rather than shrinking it.
+  Also loud: any file disappearing from, or appearing in, the tree unexpectedly,
+  since membership is set-compared.
+- **Not loud:** a file dropping from N to M tests where M > 0. The inventory
+  simply becomes M, and mtest is checked against M.
+
+So: if you are here because tests went missing, this oracle rules out mtest
+having silently skipped them. It does not rule out someone having deleted them.
+Check `git log -p` on the test tree for that.
+
 The inventory is derived, never declared. There is no committed path list, no
 committed test count, and nothing a human edits when adding a test file or a
 test function -- see `derive_inventory` and `independent_test_function_names`.
@@ -65,6 +97,8 @@ import math
 import os
 from pathlib import Path
 import re
+import secrets
+import shutil
 import signal
 import sys
 import threading
@@ -109,24 +143,22 @@ detect, and would be debugged as one.
 `watchdog.MAX_TIMEOUT_SECONDS`.
 """
 
-JSON_STREAM = Path("build/tests/selfhost.ndjson")
-"""Where mtest's machine event stream is written for this run.
+ARTIFACT_DIR = Path("build/tests")
+ARTIFACT_NONCE_BYTES = 8
 
-Kept at a fixed repository path rather than a temporary one so a failed run
-leaves the evidence behind for the next person to read. Removed before every
-spawn, so a run that never wrote it can never be reconciled against a stale one.
+LATEST_JSON_STREAM = ARTIFACT_DIR / "selfhost.ndjson"
+"""Stable copy of the last run's event stream, for a human reading a red run.
+
+Write-only evidence. It is NEVER the file a run reconciles against, and nothing
+reads it back: reconciliation only ever touches the per-invocation stream below.
+That separation is what makes the fixed name safe. Two concurrent runs racing to
+publish here can only decide *whose* complete stream is retained, never what
+either of them concluded, and the publish is an atomic rename so this path never
+holds a half-written or interleaved stream.
 """
 
 JSON_STREAM_LIMIT_BYTES = 64 * 1024 * 1024
 """Refusal ceiling for the event stream, ~140x the ~460KB a green run writes."""
-
-DEADLINE_SENTINEL = Path("build/tests/selfhost.run-deadline")
-"""Pre-created file the supervisor removes on every non-timeout ending.
-
-Reconciled after the run by `watchdog.validate_deadline_proof`, so a timeout is
-confirmed against filesystem state rather than trusted from the supervisor's
-own clock.
-"""
 
 REPORTED_FAILURE_LIMIT = 40
 """How many findings are printed before the rest are counted rather than shown."""
@@ -196,6 +228,91 @@ class Inventory:
     def total_tests(self) -> int:
         """Return the source-derived total number of test functions."""
         return sum(len(names) for names in self.tests_by_path.values())
+
+
+@dataclass(frozen=True)
+class RunArtifacts:
+    """The two on-disk artifacts belonging to ONE self-hosted invocation.
+
+    Both carry a per-invocation token rather than a fixed name. A later task
+    points four pixi tasks (`test`, `test-unit`, `test-integration`,
+    `test-file`) at this harness, so two invocations on one checkout is an
+    ordinary situation, not a pathological one. With fixed names, run B could
+    reconcile run A's stream: A can recreate the file in the window between B's
+    pre-spawn unlink and B's post-run read. B's console cross-check would still
+    be honest about file membership and the grand total, but the per-file and
+    per-test-name reconciliation -- the whole reason the stream is read at all --
+    would silently be describing someone else's run.
+
+    A unique path removes the window rather than narrowing it. Nothing has to
+    reason about interleavings, because the two runs never name the same file.
+    """
+
+    stream: Path
+    """Where mtest writes this invocation's machine event stream."""
+    sentinel: Path
+    """Pre-created file the supervisor removes on every non-timeout ending.
+
+    Reconciled after the run by `watchdog.validate_deadline_proof`, so a timeout
+    is confirmed against filesystem state rather than trusted from the
+    supervisor's own clock.
+    """
+
+
+def run_artifacts(repo_root: Path) -> RunArtifacts:
+    """Mint the artifact paths for one invocation.
+
+    Args:
+        repo_root: The repository root the artifacts live under.
+
+    Returns:
+        Paths unique to this invocation. The pid alone is not enough -- pids are
+        reused, and a later run inheriting a dead run's pid would inherit its
+        stream -- so a random nonce carries the uniqueness and the pid is there
+        only to make the file legible to a human reading `build/tests/`.
+    """
+    token = f"{os.getpid()}-{secrets.token_hex(ARTIFACT_NONCE_BYTES)}"
+    directory = repo_root / ARTIFACT_DIR
+    return RunArtifacts(
+        directory / f"selfhost.{token}.ndjson",
+        directory / f"selfhost.{token}.run-deadline",
+    )
+
+
+def publish_latest_stream(stream: Path, repo_root: Path) -> str | None:
+    """Publish one run's stream to the stable evidence path, atomically.
+
+    A red run is useless to debug without its stream, but the reconciled file
+    has a per-invocation name nobody can guess. This copies it to
+    `LATEST_JSON_STREAM` so there is one predictable place to look, for every
+    ending including a timeout's partial stream.
+
+    The copy lands through `os.replace`, so a reader of the stable path always
+    sees one complete stream and never a half-written or interleaved one. Losing
+    a publish race with a concurrent run costs evidence, never correctness:
+    nothing reads this path back.
+
+    Args:
+        stream: This invocation's stream. Absent is not an error -- a run that
+            died before writing one has nothing to publish.
+        repo_root: The repository root the stable path lives under.
+
+    Returns:
+        A message describing why publication failed, or None on success or when
+        there was nothing to publish.
+    """
+    if not stream.is_file() or stream.is_symlink():
+        return None
+    target = repo_root / LATEST_JSON_STREAM
+    staging = target.with_name(f"{target.name}.{os.getpid()}.staging")
+    try:
+        shutil.copyfile(stream, staging)
+        os.replace(staging, target)
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            staging.unlink(missing_ok=True)
+        return f"could not publish the event stream to {target}: {exc}"
+    return None
 
 
 @dataclass(frozen=True)
@@ -456,8 +573,8 @@ def mtest_argv(
     mtest_path: str,
     native_object: str,
     roots: Sequence[Path],
-    workers: str = DEFAULT_WORKERS,
-    json_path: str = str(JSON_STREAM),
+    workers: str,
+    json_path: str,
 ) -> list[str]:
     """Build the self-hosted run command for one set of roots.
 
@@ -477,7 +594,9 @@ def mtest_argv(
         native_object: The compiled native test adapter to link into each file.
         roots: Repository-relative roots to hand mtest.
         workers: The `-n` value. Provisional; a later task pins it.
-        json_path: Where mtest writes its machine event stream.
+        json_path: Where mtest writes its machine event stream. Required rather
+            than defaulted: it must be this invocation's own path, and a default
+            here would be a fixed name two concurrent runs could share.
 
     Returns:
         The complete argv, without shell interpretation.
@@ -533,6 +652,7 @@ def run_mtest(
     command: Sequence[str],
     *,
     repo_root: Path,
+    sentinel: Path,
     seconds: float,
     supervisor: Supervisor = watchdog.run_command,
 ) -> SupervisedRun:
@@ -546,7 +666,8 @@ def run_mtest(
 
     Args:
         command: The complete mtest argv.
-        repo_root: Working directory for the child and anchor for the sentinel.
+        repo_root: Working directory for the child.
+        sentinel: This invocation's deadline sentinel, from `run_artifacts`.
         seconds: The wall-clock ceiling handed to the supervisor.
         supervisor: The watchdog entrypoint, injectable for tests.
 
@@ -555,7 +676,6 @@ def run_mtest(
         Every failure, including one raised by the supervisor itself, is
         returned as a `HarnessError` termination rather than propagated.
     """
-    sentinel = repo_root / DEADLINE_SENTINEL
     try:
         sentinel.parent.mkdir(parents=True, exist_ok=True)
         sentinel.unlink(missing_ok=True)
@@ -1120,19 +1240,78 @@ def verify(
         )
         return 1
 
-    stream_path = repo_root / JSON_STREAM
-    # Remove any stream a previous run left behind BEFORE the spawn. A run that
-    # wrote none would otherwise be reconciled against a stale one and could
-    # pass on evidence it never produced.
-    stream_path.parent.mkdir(parents=True, exist_ok=True)
-    stream_path.unlink(missing_ok=True)
+    # Per-invocation names, so two concurrent runs on one checkout cannot read
+    # each other's stream. See `RunArtifacts` for why that is an ordinary
+    # situation rather than a pathological one.
+    artifacts = run_artifacts(repo_root)
+    artifacts.stream.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        return _verify_run(
+            artifacts,
+            inventory=inventory,
+            repo_root=repo_root,
+            mtest_path=mtest_path,
+            native_object=native_object,
+            resolved_roots=resolved_roots,
+            workers=workers,
+            seconds=seconds,
+            supervisor=supervisor,
+        )
+    finally:
+        # Evidence, then cleanup, for EVERY ending including a timeout's partial
+        # stream: a red run is not debuggable without its stream, and its real
+        # name carries a nonce nobody can guess.
+        publish_failure = publish_latest_stream(artifacts.stream, repo_root)
+        if publish_failure is not None:
+            print(f"WARNING: selfhost: {publish_failure}", file=sys.stderr)
+        for artifact in (artifacts.stream, artifacts.sentinel):
+            # The sentinel has already served its purpose: `run_mtest` reconciled
+            # it through `watchdog.validate_deadline_proof` before returning.
+            with contextlib.suppress(OSError):
+                artifact.unlink(missing_ok=True)
 
+
+def _verify_run(
+    artifacts: RunArtifacts,
+    *,
+    inventory: Inventory,
+    repo_root: Path,
+    mtest_path: str,
+    native_object: str,
+    resolved_roots: Sequence[Path],
+    workers: str,
+    seconds: float,
+    supervisor: Supervisor,
+) -> int:
+    """Run mtest once against one set of artifacts and reconcile its reports.
+
+    Split out of `verify` so artifact publication and cleanup can wrap every
+    exit path, including the early returns for a timeout and a harness error.
+
+    Args:
+        artifacts: This invocation's stream and deadline sentinel paths.
+        inventory: The source-derived truth for the roots being run.
+        repo_root: The repository root, and the child's working directory.
+        mtest_path: The mtest binary under test.
+        native_object: The compiled native test adapter linked into each file.
+        resolved_roots: Normalized repository-relative roots to run.
+        workers: The `-n` value handed to mtest.
+        seconds: The wall-clock ceiling handed to the supervisor.
+        supervisor: The watchdog entrypoint that runs mtest.
+
+    Returns:
+        The exit code documented on `verify`.
+    """
     command = mtest_argv(
-        mtest_path, native_object, resolved_roots, workers, str(stream_path)
+        mtest_path, native_object, resolved_roots, workers, str(artifacts.stream)
     )
     print(f"selfhost: running {' '.join(command)}", flush=True)
     run = run_mtest(
-        command, repo_root=repo_root, seconds=seconds, supervisor=supervisor
+        command,
+        repo_root=repo_root,
+        sentinel=artifacts.sentinel,
+        seconds=seconds,
+        supervisor=supervisor,
     )
     termination = run.termination
     if isinstance(termination, watchdog.TimedOut):
@@ -1159,7 +1338,7 @@ def verify(
         return _raise_signal(termination.signo)
 
     try:
-        stream_text = read_stream(stream_path)
+        stream_text = read_stream(artifacts.stream)
     except (OSError, ValueError) as exc:
         print(f"FATAL: selfhost: {exc}", file=sys.stderr)
         return 1
