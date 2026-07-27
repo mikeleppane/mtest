@@ -295,10 +295,6 @@ CLASSIFIED_ROOTS = (
     Path("tests/unit"),
     Path("tests/integration"),
 )
-CLASSIFIED_PACKAGE_MARKERS = {
-    Path("tests/unit/__init__.mojo"),
-    Path("tests/integration/__init__.mojo"),
-}
 SUPPORT_MODULES = {
     "exec_helpers.mojo",
     "session_fixtures.mojo",
@@ -694,8 +690,8 @@ def check_classified_mojo_inventory(root: Path) -> None:
 
     Raises:
         AssertionError: A symlink sits under a classified root, or the Mojo
-            universe there differs from the registered suites plus the two
-            package markers in either direction.
+            universe there differs from the registered suites in either
+            direction.
     """
     regular, symlinked = classified_mojo_universe(root)
     if symlinked:
@@ -703,7 +699,7 @@ def check_classified_mojo_inventory(root: Path) -> None:
             "symlinked classified path: "
             f"{sorted(path.as_posix() for path in symlinked)}"
         )
-    expected = {Path(path) for path in CLASSIFIED_PATHS} | CLASSIFIED_PACKAGE_MARKERS
+    expected = {Path(path) for path in CLASSIFIED_PATHS}
     unexpected = regular - expected
     if unexpected:
         raise AssertionError(
@@ -724,7 +720,6 @@ def check_suite_layout() -> None:
     _require_nonempty("integration suite", INTEGRATION_SUITES)
     _require_nonempty("classified path", CLASSIFIED_PATHS)
     _require_nonempty("classified root", CLASSIFIED_ROOTS)
-    _require_nonempty("classified package marker", CLASSIFIED_PACKAGE_MARKERS)
     _require_nonempty("support module", SUPPORT_MODULES)
     check_classified_mojo_inventory(REPO_ROOT)
     tests_dir = REPO_ROOT / "tests"
@@ -773,9 +768,8 @@ def check_suite_layout() -> None:
         CLASSIFIED_PATHS,
         expected_count=CLASSIFIED_TEST_COUNT,
     )
-    for package in (tests_dir, tests_dir / "unit", tests_dir / "integration"):
-        if not (package / "__init__.mojo").is_file():
-            raise AssertionError(f"aggregate package marker missing: {package}")
+    if not (tests_dir / "__init__.mojo").is_file():
+        raise AssertionError(f"aggregate package marker missing: {tests_dir}")
     for relative in sorted(classified, key=lambda path: os.fsencode(str(path))):
         source = (tests_dir / relative).read_text(encoding="utf-8")
         try:

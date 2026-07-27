@@ -26,7 +26,6 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
             ("INTEGRATION_SUITES", layout.check_suite_layout),
             ("CLASSIFIED_PATHS", layout.check_suite_layout),
             ("CLASSIFIED_ROOTS", layout.check_suite_layout),
-            ("CLASSIFIED_PACKAGE_MARKERS", layout.check_suite_layout),
             ("SUPPORT_MODULES", layout.check_suite_layout),
             ("EXEC_FIXTURES", layout.check_exec_fixture_layout),
             ("E2E_NATIVE_FIXTURES", layout.check_e2e_native_fixture_layout),
@@ -243,15 +242,16 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
     SOLE_SUITE = "tests/unit/test_probe.mojo"
 
     def _accepted_tree(self, repo: Path) -> None:
-        """Create both package markers plus the one registered classified suite."""
-        for relative in (
-            "tests/unit/__init__.mojo",
-            "tests/integration/__init__.mojo",
-            self.SOLE_SUITE,
-        ):
-            path = repo / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("def test_probe():\n    pass\n", encoding="utf-8")
+        """Create the one registered classified suite; no package markers.
+
+        Both classified roots are plain directories now (no `__init__.mojo`),
+        so this also creates the empty sibling `tests/integration` directory
+        that callers write fixture files into directly.
+        """
+        path = repo / self.SOLE_SUITE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("def test_probe():\n    pass\n", encoding="utf-8")
+        (repo / "tests" / "integration").mkdir(parents=True, exist_ok=True)
 
     def test_universe_separates_regular_mojo_files_from_symlinked_entries(
         self,
@@ -275,11 +275,9 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
         self.assertEqual(
             regular,
             {
-                Path("tests/unit/__init__.mojo"),
                 Path("tests/unit/test_probe.mojo"),
                 Path("tests/unit/session_shard_test.mojo"),
                 Path("tests/unit/helper.mojo"),
-                Path("tests/integration/__init__.mojo"),
                 Path("tests/integration/test_probe.mojo.disabled"),
             },
         )
@@ -288,7 +286,7 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
             {Path("tests/unit/test_link.mojo"), Path("tests/unit/linked")},
         )
 
-    def test_registered_suites_and_package_markers_are_accepted(self) -> None:
+    def test_registered_suites_are_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp)
             self._accepted_tree(repo)
