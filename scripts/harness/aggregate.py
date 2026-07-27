@@ -13,7 +13,6 @@ import sys
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TEST_DEF_RE = re.compile(r"(?m)^def (test_[A-Za-z0-9_]+)\s*\(")
-MAIN_DEF_RE = re.compile(r"(?m)^def main\s*\(")
 MODULE_PART_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -63,9 +62,15 @@ def discover_test_files(repo_root: Path, roots: list[Path]) -> list[Path]:
 
 
 def test_function_names(source: str) -> list[str]:
-    """Extract declared test functions, rejecting executable module entrypoints."""
-    if MAIN_DEF_RE.search(source):
-        raise ValueError("aggregate test modules must not define main()")
+    """Extract declared test functions from a module's source.
+
+    A module may also declare `main()` (mtest's classified runner requires
+    every test module to be independently executable); that declaration is
+    irrelevant here; the aggregate only imports the module and calls its
+    `test_*` functions directly; it never invokes `main()`. Mojo's real
+    constraint is on *packaging* a `main()`-declaring module (`mojo
+    precompile`), not on importing one, and the aggregate only imports.
+    """
     names = TEST_DEF_RE.findall(source)
     if not names:
         raise ValueError("aggregate test module declares no test_* functions")

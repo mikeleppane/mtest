@@ -58,7 +58,7 @@ class AggregateDiscoveryTests(unittest.TestCase):
 
 
 class AggregateRenderingTests(unittest.TestCase):
-    def test_test_function_parser_is_exact_and_rejects_main(self) -> None:
+    def test_test_function_parser_is_exact(self) -> None:
         source = (
             "def _helper():\n    pass\n\n"
             "def test_first() raises:\n    pass\n\n"
@@ -69,8 +69,23 @@ class AggregateRenderingTests(unittest.TestCase):
             ["test_first", "test_second"],
         )
 
-        with self.assertRaisesRegex(ValueError, "must not define main"):
-            aggregate.test_function_names(source + "\ndef main():\n    pass\n")
+    def test_module_entrypoint_is_accepted_and_its_tests_still_extracted(
+        self,
+    ) -> None:
+        # mtest's classified runner requires every test module to declare
+        # `main()`. The aggregate only imports the module and calls its
+        # `test_*` functions directly, so a declared `main()` must not be
+        # rejected; it is simply irrelevant to this parser.
+        source = (
+            "def test_first() raises:\n    pass\n\n"
+            "def test_second(value: Int = 1) raises:\n    pass\n\n"
+            "def main() raises:\n    pass\n"
+        )
+
+        self.assertEqual(
+            aggregate.test_function_names(source),
+            ["test_first", "test_second"],
+        )
 
     def test_obsolete_fn_declarations_are_not_silently_accepted(self) -> None:
         # `fn test_*` is 1.0.0b2-invalid Mojo, so the parser must report an
