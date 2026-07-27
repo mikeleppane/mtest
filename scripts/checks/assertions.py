@@ -299,7 +299,7 @@ def reset_build_root(build_root: Path = BUILD_ROOT) -> None:
 
 
 def expected_locations(source: Path) -> dict[str, tuple[int, int]]:
-    """Extract expected first-argument coordinates from marked assertion calls."""
+    """Extract expected open-parenthesis coordinates from marked assertion calls."""
     source = source.resolve()
     locations: dict[str, tuple[int, int]] = {}
     last_call: tuple[int, int] | None = None
@@ -635,24 +635,29 @@ def _validate_api_run(
         raise AssertionError(f"API consumer wrote stderr: {run.stderr}")
     if re.search(r"^\s+(?:FAIL|CRASH) \[", run.stdout, re.MULTILINE):
         raise AssertionError(f"API consumer did not pass cleanly:\n{run.stdout}")
-    pass_rows = set(
-        re.findall(r"^\s+PASS \[[^\]]+\] ([A-Za-z0-9_]+)\s*$", run.stdout, re.MULTILINE)
+    pass_rows = re.findall(
+        r"^\s+PASS \[[^\]]+\] ([A-Za-z0-9_]+)\s*$",
+        run.stdout,
+        re.MULTILINE,
     )
-    if pass_rows != expected_rows:
+    if len(pass_rows) != len(expected_rows) or set(pass_rows) != expected_rows:
         raise AssertionError(
             f"API consumer PASS rows differ: expected {sorted(expected_rows)}, "
-            f"got {sorted(pass_rows)}"
+            f"got {pass_rows}"
         )
-    summary = re.search(
+    summaries = re.findall(
         r"^Summary \[[^\]]+\] (\d+) tests run: (\d+) passed , "
         r"(\d+) failed , (\d+) skipped\s*$",
         run.stdout,
         re.MULTILINE,
     )
-    if summary is None:
-        raise AssertionError("API consumer did not emit a TestSuite summary")
-    total, passed, failed, skipped = map(int, summary.groups())
-    if total != len(expected_rows) or (passed, failed, skipped) != (
+    if len(summaries) != 1:
+        raise AssertionError(
+            "API consumer must emit exactly one TestSuite summary, "
+            f"got {len(summaries)}"
+        )
+    total, passed, failed, skipped = map(int, summaries[0])
+    if total != len(pass_rows) or (passed, failed, skipped) != (
         total,
         0,
         0,

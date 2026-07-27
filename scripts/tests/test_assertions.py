@@ -215,6 +215,45 @@ class AssertionApiValidationTests(unittest.TestCase):
             {"test_one"},
         )
 
+    def test_rejects_duplicate_pass_rows(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "PASS rows differ"):
+            assertions._validate_api_run(
+                subprocess.CompletedProcess(
+                    args=["api-o0"],
+                    returncode=0,
+                    stdout=(
+                        "Running 1 tests for api_consumer.mojo\n"
+                        "    PASS [ T ] test_one\n"
+                        "    PASS [ T ] test_one\n"
+                        "--------\n"
+                        "Summary [ T ] 1 tests run: 1 passed , 0 failed , "
+                        "0 skipped\n"
+                    ),
+                    stderr="",
+                ),
+                {"test_one"},
+            )
+
+    def test_rejects_more_than_one_testsuite_summary(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "exactly one TestSuite summary"):
+            assertions._validate_api_run(
+                subprocess.CompletedProcess(
+                    args=["api-o0"],
+                    returncode=0,
+                    stdout=(
+                        "Running 1 tests for api_consumer.mojo\n"
+                        "    PASS [ T ] test_one\n"
+                        "--------\n"
+                        "Summary [ T ] 1 tests run: 1 passed , 0 failed , "
+                        "0 skipped\n"
+                        "Summary [ T ] 1 tests run: 1 passed , 0 failed , "
+                        "0 skipped\n"
+                    ),
+                    stderr="",
+                ),
+                {"test_one"},
+            )
+
     def test_public_surface_includes_traits_and_exact_signatures(self) -> None:
         declaration = {
             "functions": [

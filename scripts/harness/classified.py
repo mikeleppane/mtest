@@ -222,7 +222,7 @@ def _run_step(
     try:
         termination = supervisor(
             command,
-            source=source,
+            source=f"classified: {source}",
             step=step,
             timeout_seconds=timeout_seconds,
             deadline_sentinel=sentinel,

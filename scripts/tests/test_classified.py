@@ -213,10 +213,10 @@ def test_pipeline_builds_each_artifact_once_and_runs_aggregate_once() -> None:
     if result.termination != watchdog.Exited(0):
         raise AssertionError(f"successful fake pipeline returned {result!r}")
     if [(source, step) for source, step, _command in calls] != [
-        ("package", "build"),
-        ("native adapter", "build"),
-        ("aggregate suite", "build"),
-        ("aggregate suite", "run"),
+        ("classified: package", "build"),
+        ("classified: native adapter", "build"),
+        ("classified: aggregate suite", "build"),
+        ("classified: aggregate suite", "run"),
     ]:
         raise AssertionError(f"classified pipeline topology drifted: {calls}")
     aggregate_build = calls[2][2]
