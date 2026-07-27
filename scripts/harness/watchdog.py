@@ -591,11 +591,11 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
     process.wait()
 
 
-def _forward_signal_and_cleanup(process: subprocess.Popen[bytes], signum: int) -> None:
-    """Forward caller cancellation, then force-reap the complete child group."""
+def _forward_signal_and_cleanup(process: subprocess.Popen[bytes], signum: int) -> bool:
+    """Forward a signal, force-reap the group, and report whether it existed."""
     if not _signal_group(process.pid, signum):
         process.wait()
-        return
+        return False
 
     deadline = time.monotonic() + TERMINATION_GRACE_SECONDS
     while time.monotonic() < deadline:
@@ -605,11 +605,12 @@ def _forward_signal_and_cleanup(process: subprocess.Popen[bytes], signum: int) -
         process.poll()
         if not _signal_group(process.pid, 0):
             process.wait()
-            return
+            return True
         time.sleep(0.01)
 
     _signal_group(process.pid, signal.SIGKILL)
     process.wait()
+    return True
 
 
 def _validate_deadline_sentinel(deadline_sentinel: Path | None) -> None:
@@ -811,19 +812,17 @@ def run_command(
                 termination = Signaled(-status)
             else:
                 termination = Exited(status)
+                # Signal any surviving group immediately after reaping the
+                # leader. Delaying a numeric group-id probe until after drain
+                # settlement would let an unrelated process reuse that id.
+                had_survivors = _forward_signal_and_cleanup(process, signal.SIGTERM)
+                if had_survivors and marker_retention is not None:
+                    marker_retention.mark_capture_incomplete()
             # Settle inside this try, never in the `finally`: the drain can wait
             # seconds on a leaked descendant, and a caller signal in that window
             # must reach the cancellation arm below rather than escaping as an
             # unhandled BaseException past the caller's own except clauses.
             _settle_drainers(drain_state)
-            # A successful leader can still leave background descendants in
-            # the session it created. Settle first so caller cancellation keeps
-            # its established precedence during that bounded window, then mark
-            # the transcript incomplete and sweep any surviving owned group.
-            if isinstance(termination, Exited) and _signal_group(process.pid, 0):
-                if marker_retention is not None:
-                    marker_retention.mark_capture_incomplete()
-                _forward_signal_and_cleanup(process, signal.SIGTERM)
             return _clear_non_timeout_sentinel(termination, deadline_sentinel)
         except _WatchdogCancellation as cancellation:
             # The first callback already recorded precedence. Keep the handlers

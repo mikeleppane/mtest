@@ -1247,6 +1247,40 @@ def test_read_error_cannot_report_capture_complete() -> None:
         raise AssertionError("read failure was reported as complete capture")
 
 
+def test_ordinary_exit_signals_survivors_before_drain_settlement() -> None:
+    """A reaped leader's numeric group id is never probed after a drain delay."""
+    order: list[str] = []
+    original_signal_group = watchdog._signal_group
+    original_settle = watchdog._settle_drainers
+
+    def gone_group(pid: int, signum: int) -> bool:  # noqa: ARG001
+        order.append(f"signal-{signum}")
+        return False
+
+    def recording_settle(state: watchdog._DrainState | None) -> None:
+        order.append("settle")
+        original_settle(state)
+
+    watchdog._signal_group = gone_group
+    watchdog._settle_drainers = recording_settle
+    try:
+        termination = run_command(
+            [PYTHON, "-c", "raise SystemExit(0)"],
+            source="tests/unit/test_watchdog.mojo",
+            step="run",
+            timeout_seconds=10.0,
+            marker_retention=MarkerRetention(MARKER_PREFIX),
+        )
+    finally:
+        watchdog._signal_group = original_signal_group
+        watchdog._settle_drainers = original_settle
+    if termination != Exited(0):
+        raise AssertionError(f"ordinary child returned {termination!r}")
+    expected = [f"signal-{signal.SIGTERM}", "settle"]
+    if order != expected:
+        raise AssertionError(f"ordinary cleanup order was {order}, expected {expected}")
+
+
 def test_a_caller_stream_without_a_byte_buffer_still_receives_the_tee() -> None:
     """A redirected text stream is written to, never silently discarded."""
     with tempfile.TemporaryDirectory(prefix="mtest-watchdog-text-") as raw_tmp:
@@ -1290,27 +1324,56 @@ def test_cancellation_during_the_drain_settle_stays_cancelled() -> None:
     """A caller signal in the post-exit drain is Cancelled, never a traceback."""
     with tempfile.TemporaryDirectory(prefix="mtest-watchdog-cancel-") as raw_tmp:
         tmp = Path(raw_tmp)
-        actor = _leaking_actor(tmp)
-        leader_done = tmp / "leader-done"
         sentinel = tmp / "deadline-sentinel"
         sentinel.touch()
+        settle_ready = tmp / "settle-ready"
+        wrapper = tmp / "delayed_settle_watchdog.py"
+        wrapper.write_text(
+            "from pathlib import Path\n"
+            "import sys\n"
+            "import time\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from scripts.harness import watchdog\n"
+            "original_settle = watchdog._settle_drainers\n"
+            "settle_calls = [0]\n"
+            "def delayed_settle(state):\n"
+            "    settle_calls[0] += 1\n"
+            "    if settle_calls[0] == 1:\n"
+            "        Path(sys.argv[4]).touch()\n"
+            "        time.sleep(120)\n"
+            "    original_settle(state)\n"
+            "watchdog._settle_drainers = delayed_settle\n"
+            "retention = watchdog.MarkerRetention(sys.argv[2])\n"
+            "termination = watchdog.run_command(\n"
+            "    sys.argv[6:],\n"
+            "    source='tests/unit/test_watchdog.mojo',\n"
+            "    step='run',\n"
+            "    timeout_seconds=float(sys.argv[5]),\n"
+            "    deadline_sentinel=Path(sys.argv[3]),\n"
+            "    marker_retention=retention,\n"
+            ")\n"
+            "raise SystemExit(watchdog._exit_with_termination(termination))",
+            encoding="utf-8",
+        )
         supervisor = subprocess.Popen(
             [
-                *_retaining_watchdog_argv(tmp, sentinel, timeout_seconds=30.0),
                 PYTHON,
-                str(actor),
-                str(leader_done),
-                str(DRAIN_SETTLE_SECONDS + 30.0),
+                str(wrapper),
+                str(REPO_ROOT),
+                MARKER_PREFIX,
+                str(sentinel),
+                str(settle_ready),
+                "30.0",
+                PYTHON,
+                "-c",
+                "raise SystemExit(0)",
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
         )
         try:
-            _wait_for_paths((leader_done,))
-            # The leader has exited, so the supervisor is past `wait` and inside
-            # the bounded drain that the leaked descendant is holding open.
-            time.sleep(DRAIN_SETTLE_SECONDS / 4.0)
+            _wait_for_paths((settle_ready,))
             os.kill(supervisor.pid, signal.SIGTERM)
             status = supervisor.wait(timeout=30.0)
             if supervisor.stderr is None:
@@ -1510,6 +1573,7 @@ def main() -> int:
         test_leaked_descendant_bounds_the_drain_and_seals_the_tee,
         test_captured_command_marks_a_forced_drain_incomplete,
         test_read_error_cannot_report_capture_complete,
+        test_ordinary_exit_signals_survivors_before_drain_settlement,
         test_a_caller_stream_without_a_byte_buffer_still_receives_the_tee,
         test_cancellation_during_the_drain_settle_stays_cancelled,
         test_a_blocked_caller_stream_cannot_swallow_a_caller_signal,
