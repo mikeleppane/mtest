@@ -591,6 +591,13 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
     process.wait()
 
 
+def _kill_surviving_group(process: subprocess.Popen[bytes]) -> bool:
+    """Sweep descendants immediately after their group leader was reaped."""
+    delivered = _signal_group(process.pid, signal.SIGKILL)
+    process.wait()
+    return delivered
+
+
 def _forward_signal_and_cleanup(process: subprocess.Popen[bytes], signum: int) -> bool:
     """Forward a signal, force-reap the group, and report whether it existed."""
     if not _signal_group(process.pid, signum):
@@ -731,6 +738,7 @@ def run_command(
         )
 
     process: subprocess.Popen[bytes] | None = None
+    process_group_cleaned = False
     pending_signum: int | None = None
     previous_handlers: dict[signal.Signals, _SignalHandler] = {}
     drain_state: _DrainState | None = None
@@ -747,6 +755,11 @@ def run_command(
             return
         pending_signum = signum
         if process is None:
+            return
+        if process.returncode is not None and not process_group_cleaned:
+            # `wait` has reaped the leader, so its numeric pid is no longer a
+            # safe process-group handle. Record cancellation but let the
+            # immediate, single-syscall survivor sweep finish before raising.
             return
         raise _WatchdogCancellation(signum)
 
@@ -791,6 +804,7 @@ def run_command(
                 status = process.wait(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
                 _terminate_process_group(process)
+                process_group_cleaned = True
                 try:
                     _settle_drainers(drain_state)
                 except _WatchdogCancellation:
@@ -807,17 +821,24 @@ def run_command(
             termination: Termination
             if status < 0:
                 # The leader is already reaped, but descendants may still own
-                # its process group. Sweep them before exposing the signal.
-                _terminate_process_group(process)
+                # its process group. Kill them in one immediate syscall: once
+                # the leader is gone, a delayed numeric group-id probe could
+                # target an unrelated group that reused the id.
+                _kill_surviving_group(process)
+                process_group_cleaned = True
                 termination = Signaled(-status)
             else:
                 termination = Exited(status)
-                # Signal any surviving group immediately after reaping the
-                # leader. Delaying a numeric group-id probe until after drain
-                # settlement would let an unrelated process reuse that id.
-                had_survivors = _forward_signal_and_cleanup(process, signal.SIGTERM)
+                # Kill any surviving group immediately after reaping the
+                # leader. This is deliberately one syscall with no grace-period
+                # probe: the numeric group id stops being owned proof as soon as
+                # its leader has been reaped.
+                had_survivors = _kill_surviving_group(process)
+                process_group_cleaned = True
                 if had_survivors and marker_retention is not None:
                     marker_retention.mark_capture_incomplete()
+            if pending_signum is not None:
+                raise _WatchdogCancellation(pending_signum)  # noqa: TRY301
             # Settle inside this try, never in the `finally`: the drain can wait
             # seconds on a leaked descendant, and a caller signal in that window
             # must reach the cancellation arm below rather than escaping as an
@@ -839,9 +860,11 @@ def run_command(
             # without adding a branch; if it were ever violated the attribute
             # access inside would still fall to the internal-failure arm below,
             # exactly as it does today.
-            _forward_signal_and_cleanup(
-                cast("subprocess.Popen[bytes]", process), cancellation.signum
-            )
+            if not process_group_cleaned:
+                _forward_signal_and_cleanup(
+                    cast("subprocess.Popen[bytes]", process), cancellation.signum
+                )
+                process_group_cleaned = True
             _settle_drainers(drain_state)
             return _clear_non_timeout_sentinel(
                 Cancelled(cancellation.signum), deadline_sentinel

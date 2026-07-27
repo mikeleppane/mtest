@@ -21,6 +21,7 @@ from scripts.harness import watchdog
 from scripts.harness.watchdog import (
     DRAIN_SETTLE_SECONDS,
     TIMEOUT_EXIT_CODE,
+    Cancelled,
     Exited,
     HarnessError,
     MarkerRetention,
@@ -1247,18 +1248,23 @@ def test_read_error_cannot_report_capture_complete() -> None:
         raise AssertionError("read failure was reported as complete capture")
 
 
-def test_ordinary_exit_signals_survivors_before_drain_settlement() -> None:
-    """A reaped leader's numeric group id is never probed after a drain delay."""
+def test_ordinary_exit_kills_survivors_before_drain_settlement() -> None:
+    """A reaped leader's group is swept once, even if settlement is cancelled."""
     order: list[str] = []
     original_signal_group = watchdog._signal_group
     original_settle = watchdog._settle_drainers
+    settle_calls = 0
 
     def gone_group(pid: int, signum: int) -> bool:  # noqa: ARG001
         order.append(f"signal-{signum}")
         return False
 
     def recording_settle(state: watchdog._DrainState | None) -> None:
+        nonlocal settle_calls
+        settle_calls += 1
         order.append("settle")
+        if settle_calls == 1:
+            raise watchdog._WatchdogCancellation(signal.SIGINT)
         original_settle(state)
 
     watchdog._signal_group = gone_group
@@ -1274,9 +1280,9 @@ def test_ordinary_exit_signals_survivors_before_drain_settlement() -> None:
     finally:
         watchdog._signal_group = original_signal_group
         watchdog._settle_drainers = original_settle
-    if termination != Exited(0):
+    if termination != Cancelled(signal.SIGINT):
         raise AssertionError(f"ordinary child returned {termination!r}")
-    expected = [f"signal-{signal.SIGTERM}", "settle"]
+    expected = [f"signal-{signal.SIGKILL}", "settle", "settle"]
     if order != expected:
         raise AssertionError(f"ordinary cleanup order was {order}, expected {expected}")
 
@@ -1573,7 +1579,7 @@ def main() -> int:
         test_leaked_descendant_bounds_the_drain_and_seals_the_tee,
         test_captured_command_marks_a_forced_drain_incomplete,
         test_read_error_cannot_report_capture_complete,
-        test_ordinary_exit_signals_survivors_before_drain_settlement,
+        test_ordinary_exit_kills_survivors_before_drain_settlement,
         test_a_caller_stream_without_a_byte_buffer_still_receives_the_tee,
         test_cancellation_during_the_drain_settle_stays_cancelled,
         test_a_blocked_caller_stream_cannot_swallow_a_caller_signal,
