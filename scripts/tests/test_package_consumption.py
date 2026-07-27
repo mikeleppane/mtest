@@ -1127,7 +1127,7 @@ class AssertionPackageLayoutTests(unittest.TestCase):
         )
 
     def _valid_prefix(self, root: Path) -> Path:
-        prefix = root / "prefix"
+        prefix = root.resolve() / "prefix"
         library_suffix = ".dylib" if sys.platform == "darwin" else ".so"
         for relative in package_consumption.INSTALLED_ASSERTION_FILES:
             path = prefix / "share" / "mtest" / "assertions-src" / relative

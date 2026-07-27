@@ -5,7 +5,7 @@
 `mojo-compiler ==1.0.0b2` run dependency (see `pixi run package-build`). That
 proves the recipe *solves*; it does not prove the artifact it produces is
 actually consumable by someone who only has the package, not this repo's dev
-toolchain. This script is that proof, run in six ordered stages:
+toolchain. This script is that proof, with ten ordered completion records:
 
   1. Build the package into a LOCAL channel (`pixi run package-build`,
      unmodified -- this script reuses that exact task rather than duplicating
@@ -19,8 +19,7 @@ toolchain. This script is that proof, run in six ordered stages:
      `conda-meta/mtest-<version>-<build>.json` record is then compared against
      the built artifact's SHA-256 and subdir: a same-version package pulled
      from a remote channel fails here. Also confirms the solve pulled
-     `mojo-compiler ==1.0.0b2`, then compiles the installed assertion source at
-     `-O0` and `-O3` with that exact compiler.
+     `mojo-compiler ==1.0.0b2`.
   3. LOADER-CLEAN PROBE FIRST, on the INSTALLED binary: run `mtest --version`
      and `mtest --help` with THIS PROCESS's own child environment scrubbed --
      the dev pixi env absent from PATH, this platform's loader-path variables
@@ -33,21 +32,25 @@ toolchain. This script is that proof, run in six ordered stages:
      expected discovery refusal. A loader failure here is a recipe
      run-dependency gap, not a retry-able flake -- this script stops and
      reports it.
-  4. Toolchain-threaded dogfood run: three focused executable probes, run
+  4. Compile and run the installed assertion source at `-O0` and `-O3` with
+     the exact compiler installed as the package's run dependency.
+  5. Run the committed assertion example through the installed binary and
+     compare its normalized output byte-for-byte with the README.
+  6. Toolchain-threaded dogfood run: three focused executable probes, run
      through the INSTALLED binary (never `build/mtest`). Unlike stage 3, this
      stage does NOT scrub the environment -- the probes' compiler children need
      `mojo` on PATH. Reuses dogfood's exact-membership gate, parameterized onto
      the installed binary.
-  5. Known-failing fixture run through the INSTALLED binary. A green dogfood
+  7. Known-failing fixture run through the INSTALLED binary. A green dogfood
      run only proves the package can report success; this stage proves it
      reports FAILURE truthfully -- exact exit 1, exactly one FAIL verdict row
      naming the fixture, no PASS verdict row, and a summary carrying the
      fixture's one failure with nothing left unrun.
-  6. Tarball fallback smoke-run: build the SAME recipe in the classic tar-bz2
+  8-10. Tarball fallback: build the SAME recipe in the classic tar-bz2
      package format into its own local channel, install it into a second
      scratch env (again pinned to that build's exact build string and verified
-     against its recorded SHA-256), run `--version`, and repeat the installed
-     assertion-source proof.
+     against its recorded SHA-256), repeat the installed assertion-source and
+     README-example proofs, then run `--version`.
 
 Both gated platforms run this identical gate: the subdir, the loader-inspection
 command, and the loader environment variables come from one immutable
@@ -85,11 +88,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PIXI_TOML = REPO_ROOT / "pixi.toml"
 RECIPE_PATH = REPO_ROOT / "recipe" / "recipe.yaml"
 
-# Where `pixi run package-build` (invoked unmodified by stage 1) writes the
+# Where `pixi run package-build` (invoked unmodified by `build`) writes the
 # primary `.conda` local channel -- must match that task's `--output-dir` in
-# pixi.toml exactly, since stage 2 solves against it.
+# pixi.toml exactly, since `install` solves against it.
 CONDA_CHANNEL_DIR = REPO_ROOT / "build" / "conda-channel"
-# This script's own local channel for the tar-bz2 fallback form (stage 6) --
+# This script's own local channel for the tar-bz2 fallback form --
 # kept separate from CONDA_CHANNEL_DIR so the two package formats never mix in
 # one repodata.
 TARBALL_CHANNEL_DIR = REPO_ROOT / "build" / "conda-channel-tarball"
@@ -104,7 +107,7 @@ LOADER_PROBE_CWD = SCRATCH_ROOT / "loader-probe-cwd"
 MODULAR_CHANNEL = "https://conda.modular.com/max/"
 CONDA_FORGE_CHANNEL = "conda-forge"
 
-# The known-failing fixture stage 5 drives through the installed binary. It is
+# The known-failing fixture stage drives through the installed binary. It is
 # an e2e fixture with a declared, manifest-pinned outcome (verdict FAIL, exit
 # class 1, two passing and one failing test); scripts/checks/layout.py fails the
 # cheap harness gate if that declaration and these constants ever disagree.
@@ -206,7 +209,7 @@ class BuiltArtifact:
     subdir: str
 
 
-# Artifacts stage 4 needs from THIS repo checkout (not from the isolated
+# Artifacts dogfood needs from THIS repo checkout (not from the isolated
 # rattler-build sandbox): the precompiled package the probes import against,
 # and the test-variant native object linked into each probe build -- the exact
 # pair scripts/harness/dogfood.py uses for `pixi run dogfood-check`.
@@ -307,7 +310,7 @@ GATE_STAGE_IDS = (
     "tarball",
 )
 
-# The probes stage 3 must run on the installed binary, in order. Its closing
+# The loader-clean probes must run on the installed binary, in order. Its closing
 # line is derived from these and checked against them, for the same reason.
 LOADER_PROBE_FLAGS = ("--version", "--help", "--config")
 ASSERTION_OPTIMIZATIONS = (("-O0", "o0"), ("-O3", "o3"))
@@ -776,7 +779,7 @@ def stage_assertion_source_probe(
     completion_id: str | None = None,
 ) -> None:
     """Compile and run public-source probes from one installed package form."""
-    _banner(f"installed assertion source probe -- {label}")
+    _banner(f"stage {completion_id or 'assertion-source'} -- {label}")
     source_root = validate_assertion_install(
         env_prefix,
         allow_installer_group_write=label == "tarball",
@@ -1000,7 +1003,7 @@ def stage_assertion_example(
     completion_id: str | None = None,
 ) -> None:
     """Run the committed diagnostic example through the installed artifact."""
-    _banner("installed assertion README example")
+    _banner(f"stage {completion_id or 'assertion-example'}")
     prefix = env_prefix.resolve()
     source_root = validate_assertion_install(
         prefix,
@@ -1186,7 +1189,7 @@ def sole_built_artifact(
 
 
 def stage_build_local_channel(target: PackagePlatform | None = None) -> BuiltArtifact:
-    """Stage 1: build the recipe into the LOCAL channel.
+    """Build the recipe into the LOCAL channel.
 
     Goes through the unmodified `package-build` pixi task, and wipes any prior
     channel dir first so this run's artifact can never be mistaken for a stale
@@ -1202,7 +1205,7 @@ def stage_build_local_channel(target: PackagePlatform | None = None) -> BuiltArt
         PackageCheckError: The build failed or produced no unique artifact.
     """
     resolved = host_platform() if target is None else target
-    _banner(f"stage 1/6 -- build the package into a LOCAL channel ({resolved.subdir})")
+    _banner(f"stage build -- package into a LOCAL channel ({resolved.subdir})")
     if CONDA_CHANNEL_DIR.exists():
         shutil.rmtree(CONDA_CHANNEL_DIR)
 
@@ -1335,14 +1338,14 @@ def verify_installed_artifact_identity(
 
 
 def stage_install_from_local_channel(artifact: BuiltArtifact) -> Path:
-    """Stage 2: install the just-built package into a FRESH scratch pixi env.
+    """Install the just-built package into a FRESH scratch pixi env.
 
     Solves from CONDA_CHANNEL_DIR (+ modular/conda-forge), proves the installed
     package IS that artifact, and confirms the solve pulled
     `mojo-compiler ==1.0.0b2` as a run dependency.
 
     Args:
-        artifact: The artifact stage 1 produced.
+        artifact: The artifact the build stage produced.
 
     Returns:
         The absolute path to the installed `mtest` binary.
@@ -1351,7 +1354,7 @@ def stage_install_from_local_channel(artifact: BuiltArtifact) -> Path:
         PackageCheckError: The install failed, installed a different package,
             or did not pull the declared run dependency.
     """
-    _banner("stage 2/6 -- install into a fresh scratch env from the LOCAL channel")
+    _banner("stage install -- fresh scratch env from the LOCAL channel")
     if SCRATCH_ROOT.exists():
         shutil.rmtree(SCRATCH_ROOT)
 
@@ -1393,7 +1396,7 @@ def stage_install_from_local_channel(artifact: BuiltArtifact) -> Path:
 def verify_loader_probe_roster(performed: tuple[str, ...]) -> None:
     """Refuse to summarize the loader-clean stage as more than it ran.
 
-    Stage 3's closing line names several probes in one sentence, so it must be
+    The closing line names several probes in one sentence, so it must be
     derived from the probes that actually executed rather than written as prose.
 
     Args:
@@ -1433,7 +1436,7 @@ def scrubbed_probe_env(target: PackagePlatform) -> dict[str, str]:
 
 
 def stage_loader_clean_probe(mtest_bin: Path, target: PackagePlatform) -> None:
-    """Stage 3: run the INSTALLED binary under a loader-clean child environment.
+    """Run the INSTALLED binary under a loader-clean child environment.
 
     Probes `--version` and `--help` with our own child environment scrubbed
     clean of the dev pixi env (PATH) and of this platform's loader search paths.
@@ -1452,7 +1455,7 @@ def stage_loader_clean_probe(mtest_bin: Path, target: PackagePlatform) -> None:
         PackageCheckError: The installed binary failed to load or run, or its
             output did not carry the expected version, help, or refusal.
     """
-    _banner("stage 3/6 -- LOADER-CLEAN PROBE on the installed binary")
+    _banner("stage loader-clean -- installed binary")
     LOADER_PROBE_CWD.mkdir(parents=True, exist_ok=True)
 
     scrubbed_env = scrubbed_probe_env(target)
@@ -1561,9 +1564,9 @@ def stage_loader_clean_probe(mtest_bin: Path, target: PackagePlatform) -> None:
 
 
 def stage_suite_run_with_installed_binary(mtest_bin: Path) -> None:
-    """Stage 4: run focused dogfood probes through the INSTALLED binary.
+    """Run focused dogfood probes through the INSTALLED binary.
 
-    The environment is fully inherited (unlike stage 3) so probe compiler
+    The environment is fully inherited (unlike loader-clean) so probe compiler
     children can resolve `mojo` on PATH.
 
     Reuses dogfood's membership-and-completeness gate, which
@@ -1577,7 +1580,7 @@ def stage_suite_run_with_installed_binary(mtest_bin: Path) -> None:
         PackageCheckError: A build input is missing or the probes were not
             all selected and green.
     """
-    _banner("stage 4/6 -- toolchain-threaded suite run with the INSTALLED binary")
+    _banner("stage dogfood -- toolchain-threaded run with the INSTALLED binary")
     if not MOJOPKG_INCLUDE_DIR.joinpath("mtest.mojopkg").is_file():
         raise PackageCheckError(
             f"{MOJOPKG_INCLUDE_DIR / 'mtest.mojopkg'} missing -- run `pixi run build` "
@@ -1689,11 +1692,11 @@ def check_failing_fixture_consumption(
 
 
 def stage_failing_fixture_consumption(mtest_bin: Path, version: str) -> None:
-    """Stage 5: drive the known-failing fixture through the INSTALLED binary.
+    """Drive the known-failing fixture through the INSTALLED binary.
 
-    Stage 4 proves the package can report success. This stage proves it reports
+    Dogfood proves the package can report success. This stage proves it reports
     FAILURE truthfully, which is the half a consuming CI actually depends on.
-    The environment is inherited (as in stage 4) so the fixture's compiler child
+    The environment is inherited (as in dogfood) so the fixture's compiler child
     can resolve `mojo`; project configuration is disabled so the verdict comes
     from the fixture alone.
 
@@ -1704,7 +1707,7 @@ def stage_failing_fixture_consumption(mtest_bin: Path, version: str) -> None:
     Raises:
         PackageCheckError: The run did not produce truthful failure evidence.
     """
-    _banner("stage 5/6 -- known-failing fixture through the INSTALLED binary")
+    _banner("stage failing-fixture -- installed binary")
     argv = [
         str(mtest_bin),
         "--no-config",
@@ -1743,7 +1746,7 @@ def stage_failing_fixture_consumption(mtest_bin: Path, version: str) -> None:
 
 
 def stage_tarball_fallback_smoke(target: PackagePlatform | None = None) -> None:
-    """Stage 6: smoke-run the classic tar-bz2 package format.
+    """Smoke-run the classic tar-bz2 package format.
 
     Builds the SAME recipe into its own local channel, installs it into a second
     scratch env, runs `--version`, and repeats the source and README assertion
@@ -1756,7 +1759,7 @@ def stage_tarball_fallback_smoke(target: PackagePlatform | None = None) -> None:
         PackageCheckError: The fallback form did not build, install, or run.
     """
     resolved = host_platform() if target is None else target
-    _banner("stage 6/6 -- tarball fallback smoke-run")
+    _banner("stage tarball -- fallback build, install, and smoke-run")
     if TARBALL_CHANNEL_DIR.exists():
         shutil.rmtree(TARBALL_CHANNEL_DIR)
 
