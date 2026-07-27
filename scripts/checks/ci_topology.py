@@ -16,9 +16,9 @@ WORKFLOW_PATHS = {
 }
 """Every hosted workflow tracked by the repository."""
 
-CHECKOUT_ACTION_SHA = "11bd71901bbe5b1630ceea73d27597364c9af683"
+CHECKOUT_ACTION_SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1"
 SETUP_PIXI_ACTION_SHA = "a09b6247153796b190642a2b53fac4241043cf6f"
-CODEQL_ACTION_SHA = "4187e74d05793876e9989daffde9c3e66b4acd07"
+CODEQL_ACTION_SHA = "e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81"
 """Reviewed immutable action revisions used by the CodeQL workflow."""
 
 HARNESS_CHECK_MODULES = (
@@ -399,10 +399,10 @@ def check_codeql_workflow(repo_root: Path = REPO_ROOT) -> None:
         ],
     }
     expected_pin_lines = {
-        f"        uses: actions/checkout@{CHECKOUT_ACTION_SHA} # v4.2.2",
+        f"        uses: actions/checkout@{CHECKOUT_ACTION_SHA} # v7.0.1",
         f"        uses: prefix-dev/setup-pixi@{SETUP_PIXI_ACTION_SHA} # v0.10.0",
-        f"        uses: github/codeql-action/init@{CODEQL_ACTION_SHA} # v3.37.3",
-        f"        uses: github/codeql-action/analyze@{CODEQL_ACTION_SHA} # v3.37.3",
+        f"        uses: github/codeql-action/init@{CODEQL_ACTION_SHA} # v4.37.3",
+        f"        uses: github/codeql-action/analyze@{CODEQL_ACTION_SHA} # v4.37.3",
     }
     for name, job in job_blocks.items():
         uses = re.findall(r"^        uses: ([^ ]+)(?: # .*)?$", job, re.MULTILINE)
@@ -1002,9 +1002,11 @@ def check_ci_workflow(repo_root: Path = REPO_ROOT) -> None:
         )
 
     for name, job in job_blocks.items():
-        if job.count("uses: actions/checkout@v4") != 1:
-            raise AssertionError(f"CI job {name!r} does not pin checkout@v4 once")
-        if job.count("uses: prefix-dev/setup-pixi@v0.10.0") != 1:
+        if job.count(f"uses: actions/checkout@{CHECKOUT_ACTION_SHA}") != 1:
+            raise AssertionError(
+                f"CI job {name!r} does not pin checkout v7.0.1 once"
+            )
+        if job.count(f"uses: prefix-dev/setup-pixi@{SETUP_PIXI_ACTION_SHA}") != 1:
             raise AssertionError(f"CI job {name!r} does not pin setup-pixi once")
         if "          locked: true" not in job or "          cache: true" not in job:
             raise AssertionError(f"CI job {name!r} lacks locked cached Pixi setup")

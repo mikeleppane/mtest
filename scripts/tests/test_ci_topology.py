@@ -565,6 +565,37 @@ class CodeQLWorkflowTests(unittest.TestCase):
         )
         ci_topology.check_workflow_inventory()
 
+    def test_javascript_actions_pin_reviewed_node24_releases(self) -> None:
+        self.assertEqual(
+            ci_topology.CHECKOUT_ACTION_SHA,
+            "3d3c42e5aac5ba805825da76410c181273ba90b1",
+        )
+        self.assertEqual(
+            ci_topology.CODEQL_ACTION_SHA,
+            "e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81",
+        )
+        for name in ("ci.yml", "codeql.yml"):
+            workflow = (
+                ci_topology.REPO_ROOT / ".github" / "workflows" / name
+            ).read_text(encoding="utf-8")
+            self.assertNotIn("actions/checkout@v4", workflow, name)
+            self.assertNotIn(
+                "11bd71901bbe5b1630ceea73d27597364c9af683",
+                workflow,
+                name,
+            )
+        codeql = self._workflow()
+        self.assertNotIn(
+            "github/codeql-action/",
+            codeql.replace(
+                "github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81",
+                "",
+            ).replace(
+                "github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81",
+                "",
+            ),
+        )
+
     def test_missing_workflow_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-workflow-inventory-") as raw_tmp:
             repo = Path(raw_tmp)
@@ -635,7 +666,7 @@ class CodeQLWorkflowTests(unittest.TestCase):
             "      - name: Autobuild\n"
             "        uses: github/codeql-action/autobuild@"
             f"{ci_topology.CODEQL_ACTION_SHA}"
-            " # v3.37.3\n\n" + marker,
+            " # v4.37.3\n\n" + marker,
             1,
         )
         self._reject(mutated, "autobuild")
