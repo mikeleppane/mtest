@@ -1164,7 +1164,7 @@ def check_assertion_companion_layout(repo_root: Path = REPO_ROOT) -> None:
     for name, expected, root in (
         ("assertion source", ASSERTION_SOURCE_PATHS, "assertions-src"),
         ("assertion consumer", ASSERTION_CONSUMER_PATHS, "tests/assertions"),
-        ("assertion example", ASSERTION_EXAMPLE_PATHS, "examples/assertions"),
+        ("assertion example", ASSERTION_EXAMPLE_PATHS, "examples"),
     ):
         _require_nonempty(name, expected)
         base = repo_root / root

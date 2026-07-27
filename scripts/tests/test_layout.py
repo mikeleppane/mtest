@@ -119,6 +119,16 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
             )
 
             layout.check_assertion_companion_layout(repo)
+            unregistered_example = repo / "examples" / "perf" / "bench.mojo"
+            unregistered_example.parent.mkdir(parents=True)
+            unregistered_example.write_text("# accidental example\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                AssertionError,
+                "assertion example membership mismatch",
+            ):
+                layout.check_assertion_companion_layout(repo)
+            unregistered_example.unlink()
+
             with (
                 mock.patch.object(
                     package_consumption,
