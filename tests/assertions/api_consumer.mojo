@@ -678,6 +678,11 @@ def test_text_crop_reports_whole_elided_lines() raises:
     testing.assert_true(
         "expected lines 1-2: ... [cropped]" in empty_before_content
     )
+    var trailing_empty = _text_failure("X\n\n\n", "Y\n\n\n")
+    testing.assert_true("actual lines after 3: ... [cropped]" in trailing_empty)
+    testing.assert_true(
+        "expected lines after 3: ... [cropped]" in trailing_empty
+    )
 
 
 def test_large_text_context_is_bounded_and_message_is_last() raises:
