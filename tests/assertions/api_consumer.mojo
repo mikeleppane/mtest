@@ -635,10 +635,10 @@ def test_text_crop_marker_requires_an_elided_line_prefix() raises:
         "\né" + _repeated("a", 127) + "Y",
     )
     testing.assert_true("actual line 2: é" in multibyte_boundary)
-    testing.assert_false("actual line 1: ... [cropped]" in multibyte_boundary)
+    testing.assert_true("actual line 1: ... [cropped]" in multibyte_boundary)
     testing.assert_false("actual line 2: ... " in multibyte_boundary)
     testing.assert_true("expected line 2: é" in multibyte_boundary)
-    testing.assert_false("expected line 1: ... [cropped]" in multibyte_boundary)
+    testing.assert_true("expected line 1: ... [cropped]" in multibyte_boundary)
     testing.assert_false("expected line 2: ... " in multibyte_boundary)
     var cropped_prefix = _text_failure(
         _repeated("a", 200) + "X",
@@ -658,6 +658,26 @@ def test_text_crop_reports_whole_elided_lines() raises:
     testing.assert_true("actual line 2: " + line_two + "\\n" in detail)
     testing.assert_true("expected line 1: ... [cropped]" in detail)
     testing.assert_true("expected line 2: " + line_two + "\\n" in detail)
+    var empty_after_content = _text_failure(
+        "aaaaaaaaaa\n\n" + _repeated("b", 200) + "X",
+        "aaaaaaaaaa\n\n" + _repeated("b", 200) + "Y",
+    )
+    testing.assert_true(
+        "actual lines 1-2: ... [cropped]" in empty_after_content
+    )
+    testing.assert_true(
+        "expected lines 1-2: ... [cropped]" in empty_after_content
+    )
+    var empty_before_content = _text_failure(
+        "\naaaaaaaaaa\n" + _repeated("b", 200) + "X",
+        "\naaaaaaaaaa\n" + _repeated("b", 200) + "Y",
+    )
+    testing.assert_true(
+        "actual lines 1-2: ... [cropped]" in empty_before_content
+    )
+    testing.assert_true(
+        "expected lines 1-2: ... [cropped]" in empty_before_content
+    )
 
 
 def test_large_text_context_is_bounded_and_message_is_last() raises:
