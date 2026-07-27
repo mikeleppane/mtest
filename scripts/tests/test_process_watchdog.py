@@ -1566,6 +1566,69 @@ def test_signal_during_internal_failure_cleanup_cannot_escape() -> None:
         raise AssertionError(f"cleanup signal escaped as {termination!r}")
 
 
+def test_signal_while_formatting_internal_failure_still_cleans_group() -> None:
+    """A managed signal before the backstop flag cannot escape group cleanup."""
+    original_wait_for_exit = watchdog._wait_for_exit_without_reaping
+    original_terminate = watchdog._terminate_process_group
+    terminate_calls = 0
+
+    class _InterruptingError(RuntimeError):
+        @override
+        def __str__(self) -> str:
+            os.kill(os.getpid(), signal.SIGTERM)
+            return "injected formatting failure"
+
+    def injected_failure(
+        process: subprocess.Popen[bytes],  # noqa: ARG001
+        timeout_seconds: float,  # noqa: ARG001
+    ) -> bool:
+        raise _InterruptingError
+
+    def recording_terminate(process: subprocess.Popen[bytes]) -> None:
+        nonlocal terminate_calls
+        terminate_calls += 1
+        original_terminate(process)
+
+    watchdog._wait_for_exit_without_reaping = injected_failure
+    watchdog._terminate_process_group = recording_terminate
+    try:
+        try:
+            termination = run_command(
+                [PYTHON, "-c", "import time; time.sleep(120)"],
+                source="tests/unit/test_watchdog.mojo",
+                step="run",
+                timeout_seconds=10.0,
+            )
+        except watchdog._WatchdogCancellation as exc:
+            raise AssertionError(
+                "managed signal escaped while formatting internal failure"
+            ) from exc
+    finally:
+        watchdog._wait_for_exit_without_reaping = original_wait_for_exit
+        watchdog._terminate_process_group = original_terminate
+    if not isinstance(termination, HarnessError):
+        raise AssertionError(f"formatting signal escaped as {termination!r}")
+    if terminate_calls != 1:
+        raise AssertionError(
+            f"backstop swept the child group {terminate_calls} times, expected once"
+        )
+
+
+def test_timeout_diagnostic_uses_the_callers_source() -> None:
+    """A reusable watchdog diagnostic must not claim a classified-suite caller."""
+    captured = io.StringIO()
+    with contextlib.redirect_stderr(captured):
+        watchdog._notify_timeout("assertions-check", "compile", 1.5)
+    expected = (
+        "FATAL: assertions-check: compile exceeded 1.5s; "
+        "terminating its process group\n"
+    )
+    if captured.getvalue() != expected:
+        raise AssertionError(
+            f"timeout diagnostic was {captured.getvalue()!r}, expected {expected!r}"
+        )
+
+
 def test_a_caller_stream_without_a_byte_buffer_still_receives_the_tee() -> None:
     """A redirected text stream is written to, never silently discarded."""
     with tempfile.TemporaryDirectory(prefix="mtest-watchdog-text-") as raw_tmp:
@@ -1864,6 +1927,8 @@ def main() -> int:
         test_darwin_exit_observation_rejects_registration_errors,
         test_internal_failure_cleans_an_exited_unreaped_group,
         test_signal_during_internal_failure_cleanup_cannot_escape,
+        test_signal_while_formatting_internal_failure_still_cleans_group,
+        test_timeout_diagnostic_uses_the_callers_source,
         test_a_caller_stream_without_a_byte_buffer_still_receives_the_tee,
         test_cancellation_during_the_drain_settle_stays_cancelled,
         test_a_blocked_caller_stream_cannot_swallow_a_caller_signal,

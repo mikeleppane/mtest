@@ -680,18 +680,17 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
     process.wait()
 
 
-def _forward_signal_and_cleanup(process: subprocess.Popen[bytes], signum: int) -> bool:
-    """Forward a signal, force-reap the group, and report whether it existed."""
+def _forward_signal_and_cleanup(process: subprocess.Popen[bytes], signum: int) -> None:
+    """Forward a signal, force-reap the process group, and its leader."""
     if not _signal_group(process.pid, signum):
         process.wait()
-        return False
+        return
 
     _wait_for_exit_without_reaping(process, TERMINATION_GRACE_SECONDS)
     # Whether the leader exited or ignored the forwarded signal, it still pins
     # the group ID here: no wait operation above made that ID reusable.
     _signal_group(process.pid, signal.SIGKILL)
     process.wait()
-    return True
 
 
 def _validate_deadline_sentinel(deadline_sentinel: Path | None) -> None:
@@ -720,8 +719,7 @@ def _notify_timeout(source: str, step: str, timeout_seconds: float) -> None:
     """Best-effort timeout diagnostic after process-group cleanup."""
     with contextlib.suppress(BrokenPipeError, OSError):
         print(
-            "FATAL: classified: "
-            f"{source}: {step} exceeded {timeout_seconds:g}s; "
+            f"FATAL: {source}: {step} exceeded {timeout_seconds:g}s; "
             "terminating its process group",
             file=sys.stderr,
         )
@@ -829,7 +827,11 @@ def run_command(
         if pending_signum is not None:
             return
         pending_signum = signum
-        if process is None or cleanup_in_progress:
+        # An exception already being handled will reach the supervisor's
+        # backstop without help. Raising through that handler could skip the
+        # cleanup it is about to perform, including in the small interval
+        # before `cleanup_in_progress` can be set.
+        if process is None or cleanup_in_progress or sys.exception() is not None:
             return
         raise _WatchdogCancellation(signum)
 
