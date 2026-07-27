@@ -21,12 +21,16 @@ This probe re-creates the co-linked property for exactly the modules that need
 it, without recreating the full 101-module aggregate: it scans every classified
 `test_*.mojo` module for real `external_call["symbol", ...]` declarations,
 groups them by symbol name, and -- for every symbol two or more modules
-declare -- generates one small entrypoint (via `scripts.harness.aggregate`)
-that imports every one of those modules and builds it. Mojo's own compiler is
-the oracle: if any two declarations of a shared symbol disagree, the build
-fails with a specific, compiler-authored diagnostic naming the conflict. The
-binary is never executed -- the archive-time link is the whole proof, and this
-probe has nothing to say about runtime behavior.
+declare -- generates one small entrypoint that imports every one of those
+modules, registers each of their `test_*` functions so nothing is dropped as
+unreferenced, and builds it. Mojo's own compiler is the oracle: if any two
+declarations of a shared symbol disagree, the build fails with a specific,
+compiler-authored diagnostic naming the conflict. The binary is never
+executed -- the archive-time link is the whole proof, and this probe has
+nothing to say about runtime behavior.
+
+The entrypoint generator lives here rather than in a shared harness module
+because this probe is its only consumer.
 
 A declaration is matched over its complete bracketed span
 (`external_call[...]`), not one line: the symbol name legitimately sits on a
@@ -54,8 +58,6 @@ import shutil
 import subprocess
 import sys
 
-from scripts.harness import aggregate
-
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "build" / "safety" / "abi_probe"
@@ -64,6 +66,8 @@ SEARCH_ROOTS = (ROOT / "tests" / "unit", ROOT / "tests" / "integration")
 
 _EXTERNAL_CALL_OPEN_RE = re.compile(r"external_call\[")
 _SYMBOL_IN_SPAN_RE = re.compile(r'"([A-Za-z0-9_]+)"')
+_TEST_DEF_RE = re.compile(r"(?m)^def (test_[A-Za-z0-9_]+)\s*\(")
+_MODULE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def require(condition: bool, message: str) -> None:
@@ -206,6 +210,122 @@ def affected_sources(shared: dict[str, list[Path]]) -> list[Path]:
     return sorted(union)
 
 
+def test_function_names(source: str) -> list[str]:
+    """Return every top-level `test_*` function declared in `source`, in order.
+
+    Registering these is what keeps each co-linked module's code reachable:
+    an `external_call` declaration sits inside a function body, and a body
+    nothing references need never be compiled at all, which would make the
+    co-link prove nothing about it.
+
+    There is deliberately no rejection of a module that declares zero test
+    functions here. That property belongs to the real suite and
+    `scripts/harness/selfhost.py`'s oracle owns it, reconciling mtest's report
+    against a source-derived inventory per file and per test name. This probe
+    only needs to co-link, and a module with no test functions is a module
+    with no `external_call` in a test body, so it never reaches this scan.
+
+    Args:
+        source: The complete text of one classified `test_*.mojo` module.
+
+    Returns:
+        The declared function names in source order, possibly empty.
+    """
+    return _TEST_DEF_RE.findall(source)
+
+
+def _module_name(source: Path) -> str:
+    """Return the dotted Mojo module name for one classified source.
+
+    The generated entrypoint is built with `-I .` from the repository root,
+    so a module is named by its repository-relative path with separators
+    turned into dots: `tests/unit/test_config.mojo` is `tests.unit.test_config`.
+
+    Args:
+        source: A classified `test_*.mojo` module, inside the repository.
+
+    Returns:
+        The dotted module name an `import` statement can name.
+
+    Raises:
+        SystemExit: The path lies outside the repository, or a path component
+            is not a legal Mojo identifier, so no import could name it.
+    """
+    try:
+        relative = source.resolve().relative_to(ROOT)
+    except ValueError:
+        raise SystemExit(
+            f"abi-probe-check: classified module outside the repository: {source}"
+        ) from None
+    parts = relative.with_suffix("").parts
+    require(
+        all(_MODULE_NAME_RE.fullmatch(part) for part in parts),
+        f"not an importable Mojo module path: {relative}",
+    )
+    return ".".join(parts)
+
+
+def render_entrypoint(sources: list[Path]) -> str:
+    """Render the Mojo source of a co-linked entrypoint over `sources`.
+
+    Args:
+        sources: The modules to co-link, in the order they are imported.
+
+    Returns:
+        The complete Mojo source of the entrypoint.
+
+    Raises:
+        SystemExit: A source is not an importable Mojo module; see
+            `_module_name`.
+        OSError: A source could not be read.
+    """
+    names = [_module_name(source) for source in sources]
+    lines = [
+        '"""Generated ABI co-link probe; edit scripts/checks/abi_probe.py."""',
+        "",
+        "from std.testing import TestSuite",
+        "",
+    ]
+    lines.extend(
+        f"import {name} as _mtest_module_{index}" for index, name in enumerate(names)
+    )
+    lines.extend(
+        [
+            "",
+            "",
+            "def main() raises:",
+            '    """Reference every co-linked module\'s tests. Never executed."""',
+        ]
+    )
+    for index, source in enumerate(sources):
+        functions = test_function_names(source.read_text(encoding="utf-8"))
+        lines.append(f"    var suite_{index} = TestSuite()")
+        lines.extend(
+            f"    suite_{index}.test[_mtest_module_{index}.{function}]()"
+            for function in functions
+        )
+        lines.append(f"    suite_{index}^.run()")
+        if index + 1 < len(sources):
+            lines.append("")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def write_entrypoint(output: Path, sources: list[Path]) -> None:
+    """Write the co-linked entrypoint for `sources` to `output`.
+
+    Args:
+        output: The path the generated Mojo source is written to.
+        sources: The modules to co-link.
+
+    Raises:
+        SystemExit: See `render_entrypoint`.
+        OSError: The entrypoint could not be written.
+    """
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(render_entrypoint(sources), encoding="utf-8")
+
+
 def run(command: list[str]) -> subprocess.CompletedProcess[str]:
     """Run one build command from the repository root, output captured."""
     return subprocess.run(
@@ -235,7 +355,7 @@ def build_probe(sources_to_colink: list[Path]) -> subprocess.CompletedProcess[st
         shutil.rmtree(OUT)
     OUT.mkdir(parents=True)
     entrypoint = OUT / "abi_probe_main.mojo"
-    aggregate.write_entrypoint(ROOT, entrypoint, sources_to_colink)
+    write_entrypoint(entrypoint, sources_to_colink)
     binary = OUT / "abi_probe"
     return run(
         [

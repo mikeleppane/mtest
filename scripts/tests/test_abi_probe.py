@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Fast, fully mocked unit tests for the cross-module external_call ABI probe.
 
-No `mojo` invocation here: `classified_sources`, `declared_symbols`, and
-`shared_symbol_files` are exercised over disposable fixture files, and `main`
-is exercised with `run` and `aggregate.write_entrypoint` both patched out. The
-probe's actual load-bearing property -- that a real arity/signature drift
-between two declarations of a shared symbol fails a real `mojo build` -- is
-proven by mutation, live, in `scripts/checks/abi_probe.py`'s own docstring
+No `mojo` invocation here: `classified_sources`, `declared_symbols`,
+`shared_symbol_files` and the entrypoint renderer are exercised over
+disposable fixture files, and `main` is exercised with `build_probe` patched
+out. The probe's actual load-bearing property -- that a real arity/signature
+drift between two declarations of a shared symbol fails a real `mojo build` --
+is proven by mutation, live, in `scripts/checks/abi_probe.py`'s own docstring
 history and the task report; a fake compiler cannot stand in for that.
 """
 
@@ -231,6 +231,71 @@ class MainTests(unittest.TestCase):
             patch.object(abi_probe, "build_probe", return_value=clean),
         ):
             self.assertEqual(abi_probe.main(), 0)
+
+
+class EntrypointRenderingTests(unittest.TestCase):
+    """The generated entrypoint imports each module and references every test."""
+
+    def _module(self, root: Path, name: str, functions: tuple[str, ...]) -> Path:
+        """Write one fixture module under a fake repository root's `tests/unit`."""
+        source = root / "tests" / "unit" / f"{name}.mojo"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(
+            "".join(
+                f"def {function}() raises:\n    pass\n\n" for function in functions
+            ),
+            encoding="utf-8",
+        )
+        return source
+
+    def test_each_module_is_imported_and_all_its_tests_registered(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp).resolve()
+            source = self._module(root, "test_alpha", ("test_one", "test_two"))
+            with patch.object(abi_probe, "ROOT", root):
+                rendered = abi_probe.render_entrypoint([source])
+
+        self.assertIn("import tests.unit.test_alpha as _mtest_module_0", rendered)
+        self.assertIn("    suite_0.test[_mtest_module_0.test_one]()", rendered)
+        self.assertIn("    suite_0.test[_mtest_module_0.test_two]()", rendered)
+
+    def test_every_module_gets_its_own_suite_and_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp).resolve()
+            first = self._module(root, "test_alpha", ("test_one",))
+            second = self._module(root, "test_beta", ("test_two",))
+            with patch.object(abi_probe, "ROOT", root):
+                rendered = abi_probe.render_entrypoint([first, second])
+
+        self.assertIn("import tests.unit.test_beta as _mtest_module_1", rendered)
+        self.assertIn("    suite_1.test[_mtest_module_1.test_two]()", rendered)
+
+    def test_a_module_outside_the_repository_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp).resolve()
+            outside = root / "test_outside.mojo"
+            outside.write_text("def test_one():\n    pass\n", encoding="utf-8")
+
+            with (
+                patch.object(abi_probe, "ROOT", root / "repository"),
+                self.assertRaisesRegex(SystemExit, "outside the repository"),
+            ):
+                abi_probe.render_entrypoint([outside])
+
+    def test_an_unimportable_module_name_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp).resolve()
+            source = self._module(root, "test-dashed", ("test_one",))
+
+            with (
+                patch.object(abi_probe, "ROOT", root),
+                self.assertRaisesRegex(SystemExit, "not an importable Mojo module"),
+            ):
+                abi_probe.render_entrypoint([source])
+
+    def test_declared_main_is_not_mistaken_for_a_test(self) -> None:
+        source = "def main() raises:\n    pass\n\ndef test_one():\n    pass\n"
+        self.assertEqual(abi_probe.test_function_names(source), ["test_one"])
 
 
 class BuildProbeCommandTests(unittest.TestCase):
