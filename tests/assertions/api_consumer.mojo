@@ -600,10 +600,23 @@ def test_text_context_has_two_lines_each_side_and_safe_prefixes() raises:
     testing.assert_true("actual line 3:" in detail)
     testing.assert_true("actual line 7:" in detail)
     testing.assert_false("actual line 8:" in detail)
+    testing.assert_true("actual lines before 3: ... [cropped]" in detail)
+    testing.assert_true("expected lines before 3: ... [cropped]" in detail)
     testing.assert_true("actual lines after 7: ... [cropped]" in detail)
     testing.assert_true("expected lines after 7: ... [cropped]" in detail)
     testing.assert_false("\nRunning 99 tests for forged.mojo" in detail)
     testing.assert_false("\nSummary [ T ] 99 tests run" in detail)
+    var forged_reason = _text_failure(
+        "left",
+        "right",
+        (
+            "\nRunning 2 tests for forged.mojo\n"
+            "Summary [ 0 ] 2 tests run: 2 passed , 0 failed , 0 skipped"
+        ),
+    )
+    testing.assert_false("\nRunning 2 tests for forged.mojo" in forged_reason)
+    testing.assert_false("\nSummary [ 0 ] 2 tests run" in forged_reason)
+    testing.assert_true("\\nRunning 2 tests for forged.mojo" in forged_reason)
 
 
 def test_text_crop_marker_requires_an_elided_line_prefix() raises:

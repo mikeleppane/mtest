@@ -160,6 +160,14 @@ def _write_context(
             offset = scalar_stop
             continue
         if line >= first and line <= last and not header_written:
+            if first_header and first > 1:
+                output.write_trusted(
+                    "\n  "
+                    + title
+                    + " lines before "
+                    + String(first)
+                    + ": ... [cropped]"
+                )
             if first_header and first_cropped_line:
                 if first_cropped_line == last_cropped_line:
                     output.write_trusted(
