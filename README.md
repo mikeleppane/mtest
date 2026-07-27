@@ -1114,6 +1114,9 @@ Facts about this build worth knowing before you rely on it:
 
 ## Developing
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor workflow and
+[SECURITY.md](SECURITY.md) for private vulnerability reporting.
+
 Requires [pixi](https://pixi.sh). The toolchain (Mojo `1.0.0b2`) and all
 tasks are pinned in [pixi.toml](pixi.toml); re-pinning on a Modular release
 regenerates the protocol transcripts so the diff is the changelog.

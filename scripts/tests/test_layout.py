@@ -533,10 +533,22 @@ class DirectInvocationPolicyTests(unittest.TestCase):
         self.assertEqual(violations, ())
 
     def test_each_live_surface_is_checked(self) -> None:
+        self.assertEqual(
+            layout.LIVE_COMMAND_FIXED_PATHS,
+            (
+                Path("README.md"),
+                Path("CONTRIBUTING.md"),
+                Path("SECURITY.md"),
+                Path("AGENTS.md"),
+                Path("pixi.toml"),
+            ),
+        )
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp)
             relative_paths = (
                 Path("README.md"),
+                Path("CONTRIBUTING.md"),
+                Path("SECURITY.md"),
                 Path("AGENTS.md"),
                 Path("pixi.toml"),
                 Path("scripts/probe.py"),
