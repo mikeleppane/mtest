@@ -155,6 +155,7 @@ class CiTopologyTests(unittest.TestCase):
             "scripts.tests.test_release_attestations",
             "scripts.tests.test_github_release",
             "scripts.tests.test_community_publication",
+            "scripts.tests.test_public_verify",
         )
         for module in expected:
             with self.subTest(module=module):
