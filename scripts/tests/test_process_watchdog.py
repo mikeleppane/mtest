@@ -1312,16 +1312,7 @@ def test_ordinary_exit_kills_survivors_before_drain_settlement() -> None:
     settle_calls = 0
 
     def gone_group(pid: int, signum: int) -> bool:
-        try:
-            status = os.waitid(
-                os.P_PID,
-                pid,
-                os.WEXITED | os.WNOHANG | os.WNOWAIT,
-            )
-        except ChildProcessError as exc:
-            raise AssertionError("leader was reaped before survivor sweep") from exc
-        if status is None:
-            raise AssertionError("leader had not exited before survivor sweep")
+        _assert_leader_is_unreaped(pid)
         order.append(f"signal-{signum}")
         return False
 
@@ -1362,10 +1353,30 @@ def test_exit_observation_does_not_reap_the_group_leader() -> None:
     try:
         if not watchdog._wait_for_exit_without_reaping(process, 10.0):
             raise AssertionError("ordinary child exit was not observed")
+        _assert_leader_is_unreaped(process.pid)
+        watchdog._signal_group(process.pid, signal.SIGKILL)
+        if process.wait() != 0:
+            raise AssertionError("post-observation wait lost the original exit status")
+    finally:
+        if process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+
+
+def _assert_leader_is_unreaped(
+    pid: int,
+    *,
+    waitid_available: bool | None = None,
+) -> None:
+    """Require a zombie leader to retain its PID on this Python platform."""
+    if waitid_available is None:
+        waitid_available = hasattr(os, "waitid")
+    if waitid_available:
         try:
             status = os.waitid(
                 os.P_PID,
-                process.pid,
+                pid,
                 os.WEXITED | os.WNOHANG | os.WNOWAIT,
             )
         except ChildProcessError as exc:
@@ -1374,9 +1385,26 @@ def test_exit_observation_does_not_reap_the_group_leader() -> None:
             ) from exc
         if status is None:
             raise AssertionError("observed leader was not waitable")
-        watchdog._signal_group(process.pid, signal.SIGKILL)
-        if process.wait() != 0:
-            raise AssertionError("post-observation wait lost the original exit status")
+        return
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError as exc:
+        raise AssertionError(
+            "exit observation released the process-group leader PID"
+        ) from exc
+
+
+def test_unreaped_leader_probe_has_a_darwin_safe_fallback() -> None:
+    """The non-reaping guard works when Python exposes no waitid binding."""
+    process = subprocess.Popen(
+        [PYTHON, "-c", "raise SystemExit(0)"],
+        start_new_session=True,
+    )
+    try:
+        if not watchdog._wait_for_exit_without_reaping(process, 10.0):
+            raise AssertionError("ordinary child exit was not observed")
+        _assert_leader_is_unreaped(process.pid, waitid_available=False)
+        process.wait()
     finally:
         if process.returncode is None:
             with contextlib.suppress(ProcessLookupError):
@@ -1832,6 +1860,7 @@ def main() -> int:
         test_read_error_cannot_report_capture_complete,
         test_ordinary_exit_kills_survivors_before_drain_settlement,
         test_exit_observation_does_not_reap_the_group_leader,
+        test_unreaped_leader_probe_has_a_darwin_safe_fallback,
         test_darwin_exit_observation_rejects_registration_errors,
         test_internal_failure_cleans_an_exited_unreaped_group,
         test_signal_during_internal_failure_cleanup_cannot_escape,
