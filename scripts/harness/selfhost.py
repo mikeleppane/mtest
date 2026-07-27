@@ -555,9 +555,15 @@ def parse_request(
     reports in the harness's own voice.
 
     The worker value is validated rather than forwarded blind, so a typo
-    (`-n atuo`, `-n 0`) fails here instead of reaching mtest, where a
-    non-positive count silently means `auto` -- exactly the pinned-value bypass
-    a measured policy must not have.
+    (`-n atuo`, `-n 0`) fails here instead of reaching mtest. This is
+    defense in depth, not a repair: mtest's own CLI already rejects a
+    non-positive or non-numeric count before it can reach the internal
+    zero-means-auto sentinel (`parse_worker_count`,
+    `src/mtest/config/value_validation.mojo`), exiting 4 with
+    `'-n'/'--workers' wants a positive integer or 'auto'`. Checking here buys
+    two things only: the harness fails in its own voice without spawning a
+    subprocess, and the same validation covers a worker count arriving from a
+    config file rather than this command line.
 
     Args:
         argv: The command line after the program name.
@@ -696,7 +702,9 @@ def mtest_argv(
         mtest_path: The mtest binary to run.
         native_object: The compiled native test adapter to link into each file.
         roots: Repository-relative roots to hand mtest.
-        workers: The `-n` value. Provisional; a later task pins it.
+        workers: The `-n` value: `auto` or a positive integer, as text. See
+            `DEFAULT_WORKERS` for the pinned policy and why it is not a
+            fixed integer.
         json_path: Where mtest writes its machine event stream. Required rather
             than defaulted: it must be this invocation's own path, and a default
             here would be a fixed name two concurrent runs could share.
