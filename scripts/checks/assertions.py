@@ -407,6 +407,8 @@ def _run_checked(
     )
     termination = captured.termination
     if isinstance(termination, watchdog.Exited):
+        if not captured.capture_complete:
+            raise AssertionError(f"command capture was incomplete: {' '.join(command)}")
         return subprocess.CompletedProcess(
             command,
             termination.code,

@@ -927,6 +927,28 @@ class AssertionPackageCommandTests(unittest.TestCase):
                 timeout=3.0,
             )
 
+    def test_assertion_process_helper_rejects_incomplete_pipe_drain(self) -> None:
+        captured = watchdog.CapturedCommand(
+            watchdog.Exited(0),
+            "",
+            "",
+            capture_complete=False,
+        )
+        with (
+            mock.patch.object(
+                watchdog,
+                "run_captured_command",
+                return_value=captured,
+            ),
+            self.assertRaisesRegex(PackageCheckError, "capture was incomplete"),
+        ):
+            package_consumption._run_assertion_process(
+                ["/prefix/bin/mojo", "build"],
+                cwd=Path("/scratch/probe"),
+                env={},
+                timeout=3.0,
+            )
+
     def test_assertion_process_helper_rejects_truncated_output(self) -> None:
         captured = watchdog.CapturedCommand(
             watchdog.Exited(0),

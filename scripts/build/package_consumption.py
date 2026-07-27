@@ -648,6 +648,10 @@ def _run_assertion_process(
     )
     termination = captured.termination
     if isinstance(termination, watchdog.Exited):
+        if not captured.capture_complete:
+            raise PackageCheckError(
+                "assertion process capture was incomplete: " + " ".join(command)
+            )
         if watchdog.CAPTURE_TRUNCATION_MARKER in captured.stdout + captured.stderr:
             raise PackageCheckError(
                 "assertion process output was truncated: " + " ".join(command)

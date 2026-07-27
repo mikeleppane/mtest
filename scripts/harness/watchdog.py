@@ -110,6 +110,8 @@ class CapturedCommand:
     termination: Termination
     stdout: str
     stderr: str
+    capture_complete: bool = True
+    """Whether both child pipes reached EOF before bounded drain settlement."""
 
 
 class _BoundedTextCapture:
@@ -176,6 +178,7 @@ class MarkerRetention:
         """The last complete matching line, newline included; empty when none."""
         self._lock = threading.Lock()
         self._frozen = False
+        self._capture_complete = True
 
     def record(self, line: str) -> None:
         """Retain one complete marker line unless the capture is already frozen.
@@ -194,6 +197,17 @@ class MarkerRetention:
         """Close the capture so `text` can be read without racing a drainer."""
         with self._lock:
             self._frozen = True
+
+    def mark_capture_incomplete(self) -> None:
+        """Record that at least one child pipe did not reach end of file."""
+        with self._lock:
+            self._capture_complete = False
+
+    @property
+    def capture_complete(self) -> bool:
+        """Whether every child pipe reached end of file before capture closed."""
+        with self._lock:
+            return self._capture_complete
 
 
 class _WatchdogCancellation(BaseException):
@@ -481,6 +495,13 @@ def _seal_drainers(state: _DrainState | None) -> None:
     """
     if state is None:
         return
+    if state.retention is not None and any(
+        thread.is_alive() for thread in state.threads
+    ):
+        # A live drainer at forced settlement means its pipe never reached EOF.
+        # The bounded return is still required, but semantic callers must know
+        # that unseen descendant output may exist and fail closed.
+        state.retention.mark_capture_incomplete()
     state.stop.set()
     # Freeze BEFORE sealing the tees, not after. A drainer already past its
     # stop check reads one more chunk; sealing first means that chunk's bytes
@@ -876,7 +897,12 @@ def run_captured_command(
                 env=env,
                 marker_retention=retention,
             )
-    return CapturedCommand(termination, stdout.finish(), stderr.finish())
+    return CapturedCommand(
+        termination,
+        stdout.finish(),
+        stderr.finish(),
+        capture_complete=retention.capture_complete,
+    )
 
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:

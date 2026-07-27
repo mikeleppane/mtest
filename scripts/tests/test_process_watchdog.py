@@ -1142,6 +1142,30 @@ def test_leaked_descendant_bounds_the_drain_and_seals_the_tee() -> None:
             )
 
 
+def test_captured_command_marks_a_forced_drain_incomplete() -> None:
+    """A leaked pipe holder must make bounded capture fail closed."""
+    with tempfile.TemporaryDirectory(prefix="mtest-watchdog-capture-leak-") as raw_tmp:
+        tmp = Path(raw_tmp)
+        late_seconds = DRAIN_SETTLE_SECONDS + 0.5
+        actor = _leaking_actor(tmp)
+        leader_done = tmp / "leader-done"
+        captured = watchdog.run_captured_command(
+            [PYTHON, str(actor), str(leader_done), str(late_seconds)],
+            source="tests/unit/test_watchdog.mojo",
+            step="run",
+            timeout_seconds=30.0,
+        )
+        if captured.termination != Exited(0):
+            raise AssertionError(
+                f"captured leaking actor returned {captured.termination!r}"
+            )
+        if captured.capture_complete:
+            raise AssertionError("forced drain settlement reported complete capture")
+        # Let the descendant close its inherited pipe before its temporary
+        # source directory is removed.
+        time.sleep(late_seconds - DRAIN_SETTLE_SECONDS + 0.5)
+
+
 def test_a_caller_stream_without_a_byte_buffer_still_receives_the_tee() -> None:
     """A redirected text stream is written to, never silently discarded."""
     with tempfile.TemporaryDirectory(prefix="mtest-watchdog-text-") as raw_tmp:
@@ -1403,6 +1427,7 @@ def main() -> int:
         test_cancellation_wins_when_spawn_then_raises,
         test_flooding_child_is_drained_teed_and_marked,
         test_leaked_descendant_bounds_the_drain_and_seals_the_tee,
+        test_captured_command_marks_a_forced_drain_incomplete,
         test_a_caller_stream_without_a_byte_buffer_still_receives_the_tee,
         test_cancellation_during_the_drain_settle_stays_cancelled,
         test_a_blocked_caller_stream_cannot_swallow_a_caller_signal,

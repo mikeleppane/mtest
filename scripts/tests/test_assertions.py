@@ -156,6 +156,26 @@ class AssertionCommandTests(unittest.TestCase):
                 timeout=5,
             )
 
+    def test_run_checked_rejects_incomplete_pipe_drain(self) -> None:
+        with (
+            mock.patch.object(
+                watchdog,
+                "run_captured_command",
+                return_value=watchdog.CapturedCommand(
+                    watchdog.Exited(0),
+                    "",
+                    "",
+                    capture_complete=False,
+                ),
+            ),
+            self.assertRaisesRegex(AssertionError, "capture was incomplete"),
+        ):
+            assertions._run_checked(
+                ["mojo", "build"],
+                cwd=assertions.REPO_ROOT,
+                timeout=5,
+            )
+
     def test_successful_compile_must_be_warning_free(self) -> None:
         result = subprocess.CompletedProcess(
             args=["mojo", "build"],
