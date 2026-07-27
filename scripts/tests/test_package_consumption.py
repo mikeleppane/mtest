@@ -851,6 +851,40 @@ class AssertionPackageCommandTests(unittest.TestCase):
                 self.assertNotIn("subprocess.run(", source)
                 self.assertEqual(source.count("_run_assertion_process("), count)
 
+    def test_assertion_example_disables_project_configuration(self) -> None:
+        prefix = Path("/prefix")
+        stopped = package_consumption.PackageCheckError("stop after argv capture")
+        with (
+            mock.patch.object(
+                package_consumption,
+                "validate_assertion_install",
+                return_value=prefix / "share/mtest/assertions-src",
+            ),
+            mock.patch.object(
+                package_consumption,
+                "assertion_probe_environment",
+                return_value={"PATH": "/prefix/bin"},
+            ),
+            mock.patch.object(
+                package_consumption,
+                "_run_assertion_process",
+                side_effect=stopped,
+            ) as run,
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaisesRegex(
+                package_consumption.PackageCheckError,
+                "stop after argv capture",
+            ),
+        ):
+            package_consumption.stage_assertion_example(
+                prefix,
+                prefix / "bin/mtest",
+            )
+        self.assertEqual(
+            run.call_args.args[0][:4],
+            ["/prefix/bin/mtest", "--no-config", "--show-output", "failures"],
+        )
+
     def test_assertion_process_helper_delegates_environment_and_timeout(
         self,
     ) -> None:

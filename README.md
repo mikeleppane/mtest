@@ -152,7 +152,7 @@ def main() raises:
 ```
 
 ```console
-$ mtest --show-output failures -I <PREFIX>/share/mtest/assertions-src examples/assertions
+$ mtest --no-config --show-output failures -I <PREFIX>/share/mtest/assertions-src examples/assertions
 mtest 0.6.0 (mojo)
 root: <REPO>   selected: 1 files   excluded: 0
 

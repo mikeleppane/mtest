@@ -49,8 +49,8 @@ toolchain. This script is that proof, with ten ordered completion records:
   8-10. Tarball fallback: build the SAME recipe in the classic tar-bz2
      package format into its own local channel, install it into a second
      scratch env (again pinned to that build's exact build string and verified
-     against its recorded SHA-256), repeat the installed assertion-source and
-     README-example proofs, then run `--version`.
+     against its recorded SHA-256), run `--version`, then repeat the installed
+     assertion-source and README-example proofs.
 
 Both gated platforms run this identical gate: the subdir, the loader-inspection
 command, and the loader environment variables come from one immutable
@@ -1013,6 +1013,7 @@ def stage_assertion_example(
     environment["PATH"] = str(prefix / "bin") + ":/usr/bin:/bin"
     command = [
         str(mtest_bin.resolve()),
+        "--no-config",
         "--show-output",
         "failures",
         "-I",
@@ -1061,7 +1062,7 @@ def stage_assertion_example(
         )
     documented = readme_assertion_example_block(readme)
     actual = (
-        "$ mtest --show-output failures -I "
+        "$ mtest --no-config --show-output failures -I "
         "<PREFIX>/share/mtest/assertions-src examples/assertions\n" + normalized
     )
     normalized_documented = _normalize_assertion_times(documented)
