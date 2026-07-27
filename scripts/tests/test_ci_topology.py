@@ -150,6 +150,16 @@ class CiTopologyTests(unittest.TestCase):
             ci_topology.FORMAT_COMMAND,
         )
 
+    def test_release_state_models_are_owned_by_the_harness_gate(self) -> None:
+        expected = (
+            "scripts.tests.test_release_attestations",
+            "scripts.tests.test_github_release",
+            "scripts.tests.test_community_publication",
+        )
+        for module in expected:
+            with self.subTest(module=module):
+                self.assertIn(module, ci_topology.HARNESS_CHECK_MODULES)
+
     def test_readme_help_gate_removal_is_rejected(self) -> None:
         source = (ci_topology.REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
         mutated = source.replace(
