@@ -124,6 +124,67 @@ class DeclaredSymbolsTests(unittest.TestCase):
             )
             self.assertEqual(abi_probe.declared_symbols(source), {"kill"})
 
+    def test_a_real_declaration_on_a_line_opening_with_a_quote_is_counted(
+        self,
+    ) -> None:
+        """A line may begin with a complete string and still be code.
+
+        The first-character test this replaces read any line whose first
+        non-space character was a quote as fixture data, so a real
+        declaration on the continuation line of a multi-argument call was
+        invisible: the symbol never entered the co-link set, and an arity
+        drift against it built clean and printed OK.
+        """
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            source = Path(raw_tmp) / "test_example.mojo"
+            source.write_text(
+                "def test_reports() raises:\n"
+                "    assert_equal(\n"
+                '        "expected", String(external_call["getpid", Int32]())\n'
+                "    )\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(abi_probe.declared_symbols(source), {"getpid"})
+
+    def test_a_quote_of_the_other_kind_inside_a_literal_opens_nothing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            source = Path(raw_tmp) / "test_example.mojo"
+            source.write_text(
+                "def test_apostrophe() raises:\n"
+                '        "it\'s fine", String(external_call["getppid", Int32]())\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(abi_probe.declared_symbols(source), {"getppid"})
+
+    def test_an_escaped_quote_does_not_close_a_fixture_literal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            source = Path(raw_tmp) / "test_example.mojo"
+            source.write_text(
+                "def test_generates_fixture() raises:\n"
+                "    var fixture = (\n"
+                '        "    var s = \\"x\\" + external_call'
+                '[\\"abort\\", Int32]()\\n"\n'
+                "    )\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(abi_probe.declared_symbols(source), set())
+
+    def test_the_offset_test_agrees_with_an_odd_quote_count(self) -> None:
+        cases = (
+            ('    _ = external_call["sym", Int32]()', False),
+            ("        '    _ = external_call[\"sym\", Int32]()\\n'", True),
+            ('        "expected", String(external_call["sym", Int32]())', False),
+            ('    "one" + "two" + String(external_call["sym", Int32]())', False),
+        )
+        for line, expected in cases:
+            with self.subTest(line=line):
+                column = line.index("external_call[")
+                self.assertEqual(
+                    abi_probe._opens_inside_string_literal(line, column), expected
+                )
+
 
 class ClassifiedSourcesTests(unittest.TestCase):
     def test_empty_search_roots_are_rejected(self) -> None:

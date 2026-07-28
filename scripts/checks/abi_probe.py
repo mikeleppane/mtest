@@ -60,18 +60,21 @@ A declaration is matched over its complete bracketed span
 (`external_call[...]`), not one line: the symbol name legitimately sits on a
 continuation line in this codebase (`external_call[\n    "sym", Int32\n]`),
 and a scan that required the symbol on the same line as `external_call[`
-would silently miss it. A span is counted as a real declaration only if the
-line that OPENS it is not itself string data: several classified suites embed
-generated Mojo source as line-by-line string literals to write out and
+would silently miss it. A span is counted as a real declaration only if no
+quote is still open AT THE OFFSET where it begins: several classified suites
+embed generated Mojo source as line-by-line string literals to write out and
 compile as a throwaway fixture elsewhere (the same pattern
 `asan.py`/`valgrind.py`'s own `CLI_PROBE_SOURCE` uses), and by that same
 convention every physical line of such a fixture is its own quoted literal --
-including the line that would otherwise open a real span -- so checking only
-the opening line is sufficient to exclude the whole fixture span, however
-many lines it happens to spread across. A naive text search over
-`external_call["sym"` matches those lines too, but they are never compiled as
-part of the module that contains them, so co-linking on their account would
-prove nothing. See `_is_string_literal_line` and `_bracket_span`.
+including the line that would otherwise open a real span -- so testing only
+the offset that opens an `external_call[` span is sufficient to exclude the
+whole fixture span, however many lines it happens to spread across. A naive
+text search over `external_call["sym"` matches those lines too, but they are
+never compiled as part of the module that contains them, so co-linking on
+their account would prove nothing. Testing the OFFSET rather than the line's
+first character is what keeps a real declaration that merely follows a
+complete string on its own line visible. See `_opens_inside_string_literal`
+and `_bracket_span`.
 """
 
 from __future__ import annotations
@@ -100,31 +103,78 @@ def require(condition: bool, message: str) -> None:
         raise SystemExit(f"abi-probe-check: {message}")
 
 
-def _is_string_literal_line(line: str) -> bool:
-    """Whether `line` opens (once stripped) with a quote -- string data, not code.
+def _opens_inside_string_literal(line: str, column: int) -> bool:
+    r"""Whether `line[column]` sits inside a quoted literal -- data, not code.
 
-    A real `external_call` invocation's opening line always starts with code:
-    `_ = external_call[...]`, `var x = external_call[...]`, and
-    `return external_call[...]` are the three shapes this project uses, and
-    none of them opens with a quote character. A line that IS one fragment of
-    a hand-built string literal (used elsewhere to write out a throwaway
-    fixture source) opens with the quote that starts or continues the
-    literal -- and, by that same fixture-writing convention, so does every
-    other physical line the fixture spans, which is why checking only the
-    line that opens an `external_call[` span is enough. This is a per-line
-    heuristic, not a parser, and it is only asked to distinguish these two
-    shapes -- it is not a general Mojo string detector.
+    Decided at the MATCH OFFSET, by tracking quotes to its left, rather than
+    from the line's first character. The first-character test this replaces
+    asked whether the line *begins* with a quote, so a real declaration merely
+    PRECEDED on its line by a complete string was read as fixture data and
+    silently dropped from the co-link set:
+
+        "expected", String(external_call["getpid", Int32]()),
+
+    as the continuation line of a multi-argument call begins with a quote and
+    is ordinary code. That is the same defect class as the multi-line span
+    fixed in `746a0d7`, at a different instance: a positional proxy standing
+    in for the property it is meant to test.
+
+    Equivalent to an odd-quote count over `line[:column]`, but scanned rather
+    than counted so it agrees with the language on the two points a raw count
+    gets wrong: a quote of the other kind inside a literal (`"it's"`) opens
+    nothing, and a backslash-escaped quote (`\"`) closes nothing.
+
+    The fixture exclusion this exists for is unchanged. Several classified
+    suites embed generated Mojo source as line-by-line string literals; by
+    that convention each physical line is its own quoted literal, so at the
+    offset where `external_call[` appears exactly one opening quote is still
+    unclosed to its left and the span is excluded, as before.
+
+    This is a lexical test over one line, not a Mojo parser. It does not model
+    triple-quoted strings, which no `external_call` in this tree sits inside;
+    a declaration written inside one would be read as code and co-linked,
+    which fails loudly at build time rather than passing silently.
+
+    Args:
+        line: One complete physical line, without its newline.
+        column: The offset within `line` of the `external_call` match.
+
+    Returns:
+        True when a quote is still open at `column`.
     """
-    return line.strip()[:1] in ("'", '"')
+    quote: str | None = None
+    index = 0
+    limit = min(column, len(line))
+    while index < limit:
+        char = line[index]
+        if quote is not None:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+        elif char in ("'", '"'):
+            quote = char
+        index += 1
+    return quote is not None
 
 
-def _opening_line(text: str, index: int) -> str:
-    """Return the complete physical line of `text` containing offset `index`."""
+def _line_and_column(text: str, index: int) -> tuple[str, int]:
+    """Return the physical line of `text` at `index`, and the offset within it.
+
+    Args:
+        text: The complete file text.
+        index: An offset into `text`.
+
+    Returns:
+        The complete line containing `index`, without its newline, and the
+        zero-based column of `index` within that line.
+    """
     line_start = text.rfind("\n", 0, index) + 1
     line_end = text.find("\n", index)
     if line_end == -1:
         line_end = len(text)
-    return text[line_start:line_end]
+    return text[line_start:line_end], index - line_start
 
 
 def _bracket_span(text: str, open_index: int) -> str:
@@ -165,8 +215,8 @@ def declared_symbols(source: Path) -> set[str]:
     Matches over each occurrence's complete bracketed span rather than one
     line, so a declaration whose symbol sits on a continuation line --
     `external_call[\\n    "sym", Int32\\n](...)`, a real, legitimate shape in
-    this codebase -- is still found. Only the line that OPENS the span is
-    checked for string-literal exclusion; see `_is_string_literal_line`.
+    this codebase -- is still found. Only the offset that OPENS the span is
+    checked for string-literal exclusion; see `_opens_inside_string_literal`.
 
     Args:
         source: A classified `test_*.mojo` module.
@@ -179,7 +229,8 @@ def declared_symbols(source: Path) -> set[str]:
     text = source.read_text(encoding="utf-8")
     symbols: set[str] = set()
     for match in _EXTERNAL_CALL_OPEN_RE.finditer(text):
-        if _is_string_literal_line(_opening_line(text, match.start())):
+        line, column = _line_and_column(text, match.start())
+        if _opens_inside_string_literal(line, column):
             continue
         span = _bracket_span(text, match.end() - 1)
         symbol_match = _SYMBOL_IN_SPAN_RE.search(span)
