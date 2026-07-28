@@ -859,12 +859,17 @@ def _stage_binary(
 ) raises -> StoreBuildTarget:
     """Stage a build target and put `payload` exactly where `-o` would land.
 
+    The staged file is given the execute bit, because that is what `mojo build`
+    leaves at `-o` and what a generation has to carry to be runnable. A probe
+    checks it, so a payload without it would stand in for something the compiler
+    never produces and every publish-then-hit case here would miss.
+
     Args:
         root: The invocation root.
         payload: The bytes standing in for a compiled binary.
 
     Returns:
-        The staging target, with its `bin` already written.
+        The staging target, with its `bin` already written and executable.
 
     Raises:
         Error: If the store could not stage a target.
@@ -873,6 +878,7 @@ def _stage_binary(
     if not target.ok():
         raise Error("test: store_build_target produced no staging directory")
     write_bytes(root, target.out_rel, payload)
+    _make_executable(root + "/" + target.out_rel)
     return target^
 
 
@@ -993,6 +999,35 @@ def test_probe_rejects_corrupted_bin() raises:
     assert_equal(store_probe(root, key).kind, PROBE_MISS)
     # A failed check deletes the generation, so the corruption cannot be re-read
     # on the next probe either.
+    assert_false(isdir(root + "/" + key.gen_dir))
+    assert_equal(store_probe(root, key).kind, PROBE_MISS)
+
+
+def test_probe_rejects_a_bin_that_lost_its_execute_bit() raises:
+    var root = temp_root()
+    var rel = String("tests/test_unrunnable.mojo")
+    var key = _fixture_key(root, rel, "# unrunnable\n")
+    var target = _stage_binary(root, [UInt8(1), UInt8(2), UInt8(3)])
+    assert_equal(
+        store_publish(
+            root, key, target, 1.0, _build_argv(rel, target.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    assert_equal(store_probe(root, key).kind, PROBE_HIT)
+
+    # An archive restore, a `docker COPY`, or a `chmod -R` over the checkout
+    # drops the mode bits while leaving every byte intact, so the content digest
+    # still matches and only the permission has moved.
+    _chmod("600", root + "/" + key.gen_dir + "/bin")
+
+    # A generation that cannot be spawned is not a usable generation. Reporting
+    # it as a hit hands the runner a path it cannot execute, which surfaces as an
+    # internal error on a run that would otherwise have passed.
+    assert_equal(store_probe(root, key).kind, PROBE_MISS)
+    # And it resolves like every other corruption: the generation is deleted, so
+    # the next run rebuilds instead of failing again on the same artifact
+    # forever.
     assert_false(isdir(root + "/" + key.gen_dir))
     assert_equal(store_probe(root, key).kind, PROBE_MISS)
 

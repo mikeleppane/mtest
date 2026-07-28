@@ -115,6 +115,7 @@ from mtest.platform import (
     close_checked_fd,
     create_unique_temp,
     fsync_path,
+    is_executable_file,
     process_id,
     read_bounded_regular_file,
     read_regular_file_bytes,
@@ -1840,15 +1841,20 @@ def store_probe(root: String, key: FileKey) -> ProbeResult:
 
     This is the function where a mistake serves a stale or corrupt binary and
     reports a green run that never happened, so every question resolves toward
-    MISS. A hit has proven all five of:
+    MISS. A hit has proven all six of:
 
     1. The generation path is a real directory — characterized NO-FOLLOW and
        first, because everything after it reads through that path.
     2. `meta` is a regular file that parses completely.
     3. `meta.key_full` equals the WHOLE key, not just the 128 bits its name
        carries.
-    4. `bin` is a readable regular file.
-    5. `bin`'s content digest equals the digest `meta` recorded.
+    4. `bin` can be executed by this process. It is asked before the digest
+       because it is a single `access(2)` against a whole-file read, and because
+       a generation that cannot be spawned is unusable however well its bytes
+       verify — an archive restore, a container `COPY`, or a `chmod -R` over the
+       checkout drops the mode bits while leaving the content untouched.
+    5. `bin` is a readable regular file.
+    6. `bin`'s content digest equals the digest `meta` recorded.
 
     Any failed check deletes the generation, so a corruption cannot be re-read
     on the next probe and the next build republishes cleanly. The one deliberate
@@ -1917,7 +1923,22 @@ def store_probe(root: String, key: FileKey) -> ProbeResult:
         _discard(gen_abs)
         return _probe_miss()
 
-    # --- Checks 4 and 5: the binary is there and is the one recorded. -------
+    # --- Check 4: the binary can actually be spawned. -----------------------
+    var runnable: Bool
+    try:
+        runnable = is_executable_file(gen_abs + "/" + _BIN_NAME)
+    except:
+        # The query itself failed, so executability is unknown — and unknown
+        # resolves to unusable, the same way every other question here does.
+        runnable = False
+    if not runnable:
+        # Deleted like any other corruption, which is what makes this
+        # self-healing: a hit on an unspawnable binary would route the run to an
+        # internal error and re-serve the same artifact on every later run.
+        _discard(gen_abs)
+        return _probe_miss()
+
+    # --- Checks 5 and 6: the binary is there and is the one recorded. -------
     var bin_bytes: List[UInt8]
     try:
         bin_bytes = read_regular_file_bytes(gen_abs + "/" + _BIN_NAME, _BIN_CAP)

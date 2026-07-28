@@ -48,7 +48,7 @@ constant needs no per-target branch.
 """
 
 
-def _is_executable_file(path: String) raises -> Bool:
+def is_executable_file(path: String) raises -> Bool:
     """Whether `path` is a regular file the caller is permitted to execute.
 
     Both halves are needed. `access(X_OK)` alone says yes for a DIRECTORY the
@@ -56,6 +56,11 @@ def _is_executable_file(path: String) raises -> Bool:
     component holding a subdirectory named `mojo` would otherwise resolve as the
     compiler. `isfile` alone says yes for a data file, which `execve` rejects
     with `EACCES` and the supervisor walks straight past.
+
+    Public because it answers a second question too: whether a file mtest is
+    about to hand the supervisor can be spawned at all. The build cache asks it
+    of a stored binary before reporting a hit — a cached artifact that lost its
+    mode bits digests correctly and still cannot run.
 
     Args:
         path: The candidate path; may be relative, in which case it is resolved
@@ -67,6 +72,15 @@ def _is_executable_file(path: String) raises -> Bool:
 
     Raises:
         Error: If the underlying `isfile` query itself fails.
+
+    Examples:
+
+    ```mojo
+    from mtest.platform import is_executable_file
+
+    if not is_executable_file("build/bin/tests_sa"):
+        pass  # nothing here can be spawned
+    ```
     """
     if not isfile(path):
         return False
@@ -111,7 +125,7 @@ def _canonical_if_executable(candidate: String) raises -> Optional[String]:
     Raises:
         Error: If the executability query itself fails.
     """
-    if not _is_executable_file(candidate):
+    if not is_executable_file(candidate):
         return None
     try:
         return Optional(realpath(candidate))

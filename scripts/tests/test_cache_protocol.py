@@ -618,6 +618,43 @@ class PublicationFaultTests(ProtocolScenario):
         self.assertEqual(len(generations(self.root)), 1)
 
 
+class UnrunnableGenerationTests(ProtocolScenario):
+    """A stored binary whose mode bits were dropped, over real processes.
+
+    Every other corruption of a generation changes its bytes, so the digest
+    check catches it and the store heals itself. This one changes only the
+    permission: the content still matches its record exactly, and the only thing
+    that can tell it apart from a usable artifact is asking whether it can be
+    spawned. It is worth a real-process scenario because the symptom lives
+    outside the store — the run reaches the supervisor, cannot execute the path
+    it was handed, and reports an internal error on a suite that passes.
+
+    The realistic sources are all restores: unzipping a CI cache archive, a
+    container image `COPY`, or a `chmod -R` swept over a checkout.
+    """
+
+    def test_a_generation_that_cannot_be_executed_is_rebuilt(self) -> None:
+        self.run_ok(["--json", "cold.ndjson", "tests"])
+        (generation,) = generations(self.root)
+        binary = self.root / STORE_REL / generation / "bin"
+        self.assertEqual(counters(self.root / "cold.ndjson"), (1, 0))
+
+        binary.chmod(0o600)
+
+        # No cache condition may fail a run that would otherwise pass, so this
+        # is a miss and a rebuild — not an internal error over a suite whose
+        # source never changed.
+        completed = self.run_ok(["--json", "restored.ndjson", "tests"])
+        self.assertNotIn("INTERNAL-ERROR", completed.stdout)
+        self.assertEqual(counters(self.root / "restored.ndjson"), (1, 0))
+
+        # And it heals: the rebuilt generation is served on the next run. A
+        # probe that reported the unrunnable artifact as a hit would leave it in
+        # place and fail every later run over the same store, forever.
+        self.run_ok(["--json", "warm.ndjson", "tests"])
+        self.assertEqual(counters(self.root / "warm.ndjson"), (0, 1))
+
+
 class ToolchainIdentityTests(ProtocolScenario):
     """Frame 2 of the key: the compiler's own bytes, not merely its path."""
 
