@@ -38,6 +38,7 @@ from scripts.e2e.runner import (
 from scripts.e2e.runner import ScenarioContext as ScenarioContext  # noqa: PLC0414
 from scripts.e2e.scenarios import annotations as annotations_scenarios
 from scripts.e2e.scenarios import (
+    cache,
     config_file,
     config_show,
     core,
@@ -151,6 +152,7 @@ SCENARIOS: ScenarioRegistry = (
     ("stale-recovery-two-builds", selection.s_stale_recovery_two_builds),
     ("mojo-executable-precedence", selection.s_mojo_executable_precedence),
     ("collect", selection.s_collect),
+    ("cache-cold-then-warm", cache.s_cache_cold_then_warm),
     ("passthrough+forbidden", core.s_passthrough_and_forbidden),
     ("out-of-root", core.s_out_of_root),
     ("internal-error", resilience.s_internal_error),
