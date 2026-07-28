@@ -117,9 +117,28 @@ def _mangle(rel: String) -> String:
 
 
 def _ensure_dir(path: String) raises:
-    """Create `path` and any missing parents; a no-op if it already exists."""
+    """Create `path` and any missing parents; a no-op if it already exists.
+
+    `exist_ok=True` is load-bearing, not belt-and-braces. Two mtest processes
+    over one checkout is ordinary — `--shard` splits a suite across exactly
+    that, and so does a second terminal — and the `exists` test above is not the
+    same instruction as the create below. Both processes can observe `build/bin`
+    absent and then race into `makedirs`, and without `exist_ok` the loser
+    raises. That raise reaches `_build_one_file`'s caller, which reports
+    `internal_error` and exits 3 on a run whose only fault was being second;
+    reproduced on this tree before the flag was added. The `exists` fast path is
+    kept so a NON-directory already sitting at `path` still no-ops here and
+    fails where it always did — at the build that tries to write through it —
+    rather than becoming a new raise.
+
+    Args:
+        path: The directory to create, together with any missing parents.
+
+    Raises:
+        Error: If the directory does not exist and cannot be created.
+    """
     if not exists(path):
-        makedirs(path)
+        makedirs(path, exist_ok=True)
 
 
 def _rmtree(path: String) raises:

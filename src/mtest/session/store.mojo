@@ -73,6 +73,24 @@ symlinked root and unlinks child symlinks rather than descending them. The cache
 deletes only what it owns, and it proves ownership with the `CACHEDIR.TAG`
 marker written at `CACHE_ROOT_DIR` — above the store, because `--cache-clear`
 deletes the whole owned directory and that is what must be proven mtest's.
+
+**The publication fault seam — TEST ONLY.** `store_publish` reads the
+environment variable `MTEST_STORE_FAULT` exactly ONCE per call, through the same
+`_env_value` accessor `MODULAR_HOME` goes through, and what it reads never
+reaches a `KeyBuilder`: the seam is not a key input, not a config field, and not
+part of the tag namespace. Absent or empty — the only shape any real invocation
+has — means no effect at all, and so does any value outside the two names below.
+
+It exists because the two publication windows worth faulting are inside mtest's
+own process, AFTER the compiler child has exited, so no fake compiler can reach
+them. `before-fsync` abandons the publication before step 4, leaving a staging
+directory that was never flushed; `before-rename` abandons it after step 4 and
+before step 5, so the generation is fully durable and simply never committed.
+Both take the ordinary `PUB_FAILED` path — the staged binary stays alive and the
+session keeps running it — so the seam introduces no state and no control flow
+the protocol does not already have. `scripts/tests/test_cache_protocol.py` drives
+both windows and asserts the property they exist to demonstrate: an interrupted
+publication leaves no generation a later run could probe.
 """
 from std.ffi import _Global
 from std.os import getenv, listdir, lstat, mkdir, rmdir, stat, unlink
@@ -1843,6 +1861,69 @@ def _publish_failed(
     )
 
 
+comptime STORE_FAULT_ENV = "MTEST_STORE_FAULT"
+"""The test-only publication fault seam's environment variable.
+
+Read once per `store_publish` call and never fed to a `KeyBuilder`. See the
+module docstring's "The publication fault seam" note for why the seam exists
+and what each recognized value abandons.
+"""
+
+comptime _FAULT_BEFORE_FSYNC = "before-fsync"
+"""Abandon the publication before the durability flush."""
+
+comptime _FAULT_BEFORE_RENAME = "before-rename"
+"""Abandon the publication after the flush and before the commit rename."""
+
+
+def _store_fault() -> String:
+    """The publication fault requested for this call, or the empty string.
+
+    Goes through `_env_value`, the accessor `MODULAR_HOME` already uses, so an
+    unset variable and one set to the empty string reach the same inert answer
+    without inventing a second convention for the same question.
+
+    Returns:
+        The variable's value verbatim, or the empty string when it is unset. An
+        unrecognized value is returned as-is and acts as no fault at all — the
+        seam must never grow a third, unreviewed window by typo.
+    """
+    var requested = _env_value(STORE_FAULT_ENV)
+    if not requested:
+        return String("")
+    return String(requested.value())
+
+
+def _fault_abandoned(
+    target: StoreBuildTarget,
+    argv: List[String],
+    window: String,
+    src_rel: String,
+) -> PublishResult:
+    """The `PUB_FAILED` result one fault window produces.
+
+    Args:
+        target: The staging target, whose binary the caller keeps running.
+        argv: The command line the build ran, returned verbatim.
+        window: The recognized `MTEST_STORE_FAULT` value that fired.
+        src_rel: The source whose publication was abandoned.
+
+    Returns:
+        A `PUB_FAILED` result whose warning names the variable, the window, and
+        the file, so a scenario can tell the two windows apart from outside.
+    """
+    return _publish_failed(
+        target,
+        argv,
+        String(STORE_FAULT_ENV)
+        + "="
+        + window
+        + ": test-only fault abandoned the publication of '"
+        + src_rel
+        + "'",
+    )
+
+
 def _rewrite_output(
     argv: List[String], staged_out: String, final_out: String
 ) -> List[String]:
@@ -1988,6 +2069,11 @@ def store_publish(
             argv.copy(),
             "the cache could not stage a directory for this build",
         )
+    # The test-only fault seam, read ONCE so both windows below answer the same
+    # question — a real fault strikes one publication, not a variable that could
+    # change under it mid-call. Absent, empty, and unrecognized are all inert.
+    # See the module docstring; nothing here reaches a key.
+    var fault = _store_fault()
     var tmp_abs = root + "/" + target.tmp_dir_rel
     var bin_abs = root + "/" + target.out_rel
     var final_bin_rel = key.gen_dir + "/" + _BIN_NAME
@@ -2039,6 +2125,8 @@ def store_publish(
         )
 
     # --- Step 4: durability before the commit. ------------------------------
+    if fault == _FAULT_BEFORE_FSYNC:
+        return _fault_abandoned(target, argv, _FAULT_BEFORE_FSYNC, key.src_rel)
     try:
         fsync_path(bin_abs)
         fsync_path(tmp_abs + "/" + _META_NAME)
@@ -2051,6 +2139,8 @@ def store_publish(
         )
 
     # --- Step 5: the commit. ------------------------------------------------
+    if fault == _FAULT_BEFORE_RENAME:
+        return _fault_abandoned(target, argv, _FAULT_BEFORE_RENAME, key.src_rel)
     try:
         rename_path(tmp_abs, root + "/" + key.gen_dir)
     except:
