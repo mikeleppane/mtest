@@ -826,6 +826,199 @@ malformed selected config is a `FAIL`ed check and exit `1`, not the usage error
 diagnose is useless. Its exit domain is `{0, 1, 2, 4}`, and `WARN` never fails
 the command.
 
+## Build cache
+
+mtest compiles every test file with `mojo build` before it runs it. The build
+cache keeps those binaries under `.mtest-cache/build-v1/` in the invocation
+root, so a file whose compile inputs have not changed is not compiled again. It
+is on by default and needs no configuration.
+
+The summary band reports the split. A cold store builds everything:
+
+```console
+$ pixi run bash -c 'build/mtest --cache-clear e2e/matrix'
+mtest 0.6.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
+
+PASS           e2e/matrix/test_alpha.mojo      0.02s
+PASS           e2e/matrix/test_beta.mojo       0.02s
+
+===== 5 passed, 0 failed, 0 skipped, builds: 2, cached: 0 (0 excluded, 0 not run) in 1.6s =====
+```
+
+Run it again over the same tree and nothing is compiled:
+
+```console
+$ pixi run bash -c 'build/mtest e2e/matrix'
+mtest 0.6.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
+
+PASS           e2e/matrix/test_alpha.mojo      0.02s
+PASS           e2e/matrix/test_beta.mojo       0.02s
+
+===== 5 passed, 0 failed, 0 skipped, builds: 0, cached: 2 (0 excluded, 0 not run) in 0.8s =====
+```
+
+`builds` counts files compiled for the first time this run — compile failures
+included, because a file that failed to compile was still built. `cached` counts
+files served from the store. Retries, `collect` probes, and precompile steps
+never touch either. Their sum is the run's first-attempt compile count, so
+`builds: 0, cached: N` is the only shape that means nothing was compiled. The
+pair appears on the band only when the run admitted at least one compile, and
+the same two numbers are `built_files` and `cached_files` on the `--json`
+stream's `session_finished` record.
+
+Read the counters, not the clock. Both runs above finish in about a second
+because the files are tiny and `mojo` keeps a module cache of its own; the
+counters are what tell you whether a compile happened.
+
+### What invalidates an entry
+
+Each cached binary is keyed by a digest over everything that could change the
+bytes the compiler produces:
+
+- the resolved `mojo` executable — its canonical path, its contents, and its
+  `--version` output — plus the `.mojopkg` and `.mojoc` files in its library
+  directory, so a toolchain upgrade rebuilds everything;
+- `MODULAR_HOME` and `MODULAR_CACHE_DIR`;
+- the canonicalized invocation root;
+- the build arguments, with any file or `-I` directory they name resolved and
+  digested;
+- the walked contents of every include root — every `*.mojo`, `*.🔥`,
+  `*.mojopkg`, and `*.mojoc` an `-I` makes visible, recursing into
+  subdirectories that carry an `__init__`, and nothing else, so a README or a
+  lockfile changing under an include root does not evict anything;
+- the test file itself.
+
+Files enter the key by **content**, never by modification time, so a `touch`, a
+`git checkout` that rewrites a file with the same bytes, or a branch switch and
+back all still hit. Settings that cannot change a compiled byte — timeouts,
+workers, retries, selection, reporters — are not in the key and never
+invalidate anything. The invocation root is in the key, though, so moving or
+renaming the checkout invalidates everything in it.
+
+There is no import-graph analysis. One edit under an `-I` root invalidates every
+file keyed over that root, which over-rebuilds on purpose: the alternative is
+guessing which files an edit reached, and a wrong guess there is a stale binary.
+
+Configured `precompile` steps are keyed separately, against their own sources
+and include roots, so an unchanged step is skipped rather than re-run. A step
+that does run rewrites its package, which moves the key every test file in the
+session is built from — so skipping unchanged steps is also what lets the file
+cache hit at all in a project that precompiles anything.
+
+### When it turns itself off
+
+Anything the key cannot fully characterize switches the cache off for the whole
+session rather than risk a wrong hit. You get one `cache-off` warning naming the
+first cause, and the run proceeds normally, compiling everything:
+
+```console
+$ pixi run bash -c 'build/mtest --build-arg --target-cpu --build-arg x86-64-v3 e2e/matrix'
+mtest 0.6.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
+
+WARNING  cache-off: unrecognized build argument '--target-cpu'
+PASS           e2e/matrix/test_alpha.mojo      0.02s
+PASS           e2e/matrix/test_beta.mojo       0.02s
+
+===== 5 passed, 0 failed, 0 skipped, builds: 2, cached: 0 (0 excluded, 0 not run) in 3.6s =====
+```
+
+The common causes are a build argument mtest's grammar does not recognize (as
+above — an unknown flag might change what gets built in a way the key cannot
+see), a `mojo` that will not resolve, and an include tree that cannot be walked:
+a file over the size cap, a directory that cannot be listed, or a package
+directory hiding behind a symlink. `collect` has no reporter to warn through and
+reports the same condition as a `collect: cache-off: ...` line on stderr.
+
+No cache condition ever fails a run that would otherwise pass, and none of them
+changes a verdict.
+
+### The two flags
+
+`--no-cache` neither reads nor writes the store. Its gate sits ahead of any
+staging, so the run creates neither `build-v1/` nor the ownership marker and
+leaves nothing a later run could trust; it also emits no `cache-off` warning,
+because you asked for it. This is how you get a measurement with the store out
+of the picture:
+
+```console
+$ pixi run bash -c 'build/mtest --no-cache e2e/matrix'
+mtest 0.6.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
+
+PASS           e2e/matrix/test_alpha.mojo      0.02s
+PASS           e2e/matrix/test_beta.mojo       0.02s
+
+===== 5 passed, 0 failed, 0 skipped, builds: 2, cached: 0 (0 excluded, 0 not run) in 0.8s =====
+```
+
+`--cache-clear` deletes `.mtest-cache` — the cached binaries and the last-run
+state together — and *then* runs, so the session that clears the store also
+repopulates it. Both flags are CLI-only and are never read from `mtest.toml`.
+
+Deletion is guarded, because `.mtest-cache` is a path anything could be sitting
+at. mtest writes a `CACHEDIR.TAG` marker when it creates the store, and
+`--cache-clear` refuses whatever it cannot prove is that store — a symlink, or a
+directory with no marker — as a pre-run usage error, exit `4`, with the tree
+untouched:
+
+```console
+$ mtest --cache-clear tests
+cache-clear: /tmp/demo/.mtest-cache: refusing to delete a symlink — mtest deletes only the cache directory it created, and following this link would delete whatever it points at; remove or repoint the link yourself, then rerun
+$ echo $?
+4
+```
+
+There is deliberately no "but its contents look like ours" override: that
+heuristic is exactly how a directory somebody else created gets deleted. The
+diagnostic always hands over the manual `rm -rf`, and the refusal is one-shot —
+a single run with the cache enabled writes the marker. Note that the marker is
+written when the *store* is created, so a project whose runs have all used
+`--no-cache`, or have all hit a `cache-off` condition, has a `.mtest-cache/`
+holding only `lastrun` and no marker; `--cache-clear` refuses that too, until
+one cached run has happened. Nothing under `build/` is ever deleted.
+
+### The store is yours to throw away
+
+```text
+.mtest-cache/
+├── CACHEDIR.TAG                                       # ownership marker
+├── lastrun                                            # --lf/--ff state
+└── build-v1/
+    ├── e2e_smatrix_stest_ualpha_h8a5ff16933785.../
+    │   ├── bin                                        # the cached binary
+    │   └── meta                                       # the key it was built for
+    └── e2e_smatrix_stest_ubeta_hfb59d7660a4b3.../
+        ├── bin
+        └── meta
+```
+
+`CACHEDIR.TAG` carries the standard cachedir signature, so backup and archiving
+tools that honor the convention skip the directory. The store is per-checkout,
+is never shared between machines, and belongs in `.gitignore` — the same
+`.mtest-cache/` line that covers the last-run state covers it. Deleting it by
+hand at any moment is safe; the next run is simply cold.
+
+A build compiles into a private staging directory beside its final home, and is
+published with a single `rename(2)` once its bytes are on disk, so an
+interrupted run never leaves a half-written entry for a later run to trust. Two
+runs racing for one key is not an error either: the loser revalidates the
+winner's entry and adopts it.
+
+### It is never authoritative
+
+Before a stored binary is run, the store re-checks that its directory is a real
+directory and not a symlink, that its record parses, that the record names the
+*whole* key and not just the half the directory name carries, and that the
+binary on disk still digests to what the record says. Any check that fails
+deletes the entry, and the file is rebuilt.
+
+That is the shape of every decision here. A key that errs in the conservative
+direction costs one rebuild; there is no direction in which it costs a wrong
+verdict.
+
 ## CLI reference
 
 This section is generated against `build/mtest --help` and is not allowed to
@@ -1107,20 +1300,14 @@ Facts about this build worth knowing before you rely on it:
 - **`config show` output is for humans.** It is valid, copy-pasteable TOML,
   but its layout and its `# (source)` comments are informal and may change; a
   machine-readable configuration format is reserved, not shipped.
-- **The build cache is local, conservative, and never authoritative.** Built
-  binaries persist under `.mtest-cache/build-v1/`, so a rerun over an unchanged
-  tree compiles nothing and the summary band reports `builds: 0, cached: N`.
-  A file's key covers the resolved compiler and its standard library, the build
-  arguments, every walked `-I` tree, and the file's own bytes — content, not
-  timestamps, so a `touch` or a branch switch that restores identical text
-  rebuilds nothing. There is no import graph in it: one edit under an `-I` root
-  rebuilds every selected file, which over-rebuilds by design. The store is
-  per-checkout and is never shared between machines. Every hit re-verifies the
-  binary against the digest recorded with it, and any doubt at all — an
-  unclassifiable build argument, an include tree that cannot be walked, a store
-  that cannot be created — turns the cache off for that session with one
-  warning and builds normally. `--no-cache` neither reads nor writes it;
-  `--cache-clear` deletes `.mtest-cache` and then runs cold.
+- **The build cache has no import graph, and no reach past this checkout.** One
+  edit under an `-I` root invalidates every file keyed over that root, so a
+  one-line change to a shared library rebuilds the whole selection — deliberate
+  over-rebuilding, since the alternative is guessing which files an edit
+  reached. The store is per-checkout: there is no spelling that moves it
+  elsewhere, and it is never shared between machines or between two clones on
+  one machine. Anything it cannot characterize turns it off for the session
+  rather than guessing. [Build cache](#build-cache) has the whole picture.
 - **Last-run state is one file, last writer wins.** Two sessions running
   concurrently in one invocation root both write it, and the one that finishes
   last is the state the next `--lf` reads. A write failure is one stderr
