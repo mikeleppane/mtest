@@ -235,8 +235,8 @@ def precompile_out_path(src: String, out_name: Optional[String]) -> String:
         src: The source the step precompiles, root-relative or absolute as
             configured.
         out_name: The `:OUT` value if the step named one; `None` for the
-            default. Spelled `out_name` rather than the plan's `out`, which the
-            pinned compiler reads as an argument convention, not a name.
+            default. Spelled `out_name` rather than `out`, which the pinned
+            compiler reads as an argument convention, not a name.
 
     Returns:
         The output package's path, exactly as the compiler's `-o` receives it —

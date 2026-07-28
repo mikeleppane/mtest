@@ -3,7 +3,7 @@
 
 `scripts/build/production_build.sh`'s `stage_precompile` runs `mojo
 precompile` twice (the vendored TOML parser, then `src/mtest`) to produce
-`build/toml.mojopkg` and `build/mtest.mojopkg`. Task 14 established that
+`build/toml.mojopkg` and `build/mtest.mojopkg`. The cache work established that
 `mojo precompile` is NOT byte-reproducible on this toolchain -- two identical
 inputs measured at `43fcef41...` and `eb81d1f7...` on this branch -- which
 means a naive re-run of this stage rewrites both packages, with different
@@ -27,8 +27,8 @@ two different `build/mtest.mojopkg`s. It goes green once the second run
 SKIPS the stage -- the bytes become identical because the second run never
 touches the file, not because the compiler became deterministic.
 
-`test_toolchain_change_forces_rebuild` pins the fix from Task 16's review
-round 1: the input digest also covers `mojo --version` and `pixi.lock`'s
+`test_toolchain_change_forces_rebuild` pins toolchain identity: the input
+digest also covers `mojo --version` and `pixi.lock`'s
 bytes, so a toolchain swap invalidates a stamp that no tracked source file's
 content would otherwise touch -- the same hazard Layer 1's file cache already
 guards against by digesting the compiler binary's own content into every key.
@@ -357,7 +357,7 @@ class BuildStampTests(unittest.TestCase):
     def test_double_build_leaves_identical_package_bytes(self) -> None:
         """Two back-to-back builds must leave `build/mtest.mojopkg` untouched.
 
-        The nondeterminism proof from Task 14 means the only way the bytes
+        Package output is not byte-reproducible, so the only way the bytes
         can match across two builds is if the second run skipped entirely.
         """
         require_mojo()
@@ -457,10 +457,9 @@ class BuildStampTests(unittest.TestCase):
 
         Every tracked source file, the script, and the stage commands are
         byte-identical between the two runs; only the toolchain identity
-        the second run observes differs. Review round 1's finding: without
-        this, an upgraded (or relocked) `mojo` would report a stamp match
-        and `pixi run build` would ship a `.mojopkg` compiled by the OLD
-        compiler.
+        the second run observes differs. Without the toolchain in the digest,
+        an upgraded (or relocked) `mojo` would report a stamp match and
+        `pixi run build` would ship a `.mojopkg` compiled by the OLD compiler.
         """
         require_mojo()
         sandbox = sandbox_tree()
