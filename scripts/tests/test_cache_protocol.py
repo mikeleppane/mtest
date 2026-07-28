@@ -45,6 +45,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 from typing import ClassVar, override
 import unittest
@@ -492,6 +493,14 @@ class ConcurrencyTests(ProtocolScenario):
             # question, not a protocol one. What the protocol owes is that the
             # file is admitted exactly once, from exactly one source.
             self.assertEqual((name, built + cached), (name, 1))
+            # ...and that BOTH sources were the cache. A loser that hit a
+            # contended store and quietly degraded to an uncached build would
+            # satisfy the sum above with `built = 1` and look identical to a
+            # winner, so the sum alone cannot tell a race the protocol handled
+            # from one it gave up on. Losing a rename is not a malfunction and
+            # must never spend the session's cache.
+            off = warnings_of(self.stream(name), "cache-off")
+            self.assertEqual((name, off), (name, []))
         # The survivor is not merely present: it validates, key and binary
         # digest both, or this third run would rebuild instead of hitting.
         self.run_ok(["--json", "three.ndjson", "tests"])
@@ -578,6 +587,21 @@ class PublicationFaultTests(ProtocolScenario):
         self.run_ok(["--json", "warm.ndjson", "tests"])
         self.assertEqual(counters(self.root / "warm.ndjson"), (0, 1))
 
+    # The two cases below deliberately assert the SAME properties, and no
+    # assertion here can tell them apart. That is a fact about the protocol, not
+    # a gap in the coverage: both windows abandon the staging directory before
+    # the one `rename(2)` that would publish anything, so from outside the
+    # process the two are the same event — no generation, one warning naming the
+    # window, a clean rebuild afterwards. The only difference is whether the
+    # durability flush had already run, and a flush leaves no trace in a
+    # directory that is then discarded. Distinguishing them from here would take
+    # an assertion about mtest's internal call order dressed up as a filesystem
+    # claim, which would pin the implementation rather than the guarantee.
+    #
+    # What the pair still buys: each window is REACHED. A seam that stopped
+    # honoring one of the two values would leave that case with a published
+    # generation and no warning, and it goes red on its own.
+
     def test_fault_before_rename_leaves_no_generation(self) -> None:
         self._assert_abandoned("before-rename")
 
@@ -661,6 +685,60 @@ class IncludeRootTests(ProtocolScenario):
         self.assertFalse((self.root / TAG_REL).exists())
 
 
+@unittest.skipUnless(
+    sys.platform == "darwin",
+    "case-insensitive path resolution is a macOS filesystem property",
+)
+class CaseFoldTests(ProtocolScenario):
+    """One file reachable by two spellings must not make the cache flap.
+
+    macOS volumes are case-insensitive by default, so `tests/test_alpha.mojo`
+    and `tests/TEST_ALPHA.mojo` open the same inode while remaining two
+    different strings. The key frames the test file by its root-relative path as
+    given, and the artifact directory is named from that same path, so the two
+    spellings are two keys over identical bytes.
+
+    That is fine as long as they stay independent. The failure this guards is
+    the alternating one: if either spelling's publication reaped or overwrote
+    the other's artifact, a developer whose editor, shell completion, and build
+    script disagreed about the case of one path would see every run rebuild what
+    the previous run had just cached, forever, with no warning and no way to
+    tell the cache was doing anything at all.
+    """
+
+    def test_a_case_variant_operand_does_not_flap(self) -> None:
+        lower = "tests/test_alpha.mojo"
+        upper = "tests/TEST_ALPHA.mojo"
+        if not (self.root / upper).is_file():
+            self.skipTest(
+                "this volume resolves paths case-sensitively, so the two "
+                "spellings are genuinely two files and there is no alias to test"
+            )
+
+        self.run_ok(["--json", "cold.ndjson", lower])
+        self.assertEqual(counters(self.root / "cold.ndjson"), (1, 0))
+        self.run_ok(["--json", "warm.ndjson", lower])
+        self.assertEqual(counters(self.root / "warm.ndjson"), (0, 1))
+
+        # The other spelling may build or may hit -- which one depends on how
+        # the key frames the path, and that is not what this pins.
+        self.run_ok(["--json", "other-first.ndjson", upper])
+        self.run_ok(["--json", "other-second.ndjson", upper])
+        self.assertEqual(counters(self.root / "other-second.ndjson"), (0, 1))
+
+        # The claim: the second spelling settling did not cost the first
+        # spelling the artifact it had already published.
+        self.run_ok(["--json", "back.ndjson", lower])
+        self.assertEqual(
+            counters(self.root / "back.ndjson"),
+            (0, 1),
+            msg=f"generations={generations(self.root)}",
+        )
+        # And the store did not grow past one live artifact per spelling: the
+        # superseded-sibling sweep still runs, it just does not cross spellings.
+        self.assertLessEqual(len(generations(self.root)), 2)
+
+
 class NoCacheTests(ProtocolScenario):
     """`--no-cache` end to end, over a real command line.
 
@@ -701,6 +779,53 @@ class NoCacheTests(ProtocolScenario):
         # And the counters agree with the filesystem — both files went to the
         # compiler even though a valid generation for each was sitting there.
         self.assertEqual(counters(self.root / "off.ndjson"), (2, 0))
+
+
+class CollectOnlyTests(ProtocolScenario):
+    """`--collect-only` reaches the store through the same seam a run does.
+
+    Collect builds every discovered file and probes it for its test names,
+    running no test body. It takes its own branch out of `src/main.mojo` — it
+    never reaches `run_session` and therefore emits no event stream and no
+    counters — so nothing inside a session can observe what it did with the
+    store. Its only witness is the store itself, which is why this scenario
+    lives here.
+
+    A collect that neither probed nor published would still print the right
+    listing and pass every other gate in this repository, while making the
+    listing cost a full cold compile of the suite every time an editor asked for
+    it.
+    """
+
+    file_names: ClassVar[tuple[str, ...]] = ("alpha", "beta")
+
+    def test_collect_only_publishes_and_then_serves(self) -> None:
+        listing = self.run_ok(["--collect-only", "tests"])
+        self.assertEqual(
+            listing.stdout.splitlines(),
+            [
+                "tests/test_alpha.mojo::test_alpha",
+                "tests/test_beta.mojo::test_beta",
+            ],
+        )
+        # PUBLISHES: the store and its ownership marker exist only as a side
+        # effect of staging a build into them, so a collect that built
+        # invocation-private would leave neither.
+        self.assertEqual(len(generations(self.root)), 2)
+        self.assertTrue((self.root / TAG_REL).is_file(), msg="marker missing")
+        before = store_identities(self.root)
+
+        # PROBES: a second collect that missed would stage into the store and
+        # publish again, moving at least one inode or mtime. Not one artifact
+        # was rewritten, so both files came back off the disk.
+        again = self.run_ok(["--collect-only", "tests"])
+        self.assertEqual(again.stdout, listing.stdout)
+        self.assertEqual(store_identities(self.root), before)
+
+        # And what collect published is not a private dialect: an ordinary run
+        # serves both files out of it without compiling anything.
+        self.run_ok(["--json", "run.ndjson", "tests"])
+        self.assertEqual(counters(self.root / "run.ndjson"), (0, 2))
 
 
 class CacheClearTests(ProtocolScenario):
@@ -749,6 +874,36 @@ class CacheClearTests(ProtocolScenario):
         self.assertEqual(cached, 0)
         self.assertGreater(built, 0)
         self.assertEqual(len(generations(self.root)), 2)
+
+    def test_a_bare_cache_clear_clears_and_then_runs_cold(self) -> None:
+        # Every other clear scenario pairs the flag with something -- `--no-cache`
+        # to keep the deletion observable, `--lf` to reach the warning -- so the
+        # spelling a user actually reaches for is the one shape nothing drove.
+        # It is also the shape whose two halves look like each other's absence:
+        # the flag clears the store and THEN runs the session, which legitimately
+        # fills it straight back up, so "the store is populated afterwards" is
+        # the expected end state of both a working clear and a clear that did
+        # nothing at all.
+        self._populate()
+        before = store_identities(self.root)
+        before_names = generations(self.root)
+
+        self.run_ok(["--cache-clear", "--json", "after.ndjson", "tests"])
+
+        # The deletion, witnessed by the run's own accounting: two valid
+        # generations were sitting there and neither could be served.
+        self.assertEqual(counters(self.root / "after.ndjson"), (2, 0))
+        # The repopulation, witnessed by identity rather than by presence. Same
+        # inputs mean the same keys, so the names come back identical -- but
+        # every generation is a directory that was created after the deletion,
+        # so not one of them can be the object that was there before.
+        self.assertEqual(generations(self.root), before_names)
+        after = store_identities(self.root)
+        self.assertEqual(sorted(after), sorted(before), msg="store membership")
+        for name in before_names:
+            key = f"{STORE_REL}/{name}"
+            self.assertNotEqual(after[key], before[key], msg=key)
+        self.assertTrue((self.root / TAG_REL).is_file(), msg="marker missing")
 
     def test_an_unmarked_cache_directory_is_refused_intact(self) -> None:
         cache_root = self.root / CACHE_ROOT_REL

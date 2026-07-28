@@ -27,7 +27,7 @@ going through `run_recording_session`, which deliberately flattens the stream
 away.
 """
 from std.ffi import external_call
-from std.os import getenv, remove
+from std.os import getenv, makedirs, remove
 from std.os.path import exists, isdir, islink
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
@@ -35,6 +35,7 @@ from mtest.config import (
     CliOverlay,
     ConfigEnvironment,
     FileConfig,
+    Precompile,
     ResolvedConfig,
     RunnerConfig,
     resolve_config,
@@ -53,15 +54,17 @@ from mtest.report import (
     RecordingCoordinator,
     RecordingReporter,
 )
+from mtest.platform import read_regular_file_bytes
 from mtest.platform.cstring import c_string_bytes
 from mtest.session import run_session
-from mtest.session.store import clear_cache_root
+from mtest.session.store import PRECOMPILE_SUBDIR, clear_cache_root
 
 from cache_fixtures import dir_listing, run_recording_session
 from session_fixtures import (
     SRC_CHAMELEON,
     SRC_COMPILE_ERROR,
     SRC_CRASH,
+    SRC_MATRIX,
     SRC_PASS,
     base_config,
     write_file,
@@ -1102,6 +1105,358 @@ def test_cache_clear_warns_when_lf_lost_its_state() raises:
     assert_false(
         _saw_warning_kind(quiet.composite.reporters[0], "cache-clear"),
         "a plain --lf run must not gain a warning it never had",
+    )
+
+
+comptime _SRC_SUPPORT = "fn shared_constant() -> Int:\n    return 1\n"
+"""A support module that lives under an include root and nothing imports.
+
+The key walks every `-I` root whether or not the compiler resolves anything out
+of it, which is the conservative half of the invalidation rule: mtest cannot
+know which file the compiler would have read, so a change to any of them
+invalidates everything. A fixture that imported this would test the compiler's
+resolution instead of the walk's.
+"""
+
+
+def test_editing_a_walked_support_file_rebuilds_every_file() raises:
+    """A change under an include root invalidates every file, not just readers.
+
+    The include walk is the conservative frame of the key: `mojo build` emits no
+    dependency information, so mtest cannot know which walked file a given
+    compile actually consumed. Every file therefore keys over the whole walked
+    closure, and one edit inside it must take the entire selection back to the
+    compiler. Over-rebuilding here is the intended price; a file served from the
+    store after its support tree moved would be the failure this forbids.
+    """
+    var root = temp_root()
+    write_file(root, "lib/shared.mojo", _SRC_SUPPORT)
+    write_file(root, "tests/test_a.mojo", SRC_PASS)
+    write_file(root, "tests/test_b.mojo", SRC_PASS)
+    var config = base_config()
+    config.include_paths = ["lib"]
+
+    var cold = run_recording_session(config.copy(), root)
+    assert_equal(cold.code, 0, "the cold run must pass")
+    assert_equal(cold.built_files, 2, "the cold run compiles both files")
+
+    var warm = run_recording_session(config.copy(), root)
+    assert_equal(warm.cached_files, 2, "both files are served from the store")
+    assert_equal(warm.built_files, 0, "the warm run compiles nothing")
+
+    write_file(
+        root, "lib/shared.mojo", "fn shared_constant() -> Int:\n    return 2\n"
+    )
+    var edited = run_recording_session(config.copy(), root)
+    assert_equal(edited.code, 0, "an edited support file must not fail the run")
+    assert_equal(
+        edited.built_files,
+        2,
+        (
+            "a walked support file changed, so every file's key moved; serving"
+            " either of them from the store would be serving a stale binary"
+        ),
+    )
+    assert_equal(edited.cached_files, 0, "no pre-edit generation may be served")
+    # The superseded generations are reaped as their replacements publish, so
+    # the store stays one generation per file rather than one per edit.
+    assert_equal(
+        len(dir_listing(root + "/" + _STORE_DIR)),
+        2,
+        "the store must hold one live generation per file",
+    )
+
+    var settled = run_recording_session(config^, root)
+    assert_equal(
+        settled.cached_files, 2, "the post-edit generations must serve in turn"
+    )
+    assert_equal(settled.built_files, 0, "a settled tree compiles nothing")
+
+
+def test_editing_one_test_file_rebuilds_only_that_file() raises:
+    """A test file outside every include root keys only itself.
+
+    The counterpart to the walk's deliberate over-rebuilding: a file the walk
+    cannot see contributes to no other file's key, so editing it costs exactly
+    one compile. A key that reached wider — hashing the selection, the discovery
+    root, or a sibling's bytes — would still pass every warm-run case in this
+    module while making an ordinary one-line edit rebuild the whole suite.
+    """
+    var root = temp_root()
+    write_file(root, "tests/test_a.mojo", SRC_PASS)
+    write_file(root, "tests/test_b.mojo", SRC_PASS)
+    var config = base_config()
+
+    var cold = run_recording_session(config.copy(), root)
+    assert_equal(cold.built_files, 2, "the cold run compiles both files")
+    var warm = run_recording_session(config.copy(), root)
+    assert_equal(warm.cached_files, 2, "both files are served from the store")
+
+    # `SRC_MATRIX` is a different suite body, so the file's bytes really change;
+    # rewriting it with its own content would be the mtime case, not this one.
+    write_file(root, "tests/test_a.mojo", SRC_MATRIX)
+    var edited = run_recording_session(config^, root)
+    assert_equal(edited.code, 0, "both files still pass")
+    assert_equal(edited.built_files, 1, "exactly the edited file recompiles")
+    assert_equal(
+        edited.cached_files,
+        1,
+        "the untouched file's key did not move, so it must still be served",
+    )
+
+
+def test_a_content_identical_rewrite_rebuilds_nothing() raises:
+    """A file rewritten with its own bytes is not a change, and is not rebuilt.
+
+    Modification times are deliberately absent from the key. Every git checkout,
+    stash, rebase, and editor save-without-edit moves them, and a cache keyed on
+    them would miss on every one of those while still missing the case that
+    matters — a file whose content changed inside one timestamp granule. The key
+    reads content, so rewriting a file with exactly what it already held is
+    invisible to it, and this pins that as the feature it is rather than an
+    accident of what the walk happens to digest.
+    """
+    var root = temp_root()
+    write_file(root, "tests/test_ok.mojo", SRC_PASS)
+    var config = base_config()
+
+    var cold = run_recording_session(config.copy(), root)
+    assert_equal(cold.built_files, 1, "the cold run compiles the one file")
+    var generations = dir_listing(root + "/" + _STORE_DIR)
+    assert_equal(len(generations), 1, "the cold run publishes one generation")
+
+    # Written again, byte for byte. The file is created afresh, so its
+    # modification time moves and its inode may too.
+    write_file(root, "tests/test_ok.mojo", SRC_PASS)
+
+    var touched = run_recording_session(config^, root)
+    assert_equal(touched.code, 0, "the run must pass on the cached binary")
+    assert_equal(
+        touched.cached_files,
+        1,
+        "a rewrite that changed no byte must still be served from the store",
+    )
+    assert_equal(touched.built_files, 0, "nothing may be recompiled")
+    var after = dir_listing(root + "/" + _STORE_DIR)
+    assert_equal(len(after), 1, "a run that compiled nothing published nothing")
+    assert_equal(
+        after[0],
+        generations[0],
+        "the key moved: the generation the cold run published was superseded",
+    )
+
+
+def test_a_compile_irrelevant_setting_change_still_hits() raises:
+    """Settings that cannot change a binary's bytes must not move the key.
+
+    The key never digests the configuration file. Every compile-affecting
+    setting reaches it through its EFFECT instead — the compiler through the
+    toolchain identity, includes through the walked roots, build arguments
+    through the classified argument list — so the settings that reach no compile
+    at all reach no key either. Digesting the configuration wholesale would be
+    the easy implementation and would rebuild the entire suite the first time
+    anyone raised a timeout or asked for a duration ranking.
+    """
+    var root = temp_root()
+    write_file(root, "tests/test_ok.mojo", SRC_PASS)
+    var config = base_config()
+
+    var cold = run_recording_session(config.copy(), root)
+    assert_equal(cold.built_files, 1, "the cold run compiles the one file")
+    var generations = dir_listing(root + "/" + _STORE_DIR)
+    assert_equal(len(generations), 1, "the cold run publishes one generation")
+
+    # A run deadline, a duration ranking, and a retry budget: three settings a
+    # project changes routinely, none of which reaches `mojo build` at all.
+    var retuned = base_config()
+    retuned.timeout_secs = config.timeout_secs + 5
+    retuned.durations = 5
+    retuned.retries = 2
+
+    var warm = run_recording_session(retuned^, root)
+    assert_equal(warm.code, 0, "the retuned run must pass")
+    assert_equal(
+        warm.cached_files,
+        1,
+        (
+            "a setting that cannot change a compiled byte moved the key; the"
+            " key must reflect compile inputs, never configuration text"
+        ),
+    )
+    assert_equal(warm.built_files, 0, "nothing may be recompiled")
+    var after = dir_listing(root + "/" + _STORE_DIR)
+    assert_equal(len(after), 1, "a run that compiled nothing published nothing")
+    assert_equal(
+        after[0],
+        generations[0],
+        "the retuned run published a second generation for the same inputs",
+    )
+
+
+def test_pool_run_retry_neither_counts_nor_publishes() raises:
+    """A pooled crash-class retry stays out of both the counters and the store.
+
+    The pool is the third seam, and the only one where a file's build and its
+    run are separate dispatches through a persistent phase machine: a retry
+    re-enters that machine at the run phase for a file whose build already
+    published. A guard written against the phase rather than against the attempt
+    index would fire again here, counting a second admission for a file that
+    reached the compiler once and writing a retry's binary into a store other
+    runs read.
+
+    The retry is asserted rather than assumed, because every counter claim below
+    is equally true of a file that never retried at all.
+    """
+    var root = temp_root()
+    write_file(root, "tests/test_boom.mojo", SRC_CRASH)
+    write_file(root, "tests/test_ok.mojo", SRC_PASS)
+    var config = base_config()
+    config.workers = 2
+    config.retries = 1
+
+    var comp = _recorder()
+    var code = run_session(config.copy(), root, comp)
+    assert_equal(code, 1, "a signalled binary is a CRASH, exit 1")
+    ref rec = comp.composite.reporters[0]
+
+    var retries_seen = 0
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.ATTEMPT_FINISHED:
+            ref ap = rec.event_at(i).data[AttemptFinishedPayload]
+            retries_seen += 1
+            assert_equal(ap.step, "run", "the retried step must be the RUN")
+            assert_equal(
+                ap.attempt_index, 1, "the retried attempt is the first"
+            )
+    assert_equal(retries_seen, 1, "exactly one attempt was retried")
+
+    var counters = _counters(rec)
+    assert_equal(counters.built_files, 2, "each file is admitted exactly once")
+    assert_equal(counters.cached_files, 0, "no hit was possible on a cold tree")
+    var entries = dir_listing(root + "/" + _STORE_DIR)
+    assert_equal(
+        len(entries),
+        2,
+        (
+            "the store must hold one generation per file; the retry publishes"
+            " nothing and stages nothing of its own"
+        ),
+    )
+
+    # What the store holds is the FIRST attempt's work, and it validates: a
+    # warm run serves both files rather than rebuilding either.
+    var warm = run_recording_session(config^, root)
+    assert_equal(warm.code, 1, "the cached binary still crashes")
+    assert_equal(warm.cached_files, 2, "both files are served from the store")
+    assert_equal(warm.built_files, 0, "the warm run compiles nothing")
+
+
+comptime _COUNTING_MOJO = "/scripts/fixtures/toolchain/counting_mojo.py"
+"""The invocation-counting compiler shim, relative to the repository root."""
+
+comptime _COUNTER_REL = ".mtest-precompile-invocations"
+"""Where that shim appends one line per `mojo precompile` it was started for."""
+
+
+def _precompile_invocations(root: String) raises -> Int:
+    """How many times the compiler was started for a precompile step under
+    `root`.
+
+    The one oracle for "the step was skipped" that the code under test does not
+    write: a result field saying so is set by that code, so a bug that sets it
+    and compiles anyway reads as a pass, while a process that never started
+    cannot be faked. The shim appends one line per `mojo precompile` to a counter
+    in its current directory, and every compile child runs with the invocation
+    root as its current directory, so the counter belongs to this run alone.
+
+    Args:
+        root: The invocation root the sessions ran in.
+
+    Returns:
+        The number of recorded invocations, and 0 when the counter does not
+        exist at all.
+
+    Raises:
+        Error: If the counter exists but cannot be read.
+    """
+    var path = root + "/" + _COUNTER_REL
+    if not exists(path):
+        return 0
+    var data = read_regular_file_bytes(path, 1 << 20)
+    var lines = 0
+    for b in data:
+        if b == UInt8(10):
+            lines += 1
+    return lines
+
+
+def test_a_precompile_stamp_replaced_by_a_directory_is_refused() raises:
+    """A stamp that is not a regular file can never grant a skip.
+
+    A stamp is the one cache record that lives at a name a later run looks up by
+    key alone, so "the name exists" must never be enough. A directory is the
+    sharpest way to say the name is occupied by something the store did not
+    write: it survives an `unlink`, it cannot be parsed, and a probe that
+    accepted the name's existence would skip a step whose output nothing has
+    verified. The refusal is silent and self-healing — the occupant is removed
+    no-follow, the step runs, and the record it then writes is a real stamp.
+    """
+    var root = temp_root()
+    write_file(
+        root, "goodpkg/__init__.mojo", "def helper() -> Int:\n    return 7\n"
+    )
+    write_file(root, "tests/test_ok.mojo", SRC_PASS)
+    var config = base_config()
+    config.mojo_path = getenv("PIXI_PROJECT_ROOT", "") + _COUNTING_MOJO
+    config.precompiles.append(Precompile("goodpkg", None))
+
+    var cold = run_recording_session(config.copy(), root)
+    assert_equal(cold.code, 0, "a clean step plus a passing file is exit 0")
+    assert_equal(
+        _precompile_invocations(root), 1, "the cold run must build the step"
+    )
+
+    var warm = run_recording_session(config.copy(), root)
+    assert_equal(warm.code, 0, "a warm run is still exit 0")
+    assert_equal(
+        _precompile_invocations(root),
+        1,
+        "the premise: an unchanged step is skipped before anything is broken",
+    )
+
+    var stamp_dir = root + "/" + _STORE_DIR + "/" + PRECOMPILE_SUBDIR
+    var stamps = dir_listing(stamp_dir)
+    assert_equal(len(stamps), 1, "the step must have left exactly one stamp")
+    var stamp = stamp_dir + "/" + stamps[0]
+    remove(stamp)
+    makedirs(stamp)
+    assert_true(isdir(stamp), "the stamp name must now be a directory")
+
+    var blocked = run_recording_session(config.copy(), root)
+    assert_equal(
+        blocked.code,
+        0,
+        "an unusable stamp may never fail an otherwise green run",
+    )
+    assert_equal(
+        _precompile_invocations(root),
+        2,
+        (
+            "the step was skipped against a stamp that is not a regular file;"
+            " existence of the name is not a record"
+        ),
+    )
+    assert_false(
+        isdir(stamp),
+        "the occupant must be removed so the step can record itself again",
+    )
+
+    var healed = run_recording_session(config^, root)
+    assert_equal(healed.code, 0)
+    assert_equal(
+        _precompile_invocations(root),
+        2,
+        "the replacement stamp must skip the step exactly as the first did",
     )
 
 
