@@ -35,6 +35,35 @@ from session_fixtures import (
 )
 
 
+def _verdict(rec: RecordingReporter) raises -> FileFinishedPayload:
+    """The single recorded `FileFinished` payload, found by KIND.
+
+    Every case here runs exactly one file, so the verdict is unique — but its
+    POSITION is not stable. Anything the session may emit ahead of the first
+    file shifts it, and the build cache's once-per-session `cache-off` warning
+    does exactly that whenever a case's config happens to disable the cache
+    (`build_args = ["path with space"]` classifies as an unrecognized argument).
+    A literal index that lands on that warning does not fail an assertion: it
+    unpacks the wrong variant and aborts the whole suite binary, taking every
+    other test in this module with it. Searching by kind cannot.
+
+    Args:
+        rec: The recorder to read back.
+
+    Returns:
+        A copy of the one recorded verdict payload.
+
+    Raises:
+        Error: When the recording does not hold exactly one `FileFinished`.
+    """
+    var found = List[FileFinishedPayload]()
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.FILE_FINISHED:
+            found.append(rec.event_at(i).data[FileFinishedPayload].copy())
+    assert_equal(len(found), 1, "exactly one file verdict is recorded")
+    return found[0].copy()
+
+
 def test_signal_death_is_crash_not_fail() raises:
     var root = temp_root()
     write_file(root, "tests/test_crash.mojo", SRC_CRASH)
@@ -45,16 +74,14 @@ def test_signal_death_is_crash_not_fail() raises:
     var code = run_session(base_config(), root, comp)
 
     assert_equal(code, 1)
-    ref rec = comp.composite.reporters[0]
-    var finished = rec.event_at(2)
-    assert_true(finished.kind == EventKind.FILE_FINISHED)
+    var finished = _verdict(comp.composite.reporters[0])
     assert_true(
-        finished.data[FileFinishedPayload].outcome == Outcome.CRASH,
+        finished.outcome == Outcome.CRASH,
         "signal death must be CRASH",
     )
     assert_true(
-        finished.data[FileFinishedPayload].signal_number > 0,
-        String(finished.data[FileFinishedPayload].signal_number),
+        finished.signal_number > 0,
+        String(finished.signal_number),
     )
 
 
@@ -68,14 +95,13 @@ def test_compiler_rejection_is_compile_error_not_crash() raises:
     var code = run_session(base_config(), root, comp)
 
     assert_equal(code, 1)
-    ref rec = comp.composite.reporters[0]
-    var finished = rec.event_at(2)
+    var finished = _verdict(comp.composite.reporters[0])
     assert_true(
-        finished.data[FileFinishedPayload].outcome == Outcome.COMPILE_ERROR,
+        finished.outcome == Outcome.COMPILE_ERROR,
         "a rejected build is COMPILE_ERROR, never a run CRASH",
     )
     # The compiler's stderr rides as captured bytes for the compiler banner.
-    assert_true(len(finished.data[FileFinishedPayload].captured_stderr) > 0)
+    assert_true(len(finished.captured_stderr) > 0)
 
 
 def test_compile_error_build_command_is_shell_quoted() raises:
@@ -94,17 +120,12 @@ def test_compile_error_build_command_is_shell_quoted() raises:
     var code = run_session(config, root, comp)
 
     assert_equal(code, 1)
-    ref rec = comp.composite.reporters[0]
-    var finished = rec.event_at(2)
-    assert_true(
-        finished.data[FileFinishedPayload].outcome == Outcome.COMPILE_ERROR
-    )
+    var finished = _verdict(comp.composite.reporters[0])
+    assert_true(finished.outcome == Outcome.COMPILE_ERROR)
     # The raw space-bearing arg rides in the argv; the reproduce line shell-joins
     # it into a copy-paste-safe (quoted) command.
-    assert_true(
-        "path with space" in finished.data[FileFinishedPayload].build_argv
-    )
-    var joined = shell_join(finished.data[FileFinishedPayload].build_argv)
+    assert_true("path with space" in finished.build_argv)
+    var joined = shell_join(finished.build_argv)
     assert_true("'path with space'" in joined, joined)
 
 
@@ -121,10 +142,9 @@ def test_deadline_overrun_is_timeout_not_fail() raises:
     var code = run_session(config, root, comp)
 
     assert_equal(code, 1)
-    ref rec = comp.composite.reporters[0]
-    var finished = rec.event_at(2)
+    var finished = _verdict(comp.composite.reporters[0])
     assert_true(
-        finished.data[FileFinishedPayload].outcome == Outcome.TIMEOUT,
+        finished.outcome == Outcome.TIMEOUT,
         "a deadline overrun is TIMEOUT",
     )
 

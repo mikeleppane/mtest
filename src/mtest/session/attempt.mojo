@@ -33,6 +33,7 @@ from mtest.exec import (
 )
 from mtest.model import (
     Event,
+    InternalErrorPayload,
     NodeId,
     Outcome,
     ParseDisposition,
@@ -906,6 +907,29 @@ def _run_one(
             if att.control != 0:
                 # An internal error or an interrupt: no binary this session will
                 # run came out of it, so the staged directory is pure debris.
+                if att.control == 1:
+                    # `_single_attempt` baked `out_bin` into the RUN step's
+                    # internal-error diagnostic before returning, and `out_bin`
+                    # is the staging path the next line deletes — so the
+                    # diagnostic would send a user looking for a directory mtest
+                    # itself had just removed. Point it back at `build/bin`, the
+                    # same substitution the compile-failure branch below makes
+                    # to the reproduce line, and for the same reason. The BUILD
+                    # step's diagnostic names the compiler rather than `out_bin`,
+                    # so the equality test leaves it untouched.
+                    var ie_step = String(
+                        att.internal_event.data[InternalErrorPayload].step
+                    )
+                    var ie_program = String(
+                        att.internal_event.data[InternalErrorPayload].program
+                    )
+                    var ie_errno = att.internal_event.data[
+                        InternalErrorPayload
+                    ].errno
+                    if ie_program == out_bin:
+                        att.internal_event = Event.internal_error(
+                            ie_step, plain_out, ie_errno
+                        )
                 _discard_staging(root, target)
             elif att.build_failed:
                 # The reproduce line names `build/bin`, never the staging

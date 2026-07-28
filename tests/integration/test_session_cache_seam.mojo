@@ -16,9 +16,32 @@ config, never by the assertions:
   and `workers` at its default of 1. Those two defaults are asserted in the
   first sequential case rather than assumed, because the routing is what makes
   the rest of that case mean anything.
+
+Cases that need the raw event stream — a retry's `AttemptFinished`, an
+`InternalError`'s program — compose the recording triple themselves rather than
+going through `run_recording_session`, which deliberately flattens the stream
+away.
 """
+from std.ffi import external_call
+from std.os import getenv, remove
 from std.os.path import exists, isdir
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
+
+from mtest.model import (
+    AttemptFinishedPayload,
+    EventKind,
+    FileFinishedPayload,
+    InternalErrorPayload,
+    Outcome,
+    SessionFinishedPayload,
+    WarningPayload,
+)
+from mtest.report import (
+    CompositeReporter,
+    RecordingCoordinator,
+    RecordingReporter,
+)
+from mtest.session import run_session
 
 from cache_fixtures import dir_listing, run_recording_session
 from session_fixtures import (
@@ -33,6 +56,91 @@ from tmptree import temp_root
 
 comptime _STORE_DIR = ".mtest-cache/build-v1"
 """The store's generations directory, relative to a run root."""
+
+comptime _OP_PIPE_STDOUT = 11
+"""`MTEST_EXEC_OP_PIPE_STDOUT`: the child's stdout pipe, opened per dispatch."""
+
+comptime _EIO = 5
+"""`EIO`, the errno a faulted native adapter operation reports."""
+
+comptime _RUN_SPAWN_OCCURRENCE = 3
+"""Which stdout-pipe open is the RUN spawn of a one-file cached session.
+
+Three children are dispatched, in this order: `<compiler> --version` (the cache
+key's toolchain-version frame), the build, then the run. The case that uses this
+does not trust the arithmetic — it asserts the faulted step is `"run"`, so a
+miscount fails loudly instead of quietly measuring the build spawn.
+"""
+
+
+def _reset_faults():
+    """Clear the isolated testing adapter's native fault table."""
+    # SAFETY: this test-only ABI takes no pointer, retains nothing, and mutates
+    # only the testing adapter's single-threaded fault configuration.
+    external_call["mtest_exec_test_fault_reset", NoneType]()
+
+
+def _configure_fault(operation: Int, occurrence: Int, error_number: Int) raises:
+    """Fail one occurrence of one native adapter operation.
+
+    Args:
+        operation: The `MTEST_EXEC_OP_*` discriminator to fault.
+        occurrence: Which visit to that operation fails, counting from 1.
+        error_number: The errno the faulted operation reports.
+
+    Raises:
+        Error: When the testing adapter rejects the configuration.
+    """
+    # SAFETY: the test-only ABI takes scalar discriminators only; all three are
+    # exact enum/errno/count constants and no pointer or state escapes the call.
+    var result = external_call["mtest_exec_test_fault_configure", Int32](
+        UInt32(operation), UInt32(occurrence), Int32(error_number), Int64(0)
+    )
+    assert_equal(result, Int32(0), "could not configure native fault")
+
+
+def _recorder() -> RecordingCoordinator[RecordingReporter]:
+    """The recording triple every raw-stream case in this module drives."""
+    return RecordingCoordinator(CompositeReporter(Tuple(RecordingReporter())))
+
+
+def _counters(rec: RecordingReporter) raises -> SessionFinishedPayload:
+    """The session's one terminal payload, carrying the build/cache counters.
+
+    Args:
+        rec: The recorder to read back.
+
+    Returns:
+        A copy of the one recorded `SessionFinished` payload.
+
+    Raises:
+        Error: When the recording does not hold exactly one terminal record.
+    """
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.SESSION_FINISHED:
+            return rec.event_at(i).data[SessionFinishedPayload].copy()
+    raise Error("the session never dispatched SessionFinished")
+
+
+def _verdict_of(
+    rec: RecordingReporter, path: String
+) raises -> FileFinishedPayload:
+    """One file's terminal verdict payload, found by kind and path.
+
+    Args:
+        rec: The recorder to read back.
+        path: The root-relative file whose verdict is wanted.
+
+    Returns:
+        A copy of that file's `FileFinished` payload.
+
+    Raises:
+        Error: When the file never reached a verdict.
+    """
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.FILE_FINISHED and rec.path_at(i) == path:
+            return rec.event_at(i).data[FileFinishedPayload].copy()
+    raise Error("no FileFinished for " + path)
 
 
 def _saw_cache_off(warnings: List[String]) -> Bool:
@@ -310,19 +418,47 @@ def test_sequential_run_retry_neither_counts_nor_publishes() raises:
     once, published once, then re-run — so the counters move exactly once
     between them and the store ends the run holding the single generation the
     first attempt wrote, with no staging directory beside it.
+
+    The retry itself is asserted, not assumed. Every counter claim below is also
+    true of a file that never retried at all, so without the `AttemptFinished`
+    evidence this case would keep passing while silently testing nothing if
+    `SRC_CRASH` ever stopped being retry-eligible.
     """
     var root = temp_root()
     write_file(root, "tests/test_boom.mojo", SRC_CRASH)
     var config = base_config()
     config.retries = 1
 
-    var run = run_recording_session(config^, root)
-    assert_equal(run.code, 1, "a signalled binary is a CRASH, exit 1")
+    var comp = _recorder()
+    var code = run_session(config, root, comp)
+    assert_equal(code, 1, "a signalled binary is a CRASH, exit 1")
+    ref rec = comp.composite.reporters[0]
+
+    # The premise: a first attempt was recorded as non-final, and the verdict
+    # spent two attempts. Only a real retry produces both.
+    var retries_seen = 0
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.ATTEMPT_FINISHED:
+            ref ap = rec.event_at(i).data[AttemptFinishedPayload]
+            retries_seen += 1
+            assert_equal(ap.step, "run", "the retried step must be the RUN")
+            assert_equal(
+                ap.attempt_index, 1, "the retried attempt is the first"
+            )
+            assert_equal(ap.attempts_planned, 2, "--retries 1 plans 2 attempts")
+    assert_equal(retries_seen, 1, "exactly one attempt was retried")
+    var verdict = _verdict_of(rec, "tests/test_boom.mojo")
+    assert_true(verdict.outcome == Outcome.CRASH, "the file must end CRASH")
     assert_equal(
-        run.built_files, 1, "only the first attempt's compile is admitted"
+        verdict.attempts_used, 2, "the file must have spent 2 attempts"
+    )
+
+    var counters = _counters(rec)
+    assert_equal(
+        counters.built_files, 1, "only the first attempt's compile is admitted"
     )
     assert_equal(
-        run.cached_files,
+        counters.cached_files,
         0,
         "a retry must not probe: the store holds only what this run just wrote",
     )
@@ -335,6 +471,169 @@ def test_sequential_run_retry_neither_counts_nor_publishes() raises:
     assert_true(
         String(entries[0]).startswith("tests_stest_uboom_h"),
         "the one store entry is not this file's generation: " + entries[0],
+    )
+
+
+def test_compile_kill_rebuild_neither_counts_nor_publishes() raises:
+    """The compile-kill rebuild is the retry that re-enters with `do_build`.
+
+    This is the one control-flow claim the seam rests on that no other case can
+    reach. A crash-class BUILD failure is the only retry that comes back around
+    with `do_build = True`, so a first-attempt guard written as `do_build` alone
+    would fire a second time here — probing a key this session already answered,
+    and publishing a quarantined retry's binary into a store other runs read.
+    The guard also tests `attempt_index == 1`, and this pins that it must.
+
+    `fake_retry_crash_mojo.py` makes the shape deterministic rather than
+    wall-clock dependent: its first build takes the `-o` path, writes nothing
+    runnable, and then sleeps far past any deadline, so `compile_timeout_secs =
+    1` ALWAYS kills it — there is no race in which the compile finishes early
+    and the scenario silently degrades. Its second build (chosen by the marker
+    the first one dropped, not by argv) succeeds at the retry's fresh
+    `.attempt-2` path under `build/bin`.
+
+    What that leaves observable: the counters moved exactly once, for the
+    first-attempt compile that was killed — a compile FAILURE is still an
+    admission — and the store is EMPTY, because the killed first attempt's
+    staging directory was discarded and the rebuild never staged one at all.
+    """
+    var marker = (
+        getenv("PIXI_PROJECT_ROOT", "")
+        + "/build/e2e-scratch/retry_crash_build_marker"
+    )
+    # The shim picks its branch off a marker under the REPO root, not the test's
+    # temp tree, so it is shared state: a marker left by an earlier run would
+    # make the FIRST build succeed and the scenario evaporate. Clear it on both
+    # sides rather than trusting whatever ran last.
+    if exists(marker):
+        remove(marker)
+
+    var root = temp_root()
+    write_file(root, "tests/test_ok.mojo", SRC_PASS)
+    var config = base_config()
+    config.retries = 1
+    config.compile_timeout_secs = 1
+    config.mojo_path = (
+        getenv("PIXI_PROJECT_ROOT", "")
+        + "/scripts/fixtures/toolchain/fake_retry_crash_mojo.py"
+    )
+
+    var comp = _recorder()
+    var code: Int
+    try:
+        code = run_session(config, root, comp)
+    finally:
+        if exists(marker):
+            remove(marker)
+
+    ref rec = comp.composite.reporters[0]
+    # The premise: the first BUILD was killed and retried. Without this the
+    # counter claims below would also hold for a run that never retried.
+    var build_retries = 0
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.ATTEMPT_FINISHED:
+            ref ap = rec.event_at(i).data[AttemptFinishedPayload]
+            if ap.step == "build":
+                build_retries += 1
+                assert_equal(
+                    ap.attempt_index, 1, "the killed compile is attempt 1"
+                )
+    assert_equal(
+        build_retries, 1, "the first compile must have been killed and retried"
+    )
+
+    var counters = _counters(rec)
+    assert_equal(
+        counters.built_files,
+        1,
+        (
+            "the killed first compile is one admission; the rebuild that"
+            " followed it is a retry and must not count"
+        ),
+    )
+    assert_equal(counters.cached_files, 0, "no hit was possible on a cold tree")
+    assert_equal(
+        len(dir_listing(root + "/" + _STORE_DIR)),
+        0,
+        (
+            "the store must be empty: the killed attempt's staging directory is"
+            " discarded, and the rebuild neither stages nor publishes"
+        ),
+    )
+    # The rebuild is invocation-private, and `build/bin` is where it lands.
+    assert_true(
+        exists(root + "/build/bin"),
+        "the retry path still needs build/bin in the tree",
+    )
+    # A second settle would try to publish the FIRST attempt's staging directory
+    # a second time — it was discarded when that compile failed, so the publish
+    # fails and says so. Nothing here may produce that warning.
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.WARNING:
+            assert_false(
+                rec.event_at(i).data[WarningPayload].warning_kind
+                == "cache-publish",
+                (
+                    "the rebuild attempted a publication; the settle must fire"
+                    " once, on the first attempt only"
+                ),
+            )
+    assert_equal(code, 1, "the rebuilt binary crashes, so the file is CRASH")
+
+
+def test_run_spawn_failure_never_names_a_deleted_staging_path() raises:
+    """A run-step internal error names `build/bin`, not the staging directory.
+
+    `_single_attempt` bakes the binary path into its RUN-step internal-error
+    diagnostic before returning, and under an enabled cache that path is the
+    staging directory the seam deletes moments later. Reporting it would send a
+    user looking for a directory mtest itself had just removed — so the seam
+    rewrites it to `build/bin/<mangled>`, exactly as it rewrites a failed
+    compile's reproduce line.
+
+    The fault adapter is what makes a run spawn fail on demand; the case asserts
+    the faulted STEP as well as the program, so a miscounted occurrence fails
+    loudly instead of quietly measuring the build spawn.
+    """
+    var root = temp_root()
+    write_file(root, "tests/test_ok.mojo", SRC_PASS)
+
+    var comp = _recorder()
+    var code: Int
+    _configure_fault(_OP_PIPE_STDOUT, _RUN_SPAWN_OCCURRENCE, _EIO)
+    try:
+        code = run_session(base_config(), root, comp)
+    finally:
+        _reset_faults()
+
+    assert_equal(code, 3, "a run-dispatch machinery fault resolves to exit 3")
+    ref rec = comp.composite.reporters[0]
+    var found = 0
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.INTERNAL_ERROR:
+            found += 1
+            ref ie = rec.event_at(i).data[InternalErrorPayload]
+            assert_equal(
+                ie.step,
+                "run",
+                (
+                    "the fault landed on the wrong spawn; this case is only"
+                    " about the RUN step"
+                ),
+            )
+            assert_equal(
+                ie.program,
+                "build/bin/tests_stest_uok",
+                (
+                    "the diagnostic must name build/bin, never the staging"
+                    " directory the seam is about to delete"
+                ),
+            )
+    assert_equal(found, 1, "exactly one internal error is emitted")
+    assert_equal(
+        len(dir_listing(root + "/" + _STORE_DIR)),
+        0,
+        "a build whose run never happened must publish nothing",
     )
 
 
