@@ -287,6 +287,18 @@ def run_session[
     )
     for warning in resolved.state_warnings:
         reporter.handle(Event.warning("state-malformed-line", warning))
+    # `--cache-clear` deleted the last-run state before this session started, so
+    # a reselection flag that survived the same command line has nothing left to
+    # select from. Said here rather than from main because this is where a
+    # reporter exists, and gated on the plumbed flag rather than on the config
+    # so an ordinary `--lf` run's event stream is unchanged.
+    if resolved.state_cleared and (config.last_failed or config.failed_first):
+        reporter.handle(
+            Event.warning(
+                "cache-clear",
+                "last-run state was just cleared; running the full selection",
+            )
+        )
     if config.last_failed:
         if not resolved.state:
             reporter.handle(

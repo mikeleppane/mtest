@@ -1252,6 +1252,92 @@ def _discard(path: String):
         pass
 
 
+def clear_cache_root(root: String) -> Optional[String]:
+    """Delete `<root>/.mtest-cache` whole, but only where mtest can prove it
+    owns it.
+
+    `--cache-clear`'s entire implementation, and the one place in mtest that
+    removes a directory the USER named rather than one mtest invented. Three
+    guards stand between the flag and the removal, in this order:
+
+    1. The path is characterized `lstat`-no-follow FIRST. A symlink is REFUSED,
+       never removed and never followed — following it would delete whatever it
+       points at, which is outside the tree mtest owns.
+    2. The directory must hold the `CACHEDIR.TAG` marker mtest writes at store
+       creation. There is deliberately no "but its contents look like ours"
+       exception: that heuristic is exactly how a directory somebody else
+       created gets deleted. A checkout whose cache predates the marker
+       therefore refuses ONCE, and the diagnostic says so and hands over the
+       manual removal.
+    3. Removal itself goes through `remove_tree_no_follow`, which unlinks child
+       symlinks rather than descending them, so the blast radius stays inside
+       the proven directory.
+
+    An ABSENT cache root is success, not a diagnostic: there is nothing to
+    clear, which is the ordinary shape of a first run.
+
+    Args:
+        root: The invocation root the cache directory hangs under.
+
+    Returns:
+        Nothing when the directory was deleted or was already absent; otherwise
+        a complete, framed diagnostic for main to print before exiting 4. Every
+        refusal leaves the filesystem exactly as it found it.
+
+    Examples:
+
+    ```mojo
+    from mtest.session.store import clear_cache_root
+
+    var failure = clear_cache_root("/repo")
+    if failure:
+        print(failure.value())
+    ```
+    """
+    var cache_root = root + "/" + CACHE_ROOT_DIR
+    # `lstat`, never `islink`/`isdir`: those follow or fold an unreadable path
+    # into False, and "not a link" is precisely the answer that would let the
+    # removal proceed straight through one.
+    var kind: Int
+    try:
+        kind = Int(lstat(cache_root).st_mode) & _S_IFMT
+    except:
+        # Absent, or a parent that cannot be searched. `lstat` cannot separate
+        # the two through a Mojo `Error`, and both resolve identically here:
+        # nothing is deleted. Reporting the unreadable case as success costs a
+        # cold run that was already going to be cold; guessing the other way
+        # would fail runs over a cache directory that never existed.
+        return Optional[String](None)
+    if kind == _S_IFLNK:
+        var symlink_note = String("cache-clear: ") + cache_root
+        symlink_note += ": refusing to delete a symlink"
+        symlink_note += " — mtest deletes only the cache directory it created,"
+        symlink_note += " and following this link would delete whatever it"
+        symlink_note += " points at; remove or repoint the link yourself, then"
+        symlink_note += " rerun"
+        return Optional[String](symlink_note^)
+    if not exists(root + "/" + CACHEDIR_TAG_REL):
+        var unmarked_note = String("cache-clear: ") + cache_root
+        unmarked_note += ": refusing to delete a directory mtest cannot prove"
+        unmarked_note += " it owns — the ownership marker '"
+        unmarked_note += CACHEDIR_TAG_REL
+        unmarked_note += "' is missing. mtest writes that marker when it"
+        unmarked_note += " creates the store, so a cache directory left by an"
+        unmarked_note += " older mtest refuses exactly once: run mtest once"
+        unmarked_note += " with the cache enabled to write the marker, or"
+        unmarked_note += " delete the directory yourself with 'rm -rf "
+        unmarked_note += CACHE_ROOT_DIR
+        unmarked_note += "'"
+        return Optional[String](unmarked_note^)
+    try:
+        remove_tree_no_follow(cache_root)
+    except e:
+        var failure_note = String("cache-clear: ") + cache_root
+        failure_note += ": could not delete the cache directory: " + String(e)
+        return Optional[String](failure_note^)
+    return Optional[String](None)
+
+
 # --- Per-file keys. ----------------------------------------------------------
 
 

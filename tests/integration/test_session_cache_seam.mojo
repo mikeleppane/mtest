@@ -28,9 +28,17 @@ away.
 """
 from std.ffi import external_call
 from std.os import getenv, remove
-from std.os.path import exists, isdir
+from std.os.path import exists, isdir, islink
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
+from mtest.config import (
+    CliOverlay,
+    ConfigEnvironment,
+    FileConfig,
+    ResolvedConfig,
+    RunnerConfig,
+    resolve_config,
+)
 from mtest.model import (
     AttemptFinishedPayload,
     EventKind,
@@ -46,6 +54,7 @@ from mtest.report import (
     RecordingReporter,
 )
 from mtest.session import run_session
+from mtest.session.store import clear_cache_root
 
 from cache_fixtures import dir_listing, run_recording_session
 from session_fixtures import (
@@ -56,10 +65,24 @@ from session_fixtures import (
     base_config,
     write_file,
 )
-from tmptree import temp_root
+from tmptree import link_dir, temp_root
+
+comptime _CACHE_ROOT = ".mtest-cache"
+"""The whole directory mtest owns, relative to a run root."""
 
 comptime _STORE_DIR = ".mtest-cache/build-v1"
 """The store's generations directory, relative to a run root."""
+
+comptime _MARKER_TEXT = (
+    "Signature: 8a477f597d28d172789f06886806bc55\n"
+    "# This file is a cache directory tag created by mtest.\n"
+)
+"""A hand-written `CACHEDIR.TAG` body, for cases with no session to write one.
+
+Only `test_cache_clear_deletes_a_store_a_real_session_wrote` needs the marker a
+session actually writes; every other clear case only needs the file to be there,
+so it writes this rather than paying for a compile.
+"""
 
 comptime _OP_PIPE_STDOUT = 11
 """`MTEST_EXEC_OP_PIPE_STDOUT`: the child's stdout pipe, opened per dispatch."""
@@ -145,6 +168,65 @@ def _verdict_of(
         if rec.kind_at(i) == EventKind.FILE_FINISHED and rec.path_at(i) == path:
             return rec.event_at(i).data[FileFinishedPayload].copy()
     raise Error("no FileFinished for " + path)
+
+
+def _clear_diagnostic(root: String) -> String:
+    """Run `clear_cache_root` against `root` and render its answer as text.
+
+    Args:
+        root: The invocation root whose `.mtest-cache` is to be cleared.
+
+    Returns:
+        The refusal diagnostic, or the empty string when the clear succeeded.
+        Flattening the `Optional` here keeps every case's assertion a plain
+        string comparison, so a refusal that appears where none was expected
+        prints its own reason instead of `False`.
+    """
+    var failure = clear_cache_root(root)
+    if failure:
+        return failure.value()
+    return String("")
+
+
+def _resolved(config: RunnerConfig) -> ResolvedConfig:
+    """Layer `config` with no project file, environment, or CLI overlay.
+
+    Args:
+        config: The runner values the session should see.
+
+    Returns:
+        The resolved configuration, with `state_cleared` at its default.
+    """
+    return resolve_config(
+        config,
+        FileConfig.empty(),
+        ConfigEnvironment.empty(),
+        CliOverlay.default(),
+    )
+
+
+def _saw_warning_kind(rec: RecordingReporter, kind: String) raises -> Bool:
+    """Whether the recording holds a `WARNING` event of `kind`.
+
+    Found BY KIND, never by position: this module's cases insert and remove
+    warnings, and an index-addressed assertion would break every time one moved.
+
+    Args:
+        rec: The recorder to read back.
+        kind: The warning kind to look for, as `Event.warning` spells it.
+
+    Returns:
+        True if at least one warning carries that kind.
+
+    Raises:
+        Error: If the recording cannot be read back.
+    """
+    for i in range(rec.count()):
+        var e = rec.event_at(i)
+        if e.kind == EventKind.WARNING:
+            if e.data[WarningPayload].warning_kind == kind:
+                return True
+    return False
 
 
 def _saw_cache_off(warnings: List[String]) -> Bool:
@@ -779,6 +861,161 @@ def test_pool_compile_failure_counts_and_names_build_bin() raises:
             "the reproduce line must name build/bin, never the staging"
             " directory the seam deletes before emitting the verdict"
         ),
+    )
+
+
+def test_cache_clear_removes_owned_store() raises:
+    """A marked `.mtest-cache` is deleted whole — store, marker, and lastrun."""
+    var root = temp_root()
+    write_file(root, ".mtest-cache/CACHEDIR.TAG", _MARKER_TEXT)
+    write_file(root, _STORE_DIR + "/tests_stest_uok_h00/bin", "not a binary")
+    write_file(root, _STORE_DIR + "/tests_stest_uok_h00/meta", "not a record")
+    write_file(root, ".mtest-cache/lastrun", "v1\n")
+
+    var diagnostic = _clear_diagnostic(root)
+    assert_equal(diagnostic, "", "clearing an owned store must not refuse")
+    assert_false(
+        exists(root + "/" + _CACHE_ROOT),
+        "--cache-clear deletes the whole directory, not just the generations",
+    )
+
+
+def test_cache_clear_refuses_symlink() raises:
+    """A symlinked `.mtest-cache` is refused before anything is followed.
+
+    The link points at a directory holding a file that has nothing to do with
+    mtest. Deleting through the link would take that file with it, so the case
+    asserts on the SURVIVING target rather than only on the returned text: a
+    refusal that still emptied the target would pass a message-only assertion.
+    """
+    var root = temp_root()
+    write_file(root, "victim/precious.txt", "not mtest's to delete")
+    link_dir(root, "victim", _CACHE_ROOT)
+
+    var diagnostic = _clear_diagnostic(root)
+    assert_true(diagnostic != "", "a symlinked cache root must be refused")
+    assert_true(
+        "symlink" in diagnostic,
+        "the refusal must say what it refused: " + diagnostic,
+    )
+    assert_true(
+        exists(root + "/victim/precious.txt"),
+        "the link target's contents must be untouched",
+    )
+    assert_true(
+        islink(root + "/" + _CACHE_ROOT),
+        "the link itself is not mtest's to remove either",
+    )
+
+
+def test_cache_clear_refuses_unmarked() raises:
+    """An unmarked `.mtest-cache` is refused, and the refusal is actionable.
+
+    No "but everything in it looks like ours" exception exists on purpose: that
+    heuristic is exactly how a directory somebody else created gets deleted. The
+    price is that a checkout whose cache predates the marker refuses once, so the
+    text has to say so and hand over the manual removal.
+    """
+    var root = temp_root()
+    write_file(root, ".mtest-cache/build-v1/somebody_elses", "stray")
+
+    var diagnostic = _clear_diagnostic(root)
+    assert_true(diagnostic != "", "an unmarked cache root must be refused")
+    assert_true(
+        "CACHEDIR.TAG" in diagnostic,
+        "the refusal must name the marker it looked for: " + diagnostic,
+    )
+    assert_true(
+        "run mtest once" in diagnostic,
+        "the refusal must say a cache-enabled run writes it: " + diagnostic,
+    )
+    assert_true(
+        "rm -rf .mtest-cache" in diagnostic,
+        "the refusal must hand over the manual fix: " + diagnostic,
+    )
+    assert_true(
+        exists(root + "/.mtest-cache/build-v1/somebody_elses"),
+        "a refused clear must leave every byte where it was",
+    )
+
+
+def test_cache_clear_on_an_absent_store_succeeds() raises:
+    """Nothing to delete is success, not a diagnostic."""
+    var root = temp_root()
+    write_file(root, "tests/test_ok.mojo", SRC_PASS)
+
+    assert_equal(
+        _clear_diagnostic(root),
+        "",
+        "an absent cache root is the ordinary first-run shape",
+    )
+
+
+def test_cache_clear_deletes_a_store_a_real_session_wrote() raises:
+    """The marker a real session writes is the one the clear accepts.
+
+    The two halves of this feature are written by different code: Task 7 writes
+    `CACHEDIR.TAG` at store creation and the clear reads it. A test that builds
+    the marker by hand would pass even if the two spelled the path differently,
+    so this one lets a session create the store and then clears it for real.
+    """
+    var root = temp_root()
+    write_file(root, "tests/test_ok.mojo", SRC_PASS)
+    var config = base_config()
+
+    var first = run_recording_session(config.copy(), root)
+    assert_equal(first.code, 0, "the cold run must pass")
+    assert_equal(first.built_files, 1, "the cold run compiles the one file")
+    assert_true(
+        exists(root + "/.mtest-cache/CACHEDIR.TAG"),
+        "a cache-enabled session must have written the ownership marker",
+    )
+
+    assert_equal(
+        _clear_diagnostic(root), "", "a store mtest wrote is a store it owns"
+    )
+    assert_false(
+        exists(root + "/" + _CACHE_ROOT), "the cleared store must be gone"
+    )
+
+    var second = run_recording_session(config^, root)
+    assert_equal(second.code, 0, "the cold-again run must pass")
+    assert_equal(second.cached_files, 0, "a cleared store can serve no hit")
+    assert_equal(second.built_files, 1, "the file is compiled from scratch")
+
+
+def test_cache_clear_warns_when_lf_lost_its_state() raises:
+    """`--cache-clear` with `--lf` says the state it would have read is gone.
+
+    Emitted at session start rather than from main because that is where a
+    reporter exists, and gated on the plumbed flag rather than on the config so
+    an ordinary `--lf` run's event stream is byte-for-byte what it was.
+    """
+    var root = temp_root()
+    write_file(root, "tests/test_ok.mojo", SRC_PASS)
+    var config = base_config()
+    config.last_failed = True
+
+    var cleared = _resolved(config.copy())
+    cleared.state_cleared = True
+    var comp = _recorder()
+    var code = run_session(cleared, root, comp)
+    assert_equal(code, 0, "the full-selection fallback still runs the file")
+    assert_true(
+        _saw_warning_kind(comp.composite.reporters[0], "cache-clear"),
+        "a cleared state under --lf must be reported, not silently ignored",
+    )
+
+    var untouched = _resolved(config^)
+    assert_false(
+        untouched.state_cleared,
+        "the plumbed flag must default to False everywhere",
+    )
+    var quiet = _recorder()
+    _ = run_session(untouched, root, quiet)
+    assert_false(
+        _saw_warning_kind(quiet.composite.reporters[0], "cache-clear"),
+        "a plain --lf run must not gain a warning it never had",
     )
 
 

@@ -92,6 +92,7 @@ from mtest.session import (
     run_collect,
     run_session_with_state,
 )
+from mtest.session.store import clear_cache_root
 
 
 comptime _STATE_MAX_BYTES = 1024 * 1024
@@ -632,6 +633,27 @@ def main():
         exit(EXIT_USAGE_ERROR)
 
     var config = resolved.config.copy()
+
+    # `--cache-clear` runs HERE: after configuration is resolved (so a usage
+    # error never reaches a deletion) and before the last-run state is read,
+    # because that state file lives inside the directory being deleted. Reading
+    # it first would hand the session records that no longer exist on disk.
+    # A refusal is a pre-session configuration error, so it takes the same shape
+    # as a failed `_load_config`: the framed diagnostic to stderr, exit 4.
+    var state_cleared = False
+    if config.cache_clear:
+        # Asked BEFORE the removal, so the warning the session emits under
+        # `--lf`/`--ff` claims only what actually happened: with no state file
+        # there was nothing to clear, and the session's own `lf-empty` warning
+        # already says the selection fell back.
+        var had_state = exists(_state_path(root))
+        var clear_failure = clear_cache_root(root)
+        if clear_failure:
+            _eprintln(clear_failure.value())
+            exit(EXIT_USAGE_ERROR)
+        state_cleared = had_state
+    resolved.state_cleared = state_cleared
+
     var state_enabled = resolved.active_keys.state and resolved.state
     var previous_state = LastRunState.empty()
     if state_enabled:
