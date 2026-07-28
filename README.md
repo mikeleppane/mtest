@@ -1146,7 +1146,7 @@ The tasks:
 | `pixi run py-check` | ruff format/lint and `mypy --strict` over the Python tooling (needs `uv`; not part of `ci`) |
 | `pixi run build` | precompile `src/mtest` to `build/mtest.mojopkg`, the compile gate |
 | `pixi run build-bin` | link the runnable binary at `build/mtest` |
-| `pixi run test` | compile every classified unit and integration module into one aggregate binary and execute it directly |
+| `pixi run test` | run every classified unit and integration module through `build/mtest` itself, then reconcile its report against an inventory derived from the sources on disk |
 | `pixi run test-file -- PATH` | the same, focused on one module |
 | `pixi run assertions-check` | compile and directly execute the source-only assertion consumers at `-O0` and `-O3` |
 | `pixi run dogfood-check` | run three focused probes through the built `mtest` binary itself |
@@ -1172,7 +1172,7 @@ on Linux, on every pull request.
 
 About the test setup:
 
-- Everything executes real binaries. Both the aggregate suite and mtest
+- Everything executes real binaries. Both the classified suite and mtest
   itself build with `mojo build` and run the result directly; `mojo run`
   appears nowhere, because it masks crash exit codes.
 - The protocol snapshots under `tests/snapshots/protocol/` pin `TestSuite`'s
