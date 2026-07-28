@@ -119,6 +119,43 @@ def _canonical_if_executable(candidate: String) raises -> Optional[String]:
         return None
 
 
+comptime _UNSET_PROBE_A = "\x01mtest-path-probe-a"
+"""One of the two sentinels that tell an unset `PATH` from an empty one."""
+
+comptime _UNSET_PROBE_B = "\x01mtest-path-probe-b"
+"""The second sentinel; see `_process_path` for why one is not enough."""
+
+
+def _process_path() -> Optional[String]:
+    """The process `PATH`, or nothing at all when the environment carries none.
+
+    `getenv` folds "unset" into its default, so a single call cannot tell an
+    absent `PATH` from one set to the empty string — and the two mean opposite
+    things here. An empty `PATH` is one cwd component; an absent one must NOT
+    become a cwd search, because the C adapter falls back to
+    `confstr(_CS_PATH)` instead (`native/mtest_exec_native.c`,
+    `mtest_build_candidates`) and would exec a system binary where a cwd search
+    would name a local file.
+
+    Two probes with different defaults settle it without a foreign call. If the
+    variable is set, both probes return its value, and at most one of them can
+    equal its own default — so a `PATH` that literally spells one sentinel is
+    still reported correctly. Only a genuinely unset variable returns each
+    default in turn.
+
+    Returns:
+        The `PATH` value, empty string included, or `None` when the environment
+        holds no `PATH` at all.
+    """
+    var first = getenv("PATH", _UNSET_PROBE_A)
+    if first != _UNSET_PROBE_A:
+        return Optional(first^)
+    var second = getenv("PATH", _UNSET_PROBE_B)
+    if second != _UNSET_PROBE_B:
+        return Optional(second^)
+    return None
+
+
 def resolve_executable(
     spelling: String, path_env: Optional[String] = None
 ) raises -> Optional[String]:
@@ -137,12 +174,12 @@ def resolve_executable(
         spelling: The program as written, for example `config.mojo_path`'s
             default literal `"mojo"`, or an absolute path.
         path_env: The `PATH` value to search, for injection from tests. Defaults
-            to `None`, which reads the process environment through `getenv`, so
-            production call sites pass one argument and get the real search
-            path. An unset `PATH` reads as empty here, which is one cwd
-            component; the C adapter falls back to `confstr(_CS_PATH)` in that
-            case, so the two diverge only for a process launched with no `PATH`
-            at all.
+            to `None`, which reads the process environment, so production call
+            sites pass one argument and get the real search path. An EXPLICIT
+            value is searched exactly as given, the empty string included — that
+            is one cwd component, which is what the POSIX rule says and what the
+            adapter does. An ABSENT environment `PATH` is different and is
+            answered fail-closed; see Returns.
 
     Returns:
         The canonical absolute path of the first matching candidate, or `None`
@@ -150,6 +187,22 @@ def resolve_executable(
         ordinary "not found" answer and is never an error: an uninstalled
         compiler, a typo, and a data file shadowing the name on `PATH` all
         report it alike.
+
+        A bare spelling also answers `None` when `path_env` is `None` and the
+        environment carries no `PATH` at all. The adapter falls back to
+        `confstr(_CS_PATH)` there, which this module will not reimplement
+        without a second foreign call; guessing instead would be worse than
+        refusing, because the natural guess — treat unset as empty — searches
+        the working directory, and a cwd file matching the spelling would then
+        be keyed as the compiler while the supervisor exec'd the system one. A
+        spelling containing `/` needs no search and still resolves normally with
+        no `PATH` in the environment.
+
+    Caveats:
+        `access(2)` tests the REAL uid/gid where `execve` tests the EFFECTIVE
+        pair. mtest is never installed setuid, so the two coincide in practice;
+        the direction that would matter is `access` GRANTING where `execve`
+        denies, which would name an earlier candidate than the one that runs.
 
     Raises:
         Error: Only if a filesystem query fails outright while probing a
@@ -170,9 +223,17 @@ def resolve_executable(
     var stub = resolve_executable("tool", "/tmp/a:/tmp/b")
     ```
     """
-    var search = path_env.value() if path_env else getenv("PATH", "")
     if "/" in spelling:
+        # No search is involved, so this branch answers even with no `PATH`.
         return _canonical_if_executable(spelling)
+    var search: String
+    if path_env:
+        search = path_env.value()
+    else:
+        var inherited = _process_path()
+        if not inherited:
+            return None
+        search = inherited.value()
     for component in search.split(":"):
         var directory = String(component)
         var candidate = (

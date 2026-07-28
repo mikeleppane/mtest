@@ -1,5 +1,6 @@
 """Integration tests for the session store, its scaffolding, and its key inputs.
 """
+from std.os import getenv, setenv, unsetenv
 from std.os.path import isdir, realpath
 from std.testing import (
     TestSuite,
@@ -168,6 +169,37 @@ def test_resolve_traverses_empty_path_entries() raises:
     var found = resolve_executable("tool", ":" + root + "/a:" + root + "/b")
     assert_true(Bool(found))
     assert_equal(found.value(), realpath(only))
+
+
+def test_resolve_without_environment_path_is_fail_closed() raises:
+    var root = temp_root()
+    # The stub (and its `chmod` child) is built while PATH is still intact.
+    var stub = _executable_stub(root, "b/tool")
+    var saved = getenv("PATH", "")
+    var bare = Optional[String](None)
+    var slashed = Optional[String](None)
+    var injected = Optional[String](None)
+    try:
+        _ = unsetenv("PATH")
+        bare = resolve_executable("tool")
+        slashed = resolve_executable(stub)
+        injected = resolve_executable("tool", root + "/b")
+    finally:
+        _ = setenv("PATH", saved, True)
+    # A bare name refuses rather than falling back to a cwd search: guessing
+    # would key a cwd file as the compiler while the supervisor exec'd the one
+    # `confstr(_CS_PATH)` names.
+    assert_false(Bool(bare))
+    # A spelling with a slash needs no search, so it still resolves.
+    assert_true(Bool(slashed))
+    assert_equal(slashed.value(), realpath(stub))
+    # An injected PATH is unaffected by the environment lacking one: the
+    # fail-closed branch is reached only when no `path_env` was supplied.
+    assert_true(Bool(injected))
+    assert_equal(injected.value(), realpath(stub))
+    # An EXPLICIT empty PATH is a different thing entirely: one cwd component,
+    # searched, and reported as a plain miss.
+    assert_false(Bool(resolve_executable("tool", "")))
 
 
 def test_resolve_rejects_directory_candidate() raises:
