@@ -5,7 +5,11 @@ job is to let `collect`, `probe`, and `run` share one build per file. The
 session builds and probes, then records the results in the passive
 `BuildRegistry` here.
 
+Alongside it sits the pure SHA-256 primitive every persistent cache key is
+built from — still no I/O: bytes in, hex digest out.
+
 The public surface is re-exported so callers write
-`from mtest.cache import BuildProduct, BuildRegistry`.
+`from mtest.cache import BuildProduct, BuildRegistry, Sha256, sha256_hex`.
 """
 from mtest.cache.build_products import BuildProduct, BuildRegistry
+from mtest.cache.sha256 import Sha256, sha256_hex
