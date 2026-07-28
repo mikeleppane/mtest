@@ -32,6 +32,9 @@ from mtest.session.store import (
     CacheContext,
     FileKey,
     StoreBuildTarget,
+    _MEMO_PATH_CAP,
+    _ToolchainMemo,
+    _toolchain_identity,
     cache_key_tags,
     collect_env_base,
     file_key,
@@ -116,7 +119,7 @@ def _chmod(mode: String, path: String) raises:
     (`grep -rn "chmod\\|permissions" src/mtest/platform/` finds nothing) and the
     pinned `std.os` exposes no `chmod` either, so the bit has to come from a
     real process. `mtest.exec` already owns every fork/exec in the tree, which
-    makes a supervised spawn the fallback the brief names — cheaper than a
+    makes a supervised spawn the natural fallback — cheaper than a
     foreign declaration written only for the tests.
 
     The runtime is closed in a `finally`. Without it a raising `run_supervised`
@@ -266,7 +269,7 @@ def test_resolve_rejects_directory_candidate() raises:
     assert_false(Bool(found))
 
 
-# --- CacheContext: the include walk (Task 6) ---------------------------------
+# --- CacheContext: the include walk ------------------------------------------
 
 
 def _walk_digest(root: String, dir: String, exclude: String) raises -> String:
@@ -456,7 +459,100 @@ def test_walk_disables_on_unsearchable_subdir() raises:
     )
 
 
-# --- CacheContext: construction, disabling, and the env base (Task 6) --------
+# --- The toolchain memo's fixed-width record ---------------------------------
+#
+# `_ToolchainMemo` is what the process-lifetime memo slot holds, and it is
+# fixed-width so that slot owns no allocation to leak. Everything below is pure
+# in-memory logic: no compiler is read, and nothing here spawns.
+
+
+comptime _HEX64 = (
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+)
+"""A well-formed 64-character digest rendering, standing in for a real one."""
+
+
+def test_toolchain_memo_starts_matching_nothing() raises:
+    # The empty slot every process starts with. If it ever matched, the first
+    # lookup in a process would answer with a digest nobody computed.
+    var empty = _ToolchainMemo()
+    assert_false(empty.matches("/usr/bin/mojo", 141))
+    assert_false(empty.matches("", 0))
+
+
+def test_toolchain_memo_round_trips_a_stored_digest() raises:
+    var stored = _ToolchainMemo.of("/usr/bin/mojo", 141, _HEX64)
+    assert_true(stored, "a plain path and digest were refused")
+    var memo = stored.value().copy()
+    assert_true(memo.matches("/usr/bin/mojo", 141))
+    # The rebuilt string is the property a hit rests on: a memoized run and a
+    # cold run must frame identical bytes, so the digest has to come back
+    # character for character.
+    assert_equal(memo.sha_hex(), _HEX64)
+
+
+def test_toolchain_memo_discriminates_path_and_size() raises:
+    var memo = _ToolchainMemo.of("/usr/bin/mojo", 141, _HEX64).value().copy()
+    # Size is the field that catches a toolchain swap changing the binary's
+    # length; path is the field that catches a different compiler entirely.
+    assert_false(memo.matches("/usr/bin/mojo", 142))
+    assert_false(memo.matches("/usr/local/bin/mojo", 141))
+    # A prefix and an extension of the stored path are both misses: the
+    # comparison is on the whole path, not on what fits.
+    assert_false(memo.matches("/usr/bin/moj", 141))
+    assert_false(memo.matches("/usr/bin/mojoo", 141))
+
+
+def test_toolchain_memo_refuses_what_it_cannot_hold_exactly() raises:
+    # Every refusal costs one recomputation and nothing else. Truncating instead
+    # is what would be dangerous: two compilers sharing a long prefix would
+    # start matching each other.
+    var long_path = String("/")
+    while long_path.byte_length() <= _MEMO_PATH_CAP:
+        long_path += "abcdefgh"
+    assert_false(
+        Bool(_ToolchainMemo.of(long_path, 141, _HEX64)),
+        "an over-long path was stored rather than refused",
+    )
+    assert_false(
+        Bool(_ToolchainMemo.of("", 141, _HEX64)),
+        "an empty path was stored, forging the empty-slot marker",
+    )
+    assert_false(
+        Bool(_ToolchainMemo.of("/usr/bin/mojo", 141, "abc")),
+        "a short digest was stored rather than refused",
+    )
+    assert_false(
+        Bool(_ToolchainMemo.of("/usr/bin/mojo", 141, _HEX64 + "0")),
+        "an over-long digest was stored rather than refused",
+    )
+    # The longest path that still fits is stored, so the refusal is a boundary
+    # and not an off-by-one that quietly shrinks the memo.
+    var exact = String("/")
+    while exact.byte_length() < _MEMO_PATH_CAP:
+        exact += "a"
+    var stored = _ToolchainMemo.of(exact, 141, _HEX64)
+    assert_true(stored, "a path of exactly the capacity was refused")
+    assert_true(stored.value().matches(exact, 141))
+
+
+def test_toolchain_identity_memoizes_the_same_answer() raises:
+    # The end-to-end property, over the real compiler: the second call must
+    # answer identically to the first. A memo that returned anything else would
+    # move the key bytes between two sessions of one process.
+    var resolved = resolve_executable("mojo")
+    assert_true(resolved, "the pinned compiler did not resolve")
+    var path = resolved.value()
+    var first = _toolchain_identity(path)
+    var second = _toolchain_identity(path)
+    assert_true(first, "the compiler could not be read")
+    assert_true(second, "the memoized lookup failed")
+    assert_equal(first.value().path, second.value().path)
+    assert_equal(first.value().size, second.value().size)
+    assert_equal(first.value().sha_hex, second.value().sha_hex)
+
+
+# --- CacheContext: construction, disabling, and the env base -----------------
 
 
 def _env_base(config: RunnerConfig, root: String) raises -> CacheContext:
@@ -653,7 +749,7 @@ def test_env_base_records_include_dir_args() raises:
     assert_equal(ctx.extra_walk_dirs[0], "extra")
 
 
-# --- CacheContext: finalize_includes (Task 6) --------------------------------
+# --- CacheContext: finalize_includes -----------------------------------------
 
 
 def _prefix_digest(ctx: CacheContext) raises -> String:
@@ -723,7 +819,7 @@ def test_finalize_includes_leaves_a_disabled_context_alone() raises:
     assert_equal(ctx.disable_reason, "earlier cause")
 
 
-# --- The store: staging, probe, publish, adopt, and reap (Task 7) ------------
+# --- The store: staging, probe, publish, adopt, and reap ---------------------
 
 
 def _fixture_key(root: String, rel: String, body: String) raises -> FileKey:
@@ -1115,7 +1211,7 @@ def test_remove_tree_no_follow_unlinks_child_symlinks() raises:
     assert_true(exists(root + "/outside/keep.txt"))
 
 
-# --- Configured precompile steps: the per-step key (Task 14) -----------------
+# --- Configured precompile steps: the per-step key ---------------------------
 
 
 def _step_key(
@@ -1529,7 +1625,7 @@ def test_precompile_publish_reaps_the_steps_stale_stamps() raises:
     assert_equal(stamps[0], second.gen_name)
 
 
-# --- Configured precompile steps: the invocation oracle (Task 14) ------------
+# --- Configured precompile steps: the invocation oracle ----------------------
 
 comptime _COUNTING_MOJO = "/scripts/fixtures/toolchain/counting_mojo.py"
 """The invocation-counting compiler shim, relative to the repository root."""

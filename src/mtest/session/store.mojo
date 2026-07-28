@@ -771,11 +771,16 @@ struct CacheContext(Movable):
 
 @fieldwise_init
 struct _ToolchainDigest(Copyable, Movable):
-    """One compiler binary's identity: which file, how long, and its digest."""
+    """One compiler binary's identity: which file, how long, and its digest.
+
+    The triple frame 2 keys on, and what `_toolchain_identity` hands back on
+    every path — a cold read and a memo hit produce the same three values. It is
+    NOT what the memo stores; see `_ToolchainMemo` for why that is a separate,
+    heap-free type.
+    """
 
     var path: String
-    """The canonical path the digest was taken from; `""` means "nothing memoed
-    yet"."""
+    """The canonical path the digest was taken from."""
 
     var size: Int
     """The number of bytes actually read and hashed."""
@@ -784,18 +789,157 @@ struct _ToolchainDigest(Copyable, Movable):
     """The 64-hex SHA-256 of those bytes."""
 
 
-def _no_toolchain_digest() -> _ToolchainDigest:
+comptime _MEMO_PATH_CAP = 4096
+"""Bytes of compiler path `_ToolchainMemo` can hold inline.
+
+`PATH_MAX` is 4096 on Linux and 1024 on Darwin, both counting the terminating
+NUL, and a `realpath` result is bounded by it, so every canonical compiler path
+this runner can resolve fits here with a byte to spare. The number is a capacity
+and not a precondition: `_ToolchainMemo.of` refuses a path that does not fit
+rather than truncating it, so getting the bound wrong costs one recomputation
+per session and can never produce a false hit.
+"""
+
+comptime _MEMO_SHA_LEN = 64
+"""Hex digits `_ToolchainMemo` reserves for the memoized digest.
+
+SHA-256 is 32 bytes and `sha256_hex` renders each as two lowercase hex digits,
+so 64 is a property of the algorithm rather than of any input.
+`_ToolchainMemo.of` re-checks the length anyway and refuses anything else,
+because a digest of a different length is not one this record can represent.
+"""
+
+
+struct _ToolchainMemo(Copyable, Movable):
+    """A `_ToolchainDigest` flattened into fixed-width storage, owning no heap.
+
+    Exists so `_TOOLCHAIN_MEMO` below can hold a compiler's identity without
+    holding an allocation. A process-lifetime memo is never torn down — there is
+    no exit hook to run and nothing to run it — so a `String` field there is
+    still live when the process calls `exit`, LeakSanitizer reports it as a
+    direct leak, and the ASan lane fails a run in which nothing actually went
+    wrong. Every field here is inline, so the slot owns nothing to report. What
+    callers get back is still a `_ToolchainDigest`: rebuilding its 64-character
+    digest on a hit costs one small allocation that its owner frees normally,
+    against the 141 MB read it replaces.
+
+    The path is compared byte for byte rather than through a digest of its own.
+    A digest would be smaller but would need a collision argument, and this
+    module's contract is that every question it cannot answer exactly resolves
+    against the cache; comparing the whole path needs no such argument, because
+    two compilers that are not the same file cannot be spelled the same way.
+    """
+
+    var path: InlineArray[UInt8, _MEMO_PATH_CAP]
+    """The canonical path's bytes. Only the leading `path_len` are meaningful;
+    the rest is the fill this record was constructed with."""
+
+    var path_len: Int
+    """How many bytes of `path` are in use. Zero means "nothing memoed yet", a
+    state no real record can reach because `of` refuses an empty path."""
+
+    var size: Int
+    """The number of bytes actually read and hashed under that path."""
+
+    var sha: InlineArray[UInt8, _MEMO_SHA_LEN]
+    """The digest's hex characters. Meaningful only when `path_len` is
+    nonzero."""
+
+    def __init__(out self):
+        """Start empty, so the first lookup in a process always misses."""
+        self.path = InlineArray[UInt8, _MEMO_PATH_CAP](fill=0)
+        self.path_len = 0
+        self.size = 0
+        self.sha = InlineArray[UInt8, _MEMO_SHA_LEN](fill=0)
+
+    @staticmethod
+    def of(
+        path: String, size: Int, sha_hex: String
+    ) -> Optional[_ToolchainMemo]:
+        """The memoizable form of one digest, or nothing when it does not fit.
+
+        Total by construction: nothing is truncated and nothing is approximated,
+        so a record that comes back is exact and one that does not come back
+        simply is not stored. Refusing costs the next session in this process a
+        recomputation, which is the same price an unreachable memo already pays.
+
+        Args:
+            path: The canonical path the digest was taken from. An empty path is
+                refused, because zero length is this record's "empty" marker.
+            size: The number of bytes read and hashed.
+            sha_hex: The digest rendering, which must be exactly
+                `_MEMO_SHA_LEN` characters.
+
+        Returns:
+            The fixed-width record, or `None` when the path is empty, the path
+            is longer than `_MEMO_PATH_CAP`, or the digest is not
+            `_MEMO_SHA_LEN` characters.
+        """
+        var path_bytes = path.as_bytes()
+        var sha_bytes = sha_hex.as_bytes()
+        if len(path_bytes) == 0 or len(path_bytes) > _MEMO_PATH_CAP:
+            return None
+        if len(sha_bytes) != _MEMO_SHA_LEN:
+            return None
+        var memo = _ToolchainMemo()
+        for i in range(len(path_bytes)):
+            memo.path[i] = path_bytes[i]
+        memo.path_len = len(path_bytes)
+        memo.size = size
+        for i in range(_MEMO_SHA_LEN):
+            memo.sha[i] = sha_bytes[i]
+        return Optional(memo^)
+
+    def matches(self, path: String, size: Int) -> Bool:
+        """Whether this record was taken from `path` at exactly `size` bytes.
+
+        Args:
+            path: The canonical path being looked up.
+            size: The byte count `stat` reports for it now.
+
+        Returns:
+            True only for a populated record whose stored path and size both
+            equal the arguments. An empty record matches nothing.
+        """
+        if self.path_len == 0 or self.size != size:
+            return False
+        var bytes = path.as_bytes()
+        if len(bytes) != self.path_len:
+            return False
+        for i in range(self.path_len):
+            if self.path[i] != bytes[i]:
+                return False
+        return True
+
+    def sha_hex(self) raises -> String:
+        """Rebuild the memoized digest as an owned string.
+
+        Returns:
+            The `_MEMO_SHA_LEN` stored characters, allocated fresh for the
+            caller to own.
+
+        Raises:
+            Error: The stored bytes are not well-formed UTF-8, which no digest
+                this module wrote can be. Raising rather than reinterpreting
+                keeps the checked `from_utf8` decoder here instead of an unsafe
+                one, and the single caller already treats any failure to reach
+                the memo as a reason to recompute.
+        """
+        return String(StringSlice(from_utf8=Span(self.sha)))
+
+
+def _no_toolchain_memo() -> _ToolchainMemo:
     """The empty memo slot every process starts with.
 
     Returns:
-        A record whose empty `path` matches no real compiler, so the first
+        A record whose zero `path_len` matches no real compiler, so the first
         lookup always misses.
     """
-    return _ToolchainDigest(String(""), 0, String(""))
+    return _ToolchainMemo()
 
 
 comptime _TOOLCHAIN_MEMO = _Global[
-    "mtest_store_toolchain_digest", _no_toolchain_digest
+    "mtest_store_toolchain_digest", _no_toolchain_memo
 ]
 """The process-lifetime memo for the compiler's content digest.
 
@@ -817,6 +961,12 @@ worst it can do is reuse a digest taken moments earlier by the same process.
 and the pin means it cannot move underneath this code. The session layer is
 single-threaded — concurrency in this runner is child PROCESSES, never threads —
 so the unsynchronized read-modify-write below has no racing writer.
+
+It holds `_ToolchainMemo` and not `_ToolchainDigest` because nothing ever frees
+what a slot like this holds: the process exits with the last value still in it,
+and a heap field there is a live allocation at `exit` that LeakSanitizer reports
+and the ASan lane fails on. `_ToolchainMemo` is entirely inline, so the slot
+owns no allocation and there is nothing to report.
 """
 
 
@@ -846,13 +996,14 @@ def _toolchain_identity(path: String) -> Optional[_ToolchainDigest]:
         size = Int(stat(path).st_size)
     except:
         return None
-    # Every memo touch is wrapped: `get_or_create_ptr` is fallible, and a memo
-    # that cannot be reached must cost a recomputation, never an answer. Both
-    # `except` arms therefore fall through to the full read.
+    # Every memo touch is wrapped: `get_or_create_ptr` is fallible, and so is
+    # decoding the stored digest, and a memo that cannot be reached must cost a
+    # recomputation, never an answer. Both `except` arms therefore fall through
+    # to the full read.
     try:
         var slot = _TOOLCHAIN_MEMO.get_or_create_ptr()
-        if slot[].path == path and slot[].size == size:
-            return Optional(slot[].copy())
+        if slot[].matches(path, size):
+            return Optional(_ToolchainDigest(path, size, slot[].sha_hex()))
     except:
         pass
     var data: List[UInt8]
@@ -863,10 +1014,15 @@ def _toolchain_identity(path: String) -> Optional[_ToolchainDigest]:
     # The read, not the stat, is the authority on length: if the file changed in
     # between, the digest and the size must describe the SAME bytes.
     var fresh = _ToolchainDigest(path, len(data), sha256_hex(data))
-    try:
-        _TOOLCHAIN_MEMO.get_or_create_ptr()[] = fresh.copy()
-    except:
-        pass
+    # A path too long to store inline is memoized not at all rather than
+    # partially: the next session in this process re-reads the compiler, the
+    # exact price an unreachable memo already pays.
+    var memo = _ToolchainMemo.of(fresh.path, fresh.size, fresh.sha_hex)
+    if memo:
+        try:
+            _TOOLCHAIN_MEMO.get_or_create_ptr()[] = memo.value().copy()
+        except:
+            pass
     return Optional(fresh^)
 
 
@@ -1451,7 +1607,7 @@ struct FileKey(Copyable, Movable):
     var src_rel: String
     """The source's root-relative path.
 
-    Not in the plan's field list, and required by the protocol it specifies:
+    Required by the publication protocol:
     `store_publish` re-digests the SOURCE before publishing, and its signature
     carries no path to re-read. `gen_name` cannot supply one — mangling is
     lossy for an over-budget name — so the path travels with the key.
