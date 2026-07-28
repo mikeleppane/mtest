@@ -257,6 +257,63 @@ class ClassifiedSourcesTests(unittest.TestCase):
 
         self.assertEqual([path.stem for path in found], ["test_alpha", "test_beta"])
 
+    def test_a_nested_module_is_discovered(self) -> None:
+        """Everything else that reads this tree walks it recursively.
+
+        `scripts/harness/selfhost.py` discovers, builds and RUNS a nested
+        module, and `scripts/checks/layout.py` reaches it with `rglob`. A
+        non-recursive probe therefore omitted from the co-link check exactly
+        the modules the suite was still executing -- measured on this
+        checkout as a recursive walk of 102 against a probe inventory of 101.
+        """
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            unit = root / "unit"
+            integration = root / "integration"
+            (unit / "nested").mkdir(parents=True)
+            integration.mkdir()
+            (unit / "test_flat.mojo").write_text("", encoding="utf-8")
+            (unit / "nested" / "test_ffi.mojo").write_text("", encoding="utf-8")
+            (integration / "test_beta.mojo").write_text("", encoding="utf-8")
+
+            with (
+                patch.object(abi_probe, "SEARCH_ROOTS", (unit, integration)),
+                patch.object(abi_probe, "ROOT", root),
+            ):
+                found = abi_probe.classified_sources()
+
+        # Ordered root by root, sorted by name within each -- the nested
+        # module simply joins its own root's group.
+        self.assertEqual(
+            [path.stem for path in found],
+            ["test_ffi", "test_flat", "test_beta"],
+        )
+
+    def test_a_nested_stem_colliding_with_a_top_level_one_is_rejected(self) -> None:
+        """Recursion widens the shadowing hazard; the guard already covers it.
+
+        Before the recursive walk a stem could only collide across the two
+        roots. Now `unit/test_twin.mojo` and `unit/nested/test_twin.mojo`
+        collide too, and `include_roots` puts BOTH directories on the include
+        path -- so the universe-wide stem check is what makes the added
+        include paths safe rather than a new way to shadow silently.
+        """
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            unit = root / "unit"
+            integration = root / "integration"
+            (unit / "nested").mkdir(parents=True)
+            integration.mkdir()
+            for path in (unit / "test_twin.mojo", unit / "nested" / "test_twin.mojo"):
+                path.write_text("def test_one():\n    pass\n", encoding="utf-8")
+
+            with (
+                patch.object(abi_probe, "SEARCH_ROOTS", (unit, integration)),
+                patch.object(abi_probe, "ROOT", root),
+                self.assertRaisesRegex(SystemExit, "share a stem"),
+            ):
+                abi_probe.classified_sources()
+
 
 class SharedSymbolFilesTests(unittest.TestCase):
     def test_a_symbol_declared_once_is_excluded(self) -> None:
@@ -454,6 +511,29 @@ class BuildProbeCommandTests(unittest.TestCase):
                 "import test_config as _mtest_module_0",
                 entrypoint.read_text(encoding="utf-8"),
             )
+
+    def test_a_nested_module_puts_its_own_directory_on_the_include_path(
+        self,
+    ) -> None:
+        # The entrypoint imports by bare stem, which only resolves when the
+        # module's own directory is named. Without this a nested module found
+        # by the recursive walk would fail to locate at build time.
+        nested = abi_probe.ROOT / "tests" / "unit" / "nested" / "test_ffi.mojo"
+        roots = abi_probe.include_roots([nested])
+
+        self.assertEqual(
+            roots[: len(abi_probe.SEARCH_ROOTS)],
+            [str(root) for root in abi_probe.SEARCH_ROOTS],
+        )
+        self.assertIn(str(nested.parent), roots)
+
+    def test_a_flat_tree_adds_no_include_path(self) -> None:
+        flat = abi_probe.ROOT / "tests" / "unit" / "test_config.mojo"
+
+        self.assertEqual(
+            abi_probe.include_roots([flat]),
+            [str(root) for root in abi_probe.SEARCH_ROOTS],
+        )
 
 
 if __name__ == "__main__":

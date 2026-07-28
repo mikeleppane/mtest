@@ -33,9 +33,10 @@ The entrypoint generator lives here rather than in a shared harness module
 because this probe is its only consumer.
 
 The generated entrypoint imports each module by its bare stem off an include
-path (`-I tests/unit -I tests/integration`, then `import test_foo`), the same
-way the classified suites themselves import `exec_helpers` and
-`session_fixtures` off `-I tests/support`. It cannot import them as
+path (`-I tests/unit -I tests/integration`, plus the directory of any nested
+module being co-linked, then `import test_foo`), the same way the classified
+suites themselves import `exec_helpers` and `session_fixtures` off
+`-I tests/support`. It cannot import them as
 `tests.unit.test_foo`: that spelling requires `tests/unit` to be a Mojo
 package, and `tests/unit/__init__.mojo` cannot exist, because every classified
 module declares `main()` and Mojo 1.0.0b2 refuses to `mojo precompile` a
@@ -52,9 +53,11 @@ would make one silently shadow the other: `import test_foo` would compile the
 `tests/unit` twin while this probe's own output named the `tests/integration`
 one. An arity drift declared only in the shadowed twin would then co-link
 clean and this gate would print OK. `classified_sources` therefore requires
-every stem across BOTH roots to be distinct, over the whole classified
-universe rather than over one co-link list -- shadowing needs only ONE twin
-in the list and the other merely present on disk.
+every stem to be distinct across the whole classified universe -- which the
+scan walks RECURSIVELY, so nested directories are inside it, and a nested
+twin collides with a top-level one exactly as a cross-root twin does -- and
+over that universe rather than over one co-link list, because shadowing needs
+only ONE twin in the list and the other merely present on disk.
 
 A declaration is matched over its complete bracketed span
 (`external_call[...]`), not one line: the symbol name legitimately sits on a
@@ -242,6 +245,14 @@ def declared_symbols(source: Path) -> set[str]:
 def classified_sources() -> list[Path]:
     """Return every classified `test_*.mojo` module, bytewise sorted.
 
+    Walks RECURSIVELY, because everything else that reads the classified tree
+    does: `scripts/harness/selfhost.py` (`os.walk`) discovers, builds and runs
+    a nested module, and `scripts/checks/layout.py` reaches it with `rglob`.
+    A non-recursive walk here meant a nested module declaring an existing
+    foreign symbol at the wrong arity ran in the suite and was silently absent
+    from the co-link set -- measured on this checkout as a recursive walk of
+    102 against a probe inventory of 101.
+
     Also enforces that every classified module across BOTH roots has a
     distinct stem, because the generated entrypoint imports by stem off an
     include path and `-I tests/unit` precedes `-I tests/integration`. Mojo
@@ -252,6 +263,14 @@ def classified_sources() -> list[Path]:
     declared only in the shadowed twin then co-links clean and the gate
     reports OK -- reproduced end to end: a shadowed build returned 0 on real
     injected arity drift where the unshadowed control returned nonzero.
+
+    Recursion widens exactly that hazard, which is why the two changes belong
+    together: before it, a stem could only collide across the two roots; now
+    `tests/unit/test_foo.mojo` and `tests/unit/nested/test_foo.mojo` collide
+    as well, and `build_probe` puts BOTH directories on the include path. The
+    guard needed no change -- it already compares stems over the whole
+    universe rather than per directory -- but it did need re-proving against
+    the nested shape, and it is what makes the added include paths safe.
 
     This is checked over the whole classified universe rather than over one
     co-link list, because shadowing does not require both twins to be in the
@@ -268,7 +287,7 @@ def classified_sources() -> list[Path]:
     found = [
         path
         for root in SEARCH_ROOTS
-        for path in sorted(root.glob("test_*.mojo"), key=lambda p: p.name)
+        for path in sorted(root.rglob("test_*.mojo"), key=lambda p: p.name)
     ]
     require(bool(found), "no classified test_*.mojo modules found")
     by_stem: dict[str, list[Path]] = {}
@@ -453,6 +472,33 @@ def run(command: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
+def include_roots(sources_to_colink: list[Path]) -> list[str]:
+    """Return the classified include paths one co-link build needs.
+
+    The entrypoint imports each module by its bare stem, which only resolves
+    when the module's own directory is on the include path. The two search
+    roots alone were sufficient while the tree was flat; a nested module needs
+    its own directory named too, or the generated `import` fails to locate it.
+
+    Every stem across the whole classified universe is distinct
+    (`classified_sources`), so widening the include path cannot make one
+    module shadow another.
+
+    Args:
+        sources_to_colink: The modules the entrypoint will import.
+
+    Returns:
+        The search roots followed by any further directory holding one of
+        `sources_to_colink`, deduplicated and ordered.
+    """
+    roots = [str(root) for root in SEARCH_ROOTS]
+    for source in sources_to_colink:
+        directory = str(source.parent)
+        if directory not in roots:
+            roots.append(directory)
+    return roots
+
+
 def build_probe(sources_to_colink: list[Path]) -> subprocess.CompletedProcess[str]:
     """Generate and build the co-linked entrypoint for `sources_to_colink`.
 
@@ -481,7 +527,11 @@ def build_probe(sources_to_colink: list[Path]) -> subprocess.CompletedProcess[st
             "build",
             "-I",
             "tests/support",
-            *(argument for root in SEARCH_ROOTS for argument in ("-I", str(root))),
+            *(
+                argument
+                for root in include_roots(sources_to_colink)
+                for argument in ("-I", root)
+            ),
             str(entrypoint),
             "-o",
             str(binary),
