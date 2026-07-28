@@ -96,25 +96,41 @@ def test_meta_rejects_truncation() raises:
 def test_classify_known_forms() raises:
     var args: List[String] = [
         "--no-optimization",
+        "-O0",
+        "-O1",
         "-O2",
+        "-O3",
         "--debug-level",
         "3",
+        "--debug-level=5",
         "-Iinclude",
         "-I",
         "vendor/include",
     ]
     var result = classify_build_args(args)
-    assert_equal(len(result), 5)
+    assert_true(len(result) <= len(args))
+    assert_equal(len(result), 9)
     assert_equal(result[0].kind, ARG_FLAG)
     assert_equal(result[0].value, "--no-optimization")
     assert_equal(result[1].kind, ARG_FLAG)
-    assert_equal(result[1].value, "-O2")
+    assert_equal(result[1].value, "-O0")
     assert_equal(result[2].kind, ARG_FLAG)
-    assert_equal(result[2].value, "--debug-level 3")
-    assert_equal(result[3].kind, ARG_INCLUDE_DIR)
-    assert_equal(result[3].value, "include")
-    assert_equal(result[4].kind, ARG_INCLUDE_DIR)
-    assert_equal(result[4].value, "vendor/include")
+    assert_equal(result[2].value, "-O1")
+    assert_equal(result[3].kind, ARG_FLAG)
+    assert_equal(result[3].value, "-O2")
+    assert_equal(result[4].kind, ARG_FLAG)
+    assert_equal(result[4].value, "-O3")
+    assert_equal(result[5].kind, ARG_FLAG)
+    assert_equal(result[5].value, "--debug-level 3")
+    # The attached `--debug-level=<val>` spelling is not part of the
+    # grammar's allowlist (only the two-token form is): it must be
+    # conservative, not silently accepted as a flag.
+    assert_equal(result[6].kind, ARG_UNKNOWN)
+    assert_equal(result[6].value, "--debug-level=5")
+    assert_equal(result[7].kind, ARG_INCLUDE_DIR)
+    assert_equal(result[7].value, "include")
+    assert_equal(result[8].kind, ARG_INCLUDE_DIR)
+    assert_equal(result[8].value, "vendor/include")
 
 
 def test_classify_unknown_is_conservative() raises:
@@ -125,6 +141,42 @@ def test_classify_unknown_is_conservative() raises:
     assert_equal(result[0].value, "--totally-unrecognized-flag")
     assert_equal(result[1].kind, ARG_FLAG)
     assert_equal(result[1].value, "-O2")
+
+
+def test_classify_missing_lookahead_is_conservative() raises:
+    # A two-token introducer as the LAST argv token, with its value missing,
+    # must classify as ARG_UNKNOWN rather than being dropped or matched
+    # against a made-up value -- this is the property Task 6 relies on to
+    # disable the cache instead of silently treating a malformed build
+    # command as harmless. An empty-string token gets the same conservative
+    # treatment. `len(result) <= len(args)` must still hold in every case.
+    var trailing_include: List[String] = ["-O2", "-I"]
+    var r1 = classify_build_args(trailing_include)
+    assert_true(len(r1) <= len(trailing_include))
+    assert_equal(len(r1), 2)
+    assert_equal(r1[1].kind, ARG_UNKNOWN)
+    assert_equal(r1[1].value, "-I")
+
+    var trailing_linker: List[String] = ["-O2", "-Xlinker"]
+    var r2 = classify_build_args(trailing_linker)
+    assert_true(len(r2) <= len(trailing_linker))
+    assert_equal(len(r2), 2)
+    assert_equal(r2[1].kind, ARG_UNKNOWN)
+    assert_equal(r2[1].value, "-Xlinker")
+
+    var trailing_debug: List[String] = ["-O2", "--debug-level"]
+    var r3 = classify_build_args(trailing_debug)
+    assert_true(len(r3) <= len(trailing_debug))
+    assert_equal(len(r3), 2)
+    assert_equal(r3[1].kind, ARG_UNKNOWN)
+    assert_equal(r3[1].value, "--debug-level")
+
+    var empty_token: List[String] = ["-O2", ""]
+    var r4 = classify_build_args(empty_token)
+    assert_true(len(r4) <= len(empty_token))
+    assert_equal(len(r4), 2)
+    assert_equal(r4[1].kind, ARG_UNKNOWN)
+    assert_equal(r4[1].value, "")
 
 
 def test_classify_selfhost_invocation() raises:
