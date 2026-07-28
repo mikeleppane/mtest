@@ -961,9 +961,22 @@ def check_vendored_toml_layout(repo_root: Path = REPO_ROOT) -> None:
         raise AssertionError(
             "production build does not compile and link the vendored TOML package"
         )
-    if len(re.findall(r"(?m)^\s*mojo precompile\b", build_source)) != 2:
+    # Exactly two precompiles, counted at the INVOCATION rather than anywhere
+    # the words appear: the script discusses `mojo precompile` in prose several
+    # times, and a bare substring count would read those comments as build
+    # steps. Both spellings the script has used are accepted -- a bare command
+    # line, and the `NAME=(mojo precompile ...)` argv array the stamped stage
+    # holds its two vectors in -- because which one is in force is a detail of
+    # how the stage is written, while "exactly two packages get precompiled" is
+    # the claim this gate exists to make. Anchoring to one spelling is what let
+    # this check silently count zero after the arrays landed.
+    precompiles = re.findall(
+        r"(?m)^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\()?mojo precompile\b", build_source
+    )
+    if len(precompiles) != 2:
         raise AssertionError(
-            "production build must execute exactly two package precompiles"
+            "production build must execute exactly two package precompiles, "
+            f"found {len(precompiles)}"
         )
     if re.search(r"\b(curl|wget|git\s+(clone|fetch|pull))\b", build_source):
         raise AssertionError("production build fetches a dependency from the network")
