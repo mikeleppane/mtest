@@ -47,7 +47,12 @@ from mtest.session.store import (
     walk_include_root,
 )
 
-from cache_fixtures import dir_listing, run_recording_session, write_bytes
+from cache_fixtures import (
+    RecordedRun,
+    dir_listing,
+    run_recording_session,
+    write_bytes,
+)
 from session_fixtures import SRC_PASS, base_config, write_file
 from tmptree import temp_root
 
@@ -1333,17 +1338,25 @@ def test_precompile_key_disables_on_an_unreadable_source() raises:
 
 
 def test_precompile_key_disables_on_an_unwalkable_include_root() raises:
+    # An include root that EXISTS but cannot be characterized is a build input
+    # this key cannot represent, so it still takes the cache down — unlike one
+    # that is merely absent, which a step is expected to create.
     var root = _pkg_root()
+    write_file(root, "inc/top.mojo", "# a")
     var no_dirs = List[String]()
-    var includes: List[String] = ["nowhere"]
+    var includes: List[String] = ["inc"]
     var ctx = CacheContext()
+    _chmod("000", root + "/inc")
+    # No `try`/`finally`: `precompile_key` is non-raising by contract, so the
+    # restore below is unconditionally reached.
     var key = precompile_key(
         ctx, root, "pkg", includes, no_dirs, "build/pkg.mojopkg"
     )
+    _chmod("755", root + "/inc")
     assert_false(Bool(key))
     assert_false(ctx.enabled)
     assert_true(
-        "nowhere" in ctx.disable_reason,
+        "inc" in ctx.disable_reason,
         "reason did not name the include root: " + ctx.disable_reason,
     )
 
@@ -1411,6 +1424,86 @@ def test_precompile_stamp_round_trips_and_guards_its_output() raises:
     remove(root + "/" + out_path)
     assert_false(precompile_probe(root, key, out_path))
     assert_false(precompile_probe(root, key, out_path))
+
+
+def test_precompile_key_frames_an_absent_include_root() raises:
+    # The ordinary `-I build` shape has a precompile step CREATE the include
+    # root, so on a cold tree it does not exist when the step is keyed.
+    # Disabling there would cost the whole session its cache on the first run of
+    # a legitimate config — but absent still may not key like present-and-empty,
+    # or a directory that later grew contents would serve a stale hit.
+    var root = _pkg_root()
+    var no_dirs = List[String]()
+    var includes: List[String] = ["build"]
+    var cold_ctx = CacheContext()
+    var cold = _step_key(
+        cold_ctx, root, "pkg", includes, no_dirs, "build/pkg.mojopkg"
+    )
+    assert_true(cold_ctx.enabled, "cache off: " + cold_ctx.disable_reason)
+
+    # Present and empty is a DIFFERENT state from absent.
+    makedirs(root + "/build")
+    var empty_ctx = CacheContext()
+    var empty = _step_key(
+        empty_ctx, root, "pkg", includes, no_dirs, "build/pkg.mojopkg"
+    )
+    assert_true(empty_ctx.enabled, "cache off: " + empty_ctx.disable_reason)
+    assert_not_equal(cold.digest_full, empty.digest_full)
+
+    # ...and so is present with contents, so a root that fills up takes a miss.
+    write_bytes(root, "build/other.mojopkg", [UInt8(7)])
+    var filled_ctx = CacheContext()
+    var filled = _step_key(
+        filled_ctx, root, "pkg", includes, no_dirs, "build/pkg.mojopkg"
+    )
+    assert_not_equal(empty.digest_full, filled.digest_full)
+    assert_not_equal(cold.digest_full, filled.digest_full)
+
+    # An include root that EXISTS but cannot be characterized still disables: a
+    # plain file where a directory belongs is an input this key cannot cover.
+    var file_root = _pkg_root()
+    write_file(file_root, "build", "not a directory\n")
+    var file_ctx = CacheContext()
+    var refused = precompile_key(
+        file_ctx, file_root, "pkg", includes, no_dirs, "build/pkg.mojopkg"
+    )
+    assert_false(Bool(refused))
+    assert_false(file_ctx.enabled)
+    assert_true(
+        "build" in file_ctx.disable_reason,
+        "reason did not name the include root: " + file_ctx.disable_reason,
+    )
+
+
+def test_precompile_probe_refuses_a_symlinked_stamp() raises:
+    # `store_probe` refuses a symlink at the generation path and leaves it
+    # exactly where it is; the two probes must not disagree about that at the
+    # same structural position. Re-digesting the output means a followed link
+    # cannot serve stale bytes TODAY — this pins that the asymmetry is closed
+    # before some later change starts depending on it.
+    var root = _pkg_root()
+    var out_path = String("build/pkg.mojopkg")
+    write_bytes(root, out_path, [UInt8(1), UInt8(2)])
+    var no_dirs = List[String]()
+    var ctx = CacheContext()
+    var key = _step_key(ctx, root, "pkg", no_dirs, no_dirs, out_path)
+
+    # A perfectly valid stamp, moved aside and replaced by a link to itself.
+    precompile_publish(root, key, out_path)
+    var stamp_abs = root + "/" + precompile_stamp_rel(key.gen_name)
+    assert_true(precompile_probe(root, key, out_path))
+    var elsewhere = root + "/elsewhere-stamp"
+    rename_path(stamp_abs, elsewhere)
+    symlink(elsewhere, stamp_abs)
+
+    assert_false(
+        precompile_probe(root, key, out_path),
+        "a symlinked stamp was followed",
+    )
+    # Refused, never removed: a link the cache did not create is not the
+    # cache's to delete, and deleting it would hide whoever planted it.
+    assert_true(islink(stamp_abs))
+    assert_true(exists(elsewhere))
 
 
 def test_precompile_publish_reaps_the_steps_stale_stamps() raises:
@@ -1553,6 +1646,76 @@ def test_unchanged_precompile_step_is_not_recompiled() raises:
         3,
         "an edited step source must rebuild the step",
     )
+
+
+def _cache_off_reasons(run: RecordedRun) raises -> List[String]:
+    """Every `cache-off` warning a recorded run emitted, in emission order."""
+    var reasons = List[String]()
+    for entry in run.warnings:
+        var warning = String(entry)
+        if warning.startswith("cache-off:"):
+            reasons.append(warning)
+    return reasons^
+
+
+def test_cold_tree_include_root_created_by_a_step_keeps_the_cache_on() raises:
+    # The `-I build` shape: a configured include root that a precompile step
+    # itself creates. On a COLD tree it does not exist when the step is keyed,
+    # and treating that as a failure to characterize took the whole session's
+    # cache down on the first run of a legitimate config — the run on which
+    # people decide whether the feature is worth having.
+    var root = temp_root()
+    write_file(
+        root, "goodpkg/__init__.mojo", "def helper() -> Int:\n    return 7\n"
+    )
+    write_file(root, "tests/test_a.mojo", SRC_PASS)
+    var config = _counting_config()
+    config.include_paths = ["build"]
+    assert_false(exists(root + "/build"), "the tree must start cold")
+
+    # --- Run 1: cold, and the cache must stay ON. ---------------------------
+    var first = run_recording_session(config, root)
+    assert_equal(first.code, 0)
+    assert_equal(
+        len(_cache_off_reasons(first)),
+        0,
+        (
+            "an include root a step had not created yet switched the whole"
+            " session's cache off"
+        ),
+    )
+    assert_equal(_precompile_invocations(root), 1)
+    assert_equal(first.built_files, 1, "the file was compiled and published")
+    assert_true(exists(root + "/build"), "step 1 created the include root")
+
+    # --- Run 2: one re-key, by design. --------------------------------------
+    # Absent and present-but-empty are deliberately DIFFERENT states — a root
+    # that later grew contents must take a miss, not a stale hit — so the step
+    # is keyed afresh exactly once as the tree stops being cold.
+    var second = run_recording_session(config, root)
+    assert_equal(second.code, 0)
+    assert_equal(len(_cache_off_reasons(second)), 0)
+    assert_equal(
+        _precompile_invocations(root),
+        2,
+        "the absent-to-present transition re-keys the step exactly once",
+    )
+
+    # --- Run 3: converged, and now the store serves. ------------------------
+    var third = run_recording_session(config, root)
+    assert_equal(third.code, 0)
+    assert_equal(len(_cache_off_reasons(third)), 0)
+    assert_equal(
+        _precompile_invocations(root),
+        2,
+        "the step must be skipped once the include root has settled",
+    )
+    # `mojo precompile` is not byte-deterministic, so a step that RERUNS
+    # rewrites its package and moves the session prefix every file keys from.
+    # Skipping the step is therefore what makes the file cache hit at all in a
+    # config that precompiles anything.
+    assert_equal(third.cached_files, 1, "the test file came from the store")
+    assert_equal(third.built_files, 0)
 
 
 def main() raises:

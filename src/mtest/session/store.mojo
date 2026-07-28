@@ -200,6 +200,20 @@ walk, because the walk covers a directory and a prior output can be excluded fro
 one — or sit somewhere the walk never reaches.
 """
 
+comptime TAG_PRECOMPILE_INCLUDE_ABSENT = "precompile-include-absent"
+"""One include root that did not exist yet when the step was keyed.
+
+`precompile_key`'s only, and the frame that keeps a cold tree from switching the
+whole cache off. A configured `-I build` is ordinarily created BY a precompile
+step, so on a first run the directory genuinely is not there when the step is
+keyed — and "not there" is a fact about the build, not a failure to read one.
+
+It is a positive frame rather than silence because absent and present-but-empty
+must not key alike: if the directory later exists with contents, the walk emits
+`walkfile` frames where this run emitted this one, so the key differs and the
+next run takes a MISS rather than a stale hit.
+"""
+
 
 def cache_key_tags() -> List[String]:
     """Every tag the cache key uses, including the one `KeyBuilder` feeds itself.
@@ -239,6 +253,7 @@ def cache_key_tags() -> List[String]:
         String(TAG_PRECOMPILE_OUT),
         String(TAG_PRECOMPILE_SRC),
         String(TAG_PRECOMPILE_PRIOR),
+        String(TAG_PRECOMPILE_INCLUDE_ABSENT),
     ]
     return tags^
 
@@ -2196,7 +2211,8 @@ def precompile_key(
     5. Each include root the step will be given, in order — the configured ones
        first, then the `-I` directories recorded out of the build arguments,
        which is the order the compiler receives them — each as an `include`
-       frame followed by that root's walked contents.
+       frame followed by that root's walked contents, or by one
+       `precompile-include-absent` frame when the root does not exist yet.
     6. Each earlier step's output, as a `precompile-prior` file frame.
 
     Every walk here excludes `out_path`. That is not an optimization: this
@@ -2204,6 +2220,15 @@ def precompile_key(
     key that digested it would describe the step's RESULT rather than its
     inputs — so the first run and the second would key differently and no stamp
     could ever be hit.
+
+    An include root that does not exist yet is the OTHER thing this function
+    treats differently from `finalize_includes`, and for the same reason: a
+    configured `-I build` is ordinarily created by a precompile step, so it is
+    genuinely absent at the moment the step is keyed on a cold tree. That is a
+    fact about the build, framed as such, not a failure to characterize one —
+    disabling on it would cost the whole session its cache on the first run of a
+    legitimate config. A root that EXISTS but will not characterize still
+    disables.
 
     Args:
         ctx: The session context. `base` is read, `extra_walk_dirs` is walked
@@ -2279,6 +2304,29 @@ def precompile_key(
     for entry in dirs:
         var dir = String(entry)
         kb.feed_str(TAG_INCLUDE, dir)
+        # An include root that is GENUINELY ABSENT is not a failure here, and
+        # this is the one place in the module where that is true. The ordinary
+        # `-I build` shape has a precompile step CREATE the include root, so on
+        # a cold tree the directory does not exist yet at the moment the step is
+        # keyed — `finalize_includes` walks the same root after the loop, when it
+        # does. Disabling on it would take the whole session's cache down on the
+        # first run of a perfectly legitimate config, which is the run that
+        # decides whether the feature is ever trusted.
+        #
+        # `lstat` is what separates absent from unreadable: it raises where the
+        # path is not there (or its parent cannot be searched) and succeeds for
+        # everything that exists, symlinks included. Anything that EXISTS but
+        # will not characterize still disables below — a file where a directory
+        # belongs, an unlistable directory, a symlinked package — because that
+        # is a build input this key cannot represent.
+        var present = True
+        try:
+            _ = lstat(_absolute(root, dir))
+        except:
+            present = False
+        if not present:
+            kb.feed_str(TAG_PRECOMPILE_INCLUDE_ABSENT, dir)
+            continue
         var walked = walk_include_root(root, dir, kb, out_path)
         if not walked.ok:
             ctx.disable(
@@ -2323,8 +2371,11 @@ def precompile_key(
 def precompile_probe(root: String, key: FileKey, out_path: String) -> Bool:
     """Decide whether a configured precompile step may be skipped entirely.
 
-    A skip is granted only when all four hold:
+    A skip is granted only when all five hold:
 
+    0. The stamp path is not a SYMLINK — characterized no-follow and first,
+       exactly as `store_probe` characterizes a generation directory. A link is
+       refused and left untouched; it is not the cache's to delete.
     1. The stamp for this key is a readable regular file.
     2. It parses as a complete `MetaFile`.
     3. Its `key` line equals the WHOLE 64-hex key, not just the 128 bits the
@@ -2361,6 +2412,25 @@ def precompile_probe(root: String, key: FileKey, out_path: String) -> Bool:
     ```
     """
     var stamp_abs = root + "/" + precompile_stamp_rel(key.gen_name)
+
+    # Characterized NO-FOLLOW and first, exactly as `store_probe` does at the
+    # same structural position. A symlink is refused and LEFT WHERE IT IS: a
+    # link the cache did not create is not the cache's to delete, and deleting
+    # it would hide the fact that something else is writing into the store's
+    # namespace. Re-digesting the output below means a followed link could not
+    # serve stale bytes today, but the two probes must not disagree about
+    # whether a symlink is acceptable here — that asymmetry is how a later
+    # change lands on the wrong side of it.
+    var kind: Int
+    try:
+        kind = Int(lstat(stamp_abs).st_mode) & _S_IFMT
+    except:
+        # Absent, or in a directory this process cannot search. Either way there
+        # is nothing here to trust and nothing to delete.
+        return False
+    if kind == _S_IFLNK:
+        return False
+
     var stamp_text: String
     try:
         var opened = read_bounded_regular_file(stamp_abs, _META_CAP)
