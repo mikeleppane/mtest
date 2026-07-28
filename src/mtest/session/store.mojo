@@ -53,8 +53,9 @@ binary is served. The complete namespace is the `TAG_*` block below, and
 `cache_key_tags` returns exactly it: anyone adding a tag adds it in that one
 place, and `test_tag_namespace_is_frame_safe` re-checks the whole set.
 """
-from std.os import getenv, listdir
-from std.os.path import dirname, isdir, isfile, islink, realpath
+from std.ffi import _Global
+from std.os import getenv, listdir, lstat, stat
+from std.os.path import dirname, isdir, realpath
 
 from mtest.cache import (
     ARG_FILE_CANDIDATE,
@@ -317,23 +318,105 @@ def _is_source_name(name: String) -> Bool:
     return name.endswith(".mojopkg") or name.endswith(".mojoc")
 
 
-def _is_package_dir(abs_dir: String) -> Bool:
-    """Whether `abs_dir` carries an `__init__`, making it an importable package.
+@fieldwise_init
+struct WalkOutcome(Copyable, Movable):
+    """Whether an include walk covered its root, and if not, why not.
+
+    A bare `False` was not enough once a symlinked package became its own
+    disable condition rather than a generic read failure: the user has to be
+    told which link to replace, and `cannot read the include root 'src'` does
+    not say that.
+    """
+
+    var ok: Bool
+    """True iff every reachable input was framed."""
+
+    var reason: String
+    """Why the walk could not cover its root; empty when `ok`."""
+
+    @staticmethod
+    def success() -> WalkOutcome:
+        """A walk that covered everything.
+
+        Returns:
+            An outcome with `ok` set and no reason.
+        """
+        return WalkOutcome(True, String(""))
+
+    @staticmethod
+    def failure(reason: String) -> WalkOutcome:
+        """A walk that did not cover everything.
+
+        Args:
+            reason: What could not be covered, in words a user can act on.
+
+        Returns:
+            An outcome with `ok` clear, carrying `reason`.
+        """
+        return WalkOutcome(False, reason)
+
+
+comptime _S_IFMT = 0xF000
+"""File-type mask over `st_mode`; POSIX fixes it on Linux and Darwin alike."""
+
+comptime _S_IFDIR = 0x4000
+"""`S_IFDIR`: the `st_mode` file-type value for a directory."""
+
+comptime _S_IFLNK = 0xA000
+"""`S_IFLNK`: the `st_mode` file-type value for a symbolic link."""
+
+
+def _list_sorted(abs_dir: String) -> Optional[List[String]]:
+    """The entries of `abs_dir` in byte order, or nothing if it cannot be read.
+
+    `listdir` raises on failure — unlike `isdir` / `isfile`, which fold every
+    error into `False` — so this is the one directory query in the module that
+    can tell "empty" from "unreadable". Every place the walk needs to
+    characterize a directory goes through it for exactly that reason.
 
     Args:
-        abs_dir: The directory's absolute path.
+        abs_dir: The directory to read, absolute.
 
     Returns:
-        True iff it holds `__init__.mojo` or `__init__.🔥`. A query that cannot
-        answer — an unreadable parent, a vanished entry — reads as False, which
-        keeps the walk out of a directory it cannot characterize.
+        The sorted entry names, or `None` when the directory could not be
+        listed at all.
     """
-    return isfile(abs_dir + "/__init__.mojo") or isfile(abs_dir + "/__init__.🔥")
+    var names = List[String]()
+    try:
+        for entry in listdir(abs_dir):
+            names.append(String(entry))
+    except:
+        return None
+    _sort_bytewise(names)
+    return Optional(names^)
+
+
+def _has_init(names: List[String]) -> Bool:
+    """Whether a directory listing contains an `__init__`, making it a package.
+
+    Reads the listing rather than asking `isfile` twice: `isfile` cannot tell a
+    missing `__init__.mojo` from one it was not permitted to stat, and those two
+    answers must lead to opposite decisions.
+
+    Args:
+        names: One directory's entry names.
+
+    Returns:
+        True iff `__init__.mojo` or `__init__.🔥` is among them.
+    """
+    for name in names:
+        if name == "__init__.mojo" or name == "__init__.🔥":
+            return True
+    return False
 
 
 def _walk_into(
-    abs_dir: String, rel_prefix: String, mut kb: KeyBuilder, exclude_abs: String
-) -> Bool:
+    abs_dir: String,
+    rel_prefix: String,
+    var names: List[String],
+    mut kb: KeyBuilder,
+    exclude_abs: String,
+) -> WalkOutcome:
     """Feed one directory's contributions, recursing into package subdirectories.
 
     Args:
@@ -341,22 +424,17 @@ def _walk_into(
         rel_prefix: The path of `abs_dir` relative to the walked include root;
             empty at the top. Frames name files by this prefix, never by an
             absolute path, so the same tree keys alike in any checkout.
+        names: `abs_dir`'s entries, already sorted — passed in because the
+            caller had to list the directory to decide it was a package, and
+            listing it twice would invite a mid-walk race between the two.
         kb: The builder to feed.
         exclude_abs: One absolute path to skip wherever met, or empty for none.
 
     Returns:
-        True on a complete walk; False if anything at all could not be read.
-        Never raises: a half-read tree must not become a key, so every
-        filesystem failure is turned into a False return instead.
+        A successful outcome once every reachable input is framed, or a failure
+        naming the first thing this walk could not account for. Never raises: a
+        half-read tree must not become a key.
     """
-    var names = List[String]()
-    try:
-        for entry in listdir(abs_dir):
-            names.append(String(entry))
-    except:
-        return False
-    _sort_bytewise(names)
-
     for entry in names:
         var name = String(entry)
         # Dot entries are the runner's own scratch (`.mtest-cache`), the VCS
@@ -368,19 +446,57 @@ def _walk_into(
             continue
         var rel = name if rel_prefix == "" else rel_prefix + "/" + name
 
-        if isdir(full):
-            # The link check comes BEFORE the recursion, and before the package
-            # test: a symlinked directory can close a cycle that no lexical
-            # normalization detects, and the walk would never terminate.
-            if islink(full):
-                continue
+        # `lstat` raises where `isdir` / `islink` answer False, which is the
+        # whole point of using it: this name came out of a directory listing, so
+        # it existed a moment ago. If it cannot be stat'd now it either vanished
+        # mid-walk or sits under a directory this process may read but not
+        # search (mode 0644) — and in that second case EVERY entry would answer
+        # "not a directory, not a source file" and the walk would silently frame
+        # nothing. A tree the walk cannot characterize must not key as an empty
+        # one.
+        var kind: Int
+        try:
+            kind = Int(lstat(full).st_mode) & _S_IFMT
+        except:
+            return WalkOutcome.failure(
+                "cannot inspect '" + rel + "' (in '" + abs_dir + "')"
+            )
+        var is_link = kind == _S_IFLNK
+        # For a link, the type that matters is the target's. A dangling link
+        # answers False here and falls through to the file path below, where a
+        # source-named one fails the read (correctly) and anything else is
+        # ignored (also correctly — the compiler would not have read it either).
+        var is_dir = kind == _S_IFDIR or (is_link and isdir(full))
+
+        if is_dir:
+            var listing = _list_sorted(full)
+            if not listing:
+                return WalkOutcome.failure(
+                    "cannot read the directory '" + rel + "'"
+                )
+            var sub = listing.value().copy()
             # Without an `__init__`, `-I` on the parent does not reach inside,
             # so the contents cannot change the build and must not change the
-            # key.
-            if not _is_package_dir(full):
+            # key. That holds for a symlinked directory too, which is why the
+            # package test comes first.
+            if not _has_init(sub):
                 continue
-            if not _walk_into(full, rel, kb, exclude_abs):
-                return False
+            if is_link:
+                # A symlinked PACKAGE is imported by the compiler but cannot be
+                # walked: descending it risks a cycle no lexical normalization
+                # detects. Skipping it silently was the stale-hit hole — editing
+                # the link's target would leave the key untouched and serve the
+                # previous binary on a green run. So the cache goes off and says
+                # which link to replace.
+                return WalkOutcome.failure(
+                    "package '"
+                    + rel
+                    + "' is reached through a directory symlink, which the"
+                    " cache cannot walk safely"
+                )
+            var inner = _walk_into(full, rel, sub^, kb, exclude_abs)
+            if not inner.ok:
+                return inner^
             continue
 
         if not _is_source_name(name):
@@ -392,22 +508,29 @@ def _walk_into(
             # Over the cap, unreadable, or a dangling symlink. Each is a fact
             # about the build input this key cannot represent, so the walk
             # fails and the cache goes off rather than keying on a guess.
-            return False
+            return WalkOutcome.failure("cannot read the file '" + rel + "'")
         kb.feed_file(TAG_WALK_FILE, rel, len(data), sha256_hex(data))
-    return True
+    return WalkOutcome.success()
 
 
 def walk_include_root(
     root: String, dir: String, mut kb: KeyBuilder, exclude: String
-) -> Bool:
+) -> WalkOutcome:
     """Feed everything `-I dir` makes visible to the compiler, in a fixed order.
 
     The walk mirrors what the import resolver can actually reach: every
     top-level `*.mojo` / `*.🔥` / `*.mojopkg` / `*.mojoc`, plus the same rule
     applied recursively inside each subdirectory that carries an `__init__`.
-    Dot-prefixed entries and symlinked directories are skipped, entries are
-    visited in byte order, and each file contributes its path (relative to
-    `dir`), its size, and its content digest.
+    Dot-prefixed entries are skipped, entries are visited in byte order, and
+    each file contributes its path (relative to `dir`), its size, and its
+    content digest.
+
+    Symlinks are resolved by what the compiler would do with them. A symlinked
+    directory that is NOT a package contributes nothing, because `-I` does not
+    reach inside it either. A symlinked directory that IS a package fails the
+    walk: the compiler imports it, so its contents belong in the key, but
+    descending a link can close a cycle. Off is the only honest answer, and the
+    reason names the link.
 
     Args:
         root: The invocation root; `dir` and `exclude` resolve against it.
@@ -419,10 +542,12 @@ def walk_include_root(
             whether the step runs does not depend on what the step produces.
 
     Returns:
-        True on a complete walk. False if `dir` is not a directory, or if any
-        listing or read failed — the caller's only correct response is to
-        disable the cache, since a partial walk is a key that does not cover
-        its inputs. Never raises.
+        A successful outcome on a complete walk, or a failure carrying a reason
+        — `dir` is not a readable directory, an entry could not be stat'd, a
+        subdirectory could not be listed, a file could not be read, or a package
+        hides behind a symlink. The caller's only correct response to a failure
+        is to disable the cache, since a partial walk is a key that does not
+        cover its inputs. Never raises.
 
     Examples:
 
@@ -431,15 +556,17 @@ def walk_include_root(
     from mtest.session.store import walk_include_root
 
     var kb = KeyBuilder()
-    if not walk_include_root("/repo", "src", kb, ""):
-        pass  # disable the cache; the key would not cover `src`
+    var outcome = walk_include_root("/repo", "src", kb, "")
+    if not outcome.ok:
+        pass  # disable the cache, quoting `outcome.reason`
     ```
     """
     var abs_dir = _absolute(root, dir)
-    if not isdir(abs_dir):
-        return False
+    var listing = _list_sorted(abs_dir)
+    if not listing:
+        return WalkOutcome.failure("'" + dir + "' is not a readable directory")
     var exclude_abs = String("") if exclude == "" else _absolute(root, exclude)
-    return _walk_into(abs_dir, "", kb, exclude_abs)
+    return _walk_into(abs_dir, "", listing.value().copy(), kb, exclude_abs)
 
 
 struct CacheContext(Movable):
@@ -538,6 +665,107 @@ struct CacheContext(Movable):
         self.disable_reason = reason
 
 
+@fieldwise_init
+struct _ToolchainDigest(Copyable, Movable):
+    """One compiler binary's identity: which file, how long, and its digest."""
+
+    var path: String
+    """The canonical path the digest was taken from; `""` means "nothing memoed
+    yet"."""
+
+    var size: Int
+    """The number of bytes actually read and hashed."""
+
+    var sha_hex: String
+    """The 64-hex SHA-256 of those bytes."""
+
+
+def _no_toolchain_digest() -> _ToolchainDigest:
+    """The empty memo slot every process starts with.
+
+    Returns:
+        A record whose empty `path` matches no real compiler, so the first
+        lookup always misses.
+    """
+    return _ToolchainDigest(String(""), 0, String(""))
+
+
+comptime _TOOLCHAIN_MEMO = _Global[
+    "mtest_store_toolchain_digest", _no_toolchain_digest
+]
+"""The process-lifetime memo for the compiler's content digest.
+
+Hashing the compiler is the single most expensive thing this module does — on a
+141 MB toolchain, roughly 0.7 s optimized and some twenty times that in the
+unoptimized test lane — and it is recomputed identically by every session in a
+process. One session per process is the production shape, so this buys
+production nothing; the aggregate test binary, which drives many sessions back
+to back, is what it is for.
+
+Deliberately IN-PROCESS ONLY. An on-disk memo keyed by path, size, and mtime
+was considered and rejected: it would survive a toolchain swap that preserved
+those three fields, turning the one input that identifies the compiler into a
+poisonable indirection. This memo dies with the process that made it, so the
+worst it can do is reuse a digest taken moments earlier by the same process.
+
+`_Global` is stdlib-private at the pinned toolchain. It is used because Mojo
+1.0.0b2 offers no other process-lifetime mutable slot without a foreign symbol,
+and the pin means it cannot move underneath this code. The session layer is
+single-threaded — concurrency in this runner is child PROCESSES, never threads —
+so the unsynchronized read-modify-write below has no racing writer.
+"""
+
+
+def _toolchain_identity(path: String) -> Optional[_ToolchainDigest]:
+    """The compiler's size and digest, computed at most once per process.
+
+    The memo hits only when the canonical path AND the byte count both match
+    what was hashed before. The size comes from a `stat` that costs nothing next
+    to the read it guards, and it catches every toolchain swap that changes the
+    binary's length. It cannot catch a same-path, same-length replacement — but
+    that would have to happen between two sessions of one live process, and the
+    memo never outlives that process.
+
+    The key bytes are unaffected either way: a hit returns exactly the `size`
+    and `sha_hex` a miss would have recomputed, so a memoized run and a cold run
+    frame identical bytes.
+
+    Args:
+        path: The compiler's canonical path, from `resolve_executable`.
+
+    Returns:
+        Its identity, or `None` when the file could not be stat'd or read —
+        which the caller turns into a disabled cache.
+    """
+    var size: Int
+    try:
+        size = Int(stat(path).st_size)
+    except:
+        return None
+    # Every memo touch is wrapped: `get_or_create_ptr` is fallible, and a memo
+    # that cannot be reached must cost a recomputation, never an answer. Both
+    # `except` arms therefore fall through to the full read.
+    try:
+        var slot = _TOOLCHAIN_MEMO.get_or_create_ptr()
+        if slot[].path == path and slot[].size == size:
+            return Optional(slot[].copy())
+    except:
+        pass
+    var data: List[UInt8]
+    try:
+        data = read_regular_file_bytes(path, _BIN_CAP)
+    except:
+        return None
+    # The read, not the stat, is the authority on length: if the file changed in
+    # between, the digest and the size must describe the SAME bytes.
+    var fresh = _ToolchainDigest(path, len(data), sha256_hex(data))
+    try:
+        _TOOLCHAIN_MEMO.get_or_create_ptr()[] = fresh.copy()
+    except:
+        pass
+    return Optional(fresh^)
+
+
 def collect_env_base(
     mut runtime: ExecRuntime, config: RunnerConfig, root: String
 ) -> CacheContext:
@@ -605,17 +833,13 @@ def collect_env_base(
     var ctx = CacheContext()
 
     # --- Frame 2: toolchain identity. ---------------------------------------
-    var compiler_bytes: List[UInt8]
-    try:
-        compiler_bytes = read_regular_file_bytes(compiler, _BIN_CAP)
-    except:
+    var identity = _toolchain_identity(compiler)
+    if not identity:
         ctx.disable("cannot read the compiler at '" + compiler + "'")
         return ctx^
+    var toolchain = identity.value().copy()
     ctx.base.feed_file(
-        TAG_TOOLCHAIN,
-        compiler,
-        len(compiler_bytes),
-        sha256_hex(compiler_bytes),
+        TAG_TOOLCHAIN, compiler, toolchain.size, toolchain.sha_hex
     )
 
     # --- Frame 3: toolchain version. ----------------------------------------
@@ -771,6 +995,9 @@ def finalize_includes(
     for entry in dirs:
         var dir = String(entry)
         ctx.prefix.feed_str(TAG_INCLUDE, dir)
-        if not walk_include_root(root, dir, ctx.prefix, ""):
-            ctx.disable("cannot read the include root '" + dir + "'")
+        var outcome = walk_include_root(root, dir, ctx.prefix, "")
+        if not outcome.ok:
+            # The walk's own words, not a generic "unreadable": a symlinked
+            # package and an unreadable file are different things to fix.
+            ctx.disable("include root '" + dir + "': " + outcome.reason)
             return

@@ -13,7 +13,7 @@ from std.testing import (
 
 from mtest.cache import KeyBuilder
 from mtest.config import RunnerConfig
-from mtest.exec import ExecRuntime, ProcessSpec, run_supervised
+from mtest.exec import ExecRuntime, ProcessResult, ProcessSpec, run_supervised
 from mtest.platform import (
     read_bounded_regular_file,
     read_regular_file_bytes,
@@ -84,8 +84,8 @@ def test_rejects_over_cap() raises:
         _ = read_regular_file_bytes(root + "/blob.bin", 3)
 
 
-def _make_executable(path: String) raises:
-    """Give `path` the execute bit through a supervised `chmod` child.
+def _chmod(mode: String, path: String) raises:
+    """Set `path`'s mode through a supervised `chmod` child.
 
     The platform layer carries no permissions primitive
     (`grep -rn "chmod\\|permissions" src/mtest/platform/` finds nothing) and the
@@ -94,19 +94,40 @@ def _make_executable(path: String) raises:
     makes a supervised spawn the fallback the brief names — cheaper than a
     foreign declaration written only for the tests.
 
+    The runtime is closed in a `finally`. Without it a raising `run_supervised`
+    would leave mtest's process-global signal dispositions owned by a runtime
+    nobody can close, and every later test in this file that opens one would
+    fail on "a runtime is already active".
+
+    Args:
+        mode: The mode argument to pass to `chmod`, e.g. `"755"` or `"000"`.
+        path: The file or directory to change.
+
+    Raises:
+        Error: If the child did not exit, or exited non-zero.
+    """
+    var argv: List[String] = ["chmod", mode, path]
+    var runtime = ExecRuntime()
+    runtime.open()
+    var result: ProcessResult
+    try:
+        result = run_supervised(runtime, ProcessSpec.command(argv^, 30000))
+    finally:
+        runtime.close()
+    if not result.termination.is_exited() or result.termination.value != 0:
+        raise Error("test setup: chmod " + mode + " failed for '" + path + "'")
+
+
+def _make_executable(path: String) raises:
+    """Give `path` the execute bit.
+
     Args:
         path: The file to make owner/group/other executable.
 
     Raises:
         Error: If the child did not exit, or exited non-zero.
     """
-    var argv: List[String] = ["chmod", "755", path]
-    var runtime = ExecRuntime()
-    runtime.open()
-    var result = run_supervised(runtime, ProcessSpec.command(argv^, 30000))
-    runtime.close()
-    if not result.termination.is_exited() or result.termination.value != 0:
-        raise Error("test setup: chmod failed for '" + path + "'")
+    _chmod("755", path)
 
 
 def _executable_stub(root: String, rel: String) raises -> String:
@@ -242,8 +263,14 @@ def _walk_digest(root: String, dir: String, exclude: String) raises -> String:
         Error: If the walk reported failure.
     """
     var kb = KeyBuilder()
-    if not walk_include_root(root, dir, kb, exclude):
-        raise Error("test: walk_include_root failed for '" + dir + "'")
+    var outcome = walk_include_root(root, dir, kb, exclude)
+    if not outcome.ok:
+        raise Error(
+            "test: walk_include_root failed for '"
+            + dir
+            + "': "
+            + outcome.reason
+        )
     return kb^.digest_full()
 
 
@@ -322,23 +349,86 @@ def test_walk_exclude_skips_path() raises:
     )
 
 
-def test_walk_skips_directory_symlinks() raises:
-    var bare = temp_root()
-    write_file(bare, "inc/top.mojo", "# a")
+def test_walk_disables_on_symlinked_package() raises:
     var root = temp_root()
     write_file(root, "inc/top.mojo", "# a")
     write_file(root, "pkgsrc/__init__.mojo", "# i")
     write_file(root, "pkgsrc/mod.mojo", "# m")
     symlink(root + "/pkgsrc", root + "/inc/p")
-    # `inc/p` is a package by content, so only the `islink` check keeps the walk
-    # out of it — and out of the cycle a self-referential link would close.
+    # `inc/p` IS a package, so the compiler imports `p.mod` — but the walk
+    # cannot descend a link without risking a cycle. Skipping it silently was a
+    # stale-hit hole: editing `pkgsrc/mod.mojo` left the key untouched and
+    # served the previous binary on a green run. Off, loudly, is the only
+    # honest answer.
+    var kb = KeyBuilder()
+    var outcome = walk_include_root(root, "inc", kb, "")
+    assert_false(outcome.ok)
+    assert_true(
+        "symlink" in outcome.reason and "p" in outcome.reason,
+        "reason did not name the symlinked package: " + outcome.reason,
+    )
+
+
+def test_walk_skips_symlinked_non_package_dirs() raises:
+    var bare = temp_root()
+    write_file(bare, "inc/top.mojo", "# a")
+    var root = temp_root()
+    write_file(root, "inc/top.mojo", "# a")
+    write_file(root, "plainsrc/mod.mojo", "# m")
+    symlink(root + "/plainsrc", root + "/inc/p")
+    # No `__init__`, so `-I inc` does not reach inside `p` whether it is a link
+    # or not. Nothing to key, nothing to refuse.
     assert_equal(_walk_digest(bare, "inc", ""), _walk_digest(root, "inc", ""))
 
 
 def test_walk_reports_failure_for_missing_dir() raises:
     var root = temp_root()
     var kb = KeyBuilder()
-    assert_false(walk_include_root(root, "absent", kb, ""))
+    assert_false(walk_include_root(root, "absent", kb, "").ok)
+
+
+def test_walk_disables_on_unlistable_subdir() raises:
+    var root = temp_root()
+    write_file(root, "inc/top.mojo", "# a")
+    write_file(root, "inc/p/__init__.mojo", "# i")
+    write_file(root, "inc/p/mod.mojo", "# m")
+    var kb = KeyBuilder()
+    _chmod("000", root + "/inc/p")
+    # No `try`/`finally`: `walk_include_root` is non-raising by contract, so the
+    # restore below is unconditionally reached.
+    #
+    # `isdir`/`isfile` fold an unreadable directory into "not a package", which
+    # would key this tree exactly like one with no `p` at all. `listdir` raises
+    # instead, and the walk refuses.
+    var outcome = walk_include_root(root, "inc", kb, "")
+    _chmod("755", root + "/inc/p")
+    assert_false(outcome.ok, "an unreadable package did not disable the cache")
+    assert_true(
+        "p" in outcome.reason,
+        "reason did not name the directory: " + outcome.reason,
+    )
+
+
+def test_walk_disables_on_unsearchable_subdir() raises:
+    var root = temp_root()
+    write_file(root, "inc/top.mojo", "# a")
+    write_file(root, "inc/p/__init__.mojo", "# i")
+    write_file(root, "inc/p/mod.mojo", "# m")
+    var kb = KeyBuilder()
+    # Readable but not searchable: `listdir` succeeds and every `stat` of an
+    # entry inside fails. Under `isdir`/`isfile` every entry would answer "not a
+    # directory, not a source file" and the package would frame NOTHING while
+    # the walk reported success — the same stale-hit hole, one level down.
+    _chmod("644", root + "/inc/p")
+    var outcome = walk_include_root(root, "inc", kb, "")
+    _chmod("755", root + "/inc/p")
+    assert_false(
+        outcome.ok, "an unsearchable package did not disable the cache"
+    )
+    assert_true(
+        "cannot inspect" in outcome.reason,
+        "reason was not the stat failure: " + outcome.reason,
+    )
 
 
 # --- CacheContext: construction, disabling, and the env base (Task 6) --------
@@ -444,6 +534,86 @@ def test_env_base_disables_on_missing_arg_file() raises:
     assert_true(
         "absent.o" in ctx.disable_reason,
         "reason did not name the token: " + ctx.disable_reason,
+    )
+
+
+def _base_digest(ctx: CacheContext) raises -> String:
+    """The full key of `ctx.base`, taken from a fork so `ctx` stays usable."""
+    var forked = ctx.base.copy()
+    return forked^.digest_full()
+
+
+def test_env_base_digest_is_stable_across_calls() raises:
+    var root = temp_root()
+    var first = _env_base(base_config(), root)
+    var second = _env_base(base_config(), root)
+    assert_true(first.enabled, "cache off: " + first.disable_reason)
+    assert_true(second.enabled, "cache off: " + second.disable_reason)
+    # THE property every future cache hit rests on. If two collections over
+    # unchanged inputs ever disagree — an unsorted listing, an absolute path
+    # leaking into a frame, a memo returning something other than what it
+    # replaced — the cache degrades to a rebuild every time and nothing else in
+    # the suite would notice.
+    assert_equal(_base_digest(first), _base_digest(second))
+
+
+def test_env_base_digest_moves_with_build_args() raises:
+    var root = temp_root()
+    var plain = _env_base(base_config(), root)
+    var one = base_config()
+    one.build_args = ["-O2"]
+    var flagged = _env_base(one^, root)
+    assert_true(flagged.enabled, "cache off: " + flagged.disable_reason)
+    assert_not_equal(_base_digest(plain), _base_digest(flagged))
+
+    var forward = base_config()
+    forward.build_args = ["-O2", "--no-optimization"]
+    var backward = base_config()
+    backward.build_args = ["--no-optimization", "-O2"]
+    # Frame ORDER inside field 7: the same two flags in the other order are a
+    # different command line and must be a different key.
+    assert_not_equal(
+        _base_digest(_env_base(forward^, root)),
+        _base_digest(_env_base(backward^, root)),
+    )
+
+
+def test_env_base_digest_moves_with_environment() raises:
+    var root = temp_root()
+    # `MODULAR_HOME` relocates the compiler's module cache, so it is keyed. It
+    # is restored exactly, including the "was not set at all" case, which is a
+    # different fact from "set to the empty string" and keys differently.
+    var was_set = getenv("MODULAR_HOME", "\x01unset") != "\x01unset"
+    var saved = getenv("MODULAR_HOME", "")
+    # Collected into a list rather than three pre-declared strings so the
+    # `finally` restore is never skipped and no dead initializer is needed.
+    var digests = List[String]()
+    try:
+        _ = setenv("MODULAR_HOME", "/tmp/mtest-modular-here", True)
+        digests.append(_base_digest(_env_base(base_config(), root)))
+        _ = setenv("MODULAR_HOME", "/tmp/mtest-modular-there", True)
+        digests.append(_base_digest(_env_base(base_config(), root)))
+        _ = unsetenv("MODULAR_HOME")
+        digests.append(_base_digest(_env_base(base_config(), root)))
+    finally:
+        if was_set:
+            _ = setenv("MODULAR_HOME", saved, True)
+        else:
+            _ = unsetenv("MODULAR_HOME")
+    assert_equal(len(digests), 3)
+    assert_not_equal(digests[0], digests[1])
+    assert_not_equal(digests[0], digests[2])
+    assert_not_equal(digests[1], digests[2])
+
+
+def test_env_base_digest_moves_with_root() raises:
+    var here = temp_root()
+    var there = temp_root()
+    # Field 6 is the CANONICAL root, so two runs of the same sources from two
+    # checkouts do not share a generation.
+    assert_not_equal(
+        _base_digest(_env_base(base_config(), here)),
+        _base_digest(_env_base(base_config(), there)),
     )
 
 
