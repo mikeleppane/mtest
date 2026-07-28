@@ -127,10 +127,39 @@ DIRECT_SCRIPT_COMMAND_RE = re.compile(
     # options, and then a repository-relative `.py` operand instead of `-m`.
     # `-m scripts.checks.layout` cannot match: the operand after the options
     # has to end in `.py`, and a dotted module name does not.
+    #
+    # This is the raw-text pass, and it is deliberately quote-blind: 4.3% of
+    # this repository's tracked lines (5368 of 124139, measured) cannot be
+    # lexed as a shell command at all, because prose uses an unpaired
+    # apostrophe. The word pass below returns nothing for those lines, so a
+    # scan built only on `shlex` would go quiet over a twentieth of the tree.
     r"(?<![\w./-])(?:[\w./-]*/)?python[0-9.]*"
     r"(?:\s+-\S+)*"
     r"\s+(?:\./)?(scripts/[\w./-]+\.py)"
 )
+
+PYTHON_EXECUTABLE_RE = re.compile(r"python(?:\d+(?:\.\d+)*)?")
+"""An interpreter basename, with or without a version suffix."""
+
+PYTHON_EXECUTABLE_ALIASES = {"sys.executable"}
+"""Source spellings that name the running interpreter without naming `python`.
+
+`subprocess.run([sys.executable, "scripts/<name>.py"])` is the argv form of the
+same defect the prose form has, and it is the form actually written in Python
+tooling. Without this the word pass sees `sys.executable` as an ordinary word
+and walks past the script operand behind it.
+"""
+
+DIRECT_SCRIPT_RE = re.compile(r"scripts/[A-Za-z0-9_./-]+\.py")
+"""A repository-relative Python script operand, once punctuation is stripped."""
+
+OPTION_TAKES_VALUE = {"-W", "-X", "--check-hash-based-pycs"}
+"""Interpreter options whose value is a separate word, not a script operand.
+
+`python -X dev scripts/<name>.py` has to skip `dev` to reach the operand, and
+`python -W ignore ...` likewise. Treating the value as the operand would stop
+the walk one word early and miss the finding.
+"""
 
 
 def _reraise_walk_error(error: OSError) -> None:
@@ -478,6 +507,106 @@ def check_platform_task_overrides(repo_root: Path = REPO_ROOT) -> None:
                 )
 
 
+def _shell_words(text: str) -> list[str]:
+    """Split one command-like line, including commands inside quoted fields."""
+    try:
+        lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|()")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        words = list(lexer)
+    except ValueError:
+        return []
+    expanded: list[str] = []
+    for word in words:
+        if any(character.isspace() for character in word):
+            expanded.extend(_shell_words(word))
+        else:
+            expanded.append(word)
+    return expanded
+
+
+def _normalized_shell_word(word: str) -> str:
+    """Strip presentation punctuation without changing command path content.
+
+    A word lifted out of an argv literal arrives wearing the list's syntax:
+    `[sys.executable,`, `"scripts/<name>.py"]`, `` `python ``. None of that is
+    part of the command, and all of it would defeat an exact match.
+
+    Args:
+        word: One lexed word.
+
+    Returns:
+        The word with surrounding quoting, bracketing and separator
+        punctuation removed.
+    """
+    return word.strip("`'\"[]{}(),:")
+
+
+def _is_python_executable(word: str) -> bool:
+    """Return whether a shell word names a Python interpreter.
+
+    Args:
+        word: One lexed word, still carrying its punctuation.
+
+    Returns:
+        True for `python`, a versioned or path-qualified spelling of it, or
+        one of `PYTHON_EXECUTABLE_ALIASES`.
+    """
+    normalized = _normalized_shell_word(word)
+    if normalized in PYTHON_EXECUTABLE_ALIASES:
+        return True
+    return PYTHON_EXECUTABLE_RE.fullmatch(Path(normalized).name.lower()) is not None
+
+
+def _is_direct_script(word: str) -> bool:
+    """Return whether a shell word is a repository-relative Python script.
+
+    Args:
+        word: One lexed word, still carrying its punctuation.
+
+    Returns:
+        True when the word is a `scripts/...py` operand.
+    """
+    normalized = _normalized_shell_word(word).removeprefix("./")
+    return DIRECT_SCRIPT_RE.fullmatch(normalized) is not None
+
+
+def _argv_direct_scripts(words: list[str]) -> list[str]:
+    """Return every script operand handed to an interpreter in one word list.
+
+    Walks from each interpreter word through its options to the first operand,
+    which is where a script path and a `-m` module name are distinguishable:
+    `-m` and `-c` end the walk (those are the correct forms), a value-taking
+    option consumes the word after it, and anything else that is not an option
+    is the operand.
+
+    Args:
+        words: One line's lexed words, in order.
+
+    Returns:
+        The `scripts/...py` operands found, in the order they appear.
+    """
+    found: list[str] = []
+    for interpreter_index, word in enumerate(words):
+        if not _is_python_executable(word):
+            continue
+        index = interpreter_index + 1
+        while index < len(words):
+            candidate = _normalized_shell_word(words[index])
+            if candidate in {";", "&&", "||", "|", "(", ")"} or candidate in {
+                "-m",
+                "-c",
+            }:
+                break
+            if candidate.startswith("-"):
+                index += 2 if candidate in OPTION_TAKES_VALUE else 1
+                continue
+            if _is_direct_script(words[index]):
+                found.append(candidate.removeprefix("./"))
+            break
+    return found
+
+
 def direct_script_invocations(repo_root: Path = REPO_ROOT) -> tuple[str, ...]:
     """Return every by-path Python script command written into a tracked file.
 
@@ -487,12 +616,34 @@ def direct_script_invocations(repo_root: Path = REPO_ROOT) -> tuple[str, ...]:
     holding another branch's checkout cannot make this read one file set on a
     contributor's machine and a different one on CI.
 
+    Each line is read twice, because neither pass covers the other:
+
+    - the raw-text pass (`DIRECT_SCRIPT_COMMAND_RE`) sees the prose form,
+      `python -u scripts/<name>.py`, on any line at all -- including the 4.3%
+      of tracked lines that are not lexable as a command because prose spells
+      an unpaired apostrophe;
+    - the word pass (`_argv_direct_scripts`) sees the argv form, which the
+      raw-text pass cannot match because the interpreter and the operand are
+      separated by quotes and a comma:
+      `subprocess.run([sys.executable, "scripts/<name>.py"])` and
+      `subprocess.run(["python", "scripts/<name>.py"])`. That form is what
+      Python tooling actually writes, and it is the one form that is not
+      merely copied by a reader but really executed.
+
+    `python -m scripts.probe` matches neither, in either pass: `-m` ends the
+    word walk, and a dotted module name does not end in `.py`.
+
+    Every example above spells the operand `scripts/<name>.py` on purpose.
+    Written literally it would be a finding against this file -- which the
+    scan demonstrated by reporting all six of them the first time it ran.
+
     Args:
         repo_root: Repository root whose tracked files are scanned.
 
     Returns:
         One `path:line: operand` finding per invocation, in `git ls-files`
-        order.
+        order, deduplicated within a line so a form both passes recognise is
+        reported once.
 
     Raises:
         AssertionError: `git ls-files` failed, or reported nothing to scan.
@@ -519,11 +670,17 @@ def direct_script_invocations(repo_root: Path = REPO_ROOT) -> tuple[str, ...]:
             # Neither can carry a command line a reader would copy, and a
             # missing work-tree file is already someone else's loud failure.
             continue
-        findings.extend(
-            f"{name}:{number}: {match.group(1)}"
-            for number, line in enumerate(contents.splitlines(), start=1)
-            for match in DIRECT_SCRIPT_COMMAND_RE.finditer(line)
-        )
+        for number, line in enumerate(contents.splitlines(), start=1):
+            operands = [
+                match.group(1) for match in DIRECT_SCRIPT_COMMAND_RE.finditer(line)
+            ]
+            operands.extend(_argv_direct_scripts(_shell_words(line)))
+            seen: set[str] = set()
+            for operand in operands:
+                if operand in seen:
+                    continue
+                seen.add(operand)
+                findings.append(f"{name}:{number}: {operand}")
     return tuple(findings)
 
 
@@ -551,24 +708,6 @@ def check_python_package_invocation(repo_root: Path = REPO_ROOT) -> None:
             f"script commands written as an interpreter plus a path, which "
             f"cannot resolve this repository's imports: {list(findings)}"
         )
-
-
-def _shell_words(text: str) -> list[str]:
-    """Split one command-like line, including commands inside quoted fields."""
-    try:
-        lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|()")
-        lexer.whitespace_split = True
-        lexer.commenters = ""
-        words = list(lexer)
-    except ValueError:
-        return []
-    expanded: list[str] = []
-    for word in words:
-        if any(character.isspace() for character in word):
-            expanded.extend(_shell_words(word))
-        else:
-            expanded.append(word)
-    return expanded
 
 
 def check_build_source_visibility(repo_root: Path = REPO_ROOT) -> None:

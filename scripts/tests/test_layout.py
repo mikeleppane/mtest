@@ -639,6 +639,129 @@ class DirectInvocationPolicyTests(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, "interpreter plus a path"):
                     layout.check_python_package_invocation(repo)
 
+    def test_every_argv_literal_spelling_is_rejected(self) -> None:
+        # The prose form is what a reader copies; the argv form is what runs.
+        # A `git ls-files`-derived scan is stricter than the deleted path
+        # ledger about WHICH files it reads, but a raw-text regex cannot see
+        # an interpreter and its operand separated by `", "`, so this half was
+        # lost with the AST check and had to come back.
+        quote = '"'
+        forms = (
+            "subprocess.run([sys.executable, "
+            + quote
+            + self.SCRIPT_PATH
+            + quote
+            + "])",
+            "subprocess.run([" + quote + "python" + quote + ", "
+            "" + quote + self.SCRIPT_PATH + quote + "])",
+            "subprocess.run([sys.executable, "
+            + quote
+            + "-u"
+            + quote
+            + ", "
+            + quote
+            + self.SCRIPT_PATH
+            + quote
+            + "], check=True)",
+            "cmd = [" + quote + "python3.12" + quote + ", "
+            "" + quote + "./" + self.SCRIPT_PATH + quote + "]",
+        )
+        for form in forms:
+            with (
+                self.subTest(form=form),
+                tempfile.TemporaryDirectory() as raw_tmp,
+            ):
+                repo = Path(raw_tmp)
+                self._repo(repo)
+                self._track(repo, "tool.py", form + "\n")
+
+                with self.assertRaisesRegex(AssertionError, "interpreter plus a path"):
+                    layout.check_python_package_invocation(repo)
+
+    def test_the_argv_module_form_is_accepted(self) -> None:
+        # The RIGHT spelling of the same call. It must stay silent, or the
+        # check pushes contributors back toward the form it exists to ban.
+        quote = '"'
+        accepted = (
+            "subprocess.run([sys.executable, "
+            + quote
+            + "-m"
+            + quote
+            + ", "
+            + quote
+            + "scripts.probe"
+            + quote
+            + "])",
+            "subprocess.run([" + quote + "python" + quote + ", "
+            "" + quote + "-m" + quote + ", " + quote + "scripts.probe" + quote + "])",
+        )
+        for form in accepted:
+            with (
+                self.subTest(form=form),
+                tempfile.TemporaryDirectory() as raw_tmp,
+            ):
+                repo = Path(raw_tmp)
+                self._repo(repo)
+                self._track(repo, "tool.py", form + "\n")
+
+                self.assertEqual(layout.direct_script_invocations(repo), ())
+
+    def test_a_line_shlex_cannot_lex_is_still_scanned(self) -> None:
+        # 4.3% of this repository's tracked lines cannot be lexed as a shell
+        # command, because prose spells an unpaired apostrophe. The word pass
+        # returns nothing for those, so the raw-text pass has to stay.
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            self._repo(repo)
+            line = "don't run python -u " + self.SCRIPT_PATH + " by hand"
+            self._track(repo, "README.md", line + "\n")
+
+            self.assertEqual(layout._shell_words(line), [])
+            self.assertEqual(
+                layout.direct_script_invocations(repo),
+                (f"README.md:1: {self.SCRIPT_PATH}",),
+            )
+
+    def test_a_form_both_passes_see_is_reported_once(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            self._repo(repo)
+            self._track(repo, "run.sh", "python -u " + self.SCRIPT_PATH + "\n")
+
+            self.assertEqual(
+                layout.direct_script_invocations(repo),
+                (f"run.sh:1: {self.SCRIPT_PATH}",),
+            )
+
+    def test_an_option_taking_a_value_does_not_hide_the_operand(self) -> None:
+        for option, value in (("-X", "dev"), ("-W", "ignore")):
+            with (
+                self.subTest(option=option),
+                tempfile.TemporaryDirectory() as raw_tmp,
+            ):
+                repo = Path(raw_tmp)
+                self._repo(repo)
+                quote = '"'
+                form = (
+                    "subprocess.run([sys.executable, "
+                    + quote
+                    + option
+                    + quote
+                    + ", "
+                    + quote
+                    + value
+                    + quote
+                    + ", "
+                    + quote
+                    + self.SCRIPT_PATH
+                    + quote
+                    + "])"
+                )
+                self._track(repo, "tool.py", form + "\n")
+
+                with self.assertRaisesRegex(AssertionError, "interpreter plus a path"):
+                    layout.check_python_package_invocation(repo)
+
     def test_the_module_form_and_untracked_files_are_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp)
