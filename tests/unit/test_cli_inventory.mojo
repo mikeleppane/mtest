@@ -281,6 +281,25 @@ def frozen_inventory() -> List[InvRow]:
             "Run matching files serially (repeatable).",
             "--serial GLOB",
         ),
+        # CLI-only: never read from mtest.toml (Task 9, build cache).
+        InvRow(
+            "--no-cache",
+            0,
+            False,
+            "",
+            FlagGroup.EXECUTION,
+            "Build without reading/writing the build cache.",
+            "--no-cache",
+        ),
+        InvRow(
+            "--cache-clear",
+            0,
+            False,
+            "",
+            FlagGroup.EXECUTION,
+            "Delete .mtest-cache (cache/last-run state), run.",
+            "--cache-clear",
+        ),
         # `--gh-annotations off|on|auto`: now served.
         InvRow(
             "--gh-annotations",
@@ -469,8 +488,8 @@ def test_help_renders_every_option_once_with_values_and_aligned_help() raises:
     for line_slice in rendered.split("\n"):
         if String(line_slice).startswith("  -"):
             option_rows += 1
-    # Five two-spelling aliases collapse 36 spellings into 31 physical rows.
-    assert_equal(option_rows, 31)
+    # Five two-spelling aliases collapse 38 spellings into 33 physical rows.
+    assert_equal(option_rows, 33)
     for row in frozen_inventory():
         var expected_line = "  " + row.help_label
         for _ in range(30 - expected_line.count_codepoints()):

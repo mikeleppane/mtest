@@ -95,6 +95,7 @@ single **invocation root**. In v1 the root is the **current working directory**.
 | `--serial GLOB` | ✓ | — | — |
 | `--timeout`, `--compile-timeout` | ✓ | ✓ (compile only) | — |
 | `--retries N` | ✓ | — | — |
+| `--no-cache`, `--cache-clear` | ✓ | ✓ | — |
 | `--gate PATH` | ✓ | — | — |
 | `-s`, `--show-output MODE` | ✓ | — | — |
 | `--durations N` | ✓ | — | — |
@@ -967,13 +968,15 @@ as noted:
 same upstream per-test timing gap that blocks per-test attribution elsewhere;
 the file-level `--durations N` is itself served now, §15.1); markers /
 `xfail`; `--asan`; `--shuffle` (file-order randomization to surface order
-dependencies); `--fail-on-flaky`; watch mode; and a **persistent**
-build/collection cache (`--cache-dir`/`--no-cache`); and a machine-readable
-`config show` format (the served TOML display is informal human output,
-§27.1). Within one session the runner builds each file once and reuses it
-(`collect` and `run` share the binary), but nothing persists across invocations
-in v1: a trustworthy-verdict tool does not ship "fast but possibly stale", and
-a correct cache key (transitive source closure, environment inputs, target
+dependencies); `--fail-on-flaky`; watch mode; a **persistent**
+build/collection cache directory override (`--cache-dir`); and a
+machine-readable `config show` format (the served TOML display is informal
+human output, §27.1). Within one session the runner builds each file once and
+reuses it (`collect` and `run` share the binary); a persistent cache across
+invocations is landing incrementally (`--no-cache`/`--cache-clear` are served,
+§24.1, though this build does not yet read or write a cache): a
+trustworthy-verdict tool does not ship "fast but possibly stale", and a
+correct cache key (transitive source closure, environment inputs, target
 triple, schema version, concurrent-writer safety) is its own deliverable.
 
 ---
@@ -1309,7 +1312,8 @@ above — it only reports which of those surfaces are wired up yet.
 `--precompile`, `--mojo`,
 `-x`/`--exitfirst`, `--maxfail`, `--timeout`, `--compile-timeout`, `--retries`,
 `--shard`, `--lf`/`--last-failed`, `--ff`/`--failed-first`,
-`-n`/`--workers`, `--serial`, `--gate`, `-s`/`--show-output`,
+`-n`/`--workers`, `--serial`, `--no-cache`, `--cache-clear`, `--gate`,
+`-s`/`--show-output`,
 `--durations`, `-q`/`-v`, `--color`,
 `-h`/`--help`, `--version`, and the `run`, `collect`, `config show`, `doctor`,
 `version`, and `help` subcommands (`--collect-only` too, as an alias that
@@ -1317,7 +1321,10 @@ behaves as `collect`).
 `--shard` applies under both `run` and `collect`. `--json` (the machine event
 stream, §15.4), `--junit-xml` (the JUnit report, §15.2), and `--gh-annotations`
 (the CI annotation tail, §15.3) are served too — see §24.2 for how they are now
-reached.
+reached. `--no-cache`/`--cache-clear` are parsed and carried through config
+resolution like every other CLI-only field, but this build does not yet read
+or write a build cache (§21): they have no effect on any outcome until that
+lands.
 
 Every flag and subcommand in the frozen contract above is now served: nothing is
 refused for being unavailable. For `run` and `collect`, exit 4 therefore covers

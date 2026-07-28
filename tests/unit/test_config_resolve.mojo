@@ -533,6 +533,8 @@ def test_non_config_invocation_fields_survive_resolution() raises:
     defaults.shard_mode = ShardMode.SLICE
     defaults.shard_m = 2
     defaults.shard_n = 3
+    defaults.no_cache = True
+    defaults.cache_clear = True
     var file = FileConfig.empty()
     _set_every_file_value(file)
     var overlay = CliOverlay.default()
@@ -550,6 +552,14 @@ def test_non_config_invocation_fields_survive_resolution() raises:
     assert_true(resolved.config.shard_mode == ShardMode.SLICE)
     assert_equal(resolved.config.shard_m, 2)
     assert_equal(resolved.config.shard_n, 3)
+    # `--no-cache`/`--cache-clear` are CLI-only by design (exempt from
+    # mtest.toml): neither `file` nor `overlay` carries a slot for them, so
+    # this is the same "parsed flag survives the defaults-projection main
+    # builds before resolve_config" shape the plan's Task 9 anchors — a field
+    # missing from that projection would silently reset to False here even
+    # though every CLI parse test above still passes.
+    assert_true(resolved.config.no_cache)
+    assert_true(resolved.config.cache_clear)
 
 
 def test_run_projection_activates_every_config_key() raises:

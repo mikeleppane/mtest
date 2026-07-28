@@ -487,6 +487,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var no_config = False
     var last_failed = False
     var failed_first = False
+    var no_cache = False
+    var cache_clear = False
     var saw_select = False
     var saw_shard = False
     var saw_passthrough = False
@@ -572,6 +574,10 @@ def parse_args(argv: List[String]) raises -> ParseResult:
                 last_failed = True
             elif s.id == FlagId.FAILED_FIRST:
                 failed_first = True
+            elif s.id == FlagId.NO_CACHE:
+                no_cache = True
+            elif s.id == FlagId.CACHE_CLEAR:
+                cache_clear = True
             i += 1
             continue
 
@@ -902,6 +908,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     defaults.shard_mode = shard_mode
     defaults.shard_m = shard_m
     defaults.shard_n = shard_n
+    defaults.no_cache = no_cache
+    defaults.cache_clear = cache_clear
     var cfg = overlay.fold(defaults)
     if doctor:
         return ParseResult.doctor(cfg^, overlay^, config_path^, no_config)

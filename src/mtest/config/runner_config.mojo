@@ -153,6 +153,21 @@ struct RunnerConfig(Copyable, Movable):
     (non-empty, with an existing parent directory); a runtime creation failure
     is the session's to resolve."""
 
+    var no_cache: Bool
+    """`--no-cache`: build without reading or writing the build cache.
+
+    CLI-only by design: this is deliberately exempt from `mtest.toml`, so it
+    is never a layered value and carries no file or environment source.
+    Defaults to `False`."""
+
+    var cache_clear: Bool
+    """`--cache-clear`: delete `.mtest-cache` (build cache and last-run
+    state), then run.
+
+    CLI-only by design: this is deliberately exempt from `mtest.toml`, so it
+    is never a layered value and carries no file or environment source.
+    Defaults to `False`."""
+
     @staticmethod
     def default() -> RunnerConfig:
         """A config with every field at its contract default.
@@ -162,9 +177,10 @@ struct RunnerConfig(Copyable, Movable):
         path. `maxfail`, `durations`, `retries`, `shard_m`, and `shard_n` are
         all `0`, which disables each limit and leaves the run unsharded. Every
         list is empty; `paths_supplied`, `exitfirst`, `collect`, `last_failed`,
-        and `failed_first` are False; and `keyword`, `json_dest`, and
-        `junit_dest` are `""`, so no keyword filter, event stream, or JUnit
-        report is configured. The rest are `mojo_path="mojo"`,
+        `failed_first`, `no_cache`, and `cache_clear` are False; and
+        `keyword`, `json_dest`, and `junit_dest` are `""`, so no keyword
+        filter, event stream, or JUnit report is configured. The rest are
+        `mojo_path="mojo"`,
         `show_output=FAILURES`, `verbosity=NORMAL`, `color=AUTO`,
         `shard_mode=HASH`, and `gh_annotations=AUTO`.
 
@@ -213,4 +229,6 @@ struct RunnerConfig(Copyable, Movable):
             json_dest="",
             gh_annotations=AnnotationsMode.AUTO,
             junit_dest="",
+            no_cache=False,
+            cache_clear=False,
         )

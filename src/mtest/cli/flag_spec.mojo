@@ -52,6 +52,8 @@ struct FlagId:
     comptime NO_CONFIG = 28
     comptime LAST_FAILED = 29
     comptime FAILED_FIRST = 30
+    comptime NO_CACHE = 31
+    comptime CACHE_CLEAR = 32
 
 
 struct FlagGroup:
@@ -251,6 +253,25 @@ def flag_specs() -> List[FlagSpec]:
             True,
             "Run matching files serially (repeatable).",
             "GLOB",
+            FlagGroup.EXECUTION,
+        ),
+        # CLI-only, exempt from mtest.toml by design (build-cache Task 9).
+        FlagSpec(
+            "--no-cache",
+            FlagId.NO_CACHE,
+            0,
+            False,
+            "Build without reading/writing the build cache.",
+            "",
+            FlagGroup.EXECUTION,
+        ),
+        FlagSpec(
+            "--cache-clear",
+            FlagId.CACHE_CLEAR,
+            0,
+            False,
+            "Delete .mtest-cache (cache/last-run state), run.",
+            "",
             FlagGroup.EXECUTION,
         ),
         # Building.

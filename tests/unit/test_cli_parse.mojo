@@ -204,6 +204,26 @@ def test_exitfirst_short_and_long() raises:
     assert_true(parse_args(long).config.exitfirst)
 
 
+def test_no_cache_sets_config() raises:
+    var argv: List[String] = ["--no-cache"]
+    assert_true(parse_args(argv).config.no_cache)
+
+
+def test_no_cache_defaults_to_false() raises:
+    var argv: List[String] = ["tests/"]
+    assert_false(parse_args(argv).config.no_cache)
+
+
+def test_cache_clear_sets_config() raises:
+    var argv: List[String] = ["--cache-clear"]
+    assert_true(parse_args(argv).config.cache_clear)
+
+
+def test_cache_clear_defaults_to_false() raises:
+    var argv: List[String] = ["tests/"]
+    assert_false(parse_args(argv).config.cache_clear)
+
+
 def test_timeout_sets_seconds() raises:
     var argv: List[String] = ["--timeout", "45"]
     assert_equal(parse_args(argv).config.timeout_secs, 45)

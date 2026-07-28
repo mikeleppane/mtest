@@ -858,6 +858,8 @@ Execution:
   --retries N                 Retry crash-class outcomes N times.
   -n, --workers N|auto        Set worker count (default: 1).
   --serial GLOB               Run matching files serially (repeatable).
+  --no-cache                  Build without reading/writing the build cache.
+  --cache-clear               Delete .mtest-cache (cache/last-run state), run.
 
 Building:
   -I PATH                     Add a Mojo include path (repeatable).
@@ -917,6 +919,8 @@ General:
 | `--shard [hash:\|slice:]M/N` | run (or collect) only shard `M` of `N`; `hash:` (default, stable over the path) or `slice:` (sorted round-robin) |
 | `-n`, `--workers N\|auto` | run files across a pool of `N` worker processes; `auto` is half the logical cores (default `1`, sequential; ignored under `-k`/node-id selection) |
 | `--serial GLOB` | (repeatable) pin matching files to a final one-at-a-time pass after the parallel batch |
+| `--no-cache` | build without reading or writing the build cache; CLI-only, never read from `mtest.toml` |
+| `--cache-clear` | delete `.mtest-cache` (build cache and last-run state), then run; CLI-only, never read from `mtest.toml` |
 | `--json PATH\|-` | write the versioned NDJSON event stream to `PATH`, or to stdout with `-` |
 | `--junit-xml PATH` | write a schema-validated JUnit XML report, renamed atomically onto `PATH` |
 | `--gh-annotations MODE` | `off\|on\|auto` (default `auto`); `--json -` requires an explicit `--gh-annotations off` |
