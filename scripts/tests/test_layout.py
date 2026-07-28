@@ -34,6 +34,8 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
             ),
             ("BUILD_SOURCE_PATHS", layout.check_build_source_visibility),
             ("VENDORED_TOML_PATHS", layout.check_vendored_toml_layout),
+            ("PLATFORM_TASK_OVERRIDES", layout.check_platform_task_overrides),
+            ("PLATFORM_TARGET_KEYS", layout.check_platform_task_overrides),
         )
         for name, check in cases:
             with (
@@ -498,6 +500,98 @@ class ClassifiedPackagePrecompileGuardTests(unittest.TestCase):
 
             self.assertEqual(run.call_args.kwargs["cwd"], repo)
             self.assertIn("tests/", run.call_args.args[0])
+
+
+class PlatformTaskOverrideTests(unittest.TestCase):
+    """A `[target.<platform>.tasks]` entry replaces a base task invisibly.
+
+    Pixi emits no warning, `pixi run <task>` keeps working, and the hosted
+    matrix names its lanes by task name -- so a substituted lane stays green
+    in every view while running something else. Three words of TOML are the
+    whole attack, which is why the bound is a check rather than a review
+    convention.
+    """
+
+    BASE = (
+        "[workspace]\n"
+        'name = "fixture"\n'
+        "\n"
+        "[tasks]\n"
+        'asan-check = "python -m scripts.checks.memory.asan"\n'
+        'ci-memory = "python -m scripts.checks.memory.host_support"\n'
+    )
+    LEGITIMATE = (
+        "\n[target.linux-64.dependencies]\n"
+        'valgrind = "==3.27.1"\n'
+        "\n[target.linux-64.tasks]\n"
+        'ci-memory = { depends-on = ["asan-check"] }\n'
+    )
+
+    def _manifest(self, body: str) -> Path:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (root / "pixi.toml").write_text(body, encoding="utf-8")
+        return root
+
+    def test_the_repositorys_own_manifest_is_within_the_bound(self) -> None:
+        layout.check_platform_task_overrides()
+
+    def test_the_dependency_only_override_is_accepted(self) -> None:
+        root = self._manifest(self.BASE + self.LEGITIMATE)
+
+        layout.check_platform_task_overrides(root)
+
+    def test_substituting_a_lane_for_one_platform_is_rejected(self) -> None:
+        # The exact reproduced attack: three words that leave `pixi run
+        # asan-check` exiting 0 having run `/bin/true`, with the hosted
+        # "ASan + LSan" required check still reporting the same task name.
+        root = self._manifest(
+            self.BASE + self.LEGITIMATE + 'asan-check = "true"\n',
+        )
+
+        with self.assertRaisesRegex(AssertionError, r"outside the bounded set"):
+            layout.check_platform_task_overrides(root)
+
+    def test_an_allowlisted_override_may_not_carry_a_command(self) -> None:
+        # Narrowing to a name list alone is not enough: the permitted entry
+        # must stay a pure dependency edge, or the same substitution arrives
+        # under a name the allowlist blesses.
+        for body in (
+            'ci-memory = "true"\n',
+            'ci-memory = { cmd = "true", depends-on = ["asan-check"] }\n',
+        ):
+            with self.subTest(body=body):
+                root = self._manifest(
+                    self.BASE + "\n[target.linux-64.tasks]\n" + body,
+                )
+
+                with self.assertRaisesRegex(AssertionError, r"dependency-only|`cmd`"):
+                    layout.check_platform_task_overrides(root)
+
+    def test_an_unread_target_key_is_rejected(self) -> None:
+        root = self._manifest(
+            self.BASE + '\n[target.linux-64]\nactivation = { env = { X = "1" } }\n',
+        )
+
+        with self.assertRaisesRegex(AssertionError, "unexpected keys"):
+            layout.check_platform_task_overrides(root)
+
+    def test_an_override_on_any_other_platform_is_rejected_too(self) -> None:
+        root = self._manifest(
+            self.BASE + '\n[target.osx-arm64.tasks]\nasan-check = "true"\n',
+        )
+
+        with self.assertRaisesRegex(AssertionError, r"\[target\.osx-arm64\.tasks\]"):
+            layout.check_platform_task_overrides(root)
+
+    def test_a_renamed_base_task_leaves_the_allowlist_loud(self) -> None:
+        # A stale allowlist entry permits overriding a name nothing runs, so
+        # the bound would quietly cover the wrong task.
+        root = self._manifest(
+            self.BASE.replace("ci-memory", "ci-mem") + self.LEGITIMATE,
+        )
+
+        with self.assertRaisesRegex(AssertionError, "no longer exists"):
+            layout.check_platform_task_overrides(root)
 
 
 class DirectInvocationPolicyTests(unittest.TestCase):

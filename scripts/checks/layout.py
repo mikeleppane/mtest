@@ -91,6 +91,37 @@ compiler recurses into it as a package. `tests/__init__.mojo` is deliberately
 kept so `tests/` itself stays a nameable package; only its two children must
 stay marker-free. See `check_classified_roots_are_not_precompilable_packages`.
 """
+PLATFORM_TARGET_KEYS = {"dependencies", "tasks"}
+"""What a `[target.<platform>]` table in `pixi.toml` may contain.
+
+Bounded so a new kind of platform-scoped table cannot appear without this
+check naming it. Anything outside this set is an override shape nothing in
+this repository has reasoned about.
+"""
+
+PLATFORM_TASK_OVERRIDES = {"ci-memory"}
+"""The ONLY task any platform table may override, and why the set is bounded.
+
+A `[target.<platform>.tasks]` entry silently REPLACES the base task of the
+same name. Pixi prints no warning, every other view of the floor -- `pixi run
+ci`, `harness-check`, and the hosted matrix, which name lanes by task name --
+keeps reporting the same name, and nothing reads the replaced command. So an
+unbounded override table is a hole big enough to drive a lane through:
+adding the three words
+
+    asan-check = "true"
+
+under `[target.linux-64.tasks]` leaves `pixi run asan-check` exiting 0 having
+run `/bin/true`, with the hosted "ASan + LSan" required check still green,
+because the lane never leaves any view by name. Reproduced on this checkout.
+
+Bounding the table to one known entry is what closes that. `ci-memory` is the
+one legitimate member: on linux-64 it is replaced by a dependency edge onto
+the two memory lanes, and `scripts/checks/memory/host_support.py` -- the base
+command -- fails closed if that override is ever LOST. This check is the
+other direction: an override that is ever GAINED.
+"""
+
 DIRECT_SCRIPT_COMMAND_RE = re.compile(
     # An interpreter word, optionally path-qualified and version-suffixed, its
     # options, and then a repository-relative `.py` operand instead of `-m`.
@@ -363,6 +394,88 @@ def check_e2e_layout() -> None:
     }
     if any(not path.startswith("e2e/") for path in referenced):
         raise AssertionError("e2e manifest retains a path outside e2e/")
+
+
+def check_platform_task_overrides(repo_root: Path = REPO_ROOT) -> None:
+    """No platform table may silently replace a base task's command.
+
+    This is a policy over an OPEN set, not a mirror of the manifest: it does
+    not restate any task's command, and adding a task costs no edit here. What
+    it bounds is the one manifest construct that changes what a named gate
+    RUNS without changing what anything calls it -- see
+    `PLATFORM_TASK_OVERRIDES` for the three-word attack this closes.
+
+    Four properties, each of which the attack has to defeat:
+
+    - a `[target.<platform>]` table carries only known keys, so a new override
+      construct cannot arrive unread;
+    - an override names a task in `PLATFORM_TASK_OVERRIDES`, so a lane cannot
+      be substituted for one platform;
+    - an override is dependency-only (a table with `depends-on` and no `cmd`),
+      so even a permitted entry cannot swap in a different command;
+    - every allowlisted name still exists in the base `[tasks]` table, so a
+      rename leaves a stale allowlist entry loud instead of vacuous.
+
+    Args:
+        repo_root: Repository root holding `pixi.toml`.
+
+    Raises:
+        AssertionError: The manifest is unreadable, the allowlist went empty
+            or stale, a target table grew an unexpected key, or a platform
+            override names a task outside the allowlist or carries a command.
+    """
+    _require_nonempty("platform task override", PLATFORM_TASK_OVERRIDES)
+    _require_nonempty("platform target key", PLATFORM_TARGET_KEYS)
+    manifest = tomllib.loads((repo_root / "pixi.toml").read_text(encoding="utf-8"))
+    base_tasks = manifest.get("tasks")
+    if not isinstance(base_tasks, dict):
+        raise AssertionError("pixi.toml has no [tasks] table")
+    stale = sorted(PLATFORM_TASK_OVERRIDES - set(base_tasks))
+    if stale:
+        raise AssertionError(
+            "platform-override allowlist names a task that no longer exists in "
+            f"the base [tasks] table: {stale}; a stale entry permits an "
+            "override of something nothing else runs"
+        )
+    targets = manifest.get("target", {})
+    if not isinstance(targets, dict):
+        raise AssertionError("pixi.toml [target] is not a table")
+    for name, table in sorted(targets.items()):
+        if not isinstance(table, dict):
+            raise AssertionError(f"[target.{name}] is not a table")
+        unexpected = sorted(set(table) - PLATFORM_TARGET_KEYS)
+        if unexpected:
+            raise AssertionError(
+                f"[target.{name}] carries unexpected keys {unexpected}; only "
+                f"{sorted(PLATFORM_TARGET_KEYS)} are reasoned about here"
+            )
+        overrides = table.get("tasks", {})
+        if not isinstance(overrides, dict):
+            raise AssertionError(f"[target.{name}.tasks] is not a table")
+        outside = sorted(set(overrides) - PLATFORM_TASK_OVERRIDES)
+        if outside:
+            raise AssertionError(
+                f"[target.{name}.tasks] overrides {outside}, which is outside "
+                f"the bounded set {sorted(PLATFORM_TASK_OVERRIDES)}; a platform "
+                "override REPLACES the base command with no warning from pixi, "
+                "so the lane keeps its name in `pixi run ci` and in the hosted "
+                "matrix while running something else entirely"
+            )
+        for task_name, definition in sorted(overrides.items()):
+            if not isinstance(definition, dict) or "depends-on" not in definition:
+                raise AssertionError(
+                    f"[target.{name}.tasks] entry {task_name!r} is not a "
+                    "dependency-only override; a platform override may only "
+                    "add a `depends-on` edge, never supply a command, because "
+                    "the command it replaces is the one every other view of "
+                    f"the floor believes is running: {definition!r}"
+                )
+            if "cmd" in definition:
+                raise AssertionError(
+                    f"[target.{name}.tasks] entry {task_name!r} supplies a "
+                    "`cmd`, which replaces the base command for that platform "
+                    f"alone: {definition!r}"
+                )
 
 
 def direct_script_invocations(repo_root: Path = REPO_ROOT) -> tuple[str, ...]:
@@ -782,6 +895,7 @@ def main() -> int:
         check_classified_roots_are_not_precompilable_packages()
         check_suite_layout()
         check_e2e_layout()
+        check_platform_task_overrides()
         check_python_package_invocation()
         check_build_source_visibility()
         check_assertion_companion_layout()

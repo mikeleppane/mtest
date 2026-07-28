@@ -132,9 +132,11 @@ class QualityWiringTests(unittest.TestCase):
         # [target.linux-64.tasks], which silently replaces the base entry for
         # that one platform. Walking the base table alone stops at
         # `ci-memory` and never reaches the memory lanes at all — so this
-        # merges the linux-64 override over the base table first, the same
-        # way the deleted `ci_topology._platform_tasks` did, before walking
-        # the closure. Skipping instead of raising on a dependency shape this
+        # merges the linux-64 override over the base table first before
+        # walking the closure. That the override table can only ever hold such
+        # a dependency-only edge, and only for a bounded set of task names, is
+        # `layout.check_platform_task_overrides`'s property, not this test's.
+        # Skipping instead of raising on a dependency shape this
         # module does not expect (Pixi also allows table-form dependency
         # entries) would make the closure shrink quietly; raise instead.
         with (python_quality.REPO_ROOT / "pixi.toml").open("rb") as handle:
