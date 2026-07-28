@@ -1332,8 +1332,20 @@ def clear_cache_root(root: String) -> Optional[String]:
     try:
         remove_tree_no_follow(cache_root)
     except e:
+        # The ONE refusal here that leaves the disk changed:
+        # `_remove_dir_contents_no_follow` raises on the first entry it cannot
+        # remove, so an unwritable generation — or a concurrent mtest writing
+        # into the store — stops the walk with part of the cache already gone.
+        # Every other refusal above ends with the tree untouched, so this text
+        # has to admit the partial state and finish the job for the reader;
+        # otherwise their next move is a guess about what is left.
         var failure_note = String("cache-clear: ") + cache_root
         failure_note += ": could not delete the cache directory: " + String(e)
+        failure_note += ". Some entries may already have been removed, so the"
+        failure_note += " cache is now in a partial state; complete the removal"
+        failure_note += " with 'rm -rf "
+        failure_note += CACHE_ROOT_DIR
+        failure_note += "'"
         return Optional[String](failure_note^)
     return Optional[String](None)
 

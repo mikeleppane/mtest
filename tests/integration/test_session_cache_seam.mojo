@@ -53,6 +53,7 @@ from mtest.report import (
     RecordingCoordinator,
     RecordingReporter,
 )
+from mtest.platform.cstring import c_string_bytes
 from mtest.session import run_session
 from mtest.session.store import clear_cache_root
 
@@ -168,6 +169,42 @@ def _verdict_of(
         if rec.kind_at(i) == EventKind.FILE_FINISHED and rec.path_at(i) == path:
             return rec.event_at(i).data[FileFinishedPayload].copy()
     raise Error("no FileFinished for " + path)
+
+
+def _chmod(path: String, mode: Int) raises:
+    """Set `path`'s permission bits.
+
+    The pinned `std.os` exposes no `chmod`, and the partial-delete refusal
+    cannot be reached without one: that path only opens when the removal fails
+    on a child the process genuinely may not unlink, which is a permission fact
+    and not something a fault injector can stand in for.
+
+    Args:
+        path: An existing path whose mode is replaced.
+        mode: The POSIX permission bits, for example `0o500`.
+
+    Raises:
+        Error: If `chmod` reports a failure.
+    """
+    var c = c_string_bytes(path)
+    # SAFETY: libc `chmod` has the exact ABI `int chmod(const char*, mode_t)` on
+    # both Linux and Darwin — a fixed arity of two with no variadic tail, so the
+    # NON-variadic call `external_call` emits is the correct one on every target
+    # this suite builds for. The pointer names a complete, fully initialized,
+    # NUL-terminated byte copy this function uniquely owns: `c_string_bytes`
+    # allocates it here, nothing else holds a reference, and `c` stays a live
+    # local that is consumed only after the call returns, so the pointer is valid
+    # for the whole synchronous call and aliases nothing. It does not escape —
+    # `chmod` reads the path and retains nothing past its return — and the callee
+    # writes through it not at all. The mode is a plain scalar widened to the
+    # `unsigned int` Linux uses; Darwin's narrower `mode_t` reads the same low
+    # bits from the same register, and every value passed here fits in nine bits.
+    # Nothing is allocated for the callee to free, and the result is a plain
+    # status; `errno` is never read, so no ordering constraint against the
+    # release of `c` exists.
+    var rc = external_call["chmod", Int32](c.unsafe_ptr(), UInt32(mode))
+    _ = c^
+    assert_equal(rc, Int32(0), "could not chmod " + path)
 
 
 def _clear_diagnostic(root: String) -> String:
@@ -936,6 +973,55 @@ def test_cache_clear_refuses_unmarked() raises:
     assert_true(
         exists(root + "/.mtest-cache/build-v1/somebody_elses"),
         "a refused clear must leave every byte where it was",
+    )
+
+
+def test_cache_clear_reports_a_partial_delete() raises:
+    """The one refusal that changes the disk says so, and how to finish the job.
+
+    `_remove_dir_contents_no_follow` raises on the FIRST entry it cannot remove,
+    so an unwritable generation — or an `ENOTEMPTY` from a concurrent mtest
+    writing into the store — stops the walk with part of the cache already gone.
+    The other two refusals leave every byte where it was and can simply name a
+    fix; this one has to admit the partial state first, or a user reading it has
+    no way to know what is still there.
+
+    The failure is induced with the permission bit rather than an injector,
+    because that is the shape the real one takes: a directory whose contents the
+    process may read but may not unlink from.
+    """
+    var root = temp_root()
+    write_file(root, ".mtest-cache/CACHEDIR.TAG", _MARKER_TEXT)
+    write_file(root, _STORE_DIR + "/tests_stest_uok_h00/bin", "not a binary")
+    var locked = root + "/" + _STORE_DIR + "/tests_stest_uok_h00"
+    # `r-x`: the walk can still list and characterize the generation, so it
+    # reaches the `unlink` that the missing write bit denies.
+    _chmod(locked, 0o500)
+
+    var diagnostic = _clear_diagnostic(root)
+    # Restored BEFORE the first assertion, so a failing case still leaves a
+    # removable temp tree behind rather than an undeletable one.
+    _chmod(locked, 0o700)
+
+    assert_true(
+        diagnostic != "",
+        (
+            "an entry the process may not unlink must refuse; a run as root"
+            " would defeat this setup and is not a supported test environment"
+        ),
+    )
+    assert_true(
+        "could not delete the cache directory" in diagnostic,
+        "the refusal must still name what failed: " + diagnostic,
+    )
+    assert_true(
+        "may already have been removed" in diagnostic,
+        "the one refusal that changes the disk must admit it: " + diagnostic,
+    )
+    assert_true(
+        "rm -rf .mtest-cache" in diagnostic,
+        "a partial delete must hand over the command that finishes it: "
+        + diagnostic,
     )
 
 
