@@ -1212,6 +1212,13 @@ def remove_tree_no_follow(path: String) raises:
         pass  # a generation that will not die is litter, not a failed run
     ```
     """
+    # Known and accepted: every check here is by PATHNAME, so a directory
+    # swapped for a symlink between this `lstat` and the `listdir` below would
+    # not be caught. Closing that needs `openat`/`unlinkat` walking descriptors,
+    # which the pinned `std.os` does not expose and which would cost this module
+    # three more foreign declarations. The window is inside a directory mtest
+    # created and owns, and the no-follow checks still make every step refuse
+    # what it can see; this is a narrowing, not a proof.
     var kind = Int(lstat(path).st_mode) & _S_IFMT
     if kind == _S_IFLNK:
         raise Error(
@@ -1597,25 +1604,50 @@ struct PublishResult(Copyable, Movable):
     on `PUB_FAILED`, which still exists and is this session's artifact.
     """
 
+    var argv: List[String]
+    """The command line to RECORD, which is not the one that was run.
+
+    The build genuinely ran with `-o <staging dir>/bin`, and that directory no
+    longer exists after `PUB_OK` — so the caller's own argv names a dead path
+    the moment publication succeeds, and on `PUB_ADOPTED` the live path belongs
+    to a generation the caller has never seen. Rewriting it is therefore not
+    something a caller can do for itself, which is why it travels back here
+    rather than staying inside `meta`.
+
+    `PUB_OK`: the caller's argv with its `-o` pointed at the new generation.
+    `PUB_ADOPTED`: the ADOPTED generation's own recorded argv, straight out of
+    its validated `meta` — the winner's reproduce line, for the winner's binary.
+    `PUB_FAILED`: the caller's argv verbatim, since the staging path it names is
+    exactly the binary that is still there and still going to run.
+
+    So the rule has no exceptions: record `pub.argv`, run `pub.bin_rel`.
+    """
+
     var warning: String
     """Why publication failed, in words a user can act on; empty otherwise."""
 
 
-def _publish_failed(target: StoreBuildTarget, warning: String) -> PublishResult:
+def _publish_failed(
+    target: StoreBuildTarget, argv: List[String], warning: String
+) -> PublishResult:
     """A failed publication that keeps the staged build alive.
 
     The staging directory is deliberately NOT removed: the caller is about to
     run the binary inside it, and it is the only copy this session has. Session
-    end discards it.
+    end discards it. The command line is handed back untouched for the same
+    reason — it names the staging binary, which is precisely what will run.
 
     Args:
         target: The staging target, whose binary the caller keeps using.
+        argv: The command line the build ran, returned verbatim.
         warning: Why nothing was published.
 
     Returns:
-        A `PUB_FAILED` result naming the staged binary.
+        A `PUB_FAILED` result naming the staged binary and its live argv.
     """
-    return PublishResult(PUB_FAILED, String(target.out_rel), warning)
+    return PublishResult(
+        PUB_FAILED, String(target.out_rel), argv.copy(), warning
+    )
 
 
 def _rewrite_output(
@@ -1740,7 +1772,10 @@ def store_publish(
     Returns:
         `PUB_OK` naming the published binary, `PUB_ADOPTED` naming the winner's
         binary, or `PUB_FAILED` naming the STAGED binary — which still exists
-        and which the caller must keep running this session. Never raises.
+        and which the caller must keep running this session. Every kind also
+        carries the command line to RECORD, which the caller cannot derive
+        itself once the staging directory is gone: run `bin_rel`, record
+        `argv`, on all three. Never raises.
 
     Examples:
 
@@ -1749,13 +1784,15 @@ def store_publish(
 
     var pub = store_publish(root, key, target, 2.5, build_argv)
     if pub.kind == PUB_FAILED:
-        pass  # warn once with pub.warning, keep running pub.bin_rel
+        pass  # warn once with pub.warning
+    # every kind: run pub.bin_rel, record pub.argv
     ```
     """
     if not target.ok():
         return PublishResult(
             PUB_FAILED,
             String(""),
+            argv.copy(),
             "the cache could not stage a directory for this build",
         )
     var tmp_abs = root + "/" + target.tmp_dir_rel
@@ -1771,12 +1808,13 @@ def store_publish(
     except:
         return _publish_failed(
             target,
+            argv,
             "could not re-read the source '"
             + key.src_rel
             + "' after building it",
         )
     if sha256_hex(fresh) != key.src_sha:
-        return _publish_failed(target, "source changed during compile")
+        return _publish_failed(target, argv, "source changed during compile")
 
     # --- Steps 2 and 3: digest the artifact and record it. ------------------
     var bin_bytes: List[UInt8]
@@ -1785,19 +1823,26 @@ def store_publish(
     except:
         return _publish_failed(
             target,
+            argv,
             "could not read the binary just built for '" + key.src_rel + "'",
         )
+    # One rewritten command line, recorded in `meta` for a future hit AND
+    # returned to this caller for its own registry: the caller cannot derive it
+    # itself, because the staging path it knows is the one about to disappear.
+    var recorded = _rewrite_output(argv, target.out_rel, final_bin_rel)
     var meta = MetaFile(
         key_full=String(key.digest_full),
         bin_sha=sha256_hex(bin_bytes),
         build_seconds=build_seconds,
-        argv=_rewrite_output(argv, target.out_rel, final_bin_rel),
+        argv=recorded.copy(),
     )
     try:
         _write_meta(tmp_abs + "/" + _META_NAME, meta.render())
     except:
         return _publish_failed(
-            target, "could not write the cache record for '" + key.src_rel + "'"
+            target,
+            argv,
+            "could not write the cache record for '" + key.src_rel + "'",
         )
 
     # --- Step 4: durability before the commit. ------------------------------
@@ -1808,6 +1853,7 @@ def store_publish(
     except:
         return _publish_failed(
             target,
+            argv,
             "could not flush the cache generation for '" + key.src_rel + "'",
         )
 
@@ -1821,11 +1867,19 @@ def store_publish(
         var winner = store_probe(root, key)
         if winner.kind == PROBE_HIT:
             _discard(tmp_abs)
+            # The WINNER's argv, not this run's: the binary the caller is about
+            # to run is the winner's, and the only reproduce line that both
+            # names a live path and describes those bytes is the one out of the
+            # generation this run just validated.
             return PublishResult(
-                PUB_ADOPTED, String(winner.bin_rel), String("")
+                PUB_ADOPTED,
+                String(winner.bin_rel),
+                winner.argv.copy(),
+                String(""),
             )
         return _publish_failed(
             target,
+            argv,
             "could not publish the cached build for '" + key.src_rel + "'",
         )
 
@@ -1838,4 +1892,4 @@ def store_publish(
     except:
         pass
     _reap_siblings(root, key)
-    return PublishResult(PUB_OK, final_bin_rel^, String(""))
+    return PublishResult(PUB_OK, final_bin_rel^, recorded^, String(""))

@@ -820,6 +820,12 @@ def test_publish_then_probe_hits() raises:
     assert_equal(pub.warning, "")
     # The staging directory was RENAMED into place, not copied out of.
     assert_false(isdir(root + "/" + target.tmp_dir_rel))
+    # The caller records THIS argv, not the one it passed in: the `-o` it built
+    # with names the staging directory, which the rename just consumed. The
+    # caller cannot fix that up itself, so publication hands it back fixed.
+    assert_equal(len(pub.argv), 5)
+    assert_equal(pub.argv[3], key.gen_dir + "/bin")
+    assert_true(exists(root + "/" + pub.argv[3]))
 
     var hit = store_probe(root, key)
     assert_equal(hit.kind, PROBE_HIT)
@@ -902,14 +908,22 @@ def test_publish_adopts_existing_same_key() raises:
         PUB_OK,
     )
     var second = _stage_binary(root, [UInt8(1)])
-    var again = store_publish(
-        root, key, second, 1.0, _build_argv(rel, second.out_rel)
-    )
+    # A sixth token this run's command line carries and the winner's does not,
+    # so the adopted argv can be told apart from a merely rewritten one.
+    var loser_argv = _build_argv(rel, second.out_rel)
+    loser_argv.append("--loser-only")
+    var again = store_publish(root, key, second, 1.0, loser_argv^)
     # A concurrent run reached the path first. Its generation revalidated, so
     # this one adopts it rather than failing or clobbering it.
     assert_equal(again.kind, PUB_ADOPTED)
     assert_equal(again.bin_rel, key.gen_dir + "/bin")
     assert_false(isdir(root + "/" + second.tmp_dir_rel))
+    # The adopted binary is the WINNER's, so the reproduce line must be the
+    # winner's too — this run's own command line describes bytes nobody will
+    # run, and its `-o` names a staging directory that is already gone.
+    assert_equal(len(again.argv), 5)
+    assert_equal(again.argv[3], key.gen_dir + "/bin")
+    assert_true(exists(root + "/" + again.argv[3]))
 
 
 def test_adoption_revalidates_winner() raises:
@@ -926,11 +940,24 @@ def test_adoption_revalidates_winner() raises:
         root, key, target, 1.0, _build_argv(rel, target.out_rel)
     )
     assert_equal(pub.kind, PUB_FAILED)
-    assert_true(pub.warning != "")
+    # The SPECIFIC warning, because a regression that short-circuited at the
+    # source-changed guard — or anywhere else before the rename — would also
+    # produce a bare PUB_FAILED and this test would sail past it.
+    assert_true(
+        "could not publish the cached build" in pub.warning,
+        "publication failed somewhere other than the commit: " + pub.warning,
+    )
+    # THE observable difference between "re-probed the winner and rejected it"
+    # and "never looked": only a real re-probe deletes the corrupt generation.
+    assert_false(isdir(root + "/" + key.gen_dir))
     # The caller runs the binary it just built, so the staging copy SURVIVES a
     # failed publication; only session end discards it.
     assert_equal(pub.bin_rel, target.out_rel)
     assert_true(exists(root + "/" + target.out_rel))
+    # Nothing was published, so the caller's own command line still names a
+    # path that exists — it is handed back untouched.
+    assert_equal(len(pub.argv), 5)
+    assert_equal(pub.argv[3], target.out_rel)
 
 
 def test_publish_reaps_stale_sibling() raises:
