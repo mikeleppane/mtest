@@ -241,8 +241,10 @@ Repeatable. Each `--precompile` package is built with `mojo precompile` **before
 any test build**, in the order listed. Precompiled packages inherit `-I` and
 `--build-arg`. `OUT` defaults to `build/<name>.mojopkg`, and its directory is
 automatically added to `-I` so dependent test files resolve `from <name> import
-…`. In v1 precompiled packages are **always rebuilt** (no caching across
-invocations — the step is cheap and a wrong cache key is worse than a rebuild).
+…`. A step whose inputs and whose output are both unchanged is **skipped**
+(§8.5): `mojo precompile` does not produce identical bytes for identical
+sources, so a step that re-ran every session would rewrite a package every
+dependent test file is keyed over and no test build could ever be cached.
 
 Each attempt builds to a temp path beside OUT and is renamed onto OUT **only
 after it exits 0**, so a killed, crashed, or rejected attempt never touches OUT:
@@ -278,6 +280,68 @@ is the runner's own build spawn; a COMPILE-TIMEOUT reproduce line prints that
 effective `--num-threads K` with the deadline, so the reproduce stays faithful —
 that is the runner's flag, not a forwarded user argument.
 
+### 8.5 The build-artifact cache
+
+Built binaries persist across invocations under `.mtest-cache/build-v1/` in the
+invocation root, so a rerun over an unchanged tree compiles nothing. The cache
+is **on by default**, is local to one checkout, and is never shared between
+machines.
+
+Each artifact is an immutable directory named `<mangled>_h<digest>`, holding the
+binary and a record of the key that produced it. A build compiles into a private
+staging directory beside it and is published with one `rename(2)`, so a key and
+a binary are never observably paired with anything but each other, and an
+interrupted publication leaves nothing a later run can adopt. Two runs that race
+for one key are not an error: the loser adopts the winner's artifact.
+
+The key is derived from the compile inputs, never from configuration text. It
+covers the resolved compiler and its standard library, `MODULAR_HOME` and
+`MODULAR_CACHE_DIR`, the physical invocation root, the build arguments, every
+file named by a build argument, the walked contents of every `-I` root, and the
+test file itself — by CONTENT, so a modification time that moves without the
+bytes changing rebuilds nothing. Settings that cannot change a compiled byte
+(timeouts, workers, retries, selection, reporters, and the rest of §25) are
+absent from it and never invalidate anything. There is no import-graph analysis:
+one change under an `-I` root invalidates every file keyed over that root, which
+over-rebuilds deliberately.
+
+A hit re-verifies the stored binary against the digest recorded with it before
+running it, and reports the recorded build duration so the SLOW annotation reads
+the same warm as cold. Anything the key cannot characterize honestly — an
+unclassifiable `--build-arg`, an include tree that cannot be walked, a store
+that cannot be created — turns the cache off for the whole session with one
+warning and builds normally. No cache condition ever fails a run that would
+otherwise pass.
+
+Retries are outside the cache entirely: a crash-class retry builds to its
+invocation-private path under `build/bin/` and publishes nothing, and the file
+is rebuilt in the next session. Configured precompile steps are stamped rather
+than content-addressed, because their output must land at the contractual path
+dependents reach through `-I`; a skip requires both the stamp's key and the
+output file's digest to match (§8.3).
+
+Reproduce lines and diagnostics always name `build/bin/<mangled>` as the output
+path, never the cache's staging or artifact directory: the reproduce line is a
+command a user runs, and the runner deletes its staging directories before the
+verdict is even emitted.
+
+`--no-cache` neither reads nor writes the store. Its gate sits before any
+staging, so a run that asked for no cache creates neither the store directory
+nor its ownership marker and leaves no trace a later run could trust.
+
+`--cache-clear` deletes `.mtest-cache` — the artifacts and the last-run state
+together — and then runs the session normally, which legitimately repopulates
+the store. Before deleting, the path is characterized without following
+symlinks and must be a real directory carrying the `CACHEDIR.TAG` marker mtest
+writes when it creates the store; a symlink, an unmarked directory, or a
+deletion that fails partway is a pre-session usage error (exit 4) with a
+diagnostic that names the manual removal, and there is deliberately no
+"its contents look like ours" override. Combined with `--lf`/`--ff`, a warning
+states that the last-run state was just deleted and that selection falls back
+to the full set. Nothing under `build/` is ever deleted: test binaries no longer
+land there, and configured precompile outputs are user-visible products rather
+than cache state.
+
 ---
 
 ## 9. Run and collect exit codes
@@ -294,7 +358,7 @@ grow:
 | 1 | at least one selected outcome is FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, or PRECOMPILE-ERROR |
 | 2 | interrupted (SIGINT/SIGTERM); a partial summary is printed |
 | 3 | internal `mtest` error — including protocol drift (a report present but off-grammar) and an environment/I-O failure such as a runtime report-destination open/write failure (a `--json` destination that cannot be opened at session start, or whose stream write later fails — a fatal abort; or a `--junit-xml` target that cannot be created at session start, or whose report cannot be finalized and renamed onto PATH) |
-| 4 | pre-run usage error (unknown flag, bad value, nonexistent path, unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, or the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout) — detected **before any test runs** |
+| 4 | pre-run usage error (unknown flag, bad value, nonexistent path, unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout, or a `--cache-clear` target mtest cannot prove it owns or cannot delete, §8.5) — detected **before any test runs** |
 | 5 | no tests collected (empty walk, `-k` matched nothing, everything excluded) |
 
 **Precedence** when outcomes mix. A usage error aborts before the run with 4.
@@ -968,16 +1032,14 @@ as noted:
 same upstream per-test timing gap that blocks per-test attribution elsewhere;
 the file-level `--durations N` is itself served now, §15.1); markers /
 `xfail`; `--asan`; `--shuffle` (file-order randomization to surface order
-dependencies); `--fail-on-flaky`; watch mode; a **persistent**
-build/collection cache directory override (`--cache-dir`); and a
+dependencies); `--fail-on-flaky`; watch mode; a **relocatable** build-cache
+directory (`--cache-dir`); and a
 machine-readable `config show` format (the served TOML display is informal
-human output, §27.1). Within one session the runner builds each file once and
-reuses it (`collect` and `run` share the binary); a persistent cache across
-invocations is landing incrementally (`--no-cache`/`--cache-clear` are served,
-§24.1, though this build does not yet read or write a cache): a
-trustworthy-verdict tool does not ship "fast but possibly stale", and a
-correct cache key (transitive source closure, environment inputs, target
-triple, schema version, concurrent-writer safety) is its own deliverable.
+human output, §27.1). The build cache itself is served (§8.5), but only as a
+per-checkout store at the fixed path `.mtest-cache/build-v1/`: choosing where it
+lives, sharing it between checkouts or machines, and saving and restoring it in
+CI are separate deliverables, each of which needs a key that survives leaving
+the machine it was computed on.
 
 ---
 
@@ -1321,10 +1383,8 @@ behaves as `collect`).
 `--shard` applies under both `run` and `collect`. `--json` (the machine event
 stream, §15.4), `--junit-xml` (the JUnit report, §15.2), and `--gh-annotations`
 (the CI annotation tail, §15.3) are served too — see §24.2 for how they are now
-reached. `--no-cache`/`--cache-clear` are parsed and carried through config
-resolution like every other CLI-only field, but this build does not yet read
-or write a build cache (§21): they have no effect on any outcome until that
-lands.
+reached. `--no-cache`/`--cache-clear` act on the persistent build-artifact
+store described in §8.5, which this build reads and writes by default.
 
 Every flag and subcommand in the frozen contract above is now served: nothing is
 refused for being unavailable. For `run` and `collect`, exit 4 therefore covers
@@ -1355,8 +1415,9 @@ code exist today. Section 27 separately covers the reachable `config show` and
 - **4** — reachable under `run` and `collect` for every served cause in §9 —
   including mutually exclusive config controls; a selected config that is
   missing, unreadable, malformed, or invalid; a syntactically invalid `--json`
-  or `--junit-xml` destination; and the `--json -`/annotations stdout conflict,
-  all detected pre-run.
+  or `--junit-xml` destination; the `--json -`/annotations stdout conflict; and
+  a `--cache-clear` target that is a symlink, carries no ownership marker, or
+  cannot be deleted (§8.5), all detected pre-run.
 
 **`--json` reachability.** `--json PATH|-` is served (§15.4): it is parsed into a
 live event-stream reporter composed beside the console. Its destination is
@@ -1605,7 +1666,12 @@ Gates are never filtered or reordered by either mode: they always run first.
 `mtest config show` accepts the full `run` grammar and applies the ordinary
 resolution order: built-in defaults, `mtest.toml`, non-empty `MTEST_MOJO`, then
 CLI. It performs resolution only. It does not discover, build, execute, set up
-reporters, read or parse last-run state, or write state. `--config` and
+reporters, read or parse last-run state, or write state. The branch
+short-circuits before every side effect the command line could otherwise
+request, so `config show --cache-clear` renders the resolution and deletes
+nothing: the flag is accepted, as the whole `run` grammar is, and performing its
+deletion for a command that only prints would make an inspection command
+destructive. `--config` and
 `--no-config` keep their ordinary meanings; a missing, unreadable, malformed,
 or invalid selected config produces the same exit 4 and byte-identical stderr
 diagnostic as `run`.

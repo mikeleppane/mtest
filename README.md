@@ -682,11 +682,12 @@ command never reads it.
 ### Re-running just the failures: `--lf` and `--ff`
 
 A completed run remembers what failed, in `.mtest-cache/lastrun` under the
-invocation root. That directory is mtest's working state, not a build product
-you want in review, so ignore it:
+invocation root. That directory is mtest's own working state — the last-run
+record and the cached test binaries beside it — and none of it belongs in
+review, so ignore it:
 
 ```gitignore
-# mtest's in-session build cache and its last-run state
+# mtest's build cache and its last-run state
 .mtest-cache/
 ```
 
@@ -1106,10 +1107,20 @@ Facts about this build worth knowing before you rely on it:
 - **`config show` output is for humans.** It is valid, copy-pasteable TOML,
   but its layout and its `# (source)` comments are informal and may change; a
   machine-readable configuration format is reserved, not shipped.
-- **The build cache does not survive the process.** Within one session each
-  file is built once and reused (`collect` and `run` share the binary), but
-  `.mtest-cache/` carries no cross-invocation build reuse in this build: only
-  the `lastrun` state persists.
+- **The build cache is local, conservative, and never authoritative.** Built
+  binaries persist under `.mtest-cache/build-v1/`, so a rerun over an unchanged
+  tree compiles nothing and the summary band reports `builds: 0, cached: N`.
+  A file's key covers the resolved compiler and its standard library, the build
+  arguments, every walked `-I` tree, and the file's own bytes — content, not
+  timestamps, so a `touch` or a branch switch that restores identical text
+  rebuilds nothing. There is no import graph in it: one edit under an `-I` root
+  rebuilds every selected file, which over-rebuilds by design. The store is
+  per-checkout and is never shared between machines. Every hit re-verifies the
+  binary against the digest recorded with it, and any doubt at all — an
+  unclassifiable build argument, an include tree that cannot be walked, a store
+  that cannot be created — turns the cache off for that session with one
+  warning and builds normally. `--no-cache` neither reads nor writes it;
+  `--cache-clear` deletes `.mtest-cache` and then runs cold.
 - **Last-run state is one file, last writer wins.** Two sessions running
   concurrently in one invocation root both write it, and the one that finishes
   last is the state the next `--lf` reads. A write failure is one stderr
