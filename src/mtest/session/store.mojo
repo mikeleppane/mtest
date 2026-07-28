@@ -1635,9 +1635,17 @@ def _publish_failed(
     """A failed publication that keeps the staged build alive.
 
     The staging directory is deliberately NOT removed: the caller is about to
-    run the binary inside it, and it is the only copy this session has. Session
-    end discards it. The command line is handed back untouched for the same
-    reason — it names the staging binary, which is precisely what will run.
+    run the binary inside it, and it is the only copy this session has. Nothing
+    removes it afterwards either — there is no session-end sweep, and a build
+    seam must not invent one, because it cannot know when the last run of that
+    binary has finished. What is left behind is inert: `.tmp-` names are skipped
+    by the reaper and by every include walk, and they carry the writing
+    process's pid, so no later run can adopt, probe, or publish one. It survives
+    until `--cache-clear` (or any removal of the store) takes it, which is the
+    accepted price of never deleting a binary that is still running.
+
+    The command line is handed back untouched for the same reason as the
+    directory — it names the staging binary, which is precisely what will run.
 
     Args:
         target: The staging target, whose binary the caller keeps using.

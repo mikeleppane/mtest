@@ -228,8 +228,10 @@ The single terminal record (§8).
 | `cached_files` | int | files admitted from a build-cache hit |
 
 `built_files + cached_files` equals the run's first-attempt compile admissions,
-gates included. Both are `0` when the cache admitted nothing — a run with the
-cache off, and every run that compiled nothing at all.
+gates included. `cached_files` alone is `0` when the cache served nothing — a run
+with the cache off, and every cold store; the compiles those runs admit are
+counted in `built_files` like any other. Both are `0` only for a run that
+compiled nothing at all.
 
 `summary` is a stable, fully-enumerated object of the 13 outcome tokens in
 discriminant order:
