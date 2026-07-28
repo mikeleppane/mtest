@@ -10,7 +10,12 @@ from std.testing import assert_equal, assert_true, TestSuite
 
 from mtest.exec import ExecRuntime, interrupt_requested
 from mtest.exec.signals import _raise_self, _reset_interrupt
-from mtest.model import EventKind, Outcome, SessionFinishedPayload
+from mtest.model import (
+    EventKind,
+    Outcome,
+    SessionFinishedPayload,
+    WarningPayload,
+)
 from mtest.report import (
     CompositeReporter,
     RecordingCoordinator,
@@ -45,26 +50,32 @@ def test_interrupt_before_files_is_exit_2_all_not_run() raises:
 
     assert_equal(code, 2, "an interrupt resolves to exit 2, never a TIMEOUT")
     ref rec = comp.composite.reporters[0]
-    # No file is started. Asserted by KIND, never by count or position: a
-    # session interrupted before its first file still emits whatever it learned
-    # on the way there, and under an already-set interrupt flag the build
-    # cache's `<compiler> --version` child is killed, which disables the cache
-    # and adds the once-per-session `cache-off` warning between the two frame
-    # events. Neither that warning nor anything else later added ahead of the
-    # first file changes what this case is about, so the claim is stated as
-    # "no file event at all" rather than as a literal event count.
-    var started = 0
-    var finished_files = 0
-    for i in range(rec.count()):
-        if rec.kind_at(i) == EventKind.FILE_STARTED:
-            started += 1
-        elif rec.kind_at(i) == EventKind.FILE_FINISHED:
-            finished_files += 1
-    assert_equal(started, 0, "no file may start after the flag is already set")
-    assert_equal(finished_files, 0, "and none may reach a verdict")
-    assert_true(rec.kind_at(0) == EventKind.SESSION_STARTED)
+    # The COMPLETE sequence, asserted by kind: no file starts, none finishes,
+    # and nothing else happens either. The middle event is not incidental and is
+    # not a race — the build cache spawns `<compiler> --version` to key the
+    # session, and with the interrupt flag already set the Supervisor kills
+    # every active slot on its first sweep, so that child can never report
+    # cleanly, the cache is switched off, and the once-per-session `cache-off`
+    # warning is emitted between the two frame events. Naming the whole sequence
+    # keeps the "and nothing else" half of this case's claim, which a count of
+    # file events alone would quietly give up.
+    var expected: List[EventKind] = [
+        EventKind.SESSION_STARTED,
+        EventKind.WARNING,
+        EventKind.SESSION_FINISHED,
+    ]
+    assert_equal(rec.count(), len(expected), "the exact event count")
+    for i in range(len(expected)):
+        assert_true(
+            rec.kind_at(i) == expected[i],
+            "event " + String(i) + " has the wrong kind",
+        )
+    assert_equal(
+        rec.event_at(1).data[WarningPayload].warning_kind,
+        "cache-off",
+        "the one warning is the cache switching itself off, nothing else",
+    )
     var last = rec.event_at(rec.count() - 1)
-    assert_true(last.kind == EventKind.SESSION_FINISHED)
     assert_equal(last.data[SessionFinishedPayload].exit_code, 2)
     # Both discovered files are accounted for as NOT_RUN, none as TIMEOUT.
     assert_equal(

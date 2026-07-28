@@ -322,6 +322,22 @@ def test_build_dispatch_open_fault_is_exit_3_with_every_file_not_run() raises:
     # No file was ever started: the fault preceded the first FileStarted.
     assert_equal(len(_started_paths(rec)), 0)
 
+    # The staging directory that dispatch had ALREADY claimed is swept. The
+    # cache stages into the store before it spawns the compiler, so by the time
+    # the stdout pipe fails there is a live `.tmp-<pid>-…` directory under the
+    # store — and the fault tears the batch down without that build ever
+    # reaching its completion handler, which is the one place a staged directory
+    # is otherwise settled. Nothing in the tree sweeps `.tmp-` names afterwards,
+    # so the batch's own terminal pass is the last chance to remove it, and this
+    # is what proves that pass runs. A binary the run is still using is never at
+    # risk: publication clears the batch's claim on all three outcomes,
+    # including the failed one whose staged binary stays live.
+    assert_equal(
+        len(dir_listing(root + "/" + _STORE_DIR)),
+        0,
+        "a torn-down batch left its staging directory in the store",
+    )
+
     var err = _internal_error(rec)
     assert_equal(err.step, "build", "the failed boundary is the build dispatch")
     assert_equal(err.program, config.mojo_path)
