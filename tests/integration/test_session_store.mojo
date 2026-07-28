@@ -1,8 +1,20 @@
-"""Integration tests for the session store and its scaffolding."""
-from std.os.path import isdir
-from std.testing import TestSuite, assert_equal, assert_raises, assert_true
+"""Integration tests for the session store, its scaffolding, and its key inputs.
+"""
+from std.os.path import isdir, realpath
+from std.testing import (
+    TestSuite,
+    assert_equal,
+    assert_false,
+    assert_raises,
+    assert_true,
+)
 
-from mtest.platform import read_bounded_regular_file, read_regular_file_bytes
+from mtest.exec import ExecRuntime, ProcessSpec, run_supervised
+from mtest.platform import (
+    read_bounded_regular_file,
+    read_regular_file_bytes,
+    resolve_executable,
+)
 
 from cache_fixtures import dir_listing, write_bytes
 from tmptree import temp_root
@@ -58,6 +70,111 @@ def test_rejects_over_cap() raises:
     assert_equal(len(exact), 4)
     with assert_raises(contains="exceeds"):
         _ = read_regular_file_bytes(root + "/blob.bin", 3)
+
+
+def _make_executable(path: String) raises:
+    """Give `path` the execute bit through a supervised `chmod` child.
+
+    The platform layer carries no permissions primitive
+    (`grep -rn "chmod\\|permissions" src/mtest/platform/` finds nothing) and the
+    pinned `std.os` exposes no `chmod` either, so the bit has to come from a
+    real process. `mtest.exec` already owns every fork/exec in the tree, which
+    makes a supervised spawn the fallback the brief names — cheaper than a
+    foreign declaration written only for the tests.
+
+    Args:
+        path: The file to make owner/group/other executable.
+
+    Raises:
+        Error: If the child did not exit, or exited non-zero.
+    """
+    var argv: List[String] = ["chmod", "755", path]
+    var runtime = ExecRuntime()
+    runtime.open()
+    var result = run_supervised(runtime, ProcessSpec.command(argv^, 30000))
+    runtime.close()
+    if not result.termination.is_exited() or result.termination.value != 0:
+        raise Error("test setup: chmod failed for '" + path + "'")
+
+
+def _executable_stub(root: String, rel: String) raises -> String:
+    """Write a trivial executable shell script at `root/rel` and return its path.
+
+    Args:
+        root: The scratch directory the relative path is resolved against.
+        rel: The path relative to `root`; parent directories are created.
+
+    Returns:
+        The absolute (but not canonicalized) path of the stub.
+
+    Raises:
+        Error: If the file cannot be written or the execute bit cannot be set.
+    """
+    var source = String("#!/bin/sh\nexit 0\n")
+    var data = List[UInt8]()
+    for b in source.as_bytes():
+        data.append(b)
+    write_bytes(root, rel, data)
+    var full = root + "/" + rel
+    _make_executable(full)
+    return full^
+
+
+def test_resolve_absolute_path() raises:
+    var root = temp_root()
+    var stub = _executable_stub(root, "bin/stub")
+    var found = resolve_executable(stub)
+    assert_true(Bool(found))
+    assert_equal(found.value(), realpath(stub))
+
+
+def test_resolve_via_path_order() raises:
+    var root = temp_root()
+    var first = _executable_stub(root, "a/tool")
+    var second = _executable_stub(root, "b/tool")
+    var forward = resolve_executable("tool", root + "/a:" + root + "/b")
+    assert_true(Bool(forward))
+    assert_equal(forward.value(), realpath(first))
+    var backward = resolve_executable("tool", root + "/b:" + root + "/a")
+    assert_true(Bool(backward))
+    assert_equal(backward.value(), realpath(second))
+
+
+def test_resolve_skips_non_executable_candidate() raises:
+    var root = temp_root()
+    write_bytes(root, "a/tool", [UInt8(35), UInt8(10)])
+    var second = _executable_stub(root, "b/tool")
+    var found = resolve_executable("tool", root + "/a:" + root + "/b")
+    assert_true(Bool(found))
+    assert_equal(found.value(), realpath(second))
+
+
+def test_resolve_missing_returns_none() raises:
+    var root = temp_root()
+    assert_false(Bool(resolve_executable("mtest-absent-tool", root)))
+    assert_false(Bool(resolve_executable(root + "/absent/tool")))
+    assert_false(Bool(resolve_executable("mtest-absent-tool", "")))
+
+
+def test_resolve_traverses_empty_path_entries() raises:
+    var root = temp_root()
+    var only = _executable_stub(root, "b/tool")
+    # An empty component is the cwd entry. Asserting that it RESOLVES to cwd
+    # would need an executable inside the test's own working directory, which
+    # is the repo checkout — writing one there would dirty the tree the fmt
+    # gate diffs. What is assertable is that the empty component neither aborts
+    # the search nor swallows the separator behind it: the components after it
+    # are still tried, in order.
+    var found = resolve_executable("tool", ":" + root + "/a:" + root + "/b")
+    assert_true(Bool(found))
+    assert_equal(found.value(), realpath(only))
+
+
+def test_resolve_rejects_directory_candidate() raises:
+    var root = temp_root()
+    write_bytes(root, "a/tool/keep.txt", [UInt8(107)])
+    var found = resolve_executable("tool", root + "/a")
+    assert_false(Bool(found))
 
 
 def main() raises:
