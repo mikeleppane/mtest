@@ -195,7 +195,7 @@ reproduce: mtest -I <PREFIX>/share/mtest/companions/assertions/src companions/as
 --- captured stderr ---
 
 
-===== 1 passed, 1 failed, 0 skipped (0 excluded, 0 not run) in <TIME> =====
+===== 1 passed, 1 failed, 0 skipped, builds: 1, cached: 0 (0 excluded, 0 not run) in <TIME> =====
 ```
 
 That output was captured from the installed `.conda` artifact. The companion
