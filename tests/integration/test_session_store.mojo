@@ -1,23 +1,34 @@
 """Integration tests for the session store, its scaffolding, and its key inputs.
 """
-from std.os import getenv, setenv, unsetenv
+from std.os import getenv, setenv, symlink, unsetenv
 from std.os.path import isdir, realpath
 from std.testing import (
     TestSuite,
     assert_equal,
     assert_false,
+    assert_not_equal,
     assert_raises,
     assert_true,
 )
 
+from mtest.cache import KeyBuilder
+from mtest.config import RunnerConfig
 from mtest.exec import ExecRuntime, ProcessSpec, run_supervised
 from mtest.platform import (
     read_bounded_regular_file,
     read_regular_file_bytes,
     resolve_executable,
 )
+from mtest.session.store import (
+    CacheContext,
+    cache_key_tags,
+    collect_env_base,
+    finalize_includes,
+    walk_include_root,
+)
 
 from cache_fixtures import dir_listing, write_bytes
+from session_fixtures import base_config, write_file
 from tmptree import temp_root
 
 
@@ -207,6 +218,314 @@ def test_resolve_rejects_directory_candidate() raises:
     write_bytes(root, "a/tool/keep.txt", [UInt8(107)])
     var found = resolve_executable("tool", root + "/a")
     assert_false(Bool(found))
+
+
+# --- CacheContext: the include walk (Task 6) ---------------------------------
+
+
+def _walk_digest(root: String, dir: String, exclude: String) raises -> String:
+    """The full key of a fresh builder fed by exactly one include walk.
+
+    Comparing two of these compares the SETS OF FRAMES two walks produced, which
+    is the only property that matters: the cache key is the digest, so "the walk
+    saw the same thing" and "the digests match" are the same statement.
+
+    Args:
+        root: The invocation root the walk resolves `dir` and `exclude` against.
+        dir: The include root to walk.
+        exclude: A root-relative path to skip, or empty for none.
+
+    Returns:
+        The 64-hex digest of a builder fed only by this walk.
+
+    Raises:
+        Error: If the walk reported failure.
+    """
+    var kb = KeyBuilder()
+    if not walk_include_root(root, dir, kb, exclude):
+        raise Error("test: walk_include_root failed for '" + dir + "'")
+    return kb^.digest_full()
+
+
+def test_walk_hashes_top_level_sources() raises:
+    var a = temp_root()
+    write_file(a, "inc/top.mojo", "# a")
+    var b = temp_root()
+    write_file(b, "inc/top.mojo", "# a")
+    # Frames name paths RELATIVE TO the walked dir, so two identical trees in
+    # different scratch roots key alike — otherwise no run could ever hit.
+    assert_equal(_walk_digest(a, "inc", ""), _walk_digest(b, "inc", ""))
+    var c = temp_root()
+    write_file(c, "inc/top.mojo", "# b")
+    assert_not_equal(_walk_digest(a, "inc", ""), _walk_digest(c, "inc", ""))
+
+
+def test_walk_covers_every_source_suffix() raises:
+    var bare = temp_root()
+    write_file(bare, "inc/top.mojo", "# a")
+    for suffix in ["🔥", "mojopkg", "mojoc"]:
+        var full = temp_root()
+        write_file(full, "inc/top.mojo", "# a")
+        write_file(full, "inc/extra." + String(suffix), "# x")
+        assert_not_equal(
+            _walk_digest(bare, "inc", ""), _walk_digest(full, "inc", "")
+        )
+    # A suffix the compiler does not consume is not part of the build input.
+    var noise = temp_root()
+    write_file(noise, "inc/top.mojo", "# a")
+    write_file(noise, "inc/README.md", "# x")
+    assert_equal(_walk_digest(bare, "inc", ""), _walk_digest(noise, "inc", ""))
+
+
+def test_walk_skips_dot_entries_and_plain_subdirs() raises:
+    var bare = temp_root()
+    write_file(bare, "inc/top.mojo", "# a")
+    var noisy = temp_root()
+    write_file(noisy, "inc/top.mojo", "# a")
+    write_file(noisy, "inc/.hidden.mojo", "# x")
+    write_file(noisy, "inc/.dotdir/__init__.mojo", "# x")
+    # A subdirectory with no `__init__` is not a package, so `-I` never reaches
+    # its contents and the key must not depend on them.
+    write_file(noisy, "inc/plain/deep.mojo", "# x")
+    assert_equal(_walk_digest(bare, "inc", ""), _walk_digest(noisy, "inc", ""))
+
+
+def test_walk_recurses_into_package_subdirs() raises:
+    var bare = temp_root()
+    write_file(bare, "inc/top.mojo", "# a")
+    var pkg = temp_root()
+    write_file(pkg, "inc/top.mojo", "# a")
+    write_file(pkg, "inc/p/__init__.mojo", "# i")
+    write_file(pkg, "inc/p/mod.mojo", "# m")
+    var with_pkg = _walk_digest(pkg, "inc", "")
+    assert_not_equal(_walk_digest(bare, "inc", ""), with_pkg)
+    # The recursion reads the nested file's CONTENT, not just its name.
+    write_file(pkg, "inc/p/mod.mojo", "# n")
+    assert_not_equal(with_pkg, _walk_digest(pkg, "inc", ""))
+
+
+def test_walk_exclude_skips_path() raises:
+    var bare = temp_root()
+    write_file(bare, "inc/top.mojo", "# a")
+    var root = temp_root()
+    write_file(root, "inc/top.mojo", "# a")
+    write_file(root, "inc/gen.mojopkg", "# generated")
+    assert_not_equal(
+        _walk_digest(bare, "inc", ""), _walk_digest(root, "inc", "")
+    )
+    # Excluding the generated artifact leaves exactly the tree without it: a
+    # precompile step's own output must not feed the key that decides whether
+    # that step runs.
+    assert_equal(
+        _walk_digest(bare, "inc", ""),
+        _walk_digest(root, "inc", "inc/gen.mojopkg"),
+    )
+
+
+def test_walk_skips_directory_symlinks() raises:
+    var bare = temp_root()
+    write_file(bare, "inc/top.mojo", "# a")
+    var root = temp_root()
+    write_file(root, "inc/top.mojo", "# a")
+    write_file(root, "pkgsrc/__init__.mojo", "# i")
+    write_file(root, "pkgsrc/mod.mojo", "# m")
+    symlink(root + "/pkgsrc", root + "/inc/p")
+    # `inc/p` is a package by content, so only the `islink` check keeps the walk
+    # out of it — and out of the cycle a self-referential link would close.
+    assert_equal(_walk_digest(bare, "inc", ""), _walk_digest(root, "inc", ""))
+
+
+def test_walk_reports_failure_for_missing_dir() raises:
+    var root = temp_root()
+    var kb = KeyBuilder()
+    assert_false(walk_include_root(root, "absent", kb, ""))
+
+
+# --- CacheContext: construction, disabling, and the env base (Task 6) --------
+
+
+def _env_base(config: RunnerConfig, root: String) raises -> CacheContext:
+    """Collect an env base over a runtime this helper opens and closes.
+
+    No `try`/`finally` is needed and none is written: `collect_env_base` is
+    non-raising by contract — every failure it can meet becomes a disabled
+    context — so there is no path on which `runtime.close()` is skipped. That
+    contract is what keeps this helper from repeating `_make_executable`'s
+    shape above, where a raising `run_supervised` would leak an open runtime
+    into every later test in this file.
+
+    Args:
+        config: The config to key.
+        root: The invocation root.
+
+    Returns:
+        The collected context.
+    """
+    var runtime = ExecRuntime()
+    runtime.open()
+    var ctx = collect_env_base(runtime, config, root)
+    runtime.close()
+    return ctx^
+
+
+def test_disable_keeps_the_first_reason() raises:
+    var ctx = CacheContext()
+    assert_true(ctx.enabled)
+    assert_equal(ctx.disable_reason, "")
+    ctx.disable("first")
+    ctx.disable("second")
+    assert_false(ctx.enabled)
+    # The FIRST cause is the one the user can act on; a later symptom would
+    # bury it.
+    assert_equal(ctx.disable_reason, "first")
+
+
+def test_tag_namespace_is_frame_safe() raises:
+    var tags = cache_key_tags()
+    assert_true(len(tags) > 0)
+    for i in range(len(tags)):
+        var tag = tags[i]
+        assert_true(tag.byte_length() > 0, "empty tag at " + String(i))
+        for b in tag.as_bytes():
+            # A NUL inside a tag forges a frame boundary: `feed` writes the tag
+            # bytes then one NUL, so `"a\0b"` and `"a"` with payload `b...`
+            # become the same byte stream and two different builds key alike.
+            assert_true(Int(b) != 0, "NUL in tag '" + tag + "'")
+        # `feed_file` derives `tag + ".size"` and `tag + ".sha"`, so a base tag
+        # spelled that way could collide with another tag's derived frames.
+        assert_false(tag.endswith(".size"), "reserved suffix in '" + tag + "'")
+        assert_false(tag.endswith(".sha"), "reserved suffix in '" + tag + "'")
+        for j in range(i + 1, len(tags)):
+            assert_not_equal(tag, tags[j], "duplicate tag '" + tag + "'")
+
+
+def test_env_base_enabled_for_default_config() raises:
+    var root = temp_root()
+    var ctx = _env_base(base_config(), root)
+    assert_true(ctx.enabled, "cache off: " + ctx.disable_reason)
+    assert_equal(ctx.disable_reason, "")
+    assert_false(ctx.warned)
+    assert_equal(ctx.built_files, 0)
+    assert_equal(ctx.cached_files, 0)
+    assert_equal(len(ctx.extra_walk_dirs), 0)
+
+
+def test_env_base_disables_on_unknown_arg() raises:
+    var root = temp_root()
+    var config = base_config()
+    config.build_args = ["--sysroot=/x"]
+    var ctx = _env_base(config^, root)
+    assert_false(ctx.enabled)
+    # The reason names the token, because that is the thing the user can remove.
+    assert_true(
+        "--sysroot=/x" in ctx.disable_reason,
+        "reason did not name the token: " + ctx.disable_reason,
+    )
+
+
+def test_env_base_disables_on_unresolvable_compiler() raises:
+    var root = temp_root()
+    var config = base_config()
+    config.mojo_path = "mtest-absent-compiler"
+    var ctx = _env_base(config^, root)
+    assert_false(ctx.enabled)
+    assert_true(
+        "mtest-absent-compiler" in ctx.disable_reason,
+        "reason did not name the compiler: " + ctx.disable_reason,
+    )
+
+
+def test_env_base_disables_on_missing_arg_file() raises:
+    var root = temp_root()
+    var config = base_config()
+    config.build_args = ["-Xlinker", "absent.o"]
+    var ctx = _env_base(config^, root)
+    assert_false(ctx.enabled)
+    assert_true(
+        "absent.o" in ctx.disable_reason,
+        "reason did not name the token: " + ctx.disable_reason,
+    )
+
+
+def test_env_base_records_include_dir_args() raises:
+    var root = temp_root()
+    write_file(root, "extra/top.mojo", "# a")
+    var config = base_config()
+    config.build_args = ["-I", "extra"]
+    var ctx = _env_base(config^, root)
+    assert_true(ctx.enabled, "cache off: " + ctx.disable_reason)
+    assert_equal(len(ctx.extra_walk_dirs), 1)
+    assert_equal(ctx.extra_walk_dirs[0], "extra")
+
+
+# --- CacheContext: finalize_includes (Task 6) --------------------------------
+
+
+def _prefix_digest(ctx: CacheContext) raises -> String:
+    """The full key of `ctx.prefix`, taken from a fork so `ctx` stays usable."""
+    var forked = ctx.prefix.copy()
+    return forked^.digest_full()
+
+
+def test_finalize_includes_is_order_sensitive() raises:
+    var root = temp_root()
+    write_file(root, "a/one.mojo", "# one")
+    write_file(root, "b/two.mojo", "# two")
+    var forward = CacheContext()
+    finalize_includes(forward, root, ["a", "b"])
+    assert_true(forward.enabled, "cache off: " + forward.disable_reason)
+    var backward = CacheContext()
+    finalize_includes(backward, root, ["b", "a"])
+    assert_true(backward.enabled, "cache off: " + backward.disable_reason)
+    # Frame ORDER is the wire contract: `-I a -I b` and `-I b -I a` are
+    # different command lines and must be different keys.
+    assert_not_equal(_prefix_digest(forward), _prefix_digest(backward))
+
+
+def test_finalize_includes_tracks_content() raises:
+    var root = temp_root()
+    write_file(root, "a/one.mojo", "# one")
+    var before = CacheContext()
+    finalize_includes(before, root, ["a"])
+    write_file(root, "a/one.mojo", "# changed")
+    var after = CacheContext()
+    finalize_includes(after, root, ["a"])
+    assert_not_equal(_prefix_digest(before), _prefix_digest(after))
+
+
+def test_finalize_includes_disables_on_unwalkable_root() raises:
+    var root = temp_root()
+    var ctx = CacheContext()
+    finalize_includes(ctx, root, ["absent"])
+    assert_false(ctx.enabled)
+    assert_true(
+        "absent" in ctx.disable_reason,
+        "reason did not name the include root: " + ctx.disable_reason,
+    )
+
+
+def test_finalize_includes_walks_recorded_extra_dirs() raises:
+    var root = temp_root()
+    write_file(root, "a/one.mojo", "# one")
+    write_file(root, "extra/two.mojo", "# two")
+    var plain = CacheContext()
+    finalize_includes(plain, root, ["a"])
+    var with_extra = CacheContext()
+    with_extra.extra_walk_dirs.append("extra")
+    finalize_includes(with_extra, root, ["a"])
+    assert_true(with_extra.enabled, "cache off: " + with_extra.disable_reason)
+    # A `-I` inside `--build-arg` reaches the compiler exactly like a configured
+    # include root, so it has to reach the key the same way.
+    assert_not_equal(_prefix_digest(plain), _prefix_digest(with_extra))
+
+
+def test_finalize_includes_leaves_a_disabled_context_alone() raises:
+    var root = temp_root()
+    var ctx = CacheContext()
+    ctx.disable("earlier cause")
+    finalize_includes(ctx, root, ["absent"])
+    assert_false(ctx.enabled)
+    assert_equal(ctx.disable_reason, "earlier cause")
 
 
 def main() raises:
