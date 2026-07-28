@@ -1,7 +1,7 @@
 """Integration tests for the session store, its scaffolding, and its key inputs.
 """
-from std.os import getenv, setenv, symlink, unsetenv
-from std.os.path import isdir, realpath
+from std.os import getenv, makedirs, setenv, symlink, unsetenv
+from std.os.path import exists, isdir, islink, realpath
 from std.testing import (
     TestSuite,
     assert_equal,
@@ -17,13 +17,27 @@ from mtest.exec import ExecRuntime, ProcessResult, ProcessSpec, run_supervised
 from mtest.platform import (
     read_bounded_regular_file,
     read_regular_file_bytes,
+    rename_path,
     resolve_executable,
 )
 from mtest.session.store import (
+    PROBE_HIT,
+    PROBE_MISS,
+    PUB_ADOPTED,
+    PUB_FAILED,
+    PUB_OK,
+    STORE_DIR,
     CacheContext,
+    FileKey,
+    StoreBuildTarget,
     cache_key_tags,
     collect_env_base,
+    file_key,
     finalize_includes,
+    remove_tree_no_follow,
+    store_build_target,
+    store_probe,
+    store_publish,
     walk_include_root,
 )
 
@@ -696,6 +710,341 @@ def test_finalize_includes_leaves_a_disabled_context_alone() raises:
     finalize_includes(ctx, root, ["absent"])
     assert_false(ctx.enabled)
     assert_equal(ctx.disable_reason, "earlier cause")
+
+
+# --- The store: staging, probe, publish, adopt, and reap (Task 7) ------------
+
+
+def _fixture_key(root: String, rel: String, body: String) raises -> FileKey:
+    """Key a REAL source file at `root/rel`, so `src_sha` describes real bytes.
+
+    The publication guard re-digests the source and compares it to `src_sha`,
+    so a key built from an invented digest would fail every publish and prove
+    nothing. The context is a bare `CacheContext`, whose `prefix` is an empty
+    builder: the store protocol does not care what the session prefix covers,
+    only that two different sources key differently, and skipping
+    `collect_env_base` keeps each of these tests off the 141 MB toolchain
+    digest.
+
+    Args:
+        root: The scratch root the source is written under.
+        rel: The source's root-relative path; parent directories are created.
+        body: The source text to write. Two calls with different bodies at the
+            same `rel` produce two keys sharing a mangled prefix — which is
+            exactly what the reaping test needs.
+
+    Returns:
+        The key a session would compute for that file.
+
+    Raises:
+        Error: If the source cannot be written or keyed.
+    """
+    write_file(root, rel, body)
+    var ctx = CacheContext()
+    var key = file_key(ctx, root, rel)
+    if not key:
+        raise Error("test: file_key failed for '" + rel + "'")
+    return key.value().copy()
+
+
+def _stage_binary(
+    root: String, payload: List[UInt8]
+) raises -> StoreBuildTarget:
+    """Stage a build target and put `payload` exactly where `-o` would land.
+
+    Args:
+        root: The invocation root.
+        payload: The bytes standing in for a compiled binary.
+
+    Returns:
+        The staging target, with its `bin` already written.
+
+    Raises:
+        Error: If the store could not stage a target.
+    """
+    var target = store_build_target(root)
+    if not target.ok():
+        raise Error("test: store_build_target produced no staging directory")
+    write_bytes(root, target.out_rel, payload)
+    return target^
+
+
+def _build_argv(rel: String, out_rel: String) -> List[String]:
+    """The shape every build site emits: `-o` and its path as two tokens."""
+    var argv = List[String]()
+    argv.append("mojo")
+    argv.append("build")
+    argv.append("-o")
+    argv.append(String(out_rel))
+    argv.append(String(rel))
+    return argv^
+
+
+def _near(a: Float64, b: Float64) -> Bool:
+    """Whether two durations agree to the meta format's microsecond grid."""
+    var d = a - b
+    if d < 0.0:
+        d = -d
+    return d < 1.0e-6
+
+
+def test_marker_written_at_mtest_cache_root() raises:
+    var root = temp_root()
+    var target = store_build_target(root)
+    assert_true(target.ok())
+    assert_true(isdir(root + "/" + STORE_DIR))
+    assert_true(isdir(root + "/" + target.tmp_dir_rel))
+    # The tag marks the WHOLE owned directory, not just the store, because that
+    # is the directory `--cache-clear` deletes and the marker is what proves the
+    # directory is mtest's before anything is removed.
+    var tag = read_bounded_regular_file(
+        root + "/.mtest-cache/CACHEDIR.TAG", 4096
+    )
+    assert_true(tag.is_regular)
+    assert_true(
+        tag.text.startswith("Signature: 8a477f597d28d172789f06886806bc55"),
+        "the tag did not lead with the standard signature: " + tag.text,
+    )
+
+
+def test_publish_then_probe_hits() raises:
+    var root = temp_root()
+    var rel = String("tests/test_hit.mojo")
+    var key = _fixture_key(root, rel, "# hit\n")
+    var target = _stage_binary(root, [UInt8(1), UInt8(2), UInt8(3)])
+    var pub = store_publish(
+        root, key, target, 2.5, _build_argv(rel, target.out_rel)
+    )
+    assert_equal(pub.kind, PUB_OK)
+    assert_equal(pub.bin_rel, key.gen_dir + "/bin")
+    assert_equal(pub.warning, "")
+    # The staging directory was RENAMED into place, not copied out of.
+    assert_false(isdir(root + "/" + target.tmp_dir_rel))
+
+    var hit = store_probe(root, key)
+    assert_equal(hit.kind, PROBE_HIT)
+    assert_equal(hit.bin_rel, key.gen_dir + "/bin")
+    # `secs` round-trips through a fixed-point field with six decimals, so exact
+    # float equality is the wrong question to ask of it.
+    assert_true(_near(hit.build_seconds, 2.5), "build seconds did not survive")
+    # The reproduce line must name a path that exists AFTER publication; the
+    # staging path it was built with is gone by then.
+    assert_equal(len(hit.argv), 5)
+    assert_equal(hit.argv[3], key.gen_dir + "/bin")
+
+
+def test_probe_rejects_corrupted_bin() raises:
+    var root = temp_root()
+    var rel = String("tests/test_corrupt.mojo")
+    var key = _fixture_key(root, rel, "# corrupt\n")
+    var target = _stage_binary(root, [UInt8(1), UInt8(2), UInt8(3)])
+    assert_equal(
+        store_publish(
+            root, key, target, 1.0, _build_argv(rel, target.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    write_bytes(root, key.gen_dir + "/bin", [UInt8(9), UInt8(9)])
+    # The recorded digest is the ONLY thing binding `meta` to `bin`; a key match
+    # alone would have served these two bytes as a green test run.
+    assert_equal(store_probe(root, key).kind, PROBE_MISS)
+    # A failed check deletes the generation, so the corruption cannot be re-read
+    # on the next probe either.
+    assert_false(isdir(root + "/" + key.gen_dir))
+    assert_equal(store_probe(root, key).kind, PROBE_MISS)
+
+
+def test_probe_rejects_wrong_key_meta() raises:
+    var root = temp_root()
+    var rel = String("tests/test_collide.mojo")
+    var key = _fixture_key(root, rel, "# collide\n")
+    var target = _stage_binary(root, [UInt8(7)])
+    assert_equal(
+        store_publish(
+            root, key, target, 1.0, _build_argv(rel, target.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    # The generation NAME carries only the first 128 bits of the key. A prefix
+    # collision would put a foreign build at exactly this path, so the FULL
+    # digest recorded in `meta` is what a hit is checked against.
+    var collided = FileKey(
+        digest32=key.digest32,
+        digest_full=String("a") * 64,
+        gen_name=key.gen_name,
+        gen_dir=key.gen_dir,
+        src_rel=key.src_rel,
+        src_sha=key.src_sha,
+    )
+    assert_equal(store_probe(root, collided).kind, PROBE_MISS)
+    assert_false(isdir(root + "/" + key.gen_dir))
+
+
+def test_partial_tmp_generation_is_inert() raises:
+    var root = temp_root()
+    var key = _fixture_key(root, "tests/test_partial.mojo", "# partial\n")
+    makedirs(root + "/" + STORE_DIR + "/.tmp-999-zz")
+    assert_equal(store_probe(root, key).kind, PROBE_MISS)
+    # A half-built staging directory is not a generation, and a probe does not
+    # reap it: another process may be compiling into it right now.
+    assert_true(isdir(root + "/" + STORE_DIR + "/.tmp-999-zz"))
+
+
+def test_publish_adopts_existing_same_key() raises:
+    var root = temp_root()
+    var rel = String("tests/test_adopt.mojo")
+    var key = _fixture_key(root, rel, "# adopt\n")
+    var first = _stage_binary(root, [UInt8(1)])
+    assert_equal(
+        store_publish(
+            root, key, first, 1.0, _build_argv(rel, first.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    var second = _stage_binary(root, [UInt8(1)])
+    var again = store_publish(
+        root, key, second, 1.0, _build_argv(rel, second.out_rel)
+    )
+    # A concurrent run reached the path first. Its generation revalidated, so
+    # this one adopts it rather than failing or clobbering it.
+    assert_equal(again.kind, PUB_ADOPTED)
+    assert_equal(again.bin_rel, key.gen_dir + "/bin")
+    assert_false(isdir(root + "/" + second.tmp_dir_rel))
+
+
+def test_adoption_revalidates_winner() raises:
+    var root = temp_root()
+    var rel = String("tests/test_garbage.mojo")
+    var key = _fixture_key(root, rel, "# garbage\n")
+    # A generation that EXISTS but does not validate — the shape a killed run
+    # leaves behind. Adopting it unchecked is how one corrupt generation spreads
+    # to every process that loses a rename against it.
+    write_bytes(root, key.gen_dir + "/bin", [UInt8(4)])
+    write_bytes(root, key.gen_dir + "/meta", [UInt8(110), UInt8(111)])
+    var target = _stage_binary(root, [UInt8(5)])
+    var pub = store_publish(
+        root, key, target, 1.0, _build_argv(rel, target.out_rel)
+    )
+    assert_equal(pub.kind, PUB_FAILED)
+    assert_true(pub.warning != "")
+    # The caller runs the binary it just built, so the staging copy SURVIVES a
+    # failed publication; only session end discards it.
+    assert_equal(pub.bin_rel, target.out_rel)
+    assert_true(exists(root + "/" + target.out_rel))
+
+
+def test_publish_reaps_stale_sibling() raises:
+    var root = temp_root()
+    var rel = String("tests/test_reap.mojo")
+    var old = _fixture_key(root, rel, "# one\n")
+    var first = _stage_binary(root, [UInt8(1)])
+    assert_equal(
+        store_publish(
+            root, old, first, 1.0, _build_argv(rel, first.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    var new = _fixture_key(root, rel, "# two\n")
+    assert_not_equal(old.gen_name, new.gen_name)
+    var second = _stage_binary(root, [UInt8(2)])
+    assert_equal(
+        store_publish(
+            root, new, second, 1.0, _build_argv(rel, second.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    # One live generation per source file: an editing loop must not grow the
+    # store without bound.
+    assert_false(isdir(root + "/" + old.gen_dir))
+    assert_true(isdir(root + "/" + new.gen_dir))
+
+
+def test_probe_refuses_symlinked_generation() raises:
+    var root = temp_root()
+    var rel = String("tests/test_link.mojo")
+    var key = _fixture_key(root, rel, "# link\n")
+    var target = _stage_binary(root, [UInt8(3)])
+    assert_equal(
+        store_publish(
+            root, key, target, 1.0, _build_argv(rel, target.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    assert_equal(store_probe(root, key).kind, PROBE_HIT)
+    # Move the VALID generation aside and leave a symlink in its place. A probe
+    # that followed the link would still hit — and the same followed link would
+    # let the store's remover delete whatever the link names.
+    rename_path(root + "/" + key.gen_dir, root + "/decoy")
+    symlink(root + "/decoy", root + "/" + key.gen_dir)
+    assert_equal(store_probe(root, key).kind, PROBE_MISS)
+    # REFUSED, not removed: the link is not the cache's to delete either.
+    assert_true(islink(root + "/" + key.gen_dir))
+    assert_true(isdir(root + "/decoy"))
+
+
+def test_publish_refuses_a_source_changed_mid_compile() raises:
+    var root = temp_root()
+    var rel = String("tests/test_race.mojo")
+    var key = _fixture_key(root, rel, "# before\n")
+    var target = _stage_binary(root, [UInt8(1)])
+    write_file(root, rel, "# after\n")
+    var pub = store_publish(
+        root, key, target, 1.0, _build_argv(rel, target.out_rel)
+    )
+    # The binary was compiled from bytes this key does not describe. Publishing
+    # it would serve it to a later run whose key still says "before".
+    assert_equal(pub.kind, PUB_FAILED)
+    assert_true(
+        "source changed" in pub.warning,
+        "the warning did not name the cause: " + pub.warning,
+    )
+    assert_false(isdir(root + "/" + key.gen_dir))
+    assert_equal(pub.bin_rel, target.out_rel)
+    assert_true(exists(root + "/" + target.out_rel))
+
+
+def test_file_key_tracks_the_source_and_misses_a_vanished_one() raises:
+    var root = temp_root()
+    var rel = String("tests/test_key.mojo")
+    var before = _fixture_key(root, rel, "# before\n")
+    var after = _fixture_key(root, rel, "# after\n")
+    assert_not_equal(before.digest_full, after.digest_full)
+    assert_not_equal(before.src_sha, after.src_sha)
+    # `digest32` is a true prefix of the full key, so the two are one digest
+    # read at two lengths and can never disagree about which build this is.
+    assert_true(after.digest_full.startswith(after.digest32))
+    # The generation name keeps the mangled source so a human can read the
+    # store; only the digest moves.
+    assert_true(after.gen_name.startswith("tests_stest_ukey_h"))
+    assert_equal(after.gen_dir, STORE_DIR + "/" + after.gen_name)
+    # A source that cannot be read is the one `None`: the caller turns it into
+    # a per-file miss and switches the cache off.
+    var ctx = CacheContext()
+    assert_false(Bool(file_key(ctx, root, "tests/absent.mojo")))
+
+
+def test_remove_tree_no_follow_refuses_a_symlinked_root() raises:
+    var root = temp_root()
+    write_file(root, "outside/keep.txt", "k")
+    symlink(root + "/outside", root + "/link")
+    # Recursing through the link would delete the TARGET's contents. That is the
+    # whole reason the store does not reuse `scratch.mojo`'s remover, which
+    # never lstats its root and swallows what it cannot delete.
+    with assert_raises(contains="symlink"):
+        remove_tree_no_follow(root + "/link")
+    assert_true(exists(root + "/outside/keep.txt"))
+    assert_true(islink(root + "/link"))
+
+
+def test_remove_tree_no_follow_unlinks_child_symlinks() raises:
+    var root = temp_root()
+    write_file(root, "outside/keep.txt", "k")
+    write_file(root, "doomed/inner/file.txt", "f")
+    symlink(root + "/outside", root + "/doomed/link")
+    remove_tree_no_follow(root + "/doomed")
+    assert_false(exists(root + "/doomed"))
+    # The child link was UNLINKED, never traversed.
+    assert_true(exists(root + "/outside/keep.txt"))
 
 
 def main() raises:

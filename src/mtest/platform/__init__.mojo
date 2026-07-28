@@ -28,6 +28,7 @@ from mtest.platform.fs import rename_path
 from mtest.platform.process import process_id
 from mtest.platform.regular_file import (
     BoundedRegularFileRead,
+    fsync_path,
     read_bounded_regular_file,
     read_regular_file_bytes,
 )

@@ -12,6 +12,12 @@ text. They share `_read_opened_regular_file_bytes`, which owns the descriptor
 lifetime and the single `open`/`fstat`/`read` declaration shape this binary
 emits for those symbols — a second shape for any of them is a link-time
 conflict raised from an unrelated file.
+
+`fsync_path` sits beside them because it needs exactly the same open: it flushes
+a path rather than reading it, which the build cache's publication protocol
+needs for the binary, its record, and their containing directory before the one
+rename that commits them. It reuses the same three-argument `open` shape and
+adds the binary's only `fsync` declaration.
 """
 from std.ffi import external_call
 from std.memory import Span, alloc, memset_zero
@@ -354,6 +360,112 @@ def _read_opened_regular_file_bytes(
     if close_fd(fd) != 0:
         raise Error("platform: close failed after bounded regular-file read")
     return _OpenedRegularFileBytes(True, data^)
+
+
+def fsync_path(path: String) raises:
+    """Flush `path`'s contents and metadata to durable storage.
+
+    The durability half of an atomic publication. `rename(2)` is atomic against
+    a crash of the process, but not against a crash of the MACHINE: without this
+    a power loss can leave a directory entry pointing at a file whose bytes
+    never reached the disk, and the next run would then read a generation whose
+    binary is zeros while its recorded digest says otherwise. Flushing the
+    payload files first and their containing directory last is what makes the
+    subsequent rename a promise rather than a hope.
+
+    Works on a directory as well as a regular file, which is why it takes a
+    path rather than a descriptor: the caller has no descriptor for either, and
+    the read flags this module already uses — `O_RDONLY|O_NONBLOCK|O_CLOEXEC` —
+    are valid for both. Nothing is read through the descriptor, so a pathname
+    swapped for a FIFO cannot block and a swapped device cannot be consumed.
+
+    Args:
+        path: The file or directory to flush.
+
+    Raises:
+        Error: If the path cannot be opened, if `fsync(2)` reports a failure, or
+            if the descriptor cannot be closed. A successfully opened descriptor
+            is always closed first, and the primary errno is preserved when
+            cleanup also fails.
+
+    Examples:
+
+    ```mojo
+    from mtest.platform import fsync_path, rename_path
+
+    fsync_path("staging/bin")
+    fsync_path("staging")
+    rename_path("staging", "final")
+    ```
+    """
+    var path_bytes = c_string_bytes(path)
+    var raw_fd: Int32
+    var open_errno = 0
+    while True:
+        # SAFETY: libc `open` has ABI `int open(const char*, int, ...)`, and
+        # this is the same three-argument shape the reader above emits — one
+        # declaration shape per symbol, so no link-time conflict can arise from
+        # here. Neither O_CREAT nor O_TMPFILE is present, so libc never
+        # `va_arg`s the trailing mode and the ignored `UInt32(0)` is sound on
+        # Darwin arm64 as well as Linux. `path_bytes` uniquely owns a complete,
+        # initialized NUL-terminated copy with a concrete local origin; it is
+        # live across this synchronous call and libc neither retains nor frees
+        # it. The guarded flags are O_RDONLY|O_NONBLOCK|O_CLOEXEC, so opening a
+        # replaced FIFO cannot block and the descriptor cannot cross an exec.
+        # Failure owns no descriptor; success transfers exactly one here.
+        raw_fd = external_call["open", Int32](
+            path_bytes.unsafe_ptr().bitcast[NoneType](),
+            _open_read_flags(),
+            UInt32(0),
+        )
+        if raw_fd >= 0:
+            break
+        open_errno = errno_now()
+        if open_errno != _EINTR:
+            break
+    _ = path_bytes^
+    if raw_fd < 0:
+        raise Error(
+            "platform: could not open '"
+            + path
+            + "' to flush it (errno "
+            + String(open_errno)
+            + ")"
+        )
+    var fd = Int(raw_fd)
+    var sync_rc: Int32
+    var sync_errno = 0
+    while True:
+        # SAFETY: libc `fsync` has the exact ABI `int fsync(int)`. This is the
+        # only declaration of the symbol in the binary. The argument is a plain
+        # scalar — the descriptor this function opened above and owns until the
+        # single close below — so there is no pointer to keep live, alias,
+        # bound, or free, and nothing can escape the call. `fsync` writes only
+        # kernel-held state associated with that descriptor and neither
+        # allocates nor retains anything on this process's behalf. It is
+        # synchronous and returns a plain scalar status; on failure the
+        # descriptor remains open and owned here, and the branch below closes it
+        # exactly once before raising, so no path leaks or double-closes it.
+        sync_rc = external_call["fsync", Int32](Int32(fd))
+        if sync_rc == 0:
+            break
+        sync_errno = errno_now()
+        if sync_errno != _EINTR:
+            break
+    if sync_rc != 0:
+        # Inspect close to discharge ownership, but preserve fsync's primary
+        # errno deterministically if cleanup also reports an error.
+        var close_rc = close_fd(fd)
+        _ = close_rc
+        raise Error(
+            "platform: fsync failed for '"
+            + path
+            + "' (errno "
+            + String(sync_errno)
+            + ")"
+        )
+    if close_fd(fd) != 0:
+        raise Error("platform: close failed after flushing '" + path + "'")
 
 
 def read_bounded_regular_file(

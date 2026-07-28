@@ -1,5 +1,5 @@
-"""`CacheContext`: what the build-artifact cache key covers, and when the cache
-switches itself off.
+"""The build-artifact cache: what its key covers, when it switches itself off,
+and the protocol that reads and writes the store.
 
 Layer 4 (`session`). This module is where the persistent build cache touches the
 world: it opens files, lists directories, canonicalizes paths, and spawns one
@@ -52,10 +52,32 @@ tag's derived frames — either way two different builds key alike and a stale
 binary is served. The complete namespace is the `TAG_*` block below, and
 `cache_key_tags` returns exactly it: anyone adding a tag adds it in that one
 place, and `test_tag_namespace_is_frame_safe` re-checks the whole set.
+
+**The store protocol.** `file_key` forks `prefix` and appends one `source`
+frame, which names the generation `<mangled>_h<digest32>` under `STORE_DIR`.
+`store_build_target` claims a private staging directory the compiler writes its
+`-o` straight into, so publication is one `rename(2)` of a directory rather than
+a copy — there is no half-published generation for a reader to observe, and the
+bytes that were digested are the bytes that get committed. `store_probe` decides
+whether a stored generation may be RUN, and is the one function here where a
+mistake reports a green test run that never happened; every one of its questions
+resolves toward `PROBE_MISS`, and a failed check deletes the generation so the
+same corruption cannot be re-read next time. `store_publish` promotes a staged
+build, guarding first that the source has not changed underneath the compile,
+and re-probing in full — key AND binary digest — before adopting a generation
+that won a rename race, because adopting an unvalidated winner is how a single
+corrupt generation spreads to every process that loses to it.
+
+Deletion inside the store goes through `remove_tree_no_follow`, which refuses a
+symlinked root and unlinks child symlinks rather than descending them. The cache
+deletes only what it owns, and it proves ownership with the `CACHEDIR.TAG`
+marker written at `CACHE_ROOT_DIR` — above the store, because `--cache-clear`
+deletes the whole owned directory and that is what must be proven mtest's.
 """
 from std.ffi import _Global
-from std.os import getenv, listdir, lstat, stat
-from std.os.path import dirname, isdir, realpath
+from std.os import getenv, listdir, lstat, mkdir, rmdir, stat, unlink
+from std.os.path import dirname, exists, isdir, realpath
+from std.time import perf_counter_ns
 
 from mtest.cache import (
     ARG_FILE_CANDIDATE,
@@ -64,12 +86,25 @@ from mtest.cache import (
     ARG_UNKNOWN,
     KEY_FORMAT_TAG,
     KeyBuilder,
+    MetaFile,
     classify_build_args,
+    generation_name,
     sha256_hex,
 )
 from mtest.config import RunnerConfig
 from mtest.exec import ExecRuntime, ProcessResult, ProcessSpec, run_supervised
-from mtest.platform import read_regular_file_bytes, resolve_executable
+from mtest.platform import (
+    close_checked_fd,
+    create_unique_temp,
+    fsync_path,
+    process_id,
+    read_bounded_regular_file,
+    read_regular_file_bytes,
+    rename_path,
+    resolve_executable,
+    write_all_fd,
+)
+from mtest.session.scratch import _ensure_dir, _mangle
 
 
 comptime STORE_DIR = ".mtest-cache/build-v1"
@@ -134,6 +169,11 @@ comptime TAG_WALK_FILE = "walkfile"
 Its path is relative to the walked root, so the same tree keys alike wherever
 it is checked out."""
 
+comptime TAG_SOURCE = "source"
+"""The test file being keyed, as a file frame (adds `.size` and `.sha`). The one
+frame `file_key` appends to the shared prefix, and therefore the only thing that
+distinguishes two files of one session."""
+
 
 def cache_key_tags() -> List[String]:
     """Every tag the cache key uses, including the one `KeyBuilder` feeds itself.
@@ -168,6 +208,7 @@ def cache_key_tags() -> List[String]:
         String(TAG_ARG_FILE),
         String(TAG_INCLUDE),
         String(TAG_WALK_FILE),
+        String(TAG_SOURCE),
     ]
     return tags^
 
@@ -1001,3 +1042,800 @@ def finalize_includes(
             # package and an unreadable file are different things to fix.
             ctx.disable("include root '" + dir + "': " + outcome.reason)
             return
+
+
+# --- The owned store: layout and the ownership marker. -----------------------
+
+comptime CACHE_ROOT_DIR = ".mtest-cache"
+"""The whole directory mtest owns, relative to the invocation root.
+
+`STORE_DIR` lives inside it, and so does the last-run reselection state, which
+is why the ownership marker sits HERE rather than beside the generations:
+`--cache-clear` deletes this directory, so this is the directory whose ownership
+has to be provable before anything is removed.
+"""
+
+comptime CACHEDIR_TAG_REL = ".mtest-cache/CACHEDIR.TAG"
+"""The ownership marker, relative to the invocation root.
+
+Spelled out rather than composed from `CACHE_ROOT_DIR`, because the pinned
+toolchain's `comptime` bindings are literals; the two must agree, and
+`test_marker_written_at_mtest_cache_root` checks the path that ships.
+"""
+
+comptime CACHEDIR_TAG_SIGNATURE = "Signature: 8a477f597d28d172789f06886806bc55"
+"""The first line every `CACHEDIR.TAG` carries, per the cachedir convention.
+
+Backup and archiving tools recognize this exact byte string and skip the
+directory holding it — which is correct for a build cache, and a free side
+effect of the marker mtest needs anyway to prove the directory is its own.
+"""
+
+comptime _BIN_NAME = "bin"
+"""The generation's binary, inside the generation directory."""
+
+comptime _META_NAME = "meta"
+"""The generation's validation record, inside the generation directory."""
+
+comptime _META_CAP = 1024 * 1024
+"""Largest `meta` file the store will read, in bytes.
+
+Generous next to a record of four short lines plus one per argv token, and
+bounded so a garbage file cannot be read into memory in full before
+`MetaFile.parse` rejects it.
+"""
+
+comptime _TMP_PREFIX = ".tmp-"
+"""Leading component of every staging directory's name.
+
+Dot-prefixed so an include walk skips it, and distinct from any generation name,
+which always contains `_h` after a mangled source name. The reaper keys on this
+so it can never delete a concurrent process's live staging directory.
+"""
+
+comptime _TMP_ATTEMPTS = 16
+"""How many staging-directory names one call may try before giving up."""
+
+
+def _cachedir_tag_text() -> String:
+    """The marker file's full contents.
+
+    Returns:
+        The standard signature line, then two comment lines naming mtest as the
+        owner and the convention as the reference.
+    """
+    var out = String(CACHEDIR_TAG_SIGNATURE) + "\n"
+    out += "# This file is a cache directory tag created by mtest.\n"
+    out += "# For information about cache directory tags, see"
+    out += " https://bford.info/cachedir/\n"
+    return out^
+
+
+def _ensure_store(root: String) raises:
+    """Create the store directory and, once, the ownership marker above it.
+
+    The marker is written to a unique temporary file in its own directory and
+    renamed onto its final name, so a concurrent run can never observe a
+    half-written tag — and `--cache-clear`, whose entire safety argument is "the
+    marker is present", can never be defeated by a torn write.
+
+    Args:
+        root: The invocation root the store hangs under.
+
+    Raises:
+        Error: If the directories cannot be created or the marker cannot be
+            written. The caller turns that into "no staging target", which
+            degrades to an uncached build.
+    """
+    _ensure_dir(root + "/" + STORE_DIR)
+    var tag = root + "/" + CACHEDIR_TAG_REL
+    if exists(tag):
+        return
+    var created = create_unique_temp(
+        root + "/" + CACHE_ROOT_DIR + "/CACHEDIR.TAG.XXXXXX"
+    )
+    var wrote = True
+    try:
+        write_all_fd(created.fd, _cachedir_tag_text())
+    except:
+        wrote = False
+    # The descriptor is discharged exactly once whether or not the write
+    # succeeded; a failed write leaves only an empty temporary file behind.
+    close_checked_fd(created.fd)
+    if not wrote:
+        raise Error(
+            "session: could not write the cache ownership marker at '"
+            + tag
+            + "'"
+        )
+    rename_path(created.path, tag)
+
+
+# --- No-follow deletion. -----------------------------------------------------
+
+
+def _remove_dir_contents_no_follow(dir: String) raises:
+    """Empty `dir`, unlinking child symlinks instead of following them.
+
+    Args:
+        dir: A real directory, already characterized by the caller.
+
+    Raises:
+        Error: If any entry cannot be characterized or removed. Nothing is
+            swallowed: a caller that wanted "delete it if you can" says so at
+            its own call site.
+    """
+    for entry in listdir(dir):
+        var child = dir + "/" + String(entry)
+        # `lstat`, never `isdir`: `isdir` follows a link, so a
+        # symlink-to-directory would be recursed into and the TARGET's contents
+        # deleted. It also folds an unreadable entry into False, which would
+        # make this unlink something it could not characterize.
+        var kind = Int(lstat(child).st_mode) & _S_IFMT
+        if kind == _S_IFDIR:
+            _remove_dir_contents_no_follow(child)
+            rmdir(child)
+        else:
+            # Symlinks included: `unlink` removes the LINK, never its target.
+            unlink(child)
+
+
+def remove_tree_no_follow(path: String) raises:
+    """Delete `path` and everything under it without ever following a symlink.
+
+    The store's remover, and deliberately not `scratch.mojo`'s `_discard_path`:
+    that one swallows every failure and never `lstat`s its own root, so pointing
+    it at a symlink planted where a generation belongs would delete the link's
+    target instead. Here the root is characterized first and a symlinked root is
+    REFUSED rather than removed — the link is not the cache's to delete, and
+    deleting it would hide the fact that something else is writing into the
+    store's namespace.
+
+    Args:
+        path: The generation directory, staging directory, or file to remove.
+            It must exist: an absent path is a failure here, not a no-op, so a
+            caller that means "remove it if it is there" checks first or ignores
+            the error deliberately.
+
+    Raises:
+        Error: If `path` is itself a symlink, if it cannot be characterized, or
+            if any part of the removal fails.
+
+    Examples:
+
+    ```mojo
+    from mtest.session.store import remove_tree_no_follow
+
+    try:
+        remove_tree_no_follow("/repo/.mtest-cache/build-v1/tests_a_h0123")
+    except:
+        pass  # a generation that will not die is litter, not a failed run
+    ```
+    """
+    var kind = Int(lstat(path).st_mode) & _S_IFMT
+    if kind == _S_IFLNK:
+        raise Error(
+            "session: refusing to remove '"
+            + path
+            + "': it is a symlink, and the cache deletes only what it owns"
+        )
+    if kind != _S_IFDIR:
+        unlink(path)
+        return
+    _remove_dir_contents_no_follow(path)
+    rmdir(path)
+
+
+def _discard(path: String):
+    """Remove `path` no-follow, ignoring failure.
+
+    Every store caller of the remover is in this position: a generation that
+    cannot be deleted is litter under a directory mtest owns, and failing a test
+    run over it would be exactly the "cache condition fails an otherwise green
+    run" the design forbids.
+
+    Args:
+        path: The path to remove; an absent one is silently fine.
+    """
+    try:
+        remove_tree_no_follow(path)
+    except:
+        pass
+
+
+# --- Per-file keys. ----------------------------------------------------------
+
+
+@fieldwise_init
+struct FileKey(Copyable, Movable):
+    """Everything the store needs to name, validate, and publish one file's
+    build.
+
+    Built by `file_key` from the session prefix plus the source's own frame, so
+    two files of one session differ by exactly one frame and two sessions over
+    changed inputs differ by the prefix.
+    """
+
+    var digest32: String
+    """The first 32 hex digits of the key; the generation name's suffix."""
+
+    var digest_full: String
+    """The whole 64-hex key, recorded in `meta` and re-checked on every hit.
+
+    The name carries only half of it, so a 128-bit prefix collision would put a
+    foreign build at exactly the right path. This is what a hit is actually
+    compared against.
+    """
+
+    var gen_name: String
+    """`<mangled source>_h<digest32>`, one path component."""
+
+    var gen_dir: String
+    """`STORE_DIR + "/" + gen_name`, relative to the invocation root."""
+
+    var src_rel: String
+    """The source's root-relative path.
+
+    Not in the plan's field list, and required by the protocol it specifies:
+    `store_publish` re-digests the SOURCE before publishing, and its signature
+    carries no path to re-read. `gen_name` cannot supply one — mangling is
+    lossy for an over-budget name — so the path travels with the key.
+    """
+
+    var src_sha: String
+    """The source's content digest at key time, and the publication guard's
+    reference: a build whose source moved underneath it must never publish."""
+
+
+def file_key(ctx: CacheContext, root: String, rel: String) -> Optional[FileKey]:
+    """Fork the session prefix and key one test file.
+
+    The prefix already covers the toolchain, the environment, the root, the
+    build arguments, and every include root's contents; this appends the one
+    frame that distinguishes this file from its neighbours. Forking rather than
+    rebuilding is why `KeyBuilder` is copyable: the shared prefix is absorbed
+    once per session, not once per file.
+
+    Args:
+        ctx: The finalized session context; only `prefix` is read.
+        root: The invocation root `rel` resolves against.
+        rel: The test file's root-relative path.
+
+    Returns:
+        The key, or `None` when the source could not be read at all. `None` is
+        the caller's cue to treat the file as a per-file miss AND to disable the
+        cache: a source that will not read is about to fail the build anyway,
+        and a key that cannot cover its own source must not be written.
+
+    Examples:
+
+    ```mojo
+    from mtest.session.store import file_key, store_probe
+
+    var key = file_key(ctx, root, "tests/test_a.mojo")
+    if not key:
+        ctx.disable("cannot read the test file 'tests/test_a.mojo'")
+    ```
+    """
+    var data: List[UInt8]
+    try:
+        data = read_regular_file_bytes(_absolute(root, rel), _WALK_FILE_CAP)
+    except:
+        return None
+    var src_sha = sha256_hex(data)
+    var kb = ctx.prefix.copy()
+    kb.feed_file(TAG_SOURCE, rel, len(data), src_sha)
+    # Two finalizations of one state, not two different states: `digest32` is a
+    # true prefix of `digest_full`, so the fork is only a way to read the same
+    # digest at two lengths without slicing a `String`.
+    var forked = kb.copy()
+    var digest_full = forked^.digest_full()
+    var digest32 = kb^.digest32()
+    var gen_name = generation_name(_mangle(rel), digest32)
+    var gen_dir = STORE_DIR + "/" + gen_name
+    return Optional(
+        FileKey(
+            digest32^,
+            digest_full^,
+            gen_name^,
+            gen_dir^,
+            String(rel),
+            src_sha^,
+        )
+    )
+
+
+# --- Staging a build the compiler writes straight into. ----------------------
+
+
+@fieldwise_init
+struct StoreBuildTarget(Copyable, Movable):
+    """Where a first-attempt compile writes, so publication is one rename.
+
+    The compiler builds INTO the store's staging directory rather than into
+    `build/bin`, which is what makes publication a single `rename(2)` of a
+    directory rather than a copy: there is no window in which a generation
+    exists half-written, and no second read of a binary that could differ from
+    the one that was digested.
+    """
+
+    var out_rel: String
+    """The `-o` value, relative to the invocation root: `<tmp dir>/bin`."""
+
+    var tmp_dir_rel: String
+    """The staging directory itself, relative to the invocation root."""
+
+    def ok(self) -> Bool:
+        """Whether the store actually staged a directory for this build.
+
+        Returns:
+            False when the store could not be created or no unique staging name
+            could be claimed. The caller must then build the ordinary way, into
+            `build/bin`, and skip publication entirely — an unusable store costs
+            a rebuild, which is always the safe direction.
+        """
+        return self.out_rel != "" and self.tmp_dir_rel != ""
+
+
+def store_build_target(root: String) -> StoreBuildTarget:
+    """Create the store, its marker, and one private staging directory.
+
+    The name carries the process id and a monotonic reading, so two mtest
+    processes over one checkout — which `--shard` makes ordinary — never share a
+    staging directory, and `mkdir`'s exclusive create is the arbiter rather than
+    the name's uniqueness alone.
+
+    Args:
+        root: The invocation root.
+
+    Returns:
+        A staging target, or one whose `ok()` is False when the store could not
+        be prepared. Never raises: an unusable cache must cost a rebuild, never
+        an error the caller has to turn into a cache-policy decision.
+
+    Examples:
+
+    ```mojo
+    from mtest.session.store import store_build_target
+
+    var target = store_build_target(root)
+    if target.ok():
+        pass  # build with `-o target.out_rel`
+    ```
+    """
+    try:
+        _ensure_store(root)
+    except:
+        return StoreBuildTarget(String(""), String(""))
+    var pid = String(process_id())
+    for attempt in range(_TMP_ATTEMPTS):
+        var rel = (
+            STORE_DIR
+            + "/"
+            + _TMP_PREFIX
+            + pid
+            + "-"
+            + String(perf_counter_ns())
+            + "-"
+            + String(attempt)
+        )
+        try:
+            # Exclusive create: a collision raises rather than handing two
+            # builds one directory, and 0o700 keeps the staged binary private
+            # until it is published.
+            mkdir(root + "/" + rel, 0o700)
+        except:
+            continue
+        var out_rel = rel + "/" + _BIN_NAME
+        return StoreBuildTarget(out_rel^, rel^)
+    return StoreBuildTarget(String(""), String(""))
+
+
+# --- Probing a generation. ---------------------------------------------------
+
+comptime PROBE_HIT = 0
+"""The generation exists, matches the key, and its binary matches its digest."""
+
+comptime PROBE_MISS = 1
+"""Nothing usable is stored for this key; the caller must build."""
+
+
+@fieldwise_init
+struct ProbeResult(Copyable, Movable):
+    """What a probe found, and everything a hit lets the caller skip."""
+
+    var kind: Int
+    """`PROBE_HIT` or `PROBE_MISS`."""
+
+    var bin_rel: String
+    """The cached binary, relative to the invocation root; empty on a miss."""
+
+    var build_seconds: Float64
+    """What the original build cost, to microsecond resolution; 0 on a miss.
+
+    Round-tripped through a fixed-point field, so it is equal to the published
+    value only to that grid — never compare it for exact float equality.
+    """
+
+    var argv: List[String]
+    """The original build command line, for the reproduce line; empty on a
+    miss. Its `-o` names the generation, not the staging directory it was
+    actually built in, so the line a user copies still points at a live
+    path."""
+
+
+def _probe_miss() -> ProbeResult:
+    """The one miss value; every failed check returns exactly this."""
+    return ProbeResult(PROBE_MISS, String(""), 0.0, List[String]())
+
+
+def store_probe(root: String, key: FileKey) -> ProbeResult:
+    """Decide whether a stored generation may be run instead of rebuilding.
+
+    This is the function where a mistake serves a stale or corrupt binary and
+    reports a green run that never happened, so every question resolves toward
+    MISS. A hit has proven all five of:
+
+    1. The generation path is a real directory — characterized NO-FOLLOW and
+       first, because everything after it reads through that path.
+    2. `meta` is a regular file that parses completely.
+    3. `meta.key_full` equals the WHOLE key, not just the 128 bits its name
+       carries.
+    4. `bin` is a readable regular file.
+    5. `bin`'s content digest equals the digest `meta` recorded.
+
+    Any failed check deletes the generation, so a corruption cannot be re-read
+    on the next probe and the next build republishes cleanly. The one deliberate
+    exception is a SYMLINK at the generation path: that is refused and left
+    exactly where it is, because a link the cache did not create is not the
+    cache's to delete.
+
+    Args:
+        root: The invocation root.
+        key: The file's key, from `file_key`.
+
+    Returns:
+        A hit carrying the binary's path, the original build duration, and the
+        original argv, or a miss. Never raises: the caller must be handed a
+        cache decision, not an error it would have to turn into one itself.
+
+    Examples:
+
+    ```mojo
+    from mtest.session.store import PROBE_HIT, store_probe
+
+    var hit = store_probe(root, key)
+    if hit.kind == PROBE_HIT:
+        pass  # run hit.bin_rel; do not compile
+    ```
+    """
+    var gen_abs = root + "/" + key.gen_dir
+
+    # --- Check 1: a real directory, characterized without following. --------
+    var kind: Int
+    try:
+        kind = Int(lstat(gen_abs).st_mode) & _S_IFMT
+    except:
+        # Absent, or in a directory this process cannot search. Either way
+        # there is nothing here to trust and nothing to delete.
+        return _probe_miss()
+    if kind == _S_IFLNK:
+        return _probe_miss()
+    if kind != _S_IFDIR:
+        # A plain file (or a device, or a socket) where a generation belongs is
+        # not a generation, and it occupies the name the next publish needs.
+        _discard(gen_abs)
+        return _probe_miss()
+
+    # --- Checks 2 and 3: the record parses and names THIS key. --------------
+    var meta_text: String
+    try:
+        var opened = read_bounded_regular_file(
+            gen_abs + "/" + _META_NAME, _META_CAP
+        )
+        if not opened.is_regular:
+            _discard(gen_abs)
+            return _probe_miss()
+        meta_text = opened.text.copy()
+    except:
+        # Missing, oversized, unreadable, or not UTF-8. `MetaFile.render` emits
+        # only ASCII, so none of those can describe a record this store wrote.
+        _discard(gen_abs)
+        return _probe_miss()
+    var parsed = MetaFile.parse(meta_text)
+    if not parsed:
+        _discard(gen_abs)
+        return _probe_miss()
+    var meta = parsed.value().copy()
+    if meta.key_full != key.digest_full:
+        _discard(gen_abs)
+        return _probe_miss()
+
+    # --- Checks 4 and 5: the binary is there and is the one recorded. -------
+    var bin_bytes: List[UInt8]
+    try:
+        bin_bytes = read_regular_file_bytes(gen_abs + "/" + _BIN_NAME, _BIN_CAP)
+    except:
+        _discard(gen_abs)
+        return _probe_miss()
+    if sha256_hex(bin_bytes) != meta.bin_sha:
+        _discard(gen_abs)
+        return _probe_miss()
+
+    return ProbeResult(
+        PROBE_HIT,
+        key.gen_dir + "/" + _BIN_NAME,
+        meta.build_seconds,
+        meta.argv.copy(),
+    )
+
+
+# --- Publishing a build. -----------------------------------------------------
+
+comptime PUB_OK = 0
+"""The staged build is now the generation for this key."""
+
+comptime PUB_ADOPTED = 1
+"""Another run published this key first, and its generation revalidated."""
+
+comptime PUB_FAILED = 2
+"""Nothing was published; the caller keeps running what it just built."""
+
+
+@fieldwise_init
+struct PublishResult(Copyable, Movable):
+    """The outcome of one publication, and which binary the caller should run.
+    """
+
+    var kind: Int
+    """`PUB_OK`, `PUB_ADOPTED`, or `PUB_FAILED`."""
+
+    var bin_rel: String
+    """The binary to run and to record, relative to the invocation root.
+
+    The generation's binary on `PUB_OK` and on `PUB_ADOPTED`; the STAGED binary
+    on `PUB_FAILED`, which still exists and is this session's artifact.
+    """
+
+    var warning: String
+    """Why publication failed, in words a user can act on; empty otherwise."""
+
+
+def _publish_failed(target: StoreBuildTarget, warning: String) -> PublishResult:
+    """A failed publication that keeps the staged build alive.
+
+    The staging directory is deliberately NOT removed: the caller is about to
+    run the binary inside it, and it is the only copy this session has. Session
+    end discards it.
+
+    Args:
+        target: The staging target, whose binary the caller keeps using.
+        warning: Why nothing was published.
+
+    Returns:
+        A `PUB_FAILED` result naming the staged binary.
+    """
+    return PublishResult(PUB_FAILED, String(target.out_rel), warning)
+
+
+def _rewrite_output(
+    argv: List[String], staged_out: String, final_out: String
+) -> List[String]:
+    """Point the recorded command line's `-o` at the published generation.
+
+    The build genuinely ran with `-o <staging dir>/bin`, and that directory is
+    gone the instant the rename succeeds. A reproduce line naming it would be a
+    line no user can run, so the record names where the artifact actually ended
+    up. Every build site in the tree emits `-o` and its path as two tokens; the
+    staged path is matched as well, so a site that ever joins them still lands
+    on a live path.
+
+    Args:
+        argv: The command line as it was run.
+        staged_out: The staging `-o` value to replace.
+        final_out: The published binary's root-relative path.
+
+    Returns:
+        A new command line, the same length, with the output path rewritten.
+    """
+    var out = List[String]()
+    var previous_was_o = False
+    for token in argv:
+        var value = String(token)
+        var is_o = value == "-o"
+        if previous_was_o or (staged_out != "" and value == staged_out):
+            out.append(String(final_out))
+        else:
+            out.append(value^)
+        previous_was_o = is_o
+    return out^
+
+
+def _write_meta(path: String, text: String) raises:
+    """Write the validation record into the staging directory.
+
+    Args:
+        path: The record's path.
+        text: The rendered record.
+
+    Raises:
+        Error: If the file cannot be created or written.
+    """
+    with open(path, "w") as f:
+        f.write(text)
+
+
+def _reap_siblings(root: String, key: FileKey):
+    """Delete this source's other generations, keeping one live per file.
+
+    An editing loop produces a new key per edit, and without this every one of
+    them would keep its binary forever. Siblings are recognized by the mangled
+    source name plus the `_h` separator, which no mangled name can contain, so
+    the match cannot reach another file's generations. Staging directories are
+    skipped by name: one of them may belong to a concurrent process that is
+    compiling into it right now.
+
+    Args:
+        root: The invocation root.
+        key: The key just published; its own generation is kept.
+    """
+    var prefix = _mangle(key.src_rel) + "_h"
+    var store_abs = root + "/" + STORE_DIR
+    var names = List[String]()
+    try:
+        for entry in listdir(store_abs):
+            names.append(String(entry))
+    except:
+        return
+    for entry in names:
+        var name = String(entry)
+        if name == key.gen_name or name.startswith(_TMP_PREFIX):
+            continue
+        if not name.startswith(prefix):
+            continue
+        _discard(store_abs + "/" + name)
+
+
+def store_publish(
+    root: String,
+    key: FileKey,
+    target: StoreBuildTarget,
+    build_seconds: Float64,
+    argv: List[String],
+) -> PublishResult:
+    """Promote a staged build into its generation, atomically or not at all.
+
+    The protocol, in order:
+
+    1. **The publication guard.** Re-digest the SOURCE and compare it to the
+       digest the key was built from. A file edited while its compile was in
+       flight produced a binary this key does not describe, and publishing it
+       would serve those bytes to every later run whose key still says the old
+       source. Nothing is published; the caller runs what it built.
+    2. Rewrite the recorded command line's `-o` to the FINAL generation path,
+       so the reproduce line names something that exists after publication.
+    3. Digest the staged binary and write `meta` beside it.
+    4. `fsync` the binary, the record, and the staging directory, so a machine
+       crash cannot leave a committed directory entry pointing at bytes that
+       never reached the disk.
+    5. `rename(2)` the staging directory onto the generation path. One syscall,
+       no half-published state, no window a concurrent reader can observe.
+    6. On success, flush the store directory and reap this source's superseded
+       generations.
+
+    A rename that fails with the target already present means another run got
+    there first. That winner is then fully RE-PROBED — key match and binary
+    digest both — before it is adopted, because adopting an unvalidated winner
+    is precisely how one corrupt generation spreads to every process that loses
+    a race against it. An invalid winner is deleted by the probe and this
+    publication reports failure rather than pretending to have cached anything.
+
+    Args:
+        root: The invocation root.
+        key: The file's key, from `file_key`.
+        target: The staging target the build wrote into.
+        build_seconds: The build's wall-clock duration, recorded for reporting.
+        argv: The command line the build actually ran.
+
+    Returns:
+        `PUB_OK` naming the published binary, `PUB_ADOPTED` naming the winner's
+        binary, or `PUB_FAILED` naming the STAGED binary — which still exists
+        and which the caller must keep running this session. Never raises.
+
+    Examples:
+
+    ```mojo
+    from mtest.session.store import PUB_FAILED, store_publish
+
+    var pub = store_publish(root, key, target, 2.5, build_argv)
+    if pub.kind == PUB_FAILED:
+        pass  # warn once with pub.warning, keep running pub.bin_rel
+    ```
+    """
+    if not target.ok():
+        return PublishResult(
+            PUB_FAILED,
+            String(""),
+            "the cache could not stage a directory for this build",
+        )
+    var tmp_abs = root + "/" + target.tmp_dir_rel
+    var bin_abs = root + "/" + target.out_rel
+    var final_bin_rel = key.gen_dir + "/" + _BIN_NAME
+
+    # --- Step 1: the publication guard. -------------------------------------
+    var fresh: List[UInt8]
+    try:
+        fresh = read_regular_file_bytes(
+            _absolute(root, key.src_rel), _WALK_FILE_CAP
+        )
+    except:
+        return _publish_failed(
+            target,
+            "could not re-read the source '"
+            + key.src_rel
+            + "' after building it",
+        )
+    if sha256_hex(fresh) != key.src_sha:
+        return _publish_failed(target, "source changed during compile")
+
+    # --- Steps 2 and 3: digest the artifact and record it. ------------------
+    var bin_bytes: List[UInt8]
+    try:
+        bin_bytes = read_regular_file_bytes(bin_abs, _BIN_CAP)
+    except:
+        return _publish_failed(
+            target,
+            "could not read the binary just built for '" + key.src_rel + "'",
+        )
+    var meta = MetaFile(
+        key_full=String(key.digest_full),
+        bin_sha=sha256_hex(bin_bytes),
+        build_seconds=build_seconds,
+        argv=_rewrite_output(argv, target.out_rel, final_bin_rel),
+    )
+    try:
+        _write_meta(tmp_abs + "/" + _META_NAME, meta.render())
+    except:
+        return _publish_failed(
+            target, "could not write the cache record for '" + key.src_rel + "'"
+        )
+
+    # --- Step 4: durability before the commit. ------------------------------
+    try:
+        fsync_path(bin_abs)
+        fsync_path(tmp_abs + "/" + _META_NAME)
+        fsync_path(tmp_abs)
+    except:
+        return _publish_failed(
+            target,
+            "could not flush the cache generation for '" + key.src_rel + "'",
+        )
+
+    # --- Step 5: the commit. ------------------------------------------------
+    try:
+        rename_path(tmp_abs, root + "/" + key.gen_dir)
+    except:
+        # Either another run published this key first — a directory rename onto
+        # a non-empty directory fails — or something else went wrong. The probe
+        # answers which, and it answers it by FULL validation, not by presence.
+        var winner = store_probe(root, key)
+        if winner.kind == PROBE_HIT:
+            _discard(tmp_abs)
+            return PublishResult(
+                PUB_ADOPTED, String(winner.bin_rel), String("")
+            )
+        return _publish_failed(
+            target,
+            "could not publish the cached build for '" + key.src_rel + "'",
+        )
+
+    # --- Step 6: make the commit durable, then reap. ------------------------
+    # Best-effort: the rename already succeeded, and refusing to report a
+    # published generation because its parent directory would not flush would
+    # cost a rebuild for no gain in safety.
+    try:
+        fsync_path(root + "/" + STORE_DIR)
+    except:
+        pass
+    _reap_siblings(root, key)
+    return PublishResult(PUB_OK, final_bin_rel^, String(""))
