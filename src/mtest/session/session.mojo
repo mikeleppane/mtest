@@ -69,13 +69,20 @@ from mtest.select.failure_selection import (
 from mtest.session.pipeline import PipelineHalt, RunPipeline
 from mtest.session.pool import _run_pool_batch, resolve_worker_plan
 from mtest.session.pool_plan import partition_effective_serial, stale_serials
-from mtest.session.precompile import _run_precompile
+from mtest.session.precompile import (
+    _run_precompile,
+    precompile_out_dir,
+    precompile_out_path,
+)
 from mtest.session.selection import _run_selection
 from mtest.session.shard import partition
 from mtest.session.store import (
     CacheContext,
     collect_env_base,
     finalize_includes,
+    precompile_key,
+    precompile_probe,
+    precompile_publish,
 )
 
 
@@ -435,6 +442,10 @@ def run_session[
     var casualty_files = disc.gate_files.copy()
     for f in disc.run_files:
         casualty_files.append(String(f))
+    # Every earlier step's package is an input to the next one, so the key of a
+    # step carries them explicitly. Skipped steps land here too: their output is
+    # on disk and on the include path exactly as a step that ran.
+    var prior_outputs = List[String]()
     for pc in config.precompiles:
         if interrupt_requested():
             interrupted = True
@@ -442,6 +453,24 @@ def run_session[
         if reporter.stream_failed():
             stream_dead = True
             break
+        var out_path = precompile_out_path(pc.src, pc.out)
+        # Keyed from `ctx.base`, never from `ctx.prefix`: the include walks that
+        # make up `prefix` are exactly what THIS step's output changes.
+        var key = precompile_key(
+            ctx, root, pc.src, includes, prior_outputs, out_path
+        )
+        var skip = False
+        if key:
+            skip = precompile_probe(root, key.value(), out_path)
+        if skip:
+            # The package on disk is already the one this key names. The step
+            # contributes nothing but its include directory — and no counter:
+            # `built_files` and `cached_files` count first-attempt TEST FILE
+            # compile admissions, and a precompile step sits outside that
+            # invariant whether it runs or not.
+            includes.append(precompile_out_dir(out_path))
+            prior_outputs.append(out_path)
+            continue
         try:
             var pr = _run_precompile(
                 runtime, config, root, pc.src, pc.out, includes
@@ -478,7 +507,15 @@ def run_session[
                     )
                 )
                 break
+            # Only a FIRST-ATTEMPT output is stamped, exactly as only a
+            # first-attempt build is published: a step that succeeded on a retry
+            # emitted `precompile-succeeded-after-retry` because its package is
+            # suspect, and stamping it would let every later run skip straight
+            # past that suspicion instead of rebuilding it once.
+            if key and pr.attempts_used == 1:
+                precompile_publish(root, key.value(), out_path)
             includes.append(pr.out_dir)
+            prior_outputs.append(out_path)
         except:
             reporter.handle(
                 Event.internal_error("precompile", config.mojo_path, 0)
