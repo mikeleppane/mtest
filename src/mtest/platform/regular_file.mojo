@@ -25,6 +25,9 @@ comptime _EINTR = 4
 comptime _STAT_BYTES = 144
 comptime _S_IFMT = 0o170000
 comptime _S_IFREG = 0o100000
+comptime _READ_CHUNK = 1 << 16
+"""The staging buffer's size, in bytes. Bounds resident memory independently of
+the caller's ceiling: a 512 MiB cap and a 4 KiB file must not cost a gigabyte."""
 
 
 @fieldwise_init
@@ -106,6 +109,57 @@ def _opened_mode(
         # of this aligned UInt32 view. The read stays inside the allocation,
         # the pointer remains live and local, and the caller owns and frees it.
         return Int(storage.bitcast[UInt32]()[6])
+
+
+def _opened_size_hint(
+    storage: UnsafePointer[UInt64, MutUntrackedOrigin],
+) -> Int:
+    """Read `st_size` out of a filled `struct stat` as a SIZING HINT ONLY.
+
+    Nothing about the read's correctness may depend on this number, and nothing
+    here does: it only decides how much the byte list reserves up front. `st_size`
+    is a snapshot taken at `fstat` time, so it under-reports a file being appended
+    to and reads zero for the procfs-style regular files whose contents are
+    generated at read time. The read loop therefore keeps its own count and grows
+    the list when the hint proves short — the hint saves reallocations, it does
+    not bound anything.
+
+    Args:
+        storage: The 144 initialized bytes `fstat` filled, aligned to 8.
+
+    Returns:
+        The recorded size in bytes, or a value the caller must clamp. A negative
+        or absurd number is not an error here; the caller clamps it into range.
+    """
+    comptime if CompilationTarget.is_macos():
+        comptime assert (
+            not CompilationTarget.is_x86()
+        ), "platform regular-file reads support macOS arm64 only"
+        # SAFETY: the caller supplies 144 initialized bytes aligned to 8 that
+        # `fstat` has filled as Darwin arm64 `struct stat`. Darwin's `st_size` is
+        # a fully initialized `off_t` (Int64) at byte offset 96 — element twelve
+        # of this aligned Int64 view — which the 144-byte struct fully contains.
+        # The read stays inside the allocation, the typed pointer is read once
+        # while `storage` is live and does not escape, and the caller retains and
+        # frees the allocation. A wrong value could only mis-size a reservation,
+        # never a bound: the caller clamps it and the read loop ignores it.
+        return Int(storage.bitcast[Int64]()[12])
+    else:
+        comptime assert (
+            CompilationTarget.is_linux()
+        ), "platform regular-file reads support Linux or macOS only"
+        comptime assert (
+            CompilationTarget.is_x86()
+        ), "platform regular-file reads support Linux x86_64 only"
+        # SAFETY: the caller supplies 144 initialized bytes aligned to 8 that
+        # `fstat` has filled as Linux x86_64 `struct stat`. Linux's `st_size` is
+        # a fully initialized `off_t` (Int64) at byte offset 48 — element six of
+        # this aligned Int64 view — which the 144-byte struct fully contains. The
+        # read stays inside the allocation, the pointer remains live and local,
+        # and the caller owns and frees it. A wrong value could only mis-size a
+        # reservation, never a bound: the caller clamps it and the read loop
+        # ignores it.
+        return Int(storage.bitcast[Int64]()[6])
 
 
 def _read_opened_regular_file_bytes(
@@ -209,30 +263,52 @@ def _read_opened_regular_file_bytes(
             + ")"
         )
     var mode = _opened_mode(stat_storage)
-    # SAFETY: `_opened_mode` completed its one bounded read and retained no
-    # pointer. This is the allocation's sole owner and frees it exactly once;
-    # only the copied scalar `mode` remains live afterward.
+    var size_hint = _opened_size_hint(stat_storage)
+    # SAFETY: `_opened_mode` and `_opened_size_hint` each completed their one
+    # bounded read and retained no pointer. This is the allocation's sole owner
+    # and frees it exactly once; only the copied scalars remain live afterward.
     stat_storage.free()
     if mode & _S_IFMT != _S_IFREG:
         if close_fd(fd) != 0:
             raise Error("platform: close failed after regular-file validation")
         return _OpenedRegularFileBytes(False, List[UInt8]())
 
+    # The READ CEILING is unchanged at `max_bytes + 1`: a caller tells a file of
+    # exactly `max_bytes` from a longer one by whether that extra byte arrives.
+    # What no longer scales with the ceiling is MEMORY. A ceiling-sized staging
+    # buffer plus a ceiling-sized result made a 4 KiB file cost twice the cap,
+    # which is invisible at the 64 KiB config cap and about a gigabyte at the cap
+    # a build cache needs for compiled binaries. So bytes now land in a fixed
+    # `_READ_CHUNK` staging buffer and are appended to a list reserved from
+    # `st_size` — a hint, never a bound, since it is stale for a growing file and
+    # zero for procfs-style regular files. The list grows itself when the hint is
+    # short, so the ceiling alone still decides what is read.
     var capacity = max_bytes + 1
-    # SAFETY: `capacity` is positive because `max_bytes` is nonnegative. This
-    # allocation owns exactly `capacity` writable UInt8 slots with a concrete
-    # mutable origin. No byte is read until `read_fd` reports it initialized;
-    # the pointer remains live through all synchronous reads and UTF-8 copying,
-    # never escapes, and is freed on every success or error path below.
-    var buffer = alloc[UInt8](capacity)
+    var reserved = 1 if size_hint < 0 else size_hint + 1
+    if reserved > capacity:
+        reserved = capacity
+    var data = List[UInt8](capacity=reserved)
+    var chunk_len = capacity if capacity < _READ_CHUNK else _READ_CHUNK
+    # SAFETY: `chunk_len` is in `[1, _READ_CHUNK]` because `capacity` is positive
+    # (`max_bytes` is nonnegative). This allocation owns exactly `chunk_len`
+    # writable UInt8 slots with a concrete mutable origin. No byte is read until
+    # `read_fd` reports it initialized; the pointer remains live through every
+    # synchronous read and every copy out of it, never escapes, and is freed on
+    # every success or error path below.
+    var buffer = alloc[UInt8](chunk_len)
     var total = 0
     while total < capacity:
-        # SAFETY: `total` is in `[0, capacity)`, so this pointer addresses the
-        # first uninitialized byte and `capacity - total` is exactly the
-        # writable remainder. `read_fd` initializes at most that many bytes,
-        # retains no pointer, and reports the initialized count before Mojo
-        # inspects any content. The allocation and descriptor remain owned here.
-        var count = read_fd(fd, buffer + total, capacity - total)
+        var room = capacity - total
+        if room > chunk_len:
+            room = chunk_len
+        # SAFETY: `room` is in `[1, chunk_len]` because `total < capacity` here,
+        # so the whole requested span lies inside the staging allocation, which
+        # is rewritten from its start on every iteration — the bytes carried over
+        # from the previous read were already copied out. `read_fd` initializes
+        # at most `room` bytes, retains no pointer, and reports the initialized
+        # count before Mojo inspects any content. The allocation and the
+        # descriptor remain owned here.
+        var count = read_fd(fd, buffer, room)
         if count < 0:
             var read_errno = errno_now()
             if read_errno == _EINTR:
@@ -254,7 +330,7 @@ def _read_opened_regular_file_bytes(
             )
         if count == 0:
             break
-        if count > capacity - total:
+        if count > room:
             # SAFETY: this is the buffer's sole owner and `read_fd` retained no
             # pointer. No view was constructed, and the raising branch makes
             # this the allocation's only free with no subsequent access.
@@ -262,24 +338,21 @@ def _read_opened_regular_file_bytes(
             var close_rc = close_fd(fd)
             _ = close_rc
             raise Error("platform: read reported impossible progress")
+        # SAFETY: `read_fd` initialized exactly bytes `[0, count)` of the still
+        # live staging allocation and `count <= room <= chunk_len`. `Span`
+        # preserves that precise bound, and `List` copies every byte out of it
+        # eagerly; the view is a temporary that cannot outlive this statement,
+        # let alone the buffer.
+        data.extend(Span(ptr=buffer, length=count))
         total += count
 
-    if close_fd(fd) != 0:
-        # SAFETY: descriptor cleanup does not borrow the buffer. This is its
-        # sole owner, no view exists, and the raising branch prevents reuse or
-        # a second free after the allocation is released.
-        buffer.free()
-        raise Error("platform: close failed after bounded regular-file read")
-    var data = List[UInt8](capacity=capacity)
-    # SAFETY: the read loop initialized exactly bytes `[0, total)` in the
-    # still-live allocation and `total <= capacity`. `Span` preserves that
-    # precise bound, and `List` copies every byte out of it eagerly; the view is
-    # a temporary that cannot outlive this statement, let alone the buffer.
-    data.extend(Span(ptr=buffer, length=total))
-    # SAFETY: `List` copied all `total` initialized bytes and retained no view.
-    # This is the buffer's sole owner and final use, so freeing exactly once
-    # leaves only the independent owned `data`.
+    # SAFETY: every byte the staging allocation ever held was copied into `data`
+    # in the loop above, and no view of it survived the statement that copied it.
+    # This is its sole owner and final use, so freeing exactly once here leaves
+    # only the independent owned `data`; no path below touches the buffer.
     buffer.free()
+    if close_fd(fd) != 0:
+        raise Error("platform: close failed after bounded regular-file read")
     return _OpenedRegularFileBytes(True, data^)
 
 
