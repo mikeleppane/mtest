@@ -719,7 +719,13 @@ class IncludeRootTests(ProtocolScenario):
         # served or staged.
         self.assertEqual(counters(self.root / "off.ndjson"), (2, 0))
         self.assertEqual(generations(self.root), [])
-        self.assertFalse((self.root / TAG_REL).exists())
+        self.assertFalse((self.root / STORE_REL).exists(), msg="store created")
+        # The ownership marker is not part of "off". It belongs to the
+        # `.mtest-cache` DIRECTORY, which this run created anyway for its
+        # last-run state, and every directory mtest creates carries the proof
+        # that it is mtest's — otherwise `--cache-clear` would refuse to delete
+        # a tree this same run had just made.
+        self.assertTrue((self.root / TAG_REL).is_file(), msg="marker missing")
 
 
 @unittest.skipUnless(
