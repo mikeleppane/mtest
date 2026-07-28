@@ -320,10 +320,14 @@ than content-addressed, because their output must land at the contractual path
 dependents reach through `-I`; a skip requires both the stamp's key and the
 output file's digest to match (§8.3).
 
-Reproduce lines and diagnostics always name `build/bin/<mangled>` as the output
-path, never the cache's staging or artifact directory: the reproduce line is a
-command a user runs, and the runner deletes its staging directories before the
-verdict is even emitted.
+A failed build's reproduce line and diagnostics name `build/bin/<mangled>` as
+the output path, never the cache's staging directory: the reproduce line is a
+command a user runs, and a build that publishes nothing has its staging
+directory deleted before the verdict is even emitted. A build that succeeds
+records the artifact path it was published to, and a hit reports the path
+recorded with the artifact — that is the output path `-v` prints (§15.1) and the
+`--json` stream reports (§15.4), and unlike a staging directory it is still
+there when the run ends.
 
 `--no-cache` neither reads nor writes the store. Its gate sits before any
 staging, so a run that asked for no cache creates neither the store directory
