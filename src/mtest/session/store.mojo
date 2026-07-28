@@ -73,6 +73,10 @@ symlinked root and unlinks child symlinks rather than descending them. The cache
 deletes only what it owns, and it proves ownership with the `CACHEDIR.TAG`
 marker written at `CACHE_ROOT_DIR` — above the store, because `--cache-clear`
 deletes the whole owned directory and that is what must be proven mtest's.
+`ensure_cache_root` writes that marker on EVERY path that creates the directory,
+including the one that only wants somewhere to keep last-run state, and the
+proof is the marker's whole text: `CACHEDIR.TAG` is a shared convention, so a
+marker somebody else wrote says nothing about who owns the directory.
 
 **The publication fault seam — TEST ONLY.** `store_publish` reads the
 environment variable `MTEST_STORE_FAULT` exactly ONCE per call, through the same
@@ -1341,23 +1345,44 @@ def _cachedir_tag_text() -> String:
     return out^
 
 
-def _ensure_store(root: String) raises:
-    """Create the store directory and, once, the ownership marker above it.
+def ensure_cache_root(root: String) raises:
+    """Create `<root>/.mtest-cache` and, once, the ownership marker inside it.
+
+    EVERY creation of that directory goes through here, not just the store's.
+    The last-run reselection state lives in it too and is written whether or not
+    the cache is enabled, so a project that has only ever run with `--no-cache`
+    still has the directory — and if the marker were tied to staging, that
+    directory would be unmarked and `--cache-clear` would refuse to delete a
+    tree mtest itself had just created, blaming an older mtest that was never
+    there. The directory mtest makes is always a directory mtest can prove it
+    owns.
 
     The marker is written to a unique temporary file in its own directory and
     renamed onto its final name, so a concurrent run can never observe a
-    half-written tag — and `--cache-clear`, whose entire safety argument is "the
-    marker is present", can never be defeated by a torn write.
+    half-written tag — and `--cache-clear`, whose entire safety argument rests on
+    the marker's contents, can never be defeated by a torn write. An existing
+    marker is left exactly as it is, whatever it holds: rewriting one mtest did
+    not write would manufacture the proof of ownership `clear_cache_root`
+    demands.
 
     Args:
-        root: The invocation root the store hangs under.
+        root: The invocation root the cache directory hangs under.
 
     Raises:
-        Error: If the directories cannot be created or the marker cannot be
-            written. The caller turns that into "no staging target", which
-            degrades to an uncached build.
+        Error: If the directory cannot be created or the marker cannot be
+            written. A caller that only wanted a place to put state turns that
+            into its own persistence failure; the store turns it into "no
+            staging target", which degrades to an uncached build.
+
+    Examples:
+
+    ```mojo
+    from mtest.session.store import ensure_cache_root
+
+    ensure_cache_root("/repo")  # /repo/.mtest-cache now carries CACHEDIR.TAG
+    ```
     """
-    _ensure_dir(root + "/" + STORE_DIR)
+    _ensure_dir(root + "/" + CACHE_ROOT_DIR)
     var tag = root + "/" + CACHEDIR_TAG_REL
     if exists(tag):
         return
@@ -1379,6 +1404,21 @@ def _ensure_store(root: String) raises:
             + "'"
         )
     rename_path(created.path, tag)
+
+
+def _ensure_store(root: String) raises:
+    """Create the store directory under a marked cache root.
+
+    Args:
+        root: The invocation root the store hangs under.
+
+    Raises:
+        Error: If the directories cannot be created or the marker cannot be
+            written. The caller turns that into "no staging target", which
+            degrades to an uncached build.
+    """
+    ensure_cache_root(root)
+    _ensure_dir(root + "/" + STORE_DIR)
 
 
 # --- No-follow deletion. -----------------------------------------------------

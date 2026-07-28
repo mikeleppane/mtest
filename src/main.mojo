@@ -27,7 +27,7 @@ cwd, getenv, file operations, and exit are ordinary program-level operations
 via `std`.
 """
 from std.io import FileDescriptor
-from std.os import getenv, listdir, makedirs, remove, rmdir
+from std.os import getenv, listdir, remove, rmdir
 from std.os.path import dirname, exists, isdir
 from std.pathlib import cwd
 from std.sys import argv, exit
@@ -92,7 +92,7 @@ from mtest.session import (
     run_collect,
     run_session_with_state,
 )
-from mtest.session.store import clear_cache_root
+from mtest.session.store import clear_cache_root, ensure_cache_root
 
 
 comptime _STATE_MAX_BYTES = 1024 * 1024
@@ -408,13 +408,17 @@ def _load_state(root: String) -> StateLoad:
 
 
 def _persist_state(root: String, text: String) -> Optional[String]:
-    var directory = root + "/.mtest-cache"
     var target = _state_path(root)
     var template = target + ".tmp." + String(process_id()) + ".XXXXXX"
     var temp = String("")
     var owned_fd = -1
     try:
-        makedirs(directory, exist_ok=True)
+        # Not a bare `makedirs`: `.mtest-cache` is the directory `--cache-clear`
+        # deletes, and it will only delete one carrying mtest's ownership
+        # marker. State is written whether or not the cache is enabled, so this
+        # is a path that can create the directory on its own — and a directory
+        # created without the marker is one mtest could not later prove is its.
+        ensure_cache_root(root)
         var created = create_unique_temp(template)
         temp = created.path.copy()
         owned_fd = created.fd

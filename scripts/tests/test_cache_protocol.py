@@ -791,15 +791,38 @@ class NoCacheTests(ProtocolScenario):
     def test_no_cache_leaves_no_store_directory(self) -> None:
         self.run_ok(["--no-cache", "--json", "off.ndjson", "tests"])
 
-        # The gate sits before any staging, and staging is what creates both
-        # the store and the ownership marker. A run that asked for no cache
-        # must therefore leave neither behind.
+        # The gate sits before any staging, and staging is what creates the
+        # store, so a run that asked for no cache leaves no store behind.
         self.assertFalse((self.root / STORE_REL).exists(), msg="store created")
-        self.assertFalse((self.root / TAG_REL).exists(), msg="marker created")
+        # The ownership marker is a different matter: it belongs to the
+        # `.mtest-cache` DIRECTORY, which this run created anyway for its
+        # last-run state. Every directory mtest creates carries the proof that
+        # it is mtest's, or `--cache-clear` would refuse to delete a tree this
+        # same run had just made.
+        self.assertTrue((self.root / TAG_REL).is_file(), msg="marker missing")
         self.assertEqual(counters(self.root / "off.ndjson"), (2, 0))
         # And it says nothing about it: the user turned the cache off, so
         # reporting back that it is off would be noise.
         self.assertEqual(warnings_of(self.stream("off.ndjson"), "cache-off"), [])
+
+    def test_a_cache_directory_no_cache_left_behind_can_be_cleared(self) -> None:
+        # `--no-cache` still writes `.mtest-cache/lastrun`, so it creates the
+        # cache directory even though it creates no store. A directory mtest
+        # made seconds earlier must be one mtest can prove it owns, or
+        # `--cache-clear` refuses it as somebody else's and exits 4 — a usage
+        # error on an ordinary sequence, blaming a mtest that was never here.
+        self.run_ok(["--no-cache", "--json", "off.ndjson", "tests"])
+        self.assertTrue((self.root / CACHE_ROOT_REL / "lastrun").is_file())
+        self.assertFalse((self.root / STORE_REL).exists(), msg="store created")
+
+        # State off for the clearing run only, so the session that follows the
+        # deletion cannot write the directory straight back and make "deleted"
+        # unobservable.
+        (self.root / "mtest.toml").write_text(STATELESS_CONFIG, encoding="utf-8")
+        completed = self.run_ok(["--cache-clear", "--no-cache", "tests"])
+
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+        self.assertFalse((self.root / CACHE_ROOT_REL).exists(), msg=completed.stderr)
 
     def test_no_cache_preserves_store_inodes(self) -> None:
         self.run_ok(["--json", "cold.ndjson", "tests"])

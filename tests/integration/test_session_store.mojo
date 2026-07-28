@@ -36,7 +36,9 @@ from mtest.session.store import (
     _ToolchainMemo,
     _toolchain_identity,
     cache_key_tags,
+    clear_cache_root,
     collect_env_base,
+    ensure_cache_root,
     file_key,
     finalize_includes,
     precompile_key,
@@ -948,6 +950,41 @@ def test_marker_written_at_mtest_cache_root() raises:
         tag.text.startswith("Signature: 8a477f597d28d172789f06886806bc55"),
         "the tag did not lead with the standard signature: " + tag.text,
     )
+
+
+def test_a_cache_root_made_for_state_alone_is_still_marked() raises:
+    """The directory mtest creates is always one mtest can prove it owns.
+
+    `.mtest-cache` holds the last-run reselection state as well as the store,
+    and the state is written whether the cache is on or off — so the directory
+    can come into existence with no generation ever staged into it. Tying the
+    marker to staging left that shape unmarked, and `--cache-clear` then refused
+    to delete a tree this same binary had created moments earlier.
+    """
+    var root = temp_root()
+
+    ensure_cache_root(root)
+
+    assert_true(isdir(root + "/.mtest-cache"))
+    assert_false(
+        isdir(root + "/" + STORE_DIR),
+        "no build was staged, so no store belongs here",
+    )
+    var tag = read_bounded_regular_file(
+        root + "/.mtest-cache/CACHEDIR.TAG", 4096
+    )
+    assert_true(tag.is_regular)
+    assert_true(
+        tag.text.startswith("Signature: 8a477f597d28d172789f06886806bc55"),
+        "the tag did not lead with the standard signature: " + tag.text,
+    )
+    # The ownership proof and the marker writer have to agree byte for byte, or
+    # the directory is marked and still unclearable.
+    assert_false(
+        Bool(clear_cache_root(root)),
+        "a directory mtest marked itself must clear without a refusal",
+    )
+    assert_false(exists(root + "/.mtest-cache"))
 
 
 def test_publish_then_probe_hits() raises:

@@ -333,8 +333,12 @@ recorded with the artifact — that is the output path `-v` prints (§15.1) and 
 there when the run ends.
 
 `--no-cache` neither reads nor writes the store. Its gate sits before any
-staging, so a run that asked for no cache creates neither the store directory
-nor its ownership marker and leaves no trace a later run could trust.
+staging, so a run that asked for no cache creates no store directory and leaves
+behind no artifact a later run could trust. It does still create `.mtest-cache`
+itself, because the last-run state lives there and is written whatever the cache
+is doing — and every `.mtest-cache` mtest creates carries the `CACHEDIR.TAG`
+ownership marker, so a directory left by a `--no-cache` run is one
+`--cache-clear` can still prove it owns and delete.
 
 `--cache-clear` deletes `.mtest-cache` — the artifacts and the last-run state
 together — and then runs the session normally, which legitimately repopulates
@@ -1425,8 +1429,8 @@ code exist today. Section 27 separately covers the reachable `config show` and
   including mutually exclusive config controls; a selected config that is
   missing, unreadable, malformed, or invalid; a syntactically invalid `--json`
   or `--junit-xml` destination; the `--json -`/annotations stdout conflict; and
-  a `--cache-clear` target that is a symlink, carries no ownership marker, or
-  cannot be deleted (§8.5), all detected pre-run.
+  a `--cache-clear` target that is a symlink, carries no ownership marker mtest
+  can prove it wrote, or cannot be deleted (§8.5), all detected pre-run.
 
 **`--json` reachability.** `--json PATH|-` is served (§15.4): it is parsed into a
 live event-stream reporter composed beside the console. Its destination is

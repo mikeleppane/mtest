@@ -944,10 +944,11 @@ changes a verdict.
 ### The two flags
 
 `--no-cache` neither reads nor writes the store. Its gate sits ahead of any
-staging, so the run creates neither `build-v1/` nor the ownership marker and
-leaves nothing a later run could trust; it also emits no `cache-off` warning,
-because you asked for it. This is how you get a measurement with the store out
-of the picture:
+staging, so the run creates no `build-v1/` and leaves no artifact a later run
+could trust; it also emits no `cache-off` warning, because you asked for it.
+(`.mtest-cache/` itself is still created, for the last-run state, and carries
+the ownership marker like any other directory mtest makes.) This is how you get
+a measurement with the store out of the picture:
 
 ```console
 $ pixi run bash -c 'build/mtest --no-cache e2e/matrix'
@@ -965,10 +966,10 @@ state together — and *then* runs, so the session that clears the store also
 repopulates it. Both flags are CLI-only and are never read from `mtest.toml`.
 
 Deletion is guarded, because `.mtest-cache` is a path anything could be sitting
-at. mtest writes a `CACHEDIR.TAG` marker when it creates the store, and
-`--cache-clear` refuses whatever it cannot prove is that store — a symlink, or a
-directory with no marker — as a pre-run usage error, exit `4`, with the tree
-untouched:
+at. mtest writes a `CACHEDIR.TAG` marker whenever it creates that directory, and
+`--cache-clear` refuses whatever it cannot prove is its own — a symlink, a
+directory with no marker, or a marker mtest did not write — as a pre-run usage
+error, exit `4`, with the tree untouched:
 
 ```console
 $ mtest --cache-clear tests
@@ -978,13 +979,14 @@ $ echo $?
 ```
 
 There is deliberately no "but its contents look like ours" override: that
-heuristic is exactly how a directory somebody else created gets deleted. The
-diagnostic always hands over the manual `rm -rf`, and the refusal is one-shot —
-a single run with the cache enabled writes the marker. Note that the marker is
-written when the *store* is created, so a project whose runs have all used
-`--no-cache`, or have all hit a `cache-off` condition, has a `.mtest-cache/`
-holding only `lastrun` and no marker; `--cache-clear` refuses that too, until
-one cached run has happened. Nothing under `build/` is ever deleted.
+heuristic is exactly how a directory somebody else created gets deleted. Nor is
+the marker's presence enough — `CACHEDIR.TAG` is a shared convention that backup
+tools and users write themselves, so mtest compares the whole file against the
+text it writes. The diagnostic always hands over the manual `rm -rf`. A missing
+marker is one-shot: a single run writes it, cache enabled or not, because every
+`.mtest-cache/` mtest creates gets one. A marker mtest did not write is never
+overwritten and stays refused until you remove the directory yourself. Nothing
+under `build/` is ever deleted.
 
 ### The store is yours to throw away
 
