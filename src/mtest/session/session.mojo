@@ -548,6 +548,7 @@ def run_session[
                     root,
                     disc.gate_files[gi],
                     includes,
+                    ctx,
                 )
                 if fr.interrupted:
                     interrupted = True
@@ -772,6 +773,7 @@ def run_session[
                     root,
                     disc.run_files[ri],
                     includes,
+                    ctx,
                 )
                 if fr.interrupted:
                     interrupted = True
