@@ -183,7 +183,9 @@ ci-memory = "python -m scripts.checks.memory.host_support"
 # leak, and fd controls run first; reviewed runtime-reachable allocations are
 # matched exactly and project/native frames are forbidden from that baseline.
 # The unified CI workflow's Valgrind cell has a narrow approved apt exception
-# for the exact debug-symbol version matching the runner's preinstalled glibc;
+# for glibc debug symbols matching the libc6 it runs against -- the
+# preinstalled revision where the archive still carries it, otherwise libc6
+# and libc6-dbg moved together to the archive's current one, asserted equal;
 # no other source/test/memory step has that exception, and this task is not
 # hermetic. The independent package job has its own external-channel contract.
 valgrind-check = "python -m scripts.tests.test_valgrind && python -m scripts.checks.memory.valgrind"

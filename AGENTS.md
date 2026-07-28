@@ -169,8 +169,14 @@ only thing that writes them.
 
 The source, test, and memory-analysis lanes touch the network once for the
 locked `pixi install`; everything after is offline, with one exception. The
-Linux Valgrind cell may install exactly the `libc6-dbg` version matching the
-runner's `libc6`, logging apt provenance and failing on any mismatch.
+Linux Valgrind cell may install glibc debug symbols that MATCH the libc6 it
+runs against, logging apt provenance and failing on any mismatch. It prefers
+the runner's preinstalled `libc6` revision and installs only `libc6-dbg` at
+that version; when the archive has already dropped that revision it moves
+`libc6` and `libc6-dbg` together to the archive's current one, because the
+property Memcheck needs is that the symbols match, not that libc6 is frozen.
+No other package is ever named. Widening this to anything but those two
+packages is an Ask-first decision.
 
 The package-consumption jobs, one per gated platform, have their own approved
 network contract: rattler-build solves against the pinned Modular and

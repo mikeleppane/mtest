@@ -115,8 +115,11 @@ jobs:
       # This is the only post-Pixi network exception among source, test, and
       # memory-analysis lanes. It is confined to the Valgrind cell on PRs,
       # main/master pushes, and manual unified-CI runs. The independent package
-      # lane has its own external-channel solve contract. Installing the exact
-      # matching debug package must not upgrade libc.
+      # lane has its own external-channel solve contract. The exception is
+      # bounded to glibc debug symbols MATCHING the libc6 this cell runs
+      # against -- that is what Memcheck reads. It does not promise libc6
+      # itself never moves; the step below says why, names the only two
+      # packages that may be installed, and asserts the pair.
       - name: Install matching glibc debug symbols
         if: ${{ matrix.libc_debug }}
         run: |
