@@ -353,6 +353,20 @@ depends-on = ["build-bin"]
 cmd = "python -m scripts.tests.test_cache_protocol"
 depends-on = ["build-bin"]
 
+# Layer 2 of the build-artifact cache: stamps `scripts/build/production_build.sh`'s
+# own precompile stage against its inputs (the script itself, the exact stage
+# command lines, and every file under src/mtest + vendor/mojo-toml), so a second
+# `pixi run build` with nothing changed skips re-running `mojo precompile`
+# entirely. That skip is the only way two builds can leave `build/mtest.mojopkg`
+# byte-identical: `mojo precompile` is not byte-reproducible on this toolchain
+# (see production_build.sh), so an unstamped re-run rewrites the package with
+# different bytes every time even when nothing changed. No `depends-on`: every
+# scenario copies its own throwaway `scripts/build` + `src/mtest` +
+# `vendor/mojo-toml` sandbox and runs the script there directly, never against
+# this checkout's own `build/`.
+[tasks.build-stamp-check]
+cmd = "python -m scripts.tests.test_build_stamp"
+
 # The cheap hosted-CI release barrier. Every non-behavioral member of the local
 # floor stays in its exact fail-fast order; GitHub releases the independent
 # behavioral and memory-safety lanes only after this aggregate passes.
@@ -393,6 +407,7 @@ depends-on = [
     "dogfood-check",
     "e2e",
     "cache-protocol-check",
+    "build-stamp-check",
     "contract-check-strict",
     "ci-memory",
 ]
