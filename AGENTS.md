@@ -196,7 +196,7 @@ pixi run build             # the package-compiles gate
 pixi run readme-help-check # compare README help with the real binary
 pixi run junit-render-check  # validate bytes emitted by the real JUnit reporter
 pixi run transcripts-check # regenerate to a temp dir and diff byte-for-byte
-pixi run test              # compile the classified inventory into one direct-run binary
+pixi run test              # run the classified inventory through build/mtest itself, self-hosted
 pixi run assertions-check  # direct-run public assertion consumers at O0 and O3
 pixi run recipe-check      # render and compare the community submission recipe
 pixi run dogfood-check     # run three focused probes through the built mtest binary
@@ -327,22 +327,33 @@ omits it because the hosted macOS lane compiles natively and owns that verdict.
 
 ### Classified test modules
 
-Classified modules under `tests/unit/` and `tests/integration/` are import-only:
-they declare `test_*` functions and must not declare `main()`.
-`scripts/harness/aggregate.py` imports them and registers every test function
-explicitly, and every harness that executes a classified module (test,
-test-file, ASan, Valgrind) generates its entrypoint through that script.
-Standalone protocol fixtures, e2e fixtures, and dogfood probes still declare
-their own `main()`, because mtest compiles them as individual programs. Use
-`pixi run test-file -- <classified-test.mojo>` while investigating a failure.
+Classified modules under `tests/unit/` and `tests/integration/` each compile
+and run as their own program: they declare `test_*` functions **and must**
+declare their own `main()` handing them to `TestSuite.discover_tests`, exactly
+like every other test file in this repo (protocol fixtures, e2e fixtures,
+dogfood probes). This is a packaging constraint, not a style choice: a module
+with `main()` builds and runs fine on its own, and importing one that declares
+`main()` also builds fine, but `mojo precompile` over a tree containing one
+fails with `'main()' is not supported within packages` — which is why
+`tests/unit/__init__.mojo` and `tests/integration/__init__.mojo` do not exist
+(package markers would make the directory precompilable) while
+`tests/__init__.mojo` does, and why `scripts/checks/layout.py` guards it.
+`pixi run test` runs every classified module **through the `build/mtest`
+binary itself** (`scripts/harness/selfhost.py`), under a whole-process-group
+watchdog, reconciling mtest's own report against an inventory derived from the
+sources on disk. Use `pixi run test-file -- <classified-test.mojo>` while
+investigating a failure.
 
-Membership is explicit, so adding the file is not enough. A new classified
-module touches four ledgers in the same commit: `UNIT_SUITES` or
-`INTEGRATION_SUITES`, `CLASSIFIED_PATHS`, and `CLASSIFIED_TEST_COUNT` in
-`scripts/checks/layout.py`, plus the per-root file counts in
-`scripts/tests/test_classified.py`. Miss one and `harness-check` fails closed.
-A new fixture, snapshot, or e2e file has its own pinned inventory under the same
-rule.
+Membership is derived, not declared: there is no committed path list or test
+count to update. Adding a test file or a `test_*` function costs zero ledger
+edits — `scripts/checks/layout.py` and `scripts/harness/selfhost.py` both
+compute their expectations from the tree on each run. The trade this makes
+explicit: the oracle proves mtest ran every test the sources declare *right
+now*; it cannot prove the sources still declare every test they used to. A
+file dropping from N tests to M (M > 0) is invisible to every gate — that is a
+reviewable diff, not a runner defect. A file reaching **zero** `test_*`
+functions is loud and fails closed. See `scripts/harness/selfhost.py`'s module
+docstring for the full reasoning.
 
 ## Pin policy and ask-first boundaries
 
@@ -414,7 +425,7 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `assertions` | source-only companion under `companions/assertions/src/mtest/assertions` |
 | `cli` | `src/mtest/cli` (arg parsing, main) |
 | `cache` | in-session build/collection reuse |
-| `test` | test infrastructure (`scripts/harness/{classified,dogfood}.py`, `scripts/build/mojo_package.sh`, shared helpers) |
+| `test` | test infrastructure (`scripts/harness/{selfhost,dogfood}.py`, `scripts/build/mojo_package.sh`, shared helpers) |
 | `e2e` | end-to-end harness (`scripts/e2e/`) and its `e2e/` manifest and scenarios |
 | `bench` | `benchmarks/` |
 | `docs` | docstrings, `docs/` |

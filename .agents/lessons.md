@@ -167,16 +167,28 @@ append here as later phases teach more.
   Errno 2 on `mojo` means wrong environment, not broken code.
 - Capture a gate's real exit as its own statement (`cmd; echo "x=$?"`); a
   trailing pipe silently reports 0.
-- The harness gates enforce explicit membership (`scripts/checks/layout.py`
-  pins exact suite/fixture sets and counts), so register a new suite, fixture,
-  snapshot, or e2e file in the same commit that adds it.
+- The harness gates derive membership from the tree, not from a committed
+  list: `scripts/checks/layout.py` and `scripts/harness/selfhost.py` both
+  compute their expected suite/fixture/test inventory from disk on each run,
+  so adding a new suite, fixture, or test function costs zero ledger edits.
+  The boundary that buys: the oracle proves mtest ran every test the sources
+  declare *right now*; it cannot prove the sources still declare every test
+  they used to. A file dropping from N tests to M (M > 0) is invisible to
+  every gate and is a reviewable diff, not a runner defect. A file reaching
+  **zero** `test_*` functions is loud and fails closed. See
+  `scripts/harness/selfhost.py`'s module docstring for the full argument.
 - `mojo precompile` rejects `--target-triple`, so a cross-target check cannot
   reuse the host-target packages under `-I build`; compile from sources with
-  `-I src -I vendor/mojo-toml`. Cross-compiling the test aggregate needs
-  `-I . -I tests/support` on top of those (generate the entrypoint first, about
-  eighty seconds). Omitting an include prints bogus `statement indentation must
-  match the rest of the block` errors in files that parse fine; resolve the
-  module, never the indentation.
+  `-I src -I vendor/mojo-toml`. There is no test aggregate to cross-compile
+  anymore -- each classified module is its own program -- so the equivalent
+  coverage is one `--target-triple --emit=asm` invocation per classified
+  `test_*.mojo` file (101 of them today; `-I tests/support` added on top of
+  those for the integration modules importing `exec_helpers`/
+  `session_fixtures`; no `-I .` needed since a standalone file never imports
+  another classified module by its `tests.unit.*` package path), and nobody
+  has scripted or timed that sweep yet. Omitting an include prints bogus
+  `statement indentation must match the rest of the block` errors in files
+  that parse fine; resolve the module, never the indentation.
 - Never run two builds against the shared `build/` tree at once. A racing build
   corrupted `build/mtest.mojopkg` mid-write and looked exactly like a real
   regression. Builds run one at a time.
@@ -222,5 +234,10 @@ append here as later phases teach more.
   inferring it from a scenario verdict.
 - A tool that commits captured program output containing filesystem paths must
   rewrite the ephemeral run root to a stable placeholder before writing (both
-  the literal and realpath spellings), the way
-  `scripts/maintenance/pty_capture.py` and `scripts/gen_transcripts.py` do.
+  the literal and realpath spellings), the way `scripts/gen_transcripts.py`
+  does. `scripts/maintenance/console_svg.py`'s README SVGs are the deliberate
+  exception: they are documentation, not oracle evidence, so the absolute repo
+  root and wall-clock timings a fresh capture bakes in are expected residual
+  variance, not a bug (`scripts/maintenance/pty_capture.py`, which never
+  rewrote either, is deleted; `console_svg.py` is its surviving PTY-capture
+  tool).
