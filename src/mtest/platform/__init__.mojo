@@ -28,6 +28,7 @@ from mtest.platform.process import process_id
 from mtest.platform.regular_file import (
     BoundedRegularFileRead,
     read_bounded_regular_file,
+    read_regular_file_bytes,
 )
 from mtest.platform.temp_file import (
     UniqueTempFile,

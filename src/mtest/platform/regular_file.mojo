@@ -1,8 +1,17 @@
 """Bounded reads from opened regular-file descriptors.
 
-Part of the narrow platform-I/O boundary. The path is opened nonblocking and
-close-on-exec before its file type is inspected, so a pathname replacement
-cannot turn a prior regular-file check into a blocking FIFO or device read.
+Part of the narrow platform-I/O boundary (Layer 0). The path is opened
+nonblocking and close-on-exec before its file type is inspected, so a pathname
+replacement cannot turn a prior regular-file check into a blocking FIFO or
+device read.
+
+Two readers sit on one core. `read_bounded_regular_file` decodes UTF-8 and is
+what the config and state readers want; `read_regular_file_bytes` hands back the
+raw bytes and is what a cache digest wants, because a compiled binary is not
+text. They share `_read_opened_regular_file_bytes`, which owns the descriptor
+lifetime and the single `open`/`fstat`/`read` declaration shape this binary
+emits for those symbols — a second shape for any of them is a link-time
+conflict raised from an unrelated file.
 """
 from std.ffi import external_call
 from std.memory import Span, alloc, memset_zero
@@ -26,6 +35,32 @@ struct BoundedRegularFileRead(Copyable, Movable):
     """Whether the opened descriptor identified a regular file."""
     var text: String
     """At most the requested byte limit plus one, copied into owned UTF-8."""
+
+
+@fieldwise_init
+struct _OpenedRegularFileBytes(Copyable, Movable):
+    """The undecoded result of the shared open-fstat-read core.
+
+    The raw counterpart of `BoundedRegularFileRead`: the same verdict, but the
+    payload is still bytes. Text is a decision the callers above make — one
+    validates UTF-8 and the other must not — so the core stops one step short of
+    it and hands back exactly what the descriptor produced.
+    """
+
+    var is_regular: Bool
+    """Whether the opened descriptor identified a regular file."""
+    var data: List[UInt8]
+    """At most the requested byte limit plus one, verbatim. Empty when
+    `is_regular` is False, in which case nothing was read at all."""
+
+    def take_data(deinit self) -> List[UInt8]:
+        """Consume this verdict and hand the bytes to the caller.
+
+        Returns:
+            The owned bytes, moved rather than copied. The verdict is gone
+            afterwards, so read `is_regular` first.
+        """
+        return self.data^
 
 
 def _open_read_flags() -> Int32:
@@ -73,34 +108,30 @@ def _opened_mode(
         return Int(storage.bitcast[UInt32]()[6])
 
 
-def read_bounded_regular_file(
+def _read_opened_regular_file_bytes(
     path: String, max_bytes: Int
-) raises -> BoundedRegularFileRead:
-    """Open, validate, and read at most `max_bytes + 1` bytes from `path`.
+) raises -> _OpenedRegularFileBytes:
+    """Open, validate, and read at most `max_bytes + 1` raw bytes from `path`.
+
+    The shared core beneath `read_bounded_regular_file` and
+    `read_regular_file_bytes`. It owns the whole descriptor lifetime — the
+    interrupt-retrying open, the file-type check on the already-open descriptor,
+    the short-read loop, and the close — and interprets nothing about the bytes
+    it produces. The single `open`/`fstat`/`read` declaration shape for those
+    libc symbols lives here and is not repeated anywhere above.
 
     Args:
-        path: The selected configuration pathname. Symlinks are followed.
+        path: The pathname to open. Symlinks are followed.
         max_bytes: The accepted payload ceiling, which must be nonnegative.
 
     Returns:
-        An opened-descriptor regular-file verdict and owned UTF-8 text. A
-        regular file returns at most `max_bytes + 1` bytes so the caller can
-        distinguish an exact-boundary file from an oversized one.
+        An opened-descriptor regular-file verdict and the owned bytes. A regular
+        file returns at most `max_bytes + 1` of them, so a caller can tell an
+        exact-boundary file from an oversized one.
 
     Raises:
-        Error: If open, fstat, read, close, allocation, or UTF-8 validation
-            fails. Every successfully opened descriptor is closed first.
-
-    Examples:
-
-    ```mojo
-    from mtest.platform import read_bounded_regular_file
-
-    var opened = read_bounded_regular_file("mtest.toml", 65536)
-    if not opened.is_regular:
-        raise Error("mtest.toml is not a regular file")
-    var text = opened.text.copy()
-    ```
+        Error: If open, fstat, read, close, or allocation fails. Every
+            successfully opened descriptor is closed first.
     """
     if max_bytes < 0:
         raise Error("platform: bounded read requires a nonnegative limit")
@@ -185,7 +216,7 @@ def read_bounded_regular_file(
     if mode & _S_IFMT != _S_IFREG:
         if close_fd(fd) != 0:
             raise Error("platform: close failed after regular-file validation")
-        return BoundedRegularFileRead(False, "")
+        return _OpenedRegularFileBytes(False, List[UInt8]())
 
     var capacity = max_bytes + 1
     # SAFETY: `capacity` is positive because `max_bytes` is nonnegative. This
@@ -239,22 +270,104 @@ def read_bounded_regular_file(
         # a second free after the allocation is released.
         buffer.free()
         raise Error("platform: close failed after bounded regular-file read")
+    var data = List[UInt8](capacity=capacity)
+    # SAFETY: the read loop initialized exactly bytes `[0, total)` in the
+    # still-live allocation and `total <= capacity`. `Span` preserves that
+    # precise bound, and `List` copies every byte out of it eagerly; the view is
+    # a temporary that cannot outlive this statement, let alone the buffer.
+    data.extend(Span(ptr=buffer, length=total))
+    # SAFETY: `List` copied all `total` initialized bytes and retained no view.
+    # This is the buffer's sole owner and final use, so freeing exactly once
+    # leaves only the independent owned `data`.
+    buffer.free()
+    return _OpenedRegularFileBytes(True, data^)
+
+
+def read_bounded_regular_file(
+    path: String, max_bytes: Int
+) raises -> BoundedRegularFileRead:
+    """Open, validate, and read at most `max_bytes + 1` bytes from `path`.
+
+    Args:
+        path: The selected configuration pathname. Symlinks are followed.
+        max_bytes: The accepted payload ceiling, which must be nonnegative.
+
+    Returns:
+        An opened-descriptor regular-file verdict and owned UTF-8 text. A
+        regular file returns at most `max_bytes + 1` bytes so the caller can
+        distinguish an exact-boundary file from an oversized one.
+
+    Raises:
+        Error: If open, fstat, read, close, allocation, or UTF-8 validation
+            fails. Every successfully opened descriptor is closed first.
+
+    Examples:
+
+    ```mojo
+    from mtest.platform import read_bounded_regular_file
+
+    var opened = read_bounded_regular_file("mtest.toml", 65536)
+    if not opened.is_regular:
+        raise Error("mtest.toml is not a regular file")
+    var text = opened.text.copy()
+    ```
+    """
+    var opened = _read_opened_regular_file_bytes(path, max_bytes)
+    if not opened.is_regular:
+        return BoundedRegularFileRead(False, "")
     var text: String
     try:
-        # SAFETY: the read loop initialized exactly bytes `[0, total)` in the
-        # still-live allocation and `total <= capacity`. `Span` preserves that
-        # precise bound. `StringSlice(from_utf8=...)` validates UTF-8 and
-        # `String` copies it before `buffer` is freed; neither view escapes.
-        var initialized = Span(ptr=buffer, length=total)
-        text = String(StringSlice(from_utf8=initialized))
+        text = String(StringSlice(from_utf8=Span(opened.data)))
     except:
-        # SAFETY: UTF-8 validation retained no pointer when it raised. The
-        # temporary span cannot escape the `try`, this is the buffer's sole
-        # owner, and the raising branch prevents access or a second free.
-        buffer.free()
         raise Error("platform: regular file is not valid UTF-8")
-    # SAFETY: `String` copied all `total` validated bytes and retained no view.
-    # This is the buffer's sole owner and final use, so freeing exactly once
-    # leaves only the independent owned `text`.
-    buffer.free()
     return BoundedRegularFileRead(True, text^)
+
+
+def read_regular_file_bytes(path: String, cap: Int) raises -> List[UInt8]:
+    """Read `path`'s bytes verbatim, refusing anything larger than `cap`.
+
+    The undecoded sibling of `read_bounded_regular_file`, sharing its whole
+    descriptor discipline: the same interrupt-retrying open, the same file-type
+    check performed on the already-open descriptor rather than on the pathname,
+    the same short-read loop. What it drops is the UTF-8 validation. A cache key
+    digests compiled binaries and whatever a test file happens to contain, so a
+    reader that raises on invalid UTF-8 cannot serve it.
+
+    It is also stricter about its ceiling than the bounded reader, which reports
+    an overlong file by handing back `max_bytes + 1` bytes. There is no useful
+    truncated prefix of a digest input, so an oversized file raises here instead.
+
+    Args:
+        path: The file to read. Symlinks are followed.
+        cap: The largest accepted payload in bytes, which must be nonnegative.
+            A file of exactly `cap` bytes is accepted.
+
+    Returns:
+        Exactly the file's bytes, in order, uninterpreted. Empty for an empty
+        file.
+
+    Raises:
+        Error: If `path` is missing or cannot be opened, is not a regular file,
+            holds more than `cap` bytes, or if fstat, read, close, or allocation
+            fails. Every successfully opened descriptor is closed first.
+
+    Examples:
+
+    ```mojo
+    from mtest.platform import read_regular_file_bytes
+
+    var bytes = read_regular_file_bytes("build/bin/tests_test_ok", 1 << 26)
+    ```
+    """
+    var opened = _read_opened_regular_file_bytes(path, cap)
+    if not opened.is_regular:
+        raise Error("platform: '" + path + "' is not a regular file")
+    if len(opened.data) > cap:
+        raise Error(
+            "platform: '"
+            + path
+            + "' exceeds the byte cap of "
+            + String(cap)
+            + " for a raw read"
+        )
+    return opened^.take_data()
