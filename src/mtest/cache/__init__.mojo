@@ -11,10 +11,22 @@ generation naming, and meta-record format layered on top of it, which turn
 digests into the names and validation records a cross-run store needs.
 
 The public surface is re-exported so callers write
-`from mtest.cache import BuildProduct, BuildRegistry, KeyBuilder, MetaFile,
-Sha256, generation_name, sha256_hex`.
+`from mtest.cache import ARG_FLAG, ARG_FILE_CANDIDATE, ARG_INCLUDE_DIR,
+ARG_UNKNOWN, ArgClass, BuildProduct, BuildRegistry, KeyBuilder, MetaFile,
+Sha256, classify_build_args, generation_name, sha256_hex`.
 """
 from mtest.cache.build_products import BuildProduct, BuildRegistry
-from mtest.cache.key import KEY_FORMAT_TAG, META_HEADER, KeyBuilder, MetaFile
-from mtest.cache.key import generation_name
+from mtest.cache.key import (
+    ARG_FLAG,
+    ARG_FILE_CANDIDATE,
+    ARG_INCLUDE_DIR,
+    ARG_UNKNOWN,
+    KEY_FORMAT_TAG,
+    META_HEADER,
+    ArgClass,
+    KeyBuilder,
+    MetaFile,
+    classify_build_args,
+    generation_name,
+)
 from mtest.cache.sha256 import Sha256, sha256_hex

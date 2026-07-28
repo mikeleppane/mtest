@@ -1,4 +1,5 @@
-"""Cache key framing, generation naming, and the on-disk meta record.
+"""Cache key framing, build-arg classification, generation naming, and the
+on-disk meta record.
 
 Layer 2 (`cache`): pure, no I/O. Strings and byte lists go in, strings come
 out; opening, reading, and renaming the files this module describes belongs to
@@ -18,6 +19,12 @@ write, an interrupted rename, a hand edit, or a stale format version are all
 possible, so every deviation returns `None` rather than raising or handing back
 a half-filled record. `None` means "treat this generation as a miss and
 rebuild", which is always safe; a partially parsed record would not be.
+
+`classify_build_args` sorts a build command line into rows a cache key can
+safely absorb: a flag hashes verbatim, a file or include-dir token gets
+resolved and digested by a later layer, and anything unrecognized becomes
+`ARG_UNKNOWN` — because an unrecognized flag might change what gets built in a
+way the key cannot see, treating it as harmless would be wrong.
 
 The public surface is re-exported from `mtest.cache`.
 """
@@ -329,6 +336,128 @@ struct KeyBuilder(Copyable, Movable):
             A 64-character lowercase hex string.
         """
         return self._hasher^.hex_digest()
+
+
+comptime ARG_FLAG = 0
+"""A compiler switch with no filesystem meaning; the token(s) hash verbatim."""
+
+comptime ARG_FILE_CANDIDATE = 1
+"""A token naming a file the key must resolve and digest against run root."""
+
+comptime ARG_INCLUDE_DIR = 2
+"""A token naming a directory the key must resolve against run root."""
+
+comptime ARG_UNKNOWN = 3
+"""An argument the grammar does not recognize; the cache must not be trusted."""
+
+
+@fieldwise_init
+struct ArgClass(Copyable, Movable):
+    """One classified build argument, ready for Task 6 to fold into a key.
+
+    Each instance is one LOGICAL argument: a two-token form like `-I <dir>` or
+    `-Xlinker <tok>` collapses to a single row, so `classify_build_args` never
+    returns more rows than it was given tokens.
+    """
+
+    var kind: Int
+    """One of `ARG_FLAG`, `ARG_FILE_CANDIDATE`, `ARG_INCLUDE_DIR`,
+    `ARG_UNKNOWN`."""
+
+    var value: String
+    """The row's payload: the flag's own spelling for `ARG_FLAG` (both
+    tokens, space-joined, for a two-token flag), the bare path with any `-I`
+    or `-Xlinker` prefix stripped for `ARG_FILE_CANDIDATE` /
+    `ARG_INCLUDE_DIR`, or the offending token verbatim for `ARG_UNKNOWN`."""
+
+
+def _is_known_bare_flag(token: String) -> Bool:
+    """Whether `token` is a recognized single-token flag.
+
+    Args:
+        token: One argv element.
+
+    Returns:
+        True for `--no-optimization` or `-O0`..`-O3`.
+    """
+    if token == "--no-optimization":
+        return True
+    if token == "-O0" or token == "-O1" or token == "-O2" or token == "-O3":
+        return True
+    return False
+
+
+def classify_build_args(args: List[String]) -> List[ArgClass]:
+    """Classify a build command line into rows a cache key can safely absorb.
+
+    Walks `args` left to right with one token of lookahead for the two-token
+    forms (`--debug-level <val>`, `-Xlinker <tok>`, `-I <dir>`), so every
+    logical argument yields exactly one row and `len(result) <= len(args)`.
+    Anything the grammar does not recognize classifies as `ARG_UNKNOWN`
+    rather than being silently folded into a known kind: an unrecognized flag
+    means the cache cannot prove the build is reproducible.
+
+    Args:
+        args: The build command line's tokens, in order.
+
+    Returns:
+        One `ArgClass` per logical argument, in the same order they appeared.
+
+    Examples:
+
+    ```mojo
+    from mtest.cache import ARG_FLAG, ARG_FILE_CANDIDATE, classify_build_args
+
+    var argv: List[String] = ["--no-optimization", "-Xlinker", "obj/a.o"]
+    var rows = classify_build_args(argv)
+    # rows[0].kind == ARG_FLAG, rows[0].value == "--no-optimization"
+    # rows[1].kind == ARG_FILE_CANDIDATE, rows[1].value == "obj/a.o"
+    ```
+    """
+    var result = List[ArgClass]()
+    var n = len(args)
+    var i = 0
+    while i < n:
+        var token = args[i]
+        if _is_known_bare_flag(token):
+            result.append(ArgClass(kind=ARG_FLAG, value=token))
+            i += 1
+        elif token == "--debug-level":
+            if i + 1 < n:
+                result.append(
+                    ArgClass(kind=ARG_FLAG, value=token + " " + args[i + 1])
+                )
+                i += 2
+            else:
+                result.append(ArgClass(kind=ARG_UNKNOWN, value=token))
+                i += 1
+        elif token == "-Xlinker":
+            if i + 1 < n:
+                result.append(
+                    ArgClass(kind=ARG_FILE_CANDIDATE, value=args[i + 1])
+                )
+                i += 2
+            else:
+                result.append(ArgClass(kind=ARG_UNKNOWN, value=token))
+                i += 1
+        elif token == "-I":
+            if i + 1 < n:
+                result.append(ArgClass(kind=ARG_INCLUDE_DIR, value=args[i + 1]))
+                i += 2
+            else:
+                result.append(ArgClass(kind=ARG_UNKNOWN, value=token))
+                i += 1
+        elif token.startswith("-I") and token.byte_length() > 2:
+            result.append(
+                ArgClass(
+                    kind=ARG_INCLUDE_DIR, value=String(token.removeprefix("-I"))
+                )
+            )
+            i += 1
+        else:
+            result.append(ArgClass(kind=ARG_UNKNOWN, value=token))
+            i += 1
+    return result^
 
 
 def generation_name(mangled: String, digest32: String) -> String:

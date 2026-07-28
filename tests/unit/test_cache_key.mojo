@@ -9,7 +9,17 @@ the generation as a miss and rebuilds, rather than serving a wrong binary.
 """
 from std.testing import TestSuite, assert_equal, assert_true
 
-from mtest.cache import KeyBuilder, MetaFile, generation_name
+from mtest.cache import (
+    ARG_FLAG,
+    ARG_FILE_CANDIDATE,
+    ARG_INCLUDE_DIR,
+    ARG_UNKNOWN,
+    ArgClass,
+    KeyBuilder,
+    MetaFile,
+    classify_build_args,
+    generation_name,
+)
 
 
 def test_frame_order_changes_digest() raises:
@@ -81,6 +91,54 @@ def test_meta_rejects_truncation() raises:
     for i in range(text.byte_length() - 4):
         cut += String(text[byte=i])
     assert_true(not Bool(MetaFile.parse(cut)))
+
+
+def test_classify_known_forms() raises:
+    var args: List[String] = [
+        "--no-optimization",
+        "-O2",
+        "--debug-level",
+        "3",
+        "-Iinclude",
+        "-I",
+        "vendor/include",
+    ]
+    var result = classify_build_args(args)
+    assert_equal(len(result), 5)
+    assert_equal(result[0].kind, ARG_FLAG)
+    assert_equal(result[0].value, "--no-optimization")
+    assert_equal(result[1].kind, ARG_FLAG)
+    assert_equal(result[1].value, "-O2")
+    assert_equal(result[2].kind, ARG_FLAG)
+    assert_equal(result[2].value, "--debug-level 3")
+    assert_equal(result[3].kind, ARG_INCLUDE_DIR)
+    assert_equal(result[3].value, "include")
+    assert_equal(result[4].kind, ARG_INCLUDE_DIR)
+    assert_equal(result[4].value, "vendor/include")
+
+
+def test_classify_unknown_is_conservative() raises:
+    var args: List[String] = ["--totally-unrecognized-flag", "-O2"]
+    var result = classify_build_args(args)
+    assert_equal(len(result), 2)
+    assert_equal(result[0].kind, ARG_UNKNOWN)
+    assert_equal(result[0].value, "--totally-unrecognized-flag")
+    assert_equal(result[1].kind, ARG_FLAG)
+    assert_equal(result[1].value, "-O2")
+
+
+def test_classify_selfhost_invocation() raises:
+    var args: List[String] = [
+        "--no-optimization",
+        "-Xlinker",
+        "build/obj/support.o",
+    ]
+    var result = classify_build_args(args)
+    assert_equal(len(result), 2)
+    assert_equal(result[0].kind, ARG_FLAG)
+    assert_equal(result[0].value, "--no-optimization")
+    assert_equal(result[1].kind, ARG_FILE_CANDIDATE)
+    assert_equal(result[1].value, "build/obj/support.o")
 
 
 def main() raises:
