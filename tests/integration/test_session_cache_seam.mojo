@@ -64,7 +64,6 @@ from session_fixtures import (
     SRC_CHAMELEON,
     SRC_COMPILE_ERROR,
     SRC_CRASH,
-    SRC_MATRIX,
     SRC_PASS,
     base_config,
     write_file,
@@ -1240,18 +1239,151 @@ def test_editing_a_walked_support_file_rebuilds_every_file() raises:
     assert_equal(settled.built_files, 0, "a settled tree compiles nothing")
 
 
-def test_editing_one_test_file_rebuilds_only_that_file() raises:
-    """A test file outside every include root keys only itself.
+comptime _SRC_SIBLING_HELPER = "def helper_value() -> Int:\n    return 7\n"
+"""A helper module sitting BESIDE the test files, which import it by bare name.
 
-    The counterpart to the walk's deliberate over-rebuilding: a file the walk
-    cannot see contributes to no other file's key, so editing it costs exactly
-    one compile. A key that reached wider — hashing the selection, the discovery
-    root, or a sibling's bytes — would still pass every warm-run case in this
-    module while making an ordinary one-line edit rebuild the whole suite.
+No `-I` reaches this file. The compiler resolves a bare `from helper import ...`
+against the source file's OWN directory, which is a second search path beside
+the include roots and the ordinary way neighbouring suites share fixtures.
+"""
+
+comptime _SRC_SIBLING_HELPER_POISONED = (
+    "def helper_value() -> Int:\n    return 999\n"
+)
+"""The same helper, returning a value that makes its readers' assertions fail."""
+
+comptime _SRC_READS_HELPER = (
+    "from sibling_helper import helper_value\n"
+    "from std.testing import TestSuite, assert_equal\n\n\n"
+    "def test_helper_value() raises:\n"
+    "    assert_equal(helper_value(), 7)\n\n\n"
+    "def main() raises:\n"
+    "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
+)
+"""A suite whose verdict is decided by the helper next to it."""
+
+comptime _SRC_READS_HELPER_TWICE = (
+    "from sibling_helper import helper_value\n"
+    "from std.testing import TestSuite, assert_equal\n\n\n"
+    "def test_helper_value_once() raises:\n"
+    "    assert_equal(helper_value(), 7)\n\n\n"
+    "def test_helper_value_again() raises:\n"
+    "    assert_equal(helper_value(), 7)\n\n\n"
+    "def main() raises:\n"
+    "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
+)
+"""A second suite over the same helper, with a different body of its own.
+
+Different bytes from `_SRC_READS_HELPER`, so rewriting one file with this is a
+real edit rather than the content-identical case.
+"""
+
+comptime _SRC_TEST_SIBLING_LIBRARY = (
+    "from std.testing import TestSuite, assert_true\n\n\n"
+    "def shared_value() -> Int:\n"
+    "    return 7\n\n\n"
+    "def test_sibling_of_its_own() raises:\n"
+    "    assert_true(True)\n\n\n"
+    "def main() raises:\n"
+    "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
+)
+"""A file that is BOTH a discovered test file and a library for its neighbour."""
+
+comptime _SRC_TEST_SIBLING_LIBRARY_POISONED = (
+    "from std.testing import TestSuite, assert_true\n\n\n"
+    "def shared_value() -> Int:\n"
+    "    return 999\n\n\n"
+    "def test_sibling_of_its_own() raises:\n"
+    "    assert_true(True)\n\n\n"
+    "def main() raises:\n"
+    "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
+)
+"""The same file, exporting a value that makes its importer's assertion fail."""
+
+comptime _SRC_READS_TEST_SIBLING = (
+    "from test_shared import shared_value\n"
+    "from std.testing import TestSuite, assert_equal\n\n\n"
+    "def test_reads_the_sibling() raises:\n"
+    "    assert_equal(shared_value(), 7)\n\n\n"
+    "def main() raises:\n"
+    "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
+)
+"""A suite that imports a neighbour which is itself a discovered test file."""
+
+
+def test_editing_a_helper_beside_the_test_rebuilds_it() raises:
+    """A module in the test file's own directory is a build input, and is keyed.
+
+    `mojo build tests/test_x.mojo` resolves `from helper import ...` out of
+    `tests/`, with no `-I` involved and no way to ask the compiler afterwards
+    what it read. The file's own directory is therefore walked into its key
+    exactly as an include root is, and this case is why: the helper here decides
+    the suite's verdict, so a key blind to it serves a binary compiled against
+    the OLD helper and reports PASS over source that now fails. That is a green
+    run which never compiled the change — the one failure the cache must not
+    have.
+
+    The edit flips the verdict rather than merely moving bytes: a counter
+    assertion alone would pass on a suite whose result never depended on the
+    helper at all.
     """
     var root = temp_root()
-    write_file(root, "tests/test_a.mojo", SRC_PASS)
-    write_file(root, "tests/test_b.mojo", SRC_PASS)
+    write_file(root, "tests/sibling_helper.mojo", _SRC_SIBLING_HELPER)
+    write_file(root, "tests/test_reads_helper.mojo", _SRC_READS_HELPER)
+    var config = base_config()
+
+    var cold = run_recording_session(config.copy(), root)
+    assert_equal(cold.code, 0, "the cold run must pass")
+    assert_equal(cold.built_files, 1, "the cold run compiles the one suite")
+
+    var warm = run_recording_session(config.copy(), root)
+    assert_equal(
+        warm.cached_files, 1, "an unchanged tree serves from the store"
+    )
+    assert_equal(warm.built_files, 0, "the warm run compiles nothing")
+
+    write_file(root, "tests/sibling_helper.mojo", _SRC_SIBLING_HELPER_POISONED)
+    var edited = run_recording_session(config^, root)
+    assert_equal(
+        edited.built_files,
+        1,
+        (
+            "the helper the compiler read changed, so the key must have moved;"
+            " a hit here is a binary built against the previous helper"
+        ),
+    )
+    assert_equal(edited.cached_files, 0, "no pre-edit generation may be served")
+    assert_equal(
+        edited.code,
+        1,
+        (
+            "the edited helper makes the suite's assertion fail, so the run"
+            " must fail; a green run here is a stale binary reporting a verdict"
+            " for source that no longer exists"
+        ),
+    )
+
+
+def test_editing_one_test_file_rebuilds_only_that_file() raises:
+    """Editing one test file leaves its neighbours in the store.
+
+    The directory walk that closes the sibling-helper hole omits exactly the
+    entries mtest would discover as test files, and this is the reason: each of
+    those is an independent entry point already keyed by its own source frame,
+    so folding them in would make editing any one file in a directory rebuild
+    every test in it — destroying the single-file edit-and-rerun loop the cache
+    exists to make fast.
+
+    The helper is in the directory on purpose. It makes the walk non-empty, so a
+    pass here means the omission really happened rather than the directory
+    having nothing to omit. A key that swept the whole directory in, or that
+    hashed the selection or the discovery root, would still satisfy every
+    warm-run case in this module while rebuilding the world on every edit.
+    """
+    var root = temp_root()
+    write_file(root, "tests/sibling_helper.mojo", _SRC_SIBLING_HELPER)
+    write_file(root, "tests/test_a.mojo", _SRC_READS_HELPER)
+    write_file(root, "tests/test_b.mojo", _SRC_READS_HELPER)
     var config = base_config()
 
     var cold = run_recording_session(config.copy(), root)
@@ -1259,16 +1391,66 @@ def test_editing_one_test_file_rebuilds_only_that_file() raises:
     var warm = run_recording_session(config.copy(), root)
     assert_equal(warm.cached_files, 2, "both files are served from the store")
 
-    # `SRC_MATRIX` is a different suite body, so the file's bytes really change;
-    # rewriting it with its own content would be the mtime case, not this one.
-    write_file(root, "tests/test_a.mojo", SRC_MATRIX)
+    # A different suite body, so the file's bytes really change; rewriting it
+    # with its own content would be the mtime case, not this one.
+    write_file(root, "tests/test_a.mojo", _SRC_READS_HELPER_TWICE)
     var edited = run_recording_session(config^, root)
     assert_equal(edited.code, 0, "both files still pass")
     assert_equal(edited.built_files, 1, "exactly the edited file recompiles")
     assert_equal(
         edited.cached_files,
         1,
-        "the untouched file's key did not move, so it must still be served",
+        "the neighbour's key did not move, so it must still be served",
+    )
+
+
+def test_a_test_file_read_by_its_neighbour_invalidates_that_neighbour() raises:
+    """Omitting test siblings is abandoned for a file that imports one.
+
+    Leaving discovered test files out of the walk is safe only while no file in
+    that directory imports one. That is not assumed, it is proved per file: the
+    source is scanned for its imports, and a file naming an omitted neighbour
+    keys over the whole directory instead — the same conservative walk an `-I`
+    root gets.
+
+    Here the neighbour is both a test file in its own right and the library
+    deciding this suite's verdict, so an unconditional omission would serve a
+    binary compiled against the previous version of it and report PASS over
+    source that now fails.
+    """
+    var root = temp_root()
+    write_file(root, "tests/test_shared.mojo", _SRC_TEST_SIBLING_LIBRARY)
+    write_file(root, "tests/test_reader.mojo", _SRC_READS_TEST_SIBLING)
+    var config = base_config()
+
+    var cold = run_recording_session(config.copy(), root)
+    assert_equal(cold.code, 0, "the cold run must pass")
+    assert_equal(cold.built_files, 2, "the cold run compiles both files")
+
+    var warm = run_recording_session(config.copy(), root)
+    assert_equal(warm.cached_files, 2, "both files are served from the store")
+    assert_equal(warm.built_files, 0, "the warm run compiles nothing")
+
+    write_file(
+        root, "tests/test_shared.mojo", _SRC_TEST_SIBLING_LIBRARY_POISONED
+    )
+    var edited = run_recording_session(config^, root)
+    assert_equal(
+        edited.built_files,
+        2,
+        (
+            "the edited file keys itself, and its reader imported it, so the"
+            " reader's key must have moved with it"
+        ),
+    )
+    assert_equal(edited.cached_files, 0, "no pre-edit generation may be served")
+    assert_equal(
+        edited.code,
+        1,
+        (
+            "the reader asserts on the value its neighbour exports, so the"
+            " edit must fail the run; a green run here is the stale binary"
+        ),
     )
 
 

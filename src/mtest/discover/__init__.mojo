@@ -19,4 +19,4 @@ from mtest.discover.discover import discover
 from mtest.discover.fnmatch import fnmatch
 from mtest.discover.normalize import normalize_operand, normalize_root
 from mtest.discover.result import DiscoveryResult, ExcludedEntry
-from mtest.discover.walk import walk_dir
+from mtest.discover.walk import is_discovered_test_name, walk_dir

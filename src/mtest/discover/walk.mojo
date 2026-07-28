@@ -28,6 +28,34 @@ comptime _TEST_GLOB = "test_*.mojo"
 """The directory-walk pattern, matched against each file's basename."""
 
 
+def is_discovered_test_name(name: String) -> Bool:
+    """Whether a directory walk would collect a file with this basename.
+
+    The one place the pattern is applied, so every caller means the same thing
+    by "a test file". `walk_dir` asks it of each entry it meets; the build cache
+    asks it of a test file's siblings to tell an independent entry point — one
+    that already carries its own key — from a shared helper that belongs in its
+    neighbours' keys. Those two answers must never drift apart, which is why the
+    pattern is not spelled a second time anywhere.
+
+    Args:
+        name: One directory entry's bare name, with no directory part.
+
+    Returns:
+        True iff a directory walk would collect a file of that name.
+
+    Examples:
+
+    ```mojo
+    from mtest.discover import is_discovered_test_name
+
+    print(is_discovered_test_name("test_addition.mojo"))  # True
+    print(is_discovered_test_name("helpers.mojo"))  # False
+    ```
+    """
+    return fnmatch(name, _TEST_GLOB)
+
+
 @fieldwise_init
 struct WalkResult(Copyable, Movable):
     """The files a walk found, plus the links it could not use.
@@ -80,9 +108,9 @@ def walk_dir(abs_dir: String, rel_prefix: String) raises -> WalkResult:
                 skipped.append(rel^)
             elif isfile(full):
                 # One entry, no cycle possible: an ordinary test file.
-                if fnmatch(name, _TEST_GLOB):
+                if is_discovered_test_name(name):
                     out.append(rel^)
-            elif fnmatch(name, _TEST_GLOB):
+            elif is_discovered_test_name(name):
                 # Dangling, and named like a test the user expects to run.
                 skipped.append(rel^)
             continue
@@ -93,6 +121,6 @@ def walk_dir(abs_dir: String, rel_prefix: String) raises -> WalkResult:
             for s in sub.skipped_links:
                 skipped.append(s)
         elif isfile(full):
-            if fnmatch(name, _TEST_GLOB):
+            if is_discovered_test_name(name):
                 out.append(rel^)
     return WalkResult(out^, skipped^)

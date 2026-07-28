@@ -894,6 +894,10 @@ bytes the compiler produces:
   `*.mojopkg`, and `*.mojoc` an `-I` makes visible, recursing into
   subdirectories that carry an `__init__`, and nothing else, so a README or a
   lockfile changing under an include root does not evict anything;
+- the walked contents of the directory the test file sits in, by those same
+  rules — the compiler resolves a bare `from helper import ...` against the
+  source file's own directory, with no `-I` involved, so a helper beside a test
+  is a build input nothing else in this list covers;
 - the test file itself.
 
 Files enter the key by **content**, never by modification time, so a `touch`, a
@@ -904,8 +908,16 @@ invalidate anything. The invocation root is in the key, though, so moving or
 renaming the checkout invalidates everything in it.
 
 There is no import-graph analysis. One edit under an `-I` root invalidates every
-file keyed over that root, which over-rebuilds on purpose: the alternative is
-guessing which files an edit reached, and a wrong guess there is a stale binary.
+file keyed over that root, and one edit beside a test file invalidates every test
+in that directory; both over-rebuild on purpose, since the alternative is
+guessing which files an edit reached and a wrong guess there is a stale binary.
+
+The test files in that directory are the one thing left out of it. Each is an
+entry point keyed on its own, so editing one leaves its neighbours cached and an
+ordinary edit-and-rerun loop rebuilds one file rather than a directory. mtest
+does not assume that is safe: it reads each file's imports, and a file that
+imports a neighbouring test file — or one whose imports it cannot read — keys
+over the whole directory like everything else.
 
 Configured `precompile` steps are keyed separately, against their own sources
 and include roots, so an unchanged step is skipped rather than re-run. A step
@@ -1309,10 +1321,12 @@ Facts about this build worth knowing before you rely on it:
   but its layout and its `# (source)` comments are informal and may change; a
   machine-readable configuration format is reserved, not shipped.
 - **The build cache has no import graph, and no reach past this checkout.** One
-  edit under an `-I` root invalidates every file keyed over that root, so a
-  one-line change to a shared library rebuilds the whole selection — deliberate
-  over-rebuilding, since the alternative is guessing which files an edit
-  reached. The store is per-checkout: there is no spelling that moves it
+  edit under an `-I` root invalidates every file keyed over that root, and one
+  edit beside a test file invalidates every test in that directory, so a
+  one-line change to a shared library or a shared helper rebuilds the whole
+  selection — deliberate over-rebuilding, since the alternative is guessing
+  which files an edit reached. The store is per-checkout: there is no spelling
+  that moves it
   elsewhere, and it is never shared between machines or between two clones on
   one machine. Anything it cannot characterize turns it off for the session
   rather than guessing. [Build cache](#build-cache) has the whole picture.

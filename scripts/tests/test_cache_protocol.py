@@ -86,6 +86,36 @@ def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
 """
 
+HELPER_SOURCE = """\
+def helper_value() -> Int:
+    return {value}
+"""
+"""A module sitting BESIDE the test files, imported by bare name.
+
+No `-I` reaches it: the compiler resolves a bare import against the source
+file's own directory, which is the ordinary way neighbouring suites share
+fixtures and a search path the key has to cover on its own.
+"""
+
+READS_HELPER_SOURCE = """\
+from helper import helper_value
+from std.testing import assert_equal, TestSuite
+
+
+def test_reads_helper() raises:
+    assert_equal(helper_value(), 7)
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()
+"""
+"""A suite whose verdict is decided by the helper next to it.
+
+The assertion is what makes a stale hit visible: a suite that merely imported
+the helper would pass either way, so the edit has to be able to flip the exit
+code.
+"""
+
 STATELESS_CONFIG = "[run]\nstate = false\n"
 """A project file that turns last-run persistence off.
 
@@ -726,6 +756,74 @@ class IncludeRootTests(ProtocolScenario):
         # that it is mtest's — otherwise `--cache-clear` would refuse to delete
         # a tree this same run had just made.
         self.assertTrue((self.root / TAG_REL).is_file(), msg="marker missing")
+
+
+class SiblingSearchPathTests(ProtocolScenario):
+    """The test file's own directory is a search path, so its contents are
+    inputs.
+
+    `mojo build tests/test_x.mojo` resolves a bare `from helper import ...`
+    against `tests/`, with no `-I` involved and nothing reported afterwards
+    about what it read. A key blind to that directory serves a binary compiled
+    against the previous helper, and the run goes green over source that now
+    fails — the only failure shape a build cache must never have.
+    """
+
+    def test_editing_a_helper_beside_the_test_rebuilds_and_reverses(self) -> None:
+        tests = self.root / "tests"
+        (tests / "helper.mojo").write_text(
+            HELPER_SOURCE.format(value=7), encoding="utf-8"
+        )
+        (tests / "test_reader.mojo").write_text(READS_HELPER_SOURCE, encoding="utf-8")
+
+        self.run_ok(["--json", "cold.ndjson", "tests"])
+        self.assertEqual(counters(self.root / "cold.ndjson"), (2, 0))
+        self.run_ok(["--json", "warm.ndjson", "tests"])
+        self.assertEqual(counters(self.root / "warm.ndjson"), (0, 2))
+
+        (tests / "helper.mojo").write_text(
+            HELPER_SOURCE.format(value=999), encoding="utf-8"
+        )
+        edited = run_mtest(self.root, ["--json", "edited.ndjson", "tests"])
+
+        # Both files rebuild, and deliberately so: the helper is reachable from
+        # every test in the directory and `mojo build` reports no dependency
+        # information, so mtest cannot know which of them actually read it.
+        self.assertEqual(counters(self.root / "edited.ndjson"), (2, 0))
+        # The verdict is the point. Exit 1 means the binary that ran was built
+        # from the helper on disk; exit 0 would mean a green run over source
+        # that fails.
+        self.assertEqual(
+            edited.returncode,
+            1,
+            msg=f"stdout={edited.stdout!r} stderr={edited.stderr!r}",
+        )
+
+    def test_editing_one_test_file_leaves_its_neighbour_cached(self) -> None:
+        tests = self.root / "tests"
+        # A helper makes the directory walk non-empty, so a pass here means the
+        # test files really were left out of it rather than there being nothing
+        # to leave out.
+        (tests / "helper.mojo").write_text(
+            HELPER_SOURCE.format(value=7), encoding="utf-8"
+        )
+        (tests / "test_beta.mojo").write_text(
+            TEST_SOURCE.format(name="beta"), encoding="utf-8"
+        )
+
+        self.run_ok(["--json", "cold.ndjson", "tests"])
+        self.assertEqual(counters(self.root / "cold.ndjson"), (2, 0))
+
+        (tests / "test_alpha.mojo").write_text(
+            TEST_SOURCE.format(name="alpha_renamed"), encoding="utf-8"
+        )
+        self.run_ok(["--json", "edited.ndjson", "tests"])
+
+        # A test file beside another is an entry point of its own, already keyed
+        # by its own source frame. Folding neighbours into each other would make
+        # every one-line edit rebuild the whole directory, which is the cost
+        # that would leave the cache with nothing to offer.
+        self.assertEqual(counters(self.root / "edited.ndjson"), (1, 1))
 
 
 @unittest.skipUnless(

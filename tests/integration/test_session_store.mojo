@@ -11,7 +11,7 @@ from std.testing import (
     assert_true,
 )
 
-from mtest.cache import KeyBuilder
+from mtest.cache import ImportScan, KeyBuilder, scan_imports
 from mtest.config import Precompile, RunnerConfig
 from mtest.exec import ExecRuntime, ProcessResult, ProcessSpec, run_supervised
 from mtest.platform import (
@@ -1257,6 +1257,212 @@ def test_file_key_tracks_the_source_and_misses_a_vanished_one() raises:
     # a per-file miss and switches the cache off.
     var ctx = CacheContext()
     assert_false(Bool(file_key(ctx, root, "tests/absent.mojo")))
+
+
+def _keyed(root: String, rel: String) raises -> String:
+    """The full key one file gets under a fresh context.
+
+    A fresh context per call is the point: the per-directory walk is memoized,
+    so reusing one would answer the second call from the first call's reading of
+    a directory that has since changed.
+
+    Args:
+        root: The invocation root.
+        rel: The test file's root-relative path.
+
+    Returns:
+        The 64-hex key.
+
+    Raises:
+        Error: If the file could not be keyed at all.
+    """
+    var ctx = CacheContext()
+    var key = file_key(ctx, root, rel)
+    if not key:
+        raise Error("test: file_key failed for '" + rel + "'")
+    return String(key.value().digest_full)
+
+
+def test_file_key_covers_a_helper_beside_the_source() raises:
+    """A module in the source's own directory is a build input, and is keyed.
+
+    `mojo build tests/test_x.mojo` resolves a bare `from helper import ...` out
+    of `tests/`, with no `-I` involved. A key blind to that directory serves a
+    binary compiled against the previous helper.
+    """
+    var root = temp_root()
+    write_file(root, "tests/helper.mojo", "# helper v1\n")
+    write_file(root, "tests/test_x.mojo", SRC_PASS)
+    var before = _keyed(root, "tests/test_x.mojo")
+    write_file(root, "tests/helper.mojo", "# helper v2\n")
+    assert_not_equal(
+        before,
+        _keyed(root, "tests/test_x.mojo"),
+        "the helper the compiler can reach changed, so the key must move",
+    )
+
+
+def test_file_key_ignores_a_test_sibling_nothing_imports() raises:
+    """A discovered test file beside the source is left out of its key.
+
+    Each such file is an entry point already keyed by its own source frame, so
+    folding it into its neighbours would make one edit rebuild the whole
+    directory — the cost that would make the cache worthless for the
+    edit-one-file loop it exists to speed up.
+    """
+    var root = temp_root()
+    write_file(root, "tests/helper.mojo", "# helper\n")
+    write_file(root, "tests/test_x.mojo", SRC_PASS)
+    write_file(root, "tests/test_y.mojo", SRC_PASS)
+    var before = _keyed(root, "tests/test_x.mojo")
+    write_file(root, "tests/test_y.mojo", "# a different suite entirely\n")
+    assert_equal(
+        before,
+        _keyed(root, "tests/test_x.mojo"),
+        "a neighbour nothing imports cannot change this file's build",
+    )
+
+
+def test_file_key_covers_a_test_sibling_the_source_imports() raises:
+    """Omitting test siblings is abandoned for a source that imports one."""
+    var root = temp_root()
+    write_file(root, "tests/test_y.mojo", "# neighbour v1\n")
+    write_file(root, "tests/test_x.mojo", "from test_y import thing\n")
+    var before = _keyed(root, "tests/test_x.mojo")
+    write_file(root, "tests/test_y.mojo", "# neighbour v2\n")
+    assert_not_equal(
+        before,
+        _keyed(root, "tests/test_x.mojo"),
+        "the source imports the neighbour, so the neighbour is an input",
+    )
+
+
+def test_file_key_covers_a_test_sibling_a_helper_imports() raises:
+    """The same proof runs one hop out, over the helpers the walk does frame.
+
+    A helper that imports a test file puts that file back on the compiler's
+    path for everything importing the helper, so the omission is unsafe for the
+    whole directory even though no test file names the neighbour itself.
+    """
+    var root = temp_root()
+    write_file(root, "tests/test_y.mojo", "# neighbour v1\n")
+    write_file(root, "tests/helper.mojo", "from test_y import thing\n")
+    write_file(root, "tests/test_x.mojo", SRC_PASS)
+    var before = _keyed(root, "tests/test_x.mojo")
+    write_file(root, "tests/test_y.mojo", "# neighbour v2\n")
+    assert_not_equal(
+        before,
+        _keyed(root, "tests/test_x.mojo"),
+        "a helper reaches the neighbour, so the neighbour is an input here too",
+    )
+
+
+def test_file_key_covers_the_directory_when_a_source_cannot_be_scanned() raises:
+    """A file whose imports cannot be read proves nothing, so nothing is
+    omitted.
+
+    The embedded NUL is the plainest case: those bytes are not source text, so
+    the scanner refuses to say what they import rather than reporting that they
+    import nothing. Refusing has to cost a wider key, never a narrower one.
+    """
+    var root = temp_root()
+    write_file(root, "tests/test_y.mojo", "# neighbour v1\n")
+    write_bytes(
+        root,
+        "tests/helper.mojo",
+        [UInt8(35), UInt8(0), UInt8(35), UInt8(10)],
+    )
+    write_file(root, "tests/test_x.mojo", SRC_PASS)
+    var before = _keyed(root, "tests/test_x.mojo")
+    write_file(root, "tests/test_y.mojo", "# neighbour v2\n")
+    assert_not_equal(
+        before,
+        _keyed(root, "tests/test_x.mojo"),
+        "an unscannable helper cannot license leaving the neighbour out",
+    )
+
+
+def test_a_test_directory_that_cannot_be_walked_disables_the_cache() raises:
+    """A directory the walk cannot characterize takes the cache off with it.
+
+    Same posture as an include root behind a symlinked package: the directory is
+    a search path, its contents are build inputs, and a key that cannot cover
+    them must not be written. The reason names the directory so the message is
+    something to act on rather than a bare refusal.
+    """
+    var root = temp_root()
+    write_file(root, "elsewhere/__init__.mojo", "# a package\n")
+    write_file(root, "tests/test_x.mojo", SRC_PASS)
+    symlink(root + "/elsewhere", root + "/tests/pkg")
+    var ctx = CacheContext()
+    assert_false(
+        Bool(file_key(ctx, root, "tests/test_x.mojo")),
+        "an uncharacterizable directory has no key",
+    )
+    assert_false(ctx.enabled, "and it must switch the cache off")
+    assert_true(
+        "test directory 'tests'" in ctx.disable_reason,
+        "the reason must name the directory: " + ctx.disable_reason,
+    )
+    assert_true(
+        "directory symlink" in ctx.disable_reason,
+        "and what about it could not be walked: " + ctx.disable_reason,
+    )
+
+
+def _scanned(text: String) -> ImportScan:
+    """Scan a source given as text.
+
+    Args:
+        text: The source.
+
+    Returns:
+        The scan of its bytes.
+    """
+    var data = List[UInt8]()
+    for b in text.as_bytes():
+        data.append(b)
+    return scan_imports(data)
+
+
+def test_import_scanning_reads_the_forms_a_key_depends_on() raises:
+    """The shapes the scanner understands, and the ones it refuses to guess at.
+
+    Every refusal costs a wider key and never a narrower one, so this pins the
+    direction as much as the cases: `parsed` False must never be reachable by
+    something that would let a build input out of the key.
+    """
+    var plain = _scanned("from helper import value\n")
+    assert_true(plain.parsed)
+    assert_equal(len(plain.modules), 1)
+    assert_equal(plain.modules[0], "helper")
+
+    var dotted = _scanned("import pkg.mod as m, other\n")
+    assert_true(dotted.parsed)
+    assert_equal(len(dotted.modules), 2)
+    assert_equal(dotted.modules[0], "pkg")
+    assert_equal(dotted.modules[1], "other")
+
+    # A docstring and a comment are erased before the line is read, so prose
+    # about importing is not an import — nor a reason to refuse.
+    var prose = _scanned(
+        '"""One layer never imports another.\nAnd from a to b."""\n'
+        "# from x import y\n"
+        "from real import thing\n"
+    )
+    assert_true(prose.parsed)
+    assert_equal(len(prose.modules), 1)
+    assert_equal(prose.modules[0], "real")
+
+    # An import hiding after a statement separator: understood well enough to
+    # know it is there, not well enough to say what it names.
+    assert_false(_scanned("x = 1; import y\n").parsed)
+    # A form this scanner does not model.
+    assert_false(_scanned("from . import sibling\n").parsed)
+    # A statement continued onto the next line.
+    assert_false(_scanned("import a, \\\n    b\n").parsed)
+    # A literal left open, so the file does not lex at all.
+    assert_false(_scanned('var s = "open\n').parsed)
 
 
 def test_remove_tree_no_follow_refuses_a_symlinked_root() raises:

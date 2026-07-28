@@ -297,13 +297,22 @@ for one key are not an error: the loser adopts the winner's artifact.
 The key is derived from the compile inputs, never from configuration text. It
 covers the resolved compiler and its standard library, `MODULAR_HOME` and
 `MODULAR_CACHE_DIR`, the physical invocation root, the build arguments, every
-file named by a build argument, the walked contents of every `-I` root, and the
-test file itself — by CONTENT, so a modification time that moves without the
-bytes changing rebuilds nothing. Settings that cannot change a compiled byte
-(timeouts, workers, retries, selection, reporters, and the rest of §25) are
-absent from it and never invalidate anything. There is no import-graph analysis:
-one change under an `-I` root invalidates every file keyed over that root, which
-over-rebuilds deliberately.
+file named by a build argument, the walked contents of every `-I` root, the
+walked contents of the directory the test file sits in, and the test file itself
+— by CONTENT, so a modification time that moves without the bytes changing
+rebuilds nothing. That directory is in the key because the compiler resolves a
+bare `from helper import ...` against the source file's own directory, with no
+`-I` involved: a helper beside a test is a build input nothing else covers.
+Settings that cannot change a compiled byte (timeouts, workers, retries,
+selection, reporters, and the rest of §25) are absent from it and never
+invalidate anything. There is no import-graph analysis: one change under an `-I`
+root invalidates every file keyed over that root, and one change beside a test
+file invalidates every test in that directory, both of which over-rebuild
+deliberately. The test files mtest would discover in that directory are the one
+exception, because each is an entry point keyed on its own and folding them
+together would rebuild a whole directory for every one-line edit; a file that
+imports one of them, or whose imports cannot be read, keys over the whole
+directory instead.
 
 A hit re-verifies the stored binary before running it — against the digest
 recorded with it, and as something this process can actually execute, since a

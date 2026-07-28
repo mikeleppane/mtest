@@ -53,8 +53,14 @@ binary is served. The complete namespace is the `TAG_*` block below, and
 `cache_key_tags` returns exactly it: anyone adding a tag adds it in that one
 place, and `test_tag_namespace_is_frame_safe` re-checks the whole set.
 
-**The store protocol.** `file_key` forks `prefix` and appends one `source`
-frame, which names the generation `<mangled>_h<digest32>` under `STORE_DIR`.
+**The store protocol.** `file_key` forks `prefix` and appends the test file's
+own frames — a walk of the directory it sits in, then the file itself — which
+name the generation `<mangled>_h<digest32>` under `STORE_DIR`. The directory is
+there because the compiler resolves a bare import against the source file's own
+directory, so a helper beside a test is a build input no `-I` frame covers; the
+walk is memoized per directory, so a suite sharing one directory pays for it
+once, and it omits the directory's own test files so that editing one test does
+not rebuild its neighbours.
 `store_build_target` claims a private staging directory the compiler writes its
 `-o` straight into, so publication is one `rename(2)` of a directory rather than
 a copy — there is no half-published generation for a reader to observe, and the
@@ -111,9 +117,11 @@ from mtest.cache import (
     MetaFile,
     classify_build_args,
     generation_name,
+    scan_imports,
     sha256_hex,
 )
 from mtest.config import RunnerConfig
+from mtest.discover import is_discovered_test_name
 from mtest.exec import ExecRuntime, ProcessResult, ProcessSpec, run_supervised
 from mtest.platform import (
     close_checked_fd,
@@ -193,9 +201,22 @@ Its path is relative to the walked root, so the same tree keys alike wherever
 it is checked out."""
 
 comptime TAG_SOURCE = "source"
-"""The test file being keyed, as a file frame (adds `.size` and `.sha`). The one
-frame `file_key` appends to the shared prefix, and therefore the only thing that
-distinguishes two files of one session."""
+"""The test file being keyed, as a file frame (adds `.size` and `.sha`). What
+distinguishes two files of one session that sit in the same directory."""
+
+comptime TAG_SOURCE_DIR = "source-dir"
+"""The directory the test file lives in, named relative to the invocation root.
+
+The compiler resolves a bare `from helper import ...` against the SOURCE FILE'S
+OWN DIRECTORY, with no `-I` involved, so that directory is a search path of
+every build and what sits in it is a build input."""
+
+comptime TAG_SOURCE_DIR_WALK = "source-dir-walk"
+"""The digest of that directory's walk, folded in whole.
+
+One frame rather than a `walkfile` frame per entry, because the walk is shared
+by every test file in the directory and is therefore performed once for all of
+them; its own digest is what gets forked into each file's key."""
 
 comptime TAG_PRECOMPILE_STEP = "precompile-step"
 """One configured precompile step's source, named as configured, before its
@@ -272,6 +293,8 @@ def cache_key_tags() -> List[String]:
         String(TAG_INCLUDE),
         String(TAG_WALK_FILE),
         String(TAG_SOURCE),
+        String(TAG_SOURCE_DIR),
+        String(TAG_SOURCE_DIR_WALK),
         String(TAG_PRECOMPILE_STEP),
         String(TAG_PRECOMPILE_OUT),
         String(TAG_PRECOMPILE_SRC),
@@ -427,6 +450,96 @@ def _is_source_name(name: String) -> Bool:
     return name.endswith(".mojopkg") or name.endswith(".mojoc")
 
 
+def _is_scannable_name(name: String) -> Bool:
+    """Whether `name` is Mojo source text whose imports can be read.
+
+    Args:
+        name: One directory entry's bare name.
+
+    Returns:
+        True for `*.mojo` and `*.🔥`. A `*.mojopkg` or `*.mojoc` is excluded and
+        needs no scan: its imports were bound when it was compiled and cannot
+        late-resolve to a source file sitting beside a test.
+    """
+    return name.endswith(".mojo") or name.endswith(".🔥")
+
+
+def _module_name(name: String) -> String:
+    """The name a source file in the search path is imported by.
+
+    Args:
+        name: One directory entry's bare name.
+
+    Returns:
+        The name with its final extension removed, which is the spelling a bare
+        `import` uses. A name with no extension comes back unchanged.
+    """
+    var bytes = name.as_bytes()
+    var cut = len(bytes)
+    for i in range(len(bytes)):
+        if bytes[i] == UInt8(ord(".")):
+            cut = i
+    var out = List[UInt8]()
+    for i in range(cut):
+        out.append(bytes[i])
+    return String(StringSlice(unsafe_from_utf8=Span(out)))
+
+
+def _names_contain(names: List[String], needle: String) -> Bool:
+    """Whether `needle` equals any element of `names`.
+
+    Args:
+        names: The names to search, a handful at most.
+        needle: The name to look for.
+
+    Returns:
+        True iff some element compares equal.
+    """
+    for name in names:
+        if name == needle:
+            return True
+    return False
+
+
+@fieldwise_init
+struct _SourceDirScan(Copyable, Movable):
+    """What a test file's own directory walk omits, and whether it may.
+
+    The compiler resolves a bare import against the source file's own directory,
+    so that directory is a search path of every build and its contents are build
+    inputs. Walking it whole would be correct and useless: every test file in it
+    is a search-path entry too, so one edit would move every neighbour's key and
+    the single-file edit-and-rerun loop would rebuild the whole directory.
+
+    So the walk omits exactly the entries mtest would DISCOVER as test files.
+    Each of those is an independent entry point already keyed by its own source
+    frame, and the omission is safe precisely while nothing in the directory
+    imports one of them. That is proved rather than assumed: every source the
+    walk frames is scanned for its imports, and one naming an omitted entry —
+    or one that cannot be scanned at all — sets `needs_full`, which sends the
+    whole directory back to an unomitted walk.
+    """
+
+    var active: Bool
+    """Whether this is a test file's own directory rather than an `-I` root."""
+
+    var skip_modules: List[String]
+    """Module names of the discovered test files this walk omits."""
+
+    var needs_full: Bool
+    """True once a framed source imports an omitted name or could not be read
+    for its imports; the omission is then unsafe for every file here."""
+
+    @staticmethod
+    def inert() -> _SourceDirScan:
+        """A scan that omits nothing and learns nothing: the `-I` walk's shape.
+
+        Returns:
+            An inactive scan.
+        """
+        return _SourceDirScan(False, List[String](), False)
+
+
 @fieldwise_init
 struct WalkOutcome(Copyable, Movable):
     """Whether an include walk covered its root, and if not, why not.
@@ -528,6 +641,8 @@ def _walk_into(
     var names: List[String],
     mut kb: KeyBuilder,
     exclude_abs: String,
+    mut scan: _SourceDirScan,
+    at_top: Bool,
 ) -> WalkOutcome:
     """Feed one directory's contributions, recursing into package subdirectories.
 
@@ -541,6 +656,12 @@ def _walk_into(
             listing it twice would invite a mid-walk race between the two.
         kb: The builder to feed.
         exclude_abs: One absolute path to skip wherever met, or empty for none.
+        scan: Inert for an `-I` root. Active for a test file's own directory,
+            where it omits the discovered test files and records whether that
+            omission turned out to be safe.
+        at_top: Whether this is the walked root itself rather than a package
+            inside it. Only the root's own entries are omitted: a bare import
+            resolves against the directory, not into the packages under it.
 
     Returns:
         A successful outcome once every reachable input is framed, or a failure
@@ -606,12 +727,19 @@ def _walk_into(
                     + "' is reached through a directory symlink, which the"
                     " cache cannot walk safely"
                 )
-            var inner = _walk_into(full, rel, sub^, kb, exclude_abs)
+            var inner = _walk_into(
+                full, rel, sub^, kb, exclude_abs, scan, False
+            )
             if not inner.ok:
                 return inner^
             continue
 
         if not _is_source_name(name):
+            continue
+        if scan.active and at_top and is_discovered_test_name(name):
+            # An entry point of its own, already keyed by its own source frame.
+            # Framing it here as well would make editing any one file in a
+            # directory rebuild every test that lives beside it.
             continue
         var data: List[UInt8]
         try:
@@ -622,6 +750,20 @@ def _walk_into(
             # fails and the cache goes off rather than keying on a guess.
             return WalkOutcome.failure("cannot read the file '" + rel + "'")
         kb.feed_file(TAG_WALK_FILE, rel, len(data), sha256_hex(data))
+        if scan.active and not scan.needs_full and _is_scannable_name(name):
+            # The bytes are already in hand, so proving the omission safe costs
+            # no read. A helper that imports an omitted test file puts that file
+            # back in the compiler's path one hop out, and a file whose imports
+            # cannot be read proves nothing at all; either way the omission is
+            # abandoned for this whole directory.
+            var found = scan_imports(data)
+            if not found.parsed:
+                scan.needs_full = True
+            else:
+                for module in found.modules:
+                    if _names_contain(scan.skip_modules, module):
+                        scan.needs_full = True
+                        break
     return WalkOutcome.success()
 
 
@@ -678,7 +820,79 @@ def walk_include_root(
     if not listing:
         return WalkOutcome.failure("'" + dir + "' is not a readable directory")
     var exclude_abs = String("") if exclude == "" else _absolute(root, exclude)
-    return _walk_into(abs_dir, "", listing.value().copy(), kb, exclude_abs)
+    var scan = _SourceDirScan.inert()
+    return _walk_into(
+        abs_dir, "", listing.value().copy(), kb, exclude_abs, scan, True
+    )
+
+
+def _walk_source_dir(
+    root: String, dir: String, mut kb: KeyBuilder, mut scan: _SourceDirScan
+) -> WalkOutcome:
+    """Feed a test file's own directory, omitting the test files in it.
+
+    The same walk `walk_include_root` performs, with one difference: the entries
+    mtest would discover as test files are left out of the top level, and every
+    source that IS framed is scanned to prove leaving them out was safe. See
+    `_SourceDirScan` for why both halves are needed.
+
+    Args:
+        root: The invocation root `dir` resolves against.
+        dir: The directory, relative to `root`; `.` names the root itself.
+        kb: The builder to feed.
+        scan: Overwritten with this directory's omissions and the verdict on
+            them. Meaningful only when the walk succeeds.
+
+    Returns:
+        The same outcomes `walk_include_root` returns, for the same reasons.
+        Never raises.
+    """
+    var abs_dir = _absolute(root, dir)
+    var listing = _list_sorted(abs_dir)
+    if not listing:
+        return WalkOutcome.failure("'" + dir + "' is not a readable directory")
+    var names = listing.value().copy()
+    scan.active = True
+    scan.needs_full = False
+    scan.skip_modules = List[String]()
+    for entry in names:
+        var name = String(entry)
+        if name.startswith("."):
+            continue
+        if _is_source_name(name) and is_discovered_test_name(name):
+            scan.skip_modules.append(_module_name(name))
+    return _walk_into(abs_dir, "", names^, kb, String(""), scan, True)
+
+
+@fieldwise_init
+struct _SourceDirMemo(Copyable, Movable):
+    """One test-file directory's walk, computed once and reused by every file
+    in it.
+
+    Both walk variants live here side by side rather than one replacing the
+    other, because a single directory can need both: a file that imports an
+    omitted neighbour keys over the whole directory while its neighbours keep
+    the precise key. Conflating them would silently promote every file in the
+    directory to the conservative key the moment one file needed it.
+    """
+
+    var dir: String
+    """The directory, relative to the invocation root."""
+
+    var digest: String
+    """The walk that omits the directory's discovered test files."""
+
+    var full_digest: String
+    """The walk that omits nothing, empty until some file in the directory needs
+    it. Computed on demand: most directories never do."""
+
+    var skip_modules: List[String]
+    """Module names the omitting walk left out, for matching against a file's
+    own imports."""
+
+    var needs_full: Bool
+    """True when something the omitting walk framed makes the omission unsafe
+    for every file here, so `digest` must not be used at all."""
 
 
 struct CacheContext(Movable):
@@ -723,6 +937,13 @@ struct CacheContext(Movable):
     command-line order, walked by `finalize_includes` after the configured
     roots."""
 
+    var source_dirs: List[_SourceDirMemo]
+    """Test-file directories already walked this session, in first-use order.
+
+    A list rather than a map: a session sees a handful of distinct directories,
+    so a linear scan costs less than a hash and keeps the memo inspectable.
+    """
+
     var built_files: Int
     """First-attempt compile admissions, compile failures included."""
 
@@ -737,6 +958,7 @@ struct CacheContext(Movable):
         self.base = KeyBuilder()
         self.prefix = KeyBuilder()
         self.extra_walk_dirs = List[String]()
+        self.source_dirs = List[_SourceDirMemo]()
         self.built_files = 0
         self.cached_files = 0
 
@@ -1701,8 +1923,8 @@ struct FileKey(Copyable, Movable):
     """Everything the store needs to name, validate, and publish one file's
     build.
 
-    Built by `file_key` from the session prefix plus the source's own frame, so
-    two files of one session differ by exactly one frame and two sessions over
+    Built by `file_key` from the session prefix plus the source's own frames, so
+    two files of one session differ by those frames alone and two sessions over
     changed inputs differ by the prefix.
     """
 
@@ -1737,25 +1959,142 @@ struct FileKey(Copyable, Movable):
     reference: a build whose source moved underneath it must never publish."""
 
 
-def file_key(ctx: CacheContext, root: String, rel: String) -> Optional[FileKey]:
+def _source_dir(rel: String) -> String:
+    """The directory the compiler resolves `rel`'s bare imports against.
+
+    Args:
+        rel: A test file's root-relative path.
+
+    Returns:
+        The path's directory relative to the invocation root, or `.` for a file
+        sitting at the root itself — the spelling the walk wants, since `.`
+        names the root the same way `tests` names a subdirectory.
+    """
+    var dir = dirname(rel)
+    return String(".") if dir == "" else dir^
+
+
+def _source_dir_entry(mut ctx: CacheContext, root: String, dir: String) -> Int:
+    """Walk `dir` once per session and remember the result.
+
+    Every test file in one directory shares that walk, so a suite of forty files
+    in one directory reads the directory's sources once rather than forty times.
+
+    Args:
+        ctx: The session context. The memo lands in it, and it is DISABLED when
+            the directory cannot be characterized.
+        root: The invocation root `dir` resolves against.
+        dir: The directory, relative to `root`.
+
+    Returns:
+        The memo's index in `ctx.source_dirs`, or `-1` when the directory could
+        not be walked — in which case the cache is already off, carrying the
+        walk's own words about which link or file to fix. Never raises.
+    """
+    for i in range(len(ctx.source_dirs)):
+        if ctx.source_dirs[i].dir == dir:
+            return i
+    var kb = KeyBuilder()
+    var scan = _SourceDirScan.inert()
+    var outcome = _walk_source_dir(root, dir, kb, scan)
+    if not outcome.ok:
+        ctx.disable("test directory '" + dir + "': " + outcome.reason)
+        return -1
+    ctx.source_dirs.append(
+        _SourceDirMemo(
+            String(dir),
+            kb^.digest_full(),
+            String(""),
+            scan.skip_modules.copy(),
+            scan.needs_full,
+        )
+    )
+    return len(ctx.source_dirs) - 1
+
+
+def _source_dir_full_digest(
+    mut ctx: CacheContext, root: String, index: Int
+) -> Optional[String]:
+    """The unomitted walk of a memoized directory, computed at most once.
+
+    Args:
+        ctx: The session context; the answer is memoized into it, and it is
+            DISABLED when the walk fails.
+        root: The invocation root the directory resolves against.
+        index: The memo's index in `ctx.source_dirs`.
+
+    Returns:
+        The digest of the directory walked with nothing left out, or `None` when
+        that walk failed — the omitting walk skipped exactly the files this one
+        reads, so it can fail where the first succeeded. Never raises.
+    """
+    if ctx.source_dirs[index].full_digest != "":
+        return Optional(String(ctx.source_dirs[index].full_digest))
+    var dir = String(ctx.source_dirs[index].dir)
+    var kb = KeyBuilder()
+    var outcome = walk_include_root(root, dir, kb, "")
+    if not outcome.ok:
+        ctx.disable("test directory '" + dir + "': " + outcome.reason)
+        return None
+    var digest = kb^.digest_full()
+    ctx.source_dirs[index].full_digest = String(digest)
+    return Optional(digest^)
+
+
+def file_key(
+    mut ctx: CacheContext, root: String, rel: String
+) -> Optional[FileKey]:
     """Fork the session prefix and key one test file.
 
     The prefix already covers the toolchain, the environment, the root, the
-    build arguments, and every include root's contents; this appends the one
-    frame that distinguishes this file from its neighbours. Forking rather than
+    build arguments, and every include root's contents; this appends the frames
+    that distinguish this file from its neighbours. Forking rather than
     rebuilding is why `KeyBuilder` is copyable: the shared prefix is absorbed
     once per session, not once per file.
 
+    Those frames are the file's own bytes AND a walk of the directory it sits
+    in. The directory is not an accident of layout: the compiler resolves a bare
+    `from helper import ...` against the source file's own directory, with no
+    `-I` involved and nothing reported afterwards about what it read, so a
+    helper beside a test is as much a build input as a file under an include
+    root. Keying only the test file served a binary compiled against the
+    previous helper and reported a green run over source that had changed.
+
+    The directory walk leaves out the entries mtest would DISCOVER as test
+    files, because each is an independent entry point already carrying its own
+    source frame; folding them in would make one edit rebuild every test in the
+    directory. That omission is proved safe per file rather than assumed: this
+    file's imports are read, and a file naming an omitted neighbour — or one
+    whose imports cannot be read at all — keys over the whole directory instead.
+    `_SourceDirScan` runs the matching proof over the files the walk frames, so
+    a helper that imports a test file closes the same hole one hop out.
+
+    What the proof covers is one directory: this file, the sources beside it,
+    and the packages under them. A module reached through an `-I` root is not
+    scanned, so a library that bare-imports a name which happens to match a test
+    file in the entry file's directory is outside it — the `-I` walk already
+    frames that library, but not the test file it would pull in.
+
+    A directory that is ALSO an `-I` root has its contents framed twice, once
+    per search path it occupies. That is harmless duplication rather than a case
+    to special-case away: a key with one frame too many only ever costs a
+    rebuild.
+
     Args:
-        ctx: The finalized session context; only `prefix` is read.
+        ctx: The finalized session context. `prefix` is read, each directory's
+            walk is memoized into it, and it is disabled if a directory cannot
+            be characterized.
         root: The invocation root `rel` resolves against.
         rel: The test file's root-relative path.
 
     Returns:
-        The key, or `None` when the source could not be read at all. `None` is
-        the caller's cue to treat the file as a per-file miss AND to disable the
-        cache: a source that will not read is about to fail the build anyway,
-        and a key that cannot cover its own source must not be written.
+        The key, or `None` when the source could not be read at all or its
+        directory could not be walked. `None` is the caller's cue to treat the
+        file as a per-file miss AND to disable the cache: a source that will not
+        read is about to fail the build anyway, and a key that cannot cover its
+        own inputs must not be written. A failed walk has already disabled the
+        cache with a reason naming the directory, and `disable` keeps the first
+        reason, so the caller's own generic message cannot bury it.
 
     Examples:
 
@@ -1772,8 +2111,32 @@ def file_key(ctx: CacheContext, root: String, rel: String) -> Optional[FileKey]:
         data = read_regular_file_bytes(_absolute(root, rel), _WALK_FILE_CAP)
     except:
         return None
+    var dir = _source_dir(rel)
+    var index = _source_dir_entry(ctx, root, dir)
+    if index < 0:
+        return None
+    var use_full = ctx.source_dirs[index].needs_full
+    if not use_full:
+        var found = scan_imports(data)
+        if not found.parsed:
+            use_full = True
+        else:
+            for module in found.modules:
+                if _names_contain(ctx.source_dirs[index].skip_modules, module):
+                    use_full = True
+                    break
+    var walk_digest: String
+    if use_full:
+        var full = _source_dir_full_digest(ctx, root, index)
+        if not full:
+            return None
+        walk_digest = full.value()
+    else:
+        walk_digest = String(ctx.source_dirs[index].digest)
     var src_sha = sha256_hex(data)
     var kb = ctx.prefix.copy()
+    kb.feed_str(TAG_SOURCE_DIR, dir)
+    kb.feed_str(TAG_SOURCE_DIR_WALK, walk_digest)
     kb.feed_file(TAG_SOURCE, rel, len(data), src_sha)
     # Two finalizations of one state, not two different states: `digest32` is a
     # true prefix of `digest_full`, so the fork is only a way to read the same
