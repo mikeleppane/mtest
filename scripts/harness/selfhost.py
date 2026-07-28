@@ -28,27 +28,48 @@ read by two independent parsers:
 
 - **`--json` machine event stream (primary).** Per file, `file_finished` states
   that file's own `passed_tests`, `parse_disposition` and outcome, and
-  `test_reported` NAMES every test it ran. So the oracle asserts the strongest
-  available statement: every file ran exactly the tests its own source declares,
-  by name. A grand total alone cannot say that -- one module running a test
-  twice while another runs none nets to the same number.
+  `test_reported` NAMES every test it reported. So the oracle asserts the
+  strongest statement these artifacts can support: for every file, the set of
+  test names mtest reports equals the set that file's source declares. A grand
+  total alone cannot say that -- one module running a test twice while another
+  runs none nets to the same number. Note what that statement is ABOUT: it is
+  agreement between mtest's report and an inventory derived independently of
+  it. It is not a witness that anything executed. See "What this oracle does
+  NOT prove" below.
 - **Console report (cross-check).** The session header's selected/excluded
   counts, the exact set of paths in the PASS rows, and the summary band's
   totals. A different grammar read by a different parser over the same run, so
   the two disagreeing is itself a signal worth having.
 
 Plus the process exit code. Any disagreement is a loud failure naming both
-sides and tagged with which parse objected. mtest is never asked what it ran; it
-is only checked against what the sources say it must have run.
+sides and tagged with which parse objected. mtest's own summary is never taken
+as the answer: every name and count it prints is reconciled against one derived
+from the sources, so a report that agrees with itself but not with the tree is
+still a failure.
 
-**What this oracle does NOT prove, stated plainly.** It proves mtest ran every
-test the sources declare *right now*. It cannot prove the sources still declare
-every test they used to. The inventory is derived from the tree on each run, so
-if a test function is deleted -- or renamed off its `test_` prefix, or moved
-into a `struct` where it is no longer a top-level `def` -- the expected count
-moves down with it and a faithful mtest run agrees with the smaller number and
-exits 0. Verified: take a 3-test file, move one `def test_*` into a struct, and
-the lane stays green while the total silently drops.
+**What this oracle does NOT prove, stated plainly.** It proves mtest REPORTED,
+per file and by name, exactly the tests the sources declare *right now*. Two
+separate limits follow from that sentence, and both are worth naming.
+
+**It witnesses agreement, not execution.** Every artifact it reads is one mtest
+produced. A defect that collected test names, skipped running their bodies, and
+emitted faithful-looking events would satisfy every check here. That hole is
+not closed in this lane; it is closed beside it. `e2e/manifest.json` requires
+22 of its 41 fixtures to NOT report PASS (7 FAIL, 6 CRASH, 4 TIMEOUT, 3
+MALFORMED-SUITE, 1 COMPILE-ERROR, 1 DRIFT), and
+`scripts/build/package_consumption.py`'s stage 7 exists to prove the INSTALLED
+binary reports FAILURE truthfully -- a fabricating mtest turns all 22 of those
+green and reds e2e. So a defect that survived would have to be scoped
+specifically to the classified suite while behaving truthfully across six
+verdict classes elsewhere. Recorded honestly, not claimed as closed.
+
+**It cannot prove the sources still declare every test they used to.** The
+inventory is derived from the tree on each run, so if a test function is
+deleted -- or renamed off its `test_` prefix, or moved into a `struct` where it
+is no longer a top-level `def` -- the expected count moves down with it and a
+faithful mtest run agrees with the smaller number and exits 0. Verified: take a
+3-test file, move one `def test_*` into a struct, and the lane stays green
+while the total silently drops.
 
 That is inherent to a derived oracle, and it is the correct trade. The only
 thing that would catch a partial removal is a committed expected count, which is
@@ -64,14 +85,27 @@ The boundary is sharp and worth knowing before you rely on it:
   parser refuses to produce an empty inventory for a file
   (`independent_test_function_names` raises and names the path), so a module
   emptied by a refactor or a bad merge fails the run rather than shrinking it.
-  Also loud: any file disappearing from, or appearing in, the tree unexpectedly,
-  since membership is set-compared.
 - **Not loud:** a file dropping from N to M tests where M > 0. The inventory
   simply becomes M, and mtest is checked against M.
+- **Not loud:** a file LEAVING the tree. Membership is set-compared against the
+  tree as it is now, and no historical membership exists anywhere, so deleting
+  a classified file removes it from both sides of the comparison at once.
+  Measured on an out-of-tree copy, driving the real binary through this real
+  oracle: deleting one whole classified file took a run from 34 tests to 10 and
+  still printed `selfhost: OK`, rc=0.
+
+Do not read "someone deleted tests" as implying a large, obvious diff. The
+sharpest form is one character. `def test_foo` -> `def _test_foo` reads to a
+reviewer as a deliberate privatisation and removes a test from the suite with
+no signal anywhere in CI. The same is true of a parametric signature such as
+`def test_foo[T: Copyable]()`, which this oracle's name check and Mojo's
+`discover_tests` drop in lockstep.
 
 So: if you are here because tests went missing, this oracle rules out mtest
 having silently skipped them. It does not rule out someone having deleted them.
 Check `git log -p` on the test tree for that.
+`scripts/checks/layout.py`'s `check_classified_mojo_inventory` states the same
+boundary from the other side; neither replaces the deleted ledgers outright.
 
 The inventory is derived, never declared. There is no committed path list, no
 committed test count, and nothing a human edits when adding a test file or a
