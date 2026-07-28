@@ -363,6 +363,57 @@ class ExactProcessIdentificationTests(unittest.TestCase):
         # And the compiler itself, whatever it was asked to write.
         self.assertFalse(contract.is_own_binary("/usr/bin/mojo", self.MANGLED))
 
+    def test_is_own_binary_accepts_the_unpublished_staging_shape(self) -> None:
+        # The sequential driver builds AND runs from the staging directory:
+        # publication happens only after the run has been classified, so the
+        # child whose PID the SIGINT probe needs is executing
+        # `<store>/.tmp-<mangled>-<pid>-<clock>-<attempt>/bin` and no
+        # generation for it exists yet. Missing this shape is not a cosmetic
+        # gap — `pgrep -f <mangled>` finds nothing at all, the probe burns its
+        # whole readiness deadline, and the interrupt contract fails.
+        store = contract.CACHE_STORE_PREFIX
+        staging = f"{store}{contract.CACHE_STAGING_PREFIX}{self.MANGLED}-1234-99-0/bin"
+        self.assertTrue(contract.is_own_binary(staging, self.MANGLED))
+        # The two published shapes keep working: a staging clause that
+        # displaced either of them would trade one blind spot for another.
+        digest = "0123456789abcdef0123456789abcdef"
+        self.assertTrue(
+            contract.is_own_binary(f"build/bin/{self.MANGLED}", self.MANGLED)
+        )
+        self.assertTrue(
+            contract.is_own_binary(f"{store}{self.MANGLED}_h{digest}/bin", self.MANGLED)
+        )
+        # Another file staging concurrently, sharing only the store prefix and
+        # the `.tmp-` marker. `--shard` makes two live staging directories over
+        # one checkout ordinary, so this is a real neighbour, not a hypothesis.
+        self.assertFalse(
+            contract.is_own_binary(
+                f"{store}{contract.CACHE_STAGING_PREFIX}some_uother_ufile-1234-99-0/bin",
+                self.MANGLED,
+            )
+        )
+        # A file whose mangled name merely EXTENDS this one past a `-`. Only
+        # the trailing pid/clock/attempt fields are fixed-shape, so the match
+        # is anchored on them rather than on a prefix test that `a` would pass
+        # against `a-1`'s staging directory.
+        self.assertFalse(
+            contract.is_own_binary(
+                f"{store}{contract.CACHE_STAGING_PREFIX}{self.MANGLED}-x-1234-99-0/bin",
+                self.MANGLED,
+            )
+        )
+        # A staging-shaped path outside the store must not be adopted.
+        self.assertFalse(
+            contract.is_own_binary(
+                f"/elsewhere/{contract.CACHE_STAGING_PREFIX}{self.MANGLED}-1234-99-0/bin",
+                self.MANGLED,
+            )
+        )
+        # And a compiler naming ANY of the three as its `-o` output is still
+        # the compiler: argv[0] decides, never the rest of the command line.
+        for compiler in ("/usr/bin/mojo", "mojo", "/opt/pixi/envs/default/bin/mojo"):
+            self.assertFalse(contract.is_own_binary(compiler, self.MANGLED))
+
     def test_process_state_reports_sleeping_for_the_identified_binary(self) -> None:
         fake_bin = Path(self.tmp.name) / self.MANGLED
         shutil.copy2("/bin/sleep", fake_bin)

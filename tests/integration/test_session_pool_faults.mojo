@@ -324,14 +324,14 @@ def test_build_dispatch_open_fault_is_exit_3_with_every_file_not_run() raises:
 
     # The staging directory that dispatch had ALREADY claimed is swept. The
     # cache stages into the store before it spawns the compiler, so by the time
-    # the stdout pipe fails there is a live `.tmp-<pid>-…` directory under the
-    # store — and the fault tears the batch down without that build ever
-    # reaching its completion handler, which is the one place a staged directory
-    # is otherwise settled. Nothing in the tree sweeps `.tmp-` names afterwards,
-    # so the batch's own terminal pass is the last chance to remove it, and this
-    # is what proves that pass runs. A binary the run is still using is never at
-    # risk: publication clears the batch's claim on all three outcomes,
-    # including the failed one whose staged binary stays live.
+    # the stdout pipe fails there is a live `.tmp-<mangled>-<pid>-…` directory
+    # under the store — and the fault tears the batch down without that build
+    # ever reaching its completion handler, which is the one place a staged
+    # directory is otherwise settled. Nothing in the tree sweeps `.tmp-` names
+    # afterwards, so the batch's own terminal pass is the last chance to remove
+    # it, and this is what proves that pass runs. A binary the run is still
+    # using is never at risk: publication clears the batch's claim on all three
+    # outcomes, including the failed one whose staged binary stays live.
     assert_equal(
         len(dir_listing(root + "/" + _STORE_DIR)),
         0,
@@ -397,9 +397,9 @@ def test_run_dispatch_open_fault_names_the_run_boundary_and_leaves_it_not_run() 
     # environment, the invocation root, and every include root's contents, so it
     # differs between machines, checkouts, and toolchain pins. What IS pinnable
     # is that the run dispatch names a published generation's binary — never the
-    # compiler, and never the `.tmp-<pid>-...` staging directory, whose name
-    # carries this process's pid and would be unassertable even if the seam
-    # still used it here.
+    # compiler, and never the `.tmp-<mangled>-<pid>-...` staging directory,
+    # whose name carries this process's pid and would be unassertable even if
+    # the seam still used it here.
     assert_true(
         err.program.startswith(_STORE_DIR + "/tests_stest_ua_h")
         and err.program.endswith("/bin"),

@@ -680,7 +680,9 @@ def _run_pool_batch[
                     # binary into a store other runs read.
                     var first_build = state[picked].attempt == 1
                     if first_build and state[picked].key:
-                        var target = store_build_target(root)
+                        var target = store_build_target(
+                            root, state[picked].mangled
+                        )
                         if target.ok():
                             # Compile straight into the store, so publication is
                             # one `rename(2)` and never a copy of a binary that

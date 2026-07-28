@@ -226,7 +226,7 @@ def _build_for_selection(
                     _blank_file_result(),
                     String(""),
                 )
-            target = store_build_target(root)
+            target = store_build_target(root, mangled)
             if target.ok():
                 # Compile straight into the store, so publication is one
                 # `rename(2)` and never a copy of a binary that could differ

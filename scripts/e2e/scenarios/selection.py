@@ -468,7 +468,8 @@ lines could not tell the two apart.
 The `-o` value is pinnable because every case runs under `PRECEDENCE_CACHE_OFF`,
 which keeps the build on the invocation-private path whose mangled name is
 fixed. That is the second thing this pin buys: a build cache stages its compile
-into `.mtest-cache/build-v1/.tmp-<pid>-<clock>-<n>/bin`, so an output path that
+into `.mtest-cache/build-v1/.tmp-<mangled>-<pid>-<clock>-<n>/bin`, so an output
+path that
 is anything but the one below is a run that touched the store the user told it
 to leave alone."""
 

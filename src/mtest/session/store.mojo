@@ -174,6 +174,32 @@ comptime TAG_SOURCE = "source"
 frame `file_key` appends to the shared prefix, and therefore the only thing that
 distinguishes two files of one session."""
 
+comptime TAG_PRECOMPILE_STEP = "precompile-step"
+"""One configured precompile step's source, named as configured, before its
+walked closure. `precompile_key`'s only, and the frame that separates a step's
+inputs from the include roots framed after them."""
+
+comptime TAG_PRECOMPILE_OUT = "precompile-out"
+"""One precompile step's output path, named as the compiler's `-o` receives it.
+
+The spelling alone, never the contents: the output is what the step PRODUCES, so
+digesting it would key the step on its own result.
+"""
+
+comptime TAG_PRECOMPILE_SRC = "precompile-src"
+"""A precompile step's source when it is a single file, as a file frame (adds
+`.size` and `.sha`). A directory source contributes `walkfile` frames instead."""
+
+comptime TAG_PRECOMPILE_PRIOR = "precompile-prior"
+"""One earlier step's promoted output, as a file frame (adds `.size` and
+`.sha`).
+
+Earlier steps run first and their packages are on this step's include path, so
+they are inputs to it. They are framed explicitly rather than left to the include
+walk, because the walk covers a directory and a prior output can be excluded from
+one — or sit somewhere the walk never reaches.
+"""
+
 
 def cache_key_tags() -> List[String]:
     """Every tag the cache key uses, including the one `KeyBuilder` feeds itself.
@@ -209,6 +235,10 @@ def cache_key_tags() -> List[String]:
         String(TAG_INCLUDE),
         String(TAG_WALK_FILE),
         String(TAG_SOURCE),
+        String(TAG_PRECOMPILE_STEP),
+        String(TAG_PRECOMPILE_OUT),
+        String(TAG_PRECOMPILE_SRC),
+        String(TAG_PRECOMPILE_PRIOR),
     ]
     return tags^
 
@@ -1093,6 +1123,11 @@ comptime _TMP_PREFIX = ".tmp-"
 Dot-prefixed so an include walk skips it, and distinct from any generation name,
 which always contains `_h` after a mangled source name. The reaper keys on this
 so it can never delete a concurrent process's live staging directory.
+
+A staging name carries a mangled source name too (see `store_build_target`), so
+the `_h` half of that distinction is what carries the whole weight: `_mangle`
+escapes every literal `_` as `_u`, and this prefix adds only `-` and decimal
+digits around it, so `_h` cannot occur anywhere in a staging name.
 """
 
 comptime _TMP_ATTEMPTS = 16
@@ -1484,16 +1519,48 @@ struct StoreBuildTarget(Copyable, Movable):
         return self.out_rel != "" and self.tmp_dir_rel != ""
 
 
-def store_build_target(root: String) -> StoreBuildTarget:
+def store_build_target(root: String, mangled: String) -> StoreBuildTarget:
     """Create the store, its marker, and one private staging directory.
 
-    The name carries the process id and a monotonic reading, so two mtest
-    processes over one checkout — which `--shard` makes ordinary — never share a
-    staging directory, and `mkdir`'s exclusive create is the arbiter rather than
-    the name's uniqueness alone.
+    The name is `.tmp-<mangled>-<pid>-<clock>-<attempt>`. The process id and the
+    monotonic reading are what keep two mtest processes over one checkout —
+    which `--shard` makes ordinary — off one staging directory, with `mkdir`'s
+    exclusive create as the arbiter rather than the name's uniqueness alone.
+
+    The mangled source name leads, and it is not decoration. A first-attempt
+    cached build is COMPILED here and then RUN from here: publication is a
+    rename that happens only after the file's verdict is settled, so for the
+    whole time a test child is alive its argv is `<this directory>/bin`.
+    Anything identifying that child from outside the process — the release
+    contract's SIGINT probe, a `ps` a human reads during a hang — has only that
+    path to go on, and a name built from pid and clock alone put the source
+    nowhere in it. A child that could not be named could not be found.
+
+    Every invariant `_TMP_PREFIX` claims survives the addition, and each is
+    load-bearing somewhere else in this module:
+
+    - still dot-prefixed, so `walk_include_root` skips it and the cache's own
+      staged bytes never feed the key that decides what the cache serves;
+    - still free of `_h`, since `_mangle` escapes literal `_` as `_u` and this
+      name adds only `-` and decimal digits, so a staging directory can never be
+      read as the generation `<mangled>_h<digest32>`;
+    - still keyed by the `.tmp-` prefix alone in `_reap_siblings`, which tests
+      that prefix BEFORE the mangled-name prefix, so this source's own live
+      staging directory is skipped rather than deleted out from under a
+      concurrent process compiling into it.
+
+    Name length stays comfortable: the decoration around the mangled name is
+    `.tmp-` plus three dash-separated decimal fields, about 37 bytes at the
+    widest plausible pid and clock reading. `_MANGLE_BUDGET` is 150, so the
+    component lands near 187 of a 255-byte `NAME_MAX`, and the widest decorated
+    form in the tree remains the precompile temp directory's ~45 bytes that
+    budget was chosen against.
 
     Args:
         root: The invocation root.
+        mangled: The mangled source name this build produces, from `_mangle`.
+            Carried into the directory name so the staged binary's own path
+            identifies its source.
 
     Returns:
         A staging target, or one whose `ok()` is False when the store could not
@@ -1503,9 +1570,10 @@ def store_build_target(root: String) -> StoreBuildTarget:
     Examples:
 
     ```mojo
+    from mtest.session.scratch import _mangle
     from mtest.session.store import store_build_target
 
-    var target = store_build_target(root)
+    var target = store_build_target(root, _mangle(rel))
     if target.ok():
         pass  # build with `-o target.out_rel`
     ```
@@ -1520,6 +1588,8 @@ def store_build_target(root: String) -> StoreBuildTarget:
             STORE_DIR
             + "/"
             + _TMP_PREFIX
+            + mangled
+            + "-"
             + pid
             + "-"
             + String(perf_counter_ns())

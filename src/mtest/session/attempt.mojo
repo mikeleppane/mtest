@@ -848,7 +848,7 @@ def _run_one(
                 # binary came from is already the store's.
                 key = Optional[FileKey](None)
             else:
-                target = store_build_target(root)
+                target = store_build_target(root, mangled)
                 if target.ok():
                     # Compile straight into the store, so publication is one
                     # `rename(2)` and never a copy of a binary that could differ
