@@ -290,7 +290,32 @@ def write_file(root: String, rel: String, content: String) raises:
 
 
 def base_config() raises -> RunnerConfig:
-    """A default config with a short 2-second run deadline for the fixtures."""
+    """A default config with a run deadline no fixture is expected to reach.
+
+    The deadline is a *safety net*, not a subject. Every fixture here either
+    aborts, exits, or reports within milliseconds once its child reaches
+    `main()`, so the only thing this bound has to clear is the cost of
+    spawning a freshly linked Mojo binary and initializing its runtime.
+
+    That cost is not small and it is not stable. Measured on a 32-core box:
+    a probe child reaches `main()` in well under a millisecond when the
+    machine is idle, but with 16 concurrent session suites each spawning
+    their own compiler and probe children it can exceed **two seconds**. A
+    2-second deadline therefore turned every non-TIMEOUT outcome assertion in
+    this suite into a race — `test_recovery_probe_crash_still_reaches_crash_attribution`
+    lost it in roughly 1 of 5 full runs, reporting TIMEOUT where the fixture
+    had aborted and the test asserted CRASH.
+
+    30 seconds clears that startup cost by more than an order of magnitude
+    while still bounding a genuinely hung child to well under the module's own
+    runtime.
+
+    A test that wants the deadline to *fire* must say so, and every such test
+    already does: `test_deadline_overrun_is_timeout_not_fail` and
+    `test_hanging_probe_times_out_exit_1` — the only two consumers of
+    `SRC_HANG` — both set `timeout_secs = 1` themselves. Never lower this
+    default to make one test trip its deadline; set it on that test's config.
+    """
     var c = RunnerConfig.default()
-    c.timeout_secs = 2
+    c.timeout_secs = 30
     return c^
