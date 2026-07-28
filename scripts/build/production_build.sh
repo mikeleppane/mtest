@@ -51,6 +51,18 @@ PRECOMPILE_CMD_MTEST=(mojo precompile -I build src/mtest -o build/mtest.mojopkg)
 # second build a no-op instead of a fresh, differently-byte-identical one.
 PRECOMPILE_STAMP="build/.precompile.stamp"
 
+# What actually pins the toolchain in this repo: `pixi.lock` resolves the
+# exact `mojo` build, and `mojo --version` reports what is ACTUALLY on PATH
+# right now (a relock without a version bump still changes the lockfile; a
+# version bump changes the `--version` line). Both feed the input digest, so
+# a toolchain swap invalidates a stamp that no tracked source file's content
+# would otherwise touch -- the same hazard Layer 1's file cache already
+# guards against by digesting the compiler binary's own content into every
+# key. Skipping either one would leave `pixi run build` able to ship a
+# `build/mtest.mojopkg` compiled by a DIFFERENT compiler than the one the
+# stamp was written under, while reporting a match.
+PIXI_LOCK_REL="pixi.lock"
+
 # Populated by _resolve_digest_cmd: the digest command as an argv array
 # (`sha256sum` is one word, `shasum -a 256` is three), empty when neither
 # tool is on PATH.
@@ -87,10 +99,12 @@ _hash_stdin() {
 # The precompile stage's input digest: the script itself (so an edit to the
 # stamping logic or the compile commands invalidates every stamp), the exact
 # stage command lines (so a flag change invalidates it even though no source
-# file moved), and every file under the two source trees the stage reads.
-# The file list goes through `find -print0 | LC_ALL=C sort -z | xargs -0` so
-# the digest is stable regardless of filesystem iteration order --
-# `test_source_order_permutation_stable` pins exactly this.
+# file moved), the toolchain identity ($1: a `mojo --version` line, plus
+# `pixi.lock`'s bytes if it exists -- a relock without a version bump still
+# changes the lockfile), and every file under the two source trees the stage
+# reads. The file list goes through `find -print0 | LC_ALL=C sort -z |
+# xargs -0` so the digest is stable regardless of filesystem iteration order
+# -- `test_source_order_permutation_stable` pins exactly this.
 #
 # Assumes `_resolve_digest_cmd` has already populated `DIGEST_CMD` in the
 # CALLING shell (never inside this function): command substitution runs in a
@@ -98,10 +112,15 @@ _hash_stdin() {
 # in a subshell that vanishes the instant `$(_precompile_input_digest)`
 # returns, leaving the caller's own `DIGEST_CMD` empty for every call after.
 _precompile_input_digest() {
+  local mojo_version="$1"
   {
     cat -- "$script_self"
     printf 'cmd:%s\n' "${PRECOMPILE_CMD_TOML[*]}"
     printf 'cmd:%s\n' "${PRECOMPILE_CMD_MTEST[*]}"
+    printf 'toolchain:%s\n' "$mojo_version"
+    if [[ -f "$PIXI_LOCK_REL" ]]; then
+      cat -- "$PIXI_LOCK_REL"
+    fi
     find src/mtest vendor/mojo-toml -type f -print0 |
       LC_ALL=C sort -z |
       xargs -0 "${DIGEST_CMD[@]}" --
@@ -196,14 +215,30 @@ stage_precompile() {
   mkdir -p build
   _resolve_digest_cmd
   local input_digest=""
-  if [[ ${#DIGEST_CMD[@]} -gt 0 ]]; then
-    input_digest="$(_precompile_input_digest)"
+  local mojo_version=""
+  local can_stamp=1
+
+  # Every precondition for stamping degrades the SAME way: print a notice and
+  # build unconditionally, never fail the build. A toolchain that cannot even
+  # report its own version is exactly as unstampable as a missing digest
+  # tool -- there is no toolchain identity to fingerprint either way.
+  if [[ ${#DIGEST_CMD[@]} -eq 0 ]]; then
+    echo "production-build: no sha256sum or shasum on PATH -- skipping the precompile stamp, building unconditionally" >&2
+    can_stamp=0
+  elif ! mojo_version="$(mojo --version 2>&1)"; then
+    echo "production-build: \`mojo --version\` did not run -- skipping the precompile stamp, building unconditionally" >&2
+    can_stamp=0
+  elif [[ ! -f "$PIXI_LOCK_REL" ]]; then
+    echo "production-build: $PIXI_LOCK_REL not found -- skipping the precompile stamp, building unconditionally" >&2
+    can_stamp=0
+  fi
+
+  if [[ $can_stamp -eq 1 ]]; then
+    input_digest="$(_precompile_input_digest "$mojo_version")"
     if _precompile_stamp_valid "$PRECOMPILE_STAMP" "$input_digest"; then
       echo "==> precompile stage skipped (stamp matches build/toml.mojopkg, build/mtest.mojopkg)"
       return 0
     fi
-  else
-    echo "production-build: no sha256sum or shasum on PATH -- skipping the precompile stamp, building unconditionally" >&2
   fi
 
   echo "==> precompiling vendor/mojo-toml/toml -> build/toml.mojopkg"
@@ -211,7 +246,7 @@ stage_precompile() {
   echo "==> precompiling src/mtest -> build/mtest.mojopkg"
   "${PRECOMPILE_CMD_MTEST[@]}"
 
-  if [[ -n "$input_digest" ]]; then
+  if [[ $can_stamp -eq 1 ]]; then
     _precompile_write_stamp "$PRECOMPILE_STAMP" "$input_digest"
   fi
 }

@@ -26,6 +26,12 @@ proof and is RED before the stamp exists: building twice, unstamped, gives
 two different `build/mtest.mojopkg`s. It goes green once the second run
 SKIPS the stage -- the bytes become identical because the second run never
 touches the file, not because the compiler became deterministic.
+
+`test_toolchain_change_forces_rebuild` pins the fix from Task 16's review
+round 1: the input digest also covers `mojo --version` and `pixi.lock`'s
+bytes, so a toolchain swap invalidates a stamp that no tracked source file's
+content would otherwise touch -- the same hazard Layer 1's file cache already
+guards against by digesting the compiler binary's own content into every key.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ from __future__ import annotations
 import contextlib
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -53,6 +60,10 @@ STAGE_SCRIPT_REL = "scripts/build/production_build.sh"
 SANDBOX_TREE_DIRS = ("scripts/build", "src/mtest", "vendor/mojo-toml")
 """Every directory `stage_precompile` reads: the script itself, the vendored
 TOML parser it precompiles first, and mtest's own package sources."""
+
+SANDBOX_TREE_FILES = ("pixi.lock",)
+"""Every standalone file `stage_precompile` reads: the lockfile that pins the
+toolchain, fed into the input digest alongside `mojo --version`."""
 
 RUN_TIMEOUT_SECONDS = 300
 """Ceiling on one `production_build.sh precompile` invocation. Generous next
@@ -95,6 +106,8 @@ def sandbox_tree() -> Path:
     root = Path(tempfile.mkdtemp(prefix="mtest-build-stamp-"))
     for rel in SANDBOX_TREE_DIRS:
         shutil.copytree(REPO / rel, root / rel)
+    for rel in SANDBOX_TREE_FILES:
+        shutil.copy2(REPO / rel, root / rel)
     return root
 
 
@@ -153,7 +166,7 @@ def source_call(sandbox: Path, snippet: str) -> subprocess.CompletedProcess[str]
     )
 
 
-def fabricate_valid_state(sandbox: Path) -> None:
+def fabricate_valid_state(sandbox: Path, mojo_version: str | None = None) -> None:
     """Write placeholder outputs and a stamp that is genuinely valid for them.
 
     Writes arbitrary bytes to `build/toml.mojopkg` and `build/mtest.mojopkg`
@@ -167,6 +180,11 @@ def fabricate_valid_state(sandbox: Path) -> None:
 
     Args:
         sandbox: A tree produced by `sandbox_tree`.
+        mojo_version: The toolchain-identity string to feed the digest with.
+            Defaults to invoking the real `mojo --version`; pass a literal to
+            avoid requiring `mojo` on PATH at all (used by
+            `test_source_order_permutation_stable`, which is about file
+            ordering, not toolchain identity).
 
     Raises:
         AssertionError: If the sourced helper calls fail (a bug in the
@@ -176,26 +194,33 @@ def fabricate_valid_state(sandbox: Path) -> None:
     build.mkdir(exist_ok=True)
     (build / "toml.mojopkg").write_bytes(b"placeholder-toml-package\n")
     (build / "mtest.mojopkg").write_bytes(b"placeholder-mtest-package\n")
+    version_stmt = (
+        f"mojo_version={shlex.quote(mojo_version)}"
+        if mojo_version is not None
+        else 'mojo_version="$(mojo --version 2>&1)"'
+    )
     result = source_call(
         sandbox,
         "_resolve_digest_cmd\n"
-        'digest="$(_precompile_input_digest)"\n'
+        f"{version_stmt}\n"
+        'digest="$(_precompile_input_digest "$mojo_version")"\n'
         '_precompile_write_stamp "$PRECOMPILE_STAMP" "$digest"\n',
     )
     if result.returncode != 0:
         raise AssertionError(result.stdout + result.stderr)
 
 
-def stamp_head_line(sandbox: Path) -> str:
+def stamp_head_line(sandbox: Path, mojo_version: str | None = None) -> str:
     """Fabricate placeholder outputs, write a stamp, and return its head line.
 
     Args:
         sandbox: A tree produced by `sandbox_tree`.
+        mojo_version: Forwarded to `fabricate_valid_state`.
 
     Returns:
         The stamp file's first line (`in:<input digest>`).
     """
-    fabricate_valid_state(sandbox)
+    fabricate_valid_state(sandbox, mojo_version=mojo_version)
     stamp = sandbox / "build" / ".precompile.stamp"
     return stamp.read_text(encoding="utf-8").splitlines()[0]
 
@@ -258,6 +283,49 @@ def path_hiding(excluded: frozenset[str]) -> Iterator[str]:
     finally:
         for shim in shim_for.values():
             shutil.rmtree(shim, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def toolchain_reporting(version_line: str) -> Iterator[str]:
+    """A PATH whose `mojo --version` reports `version_line`, otherwise real.
+
+    Simulates a toolchain upgrade or a same-version relock without either: a
+    tiny shim shadows `mojo` first on PATH, faking only `--version`; every
+    other argv (in particular the real `precompile` invocations the stage
+    runs) `exec`s the genuine compiler unchanged, so the stage still builds
+    for real under this PATH -- only the reported version identity differs.
+
+    Args:
+        version_line: The literal line the shim's `mojo --version` prints.
+
+    Yields:
+        A PATH string suitable for a subprocess `env`.
+
+    Raises:
+        AssertionError: If no real `mojo` is on PATH to build the shim
+            against.
+    """
+    real_mojo = shutil.which("mojo")
+    if real_mojo is None:
+        raise AssertionError(
+            "`mojo` is not on PATH -- required to build the version shim"
+        )
+    shim_dir = tempfile.mkdtemp(prefix="mtest-mojo-shim-")
+    shim_path = Path(shim_dir) / "mojo"
+    shim_path.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [[ "$1" == "--version" ]]; then\n'
+        f"  printf '%s\\n' {shlex.quote(version_line)}\n"
+        "  exit 0\n"
+        "fi\n"
+        f'exec {shlex.quote(real_mojo)} "$@"\n',
+        encoding="utf-8",
+    )
+    shim_path.chmod(0o755)
+    try:
+        yield f"{shim_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+    finally:
+        shutil.rmtree(shim_dir, ignore_errors=True)
 
 
 def which_in_env(env: dict[str, str], *names: str) -> str:
@@ -369,15 +437,50 @@ class BuildStampTests(unittest.TestCase):
             copy_files_reordered(
                 REPO / "vendor/mojo-toml", reordered / "vendor/mojo-toml"
             )
+            shutil.copy2(REPO / "pixi.lock", reordered / "pixi.lock")
 
-            head_forward = stamp_head_line(forward)
-            head_reordered = stamp_head_line(reordered)
+            # A fixed literal, not a real `mojo --version` call: this scenario
+            # is about file-creation-order stability, not toolchain identity,
+            # and it should not need `mojo` on PATH to prove that.
+            fixed_version = "Mojo 0.0.0-test-source-order (fixed)"
+            head_forward = stamp_head_line(forward, mojo_version=fixed_version)
+            head_reordered = stamp_head_line(reordered, mojo_version=fixed_version)
 
             self.assertTrue(head_forward.startswith("in:"))
             self.assertEqual(head_forward, head_reordered)
         finally:
             shutil.rmtree(forward, ignore_errors=True)
             shutil.rmtree(reordered, ignore_errors=True)
+
+    def test_toolchain_change_forces_rebuild(self) -> None:
+        """A different `mojo --version` must invalidate the stamp.
+
+        Every tracked source file, the script, and the stage commands are
+        byte-identical between the two runs; only the toolchain identity
+        the second run observes differs. Review round 1's finding: without
+        this, an upgraded (or relocked) `mojo` would report a stamp match
+        and `pixi run build` would ship a `.mojopkg` compiled by the OLD
+        compiler.
+        """
+        require_mojo()
+        sandbox = sandbox_tree()
+        try:
+            with toolchain_reporting("Mojo 1.0.0b2-shim (first)") as first_path:
+                env = os.environ.copy()
+                env["PATH"] = first_path
+                first = run_stage(sandbox, env=env)
+                self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+                self.assertTrue((sandbox / "build/.precompile.stamp").is_file())
+
+            with toolchain_reporting("Mojo 9.9.9-shim (upgraded)") as second_path:
+                env = os.environ.copy()
+                env["PATH"] = second_path
+                rebuild = run_stage(sandbox, env=env)
+                self.assertEqual(rebuild.returncode, 0, rebuild.stdout + rebuild.stderr)
+                self.assertNotIn(SKIP_LINE, rebuild.stdout)
+                self.assertIn("precompiling src/mtest", rebuild.stdout)
+        finally:
+            shutil.rmtree(sandbox, ignore_errors=True)
 
     def test_shasum_only_path(self) -> None:
         """Hiding `sha256sum` while leaving real `shasum` present must still stamp.
