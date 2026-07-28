@@ -83,6 +83,7 @@ from mtest.session.pipeline import (
     StepKind,
 )
 from mtest.session.retry_class import retry_classify
+from mtest.session.store import CacheContext
 
 
 comptime _STALE_NAME_PHRASE = "test not found in suite:"
@@ -730,6 +731,7 @@ def _run_selection[
     mut reporter: C,
     mut summary: Summary,
     mut reg: BuildRegistry,
+    mut ctx: CacheContext,
 ) raises -> SelectionSummary:
     """Run the selection sub-session: probe every run file, then run it.
 
@@ -755,6 +757,10 @@ def _run_selection[
         reporter: The composed reporter every event is handed to.
         summary: The run summary, accumulated as files finish.
         reg: The build registry recording builds, probes, and compile errors.
+        ctx: The session's cache state, threaded into every build step. Its
+            counters are advanced by the build seam, and a publication failure
+            it reports is emitted here as a `cache-publish` warning — the
+            sub-session holds the reporter, the build seam does not.
 
     Returns:
         What the sub-session folds back into `run_session`.
@@ -962,7 +968,9 @@ def _run_selection[
                     collected[i].rel,
                     include_paths,
                     reg,
+                    ctx,
                     attempts_used=step.attempt if step.recovering else 1,
+                    recovering=step.recovering,
                 )
             except:
                 reporter.handle(
@@ -970,6 +978,12 @@ def _run_selection[
                 )
                 pipeline.halt_internal_error()
                 continue
+            if bo.cache_warning != "":
+                # The build survived; only its publication did not. Said once,
+                # here, before anything this file goes on to report.
+                reporter.handle(
+                    Event.warning("cache-publish", bo.cache_warning)
+                )
             if bo.terminal:
                 if bo.result.interrupted:
                     pipeline.halt_interrupted()

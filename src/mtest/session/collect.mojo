@@ -38,6 +38,11 @@ from mtest.session.effective_settings import (
 )
 from mtest.session.precompile import _run_precompile
 from mtest.session.shard import partition
+from mtest.session.store import (
+    CacheContext,
+    collect_env_base,
+    finalize_includes,
+)
 
 
 @fieldwise_init
@@ -57,6 +62,30 @@ struct CollectResult(Copyable, Movable):
     var code: Int
     """The resolved exit code: 2 on an interrupt, 3 on drift or an internal
     error, 1 on a failing file, 5 when nothing was collectable, else 0."""
+
+
+def _cache_off_diagnostic(
+    mut ctx: CacheContext, config: RunnerConfig
+) -> String:
+    """The one line collect prints when it is listing without its cache.
+
+    Collect drives no reporter — `main` prints its diagnostics to stderr — so
+    the `cache-off` warning a run emits as an event reaches a collect user as a
+    diagnostic line instead. The condition and the once-only latch are the run
+    path's, exactly: a context that is off, has not said so, and was not turned
+    off by the user asking for it.
+
+    Args:
+        ctx: The session's cache state; `warned` is set when a line is produced.
+        config: The run's config, read for `no_cache`.
+
+    Returns:
+        The diagnostic line, or `""` when there is nothing to say.
+    """
+    if ctx.enabled or ctx.warned or config.no_cache:
+        return String("")
+    ctx.warned = True
+    return String("collect: cache-off: ") + ctx.disable_reason
 
 
 def _collect_phrase(fr: FileResult) -> String:
@@ -131,6 +160,16 @@ def run_collect(
         )
 
     var reg = BuildRegistry()
+    # The same cache lifecycle a run has, around the same loop: the base is
+    # established before the first child that could build, `--no-cache` is
+    # answered here so no store directory is ever created behind the user's
+    # back, and the include walks close after the precompile steps have widened
+    # the include set.
+    var ctx: CacheContext
+    if config.no_cache:
+        ctx = CacheContext.disabled("--no-cache")
+    else:
+        ctx = collect_env_base(runtime, config, root)
     var includes = config.include_paths.copy()
     var node_ids = List[String]()
     var diags = List[String]()
@@ -187,6 +226,11 @@ def run_collect(
             internal = True
             break
 
+    finalize_includes(ctx, root, includes)
+    var cache_off_line = _cache_off_diagnostic(ctx, config)
+    if cache_off_line != "":
+        diags.append(cache_off_line)
+
     if not (interrupted or internal):
         for ri in range(len(disc.run_files)):
             if interrupt_requested():
@@ -197,7 +241,7 @@ def run_collect(
             var bo: _BuildOutcome
             try:
                 bo = _build_for_selection(
-                    runtime, config, settings, root, rel, includes, reg
+                    runtime, config, settings, root, rel, includes, reg, ctx
                 )
             except:
                 diags.append(
@@ -207,6 +251,15 @@ def run_collect(
                 )
                 internal = True
                 break
+            if bo.cache_warning != "":
+                # The build itself succeeded; only its publication did not, so
+                # this is a note beside the listing and never a failing file.
+                diags.append(
+                    "collect: "
+                    + escape_one_line(rel)
+                    + ": cache-publish: "
+                    + bo.cache_warning
+                )
             if bo.terminal:
                 if bo.result.interrupted:
                     interrupted = True
@@ -278,6 +331,13 @@ def run_collect(
                 drift = True
             else:
                 any_failing = True
+
+    # A context that only went off while listing — a store that could not be
+    # created, a source that would not read — says so now. The latch on the
+    # context makes this a no-op when the line above already went out.
+    var late_cache_off = _cache_off_diagnostic(ctx, config)
+    if late_cache_off != "":
+        diags.append(late_cache_off)
 
     sort(node_ids)
 

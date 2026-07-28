@@ -72,6 +72,11 @@ from mtest.session.pool_plan import partition_effective_serial, stale_serials
 from mtest.session.precompile import _run_precompile
 from mtest.session.selection import _run_selection
 from mtest.session.shard import partition
+from mtest.session.store import (
+    CacheContext,
+    collect_env_base,
+    finalize_includes,
+)
 
 
 def _flush_console[
@@ -99,6 +104,38 @@ def _flush_console[
     if chunk.byte_length() == 0:
         return
     print(chunk, end="", file=FileDescriptor(console_fd), flush=True)
+
+
+def _warn_cache_off[
+    C: ReportCoordinator
+](mut ctx: CacheContext, config: RunnerConfig, mut reporter: C):
+    """Say once, and only once, that this run is building without its cache.
+
+    The warning is latched on the context rather than on a local, so the two
+    places that ask — right after the key prefix is finalized, and again once the
+    run has settled — cannot both fire. The first covers everything known before
+    any file is built (an unrecognized build argument, an unreadable include
+    root, a compiler that will not answer `--version`); the second covers a
+    context that only went off mid-run, when a store proved unusable or a source
+    would not read.
+
+    `--no-cache` says nothing: the user turned the cache off, and reporting back
+    that it is off is noise. That is why `CacheContext.disabled` presets
+    `warned`, and why this checks the flag as well — the two agree, and either
+    one alone would be enough.
+
+    Parameters:
+        C: The report coordinator the warning is fanned to.
+
+    Args:
+        ctx: The session's cache state; `warned` is set when the warning fires.
+        config: The run's config, read for `no_cache`.
+        reporter: The coordinator the warning is handed to.
+    """
+    if ctx.enabled or ctx.warned or config.no_cache:
+        return
+    reporter.handle(Event.warning("cache-off", ctx.disable_reason))
+    ctx.warned = True
 
 
 @fieldwise_init
@@ -366,6 +403,18 @@ def run_session[
     # Collected as verdicts land; feeds no count, no multiset, no exit code.
     var crash_files = List[_CrashFile]()
 
+    # The build cache's session state, established BEFORE the first child that
+    # could build anything. `--no-cache` is answered here and nowhere later:
+    # every store operation from `store_build_target` onward creates
+    # `.mtest-cache/` and its ownership marker as a side effect, so a gate placed
+    # any further down would still leave behind the directory the user asked
+    # this run not to touch.
+    var ctx: CacheContext
+    if config.no_cache:
+        ctx = CacheContext.disabled("--no-cache")
+    else:
+        ctx = collect_env_base(runtime, config, root)
+
     # Precompile steps, in listed order. Each success widens the include set.
     var includes = config.include_paths.copy()
     # Every selected file (gates first, then the run set) depends on the
@@ -424,6 +473,13 @@ def run_session[
             )
             internal_error = True
             break
+
+    # The include set is complete only now: every precompile step that succeeded
+    # added its output directory to it, and a file built later can import from
+    # there. Absorbing the roots' contents here — after the loop, before the
+    # first gate — is what makes one prefix serve every per-file key.
+    finalize_includes(ctx, root, includes)
+    _warn_cache_off(ctx, config, reporter)
 
     var gate_abort = False
     var proceed = not (
@@ -568,6 +624,7 @@ def run_session[
             reporter,
             summary,
             reg,
+            ctx,
         )
         run_outcomes.extend(sel.run_outcomes.copy())
         test_totals.passed += sel.test_totals.passed
@@ -831,18 +888,24 @@ def run_session[
     # failure. A latched junit SPOOL failure did NOT abort the run mid-flight (the
     # deliberate asymmetry vs the stream's fatal abort); it surfaces NOW.
     reporter.note_not_run(casualty_files)
+    # A context that only went off mid-run — a store that could not be created,
+    # a source that would not read — has had no chance to say so yet. It says so
+    # here, before either terminal artifact is sealed. The latch on the context
+    # makes this a no-op whenever the warning already fired up top.
+    _warn_cache_off(ctx, config, reporter)
+
     # The run-wide build-cache accounting, stated once and read by BOTH terminal
     # artifacts below: the JUnit finalize (which has no event to ride, so the
-    # counters travel on the call) and the SessionFinished payload. Nothing
-    # increments them yet — the three build seams fold their `CacheContext`
-    # counters (`ctx.built_files` / `ctx.cached_files`) in here. The rule those
-    # seams obey: `built_files` counts a FIRST-ATTEMPT compile admission,
-    # compile FAILURES included; `cached_files` a cache-hit admission; retries,
-    # probes and precompile steps count as neither. So
-    # `built_files + cached_files == first-attempt compile admissions`, gates
-    # included.
-    var built_files = 0
-    var cached_files = 0
+    # counters travel on the call) and the SessionFinished payload. The build
+    # seams keep the counts on the session's one `CacheContext` and they are
+    # folded HERE, ahead of both, so the XML and the JSON stream can never carry
+    # different numbers. The rule those seams obey: `built_files` counts a
+    # FIRST-ATTEMPT compile admission, compile FAILURES included; `cached_files`
+    # a cache-hit admission; retries, probes and precompile steps count as
+    # neither. So `built_files + cached_files == first-attempt compile
+    # admissions`, gates included.
+    var built_files = ctx.built_files
+    var cached_files = ctx.cached_files
     var junit_fin = reporter.finalize_junit(built_files, cached_files)
     var finalize_failed = junit_fin.failed
     if finalize_failed:

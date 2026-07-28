@@ -849,15 +849,20 @@ def collect_env_base(
     ```
     """
     # --- Fail-closed pre-checks: no digest, no spawn. -----------------------
+    # Both use `disable`, never `CacheContext.disabled`: the latter presets
+    # `warned` and belongs to `--no-cache` alone, where silence is what the user
+    # asked for. A cache turned off by something in the environment is a fact
+    # the user did not choose and cannot see any other way, so it has to reach
+    # the session's one `cache-off` warning.
+    var ctx = CacheContext()
     var rows = classify_build_args(config.build_args)
     for row in rows:
         if row.kind == ARG_UNKNOWN:
             # An unrecognized flag may change what gets built in a way no frame
             # here can see. Hashing the rest would produce a confident key for
             # an unknown build.
-            return CacheContext.disabled(
-                "unrecognized build argument '" + row.value + "'"
-            )
+            ctx.disable("unrecognized build argument '" + row.value + "'")
+            return ctx^
     var resolved: Optional[String]
     try:
         resolved = resolve_executable(config.mojo_path)
@@ -866,12 +871,9 @@ def collect_env_base(
     if not resolved:
         # Keying on an unresolved spelling would name a compiler that may not be
         # the one the supervisor spawns.
-        return CacheContext.disabled(
-            "cannot resolve the compiler '" + config.mojo_path + "'"
-        )
+        ctx.disable("cannot resolve the compiler '" + config.mojo_path + "'")
+        return ctx^
     var compiler = resolved.value()
-
-    var ctx = CacheContext()
 
     # --- Frame 2: toolchain identity. ---------------------------------------
     var identity = _toolchain_identity(compiler)

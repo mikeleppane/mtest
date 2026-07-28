@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tempfile
 from typing import Any
@@ -452,18 +453,31 @@ PRECEDENCE_FILE = "e2e/matrix/test_beta.mojo"
 """The one file every precedence case compiles: two passing tests, no fixture
 arming, and a build product whose name is fixed by the path mangler."""
 
-PRECEDENCE_BUILD_ARGV = (
-    "build",
-    PRECEDENCE_FILE,
-    "-o",
-    "build/bin/e2e_smatrix_stest_ubeta",
-)
-"""The exact vector mtest hands the compiler, `argv[0]` excluded.
+PRECEDENCE_BUILD_HEAD = ("build", PRECEDENCE_FILE, "-o")
+"""The fixed head of the vector mtest hands the compiler, `argv[0]` excluded.
 
-Pinned in full because the point of the scenario is that the SELECTED wrapper
-received mtest's real work: a wrapper that was merely executed — probed for a
-version, say — would log a different vector, and a check that only counted log
-lines could not tell the two apart."""
+Still pinned exactly, because the point of the scenario is that the SELECTED
+wrapper received mtest's real WORK: a wrapper that was merely executed — probed
+for a version, say — logs a different vector, and a check that only counted log
+lines could not tell the two apart. Only the `-o` value that follows this head
+is matched by shape, for the reason `PRECEDENCE_BUILD_OUT` gives."""
+
+PRECEDENCE_BUILD_OUT = re.compile(
+    r"^(?:build/bin/e2e_smatrix_stest_ubeta"
+    r"|\.mtest-cache/build-v1/\.tmp-[0-9]+-[0-9]+-[0-9]+/bin)$"
+)
+"""The two output paths a legitimate build of `PRECEDENCE_FILE` may name.
+
+The first is the invocation-private path an uncached build still uses, and its
+mangled name IS pinnable. The second is the build cache's staging directory,
+whose name cannot be pinned at all: it carries mtest's own process id and a
+monotonic clock reading, precisely so two mtest processes over one checkout
+never share it. (The published generation's `<mangled>_h<digest32>` name is
+equally unpinnable — that digest covers the toolchain's own bytes, the
+environment, the canonical root, and every include tree — but it never appears
+in a COMPILER argv: the compiler writes into the staging directory, and only the
+recorded reproduce line names the generation the staged build was renamed onto.)
+So the shape is the oracle, and the head above carries the identity."""
 
 PRECEDENCE_SOURCES = ("flag", "env", "path")
 """The three resolution sources, in the precedence order mtest must honor. Each
@@ -544,8 +558,9 @@ def s_mojo_executable_precedence(context: ScenarioContext) -> str:
     3. PATH alone -> only the path log.
 
     Each case is run twice, once as `collect` and once as a full run, because
-    resolution has to hold on the collection path as well as the run path. Both
-    invocations must land on the selected wrapper with the exact build vector.
+    resolution has to hold on the collection path as well as the run path. Every
+    spawn either case makes must land on the selected wrapper, exactly one of
+    them must be the build, and that build's vector must be the pinned one.
 
     The real compiler is resolved ONCE here, before `PATH` is touched, and
     handed to the wrappers as `MTEST_REAL_MOJO`: the PATH candidate is itself
@@ -617,24 +632,60 @@ def s_mojo_executable_precedence(context: ScenarioContext) -> str:
                     f"{sorted(losers)}: precedence did not hold\n{losers}",
                 )
                 records = wrote[expected]
+                # Every invocation the winner logged has to BE the winner's —
+                # the losers' logs are already known empty, so this is what
+                # closes "the run resolved the compiler once and used that
+                # resolution for everything it spawned".
+                for record in records:
+                    expect(
+                        record.get("wrapper") == wrappers[expected],
+                        f"a {mode} invocation ran {record.get('wrapper')!r}, "
+                        f"want the {expected} wrapper {wrappers[expected]!r}",
+                    )
+                # The build cache identifies the toolchain before it keys
+                # anything, and it does so by running `<resolved compiler>
+                # --version` — through this same wrapper, which is itself part
+                # of what precedence has to mean. So a version probe is an
+                # ALLOWED companion here; exactly one BUILD is still the
+                # oracle, because a second build would mean the probe and the
+                # run stopped sharing one compile.
+                builds = [
+                    list(r.get("argv", []))
+                    for r in records
+                    if list(r.get("argv", []))[1:2] == ["build"]
+                ]
+                others = [
+                    list(r.get("argv", []))
+                    for r in records
+                    if list(r.get("argv", []))[1:2] != ["build"]
+                ]
                 expect(
-                    len(records) == 1,
-                    f"the {expected} wrapper logged {len(records)} invocations "
-                    f"for {mode}, want exactly 1: {records}",
+                    len(builds) == 1,
+                    f"the {expected} wrapper logged {len(builds)} builds for "
+                    f"{mode}, want exactly 1: {records}",
                 )
-                record = records[0]
+                for argv in others:
+                    expect(
+                        argv[1:] == ["--version"],
+                        f"the {expected} wrapper was spawned for {mode} with "
+                        f"{argv[1:]}, which is neither the build nor the "
+                        "toolchain version probe",
+                    )
+                argv = builds[0]
                 expect(
-                    record.get("wrapper") == wrappers[expected],
-                    f"the {mode} build ran {record.get('wrapper')!r}, want the "
-                    f"{expected} wrapper {wrappers[expected]!r}",
-                )
-                argv = list(record.get("argv", []))
-                expect(
-                    tuple(argv[1:]) == PRECEDENCE_BUILD_ARGV,
+                    tuple(argv[1:4]) == PRECEDENCE_BUILD_HEAD,
                     f"the {expected} wrapper received argv {argv[1:]} for "
-                    f"{mode}, want exactly {list(PRECEDENCE_BUILD_ARGV)}",
+                    f"{mode}, want it to start {list(PRECEDENCE_BUILD_HEAD)}",
+                )
+                expect(
+                    len(argv) == 5
+                    and PRECEDENCE_BUILD_OUT.match(argv[4]) is not None,
+                    f"the {expected} wrapper's {mode} build wrote to "
+                    f"{argv[4:]}, which is neither the invocation-private "
+                    "build/bin path nor a cache staging directory",
                 )
     return (
         "--mojo > MTEST_MOJO > PATH: each of collect and run invoked ONLY the "
-        f"selected wrapper, with the exact vector {list(PRECEDENCE_BUILD_ARGV)}"
+        f"selected wrapper, with exactly one build {list(PRECEDENCE_BUILD_HEAD)}"
+        " and no foreign spawn"
     )
