@@ -116,6 +116,42 @@ the helper would pass either way, so the edit has to be able to flip the exit
 code.
 """
 
+FIXTURE_SUITE_SOURCE = """\
+from std.testing import assert_true, TestSuite
+
+
+def make_fixture() -> Int:
+    return {value}
+
+
+def test_helpers_own() raises:
+    assert_true(True)
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()
+"""
+"""A file that is BOTH a discovered test file and its neighbours' fixtures.
+
+`test_helpers.mojo` matches the discovery glob, so it is omitted from the
+directory walk that keys its neighbours — and it is importable from every one of
+them. The two facts together are the shape a stale hit would come from.
+"""
+
+READS_FIXTURE_SOURCE = """\
+from test_helpers import make_fixture
+from std.testing import assert_equal, TestSuite
+
+
+def test_session_uses_the_fixture() raises:
+    assert_equal(make_fixture(), 7)
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()
+"""
+"""A suite whose verdict is decided by a fixture file named like a test file."""
+
 STATELESS_CONFIG = "[run]\nstate = false\n"
 """A project file that turns last-run persistence off.
 
@@ -793,6 +829,43 @@ class SiblingSearchPathTests(ProtocolScenario):
         # The verdict is the point. Exit 1 means the binary that ran was built
         # from the helper on disk; exit 0 would mean a green run over source
         # that fails.
+        self.assertEqual(
+            edited.returncode,
+            1,
+            msg=f"stdout={edited.stdout!r} stderr={edited.stderr!r}",
+        )
+
+    def test_a_fixture_file_named_like_a_test_is_still_keyed(self) -> None:
+        # `test_helpers.mojo`, `test_common.mojo`, `test_fixtures.mojo` are
+        # ordinary names for shared fixture files, and every one of them matches
+        # the discovery glob — so every one is left out of its neighbours' keys.
+        # That is only safe because the importer's own imports are read: this
+        # scenario is the shape where being wrong is a green run over a fixture
+        # that no longer returns what the suite asserts.
+        tests = self.root / "tests"
+        (tests / "test_helpers.mojo").write_text(
+            FIXTURE_SUITE_SOURCE.format(value=7), encoding="utf-8"
+        )
+        (tests / "test_session.mojo").write_text(
+            READS_FIXTURE_SOURCE, encoding="utf-8"
+        )
+
+        self.run_ok(["--json", "cold.ndjson", "tests"])
+        self.run_ok(["--json", "warm.ndjson", "tests"])
+        self.assertEqual(counters(self.root / "warm.ndjson"), (0, 3))
+
+        (tests / "test_helpers.mojo").write_text(
+            FIXTURE_SUITE_SOURCE.format(value=999), encoding="utf-8"
+        )
+        edited = run_mtest(self.root, ["--json", "edited.ndjson", "tests"])
+
+        built, cached = counters(self.root / "edited.ndjson")
+        # `test_session` named the fixture file, so it keys over the whole
+        # directory and rebuilds with it. `test_alpha` named nothing in the
+        # directory and keeps its own key, which is the precision the omission
+        # exists to buy — losing it here would mean every unrelated suite
+        # rebuilding whenever any fixture moved.
+        self.assertEqual((built, cached), (2, 1))
         self.assertEqual(
             edited.returncode,
             1,

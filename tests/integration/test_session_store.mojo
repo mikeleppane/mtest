@@ -1337,6 +1337,71 @@ def test_file_key_covers_a_test_sibling_the_source_imports() raises:
     )
 
 
+def test_file_key_ignores_a_test_sibling_only_a_neighbour_imports() raises:
+    """One test file importing another does not cost the rest their precision.
+
+    A keyed file's own imports speak for that file alone. `test_b` reaching
+    `test_c` means `test_b` keys over the whole directory; it says nothing about
+    what `test_a` compiles against, so `test_a` keeps the omission and an edit
+    to `test_c` leaves it in the store.
+
+    This is the difference between scanning the file being keyed and escalating
+    the whole directory. Escalating here would be sound but pointless, and its
+    cost is real: `test_helpers.mojo` beside `test_session.mojo` is an everyday
+    layout, and one such pair would put every unrelated test in the directory
+    back on the unomitted walk for good.
+    """
+    var root = temp_root()
+    write_file(root, "tests/test_a.mojo", SRC_PASS)
+    write_file(root, "tests/test_b.mojo", "from test_c import thing\n")
+    write_file(root, "tests/test_c.mojo", "# neighbour v1\n")
+    var before = _keyed(root, "tests/test_a.mojo")
+    write_file(root, "tests/test_c.mojo", "# neighbour v2\n")
+    assert_equal(
+        before,
+        _keyed(root, "tests/test_a.mojo"),
+        "only the file that imported the neighbour keys over it",
+    )
+    # ...and the file that DID import it moved, or the omission would be a hole
+    # rather than a precision choice.
+    var b_before = _keyed(root, "tests/test_b.mojo")
+    write_file(root, "tests/test_c.mojo", "# neighbour v3\n")
+    assert_not_equal(
+        b_before,
+        _keyed(root, "tests/test_b.mojo"),
+        "the importer must key over the neighbour it named",
+    )
+
+
+def test_file_key_covers_an_unreadable_test_sibling_its_importer_names() raises:
+    """An omitted sibling is covered by the name that reaches it, not by itself.
+
+    Omitted files are never scanned, and they never need to be: the match runs
+    on the IMPORTER's side, against the directory's omitted names. So a sibling
+    whose own bytes could not be scanned at all — here an embedded NUL, the
+    plainest "this is not source text" — still invalidates the file that names
+    it, because nothing about the sibling was ever consulted to decide that.
+    """
+    var root = temp_root()
+    write_bytes(
+        root,
+        "tests/test_y.mojo",
+        [UInt8(35), UInt8(0), UInt8(118), UInt8(49), UInt8(10)],
+    )
+    write_file(root, "tests/test_x.mojo", "from test_y import thing\n")
+    var before = _keyed(root, "tests/test_x.mojo")
+    write_bytes(
+        root,
+        "tests/test_y.mojo",
+        [UInt8(35), UInt8(0), UInt8(118), UInt8(50), UInt8(10)],
+    )
+    assert_not_equal(
+        before,
+        _keyed(root, "tests/test_x.mojo"),
+        "the importer named it, so it is an input whatever its bytes are",
+    )
+
+
 def test_file_key_covers_a_test_sibling_a_helper_imports() raises:
     """The same proof runs one hop out, over the helpers the walk does frame.
 

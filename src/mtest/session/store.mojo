@@ -513,11 +513,29 @@ struct _SourceDirScan(Copyable, Movable):
 
     So the walk omits exactly the entries mtest would DISCOVER as test files.
     Each of those is an independent entry point already keyed by its own source
-    frame, and the omission is safe precisely while nothing in the directory
-    imports one of them. That is proved rather than assumed: every source the
-    walk frames is scanned for its imports, and one naming an omitted entry —
-    or one that cannot be scanned at all — sets `needs_full`, which sends the
-    whole directory back to an unomitted walk.
+    frame, and the omission is safe precisely while nothing the compiler reads
+    imports one of them. That is proved rather than assumed, by two scans that
+    together cover the whole proof and are stated here because neither is
+    sufficient alone:
+
+    - `file_key` scans the file BEING KEYED against `skip_modules`, so a test
+      file that imports a test sibling — `from test_helpers import ...`, an
+      everyday shape — abandons the omission for itself.
+    - this walk scans every source it FRAMES, so a helper that imports a test
+      sibling abandons it for the whole directory, one hop out.
+
+    Between them no omitted file can enter a compile unnoticed. Walk the chain
+    of imports from the keyed file: whichever omitted file the compiler reaches
+    first was named by the keyed file itself or by a non-omitted one, since
+    everything earlier in the chain is by definition not omitted — and both of
+    those are scanned. So an omitted file is reachable only from a directory
+    that has already set `needs_full`, and scanning the omitted files as well
+    would add nothing but would cost precision: one test file importing another
+    would drag every unrelated test in the directory onto the unomitted walk.
+
+    The proof reaches one directory. A module under an `-I` root is not scanned,
+    so a library that bare-imports a name matching a test file in the keyed
+    file's directory is outside it; `file_key` states that boundary.
     """
 
     var active: Bool
@@ -527,8 +545,12 @@ struct _SourceDirScan(Copyable, Movable):
     """Module names of the discovered test files this walk omits."""
 
     var needs_full: Bool
-    """True once a framed source imports an omitted name or could not be read
-    for its imports; the omission is then unsafe for every file here."""
+    """True once a FRAMED source imports an omitted name or could not be read
+    for its imports; the omission is then unsafe for every file here.
+
+    A keyed file that names an omitted sibling does not set this: it abandons
+    the omission for itself alone, in `file_key`, leaving its neighbours precise.
+    """
 
     @staticmethod
     def inert() -> _SourceDirScan:
@@ -2063,11 +2085,15 @@ def file_key(
     The directory walk leaves out the entries mtest would DISCOVER as test
     files, because each is an independent entry point already carrying its own
     source frame; folding them in would make one edit rebuild every test in the
-    directory. That omission is proved safe per file rather than assumed: this
-    file's imports are read, and a file naming an omitted neighbour — or one
-    whose imports cannot be read at all — keys over the whole directory instead.
-    `_SourceDirScan` runs the matching proof over the files the walk frames, so
-    a helper that imports a test file closes the same hole one hop out.
+    directory. That omission is proved safe rather than assumed, and the proof
+    is deliberately two-sided. THIS file's imports are read here, so a test file
+    naming an omitted neighbour keys over the whole directory — by itself,
+    leaving its neighbours precise, since its own import says nothing about
+    theirs. `_SourceDirScan` runs the matching scan over the files the walk
+    FRAMES, where a match escalates the entire directory, because a helper
+    naming an omitted neighbour puts that neighbour on the path of everything
+    importing the helper. A source whose imports cannot be read at all takes the
+    conservative branch on whichever side met it.
 
     What the proof covers is one directory: this file, the sources beside it,
     and the packages under them. A module reached through an `-I` root is not
