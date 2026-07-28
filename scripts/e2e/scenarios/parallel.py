@@ -51,6 +51,24 @@ from scripts.e2e.runner import (
 PARALLEL_TREE = "e2e/parallel"
 VARIED_SUITE = "e2e/suite"
 
+CACHE_OFF = "--no-cache"
+"""Passed by BOTH sides of every paired comparison in this module.
+
+The build cache's store lives under the invocation root, and every scenario here
+runs its two invocations from the one repository root over the one tree. So the
+first would compile and the second would be served from the store — a difference
+that is visible in the console's `builds:`/`cached:` band, in
+`session_finished`'s `built_files`/`cached_files`, and in the JUnit
+`mtest::cache` suite, and that is a difference in cache WARMTH when the only
+variable these scenarios vary is the worker count.
+
+Turning the cache off is what makes the pair comparable, and it costs no
+coverage of the accounting: `built_files` counts one per first-attempt compile
+admission whether or not the cache is enabled, so both sides still render the
+same non-zero `builds: N, cached: 0`. Masking the fields out of the comparison
+instead would have thrown that away — with them in, these equalities also prove
+the pool accounts for its admissions exactly as the sequential path does."""
+
 _TIMING_BRACKET = re.compile(r"\[\s*[\d.]+\s*\]")
 _TIMING_SECONDS = re.compile(r"\b\d+\.\d+s")
 _TIMING_TAGS = re.compile(r"\bin\s+[\d.]+s\b")
@@ -199,10 +217,12 @@ def s_parallel_projection_eq(context: ScenarioContext) -> str:
 
     The enumerated projection: identical exit code, identical per-file `--json`
     event sequences (grouped by file so concurrency order cannot matter),
-    identical session header and terminal summary, identical console verdict set,
-    and no Progress event in either stream.
+    identical session header and terminal summary — `built_files`/`cached_files`
+    included, so the pool's build accounting is projected too — identical console
+    verdict set, and no Progress event in either stream. Both runs pass
+    `CACHE_OFF`; see it for why.
     """
-    args = [VARIED_SUITE, "--json", "-", "--gh-annotations", "off"]
+    args = [VARIED_SUITE, "--json", "-", "--gh-annotations", "off", CACHE_OFF]
     many = context.runner.run_mtest([*args, "-n", "4"], timeout=240.0)
     one = context.runner.run_mtest([*args, "-n", "1"], timeout=240.0)
     expect(
@@ -239,9 +259,10 @@ def s_parallel_capacity_one(context: ScenarioContext) -> str:
 
     A single worker is the sequential default: the timing-masked console and the
     projected `--json` stream must be identical to a run with no `-n` at all, and
-    both must report `workers == 1` with no Progress in the stream.
+    both must report `workers == 1` with no Progress in the stream. All four
+    invocations pass `CACHE_OFF`; see it for why.
     """
-    console_args = [PARALLEL_TREE, "--gh-annotations", "off"]
+    console_args = [PARALLEL_TREE, "--gh-annotations", "off", CACHE_OFF]
     one = context.runner.run_mtest([*console_args, "-n", "1"])
     none = context.runner.run_mtest(console_args)
     expect_exit(one, 0)
@@ -253,7 +274,14 @@ def s_parallel_capacity_one(context: ScenarioContext) -> str:
         f"--- -n1 ---\n{_mask_timing(one.stdout)}\n"
         f"--- none ---\n{_mask_timing(none.stdout)}",
     )
-    stream_args = [PARALLEL_TREE, "--json", "-", "--gh-annotations", "off"]
+    stream_args = [
+        PARALLEL_TREE,
+        "--json",
+        "-",
+        "--gh-annotations",
+        "off",
+        CACHE_OFF,
+    ]
     one_json = context.runner.run_mtest([*stream_args, "-n", "1"])
     none_json = context.runner.run_mtest(stream_args)
     expect(
@@ -648,15 +676,19 @@ def s_parallel_junit_canonical_eq(context: ScenarioContext) -> str:
 
     Re-runs the Phase-4 JUnit canonicalizer equality under concurrency: the two
     reports differ only in masked timing, so their canonical forms are byte-equal.
+    The canonicalizer keeps the synthetic `mtest::cache` suite's counter
+    properties, which is why both runs pass `CACHE_OFF`; see it for why.
     """
     with tempfile.TemporaryDirectory(prefix="mtest-parallel-junit-") as tmp:
         many = Path(tmp) / "n4.xml"
         one = Path(tmp) / "n1.xml"
         run_many = context.runner.run_mtest(
-            [VARIED_SUITE, "--junit-xml", str(many), "-n", "4"], timeout=240.0
+            [VARIED_SUITE, "--junit-xml", str(many), "-n", "4", CACHE_OFF],
+            timeout=240.0,
         )
         run_one = context.runner.run_mtest(
-            [VARIED_SUITE, "--junit-xml", str(one), "-n", "1"], timeout=240.0
+            [VARIED_SUITE, "--junit-xml", str(one), "-n", "1", CACHE_OFF],
+            timeout=240.0,
         )
         expect_exit(run_many, 1)
         expect_exit(run_one, 1)

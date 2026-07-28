@@ -22,6 +22,7 @@ from scripts.e2e.assertions import (
     expect,
     expect_exit,
     expect_report,
+    file_testsuites,
     hostile_actor,
     junit_not_run_files,
 )
@@ -197,7 +198,18 @@ def assert_hostile_junit_report(
     )
 
     root = ET.parse(os.fspath(path)).getroot()
-    suite = _only_child(root, "testsuite", "testsuite for the hostile file")
+    # Scoped to the file suites on purpose. The report also carries the
+    # session-level `mtest::cache` suite, which is not a file and cannot be one;
+    # a count over every `<testsuite>` element would read it as a second hostile
+    # suite, and widening that count to absorb it would keep passing on a report
+    # that published the session suite and lost the file's.
+    file_suites = file_testsuites(root)
+    expect(
+        len(file_suites) == 1,
+        f"expected exactly one file <testsuite> for the hostile file, got "
+        f"{len(file_suites)}: {[suite.get('name') for suite in file_suites]}",
+    )
+    suite = file_suites[0]
     expect(
         suite.get("name") == rel_path,
         f"the hostile suite is named {suite.get('name')!r}, want {rel_path!r}",
