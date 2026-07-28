@@ -167,6 +167,65 @@ def test_note_not_run_synthesizes_only_for_unspooled_files() raises:
     assert_true("skipped_b" in doc)
 
 
+def test_finalize_renders_the_cache_counters_as_suite_properties() raises:
+    # junit-10 gives `<testsuites>` no `<properties>` child at all, so the
+    # run-wide cache accounting rides a synthetic zero-test `mtest::cache` suite
+    # whose `<properties>` block IS schema-valid.
+    var target = temp_root() + "/report.xml"
+    var rep = _active_reporter(target)
+    _drive_one_pass(rep, "e2e/suite/test_a.mojo")
+    var result = rep.finalize(3, 98)
+    assert_false(result.failed, "a clean finalize must not fail")
+    var body: String
+    with open(target, "r") as f:
+        body = f.read()
+    assert_true('name="mtest::cache"' in body, "the cache suite is present")
+    assert_true(
+        '<property name="mtest.built_files" value="3"/>' in body,
+        "the built-files property row is present",
+    )
+    assert_true(
+        '<property name="mtest.cached_files" value="98"/>' in body,
+        "the cached-files property row is present",
+    )
+    # The synthetic suite carries no rows, so it perturbs no arithmetic.
+    assert_true('name="mtest::cache" tests="0"' in body)
+    # The real suite still made it into the same document.
+    assert_true("test_ok" in body)
+
+
+def test_finalize_omits_the_cache_suite_when_both_counters_are_zero() raises:
+    # Zero builds and zero hits is the pre-cache shape of every run: the
+    # document is exactly what it was before the counters existed.
+    var target = temp_root() + "/report.xml"
+    var rep = _active_reporter(target)
+    _drive_one_pass(rep, "e2e/suite/test_a.mojo")
+    assert_false(rep.finalize(0, 0).failed)
+    var body: String
+    with open(target, "r") as f:
+        body = f.read()
+    assert_false("mtest::cache" in body)
+    assert_false("<properties>" in body)
+
+
+def test_note_cache_counters_is_idempotent_under_finalize() raises:
+    # The gate emitter names the counters directly, then a finalize passes them
+    # again: the suite must not double.
+    var target = temp_root() + "/report.xml"
+    var rep = _active_reporter(target)
+    _drive_one_pass(rep, "e2e/suite/test_a.mojo")
+    rep.note_cache_counters(1, 2)
+    assert_equal(rep.suite_count(), 2)
+    rep.note_cache_counters(7, 7)
+    assert_equal(rep.suite_count(), 2, "the cache suite is spooled once")
+    assert_false(rep.finalize(7, 7).failed)
+    var body: String
+    with open(target, "r") as f:
+        body = f.read()
+    assert_equal(body.count("mtest::cache"), 1)
+    assert_true('value="1"' in body, "the first naming wins")
+
+
 def main() raises:
     """Run this module's tests through the stdlib suite."""
     TestSuite.discover_tests[__functions_in_module()]().run()

@@ -1696,6 +1696,18 @@ struct ConsoleReporter(Reporter):
         body += _extra_count(s, Outcome.COMPILE_TIMEOUT, "compile timeout")
         body += _extra_count(s, Outcome.PRECOMPILE_ERROR, "precompile error")
         body += _extra_count(s, Outcome.FLAKY, "flaky")
+        # The build-cache accounting, on the same band as the outcome counts and
+        # only when the cache actually admitted something: `builds` counts
+        # first-attempt compiles (failures included), `cached` counts store
+        # hits. Both zero is every run with no admissions at all, and a band
+        # that grew a pair of zeros would be noise.
+        if e.built_files + e.cached_files > 0:
+            body += (
+                ", builds: "
+                + String(e.built_files)
+                + ", cached: "
+                + String(e.cached_files)
+            )
 
         var parenthetical = (
             String("(")

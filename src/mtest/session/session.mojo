@@ -831,7 +831,19 @@ def run_session[
     # failure. A latched junit SPOOL failure did NOT abort the run mid-flight (the
     # deliberate asymmetry vs the stream's fatal abort); it surfaces NOW.
     reporter.note_not_run(casualty_files)
-    var junit_fin = reporter.finalize_junit()
+    # The run-wide build-cache accounting, stated once and read by BOTH terminal
+    # artifacts below: the JUnit finalize (which has no event to ride, so the
+    # counters travel on the call) and the SessionFinished payload. Nothing
+    # increments them yet — the three build seams fold their `CacheContext`
+    # counters (`ctx.built_files` / `ctx.cached_files`) in here. The rule those
+    # seams obey: `built_files` counts a FIRST-ATTEMPT compile admission,
+    # compile FAILURES included; `cached_files` a cache-hit admission; retries,
+    # probes and precompile steps count as neither. So
+    # `built_files + cached_files == first-attempt compile admissions`, gates
+    # included.
+    var built_files = 0
+    var cached_files = 0
+    var junit_fin = reporter.finalize_junit(built_files, cached_files)
     var finalize_failed = junit_fin.failed
     if finalize_failed:
         # Loudly report the finalization failure — the console shows it and the
@@ -866,6 +878,8 @@ def run_session[
             code,
             test_counts=test_totals,
             flaky_files=flaky_files,
+            built_files=built_files,
+            cached_files=cached_files,
         )
     )
 

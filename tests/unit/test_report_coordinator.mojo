@@ -203,7 +203,7 @@ def test_standard_coordinator_reports_inert_lifecycle_channels() raises:
     )
     # An inert JUnit reporter is a no-op success on both lifecycle channels.
     coord.note_not_run(["tests/test_gamma.mojo"])
-    assert_false(coord.finalize_junit().failed)
+    assert_false(coord.finalize_junit(0, 0).failed)
     assert_equal(len(coord.annotation_tail()), 0)
     assert_equal(coord.fence_token(), "")
 
@@ -226,7 +226,7 @@ def test_recording_coordinator_records_the_whole_stream() raises:
 
     # Every lifecycle channel is inert, so a bare driver needs no real reporter.
     coord.note_not_run(["tests/test_gamma.mojo"])
-    assert_false(coord.finalize_junit().failed)
+    assert_false(coord.finalize_junit(0, 0).failed)
     assert_equal(len(coord.annotation_tail()), 0)
     assert_equal(coord.console_output(), "")
     assert_equal(coord.fence_token(), "")

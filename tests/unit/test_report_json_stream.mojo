@@ -296,7 +296,29 @@ def test_session_finished_exact() raises:
         + '"malformed_suite":0,"precompile_error":0,"flaky":0,"deselected":0,'
         + '"excluded":0,"not_run":0},"wall_time_us":3000000,"exit_code":1,'
         + '"test_counts":{"passed":5,"failed":1,"skipped":0,"deselected":0},'
-        + '"flaky_files":0}',
+        + '"flaky_files":0,"built_files":0,"cached_files":0}',
+    )
+
+
+def test_session_finished_carries_the_cache_counters() raises:
+    # The two build-cache admission counters are unconditional keys on the
+    # terminal record: a consumer reads them without branching on whether the
+    # cache was on. They sit last, after `flaky_files`.
+    var counts: List[Int] = [3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var e = Event.session_finished(
+        Summary(counts^),
+        1.0,
+        0,
+        TestCounts(3, 0, 0, 0),
+        0,
+        built_files=3,
+        cached_files=98,
+    )
+    var text = serialize_event(e)
+    assert_true('"built_files":3' in text)
+    assert_true('"cached_files":98' in text)
+    assert_true(
+        text.endswith('"flaky_files":0,"built_files":3,"cached_files":98}')
     )
 
 

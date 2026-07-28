@@ -585,5 +585,10 @@ def _session_finished(p: SessionFinishedPayload) -> String:
     s += ',"deselected":' + String(p.test_counts.deselected)
     s += "}"
     s += ',"flaky_files":' + String(p.flaky_files)
+    # The build-cache admission counters are UNCONDITIONAL keys: a consumer
+    # reads them without first learning whether the cache was on. Both are 0
+    # when nothing was admitted.
+    s += ',"built_files":' + String(p.built_files)
+    s += ',"cached_files":' + String(p.cached_files)
     s += "}"
     return s^

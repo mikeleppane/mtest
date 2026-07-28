@@ -18,7 +18,7 @@ from std.os import listdir, makedirs
 from std.os.path import dirname, exists, isdir
 
 from mtest.config import RunnerConfig
-from mtest.model import EventKind, WarningPayload
+from mtest.model import EventKind, SessionFinishedPayload, WarningPayload
 from mtest.report import (
     CompositeReporter,
     RecordingCoordinator,
@@ -171,6 +171,11 @@ def run_recording_session(
 
     ref rec = comp.composite.reporters[0]
     var warnings = List[String]()
+    # The counters are read off the ONE terminal event the session dispatches;
+    # a torn run that never reached it leaves them at zero, which is the honest
+    # answer for a session that admitted nothing.
+    var built_files = 0
+    var cached_files = 0
     for i in range(rec.count()):
         var e = rec.event_at(i)
         if e.kind == EventKind.WARNING:
@@ -179,9 +184,8 @@ def run_recording_session(
                 + ":"
                 + e.data[WarningPayload].warning_pattern
             )
+        elif e.kind == EventKind.SESSION_FINISHED:
+            built_files = e.data[SessionFinishedPayload].built_files
+            cached_files = e.data[SessionFinishedPayload].cached_files
 
-    # Task 8 wires these: `SessionFinishedPayload` grows `built_files` and
-    # `cached_files` there, and this driver reads them off the terminal event.
-    # Until then they are structurally present and always 0, so the dozen later
-    # suites that import `RecordedRun` compile against one stable shape.
-    return RecordedRun(code, 0, 0, warnings^)
+    return RecordedRun(code, built_files, cached_files, warnings^)
