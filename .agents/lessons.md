@@ -41,6 +41,17 @@ append here as later phases teach more.
 - The module cache is redirectable via `MODULAR_CACHE_DIR`. `mojo build` is
   multi-threaded by default (`--num-threads`), so parallel worker sizing must
   not oversubscribe compiler threads.
+- `mojo precompile` is NOT byte-reproducible: two runs over identical inputs
+  produced packages digesting `43fcef41...` and `eb81d1f7...`. Nothing may
+  assume a rebuilt `.mojopkg` is byte-stable, and any digest taken over one is
+  a fingerprint of *that* build, not of its inputs. The consequence compounds:
+  a precompile step that re-runs rewrites its package and therefore moves
+  every key derived from it, so a build cache over a project that precompiles
+  anything only hits if the unchanged step is *skipped*. Both the production
+  build stage and configured `precompile` steps are stamped against their
+  inputs for exactly that reason. Prove it by making the second run skip the
+  stage — identical bytes because nothing was written, never because the
+  compiler settled down.
 - A killed `mojo build` never corrupted its cache in a nine-trial kill probe
   (strict temp-then-rename atomicity observed). The per-attempt quarantine dir
   is defense-in-depth for residual risk, not a fix for observed corruption.
@@ -132,8 +143,9 @@ append here as later phases teach more.
   canonicalizing to the exact string `mojo build` bakes into reports.
 - Filesystem stdlib: `std.os` / `std.os.path` / `std.tempfile` (no
   `std.shutil`, no `rmtree`; delete recursively by hand). `isdir`/`isfile`
-  follow symlinks, so skip `islink` entries before recursing. `listdir` is
-  unsorted; sort with `from std.builtin.sort import sort`.
+  follow symlinks, so a recursive delete driven by them removes a link
+  target's contents; characterize with `lstat` and unlink the link. `listdir`
+  is unsorted; sort with `from std.builtin.sort import sort`.
 - Fanning one event to N heterogeneous reporters is a comptime variadic pack:
   `struct Composite[*Rs: Reporter]` holding `Tuple[*Self.Rs]`, dispatched with
   `comptime for`. Traps: write `Self.Rs` inside the struct; build the tuple at
@@ -157,6 +169,31 @@ append here as later phases teach more.
 - A raw `external_call["isatty", ...]` link-conflicts with
   `std.io.FileDescriptor`'s own declaration once imported next to TestSuite, so
   delegate to the std wrapper. The same discipline governs `write`.
+- `external_call` emits a NON-variadic call. On Darwin arm64 a variadic
+  argument travels on the stack while the emitted call passes it in a register,
+  so a variadic argument libc actually *consumes* is silent garbage there while
+  Linux passes — `open(2)`'s mode under `O_CREAT`, `fcntl`'s under `F_SETFL`.
+  Reach for a fixed-ABI sibling (`creat` instead of `open`+`O_CREAT`), or keep
+  the variadic argument unconsumed and say in the SAFETY comment why libc never
+  reads it.
+- ONE `external_call` declaration shape per libc symbol repo-wide. Arity is
+  part of the shape, and a second declaration with a different one breaks the
+  link from a file that has nothing to do with either call site — the error
+  surfaces at archive time and names neither. `open` is fixed at arity 3 in
+  this tree (`platform/regular_file.mojo`, `platform/stream.mojo`); grep for an
+  existing declaration before writing a new one.
+- `isdir` / `isfile` / `islink` fold every error into `False`, so "I could not
+  characterize this" becomes "it is not there" and a thing that should have
+  been examined is skipped in silence. Where the difference decides anything,
+  use `lstat` + `S_IFMT` (raises, and does not follow) or `listdir` (raises,
+  and tells "empty" from "unreadable"). A directory listing read with `isfile`
+  cannot tell a missing `__init__.mojo` from one it was not permitted to stat,
+  and those two answers lead to opposite decisions.
+- A directory can be readable but not *searchable* (mode `0644`): `listdir`
+  succeeds and every `stat` inside it fails. A walk built on
+  fold-errors-to-`False` predicates then finds nothing, frames nothing, and
+  reports success over a tree it never saw. Fail the walk on the first entry it
+  cannot characterize.
 
 ## Harness and workflow
 
@@ -192,6 +229,25 @@ append here as later phases teach more.
 - Never run two builds against the shared `build/` tree at once. A racing build
   corrupted `build/mtest.mojopkg` mid-write and looked exactly like a real
   regression. Builds run one at a time.
+- Two mtest processes over one checkout is ORDINARY — `--shard` splits a suite
+  across exactly that, and so does a second terminal. Any directory creation on
+  that path must be idempotent: `_ensure_dir` was check-then-create, both
+  processes saw `build/bin` absent, and the loser's raise surfaced as an
+  internal error and exit 3 on a run whose only fault was being second.
+  `makedirs(..., exist_ok=True)`, and treat every check-then-act over a shared
+  path the same way.
+- Never assert on a POSITION in a user-visible stream. Two integration suites
+  indexed events by literal offset; the `cache-off` warning that now precedes
+  the first file shifted every index, and one of them unpacked the wrong
+  payload variant, aborted with SIGILL, and took every test in that binary with
+  it. Match on event kind and search for the record you mean. The same trap in
+  a gate is quieter: `layout-check` counted lines starting with `mojo
+  precompile`, the build script moved those into `PRECOMPILE_CMD_*` arrays, and
+  the gate silently became "exactly zero, and there are none" — green on a
+  claim it had stopped making. Anything a feature can add — an event, a
+  warning, a child process, a spelling — turns an exact-position or
+  occurrence-count assertion into a landmine. Assert the property, not the
+  offset, and make the failure report the count it actually found.
 - A regression guard must be shown to fail when its property is broken:
   mutation-prove it (break the property, watch it go red, revert) before
   calling it a pin. "I ran it and it looked right" is an observation, not a
