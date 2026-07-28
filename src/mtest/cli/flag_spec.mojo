@@ -255,7 +255,7 @@ def flag_specs() -> List[FlagSpec]:
             "GLOB",
             FlagGroup.EXECUTION,
         ),
-        # CLI-only, exempt from mtest.toml by design (build-cache Task 9).
+        # CLI-only, exempt from mtest.toml by design (build cache).
         FlagSpec(
             "--no-cache",
             FlagId.NO_CACHE,

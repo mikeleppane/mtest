@@ -281,7 +281,7 @@ def frozen_inventory() -> List[InvRow]:
             "Run matching files serially (repeatable).",
             "--serial GLOB",
         ),
-        # CLI-only: never read from mtest.toml (Task 9, build cache).
+        # CLI-only: never read from mtest.toml (build cache).
         InvRow(
             "--no-cache",
             0,

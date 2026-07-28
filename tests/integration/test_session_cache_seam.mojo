@@ -1040,7 +1040,7 @@ def test_cache_clear_on_an_absent_store_succeeds() raises:
 def test_cache_clear_deletes_a_store_a_real_session_wrote() raises:
     """The marker a real session writes is the one the clear accepts.
 
-    The two halves of this feature are written by different code: Task 7 writes
+    The two halves of this feature are written by different code: the store writes
     `CACHEDIR.TAG` at store creation and the clear reads it. A test that builds
     the marker by hand would pass even if the two spelled the path differently,
     so this one lets a session create the store and then clears it for real.

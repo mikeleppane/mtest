@@ -353,7 +353,7 @@ comptime ARG_UNKNOWN = 3
 
 @fieldwise_init
 struct ArgClass(Copyable, Movable):
-    """One classified build argument, ready for Task 6 to fold into a key.
+    """One classified build argument, ready for the cache context to fold into a key.
 
     Each instance is one LOGICAL argument: a two-token form like `-I <dir>` or
     `-Xlinker <tok>` collapses to a single row, so `classify_build_args` never
@@ -503,7 +503,7 @@ struct MetaFile(Copyable, Movable):
     end
     ```
 
-    `render` assumes the fields are well formed — Task 7 fills them from real
+    `render` assumes the fields are well formed — the store fills them from real
     digests — while `parse` assumes nothing at all.
 
     Examples:

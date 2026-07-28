@@ -555,7 +555,7 @@ def test_non_config_invocation_fields_survive_resolution() raises:
     # `--no-cache`/`--cache-clear` are CLI-only by design (exempt from
     # mtest.toml): neither `file` nor `overlay` carries a slot for them, so
     # this is the same "parsed flag survives the defaults-projection main
-    # builds before resolve_config" shape the plan's Task 9 anchors — a field
+    # builds before resolve_config" shape the CLI-flag resolution path requires — a field
     # missing from that projection would silently reset to False here even
     # though every CLI parse test above still passes.
     assert_true(resolved.config.no_cache)

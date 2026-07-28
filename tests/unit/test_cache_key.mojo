@@ -146,7 +146,7 @@ def test_classify_unknown_is_conservative() raises:
 def test_classify_missing_lookahead_is_conservative() raises:
     # A two-token introducer as the LAST argv token, with its value missing,
     # must classify as ARG_UNKNOWN rather than being dropped or matched
-    # against a made-up value -- this is the property Task 6 relies on to
+    # against a made-up value -- this is the property the cache context relies on to
     # disable the cache instead of silently treating a malformed build
     # command as harmless. An empty-string token gets the same conservative
     # treatment. `len(result) <= len(args)` must still hold in every case.
