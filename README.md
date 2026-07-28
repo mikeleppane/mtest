@@ -289,13 +289,17 @@ root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 PASS           e2e/suite/test_passing.mojo  0.07s
 
-===== 3 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 0.5s =====
+===== 3 passed, 0 failed, 0 skipped, builds: 1, cached: 0 (0 excluded, 0 not run) in 1.2s =====
 $ echo $?
 0
 ```
 
 The file holds three `test_*` functions; the summary counts them
-individually, not the one file that held them.
+individually, not the one file that held them. The `builds`/`cached` pair is
+the build cache: this store was cold, so the file was compiled; a rerun over an
+unchanged tree compiles nothing and reports `builds: 0, cached: 1` instead. The
+console fences below are captured against a cold store unless the text says
+otherwise ([Build cache](#build-cache)).
 
 ### A mixed run
 
@@ -332,7 +336,7 @@ reproduce: mtest e2e/suite/test_failing.mojo::test_second_fails
 
 [...file-scoped captured output omitted...]
 
-===== 9 passed, 1 failed, 0 skipped, 1 crashed, 1 compile error (0 excluded, 0 not run) in 3.9s =====
+===== 9 passed, 1 failed, 0 skipped, 1 crashed, 1 compile error, builds: 7, cached: 0 (0 excluded, 0 not run) in 5.9s =====
 $ echo $?
 1
 ```
@@ -356,7 +360,7 @@ root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
 PASS           e2e/matrix/test_alpha.mojo 0.02s
 PASS           e2e/matrix/test_beta.mojo  0.03s
 
-===== 2 passed, 0 failed, 0 skipped (0 excluded, 0 not run, 3 deselected) in 0.9s =====
+===== 2 passed, 0 failed, 0 skipped, builds: 2, cached: 0 (0 excluded, 0 not run, 3 deselected) in 1.7s =====
 ```
 
 A node-id operand selects exactly one test:
@@ -368,7 +372,7 @@ root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 PASS           e2e/matrix/test_alpha.mojo 0.03s
 
-===== 1 passed, 0 failed, 0 skipped (0 excluded, 0 not run, 2 deselected) in 0.5s =====
+===== 1 passed, 0 failed, 0 skipped, builds: 1, cached: 0 (0 excluded, 0 not run, 2 deselected) in 1.2s =====
 ```
 
 Non-matching tests are counted once as `deselected`, never listed
@@ -424,7 +428,7 @@ ATTRIBUTION    e2e/attribution/test_deterministic_crasher.mojo  ATTRIBUTED  culp
 
 [...captured output omitted...]
 
-===== 0 passed, 0 failed, 0 skipped, 1 crashed (0 excluded, 0 not run) in 2.7s =====
+===== 0 passed, 0 failed, 0 skipped, 1 crashed, builds: 1, cached: 0 (0 excluded, 0 not run) in 3.4s =====
 $ echo $?
 1
 ```
@@ -451,7 +455,7 @@ TIMEOUT        e2e/stubborn/test_stubborn.mojo 1.31s  (timed out after 1s, escal
 
 [...captured output omitted...]
 
-===== 0 passed, 0 failed, 0 skipped, 1 timed out (0 excluded, 0 not run) in 1.7s =====
+===== 0 passed, 0 failed, 0 skipped, 1 timed out, builds: 1, cached: 0 (0 excluded, 0 not run) in 2.4s =====
 $ echo $?
 1
 ```
@@ -576,7 +580,7 @@ root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0   workers: 16
 PASS           e2e/matrix/test_alpha.mojo      0.02s
 PASS           e2e/matrix/test_beta.mojo       0.02s  SERIAL
 
-===== 5 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 0.9s =====
+===== 5 passed, 0 failed, 0 skipped, builds: 2, cached: 0 (0 excluded, 0 not run) in 3.0s =====
 
 slowest 2 files:
   e2e/matrix/test_alpha.mojo  0.02s
@@ -705,7 +709,9 @@ test	e2e/suite/test_failing.mojo::test_second_fails
 you read one failure instead of scrolling past the whole suite. It narrows what
 *executes*, not what is built: the filter applies after each file has been
 compiled and probed for its test names, so the compile cost of the selection is
-unchanged. `--lf` also runs on a single worker, ignoring `-n`:
+unchanged. The run that wrote the state also filled the build cache, so the
+bands in this section report hits rather than builds. `--lf` also runs on a
+single worker, ignoring `-n`:
 
 ```console
 $ pixi run bash -c 'build/mtest --lf e2e/matrix e2e/suite/test_failing.mojo'
@@ -722,7 +728,7 @@ reproduce: mtest e2e/suite/test_failing.mojo::test_second_fails
 
 [...file-scoped captured output omitted...]
 
-===== 0 passed, 1 failed, 0 skipped (0 excluded, 2 not run, 7 deselected) in 1.3s =====
+===== 0 passed, 1 failed, 0 skipped, builds: 0, cached: 3 (0 excluded, 2 not run, 7 deselected) in 0.8s =====
 $ echo $?
 1
 ```
@@ -739,7 +745,7 @@ FAIL           e2e/suite/test_failing.mojo     0.02s
 PASS           e2e/matrix/test_alpha.mojo      0.02s
 PASS           e2e/matrix/test_beta.mojo       0.02s
 
-===== 7 passed, 1 failed, 0 skipped (0 excluded, 0 not run) in 1.2s =====
+===== 7 passed, 1 failed, 0 skipped, builds: 0, cached: 3 (0 excluded, 0 not run) in 0.9s =====
 $ echo $?
 1
 ```
@@ -759,7 +765,7 @@ lf: no previously-failing tests match this selection — running the full select
 PASS           e2e/matrix/test_alpha.mojo      0.02s
 PASS           e2e/matrix/test_beta.mojo       0.03s
 
-===== 5 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 0.9s =====
+===== 5 passed, 0 failed, 0 skipped, builds: 0, cached: 2 (0 excluded, 0 not run) in 0.9s =====
 $ echo $?
 0
 ```
@@ -1135,7 +1141,7 @@ root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0   workers: 2
 PASS           e2e/matrix/test_beta.mojo       0.02s
 PASS           e2e/matrix/test_alpha.mojo      0.02s
 
-===== 5 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 1.1s =====
+===== 5 passed, 0 failed, 0 skipped, builds: 2, cached: 0 (0 excluded, 0 not run) in 1.9s =====
 ```
 
 `--serial GLOB` pins matching files to a final one-at-a-time pass that runs
@@ -1150,7 +1156,7 @@ root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0   workers: 2
 PASS           e2e/matrix/test_beta.mojo       0.02s
 PASS           e2e/matrix/test_alpha.mojo      0.03s  SERIAL
 
-===== 5 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in 1.5s =====
+===== 5 passed, 0 failed, 0 skipped, builds: 2, cached: 0 (0 excluded, 0 not run) in 2.3s =====
 ```
 
 The default is `-n 1`: a single worker on the sequential path, byte-for-byte
