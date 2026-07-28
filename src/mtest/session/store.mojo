@@ -470,6 +470,9 @@ comptime _S_IFDIR = 0x4000
 comptime _S_IFLNK = 0xA000
 """`S_IFLNK`: the `st_mode` file-type value for a symbolic link."""
 
+comptime _S_IFREG = 0x8000
+"""`S_IFREG`: the `st_mode` file-type value for a regular file."""
+
 
 def _list_sorted(abs_dir: String) -> Optional[List[String]]:
     """The entries of `abs_dir` in byte order, or nothing if it cannot be read.
@@ -1477,6 +1480,83 @@ def _discard(path: String):
         pass
 
 
+def _ownership_proof_failure(root: String) -> Optional[String]:
+    """Why `<root>/.mtest-cache` is not provably mtest's, or nothing if it is.
+
+    The proof is the whole marker file, not its presence and not its first line.
+    `CACHEDIR.TAG` is a published convention: the signature line is a fixed byte
+    string shared by every tool that marks a cache directory, and users are
+    actively encouraged to drop one into any directory they want backup tools to
+    skip. A marker that merely exists, or that merely carries the convention's
+    signature, therefore says somebody marked this as a cache — not that mtest
+    created it. Only the exact text `_cachedir_tag_text` writes says that.
+
+    Args:
+        root: The invocation root the cache directory hangs under.
+
+    Returns:
+        What failed and what to do about it, ready to finish a refusal, or
+        `None` when the marker is a regular file holding exactly what mtest
+        writes. Never raises: an unprovable directory is a refusal, not an
+        error.
+
+        The two shapes carry different remedies on purpose. A MISSING marker is
+        written by the next cache-enabled run, so that run is the way out. A
+        marker that is present but not mtest's is not — mtest writes the marker
+        only when it creates the directory and never overwrites one it finds,
+        precisely because overwriting it would manufacture the proof this
+        function exists to demand — so the only way out is the user's own
+        deletion.
+    """
+    var tag = root + "/" + CACHEDIR_TAG_REL
+    var quoted = String("the ownership marker '") + CACHEDIR_TAG_REL + "' "
+    var manual = String(" delete the directory yourself with 'rm -rf ")
+    manual += CACHE_ROOT_DIR
+    manual += "'"
+
+    # `lstat`, never `isfile`: a symlink at the marker's path is not the marker
+    # mtest wrote, however ordinary the file it points at may be, and `isfile`
+    # would follow it and answer yes.
+    var kind: Int
+    try:
+        kind = Int(lstat(tag).st_mode) & _S_IFMT
+    except:
+        var absent = quoted + "is missing. mtest writes that marker whenever"
+        absent += " it creates '"
+        absent += CACHE_ROOT_DIR
+        absent += "', so a cache directory left by an older mtest refuses"
+        absent += " exactly once: run mtest once with the cache enabled to"
+        absent += " write the marker, or"
+        absent += manual
+        return Optional[String](absent^)
+
+    var foreign = String("")
+    if kind != _S_IFREG:
+        foreign = quoted + "is not a regular file"
+    else:
+        var text: String
+        try:
+            var opened = read_bounded_regular_file(tag, _META_CAP)
+            if not opened.is_regular:
+                text = String("")
+                foreign = quoted + "is not a regular file"
+            else:
+                text = opened.text.copy()
+        except:
+            # Unreadable, over the cap, or not UTF-8. mtest's marker is a few
+            # short ASCII lines, so none of those can describe one.
+            text = String("")
+            foreign = quoted + "could not be read"
+        if foreign == "" and text != _cachedir_tag_text():
+            foreign = quoted + "does not hold the text mtest writes into it"
+    if foreign == "":
+        return Optional[String](None)
+    foreign += ". mtest writes that marker itself and never overwrites one it"
+    foreign += " finds, so this directory stays refused until you"
+    foreign += manual
+    return Optional[String](foreign^)
+
+
 def clear_cache_root(root: String) -> Optional[String]:
     """Delete `<root>/.mtest-cache` whole, but only where mtest can prove it
     owns it.
@@ -1488,12 +1568,17 @@ def clear_cache_root(root: String) -> Optional[String]:
     1. The path is characterized `lstat`-no-follow FIRST. A symlink is REFUSED,
        never removed and never followed — following it would delete whatever it
        points at, which is outside the tree mtest owns.
-    2. The directory must hold the `CACHEDIR.TAG` marker mtest writes at store
-       creation. There is deliberately no "but its contents look like ours"
-       exception: that heuristic is exactly how a directory somebody else
-       created gets deleted. A checkout whose cache predates the marker
-       therefore refuses ONCE, and the diagnostic says so and hands over the
-       manual removal.
+    2. The directory must hold the `CACHEDIR.TAG` marker mtest writes when it
+       creates the directory — as a regular file, holding exactly the text mtest
+       writes. Presence alone proves nothing: `CACHEDIR.TAG` is a published
+       convention whose signature line every cache-marking tool writes, and
+       users add one by hand to keep backups out, so a marker somebody else
+       wrote would otherwise hand mtest deletion rights over their directory.
+       There is deliberately no "but its contents look like ours" exception
+       either: that heuristic is exactly how a directory somebody else created
+       gets deleted. A checkout whose cache predates the marker therefore
+       refuses ONCE, and the diagnostic says so and hands over the manual
+       removal.
     3. Removal itself goes through `remove_tree_no_follow`, which unlinks child
        symlinks rather than descending them, so the blast radius stays inside
        the proven directory.
@@ -1541,18 +1626,11 @@ def clear_cache_root(root: String) -> Optional[String]:
         symlink_note += " points at; remove or repoint the link yourself, then"
         symlink_note += " rerun"
         return Optional[String](symlink_note^)
-    if not exists(root + "/" + CACHEDIR_TAG_REL):
+    var unproven = _ownership_proof_failure(root)
+    if unproven:
         var unmarked_note = String("cache-clear: ") + cache_root
         unmarked_note += ": refusing to delete a directory mtest cannot prove"
-        unmarked_note += " it owns — the ownership marker '"
-        unmarked_note += CACHEDIR_TAG_REL
-        unmarked_note += "' is missing. mtest writes that marker when it"
-        unmarked_note += " creates the store, so a cache directory left by an"
-        unmarked_note += " older mtest refuses exactly once: run mtest once"
-        unmarked_note += " with the cache enabled to write the marker, or"
-        unmarked_note += " delete the directory yourself with 'rm -rf "
-        unmarked_note += CACHE_ROOT_DIR
-        unmarked_note += "'"
+        unmarked_note += " it owns — " + unproven.value()
         return Optional[String](unmarked_note^)
     try:
         remove_tree_no_follow(cache_root)

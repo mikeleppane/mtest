@@ -959,6 +959,27 @@ class CacheClearTests(ProtocolScenario):
         # hatch, so the stray file is exactly as it was.
         self.assertEqual(stray.read_bytes(), b"not mtest's\n")
 
+    def test_a_cachedir_tag_mtest_did_not_write_is_refused_intact(self) -> None:
+        # The convention's real signature line, which is the point: `CACHEDIR.TAG`
+        # is a published standard, and its documentation tells users and backup
+        # tools to write exactly this into any directory they want skipped. A
+        # guard satisfied by the signature would hand mtest `rm -rf` rights over
+        # every directory that followed that advice.
+        cache_root = self.root / CACHE_ROOT_REL
+        cache_root.mkdir()
+        (cache_root / "CACHEDIR.TAG").write_text(
+            "Signature: 8a477f597d28d172789f06886806bc55\n", encoding="utf-8"
+        )
+        stray = cache_root / "someone-elses.txt"
+        stray.write_bytes(b"not mtest's\n")
+
+        completed = run_mtest(self.root, ["--cache-clear", "tests"])
+
+        self.assertEqual(completed.returncode, 4, msg=completed.stderr)
+        self.assertIn("CACHEDIR.TAG", completed.stderr)
+        self.assertEqual(stray.read_bytes(), b"not mtest's\n")
+        self.assertTrue((cache_root / "CACHEDIR.TAG").is_file())
+
     def test_a_symlinked_cache_directory_is_refused_unfollowed(self) -> None:
         elsewhere = self.root / "elsewhere"
         elsewhere.mkdir()

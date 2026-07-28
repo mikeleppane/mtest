@@ -340,10 +340,12 @@ nor its ownership marker and leaves no trace a later run could trust.
 together — and then runs the session normally, which legitimately repopulates
 the store. Before deleting, the path is characterized without following
 symlinks and must be a real directory carrying the `CACHEDIR.TAG` marker mtest
-writes when it creates the store; a symlink, an unmarked directory, or a
-deletion that fails partway is a pre-session usage error (exit 4) with a
-diagnostic that names the manual removal, and there is deliberately no
-"its contents look like ours" override. Combined with `--lf`/`--ff`, a warning
+writes when it creates `.mtest-cache` — as a regular file holding exactly the
+text mtest writes, because `CACHEDIR.TAG` is a shared convention and a marker
+somebody else wrote proves nothing about who owns the directory. A symlink, a
+missing or foreign marker, or a deletion that fails partway is a pre-session
+usage error (exit 4) with a diagnostic that names the manual removal, and there
+is deliberately no "its contents look like ours" override. Combined with `--lf`/`--ff`, a warning
 states that the last-run state was just deleted and that selection falls back
 to the full set. Nothing under `build/` is ever deleted: test binaries no longer
 land there, and configured precompile outputs are user-visible products rather

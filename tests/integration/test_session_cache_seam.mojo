@@ -80,11 +80,19 @@ comptime _STORE_DIR = ".mtest-cache/build-v1"
 comptime _MARKER_TEXT = (
     "Signature: 8a477f597d28d172789f06886806bc55\n"
     "# This file is a cache directory tag created by mtest.\n"
+    "# For information about cache directory tags, see"
+    " https://bford.info/cachedir/\n"
 )
 """A hand-written `CACHEDIR.TAG` body, for cases with no session to write one.
 
+Byte-identical to what the store writes, and it has to be: the clear proves
+ownership by comparing the whole marker, so a fixture that abbreviated it would
+be refused. The signature line alone would not do — it is the cachedir
+convention's, shared by every tool that marks a cache directory, so a marker
+carrying only that says nothing about who created this one.
+
 Only `test_cache_clear_deletes_a_store_a_real_session_wrote` needs the marker a
-session actually writes; every other clear case only needs the file to be there,
+session actually writes; every other clear case only needs a marker to be there,
 so it writes this rather than paying for a compile.
 """
 
@@ -975,6 +983,65 @@ def test_cache_clear_refuses_unmarked() raises:
     )
     assert_true(
         exists(root + "/.mtest-cache/build-v1/somebody_elses"),
+        "a refused clear must leave every byte where it was",
+    )
+
+
+def test_cache_clear_refuses_a_marker_it_did_not_write() raises:
+    """A `CACHEDIR.TAG` holding somebody else's text proves nothing.
+
+    `CACHEDIR.TAG` is a CONVENTION, not mtest's private name: the signature line
+    is a fixed byte string every cache-marking tool writes, and users and backup
+    scripts are actively encouraged to drop one into any directory they want
+    backups to skip. So a marker's mere presence — even a marker leading with
+    the standard signature — says only that somebody marked this as a cache, not
+    that mtest created it. Ownership is proven against the whole text mtest
+    writes, or the deletion does not happen.
+    """
+    var root = temp_root()
+    write_file(root, ".mtest-cache/CACHEDIR.TAG", "Signature: deadbeef\n")
+    write_file(root, ".mtest-cache/theirs.txt", "somebody else's cache")
+
+    var diagnostic = _clear_diagnostic(root)
+    assert_true(
+        diagnostic != "", "a marker mtest did not write must be refused"
+    )
+    assert_true(
+        "CACHEDIR.TAG" in diagnostic,
+        "the refusal must name the marker it checked: " + diagnostic,
+    )
+    assert_true(
+        "rm -rf .mtest-cache" in diagnostic,
+        "the refusal must hand over the manual fix: " + diagnostic,
+    )
+    assert_true(
+        exists(root + "/.mtest-cache/theirs.txt"),
+        "a refused clear must leave every byte where it was",
+    )
+
+
+def test_cache_clear_refuses_a_marker_that_is_not_a_regular_file() raises:
+    """A directory named `CACHEDIR.TAG` is not the marker mtest writes.
+
+    The cheapest way to defeat an ownership proof is to satisfy it with the
+    wrong kind of object: a bare existence test accepts a directory, a symlink,
+    a socket, or a device node at the marker's path, and each of those
+    authorizes deleting a tree mtest never created.
+    """
+    var root = temp_root()
+    makedirs(root + "/.mtest-cache/CACHEDIR.TAG")
+    write_file(root, ".mtest-cache/theirs.txt", "somebody else's cache")
+
+    var diagnostic = _clear_diagnostic(root)
+    assert_true(
+        diagnostic != "", "a marker that is not a regular file must be refused"
+    )
+    assert_true(
+        "regular file" in diagnostic,
+        "the refusal must say what the marker is not: " + diagnostic,
+    )
+    assert_true(
+        exists(root + "/.mtest-cache/theirs.txt"),
         "a refused clear must leave every byte where it was",
     )
 
