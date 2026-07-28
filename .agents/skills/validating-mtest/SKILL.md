@@ -115,7 +115,9 @@ A false finding wastes everyone's time. Most come from the harness, not mtest:
 - **Session suites need the native object.** A bare
   `build/mtest tests/integration/test_session_*.mojo` link-fails on
   `mtest_exec_*` symbols — a missing `-Xlinker build/native/...`, a harness
-  artifact, **not** a COMPILE-ERROR bug. `scripts/harness/classified.py` links it.
+  artifact, **not** a COMPILE-ERROR bug. `scripts/harness/selfhost.py` passes it
+  as `--build-arg=-Xlinker --build-arg=<native object>` on every self-hosted
+  invocation.
 
 **Reproduce before you report.** Re-run a suspected finding cleanly (fresh CWD,
 direct exit capture, correct build) before writing it up. The original pass

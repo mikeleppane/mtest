@@ -9,7 +9,7 @@ NOT injective (`a/b.mojo` and the literal file `a__b.mojo` both mangle to
 closes that hole, reached through the same private-helper seam
 `test_exec_interrupt.mojo` uses for `mtest.exec.signals`.
 """
-from std.testing import assert_equal, assert_true
+from std.testing import assert_equal, assert_true, TestSuite
 
 from mtest.session.scratch import _mangle
 
@@ -29,3 +29,8 @@ def test_mangle_distinguishes_adversarial_pairs() raises:
     assert_true(_mangle("a_b/c.mojo") != _mangle("a/b_c.mojo"))
     assert_true(_mangle("a/b/c.mojo") != _mangle("a__b__c.mojo"))
     assert_true(_mangle("x_/y.mojo") != _mangle("x/_y.mojo"))
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

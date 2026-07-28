@@ -10,7 +10,7 @@ always shown; an elapsed-only refresh is throttled). The erase/redraw's real
 console coordination and the piped-absence guarantee are proved end to end by the
 `parallel-progress-tty` e2e scenario against a real PTY and a pipe.
 """
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.session.pool import (
     _PROGRESS_INTERVAL_NS,
@@ -111,3 +111,8 @@ def test_throttle_admits_an_elapsed_only_refresh_after_the_interval() raises:
         _PROGRESS_INTERVAL_NS,
     )
     assert_true(emit)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

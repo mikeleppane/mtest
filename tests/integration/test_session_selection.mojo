@@ -14,6 +14,7 @@ user-controlled suite disagreements, so both stay MALFORMED-SUITE at exit 1 with
 their own exact diagnostic — never DRIFT, never exit 3.
 """
 from std.testing import (
+    TestSuite,
     assert_equal,
     assert_true,
     assert_false,
@@ -461,9 +462,20 @@ def test_recovery_probe_crash_still_reaches_crash_attribution() raises:
 
     ref rec = comp.composite.reporters[0]
     var finished = _finished(rec)
+    # The outcome, not just its name: a TIMEOUT here means the re-probe never
+    # reached `abort()` inside the deadline, which is a fixture-budget failure
+    # rather than a product one, and the two are indistinguishable from the
+    # bare assertion text. See `base_config` on why that deadline is 30s.
     assert_true(
         finished.outcome == Outcome.CRASH,
-        "a recovery re-probe that dies by signal is a CRASH",
+        String(
+            "a recovery re-probe that dies by signal is a CRASH; got outcome"
+            " code "
+        )
+        + String(finished.outcome.code)
+        + " under a "
+        + String(finished.timeout_seconds)
+        + "s deadline",
     )
     # Recovery really did fire -- otherwise this proves nothing about recovery.
     var saw_stale = False
@@ -853,3 +865,8 @@ def test_deselected_test_reporting_pass_is_malformed_suite() raises:
     var last = rec.event_at(rec.count() - 1)
     assert_true(last.kind == EventKind.SESSION_FINISHED)
     assert_equal(last.data[SessionFinishedPayload].exit_code, 1)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

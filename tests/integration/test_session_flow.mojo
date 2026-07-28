@@ -7,7 +7,7 @@ pairs -> SessionFinished), the selected/excluded counts, the per-file verdicts
 (a real PASS and a real FAIL, kept distinct), the summary tally, and the exact
 resolved exit code. Both recorders must observe the identical stream.
 """
-from std.testing import assert_equal, assert_true
+from std.testing import assert_equal, assert_true, TestSuite
 
 from mtest.model import (
     EventKind,
@@ -124,3 +124,8 @@ def test_flow_pass_fail_excluded_warning_exit1() raises:
     assert_true(
         comp.composite.reporters[1].kind_at(9) == EventKind.SESSION_FINISHED
     )
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

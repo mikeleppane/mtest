@@ -1,6 +1,12 @@
 """Tests for the `doctor` subcommand and its narrow containment seams."""
 from std.pathlib import cwd
-from std.testing import assert_equal, assert_false, assert_raises, assert_true
+from std.testing import (
+    assert_equal,
+    assert_false,
+    assert_raises,
+    assert_true,
+    TestSuite,
+)
 
 from mtest.cli import parse_args
 from mtest.cli.doctor import (
@@ -262,3 +268,8 @@ def test_doctor_platform_lines_cover_both_supported_targets() raises:
         _doctor_platform_probe(True),
         "WARN platform: macOS arm64 supported; hosted runtime evidence pending",
     )
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

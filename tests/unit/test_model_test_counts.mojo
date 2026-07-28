@@ -4,7 +4,7 @@ Trivial Int fields, closed shape. These tests pin the field names, that
 `zeros()` starts every field at zero, and that fields are independently
 settable (no cross-field coupling hiding in a synthesized constructor).
 """
-from std.testing import assert_equal
+from std.testing import assert_equal, TestSuite
 
 from mtest.model import TestCounts
 
@@ -23,3 +23,8 @@ def test_fields_are_independently_readable() raises:
     assert_equal(c.failed, 1)
     assert_equal(c.skipped, 2)
     assert_equal(c.deselected, 4)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

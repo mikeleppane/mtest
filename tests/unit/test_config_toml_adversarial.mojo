@@ -1,5 +1,5 @@
 """Focused adversarial regressions for the vendored native TOML parser."""
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.config import parse_toml
 
@@ -80,3 +80,8 @@ def test_deep_inline_tables_are_rejected_without_recursing_unboundedly() raises:
     var result = parse_toml("run = " + value + "\n", "deep-inline.toml")
     assert_false(result.is_ok)
     assert_true("nesting limit" in result.failure.render())
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

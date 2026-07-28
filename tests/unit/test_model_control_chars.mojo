@@ -16,7 +16,7 @@ Every range boundary is pinned with a literal code point rather than derived
 from the predicate under test, so an edit that widens or narrows a range shows
 up as a failure here rather than being restated by the test.
 """
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.model.control_chars import (
     escape_one_line,
@@ -158,3 +158,8 @@ def test_escape_one_line_output_spans_exactly_one_physical_line() raises:
     var got = escape_one_line("a\nb\r\nc\n")
     assert_true("\n" not in got, got)
     assert_true("\r" not in got, got)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

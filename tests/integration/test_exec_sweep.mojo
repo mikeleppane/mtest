@@ -12,7 +12,7 @@ machinery error instead of laundering the leader's exit 0 into success.
 """
 from std.os import remove, rmdir
 from std.os.path import exists
-from std.testing import assert_equal, assert_true, assert_false
+from std.testing import assert_equal, assert_true, assert_false, TestSuite
 from std.time import perf_counter_ns
 
 from mtest.exec import ExecRuntime, ProcessSpec, run_supervised
@@ -142,3 +142,8 @@ def test_escapee_cleanup_without_acknowledgement_fails_loudly() raises:
     assert_equal(cleanup.termination.value, 70)
     assert_equal(bytes_to_str(cleanup.stdout_bytes), "")
     assert_true(cleanup.duration_ms < 5000, String(cleanup.duration_ms))
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

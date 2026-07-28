@@ -7,7 +7,7 @@ signal is a CRASH (never a FAIL), a source the compiler rejects is a
 COMPILE_ERROR (never a run CRASH), and a process that outruns its deadline is a
 TIMEOUT (never a FAIL). All three resolve to exit 1.
 """
-from std.testing import assert_equal, assert_true
+from std.testing import assert_equal, assert_true, TestSuite
 
 from mtest.config import shell_join
 from mtest.model import (
@@ -168,3 +168,8 @@ def test_spawn_failure_routes_to_exit_3_and_emits_diagnostic() raises:
     assert_equal(
         last.data[SessionFinishedPayload].summary.count_of(Outcome.NOT_RUN), 1
     )
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

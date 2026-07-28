@@ -8,7 +8,7 @@ The available arity-1 spellings are enumerated, not sampled: `--exclude`, `-I`,
 value is a located usage error and that the `--flag=value` spelling lands the
 same value as `--flag value`.
 """
-from std.testing import assert_equal, assert_raises, assert_true
+from std.testing import assert_equal, assert_raises, assert_true, TestSuite
 
 from mtest.cli import parse_args
 from mtest.config import ColorWhen, ShowOutput
@@ -273,3 +273,8 @@ def test_precompile_rejects_trailing_colon() raises:
     var argv: List[String] = ["--precompile", "src:"]
     with assert_raises(contains="wants SRC[:OUT]"):
         _ = parse_args(argv)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

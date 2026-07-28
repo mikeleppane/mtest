@@ -21,7 +21,7 @@ information, so it carries a 64-bit digest of the FULL mangled name to keep
 collisions negligible where they were previously impossible — a trade only
 reachable by paths that do not build at all today.
 """
-from std.testing import assert_equal, assert_not_equal, assert_true
+from std.testing import assert_equal, assert_not_equal, assert_true, TestSuite
 
 from mtest.session.scratch import _MANGLE_BUDGET, _mangle
 
@@ -103,3 +103,8 @@ def test_unicode_deep_path_is_bounded_without_splitting_a_codepoint() raises:
     assert_true(got.byte_length() <= _MANGLE_BUDGET, got)
     # Round-tripping the bytes proves no codepoint was cut in half.
     assert_equal(String(got), got)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

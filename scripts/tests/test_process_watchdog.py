@@ -21,7 +21,9 @@ from unittest import mock
 
 from scripts.harness import watchdog
 from scripts.harness.watchdog import (
+    DEFAULT_TIMEOUT_SECONDS,
     DRAIN_SETTLE_SECONDS,
+    MAX_TIMEOUT_SECONDS,
     TIMEOUT_EXIT_CODE,
     Cancelled,
     Exited,
@@ -243,7 +245,7 @@ def test_in_process_signal_is_structured_as_signaled() -> None:
 
 def test_invalid_run_command_timeouts_never_spawn_payloads() -> None:
     """Non-finite and over-ceiling direct calls fail before creating a child."""
-    for timeout_seconds in (math.nan, math.inf, -math.inf, 901.0):
+    for timeout_seconds in (math.nan, math.inf, -math.inf, 0.0, 3601.0):
         with tempfile.TemporaryDirectory(prefix="mtest-watchdog-") as raw_tmp:
             marker = Path(raw_tmp) / "payload-started"
             sentinel = Path(raw_tmp) / "deadline-sentinel"
@@ -274,8 +276,8 @@ def test_invalid_run_command_timeouts_never_spawn_payloads() -> None:
 
 
 def test_parser_rejects_invalid_timeouts_before_payload_start() -> None:
-    """CLI timeout values reject NaN, infinities, and values above 900 seconds."""
-    for timeout_seconds in ("nan", "inf", "-inf", "901"):
+    """CLI timeout values reject NaN, infinities, and values above the maximum."""
+    for timeout_seconds in ("nan", "inf", "-inf", "3601"):
         with tempfile.TemporaryDirectory(prefix="mtest-watchdog-") as raw_tmp:
             marker = Path(raw_tmp) / "payload-started"
             result = _run(
@@ -296,6 +298,60 @@ def test_parser_rejects_invalid_timeouts_before_payload_start() -> None:
                 raise AssertionError(
                     f"parser started payload for timeout {timeout_seconds!r}"
                 )
+
+
+def test_the_requestable_maximum_is_above_the_default() -> None:
+    """The default and the maximum are separate policies, and both still bind.
+
+    The default is what a caller gets for saying nothing; the maximum is the
+    largest thing a caller may deliberately ask for. Conflating them meant no
+    lane could justify a longer ceiling than the default, which is why the
+    self-hosted classified run could not be supervised honestly on a slow host.
+    Widening the range must not disarm the guard, so a value above the maximum
+    is still refused before any child is spawned.
+    """
+    if not MAX_TIMEOUT_SECONDS > DEFAULT_TIMEOUT_SECONDS:
+        raise AssertionError(
+            f"maximum {MAX_TIMEOUT_SECONDS!r} must exceed default "
+            f"{DEFAULT_TIMEOUT_SECONDS!r}"
+        )
+    with tempfile.TemporaryDirectory(prefix="mtest-watchdog-") as raw_tmp:
+        sentinel = Path(raw_tmp) / "deadline-sentinel"
+        sentinel.touch()
+        termination = run_command(
+            [PYTHON, "-c", "pass"],
+            source="tests/unit/test_watchdog.mojo",
+            step="run",
+            timeout_seconds=DEFAULT_TIMEOUT_SECONDS + 1.0,
+            deadline_sentinel=sentinel,
+        )
+        if termination != Exited(0):
+            raise AssertionError(
+                f"a ceiling above the default was refused: {termination!r}"
+            )
+    with tempfile.TemporaryDirectory(prefix="mtest-watchdog-") as raw_tmp:
+        marker = Path(raw_tmp) / "payload-started"
+        sentinel = Path(raw_tmp) / "deadline-sentinel"
+        sentinel.touch()
+        termination = run_command(
+            [
+                PYTHON,
+                "-c",
+                (
+                    "from pathlib import Path; import sys; "
+                    "Path(sys.argv[1]).write_text('started')"
+                ),
+                str(marker),
+            ],
+            source="tests/unit/test_watchdog.mojo",
+            step="run",
+            timeout_seconds=MAX_TIMEOUT_SECONDS + 1.0,
+            deadline_sentinel=sentinel,
+        )
+        if not isinstance(termination, HarnessError):
+            raise AssertionError(f"above-maximum ceiling returned {termination!r}")
+        if marker.exists():
+            raise AssertionError("above-maximum ceiling started its payload")
 
 
 def test_spawn_failure_is_not_a_timeout() -> None:
@@ -2107,6 +2163,7 @@ def main() -> int:
         test_in_process_signal_is_structured_as_signaled,
         test_invalid_run_command_timeouts_never_spawn_payloads,
         test_parser_rejects_invalid_timeouts_before_payload_start,
+        test_the_requestable_maximum_is_above_the_default,
         test_spawn_failure_is_not_a_timeout,
         test_broken_timeout_diagnostic_leaves_the_deadline_sentinel,
         test_closed_timeout_diagnostic_preserves_the_deadline_result,

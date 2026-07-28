@@ -13,6 +13,7 @@ No processes, no filesystem — pure logic only.
 """
 from std.builtin.sort import sort
 from std.testing import (
+    TestSuite,
     assert_equal,
     assert_false,
     assert_raises,
@@ -239,3 +240,8 @@ def test_grammar_rejects_empty() raises:
 
 def test_grammar_rejects_unknown_prefix() raises:
     _assert_shard_rejected("bogus:2/5")
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

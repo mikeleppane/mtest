@@ -13,7 +13,7 @@ that "successfully" reads garbage must fail here.
 Transcripts are enumerated via MANIFEST.txt, never a directory listing, so a
 snapshot that is present on disk but missing from the manifest cannot hide.
 """
-from std.testing import assert_equal, assert_true
+from std.testing import assert_equal, assert_true, TestSuite
 
 comptime TX_DIR = "tests/snapshots/protocol/"
 
@@ -184,3 +184,8 @@ def test_tripwire_only_unknown_error_phrase() raises:
     # Pins the passing-only-unknown snapshot's stale-name error.
     var text = _read(TX_DIR + "passing--only-unknown.txt")
     assert_true("explicitly allowed test not found in suite" in text)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

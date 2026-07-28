@@ -3,15 +3,15 @@
 #
 # Two jobs: (1) it is the compile GATE -- `test` and `ci` run this first, so an
 # empty-but-broken package fails fast before any test does; (2) it produces the
-# binary package that scripts/harness/classified.py builds the tests against, so
-# each test compiles only its own small file against a binary dependency instead
-# of re-optimizing the whole source tree per run.
+# binary package the classified test files are built against (via `-I build`),
+# so each test compiles only its own small file against a binary dependency
+# instead of re-optimizing the whole source tree per run.
 #
 # It delegates to the single production-build authority's precompile stage
 # (scripts/build/production_build.sh) so the .mojopkg is built by exactly ONE
 # definition shared with the packaged recipe build. Kept as its own named
-# entrypoint because `pixi run build` and scripts/harness/classified.py invoke
-# it directly.
+# entrypoint because `pixi run build` invokes it directly, and the four `test*`
+# tasks reach it through their `build-bin` dependency.
 #
 # NOTE: mojo 1.0.0b2 has no `mojo package` subcommand -- only `mojo precompile`,
 # which produces the same .mojopkg. The outputs must be named toml.mojopkg and

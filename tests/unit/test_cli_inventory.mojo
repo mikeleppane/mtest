@@ -8,7 +8,7 @@ spelling fails loudly and the spec table can never be its own oracle. The help
 tests independently require complete metadata and one aligned, bounded line per
 spelling.
 """
-from std.testing import assert_equal, assert_raises, assert_true
+from std.testing import assert_equal, assert_raises, assert_true, TestSuite
 
 from mtest.cli import (
     FlagGroup,
@@ -966,3 +966,8 @@ def test_workers_equals_form_parses_count() raises:
     var argv: List[String] = ["--workers=3"]
     var r = parse_args(argv)
     assert_equal(r.config.workers, 3)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

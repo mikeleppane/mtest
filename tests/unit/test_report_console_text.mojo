@@ -10,7 +10,7 @@ The three surfaces under test are `escape_scalar` (a value that must occupy one
 console line), `escape_multiline` (a block whose LF and Tab structure is real),
 and `prefix_lines` (the gutter that fences an escaped block).
 """
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.report.console_text import (
     escape_multiline,
@@ -235,3 +235,8 @@ def test_escaped_then_fenced_block_carries_no_interpreted_control() raises:
         rendered,
         "    | ok\n    | \\x1B[2J\\x1B]0;t\\x07\\x0Dfake\n    | \\u009B\n",
     )
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

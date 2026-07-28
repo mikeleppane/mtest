@@ -84,9 +84,13 @@ class Harness:
         return all(passed for _name, passed, _detail in self.results)
 
 
-# The sole master registry, in execution order. Keep the core and resilience
-# scenarios interleaved: order is user-visible gate behavior and is pinned by
-# the independent layout oracle.
+# The sole master registry, in execution order, and the only place a scenario
+# is written down: nothing else in this repository restates these names, so
+# registering one is this single line. Keep the core and resilience scenarios
+# interleaved -- order is user-visible gate behavior -- and keep
+# `manifest-completeness` first, which is the one ordering constraint a test
+# pins, so a manifest drift fails before the rest of the gate spends its build
+# time.
 SCENARIOS: ScenarioRegistry = (
     ("manifest-completeness", core.s_manifest_completeness),
     ("resilience-matrix", resilience.s_resilience_matrix),

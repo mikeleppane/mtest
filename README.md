@@ -22,25 +22,24 @@ across files, and reporting results the way CI expects.
 Mojo's standard library ships a per-file test harness, `TestSuite`, and the
 `mojo test` CLI subcommand that used to drive many files was removed. That
 leaves a gap most projects fill by hand: a shell loop over `mojo build`, a
-grep of stdout, and an exit code nobody fully trusts. mtest replaces that
-loop with one binary and four commitments:
+grep of stdout, and an exit code nobody fully trusts. mtest replaces that loop
+with one binary. What it does differently:
 
-- **Exit-code fidelity.** Every test file is compiled with `mojo build` and
-  the binary is executed directly, because that is the only way Mojo reports
-  a truthful process exit code. `mojo run` masks every outcome to `1` and is
+- **Truthful exit codes.** Every test file is compiled with `mojo build` and
+  the binary is executed directly, because that is the only way Mojo reports a
+  truthful process exit code. `mojo run` masks every outcome to `1` and is
   never used.
-- **A crash is not a failure.** A failed assertion (FAIL) and a process that
-  aborts or dies by signal (CRASH) are different events with different
-  causes. They stay distinct in the console, the event stream, and the JUnit
-  mapping; the exit code groups both into its failing class.
-- **Loud over silent.** Every excluded file, retry attempt, and timeout is
-  reported visibly. A run that skipped something never looks like a run that
-  passed everything.
-- **CI is the customer.** Deterministic, path-sorted output, a hermetic build
-  with zero runtime dependencies, sharding for CI matrices, and
-  machine-readable reports are all first-class. Product logic is pure Mojo;
-  project configuration is parsed natively by the pinned, vendored
-  `mojo-toml` source.
+- **CRASH and FAIL stay distinct.** A failed assertion and a process that
+  aborts or dies by signal are different events with different causes, and
+  they stay separate in the console, the event stream, and the JUnit mapping.
+  The exit code groups both into its failing class.
+- **Nothing is skipped quietly.** Every excluded file, retry attempt, and
+  timeout is reported visibly, so a run that skipped something never looks
+  like a run that passed everything.
+- **Built for CI.** Deterministic path-sorted output, a hermetic build with
+  zero runtime dependencies, sharding for CI matrices, and machine-readable
+  reports are all first-class. Product logic is pure Mojo, and project
+  configuration is parsed natively by the pinned, vendored `mojo-toml` source.
 
 ## Features
 
@@ -78,10 +77,10 @@ loop with one binary and four commitments:
   tables, and `mtest config show` to render the resolved values with the layer
   each one came from.
 - Failure re-selection from the last completed run: `--lf` narrows to what
-  failed, `--ff` runs those files first. Both are soft filters — a stale entry
-  is dropped loudly, never fatally.
-- `mtest doctor`: ten read-only environment checks — toolchain identity,
-  configuration, last-run state, temp, report destinations — without building
+  failed, `--ff` runs those files first. Both are soft filters, so a stale
+  entry is dropped loudly, never fatally.
+- `mtest doctor`: ten read-only environment checks (toolchain identity,
+  configuration, last-run state, temp, report destinations) without building
   or running a test.
 - Gate files (`--gate`), precompiled package dependencies (`--precompile`),
   a slowest-files list (`--durations`), quiet and verbose modes, and color
@@ -114,7 +113,7 @@ the declared Mojo run dependency resolves.
 linux-64 and osx-arm64 are both gated: each has its own blocking CI job that
 builds the package, installs the exact artifact it just built into a fresh
 environment carrying only the declared run dependencies, and exercises the
-installed binary — including running a known-failing fixture through it, so
+installed binary. That includes running a known-failing fixture through it, so
 the installed package is proven to report failures truthfully, not just
 successes.
 
@@ -589,7 +588,7 @@ $ echo $?
 Resolution is per key: built-in defaults, then `mtest.toml`, then a non-empty
 `MTEST_MOJO`, then the command line. A layer that sets a key replaces the whole
 value from below it, lists included, and positional operands replace configured
-`paths`. Color is the deliberate exception — `NO_COLOR` is not a layer value,
+`paths`. Color is the deliberate exception: `NO_COLOR` is not a layer value, and
 it is consulted only once the winning `color` is `auto`.
 
 Each `[[override]]` table carries per-file `timeout`, `compile-timeout`,
@@ -599,8 +598,8 @@ Serial membership is a union instead: any matching `serial = true` pins the
 file, which is why `test_beta.mojo` above carries the `SERIAL` tag.
 
 A configuration problem names the file, the table, the key, and what was
-expected, and stops the run before a single build starts — here with the same
-file, but `retries = "two"` where an integer belongs:
+expected, and stops the run before a single build starts. Here it is the same
+file, but with `retries = "two"` where an integer belongs:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/matrix'
@@ -615,10 +614,9 @@ full closed schema and the whole resolution rule.
 ### Seeing what a configuration resolves to
 
 `mtest config show` accepts the full `run` grammar and answers one question:
-what would this invocation actually use? It resolves and renders, nothing else
-— it never discovers, builds, runs, opens a reporter, or reads last-run state.
-The output is copy-pasteable TOML, and every set key carries the layer it came
-from:
+what would this invocation actually use? It resolves and renders, nothing else.
+It never discovers, builds, runs, opens a reporter, or reads last-run state. The
+output is copy-pasteable TOML, and every set key carries the layer it came from:
 
 ```console
 $ pixi run bash -c 'build/mtest config show'
@@ -662,8 +660,8 @@ $ echo $?
 ```
 
 Flags resolve into the same rendering, so `config show` also answers "what does
-this command line change?" — while per-invocation selection flags such as `-k`
-are accepted and deliberately not rendered:
+this command line change?". Per-invocation selection flags such as `-k` are
+accepted and deliberately not rendered:
 
 ```console
 $ pixi run bash -c 'build/mtest config show --timeout 30 -n 4 -k alpha'
@@ -685,7 +683,7 @@ command never reads it.
 
 A completed run remembers what failed, in `.mtest-cache/lastrun` under the
 invocation root. That directory is mtest's working state, not a build product
-you want in review — ignore it:
+you want in review, so ignore it:
 
 ```gitignore
 # mtest's in-session build cache and its last-run state
@@ -694,7 +692,7 @@ you want in review — ignore it:
 
 The file is deterministic text, sorted and root-relative, readable without
 mtest. This is what a run over `e2e/matrix` and `e2e/suite/test_failing.mojo`
-leaves behind — two passing files and one failing test:
+leaves behind, for two passing files and one failing test:
 
 ```console
 $ cat .mtest-cache/lastrun
@@ -746,9 +744,9 @@ $ echo $?
 ```
 
 Both are soft filters, never gates. A remembered id this selection does not
-reach — deleted, renamed, or simply out of scope — is dropped with a line
-naming it, and a state file that intersects nothing runs the ordinary full
-selection rather than exiting `5`:
+reach (deleted, renamed, or simply out of scope) is dropped with a line naming
+it, and a state file that intersects nothing runs the ordinary full selection
+rather than exiting `5`:
 
 ```console
 $ pixi run bash -c 'build/mtest --lf e2e/matrix'
@@ -779,7 +777,7 @@ preserves a failure you have not retested yet.
 
 `mtest doctor` answers "is this machine set up to run tests?" without running
 one. It performs ten read-only checks and prints exactly one `PASS`, `WARN`, or
-`FAIL` line for each, in a fixed order — the inventory never shrinks, because a
+`FAIL` line for each, in a fixed order. The inventory never shrinks, because a
 missing line would be the one you needed:
 
 ```console
@@ -821,9 +819,9 @@ $ echo $?
 The `toolchain` check is deliberately strict: a `PASS` requires the exact
 pinned identity `Mojo 1.0.0b2 (2cf4d08a)`, because a different toolchain is a
 different `TestSuite` report format. `doctor` also treats a broken
-configuration differently from every other command on purpose — a missing or
-malformed selected config is a `FAIL`ed check and exit `1`, not the usage
-error `run` and `config show` raise, because a diagnostic tool that refuses to
+configuration differently from every other command on purpose. A missing or
+malformed selected config is a `FAIL`ed check and exit `1`, not the usage error
+`run` and `config show` raise, because a diagnostic tool that refuses to
 diagnose is useless. Its exit domain is `{0, 1, 2, 4}`, and `WARN` never fails
 the command.
 
@@ -943,7 +941,7 @@ PASS           e2e/matrix/test_alpha.mojo      0.02s
 ```
 
 `--serial GLOB` pins matching files to a final one-at-a-time pass that runs
-after the parallel batch drains — for a file that cannot safely share the
+after the parallel batch drains, for a file that cannot safely share the
 machine with its peers. Pinned files carry a `SERIAL` tag:
 
 ```console
@@ -991,7 +989,7 @@ flowchart TD
     main["main: composition root, the only exit() caller"]
     cli["cli: hand-rolled argument parsing"]
     session["session: orchestration and the run-file pipeline kernel"]
-    exec["exec: capacity-N supervision — pool, timeouts, process groups"]
+    exec["exec: capacity-N supervision (pool, timeouts, process groups)"]
     mid["discover · select · protocol · cache · report"]
     config["config: RunnerConfig"]
     leaves["model · platform: outcomes, events, exit codes · the audited libc boundary"]
@@ -1020,9 +1018,9 @@ Arrows show the layering: each module may import only from layers below it.
   `exec` and folds the completion back. Retry policy, `--maxfail`
   accounting, and stale-state recovery all live in the kernel, where they
   are unit-tested without spawning a process. The parallel scheduler
-  dispatches that same kernel across the worker pool — gate files first,
-  then the parallel batch, then any `--serial` pass — while the kernel
-  itself stays process-free.
+  dispatches that same kernel across the worker pool, gate files first, then
+  the parallel batch, then any `--serial` pass, while the kernel itself stays
+  process-free.
 - Reporters consume the typed event stream behind a coordinator seam;
   `session` never imports a concrete reporter. The JUnit and annotation
   reporters are fed by the same events the console renders.
@@ -1067,13 +1065,13 @@ Facts about this build worth knowing before you rely on it:
   annotation tail prints to the same destination and gets the same treatment,
   on top of its own `%25`/`%0A`/`%0D` workflow encoding. `mtest doctor`,
   `mtest config show`, and the configuration diagnostics neutralize the same
-  set of code points in their own output's escape spelling — the set is defined
-  once and shared, so it cannot drift between them. The JUnit report and the
-  `--json` stream are written elsewhere and are unaffected \u2014 they still carry
-  the raw text under their own escaping, as does `mtest collect`, whose node-id
-  listing is specified byte-exact for tooling to consume. This stops the child
-  *doing* things, not *looking* like things: bidi overrides and homoglyphs pass
-  through, so a test name can still be visually misleading.
+  set of code points in their own output's escape spelling, and the set is
+  defined once and shared so it cannot drift between them. The JUnit report and
+  the `--json` stream are written elsewhere and are unaffected: they still
+  carry the raw text under their own escaping, as does `mtest collect`, whose
+  node-id listing is specified byte-exact for tooling to consume. This stops
+  the child *doing* things, not *looking* like things: bidi overrides and
+  homoglyphs pass through, so a test name can still be visually misleading.
 - **`--maxfail` is checked between files.** A file already in flight always
   finishes, so a file with several failing tests can push the count past
   `N` before scheduling stops.
@@ -1148,7 +1146,7 @@ The tasks:
 | `pixi run py-check` | ruff format/lint and `mypy --strict` over the Python tooling (needs `uv`; not part of `ci`) |
 | `pixi run build` | precompile `src/mtest` to `build/mtest.mojopkg`, the compile gate |
 | `pixi run build-bin` | link the runnable binary at `build/mtest` |
-| `pixi run test` | compile every classified unit and integration module into one aggregate binary and execute it directly |
+| `pixi run test` | run every classified unit and integration module through `build/mtest` itself, then reconcile its report against an inventory derived from the sources on disk |
 | `pixi run test-file -- PATH` | the same, focused on one module |
 | `pixi run assertions-check` | compile and directly execute the source-only assertion consumers at `-O0` and `-O3` |
 | `pixi run dogfood-check` | run three focused probes through the built `mtest` binary itself |
@@ -1159,22 +1157,22 @@ The tasks:
 | `pixi run valgrind-check` | Linux: run the exec/native coverage under Memcheck |
 | `pixi run ci-memory` | Linux: both memory lanes together, the way `ci` runs them |
 
-`pixi run ci` is available for an explicit exhaustive local run. Routine
-development uses the focused tasks above; required hosted checks are the merge
-verdict. The complete mirror opens with a fail-fast preflight (version, formatting,
-harness membership, unsafe-Mojo inventory, post-fork audit, native ABI,
-JUnit oracle, build, rendered-JUnit, and transcript checks) and closes with
-`ci-memory`, so a green complete local run covers memory safety rather than deferring
-it. On Linux that is ASan/LSan then Memcheck, roughly four minutes together;
+`pixi run ci` is there for an explicit exhaustive local run; routine development
+uses the focused tasks above, and the required hosted checks are the merge
+verdict. The complete mirror opens with a fail-fast preflight (version,
+formatting, harness membership, unsafe-Mojo inventory, post-fork audit, native
+ABI, JUnit oracle, build, rendered-JUnit, and transcript checks) and closes with
+`ci-memory`, so a green local run covers memory safety instead of deferring it.
+On Linux that is ASan/LSan then Memcheck, roughly four minutes together;
 elsewhere it reports the two lanes as uncovered and names the Linux cells that
-own them. Hosted CI runs
-the behavioral floor (`test`, `assertions-check`, `dogfood-check`, `e2e`) as
-parallel cells on both Linux and macOS; the full preflight chain and the
-memory-safety cells run on Linux, on every pull request.
+own them. Hosted CI runs the behavioral floor (`test`, `assertions-check`,
+`dogfood-check`, `e2e`) plus `contract-check-strict` as parallel cells on both
+Linux and macOS, and runs the full preflight chain and the memory-safety cells
+on Linux, on every pull request.
 
-Three properties of the test setup are worth knowing up front:
+About the test setup:
 
-- Everything executes real binaries. Both the aggregate suite and mtest
+- Everything executes real binaries. Both the classified suite and mtest
   itself build with `mojo build` and run the result directly; `mojo run`
   appears nowhere, because it masks crash exit codes.
 - The protocol snapshots under `tests/snapshots/protocol/` pin `TestSuite`'s
@@ -1190,9 +1188,9 @@ Three properties of the test setup are worth knowing up front:
 ## Non-goals
 
 - **A TestSuite replacement.** mtest orchestrates the standard library's
-  harness and depends on its per-file protocol. Its optional source-only
-  `assert_equal` companion only improves mismatch detail; it still reports an
-  ordinary TestSuite failure. Property testing belongs upstream.
+  harness and depends on its per-file protocol. The optional source-only
+  `assert_equal` companion only improves mismatch detail, and it still reports
+  an ordinary TestSuite failure. Property testing belongs upstream.
 - **Third-party runtime dependencies.** mtest has none. Product logic is pure
   Mojo plus one statically linked C adapter and the pinned native TOML parser
   compiled into the shipped binary.

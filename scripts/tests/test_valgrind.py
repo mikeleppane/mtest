@@ -54,7 +54,13 @@ class ValgrindCheckTests(unittest.TestCase):
         ):
             valgrind_check.main()
 
-    def test_classified_suite_builds_generated_entrypoint(self) -> None:
+    def test_classified_suite_builds_source_directly(self) -> None:
+        """The Valgrind lane builds `source` itself, with no generated wrapper.
+
+        Every classified module declares its own `main()` now, so there is no
+        `*_main.mojo` wrapper and no `import tests.unit.<module>` alias to
+        assert on.
+        """
         source = valgrind_check.ROOT / "tests" / "unit" / "test_config.mojo"
         completed = subprocess.CompletedProcess(
             args=["valgrind"], returncode=0, stdout=""
@@ -72,20 +78,25 @@ class ValgrindCheckTests(unittest.TestCase):
             ):
                 valgrind_check.compile_and_run_test(source, {})
 
-            entrypoint = out / "test_config_main.mojo"
             compile_command = mocked_run.call_args_list[0].args[0]
-            self.assertIn(str(entrypoint), compile_command)
+            self.assertIn(str(source.relative_to(valgrind_check.ROOT)), compile_command)
             target_index = compile_command.index("--target-cpu")
             self.assertEqual(
                 compile_command[target_index : target_index + 2],
                 ["--target-cpu", "x86-64-v3"],
             )
             self.assertNotIn(
-                str(source.relative_to(valgrind_check.ROOT)), compile_command
+                ".",
+                compile_command,
+                "-I . is no longer needed: the source itself never imports "
+                "tests.unit.<module> or tests.integration.<module>",
             )
-            self.assertIn(
-                "import tests.unit.test_config as _mtest_module_0",
-                entrypoint.read_text(encoding="utf-8"),
+            generated_wrappers = list(out.glob("*_main.mojo"))
+            self.assertEqual(
+                generated_wrappers,
+                [],
+                f"no *_main.mojo wrapper should be generated, "
+                f"found {generated_wrappers}",
             )
 
     def test_prepare_test_scratch_creates_missing_parent_tree(self) -> None:

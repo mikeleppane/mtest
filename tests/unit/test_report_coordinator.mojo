@@ -8,7 +8,7 @@ the production coordinator and the recording one through the SAME generic
 consumer, and pin that routing a stream through the coordinator renders bytes
 byte-identical to the composite fan-out it replaces.
 """
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.config import ColorWhen, ShowOutput, Verbosity
 from mtest.model import (
@@ -419,3 +419,8 @@ def test_coordinator_folds_live_state_delta_from_events() raises:
     assert_equal(delta.terminal_files[0], "tests/test_gate.mojo")
     assert_equal(delta.terminal_files[1], "tests/test_casualty.mojo")
     assert_equal(delta.terminal_files[2], "tests/test_crash.mojo")
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

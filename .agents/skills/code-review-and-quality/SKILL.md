@@ -173,8 +173,8 @@ Walk the diff once per axis. The triage prompts are starting points, not a scrip
 - **Any obsolete syntax?** `fn`, `let`, `alias`, `@parameter`,
   `inout`/`owned`/`borrowed`, non-`std.` imports, `s[i]` string indexing. A build
   script or doc example that shells out to `mojo package` is stale too — that
-  subcommand doesn't exist on `1.0.0b2`, only `mojo precompile` (AGENTS.md
-  *Lessons*). Cite the `mojo-syntax` skill. This is the most common defect in
+  subcommand doesn't exist on `1.0.0b2`, only `mojo precompile`
+  (`.agents/lessons.md`, "Toolchain and protocol"). Cite the `mojo-syntax` skill. This is the most common defect in
   generated Mojo — check explicitly, including in ```mojo blocks inside docs.
   Training data is stale; `mojo-syntax` is the authority, not memory.
 - **FFI and async-signal-safety in `exec`.** The child path between `fork` and
@@ -183,7 +183,8 @@ Walk the diff once per axis. The triage prompts are starting points, not a scrip
   pre-fork. An allocation in the child is a **Critical** latent-deadlock finding.
   The `external_call["write", ...]` collision, the immutable-origin rule for
   `UnsafePointer[T, _]` helpers, and the `posix_spawn` dead end are the known
-  traps (AGENTS.md *Lessons*).
+  traps (`.agents/lessons.md`, "Process supervision" and "Mojo language,
+  pinned toolchain").
 - **Cleanup invariants.** The kill targets the process GROUP (`kill(-pgid, …)`),
   not the lone child; both pipes drain to EOF before `waitpid`; every fd and
   buffer is released in `__del__`; no fd growth across repeated spawns. A missing

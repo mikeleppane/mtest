@@ -14,6 +14,7 @@ event->fragment mapping and the spool mechanism are pinned directly, including
 from std.os import getenv, listdir, mkdir, rmdir, setenv, unsetenv
 from std.os.path import exists, isdir
 from std.testing import (
+    TestSuite,
     assert_equal,
     assert_false,
     assert_raises,
@@ -543,3 +544,8 @@ def test_open_junit_spool_raises_when_the_temp_base_is_unusable() raises:
             _ = setenv("TMP", prev_tmp, True)
         else:
             _ = unsetenv("TMP")
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

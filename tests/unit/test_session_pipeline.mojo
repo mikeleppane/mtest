@@ -9,7 +9,7 @@ and `test_session_verdict` pin their policies.
 Every stage, every step kind, and every halt reason in the vocabulary is reached
 by some case below, because the sequential driver reaches all of them today.
 """
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.session import (
     FileStage,
@@ -449,3 +449,8 @@ def test_a_latched_interrupt_survives_a_straggling_limit_verdict() raises:
     p.halt_interrupted()
     p.record_verdict(0, True, 1)
     assert_equal(p.halt().code, PipelineHalt.INTERRUPTED.code)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

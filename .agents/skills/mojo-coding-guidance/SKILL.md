@@ -29,8 +29,9 @@ to come.
   methods, traits, SIMD, strings, and pointers. **Do not rely on your own
   recollection of Mojo syntax; consult it.** This skill does not restate it.
 - **Project rules → [AGENTS.md](../../../AGENTS.md).** The layering plan, the
-  Python-containment rule, the transcript lifecycle, the pin policy, the Lessons
-  section, and the "Ask first" boundaries. AGENTS.md wins over this skill.
+  Python-containment rule, the transcript lifecycle, the pin policy, and the
+  "Ask first" boundaries, plus the recorded failure modes in
+  [.agents/lessons.md](../../lessons.md). AGENTS.md wins over this skill.
 - **When in doubt, compile it.** `pixi run build`, or build a single test
   binary against the package. The syntax moves; a green build is the only proof
   a snippet is current.
@@ -77,11 +78,11 @@ for two independent reasons that both destroy the product:
 - **It can JIT-crash in CI** (Mojo #6413), turning a healthy test suite red for
   reasons that have nothing to do with the tests.
 
-A prebuilt binary's termination status is the ground truth.
-`scripts/harness/classified.py` already eats this discipline for mtest's own
-suite; the runner must enforce the
-same rule on the code it tests. Anything that shells out to `mojo run`, or that
-reads an exit code from a process it did not build-then-exec, is a bug.
+A prebuilt binary's termination status is the ground truth. `build/mtest`
+already applies that exact discipline to mtest's own suite (`pixi run test`,
+self-hosted through `scripts/harness/selfhost.py`); the runner must enforce
+the same rule on the code it tests. Anything that shells out to `mojo run`, or
+that reads an exit code from a process it did not build-then-exec, is a bug.
 
 ---
 
@@ -426,9 +427,10 @@ relies on.
 
 ## Language gotchas that bite in this repo
 
-The `mojo-syntax` skill has the full language list; AGENTS.md **Lessons** has the
-pinned-`1.0.0b2` incident log (read it before non-trivial Mojo). The ones that
-recur in FFI/subprocess/parser code:
+The `mojo-syntax` skill has the full language list;
+[.agents/lessons.md](../../lessons.md) has the pinned-`1.0.0b2` incident log
+under "Mojo language, pinned toolchain" (read it before non-trivial Mojo). The
+ones that recur in FFI/subprocess/parser code:
 
 - **FFI naming collisions.** `external_call["write", ...]` collides with the
   stdlib's own `write` — never re-declare it. A helper taking
@@ -448,8 +450,8 @@ recur in FFI/subprocess/parser code:
   file_actions/attr) — fork+exec is the route; don't reach for it.
 - **Compiler stalls (#6554-class):** a test module whose function count grows too
   large stalls TestSuite discovery for minutes — a known toolchain bug. Keep test
-  modules small; split along the natural seam and record the pattern in AGENTS.md
-  Lessons; don't sit waiting.
+  modules small; split along the natural seam and record the pattern in
+  `.agents/lessons.md`; don't sit waiting.
 
 ---
 

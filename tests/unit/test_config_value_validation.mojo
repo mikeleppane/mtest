@@ -13,7 +13,7 @@ wrapped `Int.MIN` silently disables `--timeout` (an unbounded run), defeats
 The boundary is therefore pinned exactly — the largest accepted value, the two
 wrapping values, and the neighbours on both sides — rather than sampled.
 """
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.config import parse_nonnegative_decimal, parse_worker_count
 
@@ -95,3 +95,8 @@ def test_worker_count_accepts_i64_max() raises:
     var parsed = parse_worker_count("9223372036854775807")
     assert_true(Bool(parsed))
     assert_equal(parsed.value(), 9223372036854775807)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

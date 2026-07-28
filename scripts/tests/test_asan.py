@@ -56,7 +56,13 @@ class AsanCheckTests(unittest.TestCase):
         ):
             asan_check.main()
 
-    def test_classified_suite_builds_generated_entrypoint(self) -> None:
+    def test_classified_suite_builds_source_directly(self) -> None:
+        """The ASan lane builds `source` itself, with no generated wrapper.
+
+        Every classified module declares its own `main()` now, so there is no
+        `*_main.mojo` wrapper and no `import tests.unit.<module>` alias to
+        assert on.
+        """
         source = asan_check.ROOT / "tests" / "unit" / "test_config.mojo"
         expected = asan_check.test_count(source)
         results = [
@@ -76,13 +82,20 @@ class AsanCheckTests(unittest.TestCase):
             ):
                 asan_check.compile_and_run_test(source, {})
 
-            entrypoint = out / "test_config_main.mojo"
             compile_command = mocked_run.call_args_list[0].args[0]
-            self.assertIn(str(entrypoint), compile_command)
-            self.assertNotIn(str(source.relative_to(asan_check.ROOT)), compile_command)
-            self.assertIn(
-                "import tests.unit.test_config as _mtest_module_0",
-                entrypoint.read_text(encoding="utf-8"),
+            self.assertIn(str(source.relative_to(asan_check.ROOT)), compile_command)
+            self.assertNotIn(
+                ".",
+                compile_command,
+                "-I . is no longer needed: the source itself never imports "
+                "tests.unit.<module> or tests.integration.<module>",
+            )
+            generated_wrappers = list(out.glob("*_main.mojo"))
+            self.assertEqual(
+                generated_wrappers,
+                [],
+                f"no *_main.mojo wrapper should be generated, "
+                f"found {generated_wrappers}",
             )
 
     def test_production_smoke_builds_only_the_exec_probe(self) -> None:

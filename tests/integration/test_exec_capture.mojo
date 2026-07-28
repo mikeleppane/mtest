@@ -6,6 +6,7 @@ argv entries survive), a large dual-stream flood drains without deadlock, and
 output past a lowered bound is truncated to head + marker + tail.
 """
 from std.testing import (
+    TestSuite,
     assert_equal,
     assert_true,
     assert_false,
@@ -180,3 +181,8 @@ def test_lossy_utf8_replaces_invalid_preserves_valid() raises:
     assert_true(s.startswith("h"), s)
     assert_true("�" in s, s)  # replacement char for 0xFF
     assert_true(s.endswith("é"), s)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

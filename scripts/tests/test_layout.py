@@ -3,16 +3,22 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
+from typing import TYPE_CHECKING
 import unittest
 from unittest import mock
 
 from scripts.build import package_consumption
 from scripts.checks import layout
-from scripts.harness import aggregate
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 class LayoutInventoryPolicyTests(unittest.TestCase):
@@ -21,24 +27,15 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
 
     def test_every_intended_inventory_fails_closed_when_empty(self) -> None:
         cases = (
-            ("TOP_LEVEL_SCRIPT_FILES", layout.check_top_level_script_layout),
-            ("UNIT_SUITES", layout.check_suite_layout),
-            ("INTEGRATION_SUITES", layout.check_suite_layout),
-            ("CLASSIFIED_PATHS", layout.check_suite_layout),
             ("CLASSIFIED_ROOTS", layout.check_suite_layout),
-            ("CLASSIFIED_PACKAGE_MARKERS", layout.check_suite_layout),
-            ("SUPPORT_MODULES", layout.check_suite_layout),
-            ("EXEC_FIXTURES", layout.check_exec_fixture_layout),
-            ("E2E_NATIVE_FIXTURES", layout.check_e2e_native_fixture_layout),
-            ("PROTOCOL_FIXTURES", layout.check_protocol_asset_layout),
-            ("E2E_SCENARIO_NAMES", layout.check_e2e_layout),
-            ("E2E_HARNESS_PATHS", layout.check_e2e_layout),
+            (
+                "FORBIDDEN_CLASSIFIED_PACKAGE_MARKERS",
+                layout.check_classified_roots_are_not_precompilable_packages,
+            ),
             ("BUILD_SOURCE_PATHS", layout.check_build_source_visibility),
-            ("ASSERTION_SOURCE_PATHS", layout.check_assertion_companion_layout),
-            ("ASSERTION_CONSUMER_PATHS", layout.check_assertion_companion_layout),
-            ("ASSERTION_CHECK_PATHS", layout.check_assertion_companion_layout),
-            ("ASSERTION_EXAMPLE_PATHS", layout.check_assertion_companion_layout),
             ("VENDORED_TOML_PATHS", layout.check_vendored_toml_layout),
+            ("PLATFORM_TASK_OVERRIDES", layout.check_platform_task_overrides),
+            ("PLATFORM_TARGET_KEYS", layout.check_platform_task_overrides),
         )
         for name, check in cases:
             with (
@@ -48,206 +45,225 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
             ):
                 check()
 
-    def test_top_level_script_membership_is_exact(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="mtest-layout-") as raw_tmp:
+
+class AssertionCompanionLayoutTests(unittest.TestCase):
+    """The companion contract is reconciled from disk, never from a list.
+
+    Every fixture here is built by writing files, and the expectation is
+    whatever those files are. `SOURCES` names the tree this fixture happens to
+    contain -- it is not a copy of the repository's companion membership, and
+    `test_a_new_companion_source_needs_no_ledger_edit` is what holds that
+    distinction honest.
+    """
+
+    SOURCES = (
+        "mtest/__init__.mojo",
+        "mtest/assertions/__init__.mojo",
+    )
+
+    def _repo(self, root: Path, sources: tuple[str, ...]) -> None:
+        """Write a companion tree, a recipe that installs it, and a build."""
+        for relative in sources:
+            path = root / layout.COMPANION_SOURCE_ROOT / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# fixture\n", encoding="utf-8")
+        example = root / layout.COMPANION_ROOT / "examples" / "test_diagnostics.mojo"
+        example.parent.mkdir(parents=True, exist_ok=True)
+        example.write_text("# example\n", encoding="utf-8")
+        production = root / "scripts" / "build" / "production_build.sh"
+        production.parent.mkdir(parents=True, exist_ok=True)
+        production.write_text("# no assertion precompile\n", encoding="utf-8")
+        recipe = root / "recipe" / "build.sh"
+        recipe.parent.mkdir(parents=True, exist_ok=True)
+        recipe.write_text(self._recipe(sources), encoding="utf-8")
+
+    @staticmethod
+    def _recipe(sources: tuple[str, ...], suffix: str = "") -> str:
+        return (
+            "# no assertion precompile\n"
+            + "".join(
+                f"install -m 644 "
+                f"{(layout.COMPANION_SOURCE_ROOT / relative).as_posix()} dest\n"
+                for relative in sources
+            )
+            + suffix
+        )
+
+    @contextlib.contextmanager
+    def _fixture(self, sources: tuple[str, ...] = SOURCES) -> Iterator[Path]:
+        """Yield a repository whose companion contract already holds."""
+        with (
+            tempfile.TemporaryDirectory(prefix="mtest-companion-") as raw_tmp,
+            mock.patch.object(
+                package_consumption,
+                "INSTALLED_ASSERTION_FILES",
+                {Path(relative) for relative in sources},
+            ),
+        ):
             repo = Path(raw_tmp)
-            for relative in layout.TOP_LEVEL_SCRIPT_FILES:
-                path = repo / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("# fixture\n", encoding="utf-8")
+            self._repo(repo, sources)
+            layout.check_assertion_companion_layout(repo)
+            yield repo
 
-            layout.check_top_level_script_layout(repo)
-            extra = repo / "scripts" / "unexpected.py"
-            extra.write_text("# accidental top-level tool\n", encoding="utf-8")
+    def test_a_new_companion_source_needs_no_ledger_edit(self) -> None:
+        """Adding a module costs the recipe and the shipped list, nothing more.
 
-            with self.assertRaisesRegex(
-                AssertionError,
-                "top-level scripts membership mismatch",
-            ):
-                layout.check_top_level_script_layout(repo)
-
-    def test_exec_fixture_membership_exempts_only_the_bytecode_cache(self) -> None:
-        """`__pycache__` is tolerated; nothing else unlisted is.
-
-        The harness imports an exec actor as a module to predict its payload,
-        which makes CPython write that directory. The gate must survive it
-        without becoming a gate that tolerates unlisted actors.
+        The recipe line is the install the package needs and the shipped list
+        is what `public_verify` cannot derive; if this check ever needs a third
+        edit, the derivation has regressed back into a list of its own.
         """
-        with tempfile.TemporaryDirectory(prefix="mtest-layout-exec-") as raw_tmp:
-            repo = Path(raw_tmp)
-            fixtures = repo / "tests" / "fixtures" / "exec"
-            fixtures.mkdir(parents=True)
-            for name in layout.EXEC_FIXTURES:
-                (fixtures / name).write_text("# fixture\n", encoding="utf-8")
+        with self._fixture((*self.SOURCES, "mtest/assertions/_brand_new.mojo")):
+            pass
 
-            with mock.patch.object(layout, "REPO_ROOT", repo):
-                layout.check_exec_fixture_layout()
-                (fixtures / "__pycache__").mkdir()
-                layout.check_exec_fixture_layout()
+    def test_a_source_without_its_install_line_is_rejected(self) -> None:
+        """The load-bearing case: a shipped module the package never installs.
 
-                (fixtures / "unlisted_actor.py").write_text("", encoding="utf-8")
-                with self.assertRaisesRegex(
-                    AssertionError, "exec fixture membership mismatch"
-                ):
-                    layout.check_exec_fixture_layout()
-
-    def test_assertion_companion_membership_is_exact(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="mtest-layout-") as raw_tmp:
-            repo = Path(raw_tmp)
-            for relative in (
-                *layout.ASSERTION_SOURCE_PATHS,
-                *layout.ASSERTION_CONSUMER_PATHS,
-                *layout.ASSERTION_CHECK_PATHS,
-                *layout.ASSERTION_EXAMPLE_PATHS,
-            ):
-                path = repo / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("# fixture\n", encoding="utf-8")
-            for script_name in ("scripts/build/production_build.sh",):
-                path = repo / script_name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("# no assertion precompile\n", encoding="utf-8")
-            recipe = repo / "recipe" / "build.sh"
-            recipe.parent.mkdir(parents=True, exist_ok=True)
-            recipe_contents = "# no assertion precompile\n" + "".join(
-                f"install -m 644 {relative} destination\n"
-                for relative in layout.ASSERTION_SOURCE_PATHS
-            )
-            recipe.write_text(recipe_contents, encoding="utf-8")
-
-            layout.check_assertion_companion_layout(repo)
-            expected_leaf = repo / next(iter(layout.ASSERTION_SOURCE_PATHS))
-            expected_leaf.unlink()
-            expected_leaf.mkdir()
-            with self.assertRaisesRegex(
-                AssertionError,
-                "assertion companion leaf is not a regular file",
-            ):
-                layout.check_assertion_companion_layout(repo)
-            expected_leaf.rmdir()
-            expected_leaf.write_text("# fixture\n", encoding="utf-8")
-
-            unregistered_example = repo / "companions/assertions/unexpected.mojo"
-            unregistered_example.parent.mkdir(parents=True, exist_ok=True)
-            unregistered_example.write_text("# accidental example\n", encoding="utf-8")
-            with self.assertRaisesRegex(
-                AssertionError,
-                "assertion companion membership mismatch",
-            ):
-                layout.check_assertion_companion_layout(repo)
-            unregistered_example.unlink()
-
-            unregistered_consumer = repo / "tests/assertions/unexpected.mojo"
-            unregistered_consumer.write_text(
-                "# accidental consumer\n", encoding="utf-8"
-            )
-            with self.assertRaisesRegex(
-                AssertionError,
-                "assertion consumer membership mismatch",
-            ):
-                layout.check_assertion_companion_layout(repo)
-            unregistered_consumer.unlink()
-
-            companion_target = repo / "outside-companion.mojo"
-            companion_target.write_text("# external\n", encoding="utf-8")
-            expected_leaf.unlink()
-            expected_leaf.symlink_to(companion_target)
-            with self.assertRaisesRegex(AssertionError, "contains symlinks"):
-                layout.check_assertion_companion_layout(repo)
-            expected_leaf.unlink()
-            expected_leaf.write_text("# fixture\n", encoding="utf-8")
-
-            expected_consumer = repo / next(iter(layout.ASSERTION_CONSUMER_PATHS))
-            consumer_target = repo / "outside-consumer.mojo"
-            consumer_target.write_text("# external\n", encoding="utf-8")
-            expected_consumer.unlink()
-            expected_consumer.symlink_to(consumer_target)
-            with self.assertRaisesRegex(AssertionError, "contains symlinks"):
-                layout.check_assertion_companion_layout(repo)
-            expected_consumer.unlink()
-            expected_consumer.write_text("# fixture\n", encoding="utf-8")
-
-            recipe.write_text(
-                recipe_contents
-                + "mojo precompile companions/assertions/src/mtest/__init__.mojo\n",
-                encoding="utf-8",
-            )
-            with self.assertRaisesRegex(AssertionError, "precompiles"):
-                layout.check_assertion_companion_layout(repo)
-
-            for recursive_copy in (
-                "cp -r companions/assertions destination\n",
-                "cp\t-R companions/assertions destination\n",
-                "cp -pr companions/assertions destination\n",
-                "cp -aR companions/assertions destination\n",
-                "cp --recursive companions/assertions destination\n",
-            ):
-                with self.subTest(recursive_copy=recursive_copy):
-                    recipe.write_text(
-                        recipe_contents + recursive_copy,
-                        encoding="utf-8",
-                    )
-                    with self.assertRaisesRegex(
-                        AssertionError, "recursive source copy"
-                    ):
-                        layout.check_assertion_companion_layout(repo)
-            recipe.write_text(
-                recipe_contents + "scp -r companions/assertions destination\n",
-                encoding="utf-8",
-            )
-            layout.check_assertion_companion_layout(repo)
-
-            missing_install = next(iter(layout.ASSERTION_SOURCE_PATHS))
-            recipe.write_text(
-                recipe_contents.replace(
-                    f"install -m 644 {missing_install} destination\n", ""
-                ),
-                encoding="utf-8",
-            )
-            with self.assertRaisesRegex(AssertionError, "recipe install membership"):
-                layout.check_assertion_companion_layout(repo)
-            recipe.write_text(recipe_contents, encoding="utf-8")
+        The shipped membership is advanced alongside disk so the earlier
+        equality passes, which leaves the recipe as the only disagreement --
+        exactly the state that produces a broken package and is otherwise
+        invisible until a full package build runs.
+        """
+        with self._fixture() as repo:
+            orphan = repo / layout.COMPANION_SOURCE_ROOT / "mtest" / "orphan.mojo"
+            orphan.write_text("# unshipped\n", encoding="utf-8")
 
             with (
                 mock.patch.object(
                     package_consumption,
                     "INSTALLED_ASSERTION_FILES",
-                    {Path("mtest/__init__.mojo")},
+                    {Path(relative) for relative in self.SOURCES}
+                    | {Path("mtest/orphan.mojo")},
                 ),
                 self.assertRaisesRegex(
-                    AssertionError,
-                    "assertion package-check membership mismatch",
+                    AssertionError, "recipe install membership mismatch"
                 ),
             ):
                 layout.check_assertion_companion_layout(repo)
 
-            extra = (
-                repo
-                / "companions/assertions/src"
-                / "mtest"
-                / "assertions"
-                / "unexpected.mojo"
+    def test_an_install_line_without_its_source_is_rejected(self) -> None:
+        with self._fixture() as repo:
+            (repo / "recipe" / "build.sh").write_text(
+                self._recipe((*self.SOURCES, "mtest/ghost.mojo")), encoding="utf-8"
             )
-            extra.write_text("# accidental public module\n", encoding="utf-8")
 
             with self.assertRaisesRegex(
-                AssertionError,
-                "assertion companion membership mismatch",
+                AssertionError, "recipe install membership mismatch"
             ):
                 layout.check_assertion_companion_layout(repo)
+
+    def test_a_shipped_membership_that_disagrees_with_disk_is_rejected(self) -> None:
+        with (
+            self._fixture() as repo,
+            mock.patch.object(
+                package_consumption,
+                "INSTALLED_ASSERTION_FILES",
+                {Path("mtest/__init__.mojo")},
+            ),
+            self.assertRaisesRegex(
+                AssertionError, "assertion package-check membership mismatch"
+            ),
+        ):
+            layout.check_assertion_companion_layout(repo)
+
+    def test_an_empty_companion_tree_fails_closed(self) -> None:
+        with self._fixture() as repo:
+            for relative in self.SOURCES:
+                (repo / layout.COMPANION_SOURCE_ROOT / relative).unlink()
+
+            with self.assertRaisesRegex(AssertionError, "has no source file"):
+                layout.check_assertion_companion_layout(repo)
+
+    def test_a_symlinked_companion_entry_is_rejected(self) -> None:
+        with self._fixture() as repo:
+            outside = repo / "outside.mojo"
+            outside.write_text("# external\n", encoding="utf-8")
+            leaf = repo / layout.COMPANION_SOURCE_ROOT / self.SOURCES[0]
+            leaf.unlink()
+            leaf.symlink_to(outside)
+
+            with self.assertRaisesRegex(AssertionError, "contains symlinks"):
+                layout.check_assertion_companion_layout(repo)
+
+    def test_a_non_regular_companion_entry_is_rejected(self) -> None:
+        with self._fixture() as repo:
+            os.mkfifo(repo / layout.COMPANION_ROOT / "pipe")
+
+            with self.assertRaisesRegex(AssertionError, "not a regular file"):
+                layout.check_assertion_companion_layout(repo)
+
+    def test_a_leak_into_the_private_package_is_rejected(self) -> None:
+        with self._fixture() as repo:
+            (repo / "src" / "mtest" / "assertions").mkdir(parents=True)
+
+            with self.assertRaisesRegex(AssertionError, "leaked into private"):
+                layout.check_assertion_companion_layout(repo)
+
+    def test_precompiling_the_public_source_is_rejected(self) -> None:
+        cases = (
+            ("scripts/build/production_build.sh", "production build"),
+            ("recipe/build.sh", "recipe build"),
+        )
+        for relative, label in cases:
+            with self.subTest(script=relative), self._fixture() as repo:
+                path = repo / relative
+                path.write_text(
+                    path.read_text(encoding="utf-8")
+                    + "mojo precompile companions/assertions/src/mtest\n",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(AssertionError, f"{label} precompiles"):
+                    layout.check_assertion_companion_layout(repo)
+
+    def test_a_recursive_copy_of_the_public_source_is_rejected(self) -> None:
+        recursive_copies = (
+            "cp -r companions/assertions destination\n",
+            "cp\t-R companions/assertions destination\n",
+            "cp -pr companions/assertions destination\n",
+            "cp -aR companions/assertions destination\n",
+            "cp --recursive companions/assertions destination\n",
+        )
+        for recursive_copy in recursive_copies:
+            with self.subTest(copy=recursive_copy), self._fixture() as repo:
+                (repo / "recipe" / "build.sh").write_text(
+                    self._recipe(self.SOURCES, recursive_copy), encoding="utf-8"
+                )
+
+                with self.assertRaisesRegex(AssertionError, "recursive source copy"):
+                    layout.check_assertion_companion_layout(repo)
+
+    def test_a_non_recursive_lookalike_command_is_accepted(self) -> None:
+        with self._fixture() as repo:
+            (repo / "recipe" / "build.sh").write_text(
+                self._recipe(
+                    self.SOURCES, "scp -r companions/assertions destination\n"
+                ),
+                encoding="utf-8",
+            )
+
+            layout.check_assertion_companion_layout(repo)
 
 
 class ClassifiedMojoUniverseTests(unittest.TestCase):
-    """The classified roots hold exactly the registered Mojo files, and no links."""
+    """Every Mojo file under a classified root is one the runner actually runs.
+
+    The expectation is derived from disk and from the runner's own glob, so
+    these fixtures never register anything: a tree is accepted or rejected on
+    what it contains, not on what some list says it should contain.
+    """
 
     SOLE_SUITE = "tests/unit/test_probe.mojo"
 
     def _accepted_tree(self, repo: Path) -> None:
-        """Create both package markers plus the one registered classified suite."""
+        """Create one discoverable suite per classified root, and no markers.
+
+        Both classified roots are plain directories: an `__init__.mojo` there
+        would make `mojo precompile tests/` fail, since every classified
+        module declares `main()`.
+        """
         for relative in (
-            "tests/unit/__init__.mojo",
-            "tests/integration/__init__.mojo",
             self.SOLE_SUITE,
+            "tests/integration/test_flow.mojo",
         ):
             path = repo / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -275,11 +291,10 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
         self.assertEqual(
             regular,
             {
-                Path("tests/unit/__init__.mojo"),
                 Path("tests/unit/test_probe.mojo"),
                 Path("tests/unit/session_shard_test.mojo"),
                 Path("tests/unit/helper.mojo"),
-                Path("tests/integration/__init__.mojo"),
+                Path("tests/integration/test_flow.mojo"),
                 Path("tests/integration/test_probe.mojo.disabled"),
             },
         )
@@ -288,15 +303,38 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
             {Path("tests/unit/test_link.mojo"), Path("tests/unit/linked")},
         )
 
-    def test_registered_suites_and_package_markers_are_accepted(self) -> None:
+    def test_a_discoverable_tree_is_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp)
             self._accepted_tree(repo)
 
-            with mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)):
-                layout.check_classified_mojo_inventory(repo)
+            layout.check_classified_mojo_inventory(repo)
 
-    def test_every_unregistered_mojo_name_is_rejected(self) -> None:
+    def test_a_new_test_file_needs_no_ledger_edit(self) -> None:
+        """Adding a suite must cost zero edits anywhere in this repository.
+
+        This is the property the deleted `CLASSIFIED_PATHS`/`UNIT_SUITES`
+        ledgers cost on every single new test file, and the reason they are
+        gone. If this test ever needs a companion edit to pass, the derivation
+        has regressed back into a list.
+        """
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            self._accepted_tree(repo)
+            (repo / "tests" / "unit" / "test_brand_new.mojo").write_text(
+                "def test_new():\n    pass\n", encoding="utf-8"
+            )
+
+            layout.check_classified_mojo_inventory(repo)
+
+    def test_every_name_the_runner_would_skip_is_rejected(self) -> None:
+        """A Mojo file the discovery glob misses never runs, and no oracle sees it.
+
+        `selfhost.py` reconciles what mtest reported against what it found on
+        disk, so it can only speak for files discovery reached. A parked
+        `.mojo.disabled` or a misnamed module is invisible to both, which is
+        exactly the gap this check exists to close.
+        """
         cases = (
             "tests/unit/session_shard_test.mojo",
             "tests/integration/test_probe.mojo.disabled",
@@ -311,11 +349,8 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
                 self._accepted_tree(repo)
                 (repo / relative).write_text("", encoding="utf-8")
 
-                with (
-                    mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)),
-                    self.assertRaisesRegex(
-                        AssertionError, "unexpected classified Mojo file"
-                    ),
+                with self.assertRaisesRegex(
+                    AssertionError, "discovery would silently skip"
                 ):
                     layout.check_classified_mojo_inventory(repo)
 
@@ -334,9 +369,8 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
                 (repo / "outside.mojo").write_text("", encoding="utf-8")
                 os.symlink(repo / target, repo / relative)
 
-                with (
-                    mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)),
-                    self.assertRaisesRegex(AssertionError, "symlinked classified path"),
+                with self.assertRaisesRegex(
+                    AssertionError, "symlinked classified path"
                 ):
                     layout.check_classified_mojo_inventory(repo)
 
@@ -355,10 +389,7 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
             try:
                 with self.assertRaises(PermissionError):
                     layout.classified_mojo_universe(repo)
-                with (
-                    mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)),
-                    self.assertRaises(PermissionError),
-                ):
+                with self.assertRaises(PermissionError):
                     layout.check_classified_mojo_inventory(repo)
             finally:
                 hidden.chmod(0o700)
@@ -374,21 +405,23 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
             _regular, symlinked = layout.classified_mojo_universe(repo)
             self.assertEqual(symlinked, {Path("tests/unit")})
 
-            with (
-                mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)),
-                self.assertRaisesRegex(AssertionError, "symlinked classified path"),
-            ):
+            with self.assertRaisesRegex(AssertionError, "symlinked classified path"):
                 layout.check_classified_mojo_inventory(repo)
 
-    def test_a_registered_suite_that_vanished_is_rejected(self) -> None:
+    def test_a_classified_root_with_no_test_file_is_rejected(self) -> None:
+        """Emptiness fails closed; a derived expectation must not become vacuous.
+
+        Without this, a root that lost every suite -- or a glob that stopped
+        matching anything -- would satisfy a check that only ever asks
+        "is everything present named correctly?".
+        """
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp)
             self._accepted_tree(repo)
             (repo / self.SOLE_SUITE).unlink()
 
-            with (
-                mock.patch.object(layout, "CLASSIFIED_PATHS", (self.SOLE_SUITE,)),
-                self.assertRaisesRegex(AssertionError, "missing classified Mojo file"),
+            with self.assertRaisesRegex(
+                AssertionError, "classified root holds no .* test file: tests/unit"
             ):
                 layout.check_classified_mojo_inventory(repo)
 
@@ -406,178 +439,365 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
         self.assertEqual(roots, [layout.REPO_ROOT])
 
 
-class AggregateMembershipOracleTests(unittest.TestCase):
-    def _fixture(self, repo: Path) -> tuple[str, ...]:
-        relative = "tests/unit/test_probe.mojo"
-        source = repo / relative
-        source.parent.mkdir(parents=True)
-        source.write_text(
-            "def test_alpha():\n    pass\n\ndef test_beta() raises:\n    pass\n",
-            encoding="utf-8",
-        )
-        return (relative,)
+class ClassifiedPackagePrecompileGuardTests(unittest.TestCase):
+    """Reintroducing a package marker over main()-declaring tests must fail."""
 
-    def test_oracle_reads_source_without_aggregate_parser(self) -> None:
+    def test_a_reintroduced_marker_is_rejected_without_touching_mojo(self) -> None:
+        # The structural pre-check must fire before any subprocess is spawned,
+        # so this proves the failure even with `mojo` unresolvable.
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp)
-            paths = self._fixture(repo)
-
-            with mock.patch.object(
-                aggregate,
-                "test_function_names",
-                return_value=["test_wrong_a", "test_wrong_b"],
-            ):
-                membership = layout.independent_registration_membership(repo, paths)
-
-        self.assertEqual(
-            membership,
-            (
-                ("tests/unit/test_probe.mojo", "test_alpha"),
-                ("tests/unit/test_probe.mojo", "test_beta"),
-            ),
-        )
-
-    def test_same_count_loader_substitution_is_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_tmp:
-            repo = Path(raw_tmp)
-            paths = self._fixture(repo)
+            marker = repo / "tests" / "unit" / "__init__.mojo"
+            marker.parent.mkdir(parents=True)
+            marker.write_text("", encoding="utf-8")
 
             with (
-                mock.patch.object(
-                    aggregate,
-                    "test_function_names",
-                    return_value=["test_alpha", "test_gamma"],
-                ),
-                self.assertRaisesRegex(AssertionError, "registration membership/order"),
+                mock.patch.object(shutil, "which", return_value=None),
+                self.assertRaisesRegex(AssertionError, "package marker reintroduced"),
             ):
-                layout.check_classified_entrypoint(repo, paths, expected_count=2)
+                layout.check_classified_roots_are_not_precompilable_packages(repo)
 
-    def test_same_count_loader_reordering_is_rejected(self) -> None:
+    def test_mojo_missing_from_path_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp)
-            paths = self._fixture(repo)
-
             with (
-                mock.patch.object(
-                    aggregate,
-                    "test_function_names",
-                    return_value=["test_beta", "test_alpha"],
-                ),
-                self.assertRaisesRegex(AssertionError, "registration membership/order"),
+                mock.patch.object(shutil, "which", return_value=None),
+                self.assertRaisesRegex(AssertionError, "mojo is not available on PATH"),
             ):
-                layout.check_classified_entrypoint(repo, paths, expected_count=2)
+                layout.check_classified_roots_are_not_precompilable_packages(repo)
+
+    def test_a_failed_precompile_is_surfaced_with_its_stderr(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            failed = subprocess.CompletedProcess(
+                args=["mojo", "precompile"],
+                returncode=1,
+                stdout="",
+                stderr="error: 'main()' is not supported within packages\n",
+            )
+            with (
+                mock.patch.object(shutil, "which", return_value="/bin/mojo"),
+                mock.patch.object(subprocess, "run", return_value=failed),
+                self.assertRaisesRegex(
+                    AssertionError,
+                    r"mojo precompile tests/ failed \(rc=1\).*not supported "
+                    r"within packages",
+                ),
+            ):
+                layout.check_classified_roots_are_not_precompilable_packages(repo)
+
+    def test_absent_markers_and_a_clean_precompile_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            ok = subprocess.CompletedProcess(
+                args=["mojo", "precompile"], returncode=0, stdout="", stderr=""
+            )
+            with (
+                mock.patch.object(shutil, "which", return_value="/bin/mojo"),
+                mock.patch.object(subprocess, "run", return_value=ok) as run,
+            ):
+                layout.check_classified_roots_are_not_precompilable_packages(repo)
+
+            self.assertEqual(run.call_args.kwargs["cwd"], repo)
+            self.assertIn("tests/", run.call_args.args[0])
+
+
+class PlatformTaskOverrideTests(unittest.TestCase):
+    """A `[target.<platform>.tasks]` entry replaces a base task invisibly.
+
+    Pixi emits no warning, `pixi run <task>` keeps working, and the hosted
+    matrix names its lanes by task name -- so a substituted lane stays green
+    in every view while running something else. Three words of TOML are the
+    whole attack, which is why the bound is a check rather than a review
+    convention.
+    """
+
+    BASE = (
+        "[workspace]\n"
+        'name = "fixture"\n'
+        "\n"
+        "[tasks]\n"
+        'asan-check = "python -m scripts.checks.memory.asan"\n'
+        'ci-memory = "python -m scripts.checks.memory.host_support"\n'
+    )
+    LEGITIMATE = (
+        "\n[target.linux-64.dependencies]\n"
+        'valgrind = "==3.27.1"\n'
+        "\n[target.linux-64.tasks]\n"
+        'ci-memory = { depends-on = ["asan-check"] }\n'
+    )
+
+    def _manifest(self, body: str) -> Path:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (root / "pixi.toml").write_text(body, encoding="utf-8")
+        return root
+
+    def test_the_repositorys_own_manifest_is_within_the_bound(self) -> None:
+        layout.check_platform_task_overrides()
+
+    def test_the_dependency_only_override_is_accepted(self) -> None:
+        root = self._manifest(self.BASE + self.LEGITIMATE)
+
+        layout.check_platform_task_overrides(root)
+
+    def test_substituting_a_lane_for_one_platform_is_rejected(self) -> None:
+        # The exact reproduced attack: three words that leave `pixi run
+        # asan-check` exiting 0 having run `/bin/true`, with the hosted
+        # "ASan + LSan" required check still reporting the same task name.
+        root = self._manifest(
+            self.BASE + self.LEGITIMATE + 'asan-check = "true"\n',
+        )
+
+        with self.assertRaisesRegex(AssertionError, r"outside the bounded set"):
+            layout.check_platform_task_overrides(root)
+
+    def test_an_allowlisted_override_may_not_carry_a_command(self) -> None:
+        # Narrowing to a name list alone is not enough: the permitted entry
+        # must stay a pure dependency edge, or the same substitution arrives
+        # under a name the allowlist blesses.
+        for body in (
+            'ci-memory = "true"\n',
+            'ci-memory = { cmd = "true", depends-on = ["asan-check"] }\n',
+        ):
+            with self.subTest(body=body):
+                root = self._manifest(
+                    self.BASE + "\n[target.linux-64.tasks]\n" + body,
+                )
+
+                with self.assertRaisesRegex(AssertionError, r"dependency-only|`cmd`"):
+                    layout.check_platform_task_overrides(root)
+
+    def test_an_unread_target_key_is_rejected(self) -> None:
+        root = self._manifest(
+            self.BASE + '\n[target.linux-64]\nactivation = { env = { X = "1" } }\n',
+        )
+
+        with self.assertRaisesRegex(AssertionError, "unexpected keys"):
+            layout.check_platform_task_overrides(root)
+
+    def test_an_override_on_any_other_platform_is_rejected_too(self) -> None:
+        root = self._manifest(
+            self.BASE + '\n[target.osx-arm64.tasks]\nasan-check = "true"\n',
+        )
+
+        with self.assertRaisesRegex(AssertionError, r"\[target\.osx-arm64\.tasks\]"):
+            layout.check_platform_task_overrides(root)
+
+    def test_a_renamed_base_task_leaves_the_allowlist_loud(self) -> None:
+        # A stale allowlist entry permits overriding a name nothing runs, so
+        # the bound would quietly cover the wrong task.
+        root = self._manifest(
+            self.BASE.replace("ci-memory", "ci-mem") + self.LEGITIMATE,
+        )
+
+        with self.assertRaisesRegex(AssertionError, "no longer exists"):
+            layout.check_platform_task_overrides(root)
 
 
 class DirectInvocationPolicyTests(unittest.TestCase):
+    """A script command spelled as a path must be rejected wherever it is written.
+
+    The forms are built by concatenation so this file cannot match its own
+    scanner, and the fixture repository is a real `git init` because the file
+    set under test is `git ls-files` -- an untracked file must be invisible to
+    the scan, which is what keeps working notes and a linked worktree from
+    reddening one machine and not another.
+    """
+
     SCRIPT_PATH = "scripts" + "/probe.py"
+    MODULE_COMMAND = "python -u -m scripts.probe"
 
-    def test_optioned_and_absolute_interpreters_are_rejected(self) -> None:
+    def _repo(self, root: Path) -> None:
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        (root / "scripts").mkdir()
+        (root / "scripts" / "__init__.py").write_text("", encoding="utf-8")
+
+    def _track(self, root: Path, relative: str, contents: str) -> None:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "add", relative], check=True)
+
+    def test_every_by_path_spelling_is_rejected(self) -> None:
         forms = (
-            f"python -u {self.SCRIPT_PATH}",
-            f"/usr/bin/python {self.SCRIPT_PATH}",
+            "python " + self.SCRIPT_PATH,
+            "python -u " + self.SCRIPT_PATH,
+            "python3.12 " + self.SCRIPT_PATH,
+            "/usr/bin/python " + self.SCRIPT_PATH,
+            "python ./" + self.SCRIPT_PATH,
+            "run `python -u " + self.SCRIPT_PATH + "` to regenerate",
         )
-
         for form in forms:
-            with self.subTest(form=form):
-                self.assertTrue(
-                    layout.direct_script_invocations(Path("README.md"), form)
+            with (
+                self.subTest(form=form),
+                tempfile.TemporaryDirectory() as raw_tmp,
+            ):
+                repo = Path(raw_tmp)
+                self._repo(repo)
+                self._track(repo, "README.md", form + "\n")
+
+                with self.assertRaisesRegex(AssertionError, "interpreter plus a path"):
+                    layout.check_python_package_invocation(repo)
+
+    def test_every_argv_literal_spelling_is_rejected(self) -> None:
+        # The prose form is what a reader copies; the argv form is what runs.
+        # A `git ls-files`-derived scan is stricter than the deleted path
+        # ledger about WHICH files it reads, but a raw-text regex cannot see
+        # an interpreter and its operand separated by `", "`, so this half was
+        # lost with the AST check and had to come back.
+        quote = '"'
+        forms = (
+            "subprocess.run([sys.executable, "
+            + quote
+            + self.SCRIPT_PATH
+            + quote
+            + "])",
+            "subprocess.run([" + quote + "python" + quote + ", "
+            "" + quote + self.SCRIPT_PATH + quote + "])",
+            "subprocess.run([sys.executable, "
+            + quote
+            + "-u"
+            + quote
+            + ", "
+            + quote
+            + self.SCRIPT_PATH
+            + quote
+            + "], check=True)",
+            "cmd = [" + quote + "python3.12" + quote + ", "
+            "" + quote + "./" + self.SCRIPT_PATH + quote + "]",
+        )
+        for form in forms:
+            with (
+                self.subTest(form=form),
+                tempfile.TemporaryDirectory() as raw_tmp,
+            ):
+                repo = Path(raw_tmp)
+                self._repo(repo)
+                self._track(repo, "tool.py", form + "\n")
+
+                with self.assertRaisesRegex(AssertionError, "interpreter plus a path"):
+                    layout.check_python_package_invocation(repo)
+
+    def test_the_argv_module_form_is_accepted(self) -> None:
+        # The RIGHT spelling of the same call. It must stay silent, or the
+        # check pushes contributors back toward the form it exists to ban.
+        quote = '"'
+        accepted = (
+            "subprocess.run([sys.executable, "
+            + quote
+            + "-m"
+            + quote
+            + ", "
+            + quote
+            + "scripts.probe"
+            + quote
+            + "])",
+            "subprocess.run([" + quote + "python" + quote + ", "
+            "" + quote + "-m" + quote + ", " + quote + "scripts.probe" + quote + "])",
+        )
+        for form in accepted:
+            with (
+                self.subTest(form=form),
+                tempfile.TemporaryDirectory() as raw_tmp,
+            ):
+                repo = Path(raw_tmp)
+                self._repo(repo)
+                self._track(repo, "tool.py", form + "\n")
+
+                self.assertEqual(layout.direct_script_invocations(repo), ())
+
+    def test_a_line_shlex_cannot_lex_is_still_scanned(self) -> None:
+        # 4.3% of this repository's tracked lines cannot be lexed as a shell
+        # command, because prose spells an unpaired apostrophe. The word pass
+        # returns nothing for those, so the raw-text pass has to stay.
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            self._repo(repo)
+            line = "don't run python -u " + self.SCRIPT_PATH + " by hand"
+            self._track(repo, "README.md", line + "\n")
+
+            self.assertEqual(layout._shell_words(line), [])
+            self.assertEqual(
+                layout.direct_script_invocations(repo),
+                (f"README.md:1: {self.SCRIPT_PATH}",),
+            )
+
+    def test_a_form_both_passes_see_is_reported_once(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            self._repo(repo)
+            self._track(repo, "run.sh", "python -u " + self.SCRIPT_PATH + "\n")
+
+            self.assertEqual(
+                layout.direct_script_invocations(repo),
+                (f"run.sh:1: {self.SCRIPT_PATH}",),
+            )
+
+    def test_an_option_taking_a_value_does_not_hide_the_operand(self) -> None:
+        for option, value in (("-X", "dev"), ("-W", "ignore")):
+            with (
+                self.subTest(option=option),
+                tempfile.TemporaryDirectory() as raw_tmp,
+            ):
+                repo = Path(raw_tmp)
+                self._repo(repo)
+                quote = '"'
+                form = (
+                    "subprocess.run([sys.executable, "
+                    + quote
+                    + option
+                    + quote
+                    + ", "
+                    + quote
+                    + value
+                    + quote
+                    + ", "
+                    + quote
+                    + self.SCRIPT_PATH
+                    + quote
+                    + "])"
                 )
+                self._track(repo, "tool.py", form + "\n")
 
-    def test_sys_executable_argv_is_rejected(self) -> None:
-        source = (
-            "import subprocess\n"
-            "import sys\n"
-            "subprocess.run([sys.executable, " + repr(self.SCRIPT_PATH) + "])\n"
-        )
+                with self.assertRaisesRegex(AssertionError, "interpreter plus a path"):
+                    layout.check_python_package_invocation(repo)
 
-        self.assertTrue(
-            layout.direct_script_invocations(Path("scripts/caller.py"), source)
-        )
-
-    def test_dot_relative_script_operands_are_rejected(self) -> None:
-        operand = "./" + self.SCRIPT_PATH
-        cases = (
-            (Path("README.md"), f"python {operand}"),
-            (
-                Path("scripts/caller.py"),
-                "import subprocess\n"
-                "import sys\n"
-                "subprocess.run([sys.executable, " + repr(operand) + "])\n",
-            ),
-        )
-
-        for path, contents in cases:
-            with self.subTest(path=path):
-                self.assertTrue(layout.direct_script_invocations(path, contents))
-
-    def test_module_invocation_is_accepted(self) -> None:
-        self.assertFalse(
-            layout.direct_script_invocations(
-                Path("README.md"), "python -u -m scripts.probe"
-            )
-        )
-
-    def test_live_scope_excludes_historical_notes(self) -> None:
+    def test_the_module_form_and_untracked_files_are_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp)
-            live = repo / "README.md"
-            historical = repo / "notes" / "phase-00-history.md"
-            historical.parent.mkdir(parents=True)
-            live.write_text("python -m scripts.probe\n", encoding="utf-8")
-            historical.write_text(f"python -u {self.SCRIPT_PATH}\n", encoding="utf-8")
+            self._repo(repo)
+            self._track(repo, "README.md", self.MODULE_COMMAND + "\n")
+            # Present in the checkout, absent from the index: the scan must not
+            # see it, or a contributor's scratch file reds a gate CI passes.
+            (repo / "scratch.md").write_text(
+                "python -u " + self.SCRIPT_PATH + "\n", encoding="utf-8"
+            )
 
-            files = layout.live_command_files(repo)
-            violations = layout.live_direct_invocations(repo)
+            self.assertEqual(layout.direct_script_invocations(repo), ())
+            layout.check_python_package_invocation(repo)
 
-        self.assertEqual(files, (Path("README.md"),))
-        self.assertEqual(violations, ())
-
-    def test_each_live_surface_is_checked(self) -> None:
-        self.assertEqual(
-            layout.LIVE_COMMAND_FIXED_PATHS,
-            (
-                Path("README.md"),
-                Path("CONTRIBUTING.md"),
-                Path("SECURITY.md"),
-                Path("docs/releasing.md"),
-                Path("AGENTS.md"),
-                Path("pixi.toml"),
-            ),
-        )
+    def test_a_finding_names_its_file_line_and_operand(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp)
-            relative_paths = (
-                Path("README.md"),
-                Path("CONTRIBUTING.md"),
-                Path("SECURITY.md"),
-                Path("docs/releasing.md"),
-                Path("AGENTS.md"),
-                Path("pixi.toml"),
-                Path("scripts/probe.py"),
-                Path("src/probe.mojo"),
-                Path("tests/probe.mojo"),
-                Path("e2e/probe.mojo"),
-                Path("native/probe.c"),
-                Path(".github/workflows/ci.yml"),
-                Path("recipe/build.sh"),
-                Path(".agents/skills/example/SKILL.md"),
+            self._repo(repo)
+            self._track(
+                repo,
+                "docs/guide.md",
+                self.MODULE_COMMAND + "\npython -u " + self.SCRIPT_PATH + "\n",
             )
-            for index, relative in enumerate(relative_paths):
-                path = repo / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                command = f"/usr/bin/python -u {self.SCRIPT_PATH}"
-                if relative.suffix == ".py":
-                    command = "# " + command
-                path.write_text(command + f" # {index}\n", encoding="utf-8")
 
-            files = layout.live_command_files(repo)
-            violations = layout.live_direct_invocations(repo)
+            self.assertEqual(
+                layout.direct_script_invocations(repo),
+                (f"docs/guide.md:2: {self.SCRIPT_PATH}",),
+            )
 
-        self.assertEqual(set(files), set(relative_paths))
-        self.assertEqual(
-            {violation.split(":", 1)[0] for violation in violations},
-            {path.as_posix() for path in relative_paths},
-        )
+    def test_an_empty_index_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            self._repo(repo)
+
+            with self.assertRaisesRegex(AssertionError, "no tracked file"):
+                layout.direct_script_invocations(repo)
 
 
 class BuildSourceVisibilityTests(unittest.TestCase):

@@ -13,6 +13,7 @@ user's module for the runner's own mismatch. For a path with no symlink
 component the two agree, which is why this only ever surfaced through a link.
 """
 from std.testing import (
+    TestSuite,
     assert_equal,
     assert_true,
     assert_false,
@@ -143,3 +144,8 @@ def test_source_identity_key_is_stable_across_equivalent_roots() raises:
         source_identity_key(outer + "/real", "tests/test_a.mojo"),
     )
     remove_tree(outer)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

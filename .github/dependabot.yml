@@ -1,0 +1,11 @@
+# Dependabot keeps the reviewed action SHAs in scripts/checks/workflow_security.py
+# current. A Dependabot bump reds `check_action_pins` (and thus `harness-check`)
+# until the new pin is added to REVIEWED_ACTION_PINS there — that is intended,
+# not a bug: the pin set is a reviewed allowlist, and every bump needs a
+# companion edit to that module in the same PR.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

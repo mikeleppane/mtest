@@ -6,7 +6,7 @@ elapsed-time tolerance: a deliberately slow pass distinguishes a one-second
 effective deadline from the three-second global deadline by outcome.
 """
 from std.os import getenv
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.config import (
     CliOverlay,
@@ -617,3 +617,8 @@ def test_collect_probe_uses_its_effective_deadline() raises:
     assert_equal(len(result.listing), 0)
     assert_equal(len(result.diagnostics), 1)
     assert_true("probe timed out" in result.diagnostics[0])
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

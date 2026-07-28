@@ -8,7 +8,7 @@ one. The check runs BETWEEN files, right where `-x` is checked, so a file can
 OVERSHOOT the limit — it always finishes before the count is read. `maxfail=0`
 disables the limit (the `--timeout 0` convention).
 """
-from std.testing import assert_equal, assert_true
+from std.testing import assert_equal, assert_true, TestSuite
 
 from mtest.model import EventKind, Outcome, SessionFinishedPayload
 from mtest.report import (
@@ -282,3 +282,8 @@ def test_maxfail_stops_scheduling_after_a_terminal_file_under_selection() raises
                 rec.path_at(i) != "tests/test_b_pass.mojo",
                 "test_b_pass.mojo must never be scheduled past --maxfail 1",
             )
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

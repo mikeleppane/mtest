@@ -126,12 +126,44 @@ class QualityWiringTests(unittest.TestCase):
         # means `uv` is a contributor's own install rather than something the
         # gate may assume. Keeping py-check out of `ci` is what stops a green
         # floor from depending on a tool the environment does not pin.
-        from scripts.checks import ci_topology
-
-        self.assertNotIn("py-check", ci_topology.CI_TASKS)
-        self.assertNotIn("py-check", ci_topology.CI_PREFLIGHT_TASKS)
-        self.assertNotIn("py-check", ci_topology.LINUX_CI_FLOOR_TASKS)
-        self.assertNotIn("py-fmt", ci_topology.LINUX_CI_FLOOR_TASKS)
+        #
+        # `ci-memory` is a plain command string in the base [tasks] table and
+        # only gains its real `depends-on` (the asan/valgrind lanes) under
+        # [target.linux-64.tasks], which silently replaces the base entry for
+        # that one platform. Walking the base table alone stops at
+        # `ci-memory` and never reaches the memory lanes at all — so this
+        # merges the linux-64 override over the base table first before
+        # walking the closure. That the override table can only ever hold such
+        # a dependency-only edge, and only for a bounded set of task names, is
+        # `layout.check_platform_task_overrides`'s property, not this test's.
+        # Skipping instead of raising on a dependency shape this
+        # module does not expect (Pixi also allows table-form dependency
+        # entries) would make the closure shrink quietly; raise instead.
+        with (python_quality.REPO_ROOT / "pixi.toml").open("rb") as handle:
+            manifest = tomllib.load(handle)
+        base_tasks = manifest["tasks"]
+        linux_overrides = manifest["target"]["linux-64"]["tasks"]
+        tasks = {**base_tasks, **linux_overrides}
+        closure: set[str] = set()
+        pending = ["ci"]
+        while pending:
+            name = pending.pop()
+            if name in closure:
+                continue
+            closure.add(name)
+            task = tasks.get(name)
+            if isinstance(task, dict):
+                dependencies = task.get("depends-on", [])
+                if not isinstance(dependencies, list) or not all(
+                    isinstance(dependency, str) for dependency in dependencies
+                ):
+                    raise AssertionError(
+                        f"pixi task {name!r} has a dependency list this test "
+                        f"does not understand: {dependencies!r}"
+                    )
+                pending.extend(dependencies)
+        self.assertNotIn("py-check", closure)
+        self.assertNotIn("py-fmt", closure)
         workflow = (
             python_quality.REPO_ROOT / ".github" / "workflows" / "ci.yml"
         ).read_text(encoding="utf-8")
@@ -153,76 +185,13 @@ class QualityWiringTests(unittest.TestCase):
         """The manifest's text, for the checks that read its comments."""
         return (python_quality.REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-    def test_the_ignored_rule_set_is_exactly_this_inventory(self) -> None:
-        # An exact inventory rather than a comment-position heuristic. Position
-        # rules cannot distinguish "a group of related codes sharing one reason
-        # paragraph" from "a code appended into someone else's group", and the
-        # earlier latch accepted every entry after the block's first comment,
-        # which meant S602 or E501 could be retired with nobody noticing.
-        #
-        # Pinning the set means adding OR removing an ignore reds this test until
-        # the change is made here too, deliberately, in the same commit. That is
-        # the same exact-membership idiom layout.py and ci_topology.py use.
-        expected = {
-            # formatter owns trailing commas
-            "COM812",
-            "COM819",
-            # spawning the pinned toolchain IS the job of these scripts
-            "S404",
-            "S603",
-            "S606",
-            "S607",
-            # parses this repo's own emitted XML; the fix is a new dependency
-            "S314",
-            # `/tmp/...` literals are test data, not files anything creates
-            "S108",
-            # modules are invoked as `python -m`, so a shebang is documentation
-            "EXE001",
-            # every checker's output contract IS what it prints
-            "T201",
-            "T203",
-            # would trade ~500 sites of specific failure text for indirection
-            "EM101",
-            "EM102",
-            "EM103",
-            "TRY003",
-            # AssertionError is the uniform gate-failure protocol here
-            "TRY004",
-            # complexity thresholds flag checkers that pin long exact inventories
-            "C901",
-            "PLR0911",
-            "PLR0912",
-            "PLR0913",
-            "PLR0914",
-            "PLR0915",
-            "PLR0916",
-            "PLR0917",
-            "PLR1702",
-            "PLR2004",
-            "PLR6301",
-            # `x == ""` is the correct form where absent and empty differ
-            "PLC1901",
-            # os.path vs pathlib is a refactor with snapshot-visible risk
-            "PTH",
-            # keyword-only booleans would change harness signatures repo-wide
-            "FBT",
-            # no copyright headers anywhere in this repo, by choice
-            "CPY001",
-        }
-        with (python_quality.REPO_ROOT / "pyproject.toml").open("rb") as handle:
-            config = tomllib.load(handle)
-        actual = set(config["tool"]["ruff"]["lint"]["ignore"])
-        self.assertEqual(
-            actual,
-            expected,
-            "the ruff ignore set changed; add or remove it here in the same "
-            "commit, with the reason stated in pyproject.toml",
-        )
-
     def test_every_ruff_exclusion_carries_a_reason_comment(self) -> None:
-        # Complements the inventory above: the set pins WHICH rules are off, this
-        # pins that the manifest still explains why. Counted rather than
-        # positional, so a shared reason paragraph over related codes is fine.
+        # The ignore list itself is not restated here: changing it IS an edit to
+        # pyproject.toml, visible in the diff beside the reason it carries, and
+        # a re-typed copy of a config file is the textbook case the pruning
+        # criterion deletes. What a diff does not enforce is that the prose
+        # survives, so this counts it rather than reading positions -- a shared
+        # reason paragraph over a group of related codes is fine.
         source = self._pyproject_source()
         self.assertEqual(source.count("ignore = ["), 1)
         block = source.split("ignore = [", 1)[1].split("\n]", 1)[0]

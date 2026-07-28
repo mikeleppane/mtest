@@ -9,7 +9,7 @@ spoke no report), a forger that appends a second block is MALFORMED_SUITE
 (DRIFT), and a suite that collects ZERO tests is a PASS that ran zero tests — the
 closed zero-test ceiling, PASS-from-a-parsed-report, never PASS-from-exit-status.
 """
-from std.testing import assert_equal, assert_true
+from std.testing import assert_equal, assert_true, TestSuite
 
 from mtest.model import (
     Event,
@@ -220,3 +220,8 @@ def test_root_reached_through_a_symlink_is_not_malformed() raises:
         "the report must PARSE, not read as MALFORMED-SUITE",
     )
     assert_true(finished.outcome == Outcome.PASS, "the suite passes")
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

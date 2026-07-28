@@ -13,7 +13,7 @@ The stream is ordered by discriminant, not by session chronology: this is a
 dispatch proof, and every reporter must accept every kind independently of the
 order a real session would produce.
 """
-from std.testing import assert_equal, assert_true
+from std.testing import assert_equal, assert_true, TestSuite
 
 from mtest.config import ColorWhen, Verbosity, ShowOutput
 from mtest.model import (
@@ -187,3 +187,8 @@ def test_heterogeneous_composite_fans_to_recorder_and_console() raises:
     assert_true("tests/test_alpha.mojo" in rendered)
     assert_true("1 passed" in rendered)
     assert_true("in 302.4s" in rendered)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

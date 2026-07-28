@@ -15,7 +15,7 @@ Rust's `String::from_utf8_lossy` produce — both collapse a maximal truncated
 prefix into a single replacement. These rows record what mtest does, so any
 later change to it has to move these tables in the same commit.
 """
-from std.testing import assert_equal
+from std.testing import assert_equal, TestSuite
 
 from mtest.config import lossy_utf8
 
@@ -168,3 +168,8 @@ def test_lossy_utf8_replaces_a_whole_binary_run() raises:
         chr(0x7F) + "ELF" + chr(0x02) + chr(0x01) + chr(0x01) + chr(0x00),
         "ELF header bytes are all ASCII",
     )
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

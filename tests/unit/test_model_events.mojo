@@ -8,7 +8,7 @@ outer `kind` tag matches the active arm. A field meaningless for the current
 kind is not on that kind's payload at all, so it is unrepresentable rather than
 a blank default. The `Summary` tally is checked over the outcome codes.
 """
-from std.testing import assert_equal, assert_true, assert_false
+from std.testing import assert_equal, assert_true, assert_false, TestSuite
 
 from mtest.model import (
     EventKind,
@@ -523,3 +523,8 @@ def test_event_kinds_are_distinct() raises:
                 assert_true(kinds[i] == kinds[j])
             else:
                 assert_false(kinds[i] == kinds[j])
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

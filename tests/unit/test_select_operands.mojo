@@ -7,6 +7,7 @@ phrase "malformed node id" — never "unknown test". `selection_active` decides
 whether the pipeline engages at all.
 """
 from std.testing import (
+    TestSuite,
     assert_equal,
     assert_false,
     assert_true,
@@ -86,3 +87,8 @@ def test_selection_active_by_node_id() raises:
 def test_selection_inactive_for_plain_operands_no_keyword() raises:
     var ops: List[String] = ["tests/", "tests/test_a.mojo"]
     assert_false(selection_active(ops, ""))
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

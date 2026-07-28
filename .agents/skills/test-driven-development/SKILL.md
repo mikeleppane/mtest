@@ -31,9 +31,9 @@ on.
 mtest's own tests are ordinary `def ... raises` functions discovered by
 `TestSuite` and run against the **precompiled package** (`build/mtest.mojopkg` —
 `mojo package` does not exist in `1.0.0b2`, only `mojo precompile`). Classified
-modules under `tests/unit/` and `tests/integration/` declare only their helpers
-and `test_*` functions. They are imported by the generated aggregate entrypoint,
-so they MUST NOT declare `main()`:
+modules under `tests/unit/` and `tests/integration/` declare their `test_*`
+functions **and their own `main()`**, exactly like every other test file in
+this repo:
 
 ```mojo
 from std.testing import assert_equal, assert_true, assert_raises, TestSuite
@@ -49,42 +49,58 @@ def test_false_binary_exits_nonzero() raises:
 def test_bad_timeout_flag_raises() raises:
     with assert_raises(contains="--timeout wants an integer"):
         _ = parse_args(["--timeout", "soon"])
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()
 ```
 
-**Crucially, the repo eats the discipline the product sells.** The suite is run
-by `scripts/harness/classified.py`, which generates one explicit `TestSuite`
-registration entrypoint, **builds one aggregate binary and executes it
-directly** — never
-`mojo run`, which masks a crashing process's exit code to 1. Run the whole suite
-(the canonical green gate), or generate a focused aggregate while iterating:
+This is a packaging constraint, not a style choice: a module with `main()`
+builds and runs fine standalone, and importing one that declares `main()`
+also builds fine, but `mojo precompile` over a tree containing one fails with
+`'main()' is not supported within packages`.
+
+**Crucially, the repo eats the discipline the product sells.** The suite runs
+**through `build/mtest` itself** — `scripts/harness/selfhost.py` hands mtest
+the classified roots directly (no generated registration entrypoint; each
+module is already a complete program), under a whole-process-group watchdog,
+and then independently reconciles mtest's own report against an inventory
+derived from the sources on disk, per file and per test name. mtest is
+supervised the same way it supervises the code under test — never `mojo run`,
+which masks a crashing process's exit code to 1. Run the whole suite (the
+canonical green gate), or focus on one module while iterating:
 
 ```bash
 pixi run test
 pixi run test-file -- tests/integration/test_exec_capture.mojo
 ```
 
-`scripts/harness/classified.py` validates and inventories the requested roots
-in bytewise-sorted order, parses each module's top-level `test_*` declarations,
-and emits explicit registrations before building the package, native adapter,
-and aggregate. There is no hand-maintained execution list to drift. It fails
-closed on an empty module, a duplicate name, or a classified module that
-retains `main()`. One file per unit under test,
-named `tests/unit/test_<thing>.mojo` or
+Membership is derived, never declared: there is no committed path list or test
+count. Adding a test file or a `test_*` function costs zero ledger edits.
+That trade has a sharp edge, stated plainly: the oracle proves mtest ran every
+test the sources declare *right now*; it cannot prove the sources still
+declare every test they used to. A file dropping from N tests to M (M > 0) is
+invisible — a reviewable diff, not a runner defect. A file reaching **zero**
+`test_*` functions is loud and fails the run. See
+`scripts/harness/selfhost.py`'s module docstring for the full argument. One
+file per unit under test, named `tests/unit/test_<thing>.mojo` or
 `tests/integration/test_<thing>.mojo` according to the boundary it crosses.
 
 **Audit every harness consumer when executable topology changes.** A change to
-whether classified modules own `main()`, how their entrypoint is generated, or
-which inventory a lane runs MUST cover `test`, `test-file`, ASan, Valgrind,
-dogfood, self-host, and package consumption. A classified module is import-only
-in every lane: any consumer that executes one generates its entrypoint through
-`scripts/harness/aggregate.py`; none compiles the module path directly. Add a
-harness regression that inspects each affected build command — a green primary
-test gate does not prove the specialized consumers use the same module contract.
+whether classified modules own `main()`, how mtest discovers them, or which
+inventory a lane runs MUST cover `test`, `test-file`, ASan, Valgrind, dogfood,
+self-host, and package consumption. A classified module is a complete,
+directly buildable program in every lane now: ASan and Valgrind build
+`source` straight with `mojo build`, with no generated wrapper to bolt on
+(`scripts/checks/memory/asan.py`'s `compile_and_run_test` is the canonical
+example). Add a harness regression that inspects each affected build command
+— a green primary test gate does not prove the specialized consumers use the
+same module contract.
 
-**Keep test modules cohesive.** A failing aggregate prints `==> <module path>`
-before each module and TestSuite names the exact failing function. Re-run that
-module with `pixi run test-file -- <path>`; split a module when its failures no
-longer share a natural investigation boundary.
+**Keep test modules cohesive.** A failing self-hosted run names the exact
+failing file and TestSuite names the exact failing function inside it. Re-run
+that module with `pixi run test-file -- <path>`; split a module when its
+failures no longer share a natural investigation boundary.
 
 ---
 
@@ -304,10 +320,12 @@ float legitimately appears is a timing number under `bench` — those are
 - [ ] A new transcript scenario or fixture gets a self-verify assertion in the
       generator, mirroring `gen_transcripts.py`'s hard asserts
 - [ ] A refactor commit does not move a transcript or a tripwire's pinned value
-- [ ] Classified test module has no `main()` and stays cohesive enough for its
-      `==> <module path>` failure marker to be useful
+- [ ] Classified test module declares its own `main()` and stays cohesive
+      enough that its `FAIL <path>` row in the self-hosted run's report stays
+      useful for finding the failing function
 - [ ] A test-execution topology change audits `test`, `test-file`, ASan,
-      Valgrind, dogfood, self-host, and package consumption; every classified-module
-      consumer generates an entrypoint instead of compiling the module directly
+      Valgrind, dogfood, self-host, and package consumption; every classified
+      module is a complete, directly buildable program in each of them, with
+      no generated wrapper to keep in sync
 - [ ] `pixi run test` is green; `pixi run dogfood-check` is green when the real
       pipeline changed; the new file is in the correct classified suite root

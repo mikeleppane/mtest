@@ -4,7 +4,7 @@ The overlay records both each CLI-provided config value and whether argv
 provided it. `ParseResult.config` remains the defaults-folded compatibility
 view consumed by existing callers.
 """
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.cli import parse_args
 from mtest.config import CliOverlay, ColorWhen, ShowOutput, Verbosity
@@ -164,3 +164,8 @@ def test_defaults_folded_config_preserves_overlay_values() raises:
     assert_true(result.config.show_output == ShowOutput.NONE)
     assert_true(result.config.color == ColorWhen.ALWAYS)
     assert_equal(result.config.gh_annotations.value, 0)
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

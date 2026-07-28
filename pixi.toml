@@ -183,7 +183,9 @@ ci-memory = "python -m scripts.checks.memory.host_support"
 # leak, and fd controls run first; reviewed runtime-reachable allocations are
 # matched exactly and project/native frames are forbidden from that baseline.
 # The unified CI workflow's Valgrind cell has a narrow approved apt exception
-# for the exact debug-symbol version matching the runner's preinstalled glibc;
+# for glibc debug symbols matching the libc6 it runs against -- the
+# preinstalled revision where the archive still carries it, otherwise libc6
+# and libc6-dbg moved together to the archive's current one, asserted equal;
 # no other source/test/memory step has that exception, and this task is not
 # hermetic. The independent package job has its own external-channel contract.
 valgrind-check = "python -m scripts.tests.test_valgrind && python -m scripts.checks.memory.valgrind"
@@ -244,16 +246,33 @@ contract-check-strict = { cmd = "python -m scripts.qa.contract --strict --no-reb
 # resolve `mojo`; build the binary first (`pixi run build-bin`).
 bench-workers = "python -m scripts.maintenance.bench_workers"
 
-# The conventional exhaustive test gate: generates one explicit entrypoint for every
-# unit/integration test function, builds it once, and executes that aggregate
-# binary directly with no mtest involved. `mojo run` never appears in the gate
-# because it masks crash exit codes to 1. A focused path can be passed through
+# The conventional exhaustive test gate: runs mtest's own classified suite
+# THROUGH `build/mtest` itself -- one real invocation of the runner under test,
+# supervised by a whole-process-group watchdog, with its own report reconciled
+# against a source-derived inventory rather than trusted (scripts/harness/
+# selfhost.py). `mojo run` never appears in the gate because it masks crash
+# exit codes to 1; the classified modules are built and executed directly by
+# `build/mtest`. Depends on `build-bin`, which supplies everything a self-hosted
+# run needs: `build/mtest` itself (via `build` + the link step) and
+# `build/native/mtest_exec_native_test.o` (via `build-native`, which always
+# emits both the production and test-variant objects). The worker count is left
+# at the module's `auto` default here on purpose -- see DEFAULT_WORKERS in
+# scripts/harness/selfhost.py for why a fixed integer belongs in CI's workflow
+# instead of here. A focused path can be passed through
 # `pixi run test-file -- tests/unit/test_model_outcome.mojo` when investigating
 # a failure.
-test = "python -m scripts.harness.classified tests/unit tests/integration"
-test-unit = "python -m scripts.harness.classified tests/unit"
-test-integration = "python -m scripts.harness.classified tests/integration"
-test-file = "python -m scripts.harness.classified"
+test = { cmd = "python -m scripts.harness.selfhost tests/unit tests/integration", depends-on = [
+    "build-bin",
+] }
+test-unit = { cmd = "python -m scripts.harness.selfhost tests/unit", depends-on = [
+    "build-bin",
+] }
+test-integration = { cmd = "python -m scripts.harness.selfhost tests/integration", depends-on = [
+    "build-bin",
+] }
+test-file = { cmd = "python -m scripts.harness.selfhost", depends-on = [
+    "build-bin",
+] }
 
 # Compile and directly execute the public source-only assertion consumers at
 # both optimization levels. The task owns its checker self-tests so stale
@@ -266,9 +285,24 @@ assertions-check = "python -m scripts.tests.test_assertions && python -m scripts
 recipe-check = "python -m scripts.tests.test_community_recipe && python -m scripts.checks.community_recipe"
 
 # Fast self-tests for repository harness behavior. Uses disposable test inputs
-# and a fake compiler to prove deterministic aggregate generation, one-build
-# execution, timeout handling, and exact hosted-CI topology.
-harness-check = "python -m scripts.tests.test_aggregate && python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_classified && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_contract && python -m scripts.tests.test_pty_capture && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_assertions && python -m scripts.tests.test_community_recipe && python -m scripts.checks.community_recipe && python -m scripts.tests.test_release_attestations && python -m scripts.tests.test_github_release && python -m scripts.tests.test_community_publication && python -m scripts.tests.test_public_verify && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_ci_topology && python -m scripts.checks.ci_topology && python -m scripts.tests.test_python_quality && python -m scripts.tests.test_annotations_oracle"
+# and a fake compiler to prove the self-hosted runner's reconciliation, its
+# timeout and interrupt handling, and exact hosted-CI topology.
+harness-check = "python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_selfhost && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_contract && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_assertions && python -m scripts.tests.test_community_recipe && python -m scripts.checks.community_recipe && python -m scripts.tests.test_release_attestations && python -m scripts.tests.test_github_release && python -m scripts.tests.test_community_publication && python -m scripts.tests.test_public_verify && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_workflow_security && python -m scripts.checks.workflow_security && python -m scripts.tests.test_python_quality && python -m scripts.tests.test_annotations_oracle && python -m scripts.tests.test_abi_probe"
+
+# Re-creates, for exactly the modules that need it, the cross-module
+# external_call ABI check the old 101-module aggregate binary provided for
+# free: any two classified test_*.mojo modules that declare the same
+# external_call symbol are co-linked into one throwaway binary, so a
+# signature or arity drift between their declarations is an archive-time
+# compiler error instead of silent garbage at the ABI boundary once each
+# module builds alone. Its pure-Python scan/grouping logic is unit-tested in
+# harness-check above (test_abi_probe, fully mocked); this task needs a real
+# `mojo` on PATH and the precompiled package plus native test object, hence
+# the explicit dependency edge rather than folding it into harness-check.
+abi-probe-check = { cmd = "python -m scripts.checks.abi_probe", depends-on = [
+    "build",
+    "build-native",
+] }
 
 # DIAGNOSTIC, not a gate in `ci`: ask the pinned toolchain whether it has grown
 # a source-coverage facility. Mojo 1.0.0b2 has none — neither `mojo build
@@ -285,10 +319,11 @@ coverage-capability = "python -m scripts.checks.coverage_capability"
 # DOGFOOD gate: run three focused executable probes through the built mtest
 # binary. This exercises mtest's real discover/build/run/parse/report path and
 # checks exact header/PASS-row membership independently of mtest. The exhaustive
-# classified inventory belongs to test's single aggregate binary — see
-# CLASSIFIED_TEST_COUNT in scripts/checks/layout.py for the one authoritative
-# figure; compiling all source files separately here would duplicate compiler
-# work without adding behavioral coverage.
+# classified inventory belongs to the `test` task, which runs
+# scripts/harness/selfhost.py and derives its own inventory from the sources on
+# disk — there is no committed figure to keep in step. Compiling all classified
+# sources again here would duplicate compiler work without adding behavioral
+# coverage.
 [tasks.dogfood-check]
 cmd = "python -m scripts.harness.dogfood"
 depends-on = ["build-bin"]
@@ -320,6 +355,7 @@ depends-on = [
     "readme-help-check",
     "junit-render-check",
     "transcripts-check",
+    "abi-probe-check",
 ]
 
 # The complete serial local mirror. Hosted CI runs the exact preflight above,

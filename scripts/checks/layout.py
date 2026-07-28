@@ -3,29 +3,25 @@
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import tomllib
 
 from scripts.build import package_consumption
 from scripts.e2e import __main__ as e2e_main
-from scripts.harness import aggregate, dogfood
+from scripts.harness import dogfood, selfhost
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-
-TOP_LEVEL_SCRIPT_FILES = {
-    Path("scripts/__init__.py"),
-    Path("scripts/gen_transcripts.py"),
-}
 
 BUILD_SOURCE_PATHS = (
     Path("scripts/build/__init__.py"),
@@ -35,25 +31,8 @@ BUILD_SOURCE_PATHS = (
     Path("scripts/build/package_consumption.py"),
     Path("scripts/build/production_build.sh"),
 )
-ASSERTION_SOURCE_PATHS = {
-    Path("companions/assertions/src/mtest/__init__.mojo"),
-    Path("companions/assertions/src/mtest/assertions/__init__.mojo"),
-    Path("companions/assertions/src/mtest/assertions/_display.mojo"),
-    Path("companions/assertions/src/mtest/assertions/_mapping.mojo"),
-    Path("companions/assertions/src/mtest/assertions/_sequence.mojo"),
-    Path("companions/assertions/src/mtest/assertions/_text.mojo"),
-}
-ASSERTION_CONSUMER_PATHS = {
-    Path("tests/assertions/api_consumer.mojo"),
-    Path("tests/assertions/location_consumer.mojo"),
-}
-ASSERTION_CHECK_PATHS = {
-    Path("scripts/checks/assertions.py"),
-    Path("scripts/tests/test_assertions.py"),
-}
-ASSERTION_EXAMPLE_PATHS = {
-    Path("companions/assertions/examples/test_diagnostics.mojo"),
-}
+COMPANION_ROOT = Path("companions/assertions")
+COMPANION_SOURCE_ROOT = COMPANION_ROOT / "src"
 VENDORED_TOML_PATHS = {
     Path("vendor/mojo-toml/CHECKSUMS.json"),
     Path("vendor/mojo-toml/LICENSE"),
@@ -82,538 +61,105 @@ VENDORED_TOML_LOCAL_CHECKSUM_PATHS = {
     "toml/lexer.mojo",
     "toml/parser.mojo",
 }
-UNIT_SUITES = {
-    "test_cache_registry.mojo",
-    "test_cli_arity.mojo",
-    "test_cli_arity0.mojo",
-    "test_cli_build_flags.mojo",
-    "test_cli_collect.mojo",
-    "test_cli_doctor.mojo",
-    "test_cli_grammar.mojo",
-    "test_cli_inventory.mojo",
-    "test_cli_overlay.mojo",
-    "test_cli_parse.mojo",
-    "test_config.mojo",
-    "test_config_file.mojo",
-    "test_config_lossy_utf8.mojo",
-    "test_config_resolve.mojo",
-    "test_config_show.mojo",
-    "test_config_state.mojo",
-    "test_config_toml_adversarial.mojo",
-    "test_config_value_validation.mojo",
-    "test_discover_fnmatch.mojo",
-    "test_discover_normalize.mojo",
-    "test_exec_pool_policy.mojo",
-    "test_exec_spec.mojo",
-    "test_exec_tty.mojo",
-    "test_model_control_chars.mojo",
-    "test_model_events.mojo",
-    "test_model_exit_code.mojo",
-    "test_model_node_id.mojo",
-    "test_model_outcome.mojo",
-    "test_model_parse_disposition.mojo",
-    "test_model_slow.mojo",
-    "test_model_test_counts.mojo",
-    "test_model_test_result.mojo",
-    "test_platform_temp_file.mojo",
-    "test_protocol_corruption.mojo",
-    "test_protocol_matrix.mojo",
-    "test_report_annotations.mojo",
-    "test_report_composite.mojo",
-    "test_report_console.mojo",
-    "test_report_console_text.mojo",
-    "test_report_coordinator.mojo",
-    "test_report_escape.mojo",
-    "test_report_json_reporter.mojo",
-    "test_report_json_stream.mojo",
-    "test_report_junit.mojo",
-    "test_report_junit_finalize.mojo",
-    "test_report_junit_reporter.mojo",
-    "test_report_recording.mojo",
-    "test_report_signals.mojo",
-    "test_select_failure_selection.mojo",
-    "test_select_logic.mojo",
-    "test_select_operands.mojo",
-    "test_session_attribution.mojo",
-    "test_session_clamp.mojo",
-    "test_session_classify.mojo",
-    "test_session_detail.mojo",
-    "test_session_effective_settings.mojo",
-    "test_session_mangle.mojo",
-    "test_session_mangle_bounds.mojo",
-    "test_session_pipeline.mojo",
-    "test_session_pool_plan.mojo",
-    "test_session_pool_progress.mojo",
-    "test_session_precompile_paths.mojo",
-    "test_session_resilience.mojo",
-    "test_session_retry_class.mojo",
-    "test_session_shard.mojo",
-    "test_session_verdict.mojo",
-}
-INTEGRATION_SUITES = {
-    "test_discover_pipeline.mojo",
-    "test_discover_walk.mojo",
-    "test_exec_capture.mojo",
-    "test_exec_decode.mojo",
-    "test_exec_env.mojo",
-    "test_exec_etxtbsy.mojo",
-    "test_exec_fdhygiene.mojo",
-    "test_exec_flood.mojo",
-    "test_exec_interrupt.mojo",
-    "test_exec_paths.mojo",
-    "test_exec_pool.mojo",
-    "test_exec_prestart.mojo",
-    "test_exec_reap.mojo",
-    "test_exec_sweep.mojo",
-    "test_exec_timeout.mojo",
-    "test_protocol_collection.mojo",
-    "test_protocol_report.mojo",
-    "test_session_annotations.mojo",
-    "test_session_collect.mojo",
-    "test_session_exit_codes.mojo",
-    "test_session_flow.mojo",
-    "test_session_gates.mojo",
-    "test_session_handshake.mojo",
-    "test_session_interrupt.mojo",
-    "test_session_json_stream.mojo",
-    "test_session_junit.mojo",
-    "test_session_maxfail.mojo",
-    "test_session_outcomes.mojo",
-    "test_session_overrides.mojo",
-    "test_session_pool_faults.mojo",
-    "test_session_precompile.mojo",
-    "test_session_rmtree.mojo",
-    "test_session_schedule.mojo",
-    "test_session_selection.mojo",
-    "test_transcripts_smoke.mojo",
-}
-CLASSIFIED_PATHS = (
-    "tests/integration/test_discover_pipeline.mojo",
-    "tests/integration/test_discover_walk.mojo",
-    "tests/integration/test_exec_capture.mojo",
-    "tests/integration/test_exec_decode.mojo",
-    "tests/integration/test_exec_env.mojo",
-    "tests/integration/test_exec_etxtbsy.mojo",
-    "tests/integration/test_exec_fdhygiene.mojo",
-    "tests/integration/test_exec_flood.mojo",
-    "tests/integration/test_exec_interrupt.mojo",
-    "tests/integration/test_exec_paths.mojo",
-    "tests/integration/test_exec_pool.mojo",
-    "tests/integration/test_exec_prestart.mojo",
-    "tests/integration/test_exec_reap.mojo",
-    "tests/integration/test_exec_sweep.mojo",
-    "tests/integration/test_exec_timeout.mojo",
-    "tests/integration/test_protocol_collection.mojo",
-    "tests/integration/test_protocol_report.mojo",
-    "tests/integration/test_session_annotations.mojo",
-    "tests/integration/test_session_collect.mojo",
-    "tests/integration/test_session_exit_codes.mojo",
-    "tests/integration/test_session_flow.mojo",
-    "tests/integration/test_session_gates.mojo",
-    "tests/integration/test_session_handshake.mojo",
-    "tests/integration/test_session_interrupt.mojo",
-    "tests/integration/test_session_json_stream.mojo",
-    "tests/integration/test_session_junit.mojo",
-    "tests/integration/test_session_maxfail.mojo",
-    "tests/integration/test_session_outcomes.mojo",
-    "tests/integration/test_session_overrides.mojo",
-    "tests/integration/test_session_pool_faults.mojo",
-    "tests/integration/test_session_precompile.mojo",
-    "tests/integration/test_session_rmtree.mojo",
-    "tests/integration/test_session_schedule.mojo",
-    "tests/integration/test_session_selection.mojo",
-    "tests/integration/test_transcripts_smoke.mojo",
-    "tests/unit/test_cache_registry.mojo",
-    "tests/unit/test_cli_arity.mojo",
-    "tests/unit/test_cli_arity0.mojo",
-    "tests/unit/test_cli_build_flags.mojo",
-    "tests/unit/test_cli_collect.mojo",
-    "tests/unit/test_cli_doctor.mojo",
-    "tests/unit/test_cli_grammar.mojo",
-    "tests/unit/test_cli_inventory.mojo",
-    "tests/unit/test_cli_overlay.mojo",
-    "tests/unit/test_cli_parse.mojo",
-    "tests/unit/test_config.mojo",
-    "tests/unit/test_config_file.mojo",
-    "tests/unit/test_config_lossy_utf8.mojo",
-    "tests/unit/test_config_resolve.mojo",
-    "tests/unit/test_config_show.mojo",
-    "tests/unit/test_config_state.mojo",
-    "tests/unit/test_config_toml_adversarial.mojo",
-    "tests/unit/test_config_value_validation.mojo",
-    "tests/unit/test_discover_fnmatch.mojo",
-    "tests/unit/test_discover_normalize.mojo",
-    "tests/unit/test_exec_pool_policy.mojo",
-    "tests/unit/test_exec_spec.mojo",
-    "tests/unit/test_exec_tty.mojo",
-    "tests/unit/test_model_control_chars.mojo",
-    "tests/unit/test_model_events.mojo",
-    "tests/unit/test_model_exit_code.mojo",
-    "tests/unit/test_model_node_id.mojo",
-    "tests/unit/test_model_outcome.mojo",
-    "tests/unit/test_model_parse_disposition.mojo",
-    "tests/unit/test_model_slow.mojo",
-    "tests/unit/test_model_test_counts.mojo",
-    "tests/unit/test_model_test_result.mojo",
-    "tests/unit/test_platform_temp_file.mojo",
-    "tests/unit/test_protocol_corruption.mojo",
-    "tests/unit/test_protocol_matrix.mojo",
-    "tests/unit/test_report_annotations.mojo",
-    "tests/unit/test_report_composite.mojo",
-    "tests/unit/test_report_console.mojo",
-    "tests/unit/test_report_console_text.mojo",
-    "tests/unit/test_report_coordinator.mojo",
-    "tests/unit/test_report_escape.mojo",
-    "tests/unit/test_report_json_reporter.mojo",
-    "tests/unit/test_report_json_stream.mojo",
-    "tests/unit/test_report_junit.mojo",
-    "tests/unit/test_report_junit_finalize.mojo",
-    "tests/unit/test_report_junit_reporter.mojo",
-    "tests/unit/test_report_recording.mojo",
-    "tests/unit/test_report_signals.mojo",
-    "tests/unit/test_select_failure_selection.mojo",
-    "tests/unit/test_select_logic.mojo",
-    "tests/unit/test_select_operands.mojo",
-    "tests/unit/test_session_attribution.mojo",
-    "tests/unit/test_session_clamp.mojo",
-    "tests/unit/test_session_classify.mojo",
-    "tests/unit/test_session_detail.mojo",
-    "tests/unit/test_session_effective_settings.mojo",
-    "tests/unit/test_session_mangle.mojo",
-    "tests/unit/test_session_mangle_bounds.mojo",
-    "tests/unit/test_session_pipeline.mojo",
-    "tests/unit/test_session_pool_plan.mojo",
-    "tests/unit/test_session_pool_progress.mojo",
-    "tests/unit/test_session_precompile_paths.mojo",
-    "tests/unit/test_session_resilience.mojo",
-    "tests/unit/test_session_retry_class.mojo",
-    "tests/unit/test_session_shard.mojo",
-    "tests/unit/test_session_verdict.mojo",
-)
-CLASSIFIED_TEST_COUNT = 1342
-CLASSIFIED_ROOTS = (
-    Path("tests/unit"),
-    Path("tests/integration"),
-)
-CLASSIFIED_PACKAGE_MARKERS = {
+CLASSIFIED_ROOTS = selfhost.DEFAULT_ROOTS
+"""The classified suite roots, taken from the runner rather than restated.
+
+`scripts/harness/selfhost.py` is what `pixi run test` executes, so these are
+the directories whose contents actually run. Re-declaring them here would
+create a second list that can disagree with the first; borrowing the runner's
+own is what makes a drift impossible rather than merely detectable.
+"""
+CLASSIFIED_TEST_GLOB = selfhost.TEST_FILE_GLOB
+"""The runner's test-file glob, borrowed for the same reason as the roots.
+
+A Mojo file under a classified root that this pattern does not match never
+runs. That is the whole property `check_classified_mojo_inventory` exists to
+catch, so it has to test the runner's real pattern, not a copy of it.
+"""
+FORBIDDEN_CLASSIFIED_PACKAGE_MARKERS = {
     Path("tests/unit/__init__.mojo"),
     Path("tests/integration/__init__.mojo"),
 }
-SUPPORT_MODULES = {
-    "exec_helpers.mojo",
-    "session_fixtures.mojo",
-    "tmptree.mojo",
-    "transcript_cases.mojo",
-}
-EXEC_FIXTURES = {
-    "README.md",
-    "argv_echoer.py",
-    "close_streams_then_hang.py",
-    "dual_flooder.py",
-    "env_echo.py",
-    "escaped_pipe_holder.py",
-    "etxtbsy_target.sh",
-    "exit_nonzero.py",
-    "flooding_grandchild.py",
-    "grandchild_exit0.py",
-    "grandchild_spawner.py",
-    "hostile_report_actor.py",
-    "path_probe.sh",
-    "path_resolver.py",
-    "self_signaler.py",
-    "sigterm_grace_exit.py",
-    "sigterm_ignorer.py",
-    "sleeper.py",
-    "tagged_streams.py",
-}
-PROTOCOL_FIXTURES = {
-    "crashing.mojo",
-    "empty.mojo",
-    "mixed.mojo",
-    "noisy.mojo",
-    "passing.mojo",
-    "raising.mojo",
-    "segfault.mojo",
-    "skipped.mojo",
-    "twofail.mojo",
-}
-E2E_NATIVE_FIXTURES = {
-    "e2e_config_open_fault.c",
-    "e2e_json_terminal_write_fault.c",
-    "e2e_state_persistence_fault.c",
-}
-E2E_HARNESS_PATHS = {
-    Path("scripts/e2e/__init__.py"),
-    Path("scripts/e2e/__main__.py"),
-    Path("scripts/e2e/assertions.py"),
-    Path("scripts/e2e/main_open.py"),
-    Path("scripts/e2e/runner.py"),
-    Path("scripts/e2e/scenarios/__init__.py"),
-    Path("scripts/e2e/scenarios/annotations.py"),
-    Path("scripts/e2e/scenarios/config_file.py"),
-    Path("scripts/e2e/scenarios/config_show.py"),
-    Path("scripts/e2e/scenarios/core.py"),
-    Path("scripts/e2e/scenarios/doctor.py"),
-    Path("scripts/e2e/scenarios/json_reporter.py"),
-    Path("scripts/e2e/scenarios/junit_reporter.py"),
-    Path("scripts/e2e/scenarios/parallel.py"),
-    Path("scripts/e2e/scenarios/resilience.py"),
-    Path("scripts/e2e/scenarios/selection.py"),
-}
+"""Package markers that must never reappear under the classified roots.
 
-E2E_SCENARIO_NAMES = (
-    "manifest-completeness",
-    "resilience-matrix",
-    "default-suite",
-    "hostile",
-    "hostile-console",
-    "hostile-reporters",
-    "single-pass",
-    "exitfirst",
-    "maxfail",
-    "retries-flaky",
-    "crash-attribution",
-    "attribution-reruns-crashed-binary",
-    "compile-timeout",
-    "compile-crash-signature",
-    "exclude+stale",
-    "all-excluded",
-    "empty-dir",
-    "failing-gate",
-    "timeout",
-    "timeout-escalation",
-    "precompile",
-    "precompile-timeout",
-    "precompile-crash-retry",
-    "precompile-promotion",
-    "quiet-verbose",
-    "show-output",
-    "durations",
-    "color",
-    "config-resolution",
-    "config-diagnostics",
-    "config-state",
-    "failure-reselection",
-    "config-overrides",
-    "config-show",
-    "doctor-healthy",
-    "doctor-malformed-config",
-    "doctor-missing-config",
-    "doctor-missing-toolchain",
-    "doctor-unwritable-state",
-    "doctor-interrupt",
-    "doctor-config-free",
-    "usage-refusals",
-    "selection-keyword",
-    "selection-node-id",
-    "selection-union",
-    "selection-malformed-node-id",
-    "selection-unknown-test",
-    "selection-empty",
-    "selection-chameleon",
-    "single-build",
-    "stale-recovery-two-builds",
-    "mojo-executable-precedence",
-    "collect",
-    "passthrough+forbidden",
-    "out-of-root",
-    "internal-error",
-    "runtime-open-failure",
-    "interrupt",
-    "interrupt-sigterm",
-    "interrupt-double",
-    "json-forward-compat",
-    "json-purity",
-    "json-color-relocated-stderr",
-    "json-destination-taxonomy",
-    "json-truncation-interrupt",
-    "json-truncation-sigkill",
-    "json-truncation-dead-pipe",
-    "json-terminal-write-failure",
-    "junit-scratch-cleanup",
-    "junit-schema-gate",
-    "junit-determinism",
-    "junit-prior-report-intact",
-    "junit-finalization-and-interrupt",
-    "annotations-modes",
-    "annotations-caps",
-    "annotations-conflict",
-    "annotations-fencing",
-    "parallel-projection-eq",
-    "parallel-capacity-one",
-    "parallel-window-overlap",
-    "parallel-interrupt",
-    "parallel-shard-disjoint",
-    "collect-parallel",
-    "parallel-auto-smoke",
-    "parallel-json-workers",
-    "parallel-j-rejected",
-    "parallel-junit-canonical-eq",
-    "parallel-progress-tty",
-    "parallel-serial-noverlap",
-    "parallel-serial-stale-glob",
-    "parallel-fd-clamp",
+Every module beneath `tests/unit` and `tests/integration` declares `main()`
+(mtest's classified runner requires it). Mojo 1.0.0b2 refuses to
+`mojo precompile` a package containing a module that declares `main()` --
+`error: 'main()' is not supported within packages` -- so re-adding either
+child marker would make `mojo precompile tests/` fail again the moment the
+compiler recurses into it as a package. `tests/__init__.mojo` is deliberately
+kept so `tests/` itself stays a nameable package; only its two children must
+stay marker-free. See `check_classified_roots_are_not_precompilable_packages`.
+"""
+PLATFORM_TARGET_KEYS = {"dependencies", "tasks"}
+"""What a `[target.<platform>]` table in `pixi.toml` may contain.
+
+Bounded so a new kind of platform-scoped table cannot appear without this
+check naming it. Anything outside this set is an override shape nothing in
+this repository has reasoned about.
+"""
+
+PLATFORM_TASK_OVERRIDES = {"ci-memory"}
+"""The ONLY task any platform table may override, and why the set is bounded.
+
+A `[target.<platform>.tasks]` entry silently REPLACES the base task of the
+same name. Pixi prints no warning, every other view of the floor -- `pixi run
+ci`, `harness-check`, and the hosted matrix, which name lanes by task name --
+keeps reporting the same name, and nothing reads the replaced command. So an
+unbounded override table is a hole big enough to drive a lane through:
+adding the three words
+
+    asan-check = "true"
+
+under `[target.linux-64.tasks]` leaves `pixi run asan-check` exiting 0 having
+run `/bin/true`, with the hosted "ASan + LSan" required check still green,
+because the lane never leaves any view by name. Reproduced on this checkout.
+
+Bounding the table to one known entry is what closes that. `ci-memory` is the
+one legitimate member: on linux-64 it is replaced by a dependency edge onto
+the two memory lanes, and `scripts/checks/memory/host_support.py` -- the base
+command -- fails closed if that override is ever LOST. This check is the
+other direction: an override that is ever GAINED.
+"""
+
+DIRECT_SCRIPT_COMMAND_RE = re.compile(
+    # An interpreter word, optionally path-qualified and version-suffixed, its
+    # options, and then a repository-relative `.py` operand instead of `-m`.
+    # `-m scripts.checks.layout` cannot match: the operand after the options
+    # has to end in `.py`, and a dotted module name does not.
+    #
+    # This is the raw-text pass, and it is deliberately quote-blind: 4.3% of
+    # this repository's tracked lines (5368 of 124139, measured) cannot be
+    # lexed as a shell command at all, because prose uses an unpaired
+    # apostrophe. The word pass below returns nothing for those lines, so a
+    # scan built only on `shlex` would go quiet over a twentieth of the tree.
+    r"(?<![\w./-])(?:[\w./-]*/)?python[0-9.]*"
+    r"(?:\s+-\S+)*"
+    r"\s+(?:\./)?(scripts/[\w./-]+\.py)"
 )
 
-LIVE_COMMAND_FIXED_PATHS = (
-    Path("README.md"),
-    Path("CONTRIBUTING.md"),
-    Path("SECURITY.md"),
-    Path("docs/releasing.md"),
-    Path("AGENTS.md"),
-    Path("pixi.toml"),
-)
-LIVE_COMMAND_GLOBS = (
-    "scripts/**/*.py",
-    "scripts/**/*.sh",
-    "src/**/*.mojo",
-    "tests/**/*.mojo",
-    "tests/**/*.py",
-    "tests/**/*.sh",
-    "e2e/**/*.mojo",
-    "e2e/**/*.py",
-    "e2e/**/*.sh",
-    "native/**/*.c",
-    "native/**/*.h",
-    ".github/workflows/**/*.yml",
-    ".github/workflows/**/*.yaml",
-    "recipe/**/*",
-    ".agents/skills/**/SKILL.md",
-)
 PYTHON_EXECUTABLE_RE = re.compile(r"python(?:\d+(?:\.\d+)*)?")
+"""An interpreter basename, with or without a version suffix."""
+
+PYTHON_EXECUTABLE_ALIASES = {"sys.executable"}
+"""Source spellings that name the running interpreter without naming `python`.
+
+`subprocess.run([sys.executable, "scripts/<name>.py"])` is the argv form of the
+same defect the prose form has, and it is the form actually written in Python
+tooling. Without this the word pass sees `sys.executable` as an ordinary word
+and walks past the script operand behind it.
+"""
+
 DIRECT_SCRIPT_RE = re.compile(r"scripts/[A-Za-z0-9_./-]+\.py")
-REGISTRATION_RE = re.compile(
-    r"^    suite_(\d+)\.test\[_mtest_module_(\d+)\."
-    r"(test_[A-Za-z0-9_]+)\]\(\)$"
-)
-README_SCAN_EXCLUDED_DIRS = {
-    ".git",
-    ".pixi",
-    "build",
-    # untracked working notes, and linked worktrees holding other branches'
-    # checkouts. Both are present locally and absent in a fresh clone, so
-    # walking them would make this gate read a different file set on a
-    # contributor's machine than on CI, and a README from an unrelated branch
-    # could red it.
-    "notes",
-    ".worktrees",
-}
+"""A repository-relative Python script operand, once punctuation is stripped."""
 
+OPTION_TAKES_VALUE = {"-W", "-X", "--check-hash-based-pycs"}
+"""Interpreter options whose value is a separate word, not a script operand.
 
-def check_top_level_script_layout(repo_root: Path = REPO_ROOT) -> None:
-    """Pin the sole provenance-required exceptions to nested script packages."""
-    _require_nonempty("top-level script", TOP_LEVEL_SCRIPT_FILES)
-    scripts_dir = repo_root / "scripts"
-    actual = {
-        path.relative_to(repo_root)
-        for path in scripts_dir.iterdir()
-        if path.is_file() or path.is_symlink()
-    }
-    expected = set(TOP_LEVEL_SCRIPT_FILES)
-    if actual != expected:
-        raise AssertionError(
-            "top-level scripts membership mismatch: "
-            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
-        )
-
-
-def _independent_test_function_names(source: str) -> tuple[str, ...]:
-    """Parse top-level test declarations without aggregate helpers."""
-    names: list[str] = []
-    for line in source.splitlines():
-        if not line.startswith("def "):
-            continue
-        declaration = line.removeprefix("def ")
-        opening = declaration.find("(")
-        if opening == -1:
-            continue
-        prefix = declaration[:opening]
-        name = prefix.rstrip()
-        if prefix[len(name) :] and not prefix[len(name) :].isspace():
-            continue
-        if not name.startswith("test_") or len(name) == len("test_"):
-            continue
-        if not name or any(
-            not (character.isascii() and (character.isalnum() or character == "_"))
-            for character in name
-        ):
-            continue
-        names.append(name)
-    if not names:
-        raise AssertionError("independent oracle found no test_* functions")
-    if len(names) != len(set(names)):
-        raise AssertionError("independent oracle found duplicate test function names")
-    return tuple(names)
-
-
-def independent_registration_membership(
-    repo_root: Path, paths: tuple[str, ...]
-) -> tuple[tuple[str, str], ...]:
-    """Return ordered path/function membership from an independent source parser."""
-    membership: list[tuple[str, str]] = []
-    for relative in paths:
-        source = (repo_root / relative).read_text(encoding="utf-8")
-        membership.extend(
-            (relative, function)
-            for function in _independent_test_function_names(source)
-        )
-    return tuple(membership)
-
-
-def check_classified_entrypoint(
-    repo_root: Path,
-    paths: tuple[str, ...],
-    *,
-    expected_count: int,
-) -> None:
-    """Check generated imports and registrations against independent source truth."""
-    expected_membership = independent_registration_membership(repo_root, paths)
-    if len(expected_membership) != expected_count:
-        raise AssertionError(
-            "classified test count mismatch: "
-            f"expected={expected_count}, actual={len(expected_membership)}"
-        )
-
-    modules = aggregate.load_modules(repo_root, [Path(path) for path in paths])
-    generated_lines = aggregate.render_entrypoint(modules).splitlines()
-    expected_imports = [
-        f"import {path.removesuffix('.mojo').replace('/', '.')} "
-        f"as _mtest_module_{index}"
-        for index, path in enumerate(paths)
-    ]
-    actual_imports = [
-        line for line in generated_lines if line.startswith("import tests.")
-    ]
-    if actual_imports != expected_imports:
-        raise AssertionError("aggregate entrypoint import membership/order drifted")
-
-    expected_markers = [f'    print("==> {path}", flush=True)' for path in paths]
-    actual_markers = [
-        line for line in generated_lines if line.startswith('    print("==> tests/')
-    ]
-    if actual_markers != expected_markers:
-        raise AssertionError("aggregate entrypoint marker membership/order drifted")
-
-    actual_membership: list[tuple[str, str]] = []
-    for line in generated_lines:
-        if not line.startswith("    suite_") or ".test[" not in line:
-            continue
-        match = REGISTRATION_RE.fullmatch(line)
-        if match is None:
-            raise AssertionError(
-                f"aggregate entrypoint test registration syntax drifted: {line!r}"
-            )
-        suite_index = int(match.group(1))
-        module_index = int(match.group(2))
-        if suite_index != module_index or module_index >= len(paths):
-            raise AssertionError(
-                f"aggregate entrypoint test registration alias drifted: {line!r}"
-            )
-        actual_membership.append((paths[module_index], match.group(3)))
-    if tuple(actual_membership) != expected_membership:
-        raise AssertionError(
-            "aggregate entrypoint test registration membership/order drifted"
-        )
+`python -X dev scripts/<name>.py` has to skip `dev` to reach the operand, and
+`python -W ignore ...` likewise. Treating the value as the operand would stop
+the walk one word early and miss the finding.
+"""
 
 
 def _reraise_walk_error(error: OSError) -> None:
@@ -686,15 +232,46 @@ def classified_mojo_universe(root: Path) -> tuple[set[Path], set[Path]]:
 
 
 def check_classified_mojo_inventory(root: Path) -> None:
-    """Require the classified roots to hold exactly the registered Mojo files.
+    """Require every Mojo file under a classified root to be one the runner runs.
+
+    Nothing here is declared. The expectation is derived entirely from the
+    disk and from the runner's own glob (`CLASSIFIED_TEST_GLOB`), so adding a
+    test file costs zero edits in this repository -- the same rule
+    `scripts/harness/selfhost.py`'s oracle lives by, and the reason the
+    committed `CLASSIFIED_PATHS`/`CLASSIFIED_TEST_COUNT` ledgers are gone.
+
+    Part of what a committed list bought is reproduced here from disk: the
+    class of files that silently never run at all, which no oracle can
+    reconcile because they never reach the runner:
+
+    - a symlinked entry, which discovery refuses to follow;
+    - a file parked as `.mojo.disabled` or otherwise named so the runner's
+      glob skips it;
+    - a misnamed Mojo module (`session_shard_test.mojo`, `helper.mojo`) that
+      looks like a suite to a reader and is invisible to the runner.
+
+    It is also fail-closed on emptiness: a classified root that holds no test
+    file at all is a finding, not a vacuous pass.
+
+    Part of it is NOT reproduced, and cannot be. A committed path list and a
+    committed test count were the only artifacts that went red when a test
+    file or a test function was REMOVED from source. A bad merge that drops
+    `tests/unit/test_x.mojo`, or a `test_foo` renamed to `foo`, now leaves
+    disk, oracle and every gate in agreement -- so long as the file keeps at
+    least one test. That is the unavoidable price of the zero-ledger-edits
+    rule: the two properties are mutually exclusive, and this repository has
+    deliberately chosen the one that makes adding a test free.
+    `scripts/harness/selfhost.py`'s module docstring says the same thing about
+    its own oracle. Do not describe either as replacing the ledgers outright.
 
     Args:
         root: The repository root the classified suite directories live under.
 
     Raises:
-        AssertionError: A symlink sits under a classified root, or the Mojo
-            universe there differs from the registered suites plus the two
-            package markers in either direction.
+        AssertionError: A symlink sits under a classified root, a Mojo file
+            there is named so the runner would skip it, or a classified root
+            holds no test file at all.
+        OSError: A directory beneath a classified root could not be listed.
     """
     regular, symlinked = classified_mojo_universe(root)
     if symlinked:
@@ -702,194 +279,104 @@ def check_classified_mojo_inventory(root: Path) -> None:
             "symlinked classified path: "
             f"{sorted(path.as_posix() for path in symlinked)}"
         )
-    expected = {Path(path) for path in CLASSIFIED_PATHS} | CLASSIFIED_PACKAGE_MARKERS
-    unexpected = regular - expected
-    if unexpected:
+    discovered = {path for path in regular if path.match(CLASSIFIED_TEST_GLOB)}
+    skipped = regular - discovered
+    if skipped:
         raise AssertionError(
-            "unexpected classified Mojo file: "
-            f"{sorted(path.as_posix() for path in unexpected)}"
+            "classified Mojo file the runner's "
+            f"{CLASSIFIED_TEST_GLOB} discovery would silently skip: "
+            f"{sorted(path.as_posix() for path in skipped)}"
         )
-    missing = expected - regular
-    if missing:
+    for classified_root in CLASSIFIED_ROOTS:
+        if not any(path.parent == classified_root for path in discovered):
+            raise AssertionError(
+                f"classified root holds no {CLASSIFIED_TEST_GLOB} test file: "
+                f"{classified_root.as_posix()}"
+            )
+
+
+def check_classified_roots_are_not_precompilable_packages(
+    repo_root: Path = REPO_ROOT,
+) -> None:
+    """Guard against packaging a classified root that still declares `main()`.
+
+    Two-part, cheapest-check-first: a structural pre-check names the exact
+    marker that reappeared without needing `mojo` on PATH at all; only once
+    that passes does this pay for the real `mojo precompile tests/`
+    invocation, which tests the actual property rather than a proxy for it.
+    That real invocation is cheap here -- measured under half a second on
+    this checkout -- because a marker-free `tests/unit` and
+    `tests/integration` mean the compiler never recurses into either as a
+    package; it only compiles the one-line `tests/__init__.mojo` docstring
+    module. See `FORBIDDEN_CLASSIFIED_PACKAGE_MARKERS` for why this matters.
+
+    Args:
+        repo_root: Repository root `tests/` lives under.
+
+    Raises:
+        AssertionError: A forbidden package marker exists, `mojo` is not on
+            PATH, or a real `mojo precompile tests/` invocation fails.
+    """
+    _require_nonempty(
+        "forbidden classified package marker",
+        FORBIDDEN_CLASSIFIED_PACKAGE_MARKERS,
+    )
+    present = sorted(
+        path.as_posix()
+        for path in FORBIDDEN_CLASSIFIED_PACKAGE_MARKERS
+        if (repo_root / path).is_file()
+    )
+    if present:
         raise AssertionError(
-            "missing classified Mojo file: "
-            f"{sorted(path.as_posix() for path in missing)}"
+            "package marker reintroduced over a main()-declaring classified "
+            "root; mojo precompile tests/ will fail with \"'main()' is not "
+            f'supported within packages": {present}'
+        )
+    mojo = shutil.which("mojo")
+    if mojo is None:
+        raise AssertionError("mojo is not available on PATH")
+    with tempfile.TemporaryDirectory(prefix="mtest-precompile-guard-") as raw_tmp:
+        output = Path(raw_tmp) / "tests.mojopkg"
+        completed = subprocess.run(
+            [mojo, "precompile", "-o", str(output), "tests/"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    if completed.returncode != 0:
+        raise AssertionError(
+            "mojo precompile tests/ failed "
+            f"(rc={completed.returncode}): {completed.stderr.strip()[-2000:]}"
         )
 
 
 def check_suite_layout() -> None:
-    """Every aggregate module and support module has its classified home."""
-    _require_nonempty("unit suite", UNIT_SUITES)
-    _require_nonempty("integration suite", INTEGRATION_SUITES)
-    _require_nonempty("classified path", CLASSIFIED_PATHS)
+    """Every classified module and support module has its documented home."""
     _require_nonempty("classified root", CLASSIFIED_ROOTS)
-    _require_nonempty("classified package marker", CLASSIFIED_PACKAGE_MARKERS)
-    _require_nonempty("support module", SUPPORT_MODULES)
     check_classified_mojo_inventory(REPO_ROOT)
     tests_dir = REPO_ROOT / "tests"
-    actual_unit = {path.name for path in (tests_dir / "unit").glob("test_*.mojo")}
-    actual_integration = {
-        path.name for path in (tests_dir / "integration").glob("test_*.mojo")
+    stray = {
+        path.relative_to(REPO_ROOT)
+        for path in tests_dir.rglob(CLASSIFIED_TEST_GLOB)
+        if path.is_file() and path.parent.relative_to(REPO_ROOT) not in CLASSIFIED_ROOTS
     }
-    if actual_unit != UNIT_SUITES:
-        raise AssertionError(
-            "unit suite membership mismatch: "
-            f"missing={sorted(UNIT_SUITES - actual_unit)}, "
-            f"extra={sorted(actual_unit - UNIT_SUITES)}"
-        )
-    if actual_integration != INTEGRATION_SUITES:
-        raise AssertionError(
-            "integration suite membership mismatch: "
-            f"missing={sorted(INTEGRATION_SUITES - actual_integration)}, "
-            f"extra={sorted(actual_integration - INTEGRATION_SUITES)}"
-        )
-    all_suites = {
-        path.relative_to(tests_dir)
-        for path in tests_dir.rglob("test_*.mojo")
-        if path.is_file()
-    }
-    classified = {
-        *(Path("unit") / name for name in UNIT_SUITES),
-        *(Path("integration") / name for name in INTEGRATION_SUITES),
-    }
-    if all_suites != classified:
+    if stray:
         raise AssertionError(
             "tests/ contains a test module outside unit/integration: "
-            f"{sorted(str(path) for path in all_suites - classified)}"
+            f"{sorted(str(path) for path in stray)}"
         )
-    discovered = aggregate.discover_test_files(
-        REPO_ROOT,
-        [Path("tests/unit"), Path("tests/integration")],
-    )
-    actual_paths = tuple(path.as_posix() for path in discovered)
-    if actual_paths != CLASSIFIED_PATHS:
-        raise AssertionError(
-            "classified path ordering/membership mismatch: "
-            f"expected={list(CLASSIFIED_PATHS)}, actual={list(actual_paths)}"
-        )
-    check_classified_entrypoint(
-        REPO_ROOT,
-        CLASSIFIED_PATHS,
-        expected_count=CLASSIFIED_TEST_COUNT,
-    )
-    for package in (tests_dir, tests_dir / "unit", tests_dir / "integration"):
-        if not (package / "__init__.mojo").is_file():
-            raise AssertionError(f"aggregate package marker missing: {package}")
-    for relative in sorted(classified, key=lambda path: os.fsencode(str(path))):
-        source = (tests_dir / relative).read_text(encoding="utf-8")
-        try:
-            aggregate.test_function_names(source)
-        except ValueError as exc:
-            raise AssertionError(f"invalid aggregate module {relative}: {exc}") from exc
+    if not (tests_dir / "__init__.mojo").is_file():
+        raise AssertionError(f"tests package marker missing: {tests_dir}")
     try:
         dogfood.dogfood_test_files(REPO_ROOT)
     except RuntimeError as exc:
         raise AssertionError(str(exc)) from exc
-    actual_support = {path.name for path in (tests_dir / "support").glob("*.mojo")}
-    if actual_support != SUPPORT_MODULES:
-        raise AssertionError(
-            "support module membership mismatch: "
-            f"missing={sorted(SUPPORT_MODULES - actual_support)}, "
-            f"extra={sorted(actual_support - SUPPORT_MODULES)}"
-        )
-
-
-def check_exec_fixture_layout() -> None:
-    """Exec subprocess actors live with tests, not developer harnesses.
-
-    Membership is exact and fail-closed: an unlisted actor is a finding, not a
-    tolerated extra. The single exemption is `__pycache__`, which CPython writes
-    into this directory the moment anything imports an actor as a module — the
-    E2E harness does, to predict the hostile actor's payload — and which is
-    generated output rather than a fixture anyone chose to add.
-    """
-    _require_nonempty("exec fixture", EXEC_FIXTURES)
-    fixture_dir = REPO_ROOT / "tests" / "fixtures" / "exec"
-    actual = (
-        {path.name for path in fixture_dir.iterdir() if path.name != "__pycache__"}
-        if fixture_dir.exists()
-        else set()
-    )
-    if actual != EXEC_FIXTURES:
-        raise AssertionError(
-            "exec fixture membership mismatch: "
-            f"missing={sorted(EXEC_FIXTURES - actual)}, "
-            f"extra={sorted(actual - EXEC_FIXTURES)}"
-        )
-    if (REPO_ROOT / "scripts" / "exec_targets").exists():
-        raise AssertionError("obsolete scripts/exec_targets directory still exists")
-
-
-def check_e2e_native_fixture_layout() -> None:
-    """The E2E-only native fault sources have exact harness membership."""
-    _require_nonempty("E2E native fixture", E2E_NATIVE_FIXTURES)
-    fixture_dir = REPO_ROOT / "tests" / "native"
-    actual = {path.name for path in fixture_dir.glob("e2e_*")}
-    if actual != E2E_NATIVE_FIXTURES:
-        raise AssertionError(
-            "e2e native fixture membership mismatch: "
-            f"missing={sorted(E2E_NATIVE_FIXTURES - actual)}, "
-            f"extra={sorted(actual - E2E_NATIVE_FIXTURES)}"
-        )
-
-
-def check_protocol_asset_layout() -> None:
-    """Protocol generator inputs and outputs occupy their documented homes."""
-    _require_nonempty("protocol fixture", PROTOCOL_FIXTURES)
-    fixtures = REPO_ROOT / "tests" / "fixtures" / "protocol"
-    actual_fixtures = (
-        {path.name for path in fixtures.iterdir()} if fixtures.exists() else set()
-    )
-    if actual_fixtures != PROTOCOL_FIXTURES:
-        raise AssertionError(
-            "protocol fixture membership mismatch: "
-            f"missing={sorted(PROTOCOL_FIXTURES - actual_fixtures)}, "
-            f"extra={sorted(actual_fixtures - PROTOCOL_FIXTURES)}"
-        )
-
-    snapshots = REPO_ROOT / "tests" / "snapshots" / "protocol"
-    manifest = snapshots / "MANIFEST.txt"
-    if not manifest.is_file():
-        raise AssertionError("protocol snapshot MANIFEST.txt is missing")
-    listed = tuple(manifest.read_text(encoding="utf-8").splitlines())
-    actual_snapshots = tuple(
-        sorted(path.name for path in snapshots.glob("*.txt") if path != manifest)
-    )
-    if listed != actual_snapshots or len(listed) != 22:
-        raise AssertionError(
-            "protocol snapshot manifest/membership mismatch: "
-            f"listed={list(listed)}, actual={list(actual_snapshots)}"
-        )
-    for obsolete in (REPO_ROOT / "fixtures", REPO_ROOT / "goldens"):
-        if obsolete.exists():
-            raise AssertionError(
-                f"obsolete protocol asset root still exists: {obsolete}"
-            )
 
 
 def check_e2e_layout() -> None:
     """Known-outcome CLI inputs stay outside self-host discovery."""
-    _require_nonempty("E2E scenario", E2E_SCENARIO_NAMES)
-    _require_nonempty("E2E harness path", E2E_HARNESS_PATHS)
-    harness_root = REPO_ROOT / "scripts" / "e2e"
-    harness_paths = {
-        path.relative_to(REPO_ROOT)
-        for path in harness_root.rglob("*.py")
-        if path.is_file()
-    }
-    if harness_paths != E2E_HARNESS_PATHS:
-        raise AssertionError(
-            "E2E harness package mismatch: "
-            f"missing={sorted(E2E_HARNESS_PATHS - harness_paths)}, "
-            f"extra={sorted(harness_paths - E2E_HARNESS_PATHS)}"
-        )
-    obsolete_paths = (
-        REPO_ROOT / "scripts" / "e2e_check.py",
-        REPO_ROOT / "scripts" / "main_open_check.py",
-    )
-    if any(path.exists() for path in obsolete_paths):
-        raise AssertionError("obsolete top-level E2E compatibility module remains")
-
     pixi_manifest = tomllib.loads((REPO_ROOT / "pixi.toml").read_text(encoding="utf-8"))
     e2e_command = pixi_manifest.get("tasks", {}).get("e2e", {}).get("cmd")
     if e2e_command != "python -m scripts.e2e":
@@ -908,22 +395,27 @@ def check_e2e_layout() -> None:
     discovered = {
         path.relative_to(REPO_ROOT).as_posix() for path in e2e_root.rglob("test_*.mojo")
     }
-    if rows != discovered or len(rows) != 41:
+    if rows != discovered:
         raise AssertionError(
             "e2e manifest/discovery mismatch: "
             f"missing={sorted(discovered - rows)}, stale={sorted(rows - discovered)}, "
             f"rows={len(rows)}"
         )
+    # Derived, and deliberately not a membership list. Registering a scenario
+    # is a one-line addition to `SCENARIOS` whose owning module is visible on
+    # the same line, so a restated roster here would cost an edit per scenario
+    # to re-prove what the diff already shows. What is NOT visible is a name
+    # collided with an existing one -- the banner would still count both while
+    # a reader assumes one name means one scenario -- and a registry that lost
+    # every entry, which would make the gate vacuously green.
     scenario_names = tuple(name for name, _function in e2e_main.SCENARIOS)
-    if scenario_names != E2E_SCENARIO_NAMES:
-        raise AssertionError(
-            "E2E scenario membership/order mismatch: "
-            f"expected={list(E2E_SCENARIO_NAMES)}, actual={list(scenario_names)}"
+    if not scenario_names:
+        raise AssertionError("the E2E scenario registry is empty")
+    if len(set(scenario_names)) != len(scenario_names):
+        duplicates = sorted(
+            {name for name in scenario_names if scenario_names.count(name) > 1}
         )
-    if len(scenario_names) != 91 or len(set(scenario_names)) != len(scenario_names):
-        raise AssertionError(
-            "E2E scenarios must contain 91 unique names in the pinned order"
-        )
+        raise AssertionError(f"duplicate E2E scenario names: {duplicates}")
     referenced = {
         *rows,
         *manifest.get("non_discovered", {}).keys(),
@@ -931,49 +423,88 @@ def check_e2e_layout() -> None:
     }
     if any(not path.startswith("e2e/") for path in referenced):
         raise AssertionError("e2e manifest retains a path outside e2e/")
-    if (REPO_ROOT / "testdata").exists():
-        raise AssertionError("obsolete testdata/ root still exists")
 
 
-def live_command_files(repo_root: Path) -> tuple[Path, ...]:
-    """Return live source and command surfaces, excluding historical notes."""
-    candidates = {
-        relative
-        for relative in LIVE_COMMAND_FIXED_PATHS
-        if (repo_root / relative).is_file()
-    }
-    for pattern in LIVE_COMMAND_GLOBS:
-        candidates.update(
-            path.relative_to(repo_root)
-            for path in repo_root.glob(pattern)
-            if path.is_file()
+def check_platform_task_overrides(repo_root: Path = REPO_ROOT) -> None:
+    """No platform table may silently replace a base task's command.
+
+    This is a policy over an OPEN set, not a mirror of the manifest: it does
+    not restate any task's command, and adding a task costs no edit here. What
+    it bounds is the one manifest construct that changes what a named gate
+    RUNS without changing what anything calls it -- see
+    `PLATFORM_TASK_OVERRIDES` for the three-word attack this closes.
+
+    Four properties, each of which the attack has to defeat:
+
+    - a `[target.<platform>]` table carries only known keys, so a new override
+      construct cannot arrive unread;
+    - an override names a task in `PLATFORM_TASK_OVERRIDES`, so a lane cannot
+      be substituted for one platform;
+    - an override is dependency-only (a table with `depends-on` and no `cmd`),
+      so even a permitted entry cannot swap in a different command;
+    - every allowlisted name still exists in the base `[tasks]` table, so a
+      rename leaves a stale allowlist entry loud instead of vacuous.
+
+    Args:
+        repo_root: Repository root holding `pixi.toml`.
+
+    Raises:
+        AssertionError: The manifest is unreadable, the allowlist went empty
+            or stale, a target table grew an unexpected key, or a platform
+            override names a task outside the allowlist or carries a command.
+    """
+    _require_nonempty("platform task override", PLATFORM_TASK_OVERRIDES)
+    _require_nonempty("platform target key", PLATFORM_TARGET_KEYS)
+    manifest = tomllib.loads((repo_root / "pixi.toml").read_text(encoding="utf-8"))
+    base_tasks = manifest.get("tasks")
+    if not isinstance(base_tasks, dict):
+        raise AssertionError("pixi.toml has no [tasks] table")
+    stale = sorted(PLATFORM_TASK_OVERRIDES - set(base_tasks))
+    if stale:
+        raise AssertionError(
+            "platform-override allowlist names a task that no longer exists in "
+            f"the base [tasks] table: {stale}; a stale entry permits an "
+            "override of something nothing else runs"
         )
-    for directory, dirnames, filenames in os.walk(repo_root, followlinks=False):
-        dirnames[:] = [
-            name for name in dirnames if name not in README_SCAN_EXCLUDED_DIRS
-        ]
-        if "README.md" not in filenames:
-            continue
-        path = Path(directory) / "README.md"
-        candidates.add(path.relative_to(repo_root))
-    return tuple(sorted(candidates, key=lambda path: os.fsencode(str(path))))
-
-
-def _normalized_shell_word(word: str) -> str:
-    """Strip presentation punctuation without changing command path content."""
-    return word.strip("`'\"[]{}(),:")
-
-
-def _is_python_executable(word: str) -> bool:
-    """Return whether a shell word names a Python interpreter executable."""
-    normalized = _normalized_shell_word(word)
-    return PYTHON_EXECUTABLE_RE.fullmatch(Path(normalized).name.lower()) is not None
-
-
-def _is_direct_script(word: str) -> bool:
-    """Return whether a shell word is a repository-relative Python script."""
-    normalized = _normalized_shell_word(word).removeprefix("./")
-    return DIRECT_SCRIPT_RE.fullmatch(normalized) is not None
+    targets = manifest.get("target", {})
+    if not isinstance(targets, dict):
+        raise AssertionError("pixi.toml [target] is not a table")
+    for name, table in sorted(targets.items()):
+        if not isinstance(table, dict):
+            raise AssertionError(f"[target.{name}] is not a table")
+        unexpected = sorted(set(table) - PLATFORM_TARGET_KEYS)
+        if unexpected:
+            raise AssertionError(
+                f"[target.{name}] carries unexpected keys {unexpected}; only "
+                f"{sorted(PLATFORM_TARGET_KEYS)} are reasoned about here"
+            )
+        overrides = table.get("tasks", {})
+        if not isinstance(overrides, dict):
+            raise AssertionError(f"[target.{name}.tasks] is not a table")
+        outside = sorted(set(overrides) - PLATFORM_TASK_OVERRIDES)
+        if outside:
+            raise AssertionError(
+                f"[target.{name}.tasks] overrides {outside}, which is outside "
+                f"the bounded set {sorted(PLATFORM_TASK_OVERRIDES)}; a platform "
+                "override REPLACES the base command with no warning from pixi, "
+                "so the lane keeps its name in `pixi run ci` and in the hosted "
+                "matrix while running something else entirely"
+            )
+        for task_name, definition in sorted(overrides.items()):
+            if not isinstance(definition, dict) or "depends-on" not in definition:
+                raise AssertionError(
+                    f"[target.{name}.tasks] entry {task_name!r} is not a "
+                    "dependency-only override; a platform override may only "
+                    "add a `depends-on` edge, never supply a command, because "
+                    "the command it replaces is the one every other view of "
+                    f"the floor believes is running: {definition!r}"
+                )
+            if "cmd" in definition:
+                raise AssertionError(
+                    f"[target.{name}.tasks] entry {task_name!r} supplies a "
+                    "`cmd`, which replaces the base command for that platform "
+                    f"alone: {definition!r}"
+                )
 
 
 def _shell_words(text: str) -> list[str]:
@@ -994,122 +525,188 @@ def _shell_words(text: str) -> list[str]:
     return expanded
 
 
-def _argv_has_direct_script(words: list[str]) -> bool:
-    """Detect a script operand after an interpreter and its options."""
-    option_takes_value = {"-W", "-X", "--check-hash-based-pycs"}
+def _normalized_shell_word(word: str) -> str:
+    """Strip presentation punctuation without changing command path content.
+
+    A word lifted out of an argv literal arrives wearing the list's syntax:
+    `[sys.executable,`, `"scripts/<name>.py"]`, `` `python ``. None of that is
+    part of the command, and all of it would defeat an exact match.
+
+    Args:
+        word: One lexed word.
+
+    Returns:
+        The word with surrounding quoting, bracketing and separator
+        punctuation removed.
+    """
+    return word.strip("`'\"[]{}(),:")
+
+
+def _is_python_executable(word: str) -> bool:
+    """Return whether a shell word names a Python interpreter.
+
+    Args:
+        word: One lexed word, still carrying its punctuation.
+
+    Returns:
+        True for `python`, a versioned or path-qualified spelling of it, or
+        one of `PYTHON_EXECUTABLE_ALIASES`.
+    """
+    normalized = _normalized_shell_word(word)
+    if normalized in PYTHON_EXECUTABLE_ALIASES:
+        return True
+    return PYTHON_EXECUTABLE_RE.fullmatch(Path(normalized).name.lower()) is not None
+
+
+def _is_direct_script(word: str) -> bool:
+    """Return whether a shell word is a repository-relative Python script.
+
+    Args:
+        word: One lexed word, still carrying its punctuation.
+
+    Returns:
+        True when the word is a `scripts/...py` operand.
+    """
+    normalized = _normalized_shell_word(word).removeprefix("./")
+    return DIRECT_SCRIPT_RE.fullmatch(normalized) is not None
+
+
+def _argv_direct_scripts(words: list[str]) -> list[str]:
+    """Return every script operand handed to an interpreter in one word list.
+
+    Walks from each interpreter word through its options to the first operand,
+    which is where a script path and a `-m` module name are distinguishable:
+    `-m` and `-c` end the walk (those are the correct forms), a value-taking
+    option consumes the word after it, and anything else that is not an option
+    is the operand.
+
+    Args:
+        words: One line's lexed words, in order.
+
+    Returns:
+        The `scripts/...py` operands found, in the order they appear.
+    """
+    found: list[str] = []
     for interpreter_index, word in enumerate(words):
         if not _is_python_executable(word):
             continue
         index = interpreter_index + 1
         while index < len(words):
             candidate = _normalized_shell_word(words[index])
-            if candidate in {";", "&&", "||", "|", "(", ")"}:
-                break
-            if candidate in {"-m", "-c"}:
+            if candidate in {";", "&&", "||", "|", "(", ")"} or candidate in {
+                "-m",
+                "-c",
+            }:
                 break
             if candidate.startswith("-"):
-                consumes_value = candidate in option_takes_value
-                index += 2 if consumes_value else 1
+                index += 2 if candidate in OPTION_TAKES_VALUE else 1
                 continue
-            if _is_direct_script(candidate):
-                return True
+            if _is_direct_script(words[index]):
+                found.append(candidate.removeprefix("./"))
             break
-    return False
+    return found
 
 
-def _ast_argv_has_direct_script(node: ast.AST) -> bool:
-    """Detect a literal argv headed by sys.executable or a Python path."""
-    if not isinstance(node, (ast.List, ast.Tuple)) or not node.elts:
-        return False
-    first = node.elts[0]
-    if (
-        isinstance(first, ast.Attribute)
-        and isinstance(first.value, ast.Name)
-        and first.value.id == "sys"
-        and first.attr == "executable"
-    ):
-        words = ["python"]
-    elif isinstance(first, ast.Constant) and isinstance(first.value, str):
-        if not _is_python_executable(first.value):
-            return False
-        words = [first.value]
-    else:
-        return False
-    for element in node.elts[1:]:
-        if not isinstance(element, ast.Constant) or not isinstance(element.value, str):
-            return False
-        words.append(element.value)
-    return _argv_has_direct_script(words)
+def direct_script_invocations(repo_root: Path = REPO_ROOT) -> tuple[str, ...]:
+    """Return every by-path Python script command written into a tracked file.
 
+    The scanned set is whatever `git ls-files` reports, so it is derived
+    rather than declared: a new document, workflow or shell script is covered
+    the moment it is tracked, and untracked working notes or a linked worktree
+    holding another branch's checkout cannot make this read one file set on a
+    contributor's machine and a different one on CI.
 
-def direct_script_invocations(path: Path, contents: str) -> tuple[str, ...]:
-    """Return direct Python-script command forms found in one live surface."""
-    findings: set[str] = set()
-    for line_number, line in enumerate(contents.splitlines(), start=1):
-        if _argv_has_direct_script(_shell_words(line)):
-            findings.add(f"{path.as_posix()}:{line_number}: direct command")
-    if path.suffix == ".py":
-        try:
-            tree = ast.parse(contents, filename=str(path))
-        except SyntaxError:
-            tree = None
-        if tree is not None:
-            for node in ast.walk(tree):
-                # The helper matches only a literal list/tuple, both of which
-                # are expressions; restating that here is what establishes that
-                # `node.lineno` exists on the matched node.
-                if isinstance(
-                    node, (ast.List, ast.Tuple)
-                ) and _ast_argv_has_direct_script(node):
-                    findings.add(f"{path.as_posix()}:{node.lineno}: direct argv")
-    return tuple(sorted(findings))
+    Each line is read twice, because neither pass covers the other:
 
+    - the raw-text pass (`DIRECT_SCRIPT_COMMAND_RE`) sees the prose form,
+      `python -u scripts/<name>.py`, on any line at all -- including the 4.3%
+      of tracked lines that are not lexable as a command because prose spells
+      an unpaired apostrophe;
+    - the word pass (`_argv_direct_scripts`) sees the argv form, which the
+      raw-text pass cannot match because the interpreter and the operand are
+      separated by quotes and a comma:
+      `subprocess.run([sys.executable, "scripts/<name>.py"])` and
+      `subprocess.run(["python", "scripts/<name>.py"])`. That form is what
+      Python tooling actually writes, and it is the one form that is not
+      merely copied by a reader but really executed.
 
-def live_direct_invocations(repo_root: Path) -> tuple[str, ...]:
-    """Return direct script invocations from live repository command surfaces."""
+    `python -m scripts.probe` matches neither, in either pass: `-m` ends the
+    word walk, and a dotted module name does not end in `.py`.
+
+    Every example above spells the operand `scripts/<name>.py` on purpose.
+    Written literally it would be a finding against this file -- which the
+    scan demonstrated by reporting all six of them the first time it ran.
+
+    Args:
+        repo_root: Repository root whose tracked files are scanned.
+
+    Returns:
+        One `path:line: operand` finding per invocation, in `git ls-files`
+        order, deduplicated within a line so a form both passes recognise is
+        reported once.
+
+    Raises:
+        AssertionError: `git ls-files` failed, or reported nothing to scan.
+    """
+    listed = subprocess.run(
+        ["git", "-C", str(repo_root), "ls-files", "-z"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if listed.returncode != 0:
+        raise AssertionError(
+            f"could not list tracked files to scan: {listed.stderr.strip()}"
+        )
+    tracked = [name for name in listed.stdout.split("\0") if name]
+    if not tracked:
+        raise AssertionError("git reported no tracked file to scan")
     findings: list[str] = []
-    for relative in live_command_files(repo_root):
-        path = repo_root / relative
+    for name in tracked:
         try:
-            contents = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            raise AssertionError(
-                f"could not inspect live file {relative}: {exc}"
-            ) from exc
-        findings.extend(direct_script_invocations(relative, contents))
+            contents = (repo_root / name).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            # A binary asset, or a path in the index with no work-tree file.
+            # Neither can carry a command line a reader would copy, and a
+            # missing work-tree file is already someone else's loud failure.
+            continue
+        for number, line in enumerate(contents.splitlines(), start=1):
+            operands = [
+                match.group(1) for match in DIRECT_SCRIPT_COMMAND_RE.finditer(line)
+            ]
+            operands.extend(_argv_direct_scripts(_shell_words(line)))
+            seen: set[str] = set()
+            for operand in operands:
+                if operand in seen:
+                    continue
+                seen.add(operand)
+                findings.append(f"{name}:{number}: {operand}")
     return tuple(findings)
 
 
-def check_python_package_invocation() -> None:
-    """Python harnesses use package imports and repository-root module commands."""
-    scripts_dir = REPO_ROOT / "scripts"
-    if not (scripts_dir / "__init__.py").is_file():
+def check_python_package_invocation(repo_root: Path = REPO_ROOT) -> None:
+    """Documented script commands name a module, never a file path.
+
+    A script actually executed by path fails loudly on its own: it cannot
+    resolve `from scripts.checks import ...`. Prose is the gap this closes.
+    A command written into a README, a comment or a workflow is never run, so
+    nothing else in the repository ever contradicts it, and a contributor who
+    copies it gets an import traceback instead of the check they asked for.
+
+    Args:
+        repo_root: Repository root to scan.
+
+    Raises:
+        AssertionError: The `scripts` package marker is gone, or a tracked
+            file spells a script command as an interpreter plus a path.
+    """
+    if not (repo_root / "scripts" / "__init__.py").is_file():
         raise AssertionError("scripts package marker is missing")
-
-    module_names = {path.stem for path in scripts_dir.glob("*.py")}
-    flat_imports: list[str] = []
-    for path in sorted(scripts_dir.glob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                flat_imports.extend(
-                    f"{path.relative_to(REPO_ROOT)}:{node.lineno}: "
-                    f"import {imported.name}"
-                    for imported in node.names
-                    if imported.name in module_names
-                )
-            elif isinstance(node, ast.ImportFrom) and node.module in module_names:
-                flat_imports.append(
-                    f"{path.relative_to(REPO_ROOT)}:{node.lineno}: "
-                    f"from {node.module} import ..."
-                )
-    if flat_imports:
-        raise AssertionError(f"flat scripts imports remain: {flat_imports}")
-
-    direct_invocations = live_direct_invocations(REPO_ROOT)
-    if direct_invocations:
+    findings = direct_script_invocations(repo_root)
+    if findings:
         raise AssertionError(
-            f"direct Python script invocations remain: {list(direct_invocations)}"
+            f"script commands written as an interpreter plus a path, which "
+            f"cannot resolve this repository's imports: {list(findings)}"
         )
 
 
@@ -1163,93 +760,90 @@ def check_build_source_visibility(repo_root: Path = REPO_ROOT) -> None:
         raise AssertionError("scripts/build source is untracked")
 
 
+def companion_source_files(repo_root: Path = REPO_ROOT) -> set[Path]:
+    """Return the public assertion companion's source files, read from disk.
+
+    Nothing is declared. Adding a module to the shipped companion has to cost
+    an edit in `recipe/build.sh` -- that is the install line the package needs
+    -- and in `scripts/release/public_verify.py`, which cannot derive; it must
+    not additionally cost an edit here, or this check would be pinning a list
+    to a list instead of pinning what ships to what exists.
+
+    Args:
+        repo_root: Repository root the companion tree lives under.
+
+    Returns:
+        Repository-relative paths of every regular file under the companion's
+        source root.
+    """
+    root = repo_root / COMPANION_SOURCE_ROOT
+    if not root.is_dir():
+        return set()
+    return {
+        path.relative_to(repo_root)
+        for path in root.rglob("*")
+        if not path.is_symlink() and path.is_file()
+    }
+
+
 def check_assertion_companion_layout(repo_root: Path = REPO_ROOT) -> None:
-    """Pin the public assertion source, consumers, and namespace isolation."""
-    _require_nonempty("assertion source", ASSERTION_SOURCE_PATHS)
-    _require_nonempty("assertion example", ASSERTION_EXAMPLE_PATHS)
-    companion_paths = ASSERTION_SOURCE_PATHS | ASSERTION_EXAMPLE_PATHS
-    expected_companion_entries = companion_paths | {
-        parent
-        for path in companion_paths
-        for parent in path.parents
-        if parent not in (Path("."), Path("companions"))
-    }
+    """The shipped public companion is exactly what the recipe installs.
+
+    A companion source file added without its `install -m 644` line ships a
+    broken package, and that is invisible until the full `package-check`
+    build runs, so it is reconciled here from disk against the recipe and
+    against the installed-membership constant the package and public-channel
+    gates share. The source-only shipping model is pinned the same way:
+    neither build entrypoint may `mojo precompile` the companion, and the
+    recipe may not sweep it in with a recursive copy, because either would
+    quietly ship compiled artifacts in place of readable source.
+
+    Args:
+        repo_root: Repository root holding `companions/`, the build scripts
+            and the recipe.
+
+    Raises:
+        AssertionError: The companion tree holds a symlink or a non-regular
+            file, holds no source at all, leaked into the private package,
+            disagrees with the recipe's install lines or with the installed
+            membership, or is precompiled or recursively copied by a build.
+    """
     companions = repo_root / "companions"
-    actual_companion_entries = (
-        {path.relative_to(repo_root) for path in companions.rglob("*")}
-        if companions.is_dir()
-        else set()
-    )
-    if actual_companion_entries != expected_companion_entries:
-        raise AssertionError(
-            "assertion companion membership mismatch: "
-            f"missing={sorted(expected_companion_entries - actual_companion_entries)}, "
-            f"extra={sorted(actual_companion_entries - expected_companion_entries)}"
-        )
-    linked = [
-        path.relative_to(repo_root)
-        for path in companions.rglob("*")
-        if path.is_symlink()
-    ]
+    entries = sorted(companions.rglob("*")) if companions.is_dir() else []
+    linked = [path.relative_to(repo_root) for path in entries if path.is_symlink()]
     if linked:
-        raise AssertionError(f"assertion companion contains symlinks: {sorted(linked)}")
-    non_regular_companion_leaves = [
-        path
-        for path in sorted(companion_paths)
-        if not stat.S_ISREG((repo_root / path).lstat().st_mode)
-    ]
-    if non_regular_companion_leaves:
-        raise AssertionError(
-            "assertion companion leaf is not a regular file: "
-            f"{non_regular_companion_leaves}"
-        )
-
-    _require_nonempty("assertion consumer", ASSERTION_CONSUMER_PATHS)
-    consumer_root = repo_root / "tests" / "assertions"
-    actual_consumers = (
-        {
-            path.relative_to(repo_root)
-            for path in consumer_root.rglob("*")
-            if path.is_file()
-        }
-        if consumer_root.is_dir()
-        else set()
-    )
-    if actual_consumers != ASSERTION_CONSUMER_PATHS:
-        raise AssertionError(
-            "assertion consumer membership mismatch: "
-            f"missing={sorted(ASSERTION_CONSUMER_PATHS - actual_consumers)}, "
-            f"extra={sorted(actual_consumers - ASSERTION_CONSUMER_PATHS)}"
-        )
-    linked_consumers = [
+        raise AssertionError(f"assertion companion contains symlinks: {linked}")
+    irregular = [
         path.relative_to(repo_root)
-        for path in consumer_root.rglob("*")
-        if path.is_symlink()
+        for path in entries
+        if not stat.S_ISDIR(path.lstat().st_mode)
+        and not stat.S_ISREG(path.lstat().st_mode)
     ]
-    if linked_consumers:
+    if irregular:
         raise AssertionError(
-            f"assertion consumer contains symlinks: {sorted(linked_consumers)}"
+            f"assertion companion entry is not a regular file: {irregular}"
         )
 
-    _require_nonempty("assertion check", ASSERTION_CHECK_PATHS)
-    missing_checks = {
-        path for path in ASSERTION_CHECK_PATHS if not (repo_root / path).is_file()
-    }
-    if missing_checks:
+    sources = companion_source_files(repo_root)
+    if not sources:
+        # Fail closed. Every comparison below is an equality against this set,
+        # so an empty one would make all of them vacuously true.
         raise AssertionError(
-            f"assertion check membership missing: {sorted(missing_checks)}"
+            f"the public assertion companion has no source file under "
+            f"{COMPANION_SOURCE_ROOT.as_posix()}"
         )
     if (repo_root / "src" / "mtest" / "assertions").exists():
         raise AssertionError("assertion companion leaked into private src/mtest")
+
     packaged_sources = {
-        Path("companions/assertions/src") / path
+        COMPANION_SOURCE_ROOT / path
         for path in package_consumption.INSTALLED_ASSERTION_FILES
     }
-    if packaged_sources != ASSERTION_SOURCE_PATHS:
+    if packaged_sources != sources:
         raise AssertionError(
             "assertion package-check membership mismatch: "
-            f"missing={sorted(ASSERTION_SOURCE_PATHS - packaged_sources)}, "
-            f"extra={sorted(packaged_sources - ASSERTION_SOURCE_PATHS)}"
+            f"missing={sorted(sources - packaged_sources)}, "
+            f"extra={sorted(packaged_sources - sources)}"
         )
 
     production = (repo_root / "scripts" / "build" / "production_build.sh").read_text(
@@ -1268,11 +862,11 @@ def check_assertion_companion_layout(repo_root: Path = REPO_ROOT) -> None:
             r"(?m)^\s*install -m 644 (companions/assertions/src/\S+)", recipe
         )
     }
-    if installed_sources != ASSERTION_SOURCE_PATHS:
+    if installed_sources != sources:
         raise AssertionError(
             "assertion recipe install membership mismatch: "
-            f"missing={sorted(ASSERTION_SOURCE_PATHS - installed_sources)}, "
-            f"extra={sorted(installed_sources - ASSERTION_SOURCE_PATHS)}"
+            f"missing={sorted(sources - installed_sources)}, "
+            f"extra={sorted(installed_sources - sources)}"
         )
     if _recipe_recursively_copies_assertion_source(recipe):
         raise AssertionError("assertion recipe uses a recursive source copy")
@@ -1434,12 +1028,13 @@ def check_package_fixture_contract(repo_root: Path = REPO_ROOT) -> None:
 def main() -> int:
     """Run every repository layout and command-policy check serially."""
     try:
-        check_top_level_script_layout()
+        # Before check_suite_layout: a reintroduced marker also trips the
+        # inventory's glob check, and this one names the exact file and the
+        # exact compiler error it will cause.
+        check_classified_roots_are_not_precompilable_packages()
         check_suite_layout()
-        check_exec_fixture_layout()
-        check_e2e_native_fixture_layout()
-        check_protocol_asset_layout()
         check_e2e_layout()
+        check_platform_task_overrides()
         check_python_package_invocation()
         check_build_source_visibility()
         check_assertion_companion_layout()

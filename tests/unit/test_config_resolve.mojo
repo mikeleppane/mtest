@@ -3,7 +3,7 @@
 The resolver replaces whole values across defaults, file, environment, and
 argv layers while recording an independent source for every eligible key.
 """
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.config import (
     ActiveConfigKeys,
@@ -645,3 +645,8 @@ def test_run_cross_value_validation_names_each_value_where_it_was_set() raises:
     assert_true(Bool(cli_diagnostic))
     assert_true(cli_diagnostic.value().startswith("cli: '--json -'"))
     assert_true("use '--json PATH'" in cli_diagnostic.value())
+
+
+def main() raises:
+    """Run this module's tests through the stdlib suite."""
+    TestSuite.discover_tests[__functions_in_module()]().run()

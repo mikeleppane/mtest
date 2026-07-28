@@ -33,6 +33,17 @@ COMPANION_FILES = (
     "mtest/assertions/_sequence.mojo",
     "mtest/assertions/_text.mojo",
 )
+"""The public assertion companion's shipped source files, written down once.
+
+This module is the one consumer that genuinely cannot derive this from disk:
+it verifies a package installed from a public channel, on a machine that need
+not have this repository at all, and deriving from a checkout would compare a
+published release against whatever the working tree happens to hold. Every
+other consumer -- the package gate, the community-recipe checker, the layout
+checker's recipe cross-check -- imports this tuple rather than restating it,
+and `scripts/checks/layout.py` reconciles it against `companions/` on disk,
+so a file added there without an entry here is a failure rather than a drift.
+"""
 
 
 class PublicVerifyError(RuntimeError):
