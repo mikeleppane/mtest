@@ -292,7 +292,11 @@ class ExactProcessIdentificationTests(unittest.TestCase):
         # The decoy stands in for `mojo build irq/test_1hang.mojo -o
         # build/bin/<mangled> ...`: its full command line CONTAINS the
         # mangled name (as `-o`'s value would), but argv[0] is the
-        # compiler driver, not that name.
+        # compiler driver, not that name. That is the UNCACHED build's
+        # shape, and the shape every retry rebuild still has; a
+        # first-attempt build under the cache writes to a staging
+        # directory whose name mentions no mangled name at all, which
+        # narrows the ambiguity but never removes it.
         decoy = self._spawn(
             [
                 "python3",
@@ -333,6 +337,31 @@ class ExactProcessIdentificationTests(unittest.TestCase):
             self.assertIn(str(real.pid), raw)
         finally:
             self._killall()
+
+    def test_is_own_binary_accepts_both_output_shapes_and_nothing_else(
+        self,
+    ) -> None:
+        # mtest builds a file's binary to one of two places, and the SIGINT
+        # probe has to recognize a running child from either. The published
+        # generation's name carries a digest over the toolchain, the
+        # environment, the invocation root, and every include root's
+        # contents, so the exact directory name is run-dependent and cannot
+        # be pinned; what is asserted is the store prefix, the mangled name,
+        # and the `_h` separator that no mangled name can itself contain.
+        store = contract.CACHE_STORE_PREFIX
+        digest = "0123456789abcdef0123456789abcdef"
+        gen = f"{store}{self.MANGLED}_h{digest}/bin"
+        plain = f"build/bin/{self.MANGLED}"
+        self.assertTrue(contract.is_own_binary(plain, self.MANGLED))
+        self.assertTrue(contract.is_own_binary(gen, self.MANGLED))
+        # Another file's generation, sharing only the store prefix.
+        other = f"{store}some_uother_ufile_h{digest}/bin"
+        self.assertFalse(contract.is_own_binary(other, self.MANGLED))
+        # A cache-shaped path outside the store must not be adopted.
+        stray = f"/elsewhere/{self.MANGLED}_h{digest}/bin"
+        self.assertFalse(contract.is_own_binary(stray, self.MANGLED))
+        # And the compiler itself, whatever it was asked to write.
+        self.assertFalse(contract.is_own_binary("/usr/bin/mojo", self.MANGLED))
 
     def test_process_state_reports_sleeping_for_the_identified_binary(self) -> None:
         fake_bin = Path(self.tmp.name) / self.MANGLED

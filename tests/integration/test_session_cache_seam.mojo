@@ -6,7 +6,7 @@ only exists to change what a SESSION does: build once, then never again while
 nothing that matters changed. A unit test over `store_probe` can prove a hit is
 served; only a session can prove the hit was actually taken, counted, and run.
 
-Two seams are covered here, and which one a case exercises is decided by its
+Three seams are covered here, and which one a case exercises is decided by its
 config, never by the assertions:
 
 - The SELECTION/collect build path (`_build_for_selection`), reached by setting
@@ -16,6 +16,10 @@ config, never by the assertions:
   and `workers` at its default of 1. Those two defaults are asserted in the
   first sequential case rather than assumed, because the routing is what makes
   the rest of that case mean anything.
+- The PARALLEL pool (`_run_pool_batch`), reached by leaving `keyword` empty and
+  raising `workers` above one. The pool is the only seam whose build and run are
+  two separate dispatches through a phase machine, so its cases also pin what
+  the seam does BETWEEN them.
 
 Cases that need the raw event stream — a retry's `AttemptFinished`, an
 `InternalError`'s program — compose the recording triple themselves rather than
@@ -660,6 +664,122 @@ def test_gate_file_is_cached_like_any_other() raises:
     assert_equal(second.code, 0, "the warm run must pass")
     assert_equal(second.cached_files, 2, "both files are served from the store")
     assert_equal(second.built_files, 0, "the warm run compiles nothing")
+
+
+def test_pool_second_run_hits_cache() raises:
+    """A second POOLED run over an untouched tree compiles nothing.
+
+    The pool is the seam where a file's build and its run are two separate
+    dispatches through a persistent phase machine, so a hit has to enter that
+    machine already built: it never passes the build dispatch, and everything
+    downstream — the run spawn, the verdict's reproduce line, the SLOW token —
+    reads the facts the store handed back rather than facts a compiler produced.
+
+    Two files at `workers = 2` so the batch genuinely runs them concurrently;
+    one file would leave the concurrency claim untested. The routing is asserted
+    rather than assumed, because an empty `keyword` is what keeps the selection
+    seam out of it and `workers > 1` is the whole reason this case exists.
+    """
+    var root = temp_root()
+    write_file(root, "tests/test_a.mojo", SRC_PASS)
+    write_file(root, "tests/test_b.mojo", SRC_PASS)
+    var config = base_config()
+    config.workers = 2
+    assert_equal(
+        config.keyword, "", "a keyword would route to the selection seam"
+    )
+
+    var first = run_recording_session(config.copy(), root)
+    assert_equal(first.code, 0, "the cold run must pass")
+    assert_equal(first.built_files, 2, "the cold run compiles both files")
+    assert_equal(first.cached_files, 0, "nothing is stored yet")
+    var cold = dir_listing(root + "/" + _STORE_DIR)
+    assert_equal(
+        len(cold),
+        2,
+        (
+            "the cold run publishes one generation per file and stages nothing"
+            " else"
+        ),
+    )
+
+    var second = run_recording_session(config^, root)
+    assert_equal(
+        second.code, 0, "the warm run must pass on the cached binaries"
+    )
+    assert_equal(second.cached_files, 2, "both files are served from the store")
+    assert_equal(second.built_files, 0, "the warm run compiles nothing")
+    var warm = dir_listing(root + "/" + _STORE_DIR)
+    assert_equal(
+        len(warm),
+        2,
+        "a run that compiled nothing must neither stage nor publish",
+    )
+    assert_equal(warm[0], cold[0], "the warm run replaced a generation")
+    assert_equal(warm[1], cold[1], "the warm run replaced a generation")
+
+
+def test_pool_compile_failure_counts_and_names_build_bin() raises:
+    """A pooled compile failure is an admission, stores nothing, and reproduces.
+
+    Three claims the pool's build-completion branch owns and no other case here
+    reaches. The counting rule first: the compiler is spawned from the dispatch
+    loop and its verdict is folded a whole `wait_any` sweep later, so the only
+    honest place to count is the dispatch — and a counter moved to the fold
+    would drop this file out of the accounting entirely.
+
+    Then the two things a failed pooled build must leave behind. The staging
+    directory is debris the instant the compiler rejects the source, so the
+    store must end the run holding exactly the healthy file's generation. And
+    the reproduce line must name `build/bin/<mangled>`: the compile really did
+    write to a staging directory, but that directory is deleted before the
+    verdict is emitted, so a line naming it would be a line no user could run.
+    """
+    var root = temp_root()
+    write_file(root, "tests/test_broken.mojo", SRC_COMPILE_ERROR)
+    write_file(root, "tests/test_ok.mojo", SRC_PASS)
+    var config = base_config()
+    config.workers = 2
+
+    var comp = _recorder()
+    var code = run_session(config, root, comp)
+    assert_equal(code, 1, "a compile error is an exit-1 verdict")
+    ref rec = comp.composite.reporters[0]
+
+    var counters = _counters(rec)
+    assert_equal(
+        counters.built_files, 2, "a compile that failed was still admitted"
+    )
+    assert_equal(counters.cached_files, 0, "nothing was served from the store")
+
+    var entries = dir_listing(root + "/" + _STORE_DIR)
+    assert_equal(
+        len(entries),
+        1,
+        "only the file that built may leave a generation behind",
+    )
+    assert_true(
+        String(entries[0]).startswith("tests_stest_uok_h"),
+        "the one store entry is not the healthy file's generation: "
+        + entries[0],
+    )
+
+    var verdict = _verdict_of(rec, "tests/test_broken.mojo")
+    assert_true(
+        verdict.outcome == Outcome.COMPILE_ERROR,
+        "the broken file must end COMPILE-ERROR",
+    )
+    var saw_plain_out = False
+    for token in verdict.build_argv:
+        if String(token) == "build/bin/tests_stest_ubroken":
+            saw_plain_out = True
+    assert_true(
+        saw_plain_out,
+        (
+            "the reproduce line must name build/bin, never the staging"
+            " directory the seam deletes before emitting the verdict"
+        ),
+    )
 
 
 def main() raises:

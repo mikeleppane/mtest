@@ -45,10 +45,25 @@ def test_interrupt_before_files_is_exit_2_all_not_run() raises:
 
     assert_equal(code, 2, "an interrupt resolves to exit 2, never a TIMEOUT")
     ref rec = comp.composite.reporters[0]
-    # No file is started: only the session frame.
-    assert_equal(rec.count(), 2)
+    # No file is started. Asserted by KIND, never by count or position: a
+    # session interrupted before its first file still emits whatever it learned
+    # on the way there, and under an already-set interrupt flag the build
+    # cache's `<compiler> --version` child is killed, which disables the cache
+    # and adds the once-per-session `cache-off` warning between the two frame
+    # events. Neither that warning nor anything else later added ahead of the
+    # first file changes what this case is about, so the claim is stated as
+    # "no file event at all" rather than as a literal event count.
+    var started = 0
+    var finished_files = 0
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.FILE_STARTED:
+            started += 1
+        elif rec.kind_at(i) == EventKind.FILE_FINISHED:
+            finished_files += 1
+    assert_equal(started, 0, "no file may start after the flag is already set")
+    assert_equal(finished_files, 0, "and none may reach a verdict")
     assert_true(rec.kind_at(0) == EventKind.SESSION_STARTED)
-    var last = rec.event_at(1)
+    var last = rec.event_at(rec.count() - 1)
     assert_true(last.kind == EventKind.SESSION_FINISHED)
     assert_equal(last.data[SessionFinishedPayload].exit_code, 2)
     # Both discovered files are accounted for as NOT_RUN, none as TIMEOUT.

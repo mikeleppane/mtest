@@ -230,13 +230,30 @@ def wait_until(
 
 # --------------------------------------------------------------------------- #
 # Exact-process identification for the SIGINT probe. `mtest` builds each test
-# file with `mojo build <file> -o build/bin/<mangled-name> ...`, so a plain
-# `pgrep -f <mangled-name>` scan matches BOTH the exec'd test binary AND, for
-# as long as it is still running, its own COMPILER — the compiler's command
-# line mentions the same string as its `-o` target. These helpers resolve
-# that ambiguity by argv[0] (the process's own executable path), which only
-# the exec'd binary itself ends with, never the compiler invoking it.
+# file with `mojo build <file> -o <output> ...`, and both the compiler's
+# command line and the exec'd binary's own path mention the mangled name, so a
+# plain `pgrep -f <mangled-name>` scan matches BOTH the test binary AND, for as
+# long as it is still running, its own COMPILER. These helpers resolve that
+# ambiguity by argv[0] (the process's own executable path), which only the
+# exec'd binary itself is, never the compiler invoking it.
+#
+# `<output>` has two shapes, because the build cache moved where a
+# first-attempt build lands:
+#
+#   build/bin/<mangled>                              (uncached, and every retry)
+#   .mtest-cache/build-v1/<mangled>_h<digest32>/bin  (published generation)
+#
+# Both are matched. The generation's digest covers the toolchain, the
+# environment, the invocation root, and every include root's contents, so it is
+# run-dependent and cannot be pinned here — the assertion is on the store
+# prefix, the mangled name, and the `_h` separator (which no mangled name can
+# contain), never on the digest itself.
 # --------------------------------------------------------------------------- #
+
+CACHE_STORE_PREFIX = ".mtest-cache/build-v1/"
+"""Where `mtest` publishes a cached build, relative to the invocation root."""
+
+
 def matching_pids(pattern: str) -> list[str]:
     """PIDs whose full command line contains `pattern` (`pgrep -f`).
 
@@ -298,15 +315,32 @@ def process_state(pid: str) -> str:
     return r.stdout.strip()[:1]
 
 
+def is_own_binary(argv0: str, mangled_name: str) -> bool:
+    """Whether `argv0` is a test binary built from `mangled_name`'s source.
+
+    True for the uncached output path, whose basename IS the mangled name, and
+    for a published cache generation, whose binary is `bin` inside a directory
+    named `<mangled>_h<digest32>`. False for a compiler that merely names either
+    of those as its `-o` argument, because a compiler's argv[0] is the compiler.
+    """
+    if argv0.endswith(mangled_name):
+        return True
+    return (
+        argv0.startswith(CACHE_STORE_PREFIX)
+        and argv0.endswith("/bin")
+        and f"/{mangled_name}_h" in argv0
+    )
+
+
 def exact_process_pid(mangled_name: str) -> str | None:
-    """The PID of the process whose OWN executable is `mangled_name`.
+    """The PID of the process whose OWN executable `mangled_name` built.
 
     Never a `mojo build` compiler that merely mentions it as an `-o`
     argument. `None` if no such process is currently running.
     """
     for pid in matching_pids(mangled_name):
         argv0 = process_argv0(pid)
-        if argv0 and argv0.endswith(mangled_name):
+        if argv0 and is_own_binary(argv0, mangled_name):
             return pid
     return None
 

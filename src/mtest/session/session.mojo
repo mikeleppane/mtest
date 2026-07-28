@@ -513,7 +513,14 @@ def run_session[
             cores,
             True,
             console_fd,
+            ctx,
         )
+        # The batch's cache admissions, folded onto the session's one context
+        # here rather than counted there: the gate, parallel, and serial batches
+        # each account for themselves, and every fold happens long before the
+        # terminal artifacts read the totals.
+        ctx.built_files += gb.built_files
+        ctx.cached_files += gb.cached_files
         run_outcomes.extend(gb.run_outcomes.copy())
         test_totals.passed += gb.test_totals.passed
         test_totals.failed += gb.test_totals.failed
@@ -674,7 +681,10 @@ def run_session[
             cores,
             False,
             console_fd,
+            ctx,
         )
+        ctx.built_files += rb.built_files
+        ctx.cached_files += rb.cached_files
         run_outcomes.extend(rb.run_outcomes.copy())
         test_totals.passed += rb.test_totals.passed
         test_totals.failed += rb.test_totals.failed
@@ -715,9 +725,12 @@ def run_session[
                 cores,
                 False,
                 console_fd,
+                ctx,
                 serial=True,
                 initial_failing=_failing_count(rb.run_outcomes),
             )
+            ctx.built_files += sb.built_files
+            ctx.cached_files += sb.cached_files
             run_outcomes.extend(sb.run_outcomes.copy())
             test_totals.passed += sb.test_totals.passed
             test_totals.failed += sb.test_totals.failed

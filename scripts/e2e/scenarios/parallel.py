@@ -303,6 +303,14 @@ def s_parallel_window_overlap(context: ScenarioContext) -> str:
     stamp their own run edges. Concurrency is proved by the interval inequality
     `start_b < end_a AND start_a < end_b` on both the build log and the run log —
     neither window merely follows the other.
+
+    `CACHE_OFF` for a sharper reason than the paired scenarios' (see it): this
+    one's entire subject is the BUILD windows, and a cache hit compiles nothing
+    and stamps nothing. The store lives under the repository root and outlives
+    the harness, so a second e2e run on the same checkout would find the shim's
+    own generations waiting and the scenario would fail reporting zero windows —
+    green on a cold clone, red on a warm one. The flag also keeps the shim's
+    fabricated products out of a store real runs read.
     """
     build_log = _log_path("mtest_window_build_")
     run_log = _log_path("mtest_window_run_")
@@ -316,6 +324,7 @@ def s_parallel_window_overlap(context: ScenarioContext) -> str:
             FAKE_WINDOW_MOJO,
             "--gh-annotations",
             "off",
+            CACHE_OFF,
         ],
         timeout=240.0,
         env_overrides={
@@ -493,6 +502,12 @@ def s_parallel_shard_disjoint(context: ScenarioContext) -> str:
     The union of both shards' run sets is the whole suite, the two sets are
     disjoint, and a file sharded OUT of a given shard is never built in it — the
     logging shim's build records for a shard name only that shard's files.
+
+    The two sharded runs pass `CACHE_OFF`. The build claim is a NEGATIVE ("no
+    sharded-out file was built"), so a warm store would not make this scenario
+    fail — it would make it pass vacuously, on a shim log that recorded nothing
+    at all. The whole-suite control run keeps the cache, since it is compared on
+    verdict paths only.
     """
     run_sets: list[set[str]] = []
     built_sets: list[set[str]] = []
@@ -509,6 +524,7 @@ def s_parallel_shard_disjoint(context: ScenarioContext) -> str:
                 LOGGING_MOJO,
                 "--gh-annotations",
                 "off",
+                CACHE_OFF,
             ],
             timeout=240.0,
             env_overrides={"MTEST_MOJO_LOG": log},
@@ -723,6 +739,11 @@ def s_parallel_serial_noverlap(context: ScenarioContext) -> str:
       the next serial file's window, proving the file's whole pipeline (including
       the retry) drained inside its single serial slot before the next file was
       admitted.
+
+    `CACHE_OFF` for the same reason as `s_parallel_window_overlap`: every claim
+    here is stated over BUILD windows, and a file served from the store stamps
+    none. The store outlives the harness under the repository root, so without
+    the flag this scenario is green on a cold clone and red on the second run.
     """
     build_log = _log_path("mtest_serial_build_")
     run_log = _log_path("mtest_serial_run_")
@@ -747,6 +768,7 @@ def s_parallel_serial_noverlap(context: ScenarioContext) -> str:
                 FAKE_WINDOW_MOJO,
                 "--gh-annotations",
                 "off",
+                CACHE_OFF,
             ],
             timeout=240.0,
             env_overrides={

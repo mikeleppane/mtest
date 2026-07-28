@@ -10,10 +10,21 @@ cleanup fault: exit 2, never 3.
 
 The faults are occurrence-based, so each case is written so the named boundary
 is the counted occurrence. In particular the run-dispatch case uses `workers=2`
-with exactly ONE run file: the pool dispatches that file's build as open
-occurrence 1, waits for it, and only then dispatches its run as occurrence 2.
-A second run file would make occurrence 2 another build and fault the wrong
-boundary.
+with exactly ONE run file: the pool dispatches that file's build first, waits
+for it, and only then dispatches its run. A second run file would make the next
+occurrence another build and fault the wrong boundary.
+
+The build cache moves that arithmetic, because an enabled cache spawns one child
+of its own before any file is dispatched — `<compiler> --version`, the key's
+toolchain-version frame. Each case below therefore states which count it is
+using and why:
+
+- The two dispatch cases count that child. It is exactly one stdout-pipe open,
+  always the first, so the boundary they want is simply one occurrence later.
+- The `wait_any` case turns the cache OFF instead. Its counted operation is the
+  blocking multiplex, and `run_supervised` polls the `--version` child until it
+  exits — a count that depends on how fast the compiler answers, not on the
+  batch. Faulting an occurrence chosen against that would be a coin flip.
 """
 from std.ffi import external_call
 from std.os.path import exists
@@ -34,6 +45,7 @@ from mtest.report import (
 )
 from mtest.session import run_session
 
+from cache_fixtures import dir_listing
 from session_fixtures import SRC_PASS, base_config, temp_root, write_file
 
 comptime _READY = "pool_fault_ready"
@@ -108,6 +120,21 @@ comptime _OP_GROUP_TERM = 32
 """`MTEST_EXEC_OP_GROUP_TERM`: the SIGTERM pass over one live process group."""
 comptime _OP_POLL_SET = 36
 """`MTEST_EXEC_OP_POLL_SET`: the one blocking multiplex inside `wait_any`."""
+comptime _FIRST_BUILD_OPEN = 2
+"""Which stdout-pipe open is the pool's FIRST build dispatch.
+
+Occurrence 1 belongs to the cache's `<compiler> --version` child, which every
+enabled session spawns before it dispatches anything. The cases using this
+constant assert the faulted STEP as well, so a miscount fails loudly instead of
+quietly measuring the wrong boundary.
+"""
+comptime _FIRST_RUN_OPEN = 3
+"""Which stdout-pipe open is the RUN dispatch of a ONE-file pooled batch.
+
+`<compiler> --version`, then that file's build, then its run.
+"""
+comptime _STORE_DIR = ".mtest-cache/build-v1"
+"""The store's generations directory, relative to a run root."""
 
 
 def _reset_faults():
@@ -263,8 +290,8 @@ def _started_paths(rec: RecordingReporter) -> List[String]:
 
 
 def test_build_dispatch_open_fault_is_exit_3_with_every_file_not_run() raises:
-    # Occurrence 1 of the child stdout pipe is the pool's FIRST build dispatch:
-    # nothing has been spawned yet, so the fault lands before any file starts.
+    # `_FIRST_BUILD_OPEN` is the pool's FIRST build dispatch: only the cache's
+    # `--version` child has been spawned before it, and no file has started.
     var root = temp_root()
     write_file(root, "tests/test_a.mojo", SRC_PASS)
     write_file(root, "tests/test_b.mojo", SRC_PASS)
@@ -276,7 +303,7 @@ def test_build_dispatch_open_fault_is_exit_3_with_every_file_not_run() raises:
     var comp = _recorder()
     var code: Int
     _reset_faults()
-    _configure_fault(_OP_PIPE_STDOUT, 1, _EIO)
+    _configure_fault(_OP_PIPE_STDOUT, _FIRST_BUILD_OPEN, _EIO)
     # The fault table is process-global, so it is disarmed even if the session
     # raises; a surviving arming would corrupt every later case in this binary.
     try:
@@ -310,9 +337,14 @@ def test_build_dispatch_open_fault_is_exit_3_with_every_file_not_run() raises:
 
 def test_run_dispatch_open_fault_names_the_run_boundary_and_leaves_it_not_run() raises:
     # `workers=2` with exactly ONE run file: the pool dispatches that file's
-    # build as stdout-pipe occurrence 1, waits for it, and only then dispatches
-    # its run as occurrence 2. A second run file would make occurrence 2 another
+    # build, waits for it, and only then dispatches its run, which is
+    # `_FIRST_RUN_OPEN`. A second run file would make that occurrence another
     # build and fault the wrong boundary.
+    #
+    # The cache stays ON here, and this case is what pins where the pool
+    # publishes. The build succeeded, so its staging directory was renamed onto
+    # a generation BEFORE the run was dispatched — which is the only reason the
+    # diagnostic below can name a path that still exists.
     var root = temp_root()
     write_file(root, "tests/test_a.mojo", SRC_PASS)
 
@@ -322,7 +354,7 @@ def test_run_dispatch_open_fault_names_the_run_boundary_and_leaves_it_not_run() 
     var comp = _recorder()
     var code: Int
     _reset_faults()
-    _configure_fault(_OP_PIPE_STDOUT, 2, _EIO)
+    _configure_fault(_OP_PIPE_STDOUT, _FIRST_RUN_OPEN, _EIO)
     try:
         code = run_session(config, root, comp)
     finally:
@@ -344,10 +376,29 @@ def test_run_dispatch_open_fault_names_the_run_boundary_and_leaves_it_not_run() 
 
     var err = _internal_error(rec)
     assert_equal(err.step, "run", "the failed boundary is the RUN dispatch")
+    # A PREFIX match, not an exact path: the generation is named
+    # `<mangled>_h<digest32>`, and that digest covers the toolchain, the
+    # environment, the invocation root, and every include root's contents, so it
+    # differs between machines, checkouts, and toolchain pins. What IS pinnable
+    # is that the run dispatch names a published generation's binary — never the
+    # compiler, and never the `.tmp-<pid>-...` staging directory, whose name
+    # carries this process's pid and would be unassertable even if the seam
+    # still used it here.
+    assert_true(
+        err.program.startswith(_STORE_DIR + "/tests_stest_ua_h")
+        and err.program.endswith("/bin"),
+        "the internal error must name the published generation's binary,"
+        " not the compiler and not a staging path: "
+        + err.program,
+    )
+    var entries = dir_listing(root + "/" + _STORE_DIR)
     assert_equal(
-        err.program,
-        "build/bin/tests_stest_ua",
-        "the internal error names the built binary, not the compiler",
+        len(entries),
+        1,
+        (
+            "the store must hold exactly the one published generation, with no"
+            " staging directory left beside it"
+        ),
     )
     assert_equal(
         err.errno, 0, "a machinery raise carries errno 0, not a spawn errno"
@@ -364,6 +415,13 @@ def test_wait_any_poll_fault_is_exit_3_and_leaves_no_live_group() raises:
     # taken with both admitted builds in flight. The fault tears the Supervisor
     # down inside `wait_any`; the batch must abandon the rest rather than
     # dispatch the third file into a dead supervisor.
+    #
+    # `--no-cache` is what keeps "occurrence 1" meaningful. An enabled cache
+    # runs `<compiler> --version` first, and `run_supervised` polls that child
+    # until it exits — once on a fast answer, repeatedly on a slow one — so the
+    # pool's first sweep would sit at an occurrence nobody can name in advance.
+    # Nothing in this case is about the cache, so the honest fix is to take the
+    # extra child out rather than guess at a count.
     var root = temp_root()
     write_file(root, "tests/test_a.mojo", SRC_PASS)
     write_file(root, "tests/test_b.mojo", SRC_PASS)
@@ -371,6 +429,7 @@ def test_wait_any_poll_fault_is_exit_3_and_leaves_no_live_group() raises:
 
     var config = base_config()
     config.workers = 2
+    config.no_cache = True
 
     var comp = _recorder()
     var code: Int
