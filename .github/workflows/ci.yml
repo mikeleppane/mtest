@@ -7,9 +7,14 @@ on:
   workflow_dispatch:
 
 # A newer push to the same branch/PR cancels the older, still-running workflow.
+# Never on the default branch: `main`'s runs are the per-commit record, and
+# superseding one leaves the commit it was proving with a cancelled run and no
+# green evidence -- a state nothing later reconstructs, because the next push
+# proves the next commit, not that one. On a branch or PR the older run is
+# proving a revision nobody will merge, so cancelling it costs nothing.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 # The default token only needs to read the repo.
 permissions:
@@ -19,8 +24,32 @@ jobs:
   linux-preflight:
     name: Linux / preflight
     runs-on: ubuntu-24.04
+    # Every job below carries a ceiling because GitHub's default is six hours
+    # and the internal watchdogs in scripts/harness/ cannot supply one: they
+    # bound the commands this repository runs, and the ways a hosted job hangs
+    # happen outside any process they supervise -- a `setup-pixi` action that
+    # never returns, a conda solve stalled on a channel, an `apt-get` waiting on
+    # a mirror. Without a cap those hold a runner for six hours and report
+    # nothing.
+    #
+    # Every tier below sits well above any healthy run of the jobs it covers,
+    # and is never trimmed to fit one. A ceiling answers exactly one question --
+    # is this job stuck? -- so it must be set where a job an order of magnitude
+    # over budget is understood as wedged, while a job merely slower than it was
+    # last month stays a passing run. Sizing a tier against whatever a lane
+    # currently takes inverts that: it turns every ordinary slowdown into a red
+    # X, and makes the ceilings themselves churn. This is the cheapest tier,
+    # covering one locked Pixi install and the static barrier below.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing in this workflow uses the token after the clone, and a
+          # persisted credential stays in `.git/config` for every later step --
+          # including the ones that run this repository's own scripts and the
+          # third-party build tools they invoke. `release.yml` already drops it;
+          # this makes the policy uniform across the repository's workflows.
+          persist-credentials: false
 
       - name: Set up pixi
         uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
@@ -41,9 +70,23 @@ jobs:
     name: Linux / ${{ matrix.lane }}
     needs: linux-preflight
     strategy:
-      fail-fast: true
+      # Each lane is an independent gate over the same commit, not a sample of
+      # one shared property, so a failure in one says nothing about the other
+      # eight. Cancelling them discards eight verdicts that were already being
+      # produced and leaves the run reporting a single fact, which turns a
+      # broken commit into fix-push-discover-the-next-one one lane at a time.
+      # Every lane's verdict is wanted, because the whole set is what a reviewer
+      # has to act on. Matches `macos-test-matrix` below.
+      fail-fast: false
       matrix:
         include:
+          # A row carries only the keys it uses. An absent matrix key evaluates
+          # falsy in an expression, which is what every `if:` and the
+          # `timeout-minutes` fallback below read, so a row of `false`/`none`
+          # sentinels would restate the default nine times while making the
+          # rows that do carry a real value harder to pick out. `lane` is an
+          # externally configured required-check name; do not rename one.
+          #
           # This runner is dedicated to the job for its duration, unlike a
           # shared local machine, so `pixi run test`'s `auto` default (half the
           # cores, src/mtest/session/pool_plan.mojo) is the wrong call here: a
@@ -52,80 +95,73 @@ jobs:
           # this runner's real core count; see DEFAULT_WORKERS in
           # scripts/harness/selfhost.py for the full reasoning and why this
           # lives here instead of in pixi.toml.
-          - runner: ubuntu-24.04
-            lane: direct tests
+          - lane: direct tests
             task: test
             workers: "4"
-            libc_debug: false
-            safety_artifact: false
-            artifact_name: none
-            artifact_path: none
-          - runner: ubuntu-24.04
-            lane: assertions
+          - lane: assertions
             task: assertions-check
-            libc_debug: false
-            safety_artifact: false
-            artifact_name: none
-            artifact_path: none
-          - runner: ubuntu-24.04
-            lane: self-hosted tests
+          - lane: self-hosted tests
             task: dogfood-check
-            libc_debug: false
-            safety_artifact: false
-            artifact_name: none
-            artifact_path: none
-          - runner: ubuntu-24.04
-            lane: end-to-end tests
+          - lane: end-to-end tests
             task: e2e
-            libc_debug: false
-            safety_artifact: false
-            artifact_name: none
-            artifact_path: none
           # Drives real `build/mtest` processes against throwaway projects,
           # concurrently and under the publication fault seam, and asserts the
           # artifact store's protocol properties from outside the process. It
           # is the only coverage `--no-cache` and `--cache-clear` have.
-          - runner: ubuntu-24.04
-            lane: cache protocol
+          - lane: cache protocol
             task: cache-protocol-check
-            libc_debug: false
-            safety_artifact: false
-            artifact_name: none
-            artifact_path: none
           # Guards the production build's precompile stamp, the one thing that
           # keeps a `pixi run build` over changed sources from linking against
           # a package compiled from the previous ones.
-          - runner: ubuntu-24.04
-            lane: build stamp
+          - lane: build stamp
             task: build-stamp-check
-            libc_debug: false
-            safety_artifact: false
-            artifact_name: none
-            artifact_path: none
-          - runner: ubuntu-24.04
-            lane: strict contract
+          - lane: strict contract
             task: contract-check-strict
-            libc_debug: false
-            safety_artifact: false
-            artifact_name: none
-            artifact_path: none
-          - runner: ubuntu-24.04
-            lane: ASan + LSan
+          # Both memory lanes below build every binary they judge from source,
+          # with `-I src -I tests/support` (and the vendored TOML parser as
+          # source for the CLI probe), so no `pixi run build` precedes them:
+          # they never read `build/mtest` or `build/mtest.mojopkg`, and the
+          # CLI_BINARY docstrings in scripts/checks/memory/asan.py and
+          # scripts/checks/memory/valgrind.py both say why -- the shipped
+          # artifact is uninstrumented and carries no `-g` guarantee, so
+          # reusing it would defeat the lane. `build/safety/` and
+          # `build/tests/` are outputs these two create themselves.
+          - lane: ASan + LSan
             task: asan-check
-            libc_debug: false
             safety_artifact: true
             artifact_name: asan-logs
             artifact_path: build/safety/asan/*.log
-          - runner: ubuntu-24.04
-            lane: Valgrind Memcheck
+            timeout: 30
+          - lane: Valgrind Memcheck
             task: valgrind-check
             libc_debug: true
             safety_artifact: true
             artifact_name: valgrind-logs
             artifact_path: build/safety/valgrind/*.log
-    runs-on: ${{ matrix.runner }}
+            timeout: 30
+    runs-on: ubuntu-24.04
+    # The wide tier, sized for the widest lane: `direct tests` runs the whole
+    # discovered corpus, so it sets the shape of a healthy run here and every
+    # other lane on this matrix does strictly less. See the tier reasoning on
+    # `linux-preflight` for why this is not fitted to what the lane costs today.
+    #
+    # The two memory lanes take a tighter ceiling from their own rows. Each runs
+    # a bounded inventory enumerated in its own checker rather than whatever
+    # discovery finds, so the narrower budget still clears a healthy run with
+    # room to spare -- and these are the two lanes that gain the most from a
+    # ceiling, because their internal guards cannot supply one: BUILD_TIMEOUT in
+    # scripts/checks/memory/asan.py gives every instrumented build its own
+    # deliberately generous budget and that lane runs sixteen builds under it,
+    # so the per-build guards sum far past any job worth waiting for and this is
+    # the only thing that stops a wedged compiler. Carried as a matrix key
+    # rather than a `matrix.safety_artifact && 30 || 40` ternary so the value
+    # sits on the row it applies to, beside the other per-lane facts, and so a
+    # third tier costs one key instead of a rewrite.
+    timeout-minutes: ${{ matrix.timeout || 40 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up pixi
         uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
@@ -182,12 +218,6 @@ jobs:
         if: ${{ matrix.libc_debug }}
         run: pixi run valgrind --version
 
-      # Preserve the sanitizer jobs' package-build prerequisite. The three
-      # behavioral tasks already own their appropriate build dependencies.
-      - name: Build safety prerequisite
-        if: ${{ matrix.safety_artifact }}
-        run: pixi run build
-
       # `matrix.workers` is set only on the `test` lane's row above; every
       # other lane leaves it unset, so this appends nothing for them.
       - name: Run ${{ matrix.lane }}
@@ -205,8 +235,15 @@ jobs:
   package:
     name: Linux / packaged artifact
     runs-on: ubuntu-24.04
+    # Wider than this lane's own work would suggest, because its solve reaches
+    # two external channels. That is the one place in this workflow that can
+    # stall on something outside the repository, and so the one place a ceiling
+    # is most likely to be the thing that ends the job.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up pixi
         uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
@@ -230,8 +267,13 @@ jobs:
   macos-preflight:
     name: macOS arm64 / preflight
     runs-on: macos-15
+    # The Linux preflight's tier: the same locked Pixi install and the same kind
+    # of cheap barrier, so the same ceiling reasoning applies unchanged.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up pixi
         uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
@@ -263,67 +305,41 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # As on the Linux matrix, a row carries only the keys it uses; there
+          # are no memory lanes on this platform, so `lane`, `task`, and one
+          # `workers` override are all there is to carry.
+          #
           # Same reasoning as the Linux matrix's `test` row above, sized to
           # this platform's runner: a standard macos-15 (arm64) runner has 3
           # vCPUs, so `auto` (cores // 2) would give exactly 1 worker -- fully
           # serial. See DEFAULT_WORKERS in scripts/harness/selfhost.py.
-          - runner: macos-15
-            lane: direct tests
+          - lane: direct tests
             task: test
             workers: "3"
-            libc_debug: false
-            safety_artifact: false
-            artifact_name: none
-            artifact_path: none
-          - runner: macos-15
-            lane: assertions
+          - lane: assertions
             task: assertions-check
-            libc_debug: false
-            safety_artifact: false
-            artifact_name: none
-            artifact_path: none
-          - runner: macos-15
-            lane: self-hosted tests
+          - lane: self-hosted tests
             task: dogfood-check
-            libc_debug: false
-            safety_artifact: false
-            artifact_name: none
-            artifact_path: none
-          - runner: macos-15
-            lane: end-to-end tests
+          - lane: end-to-end tests
             task: e2e
-            libc_debug: false
-            safety_artifact: false
-            artifact_name: none
-            artifact_path: none
           # The same two cache gates the Linux matrix runs. Both spawn real
           # processes and touch the filesystem directly, so the platform whose
           # `stat` layout and path semantics differ is exactly where they have
           # to run rather than be assumed.
-          - runner: macos-15
-            lane: cache protocol
+          - lane: cache protocol
             task: cache-protocol-check
-            libc_debug: false
-            safety_artifact: false
-            artifact_name: none
-            artifact_path: none
-          - runner: macos-15
-            lane: build stamp
+          - lane: build stamp
             task: build-stamp-check
-            libc_debug: false
-            safety_artifact: false
-            artifact_name: none
-            artifact_path: none
-          - runner: macos-15
-            lane: strict contract
+          - lane: strict contract
             task: contract-check-strict
-            libc_debug: false
-            safety_artifact: false
-            artifact_name: none
-            artifact_path: none
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-15
+    # The Linux matrix's wide tier, flat because this platform has no memory
+    # lanes and so nothing here needs the second one.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up pixi
         uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
@@ -345,8 +361,13 @@ jobs:
     name: macOS arm64 / packaged artifact
     needs: macos-preflight
     runs-on: macos-15
+    # The Linux package job's tier: the same external-channel solve, and the
+    # same reason for the headroom.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up pixi
         uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
