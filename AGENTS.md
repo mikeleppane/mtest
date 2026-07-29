@@ -315,22 +315,29 @@ Hosted CI runs the same logical floor as two platform-local chains:
 - Every lane runs on every pull request and configured main-branch push, not on
   a schedule — but **running is not the same as blocking**. Which contexts block
   a merge is configured in repository settings, not in this repo, and the two
-  lists have already drifted apart: the active `mtest-branch-rules` ruleset
-  requires 16 contexts and does not include `Linux / cache protocol`,
-  `Linux / build stamp`, `macOS arm64 / cache protocol`, or
-  `macOS arm64 / build stamp`, nor either CodeQL job (`C and C++`, `Python`).
-  Those six run and report, and a red one does not stop a merge. Adding,
-  renaming, or splitting a lane must update the required-context list in the
-  same change; a workflow edit alone silently produces a lane nobody is
-  required to pass.
+  lists have drifted apart before: the `cache protocol` and `build stamp` cells
+  ran unrequired on both platforms from the day they were added until the
+  ruleset was corrected to the 20 contexts listed below. Adding, renaming, or
+  splitting a lane must update the required-context list in the same change; a
+  workflow edit alone silently produces a lane nobody is required to pass, and
+  nothing in this repository can detect that.
+- The two CodeQL jobs (`C and C++`, `Python`) are deliberately not status-check
+  contexts. Merge protection for them comes from the ruleset's `code_scanning`
+  rule instead, which blocks on a CodeQL alert at high-or-higher security
+  severity or an error-level quality alert. A green CodeQL job proves only that
+  analysis uploaded; the alert threshold is what proves nothing was found. The
+  sanitizer negative controls under `MTEST_EXEC_TESTING` are dismissed there as
+  used-in-tests, on the standing evidence that `TEST_ONLY_SYMBOLS` in
+  `scripts/checks/native_abi.py` proves them absent from the production object.
 - Transcripts and ASan/Valgrind stay Linux-only. Packaged-artifact consumption
   is blocking on both linux-64 and osx-arm64, one job per platform, both
   running `pixi run package-check`.
 - A job's display name is its status-check context, so every name the ruleset
-  requires must stay byte-stable. The 16 currently required are `preflight`,
-  `direct tests`, `assertions`, `self-hosted tests`, `end-to-end tests`,
-  `strict contract`, and `packaged artifact` on both `Linux /` and
-  `macOS arm64 /`, plus `Linux / ASan + LSan` and
+  requires must stay byte-stable. The 20 currently required are nine names
+  carried on both `Linux /` and `macOS arm64 /` — `preflight`, `direct tests`,
+  `assertions`, `self-hosted tests`, `end-to-end tests`, `strict contract`,
+  `cache protocol`, `build stamp`, `packaged artifact` — plus the two
+  Linux-only memory lanes, `Linux / ASan + LSan` and
   `Linux / Valgrind Memcheck`. Renaming one does not red the lane; it removes
   the lane from the required set and leaves a permanently pending context in
   its place.
