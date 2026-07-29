@@ -2,15 +2,12 @@
 """Run mtest's guarded end-to-end gate.
 
 The harness drives the real ``build/mtest`` binary against the committed
-known-outcome tree under ``e2e/``. Expectations come from
-``e2e/manifest.json``, and every child process is guarded by the shared runner.
+known-outcome tree under ``e2e/``, with expectations from ``e2e/manifest.json``
+and every child process guarded by the shared runner.
 
-The closing ``<passed>/<total> scenarios passed`` banner is computed from the
-results this run actually produced, and the registry it iterates is the
-``SCENARIOS`` tuple below. No scenario total is written down anywhere in this
-package: a hand-maintained count would keep reading as proof long after it
-stopped being true, so ``scripts/tests/test_e2e.py`` fails if a docstring here
-starts carrying one.
+No scenario total is written down anywhere in this package: a hand-maintained
+count would keep reading as proof after it stopped being true, so
+``scripts/tests/test_e2e.py`` fails if a docstring here carries one.
 
 Usage: ``python -m scripts.e2e``
 """
@@ -31,10 +28,9 @@ from scripts.e2e.runner import (
     load_manifest,
 )
 
-# Re-exported on purpose, in the redundant-alias form that declares it:
-# `scripts/tests/test_e2e.py` asserts this entrypoint's `ScenarioContext` IS the
-# runner's, so the name belongs to this module's surface, not to an incidental
-# import. The alias is what makes that export explicit rather than implicit.
+# Re-exported deliberately: `scripts/tests/test_e2e.py` asserts this
+# entrypoint's `ScenarioContext` IS the runner's, so the redundant alias makes
+# the export explicit.
 from scripts.e2e.runner import ScenarioContext as ScenarioContext  # noqa: PLC0414
 from scripts.e2e.scenarios import annotations as annotations_scenarios
 from scripts.e2e.scenarios import (
@@ -68,9 +64,9 @@ class Harness:
             self.results.append((name, False, str(exc)))
             print(f"FAIL  {name}\n      {exc}")
         except Exception as exc:  # noqa: BLE001 - containment boundary, see below
-            # CONTAINMENT. ScenarioError above is the expected failure channel;
-            # any other exception is still a real failure, but it must not hide
-            # the coverage provided by every later registered scenario.
+            # ScenarioError is the expected failure channel. Any other exception
+            # is a real failure too, but it must not cost the coverage of every
+            # later registered scenario.
             detail = (
                 f"{type(exc).__name__} escaped the scenario outside the "
                 f"expected ScenarioError channel — cause undetermined, see the "
@@ -85,13 +81,11 @@ class Harness:
         return all(passed for _name, passed, _detail in self.results)
 
 
-# The sole master registry, in execution order, and the only place a scenario
-# is written down: nothing else in this repository restates these names, so
-# registering one is this single line. Keep the core and resilience scenarios
-# interleaved -- order is user-visible gate behavior -- and keep
-# `manifest-completeness` first, which is the one ordering constraint a test
-# pins, so a manifest drift fails before the rest of the gate spends its build
-# time.
+# The master registry, in execution order, and the only place a scenario is
+# written down. Keep the core and resilience scenarios interleaved (order is
+# user-visible gate behavior) and keep `manifest-completeness` first, the one
+# ordering constraint a test pins, so a manifest drift fails before the gate
+# spends its build time.
 SCENARIOS: ScenarioRegistry = (
     ("manifest-completeness", core.s_manifest_completeness),
     ("resilience-matrix", resilience.s_resilience_matrix),

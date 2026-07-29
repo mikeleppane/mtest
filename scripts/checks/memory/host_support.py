@@ -6,18 +6,16 @@ manifest's platform-scoped override replaces this command with a dependency
 edge onto `asan-check` and `valgrind-check`, so this module never runs there.
 Everywhere else it is what `ci-memory` actually executes.
 
-Both lanes are linux-64 only, and for different reasons. Memcheck is pinned
-under `[target.linux-64.dependencies]`, so the binary does not exist on any
-other platform. The ASan lane's negative controls, leak accounting, and
-symbolized frame expectations were built and pinned against the Linux
-toolchain, and no hosted cell exercises them on Darwin. Silently succeeding
-would let a macOS `pixi run ci` claim a memory-safety verdict it never
-computed, so this prints exactly what went uncovered and names the lanes that
-own it.
+Both lanes are linux-64 only, for different reasons. Memcheck is pinned under
+`[target.linux-64.dependencies]`, so the binary does not exist elsewhere. The
+ASan lane's negative controls, leak accounting and symbolized frame
+expectations were pinned against the Linux toolchain, and no hosted cell
+exercises them on Darwin. Silently succeeding would let a macOS `pixi run ci`
+claim a memory-safety verdict it never computed, so this prints what went
+uncovered and names the lanes that own it.
 
-Reaching this module ON linux-64 means the platform override was lost — a
-manifest edit that quietly demoted the whole point of the aggregate. That is
-the one case here that fails closed.
+Reaching this module ON linux-64 means the platform override was lost to a
+manifest edit. That is the one case here that fails closed.
 """
 
 from __future__ import annotations

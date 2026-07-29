@@ -8,7 +8,6 @@ waiting out a deadline.
 Kept in its own module because the interrupt flag latches until explicit reset
 or the next runtime open, so these tests share no state with the others.
 """
-from std.ffi import external_call
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
 
 from mtest.exec import (
@@ -20,6 +19,7 @@ from mtest.exec import (
 from mtest.exec.signals import _reset_interrupt, _raise_self
 
 from exec_helpers import target, true_binary, py_spec
+from foreign_abi import configure_native_fault, reset_native_faults
 
 comptime _SIGINT = 2
 comptime _EIO = 5
@@ -29,23 +29,6 @@ comptime _OP_RESTORE_INT = 6
 comptime _OP_POLL = 26
 comptime _OP_GROUP_TERM = 32
 comptime _OP_GROUP_KILL = 33
-
-
-def _reset_faults():
-    """Clear the isolated testing adapter's native fault table."""
-    # SAFETY: this test-only ABI takes no pointer, retains nothing, and mutates
-    # only the testing adapter's single-threaded fault configuration.
-    external_call["mtest_exec_test_fault_reset", NoneType]()
-
-
-def _configure_fault(operation: Int, error_number: Int) raises:
-    """Fail the first occurrence of one native adapter operation."""
-    # SAFETY: the test-only ABI takes scalar discriminators only. Both values
-    # are exact enum/errno constants, and no pointer or state escapes the call.
-    var result = external_call["mtest_exec_test_fault_configure", Int32](
-        UInt32(operation), UInt32(1), Int32(error_number), Int64(0)
-    )
-    assert_equal(result, Int32(0), "could not configure native fault")
 
 
 def test_sigaction_self_signal_flips_flag() raises:
@@ -109,8 +92,8 @@ def test_second_active_runtime_is_rejected_without_ownership() raises:
 
 
 def test_install_failure_with_rollback_leaves_token_inactive() raises:
-    _reset_faults()
-    _configure_fault(_OP_INSTALL_TERM, _EIO)
+    reset_native_faults()
+    configure_native_fault(_OP_INSTALL_TERM, 1, _EIO)
     var runtime = ExecRuntime()
     var message = String("")
     try:
@@ -118,7 +101,7 @@ def test_install_failure_with_rollback_leaves_token_inactive() raises:
     except e:
         message = String(e)
     var owned_after_failure = runtime.active
-    _reset_faults()
+    reset_native_faults()
     runtime.open()
     runtime.close()
     assert_equal(message, "exec: runtime open failed (operation 5, errno 5)")
@@ -129,9 +112,9 @@ def test_install_failure_with_rollback_leaves_token_inactive() raises:
 
 
 def test_rollback_failure_keeps_token_owning_until_explicit_repair() raises:
-    _reset_faults()
-    _configure_fault(_OP_INSTALL_TERM, _EIO)
-    _configure_fault(_OP_RESTORE_INT, _EPERM)
+    reset_native_faults()
+    configure_native_fault(_OP_INSTALL_TERM, 1, _EIO)
+    configure_native_fault(_OP_RESTORE_INT, 1, _EPERM)
     var runtime = ExecRuntime()
     var message = String("")
     try:
@@ -143,7 +126,7 @@ def test_rollback_failure_keeps_token_owning_until_explicit_repair() raises:
         owned_after_failure,
         "failed rollback must remain owned by the existing token",
     )
-    _reset_faults()
+    reset_native_faults()
     runtime.close()
     var owned_after_repair = runtime.active
     runtime.open()
@@ -162,23 +145,23 @@ def test_rollback_failure_keeps_token_owning_until_explicit_repair() raises:
 
 
 def test_failed_explicit_repair_remains_owned_for_retry() raises:
-    _reset_faults()
-    _configure_fault(_OP_INSTALL_TERM, _EIO)
-    _configure_fault(_OP_RESTORE_INT, _EPERM)
+    reset_native_faults()
+    configure_native_fault(_OP_INSTALL_TERM, 1, _EIO)
+    configure_native_fault(_OP_RESTORE_INT, 1, _EPERM)
     var runtime = ExecRuntime()
     try:
         runtime.open()
     except:
         pass
-    _reset_faults()
-    _configure_fault(_OP_RESTORE_INT, _EIO)
+    reset_native_faults()
+    configure_native_fault(_OP_RESTORE_INT, 1, _EIO)
     var message = String("")
     try:
         runtime.close()
     except e:
         message = String(e)
     var owned_after_failed_repair = runtime.active
-    _reset_faults()
+    reset_native_faults()
     runtime.close()
     var owned_after_retry = runtime.active
     runtime.open()
@@ -192,9 +175,9 @@ def test_failed_explicit_repair_remains_owned_for_retry() raises:
 
 
 def test_cleanup_diagnostic_does_not_leak_native_child_slot() raises:
-    _reset_faults()
-    _configure_fault(_OP_POLL, _EIO)
-    _configure_fault(_OP_GROUP_TERM, _EIO)
+    reset_native_faults()
+    configure_native_fault(_OP_POLL, 1, _EIO)
+    configure_native_fault(_OP_GROUP_TERM, 1, _EIO)
     var runtime = ExecRuntime()
     runtime.open()
     var sleeper = List[String]()
@@ -204,7 +187,7 @@ def test_cleanup_diagnostic_does_not_leak_native_child_slot() raises:
         _ = run_supervised(runtime, py_spec(sleeper^, 0))
     except e:
         message = String(e)
-    _reset_faults()
+    reset_native_faults()
 
     var followup = List[String]()
     followup.append(true_binary())
@@ -225,10 +208,10 @@ def test_cleanup_diagnostic_does_not_leak_native_child_slot() raises:
 def test_runtime_close_retries_a_retained_native_child_handle() raises:
     """The runtime token repairs a failed abort sweep before releasing signals.
     """
-    _reset_faults()
-    _configure_fault(_OP_POLL, _EIO)
-    _configure_fault(_OP_GROUP_TERM, _EIO)
-    _configure_fault(_OP_GROUP_KILL, _EIO)
+    reset_native_faults()
+    configure_native_fault(_OP_POLL, 1, _EIO)
+    configure_native_fault(_OP_GROUP_TERM, 1, _EIO)
+    configure_native_fault(_OP_GROUP_KILL, 1, _EIO)
     var runtime = ExecRuntime()
     runtime.open()
     var sleeper = List[String]()
@@ -242,7 +225,7 @@ def test_runtime_close_retries_a_retained_native_child_handle() raises:
     # The first abort could not prove the group sweep and deliberately retained
     # its native handle. Clear the one-shot faults, then require the existing
     # ExecRuntime owner to retry that exact handle before restoring dispositions.
-    _reset_faults()
+    reset_native_faults()
     runtime.close()
     assert_false(runtime.active, "successful repair must release the runtime")
 

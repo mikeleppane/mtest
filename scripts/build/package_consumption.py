@@ -3,47 +3,42 @@
 
 `recipe/recipe.yaml` builds mtest into a LOCAL conda channel with a
 `mojo-compiler ==1.0.0b2` run dependency (see `pixi run package-build`). That
-proves the recipe *solves*; it does not prove the artifact it produces is
-actually consumable by someone who only has the package, not this repo's dev
-toolchain. This script is that proof, with ten ordered completion records:
+proves the recipe solves; it does not prove the artifact is consumable by
+someone who has only the package and not this repo's dev toolchain. This script
+is that proof, with ten ordered completion records:
 
-  1. Build the package into a LOCAL channel (`pixi run package-build`,
-     unmodified -- this script reuses that exact task rather than duplicating
-     its command). No network beyond the solve; nothing is uploaded. The stage
-     returns the ONE artifact it produced, identified by version, build string,
-     subdir, and SHA-256.
+  1. Build the package into a LOCAL channel through the unmodified
+     `pixi run package-build` task. Returns the ONE artifact it produced,
+     identified by version, build string, subdir, and SHA-256.
   2. Install that exact artifact into a FRESH scratch pixi env, solving from
-     the LOCAL channel plus the modular + conda-forge channels (needed to
-     resolve the declared run dependencies). The matchspec is constrained to
-     the produced version AND build string, and the installed
-     `conda-meta/mtest-<version>-<build>.json` record is then compared against
-     the built artifact's SHA-256 and subdir: a same-version package pulled
-     from a remote channel fails here. Also confirms the solve pulled
+     the LOCAL channel plus the modular and conda-forge channels (needed to
+     resolve the declared run dependencies). The matchspec pins the produced
+     version AND build string, and the installed
+     `conda-meta/mtest-<version>-<build>.json` record is compared against the
+     built artifact's SHA-256 and subdir, so a same-version package pulled from
+     a remote channel fails here. Also confirms the solve pulled
      `mojo-compiler ==1.0.0b2`.
-  3. LOADER-CLEAN PROBE FIRST, on the INSTALLED binary: run `mtest --version`
-     and `mtest --help` with THIS PROCESS's own child environment scrubbed --
-     the dev pixi env absent from PATH, this platform's loader-path variables
-     empty. This is us scrubbing our own env for our own artifact, not the
-     forbidden child-process env scrub inside the product. The raw dev build
-     (`build/mtest`) is NOT loader-clean this way: it needs the Mojo runtime
-     libraries, which the dev pixi env supplies but a scrubbed env does not.
-     The INSTALLED package must be loader-clean via the declared Mojo runtime
-     dependency. The same scrubbed probe parses a present config before an
-     expected discovery refusal. A loader failure here is a recipe
-     run-dependency gap, not a retry-able flake -- this script stops and
-     reports it.
+  3. LOADER-CLEAN PROBE on the INSTALLED binary: run `mtest --version` and
+     `mtest --help` with THIS PROCESS's own child environment scrubbed, the dev
+     pixi env absent from PATH and this platform's loader-path variables empty.
+     The raw dev build `build/mtest` is NOT loader-clean this way, since it
+     needs Mojo runtime libraries the dev pixi env supplies; the INSTALLED
+     package must be, via its declared Mojo runtime dependency. The same
+     scrubbed probe parses a present config before an expected discovery
+     refusal. A loader failure here is a recipe run-dependency gap rather than
+     a retry-able flake, so the gate stops and reports it.
   4. Compile and run the installed assertion source at `-O0` and `-O3` with
      the exact compiler installed as the package's run dependency.
   5. Run the committed assertion example through the installed binary and
      compare its normalized output byte-for-byte with the README.
-  6. Toolchain-threaded dogfood run: three focused executable probes, run
-     through the INSTALLED binary (never `build/mtest`). Unlike stage 3, this
-     stage does NOT scrub the environment -- the probes' compiler children need
+  6. Toolchain-threaded dogfood run: three focused executable probes through
+     the INSTALLED binary (never `build/mtest`). Unlike stage 3, this stage
+     inherits the environment, because the probes' compiler children need
      `mojo` on PATH. Reuses dogfood's exact-membership gate, parameterized onto
      the installed binary.
   7. Known-failing fixture run through the INSTALLED binary. A green dogfood
      run only proves the package can report success; this stage proves it
-     reports FAILURE truthfully -- exact exit 1, exactly one FAIL verdict row
+     reports FAILURE truthfully: exact exit 1, exactly one FAIL verdict row
      naming the fixture, no PASS verdict row, and a summary carrying the
      fixture's one failure with nothing left unrun.
   8-10. Tarball fallback: build the SAME recipe in the classic tar-bz2
@@ -54,11 +49,11 @@ toolchain. This script is that proof, with ten ordered completion records:
 
 Both gated platforms run this identical gate: the subdir, the loader-inspection
 command, and the loader environment variables come from one immutable
-descriptor resolved for the host (`package_platform`), never from a constant.
+descriptor resolved for the host (`package_platform`).
 
 The scratch envs live under build/ (gitignored); nothing here uploads,
-publishes, or authenticates anywhere. `mojo run` never appears -- every binary
-is BUILT then EXECUTED directly.
+publishes, or authenticates anywhere. `mojo run` never appears: every binary is
+BUILT then EXECUTED directly.
 
 Usage:  pixi run package-check
         python -m scripts.build.package_consumption
@@ -91,17 +86,15 @@ RECIPE_PATH = REPO_ROOT / "recipe" / "recipe.yaml"
 CHECKOUT_ASSERTION_SOURCE_ROOT = REPO_ROOT / "companions" / "assertions" / "src"
 INSTALLED_ASSERTION_SOURCE_RELATIVE = Path("share/mtest/companions/assertions/src")
 
-# Where `pixi run package-build` (invoked unmodified by `build`) writes the
-# primary `.conda` local channel -- must match that task's `--output-dir` in
-# pixi.toml exactly, since `install` solves against it.
+# Where `pixi run package-build` writes the primary `.conda` local channel.
+# Must match that task's `--output-dir` in pixi.toml, since `install` solves
+# against it.
 CONDA_CHANNEL_DIR = REPO_ROOT / "build" / "conda-channel"
-# This script's own local channel for the tar-bz2 fallback form --
-# kept separate from CONDA_CHANNEL_DIR so the two package formats never mix in
-# one repodata.
+# This script's own local channel for the tar-bz2 fallback form, kept separate
+# from CONDA_CHANNEL_DIR so the two package formats never mix in one repodata.
 TARBALL_CHANNEL_DIR = REPO_ROOT / "build" / "conda-channel-tarball"
-# Root for every scratch pixi env this script creates. Wiped and recreated
-# fresh on every run so a stale prior install can never masquerade as today's
-# proof.
+# Root for every scratch pixi env this script creates. Wiped and recreated on
+# every run so a stale prior install cannot masquerade as today's proof.
 SCRATCH_ROOT = REPO_ROOT / "build" / "package-check"
 CONDA_ENV_DIR = SCRATCH_ROOT / "conda-env"
 TARBALL_ENV_DIR = SCRATCH_ROOT / "tarball-env"
@@ -110,17 +103,17 @@ LOADER_PROBE_CWD = SCRATCH_ROOT / "loader-probe-cwd"
 MODULAR_CHANNEL = "https://conda.modular.com/max/"
 CONDA_FORGE_CHANNEL = "conda-forge"
 
-# The known-failing fixture stage drives through the installed binary. It is
-# an e2e fixture with a declared, manifest-pinned outcome (verdict FAIL, exit
-# class 1, two passing and one failing test); scripts/checks/layout.py fails the
-# cheap harness gate if that declaration and these constants ever disagree.
+# The known-failing fixture stage drives through the installed binary. It is an
+# e2e fixture with a manifest-pinned outcome (verdict FAIL, exit class 1, two
+# passing and one failing test); scripts/checks/layout.py fails the cheap
+# harness gate if that declaration and these constants ever disagree.
 FAILING_FIXTURE = "e2e/suite/test_failing.mojo"
 FAILING_FIXTURE_PASSED = 2
 FAILING_FIXTURE_FAILED = 1
 
 
 class PackageCheckError(RuntimeError):
-    """A stage failed and the gate must stop -- never papered over."""
+    """A stage failed and the gate must stop."""
 
 
 @dataclass(frozen=True)
@@ -142,8 +135,8 @@ class PackagePlatform:
 
 
 # The exact `(sys.platform, platform.machine())` pairs this gate supports. Both
-# are blocking CI lanes; anything else is an unproven target and must stop the
-# gate rather than silently borrow another platform's answers.
+# are blocking CI lanes; anything else is an unproven target and stops the gate
+# rather than borrowing another platform's answers.
 SUPPORTED_PLATFORMS: dict[tuple[str, str], PackagePlatform] = {
     ("linux", "x86_64"): PackagePlatform(
         subdir="linux-64",
@@ -213,9 +206,9 @@ class BuiltArtifact:
 
 
 # Artifacts dogfood needs from THIS repo checkout (not from the isolated
-# rattler-build sandbox): the precompiled package the probes import against,
-# and the test-variant native object linked into each probe build -- the exact
-# pair scripts/harness/dogfood.py uses for `pixi run dogfood-check`.
+# rattler-build sandbox): the precompiled package the probes import against and
+# the test-variant native object linked into each probe build, the same pair
+# scripts/harness/dogfood.py uses for `pixi run dogfood-check`.
 MOJOPKG_INCLUDE_DIR = REPO_ROOT / "build"
 NATIVE_TEST_OBJECT = REPO_ROOT / "build" / "native" / "mtest_exec_native_test.o"
 
@@ -250,11 +243,9 @@ SUMMARY_RE = re.compile(
 INSTALLED_ASSERTION_FILES = {Path(name) for name in COMPANION_FILES}
 """What a correct install of the assertion companion contains, borrowed.
 
-`scripts/release/public_verify.py` owns this membership because it is the one
-place that cannot derive it -- see the reason recorded there. Restating it
-here would create a second list that can disagree with the first, and the
-gate would then be pinning the copies to each other rather than to what
-ships.
+`scripts/release/public_verify.py` owns this membership (the reason is recorded
+there). Restating it here would create a second list that can disagree with the
+first, pinning the copies to each other rather than to what ships.
 """
 INSTALLED_ASSERTION_DIRECTORIES = {
     parent for path in INSTALLED_ASSERTION_FILES for parent in path.parents
@@ -299,9 +290,9 @@ ASSERTION_CONSOLE_FENCE = "```console\n"
 
 
 # The exact roster of stages one full gate run must perform, in order. The
-# closing summary is DERIVED from what actually ran (see `completed_stages`),
-# never assembled from this roster: a gate that skips a proof while printing
-# that the proof happened is worse than one that omits it honestly.
+# closing summary is DERIVED from what actually ran (see `completed_stages`)
+# rather than assembled from this roster, so a skipped proof cannot be printed
+# as though it happened.
 GATE_STAGE_IDS = (
     "build",
     "install",
@@ -1155,12 +1146,11 @@ def _run_streamed(
 ) -> int:
     """Run `argv` with stdout/stderr passed straight through to ours.
 
-    Passing the streams through keeps the transcript visible live. The run is
-    held to a hard wall-clock ceiling.
-
-    `env=None` means inherit this process's own environment unchanged --
-    stages 1, 2, 4, and 5 rely on that to keep `mojo`/`rattler-build`/`pixi` on
-    PATH. Only the stage-3 loader-clean probe passes an explicit, scrubbed env.
+    Pass-through keeps the transcript visible live; the run is still held to a
+    hard wall-clock ceiling. `env=None` inherits this process's environment
+    unchanged, which stages 1, 2, 4, and 5 rely on to keep `mojo`,
+    `rattler-build`, and `pixi` on PATH. Only the stage-3 loader-clean probe
+    passes an explicit, scrubbed env.
     """
     print(f"$ {' '.join(argv)}", flush=True)
     try:
@@ -1196,8 +1186,7 @@ def sole_built_artifact(
     """Identify the ONE artifact a build stage just wrote into a local channel.
 
     The channel directory is wiped before every build, so more than one match
-    means the build produced an ambiguity the later stages could silently
-    resolve the wrong way.
+    is an ambiguity later stages could resolve the wrong way.
 
     Args:
         channel_dir: Local channel root the build wrote into.
@@ -1236,8 +1225,7 @@ def stage_build_local_channel(target: PackagePlatform | None = None) -> BuiltArt
     """Build the recipe into the LOCAL channel.
 
     Goes through the unmodified `package-build` pixi task, and wipes any prior
-    channel dir first so this run's artifact can never be mistaken for a stale
-    one.
+    channel dir first so this run's artifact cannot be mistaken for a stale one.
 
     Args:
         target: Platform descriptor to build for; the host's when omitted.
@@ -1460,10 +1448,9 @@ def scrubbed_probe_env(target: PackagePlatform) -> dict[str, str]:
     """Build the loader-clean child environment for one platform.
 
     Only PATH, HOME, and that platform's loader search-path variables are
-    present: PATH without the dev pixi env, and every loader variable empty.
-    Anything absent from this mapping is absent from the child's environment,
-    which is the point -- the installed binary must load from its own declared
-    run dependencies alone.
+    present: PATH without the dev pixi env, every loader variable empty.
+    Anything absent from this mapping is absent from the child's environment, so
+    the installed binary must load from its own declared run dependencies alone.
 
     Args:
         target: The resolved platform descriptor.
@@ -1484,12 +1471,11 @@ def stage_loader_clean_probe(mtest_bin: Path, target: PackagePlatform) -> None:
 
     Probes `--version` and `--help` with our own child environment scrubbed
     clean of the dev pixi env (PATH) and of this platform's loader search paths.
-
-    This is us scrubbing OUR OWN subprocess environment to probe OUR OWN
-    artifact -- not the forbidden child-env scrub inside the product itself.
-    If the binary can only load with the dev toolchain on PATH, the recipe's
-    declared runtime dependency set is not actually sufficient, and that is a
-    packaging gap this script must stop and report, not paper over.
+    That is us scrubbing OUR OWN subprocess environment to probe OUR OWN
+    artifact, not the forbidden child-env scrub inside the product. If the
+    binary loads only with the dev toolchain on PATH, the recipe's declared
+    runtime dependency set is insufficient, and that packaging gap must stop the
+    gate.
 
     Args:
         mtest_bin: The installed binary to probe.
@@ -1611,11 +1597,10 @@ def stage_suite_run_with_installed_binary(mtest_bin: Path) -> None:
     """Run focused dogfood probes through the INSTALLED binary.
 
     The environment is fully inherited (unlike loader-clean) so probe compiler
-    children can resolve `mojo` on PATH.
-
-    Reuses dogfood's membership-and-completeness gate, which
-    itself defaults to build/mtest for `pixi run dogfood-check` -- here it is
-    parameterized onto the installed binary instead.
+    children can resolve `mojo` on PATH. Reuses dogfood's
+    membership-and-completeness gate, which defaults to build/mtest for
+    `pixi run dogfood-check` and is parameterized onto the installed binary
+    here.
 
     Args:
         mtest_bin: The installed binary to drive the probes with.
@@ -1654,11 +1639,8 @@ def check_failing_fixture_consumption(
     """Judge one installed-binary run against the known-failing fixture.
 
     Separated from the run itself so every rejection this gate must make can be
-    exercised against a recorded transcript. Each guard names one property: the
-    transcript came from this package's binary; the process exited exactly 1;
-    the fixture got exactly one FAIL verdict row; no file was reported PASS; no
-    other file was reported at all; the summary carries the fixture's one
-    failure and its two passing tests; and nothing was left unrun.
+    exercised against a recorded transcript. Each guard below names one
+    property the transcript must have.
 
     Args:
         returncode: Exit status the installed binary returned.
@@ -1738,11 +1720,10 @@ def check_failing_fixture_consumption(
 def stage_failing_fixture_consumption(mtest_bin: Path, version: str) -> None:
     """Drive the known-failing fixture through the INSTALLED binary.
 
-    Dogfood proves the package can report success. This stage proves it reports
-    FAILURE truthfully, which is the half a consuming CI actually depends on.
-    The environment is inherited (as in dogfood) so the fixture's compiler child
-    can resolve `mojo`; project configuration is disabled so the verdict comes
-    from the fixture alone.
+    Dogfood proves the package can report success; this stage proves it reports
+    FAILURE truthfully. The environment is inherited (as in dogfood) so the
+    fixture's compiler child can resolve `mojo`; project configuration is
+    disabled so the verdict comes from the fixture alone.
 
     Args:
         mtest_bin: The installed binary to run.

@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
 """Format, lint, and type-check the repository's Python tooling.
 
-Python is build and check tooling here, never product code, so it is not a
-pixi dependency and neither are its tools. `uvx` fetches ruff and mypy at the
-versions pinned below into its own cache and runs them there, which keeps the
-environment the product builds in unchanged. That is also why this check is
-absent from `pixi run ci` and from the hosted workflow: `uv` is a developer
-tool on the contributor's machine, not something the gate may assume, and a
-gate that silently passes when its tool is missing is worse than no gate.
+Python is build and check tooling here, never product code, so neither it nor
+its tools are pixi dependencies. `uvx` fetches ruff and mypy at the versions
+pinned below into its own cache and runs them there, leaving the environment the
+product builds in untouched. That is also why this check is absent from `pixi
+run ci`: `uv` is a developer tool on the contributor's machine, and a gate that
+silently passes when its tool is missing is worse than no gate. A gate may run
+this check exactly when it supplies the tool itself, which the hosted `Python
+quality` job does by installing a pinned `uv` first.
 
-The versions are exact on purpose. A floating formatter reformats the tree on
-its next release and every diff after that carries unrelated churn, so the pin
-is what makes `--check` mode a stable verdict rather than a moving one.
+The versions are exact so the verdict is a property of the tree rather than of
+the day. A floating formatter reformats the tree on its next release, and every
+diff after that carries unrelated churn.
 
 Two modes:
 
 - `--fix` rewrites files in place: ruff's safe lint fixes, then ruff format.
-  This is what `pixi run py-fmt` runs before committing. The order matters and
-  is not interchangeable: a lint fix edits code and can leave formatting
-  residue behind it, so formatting has to come second or `py-fmt` exits 0 on a
-  tree that `py-check` then rejects. Formatting never introduces a finding the
-  lint fixer would have removed, so one pass in this order is a fixed point.
+  This is what `pixi run py-fmt` runs before committing. The order matters. A
+  lint fix edits code and can leave formatting residue behind it, so formatting
+  has to come second or `py-fmt` exits 0 on a tree `py-check` then rejects.
+  Formatting never introduces a finding the lint fixer would have removed, so
+  one pass in this order is a fixed point.
 - default (check) mode rewrites nothing and fails on any finding: formatting
-  drift, a lint finding, or a mypy error. This is what `pixi run py-check`
-  runs, and it is the verdict.
+  drift, a lint finding, or a mypy error. This is the verdict `pixi run
+  py-check` reports.
 """
 
 from __future__ import annotations
@@ -37,10 +38,10 @@ import sys
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 RUFF_VERSION = "0.16.0"
-"""The pinned ruff release. Bumping it can reformat the tree; do that alone."""
+"""The exact ruff release. Bumping it can reformat the tree; do that alone."""
 
 MYPY_VERSION = "2.1.0"
-"""The pinned mypy release. Bumping it can surface new errors; do that alone."""
+"""The exact mypy release. Bumping it can surface new errors; do that alone."""
 
 RUFF = ("uvx", f"ruff@{RUFF_VERSION}")
 MYPY = ("uvx", "--from", f"mypy=={MYPY_VERSION}", "mypy")
@@ -89,10 +90,8 @@ def _missing_uvx() -> str | None:
 def quality_steps(*, fix: bool) -> tuple[tuple[str, tuple[str, ...]], ...]:
     """Return the ordered (label, argv) steps for one mode.
 
-    Split out from `main` so the step list is checkable without running the
-    tools: what matters is that check mode rewrites nothing and still runs
-    mypy, that fix mode lints before it formats, and that both modes pin their
-    tool versions.
+    Split out from `main` so the step list is testable without running the
+    tools.
 
     Args:
         fix: True for the in-place mode, False for the verdict mode.

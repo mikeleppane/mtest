@@ -15,16 +15,10 @@ from std.testing import assert_equal, assert_true, assert_false, TestSuite
 from mtest.exec import ExecRuntime, ProcessSpec, run_supervised
 
 from exec_helpers import target, py_spec
+from foreign_abi import native_test_constant
 
 comptime _CONSTANT_SIGCHLD = 1
 comptime _SIG_IGN = 1
-
-
-def _native_constant(constant_id: Int) -> Int32:
-    """Read one platform-header value from the testing adapter."""
-    # SAFETY: this test-only ABI takes one scalar closed identifier and returns
-    # one scalar C-header constant. It receives no pointer and retains no state.
-    return external_call["mtest_exec_test_constant", Int32](UInt32(constant_id))
 
 
 def _inherit_sigchld_ignored():
@@ -35,7 +29,7 @@ def _inherit_sigchld_ignored():
     # sentinel are valid; no pointer argument is retained, and ExecRuntime
     # saves/restores this state.
     _ = external_call["signal", Int](
-        _native_constant(_CONSTANT_SIGCHLD), Int(_SIG_IGN)
+        native_test_constant(_CONSTANT_SIGCHLD), Int(_SIG_IGN)
     )
 
 

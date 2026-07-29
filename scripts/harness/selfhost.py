@@ -1,123 +1,85 @@
 #!/usr/bin/env python3
 """Run mtest over its own classified suite and refuse to believe its report.
 
-This lane is circular on purpose: `build/mtest` discovers, builds, runs and
-reports mtest's own 101 classified test files. Circularity is exactly what makes
-mtest's own verdict worthless as evidence here — a runner that lost half its
-inventory, or collected zero tests from every file it found, still prints a
-well-formed report and still exits 0. Two concrete holes make that concrete:
+The lane is circular on purpose: `build/mtest` discovers, builds, runs and
+reports mtest's own 101 classified test files, which is what makes mtest's own
+verdict worthless as evidence. A runner that lost half its inventory, or
+collected zero tests from every file, still prints a well-formed report and
+exits 0. Two holes make that concrete:
 
-- **The zero-collection PASS.** A module with `main()` and no collected tests
-  builds, runs, prints "0 tests run" and exits 0, and
-  `src/mtest/session/classify.mojo` classifies that PASS *by design* ("this
-  includes the zero-test PASS"), with `e2e/suite/test_zero.mojo` pinning it as
-  the documented ceiling. The e2e lane is therefore the specification of that
-  hole, not a check on it: e2e stays green on a run where every classified
-  module collected nothing.
-- **Scale-dependent truncation.** The exec supervision ceiling is 64 in both
-  layers (`native/mtest_exec_native.c` `MTEST_EXEC_SLOT_CAPACITY`,
+- A module with `main()` and no collected tests builds, runs, prints "0 tests
+  run" and exits 0, and `src/mtest/session/classify.mojo` classifies that PASS
+  by design, with `e2e/suite/test_zero.mojo` pinning it as the documented
+  ceiling. The e2e lane specifies that hole rather than checking it.
+- The exec supervision ceiling is 64 in both layers
+  (`native/mtest_exec_native.c` `MTEST_EXEC_SLOT_CAPACITY`,
   `src/mtest/exec/supervise.mojo` `_COMPILE_CAP`). A defect conflating that
   concurrency cap with a total-file cap would report 64 green files of 101 and
-  exit 0. The whole e2e tree is 41 files and its largest fixture has 12 tests,
-  so neither the file cap nor a four-digit count-accumulation defect can show
-  up there.
+  exit 0. The whole e2e tree is 41 files whose largest fixture has 12 tests, so
+  it cannot surface there.
 
-So this harness derives the truth independently, from the test sources on disk,
-and reconciles mtest's own reports against it. Two artifacts from one run are
-read by two independent parsers:
+So this harness derives the truth from the test sources on disk and reconciles
+mtest's reports against it. Two independent parsers read two artifacts from one
+run, plus the process exit code. The `--json` event stream is primary: per file,
+`file_finished` states that file's own `passed_tests`, `parse_disposition` and
+outcome, and `test_reported` NAMES every test, so the oracle asserts set
+equality between the names mtest reports and the names the source declares. A
+grand total cannot say that, since one module running a test twice while another
+runs none nets to the same number. The console report is a cross-check over the
+same run (header counts, the exact PASS-row path set, the summary band) in a
+different grammar read by a different parser. Any disagreement is a loud failure
+naming both sides, tagged `[json]` or `[console]`.
 
-- **`--json` machine event stream (primary).** Per file, `file_finished` states
-  that file's own `passed_tests`, `parse_disposition` and outcome, and
-  `test_reported` NAMES every test it reported. So the oracle asserts the
-  strongest statement these artifacts can support: for every file, the set of
-  test names mtest reports equals the set that file's source declares. A grand
-  total alone cannot say that -- one module running a test twice while another
-  runs none nets to the same number. Note what that statement is ABOUT: it is
-  agreement between mtest's report and an inventory derived independently of
-  it. It is not a witness that anything executed. See "What this oracle does
-  NOT prove" below.
-- **Console report (cross-check).** The session header's selected/excluded
-  counts, the exact set of paths in the PASS rows, and the summary band's
-  totals. A different grammar read by a different parser over the same run, so
-  the two disagreeing is itself a signal worth having.
+What this oracle does NOT prove. It proves mtest REPORTED, per file and by name,
+exactly the tests the sources declare right now. Two limits follow.
 
-Plus the process exit code. Any disagreement is a loud failure naming both
-sides and tagged with which parse objected. mtest's own summary is never taken
-as the answer: every name and count it prints is reconciled against one derived
-from the sources, so a report that agrees with itself but not with the tree is
-still a failure.
+It witnesses agreement, not execution. Every artifact it reads is one mtest
+produced, so a defect that collected test names, skipped running their bodies
+and emitted faithful-looking events would satisfy every check here. That hole is
+closed beside this lane: `e2e/manifest.json` requires 22 of its 41 fixtures to
+NOT report PASS (7 FAIL, 6 CRASH, 4 TIMEOUT, 3 MALFORMED-SUITE, 1 COMPILE-ERROR,
+1 DRIFT), and stage 7 of `scripts/build/package_consumption.py` proves the
+INSTALLED binary reports FAILURE truthfully. A fabricating mtest reds both.
 
-**What this oracle does NOT prove, stated plainly.** It proves mtest REPORTED,
-per file and by name, exactly the tests the sources declare *right now*. Two
-separate limits follow from that sentence, and both are worth naming.
+It cannot prove the sources still declare every test they used to. The inventory
+is derived from the tree on each run, so deleting a test function, renaming it
+off its `test_` prefix, or moving it into a `struct` moves the expected count
+down and a faithful mtest agrees with the smaller number. Verified: take a
+3-test file, move one `def test_*` into a struct, and the lane stays green while
+the total silently drops. The alternative is a committed expected count, the
+hand-maintained ledger this design exists to eliminate, which someone edits to
+make CI green and thereby turns a loud failure into a diff nobody reads.
 
-**It witnesses agreement, not execution.** Every artifact it reads is one mtest
-produced. A defect that collected test names, skipped running their bodies, and
-emitted faithful-looking events would satisfy every check here. That hole is
-not closed in this lane; it is closed beside it. `e2e/manifest.json` requires
-22 of its 41 fixtures to NOT report PASS (7 FAIL, 6 CRASH, 4 TIMEOUT, 3
-MALFORMED-SUITE, 1 COMPILE-ERROR, 1 DRIFT), and
-`scripts/build/package_consumption.py`'s stage 7 exists to prove the INSTALLED
-binary reports FAILURE truthfully -- a fabricating mtest turns all 22 of those
-green and reds e2e. So a defect that survived would have to be scoped
-specifically to the classified suite while behaving truthfully across six
-verdict classes elsewhere. Recorded honestly, not claimed as closed.
+The boundary:
 
-**It cannot prove the sources still declare every test they used to.** The
-inventory is derived from the tree on each run, so if a test function is
-deleted -- or renamed off its `test_` prefix, or moved into a `struct` where it
-is no longer a top-level `def` -- the expected count moves down with it and a
-faithful mtest run agrees with the smaller number and exits 0. Verified: take a
-3-test file, move one `def test_*` into a struct, and the lane stays green
-while the total silently drops.
+- Loud: a file that reaches ZERO top-level `def test_*`.
+  `independent_test_function_names` refuses to produce an empty inventory and
+  names the path.
+- Not loud: a file dropping from N to M tests where M > 0. The inventory becomes
+  M, and mtest is checked against M.
+- Not loud: a file LEAVING the tree, since membership is set-compared against
+  the tree as it is now. Measured on an out-of-tree copy driving the real binary
+  through this real oracle: deleting one whole classified file took a run from
+  34 tests to 10 and still printed `selfhost: OK`, rc=0.
 
-That is inherent to a derived oracle, and it is the correct trade. The only
-thing that would catch a partial removal is a committed expected count, which is
-exactly the hand-maintained ledger this design exists to eliminate -- a number
-someone updates to make CI green is worse than no number, because it converts a
-loud failure into a diff nobody reads. Losing a test to a source edit is a
-reviewable diff; losing one to a runner defect is not, and it is the second that
-this lane is here for.
+The sharpest removal is one character. `def test_foo` -> `def _test_foo` reads
+as a deliberate privatisation and leaves no signal in CI, as does a parametric
+signature such as `def test_foo[T: Copyable]()`, which this oracle's name check
+and Mojo's `discover_tests` drop in lockstep. If you are here because tests went
+missing, this rules out mtest having silently skipped them; check `git log -p`
+for the rest. `scripts/checks/layout.py`'s `check_classified_mojo_inventory`
+states the same boundary from the other side.
 
-The boundary is sharp and worth knowing before you rely on it:
+The inventory is derived, never declared: no committed path list, no committed
+test count, nothing a human edits when adding a test file or function. See
+`derive_inventory` and `independent_test_function_names`. That parser is a
+deliberate port rather than an import, because it must not share a regex or a
+helper with anything that also produces the report it reconciles.
 
-- **Loud:** a file that reaches ZERO top-level `def test_*`. The independent
-  parser refuses to produce an empty inventory for a file
-  (`independent_test_function_names` raises and names the path), so a module
-  emptied by a refactor or a bad merge fails the run rather than shrinking it.
-- **Not loud:** a file dropping from N to M tests where M > 0. The inventory
-  simply becomes M, and mtest is checked against M.
-- **Not loud:** a file LEAVING the tree. Membership is set-compared against the
-  tree as it is now, and no historical membership exists anywhere, so deleting
-  a classified file removes it from both sides of the comparison at once.
-  Measured on an out-of-tree copy, driving the real binary through this real
-  oracle: deleting one whole classified file took a run from 34 tests to 10 and
-  still printed `selfhost: OK`, rc=0.
-
-Do not read "someone deleted tests" as implying a large, obvious diff. The
-sharpest form is one character. `def test_foo` -> `def _test_foo` reads to a
-reviewer as a deliberate privatisation and removes a test from the suite with
-no signal anywhere in CI. The same is true of a parametric signature such as
-`def test_foo[T: Copyable]()`, which this oracle's name check and Mojo's
-`discover_tests` drop in lockstep.
-
-So: if you are here because tests went missing, this oracle rules out mtest
-having silently skipped them. It does not rule out someone having deleted them.
-Check `git log -p` on the test tree for that.
-`scripts/checks/layout.py`'s `check_classified_mojo_inventory` states the same
-boundary from the other side; neither replaces the deleted ledgers outright.
-
-The inventory is derived, never declared. There is no committed path list, no
-committed test count, and nothing a human edits when adding a test file or a
-test function -- see `derive_inventory` and `independent_test_function_names`.
-The parser is a deliberate port rather than an import: it must not share a
-regex or a helper with anything that also produces the report it reconciles,
-because that independence is the property being relied on.
-
-The whole run is supervised by `scripts/harness/watchdog.py` under a
-whole-process-group deadline. mtest's own `--timeout`/`--compile-timeout` cover
-a hung *child*; they cannot cover a hang in mtest's own scheduler, pool or
-reaper, which is precisely the code this lane exercises.
+`scripts/harness/watchdog.py` supervises the run under a whole-process-group
+deadline. mtest's own `--timeout`/`--compile-timeout` cover a hung child; they
+cannot cover a hang in mtest's own scheduler, pool or reaper, which is the code
+this lane exercises.
 
 Usage:  python -m scripts.harness.selfhost [-n WORKERS] [ROOT ...]
 """
@@ -156,39 +118,28 @@ TEST_FILE_GLOB = "test_*.mojo"
 DEFAULT_WORKERS = "auto"
 """The worker policy every pixi task runs under, absent an explicit override.
 
-Pinned deliberately to `"auto"` -- `max(1, cores // 2)`
-(`src/mtest/session/pool_plan.mojo:79-95`), which also honours CPU affinity --
-rather than to a fixed integer. A fixed integer sized for a small hosted CI
-runner would be wrong here: `-n 4` on a 32-core development host would use an
-eighth of the machine and throw away the local speedup that motivates running
-the classified suite through mtest at all (measured: 135.0s at auto/16 workers
-on 32 cores, vs. still running at 600s pinned to 4 cores with `auto` giving
-only 2 workers). `auto` scales with whatever machine actually runs it, so it
-stays correct across arbitrary local hardware without anyone re-measuring it.
+`auto` is `max(1, cores // 2)` (`src/mtest/session/pool_plan.mojo:79-95`) and
+honours CPU affinity, so it scales with whatever machine runs it and nobody has
+to re-measure. A fixed integer sized for a small hosted runner would use an
+eighth of a 32-core development host and throw away the local speedup that
+motivates running the classified suite through mtest at all. Measured: 135.0s at
+auto/16 workers on 32 cores, against a run still going at 600s pinned to 4 cores
+with `auto` giving 2 workers.
 
-This is deliberately NOT overridden for hosted CI here, where `auto`
-underserves small runners -- a standard 4-vCPU GitHub-hosted Linux runner gets
-2 workers, a standard 3-vCPU macOS runner gets only 1 (fully serial). Pinning a
-small integer in THIS module to fix that would make every local invocation
-inherit it too, which is exactly the wrong trade this docstring just argued
-against. Instead `.github/workflows/ci.yml` passes an explicit `-n` override on
-the `test` lane only, sized to each hosted runner's actual core count (`-n 4`
-Linux, `-n 3` macOS) -- the pixi task and the CI workflow are separate places
-that legitimately want different values, and the override travels with the
-runner it was sized for instead of living in the shared default every local
-run would also inherit.
-
-Read the hosted `test` lane's own reported wall-clock on both platforms after
-this lands: that is the real validation this number needs, not a local sweep
-against a proxy machine.
+Hosted CI is deliberately not fixed up here, even though `auto` underserves
+small runners: a standard 4-vCPU GitHub-hosted Linux runner gets 2 workers and a
+3-vCPU macOS runner gets 1, fully serial. Pinning a small integer in THIS module
+would make every local invocation inherit it. `.github/workflows/ci.yml` instead
+passes an explicit `-n` on the `test` lane only, sized to each runner's core
+count (`-n 4` Linux, `-n 3` macOS), so the override travels with the runner it
+was sized for.
 """
 
 WORKER_FLAGS = ("-n", "--workers")
 """Command-line spellings of the worker-count override.
 
-The pinned `DEFAULT_WORKERS` is the policy every pixi task runs under; this
-override exists so the value can be re-measured on a differently sized host
-without editing the module or the tasks that share it.
+Exists so `DEFAULT_WORKERS` can be re-measured on a differently sized host
+without editing this module or the tasks that share it.
 """
 
 TIMEOUT_ENV = "MTEST_SELFHOST_TIMEOUT_SECONDS"
@@ -196,17 +147,16 @@ DEFAULT_TIMEOUT_SECONDS = 1800.0
 """Whole-process-group ceiling for the self-hosted run, in seconds.
 
 Measured on one 32-core host: ~134s warm, ~136s cold. The Mojo compiler cache
-barely matters there, because compilation of 101 files across sixteen workers
-hides under the ~69s critical path of the slowest integration file. Core count
-is what dominates: pinned to four cores with both caches cleared, the same run
-was still going at 600s with 13 of 101 files outstanding.
+barely matters there, because compiling 101 files across sixteen workers hides
+under the ~69s critical path of the slowest integration file. Core count
+dominates: pinned to four cores with both caches cleared, the same run was still
+going at 600s with 13 of 101 files outstanding.
 
-So the honest slow-host figure is several times the fast one, and it lands close
+The honest slow-host figure is therefore several times the fast one, close
 enough to the watchdog's old 900s limit that a hosted runner would have produced
-false timeouts. Thirty minutes is chosen to be wrong in the safe direction: a
-genuine hang wastes half an hour of CI once, whereas a false `rc=124` on a
-merely-slow run looks exactly like the scheduler hang this lane exists to
-detect, and would be debugged as one.
+false timeouts. This value is chosen to be wrong in the safe direction, because
+a false `rc=124` on a merely slow run looks exactly like the scheduler hang this
+lane exists to detect and would be debugged as one.
 
 `MTEST_SELFHOST_TIMEOUT_SECONDS` moves it in either direction, up to
 `watchdog.MAX_TIMEOUT_SECONDS`.
@@ -218,12 +168,11 @@ ARTIFACT_NONCE_BYTES = 8
 LATEST_JSON_STREAM = ARTIFACT_DIR / "selfhost.ndjson"
 """Stable copy of the last run's event stream, for a human reading a red run.
 
-Write-only evidence. It is NEVER the file a run reconciles against, and nothing
-reads it back: reconciliation only ever touches the per-invocation stream below.
-That separation is what makes the fixed name safe. Two concurrent runs racing to
-publish here can only decide *whose* complete stream is retained, never what
-either of them concluded, and the publish is an atomic rename so this path never
-holds a half-written or interleaved stream.
+Write-only evidence. Reconciliation only ever touches the per-invocation stream
+below, which is what makes the fixed name safe: two concurrent runs racing to
+publish here can only decide whose complete stream is retained, never what
+either concluded. The publish is an atomic rename, so this path never holds a
+half-written or interleaved stream.
 """
 
 JSON_STREAM_LIMIT_BYTES = 64 * 1024 * 1024
@@ -255,21 +204,19 @@ SUMMARY_RE = re.compile(
 """mtest's summary band.
 
 `abnormal` captures everything mtest appends between the skipped count and the
-parenthetical -- crashed, timed out, compile error, malformed suite, compile
-timeout, precompile error, flaky. It is a capture rather than a skip so that a
-nonzero abnormal count is *named* instead of silently swallowed.
+parenthetical: crashed, timed out, compile error, malformed suite, compile
+timeout, precompile error, flaky. A capture rather than a skip, so a nonzero
+abnormal count is named instead of silently swallowed.
 """
 
 CACHE_COUNTS_RE = re.compile(r",\s*builds:\s*\d+,\s*cached:\s*\d+")
 """The build-cache accounting mtest appends to the same band.
 
-Not an abnormal outcome and never a failure: `builds` counts first-attempt
-compiles and `cached` counts artifact-store hits, so a green lane reports
-`builds: N, cached: 0` against a cold store and `builds: 0, cached: N` against a
-warm one. Neither pair is pinnable -- whether this lane's own store is populated
-depends on what ran before it -- so the segment is removed before the abnormal
-check rather than asserted, and only genuine abnormal outcome counts survive to
-be named.
+`builds` counts first-attempt compiles and `cached` counts artifact-store hits,
+so a green lane reports `builds: N, cached: 0` against a cold store and
+`builds: 0, cached: N` against a warm one. Whether this lane's store is
+populated depends on what ran before it, so neither pair is pinnable and the
+segment is stripped before the abnormal check rather than asserted.
 """
 
 VERDICT_ROW_RE = re.compile(
@@ -278,11 +225,10 @@ VERDICT_ROW_RE = re.compile(
 )
 """One per-file verdict row: the verdict token and the file it names.
 
-Deliberately not scoped to a fixed root prefix the way `dogfood.py`'s row
-regex is. This harness is given its roots at runtime, and every row it sees is
-compared against the disk-derived path set for exactly those roots, so a row
-naming a file outside them is a membership failure rather than something to
-filter out before comparing.
+Not scoped to a fixed root prefix the way `dogfood.py`'s row regex is. This
+harness gets its roots at runtime and compares every row against the
+disk-derived path set for exactly those roots, so a row naming a file outside
+them is a membership failure rather than something to filter out first.
 """
 
 Supervisor = Callable[..., watchdog.Termination]
@@ -315,18 +261,13 @@ class Inventory:
 class RunArtifacts:
     """The two on-disk artifacts belonging to ONE self-hosted invocation.
 
-    Both carry a per-invocation token rather than a fixed name. A later task
-    points four pixi tasks (`test`, `test-unit`, `test-integration`,
-    `test-file`) at this harness, so two invocations on one checkout is an
-    ordinary situation, not a pathological one. With fixed names, run B could
-    reconcile run A's stream: A can recreate the file in the window between B's
-    pre-spawn unlink and B's post-run read. B's console cross-check would still
-    be honest about file membership and the grand total, but the per-file and
-    per-test-name reconciliation -- the whole reason the stream is read at all --
-    would silently be describing someone else's run.
-
-    A unique path removes the window rather than narrowing it. Nothing has to
-    reason about interleavings, because the two runs never name the same file.
+    Both carry a per-invocation token rather than a fixed name. Four pixi tasks
+    (`test`, `test-unit`, `test-integration`, `test-file`) point at this
+    harness, so two invocations on one checkout is ordinary. With fixed names,
+    run A could recreate the stream in the window between run B's pre-spawn
+    unlink and its post-run read, and B's per-file and per-test-name
+    reconciliation would silently describe A's run. A unique path removes the
+    window rather than narrowing it.
     """
 
     stream: Path
@@ -347,10 +288,10 @@ def run_artifacts(repo_root: Path) -> RunArtifacts:
         repo_root: The repository root the artifacts live under.
 
     Returns:
-        Paths unique to this invocation. The pid alone is not enough -- pids are
-        reused, and a later run inheriting a dead run's pid would inherit its
-        stream -- so a random nonce carries the uniqueness and the pid is there
-        only to make the file legible to a human reading `build/tests/`.
+        Paths unique to this invocation. A random nonce carries the uniqueness,
+        because pids are reused and a later run inheriting a dead run's pid
+        would inherit its stream. The pid is there only to make the file legible
+        to a human reading `build/tests/`.
     """
     token = f"{os.getpid()}-{secrets.token_hex(ARTIFACT_NONCE_BYTES)}"
     directory = repo_root / ARTIFACT_DIR
@@ -363,18 +304,15 @@ def run_artifacts(repo_root: Path) -> RunArtifacts:
 def publish_latest_stream(stream: Path, repo_root: Path) -> str | None:
     """Publish one run's stream to the stable evidence path, atomically.
 
-    A red run is useless to debug without its stream, but the reconciled file
-    has a per-invocation name nobody can guess. This copies it to
-    `LATEST_JSON_STREAM` so there is one predictable place to look, for every
-    ending including a timeout's partial stream.
-
-    The copy lands through `os.replace`, so a reader of the stable path always
-    sees one complete stream and never a half-written or interleaved one. Losing
-    a publish race with a concurrent run costs evidence, never correctness:
-    nothing reads this path back.
+    The reconciled file has a per-invocation name nobody can guess, so this
+    copies it to `LATEST_JSON_STREAM` as one predictable place to look after a
+    red run, including a timeout's partial stream. The copy lands through
+    `os.replace`, so a reader of the stable path never sees a half-written or
+    interleaved stream. Losing a publish race costs evidence, never
+    correctness, since nothing reads this path back.
 
     Args:
-        stream: This invocation's stream. Absent is not an error -- a run that
+        stream: This invocation's stream. Absent is not an error: a run that
             died before writing one has nothing to publish.
         repo_root: The repository root the stable path lives under.
 
@@ -412,9 +350,8 @@ class _TeeCapture:
 
     The watchdog tees a supervised child's pipes to whatever `sys.stdout` and
     `sys.stderr` are at spawn time, so redirecting those onto this sink is how
-    the harness gets the text it must parse. Passing the bytes through to the
-    caller's real stream as well keeps a multi-minute lane visibly alive rather
-    than silent until it ends.
+    the harness gets the text it parses. Passing the bytes through to the
+    caller's real stream keeps a long lane visibly alive.
     """
 
     def __init__(self, passthrough: IO[bytes] | None, limit_bytes: int) -> None:
@@ -468,9 +405,9 @@ class _TeeCapture:
                 passthrough.write(encoded)
                 passthrough.flush()
             except (OSError, ValueError):
-                # The caller's stream is gone. Retention must continue anyway:
-                # dropping the capture here would turn a reportable ending into
-                # an unexplainable one.
+                # The caller's stream is gone, but retention must continue:
+                # dropping the capture turns a reportable ending into an
+                # unexplainable one.
                 with self._lock:
                     self._passthrough = None
         return len(value)
@@ -489,10 +426,9 @@ class _TeeCapture:
 def independent_test_function_names(source: str, origin: str) -> tuple[str, ...]:
     """Parse top-level ``def test_*`` declarations with no shared helper.
 
-    A deliberate port rather than an import of any other parser in this
-    repository: it uses no regular expression and shares no helper with the
-    code paths that produce the report it is checking, because that
-    independence is the entire property being relied on. Do not "simplify" it
+    A deliberate port rather than an import: it uses no regular expression and
+    shares no helper with the code paths that produce the report it checks.
+    That independence is the property being relied on, so do not "simplify" it
     into sharing a parser with anything else.
 
     Args:
@@ -592,22 +528,17 @@ def parse_request(
 ) -> Request:
     """Split a self-host command line into a worker count and suite roots.
 
-    Hand-rolled rather than `argparse` for one reason: `argparse` treats an
-    operand beginning with `-` as an unknown option and exits the process
-    itself, which would turn a mistyped root into a bare `SystemExit(2)` with no
-    `FATAL: selfhost:` line. Every rejection here is a `ValueError` that `main`
-    reports in the harness's own voice.
+    Hand-rolled rather than `argparse`, which treats an operand beginning with
+    `-` as an unknown option and exits the process itself, turning a mistyped
+    root into a bare `SystemExit(2)` with no `FATAL: selfhost:` line. Every
+    rejection here is a `ValueError` that `main` reports in the harness's voice.
 
-    The worker value is validated rather than forwarded blind, so a typo
-    (`-n atuo`, `-n 0`) fails here instead of reaching mtest. This is
-    defense in depth, not a repair: mtest's own CLI already rejects a
-    non-positive or non-numeric count before it can reach the internal
-    zero-means-auto sentinel (`parse_worker_count`,
-    `src/mtest/config/value_validation.mojo`), exiting 4 with
-    `'-n'/'--workers' wants a positive integer or 'auto'`. Checking here buys
-    two things only: the harness fails in its own voice without spawning a
-    subprocess, and the same validation covers a worker count arriving from a
-    config file rather than this command line.
+    Validating the worker value here is defense in depth. mtest's own CLI
+    already rejects a non-positive or non-numeric count before it can reach the
+    internal zero-means-auto sentinel (`parse_worker_count`,
+    `src/mtest/config/value_validation.mojo`), exiting 4. Checking here lets the
+    harness fail without spawning a subprocess, and covers a worker count
+    arriving from a config file rather than this command line.
 
     Args:
         argv: The command line after the program name.
@@ -734,13 +665,13 @@ def mtest_argv(
     `-I build -I tests/support` is mandatory: the integration suites import
     `exec_helpers` and `session_fixtures` as top-level include-path modules. The
     native adapter object reaches the child compiler as a linker argument
-    (`-Xlinker <obj>`) because a bare object path is not a positional --
+    (`-Xlinker <obj>`), because a bare object path is not a positional and
     `mojo build src.mojo obj.o` fails with "too many input files".
 
-    `--json` is what makes the per-file reconciliation possible: the console
-    report states one grand total, but the event stream states each file's own
-    `passed_tests` and names every test it reported. A total can be right while
-    the distribution behind it is wrong.
+    `--json` is what makes per-file reconciliation possible. The console report
+    states one grand total, which can be right while the distribution behind it
+    is wrong; the event stream states each file's own `passed_tests` and names
+    every test it reported.
 
     Args:
         mtest_path: The mtest binary to run.
@@ -813,10 +744,10 @@ def run_mtest(
 ) -> SupervisedRun:
     """Run one mtest command under a whole-process-group deadline.
 
-    A sentinel file is created before the spawn and removed by the supervisor
-    on every non-timeout ending, then reconciled here. That makes "this timed out" a
-    claim confirmed against filesystem state rather than one taken on the
-    supervisor's word.
+    A sentinel file is created before the spawn, removed by the supervisor on
+    every non-timeout ending, and reconciled here, so "this timed out" is
+    confirmed against filesystem state rather than taken on the supervisor's
+    word.
 
     Args:
         command: The complete mtest argv.
@@ -843,9 +774,8 @@ def run_mtest(
 
     stdout = _TeeCapture(getattr(sys.stdout, "buffer", None), CAPTURE_LIMIT_BYTES)
     stderr = _TeeCapture(getattr(sys.stderr, "buffer", None), CAPTURE_LIMIT_BYTES)
-    # The watchdog only opens pipes when a marker retention is requested, and it
-    # tees them to whatever `sys.stdout`/`sys.stderr` are at spawn time. This
-    # run has no module markers to retain, so the retention is given a prefix no
+    # The watchdog only opens pipes when a marker retention is requested. This
+    # run has no module markers to retain, so the retention gets a prefix no
     # line can carry and exists purely to turn capture on.
     retention = watchdog.MarkerRetention("\0selfhost-no-marker")
     try:
@@ -979,9 +909,9 @@ def _int_field(record: Mapping[str, object], key: str) -> int | None:
         key: The field name to read.
 
     Returns:
-        The integer value. `bool` is rejected: it is an `int` subclass in
-        Python, and reading a forged `true` as `1` is exactly the silent
-        coercion this oracle exists to refuse.
+        The integer value. `bool` is rejected because it is an `int` subclass in
+        Python, and reading a forged `true` as `1` is the silent coercion this
+        oracle exists to refuse.
     """
     value = record.get(key)
     if isinstance(value, bool) or not isinstance(value, int):
@@ -1011,9 +941,8 @@ def _file_record_problems(
     outcome = _str_field(record, "outcome")
     if outcome != "pass":
         problems.append(f"outcome={outcome!r} (must be 'pass')")
-    # A file whose report mtest could not parse is precisely a silent-loss
-    # case: the run happened, the output was not understood, and the counts
-    # behind it mean nothing.
+    # A file whose report mtest could not parse is a silent-loss case: the run
+    # happened, the output was not understood, and the counts mean nothing.
     disposition = _str_field(record, "parse_disposition")
     if disposition != "parsed":
         problems.append(f"parse_disposition={disposition!r} (must be 'parsed')")
@@ -1093,16 +1022,15 @@ def _reconcile_test_records(
 ) -> None:
     """Reconcile the exact set of reported test names against each file's source.
 
-    This is the strongest statement the oracle makes. A per-file count can still
-    be satisfied by running the wrong tests; a set equality on names cannot.
+    A per-file count can be satisfied by running the wrong tests; a set equality
+    on names cannot.
 
     Args:
         records: Every decoded `test_reported` record.
         inventory: The source-derived truth for the roots that were run.
         mentioned: Paths the stream named in a `file_finished` record. A file
-            the stream never mentioned at all is already reported once by the
-            membership check; restating it per file would bury that finding and
-            the console cross-check under one message per missing file.
+            the stream never mentioned is already reported by the membership
+            check, and restating it per file would bury that finding.
         failures: Accumulator appended to, one message per disagreement.
     """
     by_path: dict[str, list[str]] = {}
@@ -1192,9 +1120,9 @@ def reconcile_stream(
 ) -> None:
     """Reconcile mtest's `--json` event stream against the derived inventory.
 
-    The stream is the primary source of truth. Unlike the console report it
-    states each file's own result, so "the grand total is right" stops being
-    enough: every file must have run exactly the tests its own source declares.
+    The primary source of truth. Unlike the console report it states each file's
+    own result, so every file must report exactly the tests its own source
+    declares rather than merely contributing to a correct grand total.
 
     Args:
         stream_text: The complete newline-delimited event stream.
@@ -1294,16 +1222,12 @@ def reconcile(
 ) -> list[str]:
     """Reconcile mtest's report against the source-derived inventory.
 
-    Two independent parses of two independent artifacts, all comparisons
-    evaluated even when an earlier one has already failed, so one run names
-    every disagreement instead of the first.
-
-    The `--json` event stream is the primary source of truth, because it states
-    each file's own result: every file must report exactly the tests its own
-    source declares, by name. The console report is retained as a cross-check
-    over the same run -- it is a different grammar read by a different parser,
-    so the two disagreeing is itself a signal worth having. Messages are tagged
-    `[json]` or `[console]` so a reader can tell which parse objected.
+    Two independent parses of two independent artifacts. Every comparison is
+    evaluated even after an earlier one failed, so one run names every
+    disagreement instead of the first. The `--json` event stream is primary
+    because it states each file's own result; the console report is a
+    cross-check in a different grammar read by a different parser. Messages are
+    tagged `[json]` or `[console]` so a reader can tell which parse objected.
 
     Args:
         output: mtest's captured console output.
@@ -1395,8 +1319,7 @@ def verify(
         return 1
 
     # Per-invocation names, so two concurrent runs on one checkout cannot read
-    # each other's stream. See `RunArtifacts` for why that is an ordinary
-    # situation rather than a pathological one.
+    # each other's stream. See `RunArtifacts`.
     artifacts = run_artifacts(repo_root)
     artifacts.stream.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -1413,8 +1336,8 @@ def verify(
         )
     finally:
         # Evidence, then cleanup, for EVERY ending including a timeout's partial
-        # stream: a red run is not debuggable without its stream, and its real
-        # name carries a nonce nobody can guess.
+        # stream: a red run is not debuggable without one, and the real name
+        # carries a nonce nobody can guess.
         publish_failure = publish_latest_stream(artifacts.stream, repo_root)
         if publish_failure is not None:
             print(f"WARNING: selfhost: {publish_failure}", file=sys.stderr)
@@ -1439,8 +1362,8 @@ def _verify_run(
 ) -> int:
     """Run mtest once against one set of artifacts and reconcile its reports.
 
-    Split out of `verify` so artifact publication and cleanup can wrap every
-    exit path, including the early returns for a timeout and a harness error.
+    Split out of `verify` so artifact publication and cleanup wrap every exit
+    path, including the early returns for a timeout and a harness error.
 
     Args:
         artifacts: This invocation's stream and deadline sentinel paths.
@@ -1515,8 +1438,8 @@ def _verify_run(
         for failure in failures[:REPORTED_FAILURE_LIMIT]:
             print(f"FATAL: selfhost: {failure}", file=sys.stderr)
         # A per-file oracle over 101 files can produce hundreds of findings from
-        # one defect. Show enough to diagnose it and say how many were held back,
-        # rather than burying the first (and usually most explanatory) one.
+        # one defect. Show enough to diagnose it and count the rest, rather than
+        # burying the first and usually most explanatory one.
         if len(failures) > REPORTED_FAILURE_LIMIT:
             print(
                 f"FATAL: selfhost: ... and {len(failures) - REPORTED_FAILURE_LIMIT} "

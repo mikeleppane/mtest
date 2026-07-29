@@ -1,37 +1,34 @@
 #!/usr/bin/env python3
 """Measure how the mtest parallel scheduler scales with the worker count.
 
-This is a MAINTENANCE tool, not a gate. It answers one empirical question: where
-does the `auto` worker count sit relative to the measured sweet spot on a real
-machine? It drives the already-built ``build/mtest`` binary against a freshly
-generated tree of medium-weight, all-pass ``test_*.mojo`` files and times it
-across a small matrix, reporting the median wall-clock per cell and the speedup
-against the ``-n 1`` sequential baseline.
+A maintenance tool, not a gate. It answers where the `auto` worker count sits
+relative to the measured sweet spot: it drives the already-built ``build/mtest``
+against a freshly generated tree of medium-weight, all-pass ``test_*.mojo``
+files, times a small matrix, and reports the median wall clock per cell plus the
+speedup over the ``-n 1`` sequential baseline.
 
 The matrix is workers x tokens x {cold, warm}, three reps each:
 
 - ``workers`` walks ``{1, 2, 4, cores}`` (``cores = os.cpu_count()``), so the
-  measured curve brackets the provisional ``auto`` ceiling of four and shows the
+  curve brackets the provisional ``auto`` ceiling of four and shows the
   diminishing- or negative-return shape past it.
 - ``tokens`` has two modes. ``on`` is the real runner default: one
   ``mtest -n W`` process whose concurrent builds share the cores-wide
-  ``--num-threads`` token budget. ``off`` is a bench-side control that needs NO
-  production change -- ``W`` concurrent ``mtest -n 1`` processes over disjoint
-  file slices, each build spawned at the compiler's default (unbudgeted) thread
-  count. The pair isolates what the token budget buys: same file-level
-  parallelism, with and without the per-build thread clamp. At one worker the two
-  modes are the same single ``mtest -n 1`` process, so ``off`` is only measured
-  for ``W > 1``.
+  ``--num-threads`` token budget. ``off`` is a bench-side control needing no
+  production change: ``W`` concurrent ``mtest -n 1`` processes over disjoint
+  file slices, each build at the compiler's default (unbudgeted) thread count.
+  The pair isolates what the token budget buys at equal file-level parallelism.
+  At one worker the modes coincide, so ``off`` is measured only for ``W > 1``.
 - ``cold`` gives every rep a fresh ``MODULAR_CACHE_DIR`` so each build compiles
-  from scratch (the realistic first-CI-run cost that dominates sizing); ``warm``
-  reuses a pre-warmed cache so the cell measures scheduling overhead, not the
+  from scratch (the first-CI-run cost that dominates sizing); ``warm`` reuses a
+  pre-warmed cache, so the cell measures scheduling overhead rather than the
   compiler.
 
 The runner resolves operands against its invocation root, so each timed run is
 spawned with its working directory set to the synthetic tree and a relative
-operand. ``mojo`` must be on PATH for the spawned ``mojo build`` children, so run
-this under ``pixi run`` (``pixi run bench-workers``). Timings are machine- and
-load-specific by nature; the table's shape is fixed, its numbers are not.
+operand. ``mojo`` must be on PATH for the spawned ``mojo build`` children, so
+run this as ``pixi run bench-workers``. Timings are machine- and load-specific;
+the table's shape is fixed, its numbers are not.
 """
 
 from __future__ import annotations
@@ -52,18 +49,17 @@ import time
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MTEST = REPO_ROOT / "build" / "mtest"
 
-# A generous per-run guard. A cold sequential build of the whole tree is the
-# slowest cell; this bounds a wedged run without capping a legitimately slow one.
+# A generous per-run guard, sized well above the slowest cell (a cold sequential
+# build of the whole tree) so it bounds a wedged run only.
 RUN_TIMEOUT = 900.0
 
 
 def _test_file_source(index: int) -> str:
     """Return the source of one medium-weight, all-pass synthetic test file.
 
-    A few imports and several ``def test_*`` functions with a modest amount of
-    compile-time surface (loops, comparisons) so each file's ``mojo build`` costs
-    enough that parallelism across files is measurable, kept trivially all-pass
-    so the run never fails.
+    Enough compile-time surface (loops, comparisons) that each file's ``mojo
+    build`` costs enough for cross-file parallelism to be measurable, and
+    trivially all-pass so the run never fails.
     """
     return f'''"""Synthetic worker-sizing bench file {index} (all-pass)."""
 from std.testing import assert_equal, assert_false, assert_true, TestSuite

@@ -31,12 +31,11 @@ class QualityStepTests(unittest.TestCase):
         self.assertEqual(labels, ["ruff check --fix", "ruff format"])
 
     def test_fix_mode_lints_before_it_formats(self) -> None:
-        # Not a style preference; the reverse order makes py-fmt lie. Formatting
-        # first, then fixing, leaves the formatter's own work stale: `ruff check
-        # --fix` deleting an unused import leaves the two blank lines that
-        # followed it, and nothing collapses them. py-fmt exits 0 and the very
-        # next `pixi run py-check` reds on `ruff format --check`, which is the
-        # one thing py-fmt exists to prevent. Reproduced against ruff 0.16.0.
+        # Formatting first, then fixing, leaves the formatter's own work stale:
+        # `ruff check --fix` deleting an unused import leaves the two blank
+        # lines that followed it, and nothing collapses them. py-fmt exits 0 and
+        # the next `pixi run py-check` reds on `ruff format --check`.
+        # Reproduced against ruff 0.16.0.
         labels = [label for label, _ in python_quality.quality_steps(fix=True)]
         self.assertLess(
             labels.index("ruff check --fix"),
@@ -46,8 +45,8 @@ class QualityStepTests(unittest.TestCase):
         )
 
     def test_check_mode_cannot_rewrite_a_file(self) -> None:
-        # The whole point of the two modes: a verdict run must be readonly, so
-        # `pixi run py-check` can never quietly "fix" the drift it is reporting.
+        # A verdict run must be readonly, so `pixi run py-check` can never
+        # quietly "fix" the drift it is reporting.
         for label, command in python_quality.quality_steps(fix=False):
             self.assertNotIn("--fix", command, label)
         formatter = next(
@@ -121,24 +120,44 @@ class QualityWiringTests(unittest.TestCase):
             tasks.get("py-fmt"), "python -m scripts.checks.python_quality --fix"
         )
 
-    def test_the_quality_check_stays_outside_the_ci_floor(self) -> None:
-        # ruff and mypy run through uvx so they are not pixi dependencies, which
-        # means `uv` is a contributor's own install rather than something the
-        # gate may assume. Keeping py-check out of `ci` is what stops a green
-        # floor from depending on a tool the environment does not pin.
+    def _workflow_job(self, workflow: str, name: str) -> str:
+        """One job's indented body, sliced out of the hosted workflow's text."""
+        header = f"  {name}:"
+        lines = workflow.splitlines()
+        self.assertIn(header, lines, f"the hosted workflow has no {name!r} job")
+        body: list[str] = []
+        for line in lines[lines.index(header) + 1 :]:
+            # A blank line still belongs to the job; the next line at the jobs
+            # table's own indentation is the next job and ends this one.
+            if line and not line.startswith("    "):
+                break
+            body.append(line)
+        return "\n".join(body)
+
+    def test_the_quality_check_gates_hosted_but_never_the_local_floor(self) -> None:
+        # ruff and mypy run through uvx, so they are not pixi dependencies and
+        # `uv` is absent from the environment `pixi run ci` is handed. A gate
+        # may run py-check exactly when it SUPPLIES the tool itself. The hosted
+        # `Python quality` job installs a pinned uv through a pinned
+        # `astral-sh/setup-uv` before calling the task, so it can block a merge
+        # on ruff and mypy. The local floor has no way to supply it, so an edge
+        # from `ci` to `py-check` would make a green floor depend on whichever
+        # `uv` a contributor happens to have installed, or red a fresh clone
+        # that has none. The hosted half is asserted INSIDE the job that
+        # installs uv, because a py-check invocation anywhere else in the
+        # workflow would look perfectly ordinary in a diff.
+        #
+        # `py-fmt` stays out of both: it rewrites files in place, so a hosted
+        # job running it would report a verdict on bytes nobody committed.
         #
         # `ci-memory` is a plain command string in the base [tasks] table and
         # only gains its real `depends-on` (the asan/valgrind lanes) under
         # [target.linux-64.tasks], which silently replaces the base entry for
-        # that one platform. Walking the base table alone stops at
-        # `ci-memory` and never reaches the memory lanes at all — so this
-        # merges the linux-64 override over the base table first before
-        # walking the closure. That the override table can only ever hold such
-        # a dependency-only edge, and only for a bounded set of task names, is
-        # `layout.check_platform_task_overrides`'s property, not this test's.
-        # Skipping instead of raising on a dependency shape this
-        # module does not expect (Pixi also allows table-form dependency
-        # entries) would make the closure shrink quietly; raise instead.
+        # that one platform. Walking the base table alone stops at `ci-memory`
+        # and never reaches the memory lanes, so the linux-64 override is
+        # merged over the base table before the closure is walked. A dependency
+        # shape this module does not expect raises rather than being skipped,
+        # which would shrink the closure quietly.
         with (python_quality.REPO_ROOT / "pixi.toml").open("rb") as handle:
             manifest = tomllib.load(handle)
         base_tasks = manifest["tasks"]
@@ -167,7 +186,13 @@ class QualityWiringTests(unittest.TestCase):
         workflow = (
             python_quality.REPO_ROOT / ".github" / "workflows" / "ci.yml"
         ).read_text(encoding="utf-8")
-        self.assertNotIn("py-check", workflow)
+        # Matched with the `run:` prefix throughout, so prose naming the task
+        # can never be counted as an invocation.
+        self.assertEqual(workflow.count("run: pixi run py-check"), 1)
+        self.assertNotIn("run: pixi run py-fmt", workflow)
+        quality_job = self._workflow_job(workflow, "python-quality")
+        self.assertIn("run: pixi run py-check", quality_job)
+        self.assertIn("uses: astral-sh/setup-uv@", quality_job)
 
     def test_the_config_lives_where_both_tools_read_it(self) -> None:
         pyproject = python_quality.REPO_ROOT / "pyproject.toml"
@@ -186,12 +211,11 @@ class QualityWiringTests(unittest.TestCase):
         return (python_quality.REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
     def test_every_ruff_exclusion_carries_a_reason_comment(self) -> None:
-        # The ignore list itself is not restated here: changing it IS an edit to
-        # pyproject.toml, visible in the diff beside the reason it carries, and
-        # a re-typed copy of a config file is the textbook case the pruning
-        # criterion deletes. What a diff does not enforce is that the prose
-        # survives, so this counts it rather than reading positions -- a shared
-        # reason paragraph over a group of related codes is fine.
+        # The ignore list is not restated here: changing it IS an edit to
+        # pyproject.toml, visible in the diff beside the reason it carries.
+        # What a diff does not enforce is that the prose survives, so this
+        # counts comments rather than reading positions; a shared reason
+        # paragraph over a group of related codes is fine.
         source = self._pyproject_source()
         self.assertEqual(source.count("ignore = ["), 1)
         block = source.split("ignore = [", 1)[1].split("\n]", 1)[0]
@@ -211,9 +235,9 @@ class QualityWiringTests(unittest.TestCase):
 
     def test_ruff_excludes_are_root_anchored(self) -> None:
         # A ruff exclude with no path separator matches ANY path component, so a
-        # bare "build" also excludes scripts/build/ — which hid three files from
-        # both lint and format while py-check printed "clean". "/build" is not
-        # the fix: it excludes nothing. Only "./build" (or "build/") is anchored.
+        # bare "build" also excludes scripts/build/, which hid three files from
+        # both lint and format while py-check printed "clean". "/build" excludes
+        # nothing; only "./build" (or "build/") is anchored.
         with (python_quality.REPO_ROOT / "pyproject.toml").open("rb") as handle:
             config = tomllib.load(handle)
         excludes = config["tool"]["ruff"]["extend-exclude"]

@@ -183,6 +183,24 @@ network contract: rattler-build solves against the pinned Modular and
 conda-forge channels, and nothing uploads or authenticates. Do not describe
 those jobs as hermetic or fold them into the Valgrind exception.
 
+**Do not restore the build-artifact store across hosted runs.** It was tried
+and reverted, and the failure is worth recording because the key looks
+complete until you ask what it does not frame. `KeyBuilder` frames the
+compiler, the toolchain libraries, the environment, the invocation root, the
+build arguments, the include-root contents, and the file's own bytes — and
+nothing about the host CPU. That is exactly right on one machine, where the
+CPU cannot change between two builds. Hosted runners are not one machine: a
+binary compiled on a runner with a wider instruction set, restored onto one
+without it, is a valid cache hit that dies with SIGILL the moment it executes.
+Observed, not theorised — cached e2e binaries crashed with `signal 4` in
+frames pointing into `.mtest-cache/build-v1/`.
+
+The lesson generalises past the cache. "A stale entry is a miss, never a wrong
+pass" holds only for the inputs the key actually frames; `store_probe`
+re-verifies the digest and refuses a binary that will not start, and neither
+check can notice that a byte-perfect binary is illegal on this host. Anything
+that moves a compiled artifact between machines has to frame the machine.
+
 ## Toolchain and verification
 
 The verification tasks are:
@@ -193,7 +211,12 @@ pixi run py-fmt            # ruff's safe lint fixes, then format Python in place
 pixi run py-check          # ruff format/lint and mypy --strict over scripts/ and
                            #   tests/fixtures/exec/ (needs `uv`; see below)
 pixi run version-check     # manifest, CLI, and shipped-version identity
-pixi run harness-check     # validate exact harness/CI membership and invariants
+pixi run harness-unit-check     # harness self-tests: runner, watchdog, comparators,
+                                #   and the two memory-lane oracles (no tools needed)
+pixi run repo-policy-check      # layout, workflow security, tool pins, annotations
+pixi run release-tooling-check  # attestations, release, publication, public verify
+pixi run harness-check     # the aggregate of the three groups above
+pixi run coverage-capability  # tripwire: the pinned toolchain must have no coverage
 pixi run safety-check      # inventory every unsafe Mojo operation and local proof
 pixi run postfork-check    # audit production/testing post-fork call graphs
 pixi run native-check      # verify native ABI/layout/exports and lifecycle
@@ -212,9 +235,11 @@ pixi run package-check     # install the built artifact into a scratch env and r
 pixi run ci-memory         # Linux: both memory lanes, ASan/LSan then Memcheck
 ```
 
-Hosted GitHub required checks enforce the applicable platform and product lanes
-described below. `py-check` remains a local requirement when Python changes,
-because its pinned tools are deliberately absent from hosted CI.
+Hosted GitHub required checks enforce most, but not all, of the platform and
+product lanes described below — see the Hosted CI section for which lanes run
+without blocking. `py-check` is worth running locally when Python changes, but
+it is no longer only local: the hosted `Python quality` job installs `uv`
+itself and blocks on it.
 
 ### Local agentic development loop
 
@@ -232,9 +257,14 @@ Before a local commit:
 3. Stage the exact bytes, run the selected gates against that staged state, and
    record each gate's own exit status.
 
-`pixi run ci` is the complete serial local mirror, for an explicit release
-rehearsal, a hosted failure reproduction, or a human-requested exhaustive run.
-It is not a routine per-commit requirement. The required GitHub checks are the
+`pixi run ci` is the complete serial source, test, and memory floor, for an
+explicit release rehearsal, a hosted failure reproduction, or a human-requested
+exhaustive run. It is not a routine per-commit requirement, and it is **not** a
+mirror of hosted CI: it omits packaged-artifact consumption (`package-check`),
+CodeQL, and Python quality (`py-check`). A green `pixi run ci` therefore says
+nothing about whether the built package installs and runs in a clean
+environment, about the CodeQL findings, or about ruff and mypy — all three of
+which hosted CI does block on. The required GitHub checks are the
 authoritative exhaustive merge verdict.
 
 `fmt-check` formats each real Mojo source under `src`, `companions`, `tests`,
@@ -245,12 +275,18 @@ produced against different bytes than you commit is not a result. Reading
 outcomes works the same way, since a background wrapper's exit status is the
 wrapper's and not the gate's, so read the gate's own marker.
 
-`pixi run ci-preflight` chains `version-check -> fmt-check -> harness-check ->
-safety-check -> postfork-check -> native-check -> junit-check -> build ->
-readme-help-check -> junit-render-check -> transcripts-check` in that exact
-fail-fast order. The complete local `pixi run ci` mirror is serial:
+`pixi run ci-preflight` chains `version-check -> fmt-check ->
+harness-unit-check -> repo-policy-check -> abi-probe-check ->
+release-tooling-check -> safety-check -> postfork-check -> native-check ->
+junit-check -> build -> readme-help-check -> junit-render-check ->
+transcripts-check -> coverage-capability` in that exact fail-fast order. The
+three `*-check` groups replaced a single two-dozen-command `harness-check`
+chain, which survives as their aggregate: a red hosted preflight names the
+group that failed instead of reporting that something in the tooling broke. The `pixi run ci` floor is serial:
 `ci-preflight -> test -> assertions-check -> dogfood-check -> e2e ->
-contract-check-strict -> ci-memory`.
+cache-protocol-check -> build-stamp-check -> contract-check-strict ->
+ci-memory`. Both chains are read out of `pixi.toml`; nothing pins them, so read
+them there rather than from this paragraph if the two disagree.
 
 `py-check` is the one floor member whose tools are not in the pixi environment.
 ruff and mypy run through `uvx` at versions pinned in
@@ -258,14 +294,16 @@ ruff and mypy run through `uvx` at versions pinned in
 environment the product compiles in and stops a floating formatter from
 reformatting the tree on its next release. The cost is a prerequisite: it needs
 `uv` on PATH and fails loudly rather than skipping when `uvx` is absent, which
-is why it is absent from `pixi run ci` and from the hosted workflow, where `uv`
-is not installed. A red
-`py-check` on a fresh clone without `uv` is an environment gap, not a defect in
-the tree. It covers `scripts/` and `tests/fixtures/exec/`, every Python file the
+is why it stays out of `pixi run ci`: a floor that assumed a tool the pixi
+environment does not pin would be green or red by accident of the machine. The
+hosted `Python quality` job may run it precisely because it *supplies* the
+tool, installing a pinned `uv` through a pinned `astral-sh/setup-uv` before it
+calls the task. A red `py-check` on a fresh clone without `uv` is an
+environment gap, not a defect in the tree. It covers `scripts/` and `tests/fixtures/exec/`, every Python file the
 repo tracks. `pyproject.toml` holds the config and no `[project]` or
 `[build-system]`, because this repo is not a Python package.
 
-`ci-memory` is how the complete local mirror covers memory safety. On linux-64 a
+`ci-memory` is how the local floor covers memory safety. On linux-64 a
 `[target.linux-64.tasks]` override makes it `asan-check` then `valgrind-check`,
 about 90 seconds and about 3 minutes against clean main, cheap enough to belong
 in the ordinary floor. Off linux-64 it runs
@@ -288,12 +326,24 @@ release/publication workflows keep their reviewed job permissions and forbid
 
 Hosted CI runs the same logical floor as two platform-local chains:
 
-- Linux: preflight releases fail-fast `test`, `assertions-check`,
-  `dogfood-check`, `e2e`, `cache-protocol-check`, `build-stamp-check`, strict
-  contract, ASan, and Valgrind cells.
-- macOS: preflight releases `test`, `assertions-check`, `dogfood-check`, `e2e`,
-  `cache-protocol-check`, `build-stamp-check`, and strict contract cells with
-  `fail-fast: false`.
+- Linux: a static preflight — pure Python over the tree, plus `mojo format`
+  over it, and nothing that compiles — releases both the behavioral matrix
+  (`test`, `assertions-check`, `e2e`, `cache-protocol-check`,
+  `build-stamp-check`, strict contract, ASan, Valgrind) and, beside it, a
+  `compiled oracles` job carrying every preflight member that needs a real
+  compiler: `native-check`, `build`, `readme-help-check`,
+  `junit-render-check`, `transcripts-check`, and `coverage-capability`. The oracles run parallel to the matrix rather than
+  ahead of it, because jobs share no filesystem and every cell compiles what
+  it needs through its own task edges, so nothing downstream could ever
+  consume what the preflight built.
+- macOS: preflight runs the native audit alone and releases `test`,
+  `assertions-check`, `e2e`, `cache-protocol-check`, `build-stamp-check`, and
+  strict contract cells. Both matrices run `fail-fast: false`, so one red lane
+  never cancels the verdicts of the others.
+- There is no self-hosted dogfood cell. `scripts/harness/dogfood.py` survives
+  as a local task and as the helper `package-check` reuses against the
+  installed artifact on both platforms, which is where those three probes now
+  block from.
 - The cache-protocol and build-stamp cells run on both platforms because both
   spawn real processes and read the filesystem directly, so the platform whose
   `stat` layout and path semantics differ is where they have to be executed
@@ -305,21 +355,41 @@ Hosted CI runs the same logical floor as two platform-local chains:
   `docs/cli-contract.md` is a blocking release-floor assertion, not manual QA.
   `pixi run contract-check` remains the contributor-friendly, non-strict,
   rebuild-if-stale entry point for local iteration.
-- Every lane is a blocking check, and memory safety runs on every pull request
-  and configured main-branch push, not on a schedule.
+- Every lane runs on every pull request and configured main-branch push, not on
+  a schedule — but **running is not the same as blocking**. Which contexts block
+  a merge is configured in repository settings, not in this repo, and the two
+  lists have drifted apart before: the `cache protocol` and `build stamp` cells
+  ran unrequired on both platforms from the day they were added until the
+  ruleset was corrected to the 20 contexts listed below. Adding, renaming, or
+  splitting a lane must update the required-context list in the same change; a
+  workflow edit alone silently produces a lane nobody is required to pass, and
+  nothing in this repository can detect that.
+- The two CodeQL jobs (`C and C++`, `Python`) are deliberately not status-check
+  contexts. Merge protection for them comes from the ruleset's `code_scanning`
+  rule instead, which blocks on a CodeQL alert at high-or-higher security
+  severity or an error-level quality alert. A green CodeQL job proves only that
+  analysis uploaded; the alert threshold is what proves nothing was found. The
+  sanitizer negative controls under `MTEST_EXEC_TESTING` are dismissed there as
+  used-in-tests, on the standing evidence that `TEST_ONLY_SYMBOLS` in
+  `scripts/checks/native_abi.py` proves them absent from the production object.
 - Transcripts and ASan/Valgrind stay Linux-only. Packaged-artifact consumption
   is blocking on both linux-64 and osx-arm64, one job per platform, both
   running `pixi run package-check`.
-- The matrix lane display names `direct tests`, `assertions`, and
-  `self-hosted tests`, and the package job display name
-  `Linux / packaged artifact`, are externally configured required check names
-  and must stay stable.
+- A job's display name is its status-check context, so every name the ruleset
+  requires must stay byte-stable. The 20 currently required are eight names
+  carried on both `Linux /` and `macOS arm64 /` — `preflight`, `classified suite`,
+  `assertions`, `end-to-end tests`, `strict contract`, `cache protocol`,
+  `build stamp`, `packaged artifact` — plus the three Linux-only jobs
+  `Linux / compiled oracles`, `Linux / ASan + LSan`, and
+  `Linux / Valgrind Memcheck`, plus the unprefixed `Python quality`. Renaming
+  one does not red the lane; it removes the lane from the required set and
+  leaves a permanently pending context in its place.
 - `native-check` depends on `postfork-check`, so the native gate alone cannot
   skip the child call-graph audit.
 
 ### Cross-compiling before commit
 
-The complete local mirror compiles for the host target only, so it is blind to a
+The local floor compiles for the host target only, so it is blind to a
 macOS-only compile failure: a `comptime` branch, `external_call` signature, or
 struct-layout offset that is wrong for Darwin passes every Linux gate and reds
 the hosted macOS preflight instead, before any test runs. Cross-compile before

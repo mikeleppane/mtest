@@ -5,23 +5,24 @@ Covers the workflow-command GRAMMAR, both escaping contexts, and the
 collision-proof stop-commands FENCING (including fence TERMINATION) of echoed
 child output.
 
-This is the LOCAL proxy for what GitHub itself would do with mtest's stdout under
-Actions. It has two independent jobs, exercised together by the e2e hostile-console
-cell and available standalone over a captured-output file:
+The LOCAL proxy for what GitHub itself would do with mtest's stdout under
+Actions. Two independent jobs, exercised together by the e2e hostile-console cell
+and available standalone over a captured-output file:
 
-  * `check_tail(lines)` — the annotation TAIL mtest emits after the console band:
-    a per-kind-GROUPED sequence (every `::error` line, then every `::warning`
-    line, then exactly one `::notice`), each block node-id-sorted, every payload
-    escaped (message `%25`/`%0D`/`%0A`; `file=` property additionally `%3A`/`%2C`),
-    and never carrying a raw CR/LF that could forge a second command line.
+  * `check_tail(lines)` checks the annotation TAIL mtest emits after the console
+    band: a per-kind-GROUPED sequence (every `::error` line, then every
+    `::warning` line, then exactly one `::notice`), each block node-id-sorted,
+    every payload escaped (message `%25`/`%0D`/`%0A`; `file=` property
+    additionally `%3A`/`%2C`), and never carrying a raw CR/LF that could forge a
+    second command line.
 
-  * `check_fencing(text, ...)` — the stop-commands fences wrapping echoed child
-    output: modelled EXACTLY as GitHub processes them (once `::stop-commands::T`
-    disables commands, ONLY `::T::` re-enables them — any other `::stop-commands::X`
-    in between is inert text), so a forged `::error` sealed inside a fence can
-    never land, every opener has its matching resume (no unterminated fence), and
-    the real per-run token is high-entropy and distinct from any token a child
-    seeded into its own output.
+  * `check_fencing(text, ...)` checks the stop-commands fences wrapping echoed
+    child output, modelled exactly as GitHub processes them: once
+    `::stop-commands::T` disables commands, ONLY `::T::` re-enables them, and any
+    other `::stop-commands::X` in between is inert text. So a forged `::error`
+    sealed inside a fence can never land, every opener has its matching resume,
+    and the real per-run token is high-entropy and distinct from any token a
+    child seeded into its own output.
 """
 
 from __future__ import annotations
@@ -96,7 +97,7 @@ def _check_escaping(ann: Annotation) -> list[str]:
             f"{ann.kind} property segment carries a raw CR/LF: {ann.props!r}"
         )
     # The property segment uses `:` and `,` as separators, so a `file=` VALUE must
-    # never contain a raw one — they escape to %3A / %2C. We check each value.
+    # never contain a raw one: they escape to %3A / %2C. Each value is checked.
     if ann.props:
         for pair in ann.props.split(","):
             if "=" not in pair:
@@ -199,8 +200,8 @@ def scan_fences(text: str) -> tuple[list[Fence], bool]:
     """Scan `text` for stop-commands fences, EXACTLY as GitHub processes them.
 
     While commands are stopped by `::stop-commands::T`, ONLY the exact line
-    `::T::` re-enables them; every other line — including another
-    `::stop-commands::X` — is inert content. Returns the closed fences plus a flag
+    `::T::` re-enables them; every other line, including another
+    `::stop-commands::X`, is inert content. Returns the closed fences plus a flag
     that is True when a fence was opened and never terminated.
     """
     lines = text.split("\n")

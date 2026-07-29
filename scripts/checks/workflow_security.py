@@ -3,10 +3,9 @@
 
 Every other change to this repository's CI configuration lands through a PR
 where the diff to `pixi.toml` or `.github/workflows/ci.yml` is visible in
-review, so this module does not mirror that topology — CI *topology*
-mirroring (the Pixi task graph, the hosted matrix rows) was deliberately
-removed from this module's predecessor, `ci_topology.py`. Do not restore it
-here.
+review, so this module does not mirror that topology. Topology mirroring (the
+Pixi task graph, the hosted matrix rows) was removed from this module's
+predecessor, `ci_topology.py`. Do not restore it here.
 
 What review genuinely cannot see:
 
@@ -46,8 +45,10 @@ CODEQL_ACTION_SHA = "e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81"
 UPLOAD_ARTIFACT_ACTION_SHA = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 """Reviewed immutable actions/upload-artifact v7.0.1 revision."""
 
+SETUP_UV_ACTION_SHA = "c771a70e6277c0a99b617c7a806ffedaca235ff9"
+"""Reviewed immutable astral-sh/setup-uv v9.0.0 revision."""
+
 DOWNLOAD_ARTIFACT_ACTION_SHA = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
-UPSTREAM_SETUP_PIXI_ACTION_SHA = "5185adfbffb4bd703da3010310260805d89ebb11"
 
 ACTION_USE_RE = re.compile(
     r"^\s*(?:-\s*)?uses:\s*"
@@ -60,12 +61,10 @@ REVIEWED_ACTION_PINS = {
     "actions/checkout": {(CHECKOUT_ACTION_SHA, "v7.0.1")},
     "actions/download-artifact": {(DOWNLOAD_ARTIFACT_ACTION_SHA, "v8.0.1")},
     "actions/upload-artifact": {(UPLOAD_ARTIFACT_ACTION_SHA, "v7.0.1")},
+    "astral-sh/setup-uv": {(SETUP_UV_ACTION_SHA, "v9.0.0")},
     "github/codeql-action/analyze": {(CODEQL_ACTION_SHA, "v4.37.3")},
     "github/codeql-action/init": {(CODEQL_ACTION_SHA, "v4.37.3")},
-    "prefix-dev/setup-pixi": {
-        (SETUP_PIXI_ACTION_SHA, "v0.10.0"),
-        (UPSTREAM_SETUP_PIXI_ACTION_SHA, "v0.9.6"),
-    },
+    "prefix-dev/setup-pixi": {(SETUP_PIXI_ACTION_SHA, "v0.10.0")},
 }
 """A tampered SHA fails even if it is a real, resolvable commit.
 

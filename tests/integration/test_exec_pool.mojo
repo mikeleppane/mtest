@@ -8,11 +8,11 @@ observation order (deadline before interrupt, second activation escalates) picks
 the right kill cause and the second activation escalates IMMEDIATELY rather than
 waiting out the grace; a spawn failure is isolated; `kill_all` and a mid-flight
 poll fault both leave zero surviving process groups through the two-pass
-protocol; fd use stays flat at the effective cap; a recycled slot rejects its
-stale token; and one slot's capture overflow never reaches a sibling's bytes,
-truncation flags, or termination.
+protocol, and release a slot whose setup channel never resolved; fd use stays
+flat at the effective cap; a recycled slot rejects its stale token; and one
+slot's capture overflow never reaches a sibling's bytes, truncation flags, or
+termination.
 """
-from std.ffi import external_call
 from std.os import listdir, remove, rmdir
 from std.os.path import exists
 from std.sys.info import CompilationTarget
@@ -31,6 +31,7 @@ from mtest.exec import (
 from mtest.exec.signals import _reset_interrupt, _raise_self
 
 from exec_helpers import bytes_to_str, count_byte, target, true_binary, py_spec
+from foreign_abi import configure_native_fault, reset_native_faults
 from tmptree import temp_root
 
 comptime _SIGINT = 2
@@ -61,23 +62,6 @@ comptime _OVERFLOW_TAG = "tag10"
 token `tag10-out-` is ten bytes and the retained tail therefore starts at
 `513 - 100 = 413`, which is NOT a multiple of ten: the retained head and tail
 begin at different token phases and cannot degenerate into the same bytes."""
-
-
-def _reset_faults():
-    """Clear the isolated testing adapter's native fault table."""
-    # SAFETY: this test-only ABI takes no pointer, retains nothing, and mutates
-    # only the testing adapter's single-threaded fault configuration.
-    external_call["mtest_exec_test_fault_reset", NoneType]()
-
-
-def _configure_fault(operation: Int, error_number: Int) raises:
-    """Fail the first occurrence of one native adapter operation."""
-    # SAFETY: the test-only ABI takes scalar discriminators only; both are exact
-    # enum/errno constants and no pointer or state escapes the call.
-    var result = external_call["mtest_exec_test_fault_configure", Int32](
-        UInt32(operation), UInt32(1), Int32(error_number), Int64(0)
-    )
-    assert_equal(result, Int32(0), "could not configure native fault")
 
 
 def _collect(mut supervisor: Supervisor, count: Int) raises -> List[Completion]:
@@ -728,10 +712,24 @@ def test_kill_all_sweeps_grandchildren_leaving_zero_survivors() raises:
     assert_equal(survivors, 0, "a grandchild survived kill_all's group sweep")
 
 
+def test_kill_all_releases_a_slot_whose_setup_never_resolved() raises:
+    var runtime = ExecRuntime()
+    runtime.open()
+    var supervisor = Supervisor(2)
+    _ = supervisor.spawn(py_spec([target("sleeper.py")], 0), 1)
+    # Deliberately no sweep: the slot reaches cleanup with its setup channel
+    # still unresolved, which is also the state any child killed before its
+    # execve completes leaves behind. Cleanup owes the caller a released slot
+    # either way, not a machinery error over a channel it declined to close.
+    supervisor.kill_all()
+    assert_equal(supervisor.in_flight(), 0)
+    runtime.close()
+
+
 def test_poll_fault_two_pass_leaves_zero_survivors() raises:
     var runtime = ExecRuntime()
     runtime.open()
-    _reset_faults()
+    reset_native_faults()
     var scratch = temp_root()
     var supervisor = Supervisor(3)
     var sentinels = List[String]()
@@ -750,13 +748,13 @@ def test_poll_fault_two_pass_leaves_zero_survivors() raises:
     # Let the group establish, then fault the shared multiplex mid-flight.
     for _ in range(8):
         _ = supervisor.wait_any(40)
-    _configure_fault(_OP_POLL_SET, _EIO)
+    configure_native_fault(_OP_POLL_SET, 1, _EIO)
     var message = String("")
     try:
         _ = supervisor.wait_any(40)
     except e:
         message = String(e)
-    _reset_faults()
+    reset_native_faults()
     assert_equal(supervisor.in_flight(), 0)
     runtime.close()
 

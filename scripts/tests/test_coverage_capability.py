@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """Mutation tests for the fail-closed Mojo coverage-capability probe.
 
-The probe's whole value is its asymmetry: an absent coverage facility is the
-quiet passing outcome, and discovering one is the failure. These tests inject
-compiler-help text for both branches, pin the exact wording of the absent
-branch, and — separately from the branch logic — pin that ``main`` actually
-runs the recorded probe commands. A guard nothing invokes is the defect this
-suite is here to prevent.
+The probe is asymmetric: an absent coverage facility is the quiet passing
+outcome, and discovering one is the failure. These tests inject compiler-help
+text for both branches, pin the exact wording of the absent branch, and pin
+that ``main`` actually runs the recorded probe commands.
 """
 
 from __future__ import annotations
@@ -23,10 +21,9 @@ from unittest import mock
 from scripts.checks import coverage_capability
 
 
-# A verbatim slice of `mojo build --help` at the pinned 1.0.0b2 toolchain. It
-# is deliberately the flag-dense OPTIONS body: if the matcher were sloppy about
-# what counts as coverage-shaped, `--print-effective-target` and friends would
-# trip it.
+# A verbatim slice of `mojo build --help` at the pinned 1.0.0b2 toolchain,
+# deliberately the flag-dense OPTIONS body: a matcher sloppy about what counts
+# as coverage-shaped would trip on `--print-effective-target`.
 MOJO_BUILD_HELP_1_0_0B2 = """    Compilation options
         --optimization-level <LEVEL>, -O, --no-optimization (LEVEL=0)
             Sets the level of optimization to use at compilation.
@@ -64,9 +61,8 @@ MOJO_HELP_1_0_0B2 = """OPTIONS
             Displays help information.
 """
 
-# A hypothetical future toolchain that grew the facility. The two flags are the
-# spellings such a toolchain would use, in the shape a clang-derived driver
-# would use.
+# A hypothetical future toolchain that grew the facility, spelled the way a
+# clang-derived driver would.
 MOJO_BUILD_HELP_WITH_COVERAGE = """    Instrumentation options
         --coverage
             Emit source-based coverage instrumentation.
@@ -147,7 +143,7 @@ class DiscoveredFacilityBranchTests(unittest.TestCase):
     def test_discovered_flags_exit_nonzero(self) -> None:
         # THE fail-closed contract: finding a coverage facility must break the
         # task, so a toolchain upgrade cannot silently bless an unreviewed
-        # metric. Nothing else in this suite asserts this exit code.
+        # metric.
         _message, code = coverage_capability.evaluate(DISCOVERED)
 
         self.assertNotEqual(code, 0)
@@ -306,10 +302,9 @@ class EmptyProbeOutputFailsClosedTests(unittest.TestCase):
     """An exit-0 command that wrote nothing is not evidence of an absence.
 
     `collect_help_text` treats only a missing executable, a timeout, and a
-    nonzero exit as failures, so a renamed subcommand path or a shim that pages
-    its help leaves `evaluate` concluding the toolchain names no coverage
-    facility having inspected zero bytes -- contradicting the docstring the
-    probe's whole value rests on.
+    nonzero exit as failures, so a renamed subcommand or a shim that pages its
+    help would let `evaluate` report no coverage facility after inspecting zero
+    bytes.
     """
 
     def test_no_reports_at_all_is_a_failure(self) -> None:

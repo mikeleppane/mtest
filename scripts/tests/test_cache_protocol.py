@@ -1,41 +1,33 @@
 #!/usr/bin/env python3
 """Adversarial protocol scenarios for the build-artifact cache, from outside.
 
-Every other cache test in this repository runs *inside* one process: the Mojo
-unit and integration suites call `store_probe`, `store_publish`, and
-`clear_cache_root` directly, one call at a time, with the store in whatever
-state the test put it. Three properties are invisible from there, and this
-module exists for exactly those three.
+Every other cache test in this repository runs inside one process: the Mojo
+suites call `store_probe`, `store_publish`, and `clear_cache_root` directly,
+one call at a time. Three properties are invisible from there.
 
-- **Concurrency.** The publication protocol's whole argument is about two
-  processes racing for one generation directory. A single-process test can
-  simulate the losing branch but cannot witness the race, so the scenarios here
-  spawn real `build/mtest` processes into one shared store and assert what the
-  store looks like afterwards.
-- **Faults in a window no fake compiler can reach.** The two windows worth
-  faulting -- before the durability flush and between the flush and the commit
-  rename -- are inside mtest's own process, *after* the compiler child has
-  exited. Nothing a fake `mojo` does can land there. `src/mtest/session/
-  store.mojo` therefore carries a test-only seam, `MTEST_STORE_FAULT`, which
-  these scenarios drive from the environment; see that module's docstring for
-  what each value abandons.
-- **The wiring in `src/main.mojo`.** `_resolution_defaults` and the
-  `--cache-clear` branch are private defs in the *executable* target, and
-  nothing under `tests/` can import `main.mojo`. Their behavior is reachable
-  only through a real command line, which makes this module the only place
-  `--no-cache` and `--cache-clear` are covered by anything but reading. A
-  regression that drops `defaults.no_cache` or `defaults.cache_clear` from the
-  resolution projection turns those flags into no-ops that every other gate
-  still reports green; `NoCacheTests` and `CacheClearTests` are what goes red.
+- Concurrency. The publication protocol is about two processes racing for one
+  generation directory. A single-process test can simulate the losing branch
+  but cannot witness the race, so the scenarios here spawn real `build/mtest`
+  processes into one shared store and assert what the store looks like after.
+- Faults in a window no fake compiler can reach. The two windows worth
+  faulting, before the durability flush and between the flush and the commit
+  rename, are inside mtest's own process after the compiler child has exited.
+  `src/mtest/session/store.mojo` therefore carries a test-only seam,
+  `MTEST_STORE_FAULT`, which these scenarios drive from the environment; see
+  that module's docstring for what each value abandons.
+- The wiring in `src/main.mojo`. `_resolution_defaults` and the
+  `--cache-clear` branch are private defs in the executable target, and
+  nothing under `tests/` can import `main.mojo`. A regression that drops
+  `defaults.no_cache` or `defaults.cache_clear` from the resolution projection
+  turns those flags into no-ops that every other gate still reports green;
+  `NoCacheTests` and `CacheClearTests` are what goes red.
 
-**These are pinning tests, not a design.** Every scenario except the two fault
-ones landed after the behavior it describes and passed on first run; they are
-here to hold that behavior still, not to have driven it. The fault scenarios
-are the genuine red step -- the seam did not exist until they demanded it.
+These are pinning tests. Every scenario except the two fault ones landed after
+the behavior it describes and passed on first run. The fault scenarios are the
+genuine red step: the seam did not exist until they demanded it.
 
 Each scenario drives a throwaway project of its own (`tempfile.mkdtemp`, torn
-down after) and reads the run's `--json` NDJSON stream rather than the console,
-following the subprocess conventions in `scripts/tests/test_selfhost.py`.
+down after) and reads the run's `--json` NDJSON stream rather than the console.
 """
 
 from __future__ import annotations
@@ -57,9 +49,8 @@ MTEST = REPO / "build" / "mtest"
 RUN_TIMEOUT_SECONDS = 300
 """Ceiling on one `mtest` invocation. A timeout is a FAIL, never a skip.
 
-Generous next to a measured cold run of one file (about 2.5s on a development
-machine), because a false timeout on a loaded host reads exactly like the
-deadlock these concurrency scenarios look for.
+Sized well above a cold run of one file, because a false timeout on a loaded
+host reads exactly like the deadlock these concurrency scenarios look for.
 """
 
 CACHE_ROOT_REL = ".mtest-cache"
@@ -134,8 +125,8 @@ def main() raises:
 """A file that is BOTH a discovered test file and its neighbours' fixtures.
 
 `test_helpers.mojo` matches the discovery glob, so it is omitted from the
-directory walk that keys its neighbours — and it is importable from every one of
-them. The two facts together are the shape a stale hit would come from.
+directory walk that keys its neighbours, while staying importable from every
+one of them. Together those are the shape a stale hit comes from.
 """
 
 READS_FIXTURE_SOURCE = """\
@@ -166,10 +157,10 @@ def main() raises:
 """
 """A suite whose verdict flips on a file at the invocation root.
 
-Nothing walks the root itself -- the key covers the directory a test file sits
-in and every `-I` root, not the working directory -- so creating the sentinel
-turns a passing warm run into a failing one without moving a single key. That
-is what makes an early stop observable over a store where every file hits.
+The key covers the directory a test file sits in and every `-I` root, never
+the working directory, so creating the sentinel turns a passing warm run into
+a failing one without moving a single key. That makes an early stop observable
+over a store where every file hits.
 """
 
 STATELESS_CONFIG = "[run]\nstate = false\n"
@@ -187,8 +178,7 @@ def require_environment() -> None:
     Raises:
         AssertionError: If `build/mtest` is missing, or `mojo` is not on PATH.
             Both are supplied by the `cache-protocol-check` task's `build-bin`
-            dependency and by running under `pixi run`; a scenario that
-            silently skipped without them would report green over nothing.
+            dependency and by running under `pixi run`.
     """
     if not MTEST.is_file():
         raise AssertionError(
@@ -406,7 +396,8 @@ def build_argv_of(record: dict[str, object]) -> list[str]:
 
     Raises:
         AssertionError: If the field is missing, is not a list of strings, or
-            was truncated — a truncated line cannot be compared to a meta file.
+            was truncated, since a truncated line cannot be compared to a meta
+            file.
     """
     if counter(record, "build_argv_omitted") != 0:
         raise AssertionError("build_argv was truncated; the comparison is void")
@@ -575,16 +566,15 @@ class ConcurrencyTests(ProtocolScenario):
         for name in ("one.ndjson", "two.ndjson"):
             built, cached = counters(self.root / name)
             # Which of the two is 1 depends on whether the second process
-            # probed before the first published, and that is a scheduling
-            # question, not a protocol one. What the protocol owes is that the
-            # file is admitted exactly once, from exactly one source.
+            # probed before the first published, which is a scheduling
+            # question. What the protocol owes is that the file is admitted
+            # exactly once, from exactly one source.
             self.assertEqual((name, built + cached), (name, 1))
             # ...and that BOTH sources were the cache. A loser that hit a
-            # contended store and quietly degraded to an uncached build would
-            # satisfy the sum above with `built = 1` and look identical to a
-            # winner, so the sum alone cannot tell a race the protocol handled
-            # from one it gave up on. Losing a rename is not a malfunction and
-            # must never spend the session's cache.
+            # contended store and degraded to an uncached build would satisfy
+            # the sum above with `built = 1`, so the sum alone cannot tell a
+            # handled race from an abandoned one. Losing a rename must never
+            # spend the session's cache.
             off = warnings_of(self.stream(name), "cache-off")
             self.assertEqual((name, off), (name, []))
         # The survivor is not merely present: it validates, key and binary
@@ -641,10 +631,10 @@ class PublicationFaultTests(ProtocolScenario):
 
     Both are inside `store_publish`, after the compiler child has exited, so
     they are driven through `store.mojo`'s test-only `MTEST_STORE_FAULT` seam.
-    The property is the same for both and is the whole point of staging into a
-    private directory and committing with one `rename(2)`: an interrupted
-    publication leaves NO generation behind — not a partial one, not an
-    unvalidated one — and the next ordinary run rebuilds and publishes cleanly.
+    Staging into a private directory and committing with one `rename(2)` buys
+    the same property for both: an interrupted publication leaves NO generation
+    behind, partial or unvalidated, and the next ordinary run rebuilds and
+    publishes cleanly.
     """
 
     def _assert_abandoned(self, window: str) -> None:
@@ -659,8 +649,8 @@ class PublicationFaultTests(ProtocolScenario):
         self.assertEqual(len(published), 1, msg=f"warnings={published!r}")
         self.assertIn(f"MTEST_STORE_FAULT={window}", published[0])
         self.assertIn("tests/test_alpha.mojo", published[0])
-        # Nothing publishable is left behind. Staging debris may remain — it
-        # carries the writing process's pid and no later run can adopt it —
+        # Nothing publishable is left behind. Staging debris may remain, since
+        # it carries the writing process's pid and no later run can adopt it,
         # but a generation a later run could probe must not exist.
         self.assertEqual(generations(self.root), [])
         self.assertTrue((self.root / TAG_REL).is_file(), msg="marker missing")
@@ -673,16 +663,11 @@ class PublicationFaultTests(ProtocolScenario):
         self.run_ok(["--json", "warm.ndjson", "tests"])
         self.assertEqual(counters(self.root / "warm.ndjson"), (0, 1))
 
-    # The two cases below deliberately assert the SAME properties, and no
-    # assertion here can tell them apart. That is a fact about the protocol, not
-    # a gap in the coverage: both windows abandon the staging directory before
-    # the one `rename(2)` that would publish anything, so from outside the
-    # process the two are the same event — no generation, one warning naming the
-    # window, a clean rebuild afterwards. The only difference is whether the
-    # durability flush had already run, and a flush leaves no trace in a
-    # directory that is then discarded. Distinguishing them from here would take
-    # an assertion about mtest's internal call order dressed up as a filesystem
-    # claim, which would pin the implementation rather than the guarantee.
+    # The two cases below assert the SAME properties, because from outside the
+    # process the two windows are the same event: both abandon the staging
+    # directory before the one `rename(2)` that would publish anything. The
+    # only difference is whether the durability flush had already run, and a
+    # flush leaves no trace in a directory that is then discarded.
     #
     # What the pair still buys: each window is REACHED. A seam that stopped
     # honoring one of the two values would leave that case with a published
@@ -707,16 +692,14 @@ class PublicationFaultTests(ProtocolScenario):
 class UnrunnableGenerationTests(ProtocolScenario):
     """A stored binary whose mode bits were dropped, over real processes.
 
-    Every other corruption of a generation changes its bytes, so the digest
-    check catches it and the store heals itself. This one changes only the
-    permission: the content still matches its record exactly, and the only thing
-    that can tell it apart from a usable artifact is asking whether it can be
-    spawned. It is worth a real-process scenario because the symptom lives
-    outside the store — the run reaches the supervisor, cannot execute the path
-    it was handed, and reports an internal error on a suite that passes.
-
-    The realistic sources are all restores: unzipping a CI cache archive, a
-    container image `COPY`, or a `chmod -R` swept over a checkout.
+    Every other corruption changes a generation's bytes, so the digest check
+    catches it and the store heals itself. This one changes only the
+    permission, and the only way to tell it from a usable artifact is to ask
+    whether it can be spawned. The symptom lives outside the store: the run
+    reaches the supervisor, cannot execute the path it was handed, and reports
+    an internal error on a suite that passes. The realistic sources are
+    restores: a CI cache archive, a container image `COPY`, a `chmod -R` swept
+    over a checkout.
     """
 
     def test_a_generation_that_cannot_be_executed_is_rebuilt(self) -> None:
@@ -728,8 +711,8 @@ class UnrunnableGenerationTests(ProtocolScenario):
         binary.chmod(0o600)
 
         # No cache condition may fail a run that would otherwise pass, so this
-        # is a miss and a rebuild — not an internal error over a suite whose
-        # source never changed.
+        # is a miss and a rebuild rather than an internal error over a suite
+        # whose source never changed.
         completed = self.run_ok(["--json", "restored.ndjson", "tests"])
         self.assertNotIn("INTERNAL-ERROR", completed.stdout)
         self.assertEqual(counters(self.root / "restored.ndjson"), (1, 0))
@@ -809,8 +792,8 @@ class IncludeRootTests(ProtocolScenario):
         # The ownership marker is not part of "off". It belongs to the
         # `.mtest-cache` DIRECTORY, which this run created anyway for its
         # last-run state, and every directory mtest creates carries the proof
-        # that it is mtest's — otherwise `--cache-clear` would refuse to delete
-        # a tree this same run had just made.
+        # that it is mtest's, or `--cache-clear` would refuse to delete a tree
+        # this same run had just made.
         self.assertTrue((self.root / TAG_REL).is_file(), msg="marker missing")
 
 
@@ -820,8 +803,8 @@ class SiblingSearchPathTests(ProtocolScenario):
     `mojo build tests/test_x.mojo` resolves a bare `from helper import ...`
     against `tests/`, with no `-I` involved and nothing reported afterwards
     about what it read. A key blind to that directory serves a binary compiled
-    against the previous helper, and the run goes green over source that now
-    fails — the only failure shape a build cache must never have.
+    against the previous helper, so the run goes green over source that now
+    fails.
     """
 
     def test_editing_a_helper_beside_the_test_rebuilds_and_reverses(self) -> None:
@@ -855,12 +838,11 @@ class SiblingSearchPathTests(ProtocolScenario):
         )
 
     def test_a_fixture_file_named_like_a_test_is_still_keyed(self) -> None:
-        # `test_helpers.mojo`, `test_common.mojo`, `test_fixtures.mojo` are
-        # ordinary names for shared fixture files, and every one of them matches
-        # the discovery glob — so every one is left out of its neighbours' keys.
-        # That is only safe because the importer's own imports are read: this
-        # scenario is the shape where being wrong is a green run over a fixture
-        # that no longer returns what the suite asserts.
+        # `test_helpers.mojo` and `test_common.mojo` are ordinary names for
+        # shared fixture files, and both match the discovery glob, so both are
+        # left out of their neighbours' keys. That is only safe because the
+        # importer's own imports are read; being wrong here is a green run over
+        # a fixture that no longer returns what the suite asserts.
         tests = self.root / "tests"
         (tests / "test_helpers.mojo").write_text(
             FIXTURE_SUITE_SOURCE.format(value=7), encoding="utf-8"
@@ -878,10 +860,9 @@ class SiblingSearchPathTests(ProtocolScenario):
 
         built, cached = counters(self.root / "edited.ndjson")
         # `test_session` named the fixture file, so it keys over the whole
-        # directory and rebuilds with it. `test_alpha` named nothing in the
-        # directory and keeps its own key, which is the precision the omission
-        # exists to buy — losing it here would mean every unrelated suite
-        # rebuilding whenever any fixture moved.
+        # directory and rebuilds with it. `test_alpha` named nothing there and
+        # keeps its own key; losing that precision would rebuild every
+        # unrelated suite whenever any fixture moved.
         self.assertEqual((built, cached), (2, 1))
         self.assertEqual(
             edited.returncode,
@@ -911,8 +892,7 @@ class SiblingSearchPathTests(ProtocolScenario):
 
         # A test file beside another is an entry point of its own, already keyed
         # by its own source frame. Folding neighbours into each other would make
-        # every one-line edit rebuild the whole directory, which is the cost
-        # that would leave the cache with nothing to offer.
+        # every one-line edit rebuild the whole directory.
         self.assertEqual(counters(self.root / "edited.ndjson"), (1, 1))
 
 
@@ -925,16 +905,15 @@ class CaseFoldTests(ProtocolScenario):
 
     macOS volumes are case-insensitive by default, so `tests/test_alpha.mojo`
     and `tests/TEST_ALPHA.mojo` open the same inode while remaining two
-    different strings. The key frames the test file by its root-relative path as
-    given, and the artifact directory is named from that same path, so the two
-    spellings are two keys over identical bytes.
+    different strings. The key frames the test file by its root-relative path
+    as given, and the artifact directory is named from that same path, so the
+    two spellings are two keys over identical bytes.
 
     That is fine as long as they stay independent. The failure this guards is
     the alternating one: if either spelling's publication reaped or overwrote
-    the other's artifact, a developer whose editor, shell completion, and build
-    script disagreed about the case of one path would see every run rebuild what
-    the previous run had just cached, forever, with no warning and no way to
-    tell the cache was doing anything at all.
+    the other's artifact, a developer whose editor and build script disagreed
+    about the case of one path would see every run rebuild what the previous
+    run had just cached, with no warning.
     """
 
     def test_a_case_variant_operand_does_not_flap(self) -> None:
@@ -951,8 +930,8 @@ class CaseFoldTests(ProtocolScenario):
         self.run_ok(["--json", "warm.ndjson", lower])
         self.assertEqual(counters(self.root / "warm.ndjson"), (0, 1))
 
-        # The other spelling may build or may hit -- which one depends on how
-        # the key frames the path, and that is not what this pins.
+        # The other spelling may build or may hit, depending on how the key
+        # frames the path; that is not what this pins.
         self.run_ok(["--json", "other-first.ndjson", upper])
         self.run_ok(["--json", "other-second.ndjson", upper])
         self.assertEqual(counters(self.root / "other-second.ndjson"), (0, 1))
@@ -996,15 +975,15 @@ class NoCacheTests(ProtocolScenario):
         self.assertTrue((self.root / TAG_REL).is_file(), msg="marker missing")
         self.assertEqual(counters(self.root / "off.ndjson"), (2, 0))
         # And it says nothing about it: the user turned the cache off, so
-        # reporting back that it is off would be noise.
+        # reporting that back would be noise.
         self.assertEqual(warnings_of(self.stream("off.ndjson"), "cache-off"), [])
 
     def test_a_cache_directory_no_cache_left_behind_can_be_cleared(self) -> None:
         # `--no-cache` still writes `.mtest-cache/lastrun`, so it creates the
         # cache directory even though it creates no store. A directory mtest
-        # made seconds earlier must be one mtest can prove it owns, or
-        # `--cache-clear` refuses it as somebody else's and exits 4 — a usage
-        # error on an ordinary sequence, blaming a mtest that was never here.
+        # just made must be one mtest can prove it owns, or `--cache-clear`
+        # refuses it as somebody else's and exits 4: a usage error on an
+        # ordinary sequence, blaming a mtest that was never here.
         self.run_ok(["--no-cache", "--json", "off.ndjson", "tests"])
         self.assertTrue((self.root / CACHE_ROOT_REL / "lastrun").is_file())
         self.assertFalse((self.root / STORE_REL).exists(), msg="store created")
@@ -1030,7 +1009,7 @@ class NoCacheTests(ProtocolScenario):
         # Not one artifact was read, rewritten, republished, or reaped: same
         # inodes, same mtimes, same membership.
         self.assertEqual(store_identities(self.root), before)
-        # And the counters agree with the filesystem — both files went to the
+        # And the counters agree with the filesystem: both files went to the
         # compiler even though a valid generation for each was sitting there.
         self.assertEqual(counters(self.root / "off.ndjson"), (2, 0))
 
@@ -1039,16 +1018,13 @@ class CollectOnlyTests(ProtocolScenario):
     """`--collect-only` reaches the store through the same seam a run does.
 
     Collect builds every discovered file and probes it for its test names,
-    running no test body. It takes its own branch out of `src/main.mojo` — it
-    never reaches `run_session` and therefore emits no event stream and no
-    counters — so nothing inside a session can observe what it did with the
-    store. Its only witness is the store itself, which is why this scenario
-    lives here.
+    running no test body. It takes its own branch out of `src/main.mojo`, never
+    reaching `run_session`, so it emits no event stream and no counters and the
+    store itself is its only witness.
 
     A collect that neither probed nor published would still print the right
-    listing and pass every other gate in this repository, while making the
-    listing cost a full cold compile of the suite every time an editor asked for
-    it.
+    listing and pass every other gate here, while making the listing cost a
+    full cold compile of the suite every time an editor asked for it.
     """
 
     file_names: ClassVar[tuple[str, ...]] = ("alpha", "beta")
@@ -1088,9 +1064,9 @@ class EarlyStopCounterTests(ProtocolScenario):
     `docs/json-stream.md` publishes `built_files + cached_files` as the run's
     first-attempt compile admissions and promises the sum is stable across runs
     over identical inputs. A file the scheduler never reaches is admitted to
-    nothing, so it belongs in neither counter — and the parallel pool is where
-    that is easiest to get wrong, because it can learn a file's cache answer
-    long before it decides whether to dispatch it.
+    nothing, so it belongs in neither counter. The parallel pool is where that
+    is easiest to get wrong, since it can learn a file's cache answer long
+    before it decides whether to dispatch it.
     """
 
     file_names: ClassVar[tuple[str, ...]] = (
@@ -1141,12 +1117,12 @@ class EarlyStopCounterTests(ProtocolScenario):
 class CacheClearTests(ProtocolScenario):
     """`--cache-clear` end to end, over a real command line.
 
-    The flag's whole implementation is `clear_cache_root` plus about eight
-    lines of ordering in `src/main.mojo` — resolve first so a usage error never
-    reaches a deletion, clear before the last-run state is read because that
-    file lives inside the directory being deleted, and refuse as a
-    configuration error with exit 4. Nothing under `tests/` can import
-    `main.mojo`, so that ordering is covered here or by reading only.
+    The flag is `clear_cache_root` plus a short ordering in `src/main.mojo`:
+    resolve first so a usage error never reaches a deletion, clear before the
+    last-run state is read because that file lives inside the directory being
+    deleted, and refuse as a configuration error with exit 4. Nothing under
+    `tests/` can import `main.mojo`, so that ordering is covered here or by
+    reading only.
     """
 
     file_names: ClassVar[tuple[str, ...]] = ("alpha", "beta")
@@ -1186,14 +1162,13 @@ class CacheClearTests(ProtocolScenario):
         self.assertEqual(len(generations(self.root)), 2)
 
     def test_a_bare_cache_clear_clears_and_then_runs_cold(self) -> None:
-        # Every other clear scenario pairs the flag with something -- `--no-cache`
-        # to keep the deletion observable, `--lf` to reach the warning -- so the
-        # spelling a user actually reaches for is the one shape nothing drove.
-        # It is also the shape whose two halves look like each other's absence:
-        # the flag clears the store and THEN runs the session, which legitimately
-        # fills it straight back up, so "the store is populated afterwards" is
-        # the expected end state of both a working clear and a clear that did
-        # nothing at all.
+        # Every other clear scenario pairs the flag with something (`--no-cache`
+        # to keep the deletion observable, `--lf` to reach the warning), so the
+        # bare spelling a user reaches for is the one shape nothing drove. It is
+        # also the shape whose halves look like each other's absence: the flag
+        # clears the store and THEN runs the session, which fills it straight
+        # back up, so a populated store afterwards is the expected end state of
+        # both a working clear and one that did nothing at all.
         self._populate()
         before = store_identities(self.root)
         before_names = generations(self.root)
@@ -1204,9 +1179,9 @@ class CacheClearTests(ProtocolScenario):
         # generations were sitting there and neither could be served.
         self.assertEqual(counters(self.root / "after.ndjson"), (2, 0))
         # The repopulation, witnessed by identity rather than by presence. Same
-        # inputs mean the same keys, so the names come back identical -- but
-        # every generation is a directory that was created after the deletion,
-        # so not one of them can be the object that was there before.
+        # inputs mean the same keys, so the names come back identical, but every
+        # generation is a directory created after the deletion, so none of them
+        # can be the object that was there before.
         self.assertEqual(generations(self.root), before_names)
         after = store_identities(self.root)
         self.assertEqual(sorted(after), sorted(before), msg="store membership")
@@ -1322,8 +1297,7 @@ class CacheClearTests(ProtocolScenario):
 
         # `config show` resolves and prints; §27.1 fixes its exit domain and
         # states it performs no side effect. `--cache-clear` is a side effect,
-        # and the ordering in main.mojo puts the config-show branch first on
-        # purpose — this pins that deliberate decision.
+        # so the ordering in main.mojo puts the config-show branch first.
         self.assertEqual(completed.returncode, 0)
         self.assertIn("[run]", completed.stdout)
         self.assertTrue((self.root / CACHE_ROOT_REL).is_dir())

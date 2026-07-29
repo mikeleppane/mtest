@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
 """The strict machine-event-stream consumer: mtest's own `--json` ORACLE.
 
-This is the reference reader for the newline-delimited JSON event stream mtest
-writes under `--json` (the normative shape lives in `docs/json-stream.md`). It is
-deliberately STRICT where a real consumer must be strict, and deliberately
-LENIENT exactly where the versioning contract demands forward-compatibility:
+The reference reader for the newline-delimited JSON event stream mtest writes
+under `--json`; the normative shape lives in `docs/json-stream.md`. It is STRICT
+where a real consumer must be, and LENIENT exactly where the versioning contract
+demands forward-compatibility:
 
 STRICT
-  * `json.loads` is configured with `parse_constant` that REJECTS the non-finite
-    tokens (`Infinity`, `-Infinity`, `NaN`) — the v1 stream carries no
-    floating-point values at all, so any such token is corruption, not data.
-  * an `object_pairs_hook` REJECTS a duplicate key in any object — a well-formed
-    record never repeats a key, and a permissive last-wins parse would hide a
-    forger.
+  * `json.loads` gets a `parse_constant` that REJECTS the non-finite tokens
+    (`Infinity`, `-Infinity`, `NaN`). The v1 stream carries no floating-point
+    values, so any such token is corruption.
+  * an `object_pairs_hook` REJECTS a duplicate key in any object. A well-formed
+    record never repeats a key, and a last-wins parse would hide a forger.
   * every NEWLINE-TERMINATED line must parse as a JSON object; a committed line
     that does not parse is CORRUPTION and fails loudly.
   * line 1 must be the frozen stream header with the known integer `version`.
-  * at most ONE `session_finished` record may appear (the session dispatches
-    exactly one terminal event); two would mean a forged or doubled terminal.
+  * at most ONE `session_finished` record may appear, since the session
+    dispatches exactly one terminal event.
 
 LENIENT (the forward-compatibility obligation)
-  * UNKNOWN event kinds and UNKNOWN object fields are ACCEPTED and ignored — a
-    v1 consumer must tolerate additive v-next fields and kinds (§ versioning).
-  * a single trailing UNTERMINATED fragment is classified as a TORN tail (a
-    truncation signal — the writer died mid-line), never as corruption. Its
-    ABSENCE of a terminal record is how a consumer learns the run was cut short.
+  * UNKNOWN event kinds and object fields are ACCEPTED and ignored, because a v1
+    consumer must tolerate additive v-next fields and kinds (see versioning).
+  * a single trailing UNTERMINATED fragment is classified as a TORN tail, the
+    truncation signal for a writer that died mid-line, never as corruption. Its
+    missing terminal record is how a consumer learns the run was cut short.
 
 Run directly (`python -m scripts.checks.reports.json_stream`) to self-test against the
 forward-compatibility and truncation fixtures under `scripts/fixtures/`.
@@ -47,7 +46,7 @@ FIXTURE_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "json_stream"
 class StreamError(Exception):
     """A strict-consumer rejection: corruption, a framing break, or a bad header.
 
-    A TORN tail is NOT a StreamError — truncation is a normal, expected outcome
+    A TORN tail is NOT a StreamError. Truncation is a normal, expected outcome
     of an interrupted or killed run and is reported as data, not raised.
     """
 

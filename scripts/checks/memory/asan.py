@@ -1,11 +1,27 @@
 #!/usr/bin/env python3
 """Build the risk-weighted ownership surface from source and run it under ASan.
 
-The inventory is the exec layer's process supervision plus the report layer's
-escaping, JUnit rendering, and file finalization, and one real CLI run that
-drives all of them together against a hostile child. `notes/test-memory-risk-map.md`
-maps every product `# SAFETY:` site to the evidence here, in the Valgrind lane,
-or in the native C tests, and states the reason for each exclusion.
+The inventory covers the exec layer's process supervision, the session layer's
+scheduling of it, the report layer's escaping, JUnit rendering and file
+finalization, plus one real CLI run driving all of them against a hostile child.
+`notes/test-memory-risk-map.md` maps every product `# SAFETY:` site to the
+evidence here, in the Valgrind lane, or in the native C tests, and gives the
+reason for each exclusion.
+
+A suite earns its place by supervising real children through completion and
+teardown, rather than by asserting on a shape. `TESTS` names FILES, so when a
+listed suite is split and half its cases move to an unlisted path, the old path
+still resolves and the gate still passes while the departed cases quietly stop
+being instrumented. Every part of a split therefore inherits the entry, and
+dropping a part means writing down here which boundaries it stopped reaching.
+
+`test_session_schedule_serial.mojo` is listed because that did not happen when
+commit `4edc296` split it out of `test_session_schedule.mojo`. Its cases latch a
+real SIGINT against an explicitly opened `ExecRuntime`, abandon a pool with
+children in flight, and open a capacity-one serial pass after draining the
+parallel batch: supervisor and signal-runtime teardown, the free-then-observe
+shape ASan exists to catch. No `test_exec_*` suite reaches it, because none of
+them goes through `run_session`.
 """
 
 from __future__ import annotations
@@ -38,6 +54,7 @@ TESTS = (
     ROOT / "tests" / "integration" / "test_exec_fdhygiene.mojo",
     ROOT / "tests" / "integration" / "test_exec_pool.mojo",
     ROOT / "tests" / "integration" / "test_session_schedule.mojo",
+    ROOT / "tests" / "integration" / "test_session_schedule_serial.mojo",
     ROOT / "tests" / "unit" / "test_report_escape.mojo",
     ROOT / "tests" / "unit" / "test_report_json_reporter.mojo",
     ROOT / "tests" / "unit" / "test_report_junit.mojo",
@@ -48,25 +65,25 @@ ASAN_OPTIONS = "detect_leaks=1:halt_on_error=1:abort_on_error=1"
 BUILD_TIMEOUT = 600
 """Seconds allowed for one instrumented `mojo build`, whatever it compiles.
 
-Every source here is built through the product's own import graph, so a suite's
-compile cost tracks the size of the closure it reaches rather than its own line
-count. `test_session_schedule.mojo` is the clearest case: it imports
-`mtest.session`, so it compiles the session and cache modules whole, and its
-cold ASan build measured 34.9s before the build cache landed and 101.8s after,
-from the same unchanged 465-line source. Nothing about that growth is visible
-in the test file, and the next module to join a compiled closure will move the
-number again.
+Every source here builds through the product's own import graph, so compile cost
+tracks the closure a suite reaches rather than its own line count. Recorded on
+`test_session_schedule.mojo` while it was still a single 465-line source: 34.9s
+before the build cache landed, 101.8s after. The file was unchanged between the
+two readings, which is what attributes the growth to the closure.
 
-So this is a guard against a wedged compiler, not a statement about how long a
-build ought to take: it is sized well above the slowest observed compile, on
-the reasoning that a build one order of magnitude over budget is stuck and a
-build merely slower than last month is not a CI failure. Hosted runners have no
-Mojo compile cache, so every CI build pays the full cold cost.
+Commit `4edc296` has since split that file, and both halves are built here. Both
+still import `mtest.session`, so the pair pays the closure's cost twice instead
+of halving it. Neither figure has been re-taken.
 
-Deliberately separate from the budget for RUNNING a built binary, which stays at
-the tighter default in `run`: these suites are expected to finish in seconds,
-and a hung binary should surface quickly rather than inherit a compiler's
-allowance."""
+The budget guards against a wedged compiler rather than stating how long a build
+ought to take. It sits well above the slowest observed compile, on the reasoning
+that a build an order of magnitude over budget is stuck while a build merely
+slower than last month is not a CI failure. Hosted runners have no Mojo compile
+cache and pay the full cold cost every time.
+
+Separate from the budget for RUNNING a built binary, which stays at the tighter
+default in `run`: a hung binary should surface quickly rather than inherit a
+compiler's allowance."""
 CONTROL_CASES = {
     "asan_oob_control": "heap-buffer-overflow",
     "asan_uaf_control": "heap-use-after-free",
@@ -88,8 +105,8 @@ the working directory, so the probe runs from a scratch tree of its own and
 leaves nothing in the checkout."""
 
 VENDORED_TOML_INCLUDE = ROOT / "vendor" / "mojo-toml"
-"""The vendored parser `mtest.config` imports. Included as SOURCE, not as the
-precompiled `build/toml.mojopkg`, so the TOML parsing the probe drives is
+"""The vendored parser `mtest.config` imports. Included as SOURCE rather than as
+the precompiled `build/toml.mojopkg`, so the TOML parsing the probe drives is
 instrumented too."""
 
 HOSTILE_BUILD_STANDIN = (
@@ -97,34 +114,31 @@ HOSTILE_BUILD_STANDIN = (
 )
 """The strict `--mojo` stand-in that fabricates the hostile report actor.
 
-It is a Python script the CLI `execve`s, so it and the actor it writes run
-OUTSIDE this gate's instrumentation: the compiler and the test child are the
-subjects of neither ASan nor Memcheck here, and only the mtest parent is."""
+The CLI `execve`s it, so it and the actor it writes run OUTSIDE this gate's
+instrumentation. Only the mtest parent is a subject of ASan or Memcheck here;
+the compiler and the test child are not."""
 
 HOSTILE_ACTOR = ROOT / "tests" / "fixtures" / "exec" / "hostile_report_actor.py"
-"""The committed actor the stand-in copies. Not invoked directly; named so this
+"""The committed actor the stand-in copies. Never invoked directly; named so this
 gate's inventory records the fixture whose bytes it depends on."""
 
 CLI_PROBE_LSAN_OPTIONS = "verbosity=1"
 """The one `LSAN_OPTIONS` value the CLI probe sets, and nothing else.
 
-`main` deliberately pops `LSAN_OPTIONS` so a developer's environment cannot
-weaken the leak check; this puts back exactly one flag, on the probe alone.
-`verbosity` only raises logging — it suppresses nothing, adds no suppression
-file, and changes no detection threshold — and it is what makes
-`CLI_LSAN_WITNESS` appear."""
+`main` pops `LSAN_OPTIONS` so a developer's environment cannot weaken the leak
+check; this puts back exactly one flag, on the probe alone. `verbosity` only
+raises logging, suppressing nothing and changing no detection threshold, and it
+is what makes `CLI_LSAN_WITNESS` appear."""
 
 CLI_LSAN_WITNESS = "LeakSanitizer: checking for leaks"
-"""LeakSanitizer announcing, from inside the process under test, that it is
-running the leak check.
+"""LeakSanitizer announcing, from inside the process under test, that the leak
+check is running.
 
-This is the ASan lane's answer to the Valgrind lane's Memcheck-provenance
-requirement, and it is a POSITIVE witness in a place the `__asan_` symbol guard
-cannot reach. That guard is static: it proves the binary was linked against the
-runtime, not that the runtime did anything in this run. Without this line, a
-clean probe and a probe whose leak check silently never ran are the same
-observation. The hostile child cannot forge it either — it is written by the
-parent's own runtime, after the child is long gone."""
+A positive witness in a place the `__asan_` symbol guard cannot reach: that
+guard is static, proving the binary links the runtime rather than that the
+runtime did anything this run. Without this line a clean probe and a probe whose
+leak check never ran are the same observation. The hostile child cannot forge it
+either, since the parent's own runtime writes it after the child is gone."""
 
 CLI_PROBE_TREE = "hostile"
 """The single subdirectory of the scratch root that holds the probe module."""
@@ -147,22 +161,18 @@ site would have no instrumented evidence at all."""
 CLI_PROBE_EXIT = 1
 """The fixed run's expected client exit code.
 
-ONE, not zero, because the actor writes a genuine reconciling report with one
-FAIL row. Pinning 1 is a stronger POSITIVE claim than pinning 0 would be: only a
-run that actually built the child, captured its bytes, parsed its report, and
+ONE because the actor writes a genuine reconciling report with one FAIL row.
+Only a run that built the child, captured its bytes, parsed its report and
 resolved a failing verdict can produce it, whereas 0 is also what a run that did
-almost nothing returns.
-
-It is NOT stronger for excluding Valgrind's `--error-exitcode=99` — any exact
-pin excludes 99 equally, including a pin of 0."""
+almost nothing returns. Any exact pin excludes Valgrind's `--error-exitcode=99`
+equally, so that is not a reason to prefer 1."""
 
 CLI_PROBE_ESCAPED_LINE = "    | \\x1B[2J\\x1B[1;31mCHILD-CSI\\x1B[0m"
 """The child's clear-screen-and-recolor sequence as the console must render it.
 
-Pinned whole. Its presence proves three things at once actually ran under
-instrumentation: the TOML `show-output` value reached the resolver, the capture
-survived to the console, and the escaper rewrote the sequence rather than
-forwarding it."""
+Pinned whole, so its presence proves the TOML `show-output` value reached the
+resolver, the capture survived to the console, and the escaper rewrote the
+sequence rather than forwarding it."""
 
 CLI_PROBE_RAW_BYTES = (
     ("ESC", "\x1b"),
@@ -206,12 +216,11 @@ gh-annotations = "off"
 """
 """The probe's project configuration, passed with an explicit `--config`.
 
-Explicit on purpose: an unreadable configuration file named on the command line
-is a usage error, so the bounded regular-file read in `mtest.platform` is on the
-probe's critical path rather than merely available to it. `paths` supplies the
-operand, `show-output` supplies the captured-output surface the escaped-line
-assertion depends on, and `state` makes the run write and promote
-`.mtest-cache/lastrun` through the temp-file and rename boundary."""
+Explicit so the bounded regular-file read in `mtest.platform` sits on the
+probe's critical path: an unreadable config named on the command line is a usage
+error. `paths` supplies the operand, `show-output` supplies the captured-output
+surface the escaped-line assertion depends on, and `state` makes the run write
+and promote `.mtest-cache/lastrun` through the temp-file and rename boundary."""
 
 
 def run(
@@ -379,10 +388,10 @@ def check_cli_probe_output(
 ) -> str:
     """Judge one instrumented CLI reporter run and both artifacts it wrote.
 
-    Every rejection names one cause. The two machine formats are handed to the
-    project's existing strict oracles — the NDJSON stream consumer and the
-    xmllint + arithmetic JUnit checker — rather than parsed here, so this gate
-    cannot accept an artifact the report gates would reject.
+    Every rejection names one cause. The two machine formats go to the project's
+    existing strict oracles (the NDJSON stream consumer and the xmllint plus
+    arithmetic JUnit checker) rather than being parsed here, so this gate cannot
+    accept an artifact the report gates would reject.
 
     Args:
         returncode: The client's exit code.
@@ -458,11 +467,10 @@ def check_cli_probe_output(
 def check_cli_instrumentation(stdout: str) -> None:
     """Require the probe's own output to prove the sanitizer ran, and was clean.
 
-    The ASan lane's counterpart to the Valgrind lane's Memcheck provenance. The
-    `__asan_` symbol guard in `check_cli` is a STATIC check — it proves the
-    binary links the runtime, not that the runtime did anything during this run.
-    Only `CLI_LSAN_WITNESS` distinguishes a clean probe from one whose leak check
-    never executed, and the two look identical without it.
+    The `__asan_` symbol guard in `check_cli` is static: it proves the binary
+    links the runtime, not that the runtime did anything this run. Only
+    `CLI_LSAN_WITNESS` separates a clean probe from one whose leak check never
+    executed.
 
     Args:
         stdout: The probe's complete combined output.
@@ -575,15 +583,11 @@ def check_controls(env: dict[str, str]) -> None:
 def compile_and_run_test(source: Path, env: dict[str, str]) -> None:
     """Build one Mojo suite from product sources and execute it directly.
 
-    Every classified module under `tests/unit` and `tests/integration` now
-    declares its own `main()`, so the source itself is a complete, directly
-    buildable entrypoint. There is no generated `*_main.mojo` wrapper to bolt
-    on: `mojo build` runs straight on `source`. `-I .` is dropped too -- it
-    existed only so a generated wrapper's `import tests.unit.<module>` could
-    resolve the repo-root-relative module path; a source file built directly
-    never spells that import (verified: no `tests/unit/*.mojo` or
-    `tests/integration/*.mojo` file imports another via the `tests.*` package
-    path), so the include has nothing left to resolve.
+    Every classified module under `tests/unit` and `tests/integration` declares
+    its own `main()`, so `mojo build` runs straight on `source` with no generated
+    wrapper. `-I .` is dropped with the wrapper: it only ever resolved a
+    wrapper's repo-root-relative `import tests.unit.<module>`, and no classified
+    file imports another through the `tests.*` package path.
     """
     binary = OUT / source.stem
     compiled = run(

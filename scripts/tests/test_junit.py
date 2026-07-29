@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Unit tests for the JUnit schema/arithmetic gate.
 
-These synthesize small <testsuite>/<testsuites> fragments directly (no XSD
-involved) to pin the arithmetic and structural invariants precisely, then
-exercise the full checker (schema plus arithmetic) end-to-end against the two
-committed fixtures — proving the broken one is REJECTED before the faithful
-mock is accepted.
+These synthesize small <testsuite>/<testsuites> fragments directly to pin the
+arithmetic and structural invariants, then exercise the full checker (schema
+plus arithmetic) against the two committed fixtures, proving the broken one is
+REJECTED before the faithful mock is accepted.
 """
 
 from __future__ import annotations

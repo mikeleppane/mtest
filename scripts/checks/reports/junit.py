@@ -4,13 +4,12 @@
 Adds the arithmetic and structural invariants the schema cannot express.
 
 `xmllint --schema junit-10.xsd --noout` enforces structure and required
-attributes — `flakyFailure`'s `type` chief among them — over the shipped
-artifact directly. It does not, however, check that declared counts agree
-with the rows that carry them: `tests`/`failures`/`errors`/`skipped` are all
-`xs:string` in junit-10, so any digits validate. junit-10 also defines no
-`skipped` attribute on the `<testsuites>` root at all, so the root-level
-skipped total can only ever be an arithmetic fact, recomputed from the child
-`<testsuite>` elements, never a schema-checked attribute.
+attributes over the shipped artifact directly, `flakyFailure`'s `type` chief
+among them. It does not check that declared counts agree with the rows carrying
+them: `tests`/`failures`/`errors`/`skipped` are all `xs:string` in junit-10, so
+any digits validate. junit-10 also defines no `skipped` attribute on the
+`<testsuites>` root, so the root-level skipped total is only ever an arithmetic
+fact recomputed from the child `<testsuite>` elements.
 """
 
 from __future__ import annotations

@@ -301,10 +301,10 @@ def s_config_resolution(context: ScenarioContext) -> str:
                 "the all-keys config did not reach both report destinations",
             )
 
-            # An explicitly empty list replaces the lower value like every
-            # other list key. Discovery once treated it as "no paths given"
-            # and silently reopened the default tree, so a project that meant
-            # to select nothing ran its whole suite.
+            # An explicitly empty list replaces the lower value like every other
+            # list key. Discovery once read it as "no paths given" and reopened
+            # the default tree, so a project that meant to select nothing ran
+            # its whole suite.
             empty_paths = tmp / "empty-paths.toml"
             empty_paths.write_text(
                 "[run]\npaths = []\nstate = false\n", encoding="utf-8"
@@ -1080,7 +1080,7 @@ def s_config_state(context: ScenarioContext) -> str:
         # An unusable state path must never block the run. Before the guarded
         # bounded read was wired into the run path, a FIFO here blocked the
         # process forever: the read happens before the exec runtime exists, so
-        # no --timeout and no interrupt handler covered it.
+        # neither --timeout nor the interrupt handler covered it.
         STATE_PATH.unlink(missing_ok=True)
         os.mkfifo(STATE_PATH)
         try:
@@ -1579,9 +1579,9 @@ def s_config_overrides(context: ScenarioContext) -> str:
         # collect must apply overrides too. main once passed the flattened
         # config here, selecting the compatibility overload that carries no
         # override tables, so the probe was bounded by the global deadline
-        # only — invisible to a test that calls the resolved overload itself.
+        # alone, invisibly to a test that calls the resolved overload itself.
         # The hang must be in the fixture's main(), where --skip-all cannot
-        # skip it; a body-level hang never reaches the probe at all.
+        # skip it; a body-level hang never reaches the probe.
         probe_config = tmp / "collect-timeout.toml"
         probe_config.write_text(
             "[run]\n"

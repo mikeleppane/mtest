@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Mutation tests for the workflow-security oracles.
 
-Each test here mutates a real workflow's text in a temporary repository and
-asserts the corresponding check rejects it. That property — the check fires
-when the exact thing it exists to prevent happens — is what makes these
-guards worth having; a passing test that never turns red under mutation would
-be worse than no test at all.
+Each test mutates a real workflow's text in a temporary repository and asserts
+the corresponding check rejects it, so every guard is watched firing on the
+exact thing it exists to prevent.
 """
 
 from __future__ import annotations

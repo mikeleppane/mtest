@@ -39,6 +39,15 @@ from mtest.exec import (
 from mtest.exec.signals import _reset_interrupt
 
 from exec_helpers import bytes_to_str, target
+from foreign_abi import (
+    configure_monotonic_wait,
+    configure_native_fault,
+    configure_secondary_native_fault,
+    monotonic_wait_fired,
+    native_test_constant,
+    reap_child,
+    reset_native_faults,
+)
 
 comptime _SIGINT = 2
 comptime _CONSTANT_EIO = 4
@@ -61,36 +70,17 @@ comptime _FAULTED_ATTEMPTS = 2
 comptime _MIN_RECOVERED_MS = _RETRY_DELAY_MS * _FAULTED_ATTEMPTS
 
 
-def _native_constant(constant_id: Int) -> Int32:
-    """Read one platform-header value from the testing adapter."""
-    # SAFETY: this test-only ABI takes one scalar closed identifier and returns
-    # one scalar C-header constant. It receives no pointer and retains no state.
-    return external_call["mtest_exec_test_constant", Int32](UInt32(constant_id))
-
-
 def _inject_etxtbsy_then_exec_error() raises:
     """Make child execve return ETXTBSY once, then a terminal EIO."""
-    # SAFETY: these test-only ABI calls use scalar values only. The operation
-    # discriminator names CHILD_EXECVE; occurrences one and two are ordered and
-    # nonzero; both errno values are positive; no pointer crosses either ABI.
-    external_call["mtest_exec_test_fault_reset", NoneType]()
-    var status = external_call["mtest_exec_test_fault_configure", Int32](
-        UInt32(_OP_CHILD_EXECVE),
-        UInt32(1),
-        _native_constant(_CONSTANT_ETXTBSY),
-        Int64(0),
+    # The operation discriminator names CHILD_EXECVE; occurrences one and two
+    # are ordered and nonzero, so the secondary fault follows the primary.
+    reset_native_faults()
+    configure_native_fault(
+        _OP_CHILD_EXECVE, 1, Int(native_test_constant(_CONSTANT_ETXTBSY))
     )
-    assert_true(status == 0, "could not configure child execve fault")
-    # SAFETY: this secondary test-only ABI also accepts scalars only; occurrence
-    # two follows the configured primary occurrence, EIO is positive, the result
-    # payload is zero as required for an error, and no pointer crosses the ABI.
-    status = external_call["mtest_exec_test_fault_configure_secondary", Int32](
-        UInt32(_OP_CHILD_EXECVE),
-        UInt32(2),
-        _native_constant(_CONSTANT_EIO),
-        Int64(0),
+    configure_secondary_native_fault(
+        _OP_CHILD_EXECVE, 2, Int(native_test_constant(_CONSTANT_EIO))
     )
-    assert_true(status == 0, "could not configure terminal child execve fault")
 
 
 def _inject_etxtbsy_for_the_first_two_attempts() raises:
@@ -99,27 +89,13 @@ def _inject_etxtbsy_for_the_first_two_attempts() raises:
     Occurrence three onward is left unfaulted, so the third attempt reaches the
     real `execve` and the retry has to succeed rather than expire.
     """
-    # SAFETY: these test-only ABI calls use scalar values only. The operation
-    # discriminator names CHILD_EXECVE; occurrences one and two are ordered and
-    # nonzero; ETXTBSY is positive; no pointer crosses either ABI.
-    external_call["mtest_exec_test_fault_reset", NoneType]()
-    var status = external_call["mtest_exec_test_fault_configure", Int32](
-        UInt32(_OP_CHILD_EXECVE),
-        UInt32(1),
-        _native_constant(_CONSTANT_ETXTBSY),
-        Int64(0),
+    reset_native_faults()
+    configure_native_fault(
+        _OP_CHILD_EXECVE, 1, Int(native_test_constant(_CONSTANT_ETXTBSY))
     )
-    assert_true(status == 0, "could not configure the first busy-exec fault")
-    # SAFETY: this secondary test-only ABI also accepts scalars only; occurrence
-    # two follows the configured primary occurrence, ETXTBSY is positive, the
-    # result payload is zero as required for an error, and no pointer crosses.
-    status = external_call["mtest_exec_test_fault_configure_secondary", Int32](
-        UInt32(_OP_CHILD_EXECVE),
-        UInt32(2),
-        _native_constant(_CONSTANT_ETXTBSY),
-        Int64(0),
+    configure_secondary_native_fault(
+        _OP_CHILD_EXECVE, 2, Int(native_test_constant(_CONSTANT_ETXTBSY))
     )
-    assert_true(status == 0, "could not configure the second busy-exec fault")
 
 
 def test_transient_etxtbsy_recovers_to_a_successful_child() raises:
@@ -134,9 +110,7 @@ def test_transient_etxtbsy_recovers_to_a_successful_child() raises:
     var argv = List[String]()
     argv.append(t)
     var result = run_supervised(runtime, ProcessSpec.command(argv^, 0))
-    # SAFETY: this test-only scalar ABI clears native test-control state; it
-    # accepts no pointer, retains nothing, and the runtime has no live child.
-    external_call["mtest_exec_test_fault_reset", NoneType]()
+    reset_native_faults()
     runtime.close()
     assert_equal(bytes_to_str(result.stdout_bytes), "etxtbsy-recovered\n")
     assert_equal(bytes_to_str(result.stderr_bytes), "")
@@ -163,24 +137,16 @@ def _wait_before_first_post_open_clock_read() raises:
     # call the test adapter waits, without consuming the child, until the one
     # 50 ms ETXTBSY backoff reaches its terminal EIO and the child is waitable.
     # That exit necessarily also follows the 20 ms deadline.
-    # SAFETY: this test-only ABI accepts two bounded scalar values, retains no
-    # pointer, and changes only testing-adapter clock-wait state.
-    var status = external_call[
-        "mtest_exec_test_monotonic_wait_configure", Int32
-    ](UInt32(_CLOCK_WAIT_OCCURRENCE), UInt32(_CLOCK_WAIT_MAX_MS))
-    assert_true(status == 0, "could not configure monotonic clock wait")
+    configure_monotonic_wait(_CLOCK_WAIT_OCCURRENCE, _CLOCK_WAIT_MAX_MS)
 
 
 def _reap_helper(helper: Int32) raises:
-    """Reap one exact test helper without consuming a supervised child."""
-    # SAFETY: `st` owns one zero-initialized aligned Int32. waitpid writes at
-    # most that status, retains no pointer, and targets only the supplied helper.
-    var st = alloc[Int32](1)
-    memset_zero(st.bitcast[UInt8](), 4)
-    var reaped = external_call["waitpid", Int32](helper, st, Int32(0))
-    # SAFETY: waitpid retained nothing; `st` remains uniquely owned raw trivial
-    # storage on success or failure and is freed exactly once before asserting.
-    st.free()
+    """Reap one exact test helper without consuming a supervised child.
+
+    Naming the helper's exact pid, rather than -1, is what keeps this off the
+    supervised child: `waitpid` can only return the process it was asked for.
+    """
+    var reaped = reap_child(helper, Int32(0))
     assert_true(reaped == helper, "could not reap test helper")
 
 
@@ -198,15 +164,9 @@ def test_deadline_beats_stuck_etxtbsy_exec_latches_timed_out() raises:
     var argv = List[String]()
     argv.append(t)
     var r = run_supervised(runtime, ProcessSpec.command(argv^, 20))
-    # SAFETY: this test-only scalar ABI reports whether the configured delay
-    # fired. It accepts no pointer and neither mutates nor retains Mojo state.
-    var wait_fired = external_call[
-        "mtest_exec_test_monotonic_wait_fired", UInt32
-    ]()
-    # SAFETY: this test-only scalar ABI clears native test-control state; it
-    # accepts no pointer, retains nothing, and the runtime has no live child.
-    external_call["mtest_exec_test_fault_reset", NoneType]()
-    assert_true(wait_fired == 1, "first post-open clock wait did not fire")
+    var wait_fired = monotonic_wait_fired()
+    reset_native_faults()
+    assert_true(wait_fired, "first post-open clock wait did not fire")
     assert_true(r.termination.is_timed_out(), String(r.termination))
     assert_true(r.termination.final_is_exited(), String(r.termination))
     # The target exits 0, so a nonzero final exit proves the injected terminal
@@ -278,9 +238,7 @@ def test_interrupt_beats_stuck_etxtbsy_exec_latches_timed_out() raises:
     # nor the interrupt state can leak into the rest of the suite.
     _reap_helper(helper)
     _reset_interrupt()
-    # SAFETY: this test-only scalar ABI clears native test-control state; it
-    # accepts no pointer, retains nothing, and the runtime has no live child.
-    external_call["mtest_exec_test_fault_reset", NoneType]()
+    reset_native_faults()
     runtime.close()
     assert_true(r.termination.is_timed_out(), String(r.termination))
     assert_true(r.termination.final_is_exited(), String(r.termination))

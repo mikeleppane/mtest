@@ -1,26 +1,25 @@
 #!/usr/bin/env python3
 """Render real mtest console runs into the SVG images embedded in README.md.
 
-This is a DOCUMENTATION tool, not a gate. It drives the already-built
-`build/mtest` binary against committed `e2e/` fixtures with stdout attached to a
-real pseudo-terminal, so `--color auto` resolves ON exactly as it does for a
-human at an interactive terminal, then converts the raw ANSI byte stream into a
-self-contained SVG under `docs/assets/`. The committed images are a faithful
-picture of real runs; they are deliberately NOT wired into any oracle or CI
-check, so an incidental byte (a wall-clock timing) never freezes a gate.
+A documentation tool, not a gate. It drives the already-built `build/mtest`
+binary against committed `e2e/` fixtures with stdout attached to a real
+pseudo-terminal, so `--color auto` resolves on exactly as it does for a human at
+an interactive terminal, then converts the raw ANSI byte stream into a
+self-contained SVG under `docs/assets/`. The committed images are deliberately
+outside every oracle and CI check, because the captured output carries bytes
+that vary per run and machine (timings, the absolute repo root) and would freeze
+a gate.
 
 Each scenario still pins its expected exit code and a few required output
 markers, and a capture is published only after both hold, so a broken binary,
-a missing `mojo`, or an internal error can never silently replace a README
-image with an error card. `NO_COLOR` and `GITHUB_ACTIONS` are scrubbed from
-the child environment so inherited settings cannot strip the colors or append
-an annotation tail.
+a missing `mojo`, or an internal error cannot silently replace a README image
+with an error card. `NO_COLOR` and `GITHUB_ACTIONS` are scrubbed from the child
+environment so inherited settings cannot strip the colors or append an
+annotation tail.
 
 Regenerate with `python -m scripts.maintenance.console_svg` after building the
 binary (`pixi run build-bin`), under `pixi run` so the spawned `mojo build`
-children resolve. Wall-clock timings and the absolute repo root in the captured
-output reflect the generating run and machine; that residual variance is
-expected and is exactly why these are documentation, not wired into any check.
+children resolve.
 """
 
 from __future__ import annotations
@@ -197,8 +196,8 @@ def main() -> int:
     """Re-record every console scenario and write its SVG into the output dir.
 
     Each scenario's reset paths are removed first so a capture never inherits
-    state from the previous one, and a scenario whose exit code does not match
-    the expected one aborts the whole regeneration.
+    state from the previous one. An unexpected exit code aborts the whole
+    regeneration.
 
     Returns:
         0 once every scenario has been captured and written, or 1 when the mtest

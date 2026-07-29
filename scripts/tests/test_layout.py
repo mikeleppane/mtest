@@ -50,10 +50,8 @@ class AssertionCompanionLayoutTests(unittest.TestCase):
     """The companion contract is reconciled from disk, never from a list.
 
     Every fixture here is built by writing files, and the expectation is
-    whatever those files are. `SOURCES` names the tree this fixture happens to
-    contain -- it is not a copy of the repository's companion membership, and
-    `test_a_new_companion_source_needs_no_ledger_edit` is what holds that
-    distinction honest.
+    whatever those files are. `SOURCES` names only the tree this fixture
+    contains, never the repository's companion membership.
     """
 
     SOURCES = (
@@ -108,9 +106,8 @@ class AssertionCompanionLayoutTests(unittest.TestCase):
     def test_a_new_companion_source_needs_no_ledger_edit(self) -> None:
         """Adding a module costs the recipe and the shipped list, nothing more.
 
-        The recipe line is the install the package needs and the shipped list
-        is what `public_verify` cannot derive; if this check ever needs a third
-        edit, the derivation has regressed back into a list of its own.
+        If this check ever needs a third edit, the derivation has regressed
+        back into a list of its own.
         """
         with self._fixture((*self.SOURCES, "mtest/assertions/_brand_new.mojo")):
             pass
@@ -119,9 +116,9 @@ class AssertionCompanionLayoutTests(unittest.TestCase):
         """The load-bearing case: a shipped module the package never installs.
 
         The shipped membership is advanced alongside disk so the earlier
-        equality passes, which leaves the recipe as the only disagreement --
-        exactly the state that produces a broken package and is otherwise
-        invisible until a full package build runs.
+        equality passes, leaving the recipe as the only disagreement. That
+        state produces a broken package and stays invisible until a full
+        package build runs.
         """
         with self._fixture() as repo:
             orphan = repo / layout.COMPANION_SOURCE_ROOT / "mtest" / "orphan.mojo"
@@ -248,8 +245,8 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
     """Every Mojo file under a classified root is one the runner actually runs.
 
     The expectation is derived from disk and from the runner's own glob, so
-    these fixtures never register anything: a tree is accepted or rejected on
-    what it contains, not on what some list says it should contain.
+    these fixtures register nothing: a tree is accepted or rejected on what it
+    contains.
     """
 
     SOLE_SUITE = "tests/unit/test_probe.mojo"
@@ -313,10 +310,9 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
     def test_a_new_test_file_needs_no_ledger_edit(self) -> None:
         """Adding a suite must cost zero edits anywhere in this repository.
 
-        This is the property the deleted `CLASSIFIED_PATHS`/`UNIT_SUITES`
-        ledgers cost on every single new test file, and the reason they are
-        gone. If this test ever needs a companion edit to pass, the derivation
-        has regressed back into a list.
+        The deleted `CLASSIFIED_PATHS`/`UNIT_SUITES` ledgers charged an edit
+        per new test file. If this test ever needs a companion edit to pass,
+        the derivation has regressed back into a list.
         """
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp)
@@ -332,8 +328,7 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
 
         `selfhost.py` reconciles what mtest reported against what it found on
         disk, so it can only speak for files discovery reached. A parked
-        `.mojo.disabled` or a misnamed module is invisible to both, which is
-        exactly the gap this check exists to close.
+        `.mojo.disabled` or a misnamed module is invisible to both.
         """
         cases = (
             "tests/unit/session_shard_test.mojo",
@@ -411,9 +406,9 @@ class ClassifiedMojoUniverseTests(unittest.TestCase):
     def test_a_classified_root_with_no_test_file_is_rejected(self) -> None:
         """Emptiness fails closed; a derived expectation must not become vacuous.
 
-        Without this, a root that lost every suite -- or a glob that stopped
-        matching anything -- would satisfy a check that only ever asks
-        "is everything present named correctly?".
+        A root that lost every suite, or a glob that stopped matching, would
+        otherwise satisfy a check that only asks whether what is present is
+        named correctly.
         """
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp)
@@ -506,10 +501,9 @@ class PlatformTaskOverrideTests(unittest.TestCase):
     """A `[target.<platform>.tasks]` entry replaces a base task invisibly.
 
     Pixi emits no warning, `pixi run <task>` keeps working, and the hosted
-    matrix names its lanes by task name -- so a substituted lane stays green
-    in every view while running something else. Three words of TOML are the
-    whole attack, which is why the bound is a check rather than a review
-    convention.
+    matrix names its lanes by task name, so a substituted lane stays green in
+    every view while running something else. Three words of TOML do it, which
+    is why this is a check rather than a review convention.
     """
 
     BASE = (
@@ -599,9 +593,8 @@ class DirectInvocationPolicyTests(unittest.TestCase):
 
     The forms are built by concatenation so this file cannot match its own
     scanner, and the fixture repository is a real `git init` because the file
-    set under test is `git ls-files` -- an untracked file must be invisible to
-    the scan, which is what keeps working notes and a linked worktree from
-    reddening one machine and not another.
+    set under test is `git ls-files`: an untracked file must stay invisible to
+    the scan, so working notes cannot redden one machine and not another.
     """
 
     SCRIPT_PATH = "scripts" + "/probe.py"
@@ -641,10 +634,8 @@ class DirectInvocationPolicyTests(unittest.TestCase):
 
     def test_every_argv_literal_spelling_is_rejected(self) -> None:
         # The prose form is what a reader copies; the argv form is what runs.
-        # A `git ls-files`-derived scan is stricter than the deleted path
-        # ledger about WHICH files it reads, but a raw-text regex cannot see
-        # an interpreter and its operand separated by `", "`, so this half was
-        # lost with the AST check and had to come back.
+        # A raw-text regex cannot see an interpreter and its operand separated
+        # by `", "`, so this half was lost with the AST check and had to return.
         quote = '"'
         forms = (
             "subprocess.run([sys.executable, "

@@ -1,12 +1,11 @@
 """Parallel worker-pool E2E scenarios.
 
-The pool landed at the session layer; these scenarios drive it through the real
-CLI now that `-n`/`--workers` is served. They prove the two invariants the pool
-must hold no matter how many workers run: the observable projection of a run
+These drive the session-layer pool through the real CLI, and prove the two
+invariants it must hold at any worker count: the observable projection of a run
 (verdicts, per-file outcomes, the `--json` event stream, exit code) is identical
 across worker counts, and files genuinely run concurrently (overlapping build and
 run windows) while each file's own steps stay ordered. The interrupt scenario
-proves the parallel teardown leaves no survivor.
+covers teardown leaving no survivor.
 """
 
 from __future__ import annotations
@@ -55,19 +54,18 @@ CACHE_OFF = "--no-cache"
 """Passed by BOTH sides of every paired comparison in this module.
 
 The build cache's store lives under the invocation root, and every scenario here
-runs its two invocations from the one repository root over the one tree. So the
-first would compile and the second would be served from the store — a difference
-that is visible in the console's `builds:`/`cached:` band, in
+runs its two invocations from the one repository root over the one tree, so the
+first would compile and the second would be served from the store. That warmth
+difference is visible in the console's `builds:`/`cached:` band, in
 `session_finished`'s `built_files`/`cached_files`, and in the JUnit
-`mtest::cache` suite, and that is a difference in cache WARMTH when the only
-variable these scenarios vary is the worker count.
+`mtest::cache` suite, while the only variable these scenarios vary is the worker
+count.
 
-Turning the cache off is what makes the pair comparable, and it costs no
-coverage of the accounting: `built_files` counts one per first-attempt compile
-admission whether or not the cache is enabled, so both sides still render the
-same non-zero `builds: N, cached: 0`. Masking the fields out of the comparison
-instead would have thrown that away — with them in, these equalities also prove
-the pool accounts for its admissions exactly as the sequential path does."""
+Turning the cache off costs no coverage of the accounting: `built_files` counts
+one per first-attempt compile admission either way, so both sides still render
+the same non-zero `builds: N, cached: 0`, and the equalities also prove the pool
+accounts for its admissions as the sequential path does. Masking the fields out
+of the comparison would have thrown that away."""
 
 _TIMING_BRACKET = re.compile(r"\[\s*[\d.]+\s*\]")
 _TIMING_SECONDS = re.compile(r"\b\d+\.\d+s")
@@ -95,7 +93,7 @@ def _mask_timing(text: str) -> str:
 
     Two separate processes never share timings, so a byte-for-byte console
     comparison must first blank the bracketed per-test timings, the trailing
-    `in N.Ns` band tag, and any bare `N.Ns` duration column.
+    band tag, and any bare duration column.
     """
     masked = _TIMING_BRACKET.sub("[T]", text)
     masked = _TIMING_TAGS.sub("in Ts", masked)
@@ -137,8 +135,7 @@ def _project_stream(text: str) -> dict[str, Any]:
         else:
             # `parse_stream` validates framing and the header, NOT event field
             # types, so a record carrying `"path": 7` reaches here. Casting would
-            # assert a guarantee nothing provides, and the wrong type would only
-            # surface later as a TypeError from sorting mixed keys.
+            # assert a guarantee nothing provides.
             raw_path = record.get("path", "")
             if not isinstance(raw_path, str):
                 raise ScenarioError(
@@ -167,7 +164,7 @@ def _workers_in_stream(text: str) -> int:
 
 
 def _log_path(prefix: str) -> str:
-    """A fresh, absent path for a window/build log — the shim creates it."""
+    """A fresh, absent path for a window/build log; the shim creates it."""
     handle, path = tempfile.mkstemp(prefix=prefix, suffix=".tsv")
     os.close(handle)
     os.remove(path)
@@ -185,9 +182,9 @@ def _log_lines(path: str) -> list[str]:
 def _intervals(lines: list[str], kind: str) -> dict[str, tuple[float, float]]:
     r"""Fold `<kind>\t<name>\t<edge>[...]` records into per-name (start, end) spans.
 
-    Each name is stamped twice, start then end, in that order — the build shim
-    appends a return code to its end record, the run fixture does not, so the two
-    edges are paired by their arrival order rather than their field count.
+    Each name is stamped twice, start then end. The build shim appends a return
+    code to its end record and the run fixture does not, so the two edges are
+    paired by arrival order rather than field count.
     """
     edges: dict[str, list[float]] = {}
     for line in lines:
@@ -215,12 +212,11 @@ def _built_files(lines: list[str]) -> set[str]:
 def s_parallel_projection_eq(context: ScenarioContext) -> str:
     """`-n 4` and `-n 1` over a varied suite project to the SAME observable run.
 
-    The enumerated projection: identical exit code, identical per-file `--json`
-    event sequences (grouped by file so concurrency order cannot matter),
-    identical session header and terminal summary — `built_files`/`cached_files`
-    included, so the pool's build accounting is projected too — identical console
-    verdict set, and no Progress event in either stream. Both runs pass
-    `CACHE_OFF`; see it for why.
+    The projection: identical exit code, identical per-file `--json` event
+    sequences (grouped by file so concurrency order cannot matter), identical
+    session header and terminal summary including `built_files`/`cached_files`,
+    identical console verdict set, and no Progress event in either stream. Both
+    runs pass `CACHE_OFF`; see it for why.
     """
     args = [VARIED_SUITE, "--json", "-", "--gh-annotations", "off", CACHE_OFF]
     many = context.runner.run_mtest([*args, "-n", "4"], timeout=240.0)
@@ -255,11 +251,11 @@ def s_parallel_projection_eq(context: ScenarioContext) -> str:
 
 
 def s_parallel_capacity_one(context: ScenarioContext) -> str:
-    """`-n 1` is byte-identical to NO FLAG — the capacity-one equivalence.
+    """`-n 1` is byte-identical to NO FLAG: the capacity-one equivalence.
 
-    A single worker is the sequential default: the timing-masked console and the
-    projected `--json` stream must be identical to a run with no `-n` at all, and
-    both must report `workers == 1` with no Progress in the stream. All four
+    A single worker is the sequential default, so the timing-masked console and
+    the projected `--json` stream must be identical to a run with no `-n` at all,
+    and both must report `workers == 1` with no Progress in the stream. All four
     invocations pass `CACHE_OFF`; see it for why.
     """
     console_args = [PARALLEL_TREE, "--gh-annotations", "off", CACHE_OFF]
@@ -301,16 +297,15 @@ def s_parallel_window_overlap(context: ScenarioContext) -> str:
 
     The window shim (`--mojo`) stamps each build's wall-clock edges; the fixtures
     stamp their own run edges. Concurrency is proved by the interval inequality
-    `start_b < end_a AND start_a < end_b` on both the build log and the run log —
-    neither window merely follows the other.
+    `start_b < end_a AND start_a < end_b` on both the build log and the run log,
+    so neither window merely follows the other.
 
-    `CACHE_OFF` for a sharper reason than the paired scenarios' (see it): this
-    one's entire subject is the BUILD windows, and a cache hit compiles nothing
-    and stamps nothing. The store lives under the repository root and outlives
-    the harness, so a second e2e run on the same checkout would find the shim's
-    own generations waiting and the scenario would fail reporting zero windows —
-    green on a cold clone, red on a warm one. The flag also keeps the shim's
-    fabricated products out of a store real runs read.
+    `CACHE_OFF` for a sharper reason than the paired scenarios' (see it): the
+    subject here is the BUILD windows, and a cache hit compiles nothing and
+    stamps nothing. The store lives under the repository root and outlives the
+    harness, so without the flag a second e2e run on the same checkout would find
+    the shim's own generations waiting and fail reporting zero windows. The flag
+    also keeps the shim's fabricated products out of a store real runs read.
     """
     build_log = _log_path("mtest_window_build_")
     run_log = _log_path("mtest_window_run_")
@@ -376,12 +371,12 @@ def s_parallel_interrupt(context: ScenarioContext) -> str:
     """A SIGINT at `-n 2` exits 2 with exact NOT-RUN identities and no survivor.
 
     Two workers pin the two run-blocked files: each announces its own process
-    group and its readiness once its run window is open, so the signal is sent
-    on an observed state rather than a wall-clock guess. The third file cannot be
-    dispatched behind them, and the run log proves it never was — a pool that
-    scheduled one more file after observing the interrupt would leave a third
-    record there. Both in-flight identities and the undispatched one are NOT-RUN
-    in the console band, in the `--json` stream, and in the JUnit report, and
+    group and its readiness once its run window is open, so the signal is sent on
+    an observed state rather than a wall-clock guess. The third file cannot be
+    dispatched behind them, and the run log proves it never was, since a pool
+    that scheduled one more file after observing the interrupt would leave a
+    third record there. Both in-flight identities and the undispatched one are
+    NOT-RUN in the console band, the `--json` stream, and the JUnit report, and
     every process group the run owned is gone afterwards.
     """
     with tempfile.TemporaryDirectory(prefix="mtest-parallel-interrupt-") as raw:
@@ -421,15 +416,15 @@ def s_parallel_interrupt(context: ScenarioContext) -> str:
         )
         expect_exit(run, 2)
 
-        # No fourth dispatch: the run log carries exactly one start record for
-        # each of the two files a `-n 2` pool can hold, and nothing for the third.
+        # No fourth dispatch: the run log carries one start record for each of
+        # the two files a `-n 2` pool can hold, and nothing for the third.
         dispatched = [
             line.split("\t")[1]
             for line in _log_lines(run_log)
             if line.split("\t")[0] == "run"
         ]
         # Sorted, because which of two concurrent workers stamps its start first
-        # is not a product guarantee — the exact MULTISET is.
+        # is not a product guarantee; the exact MULTISET is.
         expect(
             sorted(dispatched) == list(_DISPATCHED),
             f"the run log recorded dispatches {sorted(dispatched)}, want exactly "
@@ -500,14 +495,13 @@ def s_parallel_shard_disjoint(context: ScenarioContext) -> str:
     """At `-n 2`, the two hash shards partition the suite and never build across.
 
     The union of both shards' run sets is the whole suite, the two sets are
-    disjoint, and a file sharded OUT of a given shard is never built in it — the
+    disjoint, and a file sharded OUT of a given shard is never built in it: the
     logging shim's build records for a shard name only that shard's files.
 
     The two sharded runs pass `CACHE_OFF`. The build claim is a NEGATIVE ("no
-    sharded-out file was built"), so a warm store would not make this scenario
-    fail — it would make it pass vacuously, on a shim log that recorded nothing
-    at all. The whole-suite control run keeps the cache, since it is compared on
-    verdict paths only.
+    sharded-out file was built"), so a warm store would make this scenario pass
+    vacuously on a shim log that recorded nothing. The whole-suite control run
+    keeps the cache, since it is compared on verdict paths only.
     """
     run_sets: list[set[str]] = []
     built_sets: list[set[str]] = []
@@ -581,10 +575,10 @@ def s_collect_parallel(context: ScenarioContext) -> str:
 def s_parallel_auto_smoke(context: ScenarioContext) -> str:
     """`-n auto` resolves to a POSITIVE worker count in the stream and console.
 
-    No timing assertion — the auto count is machine-dependent. Only its presence
-    and positivity are contractual: the `session_started` record carries a
-    positive `workers`, and the console header renders a `workers:` token exactly
-    when that count exceeds one.
+    The auto count is machine-dependent, so only its presence and positivity are
+    contractual: the `session_started` record carries a positive `workers`, and
+    the console header renders a `workers:` token exactly when that count exceeds
+    one.
     """
     run = context.runner.run_mtest(
         [PARALLEL_TREE, "-n", "auto", "--json", "-", "--gh-annotations", "off"],
@@ -646,10 +640,10 @@ def s_parallel_progress_tty(context: ScenarioContext) -> str:
 
     The counter is a terminal-only affordance: a PTY-attached run at `-n 2` must
     write the counter marker to the terminal, while a piped run at the same
-    worker count writes not one marker byte to any stream. Only marker
-    presence/absence is asserted — never a timing or count value, which a second
-    process could never reproduce. The `--json` stream at `-n 2` is confirmed to
-    carry no `progress` event, extending the stream-absence pin to two workers.
+    worker count writes not one marker byte to any stream. Only marker presence
+    and absence are asserted, since a second process could not reproduce a timing
+    or count value. The `--json` stream at `-n 2` is confirmed to carry no
+    `progress` event, extending the stream-absence pin to two workers.
     """
     pty_rc, pty_out = context.runner.run_mtest_pty(
         [PARALLEL_TREE, "-n", "2", "--gh-annotations", "off"],
@@ -690,10 +684,9 @@ def s_parallel_progress_tty(context: ScenarioContext) -> str:
 def s_parallel_junit_canonical_eq(context: ScenarioContext) -> str:
     """`--junit-xml` at `-n 4` canonicalizes equally to `-n 1` over a varied suite.
 
-    Re-runs the Phase-4 JUnit canonicalizer equality under concurrency: the two
-    reports differ only in masked timing, so their canonical forms are byte-equal.
-    The canonicalizer keeps the synthetic `mtest::cache` suite's counter
-    properties, which is why both runs pass `CACHE_OFF`; see it for why.
+    The two reports differ only in masked timing, so their canonical forms are
+    byte-equal. The canonicalizer keeps the synthetic `mtest::cache` suite's
+    counter properties, which is why both runs pass `CACHE_OFF`; see it for why.
     """
     with tempfile.TemporaryDirectory(prefix="mtest-parallel-junit-") as tmp:
         many = Path(tmp) / "n4.xml"
@@ -735,10 +728,9 @@ def s_parallel_serial_noverlap(context: ScenarioContext) -> str:
     * every serial run window is disjoint from every other run window and starts
       AFTER the parallel file's run window (serial-last at run time);
     * `test_a_retry` CRASHES then PASSES under `--retries 1`, so it stamps TWO
-      attempt windows — the retry attempt's window is disjoint from and precedes
-      the next serial file's window, proving the file's whole pipeline (including
-      the retry) drained inside its single serial slot before the next file was
-      admitted.
+      attempt windows, and the retry attempt's window is disjoint from and
+      precedes the next serial file's, proving the file's whole pipeline drained
+      inside its single serial slot before the next file was admitted.
 
     `CACHE_OFF` for the same reason as `s_parallel_window_overlap`: every claim
     here is stated over BUILD windows, and a file served from the store stamps
@@ -840,8 +832,8 @@ def s_parallel_serial_noverlap(context: ScenarioContext) -> str:
 def s_parallel_serial_stale_glob(context: ScenarioContext) -> str:
     """A `--serial` glob matching no discovered file is a loud stale warning.
 
-    Mirrors the stale-`--exclude` warning: the pattern names nothing, so mtest
-    reports it as stale and runs everything in the parallel batch unchanged.
+    Mirrors the stale-`--exclude` warning: mtest reports the pattern as stale and
+    runs everything in the parallel batch unchanged.
     """
     run = context.runner.run_mtest(
         [
@@ -870,15 +862,15 @@ def s_parallel_serial_stale_glob(context: ScenarioContext) -> str:
 FD_CLAMP_SOFT_LIMIT = 76
 """The child's soft `RLIMIT_NOFILE` for the live clamp.
 
-Chosen so the exec layer's own arithmetic — `min(64, (soft - 64 - 3) // 3)`,
-64 descriptors of reserved headroom and 3 per supervised child — lands on
-exactly three workers: `(76 - 64 - 3) // 3 == 3`. It is also comfortably above
-the layer's `_MIN_SOFT_FD` (70), so the run clamps rather than raising the
-hard environment fault a ceiling too small for even one child would raise."""
+Chosen so the exec layer's arithmetic, `min(64, (soft - 64 - 3) // 3)` with 64
+descriptors of reserved headroom and 3 per supervised child, lands on exactly
+three workers: `(76 - 64 - 3) // 3 == 3`. It also sits above the layer's
+`_MIN_SOFT_FD` (70), so the run clamps rather than raising the hard environment
+fault a ceiling too small for even one child would raise."""
 
 FD_CLAMP_REQUEST = 16
 """The worker count the clamped run asks for: far above the cap, and not a
-number the cap arithmetic could ever produce by coincidence."""
+number the cap arithmetic could produce by coincidence."""
 
 FD_CLAMP_CAP = 3
 """The cap `FD_CLAMP_SOFT_LIMIT` yields, asserted as an exact resolved count."""
@@ -887,23 +879,21 @@ FD_CLAMP_CONTROL_MIN_SOFT = 115
 """The ambient soft `RLIMIT_NOFILE` the CONTROL run needs to stay unclamped.
 
 The control asserts the full 16 workers, which the same arithmetic reaches only
-from `(115 - 64 - 3) // 3 == 16`. A host below this clamps the control too, and
-the scenario would fail describing the product when the cause is the host — so
+from `(115 - 64 - 3) // 3 == 16`. A host below this clamps the control too, so
 the requirement is asserted up front, beside the hard-limit check, rather than
-left for the next reader to derive from an attribution failure."""
+surfacing later as an attribution failure."""
 
 FD_CLAMP_TREE = "build/e2e-scratch/fd-clamp"
 """Repo-relative home of this scenario's GENERATED sources.
 
-Deliberately outside `e2e/`. mtest names each build product after the source
-path (`/` -> `_s`, `_` -> `_u`), so sources here compile to
-`build/bin/build_se2e-scratch_sfd-clamp_...` — a prefix the real compiler never
-produces for a committed fixture. That matters because the stand-in writes
-Python scripts, not ELF binaries: pointed at a committed fixture it would leave
-a `#!`-headed script sitting under the exact name a real `mojo build` produces,
-where a later scenario expecting a prebuilt binary, or a `build/` cleanliness
-check, would trip over it. `build/` is also gitignored and never walked by the
-manifest-completeness oracle, so these files join no committed inventory."""
+Outside `e2e/`. mtest names each build product after the source path (`/` ->
+`_s`, `_` -> `_u`), so sources here compile to
+`build/bin/build_se2e-scratch_sfd-clamp_...`, a prefix the real compiler never
+produces for a committed fixture. The stand-in writes Python scripts rather than
+ELF binaries, so pointed at a committed fixture it would leave a `#!`-headed
+script under the exact name a real `mojo build` produces, where a later scenario
+expecting a prebuilt binary would trip over it. `build/` is also gitignored and
+never walked by the manifest-completeness oracle."""
 
 FD_CLAMP_NAMES = ("test_fd_alpha", "test_fd_beta", "test_fd_gamma", "test_fd_delta")
 """The four generated modules. More files than workers, so the clamped pool has
@@ -926,13 +916,13 @@ def main() raises:
 '''
 """One generated module's whole source.
 
-Exactly ONE test per file, so the summary band's per-TEST total is 4 — the
-number the contract names — while per-FILE identity is pinned separately and
-exactly by the console PASS set and the stream's finished map. Generating the
-files rather than borrowing committed fixtures also makes that test count a
-property of this scenario instead of an assumption about four unrelated files.
-Real `TestSuite` shape, so the fixture genuinely compiles and passes under the
-actual compiler even though this scenario always hands it to the stand-in."""
+Exactly ONE test per file, so the summary band's per-TEST total is the number the
+contract names, while per-FILE identity is pinned separately by the console PASS
+set and the stream's finished map. Generating the files rather than borrowing
+committed fixtures makes that test count a property of this scenario instead of
+an assumption about unrelated files. Real `TestSuite` shape, so the fixture
+compiles and passes under the actual compiler even though this scenario always
+hands it to the stand-in."""
 
 FD_CLAMP_WARNING = (
     f"worker-clamp: requested {FD_CLAMP_REQUEST} workers but the environment's"
@@ -941,11 +931,11 @@ FD_CLAMP_WARNING = (
 )
 """The exact console warning, naming request, cap, and resolved count.
 
-Pinned whole rather than by fragments: three separate `in` checks for the
-request and the cap would also pass against a warning that named those numbers
-in any other roles, and this scenario exists to prove which number is which.
-Interpolated from the constants above so the sentence and the counts this
-scenario asserts elsewhere can never drift apart."""
+Pinned whole rather than by fragments: separate `in` checks for the request and
+the cap would also pass against a warning that named those numbers in other
+roles, and this scenario exists to prove which number is which. Interpolated
+from the constants above so the sentence and the counts asserted elsewhere
+cannot drift apart."""
 
 
 def _write_fd_clamp_tree() -> None:
@@ -965,16 +955,16 @@ def _remove_fd_clamp_artifacts() -> None:
     """Delete the generated sources and the products the stand-in fabricated.
 
     The fabricated products are Python scripts under compiler-shaped names, so
-    they are removed on every path — success or failure — rather than left for
-    a later scenario to find. Best-effort: a missing artifact is the intended
-    state, and a cleanup failure must never replace a scenario's own diagnosis.
+    they are removed on every path rather than left for a later scenario to find.
+    Best-effort: a missing artifact is the intended state, and a cleanup failure
+    must never replace a scenario's own diagnosis.
     """
     shutil.rmtree(os.path.join(REPO_ROOT, FD_CLAMP_TREE), ignore_errors=True)
     # A hand-mirror of the product's `_mangle` (src/mtest/session/scratch.mojo),
     # which cannot be imported from Python. Two sequential replaces match its
     # single pass only while `FD_CLAMP_TREE` holds no `_` and `FD_CLAMP_NAMES`
-    # hold no `/`; introduce either and the passes interfere, the reconstructed
-    # name stops matching, and the products below go silently uncollected.
+    # hold no `/`; introduce either and the passes interfere, so the
+    # reconstructed name stops matching and the products go uncollected.
     if "_" in FD_CLAMP_TREE:
         raise AssertionError(FD_CLAMP_TREE)
     if any("/" in name for name in FD_CLAMP_NAMES):
@@ -996,33 +986,30 @@ def s_parallel_fd_clamp(context: ScenarioContext) -> str:
 
     The limit is genuine: the harness lowers the soft descriptor limit of the
     mtest CHILD ONLY, through a `preexec_fn` between the fork and the exec, so
-    the kernel — not a stub, a mock, or an environment variable — is what the
-    exec layer's `query_effective_cap` reads.
+    the exec layer's `query_effective_cap` reads the kernel rather than a stub or
+    an environment variable.
 
     Because 76 descriptors cannot link a real Mojo binary, the compiler is
     `fake_fd_mojo.py`, which fabricates directly executable pass actors instead
-    of calling LLVM. That keeps the ceiling where the scenario claims it is —
-    on mtest's native pool and scheduler — rather than moving the failure into
-    the toolchain, where it would prove nothing about worker sizing.
+    of calling LLVM. That keeps the ceiling on mtest's native pool and scheduler
+    rather than moving the failure into the toolchain.
 
-    The four sources are GENERATED under `build/e2e-scratch/`, not borrowed from
-    the committed tree, for two reasons: the per-file test count becomes a
-    property of this scenario rather than an assumption about other fixtures,
-    and the stand-in's Python-script products land under a `build_s...` name no
-    real `mojo build` ever produces, so they can neither be mistaken for nor
-    overwrite compiler output. Both the sources and those products are removed
+    The four sources are GENERATED under `build/e2e-scratch/`: the per-file test
+    count becomes a property of this scenario rather than an assumption about
+    other fixtures, and the stand-in's Python-script products land under a
+    `build_s...` name no real `mojo build` produces, so they can neither be
+    mistaken for nor overwrite compiler output. Sources and products are removed
     on every exit path.
 
-    The clamp is attributed, not merely observed. A CONTROL run with the same
-    argv and no fd limit must resolve the full 16 workers and print no clamp
-    warning at all, so the only difference between the two runs is the real
-    kernel limit, and three workers cannot be credited to the request, the file
-    count, the machine's cores, or the stand-in compiler.
+    A CONTROL run with the same argv and no fd limit must resolve the full 16
+    workers and print no clamp warning, so the only difference between the two
+    runs is the kernel limit and three workers cannot be credited to the request,
+    the file count, the machine's cores, or the stand-in compiler.
     """
     if not hasattr(resource, "RLIMIT_NOFILE"):
         # Neither supported platform reaches this: Linux and macOS both define
-        # RLIMIT_NOFILE, so this is a statement about portability, not a
-        # tolerance that could quietly disarm the scenario on a supported host.
+        # RLIMIT_NOFILE, so it is a portability statement rather than a
+        # tolerance that could disarm the scenario on a supported host.
         return "skipped: this platform has no RLIMIT_NOFILE to lower"
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     expect(
@@ -1031,9 +1018,9 @@ def s_parallel_fd_clamp(context: ScenarioContext) -> str:
         "this scenario lowers the child to — the run could not even start",
     )
     # The control run inherits THIS process's soft limit, so the host has to be
-    # able to reach the full request for the control to mean anything. Stated
-    # here, next to the hard-limit precondition, so a hardened host is named as
-    # the cause up front rather than surfacing later as an attribution failure.
+    # able to reach the full request for the control to mean anything. Checked
+    # beside the hard-limit precondition so a hardened host is named as the cause
+    # up front rather than surfacing later as an attribution failure.
     expect(
         soft == resource.RLIM_INFINITY or soft >= FD_CLAMP_CONTROL_MIN_SOFT,
         f"the host's own soft RLIMIT_NOFILE is {soft}, below the "
@@ -1054,9 +1041,9 @@ def s_parallel_fd_clamp(context: ScenarioContext) -> str:
         "--gh-annotations",
         "off",
     ]
-    # Inside the `try`, not before it: writing the tree is itself a loop over
-    # four files, so a failure partway through leaves sources behind unless the
-    # `finally` already owns them.
+    # Inside the `try`: writing the tree is a loop over four files, so a failure
+    # partway through leaves sources behind unless the `finally` already owns
+    # them.
     try:
         _write_fd_clamp_tree()
         run = context.runner.run_mtest(
@@ -1076,7 +1063,7 @@ def s_parallel_fd_clamp(context: ScenarioContext) -> str:
             f"under a soft RLIMIT_NOFILE of {FD_CLAMP_SOFT_LIMIT}",
         )
 
-        # `--json -` owns stdout, so the human console — verdict rows included —
+        # `--json -` owns stdout, so the human console, verdict rows included,
         # is on stderr for this run.
         console_passes = sorted(
             line.split()[1]
@@ -1123,7 +1110,7 @@ def s_parallel_fd_clamp(context: ScenarioContext) -> str:
         )
 
         # The CONTROL: same argv, no fd limit. Its full 16 workers and silent
-        # console are what make the clamp above attributable to the kernel limit.
+        # console make the clamp above attributable to the kernel limit.
         control = context.runner.run_mtest(args, timeout=240.0)
         expect_exit(control, 0)
         control_workers = _workers_in_stream(control.stdout)

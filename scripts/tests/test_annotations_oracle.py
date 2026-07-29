@@ -38,8 +38,7 @@ class AnnotationTailTests(unittest.TestCase):
 
     def test_an_aggregate_with_no_rows_to_roll_up_is_rejected(self) -> None:
         # A rollup counts the rows the cap dropped, so it cannot be the only
-        # line. Without this the sort assertion below would sort an empty list
-        # and pass, which is precisely how a broken cap would slip through.
+        # line; without this the sort assertion below sorts an empty list.
         self._reject([AGGREGATE], "no rows to roll up")
 
     def test_an_unsorted_block_is_rejected(self) -> None:
@@ -58,20 +57,16 @@ class AnnotationTailTests(unittest.TestCase):
         self._reject(["::error ::a.mojo::test_one: before\rafter"], "raw CR/LF")
 
     def test_a_raw_newline_never_parses_as_one_annotation(self) -> None:
-        # The other half of the forgery defense. A raw LF cannot reach the
-        # escaping check because the grammar refuses the line outright, so this
-        # pins the rejection where it actually happens.
+        # The other half of the forgery defense. A raw LF never reaches the
+        # escaping check, because the grammar refuses the line outright.
         self._reject(
             ["::error file=a.mojo::a.mojo\n::notice ::forged"], "not a valid annotation"
         )
 
     def test_an_unescaped_separator_in_a_property_value_is_rejected(self) -> None:
-        # `:` and `,` separate the property segment, so a value carrying either
-        # raw would split the annotation differently than mtest intended. The
-        # grammar is what enforces this: `_ANNOTATION_RE`'s property group is
-        # `[^:]*`, so the line never parses. The escaping check for the same
-        # property is unreachable defense in depth, which is why the rule is
-        # pinned here at the level that actually rejects it.
+        # A raw `:` or `,` in a value splits the annotation differently than
+        # mtest intended. `_ANNOTATION_RE`'s property group is `[^:]*`, so the
+        # grammar rejects the line and the escaping check never sees it.
         self._reject(
             ["::error file=a:b.mojo::a.mojo::test_one: failed"],
             "not a valid annotation",
@@ -87,8 +82,7 @@ class AnnotationTailTests(unittest.TestCase):
 
     def test_percent_escaped_control_characters_are_accepted(self) -> None:
         # %0A and %0D are the CORRECT encoding for CR/LF inside a property
-        # value, so the oracle must not flag them. This pins the reasoning that
-        # replaced a branch which could never fail.
+        # value, so the oracle must not flag them.
         counts = oracle.check_tail(["::error file=a%0Ab.mojo::a.mojo::test_one: ok"])
         self.assertEqual(counts["errors"], 1)
 

@@ -85,12 +85,11 @@ def _suite_tests(manifest: dict[str, Any]) -> dict[str, Any]:
 def s_default_suite(context: ScenarioContext) -> str:
     """Reconcile a whole default-suite run against the manifest rows it covers.
 
-    Each member shows its manifest verdict token on a line naming its path, the
-    zero-test file renders NO-TESTS instead of a plain PASS, the CRASH row keeps
-    the target-pinned abort signal number and name, the COMPILE-ERROR banner
-    references the undefined symbol its fixture names, the per-file and per-test
-    bands agree with the manifest's own numbers, and the verdict lines arrive in
-    lexicographic path order.
+    Each member shows its manifest verdict token on a line naming its path. The
+    zero-test file renders NO-TESTS, the CRASH row keeps the target-pinned abort
+    signal number and name, the COMPILE-ERROR banner references the undefined
+    symbol its fixture names, the bands agree with the manifest's numbers, and
+    the verdict lines arrive in lexicographic path order.
     """
     suite = _suite_tests(context.manifest)
     run = context.runner.run_mtest(["e2e/suite"])
@@ -140,11 +139,9 @@ def s_default_suite(context: ScenarioContext) -> str:
         )
 
     # Standing pin: the compile-error fixture provokes a NAME-RESOLUTION error,
-    # not merely some build failure. The manifest claims it names an undefined
-    # symbol; assert the rendered compiler banner actually references that
-    # identifier. A future edit that turned the fixture into a syntax error (or
-    # renamed the symbol) would leave the COMPILE-ERROR token green while quietly
-    # breaking the property the manifest documents — this catches that drift.
+    # so the rendered compiler banner must reference the undefined symbol the
+    # manifest claims. An edit that turned the fixture into a syntax error, or
+    # renamed the symbol, would otherwise leave the COMPILE-ERROR token green.
     expect(
         len(compile_error_files) == 1,
         f"expected exactly one COMPILE-ERROR fixture, got {compile_error_files}",
@@ -163,8 +160,7 @@ def s_default_suite(context: ScenarioContext) -> str:
     )
 
     # The zero-test file is a NO-TESTS pass: the zero-test ceiling is CLOSED, so
-    # this PASS comes from a parsed zero-test report, not from the exit status.
-    # As a member of the suite it still contributes to the exit-0 class.
+    # this PASS comes from a parsed zero-test report rather than the exit status.
     zero = [r for r, row in suite.items() if row.get("zero_tests")]
     expect(len(zero) == 1, "expected exactly one zero-test file")
     expect(
@@ -197,12 +193,12 @@ def s_default_suite(context: ScenarioContext) -> str:
         f"compile-error FILES: band {summ.compile_error} != manifest "
         f"{file_abnormals['compile_error']}",
     )
-    # pass/fail/skip are per-TEST. Every report-bearing file (PASS or FAIL —
-    # the verdict a parsed report can actually produce) must carry a per_test
-    # block, and no non-report-bearing file (CRASH/COMPILE-ERROR, which never
-    # reach the parser) may carry one; a manifest edit that adds a suite file
-    # without one, or leaves a stale block on an abnormal one, fails loudly
-    # here instead of silently under/over-counting the exact totals below.
+    # pass/fail/skip are per-TEST. Every report-bearing file (PASS or FAIL, the
+    # verdicts a parsed report can produce) must carry a per_test block, and no
+    # non-report-bearing file (CRASH/COMPILE-ERROR, which never reach the
+    # parser) may carry one. A manifest edit that adds a suite file without one,
+    # or leaves a stale block on an abnormal one, then fails loudly here instead
+    # of skewing the totals below.
     report_bearing = {"PASS", "FAIL"}
     for rel, row in suite.items():
         has_per_test = "per_test" in row
@@ -264,10 +260,9 @@ def s_hostile(context: ScenarioContext) -> str:
 
     silent -> MALFORMED-SUITE (exit 1); forger (two blocks) -> MALFORMED-SUITE
     (exit 1); liar (off-grammar report) -> DRIFT (exit 3); overflow (a ~13 MiB
-    flood) -> CAPTURE-OVERFLOW FAIL (exit 1). These files are NOT in the default
-    suite — the liar alone forces exit 3, which would swamp a whole-suite run —
-    so each is driven on its own here. The verdict tokens and exit codes come
-    straight from the manifest rows for e2e/hostile/*.
+    flood) -> CAPTURE-OVERFLOW FAIL (exit 1). They are kept out of the default
+    suite because the liar alone forces exit 3, which would swamp a whole-suite
+    run. Tokens and exit codes come from the manifest rows for e2e/hostile/*.
     """
     hostile = {
         rel: row
@@ -315,21 +310,19 @@ def s_hostile(context: ScenarioContext) -> str:
 HOSTILE_CONSOLE_TREE = "build/e2e-scratch/hostile-console"
 """Repo-relative home of this scenario's GENERATED source.
 
-Deliberately outside `e2e/`, for the same reasons the descriptor-clamp scenario
-generates its tree: the stand-in compiler writes a Python script, not an ELF
-binary, so pointing it at a committed fixture would leave a `#!`-headed file
-under the exact name a real `mojo build` produces. `build/` is gitignored and is
-never walked by the manifest-completeness oracle, so nothing here joins a
-committed inventory."""
+Outside `e2e/`, for the same reason the descriptor-clamp scenario generates its
+tree: the stand-in compiler writes a Python script rather than an ELF binary, so
+pointing it at a committed fixture would leave a `#!`-headed file under the exact
+name a real `mojo build` produces. `build/` is gitignored and never walked by the
+manifest-completeness oracle."""
 
 HOSTILE_CONSOLE_NAME = "test_hostile_console"
 """The single generated module, and the stem of the file mtest is asked for.
 
-Deliberately NOT the row name: the actor's `TEST_NAME` is a hostile row name
-that no filesystem should have to hold, and nothing in mtest requires the two to
-agree — the file is never really compiled, and the report's identity is its
-header path, not its row names. Every assertion about the row reads
-`hostile_actor().TEST_NAME`, so the two cannot silently drift into agreement."""
+Deliberately NOT the row name: the actor's `TEST_NAME` is a row name no
+filesystem should have to hold, and the file is never really compiled, so the
+report's identity is its header path. Every assertion about the row reads
+`hostile_actor().TEST_NAME`, so the two cannot drift into agreement."""
 
 HOSTILE_CONSOLE_FILE = f"{HOSTILE_CONSOLE_TREE}/{HOSTILE_CONSOLE_NAME}.mojo"
 """The generated source, as mtest is asked for it."""
@@ -363,18 +356,18 @@ HOSTILE_CONSOLE_RAW_BYTES = (
     ("C1 NEL", "\u0085"),
     ("C1 ST", "\u009c"),
 )
-"""Every control the actor writes that this harness can actually observe, by
-name. Not one may survive anywhere in the run's output: the console runs with
-`--color never`, so mtest emits no ESC of its own either and a single occurrence
-is a child byte that got through.
+"""Every control the actor writes that this harness can observe, by name. Not one
+may survive anywhere in the run's output: the console runs with `--color never`,
+so mtest emits no ESC of its own and a single occurrence is a child byte that got
+through.
 
-CR is deliberately ABSENT even though the actor writes one. `run_mtest` captures
-with `text=True`, so Python's universal-newline translation rewrites a surviving
-CR to LF before any assertion could see it \u2014 a `("CR", "\\r")` row here could
-never fail and would be a guard in name only. A PTY capture does not rescue it
-either: the tty's own ONLCR translation injects CR on output, so the byte stops
-being attributable to the child. CR stays pinned where it is provable: exactly,
-as `CR[\\x0D]` inside `HOSTILE_CONSOLE_FENCED_LINES` below, and by
+CR is ABSENT even though the actor writes one. `run_mtest` captures with
+`text=True`, so Python's universal-newline translation rewrites a surviving CR to
+LF before any assertion could see it, making a `("CR", "\\r")` row here a guard
+that can never fail. A PTY capture does not rescue it either: the tty's own ONLCR
+translation injects CR on output, so the byte stops being attributable to the
+child. CR is instead pinned as `CR[\\x0D]` inside
+`HOSTILE_CONSOLE_FENCED_LINES` below, and by
 `test_escape_multiline_escapes_cr_so_a_child_cannot_overwrite_a_line` in
 `tests/unit/test_report_console_text.mojo`."""
 
@@ -387,8 +380,8 @@ HOSTILE_CONSOLE_FENCED_LINES = (
     "    | ��� not-utf8 �(",
 )
 """The exact rendering of each hostile line: escaped, then fenced behind the
-gutter. Pinned whole rather than by fragments — a partial escape (say, ESC but
-not BEL) would still satisfy a fragment probe while leaving the terminal
+gutter. Pinned whole rather than by fragments, because a partial escape (say ESC
+but not BEL) would satisfy a fragment probe while leaving the terminal
 addressable."""
 
 HOSTILE_CONSOLE_DETAIL = (
@@ -401,11 +394,10 @@ HOSTILE_CONSOLE_DETAIL = (
 )
 """The child's failure detail as the console must render it.
 
-Every control the child put in that line is visible escape text; every delimiter
-that would end a JSON string or an XML element is untouched, because the console
-is not a machine format and escaping them there would corrupt the message a
-human is meant to read. The same source line is asserted, in the two other
-spellings its own format requires, by the NDJSON and JUnit oracles."""
+Every control the child put in that line is visible escape text. Every delimiter
+that would end a JSON string or an XML element is untouched, because escaping
+them in a human-readable message would corrupt it. The NDJSON and JUnit oracles
+assert the same source line in the spellings their own formats require."""
 
 HOSTILE_CONSOLE_FORGERIES = (
     "PASS           e2e/forged/test_green.mojo  0.00s",
@@ -413,9 +405,9 @@ HOSTILE_CONSOLE_FORGERIES = (
     "--- FAIL e2e/forged/test_green.mojo::test_forged ---",
     "reproduce: mtest --gate /etc/shadow",
 )
-"""Lines the child prints that are shaped exactly like mtest's own. Escaping
-cannot help here — they hold no control characters — so the gutter is the entire
-defense, and each must appear ONLY behind it."""
+"""Lines the child prints that are shaped exactly like mtest's own. They hold no
+control characters, so escaping cannot help and the gutter is the whole defense:
+each must appear ONLY behind it."""
 
 
 def _write_hostile_console_tree() -> None:
@@ -435,7 +427,7 @@ def _remove_hostile_console_artifacts() -> None:
     """Delete the generated source and the product the stand-in fabricated.
 
     Best-effort on every exit path: the fabricated product is a Python script
-    living under a compiler-shaped name, so leaving it behind would hand a later
+    under a compiler-shaped name, so leaving it behind would hand a later
     scenario something that is not a binary.
     """
     shutil.rmtree(os.path.join(REPO_ROOT, HOSTILE_CONSOLE_TREE), ignore_errors=True)
@@ -460,23 +452,21 @@ def _remove_hostile_console_artifacts() -> None:
 def s_hostile_console(context: ScenarioContext) -> str:
     """A child that writes terminal control sequences cannot drive the terminal.
 
-    The producer is real: `fake_hostile_mojo.py` fabricates a direct bytes actor
-    that writes invalid UTF-8, NUL, DEL, CSI, OSC closed by both BEL and ST, C1
+    The producer is real: `fake_hostile_mojo.py` fabricates a bytes actor that
+    writes invalid UTF-8, NUL, DEL, CSI, OSC closed by both BEL and ST, C1
     controls, report-lookalike noise, and lines shaped exactly like mtest's own
-    verdict rows — and then a genuine reconciling report so the file lands on a
-    real FAIL with a real per-test failure section. Every console surface the
-    boundary covers is therefore rendered from bytes the child chose.
+    verdict rows, then a genuine reconciling report so the file lands on a real
+    FAIL with a real per-test failure section.
 
     Two independent claims are asserted. First, NO raw control byte survives
     anywhere in the run's output: the run is `--color never`, so mtest writes no
     ESC of its own and one occurrence would be the child's. Second, the escaped
     text lands in the exact fenced shape the contract documents, and every
-    console-shaped forgery appears only behind the gutter, never as a line of
-    its own where a reader — or a log scraper — would take it for mtest's voice.
+    console-shaped forgery appears only behind the gutter, never as a line of its
+    own that a reader or a log scraper would take for mtest's voice.
 
-    One pinned line is deliberately about the raw side: the invalid-UTF-8 line
-    is asserted with its exact U+FFFD spelling, so a change that moved the lossy
-    decoder while "fixing" the display would fail here rather than pass quietly.
+    The invalid-UTF-8 line is pinned with its exact U+FFFD spelling, so a change
+    that moved the lossy decoder while "fixing" the display fails here.
     """
     args = [
         HOSTILE_CONSOLE_FILE,
@@ -512,8 +502,8 @@ def s_hostile_console(context: ScenarioContext) -> str:
                 f"the console did not render the fenced line {line!r}:\n{run.stdout}",
             )
 
-        # (4) Every console-shaped forgery is fenced, and none of them stands
-        # alone as a line. This is the claim escaping alone cannot make.
+        # (4) Every console-shaped forgery is fenced, and none stands alone as a
+        # line. Escaping alone cannot make this claim.
         stdout_lines = run.stdout.split("\n")
         for forgery in HOSTILE_CONSOLE_FORGERIES:
             expect(
@@ -537,9 +527,8 @@ def s_hostile_console(context: ScenarioContext) -> str:
         )
         # The node id ends in shell metacharacters, so the repro line has to
         # single-quote it: pasted unquoted, `"/><testcase/>` would redirect and
-        # the reader would run something the child composed. `'` itself is
-        # absent from the name, so one pair of single quotes is the whole
-        # quoting.
+        # the reader would run something the child composed. `'` is absent from
+        # the name, so one pair of single quotes is the whole quoting.
         expect(
             f"reproduce: mtest --mojo {FAKE_HOSTILE_MOJO} '{node}'" in stdout_lines,
             f"no exact, shell-quoted reproduce line for {node}:\n{run.stdout}",
@@ -575,10 +564,10 @@ HOSTILE_GUTTER = "    | "
 def _logical_lines(text: str) -> int:
     """How many logical lines a captured block holds.
 
-    A logical line is a run of text up to and including its terminating LF, and
-    a trailing LF closes the last line rather than opening an empty one — the
-    same rule `prefix_lines` fences by, so this is exactly how many gutter lines
-    the console must print.
+    A logical line is a run of text up to and including its terminating LF, and a
+    trailing LF closes the last line rather than opening an empty one. That is
+    the rule `prefix_lines` fences by, so this is how many gutter lines the
+    console must print.
 
     Args:
         text: The lossy-decoded captured stream.
@@ -639,13 +628,12 @@ def _fenced_capture_regions(run: Run) -> tuple[list[str], list[str]]:
 def s_hostile_reporters(context: ScenarioContext) -> str:
     """One hostile child, three reporters, one contract each.
 
-    The same actor the console scenario uses is run ONCE more — armed with a
-    stdout flood exactly the size of the capture bound, so the run overruns that
-    bound by precisely the hostile payload it must not lose — with the console,
-    the NDJSON stream, and the JUnit report all live. That is the point: every
-    escaping helper mtest owns already has passing unit tests, so what is left
-    to prove is that each reporter's call sites actually route through them, on
-    the same bytes, in the same run.
+    The actor the console scenario uses runs ONCE more with the console, the
+    NDJSON stream, and the JUnit report all live, armed with a stdout flood
+    exactly the size of the capture bound so the run overruns that bound by
+    precisely the hostile payload it must not lose. Every escaping helper mtest
+    owns already has passing unit tests; what is left to prove is that each
+    reporter's call sites route through them, on the same bytes, in one run.
 
     The three formats must NOT agree on their output, and each disagreement is
     asserted where it belongs:
@@ -659,9 +647,9 @@ def s_hostile_reporters(context: ScenarioContext) -> str:
       and an XSD.
 
     What they must agree on is the accounting: the same retained capture, the
-    same truncation flags, the same verdict, and — against a child that wrote a
-    complete report header for this very file with no Summary to close it — the
-    same genuine report block.
+    same truncation flags, the same verdict, and the same genuine report block,
+    against a child that wrote a complete report header for this very file with
+    no Summary to close it.
     """
     actor = hostile_actor()
     flood_lines = CAPTURE_BOUND_BYTES // len(actor.FLOOD_LINE)
@@ -720,11 +708,10 @@ def _assert_hostile_console(run: Run, streams: HostileStreams) -> str:
     Raises:
         ScenarioError: On any mismatch.
     """
-    # Every observable control, not just ESC and NUL. Two of these — VT and FF,
-    # and U+0085 among the C1 rows — are also line boundaries to Python's
-    # `str.splitlines()`, which `verdict_line` above uses on this very output.
-    # Pinning them here keeps that helper's safety argument local to the
-    # scenario that depends on it rather than borrowed from another one.
+    # Every observable control, not just ESC and NUL. VT, FF, and U+0085 among
+    # the C1 rows are also line boundaries to Python's `str.splitlines()`, which
+    # `verdict_line` above uses on this very output. Pinning them here keeps
+    # that helper's safety argument local to the scenario that depends on it.
     for name, byte in HOSTILE_CONSOLE_RAW_BYTES:
         expect(
             byte not in run.combined,
@@ -928,7 +915,7 @@ DURATIONS_ROW_RE = re.compile(r"^  (\S+)\s+([\d.]+)s\s*$")
 def s_durations(context: ScenarioContext) -> str:
     """`--durations N` renders a file-level slowest-files list.
 
-    INFORMAL tier: structure only (presence, size, order, `-q` survival) — never
+    INFORMAL tier: structure only (presence, size, order, `-q` survival), never
     exact timings.
     """
     suite = _suite_tests(context.manifest)
@@ -977,8 +964,8 @@ def s_durations(context: ScenarioContext) -> str:
         f"slowest-files list: {parsed}",
     )
 
-    # Descending duration order (ties would break by path, not asserted here
-    # since real wall-clock durations are exceedingly unlikely to tie).
+    # Descending duration order. Ties would break by path, which is not asserted
+    # here because real durations are very unlikely to tie.
     durs = [d for _p, d in parsed]
     expect(
         all(durs[i] >= durs[i + 1] for i in range(len(durs) - 1)),
@@ -1001,17 +988,15 @@ def s_color(context: ScenarioContext) -> str:
     `--color always` is absolute and paints regardless of NO_COLOR or tty-ness.
 
     A piped stdout (run_mtest) is NEVER a tty, so AUTO would already be
-    colorless for an unrelated reason — that would make "NO_COLOR -> no ANSI"
-    trivially true even if NO_COLOR were ignored outright. run_mtest_pty
-    attaches a real pty so the AUTO+tty case is actually colored first, then
-    proves NO_COLOR turns it off.
+    colorless for an unrelated reason, making "NO_COLOR -> no ANSI" trivially
+    true even if NO_COLOR were ignored. run_mtest_pty attaches a real pty so the
+    AUTO+tty case is colored first, then proves NO_COLOR turns it off.
     """
     rel = "e2e/suite/test_failing.mojo"
 
-    # Explicitly REMOVE NO_COLOR so the colors-expected case does not inherit an
-    # ambient NO_COLOR (e.g. under `NO_COLOR=1 pixi run ci`), which would silence
-    # AUTO color and fail this assertion spuriously. The NO_COLOR-silences case
-    # below still sets it.
+    # REMOVE NO_COLOR so the colors-expected case does not inherit an ambient
+    # one (e.g. under `NO_COLOR=1 pixi run ci`) and fail spuriously. The
+    # NO_COLOR-silences case below sets it back.
     tty_rc, tty_out = context.runner.run_mtest_pty(
         [rel], env_overrides={"NO_COLOR": None}, timeout=SHORT_TIMEOUT
     )

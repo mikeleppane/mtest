@@ -8,21 +8,20 @@ design, and a file cap conflated with the exec concurrency ceiling would report
 exit 0, so the only thing that separates them from a real green run is an
 independent source-derived count.
 
-A guard nobody has watched fail is not a guard. Every test below points the
-oracle at a *fake* mtest through the real watchdog and the real reconciliation,
-and proves the oracle goes red:
+Every test below points the oracle at a fake mtest through the real watchdog
+and the real reconciliation, and proves the oracle goes red:
 
-- `SelfhostOmittedFileTests` -- 100 files reported of 101 that exist.
-- `SelfhostOmittedTestsTests` -- every file reported PASS, one module collecting
-  zero tests. This is the D1 zero-collection shape.
-- `SelfhostFalseSuccessTests` -- exit 0 with correct counts and a path set that
+- `SelfhostOmittedFileTests`: 100 files reported of 101 that exist.
+- `SelfhostOmittedTestsTests`: every file reported PASS, one module collecting
+  zero tests (the D1 zero-collection shape).
+- `SelfhostFalseSuccessTests`: exit 0 with correct counts and a path set that
   differs by one name.
-- `SelfhostHangTests` -- a child that ignores SIGTERM and never exits, with a
-  descendant in its process group. Proves the deadline fires, the whole group
-  is swept, and the harness reports a timeout instead of blocking forever.
-- `SelfhostDistributionTests` -- the right grand total behind the wrong per-file
-  distribution, in both its shapes. This is the proof that reconciling per file
-  and per test NAME buys something a total cannot.
+- `SelfhostHangTests`: a child that ignores SIGTERM and never exits, with a
+  descendant in its process group. The deadline fires, the whole group is
+  swept, and the harness reports a timeout.
+- `SelfhostDistributionTests`: the right grand total behind the wrong per-file
+  distribution, in both its shapes, which is what reconciling per file and per
+  test NAME buys over a total.
 """
 
 from __future__ import annotations
@@ -485,10 +484,9 @@ class CommandTests(unittest.TestCase):
 class RequestParsingTests(unittest.TestCase):
     """The worker override must reach mtest, and a typo must never mean `auto`.
 
-    mtest reads a non-positive `-n` as `auto`, so an unvalidated value is not an
-    error but a silent policy change: the measured count the pixi tasks run
-    under would be replaced by cores/2 with nothing said. These prove the parse
-    rejects that rather than forwarding it.
+    mtest reads a non-positive `-n` as `auto`, so an unvalidated value silently
+    replaces the measured count the pixi tasks run under with cores/2. These
+    prove the parse rejects it rather than forwarding it.
     """
 
     def test_roots_alone_carry_the_pinned_default(self) -> None:
@@ -623,11 +621,10 @@ sys.exit(
 class ConcurrentInvocationTests(unittest.TestCase):
     """Two invocations on one checkout must never read each other's stream.
 
-    The next task points four pixi tasks (`test`, `test-unit`,
-    `test-integration`, `test-file`) at this harness, so two runs sharing a
-    checkout is ordinary. With a fixed stream path, run B could reconcile run
-    A's stream -- A can recreate the file between B's pre-spawn unlink and B's
-    read -- and B's per-file and per-test-name verdict would then be describing
+    Four pixi tasks (`test`, `test-unit`, `test-integration`, `test-file`) point
+    at this harness, so two runs sharing a checkout is ordinary. With a fixed
+    stream path, run A can recreate the file between run B's pre-spawn unlink
+    and B's read, and B's per-file and per-test-name verdict would then describe
     someone else's run.
     """
 
@@ -793,9 +790,9 @@ class SelfhostFalseSuccessTests(unittest.TestCase):
 class SelfhostDistributionTests(unittest.TestCase):
     """Mutation 5: the right grand total behind the wrong distribution.
 
-    Both shapes here satisfy every total the console report states -- the
-    selected count, the PASS row set, and `303 passed` -- and both are the
-    reason per-file and per-name reconciliation exists.
+    Both shapes satisfy every total the console report states (the selected
+    count, the PASS row set, `303 passed`), which is why per-file and per-name
+    reconciliation exists.
     """
 
     def test_a_correct_total_over_a_wrong_per_file_count_is_rejected(self) -> None:

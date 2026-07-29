@@ -1,15 +1,14 @@
 """Shared exact parsers, assertions, and live-actor arming for E2E scenarios.
 
-Besides the console/report oracles, this module owns the vocabulary the interrupt
-scenarios share: which slow/ files an interrupt must leave NOT-RUN, and the
-marker paths plus environment that arm the live actors to announce readiness,
-their real process-group ids, and mtest's polite teardown signal. Four scenario
-modules signal a live run, and they must all mean the same thing by "armed".
+The interrupt vocabulary lives here because several scenario modules signal a
+live run and must all mean the same thing by "armed": which slow/ files an
+interrupt leaves NOT-RUN, and the marker paths and environment that arm the
+actors to announce readiness, their process-group ids, and mtest's teardown
+signal.
 
-It also owns the hostile-actor capture arithmetic, for the same reason: the
-console scenario and the two machine-reporter scenarios all read artifacts
-produced from ONE actor invocation, and they must agree byte for byte on what
-that actor wrote and on what the runner's capture bound retained of it.
+So does the hostile-actor capture arithmetic: the console scenario and the two
+machine-reporter scenarios read artifacts from ONE actor invocation and must
+agree byte for byte on what it wrote and what the capture bound retained.
 """
 
 from __future__ import annotations
@@ -152,19 +151,18 @@ def expect_report(run: Run, path: str | Path, what: str) -> Path:
 
 
 INTERRUPT_TIMEOUT = 300.0
-"""Whole-call budget for one interrupt scenario: two cold `mojo build`s, the
-signal round trip, and finalization. A hang guard, never a threshold — the
-readiness barrier, not the clock, decides when the signal is sent."""
+"""Whole-call budget for one interrupt scenario, covering two cold `mojo
+build`s, the signal round trip, and finalization. A hang guard: the readiness
+barrier decides when the signal is sent, not the clock."""
 
 HARD_KILL_GUARD_SECONDS = 2.0
 """How long a second interrupt may take to end the run, from signal to exit.
 
-The blocked actor is a compile slot, whose SIGTERM-to-SIGKILL grace is 5 s. A
-second interrupt that did NOT hard-kill would therefore surface as the whole
-grace, three seconds the far side of this bound — the same 2 s/5 s separation
-`tests/integration/test_exec_pool.mojo` uses, and far outside loaded-CI jitter.
-Without this bound the double-interrupt scenario is green against a product that
-ignores the second signal entirely."""
+The blocked actor is a compile slot, whose SIGTERM-to-SIGKILL grace is 5 s, so a
+second interrupt that did not hard-kill surfaces as that whole grace, well the
+far side of this bound (the same separation
+`tests/integration/test_exec_pool.mojo` uses). Without it the double-interrupt
+scenario stays green against a product that ignores the second signal."""
 
 SLOW_TREE = "e2e/slow"
 """The tree every sequential interrupt scenario walks."""
@@ -312,7 +310,7 @@ def stream_files(text: str) -> StreamFiles:
     The machine stream deliberately carries no synthetic not-run record, so a
     NOT-RUN identity is stated by absence: a file that started and never
     finished was killed in flight, and a file with no record at all was never
-    scheduled. Both are exact.
+    scheduled.
 
     Args:
         text: The captured NDJSON stream.
@@ -330,12 +328,10 @@ def stream_files(text: str) -> StreamFiles:
     finished: dict[str, str] = {}
     summary: dict[str, int] = {}
 
-    # `parse_stream` validates FRAMING, the header version, and terminal
-    # cardinality. It does NOT type-check event fields: a record carrying
-    # `"path": 7` parses fine. Casting here would therefore assert a guarantee
-    # nothing provides, and the wrong type would surface later as a TypeError
-    # from sorting mixed paths rather than as the diagnosis this oracle exists
-    # to produce. So each field is checked where it is read.
+    # `parse_stream` validates framing, the header version, and terminal
+    # cardinality, but does NOT type-check event fields: a record carrying
+    # `"path": 7` parses fine. Casting would assert a guarantee nothing
+    # provides, so each field is checked where it is read.
     def field(record: dict[str, object], key: str, event_name: str) -> str:
         """Read one string field, or reject the record naming what was wrong."""
         value = record.get(key, "")
@@ -361,8 +357,8 @@ def stream_files(text: str) -> StreamFiles:
                     f"{type(raw_summary).__name__}, not an object: {raw_summary!r}"
                 )
             for key, value in raw_summary.items():
-                # Loud, not filtered: dropping a non-integer count would make a
-                # malformed summary look like a summary that simply omitted it.
+                # Loud: dropping a non-integer count would make a malformed
+                # summary look like one that omitted the count.
                 if not isinstance(value, int):
                     raise ScenarioError(
                         f"session_finished summary count {key!r} is "
@@ -379,25 +375,22 @@ def stream_files(text: str) -> StreamFiles:
 
 
 SESSION_SUITE_PREFIX = "mtest::"
-"""The prefix every JUnit suite that stands for the SESSION rather than a file.
+"""The prefix on a JUnit suite that stands for the SESSION rather than a file.
 
 Restated from `src/mtest/report/junit_reporter.mojo`, which no Python can
 import: `mtest::precompile` carries a failed precompile step and `mtest::cache`
-carries the build-cache counters as a zero-row property bag. The prefix is not
-decoration — a file suite is keyed by its repo-relative path, so `mtest::` is
-the one shape that can never collide with one, and that is what makes it safe to
-partition on here."""
+carries the build-cache counters as a zero-row property bag. A file suite is
+keyed by its repo-relative path, so `mtest::` can never collide with one, which
+is what makes it safe to partition on."""
 
 
 def file_testsuites(root: ET.Element) -> list[ET.Element]:
     """The `<testsuite>` elements standing for a test FILE, in document order.
 
-    A scenario that means "the suites this run's files produced" has to say so,
-    because the reporter also publishes session-level suites and the set of them
-    grows: counting raw `<testsuite>` elements instead turns every such addition
-    into a phantom file suite. Relaxing the count to absorb one is worse than
-    the failure it silences — a report that lost its real file suite and kept
-    only the session ones would then pass.
+    The reporter also publishes session-level suites, and the set of them grows,
+    so counting raw `<testsuite>` elements turns every addition into a phantom
+    file suite. Relaxing such a count to absorb one would also pass a report
+    that lost its real file suite and kept only the session ones.
 
     Args:
         root: The parsed report root, `<testsuites>` or a lone `<testsuite>`.
@@ -447,7 +440,7 @@ CAPTURE_BOUND_BYTES = 8 * 1024 * 1024
 
 Restated from `_DEFAULT_CAP_BYTES` in `src/mtest/exec/supervise.mojo`, which no
 Python can import. A drift between the two surfaces here as an exact-count
-mismatch in the hostile-reporters scenario, never as a silent pass."""
+mismatch in the hostile-reporters scenario."""
 
 CAPTURE_HEAD_BYTES = CAPTURE_BOUND_BYTES // 2
 """The leading window the capture always keeps (`Supervisor.__init__`)."""
@@ -460,8 +453,8 @@ REPORT_WINDOW_BYTES = 65536
 """The per-end window each machine reporter keeps of a captured stream.
 
 Restated from `_STREAM_HEAD`/`_STREAM_TAIL` in `report/json_stream.mojo` and
-`_JUNIT_HEAD`/`_JUNIT_TAIL` in `report/junit.mojo`, which agree by contract; the
-hostile-reporters scenario is where that agreement is actually exercised."""
+`_JUNIT_HEAD`/`_JUNIT_TAIL` in `report/junit.mojo`, which agree by contract. The
+hostile-reporters scenario is where that agreement is exercised."""
 
 ELISION = "…"
 """The visible marker both reporters splice between their two windows."""
@@ -493,9 +486,8 @@ def capture_marker(omitted: int) -> bytes:
     """The exact truncation marker the capture splices at the bound.
 
     Mirrors `_marker_text` in `src/mtest/exec/capture.mojo`, including its
-    surrounding newlines. Written here as an independent expectation so the
-    retained byte count can be predicted rather than read back from the artifact
-    it is supposed to be judging.
+    surrounding newlines, as an independent expectation: the retained byte count
+    is predicted here rather than read back from the artifact under test.
 
     Args:
         omitted: How many middle bytes the bound dropped.
@@ -516,7 +508,7 @@ class HostileStream:
     `raw` is every byte the child put on the descriptor. The rest is derived:
     what the runner's capture retains, and what a machine reporter keeps of that
     retained value. Each property states one policy, so a failure names the
-    policy that broke rather than "the numbers differ".
+    policy that broke.
     """
 
     raw: bytes
@@ -570,15 +562,15 @@ class HostileStreams:
     stdout: HostileStream
     stderr: HostileStream
     detail: str
-    """The child's per-test failure detail, exactly as it wrote it — the text
-    every reporter's per-test surface has to render from."""
+    """The child's per-test failure detail, exactly as it wrote it. Every
+    reporter's per-test surface renders from this text."""
 
 
 def hostile_streams(canonical: str, flood_lines: int) -> HostileStreams:
     """Predict both streams of one armed hostile-actor run, byte for byte.
 
-    Reproduces `main`'s write order — flood, hostile block, report on stdout; the
-    hostile block alone on stderr — from the actor's own payload constants.
+    Reproduces `main`'s write order from the actor's own payload constants:
+    flood, hostile block, report on stdout; the hostile block alone on stderr.
 
     Args:
         canonical: The absolute, symlink-resolved source path the build stand-in

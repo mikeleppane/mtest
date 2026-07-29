@@ -1,35 +1,34 @@
 #!/usr/bin/env python3
 """Black-box contract-conformance validator for the mtest CLI.
 
-The executable oracle behind the `validating-mtest` skill. It does what a new
-*user* does: scaffolds a throwaway Mojo project (a library, clean suites, and
-deliberately-broken / "poison" files) outside the repo, then drives the built
-`mtest` binary against it and asserts, per check, the exit code and the
-stdout/stderr content — every assertion tagged with the `docs/cli-contract.md`
-section it enforces.
+The executable oracle behind the `validating-mtest` skill. It scaffolds a
+throwaway Mojo project (a library, clean suites, deliberately-broken "poison"
+files) outside the repo, drives the built `mtest` binary against it, and
+asserts per check the exit code and the stdout/stderr content, every assertion
+tagged with the `docs/cli-contract.md` section it enforces.
 
-Design (hardened after adversarial review):
-  * The contract is the oracle. A check asserts what the contract PROMISES, not
-    what the implementation happens to render. Console *wording* is informal
-    (§20), so checks lean on the FROZEN surfaces: exit codes (§9), the `collect`
-    listing (§16), stream routing (§16/§19), and outcome *distinctions* (§10).
-  * Verdict fidelity over label presence. The dominant defect class is SILENT
-    test-set corruption — running the wrong SET while still printing a plausible
-    green summary. So the oracle asserts the EXACT collected node-id set and
-    EXACT counts, and uses POISON probes: a test that would FAIL/CRASH if it ran,
-    so a broken selection/exclusion/early-stop flips the frozen exit code.
-  * No false green. A run that selects zero checks, that SKIPs any check
-    under --strict, or that did not perform every check on
-    EXPECTED_CHECK_NAMES, exits non-zero. The roster exists because
-    deleting a check's call site is otherwise invisible: the remaining
-    checks keep `ran > 0` and the gate prints "0 failed, 0 skipped".
-    Setup failures exit 2 (distinct from a contract failure's 1). Freshness of
-    the binary under test is enforced, not just warned:
-    `pixi run contract-check` rebuilds a missing-or-stale `build/mtest` before
-    validating; the blocking `pixi run contract-check-strict` gate instead
-    runs `--no-rebuild` against the binary its own Pixi `build-bin` dependency
-    JUST produced, and fails closed (exit 2) if that binary is missing or
-    looks stale rather than silently building one of its own.
+Design:
+  * The contract is the oracle. A check asserts what the contract PROMISES
+    rather than what the implementation happens to render. Console wording is
+    informal (§20), so checks lean on the FROZEN surfaces: exit codes (§9), the
+    `collect` listing (§16), stream routing (§16/§19), and outcome
+    distinctions (§10).
+  * The dominant defect class is SILENT test-set corruption: running the wrong
+    SET while still printing a plausible green summary. So the oracle asserts
+    the EXACT collected node-id set and EXACT counts, and uses POISON probes (a
+    test that would FAIL or CRASH if it ran) so a broken selection, exclusion,
+    or early stop flips the frozen exit code.
+  * No false green. A run that selects zero checks, SKIPs a check under
+    `--strict`, or did not perform every check on `EXPECTED_CHECK_NAMES` exits
+    non-zero. The roster exists because deleting a check's call site is
+    otherwise invisible: the remaining checks keep `ran > 0` and the gate
+    prints "0 failed, 0 skipped". Setup failures exit 2, distinct from a
+    contract failure's 1.
+  * Freshness of the binary under test is enforced. `pixi run contract-check`
+    rebuilds a missing-or-stale `build/mtest` before validating; the blocking
+    `pixi run contract-check-strict` gate instead runs `--no-rebuild` against
+    the binary its own Pixi `build-bin` dependency JUST produced, and fails
+    closed (exit 2) if that binary is missing or looks stale.
 
 Usage:
     pixi run contract-check --                         # rebuild-if-stale, run all
@@ -41,7 +40,6 @@ Usage:
 Exit: 0 all passed; 1 a contract check failed (or a --strict skip); 2 setup
 failure (no toolchain, binary won't build, --no-rebuild found a missing/stale
 binary, zero checks ran, or the roster of performed checks was incomplete).
-CI-usable.
 """
 
 from __future__ import annotations
@@ -84,9 +82,8 @@ def find_repo_root(start: Path) -> Path:
         `pixi.toml`.
 
     Raises:
-        SystemExit: No such directory exists. Nothing else in this checker can
-            be located without the repo root, so that is a setup failure
-            (exit 2) rather than a contract failure.
+        SystemExit: No such directory exists. Nothing else here can be located
+            without the repo root, so that is a setup failure (exit 2).
     """
     for d in [start, *start.parents]:
         if (d / "pixi.toml").is_file():
@@ -103,8 +100,7 @@ def pixi_env() -> dict[str, str]:
 
     `MTEST_MOJO` is scrubbed: the scaffold library is precompiled with pixi's
     pinned mojo, so a caller's stray override would build tests with a different
-    toolchain and manufacture false findings (it also leaves §7 precedence for a
-    dedicated check, not an ambient accident).
+    toolchain and manufacture false findings. §7 precedence gets its own check.
     """
     out = subprocess.run(
         ["pixi", "run", "bash", "-c", "env -0"],
@@ -124,18 +120,13 @@ def pixi_env() -> dict[str, str]:
     return env
 
 
-# Every input whose change can change the bytes of build/mtest: the Mojo
-# sources, the private native adapter, the two build scripts that produce it,
-# the pinned strict-compile flag list, and the two manifests that pin the
-# toolchain building it. This list is a fail-closed HEURISTIC for staleness,
-# NOT a content-identity proof — mtimes can agree by coincidence and a
-# touched-but-unchanged file looks "newer" without changing a single byte.
-# The actual provenance guarantee for a strict run is the Pixi
-# `contract-check-strict -> build-bin` task edge: that edge always rebuilds
+# Every input whose change can change the bytes of build/mtest. This list is a
+# fail-closed HEURISTIC for staleness, not a content-identity proof: mtimes can
+# agree by coincidence and a touched-but-unchanged file looks "newer". The
+# provenance guarantee for a strict run is the Pixi
+# `contract-check-strict -> build-bin` task edge, which always rebuilds
 # build/mtest from this exact tree immediately before this checker runs with
-# `--no-rebuild`. This scan exists only to fail closed if that edge was
-# bypassed (a bare `--no-rebuild` invocation against a stale or missing
-# binary left over from something else).
+# `--no-rebuild`. This scan only fails closed if that edge was bypassed.
 BINARY_INPUT_PATHS = [
     REPO / "src",
     REPO / "native",
@@ -173,12 +164,10 @@ def ensure_binary(
 ) -> None:
     """Build `binary`, and REBUILD it when missing or older than any input.
 
-    A stale binary validates the *old* code and reports a false green — this
-    bit the project during its own QA pass. Freshness is enforced, not just
-    warned: with `--no-rebuild` (`allow_rebuild=False`), a missing or stale
-    binary is a setup failure (exit 2) — this checker never silently
-    validates old or absent bytes, and it never starts a build of its own
-    when the caller explicitly forbade one.
+    A stale binary validates the old code and reports a false green, which bit
+    the project during its own QA pass. With `--no-rebuild`
+    (`allow_rebuild=False`) a missing or stale binary is a setup failure
+    (exit 2), since the caller forbade a build of our own.
     """
     if build is None:
         build = _run_build_bin
@@ -212,13 +201,10 @@ def wait_until(
 ) -> bool:
     """Poll `predicate` until it holds or `deadline` passes, whichever is first.
 
-    True as soon as `predicate()` is true, False once `deadline` (a
-    `time.time()`-comparable epoch) passes first.
-
-    A genuine readiness/absence barrier, never a fixed sleep: the caller
-    decides the acceptable bound via `deadline`, and gets an answer as soon
-    as the condition is met instead of always waiting out a guessed
-    duration.
+    Returns True as soon as `predicate()` is true, False once `deadline` (a
+    `time.time()`-comparable epoch) passes first. A readiness barrier rather
+    than a fixed sleep: the caller sets the bound and gets an answer as soon as
+    the condition is met.
     """
     while True:
         if predicate():
@@ -230,12 +216,11 @@ def wait_until(
 
 # --------------------------------------------------------------------------- #
 # Exact-process identification for the SIGINT probe. `mtest` builds each test
-# file with `mojo build <file> -o <output> ...`, and both the compiler's
-# command line and the exec'd binary's own path mention the mangled name, so a
-# plain `pgrep -f <mangled-name>` scan matches BOTH the test binary AND, for as
-# long as it is still running, its own COMPILER. These helpers resolve that
-# ambiguity by argv[0] (the process's own executable path), which only the
-# exec'd binary itself is, never the compiler invoking it.
+# file with `mojo build <file> -o <output> ...`, and both the compiler's command
+# line and the exec'd binary's own path mention the mangled name, so a plain
+# `pgrep -f <mangled-name>` scan matches the test binary AND, while it is still
+# running, its own COMPILER. These helpers resolve that ambiguity by argv[0],
+# which is the exec'd binary itself, not the compiler invoking it.
 #
 # `<output>` has three shapes, because the build cache moved where a
 # first-attempt build lands:
@@ -245,19 +230,18 @@ def wait_until(
 #                                                    (staged, not yet published)
 #   .mtest-cache/build-v1/<mangled>_h<digest32>/bin  (published generation)
 #
-# All three are matched. The middle one is what a supervised child is ACTUALLY
-# running for the duration of this probe: a first-attempt cached build compiles
-# into staging and runs from there, and the rename into a generation happens
-# only once the file's verdict is settled. Recognizing only the other two left
-# `pgrep -f <mangled>` with nothing to match at all, so the SIGINT probe waited
-# out its full readiness deadline and failed.
+# All three are matched. The middle one is what a supervised child actually runs
+# for the duration of this probe: a first-attempt cached build compiles into
+# staging and runs from there, and the rename into a generation happens only
+# once the file's verdict is settled. Recognizing only the other two left
+# `pgrep -f <mangled>` with nothing to match, so the SIGINT probe waited out its
+# full readiness deadline and failed.
 #
-# The generation's digest covers the toolchain, the environment, the invocation
-# root, and every include root's contents, so it is run-dependent and cannot be
-# pinned here — the assertion is on the store prefix, the mangled name, and the
-# `_h` separator (which no mangled name can contain), never on the digest
-# itself. The staging name's pid, clock reading, and attempt index are
-# run-dependent for the same reason, and are asserted as decimal fields only.
+# The generation's digest (over the toolchain, the environment, the invocation
+# root, and every include root's contents) and the staging name's pid, clock
+# reading, and attempt index are all run-dependent, so none of them is pinned
+# here: the assertions are the store prefix, the mangled name, the `_h`
+# separator (which no mangled name can contain), and decimal-only tail fields.
 # --------------------------------------------------------------------------- #
 
 CACHE_STORE_PREFIX = ".mtest-cache/build-v1/"
@@ -266,30 +250,28 @@ CACHE_STORE_PREFIX = ".mtest-cache/build-v1/"
 CACHE_STAGING_PREFIX = ".tmp-"
 """Leading component of a staging directory's name, inside the store.
 
-Mirrors `mtest.session.store._TMP_PREFIX`. Kept as the literal it is on the
-product side rather than derived, because this module's whole job is to assert
-the shipped shape from the outside; a derivation would agree with a regression
-instead of catching it.
+Mirrors `mtest.session.store._TMP_PREFIX`, kept as a literal rather than
+derived: this module asserts the shipped shape from the outside, and a
+derivation would agree with a regression instead of catching it.
 """
 
 STAGING_TAIL_FIELDS = 3
 """Decimal fields a staging directory's name carries after the mangled name.
 
-`store_build_target` composes `.tmp-<mangled>-<pid>-<clock>-<attempt>`, and
-those last three are all-digit and dash-free. Splitting exactly that many
-fields off the RIGHT is what makes the mangled-name comparison exact even
-though a mangled name may itself contain `-` (only `_` and `/` are escaped),
-so `a` never matches `a-1`'s staging directory.
+`store_build_target` composes `.tmp-<mangled>-<pid>-<clock>-<attempt>`, whose
+last three fields are all-digit and dash-free. Splitting exactly that many
+fields off the RIGHT keeps the mangled-name comparison exact even though a
+mangled name may itself contain `-` (only `_` and `/` are escaped), so `a`
+never matches `a-1`'s staging directory.
 """
 
 
 def matching_pids(pattern: str) -> list[str]:
     """PIDs whose full command line contains `pattern` (`pgrep -f`).
 
-    Raises `RuntimeError` if this platform's process inspection (`pgrep`) is
-    unavailable or misbehaves — callers route that through
-    `_skip_or_fail_result`, so missing support is a strict failure under
-    `--strict`, never a silent pass.
+    Raises `RuntimeError` if `pgrep` is unavailable or misbehaves. Callers route
+    that through `_skip_or_fail_result`, so missing platform support is a
+    failure under `--strict` rather than a silent pass.
     """
     try:
         r = subprocess.run(
@@ -309,11 +291,10 @@ def matching_pids(pattern: str) -> list[str]:
 def process_argv0(pid: str) -> str:
     """The first whitespace-separated token of `pid`'s full command line.
 
-    Deliberately `ps -o args=`, never `ps -o comm=`: Linux truncates `comm`
-    to 15 characters, and a mangled test-binary name can be longer
-    (`irq_stest_u1hang` is 16), so a `comm`-based comparison would silently
-    fail to match the exact binary this probe must identify. Returns "" if
-    the process has already exited.
+    Deliberately `ps -o args=` rather than `ps -o comm=`: Linux truncates `comm`
+    to 15 characters and a mangled test-binary name can be longer
+    (`irq_stest_u1hang` is 16), so a `comm`-based comparison would fail to match
+    the binary this probe must identify. Returns "" if the process has exited.
     """
     try:
         r = subprocess.run(
@@ -351,8 +332,8 @@ def _is_staging_dir(dir_name: str, mangled_name: str) -> bool:
     (`_mangle` escapes only `_` and `/`), so `.tmp-a-` is a prefix of
     `.tmp-a-1-<pid>-<clock>-<attempt>` and a prefix test would let file `a`
     claim file `a-1`'s running child. The three trailing fields are the only
-    fixed-shape part of the name, so they are split off the right and required
-    to be decimal; whatever remains is then compared to the mangled name whole.
+    fixed-shape part of the name: they are split off the right and required to
+    be decimal, and whatever remains is compared to the mangled name whole.
     """
     if not dir_name.startswith(CACHE_STAGING_PREFIX):
         return False
@@ -366,19 +347,13 @@ def _is_staging_dir(dir_name: str, mangled_name: str) -> bool:
 def is_own_binary(argv0: str, mangled_name: str) -> bool:
     """Whether `argv0` is a test binary built from `mangled_name`'s source.
 
-    True for three shapes, in the order a run produces them: the uncached
-    output path, whose basename IS the mangled name; the unpublished staging
-    directory a first-attempt cached build both compiles into and RUNS from,
-    named `.tmp-<mangled>-<pid>-<clock>-<attempt>`; and a published cache
-    generation, whose binary is `bin` inside `<mangled>_h<digest32>`.
-
-    The staging shape is not an edge case: the sequential driver publishes only
-    after a file's verdict is settled, so every child this probe has to find
-    mid-run is executing out of staging and no generation for it exists yet.
+    True for the three `<output>` shapes above: the uncached output path, whose
+    basename IS the mangled name; the staging directory a first-attempt cached
+    build compiles into and RUNS from; and a published cache generation, whose
+    binary is `bin` inside `<mangled>_h<digest32>`.
 
     False for a compiler that merely names any of them as its `-o` argument,
-    because a compiler's argv[0] is the compiler. That is the whole reason this
-    predicate reads argv[0] and not the command line `pgrep` matched on.
+    since a compiler's argv[0] is the compiler.
     """
     if argv0.endswith(mangled_name):
         return True
@@ -393,8 +368,8 @@ def is_own_binary(argv0: str, mangled_name: str) -> bool:
 def exact_process_pid(mangled_name: str) -> str | None:
     """The PID of the process whose OWN executable `mangled_name` built.
 
-    Never a `mojo build` compiler that merely mentions it as an `-o`
-    argument. `None` if no such process is currently running.
+    Skips a `mojo build` compiler that merely mentions it as an `-o` argument.
+    `None` if no such process is currently running.
     """
     for pid in matching_pids(mangled_name):
         argv0 = process_argv0(pid)
@@ -435,24 +410,19 @@ def run_interrupt_probe(
 ) -> tuple[str, str]:
     """Drive one SIGINT-frees-the-owned-child-group probe attempt.
 
-    Returns `(status, detail)` with `status` one of the module's `PASS`,
-    `FAIL`, `SKIP` constants. This is the EXACT code path
-    `Runner.check_interrupt` runs against the real `mtest` binary — it is
-    free of `Runner`/`self` specifically so the negative controls in
-    `scripts/tests/test_contract.py` can drive it directly with a fake
-    `spawn`, fake `hang_ready`/`hang_present` predicates, and a fake
-    `send_sigint` (never a real `os.kill` against a fabricated PID) instead
-    of re-implementing this logic in the test.
+    Returns `(status, detail)` with `status` one of `PASS`, `FAIL`, `SKIP`.
+    This is the code path `Runner.check_interrupt` runs against the real
+    `mtest` binary, kept free of `Runner`/`self` so the negative controls in
+    `scripts/tests/test_contract.py` can drive it with a fake `spawn`, fake
+    `hang_ready`/`hang_present` predicates, and a fake `send_sigint` instead of
+    re-implementing this logic in the test.
 
-    `hang_ready`/`hang_present` may raise `RuntimeError` (missing platform
-    process inspection); that is routed through `_skip_or_fail_result`, so
-    it is a FAIL under `--strict` and a SKIP otherwise — never a silent
-    pass. `SIGINT` is sent to `spawn()`'s process only after `hang_ready()`
-    reports true (readiness), never on a fixed sleep. The readiness wait
-    also exits early — before `outer_deadline` — if the spawned process
-    itself has already exited: a dead supervisor will never spawn the hang
-    child, so waiting out the full deadline would only stall this
-    now-blocking gate for no benefit.
+    A `RuntimeError` from `hang_ready`/`hang_present` (missing platform process
+    inspection) goes through `_skip_or_fail_result`: a FAIL under `--strict`, a
+    SKIP otherwise. SIGINT is sent to `spawn()`'s process only once
+    `hang_ready()` reports true, rather than on a fixed sleep. The readiness
+    wait also exits before `outer_deadline` if the spawned process has already
+    exited, since a dead supervisor will never spawn the hang child.
     """
     if killtree is None:
         killtree = _default_killtree
@@ -473,16 +443,14 @@ def run_interrupt_probe(
                 proc.kill()
                 return _skip_or_fail_result(strict, str(e))
             if proc.poll() is not None:
-                break  # the supervisor already exited; it will never spawn
-                # the hang child now — stop waiting for it.
+                break  # the supervisor exited; it will never spawn the child
             if time.time() >= outer_deadline:
                 break
             time.sleep(poll_interval)
         if not ready:
             killtree(proc)
             return _skip_or_fail_result(strict, "child never became ready")
-        # ONLY the supervisor — teardown must free the child; SIGINT only after
-        # readiness
+        # ONLY the supervisor: its teardown must free the child.
         send_sigint(proc.pid)
         try:
             out, _ = proc.communicate(timeout=30)
@@ -511,7 +479,7 @@ def run_interrupt_probe(
 
 
 # --------------------------------------------------------------------------- #
-# Scaffold — a throwaway user project. Clean suites are all-pass with a KNOWN
+# Scaffold: a throwaway user project. Clean suites are all-pass with a KNOWN
 # exact node-id set; poison suites carry a test that fails/crashes if it runs.
 # --------------------------------------------------------------------------- #
 LIB = '''\
@@ -559,9 +527,9 @@ def scaffold(root: Path) -> None:
     Args:
         root: An existing empty directory that becomes the project root. It
             gains a `textkit` library, a `build/` output directory, the clean
-            `tests/` tree whose node ids `EXPECTED_TESTS` pins exactly, and
-            the poison suites whose tests fail or crash if a selection,
-            exclusion, or early-stop clause lets them run.
+            `tests/` tree whose node ids `EXPECTED_TESTS` pins exactly, and the
+            poison suites whose tests fail or crash if a selection, exclusion,
+            or early-stop clause lets them run.
     """
 
     def w(rel: str, body: str) -> None:
@@ -694,7 +662,7 @@ def scaffold(root: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Check model — separate streams; assert on the frozen surfaces.
+# Check model: separate streams; assert on the frozen surfaces.
 # --------------------------------------------------------------------------- #
 @dataclass
 class Check:
@@ -792,17 +760,16 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
 )
 """Every check `main` must perform, in order, on an unfiltered run.
 
-An independent origin, never derived from `build_matrix` or from the bespoke
-dispatch below. That is the whole point: the gate previously had no way to
-notice that a check it advertises did not run. Deleting
-`runner.check_interrupt(args.strict)` left every unit test green, made
+Written independently of `build_matrix` and of the dispatch below, so the gate
+can notice a check it advertises but never ran. Deleting
+`runner.check_interrupt(args.strict)` once left every unit test green, kept
 `ran > 0` true from the other checks, and let both blocking
 `contract-check-strict` lanes print "0 failed, 0 skipped" and exit 0 with the
-SIGINT clause never tested. Same shape as `package_consumption.GATE_STAGE_IDS`
+SIGINT clause untested. Same shape as `package_consumption.GATE_STAGE_IDS`
 against its stage ledger.
 
-Two entries come from one dispatch: `check_help_stream` records both the
-`--help` and the `-V` clause, so they are adjacent here and move together.
+`check_help_stream` records two entries from one dispatch (`--help`, then
+`-V`), so those names are adjacent here and move together.
 """
 
 
@@ -815,11 +782,11 @@ def verify_every_check_ran(performed: tuple[str, ...], filtered: bool) -> None:
 
     Args:
         performed: The check names `main` recorded, in the order recorded.
-        filtered: Whether `--filter` narrowed the run. A filtered run cannot
-            be complete, so it is held only to the weaker property that what
-            ran is a subset of the roster in roster order — enough to catch a
-            renamed or duplicated check, not enough to catch a deleted one.
-            The blocking `contract-check-strict` task passes no filter, and
+        filtered: Whether `--filter` narrowed the run. A filtered run cannot be
+            complete, so it is held only to the weaker property that what ran
+            is a subset of the roster in roster order, which catches a renamed
+            or duplicated check but not a deleted one. The blocking
+            `contract-check-strict` task passes no filter, and
             `test_pixi_task_uses_the_package_entry_point` pins that.
 
     Raises:
@@ -892,7 +859,7 @@ class Runner:
 
         Recording is what makes a check countable: `verify_every_check_ran`
         reads `name` back out of `results`, so a check that runs without
-        recording is indistinguishable from one that never ran.
+        recording looks exactly like one that never ran.
 
         Args:
             status: One of `PASS`, `FAIL`, `SKIP`.
@@ -910,8 +877,8 @@ class Runner:
     def check(self, c: Check) -> None:
         """Run one table-driven check and record PASS or a FAIL listing every miss.
 
-        A timeout is a FAIL, never a skip: the binary failing to finish is a
-        contract failure in its own right.
+        A timeout is a FAIL: a binary that does not finish is itself a contract
+        failure.
 
         Args:
             c: The check to run.
@@ -946,10 +913,9 @@ class Runner:
     def check_collect_exact(self) -> None:
         """Assert `collect` lists the EXACT expected node-id set, in sort order.
 
-        The anti-silent-corruption oracle: a substring or count assertion
-        passes while the wrong set is listed, so this compares the listing to
-        `EXPECTED_TESTS` element for element and names both the missing and
-        the extra ids on failure.
+        A substring or count assertion passes while the wrong set is listed, so
+        this compares the listing to `EXPECTED_TESTS` element for element and
+        names the missing and the extra ids on failure.
         """
         ref = "§16 collect lists EXACTLY the discovered node ids, sorted (§5,§17)"
         name = "collect: exact node-id set for tests/"
@@ -971,9 +937,9 @@ class Runner:
     def check_determinism(self) -> None:
         """Assert two identical `collect` runs produce byte-identical stdout.
 
-        An empty listing does not count as identical: both runs must also
-        exit 0 and print something, so a `collect` that silently stopped
-        finding anything fails here instead of passing twice.
+        An empty listing does not count as identical: both runs must also exit
+        0 and print something, so a `collect` that stopped finding anything
+        fails here instead of passing twice.
         """
         ref = "§17 machine output (collect) is byte-identical across runs"
         name = "determinism: collect byte-identical"
@@ -990,9 +956,8 @@ class Runner:
     def check_help_stream(self) -> None:
         """Assert help goes to stdout and a usage error goes to stderr.
 
-        Records TWO roster entries from this one dispatch, `--help` first and
-        then `-V`, which is why those names are adjacent in
-        `EXPECTED_CHECK_NAMES`.
+        Records TWO roster entries from this one dispatch, `--help` then `-V`,
+        which is why those names are adjacent in `EXPECTED_CHECK_NAMES`.
         """
         # §19: --help -> STDOUT, exit 0. A usage error -> STDERR, exit 4.
         h = self.mtest(["--help"])
@@ -1050,20 +1015,16 @@ class Runner:
     def check_color(self) -> None:
         """Assert `--color never/always` behaves, and that the flag beats NO_COLOR.
 
-        Each of the three runs is also held to exit 0 on an all-passing
-        fixture: an ANSI count alone is not an oracle, because a run that
-        died after one colored banner still satisfies "always > 0".
+        Each of the three runs is also held to exit 0 on the all-passing
+        `tests/test_reverse.mojo`: an ANSI count alone is not an oracle,
+        because a run that died after one colored banner still satisfies
+        "always > 0".
         """
-        # §15.1: --color never -> no ANSI; always -> ANSI; and the flag WINS over
-        # NO_COLOR. This is the exact interaction the original QA pass false-flagged.
+        # §15.1: --color never -> no ANSI; always -> ANSI; the flag wins over
+        # NO_COLOR.
         ref = "§15.1 --color never/always; the flag wins over NO_COLOR"
         name = "color: --color always beats NO_COLOR"
 
-        # The ANSI count alone is not an oracle: a run that died early after
-        # emitting one colored banner satisfies "always > 0" while never
-        # reaching a verdict. tests/test_reverse.mojo is an all-passing
-        # fixture, so exit 0 is part of what "color did not change behavior"
-        # means, and each run is held to it.
         def esc(mode: str, no_color: bool) -> tuple[int, int]:
             e = dict(self.env)
             if no_color:
@@ -1099,11 +1060,9 @@ class Runner:
         """Assert a successful `--precompile` auto-adds its own `-I`.
 
         The dependent test resolves `from textkit import ...` with no manual
-        `-I`, and both of its tests must PASS, so the auto-added include path
-        is proven to have reached the compiler rather than merely been logged.
+        `-I`, and both of its tests must PASS, which proves the auto-added
+        include path reached the compiler rather than merely being logged.
         """
-        # §8.3: a successful --precompile builds the pkg and auto-adds its -I so a
-        # dependent test resolves `from textkit import ...` with NO manual -I.
         ref = "§8.3 successful --precompile auto-adds -I; dependent test PASSes"
         name = "precompile: success path resolves import (auto -I)"
         r = self.mtest(["--precompile", "textkit", "tests/test_reverse.mojo"])
@@ -1119,16 +1078,15 @@ class Runner:
     def check_symlinked_test_file(self) -> None:
         """Assert a symlinked test file is neither dropped nor called malformed.
 
-        Two failures met here, and they contradicted each other: a directory
-        walk skipped every symlink, so the linked tests silently did not run
-        while the summary still read `0 excluded, 0 not run`; and naming the
-        link directly reported MALFORMED-SUITE, blaming a conforming module
-        for the runner's own identity mismatch (the key was `realpath`, the
-        child's report names the lexical path).
+        Two defects met here: a directory walk skipped every symlink, so the
+        linked tests did not run while the summary still read `0 excluded, 0
+        not run`; and naming the link directly reported MALFORMED-SUITE,
+        blaming a conforming module for the runner's own identity mismatch (the
+        key was `realpath`, the child's report names the lexical path).
 
-        The link points at a POISON file whose test FAILS, so a walk that
-        silently drops it again flips the frozen exit code from 1 to 0 rather
-        than merely changing text.
+        The link points at a POISON file whose test FAILS, so a walk that drops
+        it again flips the frozen exit code from 1 to 0 rather than merely
+        changing text.
         """
         ref = "§2/§5/§6 a symlinked test file is discovered, run, and honestly judged"
         name = "symlink: a symlinked test file is collected and run, never dropped"
@@ -1187,8 +1145,8 @@ class Runner:
         """Assert the decimal values `atol` wraps are refused, not accepted.
 
         `atol` does not raise across the whole out-of-range domain: at exactly
-        `2^63` and `2^63 + 1` it wraps to `Int.MIN`. Every one of these flags
-        treats its value as non-negative, so a wrapped value silently disabled
+        `2^63` and `2^63 + 1` it wraps to `Int.MIN`. These flags all treat
+        their value as non-negative, so a wrapped value silently disabled
         `--timeout` and defeated `--maxfail` while the run still exited 0.
         Refusal is a §3 usage error, detected before any test runs.
         """
@@ -1219,12 +1177,10 @@ class Runner:
 
         A plain write-open of a FIFO with no reader blocks forever, and it
         happens before the session starts, so `--timeout` cannot bound it: the
-        run produced no output, no diagnostic, and no exit code until something
-        external killed it. §9 gives a runtime report-destination failure
-        exit 3; a hang is not an exit code at all.
-
-        A generous timeout separates a true block from mere slowness, and
-        `TimeoutExpired` is recorded as a FAIL, never allowed to pass.
+        run produced no output and no exit code until something external killed
+        it. §9 gives a runtime report-destination failure exit 3. The probe's
+        own timeout separates a true block from mere slowness, and
+        `TimeoutExpired` is recorded as a FAIL.
         """
         ref = "§9/§15.4 a report destination must resolve, never wedge the run"
         name = "report: --json to a readerless FIFO fails fast, never blocks"
@@ -1261,18 +1217,18 @@ class Runner:
         so depth becomes filename length. `PATH_MAX` (4096) caps a path but
         `NAME_MAX` (255) caps a component, so a path well inside both limits
         could still mangle past `NAME_MAX`. The build then failed and was
-        reported COMPILE-ERROR — §6 fault attribution inverted, since the
-        source compiles and mtest's own output name was the illegal thing.
+        reported COMPILE-ERROR, inverting §6 fault attribution: the source
+        compiles, and mtest's own output name was the illegal thing.
         """
         ref = "§5/§6 a legal source path builds; COMPILE-ERROR means the module's fault"
         name = "path: a long-but-legal path builds, never a false COMPILE-ERROR"
         deep = self.root / "deep"
         # The trigger is the RELATIVE path, since that is what becomes one
         # component: 20 x 16 bytes puts it past NAME_MAX (255) while the
-        # absolute path stays near 450, which matters because macOS caps
-        # PATH_MAX at 1024, not Linux's 4096 — the first draft of this check
-        # built a ~1040-byte path and died with ENAMETOOLONG on Darwin before
-        # it could assert anything.
+        # absolute path stays near 450. That matters because macOS caps
+        # PATH_MAX at 1024 rather than Linux's 4096; the first draft built a
+        # ~1040-byte path and died with ENAMETOOLONG on Darwin before it could
+        # assert anything.
         for i in range(20):
             deep = deep / f"d{i:02d}abcdefghijkl"
         deep.mkdir(parents=True, exist_ok=True)
@@ -1302,15 +1258,15 @@ class Runner:
             f"(PATH_MAX 4096); stderr={r.stderr[:200]!r}",
         )
 
-    # -- interrupt: signal ONLY mtest so the child's survival tests mtest's own
-    #    process-group teardown (§18/§24.2), not a signal the child caught directly.
+    # -- interrupt: signal ONLY mtest, so the child's survival tests mtest's own
+    #    process-group teardown (§18/§24.2) rather than a signal the child caught.
     def check_interrupt(self, strict: bool) -> None:
         """Assert SIGINT to `mtest` alone frees the child process group it owns.
 
         Writes the hanging and passing suites this needs, then hands the real
-        `spawn` and the real process-inspection predicates to
-        `run_interrupt_probe`, which is the shared code path the negative
-        controls in `scripts/tests/test_contract.py` drive with fakes.
+        `spawn` and process-inspection predicates to `run_interrupt_probe`, the
+        shared code path the negative controls in
+        `scripts/tests/test_contract.py` drive with fakes.
 
         Args:
             strict: Whether a SKIP from the probe is recorded as a FAIL,
@@ -1363,18 +1319,14 @@ def build_matrix() -> list[Check]:
         compared, a signal) are `Runner` methods instead, and the roster
         covers both kinds.
     """
-    # `I` names the `-I` include flag every argv below carries, so the shorter
-    # spelling is the readable one; renaming it would only obscure that.
+    # `I` names the `-I` include flag every argv below carries.
     I = ["-I", "build"]  # noqa: E741, N806
-    # Nothing is refused in this build (§24.1): every v1 flag spelling this build
-    # knows is served now. The refused machinery stays (driving zero checks) so
-    # the served/refused loop below still compiles.
+    # Nothing is refused in this build (§24.1). The refused machinery stays,
+    # driving zero checks, so the served/refused loop below still compiles.
     refused: list[tuple[str, str, str]] = []
     # Newly served (§24.1): --retries, --compile-timeout, --shard, --junit-xml,
-    # --gh-annotations, and --json are all wired up — the parser accepts them and
-    # they run, so none of them may exit 4 with the not-available refusal. Assert
-    # the flip so the validator stops asserting a falsehood, without duplicating
-    # the e2e's behavior coverage.
+    # --gh-annotations, and --json are wired up, so none of them may exit 4 with
+    # the not-available refusal. Behavior coverage lives in the e2e suite.
     served = [
         ("-n", "2", "§18,§24.1"),
         ("--workers", "2", "§18,§24.1"),
@@ -1383,13 +1335,13 @@ def build_matrix() -> list[Check]:
         ("--compile-timeout", "600", "§18,§24.1"),
         ("--junit-xml", "r.xml", "§15.2,§24.1"),
         ("--gh-annotations", "auto", "§15.3,§24.1"),
-        # A file destination, not "-": "-" would make --json own stdout, which
-        # collides with the default --gh-annotations auto (§15.3) — a distinct,
-        # deliberate usage error, not the "not served" refusal this check probes.
+        # A file destination: "-" would make --json own stdout, which collides
+        # with the default --gh-annotations auto (§15.3), a deliberate usage
+        # error distinct from the "not served" refusal this check probes.
         ("--json", "out.ndjson", "§15.4,§24.1"),
     ]
     checks = [
-        # Version identity (§19) — discriminating, not a bare "mtest".
+        # Version identity (§19): the version string, not a bare "mtest".
         Check(
             "help: version prints the version",
             "§19",
@@ -1472,7 +1424,7 @@ def build_matrix() -> list[Check]:
             4,
             err_has=["discover"],
         ),  # structural prefix, not the informal sentence
-        # Selection (§5) — exact counts + POISON so a broken filter flips exit code.
+        # Selection (§5): exact counts + POISON, so a broken filter flips the code.
         Check(
             "select: node id runs exactly one; sibling poison must NOT run",
             "§5,§10.1",
@@ -1513,7 +1465,7 @@ def build_matrix() -> list[Check]:
             [*I, "tests::test_reverse_ab"],
             4,
         ),
-        # Exclusion (§12) — POISON crash file must be REALLY removed, not just named.
+        # Exclusion (§12): the POISON crash file must be REALLY removed.
         Check(
             "exclude: pattern truly removes a would-crash file (exit stays 0)",
             "§12",
@@ -1535,7 +1487,7 @@ def build_matrix() -> list[Check]:
             [*I, "--exclude", "*", "excl"],
             5,
         ),
-        # Early stop (§11) — the not-run COUNT is the discriminator (poison sibling).
+        # Early stop (§11): the not-run COUNT discriminates (poison sibling).
         Check(
             "stop: -x stops scheduling; poison sibling stays NOT-RUN",
             "§11",
@@ -1610,7 +1562,7 @@ def build_matrix() -> list[Check]:
             0,
             any_has=["test_reverse_ab", "test_reverse_empty"],
         ),
-        # Forbidden build args (§8.4) — and pre-run detection (poison never runs).
+        # Forbidden build args (§8.4), detected pre-run (the poison never runs).
         Check(
             "build-arg: -o forbidden -> 4, and the test never ran (pre-run, §9)",
             "§8.4,§9",
@@ -1630,7 +1582,7 @@ def build_matrix() -> list[Check]:
             [*I, "tests/test_reverse.mojo", "--", "extra.mojo"],
             4,
         ),
-        # Internal error (§24.2) — spawn failure and protocol drift both -> exit 3.
+        # Internal error (§24.2): spawn failure and protocol drift both -> 3.
         Check(
             "exit-3: bad --mojo (spawn failure) -> 3",
             "§24.2",
@@ -1671,8 +1623,8 @@ def build_matrix() -> list[Check]:
             [*I, "-q", "-v", "tests"],
             4,
         ),
-        # Precompile failure (§8.3) — pass a DIRECTORY so the casualty path is not
-        # an operand echo: its presence proves it was LISTED as a casualty.
+        # Precompile failure (§8.3): pass a DIRECTORY, so the casualty path
+        # cannot be an operand echo and its presence proves it was listed.
         Check(
             "precompile: failure -> PRECOMPILE-ERROR, casualties listed, exit 1",
             "§8.3,§10",
@@ -1693,7 +1645,7 @@ def build_matrix() -> list[Check]:
                 any_has=["v1 contract", flag],
             )
         )
-    # Served flags (§24.1): accepted on the clean suite -> 0, never the
+    # Served flags (§24.1): accepted on the clean suite -> 0, with no
     # not-available refusal.
     for flag, val, ref in served:
         checks.append(
@@ -1816,10 +1768,10 @@ def main() -> int:
             runner.check_long_path_builds()
         if wanted("interrupt: SIGINT frees the owned process group"):
             if args.no_interrupt:
-                # Recorded, not bypassed. Testing --no-interrupt BEFORE
-                # wanted() gated the check off before --strict could observe
-                # a SKIP, so the one skip-sensitive clause could be dropped
-                # from a blocking lane without leaving a trace.
+                # Recorded rather than bypassed: testing --no-interrupt BEFORE
+                # wanted() gated the check off before --strict could observe a
+                # SKIP, letting a blocking lane drop the one skip-sensitive
+                # clause without leaving a trace.
                 runner.record(
                     SKIP,
                     "interrupt: SIGINT frees the owned process group",
@@ -1863,9 +1815,9 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 2
-        # The NOTE above promises this. It used to be true only of the one
-        # check that converted its own skip to a failure internally, which
-        # left `--strict --no-interrupt` reporting an all-green run.
+        # The NOTE above promises this. It once held only for the one check
+        # that converted its own skip to a failure internally, which left
+        # `--strict --no-interrupt` reporting an all-green run.
         return 1 if (n_fail or (args.strict and n_skip)) else 0
     finally:
         if args.keep:

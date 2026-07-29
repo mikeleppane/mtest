@@ -1,27 +1,23 @@
 #!/usr/bin/env python3
 """Strict `--mojo` stand-in that builds the hostile report actor.
 
-Like `fake_fd_mojo.py` this never execs the real compiler; unlike it, this
-stand-in is strict about the WHOLE argv rather than just its first word. It
-serves exactly `build <source.mojo> -o <out>` and refuses anything else, because
-the scenarios it backs — `hostile-console` for the terminal surface and
-`hostile-reporters` for the NDJSON and JUnit ones — assert on the exact bytes
-mtest prints and on exact byte counts: an unexpected flag, an extra operand, or
-a second subcommand would change what the run does while those scenarios went on
-asserting about the old shape. Refusing loudly turns that into a visible failure
-instead of a silent one.
+Like `fake_fd_mojo.py` this never execs the real compiler, and it is strict about
+the whole argv rather than just its first word. It serves exactly
+`build <source.mojo> -o <out>`, because the scenarios it backs
+(`hostile-console` for the terminal surface, `hostile-reporters` for the NDJSON
+and JUnit ones) assert on exact bytes and byte counts. An unexpected flag or
+operand would change what the run does while those scenarios went on asserting
+about the old shape, so refusing loudly makes that visible.
 
 The build product is an executable copy of
 `tests/fixtures/exec/hostile_report_actor.py` with two substitutions: the
 interpreter on the shebang line, so the kernel can run it under mtest's plain
 `execve` with no shell in between, and the canonical source path, so the report
-header the actor prints byte-equals the path a real `mojo build` would have
-baked into the binary. Without that second substitution mtest's parser finds no
-report for the file and the run never reaches the console surfaces the scenario
-is about.
+header the actor prints byte-equals the path a real `mojo build` would have baked
+into the binary. Without that second substitution mtest's parser finds no report
+for the file and the run never reaches the console surfaces under test.
 
-Stdlib only, no third-party imports — this is build-time harness code, not part
-of the pure-Mojo product.
+Stdlib only: this is build-time harness code, outside the pure-Mojo product.
 """
 
 from __future__ import annotations
@@ -37,13 +33,13 @@ REPO_ROOT = os.path.dirname(
 """The repository root, four levels up from `scripts/fixtures/toolchain/`."""
 
 ACTOR = os.path.join(REPO_ROOT, "tests", "fixtures", "exec", "hostile_report_actor.py")
-"""The committed actor this stand-in copies. Single-sourced: the hostile bytes
-live in the fixture, never duplicated into this file."""
+"""The committed actor this stand-in copies. The hostile bytes live in the
+fixture and are never duplicated into this file."""
 
 CANONICAL_PLACEHOLDER = '"@MTEST_CANONICAL_SOURCE@"'
 """The exact token the actor assigns to `CANONICAL`, replaced with a real path
-literal. Quoted in the pattern so a bare mention in the actor's prose could not
-be substituted by accident."""
+literal. Quoted in the pattern so a bare mention in the actor's prose cannot be
+substituted by accident."""
 
 
 def _reject(message: str) -> int:
@@ -69,7 +65,7 @@ def _write_actor(out: str, canonical: str) -> None:
     Raises:
         OSError: The actor could not be read, or the product not written.
         ValueError: The actor no longer carries the canonical placeholder, which
-            would silently produce a product whose report matches no file.
+            would produce a product whose report matches no file.
     """
     with open(ACTOR, encoding="utf-8") as handle:
         source = handle.read()

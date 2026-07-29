@@ -1,36 +1,31 @@
 #!/usr/bin/env python3
-"""Stubborn-compiler `--mojo` stand-in — the double-interrupt teardown witness.
+"""Stubborn-compiler `--mojo` stand-in: the double-interrupt teardown witness.
 
 Stands in for the real `mojo` binary the way the adjacent `logging_mojo.py`
 does, and is transparent everywhere except one named target: any invocation
-whose argv does NOT contain `MTEST_STUBBORN_TARGET` EXECS the real `mojo` with
-the untouched argv, so the file before the target still builds, runs, and passes
-for real.
+whose argv omits `MTEST_STUBBORN_TARGET` execs the real `mojo` with the untouched
+argv, so the file before the target still builds, runs, and passes for real.
 
 For the named target's compile it becomes the live child group the interrupt
-scenario needs, and it is the only actor in this repository that can WITNESS
+scenario needs, and it is the only actor in this repository that can witness
 mtest's polite teardown:
 
 * it records its own process-group id, so the harness can prove that group gone;
-* it catches SIGTERM and, instead of exiting, writes a teardown marker — mtest's
-  polite signal cannot end it, exactly as a `SIG_IGN` fixture refuses it, but
-  the arrival is observable, which is what tells the harness that teardown has
-  actually begun;
-* it announces readiness only once both are in place, then sleeps far past any
+* it catches SIGTERM and writes a teardown marker instead of exiting. mtest's
+  polite signal cannot end it, as with a `SIG_IGN` fixture, but the arrival is
+  observable, which is what tells the harness teardown has begun;
+* it announces readiness only once both are in place, then sleeps past any
   deadline.
 
-A Mojo fixture cannot do the middle step. Signal DISPOSITIONS are process-wide
-but discard an ignored signal outright, while a signal MASK is per-thread and the
+A Mojo fixture cannot do the middle step: signal dispositions are process-wide
+but discard an ignored signal outright, while a signal mask is per-thread and the
 Mojo runtime holds several threads that would take the delivery instead. Python
-owns its whole process here, so the witness lives on this side of the toolchain
-boundary.
+owns its whole process here, so the witness lives on this side of the boundary.
 
-Compile steps get mtest's 5-second grace rather than the run step's 300 ms, so
-the second interrupt has a wide, unambiguous margin in which to prove it is what
-ended the group.
+Compile steps get a far wider teardown grace than run steps, so the second
+interrupt has an unambiguous margin in which to prove it ended the group.
 
-Stdlib only, no third-party imports — this is build-time harness code, not part
-of the pure-Mojo product.
+Stdlib only: this is build-time harness code, outside the pure-Mojo product.
 """
 
 from __future__ import annotations
@@ -52,10 +47,10 @@ TEARDOWN_ENV_VAR = "MTEST_STUBBORN_TEARDOWN_FILE"
 """Where the blocked compile announces that it observed mtest's SIGTERM."""
 
 # Strictly longer than any deadline the e2e sets and than the harness's own
-# per-scenario budget (`INTERRUPT_TIMEOUT`, 300 s): this compile must never
-# finish by racing the clock. Were the two merely equal, a race would return 1
-# here and turn the held compile into a compile FAILURE, silently changing the
-# scenario's accounting instead of holding.
+# per-scenario budget (`INTERRUPT_TIMEOUT`): this compile must never finish by
+# racing the clock. Were the two equal, a race would return 1 here and turn the
+# held compile into a compile FAILURE, changing the scenario's accounting
+# instead of holding.
 SLEEP_SECONDS = 900.0
 
 
@@ -69,7 +64,7 @@ def _write(path: str, text: str) -> None:
 
 
 def _on_sigterm(_signum: int, _frame: object) -> None:
-    """Record mtest's polite teardown signal and REFUSE to die on it."""
+    """Record mtest's polite teardown signal and refuse to die on it."""
     path = os.environ.get(TEARDOWN_ENV_VAR)
     if path:
         _write(path, "teardown\n")
@@ -113,9 +108,8 @@ def main() -> int:
         return 127
 
     os.execv(real_mojo, [real_mojo, *args])
-    # Kept as defence in depth: typeshed types os.execv as NoReturn, so mypy
-    # sees this as dead. Deleting it would remove the fallback if that ever
-    # changes.
+    # typeshed types os.execv as NoReturn, so mypy sees this as dead. Kept as
+    # the fallback if that ever changes.
     return 1  # type: ignore[unreachable]
 
 

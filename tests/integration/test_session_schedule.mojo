@@ -7,9 +7,13 @@ follows discovery order, `--maxfail` and a failing gate stop scheduling, and an
 ordinary verdict leaves the reproduce line clean.
 
 The serial pass, capacity-one equivalence, and interrupts across both passes
-live in `test_session_schedule_serial.mojo` — split off by weight, because a
-suite that drives real sessions pays once per process for hashing the compiler
-the cache keys against, and one per-file deadline should carry one such payment.
+live in `test_session_schedule_serial.mojo`. That division was made by weight,
+when every suite driving real sessions paid once per process for hashing the
+compiler the cache keys against; `session_fixtures.base_config` now keys a
+wrapper and the payment is gone, so the split survives on the seam it happens
+to fall along rather than on cost. Both halves are named in the ASan lane's
+inventory (`scripts/checks/memory/asan.py`), so neither may be merged away or
+renamed without that file moving in the same change.
 
 PROGRESS events are ephemeral: they appear in the recording stream but carry no
 verdict, so every count assertion here filters by event kind rather than by raw

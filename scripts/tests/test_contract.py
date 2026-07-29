@@ -57,10 +57,9 @@ class ContractToolLocationTests(unittest.TestCase):
 class EnsureBinaryFailsClosedTests(unittest.TestCase):
     """`--no-rebuild` must never validate a missing or stale binary.
 
-    `ensure_binary` takes the binary path and its input paths explicitly so
-    these tests exercise the real fail-closed/build-triggering logic against
-    a disposable temp tree — never the repo's own `build/mtest` — and never
-    invoke `pixi`/`mojo`.
+    `ensure_binary` takes the binary path and its input paths explicitly, so
+    these tests drive the real fail-closed logic against a disposable temp tree
+    without invoking `pixi` or `mojo`.
     """
 
     @override
@@ -113,14 +112,11 @@ class EnsureBinaryFailsClosedTests(unittest.TestCase):
 
     def test_stale_file_input_with_no_rebuild_dies_closed(self) -> None:
         # `_newest_mtime`'s `elif p.is_file():` limb is what makes a FILE
-        # input (as opposed to a directory) count toward staleness — 5 of
-        # the 7 documented BINARY_INPUT_PATHS entries are files
-        # (production_build.sh, native.py, native_strict_flags.txt,
-        # pixi.toml, pixi.lock). Every OTHER case in this class passes only
-        # a directory input, so a regression that mistypes that limb as
-        # `elif p.is_dir():` (or deletes it) would leave every other case
-        # green while `--no-rebuild` happily validated a binary older than
-        # a touched `pixi.lock`. Exercise the file limb directly.
+        # input count toward staleness, and five of the seven documented
+        # BINARY_INPUT_PATHS entries are files. Every OTHER case in this class
+        # passes only a directory, so a regression that mistypes that limb
+        # would stay green while `--no-rebuild` validated a binary older than
+        # a touched `pixi.lock`.
         self.binary.write_text("old")
         stale_time = time.time() - 100
         os.utime(self.binary, (stale_time, stale_time))
@@ -183,9 +179,9 @@ class EnsureBinaryFailsClosedTests(unittest.TestCase):
         self.assertEqual(len(self.build_calls), 1)
 
     def test_binary_input_paths_cover_the_documented_provenance_set(self) -> None:
-        # The mtime scan is a fail-closed HEURISTIC, not a content-identity
-        # proof (that proof is the Pixi `contract-check-strict -> build-bin`
-        # task edge) — but it must at least cover every documented input.
+        # The mtime scan is a fail-closed HEURISTIC; the content-identity proof
+        # is the Pixi `contract-check-strict -> build-bin` task edge. The scan
+        # must still cover every documented input.
         expected = {
             contract.REPO / "src",
             contract.REPO / "native",
@@ -202,8 +198,8 @@ class WaitUntilBoundedPollTests(unittest.TestCase):
     """Negative controls for the SIGINT probe's bounded barrier.
 
     The bounded readiness/absence barrier replaced fixed `time.sleep` calls.
-    These exercise the pure polling primitive directly — no subprocess, no
-    real mtest binary — so they stay fast and deterministic.
+    These drive the polling primitive directly, with no subprocess and no real
+    mtest binary.
     """
 
     def test_child_never_became_ready_returns_false_within_bound(self) -> None:
@@ -253,15 +249,12 @@ class WaitUntilBoundedPollTests(unittest.TestCase):
 class ExactProcessIdentificationTests(unittest.TestCase):
     """`exact_process_pid` must identify the compiled TEST BINARY.
 
-    Never a `mojo build` compiler that is still running and merely mentions
-    the same mangled name as its `-o` output argument. This is a real bug the
-    old `pgrep -f irq_stest_` (a shared prefix, matching BOTH files' builds
-    AND both files' binaries) let through: readiness could flip True while
-    mtest was still compiling, sending SIGINT before any hang child
-    existed. These tests spawn two REAL processes standing in for that
-    exact ambiguity — a decoy whose command line CONTAINS the mangled name
-    only as an argument, and a "binary" whose argv[0] itself IS the mangled
-    name — and confirm only the latter is identified.
+    A running `mojo build` mentions the same mangled name as its `-o` argument.
+    The old `pgrep -f irq_stest_` matched both, so readiness could flip True
+    while mtest was still compiling and SIGINT arrived before any hang child
+    existed. These spawn two REAL processes standing in for that ambiguity: a
+    decoy carrying the mangled name only as an argument, and a "binary" whose
+    argv[0] IS the mangled name.
     """
 
     MANGLED = "tch_probe_uexactuid"  # a throwaway name, not the real HANG_MANGLED_NAME
@@ -275,8 +268,7 @@ class ExactProcessIdentificationTests(unittest.TestCase):
 
     def _killall(self) -> None:
         for p in self.procs:
-            # Cleanup must never mask the assertion that already failed, so
-            # every teardown error stays suppressed exactly as before.
+            # Cleanup must never mask an assertion that already failed.
             with contextlib.suppress(Exception):
                 p.kill()
                 p.wait(timeout=5)
@@ -289,14 +281,11 @@ class ExactProcessIdentificationTests(unittest.TestCase):
     def test_exact_process_pid_ignores_a_compiler_mentioning_the_same_name(
         self,
     ) -> None:
-        # The decoy stands in for `mojo build irq/test_1hang.mojo -o
-        # build/bin/<mangled> ...`: its full command line CONTAINS the
-        # mangled name (as `-o`'s value would), but argv[0] is the
-        # compiler driver, not that name. That is the UNCACHED build's
-        # shape, and the shape every retry rebuild still has; a
-        # first-attempt build under the cache writes to a staging
-        # directory whose name mentions no mangled name at all, which
-        # narrows the ambiguity but never removes it.
+        # The decoy stands in for `mojo build ... -o build/bin/<mangled>`:
+        # its command line CONTAINS the mangled name, but argv[0] is the
+        # compiler driver. That is the UNCACHED build's shape and every
+        # retry rebuild's; a first cached build stages elsewhere, which
+        # narrows the ambiguity without removing it.
         decoy = self._spawn(
             [
                 "python3",
@@ -307,9 +296,8 @@ class ExactProcessIdentificationTests(unittest.TestCase):
             ]
         )
         # The "binary" stands in for the exec'd test binary: a real ELF
-        # executable (a copy of /bin/sleep — NOT a `#!`-script, whose
-        # argv[0] the kernel rewrites to the interpreter) invoked directly,
-        # so argv[0] IS its own path and ends with the mangled name.
+        # executable, since the kernel rewrites a `#!`-script's argv[0] to the
+        # interpreter. Here argv[0] IS its own path, ending in the mangled name.
         fake_bin = Path(self.tmp.name) / self.MANGLED
         shutil.copy2("/bin/sleep", fake_bin)
         fake_bin.chmod(0o755)
@@ -322,16 +310,14 @@ class ExactProcessIdentificationTests(unittest.TestCase):
                 poll_interval=0.05,
             )
             self.assertTrue(pid, "the real binary was never identified")
-            # The `wait_until` above already blocked on a non-None pid, and
-            # the assertion below re-checks it; the cast only tells the type
-            # checker what those two lines already establish.
+            # The cast only tells the type checker what `wait_until` above and
+            # the assertion below already establish.
             found = cast("str", contract.exact_process_pid(self.MANGLED))
             self.assertIsNotNone(found)
             self.assertEqual(int(found), real.pid)
             self.assertNotEqual(int(found), decoy.pid)
-            # The decoy DOES show up in the raw pgrep scan — proving the
-            # ambiguity is real, and that `exact_process_pid` is doing
-            # actual disambiguation, not just getting lucky.
+            # The decoy DOES show up in the raw pgrep scan, so the ambiguity
+            # `exact_process_pid` resolves is real.
             raw = contract.matching_pids(self.MANGLED)
             self.assertIn(str(decoy.pid), raw)
             self.assertIn(str(real.pid), raw)
@@ -341,13 +327,11 @@ class ExactProcessIdentificationTests(unittest.TestCase):
     def test_is_own_binary_accepts_both_output_shapes_and_nothing_else(
         self,
     ) -> None:
-        # mtest builds a file's binary to one of two places, and the SIGINT
-        # probe has to recognize a running child from either. The published
-        # generation's name carries a digest over the toolchain, the
-        # environment, the invocation root, and every include root's
-        # contents, so the exact directory name is run-dependent and cannot
-        # be pinned; what is asserted is the store prefix, the mangled name,
-        # and the `_h` separator that no mangled name can itself contain.
+        # mtest builds a file's binary to one of two places and the SIGINT
+        # probe must recognize either. A published generation's directory name
+        # carries a run-dependent digest, so what is asserted is the store
+        # prefix, the mangled name, and the `_h` separator that no mangled
+        # name can itself contain.
         store = contract.CACHE_STORE_PREFIX
         digest = "0123456789abcdef0123456789abcdef"
         gen = f"{store}{self.MANGLED}_h{digest}/bin"
@@ -364,18 +348,16 @@ class ExactProcessIdentificationTests(unittest.TestCase):
         self.assertFalse(contract.is_own_binary("/usr/bin/mojo", self.MANGLED))
 
     def test_is_own_binary_accepts_the_unpublished_staging_shape(self) -> None:
-        # The sequential driver builds AND runs from the staging directory:
-        # publication happens only after the run has been classified, so the
-        # child whose PID the SIGINT probe needs is executing
-        # `<store>/.tmp-<mangled>-<pid>-<clock>-<attempt>/bin` and no
-        # generation for it exists yet. Missing this shape is not a cosmetic
-        # gap — `pgrep -f <mangled>` finds nothing at all, the probe burns its
-        # whole readiness deadline, and the interrupt contract fails.
+        # The sequential driver builds AND runs from the staging directory,
+        # publishing only after the run is classified, so the child whose PID
+        # the SIGINT probe needs is executing
+        # `<store>/.tmp-<mangled>-<pid>-<clock>-<attempt>/bin` with no
+        # generation yet. Missing this shape leaves `pgrep -f <mangled>` empty,
+        # burns the readiness deadline, and fails the interrupt contract.
         store = contract.CACHE_STORE_PREFIX
         staging = f"{store}{contract.CACHE_STAGING_PREFIX}{self.MANGLED}-1234-99-0/bin"
         self.assertTrue(contract.is_own_binary(staging, self.MANGLED))
-        # The two published shapes keep working: a staging clause that
-        # displaced either of them would trade one blind spot for another.
+        # The two published shapes must keep working alongside the staging one.
         digest = "0123456789abcdef0123456789abcdef"
         self.assertTrue(
             contract.is_own_binary(f"build/bin/{self.MANGLED}", self.MANGLED)
@@ -385,17 +367,16 @@ class ExactProcessIdentificationTests(unittest.TestCase):
         )
         # Another file staging concurrently, sharing only the store prefix and
         # the `.tmp-` marker. `--shard` makes two live staging directories over
-        # one checkout ordinary, so this is a real neighbour, not a hypothesis.
+        # one checkout ordinary.
         self.assertFalse(
             contract.is_own_binary(
                 f"{store}{contract.CACHE_STAGING_PREFIX}some_uother_ufile-1234-99-0/bin",
                 self.MANGLED,
             )
         )
-        # A file whose mangled name merely EXTENDS this one past a `-`. Only
-        # the trailing pid/clock/attempt fields are fixed-shape, so the match
-        # is anchored on them rather than on a prefix test that `a` would pass
-        # against `a-1`'s staging directory.
+        # A file whose mangled name merely EXTENDS this one past a `-`. The
+        # match anchors on the trailing pid/clock/attempt fields, which a
+        # prefix test would not: `a` would pass against `a-1`'s directory.
         self.assertFalse(
             contract.is_own_binary(
                 f"{store}{contract.CACHE_STAGING_PREFIX}{self.MANGLED}-x-1234-99-0/bin",
@@ -426,9 +407,7 @@ class ExactProcessIdentificationTests(unittest.TestCase):
             poll_interval=0.05,
         )
         self.assertTrue(ready)
-        # `ready` above is exactly the "pid is not None" barrier, and the
-        # assertion below fails loudly if it somehow is; the cast adds no
-        # runtime behavior.
+        # The cast restates the barrier above; it adds no runtime behavior.
         pid = cast("str", contract.exact_process_pid(self.MANGLED))
         self.assertEqual(int(pid), real.pid)
         state = contract.wait_until(
@@ -468,9 +447,8 @@ class FakeSupervisor:
 class ProbeArgs(TypedDict, total=False):
     """The keyword arguments of `contract.run_interrupt_probe`, all optional.
 
-    `total=False` is what lets one dict serve as both the default set and a
-    per-test override set, which is how `_run` keeps each test to naming only
-    the one knob it is actually exercising.
+    `total=False` lets one dict serve as both the default set and a per-test
+    override set, so each test names only the knob it exercises.
     """
 
     spawn: Callable[[], subprocess.Popen[str]]
@@ -488,10 +466,9 @@ class InterruptProbeProductionPathTests(unittest.TestCase):
     """Negative controls that drive `run_interrupt_probe` itself.
 
     That is the EXACT function `Runner.check_interrupt` calls against the real
-    `mtest` binary — rather than the generic `wait_until` primitive under a
-    different name. A fake `spawn`/`send_sigint`/`killtree` means no real
-    subprocess or signal is involved; only `hang_ready`/`hang_present` are
-    faked directly.
+    `mtest` binary, rather than the generic `wait_until` primitive under a
+    different name. Faking `spawn`, `send_sigint`, and `killtree` keeps every
+    real subprocess and signal out of it.
     """
 
     def _run(
@@ -504,9 +481,8 @@ class InterruptProbeProductionPathTests(unittest.TestCase):
         sigint_calls: list[int] = []
         killtree_calls: list[object] = []
         defaults: ProbeArgs = {
-            # `FakeSupervisor` implements the three members the probe touches
-            # (`poll`, `communicate`, `kill`); the cast states that without
-            # dragging a real `Popen` into a unit test.
+            # `FakeSupervisor` implements the three members the probe touches:
+            # `poll`, `communicate`, and `kill`.
             "spawn": lambda: cast("subprocess.Popen[str]", proc),
             "hang_ready": lambda: True,
             "hang_present": lambda: False,
@@ -529,7 +505,7 @@ class InterruptProbeProductionPathTests(unittest.TestCase):
         )
         self.assertEqual(status, contract.SKIP)
         self.assertIn("child never became ready", detail)
-        self.assertEqual(sigint_calls, [])  # never signaled — not ready
+        self.assertEqual(sigint_calls, [])  # never signaled: never ready
 
     def test_child_never_ready_is_fail_when_strict(self) -> None:
         status, detail, _proc, sigint_calls, _ = self._run(
@@ -543,10 +519,8 @@ class InterruptProbeProductionPathTests(unittest.TestCase):
         self.assertEqual(sigint_calls, [])
 
     def test_supervisor_already_dead_exits_before_the_outer_deadline(self) -> None:
-        # Finding: without a `proc.poll()` fast-exit, a dead supervisor
-        # burns the FULL outer deadline waiting for a child it will never
-        # spawn. `outer_deadline` here is 5s away; a working fast-exit
-        # returns in well under a second regardless.
+        # Without a `proc.poll()` fast-exit, a dead supervisor burns the FULL
+        # outer deadline waiting for a child it will never spawn.
         proc = FakeSupervisor()
         proc.returncode = 137  # already exited before the probe even started
         start = time.time()
@@ -610,9 +584,8 @@ class InterruptProbeProductionPathTests(unittest.TestCase):
 class CheckRosterTests(unittest.TestCase):
     """The roster, and the pin that `main` actually consults it.
 
-    Without the call-site pin these body tests would all stay green while
-    `main` reported a verdict for a run that skipped half its checks — the
-    exact defect the roster exists to close, reintroduced one level up.
+    Without the call-site pin these body tests stay green while `main` reports
+    a verdict for a run that skipped half its checks.
     """
 
     def test_roster_covers_the_matrix_and_every_bespoke_check(self) -> None:

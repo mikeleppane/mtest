@@ -1213,9 +1213,9 @@ the machine it was computed on.
 Linux and macOS are the v1 targets. Linux carries the native lifecycle,
 process-supervision, transcript, dynamic memory-analysis, and packaged-artifact
 gates. The unified workflow requires the macOS arm64 preflight to run the native
-post-fork/lifecycle audit, package build, executable link, and `--help` smoke;
-on success it will dispatch the full direct, self-hosted dogfood, and end-to-end
-behavioral inventory. This is the required topology, not yet an executed-evidence
+post-fork/lifecycle audit; on success it dispatches the full direct and
+end-to-end behavioral inventory, each cell linking the binary it drives through
+its own build dependency. This is the required topology, not yet an executed-evidence
 claim: until the first hosted macOS matrix is green and recorded, current macOS
 evidence remains the earlier build/link/`--help` smoke and runtime supervision
 there remains unverified. Platform divergence in crash reporting is absorbed by
@@ -1225,9 +1225,13 @@ never as a shell-encoded `128+N`).
 The complete local `pixi run ci` mirror is serial and fail-fast; it is an
 optional exhaustive local command. Required hosted CI is the authoritative
 merge verdict and preserves that logical floor while overlapping independent
-work: a Linux preflight releases separate direct, dogfood, end-to-end,
-ASan/LSan, and Valgrind cells; a macOS preflight independently releases
-separate direct, dogfood, and end-to-end cells. The Linux packaged-artifact job
+work: a Linux static preflight releases separate direct, end-to-end,
+ASan/LSan, and Valgrind cells, and a `compiled oracles` job carrying the
+preflight members that need a real compiler runs beside them; a macOS
+preflight independently releases separate direct and end-to-end cells. The
+three focused dogfood probes have no cell of their own — they block through
+the packaged-artifact job, which runs them against the installed
+artifact. The Linux packaged-artifact job
 starts independently; the macOS packaged-artifact job waits on the macOS
 preflight.
 Memory-safety cells run for every pull request, configured `main`/`master`
