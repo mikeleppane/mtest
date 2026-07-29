@@ -212,8 +212,9 @@ pixi run package-check     # install the built artifact into a scratch env and r
 pixi run ci-memory         # Linux: both memory lanes, ASan/LSan then Memcheck
 ```
 
-Hosted GitHub required checks enforce the applicable platform and product lanes
-described below. `py-check` remains a local requirement when Python changes,
+Hosted GitHub required checks enforce most, but not all, of the platform and
+product lanes described below — see the Hosted CI section for which lanes run
+without blocking. `py-check` remains a local requirement when Python changes,
 because its pinned tools are deliberately absent from hosted CI.
 
 ### Local agentic development loop
@@ -232,10 +233,14 @@ Before a local commit:
 3. Stage the exact bytes, run the selected gates against that staged state, and
    record each gate's own exit status.
 
-`pixi run ci` is the complete serial local mirror, for an explicit release
-rehearsal, a hosted failure reproduction, or a human-requested exhaustive run.
-It is not a routine per-commit requirement. The required GitHub checks are the
-authoritative exhaustive merge verdict.
+`pixi run ci` is the complete serial source, test, and memory floor, for an
+explicit release rehearsal, a hosted failure reproduction, or a human-requested
+exhaustive run. It is not a routine per-commit requirement, and it is **not** a
+mirror of hosted CI: it omits packaged-artifact consumption (`package-check`),
+CodeQL, and Python quality (`py-check`). A green `pixi run ci` therefore says
+nothing about whether the built package installs and runs in a clean
+environment, about the CodeQL findings, or about ruff and mypy. The required
+GitHub checks are the authoritative exhaustive merge verdict.
 
 `fmt-check` formats each real Mojo source under `src`, `companions`, `tests`,
 and `e2e` in a separate deterministic, no-symlink-following invocation, then
@@ -247,10 +252,12 @@ wrapper's and not the gate's, so read the gate's own marker.
 
 `pixi run ci-preflight` chains `version-check -> fmt-check -> harness-check ->
 safety-check -> postfork-check -> native-check -> junit-check -> build ->
-readme-help-check -> junit-render-check -> transcripts-check` in that exact
-fail-fast order. The complete local `pixi run ci` mirror is serial:
+readme-help-check -> junit-render-check -> transcripts-check -> abi-probe-check`
+in that exact fail-fast order. The `pixi run ci` floor is serial:
 `ci-preflight -> test -> assertions-check -> dogfood-check -> e2e ->
-contract-check-strict -> ci-memory`.
+cache-protocol-check -> build-stamp-check -> contract-check-strict ->
+ci-memory`. Both chains are read out of `pixi.toml`; nothing pins them, so read
+them there rather than from this paragraph if the two disagree.
 
 `py-check` is the one floor member whose tools are not in the pixi environment.
 ruff and mypy run through `uvx` at versions pinned in
@@ -265,7 +272,7 @@ the tree. It covers `scripts/` and `tests/fixtures/exec/`, every Python file the
 repo tracks. `pyproject.toml` holds the config and no `[project]` or
 `[build-system]`, because this repo is not a Python package.
 
-`ci-memory` is how the complete local mirror covers memory safety. On linux-64 a
+`ci-memory` is how the local floor covers memory safety. On linux-64 a
 `[target.linux-64.tasks]` override makes it `asan-check` then `valgrind-check`,
 about 90 seconds and about 3 minutes against clean main, cheap enough to belong
 in the ordinary floor. Off linux-64 it runs
@@ -305,21 +312,34 @@ Hosted CI runs the same logical floor as two platform-local chains:
   `docs/cli-contract.md` is a blocking release-floor assertion, not manual QA.
   `pixi run contract-check` remains the contributor-friendly, non-strict,
   rebuild-if-stale entry point for local iteration.
-- Every lane is a blocking check, and memory safety runs on every pull request
-  and configured main-branch push, not on a schedule.
+- Every lane runs on every pull request and configured main-branch push, not on
+  a schedule — but **running is not the same as blocking**. Which contexts block
+  a merge is configured in repository settings, not in this repo, and the two
+  lists have already drifted apart: the active `mtest-branch-rules` ruleset
+  requires 16 contexts and does not include `Linux / cache protocol`,
+  `Linux / build stamp`, `macOS arm64 / cache protocol`, or
+  `macOS arm64 / build stamp`, nor either CodeQL job (`C and C++`, `Python`).
+  Those six run and report, and a red one does not stop a merge. Adding,
+  renaming, or splitting a lane must update the required-context list in the
+  same change; a workflow edit alone silently produces a lane nobody is
+  required to pass.
 - Transcripts and ASan/Valgrind stay Linux-only. Packaged-artifact consumption
   is blocking on both linux-64 and osx-arm64, one job per platform, both
   running `pixi run package-check`.
-- The matrix lane display names `direct tests`, `assertions`, and
-  `self-hosted tests`, and the package job display name
-  `Linux / packaged artifact`, are externally configured required check names
-  and must stay stable.
+- A job's display name is its status-check context, so every name the ruleset
+  requires must stay byte-stable. The 16 currently required are `preflight`,
+  `direct tests`, `assertions`, `self-hosted tests`, `end-to-end tests`,
+  `strict contract`, and `packaged artifact` on both `Linux /` and
+  `macOS arm64 /`, plus `Linux / ASan + LSan` and
+  `Linux / Valgrind Memcheck`. Renaming one does not red the lane; it removes
+  the lane from the required set and leaves a permanently pending context in
+  its place.
 - `native-check` depends on `postfork-check`, so the native gate alone cannot
   skip the child call-graph audit.
 
 ### Cross-compiling before commit
 
-The complete local mirror compiles for the host target only, so it is blind to a
+The local floor compiles for the host target only, so it is blind to a
 macOS-only compile failure: a `comptime` branch, `external_call` signature, or
 struct-layout offset that is wrong for Darwin passes every Linux gate and reds
 the hosted macOS preflight instead, before any test runs. Cross-compile before
