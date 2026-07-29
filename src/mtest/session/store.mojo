@@ -3241,19 +3241,26 @@ def store_publish(
        DIRECTORY, and compare both to what the key was built from. An input
        edited while its compile was in flight produced a binary this key does
        not describe, and publishing it would serve those bytes to every later
-       run whose key still names the old snapshot — including, once the edit is
-       undone, runs over a tree that looks untouched. Editing a helper while a
-       build runs and reverting it afterwards is ordinary work, so the guard
-       covers the whole directory the compiler resolves bare imports against
-       rather than the entry source alone. Nothing is published; the caller runs
-       what it built.
+       run whose key still names the old snapshot. The guard covers the whole
+       directory the compiler resolves bare imports against, not the entry
+       source alone, because a helper beside a test is as much a build input as
+       the test. Nothing is published; the caller runs what it built.
 
        The cost is a second walk of one directory, and it is paid only on a
        miss, where a compile has already been paid for.
 
-       What this does NOT re-prove is the session-wide inputs: include-root
-       contents and the toolchain are sampled once per session, so their window
-       is the whole run rather than one compile (§8.5.1).
+       **What this proves, exactly.** Two samples — one before the build, one
+       after — detect an input that is DIFFERENT at publication. They cannot
+       detect one that changed and changed back while the compiler was reading
+       it: both samples agree, and the binary came from bytes neither of them
+       saw. Closing that would take a snapshot the compiler reads from instead
+       of the live tree; sampling more often only narrows it. So the honest
+       claim is a persistent edit is caught and an edit-and-undo inside the
+       compile window is not (§8.5.1).
+
+       Nor does this re-prove the session-wide inputs: include-root contents
+       and the toolchain are sampled once per session, so their window is the
+       whole run rather than one compile.
     2. Rewrite the recorded command line's `-o` to the FINAL generation path,
        so the reproduce line names something that exists after publication.
     3. Digest the staged binary and write `meta` beside it.

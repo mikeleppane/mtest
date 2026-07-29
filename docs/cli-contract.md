@@ -387,29 +387,42 @@ than cache state.
 #### 8.5.1 What the cache does not defend against
 
 The cache defends against developer mistakes — an edit whose rebuild is skipped,
-a binary that no longer matches its source — and not against a hostile process
-running as the same user on the same machine. Anyone with that access can
-already change what a build produces by simpler means than deceiving the key:
-they can edit the sources, replace the compiler, or point `MODULAR_HOME`
-somewhere else. The five boundaries below follow from that scope. They are
-stated so a reader can tell them from defects, and each is a deliberate
-non-goal, not an omission awaiting a fix.
+a binary that no longer matches its source — and not against a process running
+as the same user that is actively trying to deceive it. Anyone with that access
+can already change what a build produces by simpler means: edit the sources,
+replace the compiler, point `MODULAR_HOME` somewhere else.
 
-- **A session-wide input mutated while the compiler is running.** The key is
-  taken before the compile, and publication re-verifies the test file and the
-  directory it sits in — the inputs a developer edits, and the ones a build
-  reaches through a bare import. What publication does not re-verify is the
-  inputs sampled once for the whole session: the contents of the `-I` roots, and
-  the toolchain. Their window is correspondingly wider — the whole run rather
-  than one compile — so an include-root library swapped mid-run and restored
-  afterwards can be compiled into a binary published under the pre-change key,
-  and a later run over the restored tree hits it.
+Five boundaries follow. Four are deliberate non-goals that follow from that
+scope. The first is not: it is a known gap, reachable by ordinary work, that
+this design cannot close without compiling from a snapshot, and it is listed
+first because a reader deciding whether to trust a warm run needs it before
+anything else here.
 
-  Re-walking every include root at every publication would narrow that window
-  without closing it — the compiler has already read the files by then — at a
-  cost that scales with the size of the include trees times the number of files
-  compiled. The per-file re-walk is bounded by one directory and is paid only on
-  a miss, which is why it is worth doing and the session-wide one is not.
+- **An input edited and edited back while the compiler is running.** The key is
+  taken before the compile and re-checked after it, so an input that is
+  DIFFERENT at publication is caught: nothing is published, a `cache-publish`
+  warning is emitted, and the file is rebuilt next run. What two samples cannot
+  see is an input that changed and changed back while the compiler was reading
+  it. Both samples agree, the binary came from bytes neither of them saw, and no
+  warning is emitted because as far as the guard can tell nothing moved. A later
+  run over the restored tree hits that binary.
+
+  This is reachable by ordinary work — editing a helper during a slow compile
+  and undoing it — and it is a real gap, not a theoretical one. Closing it takes
+  compiling from a snapshot rather than from the live tree, so that what the
+  compiler reads is what was keyed by construction. Sampling more often only
+  narrows the window. Until that changes, the guarantee is: **a persistent edit
+  during a build is caught; an edit-and-undo inside the compile window is not.**
+  If you suspect it, `--no-cache` compiles from what is on disk, and
+  `--cache-clear` discards anything already stored.
+
+  The same two-sample limit applies more widely to the session-scoped inputs.
+  The `-I` root contents and the toolchain are sampled once for the whole
+  session rather than per build, so their window is the entire run. Re-walking
+  every include root at every publication would narrow that without closing it,
+  at a cost scaling with include-tree size times files compiled; the per-file
+  directory re-walk is bounded by one directory and paid only on a miss, which
+  is why it is worth doing and the session-wide one is not.
 
 - **`PATH`, and the rest of the inherited environment.** Five variables are
   keyed, and they are named in full above; every other variable the compiler

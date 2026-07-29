@@ -918,6 +918,15 @@ workers, retries, selection, reporters — are not in the key and never
 invalidate anything. The invocation root is in the key, though, so moving or
 renaming the checkout invalidates everything in it.
 
+There is one gap worth knowing about before you trust a warm run. The key is
+taken before a build and re-checked after it, which catches an input you edited
+and left edited — that publishes nothing and rebuilds next run. It does not
+catch one you edited and undid *while the compiler was reading it*: both checks
+agree, and the stored binary came from bytes that are no longer anywhere. If you
+edited during a slow compile and changed your mind, `--no-cache` compiles from
+what is on disk and `--cache-clear` discards what was stored. The full statement
+is in [the CLI contract](docs/cli-contract.md) under the cache's non-goals.
+
 There is no import-graph analysis. One edit under an `-I` root invalidates every
 file keyed over that root, and one edit beside a test file invalidates every test
 in that directory; both over-rebuild on purpose, since the alternative is
