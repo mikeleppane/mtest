@@ -49,6 +49,9 @@ UPLOAD_ARTIFACT_ACTION_SHA = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 CACHE_ACTION_SHA = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
 """Reviewed immutable actions/cache v6.1.0 revision."""
 
+SETUP_UV_ACTION_SHA = "c771a70e6277c0a99b617c7a806ffedaca235ff9"
+"""Reviewed immutable astral-sh/setup-uv v9.0.0 revision."""
+
 DOWNLOAD_ARTIFACT_ACTION_SHA = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 UPSTREAM_SETUP_PIXI_ACTION_SHA = "5185adfbffb4bd703da3010310260805d89ebb11"
 
@@ -64,6 +67,7 @@ REVIEWED_ACTION_PINS = {
     "actions/checkout": {(CHECKOUT_ACTION_SHA, "v7.0.1")},
     "actions/download-artifact": {(DOWNLOAD_ARTIFACT_ACTION_SHA, "v8.0.1")},
     "actions/upload-artifact": {(UPLOAD_ARTIFACT_ACTION_SHA, "v7.0.1")},
+    "astral-sh/setup-uv": {(SETUP_UV_ACTION_SHA, "v9.0.0")},
     "github/codeql-action/analyze": {(CODEQL_ACTION_SHA, "v4.37.3")},
     "github/codeql-action/init": {(CODEQL_ACTION_SHA, "v4.37.3")},
     "prefix-dev/setup-pixi": {

@@ -121,11 +121,39 @@ class QualityWiringTests(unittest.TestCase):
             tasks.get("py-fmt"), "python -m scripts.checks.python_quality --fix"
         )
 
-    def test_the_quality_check_stays_outside_the_ci_floor(self) -> None:
+    def _workflow_job(self, workflow: str, name: str) -> str:
+        """One job's indented body, sliced out of the hosted workflow's text."""
+        header = f"  {name}:"
+        lines = workflow.splitlines()
+        self.assertIn(header, lines, f"the hosted workflow has no {name!r} job")
+        body: list[str] = []
+        for line in lines[lines.index(header) + 1 :]:
+            # A blank line still belongs to the job; the next line at the jobs
+            # table's own indentation is the next job and ends this one.
+            if line and not line.startswith("    "):
+                break
+            body.append(line)
+        return "\n".join(body)
+
+    def test_the_quality_check_gates_hosted_but_never_the_local_floor(self) -> None:
         # ruff and mypy run through uvx so they are not pixi dependencies, which
-        # means `uv` is a contributor's own install rather than something the
-        # gate may assume. Keeping py-check out of `ci` is what stops a green
-        # floor from depending on a tool the environment does not pin.
+        # means `uv` is absent from the environment `pixi run ci` is handed. The
+        # rule that follows is one-directional rather than a ban: a gate may run
+        # py-check exactly when it SUPPLIES the tool itself. The hosted `Python
+        # quality` job does — it installs a pinned uv through a pinned
+        # `astral-sh/setup-uv` before it calls the task — so it can block a
+        # merge on ruff and mypy while assuming nothing. The local floor has no
+        # way to supply it, so an edge from `ci` to `py-check` would make a
+        # green floor depend on whichever `uv` a contributor happens to have
+        # installed, or red a fresh clone that has none. Both halves are
+        # asserted below, and the hosted half is asserted INSIDE the job that
+        # installs uv: a py-check invocation anywhere else in this workflow is
+        # the exact regression this rule exists to stop, and it would look
+        # perfectly ordinary in a diff.
+        #
+        # `py-fmt` is held to a stricter rule and stays out of both. It rewrites
+        # files in place, so a hosted job running it would report a verdict on
+        # bytes nobody committed.
         #
         # `ci-memory` is a plain command string in the base [tasks] table and
         # only gains its real `depends-on` (the asan/valgrind lanes) under
@@ -167,7 +195,15 @@ class QualityWiringTests(unittest.TestCase):
         workflow = (
             python_quality.REPO_ROOT / ".github" / "workflows" / "ci.yml"
         ).read_text(encoding="utf-8")
-        self.assertNotIn("py-check", workflow)
+        # Matched with the `run:` prefix throughout, so that prose naming the
+        # task — the hosted job carries several lines of it — can never be
+        # counted as an invocation, and a `py-fmt` mentioned in a comment is not
+        # mistaken for one being run.
+        self.assertEqual(workflow.count("run: pixi run py-check"), 1)
+        self.assertNotIn("run: pixi run py-fmt", workflow)
+        quality_job = self._workflow_job(workflow, "python-quality")
+        self.assertIn("run: pixi run py-check", quality_job)
+        self.assertIn("uses: astral-sh/setup-uv@", quality_job)
 
     def test_the_config_lives_where_both_tools_read_it(self) -> None:
         pyproject = python_quality.REPO_ROOT / "pyproject.toml"

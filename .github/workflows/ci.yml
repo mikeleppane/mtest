@@ -373,6 +373,66 @@ jobs:
       - name: Package check
         run: pixi run package-check
 
+  python-quality:
+    name: Python quality
+    runs-on: ubuntu-24.04
+    # Independent of the preflight on purpose. This job judges the build and
+    # check tooling, not the product, and no other lane's verdict depends on
+    # its answer -- gating it behind `linux-preflight` would buy a serialized
+    # wait and nothing else.
+    #
+    # The package jobs' tier, taken for their reason rather than for the amount
+    # of work: everything here is cheap and local, but two steps reach outside
+    # the repository -- `setup-uv` fetches a release, and `uvx` resolves ruff
+    # and mypy from an index -- and an external fetch is the place where a
+    # ceiling is most likely to be the thing that ends a job.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
+        with:
+          locked: true
+          cache: true
+
+      # `py-check` shells out to `uvx`, which is deliberately absent from the
+      # Pixi environment: ruff and mypy are check tooling, and taking them as
+      # dependencies would change the environment the product is built in. See
+      # the `py-check` comment in pixi.toml and the module docstring in
+      # scripts/checks/python_quality.py. That is why this gate has never run
+      # hosted, and why it needs a step of its own here rather than a line in
+      # `ci-preflight`.
+      #
+      # The uv version is pinned for the same reason RUFF_VERSION and
+      # MYPY_VERSION are pinned exactly in that module: the verdict has to be a
+      # property of the tree, not of whatever the newest release happens to do.
+      # Those two pins alone do not reach it, because uv is what
+      # resolves them and what provisions the interpreter mypy runs under, so an
+      # unpinned uv could move the answer with no line changing in this
+      # repository -- which is the shape of drift a pinned checker exists to
+      # rule out. This is the revision `pixi run py-check` was confirmed green
+      # under.
+      #
+      # uv's own download cache is left off: both tools are pinned to exact
+      # versions, so what gets fetched is fully determined, and a second cache
+      # would add one more thing whose staleness a reviewer has to reason about
+      # in a job whose whole output is a verdict.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.17"
+          enable-cache: false
+
+      # ruff format --check, ruff check, and mypy --strict over every Python
+      # root in the repository. Check mode rewrites nothing and fails on any
+      # finding; the `--fix` sibling (`pixi run py-fmt`) is local-only, and a
+      # tree it has not been run over is exactly what this job is here to catch.
+      - name: Lint, format, and type-check Python
+        run: pixi run py-check
+
   macos-preflight:
     name: macOS arm64 / preflight
     runs-on: macos-15
