@@ -44,6 +44,29 @@ TESTS = (
     ROOT / "tests" / "unit" / "test_report_junit_finalize.mojo",
 )
 ASAN_OPTIONS = "detect_leaks=1:halt_on_error=1:abort_on_error=1"
+
+BUILD_TIMEOUT = 600
+"""Seconds allowed for one instrumented `mojo build`, whatever it compiles.
+
+Every source here is built through the product's own import graph, so a suite's
+compile cost tracks the size of the closure it reaches rather than its own line
+count. `test_session_schedule.mojo` is the clearest case: it imports
+`mtest.session`, so it compiles the session and cache modules whole, and its
+cold ASan build measured 34.9s before the build cache landed and 101.8s after,
+from the same unchanged 465-line source. Nothing about that growth is visible
+in the test file, and the next module to join a compiled closure will move the
+number again.
+
+So this is a guard against a wedged compiler, not a statement about how long a
+build ought to take: it is sized well above the slowest observed compile, on
+the reasoning that a build one order of magnitude over budget is stuck and a
+build merely slower than last month is not a CI failure. Hosted runners have no
+Mojo compile cache, so every CI build pays the full cold cost.
+
+Deliberately separate from the budget for RUNNING a built binary, which stays at
+the tighter default in `run`: these suites are expected to finish in seconds,
+and a hung binary should surface quickly rather than inherit a compiler's
+allowance."""
 CONTROL_CASES = {
     "asan_oob_control": "heap-buffer-overflow",
     "asan_uaf_control": "heap-use-after-free",
@@ -283,7 +306,8 @@ def check_production_exec(env: dict[str, str]) -> None:
             str(binary),
             "-Xlinker",
             str(NATIVE_PRODUCTION_OBJECT),
-        ]
+        ],
+        timeout=BUILD_TIMEOUT,
     )
     require(
         compiled.returncode == 0,
@@ -489,7 +513,7 @@ def check_cli(env: dict[str, str]) -> None:
             "-Xlinker",
             str(NATIVE_PRODUCTION_OBJECT),
         ],
-        timeout=600,
+        timeout=BUILD_TIMEOUT,
     )
     require(compiled.returncode == 0, f"ASan CLI build failed:\n{compiled.stdout}")
     symbols = run([os.environ.get("NM", "nm"), "-u", str(CLI_BINARY)])
@@ -578,7 +602,8 @@ def compile_and_run_test(source: Path, env: dict[str, str]) -> None:
             str(binary),
             "-Xlinker",
             str(NATIVE_OBJECT),
-        ]
+        ],
+        timeout=BUILD_TIMEOUT,
     )
     require(
         compiled.returncode == 0, f"build failed for {source.name}:\n{compiled.stdout}"
