@@ -289,9 +289,15 @@ release/publication workflows keep their reviewed job permissions and forbid
 Hosted CI runs the same logical floor as two platform-local chains:
 
 - Linux: preflight releases fail-fast `test`, `assertions-check`,
-  `dogfood-check`, `e2e`, strict contract, ASan, and Valgrind cells.
+  `dogfood-check`, `e2e`, `cache-protocol-check`, `build-stamp-check`, strict
+  contract, ASan, and Valgrind cells.
 - macOS: preflight releases `test`, `assertions-check`, `dogfood-check`, `e2e`,
-  and strict contract cells with `fail-fast: false`.
+  `cache-protocol-check`, `build-stamp-check`, and strict contract cells with
+  `fail-fast: false`.
+- The cache-protocol and build-stamp cells run on both platforms because both
+  spawn real processes and read the filesystem directly, so the platform whose
+  `stat` layout and path semantics differ is where they have to be executed
+  rather than assumed.
 - The strict contract cell runs `contract-check-strict`
   (`python -m scripts.qa.contract --strict --no-rebuild`) against the binary
   that job's own `build-bin` dependency just produced in that fresh checkout.

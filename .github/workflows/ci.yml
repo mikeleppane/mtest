@@ -81,6 +81,27 @@ jobs:
             safety_artifact: false
             artifact_name: none
             artifact_path: none
+          # Drives real `build/mtest` processes against throwaway projects,
+          # concurrently and under the publication fault seam, and asserts the
+          # artifact store's protocol properties from outside the process. It
+          # is the only coverage `--no-cache` and `--cache-clear` have.
+          - runner: ubuntu-24.04
+            lane: cache protocol
+            task: cache-protocol-check
+            libc_debug: false
+            safety_artifact: false
+            artifact_name: none
+            artifact_path: none
+          # Guards the production build's precompile stamp, the one thing that
+          # keeps a `pixi run build` over changed sources from linking against
+          # a package compiled from the previous ones.
+          - runner: ubuntu-24.04
+            lane: build stamp
+            task: build-stamp-check
+            libc_debug: false
+            safety_artifact: false
+            artifact_name: none
+            artifact_path: none
           - runner: ubuntu-24.04
             lane: strict contract
             task: contract-check-strict
@@ -271,6 +292,24 @@ jobs:
           - runner: macos-15
             lane: end-to-end tests
             task: e2e
+            libc_debug: false
+            safety_artifact: false
+            artifact_name: none
+            artifact_path: none
+          # The same two cache gates the Linux matrix runs. Both spawn real
+          # processes and touch the filesystem directly, so the platform whose
+          # `stat` layout and path semantics differ is exactly where they have
+          # to run rather than be assumed.
+          - runner: macos-15
+            lane: cache protocol
+            task: cache-protocol-check
+            libc_debug: false
+            safety_artifact: false
+            artifact_name: none
+            artifact_path: none
+          - runner: macos-15
+            lane: build stamp
+            task: build-stamp-check
             libc_debug: false
             safety_artifact: false
             artifact_name: none
