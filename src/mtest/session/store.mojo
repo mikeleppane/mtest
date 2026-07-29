@@ -29,10 +29,12 @@ therefore fixed, and changing it invalidates every stored key:
 2. Toolchain identity — the resolved compiler's canonical path, size, and
    content digest.
 3. Toolchain version — the raw bytes of `<compiler> --version` on stdout.
-4. Toolchain libraries — a count frame (or the absence marker), then one file
-   frame per `*.mojoc` / `*.mojopkg` in `<compiler dir>/../lib/mojo`, sorted.
-5. Environment — `MODULAR_HOME` then `MODULAR_CACHE_DIR`, each as a
-   present-or-absent frame.
+4. Toolchain libraries — a count frame (or the absence marker), then one
+   name-and-type frame per entry of `<compiler dir>/../lib/mojo` in byte order,
+   then one frame holding the digest of every regular file among them.
+5. Environment — `MODULAR_HOME`, `MODULAR_CACHE_DIR`, `MODULAR_DERIVED_PATH`,
+   `MODULAR_NVPTX_COMPILER_PATH`, `XDG_CACHE_HOME`, each as a present-or-absent
+   frame, in that order.
 6. The canonical invocation root.
 7. The classified build arguments, in command-line order.
 
@@ -172,17 +174,43 @@ comptime TAG_TOOLCHAIN_VERSION = "toolchain-version"
 """The raw stdout bytes of `<compiler> --version`."""
 
 comptime TAG_TOOLCHAIN_LIB_COUNT = "toolchain-lib-count"
-"""How many toolchain libraries were digested, or `absent` for no library
-directory at all."""
+"""How many entries the toolchain library directory holds, or `absent` for no
+library directory at all."""
 
 comptime TAG_TOOLCHAIN_LIB = "toolchain-lib"
-"""One toolchain library, as a file frame (adds `.size` and `.sha`)."""
+"""One entry of the toolchain library directory, as `<st_mode type>:<name>`.
+
+The type leads and is decimal digits terminated by the `:`, so a name can never
+be read as part of it — an entry that turns from a regular file into a symlink
+moves this frame even under an unchanged name. Every entry gets one, whatever
+its type, so an added or removed entry moves the key without anything being
+read.
+"""
+
+comptime TAG_TOOLCHAIN_LIB_CONTENT = "toolchain-lib-content"
+"""The digest of every REGULAR file in that directory, folded in whole.
+
+One frame rather than a file frame per library, because the digest is computed
+once per process and reused: the directory is the same for every session in a
+process, and reading it again per session would buy nothing. The sub-digest is
+built from a file frame per regular entry, in the same byte order the entry
+frames above use.
+"""
 
 comptime TAG_ENV_MODULAR_HOME = "env-MODULAR_HOME"
 """`MODULAR_HOME`, present-or-absent."""
 
 comptime TAG_ENV_MODULAR_CACHE_DIR = "env-MODULAR_CACHE_DIR"
 """`MODULAR_CACHE_DIR`, present-or-absent."""
+
+comptime TAG_ENV_MODULAR_DERIVED_PATH = "env-MODULAR_DERIVED_PATH"
+"""`MODULAR_DERIVED_PATH`, present-or-absent."""
+
+comptime TAG_ENV_MODULAR_NVPTX_COMPILER_PATH = "env-MODULAR_NVPTX_COMPILER_PATH"
+"""`MODULAR_NVPTX_COMPILER_PATH`, present-or-absent."""
+
+comptime TAG_ENV_XDG_CACHE_HOME = "env-XDG_CACHE_HOME"
+"""`XDG_CACHE_HOME`, present-or-absent."""
 
 comptime TAG_ROOT = "root"
 """The canonicalized invocation root."""
@@ -296,8 +324,12 @@ def cache_key_tags() -> List[String]:
         String(TAG_TOOLCHAIN_VERSION),
         String(TAG_TOOLCHAIN_LIB_COUNT),
         String(TAG_TOOLCHAIN_LIB),
+        String(TAG_TOOLCHAIN_LIB_CONTENT),
         String(TAG_ENV_MODULAR_HOME),
         String(TAG_ENV_MODULAR_CACHE_DIR),
+        String(TAG_ENV_MODULAR_DERIVED_PATH),
+        String(TAG_ENV_MODULAR_NVPTX_COMPILER_PATH),
+        String(TAG_ENV_XDG_CACHE_HOME),
         String(TAG_ROOT),
         String(TAG_ARG),
         String(TAG_ARG_FILE),
@@ -1386,6 +1418,41 @@ def _toolchain_identity(path: String) -> Optional[_ToolchainDigest]:
     return Optional(fresh^)
 
 
+comptime _TOOLCHAIN_LIB_MEMO = _Global[
+    "mtest_store_toolchain_lib_digest", _no_toolchain_memo
+]
+"""The process-lifetime memo for the toolchain library directory's contents.
+
+The same reasoning as `_TOOLCHAIN_MEMO`, on the same record type and for the
+same reason it is heap-free: a process-lifetime slot is never torn down, so a
+`String` in it is a live allocation at `exit` that LeakSanitizer reports and the
+ASan lane fails on. Its `path` field holds the library directory and its `size`
+field the total number of bytes the regular files in it hold, which is what a
+lookup re-establishes by `lstat` before deciding to skip the reads.
+
+That leaves one thing uncaught, and it is the same one the compiler memo
+carries: a replacement preserving both the path and the total byte count,
+between two sessions of one LIVE process. The names, types, and individual
+sizes of the entries are framed fresh on every session and do not go through
+here, so a listing that changes at all still moves the key.
+"""
+
+
+@fieldwise_init
+struct _LibEntry(Copyable, Movable):
+    """One entry of the toolchain library directory, characterized no-follow."""
+
+    var name: String
+    """The entry's name inside the directory."""
+
+    var kind: Int
+    """Its `st_mode` file-type bits, from `lstat`: a symlink reads as a symlink
+    rather than as whatever it points at."""
+
+    var size: Int
+    """Its byte count; meaningful for a regular file and ignored otherwise."""
+
+
 @fieldwise_init
 struct _LibListing(Copyable, Movable):
     """A toolchain library directory's entries, or which of two absences it is.
@@ -1445,6 +1512,97 @@ def _toolchain_lib_listing(bin_dir: String) -> _LibListing:
     # Not even the toolchain's own prefix would list. Nothing here is provable,
     # and an unprovable input is a disabled cache.
     return _LibListing(False, False, List[String]())
+
+
+def _toolchain_lib_entries(
+    lib_dir: String, names: List[String]
+) -> Optional[List[_LibEntry]]:
+    """Characterize every entry of the toolchain library directory, no-follow.
+
+    Args:
+        lib_dir: The directory the names came from.
+        names: Its entries in byte order, from `_toolchain_lib_listing`.
+
+    Returns:
+        One record per name, in the same order, or `None` when any entry could
+        not be characterized — which the caller turns into a disabled cache,
+        because an entry it cannot describe is a toolchain input the key cannot
+        represent.
+    """
+    var out = List[_LibEntry]()
+    for entry in names:
+        var name = String(entry)
+        var info: _LibEntry
+        try:
+            var st = lstat(lib_dir + "/" + name)
+            info = _LibEntry(name^, Int(st.st_mode) & _S_IFMT, Int(st.st_size))
+        except:
+            return None
+        out.append(info^)
+    return Optional(out^)
+
+
+def _toolchain_lib_content(
+    lib_dir: String, entries: List[_LibEntry]
+) -> Optional[String]:
+    """The digest of every REGULAR file in the toolchain library directory.
+
+    Every regular file, not the two extensions the compiler's own packages
+    happen to use: what ships beside those packages is as much a part of the
+    toolchain as they are, and an extension list is a guess that goes stale the
+    next time the toolchain ships something new. Non-regular entries contribute
+    nothing here — the caller frames each entry's name and type separately, so
+    their presence is keyed without anything following a link.
+
+    Computed at most once per process, on the same argument as
+    `_toolchain_identity`: one library directory serves every session in a
+    process, and the aggregate test binary drives many sessions back to back.
+    The memo hits only when the directory path AND the total byte count both
+    match, and the byte counts come from an `lstat` per entry that the caller
+    already needed.
+
+    Args:
+        lib_dir: The directory, absolute.
+        entries: Its characterized entries, in byte order.
+
+    Returns:
+        The 64-hex digest, or `None` when a regular file could not be read.
+    """
+    var total = 0
+    for entry in entries:
+        if entry.kind == _S_IFREG:
+            total += entry.size
+    try:
+        var slot = _TOOLCHAIN_LIB_MEMO.get_or_create_ptr()
+        if slot[].matches(lib_dir, total):
+            return Optional(slot[].sha_hex())
+    except:
+        pass
+    var kb = KeyBuilder()
+    var read_bytes = 0
+    for entry in entries:
+        if entry.kind != _S_IFREG:
+            continue
+        var name = String(entry.name)
+        var data: List[UInt8]
+        try:
+            data = read_regular_file_bytes(lib_dir + "/" + name, _BIN_CAP)
+        except:
+            return None
+        read_bytes += len(data)
+        kb.feed_file(TAG_TOOLCHAIN_LIB, name, len(data), sha256_hex(data))
+    var digest = kb^.digest_full()
+    # Memoized against what was actually READ, never against what `lstat` said:
+    # if a file changed length between the two, the digest and the byte count
+    # have to describe the same bytes or the next lookup would hit on a
+    # mismatch it cannot see.
+    var memo = _ToolchainMemo.of(lib_dir, read_bytes, digest)
+    if memo:
+        try:
+            _TOOLCHAIN_LIB_MEMO.get_or_create_ptr()[] = memo.value().copy()
+        except:
+            pass
+    return Optional(digest^)
 
 
 def collect_env_base(
@@ -1568,39 +1726,57 @@ def collect_env_base(
         # later layout change cannot silently match a key built without it.
         ctx.base.feed_str(TAG_TOOLCHAIN_LIB_COUNT, _ABSENT_MARK)
     else:
-        # Already in byte order out of `_list_sorted`, and filtering preserves
-        # order, so the frame sequence is the same in any checkout.
-        var libs = List[String]()
-        for entry in listing.names:
-            var name = String(entry)
-            if name.endswith(".mojoc") or name.endswith(".mojopkg"):
-                libs.append(name^)
-        ctx.base.feed_str(TAG_TOOLCHAIN_LIB_COUNT, String(len(libs)))
-        for lib in libs:
-            var lib_name = String(lib)
-            var lib_bytes: List[UInt8]
-            try:
-                lib_bytes = read_regular_file_bytes(
-                    lib_dir + "/" + lib_name, _BIN_CAP
-                )
-            except:
-                ctx.disable(
-                    "cannot read the toolchain library '" + lib_name + "'"
-                )
-                return ctx^
-            ctx.base.feed_file(
-                TAG_TOOLCHAIN_LIB,
-                lib_name,
-                len(lib_bytes),
-                sha256_hex(lib_bytes),
+        var entries = _toolchain_lib_entries(lib_dir, listing.names)
+        if not entries:
+            ctx.disable(
+                "cannot characterize the toolchain libraries at '"
+                + lib_dir
+                + "'"
             )
+            return ctx^
+        var rows = entries.value().copy()
+        # Every entry, not only the ones whose names end in a package
+        # extension. Names and types are framed here and cost no read, so an
+        # entry appearing, vanishing, or turning into a link moves the key; the
+        # single content frame below covers the bytes of the regular ones and
+        # is computed once per process.
+        ctx.base.feed_str(TAG_TOOLCHAIN_LIB_COUNT, String(len(rows)))
+        for row in rows:
+            ctx.base.feed_str(
+                TAG_TOOLCHAIN_LIB, String(row.kind) + ":" + row.name
+            )
+        var content = _toolchain_lib_content(lib_dir, rows)
+        if not content:
+            ctx.disable(
+                "cannot read the toolchain libraries at '" + lib_dir + "'"
+            )
+            return ctx^
+        ctx.base.feed_str(TAG_TOOLCHAIN_LIB_CONTENT, content.value())
 
     # --- Frame 5: environment. ----------------------------------------------
-    # Both variables relocate the compiler's own module cache, so two runs that
-    # differ only here are not the same build.
+    # Each of these moves where the toolchain reads or writes something of its
+    # own, so two runs that differ only here are not the same build: the first
+    # three relocate the compiler's module cache and derived data, and the
+    # fourth selects the NVIDIA assembler a GPU build invokes. `PATH` is
+    # deliberately NOT among them — see the cache's non-goals in
+    # `docs/cli-contract.md` for what that leaves uncovered and why keying it
+    # would cost every hit for no gain.
     _feed_optional(ctx.base, TAG_ENV_MODULAR_HOME, _env_value("MODULAR_HOME"))
     _feed_optional(
         ctx.base, TAG_ENV_MODULAR_CACHE_DIR, _env_value("MODULAR_CACHE_DIR")
+    )
+    _feed_optional(
+        ctx.base,
+        TAG_ENV_MODULAR_DERIVED_PATH,
+        _env_value("MODULAR_DERIVED_PATH"),
+    )
+    _feed_optional(
+        ctx.base,
+        TAG_ENV_MODULAR_NVPTX_COMPILER_PATH,
+        _env_value("MODULAR_NVPTX_COMPILER_PATH"),
+    )
+    _feed_optional(
+        ctx.base, TAG_ENV_XDG_CACHE_HOME, _env_value("XDG_CACHE_HOME")
     )
 
     # --- Frame 6: canonical root. -------------------------------------------

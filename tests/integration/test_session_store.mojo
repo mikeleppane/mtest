@@ -694,6 +694,78 @@ def test_env_base_disables_when_the_toolchain_libraries_cannot_be_read() raises:
     )
 
 
+def test_env_base_frames_every_entry_of_the_library_directory() raises:
+    """What ships beside the compiler's packages is toolchain too.
+
+    Framing only the two extensions the packages happen to use left the shared
+    objects, resource files, and anything else a toolchain drops in that
+    directory outside the key, so replacing one of them left every stored
+    generation valid. An extension list is also a guess that goes stale the
+    next time the toolchain ships something new.
+    """
+    var root = temp_root()
+    var stub = _executable_stub(root, "tc/bin/mojo")
+    write_file(root, "tc/lib/mojo/std.mojopkg", "# stands in for a package")
+    write_file(root, "tc/lib/mojo/libsupport.so", "# one")
+    var config = base_config()
+    config.mojo_path = stub
+    var before = _env_base(config^, root)
+    assert_true(before.enabled, "cache off: " + before.disable_reason)
+
+    # A different length as well as different bytes: the content digest is
+    # memoized per process on the directory's total byte count, so a
+    # same-length edit inside one process is the case that memo does not see.
+    write_file(root, "tc/lib/mojo/libsupport.so", "# two, and longer")
+    var second = base_config()
+    second.mojo_path = stub
+    var after = _env_base(second^, root)
+    assert_true(after.enabled, "cache off: " + after.disable_reason)
+    assert_not_equal(
+        _base_digest(before),
+        _base_digest(after),
+        "a library outside the package extensions must still be keyed",
+    )
+
+    # An entry appearing moves the key without anything being read: names and
+    # types are framed on every collection.
+    write_file(root, "tc/lib/mojo/extra.dat", "# three")
+    var third = base_config()
+    third.mojo_path = stub
+    var grown = _env_base(third^, root)
+    assert_true(grown.enabled, "cache off: " + grown.disable_reason)
+    assert_not_equal(_base_digest(after), _base_digest(grown))
+
+
+def test_env_base_frames_the_compiler_selection_environment() raises:
+    """A variable that picks a tool the compiler invokes belongs in the key.
+
+    `MODULAR_NVPTX_COMPILER_PATH` selects the NVIDIA assembler, and a build
+    child inherits it. Two runs that differ only there are not the same build,
+    so a warm entry from one of them must not answer for the other.
+    """
+    var root = temp_root()
+    var name = String("MODULAR_NVPTX_COMPILER_PATH")
+    var was_set = getenv(name, "\x01unset") != "\x01unset"
+    var saved = getenv(name, "")
+    var digests = List[String]()
+    try:
+        _ = unsetenv(name)
+        digests.append(_base_digest(_env_base(base_config(), root)))
+        _ = setenv(name, "/opt/ptxas-here", True)
+        digests.append(_base_digest(_env_base(base_config(), root)))
+        _ = setenv(name, "/opt/ptxas-there", True)
+        digests.append(_base_digest(_env_base(base_config(), root)))
+    finally:
+        if was_set:
+            _ = setenv(name, saved, True)
+        else:
+            _ = unsetenv(name)
+    assert_equal(len(digests), 3)
+    assert_not_equal(digests[0], digests[1])
+    assert_not_equal(digests[0], digests[2])
+    assert_not_equal(digests[1], digests[2])
+
+
 def test_env_base_disables_on_missing_arg_file() raises:
     var root = temp_root()
     var config = base_config()

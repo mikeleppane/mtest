@@ -884,9 +884,14 @@ Each cached binary is keyed by a digest over the compile inputs mtest names —
 everything an ordinary edit, upgrade, or move can reach:
 
 - the resolved `mojo` executable — its canonical path, its contents, and its
-  `--version` output — plus the `.mojopkg` and `.mojoc` files in its library
-  directory, so a toolchain upgrade rebuilds everything;
-- `MODULAR_HOME` and `MODULAR_CACHE_DIR`;
+  `--version` output — plus every entry of its library directory, by name and
+  type, and the contents of every regular file among them, so a toolchain
+  upgrade rebuilds everything;
+- `MODULAR_HOME`, `MODULAR_CACHE_DIR`, `MODULAR_DERIVED_PATH`,
+  `MODULAR_NVPTX_COMPILER_PATH`, and `XDG_CACHE_HOME` — the variables that move
+  where the toolchain reads or writes something of its own, or which tool it
+  reaches for. `PATH` is deliberately not among them; see the cache's non-goals
+  in [the CLI contract](docs/cli-contract.md) for what that leaves uncovered;
 - the canonicalized invocation root;
 - the build arguments, with any file or `-I` directory they name resolved and
   digested;

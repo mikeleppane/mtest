@@ -295,8 +295,11 @@ interrupted publication leaves nothing a later run can adopt. Two runs that race
 for one key are not an error: the loser adopts the winner's artifact.
 
 The key is derived from the compile inputs, never from configuration text. It
-covers the resolved compiler and its standard library, `MODULAR_HOME` and
-`MODULAR_CACHE_DIR`, the physical invocation root, the build arguments, every
+covers the resolved compiler and every file in the library directory beside it,
+five environment variables that move where the toolchain reads or writes
+something of its own (`MODULAR_HOME`, `MODULAR_CACHE_DIR`,
+`MODULAR_DERIVED_PATH`, `MODULAR_NVPTX_COMPILER_PATH`, `XDG_CACHE_HOME`), the
+physical invocation root, the build arguments, every
 file named by a build argument, the walked contents of every `-I` root, the
 walked contents of the directory the test file sits in, and the test file itself
 — by CONTENT, so a modification time that moves without the bytes changing
@@ -393,15 +396,28 @@ non-goal, not an omission awaiting a fix.
   files by then — so the guard stays on the one input whose change is both cheap
   to detect and most likely to be a genuine mistake: the test file itself.
 
-- **The loader and SDK environment.** `MODULAR_HOME` and `MODULAR_CACHE_DIR` are
-  keyed because they change where the toolchain reads its own inputs from.
-  `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES`, and every other
-  loader or SDK variable the compiler child inherits are not. Keying the whole
-  inherited environment would invalidate every entry on variables that cannot
-  reach a compiled byte — a terminal width, a shell's session id — which is a
-  cache that never hits; keying a curated list of the dangerous ones would be a
-  guess that goes stale with the next platform. Interposing on the compiler is
-  the hostile case the scope above excludes.
+- **`PATH`, and the rest of the inherited environment.** Five variables are
+  keyed, and they are named in full above; every other variable the compiler
+  child inherits is not. `PATH` is the one whose absence has a concrete
+  consequence rather than a theoretical one: on Linux the compiler links
+  through a C compiler it resolves through `PATH`, so changing `PATH` so that a
+  different `cc` is found leaves every warm entry valid although a fresh build
+  would now use a different linker. It is left out because `PATH` changes
+  constantly for reasons that never reach a compiled byte — a shell hook, a
+  directory change, an editor's integrated terminal — and keying it would cost
+  every hit on this machine to cover a case that changes what is linked perhaps
+  once a year. `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES` and
+  their neighbours are out for the reason the scope above gives: interposing on
+  the compiler is the hostile case, not the developer mistake.
+
+- **The toolchain outside its library directory.** The compiler binary is keyed
+  by content, and so is every regular file in `<compiler dir>/../lib/mojo`.
+  The linker binary beside the compiler, the shared objects it loads at run
+  time, and the clang resource directory are not. An ordinary toolchain change
+  moves the compiler binary too and so moves the key; a surgical replacement of
+  one of those files alone does not. The `--mojo <wrapper>` shape is the case
+  where this is easiest to reach, because an unchanged wrapper can be pointed
+  at a different compiler.
 
 - **A symlink raced into `--cache-clear`'s path.** The deletion characterizes
   each name with `lstat` and then walks that name, so a concurrent process
