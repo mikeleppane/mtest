@@ -232,6 +232,15 @@ struct _PoolFile(Movable):
     var had_retry: Bool
     var started_emitted: Bool
     var dispatch_ns: Int
+    var hit_uncounted: Bool
+    """A cache hit this batch has not yet charged to `cached_files`.
+
+    Set when the store answers, cleared when the run is dispatched, which is
+    where the charge lands. The two events are far apart on purpose: the store
+    is asked once per file at admission, but `-x`, `--maxfail`, a dead stream,
+    or an interrupt can tear the batch down before a file is ever dispatched,
+    and a file that never ran was admitted to nothing.
+    """
 
     def __init__(
         out self,
@@ -259,6 +268,7 @@ struct _PoolFile(Movable):
         self.had_retry = False
         self.started_emitted = False
         self.dispatch_ns = 0
+        self.hit_uncounted = False
 
 
 def _emit_progress[
@@ -447,14 +457,20 @@ def _run_pool_batch[
     drifting verdict; the run batch honors `-x`/`--maxfail`, letting in-flight
     files finish and leaving the rest NOT-RUN.
 
-    The artifact store is consulted ONCE per file, when the batch admits it,
-    because `store_probe` MUTATES the store — a generation that fails validation
-    is deleted — so it may only ever be asked about a file this batch is
-    genuinely about to build or run. A hit is admitted straight into
-    `_PENDING_RUN` carrying the stored binary, its recorded command line, and
-    its original build duration, so the SLOW token reads the same on a warm run
-    as on the cold one. A miss stages its directory at the first build dispatch
-    and publishes it when that build succeeds, BEFORE the run is dispatched.
+    The artifact store is consulted ONCE per file, as the batch takes the file
+    on, because `store_probe` MUTATES the store — a generation that fails
+    validation is deleted — so it may only ever be asked about a file this batch
+    is genuinely about to build or run. A hit goes straight into `_PENDING_RUN`
+    carrying the stored binary, its recorded command line, and its original
+    build duration, so the SLOW token reads the same on a warm run as on the
+    cold one. A miss stages its directory at the first build dispatch and
+    publishes it when that build succeeds, BEFORE the run is dispatched.
+
+    Neither counter moves where the store is consulted. Both move at DISPATCH —
+    `built_files` at the build spawn, `cached_files` at the run spawn — because
+    a stop policy that latches between the two leaves files this batch knows a
+    cache answer for and will never run, and those files are admitted to
+    nothing.
 
     Args:
         runtime: The active exec runtime; the Supervisor drives children under
@@ -532,20 +548,28 @@ def _run_pool_batch[
             else:
                 var hit = store_probe(root, key.value())
                 if hit.kind == PROBE_HIT:
-                    # ADMISSION by hit. The slot enters the phase machine as if
-                    # a build had already completed, which is exactly the shape
-                    # the build-completion handler leaves behind — the same
-                    # three fields it writes, seeded from the store instead of
-                    # from a compiler. Nothing downstream needs to know a
-                    # compile was skipped, and nothing is owed to the store, so
-                    # the key is deliberately NOT carried.
+                    # The slot enters the phase machine as if a build had
+                    # already completed, which is exactly the shape the
+                    # build-completion handler leaves behind — the same three
+                    # fields it writes, seeded from the store instead of from a
+                    # compiler. Nothing downstream needs to know a compile was
+                    # skipped, and nothing is owed to the store, so the key is
+                    # deliberately NOT carried.
+                    #
+                    # The ADMISSION is not here. This loop keys and probes the
+                    # whole batch before the scheduler runs, and `-x`,
+                    # `--maxfail`, a dead machine stream, or an interrupt can
+                    # tear the batch down with most of it still undispatched. A
+                    # file that never ran was admitted to nothing, so the charge
+                    # rides on the flag below and lands at the run dispatch —
+                    # the same point the build dispatch charges `built_files`.
                     pf.phase = _PENDING_RUN
                     pf.out_bin = hit.bin_rel
                     pf.build_argv = hit.argv.copy()
                     pf.bdur = hit.build_seconds
                     pf.bterm = Termination.exited(0)
                     pf.build_stderr = List[UInt8]()
-                    result.cached_files += 1
+                    pf.hit_uncounted = True
                 else:
                     # Owed a publication, claimed at the first build dispatch.
                     # The staging directory is NOT created here: a batch that
@@ -640,6 +664,15 @@ def _run_pool_batch[
                 if picked == -1:
                     break
                 if as_run:
+                    if state[picked].hit_uncounted:
+                        # ADMISSION by hit, and the only place this counter
+                        # moves: the file is about to run a binary the store
+                        # served, so it is a cached file whatever the run goes
+                        # on to say. The latch clears here, so a run-side crash
+                        # retry — which comes back through this same dispatch —
+                        # never charges the file twice.
+                        result.cached_files += 1
+                        state[picked].hit_uncounted = False
                     var run_argv = List[String]()
                     run_argv.append(state[picked].out_bin)
                     try:

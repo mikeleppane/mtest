@@ -152,6 +152,26 @@ def main() raises:
 """
 """A suite whose verdict is decided by a fixture file named like a test file."""
 
+TRIPWIRE_SOURCE = """\
+from std.os.path import exists
+from std.testing import assert_false, TestSuite
+
+
+def test_tripwire() raises:
+    assert_false(exists("tripped"))
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()
+"""
+"""A suite whose verdict flips on a file at the invocation root.
+
+Nothing walks the root itself -- the key covers the directory a test file sits
+in and every `-I` root, not the working directory -- so creating the sentinel
+turns a passing warm run into a failing one without moving a single key. That
+is what makes an early stop observable over a store where every file hits.
+"""
+
 STATELESS_CONFIG = "[run]\nstate = false\n"
 """A project file that turns last-run persistence off.
 
@@ -1063,6 +1083,64 @@ class CollectOnlyTests(ProtocolScenario):
         # serves both files out of it without compiling anything.
         self.run_ok(["--json", "run.ndjson", "tests"])
         self.assertEqual(counters(self.root / "run.ndjson"), (0, 2))
+
+
+class EarlyStopCounterTests(ProtocolScenario):
+    """What the counters say when a batch stops before it reaches every file.
+
+    `docs/json-stream.md` publishes `built_files + cached_files` as the run's
+    first-attempt compile admissions and promises the sum is stable across runs
+    over identical inputs. A file the scheduler never reaches is admitted to
+    nothing, so it belongs in neither counter — and the parallel pool is where
+    that is easiest to get wrong, because it can learn a file's cache answer
+    long before it decides whether to dispatch it.
+    """
+
+    file_names: ClassVar[tuple[str, ...]] = (
+        "alpha",
+        "beta",
+        "gamma",
+        "delta",
+        "epsilon",
+        "zeta",
+        "eta",
+        "theta",
+    )
+
+    def test_a_warm_pool_stopping_early_counts_only_what_it_dispatched(
+        self,
+    ) -> None:
+        tripwire = self.root / "tests" / "test_alpha.mojo"
+        tripwire.write_text(TRIPWIRE_SOURCE, encoding="utf-8")
+
+        self.run_ok(["--json", "cold.ndjson", "-n", "2", "tests"])
+        self.assertEqual(counters(self.root / "cold.ndjson"), (8, 0))
+
+        # `test_alpha.mojo` sorts first, so `-x` latches on the first verdict
+        # the batch produces and most of the suite is never dispatched.
+        (self.root / "tripped").write_bytes(b"")
+
+        completed = run_mtest(
+            self.root, ["--json", "warm.ndjson", "-n", "2", "-x", "tests"]
+        )
+        self.assertEqual(completed.returncode, 1, msg=completed.stderr)
+
+        records = self.stream("warm.ndjson")
+        started = {
+            record["path"]
+            for record in records
+            if record.get("event") == "file_started"
+        }
+        built, cached = counters(self.root / "warm.ndjson")
+        self.assertLess(len(started), 8, msg=f"started={sorted(started)}")
+        self.assertEqual(built, 0, msg="a warm store compiles nothing")
+        # A file is announced exactly when it is dispatched, and it is admitted
+        # exactly when it is dispatched, so the two counts are the same number
+        # seen from two sides. A store answer taken earlier than the dispatch
+        # shows up here as a cache count with no file behind it.
+        self.assertEqual(
+            cached, len(started), msg=f"started={sorted(started)}"
+        )
 
 
 class CacheClearTests(ProtocolScenario):
