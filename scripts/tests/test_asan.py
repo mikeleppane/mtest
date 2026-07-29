@@ -41,6 +41,7 @@ class AsanCheckTests(unittest.TestCase):
                 "tests/integration/test_exec_fdhygiene.mojo",
                 "tests/integration/test_exec_pool.mojo",
                 "tests/integration/test_session_schedule.mojo",
+                "tests/integration/test_session_schedule_serial.mojo",
                 "tests/unit/test_report_escape.mojo",
                 "tests/unit/test_report_json_reporter.mojo",
                 "tests/unit/test_report_junit.mojo",

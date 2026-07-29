@@ -1,11 +1,32 @@
 #!/usr/bin/env python3
 """Build the risk-weighted ownership surface from source and run it under ASan.
 
-The inventory is the exec layer's process supervision plus the report layer's
-escaping, JUnit rendering, and file finalization, and one real CLI run that
-drives all of them together against a hostile child. `notes/test-memory-risk-map.md`
-maps every product `# SAFETY:` site to the evidence here, in the Valgrind lane,
-or in the native C tests, and states the reason for each exclusion.
+The inventory is the exec layer's process supervision, the session layer's
+scheduling of that supervision, and the report layer's escaping, JUnit
+rendering, and file finalization, plus one real CLI run that drives all of them
+together against a hostile child. `notes/test-memory-risk-map.md` maps every
+product `# SAFETY:` site to the evidence here, in the Valgrind lane, or in the
+native C tests, and states the reason for each exclusion.
+
+A suite earns a place by executing one of those ownership boundaries for real —
+by supervising actual children through completion and teardown, not by asserting
+on a shape. That criterion was implicit while the session layer had exactly one
+scheduling suite, and `TESTS` names FILES, so nothing here notices when a named
+suite is split and half its cases move to a path this tuple does not list: the
+old path still resolves, the gate still passes, and the departed tests are
+simply no longer instrumented. Make the criterion explicit instead. Every part
+of a split inherits the entry. Dropping a part is allowed, but only by writing
+down here which boundaries it stopped reaching — an argument, not an omission.
+
+`test_session_schedule_serial.mojo` is in the inventory because that did not
+happen when commit `4edc296` split it out of `test_session_schedule.mojo`. The
+cases that moved are the ones that latch a real SIGINT against an explicitly
+opened `ExecRuntime` and abandon a pool with children in flight, and the ones
+that drain the parallel batch and then open a second, capacity-one serial pass
+in the same process. Those are supervisor and signal-runtime teardown paths —
+free-then-observe is exactly the shape ASan exists to catch — and they are a
+composition no `test_exec_*` suite drives, since none of them goes through
+`run_session`.
 """
 
 from __future__ import annotations
@@ -38,6 +59,7 @@ TESTS = (
     ROOT / "tests" / "integration" / "test_exec_fdhygiene.mojo",
     ROOT / "tests" / "integration" / "test_exec_pool.mojo",
     ROOT / "tests" / "integration" / "test_session_schedule.mojo",
+    ROOT / "tests" / "integration" / "test_session_schedule_serial.mojo",
     ROOT / "tests" / "unit" / "test_report_escape.mojo",
     ROOT / "tests" / "unit" / "test_report_json_reporter.mojo",
     ROOT / "tests" / "unit" / "test_report_junit.mojo",
@@ -50,12 +72,26 @@ BUILD_TIMEOUT = 600
 
 Every source here is built through the product's own import graph, so a suite's
 compile cost tracks the size of the closure it reaches rather than its own line
-count. `test_session_schedule.mojo` is the clearest case: it imports
-`mtest.session`, so it compiles the session and cache modules whole, and its
-cold ASan build measured 34.9s before the build cache landed and 101.8s after,
-from the same unchanged 465-line source. Nothing about that growth is visible
-in the test file, and the next module to join a compiled closure will move the
-number again.
+count. The session schedule suites are the clearest case: they import
+`mtest.session`, so each of them compiles the session and cache modules whole.
+
+The recorded pair is 34.9s before the build cache landed and 101.8s after, and
+it was measured on `test_session_schedule.mojo` while that file was still a
+single 465-line source — unchanged between the two readings, which is what makes
+the growth attributable to the closure rather than to the test. Commit `4edc296`
+has since split that file: six tests stayed and seven moved to
+`test_session_schedule_serial.mojo`, and both are built here now. Read the split
+as evidence for the claim, not as relief from it. Dividing the source did not
+divide the closure — both halves still import `mtest.session` — so the pair pays
+the closure's cost twice rather than each half paying half of it.
+
+Neither figure has been re-taken since, and neither should be read as the cost
+of a half-sized file. They are the cost of the closure, and both halves still
+reach it. Adding the second module to `TESTS` therefore adds another whole build
+of that same closure to the lane rather than dividing the one already there: the
+dominant term in this lane's wall time, now paid twice where it used to be paid
+once. Nothing about that is visible in the test files, and the next module to
+join a compiled closure will move the number again.
 
 So this is a guard against a wedged compiler, not a statement about how long a
 build ought to take: it is sized well above the slowest observed compile, on
