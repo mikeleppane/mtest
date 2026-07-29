@@ -236,6 +236,15 @@ comptime TAG_PRECOMPILE_SRC = "precompile-src"
 """A precompile step's source when it is a single file, as a file frame (adds
 `.size` and `.sha`). A directory source contributes `walkfile` frames instead."""
 
+comptime TAG_PRECOMPILE_SRC_DIR = "precompile-src-dir"
+"""The directory a single-file precompile source sits in, before its walk.
+
+The compiler resolves a bare import against the source file's own directory, so
+a module beside `lib/pkg.mojo` is compiled into the package that step produces
+just as surely as the named file is. A directory source needs no such frame:
+its own walk already covers everything beside it.
+"""
+
 comptime TAG_PRECOMPILE_PRIOR = "precompile-prior"
 """One earlier step's promoted output, as a file frame (adds `.size` and
 `.sha`).
@@ -300,6 +309,7 @@ def cache_key_tags() -> List[String]:
         String(TAG_PRECOMPILE_STEP),
         String(TAG_PRECOMPILE_OUT),
         String(TAG_PRECOMPILE_SRC),
+        String(TAG_PRECOMPILE_SRC_DIR),
         String(TAG_PRECOMPILE_PRIOR),
         String(TAG_PRECOMPILE_INCLUDE_ABSENT),
     ]
@@ -3014,9 +3024,12 @@ def precompile_key(
     2. `precompile-step`: the step's source, spelled as configured.
     3. `precompile-out`: the output path, spelled as the compiler's `-o` gets
        it. Its SPELLING only — the output is what this step produces.
-    4. The source's closure: one `precompile-src` file frame for a single-file
-       source, or an include walk of a directory source, which contributes
-       `walkfile` frames.
+    4. The source's closure. A directory source contributes an include walk of
+       itself, as `walkfile` frames. A single-file source contributes its own
+       `precompile-src` file frame, then a `precompile-src-dir` frame naming the
+       directory it sits in and an include walk of that directory — the compiler
+       resolves the file's bare imports there, so a module beside it is compiled
+       into this step's package.
     5. Each include root the step will be given, in order — the configured ones
        first, then the `-I` directories recorded out of the build arguments,
        which is the order the compiler receives them — each as an `include`
@@ -3103,6 +3116,23 @@ def precompile_key(
             return None
         src_sha = sha256_hex(data)
         kb.feed_file(TAG_PRECOMPILE_SRC, src, len(data), src_sha)
+        # The named file's own directory, by the same walk a directory source
+        # gets. A bare `from sibling import ...` in `lib/pkg.mojo` resolves
+        # against `lib/`, with no `-I` involved, so the sibling is compiled into
+        # this step's package and an edit to it has to move this step's key —
+        # otherwise the stamp still validates, the compile is skipped, and every
+        # test binary built against the stale package can hit as well.
+        #
+        # The walk omits nothing, unlike a test file's directory walk: a
+        # precompile source is not one entry point among many that each carry
+        # their own key, so there is no omission to make and none to prove safe.
+        # `out_path` is excluded for the reason every walk here excludes it.
+        var src_dir = _source_dir(src)
+        kb.feed_str(TAG_PRECOMPILE_SRC_DIR, src_dir)
+        var beside = walk_include_root(root, src_dir, kb, out_path)
+        if not beside.ok:
+            ctx.disable("precompile step '" + src + "': " + beside.reason)
+            return None
 
     # --- The include roots, in the order the compiler receives them. --------
     var dirs = includes.copy()

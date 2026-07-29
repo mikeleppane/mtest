@@ -1719,6 +1719,61 @@ def test_precompile_key_keys_a_single_file_source() raises:
     assert_not_equal(before.digest_full, after.digest_full)
 
 
+def test_precompile_key_covers_a_single_file_sources_siblings() raises:
+    """A module beside the named file is an input the step's key must cover.
+
+    The compiler resolves a bare import against the source file's own
+    directory, so `lib/sibling.mojo` is compiled into the package `lib/pkg.mojo`
+    produces. Keying only the named file left the step's stamp unmoved by an
+    edit to the sibling, and a stamp that still validates skips the compile —
+    after which every test binary built against the stale package can hit too.
+    """
+    var root = temp_root()
+    write_file(root, "lib/pkg.mojo", "from sibling import value\n")
+    write_file(root, "lib/sibling.mojo", "def value() -> Int:\n    return 1\n")
+    var no_dirs = List[String]()
+    var before_ctx = CacheContext()
+    var before = _step_key(
+        before_ctx,
+        root,
+        "lib/pkg.mojo",
+        no_dirs,
+        no_dirs,
+        "build/pkg.mojopkg",
+    )
+
+    write_file(root, "lib/sibling.mojo", "def value() -> Int:\n    return 2\n")
+    var after_ctx = CacheContext()
+    var after = _step_key(
+        after_ctx,
+        root,
+        "lib/pkg.mojo",
+        no_dirs,
+        no_dirs,
+        "build/pkg.mojopkg",
+    )
+    assert_not_equal(
+        before.digest_full,
+        after.digest_full,
+        "editing a module beside the step's source must move the step's key",
+    )
+
+    # A file the compiler cannot reach from there is not an input, and adding
+    # one must not move the key: the walk covers what `-I` on that directory
+    # makes visible, not everything on disk.
+    write_file(root, "lib/notes.txt", "unrelated\n")
+    var noise_ctx = CacheContext()
+    var noise = _step_key(
+        noise_ctx,
+        root,
+        "lib/pkg.mojo",
+        no_dirs,
+        no_dirs,
+        "build/pkg.mojopkg",
+    )
+    assert_equal(after.digest_full, noise.digest_full)
+
+
 def test_precompile_key_excludes_its_own_output() raises:
     # The circularity the `exclude` parameter exists to break. A step's output
     # ordinarily lands inside a directory that is already an include root, so a
