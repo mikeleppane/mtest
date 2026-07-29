@@ -3,51 +3,47 @@ name = "mtest"
 version = "0.6.0"
 description = "A pytest-like test runner for Mojo that orchestrates the stdlib's per-file TestSuite"
 channels = ["https://conda.modular.com/max/", "conda-forge"]
-# Linux and macOS are gate targets and share the POSIX process surface the
-# runner depends on. Bumping the platform set is an Ask-first decision; the
-# Linux-only protocol snapshots are stamped with os/arch, so regenerating them
-# on a foreign platform diffs loudly by design.
+# Both gate targets, sharing the POSIX process surface the runner depends on.
+# Bumping the set is an Ask-first decision: the Linux-only protocol snapshots
+# are stamped with os/arch, so regenerating them elsewhere diffs loudly.
 platforms = ["linux-64", "osx-arm64"]
 
 [dependencies]
 # The toolchain IS the oracle: the protocol snapshots pin TestSuite's behavior
-# at exactly this Mojo version, and the version appears in every transcript
-# header. Bumping mojo is an Ask-first decision (CI must match local; a bump can
-# silently change valid syntax AND the pinned protocol — regenerate transcripts
-# and read the diff as the changelog). See AGENTS.md.
+# at exactly this version, and the version appears in every transcript header.
+# Bumping mojo is an Ask-first decision. CI must match local, and a bump can
+# change both valid syntax and the pinned protocol, so regenerate the
+# transcripts and read the diff as the changelog. See AGENTS.md.
 mojo = "==1.0.0b2,<2"
-# Python serves build/check tooling only. Product code and project-config
-# parsing are native Mojo, and the shipped package has no Python dependency.
+# Build and check tooling only. Product code and project-config parsing are
+# native Mojo, and the shipped package has no Python dependency.
 python = "3.12.*"
-# The POSIX adapter is a build-time C object linked into Mojo executables. Pin
-# one compiler on both supported targets so its ABI and sanitizer behavior are
+# The POSIX adapter is a build-time C object linked into Mojo executables. One
+# pinned compiler on both targets keeps its ABI and sanitizer behavior
 # reproducible; the linked object adds no runtime library dependency.
 clang = "==18.1.8"
-# The JUnit report gate needs a schema validator. xmllint (from libxml2) checks
-# the vendored junit-10.xsd against the shipped artifact directly; pinned so the
-# gate's accept/reject verdict cannot drift with an unpinned system copy.
+# xmllint checks the vendored junit-10.xsd against the shipped artifact. Pinned
+# so the JUnit gate's verdict cannot drift with an unpinned system copy.
 libxml2 = "==2.15.3"
-# Builds recipe/recipe.yaml into a local conda channel (build-time packaging
-# tool only; the shipped mtest binary has zero dependency on it). Pinned exact
-# so the recipe's proven isolated-build-env behavior cannot drift with an
-# unpinned rattler-build release.
+# Builds recipe/recipe.yaml into a local conda channel. Build-time only, and
+# pinned exact so the recipe's proven isolated-build-env behavior cannot drift.
 rattler-build = "==0.69.1"
 
 [tasks]
-# Print the pinned Mojo version — first CI step, fails fast on a broken toolchain
-# and stamps the exact build into the log next to the transcript headers.
+# Print the pinned Mojo version. First CI step, so a broken toolchain fails fast
+# and the exact build is stamped into the log beside the transcript headers.
 mojo-version = "mojo --version"
 
 # Assert MTEST_VERSION (src/mtest/cli/parser.mojo) and this manifest's `version`
-# agree with each other and with the version this repo currently ships. Cheap
-# and dependency-free, so it runs first — a drift here means every later gate
-# (goldens, packaging) would be validating a lie about which release they cover.
+# agree with each other and with the version this repo ships. Runs first because
+# drift here means every later gate is validating a lie about which release it
+# covers.
 version-check = "python -m scripts.checks.version"
 
-# Precompile the src/mtest package into build/mtest.mojopkg. This is the
+# Precompile the src/mtest package into build/mtest.mojopkg. The
 # package-compiles GATE: an empty-but-broken package fails here before any test
-# does. `mojo package` does not exist in 1.0.0b2 — only `mojo precompile`, which
-# produces the same artifact.
+# does. `mojo package` does not exist in 1.0.0b2; `mojo precompile` produces the
+# same artifact.
 build = "bash scripts/build/mojo_package.sh"
 
 # Compile the exec-private C adapter to the one production object linked into
@@ -55,51 +51,41 @@ build = "bash scripts/build/mojo_package.sh"
 # the test-only fault/sanitizer controls are absent from this artifact.
 build-native = "python -m scripts.build.native"
 
-# Link the runnable binary at build/mtest from src/main.mojo via the shared
-# production-build authority's link stage (scripts/build/production_build.sh) —
-# the same definition the packaged recipe build uses, so the checkout and the
-# published link line cannot drift. Depends on `build` so the package is
-# precompiled to build/mtest.mojopkg FIRST — `-I build` resolves `from mtest...
-# import` against that artifact (the same include the test runner uses), so main
-# compiles against a binary dependency, not the whole source tree — and on
-# `build-native` so the production object it links exists. This is the first
-# artifact a human can actually run.
+# Link build/mtest from src/main.mojo through the shared production-build
+# authority's link stage (scripts/build/production_build.sh), the same
+# definition the packaged recipe build uses, so the checkout and the published
+# link line cannot drift. Depends on `build` so `-I build` resolves
+# `from mtest... import` against the precompiled package rather than the whole
+# source tree, and on `build-native` for the production object it links.
 build-bin = { cmd = "bash scripts/build/production_build.sh link", depends-on = [
     "build",
     "build-native",
 ] }
 
-# Keep README's committed CLI reference byte-identical to the real binary.
-# The checker owns a build-bin dependency so standalone use cannot read a stale
-# or missing executable.
+# Keep README's committed CLI reference byte-identical to the real binary. The
+# `build-bin` edge stops standalone use from reading a stale or missing binary.
 readme-help-check = { cmd = "python -m scripts.checks.readme_help", depends-on = [
     "build-bin",
 ] }
 
 # Build recipe/recipe.yaml into a LOCAL conda channel: rattler-build solves an
-# isolated build env (mojo ==1.0.0b2 + the C toolchain, from the modular +
-# conda-forge channels), builds mtest FROM SOURCE inside that sandbox (mirroring
-# build -> build-native -> build-bin), and writes the resulting .conda under
-# build/conda-channel/<subdir> — a plain directory with repodata.json, nothing
-# uploaded or published anywhere. The subdir is the host's: linux-64 and
-# osx-arm64 are both gated. Not wired into `pixi run ci`; each platform's
-# dedicated package job runs independently from the test chains.
+# isolated build env (mojo ==1.0.0b2 plus the C toolchain), builds mtest FROM
+# SOURCE inside that sandbox, and writes the .conda under
+# build/conda-channel/<subdir>, a plain directory with repodata.json. Nothing is
+# uploaded or published. Not wired into `pixi run ci`; each platform's package
+# job runs independently of the test chains.
 package-build = "rattler-build build --recipe recipe/recipe.yaml -c https://conda.modular.com/max/ -c conda-forge --output-dir build/conda-channel"
 
 # The packaged-artifact consumption GATE, identical on both gated platforms:
-# build -> install THAT EXACT artifact (version + build string, checked against
-# the installed conda-meta SHA-256) into a FRESH scratch env from the local
-# channel, proving it pulls mojo-compiler ==1.0.0b2 -> a loader-clean probe on
-# the INSTALLED binary (dev pixi env absent from PATH, this platform's loader
-# search path — LD_LIBRARY_PATH on linux-64, DYLD_LIBRARY_PATH on osx-arm64 —
-# empty) -> focused dogfood probes run through that installed binary with the
-# toolchain threaded so its build children can still resolve mojo -> the
-# known-failing fixture through the same binary, which must exit 1 -> a tar-bz2
-# fallback-format install + smoke-run. Depends on build + build-native (not
-# build-bin) so this repo's own build/mtest.mojopkg and the test-variant native
-# object exist for the probe run — the binary under test is the INSTALLED one,
-# never build/mtest. Standalone: NOT wired into `pixi run ci`; each platform's
-# CI package job is independent. Nothing uploads or publishes anywhere.
+# build, install THAT EXACT artifact (version, build string, and the installed
+# conda-meta SHA-256) into a FRESH scratch env from the local channel, then
+# probe the INSTALLED binary with the dev pixi env off PATH and this platform's
+# loader search path empty, run the dogfood probes and the known-failing fixture
+# through it, and repeat the install from the tar-bz2 fallback format. Depends
+# on build + build-native (not build-bin) so this repo's package and
+# test-variant object exist for the probe run; the binary under test is the
+# INSTALLED one, never build/mtest. NOT wired into `pixi run ci`; each
+# platform's CI package job is independent. Nothing uploads or publishes.
 package-check = { cmd = "python -m scripts.build.package_consumption", depends-on = [
     "build",
     "build-native",
@@ -110,18 +96,14 @@ package-check = { cmd = "python -m scripts.build.package_consumption", depends-o
 py-fmt = "python -m scripts.checks.python_quality --fix"
 
 # The Python quality verdict: formatting drift, any lint finding, or any mypy
-# --strict error fails. Deliberately NOT in `pixi run ci`: ruff and mypy run
-# through `uvx` so they stay out of the pixi environment (no new packages),
-# which means the tool is a contributor's local `uv` install rather than
-# something the floor may assume. Hosted CI runs it anyway, in a `Python
-# quality` job that installs a pinned `uv` before calling this task — the rule
-# is that a gate may run this exactly when it supplies the tool itself, which
-# the hosted job does and the local floor structurally cannot. The checker
-# fails loudly when `uvx` is absent instead of skipping. See
-# scripts/checks/python_quality.py for why the versions are pinned exactly.
+# --strict error fails. Out of the local floor because ruff and mypy run through
+# `uvx`, which is not a pixi dependency; the hosted `Python quality` job may run
+# it because it installs a pinned `uv` itself. The checker fails loudly when
+# `uvx` is absent instead of skipping. See scripts/checks/python_quality.py for
+# why the versions are pinned exactly.
 py-check = "python -m scripts.checks.python_quality"
 
-# Rewrite every real Mojo file in its own invocation — run locally before
+# Rewrite every real Mojo file in its own invocation; run locally before
 # committing. Mojo 1.0.0b2 can stall when one formatter invocation spans several
 # paths. `find -P` does not traverse symlinks; the C-locale sort fixes ordering.
 fmt = '''sh -c '
@@ -143,12 +125,12 @@ done < "$source_list"
 '''
 # CI gate: format, then fail if anything changed (never edits in CI). A format
 # that shifts a fixture's `At <path>:<line>:<col>` coordinates is an oracle-side
-# change — regenerate transcripts, do not fight the gate.
+# change: regenerate transcripts, do not fight the gate.
 fmt-check = { cmd = "git diff --exit-code", depends-on = ["fmt"] }
 
 # Stdlib-only unsafe-operation inventory. Mutation tests pin every syntax family
-# and string/comment exclusion; the complete product/test inventory must remain
-# locally documented before the ordinary CI gate can proceed.
+# and string/comment exclusion; the inventory must stay documented before the
+# ordinary CI gate proceeds.
 safety-check = "python -m scripts.tests.test_safety && python -m scripts.checks.safety"
 
 # Recurring Clang call-graph audit for the complete post-fork child region.
@@ -170,105 +152,93 @@ native-check = { cmd = "python -m scripts.tests.test_native && python -m scripts
 # the compiler instrumentation and fail-closed harness remain effective.
 asan-check = "python -m scripts.tests.test_asan && python -m scripts.checks.memory.asan"
 
-# The memory-safety aggregate that closes `pixi run ci` -- the complete serial
-# source, test, and memory floor -- and the standalone entry point for running
-# just the two lanes. On linux-64 the platform-scoped override below replaces
-# this command with the real dependency edge onto `asan-check` and
-# `valgrind-check`; this base definition is what every other platform executes,
-# and it reports the uncovered lanes loudly instead of passing quietly. Both
-# lanes belong in that floor rather than in a maintenance task like
-# `bench-workers`: their verdict is a machine-independent pass or fail, so
-# there is a threshold they can actually be red against, which is exactly what
-# a benchmark's numbers lack. What would falsify that: a lane whose verdict
-# started depending on the host's core count or memory pressure, which would
-# make it a measurement and belong out of the floor with `bench-workers`.
+# The memory-safety aggregate that closes `pixi run ci`, and the standalone
+# entry point for running just the two lanes. On linux-64 the platform-scoped
+# override below replaces this command with the real dependency edges onto
+# `asan-check` and `valgrind-check`; this base definition is what every other
+# platform executes, and it reports the uncovered lanes loudly instead of
+# passing quietly. Both lanes belong in the floor rather than beside
+# `bench-workers` because their verdict is a machine-independent pass or fail,
+# so there is a threshold they can be red against.
 ci-memory = "python -m scripts.checks.memory.host_support"
 
 # Source-build every exec integration suite with debug information and run it
 # under the locked Linux-only Memcheck binary. Undefined-value, invalid-access,
 # leak, and fd controls run first; reviewed runtime-reachable allocations are
 # matched exactly and project/native frames are forbidden from that baseline.
-# The unified CI workflow's Valgrind cell has a narrow approved apt exception
-# for glibc debug symbols matching the libc6 it runs against -- the
-# preinstalled revision where the archive still carries it, otherwise libc6
-# and libc6-dbg moved together to the archive's current one, asserted equal;
-# no other source/test/memory step has that exception, and this task is not
-# hermetic. The independent package job has its own external-channel contract.
+# The hosted Valgrind cell has a narrow approved apt exception for glibc debug
+# symbols matching the libc6 it runs against: the preinstalled revision where
+# the archive still carries it, otherwise libc6 and libc6-dbg moved together to
+# the archive's current one and asserted equal. No other source, test, or memory
+# step has that exception, and this task is not hermetic.
 valgrind-check = "python -m scripts.tests.test_valgrind && python -m scripts.checks.memory.valgrind"
 
-# Gate the JUnit report tooling ahead of the renderer that will use it: recorded
-# unit tests first prove the checker actually rejects a broken artifact, then
-# the checker runs xmllint against the vendored junit-10.xsd plus the
-# arithmetic/structural invariants the schema cannot express over the
-# committed byte-faithful mock.
+# Gate the JUnit report tooling ahead of the renderer that will use it: unit
+# tests first prove the checker rejects a broken artifact, then the checker runs
+# xmllint against the vendored junit-10.xsd plus the arithmetic and structural
+# invariants the schema cannot express.
 junit-check = "python -m scripts.tests.test_junit && python -m scripts.checks.reports.junit"
 
 # Gate mtest's OWN rendered JUnit document through the same junit-10 oracle:
-# build and run tests/fixtures/junit/junit_emit.mojo (which drives the real JunitReporter
-# over every sentinel-matrix cell), then run the schema + arithmetic checker over
-# the emitted document and confirm a tampered copy is rejected. Depends on the
-# precompiled package so the emitter can import mtest.report. This validates the
-# shipped renderer's bytes, complementing junit-check's mock and the Mojo unit
-# tests that pin the renderer structure directly.
+# build and run tests/fixtures/junit/junit_emit.mojo, which drives the real
+# JunitReporter over every sentinel-matrix cell, then run the schema and
+# arithmetic checker over the emitted document and confirm a tampered copy is
+# rejected. This validates the shipped renderer's bytes, where junit-check
+# validates a mock. Depends on the precompiled package so the emitter can
+# import mtest.report.
 junit-render-check = { cmd = "python -m scripts.checks.reports.junit_render", depends-on = [
     "build",
 ] }
 
 # Regenerate the protocol snapshots IN PLACE from the committed fixtures at the
-# pinned toolchain. Local use only (updating the committed snapshots); never run in
-# CI. The generator self-verifies (hard asserts) before writing.
+# pinned toolchain. Local use only; never run in CI. The generator self-verifies
+# with hard asserts before writing.
 transcripts = "python -m scripts.gen_transcripts"
 # CI gate: regenerate every transcript into a temp dir and diff byte-for-byte
-# against tests/snapshots/protocol/ (MANIFEST included) — byte-identical or red. This
-# is the protocol pin: a red diff after a repo change indicts THE CHANGE; a red
-# diff after a mojo re-pin is the protocol changelog. Hermetic.
+# against tests/snapshots/protocol/, MANIFEST included. This is the protocol
+# pin: a red diff after a repo change indicts THE CHANGE; a red diff after a
+# mojo re-pin is the protocol changelog. Hermetic.
 transcripts-check = "python -m scripts.checks.protocol_snapshots"
 
-# Contributor-friendly entry point for the exhaustive CLI contract oracle
-# against an external throwaway project: rebuild-if-stale, filterable, and
-# not strict by default. Pixi forwards arguments after `--`, for example:
-# `pixi run contract-check -- --strict`. `contract-check-strict` below is the
-# blocking gate; this task stays for local iteration (`-k`, `--keep`, `-v`).
+# Contributor-friendly entry point for the CLI contract oracle against an
+# external throwaway project: rebuild-if-stale, filterable, not strict by
+# default. Pixi forwards arguments after `--`, e.g. `pixi run contract-check --
+# --strict`. `contract-check-strict` below is the blocking gate; this one is for
+# local iteration (`-k`, `--keep`, `-v`).
 contract-check = "python -m scripts.qa.contract"
 
 # The blocking release-floor gate: every documented exit, stream, and
-# environment behavior in docs/cli-contract.md, asserted --strict (a SKIP
-# fails) against the binary this exact Pixi invocation's `build-bin`
-# dependency just produced, with the checker itself forbidden from starting
-# another build (`--no-rebuild`). The `build-bin` task edge — not this
-# checker's own mtime probe — is what proves the binary under test came from
-# THIS tree; see BINARY_INPUT_PATHS in scripts/qa/contract.py for what the
-# probe actually covers as a fail-closed backstop.
+# environment behavior in docs/cli-contract.md, asserted --strict (a SKIP fails)
+# against the binary this invocation's `build-bin` dependency just produced,
+# with the checker forbidden from starting another build (`--no-rebuild`). That
+# task edge, not the checker's own mtime probe, is what proves the binary under
+# test came from THIS tree; BINARY_INPUT_PATHS in scripts/qa/contract.py is the
+# fail-closed backstop.
 contract-check-strict = { cmd = "python -m scripts.qa.contract --strict --no-rebuild", depends-on = [
     "build-bin",
 ] }
 
 # Measure how the parallel scheduler scales with the worker count, to keep the
 # `auto` sizing honest against a real machine. Drives the built binary over a
-# synthetic medium-weight tree across workers x tokens x cold/warm and prints the
-# median wall-clock plus speedup-vs-`-n 1`. A MAINTENANCE task, deliberately NOT
-# in `pixi run ci`: it produces a measurement, not a verdict -- the numbers are
-# machine-specific, so there is no threshold it could be red against, and it
-# pays for a full sweep of the workers x tokens x cold/warm matrix to produce
-# them. Run under `pixi run` so the spawned `mojo build` children
-# resolve `mojo`; build the binary first (`pixi run build-bin`).
+# synthetic medium-weight tree across workers x tokens x cold/warm and prints
+# the median wall clock plus speedup against `-n 1`. A MAINTENANCE task,
+# deliberately NOT in `pixi run ci`: it produces a machine-specific measurement,
+# not a verdict, so there is no threshold it could be red against. Run under
+# `pixi run` so the spawned `mojo build` children resolve `mojo`; build the
+# binary first (`pixi run build-bin`).
 bench-workers = "python -m scripts.maintenance.bench_workers"
 
-# The conventional exhaustive test gate: runs mtest's own classified suite
-# THROUGH `build/mtest` itself -- one real invocation of the runner under test,
-# supervised by a whole-process-group watchdog, with its own report reconciled
-# against a source-derived inventory rather than trusted (scripts/harness/
-# selfhost.py). `mojo run` never appears in the gate because it masks crash
-# exit codes to 1; the classified modules are built and executed directly by
-# `build/mtest`. Depends on `build-bin`, which supplies everything a self-hosted
-# run needs: `build/mtest` itself (via `build` + the link step) and
-# `build/native/mtest_exec_native_test.o` (via `build-native`, which always
-# emits both the production and test-variant objects). The worker count is left
-# at the module's `auto` default here on purpose -- see DEFAULT_WORKERS in
+# The exhaustive test gate: runs mtest's own classified suite THROUGH
+# `build/mtest` itself, one real invocation of the runner under test, supervised
+# by a whole-process-group watchdog, with its own report reconciled against a
+# source-derived inventory rather than trusted (scripts/harness/selfhost.py).
+# `mojo run` never appears in the gate because it masks crash exit codes to 1.
+# Depends on `build-bin`, which supplies everything a self-hosted run needs:
+# `build/mtest` and `build/native/mtest_exec_native_test.o`. The worker count
+# stays at the module's `auto` default here; see DEFAULT_WORKERS in
 # scripts/harness/selfhost.py for why a fixed integer belongs in CI's workflow
-# instead of here. A focused path can be passed through
-# `pixi run test-file -- tests/unit/test_model_outcome.mojo` when investigating
-# a failure.
+# instead. Investigate a single failure with
+# `pixi run test-file -- tests/unit/test_model_outcome.mojo`.
 test = { cmd = "python -m scripts.harness.selfhost tests/unit tests/integration", depends-on = [
     "build-bin",
 ] }
@@ -283,99 +253,73 @@ test-file = { cmd = "python -m scripts.harness.selfhost", depends-on = [
 ] }
 
 # Compile and directly execute the public source-only assertion consumers at
-# both optimization levels. The task owns its checker self-tests so stale
-# binaries, skipped tests, and provider-side source locations fail closed --
-# and it owns them EXCLUSIVELY. `harness-check` used to open with a second
-# `test_assertions` run, which bought nothing and cost the hosted preflight,
-# the one job every behavioral lane waits on, a duplicate of work this task
-# was already doing in its own matrix cell on BOTH platforms. Deduplicating
-# toward this task rather than toward the preflight is what keeps the
-# self-tests adjacent to the checker they guard: a stale-binary or skipped-test
-# regression is caught in the same invocation that would have consumed it.
-# What would falsify the arrangement: dropping `assertions-check` from either
-# platform's matrix, at which point the self-tests would need an owner on the
-# preflight path again.
+# both optimization levels. This task owns its checker self-tests EXCLUSIVELY,
+# so stale binaries, skipped tests, and provider-side source locations fail
+# closed in the same invocation that would have consumed them. They stay here
+# rather than on the hosted preflight, the one job every behavioral lane waits
+# on, because this task already runs them in its own matrix cell on BOTH
+# platforms. Dropping `assertions-check` from either matrix would leave the
+# self-tests without an owner.
 assertions-check = "python -m scripts.tests.test_assertions && python -m scripts.checks.assertions"
 
 # Render and semantically compare the reviewed modular-community recipe. Its
-# tests cover canonical manifests and bounded staging; the checker prevents the
+# tests cover canonical manifests and bounded staging; the checker keeps the
 # local rattler-build recipe and the submission template from drifting apart.
 #
-# This is the SOLE definition of that pair. The old `harness-check` chain
-# restated both commands verbatim as its first two links, so one gate had two
-# spellings and nothing forced them to agree: a third command added here would
-# simply not have run in the preflight, and nothing would have said so. The
-# work stayed on this task rather than moving into the chain because this is
-# the narrower and more useful handle -- a contributor editing
-# recipe/recipe.yaml wants exactly these two commands and not the four
-# release-publication suites beside them.
-# `release-tooling-check` reaches it through `depends-on`, which Pixi runs
-# before that task's own `cmd`, so the recipe pair still executes first and the
-# chain's fail-fast order is unchanged. What would falsify the direction: the
-# recipe checker growing a dependency on release state produced by the suites
-# after it, which would make the standalone task a lie and the alias belong the
-# other way round.
+# This is the SOLE definition of that pair, and the narrower handle a
+# contributor editing recipe/recipe.yaml actually wants, without the four
+# release-publication suites beside it. `release-tooling-check` reaches it
+# through `depends-on`, which Pixi runs before that task's own `cmd`, so the
+# recipe pair still executes first.
 recipe-check = "python -m scripts.tests.test_community_recipe && python -m scripts.checks.community_recipe"
 
 # Fast self-tests for repository harness behavior: the self-hosted runner's
 # reconciliation, its timeout and interrupt handling, the dogfood and e2e
 # drivers, the CLI-contract and transcript comparators, the README-help
 # extractor, and the fully-mocked branch logic of `coverage-capability`, whose
-# real run needs a real `mojo` and therefore lives as its own preflight task.
-# Every member uses disposable
-# test inputs and a fake compiler, so nothing in this group waits on a real
-# compiler or a built binary -- which is why it sits ahead of every preflight
-# member that does. This is one of three groups the old single `harness-check`
-# chain has been split into; the aggregate below still composes all three, so
-# no existing invocation of that name lost anything. `test_assertions` is
-# deliberately
-# absent: `assertions-check` owns it and runs it in its own matrix cell on both
-# platforms, so a copy here was redundant work on the critical path.
+# real run needs a real `mojo` and lives as its own preflight task. Every member
+# uses disposable test inputs and a fake compiler, so nothing here waits on a
+# compiler or a built binary, which is why it sits ahead of every preflight
+# member that does. `test_assertions` is deliberately absent: `assertions-check`
+# owns it and runs it in its own matrix cell on both platforms.
 harness-unit-check = "python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_selfhost && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_contract && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_abi_probe"
 
 # Repository policy: does this tree still obey its own rules? The layout and
 # invocation-policy oracle, the hosted-workflow security oracle, the
 # Python-quality runner's pinning and failure policy, and the GitHub-annotation
-# tail oracle -- each checker preceded by the mutation tests that prove it
-# still rejects a broken input, because a checker that has quietly stopped
-# rejecting anything is worse than no checker. Split from `harness-unit-check`
-# because the two ask different questions of different owners: that group is
-# red when the harness broke, this one is red when a change violated a policy
-# the harness is fine at enforcing, and a hosted lane should say which. Note
+# tail oracle, each preceded by the mutation tests that prove it still rejects a
+# broken input, because a checker that has quietly stopped rejecting anything is
+# worse than no checker. Separate from `harness-unit-check` because that group
+# is red when the harness broke and this one is red when a change violated a
+# policy the harness enforces fine, and a hosted lane should say which. Note
 # `test_python_quality` runs here while `py-check` itself runs nowhere in the
 # floor (see its comment): the version pin and the fail-loudly-without-uvx
 # policy are asserted without the tool being present.
 repo-policy-check = "python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_workflow_security && python -m scripts.checks.workflow_security && python -m scripts.tests.test_python_quality && python -m scripts.tests.test_annotations_oracle"
 
 # Release tooling: the community recipe (through the `recipe-check` edge, which
-# Pixi runs before this command, preserving the old chain's order), then the
-# attestation schema, the GitHub release-state and tag-dereference driver, the
-# community channel/PR/credential driver, and public-channel verification. All
-# four suites drive the release drivers over fabricated state in temporary
-# directories -- none of them reaches a network or a real channel; the genuine
-# publication path is gated by the release workflows, not from here. Split out
-# because these fail for release-process reasons -- an attestation field, a tag
-# form, a fork's branch state -- that say nothing about whether the harness
-# works or whether the tree obeys policy, and lumping all three under one task
-# name is what made a red preflight uninformative.
+# Pixi runs first), then the attestation schema, the GitHub release-state and
+# tag-dereference driver, the community channel/PR/credential driver, and
+# public-channel verification. All four suites drive the release drivers over
+# fabricated state in temporary directories; none reaches a network or a real
+# channel, and the genuine publication path is gated by the release workflows.
+# Separate because these fail for release-process reasons (an attestation field,
+# a tag form, a fork's branch state) that say nothing about the harness or about
+# policy.
 release-tooling-check = { cmd = "python -m scripts.tests.test_release_attestations && python -m scripts.tests.test_github_release && python -m scripts.tests.test_community_publication && python -m scripts.tests.test_public_verify", depends-on = [
     "recipe-check",
 ] }
 
-# The aggregate of the three groups above. It exists because `harness-check` is
-# the name contributors, AGENTS.md, and every muscle memory in this repository
-# already use for "run the whole hermetic tooling floor", and one name is still
-# the right thing to type locally; keeping it means the split costs no existing
-# invocation anything. `ci-preflight` deliberately does NOT go through it --
-# see the note there -- so this is a convenience handle, not a gate node.
+# The aggregate of the three groups above, kept because `harness-check` is the
+# name contributors and AGENTS.md already use for "run the whole hermetic
+# tooling floor". `ci-preflight` deliberately does NOT go through it (see the
+# note there), so this is a convenience handle, not a gate node.
 #
-# The cross-group order is cheapest-and-broadest first, which is not quite the
-# order the old single chain ran (it put release tooling ahead of policy). That
-# was safe to change because no group reads anything another writes: all three
-# are hermetic, so the only thing the order buys is how fast a human learns
-# something useful, and a layout or workflow-security violation is the finding
-# most likely to indict the change in front of you. Order WITHIN each group is
-# the old chain's, untouched, because those sequences were tuned to fail fast.
+# Cross-group order is cheapest-and-broadest first. All three are hermetic and
+# no group reads anything another writes, so the order only decides how fast a
+# human learns something useful, and a layout or workflow-security violation is
+# the finding most likely to indict the change in front of you. Order WITHIN
+# each group is untouched, because those sequences were tuned to fail fast.
 harness-check = { depends-on = [
     "harness-unit-check",
     "repo-policy-check",
@@ -383,43 +327,29 @@ harness-check = { depends-on = [
 ] }
 
 # One declarer per external_call symbol across the classified tree. Two
-# classified test_*.mojo modules build as separate binaries, so nothing
-# compares their declarations of the same symbol and a drift in arity or
-# parameter type between them is silent garbage at the ABI boundary rather
-# than a compile error. Every symbol more than one suite needs is therefore
-# declared exactly once, in tests/support/foreign_abi.mojo, and this check
-# fails if a second declaration of any symbol reappears in the classified
-# tree. It used to establish the same property by generating an entrypoint
-# over the sharing modules and co-linking them, which cost a real `mojo`, the
-# precompiled package, and the native test object; forbidding the shape needs
-# none of the three, so the dependency edges are gone and this reads sources
-# rather than building them.
+# classified test_*.mojo modules build as separate binaries, so nothing compares
+# their declarations of the same symbol, and a drift in arity or parameter type
+# between them is silent garbage at the ABI boundary rather than a compile
+# error. Every symbol more than one suite needs is declared exactly once, in
+# tests/support/foreign_abi.mojo, and this check fails if a second declaration
+# reappears. Forbidding the shape reads sources rather than building them, so it
+# needs no compiler, precompiled package, or native test object.
 abi-probe-check = "python -m scripts.checks.abi_probe"
 
-# A fail-closed TRIPWIRE, and as of now an actual member of `ci-preflight`: ask
-# the pinned toolchain whether it has grown a source-coverage facility. Mojo
-# 1.0.0b2 has none -- neither `mojo build --help` nor `mojo --help` names a
-# coverage, profile, or instrumentation flag -- which is why
-# notes/test-confidence-map.md maps release confidence to behavioral and
-# mutation oracles instead of to a line percentage. The task is fail-closed and
-# asymmetric on purpose: absence is the quiet exit 0, and DISCOVERING a facility
-# (or drifting off the recorded toolchain pin, or being unable to run the probe)
-# exits nonzero so an upgrade cannot silently start publishing an unreviewed
-# number.
+# A fail-closed TRIPWIRE in `ci-preflight`: ask the pinned toolchain whether it
+# has grown a source-coverage facility. Mojo 1.0.0b2 has none, neither `mojo
+# build --help` nor `mojo --help` naming a coverage, profile, or instrumentation
+# flag, which is why notes/test-confidence-map.md maps release confidence to
+# behavioral and mutation oracles instead of to a line percentage. Asymmetric on
+# purpose: absence is the quiet exit 0, and DISCOVERING a facility (or drifting
+# off the recorded toolchain pin, or being unable to run the probe) exits
+# nonzero so an upgrade cannot silently start publishing an unreviewed number.
 #
-# It was previously wired into neither `ci-preflight` nor `ci`, which made all
-# of that inert. The only thing that ran anywhere was the MOCKED branch logic,
-# via `test_coverage_capability` in `harness-unit-check` above -- proof that the
-# probe would report correctly if asked, and nothing ever asked. The exact event
-# it exists to catch, a toolchain bump arriving with a coverage flag, would have
-# gone through green. A tripwire nobody steps on is not a tripwire, so it is
-# wired now.
-#
-# It sits last in the preflight, and is now the only member there that asks a
-# real `mojo` on PATH anything rather than using the fake compiler the hermetic
-# groups use. Last is where a nonzero exit reads correctly, because this one
-# indicts the toolchain pin for review rather than indicting the tree; every
-# gate that does indict the tree has already run by then.
+# It sits last in the preflight, and is the only member there that asks a real
+# `mojo` on PATH anything rather than using the hermetic groups' fake compiler.
+# Last is where a nonzero exit reads correctly, because this one indicts the
+# toolchain pin rather than the tree, and every gate that does indict the tree
+# has already run.
 coverage-capability = "python -m scripts.checks.coverage_capability"
 
 # DOGFOOD probes: run three focused executables through the built mtest binary,
@@ -427,34 +357,33 @@ coverage-capability = "python -m scripts.checks.coverage_capability"
 # and a reusable helper, NOT a hosted lane of its own: `scripts.harness.dogfood`
 # is imported by scripts/build/package_consumption.py, which runs these same
 # three probes against the INSTALLED artifact on both gated platforms, so the
-# behavioral content is already blocking twice per hosted run against a harder
-# target than build/mtest.
+# behavioral content already blocks twice per hosted run against a harder target
+# than build/mtest.
 #
-# This used to claim it checked header and PASS-row membership "independently of
-# mtest". It does not: all three assertions parse output mtest itself produced,
-# with looser patterns than the ones scripts/harness/selfhost.py applies to the
-# same kind of output. The one genuinely independent property it had -- that the
-# files on disk match a COMMITTED tuple, which a source-derived inventory cannot
-# notice the deletion of -- is asserted by scripts/checks/layout.py through this
+# None of it is independent of mtest: all three assertions parse output mtest
+# itself produced, with looser patterns than scripts/harness/selfhost.py applies
+# to the same output. The one genuinely independent property, that the files on
+# disk match a COMMITTED tuple (which a source-derived inventory cannot notice
+# the deletion of), is asserted by scripts/checks/layout.py through this
 # module's own `dogfood_test_files`, in the preflight, at no build cost.
 [tasks.dogfood-check]
 cmd = "python -m scripts.harness.dogfood"
 depends-on = ["build-bin"]
 
-# End-to-end gate: build the runnable binary, then drive it against the committed
-# known-outcome tree under e2e/ (via e2e/manifest.json, the single
+# End-to-end gate: build the runnable binary, then drive it against the
+# committed known-outcome tree under e2e/ (via e2e/manifest.json, the single
 # source of expectations) asserting exact exit codes and structural console
-# output. Depends on build-bin so build/mtest exists. Runs under `pixi run`, so
-# the spawned binary inherits the pixi env with `mojo` on PATH — the per-file
-# `mojo build` children need it. The harness stdlib-only Python; every subprocess
-# spawn is hard-timeout-guarded so a runner hang can never wedge CI.
+# output. Runs under `pixi run` so the spawned binary inherits the pixi env with
+# `mojo` on PATH, which the per-file `mojo build` children need. The harness is
+# stdlib-only Python and hard-timeout-guards every subprocess spawn, so a runner
+# hang can never wedge CI.
 [tasks.e2e]
 cmd = "python -m scripts.e2e"
 depends-on = ["build-bin"]
 
 # Adversarial cache-protocol gate: drive REAL `build/mtest` processes against
-# throwaway projects — concurrently, and under the test-only `MTEST_STORE_FAULT`
-# publication fault seam — and assert the store's protocol properties from the
+# throwaway projects, concurrently and under the test-only `MTEST_STORE_FAULT`
+# publication fault seam, and assert the store's protocol properties from the
 # outside. Deliberately NOT part of `harness-check`: that lane is hermetic and
 # dependency-free (fake compilers, no `mojo`, no built binary), while every
 # scenario here spawns a real per-file `mojo build`, hence the `build-bin` edge
@@ -466,17 +395,15 @@ depends-on = ["build-bin"]
 cmd = "python -m scripts.tests.test_cache_protocol"
 depends-on = ["build-bin"]
 
-# Layer 2 of the build-artifact cache: stamps `scripts/build/production_build.sh`'s
-# own precompile stage against its inputs (the script itself, the exact stage
-# command lines, and every file under src/mtest + vendor/mojo-toml), so a second
-# `pixi run build` with nothing changed skips re-running `mojo precompile`
-# entirely. That skip is the only way two builds can leave `build/mtest.mojopkg`
-# byte-identical: `mojo precompile` is not byte-reproducible on this toolchain
-# (see production_build.sh), so an unstamped re-run rewrites the package with
-# different bytes every time even when nothing changed. No `depends-on`: every
-# scenario copies its own throwaway `scripts/build` + `src/mtest` +
-# `vendor/mojo-toml` sandbox and runs the script there directly, never against
-# this checkout's own `build/`.
+# Layer 2 of the build-artifact cache: stamps the precompile stage of
+# `scripts/build/production_build.sh` against its inputs (the script, the exact
+# stage command lines, and every file under src/mtest + vendor/mojo-toml), so a
+# second `pixi run build` with nothing changed skips `mojo precompile` entirely.
+# That skip is the only way two builds can leave `build/mtest.mojopkg`
+# byte-identical, because `mojo precompile` is not byte-reproducible on this
+# toolchain (see production_build.sh). No `depends-on`: every scenario copies
+# its own throwaway sandbox and runs the script there, never against this
+# checkout's `build/`.
 [tasks.build-stamp-check]
 cmd = "python -m scripts.tests.test_build_stamp"
 
@@ -484,25 +411,18 @@ cmd = "python -m scripts.tests.test_build_stamp"
 # floor stays in its exact fail-fast order; GitHub releases the independent
 # behavioral and memory-safety lanes only after this aggregate passes.
 #
-# The three tooling groups are named INDIVIDUALLY here rather than through their
-# `harness-check` aggregate. Pixi attributes a failure to the task it was
-# running, so routing through the aggregate would report every command in all
-# three groups under one name, and a hosted red would tell a reader only that
-# "something in the tooling" broke -- which, for the single job every behavioral
-# matrix cell waits on, is the least useful thing it could say. Three lines buy
-# a self-identifying failure. `harness-check` still exists and still runs the
-# same set; it is just not what the barrier depends on.
+# The three tooling groups are named INDIVIDUALLY rather than through their
+# `harness-check` aggregate, because Pixi attributes a failure to the task it
+# was running: routing through the aggregate would report all three groups under
+# one name to the single job every behavioral matrix cell waits on. Three lines
+# buy a self-identifying failure.
 #
-# `postfork-check` is listed even though `native-check` depends on it and Pixi
-# runs the shared node exactly once either way. It stays because this list is
-# the readable statement of what the barrier runs and in what order, and it is
-# not the only entry earning its place that way: `build` below is likewise
-# pulled in by `readme-help-check` and `junit-render-check`, and is still
-# written out, because its position AHEAD of them is the point.
-# Dropping either would turn the fail-fast order into a property you can only
-# reconstruct by opening three other task definitions. The redundancy is
-# documentation with a compiler behind it: Pixi errors on a name that does not
-# exist, so this list cannot rot into fiction the way a comment could.
+# `postfork-check` and `build` are listed even though `native-check`,
+# `readme-help-check`, and `junit-render-check` already pull them in and Pixi
+# runs a shared node once either way. Their positions AHEAD of their consumers
+# are the point: this list is the readable statement of what the barrier runs
+# and in what order. Pixi errors on a name that does not exist, so unlike a
+# comment it cannot rot into fiction.
 [tasks.ci-preflight]
 depends-on = [
     "version-check",
@@ -522,28 +442,19 @@ depends-on = [
     "coverage-capability",
 ]
 
-# The complete serial source, test, and memory floor -- NOT a mirror of hosted
-# CI, and nothing here should be read as one. `package-check` runs hosted on
-# both platforms and is unreachable from this aggregate by design (each
-# platform's package job is independent of the test chains); CodeQL runs from
-# its own workflow and has no pixi task at all; `py-check` is absent from this
-# list too, because its tools live outside the pixi environment (see its
-# comment). So a green `pixi run ci` is a floor that has been cleared, never a
-# prediction of the hosted result -- read it as the former and the three
-# absences stay visible, read it as the latter and they disappear. Hosted CI
-# runs the exact preflight above, then gives each independent behavioral gate a
-# fresh parallel matrix cell.
-# Local agents use focused tasks during iteration; this aggregate is for an
-# explicit exhaustive run, hosted failure reproduction, or release rehearsal.
-# contract-check-strict's position here is a readability choice, not a
-# freshness one: `build-bin` is a single shared Pixi task node, and `test`,
-# `dogfood-check`, `e2e`, and `ci-preflight`'s `readme-help-check` already
-# depend on it, so Pixi has already run it once for this invocation well
-# before this entry — running contract-check-strict earlier would not
-# trigger a second link, and running it last does not avoid one. Its actual
-# provenance guarantee is that shared `build-bin` task edge existing at all
-# within THIS invocation; last is just where the broadest, slowest gate
-# reads best in the list.
+# The complete serial source, test, and memory floor. NOT a mirror of hosted CI:
+# `package-check`, CodeQL, and `py-check` all run hosted and none is reachable
+# from this aggregate. So a green `pixi run ci` is a floor that has been
+# cleared, never a prediction of the hosted result. Hosted CI runs the exact
+# preflight above, then gives each independent behavioral gate a fresh parallel
+# matrix cell. Local agents use focused tasks during iteration; this aggregate
+# is for an exhaustive run, hosted failure reproduction, or release rehearsal.
+#
+# `contract-check-strict` sits last for readability, not freshness: `build-bin`
+# is a single shared Pixi task node that `test`, `dogfood-check`, `e2e`, and
+# `ci-preflight`'s `readme-help-check` have already run for this invocation, and
+# that shared edge is its actual provenance guarantee. Last is just where the
+# broadest, slowest gate reads best.
 [tasks.ci]
 depends-on = [
     "ci-preflight",
@@ -560,18 +471,13 @@ depends-on = [
 [target.linux-64.dependencies]
 valgrind = "==3.27.1"
 
-# On linux-64 the memory aggregate IS the two lanes. Hosted CI gives each one
-# its own matrix cell and never invokes `pixi run ci`, so this edge exists to
-# close the gap that made a green `pixi run ci` -- the complete serial source,
-# test, and memory floor -- say nothing at all about memory safety: before it,
-# both lanes were reachable only by naming them,
-# which meant in practice they ran hosted or not at all. It sits last in `ci`
-# because it is the broadest and slowest member. It needs nothing from the
-# earlier members:
-# both lanes compile the suites and the CLI from source with `-I src` so every
-# frame is instrumented, and neither reads `build/mtest.mojopkg` or
-# `build/mtest`. `pixi run ci-memory` standalone is therefore identical to how
-# `ci` reaches it, unlike `contract-check-strict` above, whose provenance really
-# does come from a shared task edge.
+# On linux-64 the memory aggregate IS the two lanes. Hosted CI gives each its
+# own matrix cell and never invokes `pixi run ci`, so this edge is what stops a
+# green `pixi run ci` from saying nothing at all about memory safety. It sits
+# last in `ci` because it is the broadest and slowest member, and it needs
+# nothing from the earlier ones: both lanes compile the suites and the CLI from
+# source with `-I src` so every frame is instrumented, and neither reads
+# `build/mtest.mojopkg` or `build/mtest`. So `pixi run ci-memory` standalone is
+# identical to how `ci` reaches it, unlike `contract-check-strict` above.
 [target.linux-64.tasks]
 ci-memory = { depends-on = ["asan-check", "valgrind-check"] }

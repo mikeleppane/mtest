@@ -6,17 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
 
-# A newer push to the same branch/PR cancels the older, still-running workflow.
-# Never on the default branch: `main`'s runs are the per-commit record, and
-# superseding one leaves the commit it was proving with a cancelled run and no
-# green evidence -- a state nothing later reconstructs, because the next push
-# proves the next commit, not that one. On a branch or PR the older run is
-# proving a revision nobody will merge, so cancelling it costs nothing.
+# Supersede in-flight branch and PR runs; main's runs are the per-commit record.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-# The default token only needs to read the repo.
 permissions:
   contents: read
 
@@ -24,31 +18,18 @@ jobs:
   linux-preflight:
     name: Linux / preflight
     runs-on: ubuntu-24.04
-    # Every job below carries a ceiling because GitHub's default is six hours
-    # and the internal watchdogs in scripts/harness/ cannot supply one: they
-    # bound the commands this repository runs, and the ways a hosted job hangs
-    # happen outside any process they supervise -- a `setup-pixi` action that
-    # never returns, a conda solve stalled on a channel, an `apt-get` waiting on
-    # a mirror. Without a cap those hold a runner for six hours and report
-    # nothing.
-    #
-    # Every tier below sits well above any healthy run of the jobs it covers,
-    # and is never trimmed to fit one. A ceiling answers exactly one question --
-    # is this job stuck? -- so it must be set where a job an order of magnitude
-    # over budget is understood as wedged, while a job merely slower than it was
-    # last month stays a passing run. Sizing a tier against whatever a lane
-    # currently takes inverts that: it turns every ordinary slowdown into a red
-    # X, and makes the ceilings themselves churn. This is the cheapest tier,
-    # covering one locked Pixi install and the static barrier below.
+    # Every job carries a ceiling because GitHub's default is six hours and the
+    # watchdogs in scripts/harness/ cannot bound the ways a hosted job hangs: a
+    # `setup-pixi` that never returns, a conda solve stalled on a channel, an
+    # `apt-get` waiting on a mirror. Tiers are set high enough that only a
+    # wedged job hits them, never fitted to what a lane costs today, so an
+    # ordinary slowdown stays a passing run. Cheapest tier: one locked Pixi
+    # install and the barrier below.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Nothing in this workflow uses the token after the clone, and a
-          # persisted credential stays in `.git/config` for every later step --
-          # including the ones that run this repository's own scripts and the
-          # third-party build tools they invoke. `release.yml` already drops it;
-          # this makes the policy uniform across the repository's workflows.
+          # No later step needs the token, and it would sit in `.git/config`.
           persist-credentials: false
 
       - name: Set up pixi
@@ -61,30 +42,17 @@ jobs:
       - name: Mojo version
         run: pixi run mojo-version
 
-      # THE BARRIER, AND NOTHING ELSE. This is the one job every behavioral
-      # matrix cell waits on, so what belongs here is exactly the gates that
-      # make the rest of the run worthless when they are red: a version
-      # identity that disagrees with itself, an unformatted tree, a harness
-      # whose own self-tests fail, a policy violation, a release driver that
-      # broke, an undocumented unsafe operation, or JUnit tooling that has
-      # stopped rejecting a broken artifact. Every member is pure Python over
-      # this tree or `mojo format` over it; not one of them compiles a package,
-      # links a binary, or runs one. `Linux / compiled oracles` below carries
-      # every member that does, and carries them off this critical path.
+      # THE BARRIER, AND NOTHING ELSE. Every behavioral matrix cell waits on
+      # this job, so it carries only the gates that make the rest of the run
+      # worthless when red. Every member is pure Python or `mojo format` over
+      # this tree; anything that compiles, links, or runs a binary lives in
+      # `Linux / compiled oracles` below, off this critical path. Membership and
+      # order are `ci-preflight`'s, split across two jobs and not otherwise
+      # changed, since that job depends on this one.
       #
-      # This is `ci-preflight`'s membership in `ci-preflight`'s order, split
-      # across two jobs and not otherwise changed: every member still runs
-      # hosted, still blocks, and still runs after the same members it ran
-      # after before, because that job depends on this one.
-      #
-      # Named one task per step rather than through an aggregate. Expressing
-      # this subset would take a new task in pixi.toml, and it is also how it
-      # reads best: `ci-preflight` already spells its three tooling groups out
-      # one line each instead of routing through `harness-check`, for the
-      # reason written there -- Pixi attributes a failure to the task it was
-      # running, and the job every lane waits on has to report WHICH gate went
-      # red. Steps buy the same thing one level up, because GitHub reports a
-      # failed job by the name of the step that failed.
+      # One task per step rather than an aggregate, because GitHub names a
+      # failed job by the step that failed, and the job every lane waits on has
+      # to report WHICH gate went red.
       - name: Version identity
         run: pixi run version-check
 
@@ -97,11 +65,9 @@ jobs:
       - name: Repository policy
         run: pixi run repo-policy-check
 
-      # Beside the other policy gates because it is one: it forbids a shape --
-      # the same foreign symbol declared in two files under `tests/` -- rather
-      # than compiling anything to detect a disagreement between them. It needs
-      # no compiler, no precompiled package, and no native object, so it belongs
-      # in front of the run with the rest of the cheap barrier.
+      # A policy gate: it forbids a shape (the same foreign symbol declared in
+      # two files under `tests/`) instead of compiling to detect a disagreement,
+      # so it needs no compiler, package, or native object.
       - name: Foreign-declaration uniqueness
         run: pixi run abi-probe-check
 
@@ -111,45 +77,29 @@ jobs:
       - name: Unsafe-operation inventory
         run: pixi run safety-check
 
-      # Ahead of `junit-render-check`, which puts mtest's own emitted document
-      # through the same oracle and runs in the compiled job below: the tooling
-      # has to be proven to still reject a broken artifact before a verdict
-      # from it means anything. The split preserves that order rather than
-      # relying on it, because that job cannot start until this one is green.
+      # Ahead of `junit-render-check` in the compiled job below: the tooling has
+      # to be proven to still reject a broken artifact before its verdict on
+      # mtest's own emitted document means anything.
       - name: JUnit tooling
         run: pixi run junit-check
 
-  # Everything `ci-preflight` runs that needs a real compiler, moved off the
-  # barrier and run BESIDE the behavioral matrix instead of in front of it.
-  # Nothing here was ever a dependency of anything else in the preflight, and
-  # nothing here produces an artifact another job consumes -- jobs share no
-  # filesystem, this workflow uploads no build output, and every matrix lane
-  # already compiles what it needs through its own task edges. So the
-  # compile-and-link work and the slowest oracles sat ahead of nine cells for
-  # ordering reasons alone.
+  # The `ci-preflight` members that need a real compiler, run BESIDE the
+  # behavioral matrix instead of in front of it. Jobs share no filesystem and
+  # this workflow uploads no build output, so nothing here feeds another job;
+  # every matrix lane compiles what it needs through its own task edges.
   #
-  # ONE JOB, NOT SEVERAL. These members are as independent of each other as
-  # they were of the barrier, so splitting further really would run them more
-  # in parallel. It would not shorten the run: the critical path is this
-  # workflow's longest chain, the barrier plus the widest behavioral lane, and
-  # that lane compiles the entire classified corpus while this job compiles the
-  # package, one binary, the protocol fixtures, and the ABI probe's co-linked
-  # groups. A further split shortens a chain that is not the longest one, and
-  # charges a `setup-pixi` install and a required status-check context for it.
-  #
-  # It takes the barrier as a dependency for the same reason the matrix does,
-  # and that is what keeps the property the old single job had: nothing
-  # expensive starts until the cheap gates are green. What changed is that the
-  # expensive things now run beside each other instead of in sequence.
+  # ONE JOB, NOT SEVERAL. Splitting further would shorten a chain that is not
+  # the critical path (the barrier plus the widest behavioral lane, which
+  # compiles the entire classified corpus) and charge a `setup-pixi` install and
+  # a required status-check context for it. The barrier stays a dependency, so
+  # nothing expensive starts until the cheap gates are green.
   linux-compiled-oracles:
     name: Linux / compiled oracles
     runs-on: ubuntu-24.04
     needs: linux-preflight
-    # The matrix's wide tier rather than the barrier's, because what this job
-    # does is compiler work -- the kind that tier was sized against -- at
-    # strictly less volume than the lane it was sized for. Fitting a narrower
-    # ceiling to what this job costs is the thing the tier reasoning on
-    # `linux-preflight` rules out.
+    # The matrix's wide tier: this is compiler work, at less volume than the
+    # lane that tier was sized for. Fitting a narrower ceiling to what this job
+    # costs is what the tier reasoning on `linux-preflight` rules out.
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -168,18 +118,16 @@ jobs:
           pixi run clang --version
 
       # `native-check` owns `postfork-check` through a dependency edge. Pixi
-      # runs a shared node once per invocation, which is why `ci-preflight` can
-      # name both; across two `pixi run` calls it would run the audit twice.
+      # runs a shared node once per invocation, so naming both here (as
+      # `ci-preflight` can) would run the audit twice across two `pixi run`s.
       - name: Audit native adapter
         run: pixi run native-check
 
-      # The package-compiles gate, named on its own and ahead of the three
-      # checkers that pull it, exactly as `ci-preflight` writes it and for that
-      # list's stated reason: an empty-but-broken package has to fail HERE,
-      # under a step named for it, rather than inside whichever consumer
-      # happened to run first. Nothing restores a package into this job, and
-      # the precompile stamp turns each consumer's repeat `build` into a skip,
-      # so this is one cold compile of these sources at this toolchain.
+      # Named on its own and ahead of the three checkers that pull it, as
+      # `ci-preflight` writes it: an empty-but-broken package has to fail HERE,
+      # under a step named for it, rather than inside whichever consumer ran
+      # first. The precompile stamp turns each consumer's repeat `build` into a
+      # skip, so this is one cold compile.
       - name: Compile the package
         run: pixi run build
 
@@ -192,50 +140,39 @@ jobs:
       - name: Protocol snapshots
         run: pixi run transcripts-check
 
-      # Last, where `ci-preflight` puts it and for that task's reason: a
-      # nonzero exit here indicts the toolchain pin for review rather than
-      # indicting the tree, which reads correctly only once every gate that
-      # does indict the tree has passed.
+      # Last, as in `ci-preflight`: a nonzero exit here indicts the toolchain
+      # pin rather than the tree, which only reads correctly once the gates that
+      # do indict the tree have passed.
       - name: Coverage tripwire
         run: pixi run coverage-capability
 
   linux-test-matrix:
     name: Linux / ${{ matrix.lane }}
     # The barrier only. `Linux / compiled oracles` is blocking and runs beside
-    # this matrix instead of in front of it, which costs one thing and no
-    # verdict: a commit whose package does not compile now burns nine cells
-    # discovering that in parallel, where before one job discovered it first.
-    # No lane ever consumed what the preflight built -- runners share nothing
-    # -- so every cell already compiles what it needs through its own task
-    # edges, and a package that does not compile reddens each of them on its
-    # own evidence.
+    # this matrix, which costs runner time and no verdict: a commit whose
+    # package does not compile burns every cell discovering that in parallel.
+    # Runners share nothing, so each cell already compiles what it needs through
+    # its own task edges and reddens on its own evidence.
     needs: linux-preflight
     strategy:
-      # Each lane is an independent gate over the same commit, not a sample of
-      # one shared property, so a failure in one says nothing about the other
-      # eight. Cancelling them discards eight verdicts that were already being
-      # produced and leaves the run reporting a single fact, which turns a
-      # broken commit into fix-push-discover-the-next-one one lane at a time.
-      # Every lane's verdict is wanted, because the whole set is what a reviewer
-      # has to act on. Matches `macos-test-matrix` below.
+      # Every lane is an independent gate over one commit, and a reviewer has to
+      # act on the whole set, so one red must not cancel the other verdicts.
       fail-fast: false
       matrix:
         include:
           # A row carries only the keys it uses. An absent matrix key evaluates
-          # falsy in an expression, which is what every `if:` and the
-          # `timeout-minutes` fallback below read, so a row of `false`/`none`
-          # sentinels would restate the default nine times while making the
-          # rows that do carry a real value harder to pick out. `lane` is an
-          # externally configured required-check name; do not rename one.
+          # falsy, which is what every `if:` and the `timeout-minutes` fallback
+          # below read.
           #
-          # This runner is dedicated to the job for its duration, unlike a
-          # shared local machine, so `pixi run test`'s `auto` default (half the
-          # cores, src/mtest/session/pool_plan.mojo) is the wrong call here: a
-          # standard public-repo ubuntu-24.04 runner has 4 vCPUs, so `auto`
-          # would use only 2. `workers` carries an explicit override sized to
-          # this runner's real core count; see DEFAULT_WORKERS in
-          # scripts/harness/selfhost.py for the full reasoning and why this
-          # lives here instead of in pixi.toml.
+          # `lane` values and job `name` values are externally configured
+          # required status-check contexts: renaming one leaves a permanently
+          # pending check.
+          #
+          # A public ubuntu-24.04 runner has 4 vCPUs, so `pixi run test`'s
+          # `auto` default (half the cores, src/mtest/session/pool_plan.mojo)
+          # would use 2. This override is sized to the runner; see
+          # DEFAULT_WORKERS in scripts/harness/selfhost.py for why it lives here
+          # rather than in pixi.toml.
           - lane: classified suite
             task: test
             workers: "4"
@@ -244,9 +181,9 @@ jobs:
           - lane: end-to-end tests
             task: e2e
           # Drives real `build/mtest` processes against throwaway projects,
-          # concurrently and under the publication fault seam, and asserts the
-          # artifact store's protocol properties from outside the process. It
-          # is the only coverage `--no-cache` and `--cache-clear` have.
+          # concurrently and under the publication fault seam, asserting the
+          # store's protocol properties from outside the process. The only
+          # coverage `--no-cache` and `--cache-clear` have.
           - lane: cache protocol
             task: cache-protocol-check
           # Guards the production build's precompile stamp, the one thing that
@@ -256,15 +193,12 @@ jobs:
             task: build-stamp-check
           - lane: strict contract
             task: contract-check-strict
-          # Both memory lanes below build every binary they judge from source,
-          # with `-I src -I tests/support` (and the vendored TOML parser as
-          # source for the CLI probe), so no `pixi run build` precedes them:
-          # they never read `build/mtest` or `build/mtest.mojopkg`, and the
-          # CLI_BINARY docstrings in scripts/checks/memory/asan.py and
-          # scripts/checks/memory/valgrind.py both say why -- the shipped
-          # artifact is uninstrumented and carries no `-g` guarantee, so
-          # reusing it would defeat the lane. `build/safety/` and
-          # `build/tests/` are outputs these two create themselves.
+          # Both memory lanes build every binary they judge from source, so no
+          # `pixi run build` precedes them and neither reads `build/mtest` or
+          # `build/mtest.mojopkg`: the shipped artifact is uninstrumented and
+          # carries no `-g` guarantee, so reusing it would defeat the lane. See
+          # the CLI_BINARY docstrings in scripts/checks/memory/asan.py and
+          # scripts/checks/memory/valgrind.py.
           - lane: ASan + LSan
             task: asan-check
             safety_artifact: true
@@ -279,23 +213,17 @@ jobs:
             artifact_path: build/safety/valgrind/*.log
             timeout: 30
     runs-on: ubuntu-24.04
-    # The wide tier, sized for the widest lane: `classified suite` runs the whole
-    # discovered corpus, so it sets the shape of a healthy run here and every
-    # other lane on this matrix does strictly less. See the tier reasoning on
-    # `linux-preflight` for why this is not fitted to what the lane costs today.
+    # The wide tier, sized for `classified suite`, which runs the whole
+    # discovered corpus; every other lane here does strictly less. See the tier
+    # reasoning on `linux-preflight` for why it is not fitted to a lane's cost.
     #
-    # The two memory lanes take a tighter ceiling from their own rows. Each runs
-    # a bounded inventory enumerated in its own checker rather than whatever
-    # discovery finds, so the narrower budget still clears a healthy run with
-    # room to spare -- and these are the two lanes that gain the most from a
-    # ceiling, because their internal guards cannot supply one: BUILD_TIMEOUT in
-    # scripts/checks/memory/asan.py gives every instrumented build its own
-    # deliberately generous budget and that lane runs sixteen builds under it,
-    # so the per-build guards sum far past any job worth waiting for and this is
-    # the only thing that stops a wedged compiler. Carried as a matrix key
-    # rather than a `matrix.safety_artifact && 30 || 40` ternary so the value
-    # sits on the row it applies to, beside the other per-lane facts, and so a
-    # third tier costs one key instead of a rewrite.
+    # The two memory lanes take a tighter ceiling from their own rows, each
+    # running a bounded inventory its own checker enumerates. They also gain the
+    # most from a ceiling: BUILD_TIMEOUT in scripts/checks/memory/asan.py
+    # budgets each instrumented build separately and that lane runs sixteen of
+    # them, so the per-build guards sum past any job worth waiting for. The
+    # value rides on the row it applies to rather than in a ternary, so a third
+    # tier costs one key.
     timeout-minutes: ${{ matrix.timeout || 40 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -308,14 +236,10 @@ jobs:
           locked: true
           cache: true
 
-      # This is the only post-Pixi network exception among source, test, and
-      # memory-analysis lanes. It is confined to the Valgrind cell on PRs,
-      # main/master pushes, and manual unified-CI runs. The independent package
-      # lane has its own external-channel solve contract. The exception is
-      # bounded to glibc debug symbols MATCHING the libc6 this cell runs
-      # against -- that is what Memcheck reads. It does not promise libc6
-      # itself never moves; the step below says why, names the only two
-      # packages that may be installed, and asserts the pair.
+      # The only post-Pixi network exception among the source, test, and memory
+      # lanes, confined to this cell. It is bounded to glibc debug symbols
+      # MATCHING the libc6 this cell runs against, which is what Memcheck reads;
+      # it does not promise libc6 itself never moves.
       - name: Install matching glibc debug symbols
         if: ${{ matrix.libc_debug }}
         run: |
@@ -325,13 +249,13 @@ jobs:
           apt-cache policy libc6 libc6-dbg
           # Prefer the preinstalled revision so nothing else on the image moves.
           # The archive drops superseded glibc revisions, so that pin becomes
-          # unsatisfiable as soon as the runner image lags a security update --
-          # observed with libc6 2.39-0ubuntu8.7 preinstalled and only 8.8 left in
-          # noble-updates. The property Memcheck actually needs is that the debug
-          # symbols MATCH libc6, not that libc6 never changes, so the fallback
-          # moves both together and the assertion below compares them to each
-          # other. Upgrading libc6 without libc6-dbg, or the reverse, is the one
-          # outcome that must never pass.
+          # unsatisfiable as soon as the runner image lags a security update
+          # (observed with libc6 2.39-0ubuntu8.7 preinstalled and only 8.8 left
+          # in noble-updates). The property Memcheck needs is that libc6-dbg
+          # MATCHES the installed libc6, not that libc6 is pinned, so the
+          # fallback moves both to the archive's current revision together and
+          # the assertion below compares them. Upgrading one without the other
+          # is the outcome that must never pass.
           if ! sudo apt-get install --yes --no-install-recommends \
               "libc6-dbg=$libc_version"; then
             echo "libc6-dbg=$libc_version unavailable; moving libc6 and libc6-dbg together"
@@ -357,8 +281,8 @@ jobs:
         if: ${{ matrix.libc_debug }}
         run: pixi run valgrind --version
 
-      # `matrix.workers` is set only on the `test` lane's row above; every
-      # other lane leaves it unset, so this appends nothing for them.
+      # `matrix.workers` is set only on the `test` row, so this appends nothing
+      # for the other lanes.
       - name: Run ${{ matrix.lane }}
         run: pixi run ${{ matrix.task }}${{ matrix.workers && format(' -- -n {0}', matrix.workers) || '' }}
 
@@ -374,10 +298,9 @@ jobs:
   package:
     name: Linux / packaged artifact
     runs-on: ubuntu-24.04
-    # Wider than this lane's own work would suggest, because its solve reaches
-    # two external channels. That is the one place in this workflow that can
-    # stall on something outside the repository, and so the one place a ceiling
-    # is most likely to be the thing that ends the job.
+    # Wider than this lane's own work needs, because its solve reaches two
+    # external channels. That is the one place here that can stall on something
+    # outside the repository, and so where a ceiling is most likely to fire.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -393,29 +316,24 @@ jobs:
       - name: Mojo version
         run: pixi run mojo-version
 
-      # This independent lane intentionally solves the build environment
-      # against Modular + conda-forge, then installs the local artifact into
-      # fresh scratch environments while using those channels to resolve its
-      # declared runtime dependency. Nothing uploads, publishes, or
-      # authenticates. The macOS package job below runs the same task; both are
-      # blocking, and this job's display name is an externally configured
-      # required check that must not drift.
+      # Solves the build environment against Modular + conda-forge, then
+      # installs the local artifact into fresh scratch environments, resolving
+      # its declared runtime dependency from those channels. Nothing uploads,
+      # publishes, or authenticates. The macOS package job runs the same task;
+      # both are blocking, and this job's display name is an externally
+      # configured required check.
       - name: Package check
         run: pixi run package-check
 
   python-quality:
     name: Python quality
     runs-on: ubuntu-24.04
-    # Independent of the preflight on purpose. This job judges the build and
-    # check tooling, not the product, and no other lane's verdict depends on
-    # its answer -- gating it behind `linux-preflight` would buy a serialized
-    # wait and nothing else.
-    #
-    # The package jobs' tier, taken for their reason rather than for the amount
-    # of work: everything here is cheap and local, but two steps reach outside
-    # the repository -- `setup-uv` fetches a release, and `uvx` resolves ruff
-    # and mypy from an index -- and an external fetch is the place where a
-    # ceiling is most likely to be the thing that ends a job.
+    # Independent of the preflight on purpose: this job judges the build and
+    # check tooling, not the product, and no other lane's verdict depends on its
+    # answer. It takes the package jobs' tier for their reason rather than for
+    # the work involved: `setup-uv` fetches a release and `uvx` resolves ruff
+    # and mypy from an index, and an external fetch is where a ceiling is most
+    # likely to fire.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -428,28 +346,17 @@ jobs:
           locked: true
           cache: true
 
-      # `py-check` shells out to `uvx`, which is deliberately absent from the
-      # Pixi environment: ruff and mypy are check tooling, and taking them as
-      # dependencies would change the environment the product is built in. See
-      # the `py-check` comment in pixi.toml and the module docstring in
-      # scripts/checks/python_quality.py. That is why this gate has never run
-      # hosted, and why it needs a step of its own here rather than a line in
-      # `ci-preflight`.
+      # `py-check` shells out to `uvx`, deliberately absent from the Pixi
+      # environment: taking ruff and mypy as dependencies would change the
+      # environment the product is built in. See the `py-check` comment in
+      # pixi.toml and the module docstring in scripts/checks/python_quality.py.
+      # Hence a step of its own here rather than a line in `ci-preflight`.
       #
-      # The uv version is pinned for the same reason RUFF_VERSION and
-      # MYPY_VERSION are pinned exactly in that module: the verdict has to be a
-      # property of the tree, not of whatever the newest release happens to do.
-      # Those two pins alone do not reach it, because uv is what
-      # resolves them and what provisions the interpreter mypy runs under, so an
-      # unpinned uv could move the answer with no line changing in this
-      # repository -- which is the shape of drift a pinned checker exists to
-      # rule out. This is the revision `pixi run py-check` was confirmed green
-      # under.
-      #
-      # uv's own download cache is left off: both tools are pinned to exact
-      # versions, so what gets fetched is fully determined, and a second cache
-      # would add one more thing whose staleness a reviewer has to reason about
-      # in a job whose whole output is a verdict.
+      # uv is pinned for the same reason RUFF_VERSION and MYPY_VERSION are
+      # pinned in that module: uv resolves them and provisions the interpreter
+      # mypy runs under, so an unpinned uv could move the verdict with no line
+      # changing in this repository. Its download cache is left off because both
+      # tools are pinned exactly, so what gets fetched is already determined.
       - name: Set up uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
@@ -457,17 +364,16 @@ jobs:
           enable-cache: false
 
       # ruff format --check, ruff check, and mypy --strict over every Python
-      # root in the repository. Check mode rewrites nothing and fails on any
-      # finding; the `--fix` sibling (`pixi run py-fmt`) is local-only, and a
-      # tree it has not been run over is exactly what this job is here to catch.
+      # root. Check mode rewrites nothing and fails on any finding; the `--fix`
+      # sibling (`pixi run py-fmt`) is local-only, and a tree it has not been
+      # run over is what this job catches.
       - name: Lint, format, and type-check Python
         run: pixi run py-check
 
   macos-preflight:
     name: macOS arm64 / preflight
     runs-on: macos-15
-    # The Linux preflight's tier: the same locked Pixi install and the same kind
-    # of cheap barrier, so the same ceiling reasoning applies unchanged.
+    # The Linux preflight's tier: same locked Pixi install, same cheap barrier.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -486,33 +392,20 @@ jobs:
           pixi run clang --version
 
       # The whole barrier on this platform, and the only `ci-preflight` member
-      # whose answer is platform-specific at all: every other member reads this
-      # tree rather than this runner, so a second hosted copy would ask the same
-      # question of the same bytes. `native-check` owns `postfork-check`, so
-      # naming that separately would repeat the audit without strengthening the
-      # gate.
+      # whose answer is platform-specific: every other member reads this tree
+      # rather than this runner. `native-check` owns `postfork-check`, so naming
+      # that separately would repeat the audit without strengthening the gate.
       #
-      # A `build-bin` step and a `./build/mtest --help` smoke used to follow.
-      # They were DUPLICATED WORK IN FRONT OF THE MATRIX rather than a barrier:
-      # jobs share no filesystem and this workflow uploads no build output, and
-      # five of the seven cells below reach `build-bin` through their own task
-      # edges, so each compiled and linked again regardless. The preflight's
-      # copy delayed every cell and was consumed by none.
-      #
-      # The smoke was the only `./build/mtest --help` on this platform outside a
-      # lane that rebuilds -- and it was the weakest form of coverage two
-      # blocking macOS jobs already carry. `macOS arm64 / strict contract` runs
-      # the documented-CLI oracle `--strict`, where a SKIP fails, and
-      # `help: --help -> stdout, exit 0` is one of its roster entries, asserted
-      # against the binary its own `build-bin` edge just linked. `macOS arm64 /
-      # packaged artifact` then probes `--help` through the INSTALLED artifact
-      # with the dev environment off PATH and this platform's loader search path
-      # emptied, which is a stronger claim than the smoke ever made.
-      #
-      # What is given up: a macOS-only compile break now reddens the cells that
-      # hit it instead of one job ahead of them. That is runner time on a run
-      # that was already lost, not a verdict -- no cell's evidence came from the
-      # preflight's binary, because no cell could reach it.
+      # No `build-bin` step or `--help` smoke here: jobs share no filesystem, so
+      # a copy would delay every cell below and be consumed by none, and the
+      # cells that need a binary link one through their own task edges. `macOS
+      # arm64 / strict contract` runs the documented-CLI oracle `--strict`,
+      # where a SKIP fails, and `help: --help -> stdout, exit 0` is one of its
+      # roster entries; `macOS arm64 / packaged artifact` then probes `--help`
+      # through the INSTALLED artifact with the dev environment off PATH and
+      # this platform's loader search path emptied. The cost is that a
+      # macOS-only compile break reddens the cells that hit it instead of one
+      # job ahead of them.
       - name: Audit native adapter
         run: pixi run native-check
 
@@ -523,14 +416,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # As on the Linux matrix, a row carries only the keys it uses; there
-          # are no memory lanes on this platform, so `lane`, `task`, and one
-          # `workers` override are all there is to carry.
-          #
-          # Same reasoning as the Linux matrix's `test` row above, sized to
-          # this platform's runner: a standard macos-15 (arm64) runner has 3
-          # vCPUs, so `auto` (cores // 2) would give exactly 1 worker -- fully
-          # serial. See DEFAULT_WORKERS in scripts/harness/selfhost.py.
+          # As on the Linux matrix, a row carries only the keys it uses, and
+          # `lane` is an externally configured required-check name. A macos-15
+          # arm64 runner has 3 vCPUs, so `auto` (cores // 2) would give exactly
+          # 1 worker. See DEFAULT_WORKERS in scripts/harness/selfhost.py.
           - lane: classified suite
             task: test
             workers: "3"
@@ -550,7 +439,7 @@ jobs:
             task: contract-check-strict
     runs-on: macos-15
     # The Linux matrix's wide tier, flat because this platform has no memory
-    # lanes and so nothing here needs the second one.
+    # lanes.
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -568,8 +457,8 @@ jobs:
           pixi run mojo-version
           pixi run clang --version
 
-      # `matrix.workers` is set only on the `test` lane's row above; every
-      # other lane leaves it unset, so this appends nothing for them.
+      # `matrix.workers` is set only on the `test` row, so this appends nothing
+      # for the other lanes.
       - name: Run ${{ matrix.lane }}
         run: pixi run ${{ matrix.task }}${{ matrix.workers && format(' -- -n {0}', matrix.workers) || '' }}
 
@@ -577,8 +466,7 @@ jobs:
     name: macOS arm64 / packaged artifact
     needs: macos-preflight
     runs-on: macos-15
-    # The Linux package job's tier: the same external-channel solve, and the
-    # same reason for the headroom.
+    # The Linux package job's tier, for the same external-channel solve.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -594,15 +482,11 @@ jobs:
       - name: Mojo version
         run: pixi run mojo-version
 
-      # The same gate the Linux package job runs, resolved for osx-arm64: the
-      # recipe builds into a local channel, the exact artifact is installed
-      # into fresh scratch environments, and the installed binary is executed.
-      # It waits on the macOS preflight because the recipe build compiles the
-      # very adapter that job audits, and a packaged artifact is only worth
-      # consuming once that audit is green. The edge survives the preflight
-      # losing its `build-bin` step: `package-check` builds from source inside
-      # rattler-build's isolated environment and never reads anything the
-      # preflight produced, so what it waits for is that verdict, never an
-      # artifact.
+      # The same gate the Linux package job runs, resolved for osx-arm64. It
+      # waits on the macOS preflight because the recipe build compiles the very
+      # adapter that job audits, and a packaged artifact is only worth consuming
+      # once that audit is green. What it waits for is that verdict, never an
+      # artifact: `package-check` builds from source inside rattler-build's
+      # isolated environment and reads nothing the preflight produced.
       - name: Package check
         run: pixi run package-check
