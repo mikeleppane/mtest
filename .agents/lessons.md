@@ -116,6 +116,23 @@ append here as later phases teach more.
 - BuildProducts registry replacement is atomic (whole-slot): always replace the
   whole product on rebuild, never patch a field, so no stale canonical-source
   or listing survives.
+- A content-addressed artifact needs TWO proofs, not one: the key must name
+  every input, and publication must prove the artifact came from the snapshot
+  the key names. They fail differently, so covering one hides the other. An
+  input edited between key time and compile time is *in* the key and still
+  produces a binary filed under a digest of bytes the compiler never read;
+  undo the edit — ordinary, not hostile — and the tree looks untouched while
+  every later run hits. Re-verify at publication, where the cost lands only on
+  a miss that already paid for a compile.
+- Publish before you run. When a build is staged somewhere and then moved, the
+  process that runs it first and records it second reports a path it did not
+  execute. The failure is invisible cold and appears warm — the direction that
+  reads as a real regression — and it needs a test that makes the child observe
+  its own `argv[0]`, because nothing else in a verdict can tell the two apart.
+- An executable spelled with a `/` is resolved against a working directory, and
+  a supervisor that `chdir`s before `execve` does not share the parent's. Any
+  identity taken over such a spelling must be anchored to the directory the
+  CHILD will use, or the key names one file and the run executes another.
 
 ## Mojo language, pinned toolchain
 
@@ -204,6 +221,15 @@ append here as later phases teach more.
   Errno 2 on `mojo` means wrong environment, not broken code.
 - Capture a gate's real exit as its own statement (`cmd; echo "x=$?"`); a
   trailing pipe silently reports 0.
+- One test module is one process under one run deadline (300s by default), so a
+  module that keeps growing eventually reports TIMEOUT — the one verdict that
+  says nothing about the code — and it lands first on the slowest machine in
+  the matrix, not locally. Modules whose cases spawn real compilers are the
+  ones to watch. Splitting is cheap (the gates derive membership from the
+  tree) and split by SUBJECT, never by stopwatch, so the boundary survives the
+  next case. Measure the split: cases that were cheap inside a warm process
+  pay a cold compiler cache once they are alone, so the total rises even as
+  the worst file — the only number the deadline sees — falls.
 - The harness gates derive membership from the tree, not from a committed
   list: `scripts/checks/layout.py` and `scripts/harness/selfhost.py` both
   compute their expected suite/fixture/test inventory from disk on each run,
