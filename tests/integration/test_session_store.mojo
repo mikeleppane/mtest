@@ -1682,6 +1682,57 @@ def test_import_scanning_refuses_bytes_that_are_not_utf8() raises:
     assert_equal(accented.modules[0], "café")
 
 
+def test_import_scanning_reads_past_a_byte_order_mark() raises:
+    """A source opening with a UTF-8 BOM still has its imports read.
+
+    Every byte at or above 0x80 is an identifier byte, so the three bytes an
+    editor writes to mark a file as UTF-8 glue themselves onto whatever token
+    follows. `import helper` on the first line lexed as one token that is
+    neither `import` nor `from`, matched no whole `import` token either, and the
+    line came back understood with nothing found — the one answer this scanner
+    may never give wrongly, since the caller then keys a file whose helper is
+    not in the key.
+    """
+    var marked = List[UInt8]()
+    marked.append(0xEF)
+    marked.append(0xBB)
+    marked.append(0xBF)
+    for b in "import helper\n".as_bytes():
+        marked.append(b)
+    var scan = scan_imports(marked)
+    assert_true(scan.parsed, "a marked source is ordinary UTF-8 and must scan")
+    assert_equal(len(scan.modules), 1, "and its import must be reported")
+    assert_equal(scan.modules[0], "helper")
+
+    # The same on a `from` line, which takes the other branch of the dispatch.
+    var from_marked = List[UInt8]()
+    from_marked.append(0xEF)
+    from_marked.append(0xBB)
+    from_marked.append(0xBF)
+    for b in "from helper import value\n".as_bytes():
+        from_marked.append(b)
+    var from_scan = scan_imports(from_marked)
+    assert_true(from_scan.parsed)
+    assert_equal(len(from_scan.modules), 1)
+    assert_equal(from_scan.modules[0], "helper")
+
+    # Only a LEADING mark is a mark. The same bytes in the middle of a file are
+    # a zero-width no-break space inside an identifier, which is a token this
+    # scanner cannot read as a keyword and must not read as ordinary code.
+    var interior = List[UInt8]()
+    for b in "x = 1\n".as_bytes():
+        interior.append(b)
+    interior.append(0xEF)
+    interior.append(0xBB)
+    interior.append(0xBF)
+    for b in "import helper\n".as_bytes():
+        interior.append(b)
+    assert_false(
+        scan_imports(interior).parsed,
+        "an import glued to an invisible character is not understood",
+    )
+
+
 def test_remove_tree_no_follow_refuses_a_symlinked_root() raises:
     var root = temp_root()
     write_file(root, "outside/keep.txt", "k")

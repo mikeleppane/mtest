@@ -32,6 +32,13 @@ What makes it refuse to answer — every case erring toward the conservative key
 - the token `import` again after a `from a import b`, which the semicolon
   statement separator makes legal and which the `from` grammar would otherwise
   stop reading in front of
+- a token that is not `import` but contains both the letters `import` and a
+  byte outside ASCII, which is what an invisible character left against the
+  keyword looks like once it has lexed as one token
+
+A leading UTF-8 byte order mark is skipped rather than refused, because it is an
+editor's ordinary way of announcing an encoding and the source behind it is
+ordinary source.
 
 Comments and string literals are erased before any of that, so an `import`
 inside a docstring or after a `#` is neither an import nor a reason to refuse.
@@ -233,13 +240,46 @@ def _is_well_formed_utf8(data: List[UInt8]) -> Bool:
     return True
 
 
+def _leading_bom(data: List[UInt8]) -> Int:
+    """How many bytes of `data` are a byte order mark announcing UTF-8.
+
+    Editors on some platforms open a text file with `EF BB BF`, and those three
+    bytes are well-formed UTF-8, so nothing earlier refuses them. Left in place
+    they lex as identifier bytes and swallow whatever token starts the file —
+    `import helper` becomes one token that is neither the `import` keyword nor
+    an exact-token match for the refusal net, and the file is declared free of
+    imports. Skipping the mark is what makes the first statement of such a file
+    read like the first statement of any other.
+
+    Only a LEADING mark is one: the same bytes anywhere else are a zero-width
+    no-break space inside real code, and `_token_hides_import` refuses the line
+    they appear on rather than reading past them.
+
+    Args:
+        data: The whole source file's bytes.
+
+    Returns:
+        3 when the buffer opens with the mark, 0 otherwise.
+    """
+    if (
+        len(data) >= 3
+        and data[0] == 0xEF
+        and data[1] == 0xBB
+        and data[2] == 0xBF
+    ):
+        return 3
+    return 0
+
+
 def _code_lines(data: List[UInt8]) -> Optional[List[List[UInt8]]]:
     """Split `data` into per-line code text, erasing comments and literals.
 
     A literal's contents and a comment's contents are dropped rather than
     blanked out, because nothing downstream cares about column positions — only
     about which tokens are code. Newlines inside a triple-quoted literal still
-    break lines, so a line number never drifts.
+    break lines, so a line number never drifts. A leading byte order mark is
+    skipped before lexing starts, so the file's first statement is read as a
+    statement rather than as one long identifier.
 
     Args:
         data: The whole source file's bytes.
@@ -260,7 +300,7 @@ def _code_lines(data: List[UInt8]) -> Optional[List[List[UInt8]]]:
     var lines = List[List[UInt8]]()
     var cur = List[UInt8]()
     var state = _ST_CODE
-    var i = 0
+    var i = _leading_bom(data)
     var n = len(data)
     while i < n:
         var b = data[i]
@@ -332,23 +372,59 @@ def _code_lines(data: List[UInt8]) -> Optional[List[List[UInt8]]]:
     return Optional(lines^)
 
 
+def _token_hides_import(text: String) -> Bool:
+    """Whether a token that is not `import` nevertheless carries the keyword.
+
+    Every byte at or above 0x80 lexes as an identifier byte, so an invisible
+    character sitting against the keyword — a byte order mark, a zero-width
+    space, a no-break space — is absorbed into it and the result matches
+    neither the statement dispatch nor a search for the exact token. The line
+    then reads as understood with nothing on it, which is the one answer this
+    scanner may never give wrongly.
+
+    The rule is deliberately narrow. Only a token carrying a byte outside ASCII
+    can hide the keyword this way, and refusing every ASCII identifier that
+    merely contains the letters would refuse `scan_imports` itself along with
+    every source that names it, widening keys across a whole tree for nothing.
+
+    Args:
+        text: One token's text, already known not to be exactly `import`.
+
+    Returns:
+        True when the token contains a byte outside ASCII and the letters
+        `import`.
+    """
+    var non_ascii = False
+    for b in text.as_bytes():
+        if b >= 0x80:
+            non_ascii = True
+            break
+    if not non_ascii:
+        return False
+    return "import" in text
+
+
 def _has_import_token(line: List[UInt8]) -> Bool:
-    """Whether the whole token `import` appears anywhere in `line`.
+    """Whether the token `import` appears anywhere in `line`, plain or hidden.
 
     Whole tokens only: `important` and `reimport` are not it. This is the guard
-    that keeps `x = 1; import y` from reading as an ordinary assignment.
+    that keeps `x = 1; import y` from reading as an ordinary assignment, and
+    `_token_hides_import` extends it to the keyword wearing an invisible
+    character.
 
     Args:
         line: One line of code text.
 
     Returns:
-        True iff some token on the line is exactly `import`.
+        True iff some token on the line is exactly `import`, or is a non-ASCII
+        token containing it.
     """
     var i = 0
     while i < len(line):
         if _is_ident_byte(line[i]):
             var e = _ident_end(line, i)
-            if _text_of(line, i, e) == "import":
+            var text = _text_of(line, i, e)
+            if text == "import" or _token_hides_import(text):
                 return True
             i = e
         else:
