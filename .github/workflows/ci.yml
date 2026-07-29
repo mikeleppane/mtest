@@ -242,7 +242,7 @@ jobs:
           # this runner's real core count; see DEFAULT_WORKERS in
           # scripts/harness/selfhost.py for the full reasoning and why this
           # lives here instead of in pixi.toml.
-          - lane: direct tests
+          - lane: classified suite
             task: test
             workers: "4"
             store_cache: true
@@ -293,7 +293,7 @@ jobs:
             artifact_path: build/safety/valgrind/*.log
             timeout: 30
     runs-on: ubuntu-24.04
-    # The wide tier, sized for the widest lane: `direct tests` runs the whole
+    # The wide tier, sized for the widest lane: `classified suite` runs the whole
     # discovered corpus, so it sets the shape of a healthy run here and every
     # other lane on this matrix does strictly less. See the tier reasoning on
     # `linux-preflight` for why this is not fitted to what the lane costs today.
@@ -646,7 +646,7 @@ jobs:
           # this platform's runner: a standard macos-15 (arm64) runner has 3
           # vCPUs, so `auto` (cores // 2) would give exactly 1 worker -- fully
           # serial. See DEFAULT_WORKERS in scripts/harness/selfhost.py.
-          - lane: direct tests
+          - lane: classified suite
             task: test
             workers: "3"
             store_cache: true

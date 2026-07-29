@@ -183,7 +183,7 @@ network contract: rattler-build solves against the pinned Modular and
 conda-forge channels, and nothing uploads or authenticates. Do not describe
 those jobs as hermetic or fold them into the Valgrind exception.
 
-Two hosted lanes — `direct tests` and `end-to-end tests` — trade part of this
+Two hosted lanes — `classified suite` and `end-to-end tests` — trade part of this
 for speed, and knowingly. They restore the
 build-artifact store and the precompiled package from an earlier run, so their
 inputs are no longer this checkout and the locked toolchain alone. What holds
@@ -373,7 +373,7 @@ Hosted CI runs the same logical floor as two platform-local chains:
   running `pixi run package-check`.
 - A job's display name is its status-check context, so every name the ruleset
   requires must stay byte-stable. The 20 currently required are eight names
-  carried on both `Linux /` and `macOS arm64 /` — `preflight`, `direct tests`,
+  carried on both `Linux /` and `macOS arm64 /` — `preflight`, `classified suite`,
   `assertions`, `end-to-end tests`, `strict contract`, `cache protocol`,
   `build stamp`, `packaged artifact` — plus the three Linux-only jobs
   `Linux / compiled oracles`, `Linux / ASan + LSan`, and
