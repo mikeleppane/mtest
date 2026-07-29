@@ -1,26 +1,24 @@
 #!/usr/bin/env python3
 """Canonicalize a JUnit XML artifact for cross-run DETERMINISM comparison.
 
-The schema/arithmetic oracle (`junit.py`) proves ONE artifact is valid.
-This proves TWO artifacts of the same suite are the SAME up to the volatile
-bits: wall-clock `time` and embedded TEXT. Structure, identity, classification,
-and counts are preserved — the `<testsuite>`/`<testcase>` shape, node-id names,
-`classname`, the `message`/`type` attributes on outcome children, and the
-`tests`/`failures`/`errors`/`skipped` aggregates — while everything that
-legitimately varies between two runs of the same suite is masked:
+The schema/arithmetic oracle (`junit.py`) proves ONE artifact is valid. This
+proves TWO artifacts of the same suite are the SAME up to the volatile bits:
+wall-clock `time` and embedded TEXT. Preserved are the `<testsuite>`/`<testcase>`
+shape, node-id names, `classname`, the `message`/`type` attributes on outcome
+children, and the `tests`/`failures`/`errors`/`skipped` aggregates. Masked are:
 
-- every `time` attribute (the runner's wall clock), and
+- every `time` attribute, the runner's wall clock, and
 - the TEXT CONTENT of `system-out`/`system-err`, `failure`/`error`,
   `stackTrace`, and the `flakyFailure`/`flakyError`/`rerunFailure`/`rerunError`
-  children — captured child output, assertion detail, and crash stack traces.
-  Their `message`/`type` ATTRIBUTES are kept (they are classification, not
-  volatile diagnostic text).
+  children: captured child output, assertion detail and crash stack traces.
+  Their `message`/`type` ATTRIBUTES are kept, being classification rather than
+  volatile diagnostic text.
 
 The E2E determinism oracle proves that boundary with derived copies of one real
-report: changing a `time` attribute or a masked diagnostic body makes the raw
-XML unequal while preserving canonical equality, and changing an unmasked
-classification attribute makes both the raw and canonical forms unequal. The
-proof therefore does not depend on two real runs incidentally differing.
+report, so it does not depend on two real runs incidentally differing. Changing
+a `time` attribute or a masked diagnostic body makes the raw XML unequal while
+preserving canonical equality; changing an unmasked classification attribute
+makes both forms unequal.
 
 The canonical form is then emitted through C14N so attribute ordering and
 whitespace are stable, and two runs' canonical bytes are compared directly.
@@ -77,7 +75,7 @@ def canonical_bytes(xml_text: str) -> bytes:
             element.set("time", _MASK_TIME)
         # Determinism invariant: only `time` and the volatile TEXT bodies are
         # masked; the `message`/`type` ATTRIBUTES ride through unmasked. That is
-        # load-bearing — a message/type that varies run-to-run leaves the two
+        # load-bearing: a message/type that varies run-to-run leaves the two
         # canonical byte streams UNEQUAL and FAILS the e2e loudly. It never
         # silently passes, so those attributes must stay stable at their source.
         if element.tag in _MASKED_TEXT_TAGS and element.text is not None:

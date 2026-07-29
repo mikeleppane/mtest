@@ -1,37 +1,30 @@
 #!/usr/bin/env python3
 """Layer 2 of the build-artifact cache: stamp mtest's OWN precompile stage.
 
-`scripts/build/production_build.sh`'s `stage_precompile` runs `mojo
-precompile` twice (the vendored TOML parser, then `src/mtest`) to produce
-`build/toml.mojopkg` and `build/mtest.mojopkg`. The cache work established that
-`mojo precompile` is NOT byte-reproducible on this toolchain -- two identical
-inputs measured at `43fcef41...` and `eb81d1f7...` on this branch -- which
-means a naive re-run of this stage rewrites both packages, with different
-bytes, every single time `pixi run build` runs, whether or not anything
-changed. This module pins the stamp that stops that: an `in:`/`out:` file
-next to the packages that lets a second, unchanged run skip the stage
-entirely.
+`scripts/build/production_build.sh`'s `stage_precompile` runs `mojo precompile`
+twice (the vendored TOML parser, then `src/mtest`) to produce
+`build/toml.mojopkg` and `build/mtest.mojopkg`. `mojo precompile` is NOT
+byte-reproducible on this toolchain: two identical inputs measured at
+`43fcef41...` and `eb81d1f7...` on this branch. A naive re-run therefore
+rewrites both packages with different bytes on every `pixi run build`, changed
+or not. This module pins the `in:`/`out:` stamp that lets a second, unchanged
+run skip the stage.
 
-Every scenario copies exactly the subset of the repository the stage reads
-(`scripts/build`, `src/mtest`, `vendor/mojo-toml`) into a throwaway
-`tempfile.mkdtemp` sandbox and runs `production_build.sh` THERE -- never
-against the real `build/` in this checkout. `test_source_order_permutation_
-stable` additionally `source`s the script rather than executing it, which
-skips the stage-dispatch case statement at the bottom of the file (guarded by
-a `${BASH_SOURCE[0]} == ${0}` check) so it can call the digest/stamp helper
-functions directly.
+Every scenario copies exactly the subset the stage reads (`scripts/build`,
+`src/mtest`, `vendor/mojo-toml`) into a throwaway `tempfile.mkdtemp` sandbox
+and runs `production_build.sh` THERE, never against this checkout's `build/`.
+`test_source_order_permutation_stable` additionally `source`s the script so it
+can call the digest/stamp helpers directly, skipping the stage dispatch at the
+bottom of the file.
 
-`test_double_build_leaves_identical_package_bytes` is the nondeterminism
-proof and is RED before the stamp exists: building twice, unstamped, gives
-two different `build/mtest.mojopkg`s. It goes green once the second run
-SKIPS the stage -- the bytes become identical because the second run never
-touches the file, not because the compiler became deterministic.
+`test_double_build_leaves_identical_package_bytes` is the nondeterminism proof
+and is RED before the stamp exists. It goes green once the second run SKIPS
+the stage; the compiler itself is still nondeterministic.
 
 `test_toolchain_change_forces_rebuild` pins toolchain identity: the input
-digest also covers `mojo --version` and `pixi.lock`'s
-bytes, so a toolchain swap invalidates a stamp that no tracked source file's
-content would otherwise touch -- the same hazard Layer 1's file cache already
-guards against by digesting the compiler binary's own content into every key.
+digest also covers `mojo --version` and `pixi.lock`'s bytes, so a toolchain
+swap invalidates a stamp no tracked source file's content would otherwise
+touch.
 """
 
 from __future__ import annotations
@@ -58,22 +51,19 @@ STAGE_SCRIPT_REL = "scripts/build/production_build.sh"
 """The script under test, relative to a sandbox root (mirrors the real tree)."""
 
 SANDBOX_TREE_DIRS = ("scripts/build", "src/mtest", "vendor/mojo-toml")
-"""Every directory `stage_precompile` reads: the script itself, the vendored
-TOML parser it precompiles first, and mtest's own package sources."""
+"""Every directory `stage_precompile` reads."""
 
 SANDBOX_TREE_FILES = ("pixi.lock",)
 """Every standalone file `stage_precompile` reads: the lockfile that pins the
 toolchain, fed into the input digest alongside `mojo --version`."""
 
 RUN_TIMEOUT_SECONDS = 300
-"""Ceiling on one `production_build.sh precompile` invocation. Generous next
-to a measured cold run (precompiling `src/mtest` takes tens of seconds on a
-development machine); a timeout is a FAIL, never a skip."""
+"""Ceiling on one `production_build.sh precompile` invocation, sized well above
+a cold run. A timeout is a FAIL, never a skip."""
 
 SKIP_LINE = "precompile stage skipped"
-"""Substring of the console line `stage_precompile` prints when the stamp is
-valid and the stage does nothing. Pinned here so a wording change in the
-script and a stale assumption in this module fail loudly together."""
+"""The console line `stage_precompile` prints when a valid stamp skips the
+stage. Pinned so a wording change in the script fails here too."""
 
 BYPASS_NOTICE = "no sha256sum or shasum on PATH"
 """Substring of the notice `stage_precompile` prints when neither digest tool
@@ -86,8 +76,7 @@ def require_mojo() -> None:
     Raises:
         AssertionError: If `mojo` cannot be found. Every scenario except
             `test_source_order_permutation_stable` runs a real precompile, so
-            these must run under `pixi run build-stamp-check` (or any
-            invocation with the pixi environment activated).
+            these need the pixi environment activated.
     """
     if shutil.which("mojo") is None:
         raise AssertionError(
@@ -118,8 +107,7 @@ def run_stage(
 
     Args:
         sandbox: A tree produced by `sandbox_tree`.
-        stage: The stage argument to pass (`precompile` for every scenario
-            here -- Layer 2 only stamps the precompile stage).
+        stage: The stage argument to pass; Layer 2 only stamps `precompile`.
         env: The child's environment, or `None` to inherit this process's.
 
     Returns:
@@ -139,10 +127,8 @@ def run_stage(
 def source_call(sandbox: Path, snippet: str) -> subprocess.CompletedProcess[str]:
     """`source production_build.sh` in a throwaway bash, then run `snippet`.
 
-    Sourcing (rather than executing) skips the stage-dispatch case statement
-    at the bottom of the script, so `snippet` can call the digest/stamp
-    helper functions (`_resolve_digest_cmd`, `_precompile_input_digest`,
-    `_precompile_write_stamp`, `_precompile_stamp_valid`) directly, without
+    Sourcing skips the stage-dispatch case statement at the bottom of the
+    script, so `snippet` can call the digest/stamp helpers directly without
     triggering a real build.
 
     Args:
@@ -170,25 +156,20 @@ def fabricate_valid_state(sandbox: Path, mojo_version: str | None = None) -> Non
     """Write placeholder outputs and a stamp that is genuinely valid for them.
 
     Writes arbitrary bytes to `build/toml.mojopkg` and `build/mtest.mojopkg`
-    (never invoking `mojo`), then calls the script's OWN
-    `_precompile_input_digest` / `_precompile_write_stamp` (via `source_call`)
-    to write the stamp. Every digest in the result is real, computed by the
-    exact code path a genuine run uses; only the fact that `mojo` never ran
-    is fabricated. This lets `test_deleted_output_forces_rebuild` and
-    `test_unknown_out_row_forces_rebuild` start from a known-valid stamp
-    without paying for a real compile just to get there.
+    without invoking `mojo`, then writes the stamp through the script's own
+    `_precompile_input_digest` / `_precompile_write_stamp`. Every digest is
+    real; only the compile is fabricated, which lets the rebuild scenarios
+    start from a known-valid stamp without paying for a compile.
 
     Args:
         sandbox: A tree produced by `sandbox_tree`.
         mojo_version: The toolchain-identity string to feed the digest with.
             Defaults to invoking the real `mojo --version`; pass a literal to
-            avoid requiring `mojo` on PATH at all (used by
-            `test_source_order_permutation_stable`, which is about file
-            ordering, not toolchain identity).
+            avoid requiring `mojo` on PATH, as
+            `test_source_order_permutation_stable` does.
 
     Raises:
-        AssertionError: If the sourced helper calls fail (a bug in the
-            digest/stamp functions themselves, not in this fixture).
+        AssertionError: If the sourced helper calls fail.
     """
     build = sandbox / "build"
     build.mkdir(exist_ok=True)
@@ -243,13 +224,10 @@ def copy_files_reordered(src: Path, dst: Path) -> None:
 def path_hiding(excluded: frozenset[str]) -> Iterator[str]:
     """A PATH value with the named executables hidden, everything else intact.
 
-    Rebuilds only the PATH directories that actually contain one of
-    `excluded` into a throwaway shim directory, symlinking every OTHER entry
-    through by its real absolute path; every other PATH directory (including
-    wherever `mojo` itself lives) is left completely untouched. This hides
-    exactly the requested tool(s) even when they share a directory with tools
-    the stage genuinely needs (`find`, `sort`, `xargs`), without risking
-    anything the real compiler might need to find alongside itself.
+    Only the PATH directories containing one of `excluded` are rebuilt into a
+    throwaway shim directory, symlinking every OTHER entry through by its real
+    absolute path. That hides the requested tools even when they share a
+    directory with tools the stage needs, leaving the rest of PATH untouched.
 
     Args:
         excluded: Executable basenames to hide from the yielded PATH.
@@ -289,11 +267,9 @@ def path_hiding(excluded: frozenset[str]) -> Iterator[str]:
 def toolchain_reporting(version_line: str) -> Iterator[str]:
     """A PATH whose `mojo --version` reports `version_line`, otherwise real.
 
-    Simulates a toolchain upgrade or a same-version relock without either: a
-    tiny shim shadows `mojo` first on PATH, faking only `--version`; every
-    other argv (in particular the real `precompile` invocations the stage
-    runs) `exec`s the genuine compiler unchanged, so the stage still builds
-    for real under this PATH -- only the reported version identity differs.
+    Simulates a toolchain upgrade without one: a shim shadows `mojo` first on
+    PATH and fakes only `--version`, while every other argv `exec`s the genuine
+    compiler, so the stage still builds for real under this PATH.
 
     Args:
         version_line: The literal line the shim's `mojo --version` prints.
@@ -439,9 +415,8 @@ class BuildStampTests(unittest.TestCase):
             )
             shutil.copy2(REPO / "pixi.lock", reordered / "pixi.lock")
 
-            # A fixed literal, not a real `mojo --version` call: this scenario
-            # is about file-creation-order stability, not toolchain identity,
-            # and it should not need `mojo` on PATH to prove that.
+            # A fixed literal keeps this scenario about file-creation-order
+            # stability and off `mojo` on PATH.
             fixed_version = "Mojo 0.0.0-test-source-order (fixed)"
             head_forward = stamp_head_line(forward, mojo_version=fixed_version)
             head_reordered = stamp_head_line(reordered, mojo_version=fixed_version)
@@ -455,11 +430,10 @@ class BuildStampTests(unittest.TestCase):
     def test_toolchain_change_forces_rebuild(self) -> None:
         """A different `mojo --version` must invalidate the stamp.
 
-        Every tracked source file, the script, and the stage commands are
-        byte-identical between the two runs; only the toolchain identity
-        the second run observes differs. Without the toolchain in the digest,
-        an upgraded (or relocked) `mojo` would report a stamp match and
-        `pixi run build` would ship a `.mojopkg` compiled by the OLD compiler.
+        Everything except the observed toolchain identity is byte-identical
+        between the two runs. Without the toolchain in the digest, an upgraded
+        `mojo` reports a stamp match and `pixi run build` ships a `.mojopkg`
+        compiled by the OLD compiler.
         """
         require_mojo()
         sandbox = sandbox_tree()
@@ -484,8 +458,8 @@ class BuildStampTests(unittest.TestCase):
     def test_shasum_only_path(self) -> None:
         """Hiding `sha256sum` while leaving real `shasum` present must still stamp.
 
-        A real Linux exercise of the branch the macOS lane depends on for
-        real, since macOS ships no `sha256sum`.
+        Exercises on Linux the branch the macOS lane depends on, since macOS
+        ships no `sha256sum`.
         """
         require_mojo()
         sandbox = sandbox_tree()

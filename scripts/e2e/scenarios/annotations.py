@@ -22,10 +22,8 @@ def s_annotations_modes(context: ScenarioContext) -> str:
     """Resolve annotation MODE against the environment.
 
     `on` always renders the tail; `auto` follows GITHUB_ACTIONS; `off` never
-    renders even under Actions.
-
-    The tail is the node-id-sorted `::error` block then the single `::notice`,
-    printed to stdout AFTER the console summary band, only when resolved-on.
+    renders even under Actions. The tail is the node-id-sorted `::error` block
+    then the single `::notice`, on stdout after the console summary band.
     """
     fail = "e2e/annotations/test_many_fail.mojo"
 
@@ -76,7 +74,7 @@ def s_annotations_caps(context: ScenarioContext) -> str:
     """Hold the 10-error per-STEP cap.
 
     Twelve failures render nine node-id-sorted rows plus ONE
-    `... and 3 more errors` aggregate — never eleven lines.
+    `... and 3 more errors` aggregate, for ten lines.
     """
     run = context.runner.run_mtest(
         ["e2e/annotations/test_many_fail.mojo", "--gh-annotations", "on"]
@@ -139,12 +137,11 @@ def s_annotations_fencing(context: ScenarioContext) -> str:
     """The Actions-oriented HOSTILE-CONSOLE cell.
 
     A child forges a `::error` and seeds a stop-commands fence with a guessed
-    token. Under GITHUB_ACTIONS the echoed capture is wrapped in a collision-proof
-    fence minted AFTER the child exited: the forge is SEALED (cannot land), the
-    seeded token never equals the real token, every fence is terminated (the
-    always-runs epilogue restores commands before mtest's own tail), and two runs
-    mint DISTINCT tokens (per-run-unique). Fencing is active even when the child
-    CRASHES (an error path).
+    token. Under GITHUB_ACTIONS the echoed capture is wrapped in a fence minted
+    AFTER the child exited: the forge is SEALED, the seeded token never equals
+    the real one, every fence is terminated (the always-runs epilogue restores
+    commands before mtest's own tail), and two runs mint DISTINCT tokens.
+    Fencing stays active when the child CRASHES.
     """
     forger = "e2e/annotations/test_console_forger.mojo"
     seeded = "deadbeefdeadbeefdeadbeefdeadbeef"
@@ -178,8 +175,8 @@ def s_annotations_fencing(context: ScenarioContext) -> str:
     )
 
     # ERROR PATH: a CRASHING child under Actions still fences its capture and
-    # restores commands (no unterminated fence), even though it never FAILs
-    # cleanly — the always-runs epilogue guarantees the resume delimiter.
+    # restores commands, because the always-runs epilogue guarantees the resume
+    # delimiter even when the file never FAILs cleanly.
     crash = context.runner.run_mtest(
         [
             "e2e/suite/test_crashing.mojo",

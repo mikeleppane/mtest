@@ -1,18 +1,12 @@
 #!/usr/bin/env python3
 """Unit tests for the one-declarer-per-external_call-symbol rule.
 
-Nothing here compiles anything, and the checker no longer does either: the
-gate it guards is a lexical statement about the classified sources, so every
-test is a disposable fixture tree and an assertion about what the scan makes
-of it. The load-bearing cases are the ones that decide whether a match is
-real code or fixture data, because a scanner that mistook one for the other
-would either miss a genuine second declaration or reject a string.
-
-The two mutation cases -- `test_two_modules_declaring_one_symbol_is_rejected`
-and `test_the_real_tree_has_no_multiply_declared_symbol` -- are what keep this
-from being a checker that has quietly stopped rejecting anything: the first
-proves a violation still fails, the second proves the live tree is clean by
-the same code path rather than by assumption.
+The gate is a lexical statement about the classified sources, so every test is
+a disposable fixture tree and an assertion about what the scan makes of it. The
+cases deciding whether a match is real code or fixture data carry the weight:
+mistaking one for the other misses a second declaration or rejects a string.
+Two mutation cases keep the checker from quietly accepting everything, one over
+fixtures and one over the live tree.
 """
 
 from __future__ import annotations
@@ -45,14 +39,12 @@ class DeclaredSymbolsTests(unittest.TestCase):
             )
 
     def test_string_literal_occurrences_are_not_counted(self) -> None:
-        """A generated-fixture string is data, never a real declaration.
+        """A fixture string literal carries no declaration.
 
-        Several classified suites build a throwaway fixture source as a
-        sequence of string literals to write out and compile elsewhere. A
-        naive text search matches `external_call["sym"` inside that string
-        too, but the module that contains it never compiles it as code, so it
-        carries no ABI risk. This is the exact shape that made a prior
-        reviewer's shared-symbol table wrong -- see the task report.
+        Several classified suites build a throwaway fixture source as string
+        literals to compile elsewhere. A naive text search matches
+        `external_call["sym"` inside that string, but the containing module
+        never compiles it, so it carries no ABI risk.
         """
         with tempfile.TemporaryDirectory() as raw_tmp:
             source = Path(raw_tmp) / "test_example.mojo"
@@ -70,12 +62,10 @@ class DeclaredSymbolsTests(unittest.TestCase):
     ) -> None:
         """A real declaration may wrap across lines, symbol and all.
 
-        `external_call[` need not share a line with its symbol.
-        `tests/integration/test_exec_etxtbsy.mojo` genuinely writes
-        `mtest_exec_test_monotonic_wait_configure` this way. A scanner that
-        requires `external_call["sym"` on one physical line never sees it:
-        the opening line has no quote at all, and the symbol's own line has
-        no `external_call[` on it -- each line individually looks unmatched.
+        `tests/integration/test_exec_etxtbsy.mojo` writes
+        `mtest_exec_test_monotonic_wait_configure` this way. A scanner
+        requiring `external_call["sym"` on one physical line never sees it,
+        because each line on its own looks unmatched.
         """
         with tempfile.TemporaryDirectory() as raw_tmp:
             source = Path(raw_tmp) / "test_example.mojo"
@@ -94,12 +84,10 @@ class DeclaredSymbolsTests(unittest.TestCase):
     def test_multiline_fixture_literal_span_is_still_excluded(self) -> None:
         """A wrapped fixture declaration must stay excluded too.
 
-        This codebase's fixture-generation convention writes every physical
-        line of a throwaway generated source as its own quoted string
-        literal -- including, here, the line that would otherwise OPEN a
-        real `external_call[` span. Checking only that opening line is
-        enough to exclude the whole multi-line fixture span, however many
-        lines it happens to spread across.
+        The fixture-generation convention writes every physical line of a
+        generated source as its own quoted literal, including the line that
+        OPENS the `external_call[` span, so checking that opening line
+        excludes the whole span however far it spreads.
         """
         with tempfile.TemporaryDirectory() as raw_tmp:
             source = Path(raw_tmp) / "test_example.mojo"
@@ -133,11 +121,9 @@ class DeclaredSymbolsTests(unittest.TestCase):
     ) -> None:
         """A line may begin with a complete string and still be code.
 
-        The first-character test this replaces read any line whose first
-        non-space character was a quote as fixture data, so a real
-        declaration on the continuation line of a multi-argument call was
-        invisible: the symbol never entered the co-link set, and an arity
-        drift against it built clean and printed OK.
+        The first-character test this replaces read any line starting with a
+        quote as fixture data, so a declaration on a continuation line never
+        entered the co-link set and an arity drift against it built clean.
         """
         with tempfile.TemporaryDirectory() as raw_tmp:
             source = Path(raw_tmp) / "test_example.mojo"
@@ -207,11 +193,9 @@ class DeclaringSourcesTests(unittest.TestCase):
     def test_the_shared_home_is_inside_the_scanned_universe(self) -> None:
         """The file holding the single declarations must itself be scanned.
 
-        Scanning only the classified roots left `tests/support` outside the
+        Scanning only the classified roots left `tests/support` out of the
         comparison, so a suite re-declaring a symbol the shared wrapper
-        already owns was the lone declarer among the files being compared and
-        passed. That is the whole failure mode this gate exists for, arriving
-        by the exact route the wrapper was meant to close.
+        already owns looked like the lone declarer and passed.
         """
         found = {path.as_posix() for path in abi_probe.declaring_sources()}
         self.assertIn((abi_probe.ROOT / abi_probe.SHARED_HOME).as_posix(), found)
@@ -219,9 +203,9 @@ class DeclaringSourcesTests(unittest.TestCase):
     def test_every_mojo_file_counts_not_only_test_prefixed_ones(self) -> None:
         """Support modules and fixtures hold declarations too.
 
-        A `test_*.mojo` filter would have excluded the shared home by name
-        even after the root widened, and would leave a protocol fixture or a
-        native control program free to duplicate a declaration.
+        A `test_*.mojo` filter would exclude the shared home by name even
+        after the root widened, and leave a fixture free to duplicate a
+        declaration.
         """
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp) / "tests"
@@ -240,11 +224,10 @@ class DeclaringSourcesTests(unittest.TestCase):
     def test_a_nested_module_is_discovered(self) -> None:
         """Everything else that reads this tree walks it recursively.
 
-        `scripts/harness/selfhost.py` discovers, builds and RUNS a nested
-        module, and `scripts/checks/layout.py` reaches it with `rglob`. A
-        non-recursive walk here would leave a nested module free to declare a
-        symbol another file already declares, while the suite went on
-        executing both.
+        `scripts/harness/selfhost.py` runs nested modules and
+        `scripts/checks/layout.py` reaches them with `rglob`, so a
+        non-recursive walk here would leave a nested module free to duplicate
+        a declaration the suite still executes.
         """
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp) / "tests"
@@ -285,12 +268,7 @@ class ViolationReportTests(unittest.TestCase):
     def test_the_report_names_every_symbol_module_and_the_single_home(
         self,
     ) -> None:
-        """A violation must be fixable from the message alone.
-
-        Naming only the symbol would leave the reader grepping for which
-        modules collided, and naming only the modules would leave them
-        guessing where the one declaration is supposed to go.
-        """
+        """A violation must be fixable from the message alone."""
         a = abi_probe.ROOT / "tests" / "integration" / "test_a.mojo"
         b = abi_probe.ROOT / "tests" / "support" / "helper.mojo"
         message = abi_probe.violation_report({"waitpid": [a, b]})
@@ -305,8 +283,8 @@ class MainTests(unittest.TestCase):
         """The mutation case: a real second declaration must fail the gate.
 
         Written as two fixture sources rather than a patched grouping, so the
-        scan, the grouping, and the verdict are all exercised on the path a
-        contributor would actually take to break this.
+        scan and the verdict run on the path a contributor would take to break
+        this.
         """
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp) / "tests"
@@ -335,9 +313,8 @@ class MainTests(unittest.TestCase):
     def test_one_declarer_per_symbol_passes(self) -> None:
         """Distinct symbols, and a repeated call to one of them, are fine.
 
-        A module may declare as many symbols as it needs, and two modules may
-        both CALL a shared wrapper; only two modules DECLARING one symbol is
-        the failure.
+        Two modules may both CALL a shared wrapper; only two modules DECLARING
+        one symbol is the failure.
         """
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp) / "tests"
@@ -365,10 +342,9 @@ class MainTests(unittest.TestCase):
     def test_a_fixture_literal_in_two_modules_is_not_a_violation(self) -> None:
         """Generated-fixture source is data, so it cannot collide.
 
-        Two suites that both emit a throwaway program calling `abort` share
-        no declaration at all: neither module compiles that text, and the
-        generated programs are separate binaries. Grouping on it would fail
-        the gate over something no wrapper could ever fix.
+        Two suites emitting a throwaway program that calls `abort` share no
+        declaration: neither compiles that text, and the generated programs
+        are separate binaries.
         """
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp) / "tests"

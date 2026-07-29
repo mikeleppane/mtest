@@ -5,7 +5,7 @@
 truth `main.mojo` reuses for `--version` and the JSON stream header.
 `pixi.toml` carries an independent `version` field consumed by packaging
 tooling, and `recipe/recipe.yaml` carries its own `version` that names the
-built conda package. Nothing else keeps the three in sync — this script is that
+built conda package. Nothing else keeps the three in sync; this script is that
 gate: parse all three, assert they are byte-identical, and assert the agreed
 value is the version this repo is currently shipping. Wired into `pixi run ci`
 so a future edit to any one file that forgets the others fails loudly instead of

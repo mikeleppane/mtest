@@ -37,9 +37,9 @@ def _write_executable(path: Path, source: str) -> None:
 
 
 # A stand-in leader: it forks ONE child into its own process group, has that
-# child record the group's real id and announce readiness, and then waits. This
-# is the shape `run_mtest_signaled` must reason about — a leader whose children
-# live in groups of their own — reduced to something that starts instantly.
+# child record the group's real id and announce readiness, then waits. That is
+# the shape `run_mtest_signaled` must reason about (a leader whose children
+# live in groups of their own), reduced to something that starts instantly.
 _FAKE_LEADER = """import os
 import signal
 import subprocess
@@ -83,8 +83,8 @@ time.sleep(300)
 def _recorded_signals() -> Iterator[list[tuple[str, int, int]]]:
     """Record every `os.kill`/`os.killpg` the runner issues, in order."""
     calls: list[tuple[str, int, int]] = []
-    # `runner.os` IS this module's `os`, so patching here patches the object the
-    # runner calls through; reaching in via `runner.os` only named it indirectly.
+    # `runner.os` IS this module's `os`, so patching here patches the object
+    # the runner calls through.
     real_kill, real_killpg = os.kill, os.killpg
 
     def kill(pid: int, sig: int) -> None:
@@ -108,16 +108,13 @@ class E2EFaultTopologyTests(unittest.TestCase):
     ) -> None:
         names = tuple(name for name, _scenario in e2e_main.SCENARIOS)
 
-        # No roster and no total appear here. Registering a scenario is a
-        # one-line addition to `SCENARIOS` with its owning module on the same
-        # line, so a restated list would cost an edit per scenario to re-prove
-        # what the diff shows. Two things the diff does NOT show survive:
-        # a name that collides with an existing one, and the ordering the
-        # registry comment relies on -- `manifest-completeness` reconciles
-        # `e2e/manifest.json` against disk, and running it first is what turns
-        # a manifest drift into a first-line failure instead of one discovered
-        # after every other scenario has spent its build time. Neither costs an
-        # edit when a scenario is added.
+        # No roster and no total appear here: restating the list would cost an
+        # edit per scenario to re-prove what the diff already shows. Two things
+        # the diff does NOT show are asserted instead. A colliding name, and
+        # the ordering: `manifest-completeness` reconciles `e2e/manifest.json`
+        # against disk, so running it first turns a manifest drift into a
+        # first-line failure rather than one found after every other scenario
+        # has spent its build time.
         self.assertEqual(len(set(names)), len(names))
         self.assertEqual(names[0], "manifest-completeness")
 
@@ -209,9 +206,9 @@ class E2EFaultTopologyTests(unittest.TestCase):
         self.assertEqual(returncode, 2)
         self.assertNotEqual(child_pgid, pgid)
         # `os.kill(leader)` and `os.killpg(leader_group)` carry the same number,
-        # so WHICH call was made is the whole distinction: forwarding the signal
-        # to the group is the product's job, and a harness that did it itself
-        # would pass even against a product that forwarded nothing.
+        # so WHICH call was made is the distinction: forwarding to the group is
+        # the product's job, and a harness doing it itself would pass against a
+        # product that forwarded nothing.
         terminating = [call for call in calls if call[2] != 0]
         self.assertEqual(terminating, [("kill", pgid, int(signal.SIGINT))])
         self.assertTrue(
@@ -227,8 +224,9 @@ class E2EFaultTopologyTests(unittest.TestCase):
 
         self.assertNotEqual(child_pgid, pgid)
         terminating = [call for call in calls if call[2] != 0]
-        # The leader is signalled first, alone. Only then — mtest cannot clean up
-        # after its own death — does the harness sweep the group it recorded.
+        # The leader is signalled first, alone. Only then, since mtest cannot
+        # clean up after its own death, does the harness sweep the group it
+        # recorded.
         self.assertEqual(terminating[0], ("kill", pgid, int(signal.SIGKILL)))
         self.assertTrue(terminating[1:], "the orphaned child group was never swept")
         for name, target, _sig in terminating[1:]:
@@ -298,10 +296,10 @@ class E2EFaultTopologyTests(unittest.TestCase):
                     )
 
     def test_a_half_armed_barrier_still_sweeps_the_live_actor(self) -> None:
-        # The failure path that is supposed to clean up must not be the one that
-        # strands a process: an actor that armed before the barrier expired lives
-        # in a process group of its own, which killing the leader's group cannot
-        # reach, and the e2e actors hold for an hour.
+        # The failure path that is supposed to clean up must not strand a
+        # process: an actor that armed before the barrier expired lives in a
+        # process group of its own, which killing the leader's group cannot
+        # reach, and the e2e actors then sleep on undisturbed.
         with tempfile.TemporaryDirectory(prefix="mtest-signal-halfarmed-") as raw:
             tmp = Path(raw)
             leader = tmp / "fake-leader"
@@ -469,9 +467,9 @@ class ScenarioTotalIsRegistryDerivedTests(unittest.TestCase):
     with a substituted registry and read the banner back.
     """
 
-    # "91 scenarios", "1,053 classified tests", "72 end-to-end scenarios" —
-    # a bare integer standing in front of a countable noun, with room for the
-    # adjectives such claims usually carry.
+    # "91 scenarios", "1,053 classified tests", "72 end-to-end scenarios": a
+    # bare integer in front of a countable noun, with room for the adjectives
+    # such claims usually carry.
     _COUNT_CLAIM = re.compile(
         r"\b\d[\d,_]*\s+(?:[A-Za-z-]+\s+){0,2}"
         r"(?:scenarios?|tests?|suites?|checks?|cases?|files?|modules?)\b",

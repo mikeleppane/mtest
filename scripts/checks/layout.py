@@ -64,17 +64,16 @@ VENDORED_TOML_LOCAL_CHECKSUM_PATHS = {
 CLASSIFIED_ROOTS = selfhost.DEFAULT_ROOTS
 """The classified suite roots, taken from the runner rather than restated.
 
-`scripts/harness/selfhost.py` is what `pixi run test` executes, so these are
-the directories whose contents actually run. Re-declaring them here would
-create a second list that can disagree with the first; borrowing the runner's
-own is what makes a drift impossible rather than merely detectable.
+`scripts/harness/selfhost.py` is what `pixi run test` executes, so these are the
+directories whose contents run. Borrowing the runner's own list makes a drift
+impossible rather than merely detectable.
 """
 CLASSIFIED_TEST_GLOB = selfhost.TEST_FILE_GLOB
 """The runner's test-file glob, borrowed for the same reason as the roots.
 
-A Mojo file under a classified root that this pattern does not match never
-runs. That is the whole property `check_classified_mojo_inventory` exists to
-catch, so it has to test the runner's real pattern, not a copy of it.
+A Mojo file under a classified root that this pattern does not match never runs,
+which is the property `check_classified_mojo_inventory` exists to catch. It has
+to test the runner's real pattern rather than a copy.
 """
 FORBIDDEN_CLASSIFIED_PACKAGE_MARKERS = {
     Path("tests/unit/__init__.mojo"),
@@ -82,57 +81,53 @@ FORBIDDEN_CLASSIFIED_PACKAGE_MARKERS = {
 }
 """Package markers that must never reappear under the classified roots.
 
-Every module beneath `tests/unit` and `tests/integration` declares `main()`
-(mtest's classified runner requires it). Mojo 1.0.0b2 refuses to
-`mojo precompile` a package containing a module that declares `main()` --
-`error: 'main()' is not supported within packages` -- so re-adding either
-child marker would make `mojo precompile tests/` fail again the moment the
-compiler recurses into it as a package. `tests/__init__.mojo` is deliberately
-kept so `tests/` itself stays a nameable package; only its two children must
-stay marker-free. See `check_classified_roots_are_not_precompilable_packages`.
+Every module beneath `tests/unit` and `tests/integration` declares `main()`,
+which mtest's classified runner requires. Mojo 1.0.0b2 refuses to
+`mojo precompile` a package containing such a module (`error: 'main()' is not
+supported within packages`), so re-adding either child marker would break
+`mojo precompile tests/` the moment the compiler recurses into it.
+`tests/__init__.mojo` stays so `tests/` remains a nameable package; only its two
+children must stay marker-free. See
+`check_classified_roots_are_not_precompilable_packages`.
 """
 PLATFORM_TARGET_KEYS = {"dependencies", "tasks"}
 """What a `[target.<platform>]` table in `pixi.toml` may contain.
 
-Bounded so a new kind of platform-scoped table cannot appear without this
-check naming it. Anything outside this set is an override shape nothing in
-this repository has reasoned about.
+Bounded so a new kind of platform-scoped table cannot appear without this check
+naming it. Anything outside this set is an override shape nothing in this
+repository has reasoned about.
 """
 
 PLATFORM_TASK_OVERRIDES = {"ci-memory"}
-"""The ONLY task any platform table may override, and why the set is bounded.
+"""The ONLY task any platform table may override.
 
-A `[target.<platform>.tasks]` entry silently REPLACES the base task of the
-same name. Pixi prints no warning, every other view of the floor -- `pixi run
-ci`, `harness-check`, and the hosted matrix, which name lanes by task name --
-keeps reporting the same name, and nothing reads the replaced command. So an
-unbounded override table is a hole big enough to drive a lane through:
-adding the three words
+A `[target.<platform>.tasks]` entry silently REPLACES the base task of the same
+name. Pixi prints no warning, and every other view of the floor (`pixi run ci`,
+`harness-check`, the hosted matrix) names lanes by task name, so the replacement
+never shows up. Adding the three words
 
     asan-check = "true"
 
-under `[target.linux-64.tasks]` leaves `pixi run asan-check` exiting 0 having
-run `/bin/true`, with the hosted "ASan + LSan" required check still green,
-because the lane never leaves any view by name. Reproduced on this checkout.
+under `[target.linux-64.tasks]` leaves `pixi run asan-check` exiting 0 having run
+`/bin/true`, with the hosted "ASan + LSan" required check still green.
+Reproduced on this checkout.
 
-Bounding the table to one known entry is what closes that. `ci-memory` is the
-one legitimate member: on linux-64 it is replaced by a dependency edge onto
-the two memory lanes, and `scripts/checks/memory/host_support.py` -- the base
-command -- fails closed if that override is ever LOST. This check is the
-other direction: an override that is ever GAINED.
+`ci-memory` is the one legitimate member: on linux-64 it is replaced by a
+dependency edge onto the two memory lanes, and the base command
+(`scripts/checks/memory/host_support.py`) fails closed if that override is ever
+LOST. This check covers the other direction, an override that is ever GAINED.
 """
 
 DIRECT_SCRIPT_COMMAND_RE = re.compile(
     # An interpreter word, optionally path-qualified and version-suffixed, its
     # options, and then a repository-relative `.py` operand instead of `-m`.
-    # `-m scripts.checks.layout` cannot match: the operand after the options
-    # has to end in `.py`, and a dotted module name does not.
+    # `-m scripts.checks.layout` cannot match, since the operand after the
+    # options has to end in `.py` and a dotted module name does not.
     #
-    # This is the raw-text pass, and it is deliberately quote-blind: 4.3% of
-    # this repository's tracked lines (5368 of 124139, measured) cannot be
-    # lexed as a shell command at all, because prose uses an unpaired
-    # apostrophe. The word pass below returns nothing for those lines, so a
-    # scan built only on `shlex` would go quiet over a twentieth of the tree.
+    # The raw-text pass is quote-blind on purpose: 4.3% of this repository's
+    # tracked lines (5368 of 124139, measured) cannot be lexed as a shell
+    # command because prose uses an unpaired apostrophe. The word pass below
+    # returns nothing for those lines.
     r"(?<![\w./-])(?:[\w./-]*/)?python[0-9.]*"
     r"(?:\s+-\S+)*"
     r"\s+(?:\./)?(scripts/[\w./-]+\.py)"
@@ -145,9 +140,8 @@ PYTHON_EXECUTABLE_ALIASES = {"sys.executable"}
 """Source spellings that name the running interpreter without naming `python`.
 
 `subprocess.run([sys.executable, "scripts/<name>.py"])` is the argv form of the
-same defect the prose form has, and it is the form actually written in Python
-tooling. Without this the word pass sees `sys.executable` as an ordinary word
-and walks past the script operand behind it.
+same defect, and the form Python tooling writes. Without this the word pass
+reads `sys.executable` as an ordinary word and walks past the operand behind it.
 """
 
 DIRECT_SCRIPT_RE = re.compile(r"scripts/[A-Za-z0-9_./-]+\.py")
@@ -234,35 +228,31 @@ def classified_mojo_universe(root: Path) -> tuple[set[Path], set[Path]]:
 def check_classified_mojo_inventory(root: Path) -> None:
     """Require every Mojo file under a classified root to be one the runner runs.
 
-    Nothing here is declared. The expectation is derived entirely from the
-    disk and from the runner's own glob (`CLASSIFIED_TEST_GLOB`), so adding a
-    test file costs zero edits in this repository -- the same rule
-    `scripts/harness/selfhost.py`'s oracle lives by, and the reason the
-    committed `CLASSIFIED_PATHS`/`CLASSIFIED_TEST_COUNT` ledgers are gone.
+    Nothing here is declared. The expectation comes from disk and from the
+    runner's own glob (`CLASSIFIED_TEST_GLOB`), so adding a test file costs zero
+    edits, which is why the committed `CLASSIFIED_PATHS`/`CLASSIFIED_TEST_COUNT`
+    ledgers are gone.
 
-    Part of what a committed list bought is reproduced here from disk: the
-    class of files that silently never run at all, which no oracle can
-    reconcile because they never reach the runner:
+    What that recovers from disk is the class of files that never reach the
+    runner at all, which no oracle can reconcile:
 
     - a symlinked entry, which discovery refuses to follow;
-    - a file parked as `.mojo.disabled` or otherwise named so the runner's
-      glob skips it;
+    - a file parked as `.mojo.disabled`, or otherwise named so the glob skips
+      it;
     - a misnamed Mojo module (`session_shard_test.mojo`, `helper.mojo`) that
       looks like a suite to a reader and is invisible to the runner.
 
-    It is also fail-closed on emptiness: a classified root that holds no test
-    file at all is a finding, not a vacuous pass.
+    It is fail-closed on emptiness: a classified root holding no test file is a
+    finding rather than a vacuous pass.
 
-    Part of it is NOT reproduced, and cannot be. A committed path list and a
-    committed test count were the only artifacts that went red when a test
-    file or a test function was REMOVED from source. A bad merge that drops
-    `tests/unit/test_x.mojo`, or a `test_foo` renamed to `foo`, now leaves
-    disk, oracle and every gate in agreement -- so long as the file keeps at
-    least one test. That is the unavoidable price of the zero-ledger-edits
-    rule: the two properties are mutually exclusive, and this repository has
-    deliberately chosen the one that makes adding a test free.
-    `scripts/harness/selfhost.py`'s module docstring says the same thing about
-    its own oracle. Do not describe either as replacing the ledgers outright.
+    What it cannot recover is removal. A committed path list and test count were
+    the only artifacts that went red when a test file or function was DELETED
+    from source. A bad merge dropping `tests/unit/test_x.mojo`, or a `test_foo`
+    renamed to `foo`, now leaves disk, oracle and every gate in agreement, so
+    long as the file keeps at least one test. That is the price of the
+    zero-ledger-edits rule; the two properties are mutually exclusive.
+    `scripts/harness/selfhost.py`'s module docstring states the same limit for
+    its own oracle.
 
     Args:
         root: The repository root the classified suite directories live under.
@@ -300,15 +290,13 @@ def check_classified_roots_are_not_precompilable_packages(
 ) -> None:
     """Guard against packaging a classified root that still declares `main()`.
 
-    Two-part, cheapest-check-first: a structural pre-check names the exact
-    marker that reappeared without needing `mojo` on PATH at all; only once
-    that passes does this pay for the real `mojo precompile tests/`
-    invocation, which tests the actual property rather than a proxy for it.
-    That real invocation is cheap here -- measured under half a second on
-    this checkout -- because a marker-free `tests/unit` and
-    `tests/integration` mean the compiler never recurses into either as a
-    package; it only compiles the one-line `tests/__init__.mojo` docstring
-    module. See `FORBIDDEN_CLASSIFIED_PACKAGE_MARKERS` for why this matters.
+    Cheapest check first: a structural pre-check names the exact marker that
+    reappeared without needing `mojo` on PATH. Only once that passes does this
+    pay for a real `mojo precompile tests/`, which tests the property itself
+    rather than a proxy. That invocation stays cheap because marker-free
+    classified roots mean the compiler never recurses into either as a package
+    and only compiles the one-line `tests/__init__.mojo`. See
+    `FORBIDDEN_CLASSIFIED_PACKAGE_MARKERS`.
 
     Args:
         repo_root: Repository root `tests/` lives under.
@@ -401,13 +389,11 @@ def check_e2e_layout() -> None:
             f"missing={sorted(discovered - rows)}, stale={sorted(rows - discovered)}, "
             f"rows={len(rows)}"
         )
-    # Derived, and deliberately not a membership list. Registering a scenario
-    # is a one-line addition to `SCENARIOS` whose owning module is visible on
-    # the same line, so a restated roster here would cost an edit per scenario
-    # to re-prove what the diff already shows. What is NOT visible is a name
-    # collided with an existing one -- the banner would still count both while
-    # a reader assumes one name means one scenario -- and a registry that lost
-    # every entry, which would make the gate vacuously green.
+    # Derived rather than a restated roster: registering a scenario is a
+    # one-line addition to `SCENARIOS` with its owning module on the same line.
+    # What a diff does not show is a name colliding with an existing one, where
+    # the banner counts both while a reader assumes one name means one scenario,
+    # or a registry that lost every entry and went vacuously green.
     scenario_names = tuple(name for name, _function in e2e_main.SCENARIOS)
     if not scenario_names:
         raise AssertionError("the E2E scenario registry is empty")
@@ -428,11 +414,10 @@ def check_e2e_layout() -> None:
 def check_platform_task_overrides(repo_root: Path = REPO_ROOT) -> None:
     """No platform table may silently replace a base task's command.
 
-    This is a policy over an OPEN set, not a mirror of the manifest: it does
-    not restate any task's command, and adding a task costs no edit here. What
-    it bounds is the one manifest construct that changes what a named gate
-    RUNS without changing what anything calls it -- see
-    `PLATFORM_TASK_OVERRIDES` for the three-word attack this closes.
+    A policy over an OPEN set rather than a mirror of the manifest: no task's
+    command is restated here and adding a task costs no edit. What it bounds is
+    the one construct that changes what a named gate RUNS without changing what
+    anything calls it. See `PLATFORM_TASK_OVERRIDES` for the three-word attack.
 
     Four properties, each of which the attack has to defeat:
 
@@ -610,32 +595,29 @@ def _argv_direct_scripts(words: list[str]) -> list[str]:
 def direct_script_invocations(repo_root: Path = REPO_ROOT) -> tuple[str, ...]:
     """Return every by-path Python script command written into a tracked file.
 
-    The scanned set is whatever `git ls-files` reports, so it is derived
-    rather than declared: a new document, workflow or shell script is covered
-    the moment it is tracked, and untracked working notes or a linked worktree
-    holding another branch's checkout cannot make this read one file set on a
-    contributor's machine and a different one on CI.
+    The scanned set is whatever `git ls-files` reports, so a new document,
+    workflow or shell script is covered the moment it is tracked, and untracked
+    notes or a linked worktree cannot make this read one file set locally and a
+    different one on CI.
 
     Each line is read twice, because neither pass covers the other:
 
     - the raw-text pass (`DIRECT_SCRIPT_COMMAND_RE`) sees the prose form,
-      `python -u scripts/<name>.py`, on any line at all -- including the 4.3%
-      of tracked lines that are not lexable as a command because prose spells
-      an unpaired apostrophe;
-    - the word pass (`_argv_direct_scripts`) sees the argv form, which the
-      raw-text pass cannot match because the interpreter and the operand are
-      separated by quotes and a comma:
-      `subprocess.run([sys.executable, "scripts/<name>.py"])` and
-      `subprocess.run(["python", "scripts/<name>.py"])`. That form is what
-      Python tooling actually writes, and it is the one form that is not
-      merely copied by a reader but really executed.
+      `python -u scripts/<name>.py`, on any line, including the 4.3% of tracked
+      lines that are not lexable as a command because prose spells an unpaired
+      apostrophe;
+    - the word pass (`_argv_direct_scripts`) sees the argv form, where quotes
+      and a comma separate the interpreter from the operand:
+      `subprocess.run([sys.executable, "scripts/<name>.py"])`. That is the form
+      Python tooling writes, and the one that is really executed rather than
+      copied by a reader.
 
-    `python -m scripts.probe` matches neither, in either pass: `-m` ends the
-    word walk, and a dotted module name does not end in `.py`.
+    `python -m scripts.probe` matches neither pass: `-m` ends the word walk, and
+    a dotted module name does not end in `.py`.
 
-    Every example above spells the operand `scripts/<name>.py` on purpose.
-    Written literally it would be a finding against this file -- which the
-    scan demonstrated by reporting all six of them the first time it ran.
+    Every example above spells the operand `scripts/<name>.py` deliberately.
+    Written literally it would be a finding against this file, as the scan
+    demonstrated by reporting all six of them on its first run.
 
     Args:
         repo_root: Repository root whose tracked files are scanned.
@@ -764,8 +746,8 @@ def companion_source_files(repo_root: Path = REPO_ROOT) -> set[Path]:
     """Return the public assertion companion's source files, read from disk.
 
     Nothing is declared. Adding a module to the shipped companion has to cost
-    an edit in `recipe/build.sh` -- that is the install line the package needs
-    -- and in `scripts/release/public_verify.py`, which cannot derive; it must
+    an edit in `recipe/build.sh`, the install line the package needs, and in
+    `scripts/release/public_verify.py`, which cannot derive; it must
     not additionally cost an edit here, or this check would be pinning a list
     to a list instead of pinning what ships to what exists.
 
@@ -961,15 +943,14 @@ def check_vendored_toml_layout(repo_root: Path = REPO_ROOT) -> None:
         raise AssertionError(
             "production build does not compile and link the vendored TOML package"
         )
-    # Exactly two precompiles, counted at the INVOCATION rather than anywhere
-    # the words appear: the script discusses `mojo precompile` in prose several
-    # times, and a bare substring count would read those comments as build
-    # steps. Both spellings the script has used are accepted -- a bare command
-    # line, and the `NAME=(mojo precompile ...)` argv array the stamped stage
-    # holds its two vectors in -- because which one is in force is a detail of
-    # how the stage is written, while "exactly two packages get precompiled" is
-    # the claim this gate exists to make. Anchoring to one spelling is what let
-    # this check silently count zero after the arrays landed.
+    # Exactly two precompiles, counted at the INVOCATION rather than wherever
+    # the words appear: the script discusses `mojo precompile` in prose, and a
+    # substring count would read those comments as build steps. Both spellings
+    # the script has used are accepted, a bare command line and the
+    # `NAME=(mojo precompile ...)` argv array, because the claim being made is
+    # "exactly two packages get precompiled" rather than how the stage is
+    # written. Anchoring to one spelling let this check silently count zero
+    # after the arrays landed.
     precompiles = re.findall(
         r"(?m)^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\()?mojo precompile\b", build_source
     )

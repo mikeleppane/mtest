@@ -30,35 +30,32 @@ if TYPE_CHECKING:
     _SignalHandler = Callable[[int, FrameType | None], object] | int | None
 
 
-# The per-step wall-clock DEFAULT. It bounds a single classified build or run so
-# a hang is terminated rather than stalling CI. The integration aggregate compiles
-# and runs many worker-pool files in one binary; on a slow, contended CI host that
-# legitimate run needs well over five minutes, so the default sits at fifteen to
-# leave headroom above the real workload while still catching a genuine hang.
+# The per-step wall-clock DEFAULT, bounding a single classified build or run so a
+# hang is terminated rather than stalling CI. The integration aggregate compiles
+# and runs many worker-pool files in one binary, and on a slow contended CI host
+# that legitimate run needs well over five minutes, so the default leaves
+# headroom above the real workload while still catching a genuine hang.
 DEFAULT_TIMEOUT_SECONDS = 900.0
 
-# The largest ceiling a caller may ASK FOR. This is a separate question from the
-# default above, and conflating the two was a real constraint: until this split,
-# `DEFAULT_TIMEOUT_SECONDS` served as both, so no caller could request more than
-# fifteen minutes however well justified.
+# The largest ceiling a caller may ASK FOR, a separate question from the default
+# above. While one constant served as both, no caller could request more however
+# well justified.
 #
 # The self-hosted lane (`scripts/harness/selfhost.py`) compiles and runs 101 test
-# files through the real binary, and it is what forced the question. Measured on
-# one 32-core host: ~134s warm and ~136s cold — the compiler cache barely matters
-# at sixteen workers because compilation hides under the ~69s critical path of
-# the slowest integration file. Pinned to four cores with both caches cleared,
-# the same run was still going at 600s with 13 of 101 files outstanding. So the
-# realistic slow-host figure is minutes away from the old 900s limit, and a
-# merely-slow hosted runner would have reported a false timeout — which reads
+# files through the real binary, which is what forced the split. Measured on one
+# 32-core host: ~134s warm and ~136s cold, the compiler cache barely mattering at
+# sixteen workers because compilation hides under the ~69s critical path of the
+# slowest integration file. Pinned to four cores with both caches cleared, the
+# same run was still going at 600s with 13 of 101 files outstanding. The
+# realistic slow-host figure therefore sits close to the old 900s limit, and a
+# merely slow hosted runner would have reported a false timeout, which reads
 # exactly like the scheduler hang that lane exists to detect.
 #
-# This is a widened guard, not a removed one. Its job is to stop a typo or a
-# mis-parsed environment variable from making supervision meaningless, and an
-# hour still bounds every process group: a wedged run cannot outlive it, and
-# nan/inf/negative/zero are still rejected before spawn. Nothing that existed
-# before this split changed its own timeout — every caller either passes an
-# explicit value below the old limit or takes `DEFAULT_TIMEOUT_SECONDS`, which is
-# unchanged. Widening the accepted RANGE is the entire behavioral difference.
+# This is a widened guard rather than a removed one. It stops a typo or a
+# mis-parsed environment variable from making supervision meaningless, and it
+# still bounds every process group: a wedged run cannot outlive it, and
+# nan/inf/negative/zero are still rejected before spawn. No existing caller
+# changed its own timeout; widening the accepted RANGE is the whole difference.
 MAX_TIMEOUT_SECONDS = 3600.0
 DEFAULT_CAPTURE_LIMIT_BYTES = 1024 * 1024
 CAPTURE_TRUNCATION_MARKER = "\n[mtest-check: output truncated]\n"
@@ -194,8 +191,8 @@ class _BoundedTextCapture:
 class MarkerRetention:
     """Bounded retention of one marker line drained from a child's stdout.
 
-    The watchdog keeps at most a single line — the last complete one beginning
-    with `prefix` — so supervising a child that floods its stdout costs a fixed
+    The watchdog keeps at most a single line, the last complete one beginning
+    with `prefix`, so supervising a child that floods its stdout costs a fixed
     amount of memory rather than growing with the output. `freeze` closes the
     capture, so a drainer that outlives the supervisor's return cannot overwrite
     the marker under the caller's read of `text`.
@@ -256,8 +253,8 @@ class _StreamTee:
     """Forward drained child bytes to one caller stream until it is sealed.
 
     Owns the only writer to that stream for the child's lifetime. A write to a
-    caller stream can block indefinitely — a pipe whose consumer stopped
-    reading, a terminal under flow control — so sealing must not be expressed as
+    caller stream can block indefinitely (a pipe whose consumer stopped reading,
+    a terminal under flow control), so sealing must not be expressed as
     an unbounded wait for the writing drainer. `seal` therefore refuses further
     writes immediately and only *bounds* how long it waits out a write already
     in flight.
@@ -270,16 +267,15 @@ class _StreamTee:
             stream: The caller's original `sys.stdout` or `sys.stderr`, or None
                 when the interpreter has none.
         """
-        # The caller's stream is duck-typed on purpose: under a redirect
-        # `sys.stdout` is any object with `write`. These casts record the shape
-        # production always has without adding a runtime check.
+        # The caller's stream is duck-typed: under a redirect `sys.stdout` is
+        # any object with `write`. These casts record the shape production
+        # always has without adding a runtime check.
         #
-        # Note what is NOT covered: the binary arm in `write` catches OSError and
-        # ValueError only, so a `.buffer` exposing `write` but not `flush` raises
-        # AttributeError out of the drainer thread. Every stream this repo passes
-        # (`sys.stdout`, `io.StringIO`, `_TextOverBytes`) either has `flush` or
-        # has no `.buffer` at all, so the text arm handles it. The gap is real
-        # but pre-existing; do not read these casts as closing it.
+        # They do not close this gap: the binary arm in `write` catches OSError
+        # and ValueError only, so a `.buffer` exposing `write` but not `flush`
+        # raises AttributeError out of the drainer thread. Every stream this
+        # repo passes (`sys.stdout`, `io.StringIO`, `_TextOverBytes`) either has
+        # `flush` or has no `.buffer` at all, so the text arm handles it.
         self._binary = cast("IO[bytes] | None", getattr(stream, "buffer", None))
         self._text = cast(
             "IO[str] | None",
@@ -317,8 +313,8 @@ class _StreamTee:
                     self._binary = None
                 return
             if self._text is not None:
-                # A caller stream without a byte buffer — a redirected StringIO,
-                # say — still receives the bytes rather than losing them.
+                # A caller stream without a byte buffer, a redirected StringIO
+                # say, still receives the bytes rather than losing them.
                 try:
                     self._text.write(chunk.decode("utf-8", errors="replace"))
                     self._text.flush()
@@ -522,11 +518,11 @@ def _await_drainer_eof(state: _DrainState | None) -> bool:
 def _settle_drainers(state: _DrainState | None) -> None:
     """Finish the drain within a fixed budget, then seal both caller streams.
 
-    Waits only briefly for a natural end of file: once the child is reaped its
-    buffered bytes are already in the pipe, so a longer wait would only be
-    waiting on a leaked descendant's future output, which this supervisor does
-    not owe the caller. Idempotent, so a cancellation that interrupts one call
-    is fully settled by the next.
+    Waits only briefly for a natural end of file. Once the child is reaped its
+    buffered bytes are already in the pipe, so a longer wait would only await a
+    leaked descendant's future output, which this supervisor does not owe the
+    caller. Idempotent, so a cancellation interrupting one call is settled by
+    the next.
 
     Args:
         state: The live drainers, or None when the child was not captured.
@@ -541,18 +537,16 @@ def _seal_drainers(state: _DrainState | None) -> None:
     Bounded by construction: the stop flag and the marker freeze never wait on
     I/O, and each tee's seal waits at most `SEAL_ACQUIRE_SECONDS` for a write
     already in flight. A drainer parked in a write to a stalled consumer is
-    never *waited on*, because no path through `run_command` may become
-    unkillable — but it is no longer simply forgotten either. A seal that could
-    not take the lock means exactly that, and this function then closes the
-    child pipe that drainer owns, so the thread ends the moment its in-flight
-    write returns instead of parking forever on a descriptor nobody will read
-    again. Without that, every such call leaked one thread and one descriptor,
-    and a caller invoking `run_command` in a loop exhausted both.
+    never waited on, since no path through `run_command` may become unkillable.
+    A seal that could not take the lock means exactly that, so this closes the
+    child pipe that drainer owns and the thread ends the moment its in-flight
+    write returns. Without that close, every such call leaked one thread and one
+    descriptor, and a caller invoking `run_command` in a loop exhausted both.
 
-    The close is safe against the drainer's own use of the pipe: the tee is
-    sealed first, so any bytes a racing read produces are dropped anyway, and
-    `_tee_stream` treats a failing read as end of stream and returns through
-    its own `finally`, where a second close is tolerated.
+    The close is safe against the drainer's own use of the pipe. The tee is
+    sealed first, so bytes from a racing read are dropped anyway, and
+    `_tee_stream` treats a failing read as end of stream and returns through its
+    own `finally`, where a second close is tolerated.
 
     Idempotent.
 
@@ -569,14 +563,13 @@ def _seal_drainers(state: _DrainState | None) -> None:
         # semantic callers must know that and fail closed.
         state.retention.mark_capture_incomplete()
     state.stop.set()
-    # Freeze BEFORE sealing the tees, not after. A drainer already past its
-    # stop check reads one more chunk; sealing first means that chunk's bytes
-    # are dropped from the tee while its marker is still recorded, so the
-    # reported last module names a line the user never saw. Freezing first
-    # keeps the two consistent, and costs nothing on the normal path, where
-    # the drainers have hit EOF and been joined before this runs. Ordering
-    # matters most when a tee's seal blocks: freeze would otherwise wait out
-    # SEAL_ACQUIRE_SECONDS behind it, widening the window it is closing.
+    # Freeze BEFORE sealing the tees. A drainer already past its stop check
+    # reads one more chunk, so sealing first drops that chunk's bytes from the
+    # tee while still recording its marker, and the reported last module names a
+    # line the user never saw. Freezing first keeps the two consistent and costs
+    # nothing on the normal path, where the drainers have hit EOF and been
+    # joined already. The order matters most when a tee's seal blocks, since
+    # freeze would otherwise wait out SEAL_ACQUIRE_SECONDS behind it.
     if state.retention is not None:
         state.retention.freeze()
     for index, tee in enumerate(state.tees):
@@ -601,20 +594,19 @@ def _signal_group(pid: int, signum: int) -> bool:
     `ESRCH` is the portable "no such group". Darwin adds a second spelling for
     the same fact: `killpg` reports `EPERM` when every remaining member is a
     zombie, because a zombie can no longer be sent a signal. This supervisor
-    created the group and owns every member, so `EPERM` cannot mean a
-    permission boundary here — a caller that may not signal its own children
-    could not have spawned them. Treating it as a hard error let a Ctrl-C that
-    raced the child's exit replace a truthful `Cancelled` or `Signaled` with a
-    `HarnessError`, so the classified harness returned internal exit 70 for a
-    run that had in fact been cancelled cleanly.
+    created the group and owns every member, so `EPERM` cannot mean a permission
+    boundary here. Treating it as a hard error let a Ctrl-C racing the child's
+    exit replace a truthful `Cancelled` or `Signaled` with a `HarnessError`, and
+    the classified harness then returned internal exit 70 for a run that had
+    been cancelled cleanly.
 
     Args:
         pid: The group leader's pid, which is also the process-group id.
         signum: The signal to send, or `0` to probe for the group's existence.
 
     Returns:
-        True when the signal was delivered, False when the group is gone —
-        either fully reaped or, on Darwin, zombie-only.
+        True when the signal was delivered, False when the group is gone, either
+        fully reaped or, on Darwin, zombie-only.
     """
     try:
         os.killpg(pid, signum)
@@ -1049,8 +1041,8 @@ def run_command(
         # Restore the caller's dispositions before the backstop seal. A managed
         # handler that outlived its `try` would raise `_WatchdogCancellation`
         # from a `finally` with no arm left to catch it, so nothing may run here
-        # under one. The seal below is bounded, not instantaneous — it can wait
-        # up to `SEAL_ACQUIRE_SECONDS` per stream on a write already in flight —
+        # under one. The seal below is bounded rather than instantaneous: it
+        # can wait up to `SEAL_ACQUIRE_SECONDS` per stream on an in-flight write,
         # but with the caller's own dispositions back in force that wait stays
         # interruptible, and a signal during it terminates as the caller asked.
         for signum, handler in previous_handlers.items():

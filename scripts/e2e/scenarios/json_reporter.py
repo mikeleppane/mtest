@@ -43,9 +43,8 @@ def _looks_like_stream_line(line: str) -> bool:
 def _strict_parse(text: str, what: str) -> json_stream_check.StreamReport:
     """Consume `text` through the strict oracle, or fail naming `what`.
 
-    The oracle raises `StreamError`, which is not the harness's failure channel;
-    a rejection has to arrive as a scenario failure that says which artifact was
-    rejected and why.
+    The oracle raises `StreamError`, which is not the harness's failure channel,
+    so a rejection is re-raised as a scenario failure naming the artifact.
 
     Args:
         text: The NDJSON stream to consume.
@@ -66,8 +65,8 @@ def _strict_parse(text: str, what: str) -> json_stream_check.StreamReport:
 def _expect_strict_rejection(line: str, header: str, what: str) -> None:
     """Assert the strict consumer rejects a forged variant of a real record.
 
-    The forgery is derived from the run's OWN record, so this proves strictness
-    against the stream under test rather than against a synthetic fixture.
+    The forgery is derived from the run's OWN record, so strictness is proved
+    against the stream under test rather than a synthetic fixture.
 
     Args:
         line: The forged record line, without its terminator.
@@ -96,10 +95,9 @@ def assert_hostile_json_stream(
     Every value asserted here is predicted from the actor's own payload and the
     documented bounds, never read back from the artifact under test: the whole
     captured value, the retained and omitted byte counts, and the per-test
-    detail. The stream's contract is JSON escaping, not terminal escaping, so
-    the controls the console renders as visible text are asserted to survive
-    here as real control characters — a reporter that quietly adopted the
-    console's mapping would fail this, not pass it.
+    detail. The stream's contract is JSON escaping, so the controls the console
+    renders as visible text must survive here as real control characters, and a
+    reporter that adopted the console's mapping fails on that.
 
     Args:
         run: The completed run, for diagnostics on a missing artifact.
@@ -285,8 +283,8 @@ def _record_line(text: str, prefix: str) -> str:
 def _expect_same_text(actual: object, expected: str, what: str) -> None:
     """Assert one whole field equals its predicted value, reporting where not.
 
-    The values are up to 128 KiB, so a plain equality failure would be unusable;
-    this reports the first differing offset with a window either side.
+    The values run to 128 KiB, so a plain equality failure would be unusable.
+    This reports the first differing offset with a window either side.
 
     Args:
         actual: The value read from the artifact.
@@ -315,16 +313,16 @@ def _expect_same_text(actual: object, expected: str, what: str) -> None:
 
 
 # This scenario drives the strict consumer's own fixtures, so it never reads
-# `context` — but the parameter cannot be renamed: `scripts/tests/test_e2e.py`
+# `context`. The parameter cannot be renamed: `scripts/tests/test_e2e.py`
 # asserts every registered scenario takes exactly one parameter, spelled
 # `context`.
 def s_json_forward_compat(context: ScenarioContext) -> str:  # noqa: ARG001
     """The strict consumer is the ORACLE, and it honors ignore-unknowns.
 
     A forward-compat fixture with unknown fields AND an unknown event kind is
-    ACCEPTED, a torn tail is classified as truncation (not corruption), and a
-    corrupt committed line / duplicate key / non-finite token is REJECTED. Runs
-    the consumer's own fixture self-test so the versioning contract is gated.
+    ACCEPTED, a torn tail is classified as truncation, and a corrupt committed
+    line, duplicate key, or non-finite token is REJECTED. Runs the consumer's own
+    fixture self-test so the versioning contract is gated.
     """
     rc = json_stream_check.main(["json_stream_check.py"])
     expect(rc == 0, "the strict-consumer fixture self-test failed")
@@ -345,8 +343,8 @@ def s_json_purity(context: ScenarioContext) -> str:
 
     The whole console relocates to stderr. Every stdout byte is a stream line the
     strict consumer accepts (header first, exactly one terminal, exit_code == the
-    real exit); the human summary band lives on stderr, and NOT one stream line
-    leaks to stderr nor one console byte to stdout.
+    real exit), the human summary band lives on stderr, and neither stream lines
+    nor console bytes cross over.
     """
     run = context.runner.run_mtest(
         ["e2e/suite", "--json", "-", "--gh-annotations", "off"]
@@ -399,11 +397,10 @@ def s_json_color_on_relocated_stderr(context: ScenarioContext) -> str:
         env_overrides={"NO_COLOR": None, "GITHUB_ACTIONS": ""},
         timeout=SHORT_TIMEOUT,
     )
-    # The exit code first, and it is not incidental. Colour presence alone is
-    # satisfied by a run that died early after painting one banner: the ANSI is
-    # on stderr, the stream header parses, and the scenario would report a pass
-    # for a run that never reached a verdict. test_failing.mojo is a
-    # known-outcome fixture, so exit 1 is part of what this case asserts.
+    # The exit code first. Color presence alone is satisfied by a run that died
+    # early after painting one banner: the ANSI is on stderr, the stream header
+    # parses, and the scenario would pass for a run that never reached a verdict.
+    # test_failing.mojo is a known-outcome fixture, so exit 1 is asserted too.
     expect(
         returncode == 1,
         f"expected exit 1 from the known-failing fixture, got {returncode}; "
@@ -503,13 +500,13 @@ def s_json_truncation_interrupt(context: ScenarioContext) -> str:
 def s_json_truncation_sigkill(context: ScenarioContext) -> str:
     """Truncation trio (2/3): a SIGKILLed mtest leaves NO terminal record.
 
-    It leaves COMPLETE lines and at most one torn tail — never corruption. The
-    absence of the terminal is the truncation signal.
+    It leaves COMPLETE lines and at most one torn tail. The absence of the
+    terminal is the truncation signal.
 
-    SIGKILL is the one signal mtest cannot answer, so it is also the one case
-    where the harness owns the cleanup: the blocked child records its real PGID
-    before announcing readiness, and the runner tears that orphaned group down —
-    after the torn stream is already on disk — and proves it gone.
+    SIGKILL is the one signal mtest cannot answer, so the harness owns the
+    cleanup: the blocked child records its real PGID before announcing
+    readiness, and the runner tears that orphaned group down once the torn
+    stream is on disk, then proves it gone.
     """
     with tempfile.TemporaryDirectory(prefix="mtest-json-sigkill-") as raw:
         tmp = Path(raw)
@@ -538,9 +535,9 @@ def s_json_truncation_dead_pipe(context: ScenarioContext) -> str:
     """Truncation trio (3/3): a consumer that closes the pipe early.
 
     `mtest --json - | head`. SIGPIPE is ignored, so the reporter's write returns
-    EPIPE and latches a FATAL ABORT: mtest neither dies at 141 nor runs to
-    completion — it exits 3, with no orphaned children. What the reader DID get
-    is complete lines plus at most one torn tail.
+    EPIPE and latches a FATAL ABORT: mtest exits 3 with no orphaned children,
+    neither dying at 141 nor running to completion. What the reader DID get is
+    complete lines plus at most one torn tail.
     """
     returncode, got, pgid = context.runner.run_mtest_dead_pipe(
         ["e2e/suite", "--json", "-", "--gh-annotations", "off"],
@@ -648,11 +645,11 @@ def _build_json_terminal_write_fault(
 def s_json_terminal_write_failure(context: ScenarioContext) -> str:
     """A deterministic terminal-record write failure escalates clean 0 to 3.
 
-    A test-only dynamic-library interposer rejects only the real CLI's write
-    containing the exact `session_finished` event marker. Every earlier write
-    reaches a normal file destination, so the stream proves a clean PASS through
-    `file_finished`, then loses only its terminal record. The process exit is the
-    out-of-band truth for that final delivery failure.
+    A test-only dynamic-library interposer rejects only the write carrying the
+    exact `session_finished` event marker. Every earlier write reaches a normal
+    file destination, so the stream proves a clean PASS through `file_finished`
+    and then loses only its terminal record, leaving the process exit as the
+    out-of-band truth for that delivery failure.
     """
     rel = "e2e/suite/test_passing.mojo"
     with tempfile.TemporaryDirectory(prefix="mtest-json-terminal-fault-") as tmp:

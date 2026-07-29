@@ -1,17 +1,14 @@
 """Build-artifact cache E2E scenarios.
 
-The cache is the one feature whose whole claim is about the SECOND invocation,
-so it can only be settled by two real processes over one tree. Every other gate
-in this repository either drives the store directly from inside one process
-(the Mojo suites) or drives the publication protocol with the store as its
-subject (`scripts/tests/test_cache_protocol.py`). What neither can show is the
-thing a user is promised: run the suite, run it again, and get the same verdicts
-for none of the compile cost.
+The cache's claim is about the SECOND invocation, so only two real processes
+over one tree can settle it: run the suite, run it again, get the same verdicts
+for none of the compile cost. The Mojo suites and
+`scripts/tests/test_cache_protocol.py` both drive the store from inside a single
+process, so neither can show that.
 
-These scenarios run in a throwaway project of their own, never the repository
-root. The store lives under the invocation root, so a scenario that ran here
-would inherit whatever warmth the previous gate left behind and could never
-observe a cold run at all.
+These scenarios run in a throwaway project of their own. The store lives under
+the invocation root, so a scenario run from the repository root would inherit
+whatever warmth the previous gate left behind and never observe a cold run.
 """
 
 from __future__ import annotations
@@ -67,16 +64,15 @@ TREE = {
 }
 """A two-file project with a failing test in it.
 
-The failure is load-bearing. A cache that served a stale or foreign binary would
-most plausibly show up as a run whose verdicts moved, and an all-passing tree has
-only one verdict to move away from; a tree that must report exactly one failing
-test both times pins the counts in both directions.
+The failure is load-bearing: a cache serving a stale or foreign binary shows up
+as a run whose verdicts moved, and an all-passing tree has only one verdict to
+move away from. Requiring exactly one failing test both times pins the counts in
+both directions.
 
-Nothing here imports anything but the standard library, so the project needs no
-`-I` and no precompile step. That is deliberate: `mojo precompile` is not
-byte-deterministic, so a step that re-ran between the two invocations would
-rewrite its package, move the key every file derives from, and cost the warm run
-every hit through no fault of the store.
+Nothing here imports outside the standard library, so the project needs no `-I`
+and no precompile step. `mojo precompile` is not byte-deterministic, so a step
+re-run between the two invocations would rewrite its package, move the key every
+file derives from, and cost the warm run every hit through no fault of the store.
 """
 
 
@@ -91,7 +87,7 @@ def _accounting(run: Run) -> tuple[int, int]:
 
     Raises:
         ScenarioError: If the band carries no build-cache pair, which is what a
-            run that admitted nothing at all renders.
+            run that admitted nothing renders.
     """
     match = ACCOUNTING_RE.search(run.combined)
     expect(
@@ -133,12 +129,11 @@ def _verdicts(run: Run) -> Summary:
 def s_cache_cold_then_warm(context: ScenarioContext) -> str:
     """A rerun over an untouched tree compiles nothing and reports the same.
 
-    The product claim, end to end through the real binary: the second invocation
-    of an unchanged suite reaches the compiler zero times, and every verdict it
-    reports is the one the first invocation reported. The two halves have to be
-    asserted together — a run that skipped the compiler AND changed a verdict
-    would be the cache's worst failure mode, and a run that reproduced the
-    verdicts by rebuilding everything would be the feature not working at all.
+    The second invocation of an unchanged suite reaches the compiler zero times,
+    and every verdict it reports is the one the first invocation reported. Both
+    halves are asserted together: skipping the compiler while changing a verdict
+    is the cache's worst failure mode, and reproducing the verdicts by rebuilding
+    everything is the feature not working.
     """
     with tempfile.TemporaryDirectory(prefix="mtest-cache-warm-") as raw:
         project = Path(raw)
@@ -186,8 +181,8 @@ def s_cache_cold_then_warm(context: ScenarioContext) -> str:
             f"the warm stream disagrees with its band: {_counters(warm_stream)}",
         )
 
-        # And the verdicts did not move. Timing and the accounting pair are the
-        # only things a warm run is allowed to change.
+        # Timing and the accounting pair are the only things a warm run may
+        # change; the verdicts must not move.
         cold_summary = _verdicts(cold)
         warm_summary = _verdicts(warm)
         for field in (

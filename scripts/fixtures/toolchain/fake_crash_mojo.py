@@ -1,40 +1,35 @@
 #!/usr/bin/env python3
-"""Crashing-compiler `--mojo` stand-in — drives the compiler crash-retry paths.
+"""Crashing-compiler `--mojo` stand-in for the compiler crash-retry paths.
 
-Stands in for the real `mojo` binary the same way the adjacent
-`logging_mojo.py` and `fake_slow_mojo.py` do. It routes every child mtest
-spawns through this script first and splits by
-subcommand:
+Stands in for the real `mojo` binary the way the adjacent `logging_mojo.py` and
+`fake_slow_mojo.py` do, routing every child mtest spawns through this script
+first and splitting by subcommand:
 
-* `precompile` — TRUNCATES its `-o` output path, prints a compiler-crash banner to
-  stderr, and then DIES BY SIGSEGV, the way a real compiler ICE ends. That is the
-  crash class `--retries` exists for: mtest must retry it (quarantined, on a fresh
-  temp path) and, when the budget runs out, report PRECOMPILE-ERROR naming the
-  signal in words. It leaves a half-written package behind at `-o`, exactly as a
-  compiler killed mid-write would — so a pre-existing OUT survives ONLY if mtest
-  never pointed the compiler at OUT in the first place.
-* `build`, and ONLY when `MTEST_FAKE_BUILD_CRASH` is set — fails the build by
-  EXITING NONZERO (never by a signal), with stderr chosen by the variable:
-    - `signature` — an LLVM/Mojo ICE banner ("PLEASE submit a bug report ...",
-      "Stack dump:", a stack frame). A compiler that crashed but still managed to
-      exit under its own control: crash-class, so mtest must retry it.
-    - `plain`     — an ordinary diagnostic, no banner. Deterministic: mtest must
-      NOT retry it.
-  The two modes are byte-for-byte identical in every observable except the stderr
-  TEXT: same argv, same exit status, no `-o` written either way. That is what
-  makes the pair a proof that the crash-signature scan — and not merely "the build
-  exited nonzero" — is what decides retry eligibility.
-* anything else (an unkeyed `build`, `--version`, ...) — EXECS the real `mojo`
+* `precompile`: truncates its `-o` output path, prints a compiler-crash banner to
+  stderr, then dies by SIGSEGV, the way a real compiler ICE ends. That is the
+  crash class `--retries` exists for: mtest must retry it (quarantined, on a
+  fresh temp path) and, when the budget runs out, report PRECOMPILE-ERROR naming
+  the signal in words. The half-written package left at `-o` means a pre-existing
+  OUT survives only if mtest never pointed the compiler at OUT.
+* `build`, only when `MTEST_FAKE_BUILD_CRASH` is set: fails the build by exiting
+  nonzero (never by a signal), with stderr chosen by the variable:
+    - `signature`: an LLVM/Mojo ICE banner ("PLEASE submit a bug report ...",
+      "Stack dump:", a stack frame). A compiler that crashed but still exited
+      under its own control, so crash-class and retryable.
+    - `plain`: an ordinary diagnostic, no banner. Deterministic, so mtest must
+      not retry it.
+  The two modes differ only in the stderr text (same argv, same exit status, no
+  `-o` either way), so the pair proves that the crash-signature scan, rather than
+  the nonzero exit alone, decides retry eligibility.
+* anything else (an unkeyed `build`, `--version`, ...): execs the real `mojo`
   found on PATH with the untouched argv, so this wrapper stays a transparent
   stand-in outside the paths it exists to fail on. The precompile scenarios rely
-  on that: they leave `MTEST_FAKE_BUILD_CRASH` unset and get real builds.
+  on that, leaving `MTEST_FAKE_BUILD_CRASH` unset to get real builds.
 
-Dying by a real signal on `precompile` (rather than exiting nonzero) keeps that
-fixture honest: the supervisor must observe a SIGNALED termination, not a status
-this script chose. Both endings are instant, so the e2e stays fast.
+Dying by a real signal on `precompile` keeps that fixture honest: the supervisor
+must observe a SIGNALED termination rather than a status this script chose.
 
-Stdlib only, no third-party imports — this is build-time harness code, not part
-of the pure-Mojo product.
+Stdlib only: this is build-time harness code, outside the pure-Mojo product.
 """
 
 from __future__ import annotations
@@ -48,8 +43,8 @@ import sys
 BUILD_CRASH_ENV_VAR = "MTEST_FAKE_BUILD_CRASH"
 
 # The two stderr texts of the discriminating pair. Everything else about the two
-# modes is identical, so the ONLY input that can move the retry decision is this
-# text. `signature` carries the markers `has_crash_signature` pins (the ICE
+# modes is identical, so this text is the only input that can move the retry
+# decision. `signature` carries the markers `has_crash_signature` pins (the ICE
 # banner, a `Stack dump` header, a symbol-less frame); `plain` carries a mundane
 # compile diagnostic that must never look like a crash.
 BUILD_CRASH_STDERR = {
@@ -83,26 +78,25 @@ def _clobber_output(args: list[str]) -> None:
 
 
 def _crash_precompile(args: list[str]) -> int:
-    # Own the output path first: the damage a real compiler would do is the whole
-    # reason the promotion contract exists.
+    # Own the output path first: the damage a real compiler would do is why the
+    # promotion contract exists.
     _clobber_output(args)
-    # Emit BEFORE dying and flush: the bytes must be in mtest's capture pipe
+    # Emit before dying, and flush: the bytes must be in mtest's capture pipe
     # when the process disappears, so the banner can render them verbatim.
     sys.stderr.write("fake_crash_mojo.py: precompile: lowering module\n")
     sys.stderr.write("PLEASE submit a bug report to https://example.invalid/\n")
     sys.stderr.flush()
-    # Die by a real signal — the supervisor must see SIGNALED, not a chosen exit.
+    # Die by a real signal: the supervisor must see SIGNALED, not a chosen exit.
     os.kill(os.getpid(), signal.SIGSEGV)
     signal.pause()
     return 1  # unreachable: the SIGSEGV above never returns
 
 
 def _fail_build_nonzero(mode: str) -> int:
-    """Fail `build` by a chosen NONZERO EXIT, with the mode's stderr text.
+    """Fail `build` by a chosen nonzero exit, with the mode's stderr text.
 
-    No signal, and no `-o` written: a compile that produced no binary and told
-    the world about it on stderr. The retry decision therefore rests on the
-    stderr text alone.
+    No signal and no `-o` written: a compile that produced no binary and said so
+    on stderr, leaving the retry decision to rest on the stderr text alone.
     """
     text = BUILD_CRASH_STDERR.get(mode)
     if text is None:
@@ -143,9 +137,8 @@ def main() -> int:
         return 127
 
     os.execv(real_mojo, [real_mojo, *args])
-    # Kept as defence in depth: typeshed types os.execv as NoReturn, so mypy
-    # sees this as dead. Deleting it would remove the fallback if that ever
-    # changes.
+    # typeshed types os.execv as NoReturn, so mypy sees this as dead. Kept as
+    # the fallback if that ever changes.
     return 1  # type: ignore[unreachable]
 
 

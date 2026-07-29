@@ -40,22 +40,22 @@ STATE_PERSISTENCE_FAULT = os.path.join(
     REPO_ROOT, "tests", "native", "e2e_state_persistence_fault.c"
 )
 
-# These are guards, not performance thresholds. Cold `mojo build` is slow.
+# Hang guards, sized for a cold `mojo build`.
 DEFAULT_TIMEOUT = 180.0
 SHORT_TIMEOUT = 30.0
 BUILD_BIN_TIMEOUT = 600.0
 
-# How often a readiness or liveness barrier re-checks. Small enough that the
-# harness reacts inside the supervisor's 300 ms run-step grace, large enough not
-# to spin a core while a cold `mojo build` runs.
+# How often a readiness or liveness barrier re-checks: fast enough to react
+# inside the supervisor's 300 ms run-step grace, slow enough not to spin a core
+# during a cold `mojo build`.
 BARRIER_POLL_SECONDS = 0.005
-# How long a process group may take to disappear once the process that owned it
-# has exited and been reaped. This is a hard-failing deadline, never a tolerance:
-# a group still alive when it expires is a surviving-child defect.
+# How long a process group may take to disappear once its owner has exited and
+# been reaped. A hard-failing deadline: a group still alive when it expires is a
+# surviving-child defect.
 GROUP_EXIT_DEADLINE = 5.0
-# How long the harness's own cleanup waits on the polite signal before escalating.
-# Short on purpose: the actors this sweeps either die at once or refuse SIGTERM
-# outright, so a longer wait would only tax the scenarios that refuse it.
+# How long the harness's own cleanup waits on the polite signal before
+# escalating. The actors it sweeps either die at once or refuse SIGTERM
+# outright, so a longer wait would only tax the ones that refuse it.
 GROUP_TERM_SECONDS = 0.3
 
 
@@ -108,10 +108,9 @@ def expect_group_gone(pgid: int, what: str) -> None:
 def limit_nofile(soft: int) -> Callable[[], None]:
     """A POSIX `preexec_fn` that lowers only the CHILD's descriptor soft limit.
 
-    `preexec_fn` runs after the fork and before the exec, so the new soft limit
-    belongs to the spawned process alone: this harness keeps its own limit, and
-    nothing else on the host is perturbed. The hard limit is carried through
-    unchanged, so the call only ever lowers a ceiling it is allowed to lower.
+    `preexec_fn` runs between the fork and the exec, so the new soft limit
+    belongs to the spawned process alone and this harness keeps its own. The
+    hard limit is carried through unchanged.
 
     Args:
         soft: The soft `RLIMIT_NOFILE` the child runs under.
@@ -121,8 +120,7 @@ def limit_nofile(soft: int) -> Callable[[], None]:
     """
 
     def apply() -> None:
-        # Deliberately function-local: this runs in the forked child, so the
-        # import belongs to the child's `preexec_fn`, not to module scope.
+        # Function-local because this runs in the forked child.
         import resource  # noqa: PLC0415
 
         _old_soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -144,9 +142,8 @@ class Run:
     second_signal_wall: float | None = None
     """Seconds from the second signal to the process's exit, when one was sent.
 
-    The interval a hard-termination contract is measured against: a run that
-    waited out a per-slot grace instead of being killed at once shows up here as
-    that whole grace. None when the run took only one signal.
+    A run that waited out a per-slot grace instead of being killed at once shows
+    up here as that whole grace. None when the run took only one signal.
     """
 
     @property
@@ -183,9 +180,8 @@ class E2ERunner:
             env_overrides: Environment entries layered onto the child's env.
             fd_limit: A soft `RLIMIT_NOFILE` imposed on the CHILD ONLY, so a
                 scenario can drive mtest's descriptor arithmetic against a real
-                kernel limit rather than a mocked one. Absent by default: the
-                run inherits this harness's own limit and behaves exactly as
-                every other scenario's does.
+                kernel limit. Absent by default, leaving the run on this
+                harness's own limit.
 
         Returns:
             The captured run.
@@ -206,9 +202,9 @@ class E2ERunner:
             child_env.update(env_overrides)
         wall_limit = self.default_timeout if timeout is None else timeout
         start = time.monotonic()
-        # `preexec_fn` is load-bearing: a CHILD-ONLY descriptor limit can only
-        # be set between the fork and the exec, and this harness is not
-        # threaded, so the rule's thread caveat does not apply.
+        # A CHILD-ONLY descriptor limit can only be set between the fork and the
+        # exec. This harness is not threaded, so `preexec_fn`'s thread caveat
+        # does not apply.
         preexec = None if fd_limit is None else limit_nofile(fd_limit)
         proc = subprocess.Popen(
             argv,
@@ -329,9 +325,9 @@ class E2ERunner:
         """Signal a live mtest process, capture it, and enforce one deadline.
 
         The signal goes to the mtest LEADER pid, never to its process group.
-        Forwarding a cleanup signal to the process groups mtest owns is the
-        product's job; signalling the group here would test this harness instead
-        and would pass even if mtest forwarded nothing.
+        Forwarding a cleanup signal to the groups mtest owns is the product's
+        job; signalling the group here would pass even if mtest forwarded
+        nothing.
 
         Args:
             args: The mtest arguments after the binary.
@@ -352,16 +348,15 @@ class E2ERunner:
                 and asserted the same way as `ready_files`.
             owned_pgid_files: Paths in which live actors record their real PGIDs
                 before the ready barrier. After a managed signal each recorded
-                group must already be gone — the product cleaned up. After a
+                group must already be gone (the product cleaned up). After a
                 fatal SIGKILL, which mtest cannot clean up after, this harness
                 terminates each recorded group itself and proves it gone.
             env_overrides: Environment entries layered onto the child's env.
 
         Returns:
-            The captured run — carrying `second_signal_wall`, the interval from
-            a second signal to the exit, so a caller can bound hard termination
-            against the per-slot grace it must beat — and mtest's own
-            process-group id.
+            The captured run, carrying `second_signal_wall` so a caller can bound
+            hard termination against the per-slot grace it must beat, and mtest's
+            own process-group id.
 
         Raises:
             ScenarioError: If the binary is missing, the arming inputs are
@@ -424,9 +419,8 @@ class E2ERunner:
                 )
             if proc.poll() is not None:
                 stdout, stderr = proc.communicate()
-                # The `except BaseException` below is the sweep that keeps this
-                # failure from stranding an armed actor, so the raise has to
-                # happen inside the try, not in a helper outside it.
+                # The `except BaseException` below sweeps armed actors, so this
+                # raise has to happen inside the try.
                 raise ScenarioError(  # noqa: TRY301
                     f"mtest exited before signal {signal_number} could be sent: "
                     f"{argv}\n{stdout}\n{stderr}"
@@ -453,9 +447,9 @@ class E2ERunner:
             exited_at = time.monotonic()
         except BaseException:
             # The armed actors live in process groups of their own, which
-            # `kill_group` cannot reach. Recover whatever ids they managed to
-            # record — a barrier that expired half-armed still leaves a live
-            # child — so no failure path can strand a process on the host.
+            # `kill_group` cannot reach. Recover whatever ids they recorded (a
+            # barrier that expired half-armed still leaves a live child) so no
+            # failure path strands a process on the host.
             self._sweep_owned_groups(
                 owned_pgids or self._recover_owned_pgids(owned_pgid_files)
             )
@@ -465,7 +459,7 @@ class E2ERunner:
                 self.kill_group(proc)
         if signal_number == signal.SIGKILL:
             # mtest cannot clean up after its own death, and its children live in
-            # their own process groups, so the harness owns this teardown — after
+            # their own process groups, so the harness owns this teardown, after
             # the run's evidence is already on disk.
             self._sweep_owned_groups(owned_pgids)
             for owned in owned_pgids:
@@ -509,10 +503,9 @@ class E2ERunner:
     ) -> None:
         """Wait until every barrier path exists, or fail at the deadline.
 
-        A barrier that merely stops waiting is worse than none: the scenario
-        would silently degrade to a weaker case while every later assertion still
-        passed. So the expiry is a hard failure, and a run that ends before the
-        barrier is one too.
+        Expiry is a hard failure: a barrier that merely stopped waiting would let
+        the scenario degrade to a weaker case with every later assertion still
+        passing. A run that ends before the barrier fails too.
 
         Args:
             proc: The live mtest process, watched so an early exit fails fast.
@@ -575,9 +568,8 @@ class E2ERunner:
         """Best-effort read of the PGIDs actors recorded, for a failing path.
 
         Unlike `_read_owned_pgids` this never raises and never insists the set is
-        complete: it exists so a half-armed run — one actor live, the barrier
-        expired on another — still has its live group swept rather than left on
-        the host.
+        complete, so a half-armed run (one actor live, the barrier expired on
+        another) still has its live group swept.
 
         Args:
             owned_pgid_files: Paths that MAY each hold one decimal pgid.
@@ -599,11 +591,10 @@ class E2ERunner:
     def _sweep_owned_groups(owned_pgids: list[int]) -> None:
         """Terminate, then kill, every recorded child process group.
 
-        Two passes with a wait after each, mirroring the product's own
-        terminate-then-kill protocol: firing both signals and returning would
-        leave the caller unable to tell a swept group from one still being
-        reaped. Silent and bounded — every caller either raises its own failure
-        around this or states the outcome with `expect_group_gone`.
+        Two passes with a wait after each: firing both signals and returning
+        would leave the caller unable to tell a swept group from one still being
+        reaped. Silent and bounded; callers state the outcome themselves, with
+        their own failure or with `expect_group_gone`.
 
         Args:
             owned_pgids: The process-group ids to tear down.
@@ -761,12 +752,11 @@ class E2ERunner:
     def kill_group(proc: subprocess.Popen[str] | subprocess.Popen[bytes]) -> None:
         """Terminate, then kill, the process group containing ``proc``.
 
-        Darwin excludes zombies when it iterates process-group members, then
+        Darwin excludes zombies when it iterates process-group members and
         reports EPERM once only terminal members remain, where Linux reports
         ESRCH. Both mean the group is gone, so both end the sweep. Treating
-        EPERM as fatal here raised `PermissionError` out of a cleanup path and
-        replaced the caller's own diagnosis — the timeout or stream failure that
-        made cleanup necessary — with an unrelated escaped exception.
+        EPERM as fatal once raised `PermissionError` out of this cleanup path,
+        replacing the caller's own diagnosis with an escaped exception.
         """
         try:
             pgid = os.getpgid(proc.pid)

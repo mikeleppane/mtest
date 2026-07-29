@@ -70,17 +70,17 @@ def s_resilience_matrix(context: ScenarioContext) -> str:
     """The matrix as a WHOLE: every kill/timeout/crash class has a live scenario.
 
     The individual scenarios prove their own behavior; this one pins the SET, so
-    a future change that quietly drops a class from the gate is caught by the
-    gate. Checked both ways, mirroring `s_manifest_completeness`:
+    a change that drops a class from the gate is caught by the gate. Checked both
+    ways, mirroring `s_manifest_completeness`:
 
       * every class in RESILIENCE_MATRIX names a REGISTERED scenario (delete or
         rename `s_compile_timeout` and this goes red, instead of the compile
-        timeout simply ceasing to be tested);
+        timeout ceasing to be tested);
       * every registered scenario that drives a crash/slow compiler stand-in is
         named by the matrix (add a resilience scenario and you must say which
         class it serves).
 
-    This asserts COVERAGE, never behavior — it runs no mtest of its own.
+    This asserts COVERAGE and runs no mtest of its own.
     """
     registered = {name for name, _fn in context.registry}
     classified = set(RESILIENCE_MATRIX.values())
@@ -122,8 +122,7 @@ def s_retries_flaky(context: ScenarioContext) -> str:
       * --retries 1 -> the crashed first attempt shows a TRY line, the file is
         reported FLAKY, and the process exits 0;
       * --retries 0 -> the first crash stands as CRASH and the process exits 1.
-    Structure is asserted (a TRY line and a FLAKY token are present), never the
-    exact console bytes.
+    Structure is asserted, never the exact console bytes.
     """
     rel = "e2e/flaky/test_flaky.mojo"
     scratch = os.path.join(REPO_ROOT, "build", "e2e-scratch")
@@ -187,20 +186,19 @@ def s_retries_flaky(context: ScenarioContext) -> str:
 def s_crash_attribution(context: ScenarioContext) -> str:
     """A CRASH file gets a bounded isolation post-pass that NEVER moves the verdict.
 
-    The honesty pair, and the doctrine's core claim asserted directly:
+    The honesty pair:
 
-      * the DETERMINISTIC crasher — one test always dies — is ATTRIBUTED: the
-        pass names test_boom as the culprit;
-      * the ORDER-DEPENDENT crasher — crashes only with its tests run together —
-        is NO-REPRODUCTION: each test passes alone, so the culprit stays
-        UNATTRIBUTED and is never guessed.
+      * the DETERMINISTIC crasher, where one test always dies, is ATTRIBUTED and
+        the pass names test_boom as the culprit;
+      * the ORDER-DEPENDENT crasher, which crashes only with its tests run
+        together, is NO-REPRODUCTION: each test passes alone, so the culprit
+        stays UNATTRIBUTED and is never guessed.
 
-    Both files must produce the IDENTICAL verdict and exit code: attribution is
-    secondary evidence, so a run where it succeeds and a run where it fails must
-    be indistinguishable in everything a verdict is made of. That equality —
-    exit 1, a CRASH verdict line, and a byte-equal summary accounting tuple — is
-    asserted between the two runs, not merely against the manifest. Structure
-    only; never console bytes.
+    Both files must produce the IDENTICAL verdict and exit code, because
+    attribution is secondary evidence. That equality (exit 1, a CRASH verdict
+    line, and a byte-equal summary accounting tuple) is asserted between the two
+    runs rather than only against the manifest. Structure only, never console
+    bytes.
     """
     attributed_rel = "e2e/attribution/test_deterministic_crasher.mojo"
     unattributed_rel = "e2e/attribution/test_order_dependent_crasher.mojo"
@@ -220,7 +218,7 @@ def s_crash_attribution(context: ScenarioContext) -> str:
             f"{rel}: band counted {summ.crashed} crashed files, expected 1",
         )
         # The pass announces itself before spawning anything, so a watcher of a
-        # long run is never left wondering where the extra processes came from.
+        # long run can account for the extra processes.
         expect(
             "crash-attribution-start" in run.combined,
             f"{rel}: the attribution pass never announced itself:\n{run.stdout}",
@@ -287,13 +285,13 @@ def s_crash_attribution(context: ScenarioContext) -> str:
         f"{attributed_facts} != unattributed={unattributed_facts}",
     )
     # The REGISTRY-listing branch. A bare path operand is not a selection, so
-    # both runs above took the plain loop and the fallback probe; the branch that
-    # reads the already-recorded `rel::name` listing (and strips that prefix)
-    # would never execute. A strip bug there is INVISIBLE by construction: the
-    # malformed names would feed `--only`, every rerun would exit nonzero but
-    # UNSIGNALED, and the pass would report a falsely honest NO-REPRODUCTION on a
-    # file whose culprit is plainly nameable. `-k boom` forces the selection path,
-    # so the listing comes from the registry — and the culprit must still be named.
+    # both runs above took the plain loop and the fallback probe, leaving the
+    # branch that reads the recorded `rel::name` listing (and strips that prefix)
+    # unexecuted. A strip bug there is invisible by construction: the malformed
+    # names would feed `--only`, every rerun would exit nonzero but UNSIGNALED,
+    # and the pass would report a falsely honest NO-REPRODUCTION on a file whose
+    # culprit is nameable. `-k boom` forces the selection path, so the listing
+    # comes from the registry and the culprit must still be named.
     keyword = context.runner.run_mtest(
         [attributed_rel, "-k", "boom"], timeout=SHORT_TIMEOUT
     )
@@ -322,21 +320,19 @@ def s_crash_attribution(context: ScenarioContext) -> str:
 def s_attribution_reruns_the_binary_that_crashed(context: ScenarioContext) -> str:
     """Attribution reruns the binary that ACTUALLY crashed, not a reconstructed name.
 
-    The one path where the pass could point at the WRONG thing. A crash-class
-    BUILD failure is retried, and the retry rebuilds to a FRESH
-    `build/bin/<mangled>.attempt-2` and then RUNS that binary — so a file whose
-    rebuilt binary crashes at runtime has a CRASH verdict earned by a path the
-    mangled name does not name. A runner that reconstructed `build/bin/<mangled>`
-    would probe either a nonexistent file or a STALE binary from an earlier run,
-    and a stale binary can yield a culprit out of code that never ran: a
-    misleading ATTRIBUTED.
+    A crash-class BUILD failure is retried, and the retry rebuilds to a FRESH
+    `build/bin/<mangled>.attempt-2` and runs that binary, so a file whose rebuilt
+    binary crashes at runtime earns its CRASH verdict by a path the mangled name
+    does not name. A runner that reconstructed `build/bin/<mangled>` would probe
+    a nonexistent file or a STALE binary from an earlier run, and a stale binary
+    can yield a culprit out of code that never ran: a misleading ATTRIBUTED.
 
-    The fake retry-crash toolchain fixture makes that divergence real: its
-    first `build` truncates `-o` and hangs until `--compile-timeout` kills it
-    (crash-class -> retried), and its second writes a working binary at the
-    retry's fresh `.attempt-2` path. So `build/bin/<mangled>` exists but is
-    non-runnable, and only `.attempt-2` can answer a probe. ATTRIBUTED naming
-    test_boom is therefore reachable ONLY by rerunning the binary that ran.
+    The fake retry-crash toolchain fixture makes that divergence real. Its first
+    `build` truncates `-o` and hangs until `--compile-timeout` kills it
+    (crash-class, so retried), and its second writes a working binary at the
+    retry's fresh `.attempt-2` path. `build/bin/<mangled>` therefore exists but
+    is non-runnable, and only `.attempt-2` can answer a probe, so ATTRIBUTED
+    naming test_boom is reachable only by rerunning the binary that ran.
     """
     rel = "e2e/attribution/test_deterministic_crasher.mojo"
     scratch = os.path.join(REPO_ROOT, "build", "e2e-scratch")
@@ -361,8 +357,8 @@ def s_attribution_reruns_the_binary_that_crashed(context: ScenarioContext) -> st
             ],
             timeout=SHORT_TIMEOUT,
         )
-        # The first build was killed and retried, and the rebuilt binary crashed:
-        # the verdict is CRASH, exit 1 — attribution changes neither.
+        # The first build was killed and retried, and the rebuilt binary crashed,
+        # so the verdict is CRASH, exit 1. Attribution changes neither.
         expect_exit(run, 1)
         expect(
             verdict_line(run, "TRY", rel) is not None,
@@ -399,18 +395,15 @@ def s_compile_timeout(context: ScenarioContext) -> str:
 
     Uses the committed slow-compiler `--mojo` stand-in
     (scripts/fixtures/toolchain/fake_slow_mojo.py), which sleeps forever on
-    `build` but honors SIGTERM promptly — so this exercises the GRACEFUL half of
-    the supervised kill protocol against a normal, perfectly valid fixture. The
-    file is only slow to compile, never broken: that is exactly what separates
-    COMPILE-TIMEOUT from COMPILE-ERROR.
+    `build` but honors SIGTERM promptly, exercising the GRACEFUL half of the
+    supervised kill protocol against a valid fixture. The file is only slow to
+    compile, which is what separates COMPILE-TIMEOUT from COMPILE-ERROR.
 
       * --compile-timeout 1 -> COMPILE-TIMEOUT, the split-or-exclude hint, exit 1;
       * --compile-timeout 1 --retries 1 -> the first timed-out compile shows a TRY
         line and the compile-kill-residual warning (the rebuild ran quarantined
         against a fresh module cache), then the retry times out too and the file
         is still COMPILE-TIMEOUT at exit 1.
-
-    Structure is asserted, never the exact console bytes.
     """
     rel = "e2e/suite/test_passing.mojo"
 
@@ -471,28 +464,25 @@ def s_compile_timeout(context: ScenarioContext) -> str:
 
 
 def s_compile_crash_signature(context: ScenarioContext) -> str:
-    """The stderr CRASH SIGNATURE — not the nonzero exit — decides a build retry.
+    """The stderr CRASH SIGNATURE, rather than the nonzero exit, decides a retry.
 
     A compiler can crash and still exit under its own control: an ICE that prints
     the LLVM banner and returns nonzero looks, to the supervisor, exactly like a
     rejected program. Only the stderr tells them apart, so `retry_classify` scans
-    it (`has_crash_signature`). This scenario is the DISCRIMINATING PAIR that
-    proves the scan actually gates the decision:
+    it (`has_crash_signature`). This is the DISCRIMINATING PAIR that proves the
+    scan gates the decision:
 
-      * (a) WITH the banner  -> crash-class: a TRY line, the compile-kill-residual
-        warning, the quarantined rebuild — then the retry crashes the same way and
+      * (a) WITH the banner -> crash-class: a TRY line, the compile-kill-residual
+        warning, the quarantined rebuild, then the retry crashes the same way and
         the file lands on its deterministic COMPILE-ERROR;
       * (b) WITHOUT the banner -> deterministic: NO TRY line, NO residual warning,
         one attempt only, straight to COMPILE-ERROR.
 
     Both halves run the SAME shim with the SAME argv and the SAME `--retries 1`,
-    and the shim exits nonzero (never by a signal) in both. The ONLY difference is
-    the stderr text. A single (a)-style scenario would pass even if the runner
-    retried EVERY nonzero build — i.e. even if the signature list did nothing; (b)
-    is what makes that impossible. Delete the `has_crash_signature(...)` condition
-    from `retry_classify` (or force it true) and (b) fails on the TRY line.
-
-    Structure is asserted, never the exact console bytes.
+    and the shim exits nonzero (never by a signal) in both, so the only
+    difference is the stderr text. (a) alone would pass even if the runner
+    retried EVERY nonzero build; delete the `has_crash_signature(...)` condition
+    from `retry_classify`, or force it true, and (b) fails on the TRY line.
     """
     rel = "e2e/suite/test_passing.mojo"
     argv = ["--mojo", FAKE_CRASH_MOJO, rel, "--retries", "1"]
@@ -559,10 +549,10 @@ def s_timeout(context: ScenarioContext) -> str:
 
     The stubborn half is timeout-escalation. This fixture sleeps without
     disarming SIGTERM, so the supervisor's polite signal ends it inside the grace
-    and NO SIGKILL is ever sent. The verdict must therefore name the deadline and
-    say nothing about an escalation: this is the assertion that makes the
-    escalation clause a CONDITIONAL fact rather than a constant, so a clause
-    appended unconditionally fails HERE while the stubborn scenario stays green.
+    and NO SIGKILL is ever sent. The verdict must name the deadline and say
+    nothing about an escalation, which keeps the escalation clause conditional:
+    appended unconditionally it fails HERE while the stubborn scenario stays
+    green.
     """
     rel = "e2e/slow/test_hanging.mojo"
     run = context.runner.run_mtest([rel, "--timeout", "1"], timeout=SHORT_TIMEOUT)
@@ -596,16 +586,15 @@ def s_timeout_escalation(context: ScenarioContext) -> str:
     Termination, and BOTH places that can narrate it must:
 
       * --retries 0 -> no attempt is non-final, so there is no TRY line and the
-        TIMEOUT VERDICT line is the only place the reader can learn the child had
-        to be killed. This is the common case (`mtest --timeout N`).
+        TIMEOUT VERDICT line is the only place the reader learns the child had to
+        be killed. This is the common case (`mtest --timeout N`).
       * --retries 1 -> attempt 1 is a crash-class run-timeout, so it also gets a
         TRY line, and the two must agree.
 
-    Structure only — the wording is an informal surface, so this asserts the
-    lines, the escalation clause, and the final TIMEOUT verdict, never exact
-    bytes. Only SIGKILL can end this fixture; if the escalation ever regressed,
-    the child would survive its deadline and the harness guard (not these
-    assertions) would fire.
+    The wording is an informal surface, so this asserts the lines, the escalation
+    clause, and the final TIMEOUT verdict, never exact bytes. Only SIGKILL can
+    end this fixture: if the escalation regressed, the child would survive its
+    deadline and the harness guard would fire instead of these assertions.
     """
     rel = "e2e/stubborn/test_stubborn.mojo"
 
@@ -707,13 +696,11 @@ def s_precompile_timeout(context: ScenarioContext) -> str:
     A blown deadline is a PRECOMPILE-ERROR that NAMES the timeout.
 
     Uses the slow-compiler stand-in
-    (scripts/fixtures/toolchain/fake_slow_mojo.py), which sleeps
-    forever on `precompile` and honors SIGTERM promptly. The package is fine; only
-    the compiler is slow — so this separates "we killed it at our deadline" from
-    "the compiler rejected the code", which read identically at exit 1 unless the
+    (scripts/fixtures/toolchain/fake_slow_mojo.py), which sleeps forever on
+    `precompile` and honors SIGTERM promptly. The package is fine and only the
+    compiler is slow, which separates "we killed it at our deadline" from "the
+    compiler rejected the code": both read identically at exit 1 unless the
     banner says which one happened.
-
-    Structure is asserted, never the exact console bytes.
     """
     rel = "e2e/pkg/test_uses_pkg.mojo"
     run = context.runner.run_mtest(
@@ -733,7 +720,7 @@ def s_precompile_timeout(context: ScenarioContext) -> str:
         "PRECOMPILE-ERROR" in run.combined,
         f"a timed-out precompile did not report PRECOMPILE-ERROR:\n{run.stdout}",
     )
-    # The ending, in words: the deadline WE enforced — never a bare exit code.
+    # The ending, in words: the deadline WE enforced, never a bare exit code.
     expect(
         "timed out after 1s" in run.combined,
         f"the PRECOMPILE-ERROR banner never named the timeout:\n{run.stdout}",
@@ -758,8 +745,8 @@ def s_precompile_crash_retry(context: ScenarioContext) -> str:
     """A crash-class precompile is retried under `--retries`, then reported.
 
     Uses the crashing-compiler stand-in
-    (scripts/fixtures/toolchain/fake_crash_mojo.py), which dies
-    by SIGSEGV on `precompile`. A signal death is crash-class, so:
+    (scripts/fixtures/toolchain/fake_crash_mojo.py), which dies by SIGSEGV on
+    `precompile`. A signal death is crash-class, so:
 
       * --retries 0 -> one attempt, PRECOMPILE-ERROR naming the signal, exit 1;
       * --retries 1 -> a TRY line for the first attempt plus the residual warning
@@ -818,17 +805,16 @@ def s_precompile_promotion(context: ScenarioContext) -> str:
     """THE promotion guarantee: a failed precompile never touches OUT.
 
     An attempt builds to a temp path and is renamed onto OUT only after it exits
-    0. So a step that is killed at the deadline, or dies by a signal, must leave a
-    good package from an earlier run BYTE-IDENTICAL — and leave no temp litter in
-    the OUT directory either. Both killed endings are checked against the same
-    sentinel: this is the deliverable the whole change exists for.
+    0, so a step killed at the deadline or dead by a signal must leave a good
+    package from an earlier run BYTE-IDENTICAL, with no temp litter in the OUT
+    directory. Both killed endings are checked against the same sentinel.
 
-    This scenario is DISCRIMINATING, not decorative: both shims TRUNCATE their
-    `-o` path before sleeping/crashing, the way a real `mojo precompile` owns (and
-    on failure deletes) its output. Point mtest at eager promotion — build to OUT
-    directly — and every assertion below fails, because the shim then destroys the
-    sentinel exactly as the real compiler would. The sentinel survives ONLY
-    because mtest never let the compiler near OUT.
+    Both shims TRUNCATE their `-o` path before sleeping or crashing, the way a
+    real `mojo precompile` owns (and on failure deletes) its output. Point mtest
+    at eager promotion, building to OUT directly, and every assertion below fails
+    because the shim then destroys the sentinel exactly as the real compiler
+    would. The sentinel survives only because mtest never let the compiler near
+    OUT.
     """
     rel = "e2e/pkg/test_uses_pkg.mojo"
     out_dir = os.path.join(REPO_ROOT, "build", "e2e-promotion")
@@ -935,7 +921,7 @@ def s_internal_error(context: ScenarioContext) -> str:
     # A precompile spawn failure must name the real errno too, not a generic
     # errno 0. Point --precompile at a step whose compiler cannot be spawned: the
     # banner names the precompile step, the missing program, and ENOENT (errno 2)
-    # exactly as the build path does — the errno is threaded, not dropped.
+    # exactly as the build path does, so the errno is threaded through.
     pc = context.runner.run_mtest(
         ["--mojo", missing, rel, "--precompile", "e2e/pkg/mathlib"],
         timeout=SHORT_TIMEOUT,
@@ -960,7 +946,7 @@ def s_internal_error(context: ScenarioContext) -> str:
     )
 
 
-# This scenario drives its own build, so it never reads `context` — but the
+# This scenario drives its own build, so it never reads `context`. The
 # parameter cannot be renamed: `scripts/tests/test_e2e.py` asserts every
 # registered scenario takes exactly one parameter, spelled `context`.
 def s_runtime_open_failure(context: ScenarioContext) -> str:  # noqa: ARG001
@@ -981,22 +967,20 @@ def _interrupted_slow_walk(
 
     The signal goes to the mtest leader only, and only once one file has PASSED
     and the next child has announced that it is blocked and armed. What mtest
-    then owes is exact and stated three times over — console band, `--json`
-    stream, JUnit report — plus the process-group obligation.
+    then owes is stated exactly in the console band, the `--json` stream, and the
+    JUnit report, plus the process-group obligation.
 
     The single-interrupt cases block in the RUN step, where the blocked child is
     the slow/ fixture that ignores SIGTERM. The double-interrupt case blocks the
-    same file's COMPILE instead, through the stubborn `--mojo` stand-in: only
-    that actor can witness mtest's polite SIGTERM and live to report it, which is
-    what makes the second signal land during teardown rather than at a guess. The
-    accounting is identical either way — the file before it still passes for
-    real, and the blocked file plus everything behind it is still NOT-RUN — so
-    the same assertions cover both.
+    same file's COMPILE instead, through the stubborn `--mojo` stand-in, because
+    only that actor can witness mtest's polite SIGTERM and live to report it,
+    which is what lands the second signal during teardown rather than at a guess.
+    The accounting is identical either way, so the same assertions cover both.
 
-    The compile slot's 5 s grace is also what makes hard termination MEASURABLE:
-    every accounting assertion here holds just as well for a product that
-    ignored the second interrupt and let that grace expire, so the double case
-    additionally bounds the interval from the second signal to the exit.
+    The compile slot's 5 s grace is what makes hard termination MEASURABLE: every
+    accounting assertion here holds just as well for a product that ignored the
+    second interrupt and let that grace expire, so the double case additionally
+    bounds the interval from the second signal to the exit.
 
     Args:
         context: The scenario context.
@@ -1051,7 +1035,7 @@ def _interrupted_slow_walk(
         )
         expect_exit(run, 2)
 
-        # (1) The console band: one partial summary, exact counts, and the one
+        # (1) The console band: one partial summary, exact counts, and the
         # completed file as the ONLY verdict line. A killed child is NOT-RUN, so
         # a TIMEOUT verdict here would be mtest's own kill misreported as a
         # deadline casualty.
@@ -1117,9 +1101,9 @@ def _interrupted_slow_walk(
         )
 
         # (4) Hard termination. Everything above is equally true of a product
-        # that ignored the second interrupt and simply waited out the blocked
-        # slot's 5 s grace, so the interval from that signal to the exit is the
-        # only thing that separates the two.
+        # that ignored the second interrupt and waited out the blocked slot's
+        # 5 s grace, so the interval from that signal to the exit is the only
+        # thing that separates the two.
         if second_signal is not None:
             expect(
                 run.second_signal_wall is not None
@@ -1155,9 +1139,9 @@ def s_interrupt(context: ScenarioContext) -> str:
 def s_interrupt_sigterm(context: ScenarioContext) -> str:
     """SIGTERM is the same contract as SIGINT: same exit, same accounting.
 
-    The two signals share one latch, so the only thing that can distinguish them
-    is a regression that handles one and not the other. Asserting the identical
-    accounting for both is what keeps them tied together.
+    The two signals share one latch, so only a regression that handles one and
+    not the other can distinguish them. Asserting identical accounting for both
+    keeps them tied together.
     """
     detail = _interrupted_slow_walk(context, signal_number=signal.SIGTERM)
     return f"SIGTERM: {detail}"
@@ -1169,11 +1153,11 @@ def s_interrupt_double(context: ScenarioContext) -> str:
     The blocked actor here is the stubborn `--mojo` stand-in holding the same
     file's compile open. It CATCHES mtest's polite teardown SIGTERM and refuses
     to die on it, and announcing that arrival is how the harness knows teardown
-    has actually begun before it delivers the second interrupt — rather than
-    guessing a moment. Two things must then hold at once: the second interrupt
-    hard-kills the blocked group instead of leaving it to its 5 s grace, and the
-    escalation costs mtest nothing — the same single partial summary, the same
-    NOT-RUN identities, exit 2, and no surviving process group.
+    has begun before it delivers the second interrupt. Two things must then hold
+    at once: the second interrupt hard-kills the blocked group instead of leaving
+    it to its 5 s grace, and the escalation costs mtest nothing, keeping the same
+    single partial summary, the same NOT-RUN identities, exit 2, and no surviving
+    process group.
     """
     detail = _interrupted_slow_walk(
         context, signal_number=signal.SIGINT, second_signal=signal.SIGINT

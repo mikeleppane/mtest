@@ -29,8 +29,8 @@ def valgrind_writing_its_log(
 
     The real `valgrind()` hands the CLI lane's Memcheck diagnostics to a file
     rather than to the pipe, so a bare `return_value` mock leaves `check_cli`
-    with no log to read. Writing the file is what keeps these tests exercising
-    the same two-channel shape production runs on.
+    with no log to read. Writing the file keeps these tests on the same
+    two-channel shape production runs use.
 
     Args:
         result: What the stand-in returns, standing for the client's own run.
@@ -190,12 +190,11 @@ class ValgrindCheckTests(unittest.TestCase):
     ) -> None:
         """The one exclusion is deliberate, and covered by the other lane.
 
-        `test_report_json_reporter.mojo` closes a descriptor and then writes to
-        it, and closes the same descriptor twice, on purpose. `--track-fds=yes`
-        reports both, so this lane cannot run it without either dropping the
-        descriptor channel or relaxing a contract that seventeen other suites
-        depend on. Pinned here so re-adding it is a test failure that points at
-        the reason rather than a red gate nobody can explain.
+        `test_report_json_reporter.mojo` closes a descriptor then writes to it,
+        and closes the same descriptor twice, on purpose. `--track-fds=yes`
+        reports both, so this lane cannot run it without dropping the
+        descriptor channel or relaxing a contract seventeen other suites depend
+        on.
         """
         self.assertEqual(
             valgrind_check.FD_ADVERSARIAL_SUITE.relative_to(
@@ -280,16 +279,15 @@ class ValgrindCliProbeTests(unittest.TestCase):
     def test_both_lanes_hold_the_same_probe_oracle_source(self) -> None:
         """The duplicated FUNCTIONS, not just the constants, must stay in step.
 
-        The constants above pin what the probe runs; these three functions are
-        what materializes it and what judges the result — roughly a hundred
-        lines of tree writer, argv builder, and artifact oracle, copied into
-        both drivers because the two share no module. Equal constants with a
-        diverged oracle would be the worse failure of the two: both lanes would
-        run the identical program and disagree about whether it passed.
+        The constants above pin what the probe runs; these three functions
+        materialize it and judge the result, copied into both drivers because
+        the two share no module. Equal constants over a diverged oracle would
+        let both lanes run the identical program and disagree about whether it
+        passed.
 
-        Comparing source text is exact and needs no execution. It is also
-        deliberately brittle about formatting — a reworded docstring in one copy
-        reds here, which is the intended cost of keeping two copies at all.
+        Comparing source text is exact and deliberately brittle about
+        formatting: a reworded docstring in one copy reds here, which is the
+        cost of keeping two copies at all.
         """
         for name in (
             "write_cli_probe_tree",
@@ -317,13 +315,11 @@ class ValgrindCliProbeTests(unittest.TestCase):
 
         `CLI_VALGRIND_FLAGS` omits `possible` from `--errors-for-leak-kinds`
         because the Mojo runtime's unjoined CPU-device threads leave glibc TLS
-        descriptor tables Memcheck can only classify that way. That relaxation
-        is legitimate for the CLI probe and for nothing else. Pinning both
-        values here — rather than only asserting the CLI's — makes the
-        DIFFERENCE between the lanes the thing under test: copying the CLI
-        precedent into `VALGRIND_FLAGS` would silently cost seventeen suites
-        their possibly-lost channel, and every other test in this file would
-        still pass.
+        descriptor tables Memcheck can only classify that way, and that
+        relaxation is legitimate for the CLI probe alone. Pinning both values
+        makes the DIFFERENCE between the lanes the thing under test: copying
+        the CLI precedent into `VALGRIND_FLAGS` would cost seventeen suites
+        their possibly-lost channel while every other test here still passed.
         """
         self.assertIn(
             "--errors-for-leak-kinds=definite,indirect,possible",
@@ -429,12 +425,9 @@ class ValgrindCliProbeTests(unittest.TestCase):
 
         The build/wrapper test above patches `check_cli_provenance` out, so
         without this one the whole Memcheck-provenance control could be deleted
-        from `check_cli` and every test would stay green — which is the same
-        "did it really run" failure the control itself exists to catch, one
-        level up. Driving the real `check_cli` with an unwrapped-looking log
-        and requiring the rejection is what pins the wiring.
+        from `check_cli` and every test would stay green.
 
-        The banner-less text is planted in the VALGRIND log, not in the
+        The banner-less text is planted in the VALGRIND log rather than the
         client's stdout, so this also pins which channel provenance judges: it
         is the only one that can carry a banner.
         """
@@ -565,11 +558,10 @@ class ValgrindCliChannelSeparationTests(unittest.TestCase):
     parameterized `_Global` type name with a literal ESC byte, so Valgrind's own
     frame lines failed the raw-control-byte scan for bytes mtest never wrote.
 
-    Separating the channels is the fix under test here. Filtering `^==\d+== `
-    lines out before the scan is not: a hostile child that printed
-    `==999== <ESC>[2J` would walk straight through such a filter, which is the
-    exact escape hatch this gate exists to close. A client cannot write into
-    Valgrind's private log no matter what bytes it emits.
+    Separating the channels is the fix under test. Filtering `^==\d+== ` lines
+    out before the scan would leave a hostile child printing `==999== <ESC>[2J`
+    to walk straight through, whereas a client cannot write into Valgrind's
+    private log no matter what bytes it emits.
     """
 
     MANGLED_GLOBAL_FRAME = (
@@ -608,8 +600,8 @@ class ValgrindCliChannelSeparationTests(unittest.TestCase):
         With `--log-file` in the argv, Valgrind writes its diagnostics to that
         file and the pipe carries the client alone; without it, `run`'s
         `stderr=subprocess.STDOUT` returns both channels as one string. Driving
-        the real `check_cli` through this is what makes the test sensitive to
-        the wiring rather than to either checker in isolation.
+        the real `check_cli` through this makes the test sensitive to the
+        wiring rather than to either checker in isolation.
 
         Args:
             client_stdout: What the wrapped client itself printed.
@@ -675,10 +667,9 @@ class ValgrindCliChannelSeparationTests(unittest.TestCase):
         message = self._drive_check_cli(self.CLIENT_STDOUT)
 
         self.assertNotIn("raw ESC", message)
-        # Naming the state-file diagnostic is what proves the run reached the
-        # far side of the raw-byte scan. A test that only asserted the absence
-        # of "raw ESC" would also pass if `check_cli` had failed earlier, for
-        # instance in the provenance check, and never scanned anything at all.
+        # Naming the state-file diagnostic proves the run reached the far side
+        # of the raw-byte scan. Asserting only the absence of "raw ESC" would
+        # also pass if `check_cli` had failed earlier and scanned nothing.
         self.assertIn("wrote no state file", message)
 
     def test_a_raw_escape_from_the_client_is_still_rejected(self) -> None:
@@ -729,11 +720,11 @@ class ValgrindCliChannelSeparationTests(unittest.TestCase):
     ) -> None:
         """The startup diagnostic must follow the log, or it silently retires.
 
-        Measured on valgrind-3.27.1: a fatal raised after command-line parsing
-        — where the mandatory-redirection failure this probe exists for happens
-        — is written to `--log-file` and leaves the wrapped process's pipe
-        empty. Scanning `result.stdout` alone would turn every redirected
-        startup failure into a confusing downstream rejection instead.
+        Measured on valgrind-3.27.1: a fatal raised after command-line parsing,
+        which is where the mandatory-redirection failure this probe exists for
+        happens, is written to `--log-file` and leaves the wrapped process's
+        pipe empty. Scanning `result.stdout` alone would turn every redirected
+        startup failure into a confusing downstream rejection.
         """
         fatal = (
             "valgrind:  Fatal error at startup: a function redirection\n"
@@ -860,10 +851,9 @@ class LeakRecordsCallSiteTests(unittest.TestCase):
 
     `leak_records` failing closed protects nothing if a caller reverts to a
     bare `re.findall`, which returns `[]` on drifted wording and skips the
-    record loop silently — reinstating exactly the hole the helper closed.
-    The helper's own tests cannot see that: they call it directly. These two
-    drive the real callers with the helper replaced by a recorder, so
-    reverting either call site leaves a named test red.
+    record loop silently. The helper's own tests call it directly and cannot
+    see that, so these two drive the real callers with the helper replaced by
+    a recorder.
     """
 
     REACHABLE_LOG = (

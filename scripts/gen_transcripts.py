@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 """Generate protocol snapshots by running the committed fixtures.
 
-The toolchain IS the oracle. For every scenario in the matrix below this script
-builds the fixture, runs the binary with the scenario's arguments, captures
-stdout and stderr SEPARATELY and byte-exactly, records the termination
-structurally (exit code vs terminating signal — never the shell 128+N
-encoding), applies an ANCHORED, versioned normalization, and writes a
-line-oriented transcript with a provenance header. It then HARD-ASSERTS a set of
-structural pins and regenerates the whole matrix a second time to prove the
-output is byte-identical.
+The toolchain is the oracle. For every scenario in the matrix below this script
+builds the fixture, runs it with the scenario's arguments, captures stdout and
+stderr separately and byte-exactly, records the termination structurally (exit
+code or terminating signal, never the shell 128+N encoding), applies an
+anchored versioned normalization, and writes a line-oriented transcript with a
+provenance header. It then hard-asserts a set of structural pins and
+regenerates the whole matrix a second time to prove the output is
+byte-identical.
 
-Determinism is the whole point: a transcript must be identical across
-regenerations and across machines, or `transcripts-check` is noise instead of a
-protocol pin. The only content rewrites applied to captured output are (1) the
-repo-root absolute prefix -> <REPO> (the compiler bakes absolute source paths),
-(2) timing tokens -> [ T ] on report-grammar lines WITHIN the report block only,
-and (3) collapsing a crash stack dump to <STACK-DUMP>. Everything else is
-captured verbatim.
+A transcript must be identical across regenerations and across machines, or
+`transcripts-check` is noise rather than a protocol pin. `normalize` carries the
+only three rewrites applied to captured content; everything else is verbatim.
 
 Usage:
     python -m scripts.gen_transcripts             # write into tests/snapshots/protocol/
@@ -40,8 +36,8 @@ FIXTURES_DIR = os.path.join(REPO_ROOT, "tests", "fixtures", "protocol")
 
 # --- The scenario matrix -----------------------------------------------------
 # (scenario_id, fixture, argv). The transcript filename is
-# "<fixture>--<scenario_id>.txt". This table is the single source of truth; the
-# generator asserts the emitted MANIFEST equals it exactly.
+# "<fixture>--<scenario_id>.txt". The generator asserts the emitted MANIFEST
+# equals this table exactly.
 MATRIX = [
     ("default", "passing", []),
     ("default", "mixed", []),
@@ -72,10 +68,10 @@ MATRIX = [
     ("only-native", "skipped", ["--only", "test_natively_skipped"]),
 ]
 
-# Scenarios whose fixture crashes the process — their stderr carries a stack
-# dump. `crashing` aborts (SIGILL + an ABORT line); `segfault` faults on an
-# invalid load (SIGSEGV, no ABORT line). Both die by signal; the stderr of each
-# is treated as a crash stream and collapsed to <STACK-DUMP>.
+# Fixtures that crash the process, so their stderr carries a stack dump.
+# `crashing` aborts (SIGILL plus an ABORT line); `segfault` faults on an invalid
+# load (SIGSEGV, no ABORT line). Both die by signal, and both stderr streams are
+# treated as crash streams and collapsed to <STACK-DUMP>.
 CRASH_FIXTURES = {"crashing", "segfault"}
 
 # --- Normalization patterns --------------------------------------------------
@@ -83,7 +79,7 @@ RUNNING_RE = re.compile(r"^Running \d+ tests for ")
 REPORT_LINE_RE = re.compile(r"^(    (?:PASS|FAIL|SKIP)) \[ [^\]]* \] (.*)$")
 SUMMARY_RE = re.compile(r"^(Summary) \[ [^\]]* \] (.*)$")
 STACK_HEADER_RE = re.compile(r"^Stack dump")
-# A stack frame in EITHER form the runtime emits — the shape depends on whether
+# A stack frame in either form the runtime emits. The shape depends on whether
 # llvm-symbolizer is on PATH, so both must collapse to the same <STACK-DUMP>:
 #   symbol-less:  "<n>  <module> 0x<hex>"           (no header requires PATH)
 #   symbolized:   "#<n> 0x<hex> <sym> <file>:<l>:<c>" (leaks binary + lib paths)
@@ -91,7 +87,7 @@ FRAME_RE = re.compile(r"^\d+\s+\S+\s+0x[0-9a-f]+|^\s*#\d+ 0x[0-9a-f]+")
 
 
 class GenError(Exception):
-    """A structural pin failed — generation aborts loudly, never silently."""
+    """A structural pin failed, so generation aborts."""
 
 
 def toolchain() -> tuple[str, str]:
@@ -101,8 +97,8 @@ def toolchain() -> tuple[str, str]:
         The `mojo` version string and its build commit hash, in that order.
 
     Raises:
-        GenError: If `mojo --version` output does not carry a parsable version
-            and commit, since a transcript may not claim an unknown toolchain.
+        GenError: If the `mojo --version` output carries no parsable version and
+            commit, since a transcript may not claim an unknown toolchain.
     """
     out = subprocess.run(
         ["mojo", "--version"], check=True, capture_output=True, text=True
@@ -117,7 +113,7 @@ def os_arch() -> str:
     """Return the `<os>-<machine>` tag the transcript header records.
 
     Returns:
-        The lowercased system name joined to the machine name, for example
+        The lowercased system name joined to the machine name, e.g.
         `linux-x86_64`.
     """
     return f"{platform.system().lower()}-{platform.machine()}"
@@ -136,21 +132,20 @@ def _normalize_timing(line: str) -> str:
 def normalize(raw: bytes, *, is_crash_stream: bool) -> str:
     """Apply the anchored, versioned normalization to one captured stream."""
     text = raw.decode("utf-8", errors="surrogateescape")
-    # (2) repo-root absolute prefix -> <REPO>. This is the ONLY rewrite applied
-    # to captured content that touches paths; the compiler bakes the absolute
-    # canonicalized source path into every location line.
+    # (2) repo-root absolute prefix -> <REPO>, the only path rewrite. The
+    # compiler bakes the absolute canonicalized source path into every location
+    # line.
     text = text.replace(REPO_ROOT, "<REPO>")
 
     had_trailing_nl = text.endswith("\n")
     core = text[:-1] if had_trailing_nl else text
     lines = core.split("\n") if core != "" else []
 
-    # (3) Stack collapse — crash stderr only. Collapse the maximal trailing block
-    # starting at the first `Stack dump` header (or a frame line) to a single
-    # <STACK-DUMP>, HEADER INCLUDED: the header text varies with llvm-symbolizer
-    # presence in PATH and must never reach a snapshot. Every line after the header
-    # must match a frame pattern, or generation fails so the rule is extended
-    # deliberately, never silently.
+    # (3) Stack collapse, on crash stderr only: the maximal trailing block
+    # starting at the first `Stack dump` header (or frame line) becomes a single
+    # <STACK-DUMP>, header included, since the header text varies with
+    # llvm-symbolizer presence in PATH. Every line after the header must match a
+    # frame pattern, so extending the rule stays a deliberate act.
     if is_crash_stream:
         start = None
         for i, ln in enumerate(lines):
@@ -168,14 +163,12 @@ def normalize(raw: bytes, *, is_crash_stream: bool) -> str:
                     )
             lines = [*lines[:start], "<STACK-DUMP>"]
 
-    # (1) Timing tokens -> [ T ], ANCHORED: only on report-grammar lines at or
-    # after the `Running <N> tests for` line that OPENS the real report block.
+    # (1) Timing tokens -> [ T ], anchored: only on report-grammar lines at or
+    # after the `Running <N> tests for` line that opens the real report block.
     # A real report always ends in a `Summary ` line, so the anchor is the last
-    # `Running` line that is followed by a `Summary ` line. This matters on a
-    # crash stream, where the report is LOST: a `Running`-lookalike a test prints
-    # before aborting has no `Summary` after it, so it never becomes the anchor
-    # and the lines a test printed stay byte-exact. Requiring the Summary is what
-    # keeps "anchor on the last Running line" from over-normalizing user output.
+    # `Running` line followed by one. Requiring the Summary keeps user output
+    # byte-exact on a crash stream, where the report is lost and a
+    # `Running`-lookalike a test printed before aborting has no Summary after it.
     summary_idxs = [i for i, ln in enumerate(lines) if ln.startswith("Summary [ ")]
     if summary_idxs:
         last_summary = summary_idxs[-1]
@@ -203,7 +196,7 @@ def termination(returncode: int) -> str:
         `signal <n>` for a signalled death, otherwise `exit <n>`.
     """
     # Python reports death-by-signal as a negative returncode. Record the raw
-    # signal number, structurally — never the shell-encoded 128+N.
+    # signal number, not the shell-encoded 128+N.
     if returncode < 0:
         return f"signal {-returncode}"
     return f"exit {returncode}"
@@ -212,8 +205,8 @@ def termination(returncode: int) -> str:
 def build_fixture(fixture: str, out_dir: str) -> str:
     """Build one committed protocol fixture into a throwaway directory.
 
-    The build is unoptimized so the emitted binary stays cheap; nothing about
-    the protocol under snapshot depends on optimization.
+    The build is unoptimized; nothing about the protocol under snapshot depends
+    on optimization.
 
     Args:
         fixture: Fixture stem under `tests/fixtures/protocol`, without `.mojo`.
@@ -224,7 +217,7 @@ def build_fixture(fixture: str, out_dir: str) -> str:
         The path of the built binary.
 
     Raises:
-        subprocess.CalledProcessError: If the compile fails, because a snapshot
+        subprocess.CalledProcessError: If the compile fails, since a snapshot
             may not be generated from a fixture that did not build.
     """
     src = os.path.join(FIXTURES_DIR, f"{fixture}.mojo")
@@ -240,8 +233,8 @@ def build_fixture(fixture: str, out_dir: str) -> str:
 def run_scenario(binpath: str, argv: list[str]) -> tuple[bytes, bytes, int]:
     """Run one built fixture and capture both streams byte-exactly.
 
-    Streams are captured separately and as raw bytes, never merged and never
-    decoded here, because the snapshot pins each stream's exact content.
+    Streams are captured separately and undecoded because the snapshot pins each
+    stream's exact content.
 
     Args:
         binpath: The built fixture binary to run.
@@ -252,7 +245,7 @@ def run_scenario(binpath: str, argv: list[str]) -> tuple[bytes, bytes, int]:
         is negative when the fixture died by a signal.
     """
     # check=False: a nonzero exit and a fatal signal are both expected outcomes
-    # here, and the return code is recorded rather than raised on.
+    # here, so the return code is recorded rather than raised on.
     proc = subprocess.run([binpath, *argv], capture_output=True, check=False)
     return proc.stdout, proc.stderr, proc.returncode
 
@@ -270,8 +263,8 @@ def render(
 ) -> str:
     """Render one transcript: provenance header, command, termination, streams.
 
-    The binary path is written as the fixed token `<BIN>` so the transcript does
-    not depend on where the throwaway build directory happened to be.
+    The binary path is written as the fixed token `<BIN>`, so the transcript
+    does not depend on where the throwaway build directory happened to be.
 
     Args:
         fixture: Fixture stem the scenario ran.
@@ -330,11 +323,9 @@ def verify_scenario(
 ) -> None:
     """Hard-assert every structural pin one scenario's transcript must hold.
 
-    The pins cover section-marker framing, path and symbolizer leakage, the
-    signalled death and ABORT shape of the crash fixtures, the exact SKIP
-    listings of the selection scenarios, byte-exact survival of the noisy
-    fixture's report-lookalike lines, and reconciliation of the declared count
-    against the rows and the summary tallies.
+    The pins cover section-marker framing, path and symbolizer leakage, crash
+    shape, the selection scenarios' SKIP listings, byte-exact survival of the
+    noisy fixture's user output, and count reconciliation.
 
     Args:
         fixture: Fixture stem the scenario ran.
@@ -346,7 +337,7 @@ def verify_scenario(
 
     Raises:
         GenError: On the first pin that fails, naming the fixture, the scenario,
-            and what was expected, so generation aborts loudly.
+            and what was expected.
     """
     # Framing guard: captured output must never contain a line starting "--- ",
     # which would collide with the section markers.
@@ -373,11 +364,10 @@ def verify_scenario(
                 f"{fixture}--{scenario}: expected death by signal, got exit "
                 f"{returncode}"
             )
-        # An ABORT line is NOT universal to crashes: a controlled abort() emits
+        # An ABORT line is not universal to crashes: a controlled abort() emits
         # one, a raw segfault emits none. So the pin is two-part.
-        # (a) If ANY ABORT line appears on stdout it must be well-formed —
-        # normalized to the <REPO>-rewritten fixture-path shape, never leaking
-        # an absolute path. This holds for every crash fixture.
+        # (a) Any ABORT line on stdout must be normalized to the
+        # <REPO>-rewritten fixture-path shape. Holds for every crash fixture.
         for ln in out_norm.split("\n"):
             if ln.startswith("ABORT:") and not ln.startswith(
                 "ABORT: <REPO>/tests/fixtures/protocol/"
@@ -386,8 +376,8 @@ def verify_scenario(
                     f"{fixture}--{scenario}: ABORT line present but not "
                     f"normalized to the <REPO> fixture-path shape: {ln!r}"
                 )
-        # (b) A fixture that aborts() MUST still emit its ABORT line — without it
-        # the crash pin has nothing to anchor on. Scoped to `crashing`, the only
+        # (b) A fixture that aborts() must still emit its ABORT line, or the
+        # crash pin has nothing to anchor on. Scoped to `crashing`, the only
         # fixture that aborts; a segfault fixture is exempt by design.
         if fixture == "crashing" and (
             "ABORT: <REPO>/tests/fixtures/protocol/" not in out_norm
@@ -403,9 +393,9 @@ def verify_scenario(
         if names != expected:
             raise GenError(f"skip-all listing {names} != fixture test names {expected}")
 
-    # native-skip skip-all collection: BOTH names are listed as SKIP, in source
-    # (discovery) order — pins that a natively skipped test is not omitted or
-    # reordered by --skip-all.
+    # native-skip skip-all collection: both names are listed as SKIP, in source
+    # (discovery) order, pinning that a natively skipped test is neither omitted
+    # nor reordered by --skip-all.
     if scenario == "skip-all" and fixture == "skipped":
         names = [n for (r, n) in _report_result_lines(out_norm) if r == "SKIP"]
         expected = ["test_runs_normally", "test_natively_skipped"]
@@ -413,13 +403,11 @@ def verify_scenario(
             raise GenError(f"skip-all listing {names} != fixture test names {expected}")
 
     # native-skip survives explicit selection: --only the natively-skipped test
-    # still reports it as SKIP, not PASS — the native skip is not overridden by
-    # being explicitly named. The OTHER (unselected) test also reports SKIP —
-    # that is the ordinary selection-induced SKIP --only already gives every
-    # unselected test (see e.g. skipped--only-native's sibling behavior in
-    # mixed--skip-one.txt) — so both rows are SKIP, for two different reasons,
-    # and a bare row list cannot distinguish them; that ambiguity is exactly
-    # what downstream reconciliation must resolve.
+    # still reports it as SKIP, so naming a test does not override its native
+    # skip. The unselected test reports SKIP too, for the ordinary
+    # selection-induced reason, so both rows read SKIP for two different reasons
+    # and a bare row list cannot tell them apart. Downstream reconciliation is
+    # what must resolve that ambiguity.
     if scenario == "only-native" and fixture == "skipped":
         rows = _report_result_lines(out_norm)
         expected_rows = [
@@ -479,16 +467,15 @@ def generate() -> dict[str, str]:
     """Build, run, normalize, verify, and render the whole scenario matrix once.
 
     Each fixture is built at most once per pass and reused across the scenarios
-    that share it. The build directory is a temp dir that is asserted never to
-    appear in a rendered transcript.
+    that share it.
 
     Returns:
         A mapping from transcript filename to transcript text, one entry per
         matrix row.
 
     Raises:
-        GenError: If a structural pin fails or the build directory leaks into a
-            transcript.
+        GenError: If a structural pin fails or the temporary build directory
+            leaks into a transcript.
     """
     ver, commit = toolchain()
     oa = os_arch()
@@ -516,9 +503,8 @@ def generate() -> dict[str, str]:
 def main() -> int:
     """Generate the matrix twice, pin the manifest, and write the snapshots.
 
-    The second generation exists to prove byte-identical output; the files are
-    written only after both passes agree and the emitted name set equals the
-    matrix exactly.
+    Files are written only after both passes agree byte for byte and the emitted
+    name set equals the matrix exactly.
 
     Returns:
         0 once every transcript and the MANIFEST have been written.

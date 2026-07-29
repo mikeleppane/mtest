@@ -11,11 +11,11 @@ runs the schema + arithmetic + structural checker over that document. It then
 TAMPERS the root count and confirms the checker REJECTS it, so a
 silently-broken gate cannot pass.
 
-Kept separate from the Mojo unit tests on purpose: spawning `python`/`xmllint`
-from inside a built Mojo test binary is pathologically slow (the runtime raises
-`RLIMIT_NOFILE` to ~1M, so every child's startup crawls), so the oracle runs
-here in Python where it is fast and hermetic, while the Mojo unit tests pin the
-renderer's structure and the event->fragment mapping directly.
+Kept out of the Mojo unit tests because spawning `python`/`xmllint` from inside
+a built Mojo test binary is pathologically slow: the runtime raises
+`RLIMIT_NOFILE` to ~1M, so every child's startup crawls. The oracle runs here in
+Python instead, while the Mojo unit tests pin the renderer's structure and the
+event-to-fragment mapping directly.
 """
 
 from __future__ import annotations

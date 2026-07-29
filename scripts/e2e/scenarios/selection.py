@@ -43,14 +43,13 @@ COLLECT_DIR_EXPECTED = [
 def s_collect(context: ScenarioContext) -> str:
     """`collect` and `--collect-only` keep STDOUT byte-clean.
 
-    STDOUT is ONLY the sorted node-id listing; every diagnostic goes to STDERR;
-    the total per-file policy holds (qualifying listed;
+    STDOUT is ONLY the sorted node-id listing and every diagnostic goes to
+    STDERR, under the per-file policy (qualifying listed;
     compile-error/crash/timeout/malformed -> stderr + continue + exit-1; drift ->
     exit 3; nothing collectable -> exit 5).
 
-    STDOUT purity is asserted MECHANICALLY: stdout is split into lines and the
-    lines must be exactly the sorted expected node-id set — nothing else may ride
-    stdout, ever.
+    Purity is asserted MECHANICALLY: stdout is split into lines, and those lines
+    must be exactly the sorted expected node-id set.
     """
     # 1. Byte-purity on a clean tree: stdout is EXACTLY the sorted listing.
     run = context.runner.run_mtest(["collect", "e2e/matrix"])
@@ -147,15 +146,13 @@ def s_collect(context: ScenarioContext) -> str:
 
 
 def s_usage_refusals(context: ScenarioContext) -> str:
-    """Collect is now served, so the collect-subcommand refusal is gone.
+    """A RUN-ONLY flag combined with collect mode is a usage refusal.
 
-    The remaining usage refusal this build enforces is a RUN-ONLY flag combined
-    with collect mode: a listing is not a run, so every served run-only flag
-    (--maxfail, -x/--exitfirst, --gate, -s/--show-output) is refused with exit 4,
-    while --timeout is NOT refused (it bounds the probes). Every flag in the v1
-    contract is served now, so there is no availability refusal left to probe.
-    (--json is now SERVED — its destination taxonomy is proven by
-    s_json_destination_taxonomy, not here.)
+    A listing is not a run, so every served run-only flag (--maxfail,
+    -x/--exitfirst, --gate, -s/--show-output) is refused with exit 4, while
+    --timeout is NOT refused because it bounds the probes. Every flag in the v1
+    contract is served, so no availability refusal is left to probe;
+    `--json`'s destination taxonomy belongs to s_json_destination_taxonomy.
     """
     run = context.runner.run_mtest(
         ["collect", "--maxfail", "1", "e2e/matrix"], timeout=SHORT_TIMEOUT
@@ -260,10 +257,9 @@ def s_selection_node_id(context: ScenarioContext) -> str:
 def s_selection_union(context: ScenarioContext) -> str:
     """A dir operand UNIONs with a node id under it: the whole tree still runs.
 
-    `mtest e2e/matrix e2e/matrix/test_alpha.mojo::test_alpha_one`
-    covers test_alpha.mojo with BOTH a plain dir operand and a node id — the
-    plain operand wins (whole), so every test in both files runs and nothing is
-    deselected.
+    `mtest e2e/matrix e2e/matrix/test_alpha.mojo::test_alpha_one` covers
+    test_alpha.mojo with BOTH a plain dir operand and a node id. The plain
+    operand wins, so every test in both files runs and nothing is deselected.
     """
     run = context.runner.run_mtest(["e2e/matrix", f"{MATRIX_ALPHA}::test_alpha_one"])
     expect_exit(run, 0)
@@ -343,7 +339,8 @@ def s_selection_chameleon(context: ScenarioContext) -> str:
 def _mojo_log_path() -> str:
     """A fresh path for MTEST_MOJO_LOG, absent until the wrapper writes it.
 
-    Proves the wrapper, not some pre-existing file, produced the log.
+    The absence proves the wrapper produced the log, rather than a pre-existing
+    file.
     """
     fd, path = tempfile.mkstemp(prefix="mtest_mojo_log_", suffix=".tsv")
     os.close(fd)
@@ -372,16 +369,16 @@ def _count_builds(lines: list[str], rel: str) -> int:
 def s_single_build(context: ScenarioContext) -> str:
     """The BuildProducts registry shares ONE `mojo build` per file.
 
-    The selection probe and the run share it — proved with the committed logging
+    The selection probe and the run share it, proved with the committed logging
     `--mojo` wrapper (scripts/fixtures/toolchain/logging_mojo.py) over a SINGLE
-    selection-run invocation. Two separate `mtest` invocations would legitimately
-    rebuild; this scenario never does that.
+    selection-run invocation, since two separate `mtest` invocations would
+    legitimately rebuild.
 
     `-k one` over the whole e2e/matrix tree matches test_alpha_one AND
-    test_beta_one, so BOTH files are touched — a multi-file selection. Phase 1
-    (probe every run file) builds each file once; Phase 2 (run the selected
-    subset) reuses that same binary. The wrapper's log is the independent
-    witness: exactly one `mojo build <file>` line per file, not two.
+    test_beta_one, so BOTH files are touched. Phase 1 (probe every run file)
+    builds each file once and Phase 2 (run the selected subset) reuses that
+    binary, and the wrapper's log is the independent witness: exactly one
+    `mojo build <file>` line per file.
     """
     log_path = _mojo_log_path()
     try:
@@ -416,8 +413,8 @@ def s_stale_recovery_two_builds(context: ScenarioContext) -> str:
 
     The initial Phase-1 build, then the one recollect-once rebuild the recovery
     flow triggers when the suite refuses under `--only` a name it just listed
-    under `--skip-all`. The run still ends MALFORMED-SUITE (exit-1 class), never
-    exit 3 — the recovery is a bounded retry, not a drift.
+    under `--skip-all`. The run still ends MALFORMED-SUITE (exit-1 class) rather
+    than exit 3, because the recovery is a bounded retry.
     """
     log_path = _mojo_log_path()
     try:
@@ -460,36 +457,31 @@ PRECEDENCE_BUILD_ARGV = (
 )
 """The exact vector mtest hands the compiler, `argv[0]` excluded.
 
-Pinned in full because the point of the scenario is that the SELECTED wrapper
-received mtest's real work: a wrapper that was merely executed — probed for a
-version, say — would log a different vector, and a check that only counted log
-lines could not tell the two apart.
+Pinned in full because the scenario's point is that the SELECTED wrapper
+received mtest's real work: a wrapper merely executed (probed for a version,
+say) would log a different vector, and a check that counted log lines could not
+tell the two apart.
 
 The `-o` value is pinnable because every case runs under `PRECEDENCE_CACHE_OFF`,
-which keeps the build on the invocation-private path whose mangled name is
-fixed. That is the second thing this pin buys: a build cache stages its compile
-into `.mtest-cache/build-v1/.tmp-<mangled>-<pid>-<clock>-<n>/bin`, so an output
-path that
-is anything but the one below is a run that touched the store the user told it
-to leave alone."""
+keeping the build on the invocation-private path whose mangled name is fixed. A
+build cache stages its compile into
+`.mtest-cache/build-v1/.tmp-<mangled>-<pid>-<clock>-<n>/bin`, so any other output
+path means the run touched the store it was told to leave alone."""
 
 PRECEDENCE_CACHE_OFF = "--no-cache"
 """Passed by every precedence invocation, because the oracle is a real compile.
 
-Six invocations compile the one `PRECEDENCE_FILE` from the one repository root,
-and the build cache's store lives under that root. Nothing that varies between
-them is part of the cache key — the three wrappers are byte-identical copies, so
-they key alike, and neither `PATH` nor `MTEST_MOJO` is keyed at all — so with the
-cache on the first compile publishes a generation and every later invocation is
-served from it without dispatching a compiler. A scenario whose whole claim is
-"exactly one build went through the selected wrapper" cannot be argued from a
-wrapper that was never asked to build, and counting cache hits would not restore
-it: the hit is invisible from inside the wrapper. So each case buys its own cold
-build.
+The invocations compile the one `PRECEDENCE_FILE` from the one repository root,
+where the build cache's store lives, and nothing that varies between them is
+part of the cache key: the three wrappers are byte-identical copies and neither
+`PATH` nor `MTEST_MOJO` is keyed. With the cache on, the first compile publishes
+a generation and every later invocation is served from it without dispatching a
+compiler, so "exactly one build went through the selected wrapper" could not be
+argued; the hit is invisible from inside the wrapper, so counting hits would not
+restore it. Each case therefore buys its own cold build.
 
-It also removes the cache's own `<compiler> --version` toolchain probe, which is
-the only other spawn resolution makes: under this flag mtest keys nothing, so
-the winner's log must hold the build and nothing else."""
+It also removes the cache's own `<compiler> --version` toolchain probe, the only
+other spawn resolution makes, so the winner's log holds the build alone."""
 
 PRECEDENCE_SOURCES = ("flag", "env", "path")
 """The three resolution sources, in the precedence order mtest must honor. Each
@@ -499,10 +491,9 @@ names both a wrapper directory (`<root>/<source>/mojo`) and its log variable."""
 def _install_precedence_wrappers(root: str) -> dict[str, str]:
     """Install one identity-logging `mojo` copy per resolution source.
 
-    Each copy lands at `<root>/<source>/mojo`, so the file the kernel executes
-    is literally named `mojo` — the PATH candidate has to be, and making all
-    three identical keeps the only difference between them the directory that
-    selects them.
+    Each copy lands at `<root>/<source>/mojo`, so the file the kernel executes is
+    literally named `mojo`, as the PATH candidate has to be. Making all three
+    identical leaves the selecting directory as the only difference.
 
     Args:
         root: A scratch directory this run owns.
@@ -558,9 +549,8 @@ def s_mojo_executable_precedence(context: ScenarioContext) -> str:
     identical wrapper copies are installed as `<root>/flag/mojo`,
     `<root>/env/mojo` and `<root>/path/mojo`, each logging its own absolute
     identity and the exact argv it was spawned with. Every case arms all three
-    logs and prepends `<root>/path` to `PATH`, so all the losing sources stay
-    LIVE and would leave a record the moment mtest consulted one; which log
-    comes into existence is the run's own answer.
+    logs and prepends `<root>/path` to `PATH`, so the losing sources stay LIVE
+    and would leave a record the moment mtest consulted one.
 
     The three cases strip one source at a time, so each proves precedence over
     everything below it:
@@ -570,15 +560,15 @@ def s_mojo_executable_precedence(context: ScenarioContext) -> str:
     3. PATH alone -> only the path log.
 
     Each case is run twice, once as `collect` and once as a full run, because
-    resolution has to hold on the collection path as well as the run path. Every
-    invocation carries `PRECEDENCE_CACHE_OFF` so the build it is judged on is a
-    real compile; the winner's log must then hold exactly one record, and that
-    record must be the build with the pinned vector.
+    resolution has to hold on the collection path too. Every invocation carries
+    `PRECEDENCE_CACHE_OFF` so the build it is judged on is a real compile, and
+    the winner's log must then hold exactly one record: the build with the
+    pinned vector.
 
-    The real compiler is resolved ONCE here, before `PATH` is touched, and
-    handed to the wrappers as `MTEST_REAL_MOJO`: the PATH candidate is itself
-    called `mojo`, so a wrapper that searched `PATH` for the "real" compiler
-    would exec itself forever.
+    The real compiler is resolved ONCE here, before `PATH` is touched, and handed
+    to the wrappers as `MTEST_REAL_MOJO`, because the PATH candidate is itself
+    called `mojo` and a wrapper that searched `PATH` for the real compiler would
+    exec itself forever.
     """
     real_mojo = shutil.which("mojo")
     if real_mojo is None:
@@ -588,8 +578,8 @@ def s_mojo_executable_precedence(context: ScenarioContext) -> str:
         )
     with tempfile.TemporaryDirectory(prefix="mtest-mojo-precedence-") as raw_root:
         # Each wrapper reports os.path.realpath(__file__) as its identity, so
-        # every path derived here has to be the resolved spelling too. On macOS
-        # the scratch root arrives under /var, a symlink to /private/var, and an
+        # every path derived here has to be the resolved spelling. On macOS the
+        # scratch root arrives under /var, a symlink to /private/var, and an
         # unresolved expectation misses the record by that prefix alone.
         root = os.path.realpath(raw_root)
         wrappers = _install_precedence_wrappers(root)
@@ -645,22 +635,20 @@ def s_mojo_executable_precedence(context: ScenarioContext) -> str:
                     f"{sorted(losers)}: precedence did not hold\n{losers}",
                 )
                 records = wrote[expected]
-                # Every invocation the winner logged has to BE the winner's —
-                # the losers' logs are already known empty, so this is what
-                # closes "the run resolved the compiler once and used that
-                # resolution for everything it spawned".
+                # Every invocation the winner logged has to BE the winner's.
+                # With the losers' logs already known empty, this closes "the
+                # run resolved the compiler once and used that resolution for
+                # everything it spawned".
                 for record in records:
                     expect(
                         record.get("wrapper") == wrappers[expected],
                         f"a {mode} invocation ran {record.get('wrapper')!r}, "
                         f"want the {expected} wrapper {wrappers[expected]!r}",
                     )
-                # The compile is the whole reason a compiler was resolved, and
-                # under `PRECEDENCE_CACHE_OFF` it is the only spawn resolution
-                # makes: nothing keys the toolchain, so no `--version` probe
-                # rides along. One record, therefore, and a second one would
-                # mean the resolved compiler was spawned for something this
-                # scenario cannot account for.
+                # Under `PRECEDENCE_CACHE_OFF` the compile is the only spawn
+                # resolution makes: nothing keys the toolchain, so no
+                # `--version` probe rides along. A second record would mean the
+                # resolved compiler was spawned for something unaccounted for.
                 expect(
                     len(records) == 1,
                     f"the {expected} wrapper logged {len(records)} spawns for "

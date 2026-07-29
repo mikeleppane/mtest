@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Run source-built exec and report suites under the locked Valgrind Memcheck.
 
-Alongside those suites the lane drives one real, source-built CLI reporter run
-against a hostile child, so report escaping, JUnit rendering, and report/state
-file finalization are executed by the shipped entry point rather than only by
-unit suites. `notes/test-memory-risk-map.md` maps every product `# SAFETY:` site
-to the evidence here, in the ASan lane, or in the native C tests, and states the
-reason for each exclusion.
+The lane also drives one real, source-built CLI reporter run against a hostile
+child, so report escaping, JUnit rendering and report/state file finalization
+are executed by the shipped entry point rather than only by unit suites.
+`notes/test-memory-risk-map.md` maps every product `# SAFETY:` site to the
+evidence here, in the ASan lane, or in the native C tests, and gives the reason
+for each exclusion.
 """
 
 from __future__ import annotations
@@ -43,16 +43,14 @@ EXEC_TEST_ROOT = ROOT / "tests" / "integration"
 CONFIG_TEST = ROOT / "tests" / "unit" / "test_config.mojo"
 """The config layer's own suite: TOML parsing, layering, and state bytes.
 
-It is here for the parser's own String and List ownership over adversarial
-input, which is the largest body of pure byte-handling the product owns outside
-`exec` and `report`.
+Here for the parser's String and List ownership over adversarial input, the
+largest body of pure byte-handling the product owns outside `exec` and `report`.
 
-It does NOT exercise `mtest.config.lossy_utf8`, despite living in that package —
-`mtest.config` only re-exports the symbol, and this suite never calls it.
+It does NOT exercise `mtest.config.lossy_utf8` despite living in that package.
+`mtest.config` only re-exports the symbol and this suite never calls it;
 Callgrind over the suite binary confirms no `src/mtest/config/lossy_utf8.mojo`
 frame executes. That site's evidence is `test_exec_capture` (both lanes) and the
-real-CLI probe; see `notes/test-memory-risk-map.md`. Recorded here because an
-earlier version of this file claimed the opposite."""
+real-CLI probe; see `notes/test-memory-risk-map.md`."""
 REPORT_TESTS = (
     ROOT / "tests" / "unit" / "test_report_escape.mojo",
     ROOT / "tests" / "unit" / "test_report_junit.mojo",
@@ -60,33 +58,30 @@ REPORT_TESTS = (
 )
 """The report-layer suites whose ownership paths this lane can judge.
 
-Escaping and JUnit rendering both end in `unsafe_from_utf8`; JUnit finalization
-creates a unique temp file, writes it, closes it, and renames it over the
-target. Every one of those is an ownership transfer that a unit test alone can
-only prove correct in its observable result.
+Escaping and JUnit rendering both end in `unsafe_from_utf8`, and JUnit
+finalization creates a unique temp file, writes it, closes it, and renames it
+over the target. Each is an ownership transfer a unit test can only judge by its
+observable result.
 
-`test_report_json_reporter.mojo` is deliberately absent — see
-`FD_ADVERSARIAL_SUITE`."""
+`test_report_json_reporter.mojo` is absent; see `FD_ADVERSARIAL_SUITE`."""
 
 FD_ADVERSARIAL_SUITE = ROOT / "tests" / "unit" / "test_report_json_reporter.mojo"
 """The one report suite this lane cannot run, and why.
 
-Its subject IS descriptor misuse: `test_write_failure_latches_and_later_handles_noop`
-hands the reporter a descriptor it closed first, so the header write must latch
-`EBADF`, and `test_close_json_fd_reports_failure_on_a_dead_descriptor` closes the
-same descriptor twice so the second close must REPORT the failure rather than
-swallow it. Under `--track-fds=yes` Memcheck reports both as errors — correctly;
-they are exactly the operations the tests exist to perform.
+Its subject IS descriptor misuse. One case hands the reporter a descriptor it
+closed first, so the header write must latch `EBADF`; another closes the same
+descriptor twice, so the second close must REPORT the failure rather than
+swallow it. Under `--track-fds=yes` Memcheck correctly reports both as errors,
+because they are the operations the tests exist to perform.
 
-The alternatives were both worse than exclusion: running it with `--track-fds=no`
-would drop the descriptor channel and the `FILE DESCRIPTORS` assertion for a
-suite that is entirely about descriptors, and relaxing `check_product_output`
-would weaken the contract for all seventeen. The site it covers,
-`json_stream_reporter.mojo`'s borrowed-`String` write loop, keeps its Memcheck
-evidence through the real-CLI probe below, which drives `open_json_fd`,
-`_write_all`, and `close_json_fd` on live descriptors under the full flag set.
-The ASan lane runs this suite unchanged: LeakSanitizer does not track
-descriptors, so the deliberate `EBADF` calls are inert there."""
+Both alternatives were worse than exclusion. `--track-fds=no` would drop the
+descriptor channel and the `FILE DESCRIPTORS` assertion for a suite entirely
+about descriptors, and relaxing `check_product_output` would weaken the contract
+for all seventeen. The site it covers, `json_stream_reporter.mojo`'s
+borrowed-`String` write loop, keeps its Memcheck evidence through the real-CLI
+probe below, which drives `open_json_fd`, `_write_all` and `close_json_fd` on
+live descriptors under the full flag set. The ASan lane runs this suite
+unchanged, since LeakSanitizer does not track descriptors."""
 
 TESTS = (
     *tuple(sorted(EXEC_TEST_ROOT.glob("test_exec_*.mojo"))),
@@ -137,14 +132,13 @@ CLI_VALGRIND_FLAGS = (
 
 Identical to `VALGRIND_FLAGS` except that `possible` is absent from
 `--errors-for-leak-kinds`. The CLI initializes the Mojo async runtime's CPU
-device, which starts one unjoined worker thread per core; glibc's per-thread
-TLS descriptor table is then reachable only through an interior pointer and
-Memcheck classifies it `possibly lost`. That is a runtime artifact whose block
-count tracks the host's core count, so it cannot be pinned the way
-`EXPECTED_REACHABLE` pins the suites' baseline. Dropping it from the ERROR
-channel does NOT drop it from the gate: `check_cli_provenance` still rejects any
-possibly-lost or still-reachable record carrying a product or native-adapter
-frame, which is the claim that actually matters, and every other lane keeps
+device, which starts one unjoined worker thread per core, and glibc's per-thread
+TLS descriptor table is then reachable only through an interior pointer, which
+Memcheck classifies `possibly lost`. Its block count tracks the host's core
+count, so it cannot be pinned the way `EXPECTED_REACHABLE` pins the suites'
+baseline. Dropping it from the ERROR channel does not drop it from the gate:
+`check_cli_provenance` still rejects any possibly-lost or still-reachable record
+carrying a product or native-adapter frame, and every other lane keeps
 `possible` as a hard error."""
 
 CLI_SOURCE = ROOT / "src" / "main.mojo"
@@ -173,10 +167,10 @@ workflow uploads this lane's evidence as `build/safety/valgrind/*.log`: the two
 channels have to land next to each other and both match that glob, or a human
 debugging from the artifact alone loses half the story.
 
-A bare name rather than an `OUT`-derived `Path` like its neighbours above, so it
-follows a patched `OUT` in the unit tests. Those drive `check_cli` with a
+A bare name rather than an `OUT`-derived `Path` like its neighbours above, so
+it follows a patched `OUT` in the unit tests. Those drive `check_cli` with a
 stand-in Valgrind, and a fixed absolute path would have them writing into the
-real artifact tree — the one a concurrent gate run is using."""
+real artifact tree that a concurrent gate run is using."""
 
 HOSTILE_BUILD_STANDIN = (
     ROOT / "scripts" / "fixtures" / "toolchain" / "fake_hostile_mojo.py"
@@ -184,10 +178,10 @@ HOSTILE_BUILD_STANDIN = (
 """The strict `--mojo` stand-in that fabricates the hostile report actor.
 
 Both it and the actor are children the CLI `execve`s, and this lane runs with
-`--trace-children=no`, so neither is under Memcheck: the subject is the mtest
-parent alone. That is the point of choosing a stand-in over the real compiler —
-a `mojo build` child under Memcheck would dominate the runtime and report on a
-toolchain this project does not own."""
+`--trace-children=no`, so neither is under Memcheck and the subject is the mtest
+parent alone. That is why a stand-in beats the real compiler here: a `mojo
+build` child under Memcheck would dominate the runtime and report on a toolchain
+this project does not own."""
 
 HOSTILE_ACTOR = ROOT / "tests" / "fixtures" / "exec" / "hostile_report_actor.py"
 """The committed actor the stand-in copies. Named so this gate's inventory
@@ -203,22 +197,21 @@ the pair a provenance proof rather than only a cleanliness assertion."""
 CLI_FD_SUMMARY = "FILE DESCRIPTORS: 3 open (3 inherited) at exit."
 """The expected descriptor state at exit: the three the gate handed the client,
 and nothing else. The CLI opens a descriptor for the NDJSON stream, one for the
-state temp file, and one per JUnit spool fragment; every one of them must be
-released before `main` returns, and a retained report descriptor would show up
-here as a fourth open fd rather than as a leak.
+state temp file, and one per JUnit spool fragment, all of which must be released
+before `main` returns. A retained report descriptor shows up here as a fourth
+open fd rather than as a leak.
 
-`(3 inherited)` matches the suites: this gate runs its clients through
-`subprocess` with piped stdout/stderr, so all three standard descriptors are
-inherited rather than freshly opened terminals."""
+`(3 inherited)` matches the suites, because this gate runs its clients through
+`subprocess` with piped stdout/stderr rather than freshly opened terminals."""
 
 CLI_MEMCHECK_EXIT = 99
 """`--error-exitcode`, checked immediately before the exact exit pin.
 
-It adds no coverage: `returncode == CLI_PROBE_EXIT` already excludes 99, and
-would do so for any other pinned value too. It is checked first purely for the
-DIAGNOSTIC — a Memcheck rejection then reports itself as "Memcheck rejected the
-run" with the log attached, rather than as a bare "exited 99, expected 1" that
-sends the reader looking for a product exit-code defect that does not exist."""
+It adds no coverage, since `returncode == CLI_PROBE_EXIT` already excludes 99.
+It is checked first for the DIAGNOSTIC: a Memcheck rejection then reports itself
+as "Memcheck rejected the run" with the log attached, rather than as a bare
+"exited 99, expected 1" that sends the reader hunting a product exit-code defect
+that does not exist."""
 
 CLI_PROBE_TREE = "hostile"
 """The single subdirectory of the scratch root that holds the probe module."""
@@ -238,14 +231,11 @@ CLI_PROBE_KEYWORD = "hostile"
 CLI_PROBE_EXIT = 1
 """The fixed run's expected client exit code.
 
-ONE, not zero, because the actor writes a genuine reconciling report with one
-FAIL row. Pinning 1 is a stronger POSITIVE claim than pinning 0 would be: only a
-run that actually built the child, captured its bytes, parsed its report, and
+ONE because the actor writes a genuine reconciling report with one FAIL row.
+Only a run that built the child, captured its bytes, parsed its report and
 resolved a failing verdict can produce it, whereas 0 is also what a run that did
-almost nothing returns.
-
-It is NOT stronger for excluding Valgrind's `--error-exitcode=99` — any exact
-pin excludes 99 equally, including a pin of 0."""
+almost nothing returns. Any exact pin excludes Valgrind's `--error-exitcode=99`
+equally, so that is not a reason to prefer 1."""
 
 CLI_PROBE_ESCAPED_LINE = "    | \\x1B[2J\\x1B[1;31mCHILD-CSI\\x1B[0m"
 """The child's clear-screen-and-recolor sequence as the console must render it."""
@@ -342,11 +332,10 @@ def read_valgrind_log(path: Path) -> str:
     Memcheck prints demangled symbol names exactly as the object file spells
     them, and the pinned toolchain mangles a parameterized `_Global` type name
     with control bytes in it, so this file is not guaranteed to be clean UTF-8.
-    Replacing what will not decode keeps a hostile or merely odd symbol name
-    from turning a real Memcheck finding into a `UnicodeDecodeError` traceback
-    with no diagnostic attached. Nothing is lost: every marker the callers match
-    is plain ASCII, and a replacement character can neither create nor destroy
-    one.
+    Replacing what will not decode stops an odd symbol name from turning a real
+    Memcheck finding into a `UnicodeDecodeError` traceback. Every marker the
+    callers match is plain ASCII, so a replacement character can neither create
+    nor destroy one.
 
     Args:
         path: The log Valgrind was told to write.
@@ -523,9 +512,9 @@ def valgrind(
     # Startup failures arrive on whichever channel was open when they happened,
     # so both are scanned. Measured on valgrind-3.27.1: a command-line error is
     # reported before the log file is opened and lands on stderr, captured here
-    # in `result.stdout`; every fatal after that point — including the
+    # in `result.stdout`; every fatal after that point, including the
     # mandatory-redirection failure this probe exists for, which the loader
-    # raises while translating — is written to the log and leaves the pipe
+    # raises while translating, is written to the log and leaves the pipe
     # empty. Reading only `result.stdout` would retire this diagnostic for
     # every redirected run.
     diagnostics = result.stdout
@@ -645,14 +634,13 @@ def leak_records(log: str, kinds: str, label: str) -> list[str]:
     """Parse the leak records of `kinds` out of a Memcheck log, fail-closed.
 
     The callers scan these records for a product or native-adapter frame, which
-    is the compensating control for `CLI_VALGRIND_FLAGS` deliberately dropping
-    `possible` from the error channel. A `re.findall` that matched nothing
-    would make that scan vacuously pass, so a Valgrind upgrade that reworded a
-    leak-record header — while leaving the `LEAK SUMMARY:` and `ERROR SUMMARY:`
-    lines the neighbouring assertions match intact — would silently retire the
-    control. Every log this gate accepts carries reachable records (the Mojo
-    runtime's own allocations, pinned by `EXPECTED_REACHABLE`), so finding none
-    means the parse broke, not that the program got cleaner.
+    is the compensating control for `CLI_VALGRIND_FLAGS` dropping `possible`
+    from the error channel. A `re.findall` that matched nothing would make that
+    scan vacuously pass, so a Valgrind upgrade rewording a leak-record header,
+    while leaving the `LEAK SUMMARY:` and `ERROR SUMMARY:` lines intact, would
+    silently retire the control. Every log this gate accepts carries reachable
+    records (the Mojo runtime's own allocations, pinned by `EXPECTED_REACHABLE`),
+    so finding none means the parse broke rather than that the program improved.
 
     Args:
         log: The complete Memcheck output for one run.
@@ -809,10 +797,9 @@ def cli_probe_command(binary: Path, scratch: Path) -> list[str]:
 def check_cli_provenance(returncode: int, log: str) -> None:
     """Require the probe's own log to prove it ran under Memcheck, cleanly.
 
-    This is the assertion that separates "the instrumented run found nothing"
-    from "the instrumented run never happened". An unwrapped client produces
-    output that satisfies every artifact assertion in `check_cli_probe_output`
-    while carrying none of the four markers checked here.
+    Separates "the instrumented run found nothing" from "the instrumented run
+    never happened". An unwrapped client satisfies every artifact assertion in
+    `check_cli_probe_output` while carrying none of the four markers below.
 
     Args:
         returncode: What the `valgrind` invocation returned.
@@ -878,8 +865,8 @@ def check_cli_probe_output(
     """Judge one instrumented CLI reporter run and both artifacts it wrote.
 
     Every rejection names one cause. The two machine formats are handed to the
-    project's existing strict oracles — the NDJSON stream consumer and the
-    xmllint + arithmetic JUnit checker — rather than parsed here, so this gate
+    project's existing strict oracles (the NDJSON stream consumer and the
+    xmllint plus arithmetic JUnit checker) rather than parsed here, so this gate
     cannot accept an artifact the report gates would reject.
 
     Args:
@@ -963,7 +950,7 @@ def check_cli(env: dict[str, str]) -> None:
     indistinguishable from something mtest emitted. That is fatal here
     specifically: `check_cli_probe_output` scans for raw control bytes to prove
     a hostile child cannot address the terminal through mtest, and Memcheck
-    prints demangled symbol names verbatim — the pinned toolchain mangles a
+    prints demangled symbol names verbatim, and the pinned toolchain mangles a
     parameterized `_Global` type name with a literal ESC in it, so Valgrind's
     own leak records failed that scan for bytes the console never wrote.
 
@@ -1035,15 +1022,11 @@ def check_cli(env: dict[str, str]) -> None:
 def compile_and_run_test(source: Path, env: dict[str, str]) -> None:
     """Build one suite from product sources, then execute it directly in Memcheck.
 
-    Every classified module under `tests/unit` and `tests/integration` now
-    declares its own `main()`, so the source itself is a complete, directly
-    buildable entrypoint. There is no generated `*_main.mojo` wrapper to bolt
-    on: `mojo build` runs straight on `source`. `-I .` is dropped too -- it
-    existed only so a generated wrapper's `import tests.unit.<module>` could
-    resolve the repo-root-relative module path; a source file built directly
-    never spells that import (verified: no `tests/unit/*.mojo` or
-    `tests/integration/*.mojo` file imports another via the `tests.*` package
-    path), so the include has nothing left to resolve.
+    Every classified module under `tests/unit` and `tests/integration` declares
+    its own `main()`, so `mojo build` runs straight on `source` with no generated
+    wrapper. `-I .` is dropped with the wrapper: it only ever resolved a
+    wrapper's repo-root-relative `import tests.unit.<module>`, and no classified
+    file imports another through the `tests.*` package path.
     """
     binary = OUT / source.stem
     compiled = run(

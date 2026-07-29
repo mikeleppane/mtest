@@ -1,44 +1,36 @@
 #!/usr/bin/env python3
-"""Retry-then-crash `--mojo` stand-in — drives the BUILD-RETRY attribution path.
+"""Retry-then-crash `--mojo` stand-in for the BUILD-RETRY attribution path.
 
-Stands in for the real `mojo` binary the same way the adjacent
-`fake_slow_mojo.py` does. It routes every child
-mtest spawns through this script first. It exists to reach ONE otherwise
-unreachable state: a file whose CRASH verdict was earned by a binary at
-`build/bin/<mangled>.attempt-N` rather than `build/bin/<mangled>`.
+Stands in for the real `mojo` binary the way the adjacent `fake_slow_mojo.py`
+does, routing every child mtest spawns through this script first. It reaches one
+otherwise unreachable state: a file whose CRASH verdict was earned by a binary at
+`build/bin/<mangled>.attempt-N` rather than `build/bin/<mangled>`. mtest gets
+there on its own, since a crash-class build failure is retried to a fresh
+`.attempt-N` output path and that binary is the one run; if it then crashes, the
+mangled name no longer names what died.
 
-mtest gets there on its own: a crash-class BUILD failure is retried, and the
-retry rebuilds to a FRESH `.attempt-N` output path and then RUNS that binary. If
-that rebuilt binary crashes at runtime, the mangled name never names the thing
-that died. Crash attribution must rerun the binary that actually crashed, so this
-shim makes the divergence real and observable:
-
-* `build`, marker ABSENT (the first attempt) — drop the marker, TRUNCATE the `-o`
-  path (a real compiler owns that path from the moment it starts), write one
-  progress line to stderr, then sleep far past any deadline. mtest's
-  `--compile-timeout` kills it; that kill is crash-class, so `--retries 1` buys a
-  second attempt at a NEW `-o` (`...attempt-2`). SIGTERM exits promptly, well
-  inside the 5-second compile grace.
-* `build`, marker PRESENT (the retry) — write a working test binary at `-o` and
-  exit 0. The binary speaks the pinned report grammar and is keyed to the
-  fixture's real tests: it segfaults when run whole (so the file's verdict is
+* `build` with the marker absent (first attempt): drop the marker, truncate the
+  `-o` path (a real compiler owns that path from the moment it starts), write one
+  progress line to stderr, then sleep past any deadline. mtest's
+  `--compile-timeout` kills it, and that kill is crash-class, so `--retries 1`
+  buys a second attempt at a new `-o` (`...attempt-2`). SIGTERM exits promptly,
+  well inside mtest's compile grace.
+* `build` with the marker present (the retry): write a working test binary at
+  `-o` and exit 0. The binary speaks the pinned report grammar and is keyed to
+  the fixture's real tests: it segfaults when run whole (so the file's verdict is
   CRASH), lists its three tests under `--skip-all`, segfaults under
-  `--only test_boom`, and passes under any other selection. That is exactly the
-  behavior of the REAL fixture it stands in for — the shim relocates the binary,
-  it does not invent a different truth.
-* anything else (`--version`, ...) — EXECS the real `mojo` on PATH with the
-  untouched argv, so this stays a transparent stand-in outside the one path it
-  exists to bend.
+  `--only test_boom`, and passes under any other selection. That matches the real
+  fixture it stands in for; the shim only relocates the binary.
+* anything else (`--version`, ...): execs the real `mojo` on PATH with the
+  untouched argv, so this stays a transparent stand-in elsewhere.
 
 Truncating `-o` on the killed first attempt is what makes the scenario
-DISCRIMINATING: it leaves `build/bin/<mangled>` present but non-runnable, so a
-runner that reconstructed the mangled name (instead of carrying the binary that
-ran) reports PROBE_FAILED and the assertion fails loudly — rather than silently
-passing because a stale binary from an earlier scenario happened to be lying
-there and happened to name the same culprit.
+discriminating: `build/bin/<mangled>` is left present but non-runnable, so a
+runner that reconstructed the mangled name instead of carrying the binary that
+ran reports PROBE_FAILED rather than passing on a stale binary that happened to
+name the same culprit.
 
-Stdlib only, no third-party imports — this is build-time harness code, not part
-of the pure-Mojo product.
+Stdlib only: this is build-time harness code, outside the pure-Mojo product.
 """
 
 from __future__ import annotations
@@ -59,9 +51,9 @@ REPO_ROOT = os.path.dirname(
 )
 MARKER = os.path.join(REPO_ROOT, "build", "e2e-scratch", "retry_crash_build_marker")
 
-# The fixture's tests, in source order, and the one that dies. Kept in step with
-# e2e/attribution/test_deterministic_crasher.mojo by the e2e scenario, which
-# asserts the culprit by name.
+# The fixture's tests, in source order, and the one that dies. The e2e scenario
+# asserts the culprit by name, keeping this in step with
+# e2e/attribution/test_deterministic_crasher.mojo.
 NAMES = ("test_alpha_ok", "test_boom", "test_gamma_ok")
 CULPRIT = "test_boom"
 
@@ -178,8 +170,8 @@ def _retry_build_succeeds(args: list[str]) -> int:
 def main() -> int:
     """Hang the first `build`, succeed on the retry, exec anything else.
 
-    The marker file left by the first attempt is what makes the two builds
-    differ, so the retry path is chosen by observed state rather than by argv.
+    The marker file left by the first attempt is what separates the two builds,
+    so the retry path is chosen by observed state rather than by argv.
 
     Returns:
         0 once the retry has written a working binary, 1 when a build argv could
@@ -199,9 +191,8 @@ def main() -> int:
         return 127
 
     os.execv(real_mojo, [real_mojo, *args])
-    # Kept as defence in depth: typeshed types os.execv as NoReturn, so mypy
-    # sees this as dead. Deleting it would remove the fallback if that ever
-    # changes.
+    # typeshed types os.execv as NoReturn, so mypy sees this as dead. Kept as
+    # the fallback if that ever changes.
     return 1  # type: ignore[unreachable]
 
 

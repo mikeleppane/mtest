@@ -1,30 +1,28 @@
 #!/usr/bin/env python3
-r"""Window-recording `--mojo` stand-in — proves builds overlap under the pool.
+r"""Window-recording `--mojo` stand-in that proves builds overlap under the pool.
 
 Test-only toolchain shim. Passing this file to `mtest --mojo` routes every child
-`mojo build`/`mojo precompile` spawn through this script first, exactly as the
-adjacent `logging_mojo.py` does. Unlike that wrapper — which `os.execv`s and can
-therefore only stamp the START of a build — this shim must record BOTH edges of a
-build's wall-clock window so the harness can prove two builds ran concurrently.
-So it SPAWN-AND-WAITs the real compiler instead of exec-replacing itself:
+`mojo build`/`mojo precompile` spawn through this script first, as the adjacent
+`logging_mojo.py` does. That wrapper `os.execv`s and can therefore stamp only the
+start of a build; proving two builds overlapped needs both edges of the window,
+so this shim spawns and waits on the real compiler instead:
 
 1. `MTEST_WINDOW_LOG` names an append log. On a `build`/`precompile` subcommand it
    appends `build\t<target>\t<start_monotonic>` before the compile and
-   `build\t<target>\t<end_monotonic>\t<returncode>` after it. Unset → the shim
-   is a transparent passthrough that records nothing.
-2. A BUILD FLOOR (`MTEST_WINDOW_BUILD_FLOOR` seconds, default 0.3) keeps every
-   window observably wide. It floors the WALL time from the start stamp to the
-   end stamp — a slow real build is not double-charged, only a fast one is padded.
+   `build\t<target>\t<end_monotonic>\t<returncode>` after it. When unset, the
+   shim is a transparent passthrough that records nothing.
+2. A build floor (`MTEST_WINDOW_BUILD_FLOOR` seconds, see
+   `DEFAULT_FLOOR_SECONDS`) keeps every window observably wide. It floors the
+   wall time from the start stamp to the end stamp, so only a fast build is
+   padded and a slow real one is never charged twice.
 3. SIGTERM/SIGINT are forwarded to the spawned child, then the shim exits with the
    signal-derived code (128 + signo), so the pool's process-group sweep tears the
-   shim AND its real-`mojo` child down together and leaves no orphan.
+   shim and its real-`mojo` child down together and leaves no orphan.
 
-`run` and every other subcommand are a transparent passthrough — runs are executed
-by mtest directly, never via `--mojo`, so run windows come from the fixtures, not
-this shim.
+`run` and every other subcommand pass through untouched. mtest executes runs
+directly rather than via `--mojo`, so run windows come from the fixtures.
 
-Stdlib only, no third-party imports — this is build-time harness code, not part of
-the pure-Mojo product.
+Stdlib only: this is build-time harness code, outside the pure-Mojo product.
 """
 
 from __future__ import annotations
@@ -67,8 +65,8 @@ def _build_floor() -> float:
 def _forward_signal(signum: int, _frame: object) -> None:
     """Forward the signal to the spawned child, then exit 128 + signo.
 
-    Waits briefly for the child to fall so the pool's group sweep reaps a clean
-    tree rather than an orphaned compiler.
+    Waits for the child to fall, so the pool's group sweep reaps a clean tree
+    rather than an orphaned compiler.
     """
     child = _child
     if child is not None and child.poll() is None:
@@ -114,8 +112,8 @@ def _run_build(real_mojo: str, _subcommand: str, args: list[str]) -> int:
     _child = subprocess.Popen([real_mojo, *args])
     returncode = _child.wait()
 
-    # Floor the WHOLE window (start stamp to end stamp), so a fast build is padded
-    # but a slow real build is never charged twice.
+    # Floor the whole window (start stamp to end stamp), so a fast build is
+    # padded but a slow real build is never charged twice.
     remaining = _build_floor() - (time.monotonic() - start)
     if remaining > 0:
         time.sleep(remaining)
@@ -144,9 +142,8 @@ def main() -> int:
         return _run_build(real_mojo, args[0], args)
 
     os.execv(real_mojo, [real_mojo, *args])
-    # Kept as defence in depth: typeshed types os.execv as NoReturn, so mypy
-    # sees this as dead. Deleting it would remove the fallback if that ever
-    # changes.
+    # typeshed types os.execv as NoReturn, so mypy sees this as dead. Kept as
+    # the fallback if that ever changes.
     return 1  # type: ignore[unreachable]
 
 

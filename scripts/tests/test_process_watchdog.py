@@ -53,8 +53,8 @@ FLOOD_MARKERS = (
     "==> tests/unit/test_first.mojo\n",
     "==> tests/unit/test_crashing.mojo\n",
 )
-# Every flooding case must finish well inside this guard: the longest is the
-# timeout case at one second of deadline plus the five-second sweep grace.
+# Every flooding case must finish well inside this guard; the longest is the
+# timeout case, its own deadline plus the group sweep grace.
 FLOOD_GUARD_SECONDS = 30.0
 # What a leaked descendant emits after the supervisor has already returned, and
 # the supervisor's own verdict that must remain the caller stream's last word.
@@ -65,8 +65,7 @@ VERDICT_LINE = "FAILED: aggregate suite (run exit 1)\n"
 # or above it must still drain, so the probe pads the descriptor table past it.
 FD_SELECT_CEILING = 1024
 # A caller whose stdout consumer has stopped must not outlive its own SIGTERM.
-# The supervisor's bounded work after a signal is the group grace plus the drain
-# settle plus the seal, well inside this guard.
+# The supervisor's bounded work after a signal fits well inside this guard.
 BLOCKED_GUARD_SECONDS = 30.0
 
 
@@ -303,12 +302,9 @@ def test_parser_rejects_invalid_timeouts_before_payload_start() -> None:
 def test_the_requestable_maximum_is_above_the_default() -> None:
     """The default and the maximum are separate policies, and both still bind.
 
-    The default is what a caller gets for saying nothing; the maximum is the
-    largest thing a caller may deliberately ask for. Conflating them meant no
-    lane could justify a longer ceiling than the default, which is why the
-    self-hosted classified run could not be supervised honestly on a slow host.
-    Widening the range must not disarm the guard, so a value above the maximum
-    is still refused before any child is spawned.
+    Conflating them meant no lane could ask for a ceiling above the default,
+    which left the self-hosted classified run unsupervisable on a slow host. A
+    value above the maximum is still refused before any child is spawned.
     """
     if not MAX_TIMEOUT_SECONDS > DEFAULT_TIMEOUT_SECONDS:
         raise AssertionError(
@@ -497,10 +493,9 @@ def test_timeout_terminates_the_whole_process_group() -> None:
             raise AssertionError(
                 "timeout raced before the SIGTERM-ignoring child was ready"
             )
-        # `_run` captures the watchdog's inherited stdout/stderr. It cannot
-        # return until the descendant closes those inherited pipe ends; then
-        # this delayed marker separately proves the descendant did not survive
-        # long enough to resume after the group sweep.
+        # `_run` cannot return until the descendant closes the inherited pipe
+        # ends, so this delayed marker separately proves the descendant did not
+        # survive long enough to resume after the group sweep.
         time.sleep(1.0)
         if marker.exists():
             raise AssertionError("timeout let the descendant finish after cleanup")
@@ -805,9 +800,8 @@ def _retaining_watchdog_argv(
 ) -> list[str]:
     """Return argv for a supervisor process that captures its child's marker.
 
-    The watchdog's own command line never opts into capture, so a test that
-    needs to signal a capturing supervisor drives `run_command` through this
-    thin wrapper instead.
+    The watchdog's own command line never opts into capture, so this wrapper
+    drives `run_command` directly.
 
     Args:
         tmp: Directory the wrapper source is written into.
@@ -1004,12 +998,10 @@ def test_a_frozen_marker_capture_refuses_later_writes() -> None:
 def test_the_seal_freezes_the_capture_before_it_seals_any_tee() -> None:
     """Order matters: a tee sealed first can drop bytes whose marker still lands.
 
-    A drainer already past its stop check reads one more chunk. If the tees are
-    sealed before the capture is frozen, that chunk's bytes are dropped from
-    the caller's stream while its marker is still recorded, and the run reports
-    a last module the user never saw. The window widens to the seal's bounded
-    acquire whenever an earlier tee's seal has to wait out a write in flight,
-    so the ordering is asserted directly rather than raced for.
+    A drainer already past its stop check reads one more chunk. Sealing the
+    tees before freezing the capture drops that chunk's bytes from the caller's
+    stream while still recording its marker, so the run reports a last module
+    the user never saw. The ordering is asserted directly rather than raced for.
     """
     order: list[str] = []
 
@@ -1983,13 +1975,12 @@ def test_cancellation_during_the_drain_settle_stays_cancelled() -> None:
 
 
 def test_a_zombie_only_group_reports_gone_on_both_spellings() -> None:
-    """Darwin spells "every member is a zombie" EPERM, not ESRCH.
+    """Darwin spells "every member is a zombie" EPERM rather than ESRCH.
 
     Treating that as an error let a Ctrl-C racing the child's exit replace a
-    truthful Cancelled or Signaled with HarnessError, so the classified harness
-    returned internal exit 70 for a cancellation that in fact completed. This
-    supervisor owns every member of the group it signals, so EPERM cannot mean
-    a permission boundary.
+    truthful Cancelled or Signaled with HarnessError, so a completed
+    cancellation reported internal exit 70. This supervisor owns every member
+    of the group it signals, so EPERM cannot mean a permission boundary.
     """
     # `watchdog.os` is this module's own `os`, so patching it here reaches the
     # identical object the supervisor calls through.
@@ -2043,8 +2034,8 @@ def test_forwarding_a_signal_survives_a_zombie_only_group() -> None:
         raise PermissionError
 
     process = _Reaped()
-    # `_Reaped` is a duck-typed stand-in exposing exactly the three members both
-    # cleanup paths touch; the cast states that without changing what is passed.
+    # `_Reaped` is a duck-typed stand-in exposing the three members both cleanup
+    # paths touch.
     reaped = cast("subprocess.Popen[bytes]", process)
     original = os.killpg
     os.killpg = zombie_only
@@ -2062,9 +2053,9 @@ def test_forwarding_a_signal_survives_a_zombie_only_group() -> None:
 def test_an_unsealable_tee_releases_its_drainer_source() -> None:
     """A stalled caller stream must not leak a thread and a descriptor.
 
-    `seal` returns False when a drainer is parked in a write nobody is
-    reading. Ignoring that left the thread blocked forever holding the child's
-    pipe, so a caller running `run_command` in a loop exhausted both.
+    `seal` returns False when a drainer is parked in a write nobody is reading.
+    Ignoring that left the thread blocked forever holding the child's pipe, so
+    a caller looping over `run_command` exhausted both.
     """
 
     class _UnsealableTee:
@@ -2084,8 +2075,7 @@ def test_an_unsealable_tee_releases_its_drainer_source() -> None:
     thread.join()
     state = watchdog._DrainState(
         threads=(thread,),
-        # Duck-typed stand-ins for the only two members `_seal_drainers`
-        # touches; the casts state that without changing what is passed.
+        # Duck-typed stand-ins for the two members `_seal_drainers` touches.
         tees=cast("tuple[watchdog._StreamTee, ...]", (_UnsealableTee(),)),
         stop=threading.Event(),
         retention=None,

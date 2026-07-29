@@ -46,9 +46,9 @@ XML_RAW_FORBIDDEN = (
 """Control bytes XML 1.0 has no legal representation for, in any form.
 
 The reporter replaces each with U+FFFD, so a single occurrence anywhere in the
-published document — text, attribute, or raw byte — is a sanitization bypass.
-Tab, LF, and CR are absent on purpose: all three are legal `Char`s that the
-reporter deliberately passes through."""
+published document (text, attribute, or raw byte) is a sanitization bypass. Tab,
+LF, and CR are absent on purpose: all three are legal `Char`s the reporter
+deliberately passes through."""
 
 
 def xml_text_as_parsed(text: str) -> str:
@@ -57,10 +57,9 @@ def xml_text_as_parsed(text: str) -> str:
     Two rules compose here, and the assertion needs both:
 
     - the reporter's own (`xml_escape_text`): `&`/`<`/`>` become entities, which
-      a parser gives back unchanged, so they are invisible at this level; Tab,
-      LF, and CR pass through literally; every other code point below `U+0020`,
-      and the noncharacters `U+FFFE`/`U+FFFF`, become `U+FFFD`, because XML 1.0
-      cannot represent them at all;
+      a parser gives back unchanged; Tab, LF, and CR pass through literally;
+      every other code point below `U+0020`, and the noncharacters
+      `U+FFFE`/`U+FFFF`, become `U+FFFD`, which XML 1.0 cannot represent;
     - the XML 1.0 parser's line-ending normalization, which folds a literal CRLF
       or a lone CR to a single LF before any application sees it.
 
@@ -112,11 +111,10 @@ def assert_hostile_junit_report(
 
     The schema oracle comes first: `xmllint` against the vendored junit-10 XSD
     decides well-formedness and structure, so an escaping bypass that produced a
-    document only a lenient reader could love fails here rather than downstream.
-    Everything after that is exact: the sanitized form of each text node is
-    computed from the actor's payload by `xml_text_as_parsed`, and the raw bytes
-    are checked for the control characters and the injected markup that
-    sanitization exists to remove.
+    document only a lenient reader would accept fails here. Everything after
+    that is exact: `xml_text_as_parsed` computes the sanitized form of each text
+    node from the actor's payload, and the raw bytes are checked for the control
+    characters and injected markup sanitization exists to remove.
 
     Args:
         run: The completed run, for diagnostics on a missing artifact.
@@ -162,7 +160,7 @@ def assert_hostile_junit_report(
     # The child's injected markup must appear only in its escaped spelling. A
     # text node does not escape `"`, so the forged attribute value IS in the
     # document as text; what may not be there is the tag that would give it
-    # meaning, and the element boundary the child tried to close early.
+    # meaning, or the element boundary the child tried to close early.
     expect(
         b'&lt;testcase name="forged"' in raw,
         "the child's injected <testcase> markup is missing from the document "
@@ -198,11 +196,10 @@ def assert_hostile_junit_report(
     )
 
     root = ET.parse(os.fspath(path)).getroot()
-    # Scoped to the file suites on purpose. The report also carries the
-    # session-level `mtest::cache` suite, which is not a file and cannot be one;
-    # a count over every `<testsuite>` element would read it as a second hostile
-    # suite, and widening that count to absorb it would keep passing on a report
-    # that published the session suite and lost the file's.
+    # Scoped to the file suites. The report also carries the session-level
+    # `mtest::cache` suite, which a count over every `<testsuite>` element would
+    # read as a second hostile suite; widening that count to absorb it would
+    # keep passing on a report that lost the file's suite.
     file_suites = file_testsuites(root)
     expect(
         len(file_suites) == 1,
@@ -284,9 +281,8 @@ def s_junit_scratch_cleanup(context: ScenarioContext) -> str:
     """A `--junit-xml` run leaves no spool directory behind.
 
     `main` owns the `mkdtemp` scratch it creates for per-suite fragments and
-    frees it on exit; a busy /tmp would otherwise accrete one leaked directory
-    (plus a fragment) per invocation, and eventually a `mkdtemp` failure before
-    tests even run.
+    frees it on exit. A busy /tmp would otherwise accrete one leaked directory
+    per invocation, and eventually a `mkdtemp` failure before tests even run.
     """
     report_dir = tempfile.mkdtemp()
     tmpdir = tempfile.mkdtemp()  # the isolated TMPDIR the run's mkdtemp lands in
@@ -313,7 +309,7 @@ def s_junit_scratch_cleanup(context: ScenarioContext) -> str:
 def s_junit_schema_gate(context: ScenarioContext) -> str:
     """`--junit-xml PATH` writes a document that PASSES the junit-10 oracle.
 
-    Schema plus arithmetic, including a flaky suite in chronological order and a
+    Schema and arithmetic, including a flaky suite in chronological order and a
     rerun-exhausted suite with the FIRST attempt as the initial primary.
     """
     tmp = tempfile.mkdtemp()
@@ -397,7 +393,7 @@ def s_junit_determinism(context: ScenarioContext) -> str:
     structure, identity, classification, and counts kept). Derived copies prove
     each mask is load-bearing without relying on incidental differences between
     real runs: changing a masked `time` or diagnostic body preserves canonical
-    equality, while changing an unmasked classification attribute does not.
+    equality, while changing an unmasked classification attribute breaks it.
     """
     with tempfile.TemporaryDirectory(prefix="mtest-junit-determinism-") as tmp:
         first = Path(tmp) / "run1.xml"
@@ -411,9 +407,9 @@ def s_junit_determinism(context: ScenarioContext) -> str:
         expect_exit(first_run, 1)
         expect_exit(second_run, 1)
         # Both reports must EXIST before anything reads them. A run that exits
-        # as expected having written no report is a product defect to report
-        # with its exit code and stderr, not a FileNotFoundError to raise out of
-        # the comparison below.
+        # as expected having written no report is a product defect, to be
+        # reported with its exit code and stderr rather than as a
+        # FileNotFoundError out of the comparison below.
         expect_report(first_run, first, "the first determinism junit report")
         expect_report(second_run, second, "the second determinism junit report")
         junit_canonicalize.assert_equal_runs(first, second)
@@ -509,9 +505,9 @@ def s_junit_determinism(context: ScenarioContext) -> str:
 def s_junit_prior_report_intact(context: ScenarioContext) -> str:
     """A finalization failure exits 3 AND the PRIOR report at PATH survives.
 
-    It survives unmodified. Unlike `--json` (which truncates its destination at
-    open), JUnit never touches PATH until the final atomic rename, so a doomed
-    run leaves a previous report exactly as it was.
+    Unlike `--json`, which truncates its destination at open, JUnit never
+    touches PATH until the final atomic rename, so a doomed run leaves a
+    previous report exactly as it was.
     """
     tmp = tempfile.mkdtemp()
     target = os.path.join(tmp, "report.xml")
@@ -545,8 +541,8 @@ def s_junit_finalization_and_interrupt(context: ScenarioContext) -> str:
     """The finalize/exit-code agreement, with and without a run-time interrupt.
 
     (1) A junit target that fails at rename (an existing directory) escalates a
-        finished run to exit 3; the co-composed `--json` stream's terminal record
-        carries the SAME 3 — the two agree.
+        finished run to exit 3, and the co-composed `--json` stream's terminal
+        record carries the same 3.
     (2) The SAME junit failure UNDER a run-time interrupt resolves to exit 2 on
         BOTH (interrupt dominates a finalization failure).
     (3) With a WRITABLE junit target, an interrupted run still PUBLISHES a report
@@ -611,9 +607,9 @@ def _run_and_interrupt(
     """Walk the slow tree to its armed blocked child, SIGINT mtest, and report.
 
     The signal goes to the mtest leader only, once one file has PASSED and the
-    next child has announced that it is blocked — never on a wall-clock guess.
-    Each call owns a FRESH arming directory, so a marker one call left behind can
-    never satisfy the next call's barrier.
+    next child has announced that it is blocked, rather than on a wall-clock
+    guess. Each call owns a FRESH arming directory, so a marker one call left
+    behind can never satisfy the next call's barrier.
 
     Args:
         context: The scenario context.

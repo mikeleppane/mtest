@@ -3,16 +3,14 @@
 
 mtest has no line or branch coverage number, because Mojo 1.0.0b2 ships no
 coverage instrumentation: neither ``mojo build --help`` nor ``mojo --help``
-mentions a coverage, profile, or instrumentation flag. Release confidence
-therefore rests on the behavioral and mutation oracles the checks in this
-repository enforce, not on a percentage.
+mentions a coverage, profile, or instrumentation flag. Release confidence rests
+on the behavioral and mutation oracles this repository's checks enforce.
 
 That limitation is only honest while it is still true, so this probe is a gate
-rather than a report. The ASYMMETRY is the point: an absent facility is the
-quiet, passing outcome, and *discovering* a facility is the failure. A
-toolchain upgrade cannot silently start emitting an unreviewed percentage —
-somebody has to read the new flags and decide, in a commit, whether mtest gates
-on them.
+rather than a report, and the asymmetry is deliberate: an absent facility passes
+quietly, and discovering one fails. A toolchain upgrade cannot start emitting an
+unreviewed percentage without somebody reading the new flags and deciding, in a
+commit, whether mtest gates on them.
 
 Four outcomes, three of them nonzero:
 
@@ -58,8 +56,8 @@ _FLAG = re.compile(r"--[A-Za-z0-9][A-Za-z0-9-]*")
 
 # The positive witness each probe's output must carry before "we looked and
 # found nothing" is allowed to mean anything. Without one, an exit-0 command
-# that writes nothing at all -- a renamed subcommand path, a shim that pages
-# its help, a wrapper that swallows both streams -- reads exactly like a
+# that writes nothing at all (a renamed subcommand path, a shim that pages its
+# help, a wrapper that swallows both streams) reads exactly like a
 # toolchain with no coverage facility, and the gate concludes the facility is
 # absent having inspected zero bytes.
 #
@@ -137,8 +135,8 @@ def discover_coverage_flags(help_text: str) -> tuple[str, ...]:
 def relevant_lines(help_text: str) -> tuple[str, ...]:
     """Return the lines the recorded ripgrep probe would have matched.
 
-    A coverage facility does not have to be spelled as a flag — it could arrive
-    as a subcommand or an environment variable — so the gate also fails on a
+    A coverage facility does not have to be spelled as a flag. It could arrive
+    as a subcommand or an environment variable, so the gate also fails on a
     bare mention. Flags are reported preferentially because they are the
     actionable form; these lines are the fallback that keeps the gate closed.
 
@@ -236,7 +234,7 @@ def evaluate(
         A ``(message, exit code)`` pair. The code is ``0`` only when every
         recorded command produced recognizable help text AND none of it named
         anything coverage-shaped. Any discovery, and any report that cannot be
-        recognized as help at all, returns a nonzero code — reading zero bytes
+        recognized as help at all, returns a nonzero code. Reading zero bytes
         is not evidence that a facility is absent.
     """
     discovered: list[str] = []

@@ -102,11 +102,10 @@ class AsanCheckTests(unittest.TestCase):
     def test_a_suite_build_gets_the_compile_budget_not_the_run_budget(self) -> None:
         """Compiling a suite and running it are budgeted separately.
 
-        A `mojo build` of a suite that imports `mtest.session` compiles the whole
-        session and cache closure, which is minutes of work on a two-core hosted
-        runner; the built binary is expected to finish in seconds. Sharing one
-        budget forces a choice between killing a healthy compiler and letting a
-        hung binary sit. These are separate numbers on purpose.
+        A `mojo build` of a suite importing `mtest.session` compiles the whole
+        session and cache closure, far more work than running the built binary.
+        Sharing one budget forces a choice between killing a healthy compiler
+        and letting a hung binary sit.
         """
         source = asan_check.ROOT / "tests" / "unit" / "test_config.mojo"
         expected = asan_check.test_count(source)
@@ -139,9 +138,8 @@ class AsanCheckTests(unittest.TestCase):
     def test_every_mojo_build_shares_one_compile_budget(self) -> None:
         """One number covers every compile in the lane, so growth trips none of them.
 
-        The budget is a guard against a wedged compiler, not a performance
-        assertion, so it is sized well above the slowest observed build rather
-        than tuned per call site.
+        The budget guards against a wedged compiler, so it is sized well above
+        the slowest observed build rather than tuned per call site.
         """
         self.assertGreater(asan_check.BUILD_TIMEOUT, 180)
 
@@ -263,14 +261,9 @@ class AsanCliProbeTests(unittest.TestCase):
     def test_check_cli_actually_calls_the_instrumentation_check(self) -> None:
         """The witness must be ON the call path, not merely defined.
 
-        Every other test that drives `check_cli` patches
-        `check_cli_instrumentation` out, so without this one the whole control
-        could be deleted from `check_cli` and the suite would stay green — the
-        exact failure mode the witness exists to prevent, one level up.
-
-        This drives the real `check_cli` with a probe output that carries no
-        witness and requires the run to be rejected, which can only happen if
-        `check_cli` calls the check.
+        Every other test driving `check_cli` patches `check_cli_instrumentation`
+        out, so without this one the control could be deleted from `check_cli`
+        and the suite would stay green.
         """
         results = [
             subprocess.CompletedProcess(args=["mojo"], returncode=0, stdout=""),
@@ -296,10 +289,9 @@ class AsanCliProbeTests(unittest.TestCase):
     def test_a_run_without_the_leak_check_witness_is_rejected(self) -> None:
         """A silent run and a clean run must not be the same observation.
 
-        The `__asan_` symbol guard is static — it proves linkage, not that the
-        runtime executed. This is the ASan lane's counterpart to Memcheck
-        provenance: without the witness, a probe whose leak check never ran
-        would pass every artifact assertion.
+        The `__asan_` symbol guard is static: it proves linkage only. Without
+        the witness, a probe whose leak check never ran passes every artifact
+        assertion.
         """
         with self.assertRaisesRegex(SystemExit, "leak check did not run"):
             asan_check.check_cli_instrumentation("0 passed, 1 failed\n")

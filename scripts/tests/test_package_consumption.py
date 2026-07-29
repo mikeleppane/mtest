@@ -6,15 +6,14 @@ installs it into a scratch environment, and drives the installed binary. Those
 stages cannot run inside a unit test, but the decisions the gate makes CAN,
 because each is a pure function over data the stages collect:
 
-  * `package_platform` -- which subdir, loader command, and loader environment
+  * `package_platform`: which subdir, loader command, and loader environment
     variables belong to the host being gated;
-  * `scrubbed_probe_env` and `scratch_manifest_text` -- the two places that
-    descriptor has to reach for the gate to be platform-parameterized rather
-    than platform-agnostic-looking;
-  * `verify_installed_artifact_identity` -- whether the package the solver
+  * `scrubbed_probe_env` and `scratch_manifest_text`: the two places that
+    descriptor has to reach for the gate to be platform-parameterized;
+  * `verify_installed_artifact_identity`: whether the package the solver
     installed is byte-for-byte the artifact this run built, or a same-version
     impostor from another channel;
-  * `check_failing_fixture_consumption` -- whether the installed binary really
+  * `check_failing_fixture_consumption`: whether the installed binary really
     reported the known-failing fixture as a failure.
 
 Every test presents a double that differs from the truthful case in ONE named
@@ -507,11 +506,11 @@ class StageLedgerTests(unittest.TestCase):
 
 
 class CallSiteTests(unittest.TestCase):
-    """The proofs are not merely correct -- they are actually invoked.
+    """The proofs are invoked, not merely correct.
 
     A guard mutation shows a guard works; only these tests show the gate calls
     it. Each patches the callee out, so deleting the CALL leaves nothing to
-    observe and the test reds.
+    observe.
     """
 
     @override

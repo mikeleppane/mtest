@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Identity-logging `mojo` wrapper — the executable-precedence witness.
+"""Identity-logging `mojo` wrapper: the executable-precedence witness.
 
-Three COPIES of this file stand in for the compiler at once, one per resolution
+Three copies of this file stand in for the compiler at once, one per resolution
 source mtest must rank: `--mojo` beats `MTEST_MOJO`, which beats a plain `mojo`
 found on `PATH`. Each copy is installed as `<dir>/mojo`, and its parent
 directory names it:
@@ -11,26 +11,22 @@ directory names it:
     <root>/path/mojo   the `PATH` candidate
 
 A copy logs to the file named by `MTEST_PATH_MOJO_LOG_<DIR>`, uppercased from
-that parent directory — so all three log paths can be armed on one run and the
-run's own choice is stated by WHICH log came into existence. The record carries
-this copy's own absolute path, taken from `__file__` rather than `argv[0]`, so
-the identity is the file the kernel actually executed and not a string the
-caller chose, together with the exact argument vector mtest spawned, as one JSON
-object per line.
+that parent directory, so all three log paths can be armed on one run and the
+run's choice is stated by which log came into existence. Each record is one JSON
+object carrying the exact argument vector mtest spawned plus this copy's own
+absolute path, taken from `__file__` rather than `argv[0]` so the identity is the
+file the kernel executed.
 
-Resolution then happens exactly once, in the e2e parent: it resolves the real
-compiler BEFORE prepending the wrapper directory to `PATH` and passes that
-absolute path in `MTEST_REAL_MOJO`. This wrapper refuses to run if that variable
-is unset, is relative, or names this very file — the `PATH` candidate is
-literally called `mojo`, so a wrapper that searched `PATH` for the "real" one
-would exec itself forever.
+The e2e parent resolves the real compiler once, before prepending the wrapper
+directory to `PATH`, and passes that absolute path in `MTEST_REAL_MOJO`. This
+wrapper refuses to run if that variable is unset, is relative, or names this very
+file: the `PATH` candidate is itself called `mojo`, so a wrapper that searched
+`PATH` for the "real" one would exec itself forever.
 
-With the record durable the wrapper `execv`s the real compiler directly, with no
-shell in between, so exit code, stdout, and stderr are byte-for-byte the real
-compiler's and mtest cannot tell this apart from calling `mojo` itself.
+With the record durable the wrapper `execv`s the real compiler directly, so exit
+code, stdout, and stderr are byte-for-byte the real compiler's.
 
-Stdlib only, no third-party imports — this is build-time harness code, not part
-of the pure-Mojo product.
+Stdlib only: this is build-time harness code, outside the pure-Mojo product.
 """
 
 from __future__ import annotations
@@ -68,7 +64,7 @@ def _record(wrapper: str, argv: list[str]) -> None:
 
     Args:
         wrapper: The copy's own absolute path.
-        argv: The complete argument vector, `argv[0]` included — for the `PATH`
+        argv: The complete argument vector, `argv[0]` included. For the `PATH`
             candidate that first element is the bare word mtest searched for.
     """
     log_path = os.environ.get(log_env_var(wrapper))
@@ -118,9 +114,8 @@ def main() -> int:
         print(f"path_mojo.py: {error}", file=sys.stderr)
         return 127
     os.execv(real, [real, *sys.argv[1:]])
-    # Kept as defence in depth: typeshed types os.execv as NoReturn, so mypy
-    # sees this as dead. Deleting it would remove the fallback if that ever
-    # changes.
+    # typeshed types os.execv as NoReturn, so mypy sees this as dead. Kept as
+    # the fallback if that ever changes.
     return 1  # type: ignore[unreachable]
 
 

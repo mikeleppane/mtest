@@ -3,10 +3,9 @@
 
 Every other change to this repository's CI configuration lands through a PR
 where the diff to `pixi.toml` or `.github/workflows/ci.yml` is visible in
-review, so this module does not mirror that topology — CI *topology*
-mirroring (the Pixi task graph, the hosted matrix rows) was deliberately
-removed from this module's predecessor, `ci_topology.py`. Do not restore it
-here.
+review, so this module does not mirror that topology. Topology mirroring (the
+Pixi task graph, the hosted matrix rows) was removed from this module's
+predecessor, `ci_topology.py`. Do not restore it here.
 
 What review genuinely cannot see:
 
