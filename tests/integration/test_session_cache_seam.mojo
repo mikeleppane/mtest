@@ -54,7 +54,7 @@ from mtest.report import (
     RecordingCoordinator,
     RecordingReporter,
 )
-from mtest.platform import read_regular_file_bytes
+from mtest.platform import read_bounded_regular_file, read_regular_file_bytes
 from mtest.platform.cstring import c_string_bytes
 from mtest.session import run_session
 from mtest.session.store import PRECOMPILE_SUBDIR, clear_cache_root
@@ -303,6 +303,95 @@ def _saw_cache_off(warnings: List[String]) -> Bool:
         if String(w).startswith("cache-off:"):
             return True
     return False
+
+
+def _read_text(path: String) raises -> String:
+    """Read a small file a fixture wrote, as text.
+
+    Args:
+        path: The file to read.
+
+    Returns:
+        Its contents.
+
+    Raises:
+        Error: If the file is missing, is not a regular file, or does not
+            decode.
+    """
+    var opened = read_bounded_regular_file(path, 1 << 20)
+    if not opened.is_regular:
+        raise Error("not a regular file: " + path)
+    return opened.text.copy()
+
+
+comptime _SRC_RECORDS_ITS_OWN_PATH = (
+    "from std.sys import argv\n"
+    "from std.testing import TestSuite, assert_false\n\n\n"
+    "def test_runs_what_the_record_names() raises:\n"
+    '    var own = String("")\n'
+    "    var first = True\n"
+    "    for a in argv():\n"
+    "        if first:\n"
+    "            own = String(a)\n"
+    "            first = False\n"
+    '    with open("argv0.txt", "w") as f:\n'
+    "        f.write(own)\n"
+    '    assert_false(".tmp-" in own, "ran out of staging: " + own)\n\n\n'
+    "def main() raises:\n"
+    "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
+)
+"""A test that writes its own executable path down and refuses a staged one.
+
+The one thing a test can observe about which binary the cache chose for it. The
+run child's working directory is the invocation root, so `argv0.txt` lands
+where the case can read it back.
+"""
+
+
+def test_a_cold_run_executes_the_artifact_it_records() raises:
+    """The verdict and the recorded artifact must describe the same bytes.
+
+    The sequential seam compiles into a staging directory and publishes it by
+    renaming that directory onto the generation path. Running before publishing
+    executes the staging binary and then records the generation — so a test that
+    reads its own executable path, or anything else derived from it, sees one
+    answer cold and a different one warm over inputs that never changed. That is
+    a cold/warm equivalence break in the direction that reads as a real
+    regression, and on an adopted publication it goes further: the verdict would
+    belong to this process's own bytes while the record named the winner's.
+
+    Publishing first is what makes the two the same, and this pins it from
+    outside: the fixture refuses a staging path, and the path it recorded cold
+    has to be the path it records warm.
+    """
+    var root = temp_root()
+    write_file(root, "tests/test_argv.mojo", _SRC_RECORDS_ITS_OWN_PATH)
+    var config = base_config()
+
+    var cold = run_recording_session(config.copy(), root)
+    assert_equal(
+        cold.code,
+        0,
+        "the cold run executed a binary other than the one it recorded",
+    )
+    assert_equal(cold.built_files, 1, "the cold run compiles the one file")
+    var cold_path = _read_text(root + "/argv0.txt")
+
+    var warm = run_recording_session(config^, root)
+    assert_equal(warm.code, 0, "the warm run must pass on the cached binary")
+    assert_equal(warm.cached_files, 1, "the warm run is served from the store")
+    var warm_path = _read_text(root + "/argv0.txt")
+
+    assert_equal(
+        cold_path,
+        warm_path,
+        "cold and warm ran different binaries for one unchanged file",
+    )
+    assert_true(
+        cold_path.startswith(_STORE_DIR + "/tests_stest_uargv_h"),
+        "the run did not come out of this file's generation: " + cold_path,
+    )
+    assert_true(exists(root + "/" + cold_path), "the path run is not there")
 
 
 def test_selection_second_run_hits_cache() raises:
@@ -729,14 +818,15 @@ def test_compile_kill_rebuild_neither_counts_nor_publishes() raises:
 
 
 def test_run_spawn_failure_never_names_a_deleted_staging_path() raises:
-    """A run-step internal error names `build/bin`, not the staging directory.
+    """A run-step internal error names a path that is still there.
 
     `_single_attempt` bakes the binary path into its RUN-step internal-error
-    diagnostic before returning, and under an enabled cache that path is the
-    staging directory the seam deletes moments later. Reporting it would send a
-    user looking for a directory mtest itself had just removed — so the seam
-    rewrites it to `build/bin/<mangled>`, exactly as it rewrites a failed
-    compile's reproduce line.
+    diagnostic before returning, and reporting a path mtest itself had just
+    removed would send a user looking for a directory that no longer exists.
+    The seam publishes the staged build before dispatching the run, so the path
+    the run was given is the generation — which the failed spawn leaves exactly
+    where it is. The build succeeded; only this process's dispatch machinery
+    did not, so the artifact is good and the next run may have it.
 
     The fault adapter is what makes a run spawn fail on demand; the case asserts
     the faulted STEP as well as the program, so a miscounted occurrence fails
@@ -768,19 +858,29 @@ def test_run_spawn_failure_never_names_a_deleted_staging_path() raises:
                     " about the RUN step"
                 ),
             )
-            assert_equal(
-                ie.program,
-                "build/bin/tests_stest_uok",
+            assert_true(
+                String(ie.program).startswith(
+                    _STORE_DIR + "/tests_stest_uok_h"
+                ),
                 (
-                    "the diagnostic must name build/bin, never the staging"
-                    " directory the seam is about to delete"
+                    "the diagnostic must name the published generation, which"
+                    " is what the run was dispatched over: "
+                    + ie.program
                 ),
             )
+            assert_true(
+                exists(root + "/" + ie.program),
+                "the diagnostic names a path that is not there: " + ie.program,
+            )
     assert_equal(found, 1, "exactly one internal error is emitted")
+    var entries = dir_listing(root + "/" + _STORE_DIR)
     assert_equal(
-        len(dir_listing(root + "/" + _STORE_DIR)),
-        0,
-        "a build whose run never happened must publish nothing",
+        len(entries),
+        1,
+        (
+            "the build succeeded and was published before the run was"
+            " dispatched, so its generation survives a failed dispatch"
+        ),
     )
 
 

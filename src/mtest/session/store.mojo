@@ -2665,14 +2665,14 @@ def store_build_target(root: String, mangled: String) -> StoreBuildTarget:
     which `--shard` makes ordinary — off one staging directory, with `mkdir`'s
     exclusive create as the arbiter rather than the name's uniqueness alone.
 
-    The mangled source name leads, and it is not decoration. A first-attempt
-    cached build is COMPILED here and then RUN from here: publication is a
-    rename that happens only after the file's verdict is settled, so for the
-    whole time a test child is alive its argv is `<this directory>/bin`.
-    Anything identifying that child from outside the process — the release
-    contract's SIGINT probe, a `ps` a human reads during a hang — has only that
-    path to go on, and a name built from pid and clock alone put the source
-    nowhere in it. A child that could not be named could not be found.
+    The mangled source name leads, and it is not decoration. The compiler child
+    writes here for the whole of a first-attempt build, and when publication
+    fails the test child runs from here too — so for as long as either is alive
+    its argv is `<this directory>/bin`. Anything identifying that child from
+    outside the process — the release contract's SIGINT probe, a `ps` a human
+    reads during a hang — has only that path to go on, and a name built from pid
+    and clock alone put the source nowhere in it. A child that could not be
+    named could not be found.
 
     Every invariant `_TMP_PREFIX` claims survives the addition, and each is
     load-bearing somewhere else in this module:

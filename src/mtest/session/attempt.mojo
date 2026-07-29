@@ -234,6 +234,52 @@ struct _AttemptResult(Copyable, Movable):
         )
 
     @staticmethod
+    def _built_ok(
+        var build_argv: List[String],
+        bterm: Termination,
+        var build_stderr: List[UInt8],
+        bdur: Float64,
+        out_bin: String,
+    ) -> Self:
+        """A successful build that has not been run yet.
+
+        What `build_only` returns, so the caller can settle the staged artifact
+        — publish it, or discard it — before anything is executed. Its build
+        fields are exactly what the run pass needs handed back to it as the
+        prior build's facts.
+
+        Args:
+            build_argv: The build command that succeeded. Consumed; the
+                returned `_AttemptResult` owns it.
+            bterm: The build's raw termination.
+            build_stderr: The compiler's captured stderr. Consumed; the
+                returned `_AttemptResult` owns it.
+            bdur: The build wall time in seconds.
+            out_bin: The binary the build produced.
+
+        Returns:
+            The built-but-unrun `_AttemptResult`.
+        """
+        return Self(
+            0,
+            Event.file_started(""),
+            False,
+            build_argv^,
+            bterm,
+            build_stderr^,
+            bdur,
+            out_bin,
+            Termination.exited(0),
+            List[UInt8](),
+            List[UInt8](),
+            0.0,
+            TrustedReport(ParsedReport.absent(), False),
+            _blank_classification(),
+            False,
+            False,
+        )
+
+    @staticmethod
     def _selection_run(
         binary: String,
         rterm: Termination,
@@ -312,13 +358,18 @@ def _single_attempt(
     prior_bterm: Termination,
     prior_build_stderr: List[UInt8],
     prior_bdur: Float64,
+    build_only: Bool = False,
 ) raises -> _AttemptResult:
     """Run one build, run, and classify attempt for `rel`, returning raw facts.
 
     The retry loop wraps this. When `do_build` is set it builds `rel` into
     `out_bin` under `--compile-timeout`; otherwise it reuses the prior
     successful build's facts and only re-runs `out_bin`, since a run-side retry
-    never rebuilds. A cache quarantine applies only when `quarantine_dir` is
+    never rebuilds. `build_only` stops after a successful build and hands the
+    build facts back unrun, so the caller can settle a staged artifact before
+    anything executes; the caller then asks for the run as an ordinary
+    `do_build=False` pass over whichever binary settling left live. A cache
+    quarantine applies only when `quarantine_dir` is
     non-empty, which happens on a post-compile-kill rebuild: `MODULAR_CACHE_DIR`
     is set in the build child's own environment (via `spec.env_extra`), so
     mtest's own environment is never touched and concurrent builds cannot
@@ -342,6 +393,9 @@ def _single_attempt(
         prior_bterm: The previous attempt's build termination.
         prior_build_stderr: The previous attempt's captured build stderr.
         prior_bdur: The previous attempt's build wall time in seconds.
+        build_only: Whether to return after a successful build instead of
+            running the binary. Honored only together with `do_build`, since
+            there is nothing to stop after when no build happens.
 
     Returns:
         The raw attempt facts, including its control signal.
@@ -416,6 +470,13 @@ def _single_attempt(
             # the caller can BOTH finalize the build verdict AND classify a retry
             # (a signaled/timed-out/ICE compiler is crash-class).
             return _AttemptResult._build_failed(
+                build_argv^, bterm, build_stderr^, bdur, out_bin
+            )
+        if build_only:
+            # The artifact exists and nothing has run it. Whatever the caller
+            # does with it next decides which binary the run will name, so the
+            # run cannot already have happened.
+            return _AttemptResult._built_ok(
                 build_argv^, bterm, build_stderr^, bdur, out_bin
             )
 
@@ -764,9 +825,12 @@ def _run_one(
     context. A hit compiles nothing: the stored binary, its recorded command
     line, and its original build duration enter the loop exactly as a reused
     build's facts would, so the first pass is a bare run. A miss stages a
-    directory inside the store, points the compile's `-o` at it, and publishes
-    it on the first pass once the build has succeeded. Every later pass is a
-    retry and touches none of that.
+    directory inside the store and points the compile's `-o` at it; the first
+    pass then BUILDS ONLY, the staged artifact is published, and the run
+    happens over whatever publication left live. That order is the store's own
+    rule — record `pub.argv`, run `pub.bin_rel` — and it is what keeps the
+    binary a verdict describes and the binary the record names the same one.
+    Every later pass is a retry and touches none of that.
 
     Args:
         runtime: The exec runtime supervising the build and run spawns.
@@ -887,6 +951,27 @@ def _run_one(
 
     var attempt_index = 1
     while True:
+        # --- Is this pass the one that settles the staged build? ------------
+        # `do_build and attempt_index == 1` IS the first-attempt compile, and
+        # both halves are load-bearing. `attempt_index == 1` alone would be
+        # true forever if the loop ever gained a pass that does not advance it;
+        # `do_build` alone is true again on the compile-kill rebuild below,
+        # which re-enters the loop with `do_build = True` and a fresh
+        # `_retry_out_bin` under `build/bin`. That rebuild is invocation-private
+        # — it exists to get past a compiler the shared module cache may have
+        # torn — so publishing it would write a retry's binary into a store that
+        # other runs read. `target` is cleared once the block has run, so it
+        # cannot fire twice however the loop is later reshaped.
+        var settling = (
+            target.ok() and Bool(key) and do_build and attempt_index == 1
+        )
+        # That pass BUILDS ONLY, so publication happens before anything is
+        # executed. The store's rule is record `pub.argv`, run `pub.bin_rel`,
+        # and running first would break both halves of it: on PUB_OK the run
+        # would be the staging binary while the record named the generation, so
+        # a test reading its own executable path passes cold and fails warm over
+        # identical inputs; on PUB_ADOPTED the verdict would belong to this
+        # process's own bytes while the record named the winner's.
         var att = _single_attempt(
             runtime,
             config,
@@ -901,46 +986,15 @@ def _run_one(
             prior_bterm,
             prior_build_stderr,
             prior_bdur,
+            settling,
         )
 
-        # --- Settle the staged build, on the FIRST pass and no other. -------
-        # `do_build and attempt_index == 1` IS the first-attempt compile, and
-        # both halves are load-bearing. `attempt_index == 1` alone would be
-        # true forever if the loop ever gained a pass that does not advance it;
-        # `do_build` alone is true again on the compile-kill rebuild below,
-        # which re-enters the loop with `do_build = True` and a fresh
-        # `_retry_out_bin` under `build/bin`. That rebuild is invocation-private
-        # — it exists to get past a compiler the shared module cache may have
-        # torn — so publishing it would write a retry's binary into a store that
-        # other runs read. `target` is cleared here as well, so the block cannot
-        # fire twice however the loop is later reshaped.
-        if target.ok() and key and do_build and attempt_index == 1:
+        if settling:
             if att.control != 0:
-                # An internal error or an interrupt: no binary this session will
-                # run came out of it, so the staged directory is pure debris.
-                if att.control == 1:
-                    # `_single_attempt` baked `out_bin` into the RUN step's
-                    # internal-error diagnostic before returning, and `out_bin`
-                    # is the staging path the next line deletes — so the
-                    # diagnostic would send a user looking for a directory mtest
-                    # itself had just removed. Point it back at `build/bin`, the
-                    # same substitution the compile-failure branch below makes
-                    # to the reproduce line, and for the same reason. The BUILD
-                    # step's diagnostic names the compiler rather than `out_bin`,
-                    # so the equality test leaves it untouched.
-                    var ie_step = String(
-                        att.internal_event.data[InternalErrorPayload].step
-                    )
-                    var ie_program = String(
-                        att.internal_event.data[InternalErrorPayload].program
-                    )
-                    var ie_errno = att.internal_event.data[
-                        InternalErrorPayload
-                    ].errno
-                    if ie_program == out_bin:
-                        att.internal_event = Event.internal_error(
-                            ie_step, plain_out, ie_errno
-                        )
+                # An internal error or an interrupt during the build: no binary
+                # came out of it, so the staged directory is pure debris. The
+                # BUILD step's diagnostic names the compiler rather than a path
+                # inside the store, so nothing here needs rewriting.
                 _discard_staging(root, target)
             elif att.build_failed:
                 # The reproduce line names `build/bin`, never the staging
@@ -963,15 +1017,13 @@ def _run_one(
                 # therefore cannot reconstruct; on PUB_FAILED both are this
                 # run's own staging path, which is still there.
                 #
-                # `out_bin` moves with it, because a crash-class RUN retry
-                # re-runs this same path and the staging one may no longer
-                # exist. On PUB_ADOPTED that re-runs the winner's binary rather
-                # than the bytes this process compiled — they answer to the same
-                # key, so they are the same build, and the alternative is a
-                # retry with nothing to run.
+                # `out_bin` moves with it, so the run below — and any crash-class
+                # RUN retry after it — spawns exactly the path that was recorded.
+                # On PUB_ADOPTED that runs the winner's binary rather than the
+                # bytes this process compiled: they answer to the same key, so
+                # they are the same build, and this is the only ordering in which
+                # the verdict and the artifact describe each other.
                 out_bin = pub.bin_rel
-                att.out_bin = pub.bin_rel
-                att.build_argv = pub.argv.copy()
                 if pub.kind == PUB_FAILED:
                     # The build survived; only its publication did not. A
                     # publication failure is never a verdict, so it rides in
@@ -979,6 +1031,26 @@ def _run_one(
                     attempt_events.append(
                         Event.warning("cache-publish", pub.warning)
                     )
+                # The run pass, over the settled binary and carrying this
+                # build's facts forward exactly as a run-side retry does.
+                var built_term = att.bterm
+                var built_stderr = att.build_stderr.copy()
+                var built_dur = att.bdur
+                att = _single_attempt(
+                    runtime,
+                    config,
+                    settings,
+                    root,
+                    rel,
+                    include_paths,
+                    out_bin,
+                    False,
+                    quarantine_dir,
+                    pub.argv,
+                    built_term,
+                    built_stderr,
+                    built_dur,
+                )
             target = _no_staging()
 
         if att.control == 1:
