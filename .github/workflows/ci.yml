@@ -87,6 +87,12 @@ jobs:
           # rows that do carry a real value harder to pick out. `lane` is an
           # externally configured required-check name; do not rename one.
           #
+          # `store_cache` marks the lanes whose mtest invocations root the
+          # build-artifact store in the checkout, and so the only lanes an
+          # `actions/cache` over that store can serve. The restore step below
+          # carries the full argument, including what the four unmarked lanes
+          # do instead and what the trade gives up.
+          #
           # This runner is dedicated to the job for its duration, unlike a
           # shared local machine, so `pixi run test`'s `auto` default (half the
           # cores, src/mtest/session/pool_plan.mojo) is the wrong call here: a
@@ -98,21 +104,30 @@ jobs:
           - lane: direct tests
             task: test
             workers: "4"
+            store_cache: true
           - lane: assertions
             task: assertions-check
           - lane: self-hosted tests
             task: dogfood-check
+            store_cache: true
           - lane: end-to-end tests
             task: e2e
+            store_cache: true
           # Drives real `build/mtest` processes against throwaway projects,
           # concurrently and under the publication fault seam, and asserts the
           # artifact store's protocol properties from outside the process. It
-          # is the only coverage `--no-cache` and `--cache-clear` have.
+          # is the only coverage `--no-cache` and `--cache-clear` have, and it
+          # carries no `store_cache` on purpose: it is the cold witness the
+          # restore step below argues from, so it must keep proving that a
+          # from-scratch store still behaves.
           - lane: cache protocol
             task: cache-protocol-check
           # Guards the production build's precompile stamp, the one thing that
           # keeps a `pixi run build` over changed sources from linking against
-          # a package compiled from the previous ones.
+          # a package compiled from the previous ones. No `store_cache` either,
+          # and for a sharper reason than the rest: the restore step below
+          # leans on that stamp, so the gate proving it refuses a stale one
+          # cannot itself be handed a restored stamp to judge.
           - lane: build stamp
             task: build-stamp-check
           - lane: strict contract
@@ -218,6 +233,100 @@ jobs:
         if: ${{ matrix.libc_debug }}
         run: pixi run valgrind --version
 
+      # Restore this lane's build-artifact store, together with the precompiled
+      # package the keys inside it were derived from. Every job starts with an
+      # empty store today, so every lane recompiles every per-file test binary
+      # from scratch on every run and reports `cached: 0`.
+      #
+      # Only the `store_cache` rows above get this, because only their mtest
+      # invocations root the store in the checkout (`root = cwd()` in
+      # src/main.mojo). `strict contract` scaffolds a `mkdtemp` project and runs
+      # from inside it, `cache protocol` and `build stamp` build their own
+      # throwaway trees, `assertions` drives `mojo build` directly and never
+      # runs mtest at all, and both memory lanes compile every binary they judge
+      # with `-I src` and never open a store. For all four this would move bytes
+      # nothing reads.
+      #
+      # WHAT IT GIVES UP. AGENTS.md's "Hermetic by construction" says a lane's
+      # inputs are this checkout and the locked toolchain and nothing else.
+      # These three lanes stop satisfying that: a binary they run may have been
+      # compiled by an earlier run of an earlier commit, and the package `mojo
+      # precompile` would have produced may be restored rather than produced.
+      # The trade is deliberate, and it is confined to the rows that name it.
+      #
+      # WHAT STILL MAKES A GREEN RUN MEAN SOMETHING. The store's key is not a
+      # path. src/mtest/session/store.mojo frames the compiler's `--version`
+      # bytes and its `lib/mojo` contents, the five keyed environment variables,
+      # the canonicalized invocation root, the classified build arguments, every
+      # include root's walked contents, and finally the test file's own
+      # directory and its own bytes. A generation compiled from anything other
+      # than exactly those keys differently, so a stale entry is a MISS, never a
+      # wrong pass. `store_probe` then refuses to run whatever it cannot
+      # re-verify: `meta.key_full` against the WHOLE key rather than the 128
+      # bits the directory name carries, and `bin` characterized no-follow,
+      # executable, readable, and digesting to what `meta` recorded. That
+      # docstring already names an archive restore as a case it defends
+      # against, which is exactly what this step performs. A failed check
+      # deletes the generation instead of leaving it to be probed again.
+      #
+      # WHY `build/` IS IN THE PATH LIST. The store on its own would hit
+      # nothing here. The classified suites compile with `-I build`
+      # (`mtest_argv`, scripts/harness/selfhost.py), a walked include root
+      # frames every `*.mojopkg` it finds (`_is_source_name`, store.mojo), and
+      # `mojo precompile` is not byte-reproducible on this toolchain
+      # (scripts/build/production_build.sh). A job that recompiles the package
+      # therefore moves the shared key prefix and every per-file key hanging off
+      # it, and the restored store would answer every probe with a miss. So the
+      # two packages and the stamp ride in the SAME entry as the store, where
+      # they cannot be paired with a store that was keyed against different
+      # bytes. The stamp is what makes reusing a package safe: its input digest
+      # covers that script, both stage command lines, `mojo --version`,
+      # `pixi.lock`, and every file under `src/mtest` and `vendor/mojo-toml`,
+      # and it re-digests the artifacts themselves -- so a restored package is
+      # used only where it is a compile of exactly these sources at exactly this
+      # toolchain, and is otherwise built straight over. No gate moves: `build`
+      # is the package-compiles gate, both preflight jobs are uncached, and this
+      # matrix cannot start until its platform's preflight has compiled the
+      # package from scratch for this commit.
+      #
+      # WHAT STAYS COLD. `cache protocol`, on both platforms, is the deliberate
+      # cold witness: absent from the rows above, driving real `build/mtest`
+      # processes against throwaway projects, and the only coverage `--no-cache`
+      # and `--cache-clear` have. `build stamp` stays cold one layer down, as
+      # the gate proving the stamp this step leans on really does refuse a stale
+      # one.
+      #
+      # `.mtest-cache/lastrun` is deliberately NOT restored: it is `--lf`/`--ff`
+      # reselection state rather than a build output, and carrying it over would
+      # let one run's failures steer the next run's selection. `CACHEDIR.TAG` IS
+      # restored, because `ensure_cache_root` writes that ownership marker only
+      # on the path that CREATES `.mtest-cache`; laying down the store without
+      # it would materialize that directory unmarked and leave mtest unable, for
+      # good, to prove it owns a directory it does own.
+      #
+      # The key carries the lane's task because the three cached lanes populate
+      # disjoint parts of one path: one key per OS would have them race to save
+      # it, and whichever won would decide what the other two restore.
+      # `pixi.lock`'s hash is in the key so a toolchain re-pin is never offered
+      # an entry written under the old one -- the same input the precompile
+      # stamp already digests. `github.sha` makes each run publish its own entry
+      # and `restore-keys` falls back to the newest surviving one for the same
+      # OS, lane, and toolchain. The save runs only if the job succeeded, so a
+      # red lane never seeds the next run.
+      - name: Restore build-artifact store
+        if: ${{ matrix.store_cache }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .mtest-cache/build-v1
+            .mtest-cache/CACHEDIR.TAG
+            build/toml.mojopkg
+            build/mtest.mojopkg
+            build/.precompile.stamp
+          key: mtest-store-v1-${{ runner.os }}-${{ matrix.task }}-${{ hashFiles('pixi.lock') }}-${{ github.sha }}
+          restore-keys: |
+            mtest-store-v1-${{ runner.os }}-${{ matrix.task }}-${{ hashFiles('pixi.lock') }}-
+
       # `matrix.workers` is set only on the `test` lane's row above; every
       # other lane leaves it unset, so this appends nothing for them.
       - name: Run ${{ matrix.lane }}
@@ -316,16 +425,21 @@ jobs:
           - lane: direct tests
             task: test
             workers: "3"
+            store_cache: true
           - lane: assertions
             task: assertions-check
           - lane: self-hosted tests
             task: dogfood-check
+            store_cache: true
           - lane: end-to-end tests
             task: e2e
+            store_cache: true
           # The same two cache gates the Linux matrix runs. Both spawn real
           # processes and touch the filesystem directly, so the platform whose
           # `stat` layout and path semantics differ is exactly where they have
-          # to run rather than be assumed.
+          # to run rather than be assumed. Neither carries `store_cache`, for
+          # the reasons spelled out on the Linux rows: these two are what keeps
+          # a cold store and an unrestored stamp under test on this platform.
           - lane: cache protocol
             task: cache-protocol-check
           - lane: build stamp
@@ -351,6 +465,26 @@ jobs:
         run: |
           pixi run mojo-version
           pixi run clang --version
+
+      # The Linux matrix's build-artifact cache, on this platform's runner; see
+      # that step for what the trade gives up and what still holds. `runner.os`
+      # sits in the key, and that is load-bearing rather than tidy: the store's
+      # key frames the canonicalized invocation root, and the two platforms'
+      # checkout paths differ, so an entry crossing over would miss on every
+      # file it was asked about while still costing the transfer.
+      - name: Restore build-artifact store
+        if: ${{ matrix.store_cache }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .mtest-cache/build-v1
+            .mtest-cache/CACHEDIR.TAG
+            build/toml.mojopkg
+            build/mtest.mojopkg
+            build/.precompile.stamp
+          key: mtest-store-v1-${{ runner.os }}-${{ matrix.task }}-${{ hashFiles('pixi.lock') }}-${{ github.sha }}
+          restore-keys: |
+            mtest-store-v1-${{ runner.os }}-${{ matrix.task }}-${{ hashFiles('pixi.lock') }}-
 
       # `matrix.workers` is set only on the `test` lane's row above; every
       # other lane leaves it unset, so this appends nothing for them.
