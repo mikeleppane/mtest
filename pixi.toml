@@ -167,15 +167,18 @@ native-check = { cmd = "python -m scripts.tests.test_native && python -m scripts
 # the compiler instrumentation and fail-closed harness remain effective.
 asan-check = "python -m scripts.tests.test_asan && python -m scripts.checks.memory.asan"
 
-# The memory-safety aggregate the complete local mirror runs, and the
-# standalone entry point for running just the two lanes. On linux-64 the
-# platform-scoped
-# override below replaces this command with the real dependency edge onto
-# `asan-check` and `valgrind-check`; this base definition is what every other
-# platform executes, and it reports the uncovered lanes loudly instead of
-# passing quietly. Both lanes are cheap enough to belong in the ordinary local
-# floor — measured on a development machine against clean main, ASan takes
-# about 90 seconds and Memcheck about 3 minutes.
+# The memory-safety aggregate that closes `pixi run ci` -- the complete serial
+# source, test, and memory floor -- and the standalone entry point for running
+# just the two lanes. On linux-64 the platform-scoped override below replaces
+# this command with the real dependency edge onto `asan-check` and
+# `valgrind-check`; this base definition is what every other platform executes,
+# and it reports the uncovered lanes loudly instead of passing quietly. Both
+# lanes belong in that floor rather than in a maintenance task like
+# `bench-workers`: their verdict is a machine-independent pass or fail, so
+# there is a threshold they can actually be red against, which is exactly what
+# a benchmark's numbers lack. What would falsify that: a lane whose verdict
+# started depending on the host's core count or memory pressure, which would
+# make it a measurement and belong out of the floor with `bench-workers`.
 ci-memory = "python -m scripts.checks.memory.host_support"
 
 # Source-build every exec integration suite with debug information and run it
@@ -241,8 +244,10 @@ contract-check-strict = { cmd = "python -m scripts.qa.contract --strict --no-reb
 # `auto` sizing honest against a real machine. Drives the built binary over a
 # synthetic medium-weight tree across workers x tokens x cold/warm and prints the
 # median wall-clock plus speedup-vs-`-n 1`. A MAINTENANCE task, deliberately NOT
-# in `pixi run ci`: it takes minutes and its numbers are machine-specific, so it
-# is never a gate. Run under `pixi run` so the spawned `mojo build` children
+# in `pixi run ci`: it produces a measurement, not a verdict -- the numbers are
+# machine-specific, so there is no threshold it could be red against, and it
+# pays for a full sweep of the workers x tokens x cold/warm matrix to produce
+# them. Run under `pixi run` so the spawned `mojo build` children
 # resolve `mojo`; build the binary first (`pixi run build-bin`).
 bench-workers = "python -m scripts.maintenance.bench_workers"
 
@@ -276,18 +281,103 @@ test-file = { cmd = "python -m scripts.harness.selfhost", depends-on = [
 
 # Compile and directly execute the public source-only assertion consumers at
 # both optimization levels. The task owns its checker self-tests so stale
-# binaries, skipped tests, and provider-side source locations fail closed.
+# binaries, skipped tests, and provider-side source locations fail closed --
+# and it owns them EXCLUSIVELY. `harness-check` used to open with a second
+# `test_assertions` run, which bought nothing and cost the hosted preflight,
+# the one job every behavioral lane waits on, a duplicate of work this task
+# was already doing in its own matrix cell on BOTH platforms. Deduplicating
+# toward this task rather than toward the preflight is what keeps the
+# self-tests adjacent to the checker they guard: a stale-binary or skipped-test
+# regression is caught in the same invocation that would have consumed it.
+# What would falsify the arrangement: dropping `assertions-check` from either
+# platform's matrix, at which point the self-tests would need an owner on the
+# preflight path again.
 assertions-check = "python -m scripts.tests.test_assertions && python -m scripts.checks.assertions"
 
 # Render and semantically compare the reviewed modular-community recipe. Its
 # tests cover canonical manifests and bounded staging; the checker prevents the
 # local rattler-build recipe and the submission template from drifting apart.
+#
+# This is the SOLE definition of that pair. The old `harness-check` chain
+# restated both commands verbatim as its first two links, so one gate had two
+# spellings and nothing forced them to agree: a third command added here would
+# simply not have run in the preflight, and nothing would have said so. The
+# work stayed on this task rather than moving into the chain because this is
+# the narrower and more useful handle -- a contributor editing
+# recipe/recipe.yaml wants exactly these two commands and not the four
+# release-publication suites beside them.
+# `release-tooling-check` reaches it through `depends-on`, which Pixi runs
+# before that task's own `cmd`, so the recipe pair still executes first and the
+# chain's fail-fast order is unchanged. What would falsify the direction: the
+# recipe checker growing a dependency on release state produced by the suites
+# after it, which would make the standalone task a lie and the alias belong the
+# other way round.
 recipe-check = "python -m scripts.tests.test_community_recipe && python -m scripts.checks.community_recipe"
 
-# Fast self-tests for repository harness behavior. Uses disposable test inputs
-# and a fake compiler to prove the self-hosted runner's reconciliation, its
-# timeout and interrupt handling, and exact hosted-CI topology.
-harness-check = "python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_selfhost && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_contract && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_assertions && python -m scripts.tests.test_community_recipe && python -m scripts.checks.community_recipe && python -m scripts.tests.test_release_attestations && python -m scripts.tests.test_github_release && python -m scripts.tests.test_community_publication && python -m scripts.tests.test_public_verify && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_workflow_security && python -m scripts.checks.workflow_security && python -m scripts.tests.test_python_quality && python -m scripts.tests.test_annotations_oracle && python -m scripts.tests.test_abi_probe"
+# Fast self-tests for repository harness behavior: the self-hosted runner's
+# reconciliation, its timeout and interrupt handling, the dogfood and e2e
+# drivers, the CLI-contract and transcript comparators, the README-help
+# extractor, and the fully-mocked branch logic of the two checkers whose real
+# runs need a real `mojo` and therefore live as their own preflight tasks
+# (`coverage-capability` and `abi-probe-check`). Every member uses disposable
+# test inputs and a fake compiler, so nothing in this group waits on a real
+# compiler or a built binary -- which is why it sits ahead of every preflight
+# member that does. This is one of three groups the old single `harness-check`
+# chain has been split into; the aggregate below still composes all three, so
+# no existing invocation of that name lost anything. `test_assertions` is
+# deliberately
+# absent: `assertions-check` owns it and runs it in its own matrix cell on both
+# platforms, so a copy here was redundant work on the critical path.
+harness-unit-check = "python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_selfhost && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_contract && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_abi_probe"
+
+# Repository policy: does this tree still obey its own rules? The layout and
+# invocation-policy oracle, the hosted-workflow security oracle, the
+# Python-quality runner's pinning and failure policy, and the GitHub-annotation
+# tail oracle -- each checker preceded by the mutation tests that prove it
+# still rejects a broken input, because a checker that has quietly stopped
+# rejecting anything is worse than no checker. Split from `harness-unit-check`
+# because the two ask different questions of different owners: that group is
+# red when the harness broke, this one is red when a change violated a policy
+# the harness is fine at enforcing, and a hosted lane should say which. Note
+# `test_python_quality` runs here while `py-check` itself runs nowhere in the
+# floor (see its comment): the version pin and the fail-loudly-without-uvx
+# policy are asserted without the tool being present.
+repo-policy-check = "python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_workflow_security && python -m scripts.checks.workflow_security && python -m scripts.tests.test_python_quality && python -m scripts.tests.test_annotations_oracle"
+
+# Release tooling: the community recipe (through the `recipe-check` edge, which
+# Pixi runs before this command, preserving the old chain's order), then the
+# attestation schema, the GitHub release-state and tag-dereference driver, the
+# community channel/PR/credential driver, and public-channel verification. All
+# four suites drive the release drivers over fabricated state in temporary
+# directories -- none of them reaches a network or a real channel; the genuine
+# publication path is gated by the release workflows, not from here. Split out
+# because these fail for release-process reasons -- an attestation field, a tag
+# form, a fork's branch state -- that say nothing about whether the harness
+# works or whether the tree obeys policy, and lumping all three under one task
+# name is what made a red preflight uninformative.
+release-tooling-check = { cmd = "python -m scripts.tests.test_release_attestations && python -m scripts.tests.test_github_release && python -m scripts.tests.test_community_publication && python -m scripts.tests.test_public_verify", depends-on = [
+    "recipe-check",
+] }
+
+# The aggregate of the three groups above. It exists because `harness-check` is
+# the name contributors, AGENTS.md, and every muscle memory in this repository
+# already use for "run the whole hermetic tooling floor", and one name is still
+# the right thing to type locally; keeping it means the split costs no existing
+# invocation anything. `ci-preflight` deliberately does NOT go through it --
+# see the note there -- so this is a convenience handle, not a gate node.
+#
+# The cross-group order is cheapest-and-broadest first, which is not quite the
+# order the old single chain ran (it put release tooling ahead of policy). That
+# was safe to change because no group reads anything another writes: all three
+# are hermetic, so the only thing the order buys is how fast a human learns
+# something useful, and a layout or workflow-security violation is the finding
+# most likely to indict the change in front of you. Order WITHIN each group is
+# the old chain's, untouched, because those sequences were tuned to fail fast.
+harness-check = { depends-on = [
+    "harness-unit-check",
+    "repo-policy-check",
+    "release-tooling-check",
+] }
 
 # Re-creates, for exactly the modules that need it, the cross-module
 # external_call ABI check the old 101-module aggregate binary provided for
@@ -304,16 +394,32 @@ abi-probe-check = { cmd = "python -m scripts.checks.abi_probe", depends-on = [
     "build-native",
 ] }
 
-# DIAGNOSTIC, not a gate in `ci`: ask the pinned toolchain whether it has grown
-# a source-coverage facility. Mojo 1.0.0b2 has none — neither `mojo build
-# --help` nor `mojo --help` names a coverage, profile, or instrumentation flag
-# — which is why notes/test-confidence-map.md maps release confidence to
-# behavioral and mutation oracles instead of to a line percentage. The task is
-# fail-closed and asymmetric on purpose: absence is the quiet exit 0, and
-# DISCOVERING a facility (or drifting off the recorded toolchain pin, or being
-# unable to run the probe) exits nonzero so an upgrade cannot silently start
-# publishing an unreviewed number. Its branch logic is unit-tested in
-# harness-check above; this task needs a real `mojo` on PATH.
+# A fail-closed TRIPWIRE, and as of now an actual member of `ci-preflight`: ask
+# the pinned toolchain whether it has grown a source-coverage facility. Mojo
+# 1.0.0b2 has none -- neither `mojo build --help` nor `mojo --help` names a
+# coverage, profile, or instrumentation flag -- which is why
+# notes/test-confidence-map.md maps release confidence to behavioral and
+# mutation oracles instead of to a line percentage. The task is fail-closed and
+# asymmetric on purpose: absence is the quiet exit 0, and DISCOVERING a facility
+# (or drifting off the recorded toolchain pin, or being unable to run the probe)
+# exits nonzero so an upgrade cannot silently start publishing an unreviewed
+# number.
+#
+# It was previously wired into neither `ci-preflight` nor `ci`, which made all
+# of that inert. The only thing that ran anywhere was the MOCKED branch logic,
+# via `test_coverage_capability` in `harness-unit-check` above -- proof that the
+# probe would report correctly if asked, and nothing ever asked. The exact event
+# it exists to catch, a toolchain bump arriving with a coverage flag, would have
+# gone through green. A tripwire nobody steps on is not a tripwire, so it is
+# wired now.
+#
+# It sits last in the preflight, beside `abi-probe-check`: both are the members
+# that need a real `mojo` on PATH rather than the fake compiler the hermetic
+# groups use, and last is where a nonzero exit reads correctly, because this
+# one indicts the toolchain pin for review rather than indicting the tree. What
+# would falsify the placement: the probe becoming cheap enough and
+# dependency-free enough to run before the compiled members, which would mean
+# it had stopped asking the real toolchain anything.
 coverage-capability = "python -m scripts.checks.coverage_capability"
 
 # DOGFOOD gate: run three focused executable probes through the built mtest
@@ -370,11 +476,33 @@ cmd = "python -m scripts.tests.test_build_stamp"
 # The cheap hosted-CI release barrier. Every non-behavioral member of the local
 # floor stays in its exact fail-fast order; GitHub releases the independent
 # behavioral and memory-safety lanes only after this aggregate passes.
+#
+# The three tooling groups are named INDIVIDUALLY here rather than through their
+# `harness-check` aggregate. Pixi attributes a failure to the task it was
+# running, so routing through the aggregate would report every command in all
+# three groups under one name, and a hosted red would tell a reader only that
+# "something in the tooling" broke -- which, for the single job every behavioral
+# matrix cell waits on, is the least useful thing it could say. Three lines buy
+# a self-identifying failure. `harness-check` still exists and still runs the
+# same set; it is just not what the barrier depends on.
+#
+# `postfork-check` is listed even though `native-check` depends on it and Pixi
+# runs the shared node exactly once either way. It stays because this list is
+# the readable statement of what the barrier runs and in what order, and it is
+# not the only entry earning its place that way: `build` below is likewise
+# pulled in by `readme-help-check`, `junit-render-check`, and `abi-probe-check`,
+# and is still written out, because its position AHEAD of them is the point.
+# Dropping either would turn the fail-fast order into a property you can only
+# reconstruct by opening three other task definitions. The redundancy is
+# documentation with a compiler behind it: Pixi errors on a name that does not
+# exist, so this list cannot rot into fiction the way a comment could.
 [tasks.ci-preflight]
 depends-on = [
     "version-check",
     "fmt-check",
-    "harness-check",
+    "harness-unit-check",
+    "repo-policy-check",
+    "release-tooling-check",
     "safety-check",
     "postfork-check",
     "native-check",
@@ -384,10 +512,20 @@ depends-on = [
     "junit-render-check",
     "transcripts-check",
     "abi-probe-check",
+    "coverage-capability",
 ]
 
-# The complete serial local mirror. Hosted CI runs the exact preflight above,
-# then gives each independent behavioral gate a fresh parallel matrix cell.
+# The complete serial source, test, and memory floor -- NOT a mirror of hosted
+# CI, and nothing here should be read as one. `package-check` runs hosted on
+# both platforms and is unreachable from this aggregate by design (each
+# platform's package job is independent of the test chains); CodeQL runs from
+# its own workflow and has no pixi task at all; `py-check` is absent from this
+# list too, because its tools live outside the pixi environment (see its
+# comment). So a green `pixi run ci` is a floor that has been cleared, never a
+# prediction of the hosted result -- read it as the former and the three
+# absences stay visible, read it as the latter and they disappear. Hosted CI
+# runs the exact preflight above, then gives each independent behavioral gate a
+# fresh parallel matrix cell.
 # Local agents use focused tasks during iteration; this aggregate is for an
 # explicit exhaustive run, hosted failure reproduction, or release rehearsal.
 # contract-check-strict's position here is a readability choice, not a
@@ -417,8 +555,9 @@ valgrind = "==3.27.1"
 
 # On linux-64 the memory aggregate IS the two lanes. Hosted CI gives each one
 # its own matrix cell and never invokes `pixi run ci`, so this edge exists to
-# close the gap that made a green complete local mirror say nothing about
-# memory safety: before it, both lanes were reachable only by naming them,
+# close the gap that made a green `pixi run ci` -- the complete serial source,
+# test, and memory floor -- say nothing at all about memory safety: before it,
+# both lanes were reachable only by naming them,
 # which meant in practice they ran hosted or not at all. It sits last in `ci`
 # because it is the broadest and slowest member. It needs nothing from the
 # earlier members:

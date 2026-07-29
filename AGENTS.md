@@ -193,7 +193,11 @@ pixi run py-fmt            # ruff's safe lint fixes, then format Python in place
 pixi run py-check          # ruff format/lint and mypy --strict over scripts/ and
                            #   tests/fixtures/exec/ (needs `uv`; see below)
 pixi run version-check     # manifest, CLI, and shipped-version identity
-pixi run harness-check     # validate exact harness/CI membership and invariants
+pixi run harness-unit-check     # harness self-tests: runner, watchdog, comparators
+pixi run repo-policy-check      # layout, workflow security, tool pins, annotations
+pixi run release-tooling-check  # attestations, release, publication, public verify
+pixi run harness-check     # the aggregate of the three groups above
+pixi run coverage-capability  # tripwire: the pinned toolchain must have no coverage
 pixi run safety-check      # inventory every unsafe Mojo operation and local proof
 pixi run postfork-check    # audit production/testing post-fork call graphs
 pixi run native-check      # verify native ABI/layout/exports and lifecycle
@@ -250,10 +254,14 @@ produced against different bytes than you commit is not a result. Reading
 outcomes works the same way, since a background wrapper's exit status is the
 wrapper's and not the gate's, so read the gate's own marker.
 
-`pixi run ci-preflight` chains `version-check -> fmt-check -> harness-check ->
+`pixi run ci-preflight` chains `version-check -> fmt-check ->
+harness-unit-check -> repo-policy-check -> release-tooling-check ->
 safety-check -> postfork-check -> native-check -> junit-check -> build ->
-readme-help-check -> junit-render-check -> transcripts-check -> abi-probe-check`
-in that exact fail-fast order. The `pixi run ci` floor is serial:
+readme-help-check -> junit-render-check -> transcripts-check ->
+abi-probe-check -> coverage-capability` in that exact fail-fast order. The
+three `*-check` groups replaced a single two-dozen-command `harness-check`
+chain, which survives as their aggregate: a red hosted preflight names the
+group that failed instead of reporting that something in the tooling broke. The `pixi run ci` floor is serial:
 `ci-preflight -> test -> assertions-check -> dogfood-check -> e2e ->
 cache-protocol-check -> build-stamp-check -> contract-check-strict ->
 ci-memory`. Both chains are read out of `pixi.toml`; nothing pins them, so read
