@@ -1,10 +1,10 @@
 """Per-file overrides on the runs that are not a pool file: gates and retries.
 
-Split out of `test_session_overrides.mojo` by weight. A suite that drives real
-sessions pays once per process for reading and hashing the compiler the cache
-keys against, and this file's retry case is one of the three in the original
-that each paid it; keeping the three apart is what stops one per-file deadline
-carrying all of them.
+Split out of `test_session_overrides.mojo` by weight, back when a suite that
+drove real sessions paid once per process for reading and hashing the compiler
+the cache keys against. `session_fixtures.base_config` now keys a wrapper and
+that payment is gone, so what is left holding the three files apart is the
+subject seam below rather than any deadline.
 
 The subject holds together on its own: an override rule is matched per file, so
 a retry budget must apply to the file its pattern names and to no other, and the

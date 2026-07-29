@@ -1,16 +1,22 @@
 """Integration tests for what moves an env base's digest.
 
-Split out of `test_session_store.mojo` on cost. These key the REAL toolchain,
-and the first such collection in a process reads and hashes the compiler on
-PATH and everything beside it — seconds of I/O, after which a process-lifetime
-memo makes the rest of this file nearly free. That one-off is why these tests
-sit together and away from the other suites that also key the real toolchain:
-each such suite pays the price exactly once, and no per-file deadline carries
-two of them.
+Split out of `test_session_store.mojo` on cost. Every test here keys the REAL
+toolchain through `real_toolchain_config`, which is deliberate and is what
+separates this file from the session suites: those key a wrapper, because the
+frame covering the compiler's bytes is not their subject, while here it is.
+The first collection in a process reads and hashes the compiler on PATH and
+everything beside it — the largest fixed cost a suite can carry — after which
+a process-lifetime memo makes the rest of this file nearly free. Because that
+memo is per process and every classified module is its own program, keeping
+these tests together means the price is paid once for all of them; spreading
+them would multiply it.
 
 The subject is coherent on its own terms. A digest that fails to move when a
 build input changes is the one failure a cache must never have, so each test
-here changes exactly one input and demands a different key.
+here changes exactly one input and demands a different key. Keying the real
+toolchain is what puts the library directory beside the compiler into every
+one of those digests, so the stability case below also covers the content memo
+that directory has of its own — a memo no wrapper's layout can reach.
 """
 from std.os import getenv, setenv, unsetenv
 from std.testing import (
@@ -21,14 +27,14 @@ from std.testing import (
 )
 
 from cache_fixtures import base_digest, env_base
-from session_fixtures import base_config, write_file
+from session_fixtures import real_toolchain_config, write_file
 from tmptree import temp_root
 
 
 def test_env_base_digest_is_stable_across_calls() raises:
     var root = temp_root()
-    var first = env_base(base_config(), root)
-    var second = env_base(base_config(), root)
+    var first = env_base(real_toolchain_config(), root)
+    var second = env_base(real_toolchain_config(), root)
     assert_true(first.enabled, "cache off: " + first.disable_reason)
     assert_true(second.enabled, "cache off: " + second.disable_reason)
     # THE property every future cache hit rests on. If two collections over
@@ -41,16 +47,16 @@ def test_env_base_digest_is_stable_across_calls() raises:
 
 def test_env_base_digest_moves_with_build_args() raises:
     var root = temp_root()
-    var plain = env_base(base_config(), root)
-    var one = base_config()
+    var plain = env_base(real_toolchain_config(), root)
+    var one = real_toolchain_config()
     one.build_args = ["-O2"]
     var flagged = env_base(one^, root)
     assert_true(flagged.enabled, "cache off: " + flagged.disable_reason)
     assert_not_equal(base_digest(plain), base_digest(flagged))
 
-    var forward = base_config()
+    var forward = real_toolchain_config()
     forward.build_args = ["-O2", "--no-optimization"]
-    var backward = base_config()
+    var backward = real_toolchain_config()
     backward.build_args = ["--no-optimization", "-O2"]
     # Frame ORDER inside field 7: the same two flags in the other order are a
     # different command line and must be a different key.
@@ -72,11 +78,11 @@ def test_env_base_digest_moves_with_environment() raises:
     var digests = List[String]()
     try:
         _ = setenv("MODULAR_HOME", "/tmp/mtest-modular-here", True)
-        digests.append(base_digest(env_base(base_config(), root)))
+        digests.append(base_digest(env_base(real_toolchain_config(), root)))
         _ = setenv("MODULAR_HOME", "/tmp/mtest-modular-there", True)
-        digests.append(base_digest(env_base(base_config(), root)))
+        digests.append(base_digest(env_base(real_toolchain_config(), root)))
         _ = unsetenv("MODULAR_HOME")
-        digests.append(base_digest(env_base(base_config(), root)))
+        digests.append(base_digest(env_base(real_toolchain_config(), root)))
     finally:
         if was_set:
             _ = setenv("MODULAR_HOME", saved, True)
@@ -94,15 +100,15 @@ def test_env_base_digest_moves_with_root() raises:
     # Field 6 is the CANONICAL root, so two runs of the same sources from two
     # checkouts do not share a generation.
     assert_not_equal(
-        base_digest(env_base(base_config(), here)),
-        base_digest(env_base(base_config(), there)),
+        base_digest(env_base(real_toolchain_config(), here)),
+        base_digest(env_base(real_toolchain_config(), there)),
     )
 
 
 def test_env_base_records_include_dir_args() raises:
     var root = temp_root()
     write_file(root, "extra/top.mojo", "# a")
-    var config = base_config()
+    var config = real_toolchain_config()
     config.build_args = ["-I", "extra"]
     var ctx = env_base(config^, root)
     assert_true(ctx.enabled, "cache off: " + ctx.disable_reason)

@@ -1,12 +1,15 @@
 """The scheduler's serial pass, and interrupts across both passes.
 
 Split out of `test_session_schedule.mojo` on cost, not on subject. Every test
-that drives a real session pays, once per process, for reading and hashing the
-compiler the cache keys against; that one-off is most of a suite's wall time
-here, so two suites cost two payments no matter how the tests are divided. The
-division is therefore by weight, and the seam chosen among the several that
-balance is the one that reads: the parallel batch stays in the original file,
-and what happens beside or after it lives here.
+that drove a real session then paid, once per process, for reading and hashing
+the compiler the cache keys against, and that one-off dominated a suite's wall
+time; the division was therefore by weight, and the seam chosen among the
+several that balance is the one that reads: the parallel batch stays in the
+original file, and what happens beside or after it lives here.
+`session_fixtures.base_config` now keys a wrapper, so the payment that motivated
+the division is gone and only the seam remains. Both halves are named in the
+ASan lane's inventory (`scripts/checks/memory/asan.py`), so neither may be
+merged away or renamed without that file moving in the same change.
 
 Serial pinning is the subject proper: files matching a `--serial` glob run
 one-at-a-time on a serial pass AFTER the parallel batch, carry the informal

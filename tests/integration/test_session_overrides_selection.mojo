@@ -1,9 +1,10 @@
 """Per-file overrides along the sequential selection pipeline.
 
-Split out of `test_session_overrides.mojo` by weight; its retry case is one of
-the three in the original that each paid, once per process, for reading and
-hashing the compiler the cache keys against, and the three are kept in separate
-suites so one per-file deadline carries one such payment.
+Split out of `test_session_overrides.mojo` by weight, back when a suite that
+drove real sessions paid once per process for reading and hashing the compiler
+the cache keys against. `session_fixtures.base_config` now keys a wrapper and
+that payment is gone, so what is left holding the three files apart is the
+subject seam below rather than any deadline.
 
 The subject is the pipeline a selection run takes: build, run, and retry each
 consult the effective budget for the file being selected, not the global one.

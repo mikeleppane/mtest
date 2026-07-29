@@ -1,13 +1,18 @@
 """Integration tests for what an env base frames about the toolchain.
 
-Split out of `test_session_store.mojo` on cost. Three of these stand up a stub
-toolchain and are nearly free; the fourth,
-`test_env_base_frames_the_compiler_selection_environment`, collects against the
-real compiler three times over and is seconds of I/O on its own. It is kept
-here rather than beside `test_env_base_enabled_for_default_config`, the other
-test that keys the real toolchain, so no single suite carries both into one
-per-file deadline. What they have in common as subjects is what this file is
-named for: the toolchain is a build input, and the key has to say so.
+Split out of `test_session_store.mojo` on cost. Nothing here keys the toolchain
+executable itself: three cases stand up a stub whose layout they control
+outright, and the fourth,
+`test_env_base_frames_the_compiler_selection_environment`, is about an
+environment variable and holds over any compiler, so it takes the wrapper
+`session_fixtures.base_config` names. That is the whole reason this file is
+cheap, and it is why the real-toolchain payments stay concentrated in
+`test_session_store_digest.mojo` and
+`test_session_store_toolchain_memo.mojo` instead of being spread across every
+suite that happens to build a key.
+
+What these cases have in common as subjects is what this file is named for: the
+toolchain is a build input, and the key has to say so.
 
 Whether a config collects at all lives in `test_session_store_env_base.mojo`.
 """

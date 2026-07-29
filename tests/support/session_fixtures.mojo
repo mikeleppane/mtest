@@ -9,8 +9,14 @@ under the temp root's own `build/`, never the repo's.
 
 `temp_root` is re-exported from `tmptree` — one scratch-root primitive for the
 whole suite — so `from session_fixtures import temp_root` keeps working.
+
+Two configs, not one. `base_config` is what a suite reaches for: real builds by
+the real compiler, reached through a wrapper so the build cache keys something
+cheap. `real_toolchain_config` names the compiler on PATH directly, and only
+the handful of store suites whose subject is that key frame use it. Read
+`base_config` for the argument.
 """
-from std.os import makedirs
+from std.os import getenv, makedirs
 from std.os.path import dirname, exists
 
 from tmptree import temp_root
@@ -289,13 +295,120 @@ def write_file(root: String, rel: String, content: String) raises:
         f.write(content)
 
 
-def base_config() raises -> RunnerConfig:
-    """A default config with a run deadline no fixture is expected to reach.
+comptime PASSTHROUGH_MOJO = "/scripts/fixtures/toolchain/logging_mojo.py"
+"""The transparent compiler wrapper, relative to the repository root.
 
-    The deadline is a *safety net*, not a subject. Every fixture here either
-    aborts, exits, or reports within milliseconds once its child reaches
-    `main()`, so the only thing this bound has to clear is the cost of
-    spawning a freshly linked Mojo binary and initializing its runtime.
+`logging_mojo.py` appends a line to `MTEST_MOJO_LOG` when that variable is set
+and then `execv`s the real `mojo` found on PATH with the untouched argv. With
+the variable unset — which is the state every Mojo test module runs in, since
+none of them sets it — the log step is skipped and nothing but the exec
+remains, so exit code, stdout, and stderr are the real compiler's byte for
+byte. Its own docstring states that pass-through as the contract, and the e2e
+selection scenario has depended on it since before these suites did.
+"""
+
+
+def passthrough_mojo() -> String:
+    """The transparent compiler wrapper's path, or `"mojo"` when it is missing.
+
+    A caller gets the real compiler's behavior either way. The wrapper is
+    preferred because it is what the compiler frame of a cache key ends up
+    digesting, and a two-kilobyte script is a different proposition from the
+    toolchain executable itself; see `base_config` for why that matters here.
+
+    The fallback keeps the fixture honest outside a pixi shell, where
+    `PIXI_PROJECT_ROOT` is unset and the path cannot be formed. Falling back to
+    the bare spelling costs the digest and changes no outcome, whereas
+    returning an unresolvable path would disable the cache in every suite and
+    fail the ones that assert it is on.
+
+    Returns:
+        An absolute path to the wrapper when the repository root is known and
+        the wrapper is there, and the bare spelling `"mojo"` otherwise.
+
+    Examples:
+
+    ```mojo
+    from session_fixtures import passthrough_mojo
+
+    var config = RunnerConfig.default()
+    config.mojo_path = passthrough_mojo()
+    ```
+    """
+    var repo = getenv("PIXI_PROJECT_ROOT", "")
+    if repo == "":
+        return String("mojo")
+    var wrapper = repo + PASSTHROUGH_MOJO
+    if not exists(wrapper):
+        return String("mojo")
+    return wrapper^
+
+
+def real_toolchain_config() raises -> RunnerConfig:
+    """`base_config`, but keyed against the toolchain executable itself.
+
+    The config `base_config` hands back names a wrapper, so the toolchain frame
+    of every key it produces describes that wrapper rather than the compiler on
+    PATH. A test whose subject IS that frame — the digest of the real
+    executable, the directory of libraries shipped beside it, or the memo that
+    holds either — has to say so, and this is how it says it. Everything else
+    is `base_config`'s, deadline included.
+
+    Returns:
+        A config whose `mojo_path` is the contract default, the bare spelling
+        `"mojo"`, resolved through PATH exactly as a user's run resolves it.
+
+    Raises:
+        Error: Never; it mirrors `base_config`'s signature.
+
+    Examples:
+
+    ```mojo
+    from session_fixtures import real_toolchain_config
+
+    var ctx = env_base(real_toolchain_config(), temp_root())
+    ```
+    """
+    var c = base_config()
+    c.mojo_path = String("mojo")
+    return c^
+
+
+def base_config() raises -> RunnerConfig:
+    """A default config that compiles for real, keyed against a cheap compiler.
+
+    Two departures from `RunnerConfig.default()`, each for its own reason.
+
+    **The compiler is the transparent wrapper.** The build cache is on by
+    default, so every session driven from this config collects a key base, and
+    the toolchain frame of that base is the digest of `mojo_path`'s bytes. The
+    pinned toolchain executable is upwards of a hundred megabytes; the digest
+    is computed in Mojo, and the classified suites are compiled without
+    optimization, which is the combination that makes reading and hashing it
+    the single largest fixed item in a session suite's runtime — larger, in
+    most of these suites, than every real compile they perform put together.
+    A process-lifetime memo bounds that without removing it, and it bounds it
+    less than it looks: the memo is a SINGLE slot keyed on path and length, so
+    a suite that points one test at a fixture shim and the next back at the
+    real compiler evicts the entry and pays the whole read and hash again.
+    Measured against this suite, the modules that alternate that way paid twice.
+    Nor can one module share a payment with another, since every classified
+    module is its own program.
+
+    Nothing outside the store suites asserts anything about that frame's
+    CONTENTS. `passthrough_mojo` therefore names a wrapper that execs the real
+    compiler, which leaves every one of those suites keying, probing,
+    publishing, and reusing exactly as before over a compiler whose bytes are
+    cheap to read. The builds are the real compiler's, so outcomes, captured
+    output, and the version banner are unchanged; nothing beside the wrapper
+    looks like a toolchain, which the store records as a plain absence and
+    keeps the cache on for. Tests whose subject IS that frame use
+    `real_toolchain_config` and say so in their names.
+
+    **The deadline is raised.** It is a *safety net*, not a subject. Every
+    fixture here either aborts, exits, or reports within milliseconds once its
+    child reaches `main()`, so the only thing this bound has to clear is the
+    cost of spawning a freshly linked Mojo binary and initializing its runtime.
 
     That cost is not small and it is not stable. Measured on a 32-core box:
     a probe child reaches `main()` in well under a millisecond when the
@@ -315,7 +428,15 @@ def base_config() raises -> RunnerConfig:
     `test_hanging_probe_times_out_exit_1` — the only two consumers of
     `SRC_HANG` — both set `timeout_secs = 1` themselves. Never lower this
     default to make one test trip its deadline; set it on that test's config.
+
+    Returns:
+        A config wired to the transparent wrapper, with the raised deadline and
+        every other field at its contract default.
+
+    Raises:
+        Error: Never; the signature is `raises` for its callers' convenience.
     """
     var c = RunnerConfig.default()
     c.timeout_secs = 30
+    c.mojo_path = passthrough_mojo()
     return c^

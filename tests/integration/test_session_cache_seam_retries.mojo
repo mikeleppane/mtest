@@ -1,8 +1,10 @@
 """A build the run did not keep: retried, killed, or superseded.
 
-Split out of `test_session_cache_seam_faults.mojo` by weight, so that neither
-suite carries two of the fixed per-process compiler payments a real session
-makes.
+Split out of `test_session_cache_seam_faults.mojo` by weight, back when a real
+session's first key collection read and hashed the compiler itself and no suite
+could afford two of those. `session_fixtures.base_config` now keys a wrapper and
+that payment is gone; the division holds because the subject below stands on its
+own.
 
 The subject is the boundary between "this run compiled something" and "the
 store may answer with it". A run retried after a crash compiled twice and kept
