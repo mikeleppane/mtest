@@ -183,6 +183,21 @@ network contract: rattler-build solves against the pinned Modular and
 conda-forge channels, and nothing uploads or authenticates. Do not describe
 those jobs as hermetic or fold them into the Valgrind exception.
 
+Three hosted lanes — `direct tests`, `self-hosted tests`, and `end-to-end
+tests` — trade part of this for speed, and knowingly. They restore the
+build-artifact store and the precompiled package from an earlier run, so their
+inputs are no longer this checkout and the locked toolchain alone. What holds
+the property up instead is the store's own key, which frames the toolchain,
+the environment, the invocation root, the build arguments, the include-root
+contents, and the file's own bytes; `store_probe` re-verifies `meta.key_full`
+and refuses a binary that is not a real file inside its generation, is not
+executable, or does not digest to `meta`. A stale entry is therefore a cache
+miss, never a wrong pass. Both preflights still compile cold, `cache protocol`
+on both platforms is the deliberate cold witness for the from-scratch path,
+and `build stamp` is the gate proving the precompile stamp this leans on
+refuses a stale one. Widening the cached-lane set is an Ask-first decision,
+like the Valgrind exception.
+
 ## Toolchain and verification
 
 The verification tasks are:
@@ -218,8 +233,9 @@ pixi run ci-memory         # Linux: both memory lanes, ASan/LSan then Memcheck
 
 Hosted GitHub required checks enforce most, but not all, of the platform and
 product lanes described below — see the Hosted CI section for which lanes run
-without blocking. `py-check` remains a local requirement when Python changes,
-because its pinned tools are deliberately absent from hosted CI.
+without blocking. `py-check` is worth running locally when Python changes, but
+it is no longer only local: the hosted `Python quality` job installs `uv`
+itself and blocks on it.
 
 ### Local agentic development loop
 
@@ -243,8 +259,9 @@ exhaustive run. It is not a routine per-commit requirement, and it is **not** a
 mirror of hosted CI: it omits packaged-artifact consumption (`package-check`),
 CodeQL, and Python quality (`py-check`). A green `pixi run ci` therefore says
 nothing about whether the built package installs and runs in a clean
-environment, about the CodeQL findings, or about ruff and mypy. The required
-GitHub checks are the authoritative exhaustive merge verdict.
+environment, about the CodeQL findings, or about ruff and mypy — all three of
+which hosted CI does block on. The required GitHub checks are the
+authoritative exhaustive merge verdict.
 
 `fmt-check` formats each real Mojo source under `src`, `companions`, `tests`,
 and `e2e` in a separate deterministic, no-symlink-following invocation, then
@@ -273,10 +290,12 @@ ruff and mypy run through `uvx` at versions pinned in
 environment the product compiles in and stops a floating formatter from
 reformatting the tree on its next release. The cost is a prerequisite: it needs
 `uv` on PATH and fails loudly rather than skipping when `uvx` is absent, which
-is why it is absent from `pixi run ci` and from the hosted workflow, where `uv`
-is not installed. A red
-`py-check` on a fresh clone without `uv` is an environment gap, not a defect in
-the tree. It covers `scripts/` and `tests/fixtures/exec/`, every Python file the
+is why it stays out of `pixi run ci`: a floor that assumed a tool the pixi
+environment does not pin would be green or red by accident of the machine. The
+hosted `Python quality` job may run it precisely because it *supplies* the
+tool, installing a pinned `uv` through a pinned `astral-sh/setup-uv` before it
+calls the task. A red `py-check` on a fresh clone without `uv` is an
+environment gap, not a defect in the tree. It covers `scripts/` and `tests/fixtures/exec/`, every Python file the
 repo tracks. `pyproject.toml` holds the config and no `[project]` or
 `[build-system]`, because this repo is not a Python package.
 
@@ -341,14 +360,14 @@ Hosted CI runs the same logical floor as two platform-local chains:
   is blocking on both linux-64 and osx-arm64, one job per platform, both
   running `pixi run package-check`.
 - A job's display name is its status-check context, so every name the ruleset
-  requires must stay byte-stable. The 20 currently required are nine names
+  requires must stay byte-stable. The 21 currently required are nine names
   carried on both `Linux /` and `macOS arm64 /` — `preflight`, `direct tests`,
   `assertions`, `self-hosted tests`, `end-to-end tests`, `strict contract`,
   `cache protocol`, `build stamp`, `packaged artifact` — plus the two
   Linux-only memory lanes, `Linux / ASan + LSan` and
-  `Linux / Valgrind Memcheck`. Renaming one does not red the lane; it removes
-  the lane from the required set and leaves a permanently pending context in
-  its place.
+  `Linux / Valgrind Memcheck`, plus the unprefixed `Python quality`. Renaming
+  one does not red the lane; it removes the lane from the required set and
+  leaves a permanently pending context in its place.
 - `native-check` depends on `postfork-check`, so the native gate alone cannot
   skip the child call-graph audit.
 

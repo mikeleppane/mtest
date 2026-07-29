@@ -110,11 +110,14 @@ package-check = { cmd = "python -m scripts.build.package_consumption", depends-o
 py-fmt = "python -m scripts.checks.python_quality --fix"
 
 # The Python quality verdict: formatting drift, any lint finding, or any mypy
-# --strict error fails. Deliberately NOT in `pixi run ci` and not in the hosted
-# workflow: ruff and mypy run through `uvx` so they stay out of the pixi
-# environment (no new packages), which means the tool is a contributor's local
-# `uv` install rather than something the gate may assume. The checker fails
-# loudly when `uvx` is absent instead of skipping. See
+# --strict error fails. Deliberately NOT in `pixi run ci`: ruff and mypy run
+# through `uvx` so they stay out of the pixi environment (no new packages),
+# which means the tool is a contributor's local `uv` install rather than
+# something the floor may assume. Hosted CI runs it anyway, in a `Python
+# quality` job that installs a pinned `uv` before calling this task — the rule
+# is that a gate may run this exactly when it supplies the tool itself, which
+# the hosted job does and the local floor structurally cannot. The checker
+# fails loudly when `uvx` is absent instead of skipping. See
 # scripts/checks/python_quality.py for why the versions are pinned exactly.
 py-check = "python -m scripts.checks.python_quality"
 

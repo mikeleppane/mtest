@@ -5,9 +5,15 @@ Python is build and check tooling here, never product code, so it is not a
 pixi dependency and neither are its tools. `uvx` fetches ruff and mypy at the
 versions pinned below into its own cache and runs them there, which keeps the
 environment the product builds in unchanged. That is also why this check is
-absent from `pixi run ci` and from the hosted workflow: `uv` is a developer
-tool on the contributor's machine, not something the gate may assume, and a
-gate that silently passes when its tool is missing is worse than no gate.
+absent from `pixi run ci`: `uv` is a developer tool on the contributor's
+machine, not something the local floor may assume, and a gate that silently
+passes when its tool is missing is worse than no gate.
+
+Hosted CI runs it in a `Python quality` job that installs a pinned `uv` first.
+The rule is one-directional rather than a ban: a gate may run this check
+exactly when it supplies the tool itself. The hosted job does; `pixi run ci`
+cannot, because whatever `uv` a contributor happens to have is what it would
+get.
 
 The versions are exact on purpose. A floating formatter reformats the tree on
 its next release and every diff after that carries unrelated churn, so the pin
