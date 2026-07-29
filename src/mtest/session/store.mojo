@@ -482,6 +482,11 @@ def _module_name(name: String) -> String:
     var out = List[UInt8]()
     for i in range(cut):
         out.append(bytes[i])
+    # SAFETY: `unsafe_from_utf8` requires `out` to be well-formed UTF-8. `name`
+    # is a `String`, so it already is, and `cut` is either its length or the
+    # index of a literal ASCII `.` (0x2E). A byte below 0x80 never appears
+    # inside a multi-byte sequence, so cutting at that `.` cannot split one and
+    # the prefix `[0, cut)` is well-formed on its own.
     return String(StringSlice(unsafe_from_utf8=Span(out)))
 
 

@@ -1530,6 +1530,44 @@ def test_import_scanning_reads_the_forms_a_key_depends_on() raises:
     assert_false(_scanned('var s = "open\n').parsed)
 
 
+def test_import_scanning_refuses_bytes_that_are_not_utf8() raises:
+    """A source that is not UTF-8 is refused instead of tokenized.
+
+    Any byte at or above 0x80 counts as an identifier byte, so a Latin-1 module
+    name or a half-written multi-byte sequence would otherwise be read as a
+    token. The scanner exists to decide whether a key may be narrow, and a file
+    whose bytes it cannot read is exactly the case where it may not be.
+    """
+    var latin1 = List[UInt8]()
+    for b in "import caf".as_bytes():
+        latin1.append(b)
+    # 'é' as Latin-1: a lone continuation-range byte, never valid UTF-8.
+    latin1.append(0xE9)
+    latin1.append(UInt8(ord("\n")))
+    assert_false(
+        scan_imports(latin1).parsed,
+        "a Latin-1 module name must refuse, not tokenize",
+    )
+
+    var truncated = List[UInt8]()
+    for b in "import a".as_bytes():
+        truncated.append(b)
+    # A two-byte sequence whose continuation byte never arrived.
+    truncated.append(0xC3)
+    truncated.append(UInt8(ord("\n")))
+    assert_false(
+        scan_imports(truncated).parsed,
+        "a truncated multi-byte sequence must refuse",
+    )
+
+    # The refusal is about malformed bytes, not about non-ASCII names: a module
+    # name that IS valid UTF-8 still scans, and still reports its own spelling.
+    var accented = _scanned("import café\n")
+    assert_true(accented.parsed, "a valid UTF-8 module name still scans")
+    assert_equal(len(accented.modules), 1)
+    assert_equal(accented.modules[0], "café")
+
+
 def test_remove_tree_no_follow_refuses_a_symlinked_root() raises:
     var root = temp_root()
     write_file(root, "outside/keep.txt", "k")

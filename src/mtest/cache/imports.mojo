@@ -20,6 +20,8 @@ inside the module and can never name another one.
 
 What makes it refuse to answer — every case erring toward the conservative key:
 
+- bytes that are not well-formed UTF-8, which the compiler could not read as
+  source either
 - bytes that do not lex as source: an embedded `0x00`, a string literal still
   open at end of file, or a newline inside a single-quoted literal
 - a leading `.` on the module path, a relative form this scanner does not model
@@ -140,12 +142,11 @@ def _ident_end(line: List[UInt8], i: Int) -> Int:
 def _text_of(line: List[UInt8], start: Int, end: Int) -> String:
     """The bytes of `line` in `[start, end)` as text.
 
-    Only ever applied to an identifier token, whose bytes came from a source
-    file the compiler itself reads as UTF-8.
-
     Args:
-        line: One line of code text.
-        start: First index, inclusive.
+        line: One line of code text, from a buffer `scan_imports` has already
+            established is well-formed UTF-8.
+        start: First index, inclusive. Both ends must sit on an identifier-run
+            boundary, which every caller obtains from `_ident_end`.
         end: Last index, exclusive.
 
     Returns:
@@ -154,6 +155,16 @@ def _text_of(line: List[UInt8], start: Int, end: Int) -> String:
     var out = List[UInt8]()
     for k in range(start, end):
         out.append(line[k])
+    # SAFETY: `unsafe_from_utf8` requires `out` to be well-formed UTF-8, and
+    # three facts together give that. (1) `scan_imports` refuses any buffer that
+    # is not well-formed UTF-8 before a line is ever built, so the source bytes
+    # are. (2) `_code_lines` drops bytes only at `#`, `\n`, `"`, and `'`, all
+    # ASCII, and an ASCII byte never occurs inside a multi-byte sequence, so no
+    # erasure can cut one in half and each line's text is well-formed too.
+    # (3) `[start, end)` is bounded at both ends by a byte that is not an
+    # identifier byte (or by the line's own edge), while every byte of a
+    # multi-byte sequence is `>= 0x80` and therefore IS an identifier byte — so
+    # a boundary can never fall inside a sequence.
     return String(StringSlice(unsafe_from_utf8=Span(out)))
 
 
@@ -195,6 +206,28 @@ struct ImportScan(Copyable, Movable):
             A scan with `parsed` clear and no modules.
         """
         return ImportScan(False, List[String]())
+
+
+def _is_well_formed_utf8(data: List[UInt8]) -> Bool:
+    """Whether `data` decodes as UTF-8.
+
+    The checked `from_utf8` constructor is the decision, so overlong forms,
+    surrogates, and truncated sequences are rejected by the same rules the rest
+    of the toolchain applies rather than by a second implementation of them.
+    Nothing is kept: only the verdict matters, and the slice borrows `data`
+    rather than copying it.
+
+    Args:
+        data: The whole source file's bytes.
+
+    Returns:
+        True iff every byte belongs to a well-formed sequence.
+    """
+    try:
+        _ = StringSlice(from_utf8=Span(data))
+    except:
+        return False
+    return True
 
 
 def _code_lines(data: List[UInt8]) -> Optional[List[List[UInt8]]]:
@@ -447,7 +480,8 @@ def scan_imports(data: List[UInt8]) -> ImportScan:
         whose `modules` holds the first dotted component of every import found,
         in source order and with duplicates kept. Never raises: this is asked
         about files that arrived from a filesystem, where any byte sequence is
-        possible.
+        possible, and bytes that are not UTF-8 are one more refusal rather than
+        an error.
 
     Examples:
 
@@ -461,6 +495,15 @@ def scan_imports(data: List[UInt8]) -> ImportScan:
     print(found.parsed, len(found.modules))  # True 2
     ```
     """
+    # Checked before anything is tokenized, because an identifier byte is any
+    # byte at or above 0x80: a Latin-1 module name, a truncated multi-byte
+    # sequence, or a binary blob renamed `.mojo` would otherwise lex into a
+    # token whose bytes are not text. The compiler reads source as UTF-8, so a
+    # file that is not UTF-8 is one this scanner has no business drawing
+    # conclusions about, and refusing widens the key — the right answer for a
+    # file nothing here can read.
+    if not _is_well_formed_utf8(data):
+        return ImportScan.unreadable()
     var lines = _code_lines(data)
     if not lines:
         return ImportScan.unreadable()
