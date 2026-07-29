@@ -2796,19 +2796,26 @@ def store_probe(root: String, key: FileKey) -> ProbeResult:
     2. `meta` is a regular file that parses completely.
     3. `meta.key_full` equals the WHOLE key, not just the 128 bits its name
        carries.
-    4. `bin` can be executed by this process. It is asked before the digest
+    4. `bin` is a real file inside the generation — characterized NO-FOLLOW
+       too, and before anything reads or spawns it. The directory being genuine
+       says nothing about what is in it: a `bin` linked out of the store would
+       be executed, and would report whatever it liked, while `meta` recorded
+       the digest of the link's target and every other check passed.
+    5. `bin` can be executed by this process. It is asked before the digest
        because it is a single `access(2)` against a whole-file read, and because
        a generation that cannot be spawned is unusable however well its bytes
        verify — an archive restore, a container `COPY`, or a `chmod -R` over the
        checkout drops the mode bits while leaving the content untouched.
-    5. `bin` is a readable regular file.
-    6. `bin`'s content digest equals the digest `meta` recorded.
+    6. `bin` is readable.
+    7. `bin`'s content digest equals the digest `meta` recorded.
 
     Any failed check deletes the generation, so a corruption cannot be re-read
-    on the next probe and the next build republishes cleanly. The one deliberate
-    exception is a SYMLINK at the generation path: that is refused and left
-    exactly where it is, because a link the cache did not create is not the
-    cache's to delete.
+    on the next probe and the next build republishes cleanly — and the removal
+    unlinks a child symlink rather than descending it, so refusing a linked
+    `bin` never reaches whatever it pointed at. The one deliberate exception is
+    a SYMLINK at the generation path itself: that is refused and left exactly
+    where it is, because a link the cache did not create is not the cache's to
+    delete.
 
     Args:
         root: The invocation root.
@@ -2871,10 +2878,25 @@ def store_probe(root: String, key: FileKey) -> ProbeResult:
         _discard(gen_abs)
         return _probe_miss()
 
-    # --- Check 4: the binary can actually be spawned. -----------------------
+    # --- Check 4: the binary is a real file inside this generation. ---------
+    # `lstat`, never `is_executable_file` or `isfile`: both follow, and the one
+    # path in this function that gets EXECUTED is exactly the one that must not
+    # be allowed to leave the store.
+    var bin_abs = gen_abs + "/" + _BIN_NAME
+    var bin_kind: Int
+    try:
+        bin_kind = Int(lstat(bin_abs).st_mode) & _S_IFMT
+    except:
+        _discard(gen_abs)
+        return _probe_miss()
+    if bin_kind != _S_IFREG:
+        _discard(gen_abs)
+        return _probe_miss()
+
+    # --- Check 5: the binary can actually be spawned. -----------------------
     var runnable: Bool
     try:
-        runnable = is_executable_file(gen_abs + "/" + _BIN_NAME)
+        runnable = is_executable_file(bin_abs)
     except:
         # The query itself failed, so executability is unknown — and unknown
         # resolves to unusable, the same way every other question here does.
@@ -2886,10 +2908,10 @@ def store_probe(root: String, key: FileKey) -> ProbeResult:
         _discard(gen_abs)
         return _probe_miss()
 
-    # --- Checks 5 and 6: the binary is there and is the one recorded. -------
+    # --- Checks 6 and 7: the binary reads and is the one recorded. ----------
     var bin_bytes: List[UInt8]
     try:
-        bin_bytes = read_regular_file_bytes(gen_abs + "/" + _BIN_NAME, _BIN_CAP)
+        bin_bytes = read_regular_file_bytes(bin_abs, _BIN_CAP)
     except:
         _discard(gen_abs)
         return _probe_miss()
@@ -3096,15 +3118,46 @@ def _write_meta(path: String, text: String) raises:
         f.write(text)
 
 
+comptime _DIGEST32_LEN = 32
+"""Hex digits `KeyBuilder.digest32` renders, and so how many follow `_h` in
+every generation name this store writes."""
+
+
+def _has_digest32_tail(name: String, start: Int) -> Bool:
+    """Whether `name` from `start` onward is exactly a generation's key prefix.
+
+    Args:
+        name: A directory name inside the store.
+        start: The index just past the `_h` separator.
+
+    Returns:
+        True iff exactly `_DIGEST32_LEN` bytes remain and every one of them is
+        a lowercase hex digit — the only tail `generation_name` ever produces.
+    """
+    var bytes = name.as_bytes()
+    if len(bytes) - start != _DIGEST32_LEN:
+        return False
+    for i in range(start, len(bytes)):
+        var b = bytes[i]
+        var is_digit = b >= UInt8(ord("0")) and b <= UInt8(ord("9"))
+        var is_hex_letter = b >= UInt8(ord("a")) and b <= UInt8(ord("f"))
+        if not is_digit and not is_hex_letter:
+            return False
+    return True
+
+
 def _reap_siblings(root: String, key: FileKey):
     """Delete this source's other generations, keeping one live per file.
 
     An editing loop produces a new key per edit, and without this every one of
-    them would keep its binary forever. Siblings are recognized by the mangled
-    source name plus the `_h` separator, which no mangled name can contain, so
-    the match cannot reach another file's generations. Staging directories are
-    skipped by name: one of them may belong to a concurrent process that is
-    compiling into it right now.
+    them would keep its binary forever. A sibling has to look like something
+    this store wrote, which is three things and not one: the mangled source
+    name, the `_h` separator that no mangled name can contain, and then exactly
+    the 32 hex digits `generation_name` puts there. Matching the first two
+    alone would delete any directory somebody else parked in the store under a
+    name that merely starts like one of this source's builds. Staging
+    directories are skipped by name as well: one of them may belong to a
+    concurrent process that is compiling into it right now.
 
     Args:
         root: The invocation root.
@@ -3123,6 +3176,8 @@ def _reap_siblings(root: String, key: FileKey):
         if name == key.gen_name or name.startswith(_TMP_PREFIX):
             continue
         if not name.startswith(prefix):
+            continue
+        if not _has_digest32_tail(name, prefix.byte_length()):
             continue
         _discard(store_abs + "/" + name)
 

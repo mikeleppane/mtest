@@ -1336,6 +1336,77 @@ def test_probe_refuses_symlinked_generation() raises:
     assert_true(isdir(root + "/decoy"))
 
 
+def test_probe_refuses_a_symlinked_binary_inside_a_generation() raises:
+    """The no-follow discipline has to reach the thing that gets executed.
+
+    A generation directory can be a perfectly real directory, with a record
+    naming this exact key and a digest of whatever `bin` resolves to, while
+    `bin` itself is a link to a binary outside the checkout. The probe then
+    reports a hit and mtest runs that outside binary, which is free to emit a
+    valid PASS report. Characterizing the directory without following links and
+    then following one to reach its binary stops one level short.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_binlink.mojo")
+    var key = _fixture_key(root, rel, "# binlink\n")
+    var target = _stage_binary(root, [UInt8(3)])
+    assert_equal(
+        store_publish(
+            root, key, target, 1.0, _build_argv(rel, target.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    assert_equal(store_probe(root, key).kind, PROBE_HIT)
+
+    # The binary moves outside the store and a link takes its place. Everything
+    # else about the generation stays exactly as the cache wrote it, so the
+    # record still names this key and still records the digest of the bytes the
+    # link resolves to.
+    write_bytes(root, "outside/bin", [UInt8(3)])
+    _chmod("755", root + "/outside/bin")
+    remove(root + "/" + key.gen_dir + "/bin")
+    symlink(root + "/outside/bin", root + "/" + key.gen_dir + "/bin")
+    assert_equal(store_probe(root, key).kind, PROBE_MISS)
+    # Deleted like any other corruption inside a generation the cache owns —
+    # and the removal unlinks the child link rather than descending it, so what
+    # it pointed at is still there.
+    assert_false(isdir(root + "/" + key.gen_dir))
+    assert_true(exists(root + "/outside/bin"))
+
+
+def test_reaping_leaves_a_name_this_store_could_not_have_written() raises:
+    """A sibling is a generation of this source, not merely a name near one.
+
+    Reaping matched the mangled source name and the `_h` separator and deleted
+    whatever followed. Nothing this store writes has anything but 32 hex digits
+    there, so a name that does not is a directory somebody else put in the
+    store, and deleting it is not the cache's to do.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_suffix.mojo")
+    var key = _fixture_key(root, rel, "# suffix\n")
+    var mangled = _mangle(rel)
+    var foreign = STORE_DIR + "/" + mangled + "_hnotadigest"
+    var short = STORE_DIR + "/" + mangled + "_h0123456789abcdef"
+    write_bytes(root, foreign + "/keep", [UInt8(1)])
+    write_bytes(root, short + "/keep", [UInt8(2)])
+    var target = _stage_binary(root, [UInt8(3)])
+    assert_equal(
+        store_publish(
+            root, key, target, 1.0, _build_argv(rel, target.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    assert_true(
+        isdir(root + "/" + foreign),
+        "a name with no digest after `_h` was reaped as a generation",
+    )
+    assert_true(
+        isdir(root + "/" + short),
+        "a name with a short digest after `_h` was reaped as a generation",
+    )
+
+
 def test_publish_refuses_a_source_changed_mid_compile() raises:
     var root = temp_root()
     var rel = String("tests/test_race.mojo")
