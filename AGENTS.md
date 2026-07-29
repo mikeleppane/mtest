@@ -272,10 +272,10 @@ outcomes works the same way, since a background wrapper's exit status is the
 wrapper's and not the gate's, so read the gate's own marker.
 
 `pixi run ci-preflight` chains `version-check -> fmt-check ->
-harness-unit-check -> repo-policy-check -> release-tooling-check ->
-safety-check -> postfork-check -> native-check -> junit-check -> build ->
-readme-help-check -> junit-render-check -> transcripts-check ->
-abi-probe-check -> coverage-capability` in that exact fail-fast order. The
+harness-unit-check -> repo-policy-check -> abi-probe-check ->
+release-tooling-check -> safety-check -> postfork-check -> native-check ->
+junit-check -> build -> readme-help-check -> junit-render-check ->
+transcripts-check -> coverage-capability` in that exact fail-fast order. The
 three `*-check` groups replaced a single two-dozen-command `harness-check`
 chain, which survives as their aggregate: a red hosted preflight names the
 group that failed instead of reporting that something in the tooling broke. The `pixi run ci` floor is serial:
@@ -328,8 +328,7 @@ Hosted CI runs the same logical floor as two platform-local chains:
   `build-stamp-check`, strict contract, ASan, Valgrind) and, beside it, a
   `compiled oracles` job carrying every preflight member that needs a real
   compiler: `native-check`, `build`, `readme-help-check`,
-  `junit-render-check`, `transcripts-check`, `abi-probe-check`, and
-  `coverage-capability`. The oracles run parallel to the matrix rather than
+  `junit-render-check`, `transcripts-check`, and `coverage-capability`. The oracles run parallel to the matrix rather than
   ahead of it, because jobs share no filesystem and every cell compiles what
   it needs through its own task edges, so nothing downstream could ever
   consume what the preflight built.

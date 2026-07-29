@@ -97,6 +97,14 @@ jobs:
       - name: Repository policy
         run: pixi run repo-policy-check
 
+      # Beside the other policy gates because it is one: it forbids a shape --
+      # the same foreign symbol declared in two files under `tests/` -- rather
+      # than compiling anything to detect a disagreement between them. It needs
+      # no compiler, no precompiled package, and no native object, so it belongs
+      # in front of the run with the rest of the cheap barrier.
+      - name: Foreign-declaration uniqueness
+        run: pixi run abi-probe-check
+
       - name: Release tooling
         run: pixi run release-tooling-check
 
@@ -183,9 +191,6 @@ jobs:
 
       - name: Protocol snapshots
         run: pixi run transcripts-check
-
-      - name: Cross-module ABI probe
-        run: pixi run abi-probe-check
 
       # Last, where `ci-preflight` puts it and for that task's reason: a
       # nonzero exit here indicts the toolchain pin for review rather than

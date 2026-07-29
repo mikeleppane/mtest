@@ -26,7 +26,6 @@ using and why:
   exits — a count that depends on how fast the compiler answers, not on the
   batch. Faulting an occurrence chosen against that would be a coin flip.
 """
-from std.ffi import external_call
 from std.os.path import exists
 from std.testing import assert_equal, assert_true, TestSuite
 
@@ -46,6 +45,12 @@ from mtest.report import (
 from mtest.session import run_session
 
 from cache_fixtures import dir_listing
+from foreign_abi import (
+    configure_native_fault,
+    native_fault_seen,
+    reap_child,
+    reset_native_faults,
+)
 from session_fixtures import SRC_PASS, base_config, temp_root, write_file
 
 comptime _READY = "pool_fault_ready"
@@ -137,41 +142,6 @@ comptime _STORE_DIR = ".mtest-cache/build-v1"
 """The store's generations directory, relative to a run root."""
 
 
-def _reset_faults():
-    """Clear the isolated testing adapter's native fault table."""
-    # SAFETY: this test-only ABI takes no pointer, retains nothing, and mutates
-    # only the testing adapter's single-threaded fault configuration.
-    external_call["mtest_exec_test_fault_reset", NoneType]()
-
-
-def _configure_fault(operation: Int, occurrence: Int, error_number: Int) raises:
-    """Fail one occurrence of one native adapter operation.
-
-    Args:
-        operation: The `MTEST_EXEC_OP_*` discriminator to fault.
-        occurrence: Which visit to that operation fails, counting from 1.
-        error_number: The errno the faulted operation reports.
-
-    Raises:
-        Error: When the testing adapter rejects the configuration.
-    """
-    # SAFETY: the test-only ABI takes scalar discriminators only; all three are
-    # exact enum/errno/count constants and no pointer or state escapes the call.
-    var result = external_call["mtest_exec_test_fault_configure", Int32](
-        UInt32(operation), UInt32(occurrence), Int32(error_number), Int64(0)
-    )
-    assert_equal(result, Int32(0), "could not configure native fault")
-
-
-def _fault_seen(operation: Int) -> Int:
-    """How many visits the adapter counted for one configured operation."""
-    # SAFETY: the test-only ABI takes one scalar discriminator, returns a
-    # counter by value, and retains nothing.
-    return Int(
-        external_call["mtest_exec_test_fault_seen", UInt32](UInt32(operation))
-    )
-
-
 def _no_live_children() -> Bool:
     """Whether the runner process has no child left, live or merely reapable.
 
@@ -181,16 +151,10 @@ def _no_live_children() -> Bool:
     Returns:
         True when `waitpid` reports no child remains.
     """
-    var status = Int32(0)
-    # SAFETY: `waitpid(-1, &status, WNOHANG)` is the standard non-blocking
-    # existence probe. `status` is a live local for the whole call, the callee
-    # writes at most one `int` through the pointer, WNOHANG guarantees the call
-    # never blocks, and nothing is retained past the return; the result is -1
-    # (ECHILD) exactly when no child remains.
-    var reaped = external_call["waitpid", Int32](
-        Int32(-1), UnsafePointer(to=status), Int32(1)
-    )
-    return Int(reaped) == -1
+    # `waitpid(-1, ..., WNOHANG)` is the standard non-blocking existence
+    # probe: WNOHANG guarantees it never blocks, and it answers -1 (ECHILD)
+    # exactly when no child remains.
+    return Int(reap_child(Int32(-1), Int32(1))) == -1
 
 
 def _recorder() -> RecordingCoordinator[RecordingReporter]:
@@ -302,14 +266,14 @@ def test_build_dispatch_open_fault_is_exit_3_with_every_file_not_run() raises:
 
     var comp = _recorder()
     var code: Int
-    _reset_faults()
-    _configure_fault(_OP_PIPE_STDOUT, _FIRST_BUILD_OPEN, _EIO)
+    reset_native_faults()
+    configure_native_fault(_OP_PIPE_STDOUT, _FIRST_BUILD_OPEN, _EIO)
     # The fault table is process-global, so it is disarmed even if the session
     # raises; a surviving arming would corrupt every later case in this binary.
     try:
         code = run_session(config, root, comp)
     finally:
-        _reset_faults()
+        reset_native_faults()
 
     assert_equal(code, 3, "a build-dispatch machinery fault resolves to exit 3")
     ref rec = comp.composite.reporters[0]
@@ -369,12 +333,12 @@ def test_run_dispatch_open_fault_names_the_run_boundary_and_leaves_it_not_run() 
 
     var comp = _recorder()
     var code: Int
-    _reset_faults()
-    _configure_fault(_OP_PIPE_STDOUT, _FIRST_RUN_OPEN, _EIO)
+    reset_native_faults()
+    configure_native_fault(_OP_PIPE_STDOUT, _FIRST_RUN_OPEN, _EIO)
     try:
         code = run_session(config, root, comp)
     finally:
-        _reset_faults()
+        reset_native_faults()
 
     assert_equal(code, 3, "a run-dispatch machinery fault resolves to exit 3")
     ref rec = comp.composite.reporters[0]
@@ -449,12 +413,12 @@ def test_wait_any_poll_fault_is_exit_3_and_leaves_no_live_group() raises:
 
     var comp = _recorder()
     var code: Int
-    _reset_faults()
-    _configure_fault(_OP_POLL_SET, 1, _EIO)
+    reset_native_faults()
+    configure_native_fault(_OP_POLL_SET, 1, _EIO)
     try:
         code = run_session(config, root, comp)
     finally:
-        _reset_faults()
+        reset_native_faults()
 
     assert_equal(code, 3, "a wait-any machinery fault resolves to exit 3")
     # The teardown ran inside `wait_any`: every group it owned is reaped, so the
@@ -504,13 +468,13 @@ def test_gate_abort_cleanup_fault_escalates_over_the_gate_exit_1() raises:
     var comp = _recorder()
     var code: Int
     var term_visits: Int
-    _reset_faults()
-    _configure_fault(_OP_GROUP_TERM, 1, _EIO)
+    reset_native_faults()
+    configure_native_fault(_OP_GROUP_TERM, 1, _EIO)
     try:
         code = run_session(config, root, comp)
-        term_visits = _fault_seen(_OP_GROUP_TERM)
+        term_visits = native_fault_seen(_OP_GROUP_TERM)
     finally:
-        _reset_faults()
+        reset_native_faults()
 
     # The readiness barrier in the failing gate has a bounded fallthrough, so
     # assert what it was there to guarantee: the marker exists only because the
@@ -585,16 +549,16 @@ def test_interrupt_cleanup_fault_still_resolves_to_exit_2() raises:
     var comp = _recorder()
     var code: Int
     var term_visits: Int
-    _reset_faults()
-    _configure_fault(_OP_GROUP_TERM, 1, _EIO)
+    reset_native_faults()
+    configure_native_fault(_OP_GROUP_TERM, 1, _EIO)
     try:
         code = run_session(runtime, config, root, comp)
-        term_visits = _fault_seen(_OP_GROUP_TERM)
+        term_visits = native_fault_seen(_OP_GROUP_TERM)
     finally:
         # Process-global state, all of it: an armed fault table, a latched
         # interrupt, or an open runtime leaking out of a raising session would
         # corrupt every later case in this binary.
-        _reset_faults()
+        reset_native_faults()
         _reset_interrupt()
         runtime.close()
 

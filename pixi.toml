@@ -320,9 +320,9 @@ recipe-check = "python -m scripts.tests.test_community_recipe && python -m scrip
 # Fast self-tests for repository harness behavior: the self-hosted runner's
 # reconciliation, its timeout and interrupt handling, the dogfood and e2e
 # drivers, the CLI-contract and transcript comparators, the README-help
-# extractor, and the fully-mocked branch logic of the two checkers whose real
-# runs need a real `mojo` and therefore live as their own preflight tasks
-# (`coverage-capability` and `abi-probe-check`). Every member uses disposable
+# extractor, and the fully-mocked branch logic of `coverage-capability`, whose
+# real run needs a real `mojo` and therefore lives as its own preflight task.
+# Every member uses disposable
 # test inputs and a fake compiler, so nothing in this group waits on a real
 # compiler or a built binary -- which is why it sits ahead of every preflight
 # member that does. This is one of three groups the old single `harness-check`
@@ -382,20 +382,19 @@ harness-check = { depends-on = [
     "release-tooling-check",
 ] }
 
-# Re-creates, for exactly the modules that need it, the cross-module
-# external_call ABI check the old 101-module aggregate binary provided for
-# free: any two classified test_*.mojo modules that declare the same
-# external_call symbol are co-linked into one throwaway binary, so a
-# signature or arity drift between their declarations is an archive-time
-# compiler error instead of silent garbage at the ABI boundary once each
-# module builds alone. Its pure-Python scan/grouping logic is unit-tested in
-# harness-check above (test_abi_probe, fully mocked); this task needs a real
-# `mojo` on PATH and the precompiled package plus native test object, hence
-# the explicit dependency edge rather than folding it into harness-check.
-abi-probe-check = { cmd = "python -m scripts.checks.abi_probe", depends-on = [
-    "build",
-    "build-native",
-] }
+# One declarer per external_call symbol across the classified tree. Two
+# classified test_*.mojo modules build as separate binaries, so nothing
+# compares their declarations of the same symbol and a drift in arity or
+# parameter type between them is silent garbage at the ABI boundary rather
+# than a compile error. Every symbol more than one suite needs is therefore
+# declared exactly once, in tests/support/foreign_abi.mojo, and this check
+# fails if a second declaration of any symbol reappears in the classified
+# tree. It used to establish the same property by generating an entrypoint
+# over the sharing modules and co-linking them, which cost a real `mojo`, the
+# precompiled package, and the native test object; forbidding the shape needs
+# none of the three, so the dependency edges are gone and this reads sources
+# rather than building them.
+abi-probe-check = "python -m scripts.checks.abi_probe"
 
 # A fail-closed TRIPWIRE, and as of now an actual member of `ci-preflight`: ask
 # the pinned toolchain whether it has grown a source-coverage facility. Mojo
@@ -416,13 +415,11 @@ abi-probe-check = { cmd = "python -m scripts.checks.abi_probe", depends-on = [
 # gone through green. A tripwire nobody steps on is not a tripwire, so it is
 # wired now.
 #
-# It sits last in the preflight, beside `abi-probe-check`: both are the members
-# that need a real `mojo` on PATH rather than the fake compiler the hermetic
-# groups use, and last is where a nonzero exit reads correctly, because this
-# one indicts the toolchain pin for review rather than indicting the tree. What
-# would falsify the placement: the probe becoming cheap enough and
-# dependency-free enough to run before the compiled members, which would mean
-# it had stopped asking the real toolchain anything.
+# It sits last in the preflight, and is now the only member there that asks a
+# real `mojo` on PATH anything rather than using the fake compiler the hermetic
+# groups use. Last is where a nonzero exit reads correctly, because this one
+# indicts the toolchain pin for review rather than indicting the tree; every
+# gate that does indict the tree has already run by then.
 coverage-capability = "python -m scripts.checks.coverage_capability"
 
 # DOGFOOD probes: run three focused executables through the built mtest binary,
@@ -500,8 +497,8 @@ cmd = "python -m scripts.tests.test_build_stamp"
 # runs the shared node exactly once either way. It stays because this list is
 # the readable statement of what the barrier runs and in what order, and it is
 # not the only entry earning its place that way: `build` below is likewise
-# pulled in by `readme-help-check`, `junit-render-check`, and `abi-probe-check`,
-# and is still written out, because its position AHEAD of them is the point.
+# pulled in by `readme-help-check` and `junit-render-check`, and is still
+# written out, because its position AHEAD of them is the point.
 # Dropping either would turn the fail-fast order into a property you can only
 # reconstruct by opening three other task definitions. The redundancy is
 # documentation with a compiler behind it: Pixi errors on a name that does not
@@ -512,6 +509,7 @@ depends-on = [
     "fmt-check",
     "harness-unit-check",
     "repo-policy-check",
+    "abi-probe-check",
     "release-tooling-check",
     "safety-check",
     "postfork-check",
@@ -521,7 +519,6 @@ depends-on = [
     "readme-help-check",
     "junit-render-check",
     "transcripts-check",
-    "abi-probe-check",
     "coverage-capability",
 ]
 

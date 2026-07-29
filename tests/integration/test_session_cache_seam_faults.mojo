@@ -12,7 +12,6 @@ crash neither counts nor publishes, a staging directory deleted under a failed
 spawn is never named in a diagnostic, and a cached binary that will not start
 costs a rebuild rather than a false pass.
 """
-from std.ffi import external_call
 from std.os import getenv, makedirs, remove
 from std.os.path import exists, isdir
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
@@ -37,6 +36,7 @@ from mtest.session import run_session
 from mtest.session.store import PRECOMPILE_SUBDIR
 
 from cache_fixtures import dir_listing, run_recording_session
+from foreign_abi import configure_native_fault, reset_native_faults
 from session_fixtures import (
     SRC_CHAMELEON,
     SRC_COMPILE_ERROR,
@@ -80,32 +80,6 @@ The cases that use this do not trust the arithmetic — they assert the
 landed on the `--version` child fails loudly rather than passing over a run that
 never reached the store.
 """
-
-
-def _reset_faults():
-    """Clear the isolated testing adapter's native fault table."""
-    # SAFETY: this test-only ABI takes no pointer, retains nothing, and mutates
-    # only the testing adapter's single-threaded fault configuration.
-    external_call["mtest_exec_test_fault_reset", NoneType]()
-
-
-def _configure_fault(operation: Int, occurrence: Int, error_number: Int) raises:
-    """Fail one occurrence of one native adapter operation.
-
-    Args:
-        operation: The `MTEST_EXEC_OP_*` discriminator to fault.
-        occurrence: Which visit to that operation fails, counting from 1.
-        error_number: The errno the faulted operation reports.
-
-    Raises:
-        Error: When the testing adapter rejects the configuration.
-    """
-    # SAFETY: the test-only ABI takes scalar discriminators only; all three are
-    # exact enum/errno/count constants and no pointer or state escapes the call.
-    var result = external_call["mtest_exec_test_fault_configure", Int32](
-        UInt32(operation), UInt32(occurrence), Int32(error_number), Int64(0)
-    )
-    assert_equal(result, Int32(0), "could not configure native fault")
 
 
 def _recorder() -> RecordingCoordinator[RecordingReporter]:
@@ -175,11 +149,11 @@ def test_run_spawn_failure_never_names_a_deleted_staging_path() raises:
 
     var comp = _recorder()
     var code: Int
-    _configure_fault(_OP_PIPE_STDOUT, _RUN_SPAWN_OCCURRENCE, _EIO)
+    configure_native_fault(_OP_PIPE_STDOUT, _RUN_SPAWN_OCCURRENCE, _EIO)
     try:
         code = run_session(base_config(), root, comp)
     finally:
-        _reset_faults()
+        reset_native_faults()
 
     assert_equal(code, 3, "a run-dispatch machinery fault resolves to exit 3")
     ref rec = comp.composite.reporters[0]
@@ -246,11 +220,11 @@ def test_a_cached_binary_that_will_not_start_costs_a_rebuild() raises:
 
     var comp = _recorder()
     var code: Int
-    _configure_fault(_OP_PIPE_STDOUT, _WARM_RUN_SPAWN_OCCURRENCE, _EIO)
+    configure_native_fault(_OP_PIPE_STDOUT, _WARM_RUN_SPAWN_OCCURRENCE, _EIO)
     try:
         code = run_session(base_config(), root, comp)
     finally:
-        _reset_faults()
+        reset_native_faults()
 
     assert_equal(
         code, 0, "a cached binary that will not start must cost a rebuild"
@@ -293,11 +267,11 @@ def test_a_pooled_cached_binary_that_will_not_start_costs_a_rebuild() raises:
 
     var comp = _recorder()
     var code: Int
-    _configure_fault(_OP_PIPE_STDOUT, _WARM_RUN_SPAWN_OCCURRENCE, _EIO)
+    configure_native_fault(_OP_PIPE_STDOUT, _WARM_RUN_SPAWN_OCCURRENCE, _EIO)
     try:
         code = run_session(config^, root, comp)
     finally:
-        _reset_faults()
+        reset_native_faults()
 
     assert_equal(
         code, 0, "a cached binary that will not start must cost a rebuild"
