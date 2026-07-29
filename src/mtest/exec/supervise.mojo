@@ -64,6 +64,7 @@ comptime _SWEEP_TIME_BUDGET_MS = 50
 
 comptime _CHANNEL_STDOUT: UInt32 = 1
 comptime _CHANNEL_STDERR: UInt32 = 2
+comptime _CHANNEL_SETUP: UInt32 = 3
 comptime _READY_STDOUT: UInt32 = 1
 comptime _READY_STDERR: UInt32 = 2
 comptime _READ_BYTES: UInt32 = 1
@@ -1532,6 +1533,24 @@ struct Supervisor(Movable):
             try:
                 _close_channel(
                     self.slots[i].handle, _CHANNEL_STDERR, self.slots[i].native
+                )
+            except:
+                pass
+            # The setup channel is a channel like the other two: the adapter
+            # releases a slot only once its leader is reaped, its group is
+            # swept, and all THREE are closed. A slot torn down here need never
+            # have resolved that channel. The child's write end is
+            # close-on-exec, so the parent's end reaches EOF only when execve
+            # succeeds: a child killed before it gets that far leaves the end
+            # open, and a slot abandoned before its first sweep was never
+            # drained at all. Nothing can consume the record now — an abandoned
+            # slot yields no Completion — so close the channel rather than drain
+            # it, exactly as the single-slot native abort does. Leaving it open
+            # pinned the slot, and `process_close` rejected it with EBUSY: a
+            # teardown that had otherwise completed, reported as incomplete.
+            try:
+                _close_channel(
+                    self.slots[i].handle, _CHANNEL_SETUP, self.slots[i].native
                 )
             except:
                 pass
