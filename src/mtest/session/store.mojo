@@ -1661,9 +1661,21 @@ def collect_env_base(
             # an unknown build.
             ctx.disable("unrecognized build argument '" + row.value + "'")
             return ctx^
+    # A spelling containing `/` is taken verbatim against a working directory
+    # rather than PATH-searched, and the two processes involved do not share
+    # one: the build child `chdir`s to `root` before `execve`, while resolution
+    # here runs in mtest's own. `./tools/mojo` therefore names one file in the
+    # key and executes another whenever the two differ, and even the cold
+    # artifact is filed under the wrong compiler. Anchoring a relative spelling
+    # to `root` makes the identity the one that will actually run. A bare
+    # spelling is PATH-searched by both and needs no anchoring; an absolute one
+    # is already unambiguous.
+    var spelling = String(config.mojo_path)
+    if "/" in spelling and not spelling.startswith("/"):
+        spelling = root + "/" + spelling
     var resolved: Optional[String]
     try:
-        resolved = resolve_executable(config.mojo_path)
+        resolved = resolve_executable(spelling)
     except:
         resolved = None
     if not resolved:
@@ -2292,7 +2304,11 @@ def clear_cache_root(root: String) -> Optional[String]:
        the proven directory.
 
     An ABSENT cache root is success, not a diagnostic: there is nothing to
-    clear, which is the ordinary shape of a first run.
+    clear, which is the ordinary shape of a first run. A root that cannot be
+    characterized AT ALL — an unsearchable parent — is reported the same way,
+    because `lstat` cannot separate the two through a Mojo `Error`. Both end
+    with nothing deleted, which is the honest outcome either way; the run that
+    follows is simply cold.
 
     Args:
         root: The invocation root the cache directory hangs under.
@@ -2300,7 +2316,9 @@ def clear_cache_root(root: String) -> Optional[String]:
     Returns:
         Nothing when the directory was deleted or was already absent; otherwise
         a complete, framed diagnostic for main to print before exiting 4. Every
-        refusal leaves the filesystem exactly as it found it.
+        refusal leaves the filesystem exactly as it found it. A removal that
+        FAILS partway is not a refusal — it is the one outcome that leaves the
+        disk changed, and its diagnostic says so.
 
     Examples:
 
@@ -2403,6 +2421,29 @@ struct FileKey(Copyable, Movable):
     var src_sha: String
     """The source's content digest at key time, and the publication guard's
     reference: a build whose source moved underneath it must never publish."""
+
+    var src_dir: String
+    """The directory whose walk this key framed, relative to the invocation
+    root.
+
+    Carried for the same reason `src_rel` is: the publication guard re-walks it,
+    and `gen_name` cannot supply the path back.
+    """
+
+    var dir_sha: String
+    """The source directory's walk digest at key time.
+
+    The guard's reference for every build input that is not the entry source. A
+    helper beside the test is as much a build input as the test itself, and it
+    can move inside the same window the entry source can.
+    """
+
+    var dir_full: Bool
+    """Which of the two walks produced `dir_sha`.
+
+    The omitting walk and the unomitted one give different digests over the same
+    directory, so the guard has to repeat the one the key actually used.
+    """
 
 
 def _source_dir(rel: String) -> String:
@@ -2621,6 +2662,9 @@ def file_key(
             gen_dir^,
             String(rel),
             src_sha^,
+            dir^,
+            walk_digest^,
+            use_full,
         )
     )
 
@@ -3193,11 +3237,23 @@ def store_publish(
 
     The protocol, in order:
 
-    1. **The publication guard.** Re-digest the SOURCE and compare it to the
-       digest the key was built from. A file edited while its compile was in
-       flight produced a binary this key does not describe, and publishing it
-       would serve those bytes to every later run whose key still says the old
-       source. Nothing is published; the caller runs what it built.
+    1. **The publication guard.** Re-digest the SOURCE and re-walk its
+       DIRECTORY, and compare both to what the key was built from. An input
+       edited while its compile was in flight produced a binary this key does
+       not describe, and publishing it would serve those bytes to every later
+       run whose key still names the old snapshot — including, once the edit is
+       undone, runs over a tree that looks untouched. Editing a helper while a
+       build runs and reverting it afterwards is ordinary work, so the guard
+       covers the whole directory the compiler resolves bare imports against
+       rather than the entry source alone. Nothing is published; the caller runs
+       what it built.
+
+       The cost is a second walk of one directory, and it is paid only on a
+       miss, where a compile has already been paid for.
+
+       What this does NOT re-prove is the session-wide inputs: include-root
+       contents and the toolchain are sampled once per session, so their window
+       is the whole run rather than one compile (§8.5.1).
     2. Rewrite the recorded command line's `-o` to the FINAL generation path,
        so the reproduce line names something that exists after publication.
     3. Digest the staged binary and write `meta` beside it.
@@ -3274,6 +3330,30 @@ def store_publish(
         )
     if sha256_hex(fresh) != key.src_sha:
         return _publish_failed(target, argv, "source changed during compile")
+    # The entry source is only one of the file's inputs. Everything the compiler
+    # resolves a bare import against sits beside it, was sampled when the key
+    # was computed, and can move in exactly the window this guard exists to
+    # close. Re-walking the directory is what proves the binary came from the
+    # snapshot the key names rather than merely starting from the same file.
+    var dir_kb = KeyBuilder()
+    var dir_outcome: WalkOutcome
+    if key.dir_full:
+        dir_outcome = walk_include_root(root, key.src_dir, dir_kb, "")
+    else:
+        var scan = _SourceDirScan.inert()
+        dir_outcome = _walk_source_dir(root, key.src_dir, dir_kb, scan)
+    if not dir_outcome.ok:
+        return _publish_failed(
+            target,
+            argv,
+            "could not re-read the directory of '"
+            + key.src_rel
+            + "' after building it",
+        )
+    if dir_kb^.digest_full() != key.dir_sha:
+        return _publish_failed(
+            target, argv, "a source beside '" + key.src_rel + "' changed"
+        )
 
     # --- Steps 2 and 3: digest the artifact and record it. ------------------
     var bin_bytes: List[UInt8]
@@ -3643,9 +3723,9 @@ def precompile_key(
     # `gen_dir` carries the STAMP's path rather than a generation directory, and
     # `src_sha` is empty for a directory source: neither field is read by the
     # stamp protocol, which never stages, never renames a build, and has no
-    # publication guard to re-digest a source for. `FileKey` is reused for the
-    # digests and the name; the fields it carries for the generation protocol
-    # are inert here.
+    # publication guard to re-digest a source for. The directory fields are
+    # inert for the same reason. `FileKey` is reused for the digests and the
+    # name; the fields it carries for the generation protocol are unused here.
     return Optional(
         FileKey(
             digest32^,
@@ -3654,6 +3734,9 @@ def precompile_key(
             stamp_rel^,
             String(src),
             src_sha^,
+            String(""),
+            String(""),
+            False,
         )
     )
 

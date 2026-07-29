@@ -22,8 +22,8 @@ budget is consulted only here, so the sequential path's build argv stays clean.
 
 This is the LAST of the three build seams into the artifact store, and the only
 one whose build and run are two separate dispatches. Each file is keyed and
-probed once, when the batch admits it: a hit enters the machine already built,
-at `_PENDING_RUN`, and never passes the build dispatch at all. A miss stages a
+probed once, before the scheduler starts: a hit enters the machine already
+built, at `_PENDING_RUN`, and never passes the build dispatch at all. A miss stages a
 directory at its FIRST build dispatch — never a retry's — and the build's
 completion PUBLISHES it before the run is ever dispatched, so the binary this
 batch runs is the binary the store serves, the run-step diagnostics name a live
@@ -500,14 +500,26 @@ def _run_pool_batch[
     drifting verdict; the run batch honors `-x`/`--maxfail`, letting in-flight
     files finish and leaving the rest NOT-RUN.
 
-    The artifact store is consulted ONCE per file, as the batch takes the file
-    on, because `store_probe` MUTATES the store — a generation that fails
-    validation is deleted — so it may only ever be asked about a file this batch
-    is genuinely about to build or run. A hit goes straight into `_PENDING_RUN`
-    carrying the stored binary, its recorded command line, and its original
-    build duration, so the SLOW token reads the same on a warm run as on the
-    cold one. A miss stages its directory at the first build dispatch and
-    publishes it when that build succeeds, BEFORE the run is dispatched.
+    The artifact store is consulted ONCE per file, in the seeding loop below,
+    before the scheduler starts — not at the moment each file is taken on. A hit
+    goes straight into `_PENDING_RUN` carrying the stored binary, its recorded
+    command line, and its original build duration, so the SLOW token reads the
+    same on a warm run as on the cold one. A miss stages its directory at the
+    first build dispatch and publishes it when that build succeeds, BEFORE the
+    run is dispatched.
+
+    Probing the whole batch up front costs something a batch that halts early
+    does not get back. `store_probe` digests the whole stored binary, so a warm
+    run stopped by `-x` on its first file has still hashed every other file's
+    artifact. The scheduler is what would have to change to avoid it, and it is
+    the piece where a mistake costs a wrong verdict rather than a slow run.
+
+    It is safe in the direction that matters, which is why the cost is
+    acceptable. `store_probe` MUTATES the store — a generation that fails
+    validation is deleted — but that deletion is not a decision about the batch:
+    an artifact that fails its own key or digest check is unusable to every
+    future run as well, so removing it early is the same answer, taken sooner.
+    What a probe never does is publish, count, or build.
 
     Neither counter moves where the store is consulted. Both move at DISPATCH —
     `built_files` at the build spawn, `cached_files` at the run spawn — because

@@ -581,6 +581,32 @@ def _env_base(config: RunnerConfig, root: String) raises -> CacheContext:
     return ctx^
 
 
+def test_a_relative_compiler_resolves_against_the_run_root() raises:
+    """The key must name the compiler the build child will actually execute.
+
+    A spelling containing `/` is never PATH-searched — it is taken verbatim
+    against a working directory — and the two processes involved do not share
+    one. The build child `chdir`s to the run root before `execve`, while mtest
+    resolves in its own. Against a root that is not mtest's own directory,
+    `tools/mojo` therefore named one file in the key and ran another.
+
+    The observable form of the divergence: the compiler exists under the root
+    and nowhere near mtest's working directory, so resolving in the wrong place
+    finds nothing at all and turns the cache off.
+    """
+    var root = temp_root()
+    _ = _executable_stub(root, "tools/mojo")
+    var config = base_config()
+    config.mojo_path = String("tools/mojo")
+
+    var ctx = _env_base(config^, root)
+    assert_true(
+        ctx.enabled,
+        "the cache was disabled over a compiler that is right there: "
+        + ctx.disable_reason,
+    )
+
+
 def test_disable_keeps_the_first_reason() raises:
     var ctx = CacheContext()
     assert_true(ctx.enabled)
@@ -1208,6 +1234,9 @@ def test_probe_rejects_wrong_key_meta() raises:
         gen_dir=key.gen_dir,
         src_rel=key.src_rel,
         src_sha=key.src_sha,
+        src_dir=key.src_dir,
+        dir_sha=key.dir_sha,
+        dir_full=key.dir_full,
     )
     assert_equal(store_probe(root, collided).kind, PROBE_MISS)
     assert_false(isdir(root + "/" + key.gen_dir))
@@ -1426,6 +1455,64 @@ def test_publish_refuses_a_source_changed_mid_compile() raises:
     assert_false(isdir(root + "/" + key.gen_dir))
     assert_equal(pub.bin_rel, target.out_rel)
     assert_true(exists(root + "/" + target.out_rel))
+
+
+def test_publish_refuses_a_helper_changed_mid_compile() raises:
+    """A build input beside the test moved, so the artifact is not this key's.
+
+    The entry source is one of the file's inputs, not all of them: the compiler
+    resolves a bare import against the source's own directory, so a helper there
+    is as much a build input as the test itself and moves in the same window.
+
+    What makes it worth refusing rather than tolerating is that the damage
+    outlives the edit. The binary is compiled from the helper's new bytes while
+    the key still describes the old ones, so undoing the edit — an ordinary
+    thing to do — leaves a tree that looks untouched and a stored artifact that
+    was never built from it. Every later run over that tree hits.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_uses_helper.mojo")
+    write_file(root, "tests/helper.mojo", "# before\n")
+    var key = _fixture_key(root, rel, "# entry\n")
+    var target = _stage_binary(root, [UInt8(1)])
+    write_file(root, "tests/helper.mojo", "# after\n")
+
+    var pub = store_publish(
+        root, key, target, 1.0, _build_argv(rel, target.out_rel)
+    )
+    assert_equal(pub.kind, PUB_FAILED)
+    # The specific cause: the entry source never moved, so a guard that only
+    # re-read that file would report PUB_OK here and this test would pass on
+    # the wrong mechanism if it checked the kind alone.
+    assert_true(
+        "changed" in pub.warning and "beside" in pub.warning,
+        "the warning did not name the cause: " + pub.warning,
+    )
+    assert_false(isdir(root + "/" + key.gen_dir))
+    # A refusal is never a failure of the run: the caller keeps running exactly
+    # what it built.
+    assert_equal(pub.bin_rel, target.out_rel)
+    assert_true(exists(root + "/" + target.out_rel))
+
+
+def test_publish_accepts_an_untouched_directory() raises:
+    """The guard must refuse a moved input and nothing else.
+
+    A walk that disagreed with itself over an unchanged directory would refuse
+    every publication, turning the cache into a pure cost — and every existing
+    hit test would still pass, since they publish from directories holding one
+    file. This one holds a helper the walk has to frame identically twice.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_stable.mojo")
+    write_file(root, "tests/stable_helper.mojo", "# unchanged\n")
+    var key = _fixture_key(root, rel, "# entry\n")
+    var target = _stage_binary(root, [UInt8(1)])
+    var pub = store_publish(
+        root, key, target, 1.0, _build_argv(rel, target.out_rel)
+    )
+    assert_equal(pub.kind, PUB_OK, "warning: " + pub.warning)
+    assert_true(isdir(root + "/" + key.gen_dir))
 
 
 def test_file_key_tracks_the_source_and_misses_a_vanished_one() raises:
