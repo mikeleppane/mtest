@@ -1360,9 +1360,9 @@ Facts about this build worth knowing before you rely on it:
 - **The SLOW annotation is a fixed 60s threshold**, informational only; it
   never changes a verdict or the exit code.
 - **Memory analysis is Linux-only; packaging is not.** macOS arm64 CI is a
-  blocking check too: it audits the native adapter, links the binary, runs the
-  direct, dogfood, and end-to-end suites, and consumes the installed conda
-  artifact in its own job. ASan/LSan and Valgrind run only on linux-64.
+  blocking check too: it audits the native adapter, runs the direct and
+  end-to-end suites, and consumes the installed conda artifact in its own job.
+  ASan/LSan and Valgrind run only on linux-64.
 - **GitHub annotations are capped and root-relative.** GitHub's
   workflow-step limits allow 10 error and 10 warning annotations per step
   (past the cap, one aggregate line accounts for the rest), and every
@@ -1437,23 +1437,24 @@ The tasks:
 | `pixi run transcripts-check` | regenerate the `TestSuite` protocol snapshots to a temp dir and diff byte-for-byte |
 | `pixi run cache-protocol-check` | drive real `build/mtest` processes against throwaway projects and assert the build cache's protocol properties from outside |
 | `pixi run build-stamp-check` | check the production build's precompile stamp against its inputs in a sandboxed copy of the tree |
-| `pixi run ci` | the complete serial local mirror: preflight checks, then `test`, `assertions-check`, `dogfood-check`, `e2e`, the two cache gates, the strict contract, and the memory lanes |
+| `pixi run ci` | the complete serial source, test, and memory floor: preflight checks, then `test`, `assertions-check`, `dogfood-check`, `e2e`, the two cache gates, the strict contract, and the memory lanes. Not a mirror of hosted CI — packaged-artifact consumption, CodeQL, and `py-check` all run there and not here |
 | `pixi run asan-check` | Linux: build and run the highest-risk exec suites under ASan/LSan |
 | `pixi run valgrind-check` | Linux: run the exec/native coverage under Memcheck |
 | `pixi run ci-memory` | Linux: both memory lanes together, the way `ci` runs them |
 
 `pixi run ci` is there for an explicit exhaustive local run; routine development
 uses the focused tasks above, and the required hosted checks are the merge
-verdict. The complete mirror opens with a fail-fast preflight (version,
-formatting, harness membership, unsafe-Mojo inventory, post-fork audit, native
-ABI, JUnit oracle, build, rendered-JUnit, and transcript checks) and closes with
-`ci-memory`, so a green local run covers memory safety instead of deferring it.
-On Linux that is ASan/LSan then Memcheck, roughly four minutes together;
-elsewhere it reports the two lanes as uncovered and names the Linux cells that
-own them. Hosted CI runs the behavioral floor (`test`, `assertions-check`,
-`dogfood-check`, `e2e`) plus `contract-check-strict` as parallel cells on both
-Linux and macOS, and runs the full preflight chain and the memory-safety cells
-on Linux, on every pull request.
+verdict. The floor opens with a fail-fast preflight (version, formatting,
+harness self-tests, repository policy, release tooling, unsafe-Mojo inventory,
+post-fork audit, native ABI, JUnit oracle, build, rendered-JUnit, transcript,
+ABI-probe, and coverage-tripwire checks) and closes with `ci-memory`, so a
+green local run covers memory safety instead of deferring it.
+On Linux that is ASan/LSan then Memcheck; elsewhere it reports the two lanes as
+uncovered and names the Linux cells that own them. Hosted CI runs the
+behavioral floor (`test`, `assertions-check`, `e2e`) plus the two cache gates
+and `contract-check-strict` as parallel cells on both Linux and macOS, and runs
+the static preflight, the compiled oracles, and the memory-safety cells on
+Linux, on every pull request.
 
 About the test setup:
 

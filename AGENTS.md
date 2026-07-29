@@ -183,8 +183,8 @@ network contract: rattler-build solves against the pinned Modular and
 conda-forge channels, and nothing uploads or authenticates. Do not describe
 those jobs as hermetic or fold them into the Valgrind exception.
 
-Three hosted lanes — `direct tests`, `self-hosted tests`, and `end-to-end
-tests` — trade part of this for speed, and knowingly. They restore the
+Two hosted lanes — `direct tests` and `end-to-end tests` — trade part of this
+for speed, and knowingly. They restore the
 build-artifact store and the precompiled package from an earlier run, so their
 inputs are no longer this checkout and the locked toolchain alone. What holds
 the property up instead is the store's own key, which frames the toolchain,
@@ -322,12 +322,25 @@ release/publication workflows keep their reviewed job permissions and forbid
 
 Hosted CI runs the same logical floor as two platform-local chains:
 
-- Linux: preflight releases fail-fast `test`, `assertions-check`,
-  `dogfood-check`, `e2e`, `cache-protocol-check`, `build-stamp-check`, strict
-  contract, ASan, and Valgrind cells.
-- macOS: preflight releases `test`, `assertions-check`, `dogfood-check`, `e2e`,
-  `cache-protocol-check`, `build-stamp-check`, and strict contract cells with
-  `fail-fast: false`.
+- Linux: a static preflight — pure Python over the tree, plus `mojo format`
+  over it, and nothing that compiles — releases both the behavioral matrix
+  (`test`, `assertions-check`, `e2e`, `cache-protocol-check`,
+  `build-stamp-check`, strict contract, ASan, Valgrind) and, beside it, a
+  `compiled oracles` job carrying every preflight member that needs a real
+  compiler: `native-check`, `build`, `readme-help-check`,
+  `junit-render-check`, `transcripts-check`, `abi-probe-check`, and
+  `coverage-capability`. The oracles run parallel to the matrix rather than
+  ahead of it, because jobs share no filesystem and every cell compiles what
+  it needs through its own task edges, so nothing downstream could ever
+  consume what the preflight built.
+- macOS: preflight runs the native audit alone and releases `test`,
+  `assertions-check`, `e2e`, `cache-protocol-check`, `build-stamp-check`, and
+  strict contract cells. Both matrices run `fail-fast: false`, so one red lane
+  never cancels the verdicts of the others.
+- There is no self-hosted dogfood cell. `scripts/harness/dogfood.py` survives
+  as a local task and as the helper `package-check` reuses against the
+  installed artifact on both platforms, which is where those three probes now
+  block from.
 - The cache-protocol and build-stamp cells run on both platforms because both
   spawn real processes and read the filesystem directly, so the platform whose
   `stat` layout and path semantics differ is where they have to be executed
@@ -360,11 +373,11 @@ Hosted CI runs the same logical floor as two platform-local chains:
   is blocking on both linux-64 and osx-arm64, one job per platform, both
   running `pixi run package-check`.
 - A job's display name is its status-check context, so every name the ruleset
-  requires must stay byte-stable. The 21 currently required are nine names
+  requires must stay byte-stable. The 20 currently required are eight names
   carried on both `Linux /` and `macOS arm64 /` — `preflight`, `direct tests`,
-  `assertions`, `self-hosted tests`, `end-to-end tests`, `strict contract`,
-  `cache protocol`, `build stamp`, `packaged artifact` — plus the two
-  Linux-only memory lanes, `Linux / ASan + LSan` and
+  `assertions`, `end-to-end tests`, `strict contract`, `cache protocol`,
+  `build stamp`, `packaged artifact` — plus the three Linux-only jobs
+  `Linux / compiled oracles`, `Linux / ASan + LSan`, and
   `Linux / Valgrind Memcheck`, plus the unprefixed `Python quality`. Renaming
   one does not red the lane; it removes the lane from the required set and
   leaves a permanently pending context in its place.
