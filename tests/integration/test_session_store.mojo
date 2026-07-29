@@ -1447,6 +1447,110 @@ def test_file_key_covers_the_directory_when_a_source_cannot_be_scanned() raises:
     )
 
 
+def _keyed_with_includes(
+    root: String, rel: String, includes: List[String]
+) raises -> String:
+    """The full key one file gets under a context carrying include roots.
+
+    Args:
+        root: The invocation root.
+        rel: The test file's root-relative path.
+        includes: The include roots the session would pass as `-I`.
+
+    Returns:
+        The 64-hex key.
+
+    Raises:
+        Error: If the file could not be keyed at all.
+    """
+    var ctx = CacheContext()
+    finalize_includes(ctx, root, includes)
+    var key = file_key(ctx, root, rel)
+    if not key:
+        raise Error("test: file_key failed for '" + rel + "'")
+    return String(key.value().digest_full)
+
+
+def test_file_key_covers_a_test_sibling_an_include_root_module_imports() raises:
+    """The omission proof reaches through the include roots too.
+
+    `-I support` frames `libhelper.mojo`'s bytes, but not what those bytes
+    IMPORT. `test_peer.mojo` is a discovered test file, so the walk of the test
+    directory leaves it out — and the entry file never names it, so nothing on
+    the keyed file's own side escalates either. Without reading the include
+    root's sources, editing `test_peer.mojo` would move no keyed region at all
+    and `test_main.mojo` could serve a binary compiled against the old one.
+    """
+    var root = temp_root()
+    write_file(root, "tests/test_main.mojo", "from libhelper import thing\n")
+    write_file(root, "tests/test_peer.mojo", "# neighbour v1\n")
+    write_file(root, "support/libhelper.mojo", "from test_peer import thing\n")
+    var includes: List[String] = [String("support")]
+
+    var before = _keyed_with_includes(root, "tests/test_main.mojo", includes)
+    write_file(root, "tests/test_peer.mojo", "# neighbour v2\n")
+    assert_not_equal(
+        before,
+        _keyed_with_includes(root, "tests/test_main.mojo", includes),
+        (
+            "a module under an include root reaches the omitted neighbour, so"
+            " the neighbour is an input"
+        ),
+    )
+
+
+def test_an_include_root_import_leaves_unrelated_directories_precise() raises:
+    """Escalation follows the NAME, so it stops at the directories that omit it.
+
+    The include root names `test_peer`, which only `tests/` leaves out. A
+    directory with no such name keeps the omission and its ordinary one-file
+    edit-and-rerun loop: widening every directory in the session because one
+    library imported one test module would trade the whole feature for the
+    proof.
+    """
+    var root = temp_root()
+    write_file(root, "tests/test_main.mojo", SRC_PASS)
+    write_file(root, "tests/test_peer.mojo", "# neighbour v1\n")
+    write_file(root, "other/test_alpha.mojo", SRC_PASS)
+    write_file(root, "other/test_beta.mojo", "# unrelated v1\n")
+    write_file(root, "support/libhelper.mojo", "from test_peer import thing\n")
+    var includes: List[String] = [String("support")]
+
+    var before = _keyed_with_includes(root, "other/test_alpha.mojo", includes)
+    write_file(root, "other/test_beta.mojo", "# unrelated v2\n")
+    assert_equal(
+        before,
+        _keyed_with_includes(root, "other/test_alpha.mojo", includes),
+        "a directory the include root never names keeps its precise key",
+    )
+
+
+def test_an_unscannable_include_root_source_widens_every_omission() raises:
+    """A source under `-I` whose imports cannot be read could name anything.
+
+    The scan is what licenses leaving a directory's test files out, so a
+    library the scanner refuses to read withdraws that licence everywhere —
+    the same direction every other refusal takes, and for the same reason.
+    """
+    var root = temp_root()
+    write_file(root, "tests/test_main.mojo", SRC_PASS)
+    write_file(root, "tests/test_peer.mojo", "# neighbour v1\n")
+    write_bytes(
+        root,
+        "support/libhelper.mojo",
+        [UInt8(35), UInt8(0), UInt8(35), UInt8(10)],
+    )
+    var includes: List[String] = [String("support")]
+
+    var before = _keyed_with_includes(root, "tests/test_main.mojo", includes)
+    write_file(root, "tests/test_peer.mojo", "# neighbour v2\n")
+    assert_not_equal(
+        before,
+        _keyed_with_includes(root, "tests/test_main.mojo", includes),
+        "an unreadable library cannot license leaving a neighbour out",
+    )
+
+
 def test_a_test_directory_that_cannot_be_walked_disables_the_cache() raises:
     """A directory the walk cannot characterize takes the cache off with it.
 

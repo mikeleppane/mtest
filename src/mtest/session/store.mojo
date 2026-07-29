@@ -550,9 +550,13 @@ struct _SourceDirScan(Copyable, Movable):
     would add nothing but would cost precision: one test file importing another
     would drag every unrelated test in the directory onto the unomitted walk.
 
-    The proof reaches one directory. A module under an `-I` root is not scanned,
-    so a library that bare-imports a name matching a test file in the keyed
-    file's directory is outside it; `file_key` states that boundary.
+    The chain leaves the directory through an `-I` root, so a third scan closes
+    it there. `finalize_includes` walks the include roots in COLLECTING mode,
+    recording every module name their sources import; `_source_dir_entry` then
+    escalates a directory whose omitted names appear in that record. A library
+    that bare-imports `test_peer` therefore widens the directory holding
+    `test_peer.mojo` and no other, which is what keeps the escalation from
+    spreading to directories the include roots never name.
     """
 
     var active: Bool
@@ -569,14 +573,46 @@ struct _SourceDirScan(Copyable, Movable):
     the omission for itself alone, in `file_key`, leaving its neighbours precise.
     """
 
+    var collecting: Bool
+    """Whether this walk records what its sources import rather than omitting.
+
+    Set for the include-root walk `finalize_includes` performs. A walk is either
+    omitting-and-proving (`active`) or collecting, never both: an `-I` root omits
+    nothing, and a test file's own directory is not something the include walk
+    reaches.
+    """
+
+    var imports: List[String]
+    """Every module name a COLLECTING walk's sources named, in walk order."""
+
+    var unscannable: Bool
+    """True once a COLLECTING walk met a source whose imports could not be read.
+
+    Such a source could name anything, so the record below it is incomplete and
+    every omission in the session loses its licence.
+    """
+
     @staticmethod
     def inert() -> _SourceDirScan:
-        """A scan that omits nothing and learns nothing: the `-I` walk's shape.
+        """A scan that omits nothing and learns nothing: a plain `-I` walk.
 
         Returns:
             An inactive scan.
         """
-        return _SourceDirScan(False, List[String](), False)
+        return _SourceDirScan(
+            False, List[String](), False, False, List[String](), False
+        )
+
+    @staticmethod
+    def collector() -> _SourceDirScan:
+        """A scan that omits nothing and records what it reads.
+
+        Returns:
+            A collecting scan with an empty record.
+        """
+        return _SourceDirScan(
+            False, List[String](), False, True, List[String](), False
+        )
 
 
 @fieldwise_init
@@ -789,20 +825,33 @@ def _walk_into(
             # fails and the cache goes off rather than keying on a guess.
             return WalkOutcome.failure("cannot read the file '" + rel + "'")
         kb.feed_file(TAG_WALK_FILE, rel, len(data), sha256_hex(data))
-        if scan.active and not scan.needs_full and _is_scannable_name(name):
-            # The bytes are already in hand, so proving the omission safe costs
-            # no read. A helper that imports an omitted test file puts that file
-            # back in the compiler's path one hop out, and a file whose imports
-            # cannot be read proves nothing at all; either way the omission is
-            # abandoned for this whole directory.
+        var proving = scan.active and not scan.needs_full
+        if (proving or scan.collecting) and _is_scannable_name(name):
+            # The bytes are already in hand, so reading the imports costs no
+            # read of its own. A file whose imports cannot be read proves
+            # nothing at all, and both modes take that the conservative way.
             var found = scan_imports(data)
             if not found.parsed:
-                scan.needs_full = True
+                if proving:
+                    # A helper that cannot be read cannot license leaving this
+                    # directory's test files out.
+                    scan.needs_full = True
+                if scan.collecting:
+                    # A library that cannot be read could import any omitted
+                    # name in the session, so no directory's omission survives.
+                    scan.unscannable = True
             else:
-                for module in found.modules:
-                    if _names_contain(scan.skip_modules, module):
-                        scan.needs_full = True
-                        break
+                if proving:
+                    # A helper that imports an omitted test file puts that file
+                    # back in the compiler's path one hop out, so the omission
+                    # is abandoned for this whole directory.
+                    for module in found.modules:
+                        if _names_contain(scan.skip_modules, module):
+                            scan.needs_full = True
+                            break
+                if scan.collecting:
+                    for module in found.modules:
+                        scan.imports.append(String(module))
     return WalkOutcome.success()
 
 
@@ -854,12 +903,35 @@ def walk_include_root(
         pass  # disable the cache, quoting `outcome.reason`
     ```
     """
+    var scan = _SourceDirScan.inert()
+    return _walk_include_root_scanned(root, dir, kb, exclude, scan)
+
+
+def _walk_include_root_scanned(
+    root: String,
+    dir: String,
+    mut kb: KeyBuilder,
+    exclude: String,
+    mut scan: _SourceDirScan,
+) -> WalkOutcome:
+    """`walk_include_root`, with the walk's scan handed back to the caller.
+
+    Args:
+        root: The invocation root; `dir` and `exclude` resolve against it.
+        dir: The include root, as configured.
+        kb: The builder to feed.
+        exclude: One path to skip wherever the walk meets it, or empty.
+        scan: Inert to frame the root and learn nothing, collecting to record
+            what its sources import.
+
+    Returns:
+        Exactly what `walk_include_root` returns. Never raises.
+    """
     var abs_dir = _absolute(root, dir)
     var listing = _list_sorted(abs_dir)
     if not listing:
         return WalkOutcome.failure("'" + dir + "' is not a readable directory")
     var exclude_abs = String("") if exclude == "" else _absolute(root, exclude)
-    var scan = _SourceDirScan.inert()
     return _walk_into(
         abs_dir, "", listing.value().copy(), kb, exclude_abs, scan, True
     )
@@ -976,6 +1048,23 @@ struct CacheContext(Movable):
     command-line order, walked by `finalize_includes` after the configured
     roots."""
 
+    var include_imports: List[String]
+    """Every module name the include roots' own sources import.
+
+    Written by `finalize_includes` and read when a test directory decides
+    whether it may omit its test files: a library under `-I` that bare-imports
+    one of those names puts it back on the compiler's path, so the directory
+    holding it must be walked whole. Duplicates are kept — the list is a handful
+    of names per include root, and matching is a linear scan either way.
+    """
+
+    var include_unscannable: Bool
+    """Whether some include-root source's imports could not be read at all.
+
+    Such a source could name any omitted test file in the session, so every
+    directory that omits anything is walked whole instead.
+    """
+
     var source_dirs: List[_SourceDirMemo]
     """Test-file directories already walked this session, in first-use order.
 
@@ -997,6 +1086,8 @@ struct CacheContext(Movable):
         self.base = KeyBuilder()
         self.prefix = KeyBuilder()
         self.extra_walk_dirs = List[String]()
+        self.include_imports = List[String]()
+        self.include_unscannable = False
         self.source_dirs = List[_SourceDirMemo]()
         self.built_files = 0
         self.cached_files = 0
@@ -1502,9 +1593,19 @@ def finalize_includes(
     fed into `prefix` at that point are simply abandoned, since a disabled
     context's `prefix` is never keyed.
 
+    The walk also READS every source it frames, recording the modules those
+    sources import into `ctx.include_imports`. That record is what closes the
+    last way an omitted test file could enter a compile unseen: a library under
+    `-I` that bare-imports a name matching a discovered test file makes that file
+    a build input, and neither the entry file's own scan nor its directory's walk
+    can see one hop out through an include root. `_source_dir_entry` matches its
+    omitted names against the record and walks the directory whole when they
+    meet. A source whose imports cannot be read at all sets
+    `ctx.include_unscannable`, which withdraws every omission in the session.
+
     Args:
-        ctx: The session context; `prefix` is written and the cache may be
-            disabled.
+        ctx: The session context; `prefix` is written, the include-import record
+            is filled, and the cache may be disabled.
         root: The invocation root each include root resolves against.
         includes: The include roots, in the order the compiler gets them.
 
@@ -1523,15 +1624,20 @@ def finalize_includes(
     var dirs = includes.copy()
     for extra in ctx.extra_walk_dirs:
         dirs.append(String(extra))
+    var scan = _SourceDirScan.collector()
     for entry in dirs:
         var dir = String(entry)
         ctx.prefix.feed_str(TAG_INCLUDE, dir)
-        var outcome = walk_include_root(root, dir, ctx.prefix, "")
+        var outcome = _walk_include_root_scanned(
+            root, dir, ctx.prefix, "", scan
+        )
         if not outcome.ok:
             # The walk's own words, not a generic "unreadable": a symlinked
             # package and an unreadable file are different things to fix.
             ctx.disable("include root '" + dir + "': " + outcome.reason)
             return
+    ctx.include_imports = scan.imports.copy()
+    ctx.include_unscannable = scan.unscannable
 
 
 # --- The owned store: layout and the ownership marker. -----------------------
@@ -2067,13 +2173,29 @@ def _source_dir_entry(mut ctx: CacheContext, root: String, dir: String) -> Int:
     if not outcome.ok:
         ctx.disable("test directory '" + dir + "': " + outcome.reason)
         return -1
+    # The third side of the omission proof. The walk above and `file_key`'s own
+    # scan cover what this directory and the keyed file name; neither can see a
+    # module under an `-I` root naming an omitted file from outside. Escalation
+    # follows the NAME, so a library that imports `test_peer` widens the one
+    # directory that omits `test_peer` and leaves every other directory precise —
+    # unless no include-root source could be read at all, in which case the
+    # record is incomplete and no omission here is licensed.
+    var needs_full = scan.needs_full
+    if not needs_full and len(scan.skip_modules) > 0:
+        if ctx.include_unscannable:
+            needs_full = True
+        else:
+            for module in ctx.include_imports:
+                if _names_contain(scan.skip_modules, module):
+                    needs_full = True
+                    break
     ctx.source_dirs.append(
         _SourceDirMemo(
             String(dir),
             kb^.digest_full(),
             String(""),
             scan.skip_modules.copy(),
-            scan.needs_full,
+            needs_full,
         )
     )
     return len(ctx.source_dirs) - 1
@@ -2140,11 +2262,12 @@ def file_key(
     importing the helper. A source whose imports cannot be read at all takes the
     conservative branch on whichever side met it.
 
-    What the proof covers is one directory: this file, the sources beside it,
-    and the packages under them. A module reached through an `-I` root is not
-    scanned, so a library that bare-imports a name which happens to match a test
-    file in the entry file's directory is outside it — the `-I` walk already
-    frames that library, but not the test file it would pull in.
+    The proof reaches out of the directory as well. `finalize_includes` reads
+    every source it frames under an `-I` root and records what those sources
+    import, and `_source_dir_entry` walks a directory whole when its omitted
+    names appear in that record — so a library that bare-imports a name matching
+    a test file in this directory puts that file back in the key, and a library
+    whose imports cannot be read withdraws every omission in the session.
 
     A directory that is ALSO an `-I` root has its contents framed twice, once
     per search path it occupies. That is harmless duplication rather than a case
