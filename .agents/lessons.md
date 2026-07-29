@@ -88,6 +88,18 @@ append here as later phases teach more.
 - Valgrind needs an instruction-set ceiling: hosted runners may advertise
   x86-64-v4 and Mojo then emits EVEX instructions Valgrind cannot decode.
   Compile the Valgrind-exercised binaries with `--target-cpu x86-64-v3`.
+- The adapter releases a process record only once its leader is reaped, its
+  group is swept, and all THREE read channels are closed, the setup channel
+  included. A teardown path that abandons a slot has to close that channel
+  rather than drain it: an abandoned slot yields no `Completion`, so nothing
+  can consume the setup record. The setup pipe is close-on-exec, so the
+  parent's end reaches EOF only when the child completes `execve` — a child
+  killed before it gets that far, or a slot abandoned before its first sweep,
+  leaves it open, and `process_close` then reports EBUSY on a teardown that had
+  otherwise finished. On an idle host the child always wins that race, so the
+  defect only appears on loaded runners. Every existing `kill_all` test
+  resolved the setup channel first (waiting on a readiness file, or pumping
+  sweeps), which is how the gap survived.
 
 ## Parsing and verdict discipline
 
@@ -219,6 +231,18 @@ append here as later phases teach more.
   before such a spawn. A `pixi run`-less invocation of the e2e driver fails
   many scenarios with `INTERNAL-ERROR ... could not execute 'mojo' (errno 2)`.
   Errno 2 on `mojo` means wrong environment, not broken code.
+- Do not move a compiled artifact between hosted runners. Restoring the
+  build-artifact store across runs was tried and reverted: `KeyBuilder` frames
+  the compiler, the toolchain libraries, the environment, the invocation root,
+  the build arguments, the include-root contents, and the file's own bytes, and
+  nothing about the host CPU — which is complete on one machine, where the CPU
+  cannot change between two builds. A binary compiled where a wider instruction
+  set was available is a valid cache hit and an illegal program; the restored
+  e2e binaries died with SIGILL. This is the same hazard the Valgrind
+  `--target-cpu` ceiling above exists for, reached from the other direction.
+  "A stale entry is a miss, never a wrong pass" holds only for the inputs the
+  key actually frames, and a digest check cannot notice that a byte-perfect
+  binary is illegal on this host.
 - Capture a gate's real exit as its own statement (`cmd; echo "x=$?"`); a
   trailing pipe silently reports 0.
 - One test module is one process under one run deadline (300s by default), so a
