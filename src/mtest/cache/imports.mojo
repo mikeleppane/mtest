@@ -29,6 +29,9 @@ What makes it refuse to answer — every case erring toward the conservative key
   including a statement continued onto the next line
 - the token `import` on a line that does not START with `import` or `from` —
   the `x = 1; import y` shape, and anything else hiding an import mid-line
+- the token `import` again after a `from a import b`, which the semicolon
+  statement separator makes legal and which the `from` grammar would otherwise
+  stop reading in front of
 
 Comments and string literals are erased before any of that, so an `import`
 inside a docstring or after a `#` is neither an import nor a reason to refuse.
@@ -426,8 +429,10 @@ def _parse_from(
             contributes nothing.
 
     Returns:
-        True iff a module path followed by `import` was found. What comes after
-        `import` names symbols inside that module, so it is not examined.
+        True iff a module path followed by `import` was found, and nothing after
+        that `import` hides a second one. What ordinarily follows it names
+        symbols inside the module and can never name another, so it is read only
+        for the `import` token itself.
     """
     i = _skip_blanks(line, i)
     if i < len(line) and line[i] == _byte("."):
@@ -442,6 +447,18 @@ def _parse_from(
     i = _skip_blanks(line, i)
     var kw_end = _ident_end(line, i)
     if kw_end == i or _text_of(line, i, kw_end) != "import":
+        return False
+    # Mojo separates simple statements with `;`, so `from a import b; import c`
+    # is one line carrying two imports and the symbol list is not the last thing
+    # on it. Stopping at the first `import` recorded `a` and reported success,
+    # which told the caller no other module was named — the one answer this
+    # scanner may never give wrongly. A second `import` token therefore refuses
+    # the line, exactly as `import a; import b` already does, while a trailing
+    # statement that cannot name a module keeps the precise reading.
+    var tail = List[UInt8]()
+    for k in range(kw_end, len(line)):
+        tail.append(line[k])
+    if _has_import_token(tail):
         return False
     modules.append(first^)
     return True

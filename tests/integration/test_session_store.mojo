@@ -1522,6 +1522,16 @@ def test_import_scanning_reads_the_forms_a_key_depends_on() raises:
     # An import hiding after a statement separator: understood well enough to
     # know it is there, not well enough to say what it names.
     assert_false(_scanned("x = 1; import y\n").parsed)
+    # The same separator, on the far side of a `from` statement. What follows
+    # `import` on a `from` line ordinarily names symbols and is not examined, so
+    # this is the one place a second statement could pass unread.
+    assert_false(_scanned("from helper import value; import peer\n").parsed)
+    assert_false(_scanned("from a import b; from c import d\n").parsed)
+    # A second statement that cannot name a module keeps the precise key.
+    var trailing = _scanned("from helper import value; x = 1\n")
+    assert_true(trailing.parsed)
+    assert_equal(len(trailing.modules), 1)
+    assert_equal(trailing.modules[0], "helper")
     # A form this scanner does not model.
     assert_false(_scanned("from . import sibling\n").parsed)
     # A statement continued onto the next line.
