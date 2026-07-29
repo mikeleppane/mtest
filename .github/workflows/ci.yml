@@ -243,9 +243,6 @@ jobs:
             store_cache: true
           - lane: assertions
             task: assertions-check
-          - lane: self-hosted tests
-            task: dogfood-check
-            store_cache: true
           - lane: end-to-end tests
             task: e2e
             store_cache: true
@@ -650,9 +647,6 @@ jobs:
             store_cache: true
           - lane: assertions
             task: assertions-check
-          - lane: self-hosted tests
-            task: dogfood-check
-            store_cache: true
           - lane: end-to-end tests
             task: e2e
             store_cache: true

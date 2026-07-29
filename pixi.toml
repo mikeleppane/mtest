@@ -425,14 +425,21 @@ abi-probe-check = { cmd = "python -m scripts.checks.abi_probe", depends-on = [
 # it had stopped asking the real toolchain anything.
 coverage-capability = "python -m scripts.checks.coverage_capability"
 
-# DOGFOOD gate: run three focused executable probes through the built mtest
-# binary. This exercises mtest's real discover/build/run/parse/report path and
-# checks exact header/PASS-row membership independently of mtest. The exhaustive
-# classified inventory belongs to the `test` task, which runs
-# scripts/harness/selfhost.py and derives its own inventory from the sources on
-# disk — there is no committed figure to keep in step. Compiling all classified
-# sources again here would duplicate compiler work without adding behavioral
-# coverage.
+# DOGFOOD probes: run three focused executables through the built mtest binary,
+# exercising the real discover/build/run/parse/report path. A local smoke handle
+# and a reusable helper, NOT a hosted lane of its own: `scripts.harness.dogfood`
+# is imported by scripts/build/package_consumption.py, which runs these same
+# three probes against the INSTALLED artifact on both gated platforms, so the
+# behavioral content is already blocking twice per hosted run against a harder
+# target than build/mtest.
+#
+# This used to claim it checked header and PASS-row membership "independently of
+# mtest". It does not: all three assertions parse output mtest itself produced,
+# with looser patterns than the ones scripts/harness/selfhost.py applies to the
+# same kind of output. The one genuinely independent property it had -- that the
+# files on disk match a COMMITTED tuple, which a source-derived inventory cannot
+# notice the deletion of -- is asserted by scripts/checks/layout.py through this
+# module's own `dogfood_test_files`, in the preflight, at no build cost.
 [tasks.dogfood-check]
 cmd = "python -m scripts.harness.dogfood"
 depends-on = ["build-bin"]
