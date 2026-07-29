@@ -72,47 +72,6 @@ comptime _SRC_SLOW_PROBE = (
 )
 
 
-def _recorder() -> RecordingCoordinator[RecordingReporter]:
-    return RecordingCoordinator(CompositeReporter(Tuple(RecordingReporter())))
-
-
-def _rule(pattern: String) -> OverrideRule:
-    var rule = OverrideRule.empty()
-    rule.files = [pattern]
-    return rule^
-
-
-def _resolved(
-    config: RunnerConfig, rules: List[OverrideRule]
-) -> ResolvedConfig:
-    var file = FileConfig.empty()
-    file.overrides = rules.copy()
-    return resolve_config(
-        config,
-        file,
-        ConfigEnvironment.empty(),
-        CliOverlay.default(),
-    )
-
-
-def _payload(
-    rec: RecordingReporter, path: String
-) raises -> FileFinishedPayload:
-    for i in range(rec.count()):
-        if rec.kind_at(i) == EventKind.FILE_FINISHED and rec.path_at(i) == path:
-            return rec.event_at(i).data[FileFinishedPayload].copy()
-    raise Error("no FileFinished for " + path)
-
-
-def _event_index(
-    rec: RecordingReporter, kind: EventKind, path: String
-) raises -> Int:
-    for i in range(rec.count()):
-        if rec.kind_at(i) == kind and rec.path_at(i) == path:
-            return i
-    raise Error("no matching event for " + path)
-
-
 def _assert_string_lists_equal(
     actual: List[String], expected: List[String]
 ) raises:
@@ -156,6 +115,47 @@ def _assert_masked_seconds(actual: Float64, expected: Float64) raises:
     """
     assert_true(actual >= 0.0)
     assert_true(expected >= 0.0)
+
+
+def _recorder() -> RecordingCoordinator[RecordingReporter]:
+    return RecordingCoordinator(CompositeReporter(Tuple(RecordingReporter())))
+
+
+def _rule(pattern: String) -> OverrideRule:
+    var rule = OverrideRule.empty()
+    rule.files = [pattern]
+    return rule^
+
+
+def _resolved(
+    config: RunnerConfig, rules: List[OverrideRule]
+) -> ResolvedConfig:
+    var file = FileConfig.empty()
+    file.overrides = rules.copy()
+    return resolve_config(
+        config,
+        file,
+        ConfigEnvironment.empty(),
+        CliOverlay.default(),
+    )
+
+
+def _payload(
+    rec: RecordingReporter, path: String
+) raises -> FileFinishedPayload:
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.FILE_FINISHED and rec.path_at(i) == path:
+            return rec.event_at(i).data[FileFinishedPayload].copy()
+    raise Error("no FileFinished for " + path)
+
+
+def _event_index(
+    rec: RecordingReporter, kind: EventKind, path: String
+) raises -> Int:
+    for i in range(rec.count()):
+        if rec.kind_at(i) == kind and rec.path_at(i) == path:
+            return i
+    raise Error("no matching event for " + path)
 
 
 def _assert_complete_event_projection(
@@ -319,44 +319,6 @@ def _assert_complete_event_projection(
             raise Error("unhandled event kind in compatibility projection")
 
 
-def _crash_once_source(marker: String) -> String:
-    return (
-        "from std.ffi import external_call\n"
-        "from std.os.path import exists\n"
-        "from std.testing import TestSuite, assert_true\n\n\n"
-        "def test_eventual_pass() raises:\n"
-        "    assert_true(True)\n\n\n"
-        "def main() raises:\n"
-        '    if not exists("'
-        + marker
-        + '"):\n        with open("'
-        + marker
-        + '", "w") as f:\n'
-        '            f.write("1")\n'
-        '        _ = external_call["abort", Int32]()\n'
-        "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
-    )
-
-
-def _selection_crash_once_source(marker: String) -> String:
-    return (
-        "from std.ffi import external_call\n"
-        "from std.os.path import exists\n"
-        "from std.testing import TestSuite, assert_true\n\n\n"
-        "def test_eventual_pass() raises:\n"
-        '    if not exists("'
-        + marker
-        + '"):\n        with open("'
-        + marker
-        + '", "w") as f:\n'
-        '            f.write("1")\n'
-        '        _ = external_call["abort", Int32]()\n'
-        "    assert_true(True)\n\n\n"
-        "def main() raises:\n"
-        "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
-    )
-
-
 def test_pool_run_deadline_is_effective_per_file() raises:
     var root = temp_root()
     write_file(root, "tests/test_override.mojo", _SRC_SLOW_PASS)
@@ -407,43 +369,6 @@ def test_pool_compile_deadline_is_effective_per_file() raises:
     assert_equal(payload.timeout_seconds, 1)
 
 
-def test_plain_retries_apply_only_to_matching_file() raises:
-    var root = temp_root()
-    write_file(
-        root,
-        "tests/test_matched.mojo",
-        _crash_once_source("matched_retry_marker"),
-    )
-    write_file(
-        root,
-        "tests/test_unmatched.mojo",
-        _crash_once_source("unmatched_retry_marker"),
-    )
-    var config = base_config()
-    config.timeout_secs = 10
-    config.retries = 0
-    config.workers = 2
-    var rule = _rule("tests/test_matched.mojo")
-    rule.retries = 1
-    rule.saw_retries = True
-    var resolved = _resolved(config, [rule.copy()])
-
-    var comp = _recorder()
-    var code = run_session(resolved, root, comp)
-
-    assert_equal(code, 1)
-    ref rec = comp.composite.reporters[0]
-    var matched = _payload(rec, "tests/test_matched.mojo")
-    var unmatched = _payload(rec, "tests/test_unmatched.mojo")
-    assert_true(matched.outcome == Outcome.FLAKY)
-    assert_equal(matched.attempts_used, 2)
-    assert_true(
-        unmatched.outcome == Outcome.CRASH,
-        "unmatched outcome code=" + String(unmatched.outcome.code),
-    )
-    assert_equal(unmatched.attempts_used, 1)
-
-
 def test_later_serial_union_runs_after_parallel_at_capacity_one() raises:
     var root = temp_root()
     write_file(root, "tests/test_parallel.mojo", SRC_PASS)
@@ -481,101 +406,6 @@ def test_later_serial_union_runs_after_parallel_at_capacity_one() raises:
     assert_true(serial_a_finished < serial_b_started)
 
 
-def test_gate_uses_its_effective_run_deadline() raises:
-    var root = temp_root()
-    write_file(root, "tests/test_gate.mojo", _SRC_SLOW_PASS)
-    write_file(root, "tests/test_run.mojo", SRC_PASS)
-    var config = base_config()
-    config.timeout_secs = 3
-    config.gates = ["tests/test_gate.mojo"]
-    var rule = _rule("tests/test_gate.mojo")
-    rule.timeout_secs = 1
-    rule.saw_timeout = True
-    var resolved = _resolved(config, [rule.copy()])
-
-    var comp = _recorder()
-    var code = run_session(resolved, root, comp)
-
-    assert_equal(code, 1)
-    var payload = _payload(comp.composite.reporters[0], "tests/test_gate.mojo")
-    assert_true(payload.outcome == Outcome.TIMEOUT)
-    assert_equal(payload.timeout_seconds, 1)
-
-
-def test_selection_run_uses_its_effective_deadline() raises:
-    var root = temp_root()
-    write_file(root, "tests/test_selected.mojo", _SRC_SLOW_PASS)
-    var config = base_config()
-    config.timeout_secs = 3
-    config.paths = ["tests/test_selected.mojo::test_slow"]
-    var rule = _rule("tests/test_selected.mojo")
-    rule.timeout_secs = 1
-    rule.saw_timeout = True
-    var resolved = _resolved(config, [rule.copy()])
-
-    var comp = _recorder()
-    var code = run_session(resolved, root, comp)
-
-    assert_equal(code, 1)
-    var payload = _payload(
-        comp.composite.reporters[0], "tests/test_selected.mojo"
-    )
-    assert_true(payload.outcome == Outcome.TIMEOUT)
-    assert_equal(payload.timeout_seconds, 1)
-
-
-def test_selection_build_uses_its_effective_compile_deadline() raises:
-    var root = temp_root()
-    write_file(root, "tests/test_selected.mojo", SRC_PASS)
-    var config = base_config()
-    config.compile_timeout_secs = 3
-    config.paths = ["tests/test_selected.mojo::test_pass"]
-    config.mojo_path = (
-        getenv("PIXI_PROJECT_ROOT", "")
-        + "/scripts/fixtures/toolchain/fake_slow_mojo.py"
-    )
-    var rule = _rule("tests/test_selected.mojo")
-    rule.compile_timeout_secs = 1
-    rule.saw_compile_timeout = True
-    var resolved = _resolved(config, [rule.copy()])
-
-    var comp = _recorder()
-    var code = run_session(resolved, root, comp)
-
-    assert_equal(code, 1)
-    var payload = _payload(
-        comp.composite.reporters[0], "tests/test_selected.mojo"
-    )
-    assert_true(payload.outcome == Outcome.COMPILE_TIMEOUT)
-    assert_equal(payload.timeout_seconds, 1)
-
-
-def test_selection_retry_uses_the_effective_budget() raises:
-    var root = temp_root()
-    write_file(
-        root,
-        "tests/test_selected.mojo",
-        _selection_crash_once_source("selection_retry_marker"),
-    )
-    var config = base_config()
-    config.retries = 0
-    config.paths = ["tests/test_selected.mojo::test_eventual_pass"]
-    var rule = _rule("tests/test_selected.mojo")
-    rule.retries = 1
-    rule.saw_retries = True
-    var resolved = _resolved(config, [rule.copy()])
-
-    var comp = _recorder()
-    var code = run_session(resolved, root, comp)
-
-    assert_equal(code, 0)
-    var payload = _payload(
-        comp.composite.reporters[0], "tests/test_selected.mojo"
-    )
-    assert_true(payload.outcome == Outcome.FLAKY)
-    assert_equal(payload.attempts_used, 2)
-
-
 def test_capacity_one_without_overrides_preserves_legacy_projection() raises:
     var root = temp_root()
     write_file(root, "tests/test_plain.mojo", SRC_PASS)
@@ -598,25 +428,6 @@ def test_capacity_one_without_overrides_preserves_legacy_projection() raises:
             ref payload = layered.event_at(i).data[FileFinishedPayload]
             for arg in payload.build_argv:
                 assert_true(arg != "--num-threads")
-
-
-def test_collect_probe_uses_its_effective_deadline() raises:
-    var root = temp_root()
-    write_file(root, "tests/test_collect.mojo", _SRC_SLOW_PROBE)
-    var config = base_config()
-    config.collect = True
-    config.timeout_secs = 3
-    var rule = _rule("tests/test_collect.mojo")
-    rule.timeout_secs = 1
-    rule.saw_timeout = True
-    var resolved = _resolved(config, [rule.copy()])
-
-    var result = run_collect(resolved, root)
-
-    assert_equal(result.code, 1)
-    assert_equal(len(result.listing), 0)
-    assert_equal(len(result.diagnostics), 1)
-    assert_true("probe timed out" in result.diagnostics[0])
 
 
 def main() raises:

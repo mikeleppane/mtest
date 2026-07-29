@@ -213,15 +213,31 @@ def test_precompile_spawn_failure_names_the_real_errno() raises:
 
     assert_equal(code, 3, "a precompile spawn failure resolves to exit 3")
     ref rec = comp.composite.reporters[0]
-    # start + internal_error + finish = 3; no file is ever started.
-    assert_equal(rec.count(), 3)
-    assert_true(rec.kind_at(1) == EventKind.INTERNAL_ERROR)
-    var iev = rec.event_at(1)
-    ref ie = iev.data[InternalErrorPayload]
-    assert_equal(ie.step, "precompile")
-    assert_equal(ie.program, "/no/such/mojo/compiler")
-    assert_equal(ie.errno, 2)  # ENOENT — the real spawn cause, not 0
-    assert_false(ie.errno == 0, "the real spawn errno was dropped")
+    # The claim is "no file is ever started", asserted by KIND rather than by a
+    # literal event count. The same unresolvable `mojo_path` that fails the
+    # spawn also stops the build cache from identifying a compiler, so the
+    # session emits its once-per-run `cache-off` warning — a designed event that
+    # shifts every literal index after SESSION_STARTED without changing anything
+    # this case is about.
+    var internal_errors = 0
+    var files_seen = 0
+    for i in range(rec.count()):
+        var kind = rec.kind_at(i)
+        if kind == EventKind.INTERNAL_ERROR:
+            internal_errors += 1
+            ref ie = rec.event_at(i).data[InternalErrorPayload]
+            assert_equal(ie.step, "precompile")
+            assert_equal(ie.program, "/no/such/mojo/compiler")
+            assert_equal(ie.errno, 2)  # ENOENT — the real spawn cause, not 0
+            assert_false(ie.errno == 0, "the real spawn errno was dropped")
+        elif kind == EventKind.FILE_STARTED or kind == EventKind.FILE_FINISHED:
+            files_seen += 1
+    assert_equal(internal_errors, 1, "exactly one diagnostic is emitted")
+    assert_equal(files_seen, 0, "no file may be started after a failed step")
+    assert_true(
+        rec.kind_at(rec.count() - 1) == EventKind.SESSION_FINISHED,
+        "the session must still be terminated by SessionFinished",
+    )
 
 
 def main() raises:

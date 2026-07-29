@@ -1131,6 +1131,38 @@ def test_deselected_shows_in_band_only_when_nonzero() raises:
     assert_true("(1 excluded, 2 not run, 3 deselected)" in out)
 
 
+def test_cache_counters_ride_the_band_when_either_is_nonzero() raises:
+    # The build-artifact cache states its accounting on the same band as the
+    # outcome counts: how many files this run genuinely compiled, and how many
+    # it served from the store.
+    var c = _console()
+    c.handle(
+        Event.session_finished(
+            Summary.zeros(),
+            1.0,
+            0,
+            test_counts=TestCounts(
+                passed=101, failed=0, skipped=0, deselected=0
+            ),
+            built_files=3,
+            cached_files=98,
+        )
+    )
+    var out = c.output()
+    assert_true("builds: 3, cached: 98" in out)
+
+
+def test_band_is_silent_about_the_cache_when_both_counters_are_zero() raises:
+    # A run with no cache admissions at all (the pre-cache shape, and every run
+    # that compiled nothing) says nothing about builds or cache hits: the band
+    # never grows a pair of zeros no one asked for.
+    var c = _console()
+    _feed_mock_run(c)
+    var out = c.output()
+    assert_false("builds:" in out)
+    assert_false("cached:" in out)
+
+
 def test_color_off_emits_no_escape_codes_but_keeps_tokens() raises:
     var c = _console(color=ColorWhen.NEVER)
     _feed_mock_run(c)

@@ -230,13 +230,59 @@ def wait_until(
 
 # --------------------------------------------------------------------------- #
 # Exact-process identification for the SIGINT probe. `mtest` builds each test
-# file with `mojo build <file> -o build/bin/<mangled-name> ...`, so a plain
-# `pgrep -f <mangled-name>` scan matches BOTH the exec'd test binary AND, for
-# as long as it is still running, its own COMPILER — the compiler's command
-# line mentions the same string as its `-o` target. These helpers resolve
-# that ambiguity by argv[0] (the process's own executable path), which only
-# the exec'd binary itself ends with, never the compiler invoking it.
+# file with `mojo build <file> -o <output> ...`, and both the compiler's
+# command line and the exec'd binary's own path mention the mangled name, so a
+# plain `pgrep -f <mangled-name>` scan matches BOTH the test binary AND, for as
+# long as it is still running, its own COMPILER. These helpers resolve that
+# ambiguity by argv[0] (the process's own executable path), which only the
+# exec'd binary itself is, never the compiler invoking it.
+#
+# `<output>` has three shapes, because the build cache moved where a
+# first-attempt build lands:
+#
+#   build/bin/<mangled>                              (uncached, and every retry)
+#   .mtest-cache/build-v1/.tmp-<mangled>-<pid>-<clock>-<attempt>/bin
+#                                                    (staged, not yet published)
+#   .mtest-cache/build-v1/<mangled>_h<digest32>/bin  (published generation)
+#
+# All three are matched. The middle one is what a supervised child is ACTUALLY
+# running for the duration of this probe: a first-attempt cached build compiles
+# into staging and runs from there, and the rename into a generation happens
+# only once the file's verdict is settled. Recognizing only the other two left
+# `pgrep -f <mangled>` with nothing to match at all, so the SIGINT probe waited
+# out its full readiness deadline and failed.
+#
+# The generation's digest covers the toolchain, the environment, the invocation
+# root, and every include root's contents, so it is run-dependent and cannot be
+# pinned here — the assertion is on the store prefix, the mangled name, and the
+# `_h` separator (which no mangled name can contain), never on the digest
+# itself. The staging name's pid, clock reading, and attempt index are
+# run-dependent for the same reason, and are asserted as decimal fields only.
 # --------------------------------------------------------------------------- #
+
+CACHE_STORE_PREFIX = ".mtest-cache/build-v1/"
+"""Where `mtest` publishes a cached build, relative to the invocation root."""
+
+CACHE_STAGING_PREFIX = ".tmp-"
+"""Leading component of a staging directory's name, inside the store.
+
+Mirrors `mtest.session.store._TMP_PREFIX`. Kept as the literal it is on the
+product side rather than derived, because this module's whole job is to assert
+the shipped shape from the outside; a derivation would agree with a regression
+instead of catching it.
+"""
+
+STAGING_TAIL_FIELDS = 3
+"""Decimal fields a staging directory's name carries after the mangled name.
+
+`store_build_target` composes `.tmp-<mangled>-<pid>-<clock>-<attempt>`, and
+those last three are all-digit and dash-free. Splitting exactly that many
+fields off the RIGHT is what makes the mangled-name comparison exact even
+though a mangled name may itself contain `-` (only `_` and `/` are escaped),
+so `a` never matches `a-1`'s staging directory.
+"""
+
+
 def matching_pids(pattern: str) -> list[str]:
     """PIDs whose full command line contains `pattern` (`pgrep -f`).
 
@@ -298,15 +344,61 @@ def process_state(pid: str) -> str:
     return r.stdout.strip()[:1]
 
 
+def _is_staging_dir(dir_name: str, mangled_name: str) -> bool:
+    """Whether `dir_name` is `mangled_name`'s live staging directory.
+
+    Exact rather than a prefix test. A mangled name may itself contain `-`
+    (`_mangle` escapes only `_` and `/`), so `.tmp-a-` is a prefix of
+    `.tmp-a-1-<pid>-<clock>-<attempt>` and a prefix test would let file `a`
+    claim file `a-1`'s running child. The three trailing fields are the only
+    fixed-shape part of the name, so they are split off the right and required
+    to be decimal; whatever remains is then compared to the mangled name whole.
+    """
+    if not dir_name.startswith(CACHE_STAGING_PREFIX):
+        return False
+    body = dir_name[len(CACHE_STAGING_PREFIX) :]
+    parts = body.rsplit("-", STAGING_TAIL_FIELDS)
+    if len(parts) != STAGING_TAIL_FIELDS + 1:
+        return False
+    return parts[0] == mangled_name and all(f.isdigit() for f in parts[1:])
+
+
+def is_own_binary(argv0: str, mangled_name: str) -> bool:
+    """Whether `argv0` is a test binary built from `mangled_name`'s source.
+
+    True for three shapes, in the order a run produces them: the uncached
+    output path, whose basename IS the mangled name; the unpublished staging
+    directory a first-attempt cached build both compiles into and RUNS from,
+    named `.tmp-<mangled>-<pid>-<clock>-<attempt>`; and a published cache
+    generation, whose binary is `bin` inside `<mangled>_h<digest32>`.
+
+    The staging shape is not an edge case: the sequential driver publishes only
+    after a file's verdict is settled, so every child this probe has to find
+    mid-run is executing out of staging and no generation for it exists yet.
+
+    False for a compiler that merely names any of them as its `-o` argument,
+    because a compiler's argv[0] is the compiler. That is the whole reason this
+    predicate reads argv[0] and not the command line `pgrep` matched on.
+    """
+    if argv0.endswith(mangled_name):
+        return True
+    if not argv0.startswith(CACHE_STORE_PREFIX) or not argv0.endswith("/bin"):
+        return False
+    dir_name = argv0[len(CACHE_STORE_PREFIX) : -len("/bin")]
+    if _is_staging_dir(dir_name, mangled_name):
+        return True
+    return f"/{mangled_name}_h" in argv0
+
+
 def exact_process_pid(mangled_name: str) -> str | None:
-    """The PID of the process whose OWN executable is `mangled_name`.
+    """The PID of the process whose OWN executable `mangled_name` built.
 
     Never a `mojo build` compiler that merely mentions it as an `-o`
     argument. `None` if no such process is currently running.
     """
     for pid in matching_pids(mangled_name):
         argv0 = process_argv0(pid)
-        if argv0 and argv0.endswith(mangled_name):
+        if argv0 and is_own_binary(argv0, mangled_name):
             return pid
     return None
 

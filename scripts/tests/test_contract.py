@@ -292,7 +292,11 @@ class ExactProcessIdentificationTests(unittest.TestCase):
         # The decoy stands in for `mojo build irq/test_1hang.mojo -o
         # build/bin/<mangled> ...`: its full command line CONTAINS the
         # mangled name (as `-o`'s value would), but argv[0] is the
-        # compiler driver, not that name.
+        # compiler driver, not that name. That is the UNCACHED build's
+        # shape, and the shape every retry rebuild still has; a
+        # first-attempt build under the cache writes to a staging
+        # directory whose name mentions no mangled name at all, which
+        # narrows the ambiguity but never removes it.
         decoy = self._spawn(
             [
                 "python3",
@@ -333,6 +337,82 @@ class ExactProcessIdentificationTests(unittest.TestCase):
             self.assertIn(str(real.pid), raw)
         finally:
             self._killall()
+
+    def test_is_own_binary_accepts_both_output_shapes_and_nothing_else(
+        self,
+    ) -> None:
+        # mtest builds a file's binary to one of two places, and the SIGINT
+        # probe has to recognize a running child from either. The published
+        # generation's name carries a digest over the toolchain, the
+        # environment, the invocation root, and every include root's
+        # contents, so the exact directory name is run-dependent and cannot
+        # be pinned; what is asserted is the store prefix, the mangled name,
+        # and the `_h` separator that no mangled name can itself contain.
+        store = contract.CACHE_STORE_PREFIX
+        digest = "0123456789abcdef0123456789abcdef"
+        gen = f"{store}{self.MANGLED}_h{digest}/bin"
+        plain = f"build/bin/{self.MANGLED}"
+        self.assertTrue(contract.is_own_binary(plain, self.MANGLED))
+        self.assertTrue(contract.is_own_binary(gen, self.MANGLED))
+        # Another file's generation, sharing only the store prefix.
+        other = f"{store}some_uother_ufile_h{digest}/bin"
+        self.assertFalse(contract.is_own_binary(other, self.MANGLED))
+        # A cache-shaped path outside the store must not be adopted.
+        stray = f"/elsewhere/{self.MANGLED}_h{digest}/bin"
+        self.assertFalse(contract.is_own_binary(stray, self.MANGLED))
+        # And the compiler itself, whatever it was asked to write.
+        self.assertFalse(contract.is_own_binary("/usr/bin/mojo", self.MANGLED))
+
+    def test_is_own_binary_accepts_the_unpublished_staging_shape(self) -> None:
+        # The sequential driver builds AND runs from the staging directory:
+        # publication happens only after the run has been classified, so the
+        # child whose PID the SIGINT probe needs is executing
+        # `<store>/.tmp-<mangled>-<pid>-<clock>-<attempt>/bin` and no
+        # generation for it exists yet. Missing this shape is not a cosmetic
+        # gap — `pgrep -f <mangled>` finds nothing at all, the probe burns its
+        # whole readiness deadline, and the interrupt contract fails.
+        store = contract.CACHE_STORE_PREFIX
+        staging = f"{store}{contract.CACHE_STAGING_PREFIX}{self.MANGLED}-1234-99-0/bin"
+        self.assertTrue(contract.is_own_binary(staging, self.MANGLED))
+        # The two published shapes keep working: a staging clause that
+        # displaced either of them would trade one blind spot for another.
+        digest = "0123456789abcdef0123456789abcdef"
+        self.assertTrue(
+            contract.is_own_binary(f"build/bin/{self.MANGLED}", self.MANGLED)
+        )
+        self.assertTrue(
+            contract.is_own_binary(f"{store}{self.MANGLED}_h{digest}/bin", self.MANGLED)
+        )
+        # Another file staging concurrently, sharing only the store prefix and
+        # the `.tmp-` marker. `--shard` makes two live staging directories over
+        # one checkout ordinary, so this is a real neighbour, not a hypothesis.
+        self.assertFalse(
+            contract.is_own_binary(
+                f"{store}{contract.CACHE_STAGING_PREFIX}some_uother_ufile-1234-99-0/bin",
+                self.MANGLED,
+            )
+        )
+        # A file whose mangled name merely EXTENDS this one past a `-`. Only
+        # the trailing pid/clock/attempt fields are fixed-shape, so the match
+        # is anchored on them rather than on a prefix test that `a` would pass
+        # against `a-1`'s staging directory.
+        self.assertFalse(
+            contract.is_own_binary(
+                f"{store}{contract.CACHE_STAGING_PREFIX}{self.MANGLED}-x-1234-99-0/bin",
+                self.MANGLED,
+            )
+        )
+        # A staging-shaped path outside the store must not be adopted.
+        self.assertFalse(
+            contract.is_own_binary(
+                f"/elsewhere/{contract.CACHE_STAGING_PREFIX}{self.MANGLED}-1234-99-0/bin",
+                self.MANGLED,
+            )
+        )
+        # And a compiler naming ANY of the three as its `-o` output is still
+        # the compiler: argv[0] decides, never the rest of the command line.
+        for compiler in ("/usr/bin/mojo", "mojo", "/opt/pixi/envs/default/bin/mojo"):
+            self.assertFalse(contract.is_own_binary(compiler, self.MANGLED))
 
     def test_process_state_reports_sleeping_for_the_identified_binary(self) -> None:
         fake_bin = Path(self.tmp.name) / self.MANGLED

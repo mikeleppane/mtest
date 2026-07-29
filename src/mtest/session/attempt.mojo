@@ -8,11 +8,18 @@ with budget left is reported immediately and retried: a build rebuilds
 quarantined against a fresh module cache, and a run re-runs the same binary. A
 late pass after any retry is flaky.
 
-It sits above `build` (for the compile-spawn policy), `scratch`, `file_result`,
-and the classify/clamp/retry/verdict leaves, and below `session`, which drives
-it for the gate files and the plain run set. The precompile step reuses its
-attempt-event and residual-warning shapes so a session-level step's attempt line
-carries the same identity a file build's does.
+This is also the SECOND of the three build seams into the artifact store, and
+the one whose control flow does the work: the store is consulted once, before
+the retry loop is entered, and the staged build is settled once, on the loop's
+FIRST pass. Every later pass is a retry — a re-run of the same binary, or a
+quarantined rebuild into `build/bin` — and a retry's binary is
+invocation-private, so it is never keyed, never counted, and never published.
+
+It sits above `build` (for the compile-spawn policy and the staging helpers),
+`store`, `scratch`, `file_result`, and the classify/clamp/retry/verdict leaves,
+and below `session`, which drives it for the gate files and the plain run set.
+The precompile step reuses its attempt-event and residual-warning shapes so a
+session-level step's attempt line carries the same identity a file build's does.
 """
 from mtest.config import RunnerConfig, lossy_utf8
 from mtest.exec import (
@@ -26,6 +33,7 @@ from mtest.exec import (
 )
 from mtest.model import (
     Event,
+    InternalErrorPayload,
     NodeId,
     Outcome,
     ParseDisposition,
@@ -34,7 +42,11 @@ from mtest.model import (
     is_slow,
 )
 from mtest.protocol import ParsedReport
-from mtest.session.build import _COMPILE_GRACE_MS
+from mtest.session.build import (
+    _COMPILE_GRACE_MS,
+    _discard_staging,
+    _no_staging,
+)
 from mtest.session.clamp import clamp_stream
 from mtest.session.classify import (
     Classification,
@@ -52,6 +64,18 @@ from mtest.session.scratch import (
     _mangle,
     _quarantine_dir,
     _retry_out_bin,
+)
+from mtest.session.store import (
+    CacheContext,
+    FileKey,
+    PROBE_HIT,
+    PUB_FAILED,
+    _rewrite_output,
+    cache_rebuild_note,
+    file_key,
+    store_build_target,
+    store_probe,
+    store_publish,
 )
 from mtest.session.verdict import build_verdict
 
@@ -210,6 +234,52 @@ struct _AttemptResult(Copyable, Movable):
         )
 
     @staticmethod
+    def _built_ok(
+        var build_argv: List[String],
+        bterm: Termination,
+        var build_stderr: List[UInt8],
+        bdur: Float64,
+        out_bin: String,
+    ) -> Self:
+        """A successful build that has not been run yet.
+
+        What `build_only` returns, so the caller can settle the staged artifact
+        — publish it, or discard it — before anything is executed. Its build
+        fields are exactly what the run pass needs handed back to it as the
+        prior build's facts.
+
+        Args:
+            build_argv: The build command that succeeded. Consumed; the
+                returned `_AttemptResult` owns it.
+            bterm: The build's raw termination.
+            build_stderr: The compiler's captured stderr. Consumed; the
+                returned `_AttemptResult` owns it.
+            bdur: The build wall time in seconds.
+            out_bin: The binary the build produced.
+
+        Returns:
+            The built-but-unrun `_AttemptResult`.
+        """
+        return Self(
+            0,
+            Event.file_started(""),
+            False,
+            build_argv^,
+            bterm,
+            build_stderr^,
+            bdur,
+            out_bin,
+            Termination.exited(0),
+            List[UInt8](),
+            List[UInt8](),
+            0.0,
+            TrustedReport(ParsedReport.absent(), False),
+            _blank_classification(),
+            False,
+            False,
+        )
+
+    @staticmethod
     def _selection_run(
         binary: String,
         rterm: Termination,
@@ -288,13 +358,18 @@ def _single_attempt(
     prior_bterm: Termination,
     prior_build_stderr: List[UInt8],
     prior_bdur: Float64,
+    build_only: Bool = False,
 ) raises -> _AttemptResult:
     """Run one build, run, and classify attempt for `rel`, returning raw facts.
 
     The retry loop wraps this. When `do_build` is set it builds `rel` into
     `out_bin` under `--compile-timeout`; otherwise it reuses the prior
     successful build's facts and only re-runs `out_bin`, since a run-side retry
-    never rebuilds. A cache quarantine applies only when `quarantine_dir` is
+    never rebuilds. `build_only` stops after a successful build and hands the
+    build facts back unrun, so the caller can settle a staged artifact before
+    anything executes; the caller then asks for the run as an ordinary
+    `do_build=False` pass over whichever binary settling left live. A cache
+    quarantine applies only when `quarantine_dir` is
     non-empty, which happens on a post-compile-kill rebuild: `MODULAR_CACHE_DIR`
     is set in the build child's own environment (via `spec.env_extra`), so
     mtest's own environment is never touched and concurrent builds cannot
@@ -318,6 +393,9 @@ def _single_attempt(
         prior_bterm: The previous attempt's build termination.
         prior_build_stderr: The previous attempt's captured build stderr.
         prior_bdur: The previous attempt's build wall time in seconds.
+        build_only: Whether to return after a successful build instead of
+            running the binary. Honored only together with `do_build`, since
+            there is nothing to stop after when no build happens.
 
     Returns:
         The raw attempt facts, including its control signal.
@@ -392,6 +470,13 @@ def _single_attempt(
             # the caller can BOTH finalize the build verdict AND classify a retry
             # (a signaled/timed-out/ICE compiler is crash-class).
             return _AttemptResult._build_failed(
+                build_argv^, bterm, build_stderr^, bdur, out_bin
+            )
+        if build_only:
+            # The artifact exists and nothing has run it. Whatever the caller
+            # does with it next decides which binary the run will name, so the
+            # run cannot already have happened.
+            return _AttemptResult._built_ok(
                 build_argv^, bterm, build_stderr^, bdur, out_bin
             )
 
@@ -721,6 +806,7 @@ def _run_one(
     root: String,
     rel: String,
     include_paths: List[String],
+    mut ctx: CacheContext,
 ) raises -> FileResult:
     """Build `rel`, execute it, and retry a crash-class failure up to budget.
 
@@ -735,6 +821,17 @@ def _run_one(
     before the retry decision and so is never retried, and an unset `--retries`
     runs exactly one attempt.
 
+    The artifact store is consulted ONCE, before the loop, under an enabled
+    context. A hit compiles nothing: the stored binary, its recorded command
+    line, and its original build duration enter the loop exactly as a reused
+    build's facts would, so the first pass is a bare run. A miss stages a
+    directory inside the store and points the compile's `-o` at it; the first
+    pass then BUILDS ONLY, the staged artifact is published, and the run
+    happens over whatever publication left live. That order is the store's own
+    rule — record `pub.argv`, run `pub.bin_rel` — and it is what keeps the
+    binary a verdict describes and the binary the record names the same one.
+    Every later pass is a retry and touches none of that.
+
     Args:
         runtime: The exec runtime supervising the build and run spawns.
         config: The resolved runner configuration for build inputs.
@@ -742,18 +839,29 @@ def _run_one(
         root: The invocation root the child processes run in.
         rel: The root-relative path of the file to build and run.
         include_paths: Directories passed to the compiler as `-I`.
+        ctx: The session's cache state. Its counters are advanced here — one
+            `built_files` per first-attempt compile admission (compile failures
+            included), one `cached_files` per hit — and it is switched off if
+            this file proves the store unusable.
 
     Returns:
         The file's terminal result, with each non-final attempt's events
-        prepended.
+        prepended. A publication that failed rides in front of them as a
+        `cache-publish` warning: the build survived, only its publication did
+        not, so it is never a verdict.
 
     Raises:
         Error: If a build or quarantine directory cannot be made, or if an
             attempt's source canonicalization fails. Both `exec` supervisor
             calls are caught inside `_single_attempt` and become internal-error
-            attempts rather than raises. The caller catches what does escape and
-            resolves exit 3.
+            attempts rather than raises. Nothing in the cache path raises: an
+            unusable store costs a rebuild, never a run. The caller catches what
+            does escape and resolves exit 3.
     """
+    # `build/bin` is created unconditionally, exactly as before: every retry
+    # rebuild lands there, and so does every build under a disabled cache — and
+    # a compile error's reproduce line names it, so it has to be a directory a
+    # user can actually build into.
     _ensure_dir(root + "/build/bin")
     var mangled = _mangle(rel)
     var nonce = _invocation_nonce()
@@ -768,14 +876,102 @@ def _run_one(
 
     var do_build = True
     var quarantine_dir = String("")
-    var out_bin = String("build/bin/") + mangled
+    var plain_out = String("build/bin/") + mangled
+    var out_bin = plain_out
     var prior_build_argv = List[String]()
     var prior_bterm = Termination.exited(0)
     var prior_build_stderr = List[UInt8]()
     var prior_bdur = 0.0
 
+    # --- The store, consulted once, before the first attempt is spawned. ----
+    # It has to be here and not inside the loop: `store_probe` MUTATES the store
+    # (a generation that fails validation is deleted), so it may only ever be
+    # asked about a key this call is genuinely about to build or run.
+    var key = Optional[FileKey](None)
+    var target = _no_staging()
+    # Whether this file is about to run a binary the store served, and whether
+    # it has already fallen back from one. Publishing a generation deletes that
+    # source's older ones, so a second run over this checkout can remove the
+    # generation this one validated between the probe and the exec. A binary
+    # that is no longer there is a reason to compile the file, not an internal
+    # error — and once, so a binary that will not spawn for any other reason
+    # still reaches the internal-error path rather than looping.
+    var store_hit = False
+    var store_rebuilt = False
+    if ctx.enabled:
+        key = file_key(ctx, root, rel)
+        if not key:
+            # A source that will not read is about to fail its build anyway, and
+            # a key that cannot cover its own source must never be written.
+            ctx.disable("cannot read the test file '" + rel + "'")
+        else:
+            var hit = store_probe(root, key.value())
+            if hit.kind == PROBE_HIT:
+                # The loop enters as if a build had already succeeded: this is
+                # exactly the shape a run-side retry uses, which is why nothing
+                # downstream needs to know a compile was skipped. The stored
+                # build's OWN duration rides, not zero, so the SLOW token reads
+                # the same on a warm run as it did on the cold one.
+                do_build = False
+                out_bin = hit.bin_rel
+                prior_build_argv = hit.argv.copy()
+                prior_bterm = Termination.exited(0)
+                prior_bdur = hit.build_seconds
+                store_hit = True
+                ctx.cached_files += 1
+                # Nothing staged, so nothing to publish: the generation this
+                # binary came from is already the store's.
+                key = Optional[FileKey](None)
+            else:
+                target = store_build_target(root, mangled)
+                if target.ok():
+                    # Compile straight into the store, so publication is one
+                    # `rename(2)` and never a copy of a binary that could differ
+                    # from the one that was digested.
+                    out_bin = target.out_rel
+                else:
+                    # Cache off for the session: a store that cannot be staged
+                    # into once will not stage the next file either, and probing
+                    # on would spend a digest per file for a hit that can never
+                    # be published.
+                    ctx.disable(
+                        "the cache could not create its store directory under"
+                        " '.mtest-cache'"
+                    )
+                    key = Optional[FileKey](None)
+
+    if do_build:
+        # ADMISSION, and the only place either counter moves on this path: the
+        # file is about to be compiled for the first time, so it is a built file
+        # whatever the compiler goes on to say about it. The spawn happens one
+        # call down, inside `_single_attempt`, so counting on the way back would
+        # quietly drop every compile error out of the accounting and break
+        # `built_files + cached_files == first-attempt admissions`.
+        ctx.built_files += 1
+
     var attempt_index = 1
     while True:
+        # --- Is this pass the one that settles the staged build? ------------
+        # `do_build and attempt_index == 1` IS the first-attempt compile, and
+        # both halves are load-bearing. `attempt_index == 1` alone would be
+        # true forever if the loop ever gained a pass that does not advance it;
+        # `do_build` alone is true again on the compile-kill rebuild below,
+        # which re-enters the loop with `do_build = True` and a fresh
+        # `_retry_out_bin` under `build/bin`. That rebuild is invocation-private
+        # — it exists to get past a compiler the shared module cache may have
+        # torn — so publishing it would write a retry's binary into a store that
+        # other runs read. `target` is cleared once the block has run, so it
+        # cannot fire twice however the loop is later reshaped.
+        var settling = (
+            target.ok() and Bool(key) and do_build and attempt_index == 1
+        )
+        # That pass BUILDS ONLY, so publication happens before anything is
+        # executed. The store's rule is record `pub.argv`, run `pub.bin_rel`,
+        # and running first would break both halves of it: on PUB_OK the run
+        # would be the staging binary while the record named the generation, so
+        # a test reading its own executable path passes cold and fails warm over
+        # identical inputs; on PUB_ADOPTED the verdict would belong to this
+        # process's own bytes while the record named the winner's.
         var att = _single_attempt(
             runtime,
             config,
@@ -790,8 +986,93 @@ def _run_one(
             prior_bterm,
             prior_build_stderr,
             prior_bdur,
+            settling,
         )
+
+        if settling:
+            if att.control != 0:
+                # An internal error or an interrupt during the build: no binary
+                # came out of it, so the staged directory is pure debris. The
+                # BUILD step's diagnostic names the compiler rather than a path
+                # inside the store, so nothing here needs rewriting.
+                _discard_staging(root, target)
+            elif att.build_failed:
+                # The reproduce line names `build/bin`, never the staging
+                # directory the compile actually wrote to. A failed build
+                # publishes nothing, so that directory is deleted on the next
+                # line and a line naming it would be a line no user could ever
+                # run; `build/bin/<mangled>` is where an uncached build puts
+                # this file's binary and is live either way.
+                var shown = _rewrite_output(att.build_argv, out_bin, plain_out)
+                att.build_argv = shown^
+                _discard_staging(root, target)
+            else:
+                var pub = store_publish(
+                    root, key.value(), target, att.bdur, att.build_argv
+                )
+                # The rule with no exceptions: run `bin_rel`, record `argv`. On
+                # PUB_OK the staging directory this build's own argv names is
+                # already gone; on PUB_ADOPTED the live binary belongs to a
+                # generation this run never built and whose command line it
+                # therefore cannot reconstruct; on PUB_FAILED both are this
+                # run's own staging path, which is still there.
+                #
+                # `out_bin` moves with it, so the run below — and any crash-class
+                # RUN retry after it — spawns exactly the path that was recorded.
+                # On PUB_ADOPTED that runs the winner's binary rather than the
+                # bytes this process compiled: they answer to the same key, so
+                # they are the same build, and this is the only ordering in which
+                # the verdict and the artifact describe each other.
+                out_bin = pub.bin_rel
+                if pub.kind == PUB_FAILED:
+                    # The build survived; only its publication did not. A
+                    # publication failure is never a verdict, so it rides in
+                    # front of this file's events as a warning.
+                    attempt_events.append(
+                        Event.warning("cache-publish", pub.warning)
+                    )
+                # The run pass, over the settled binary and carrying this
+                # build's facts forward exactly as a run-side retry does.
+                var built_term = att.bterm
+                var built_stderr = att.build_stderr.copy()
+                var built_dur = att.bdur
+                att = _single_attempt(
+                    runtime,
+                    config,
+                    settings,
+                    root,
+                    rel,
+                    include_paths,
+                    out_bin,
+                    False,
+                    quarantine_dir,
+                    pub.argv,
+                    built_term,
+                    built_stderr,
+                    built_dur,
+                )
+            target = _no_staging()
+
         if att.control == 1:
+            var ie_step = String(
+                att.internal_event.data[InternalErrorPayload].step
+            )
+            if store_hit and not store_rebuilt and ie_step == "run":
+                # The store's binary would not spawn. Compile the file rather
+                # than fail a run whose only fault was that its binary was
+                # cached. This is not a retry: `attempt_index` does not move,
+                # no attempt is reported, and the file was already admitted as
+                # a cache hit, so neither counter moves either. The key was
+                # dropped at the hit, so the rebuild stages and publishes
+                # nothing — it lands in `build/bin` like every uncached build.
+                store_hit = False
+                store_rebuilt = True
+                do_build = True
+                out_bin = plain_out
+                attempt_events.append(
+                    Event.warning("cache-rebuild", cache_rebuild_note(rel))
+                )
+                continue
             _cleanup_quarantine(root, quarantine_dirs)
             return FileResult.internal(att.internal_event.copy())
         if att.control == 2:

@@ -428,6 +428,9 @@ def test_session_finished_payload() raises:
     assert_equal(p.exit_code, 1)
     # flaky_files defaults to zero when the caller does not pass it.
     assert_equal(p.flaky_files, 0)
+    # So do the two build-cache admission counters.
+    assert_equal(p.built_files, 0)
+    assert_equal(p.cached_files, 0)
     # test_counts defaults to zeros when the caller does not pass it.
     assert_equal(p.test_counts.passed, 0)
     assert_equal(p.test_counts.failed, 0)
@@ -454,6 +457,22 @@ def test_session_finished_carries_flaky_files_when_given() raises:
         s^, wall_time_seconds=1.0, exit_code=0, flaky_files=2
     )
     assert_equal(e.data[SessionFinishedPayload].flaky_files, 2)
+
+
+def test_session_finished_carries_the_cache_counters_when_given() raises:
+    # The two counters partition the run's first-attempt compile admissions, so
+    # a payload must carry them independently, not as one derived total.
+    var s = Summary.zeros()
+    var e = Event.session_finished(
+        s^,
+        wall_time_seconds=1.0,
+        exit_code=0,
+        built_files=3,
+        cached_files=98,
+    )
+    ref p = e.data[SessionFinishedPayload]
+    assert_equal(p.built_files, 3)
+    assert_equal(p.cached_files, 98)
 
 
 def test_test_reported_payload() raises:

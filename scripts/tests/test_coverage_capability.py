@@ -65,7 +65,8 @@ MOJO_HELP_1_0_0B2 = """OPTIONS
 """
 
 # A hypothetical future toolchain that grew the facility. The two flags are the
-# spellings the brief names, in the shape a clang-derived driver would use.
+# spellings such a toolchain would use, in the shape a clang-derived driver
+# would use.
 MOJO_BUILD_HELP_WITH_COVERAGE = """    Instrumentation options
         --coverage
             Emit source-based coverage instrumentation.

@@ -378,6 +378,41 @@ def stream_files(text: str) -> StreamFiles:
     )
 
 
+SESSION_SUITE_PREFIX = "mtest::"
+"""The prefix every JUnit suite that stands for the SESSION rather than a file.
+
+Restated from `src/mtest/report/junit_reporter.mojo`, which no Python can
+import: `mtest::precompile` carries a failed precompile step and `mtest::cache`
+carries the build-cache counters as a zero-row property bag. The prefix is not
+decoration — a file suite is keyed by its repo-relative path, so `mtest::` is
+the one shape that can never collide with one, and that is what makes it safe to
+partition on here."""
+
+
+def file_testsuites(root: ET.Element) -> list[ET.Element]:
+    """The `<testsuite>` elements standing for a test FILE, in document order.
+
+    A scenario that means "the suites this run's files produced" has to say so,
+    because the reporter also publishes session-level suites and the set of them
+    grows: counting raw `<testsuite>` elements instead turns every such addition
+    into a phantom file suite. Relaxing the count to absorb one is worse than
+    the failure it silences — a report that lost its real file suite and kept
+    only the session ones would then pass.
+
+    Args:
+        root: The parsed report root, `<testsuites>` or a lone `<testsuite>`.
+
+    Returns:
+        Every suite whose name is not session-level, in document order.
+    """
+    suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+    return [
+        suite
+        for suite in suites
+        if not (suite.get("name") or "").startswith(SESSION_SUITE_PREFIX)
+    ]
+
+
 def junit_not_run_files(path: str | Path) -> tuple[str, ...]:
     """The suites carrying the synthetic `[not-run]` row, in document order.
 

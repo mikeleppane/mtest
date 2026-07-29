@@ -19,6 +19,16 @@ The token budget keeps concurrent builds from oversubscribing the cores: each
 build acquires `K = build_tokens(workers, cores)` tokens against a `cores`-wide
 budget and spawns `mojo build --num-threads K`; a run takes no tokens. The
 budget is consulted only here, so the sequential path's build argv stays clean.
+
+This is the LAST of the three build seams into the artifact store, and the only
+one whose build and run are two separate dispatches. Each file is keyed and
+probed once, before the scheduler starts: a hit enters the machine already
+built, at `_PENDING_RUN`, and never passes the build dispatch at all. A miss stages a
+directory at its FIRST build dispatch — never a retry's — and the build's
+completion PUBLISHES it before the run is ever dispatched, so the binary this
+batch runs is the binary the store serves, the run-step diagnostics name a live
+generation rather than a directory that is about to disappear, and the window in
+which a hard kill can orphan a staging directory is one build long.
 """
 from std.io import FileDescriptor
 from std.time import perf_counter_ns
@@ -49,7 +59,11 @@ from mtest.session.attempt import (
     _flaky_eligible,
     _make_attempt_finished,
 )
-from mtest.session.build import _COMPILE_GRACE_MS
+from mtest.session.build import (
+    _COMPILE_GRACE_MS,
+    _discard_staging,
+    _no_staging,
+)
 from mtest.session.classify import classify, resolve_report
 from mtest.session.file_result import (
     FileResult,
@@ -70,6 +84,19 @@ from mtest.session.scratch import (
     _mangle,
     _quarantine_dir,
     _retry_out_bin,
+)
+from mtest.session.store import (
+    CacheContext,
+    FileKey,
+    PROBE_HIT,
+    PUB_FAILED,
+    StoreBuildTarget,
+    _rewrite_output,
+    cache_rebuild_note,
+    file_key,
+    store_build_target,
+    store_probe,
+    store_publish,
 )
 from mtest.session.verdict import build_verdict
 
@@ -156,6 +183,12 @@ struct PoolBatchResult(Movable):
     already halted."""
     var crash_files: List[_CrashFile]
     """The files that ended CRASH, for the sequential attribution post-pass."""
+    var built_files: Int
+    """First-attempt compile admissions in this batch, compile FAILURES
+    included. Retries never count. `run_session` folds it onto the session's one
+    `CacheContext`, which both terminal artifacts read."""
+    var cached_files: Int
+    """Cache-hit admissions in this batch, folded the same way."""
 
 
 struct _PoolFile(Movable):
@@ -167,6 +200,29 @@ struct _PoolFile(Movable):
     var attempt: Int
     var mangled: String
     var out_bin: String
+    var plain_out: String
+    """`build/bin/<mangled>`: where an UNCACHED build puts this file's binary.
+
+    Kept beside `out_bin` because a failed cached build has to be described in
+    terms of a path that survives it. The compile really did write into a
+    staging directory, and that directory is deleted the moment the compiler
+    rejects the source, so the reproduce line and the run-step diagnostics name
+    this instead — the same substitution both other seams make, for the same
+    reason.
+    """
+    var key: Optional[FileKey]
+    """This file's store key while a publication is still owed, else nothing.
+
+    Cleared the moment the file is settled into the store — published, adopted,
+    or discarded — so no later phase can publish a second time.
+    """
+    var target: StoreBuildTarget
+    """The staging directory this file's FIRST build is writing into.
+
+    Cleared whenever the directory stops being this batch's to remove: it was
+    renamed onto a generation, it was discarded, or publication failed and the
+    binary inside it is the one still being run.
+    """
     var quarantine_dir: String
     var build_argv: List[String]
     var bterm: Termination
@@ -177,6 +233,33 @@ struct _PoolFile(Movable):
     var had_retry: Bool
     var started_emitted: Bool
     var dispatch_ns: Int
+    var store_hit: Bool
+    """Whether this file's binary came from the store rather than a compile.
+
+    Read when the RUN spawn fails. Publishing a generation deletes that
+    source's older ones, so a concurrent run over the same checkout — two
+    terminals, or two shards with different build arguments — can remove a
+    generation this batch validated and was about to execute. A binary that is
+    no longer there is a reason to compile the file, not an internal error over
+    a run that was otherwise fine.
+    """
+    var store_rebuilt: Bool
+    """Whether this file already fell back from the store to a compile.
+
+    Once per file, so a binary that will not spawn for any other reason still
+    reaches the internal-error path instead of looping. The fallback charges
+    neither counter: the file was admitted as a cache hit, and one file is one
+    admission.
+    """
+    var hit_uncounted: Bool
+    """A cache hit this batch has not yet charged to `cached_files`.
+
+    Set when the store answers, cleared when the run is dispatched, which is
+    where the charge lands. The two events are far apart on purpose: the store
+    is asked once per file at admission, but `-x`, `--maxfail`, a dead stream,
+    or an interrupt can tear the batch down before a file is ever dispatched,
+    and a file that never ran was admitted to nothing.
+    """
 
     def __init__(
         out self,
@@ -190,7 +273,10 @@ struct _PoolFile(Movable):
         self.phase = _PENDING_BUILD
         self.attempt = 1
         self.mangled = mangled
-        self.out_bin = String("build/bin/") + mangled
+        self.plain_out = String("build/bin/") + mangled
+        self.out_bin = self.plain_out
+        self.key = Optional[FileKey](None)
+        self.target = _no_staging()
         self.quarantine_dir = String("")
         self.build_argv = List[String]()
         self.bterm = Termination.exited(0)
@@ -201,6 +287,31 @@ struct _PoolFile(Movable):
         self.had_retry = False
         self.started_emitted = False
         self.dispatch_ns = 0
+        self.store_hit = False
+        self.store_rebuilt = False
+        self.hit_uncounted = False
+
+
+def _degrade_hit_to_rebuild(mut file: _PoolFile):
+    """Send a file whose cached binary would not start back to the compiler.
+
+    The rebuild is invocation-private: the key was dropped when the store
+    answered, so nothing is staged and nothing is published, and the binary
+    lands where an uncached build puts it. It charges neither counter either —
+    the file was admitted as a cache hit, and one file is one admission — so the
+    warning is what keeps the compile visible.
+
+    Args:
+        file: The file to move back to the build phase. Its `store_rebuilt`
+            latch is set, so this can happen at most once per file.
+    """
+    file.store_hit = False
+    file.store_rebuilt = True
+    file.out_bin = file.plain_out
+    file.pre_events.append(
+        Event.warning("cache-rebuild", cache_rebuild_note(file.rel))
+    )
+    file.phase = _PENDING_BUILD
 
 
 def _emit_progress[
@@ -373,6 +484,7 @@ def _run_pool_batch[
     cores: Int,
     is_gate: Bool,
     console_fd: Int,
+    mut ctx: CacheContext,
     serial: Bool = False,
     initial_failing: Int = 0,
 ) raises -> PoolBatchResult:
@@ -388,6 +500,33 @@ def _run_pool_batch[
     drifting verdict; the run batch honors `-x`/`--maxfail`, letting in-flight
     files finish and leaving the rest NOT-RUN.
 
+    The artifact store is consulted ONCE per file, in the seeding loop below,
+    before the scheduler starts — not at the moment each file is taken on. A hit
+    goes straight into `_PENDING_RUN` carrying the stored binary, its recorded
+    command line, and its original build duration, so the SLOW token reads the
+    same on a warm run as on the cold one. A miss stages its directory at the
+    first build dispatch and publishes it when that build succeeds, BEFORE the
+    run is dispatched.
+
+    Probing the whole batch up front costs something a batch that halts early
+    does not get back. `store_probe` digests the whole stored binary, so a warm
+    run stopped by `-x` on its first file has still hashed every other file's
+    artifact. The scheduler is what would have to change to avoid it, and it is
+    the piece where a mistake costs a wrong verdict rather than a slow run.
+
+    It is safe in the direction that matters, which is why the cost is
+    acceptable. `store_probe` MUTATES the store — a generation that fails
+    validation is deleted — but that deletion is not a decision about the batch:
+    an artifact that fails its own key or digest check is unusable to every
+    future run as well, so removing it early is the same answer, taken sooner.
+    What a probe never does is publish, count, or build.
+
+    Neither counter moves where the store is consulted. Both move at DISPATCH —
+    `built_files` at the build spawn, `cached_files` at the run spawn — because
+    a stop policy that latches between the two leaves files this batch knows a
+    cache answer for and will never run, and those files are admitted to
+    nothing.
+
     Args:
         runtime: The active exec runtime; the Supervisor drives children under
             the process-global signal state it owns.
@@ -402,6 +541,11 @@ def _run_pool_batch[
         is_gate: Whether this batch is the gates, which abort the run on a
             failing or drifting verdict.
         console_fd: The borrowed console descriptor for incremental flushes.
+        ctx: The session's cache state, shared with every other seam. Read to
+            decide whether a file is keyed at all, and switched off if the store
+            proves unusable. Its counters are NOT touched here: this batch's
+            admissions ride back on the result and `run_session` folds them, so
+            the gate, parallel, and serial batches each account for themselves.
         serial: Whether this is the serial pass, run at one worker after the
             parallel batch. Each file's terminal verdict then carries the
             informal `serial` annotation.
@@ -431,6 +575,8 @@ def _run_pool_batch[
         False,
         False,
         List[_CrashFile](),
+        0,
+        0,
     )
     if n == 0:
         return result^
@@ -446,7 +592,47 @@ def _run_pool_batch[
     for i in range(n):
         var settings = effective_file_settings(resolved, files[i])
         retry_budgets.append(settings.retries)
-        state.append(_PoolFile(files[i], _mangle(files[i]), settings))
+        var pf = _PoolFile(files[i], _mangle(files[i]), settings)
+        if ctx.enabled:
+            var key = file_key(ctx, root, files[i])
+            if not key:
+                # A source that will not read is about to fail its build anyway,
+                # and a key that cannot cover its own source must never be
+                # written.
+                ctx.disable("cannot read the test file '" + files[i] + "'")
+            else:
+                var hit = store_probe(root, key.value())
+                if hit.kind == PROBE_HIT:
+                    # The slot enters the phase machine as if a build had
+                    # already completed, which is exactly the shape the
+                    # build-completion handler leaves behind — the same three
+                    # fields it writes, seeded from the store instead of from a
+                    # compiler. Nothing downstream needs to know a compile was
+                    # skipped, and nothing is owed to the store, so the key is
+                    # deliberately NOT carried.
+                    #
+                    # The ADMISSION is not here. This loop keys and probes the
+                    # whole batch before the scheduler runs, and `-x`,
+                    # `--maxfail`, a dead machine stream, or an interrupt can
+                    # tear the batch down with most of it still undispatched. A
+                    # file that never ran was admitted to nothing, so the charge
+                    # rides on the flag below and lands at the run dispatch —
+                    # the same point the build dispatch charges `built_files`.
+                    pf.phase = _PENDING_RUN
+                    pf.out_bin = hit.bin_rel
+                    pf.build_argv = hit.argv.copy()
+                    pf.bdur = hit.build_seconds
+                    pf.bterm = Termination.exited(0)
+                    pf.build_stderr = List[UInt8]()
+                    pf.hit_uncounted = True
+                    pf.store_hit = True
+                else:
+                    # Owed a publication, claimed at the first build dispatch.
+                    # The staging directory is NOT created here: a batch that
+                    # halts on `-x` or an interrupt would leave one orphaned per
+                    # undispatched file, and nothing in the tree sweeps them.
+                    pf.key = key^
+        state.append(pf^)
 
     # The kernel serves as the stop-policy oracle: gates are always exit-first,
     # the run batch honors the config's `-x`/`--maxfail`. `record_verdict`'s 8a
@@ -534,6 +720,15 @@ def _run_pool_batch[
                 if picked == -1:
                     break
                 if as_run:
+                    if state[picked].hit_uncounted:
+                        # ADMISSION by hit, and the only place this counter
+                        # moves: the file is about to run a binary the store
+                        # served, so it is a cached file whatever the run goes
+                        # on to say. The latch clears here, so a run-side crash
+                        # retry — which comes back through this same dispatch —
+                        # never charges the file twice.
+                        result.cached_files += 1
+                        state[picked].hit_uncounted = False
                     var run_argv = List[String]()
                     run_argv.append(state[picked].out_bin)
                     try:
@@ -546,13 +741,77 @@ def _run_pool_batch[
                             picked,
                         )
                     except:
+                        if (
+                            state[picked].store_hit
+                            and not state[picked].store_rebuilt
+                        ):
+                            # The dispatch could not start a binary the store
+                            # served. The other half of the same degradation
+                            # the completion handler performs, on the other
+                            # half of the ways a run fails to start: compile the
+                            # file and try again rather than abandon the batch
+                            # over an artifact this run did not build. If the
+                            # dispatch is broken for some reason of its own the
+                            # rebuilt file fails here a second time, and the
+                            # `store_rebuilt` latch sends it to the machinery
+                            # fault it always was.
+                            _degrade_hit_to_rebuild(state[picked])
+                            continue
                         machinery_fault = True
                         machinery_fault_step = "run"
                         machinery_fault_program = state[picked].out_bin
                         break
                     state[picked].phase = _RUNNING
                     state[picked].dispatch_ns = Int(perf_counter_ns())
+                    # A cache HIT never passes the build dispatch below, so this
+                    # is the only place its file can be announced. Guarded by
+                    # the same latch, so a run-side crash retry — which comes
+                    # back through here — never announces the file twice, and
+                    # placed at the DISPATCH rather than at admission so a file
+                    # the batch abandons NOT-RUN still never starts.
+                    if not state[picked].started_emitted:
+                        reporter.handle(Event.file_started(state[picked].rel))
+                        state[picked].started_emitted = True
                 else:
+                    # THE first-attempt predicate for this seam. `attempt`
+                    # starts at 1 and is bumped by exactly the two edges that
+                    # re-enter a slot as a RETRY: the compile-kill rebuild
+                    # (which returns here with a fresh `_retry_out_bin` under
+                    # `build/bin`) and the run-crash re-run (which returns to
+                    # `_PENDING_RUN` and never reaches this branch). The third
+                    # edge back into this branch is not a retry and does not
+                    # touch `attempt`: a cache hit whose binary vanished before
+                    # it could run falls back to compiling the file, and
+                    # `store_rebuilt` is what keeps that fallback from reading
+                    # as a first compile. Both halves matter, because a rebuild
+                    # that staged and published would write an
+                    # invocation-private binary into a store other runs read,
+                    # and one that counted would charge a file admitted once
+                    # twice.
+                    var first_build = (
+                        state[picked].attempt == 1
+                        and not state[picked].store_rebuilt
+                    )
+                    if first_build and state[picked].key:
+                        var target = store_build_target(
+                            root, state[picked].mangled
+                        )
+                        if target.ok():
+                            # Compile straight into the store, so publication is
+                            # one `rename(2)` and never a copy of a binary that
+                            # could differ from the one that was digested.
+                            state[picked].out_bin = target.out_rel
+                            state[picked].target = target^
+                        else:
+                            # Cache off for the session: a store that cannot be
+                            # staged into once will not stage the next file
+                            # either, and probing on would spend a digest per
+                            # file for a hit that can never be published.
+                            ctx.disable(
+                                "the cache could not create its store directory"
+                                " under '.mtest-cache'"
+                            )
+                            state[picked].key = Optional[FileKey](None)
                     var build_argv = List[String]()
                     build_argv.append(config.mojo_path)
                     build_argv.append("build")
@@ -576,6 +835,16 @@ def _run_pool_batch[
                         env_extra.append(
                             "MODULAR_CACHE_DIR=" + state[picked].quarantine_dir
                         )
+                    if first_build:
+                        # ADMISSION by compile, and the only place this counter
+                        # moves: the file is about to be compiled for the first
+                        # time, so it is a built file whatever the compiler goes
+                        # on to say about it. This batch folds its verdict a
+                        # whole `wait_any` sweep later, so counting there would
+                        # quietly drop every compile error out of the accounting
+                        # and break `built_files + cached_files ==
+                        # first-attempt compile admissions`.
+                        result.built_files += 1
                     try:
                         _ = supervisor.spawn(
                             ProcessSpec.command_in(
@@ -670,6 +939,11 @@ def _run_pool_batch[
             state[i].bterm = term
             state[i].build_stderr = res.stderr_bytes.copy()
             if term.is_spawn_failed():
+                # No binary this batch will run came out of it, so the staged
+                # directory is pure debris.
+                _discard_staging(root, state[i].target)
+                state[i].target = _no_staging()
+                state[i].key = Optional[FileKey](None)
                 reporter.handle(
                     Event.internal_error("build", config.mojo_path, term.value)
                 )
@@ -680,6 +954,25 @@ def _run_pool_batch[
             else:
                 var bv = build_verdict(term)
                 if bv.is_failing():
+                    if state[i].target.ok():
+                        # The reproduce line names `build/bin`, never the
+                        # staging directory the compile actually wrote to. A
+                        # failed build publishes nothing, so that directory is
+                        # deleted on the next lines and a line naming it would
+                        # be a line no user could ever run; `build/bin/<mangled>`
+                        # is where an uncached build puts this file's binary and
+                        # is live either way. Rewritten BEFORE the branch below,
+                        # so a retried compile's TRY line and a terminal
+                        # compile's verdict quote the same runnable command.
+                        state[i].build_argv = _rewrite_output(
+                            state[i].build_argv,
+                            state[i].out_bin,
+                            state[i].plain_out,
+                        )
+                        _discard_staging(root, state[i].target)
+                        state[i].target = _no_staging()
+                        state[i].out_bin = state[i].plain_out
+                    state[i].key = Optional[FileKey](None)
                     var rc = retry_classify(
                         "build", term, False, state[i].build_stderr
                     )
@@ -761,17 +1054,67 @@ def _run_pool_batch[
                         ):
                             stop_scheduling = True
                 else:
+                    if state[i].target.ok() and state[i].key:
+                        # PUBLISH HERE, in the seam between the build's
+                        # completion and the run's dispatch, which is a seam
+                        # only this driver has. Doing it now rather than after
+                        # the run means the bytes the store serves are the bytes
+                        # this batch runs (on PUB_ADOPTED, the winner's), the
+                        # run-step diagnostics below name a live generation
+                        # instead of a directory about to disappear, and a hard
+                        # kill can orphan a staging directory only for as long
+                        # as one build takes.
+                        var pub = store_publish(
+                            root,
+                            state[i].key.value(),
+                            state[i].target,
+                            state[i].bdur,
+                            state[i].build_argv,
+                        )
+                        # The rule with no exceptions: run `bin_rel`, record
+                        # `argv`. On PUB_OK the staging directory this build's
+                        # own argv names is already gone; on PUB_ADOPTED the
+                        # live binary belongs to a generation this run never
+                        # built and whose command line it therefore cannot
+                        # reconstruct; on PUB_FAILED both are this run's own
+                        # staging path, which is still there and is the only
+                        # copy of the binary about to run.
+                        state[i].out_bin = pub.bin_rel
+                        state[i].build_argv = pub.argv.copy()
+                        if pub.kind == PUB_FAILED:
+                            # The build survived; only its publication did not.
+                            # A publication failure is never a verdict, so it
+                            # rides in front of this file's events as a warning.
+                            state[i].pre_events.append(
+                                Event.warning("cache-publish", pub.warning)
+                            )
+                        # Settled either way: the directory is renamed, deleted,
+                        # or the live home of the binary this batch keeps
+                        # running. None of those is the batch's to sweep, and
+                        # the key is owed nothing further.
+                        state[i].target = _no_staging()
+                        state[i].key = Optional[FileKey](None)
                     state[i].phase = _PENDING_RUN
         else:
             # A completed run.
             if term.is_spawn_failed():
-                reporter.handle(
-                    Event.internal_error("run", state[i].out_bin, term.value)
-                )
-                result.internal_error = True
-                stop_scheduling = True
-                pipeline.halt_internal_error()
-                state[i].phase = _DONE
+                if state[i].store_hit and not state[i].store_rebuilt:
+                    # The store validated this generation and then something
+                    # removed it before the exec — a concurrent run publishing
+                    # another key for the same source reaps that source's older
+                    # generations. Compile the file instead of failing a run
+                    # whose only fault was that its binary was cached.
+                    _degrade_hit_to_rebuild(state[i])
+                else:
+                    reporter.handle(
+                        Event.internal_error(
+                            "run", state[i].out_bin, term.value
+                        )
+                    )
+                    result.internal_error = True
+                    stop_scheduling = True
+                    pipeline.halt_internal_error()
+                    state[i].phase = _DONE
             else:
                 var rdur = Float64(res.duration_ms) / 1000.0
                 var source_path = source_identity_key(root, state[i].rel)
@@ -898,6 +1241,18 @@ def _run_pool_batch[
                 # dominates, so they need no escalation.)
                 result.internal_error = True
             break
+
+    # Any staging directory still held is one whose build never reached its
+    # completion handler — an interrupt, a gate abort, or a machinery fault tore
+    # the batch down with the compiler in flight. Nothing in the tree sweeps
+    # `.tmp-` directories, so the batch that created them is the last chance to
+    # remove them, and every one still held here is by construction a directory
+    # no binary is being run out of: the publish branch clears `target` on all
+    # three outcomes, including the PUB_FAILED one whose staged binary IS live.
+    for i in range(n):
+        if state[i].target.ok():
+            _discard_staging(root, state[i].target)
+            state[i].target = _no_staging()
 
     # Batch terminal: erase any counter still on the terminal and flush the last
     # committed bytes without redrawing it. The counter is ephemeral and must

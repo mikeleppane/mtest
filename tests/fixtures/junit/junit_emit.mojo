@@ -5,9 +5,9 @@ Not a product module and not a test suite: a thin CLI tool the
 `JunitReporter` over a typed event stream that exercises every sentinel-matrix
 cell (a non-retried file-level failure, a rerun-exhausted failure, a flaky pass,
 a retried per-test failure, non-retried per-test outcomes, a not-run file, a
-precompile failure with named casualties, and suite-level capture), spools the
-per-suite fragments, assembles the whole `<testsuites>` document, and prints it
-to stdout. The gate then runs `scripts/checks/reports/junit.py` over that output
+precompile failure with named casualties, and suite-level capture), plus the
+synthetic `mtest::cache` counter suite, spools the per-suite fragments,
+assembles the whole `<testsuites>` document, and prints it to stdout. The gate then runs `scripts/checks/reports/junit.py` over that output
 — so the oracle validates the shipped renderer's OWN bytes, not a hand-authored
 mock.
 """
@@ -196,5 +196,12 @@ def main() raises:
             "build", "error: undefined symbol <foo>", 0, casualties^
         )
     )
+
+    # The run-wide cache counters: a synthetic zero-row `mtest::cache` suite
+    # whose `<properties>` block is the only schema-valid home for a run-wide
+    # fact (junit-10 gives `<testsuites>` no properties child). Named directly
+    # because this tool never finalizes; a real session's `finalize` spools the
+    # identical fragment.
+    rep.note_cache_counters(3, 98)
 
     print(rep.assemble("mtest"))

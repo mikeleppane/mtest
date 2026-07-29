@@ -463,7 +463,33 @@ PRECEDENCE_BUILD_ARGV = (
 Pinned in full because the point of the scenario is that the SELECTED wrapper
 received mtest's real work: a wrapper that was merely executed — probed for a
 version, say — would log a different vector, and a check that only counted log
-lines could not tell the two apart."""
+lines could not tell the two apart.
+
+The `-o` value is pinnable because every case runs under `PRECEDENCE_CACHE_OFF`,
+which keeps the build on the invocation-private path whose mangled name is
+fixed. That is the second thing this pin buys: a build cache stages its compile
+into `.mtest-cache/build-v1/.tmp-<mangled>-<pid>-<clock>-<n>/bin`, so an output
+path that
+is anything but the one below is a run that touched the store the user told it
+to leave alone."""
+
+PRECEDENCE_CACHE_OFF = "--no-cache"
+"""Passed by every precedence invocation, because the oracle is a real compile.
+
+Six invocations compile the one `PRECEDENCE_FILE` from the one repository root,
+and the build cache's store lives under that root. Nothing that varies between
+them is part of the cache key — the three wrappers are byte-identical copies, so
+they key alike, and neither `PATH` nor `MTEST_MOJO` is keyed at all — so with the
+cache on the first compile publishes a generation and every later invocation is
+served from it without dispatching a compiler. A scenario whose whole claim is
+"exactly one build went through the selected wrapper" cannot be argued from a
+wrapper that was never asked to build, and counting cache hits would not restore
+it: the hit is invisible from inside the wrapper. So each case buys its own cold
+build.
+
+It also removes the cache's own `<compiler> --version` toolchain probe, which is
+the only other spawn resolution makes: under this flag mtest keys nothing, so
+the winner's log must hold the build and nothing else."""
 
 PRECEDENCE_SOURCES = ("flag", "env", "path")
 """The three resolution sources, in the precedence order mtest must honor. Each
@@ -544,8 +570,10 @@ def s_mojo_executable_precedence(context: ScenarioContext) -> str:
     3. PATH alone -> only the path log.
 
     Each case is run twice, once as `collect` and once as a full run, because
-    resolution has to hold on the collection path as well as the run path. Both
-    invocations must land on the selected wrapper with the exact build vector.
+    resolution has to hold on the collection path as well as the run path. Every
+    invocation carries `PRECEDENCE_CACHE_OFF` so the build it is judged on is a
+    real compile; the winner's log must then hold exactly one record, and that
+    record must be the build with the pinned vector.
 
     The real compiler is resolved ONCE here, before `PATH` is touched, and
     handed to the wrappers as `MTEST_REAL_MOJO`: the PATH candidate is itself
@@ -596,7 +624,7 @@ def s_mojo_executable_precedence(context: ScenarioContext) -> str:
                         os.remove(log_path)
                 env = {**base_env, **extra_env}
                 run = context.runner.run_mtest(
-                    [*operands, *extra_args],
+                    [*operands, *extra_args, PRECEDENCE_CACHE_OFF],
                     timeout=240.0,
                     env_overrides=env,
                 )
@@ -617,18 +645,28 @@ def s_mojo_executable_precedence(context: ScenarioContext) -> str:
                     f"{sorted(losers)}: precedence did not hold\n{losers}",
                 )
                 records = wrote[expected]
+                # Every invocation the winner logged has to BE the winner's —
+                # the losers' logs are already known empty, so this is what
+                # closes "the run resolved the compiler once and used that
+                # resolution for everything it spawned".
+                for record in records:
+                    expect(
+                        record.get("wrapper") == wrappers[expected],
+                        f"a {mode} invocation ran {record.get('wrapper')!r}, "
+                        f"want the {expected} wrapper {wrappers[expected]!r}",
+                    )
+                # The compile is the whole reason a compiler was resolved, and
+                # under `PRECEDENCE_CACHE_OFF` it is the only spawn resolution
+                # makes: nothing keys the toolchain, so no `--version` probe
+                # rides along. One record, therefore, and a second one would
+                # mean the resolved compiler was spawned for something this
+                # scenario cannot account for.
                 expect(
                     len(records) == 1,
-                    f"the {expected} wrapper logged {len(records)} invocations "
-                    f"for {mode}, want exactly 1: {records}",
+                    f"the {expected} wrapper logged {len(records)} spawns for "
+                    f"{mode}, want exactly 1 (the build): {records}",
                 )
-                record = records[0]
-                expect(
-                    record.get("wrapper") == wrappers[expected],
-                    f"the {mode} build ran {record.get('wrapper')!r}, want the "
-                    f"{expected} wrapper {wrappers[expected]!r}",
-                )
-                argv = list(record.get("argv", []))
+                argv = list(records[0].get("argv", []))
                 expect(
                     tuple(argv[1:]) == PRECEDENCE_BUILD_ARGV,
                     f"the {expected} wrapper received argv {argv[1:]} for "
@@ -636,5 +674,5 @@ def s_mojo_executable_precedence(context: ScenarioContext) -> str:
                 )
     return (
         "--mojo > MTEST_MOJO > PATH: each of collect and run invoked ONLY the "
-        f"selected wrapper, with the exact vector {list(PRECEDENCE_BUILD_ARGV)}"
+        f"selected wrapper, exactly once, with {list(PRECEDENCE_BUILD_ARGV)}"
     )

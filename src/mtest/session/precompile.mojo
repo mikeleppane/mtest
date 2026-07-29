@@ -221,6 +221,78 @@ struct PrecompileResult(Copyable, Movable):
         return r^
 
 
+def precompile_out_path(src: String, out_name: Optional[String]) -> String:
+    """Where a configured precompile step's package lands, run or skipped.
+
+    Hoisted out of `_run_precompile` because the build cache has to answer
+    "where would this step's output be?" WITHOUT running the step: the stamp
+    probe validates that output before it may skip the compile, and a second
+    spelling of this rule in the cache would be a spelling that could drift.
+    There is now exactly one derivation, and both the runner and the cache read
+    it.
+
+    Args:
+        src: The source the step precompiles, root-relative or absolute as
+            configured.
+        out_name: The `:OUT` value if the step named one; `None` for the
+            default. Spelled `out_name` rather than `out`, which the pinned
+            compiler reads as an argument convention, not a name.
+
+    Returns:
+        The output package's path, exactly as the compiler's `-o` receives it —
+        the configured `out_name` verbatim, or `build/<name>.mojopkg` where
+        `name` is `src`'s `.mojo`-stripped basename.
+
+    Examples:
+
+    ```mojo
+    from mtest.session.precompile import precompile_out_path
+
+    var defaulted = precompile_out_path("lib/helper.mojo", None)
+    # "build/helper.mojopkg"
+    var named = precompile_out_path("lib", Optional[String]("out/lib.mojopkg"))
+    # "out/lib.mojopkg"
+    ```
+    """
+    if out_name:
+        return out_name.value().copy()
+    return (
+        String("build/")
+        + String(basename(src).removesuffix(".mojo"))
+        + ".mojopkg"
+    )
+
+
+def precompile_out_dir(out_path: String) -> String:
+    """The include directory a successful step adds, derived from its output.
+
+    The companion to `precompile_out_path`, and the reason it is a function
+    rather than a `dirname` at each call site: an output at the top of the
+    invocation root has no directory component at all, and the include set needs
+    `"."` there rather than the empty string the compiler would reject.
+
+    Args:
+        out_path: The step's output path, from `precompile_out_path`.
+
+    Returns:
+        The directory to append to the include set — `"."` when `out_path`
+        names a file directly in the invocation root.
+
+    Examples:
+
+    ```mojo
+    from mtest.session.precompile import precompile_out_dir
+
+    var nested = precompile_out_dir("build/helper.mojopkg")  # "build"
+    var top = precompile_out_dir("helper.mojopkg")  # "."
+    ```
+    """
+    var d = String(dirname(out_path))
+    if d == "":
+        return String(".")
+    return d^
+
+
 def _run_precompile(
     mut runtime: ExecRuntime,
     config: RunnerConfig,
@@ -273,12 +345,7 @@ def _run_precompile(
             directory cannot be made. The caller catches these and resolves
             exit 3.
     """
-    var name = String(basename(src).removesuffix(".mojo"))
-    var out_path: String
-    if out_name:
-        out_path = out_name.value().copy()
-    else:
-        out_path = String("build/") + name + ".mojopkg"
+    var out_path = precompile_out_path(src, out_name)
 
     # The temp lives beside OUT, so its parent must exist before the first
     # attempt writes it (and the rename stays within one directory).
@@ -410,10 +477,9 @@ def _run_precompile(
             # unpromoted run would have.
             _discard_path(root + "/" + tmp_dir)
             _cleanup_quarantine(root, quarantine_dirs)
-            var d = dirname(out_path)
-            if d == "":
-                d = String(".")
-            return PrecompileResult.success(d, events^, attempt_index)
+            return PrecompileResult.success(
+                precompile_out_dir(out_path), events^, attempt_index
+            )
 
         # The attempt failed. Classify it for retry eligibility under the BUILD
         # rules (`interrupted` is False: an interrupt was short-circuited above,

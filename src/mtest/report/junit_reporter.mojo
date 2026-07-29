@@ -49,6 +49,7 @@ from mtest.model.outcome import Outcome
 from mtest.model.test_result import TestResult
 from mtest.platform import process_id, rename_path
 from mtest.report.junit import (
+    CACHE_SUITE_NAME,
     JunitCase,
     JunitPrimary,
     JunitRerun,
@@ -57,6 +58,7 @@ from mtest.report.junit import (
     assemble,
     bounded_text_from_bytes,
     dotted_classname,
+    render_cache_suite,
     render_suite,
 )
 from mtest.report.reporter import Reporter
@@ -568,6 +570,46 @@ struct JunitReporter(Reporter):
             var suite = JunitSuite(path, 0.0, cases^, "", "")
             self._spool(render_suite(suite), "not-run suite " + path)
 
+    def note_cache_counters(mut self, built_files: Int, cached_files: Int):
+        """Spool the synthetic `mtest::cache` suite naming the two counters.
+
+        Called by `finalize` with the session's run-wide totals, and directly by
+        the render gate's emitter, which never finalizes. It is outside the
+        `Reporter` trait for the same reason `note_not_run` is: the counters are
+        a terminal fact, not an event the stream carries — `junit_reporter` has
+        no `SESSION_FINISHED` branch at all, so they ride the finalize seam.
+
+        Both counters zero spools nothing: a run that admitted no compile at all
+        (every pre-cache run among them) publishes exactly the document it
+        always did. Spooling is idempotent — a second call after the suite
+        exists is ignored, so the first naming wins and the suite never doubles.
+
+        The spool write is caught and latched as in `handle`.
+
+        Args:
+            built_files: First-attempt compile admissions, compile failures
+                included. Retries, probes and precompile steps never count.
+            cached_files: Cache-hit admissions.
+
+        Examples:
+
+        ```mojo
+        from mtest.report import JunitReporter, open_junit_spool
+
+        var rep = JunitReporter(open_junit_spool(), True)
+        rep.note_cache_counters(3, 98)
+        ```
+        """
+        if not self._active or self._failed:
+            return
+        if built_files + cached_files == 0:
+            return
+        if self._has_suite(String(CACHE_SUITE_NAME)):
+            return
+        self._spool(
+            render_cache_suite(built_files, cached_files), "cache counter suite"
+        )
+
     def _has_suite(self, suite_key: String) -> Bool:
         """Whether a suite with `suite_key` has already been spooled."""
         for i in range(len(self._index)):
@@ -575,12 +617,19 @@ struct JunitReporter(Reporter):
                 return True
         return False
 
-    def finalize(mut self) -> JunitFinalizeResult:
+    def finalize(
+        mut self, built_files: Int = 0, cached_files: Int = 0
+    ) -> JunitFinalizeResult:
         """Publish the JUnit artifact: assemble, write the temp, rename it.
 
         Called by the session on the concrete reporter, outside the `Reporter`
         trait, during terminal finalization. Every failure is caught and
         returned as a diagnostic the session collects.
+
+        The run-wide build-cache counters arrive here rather than on an event,
+        because this reporter has no `SESSION_FINISHED` branch: they are spooled
+        as the synthetic `mtest::cache` suite (see `note_cache_counters`) just
+        before the assembly, and both zero spools nothing at all.
 
         This is deliberately asymmetric with the JSON stream. A latched stream
         aborts the run mid-flight; a spool-write failure does not, and instead
@@ -593,6 +642,11 @@ struct JunitReporter(Reporter):
         assembling or writing the temp removes it, but a run that arrives here
         with an already-latched spool failure returns without touching the temp
         the session created, so that empty temp outlives the run.
+
+        Args:
+            built_files: First-attempt compile admissions, compile failures
+                included. Zero with `cached_files` renders no cache suite.
+            cached_files: Cache-hit admissions.
 
         Returns:
             A clean result when inert or published, otherwise the failure flag
@@ -612,6 +666,10 @@ struct JunitReporter(Reporter):
         """
         if not self._active or self._target_path == "":
             return JunitFinalizeResult(False, "")
+        # Spooling the counters can itself latch, so it happens BEFORE the latch
+        # is read: a failure there surfaces as the same finalization failure any
+        # other dead spool does, and never publishes a document missing a suite.
+        self.note_cache_counters(built_files, cached_files)
         if self._failed:
             return JunitFinalizeResult(
                 True,

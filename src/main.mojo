@@ -27,7 +27,7 @@ cwd, getenv, file operations, and exit are ordinary program-level operations
 via `std`.
 """
 from std.io import FileDescriptor
-from std.os import getenv, listdir, makedirs, remove, rmdir
+from std.os import getenv, listdir, remove, rmdir
 from std.os.path import dirname, exists, isdir
 from std.pathlib import cwd
 from std.sys import argv, exit
@@ -92,6 +92,7 @@ from mtest.session import (
     run_collect,
     run_session_with_state,
 )
+from mtest.session.store import clear_cache_root, ensure_cache_root
 
 
 comptime _STATE_MAX_BYTES = 1024 * 1024
@@ -354,6 +355,8 @@ def _resolution_defaults(parsed: RunnerConfig) -> RunnerConfig:
     defaults.shard_mode = parsed.shard_mode
     defaults.shard_m = parsed.shard_m
     defaults.shard_n = parsed.shard_n
+    defaults.no_cache = parsed.no_cache
+    defaults.cache_clear = parsed.cache_clear
     return defaults^
 
 
@@ -405,13 +408,17 @@ def _load_state(root: String) -> StateLoad:
 
 
 def _persist_state(root: String, text: String) -> Optional[String]:
-    var directory = root + "/.mtest-cache"
     var target = _state_path(root)
     var template = target + ".tmp." + String(process_id()) + ".XXXXXX"
     var temp = String("")
     var owned_fd = -1
     try:
-        makedirs(directory, exist_ok=True)
+        # Not a bare `makedirs`: `.mtest-cache` is the directory `--cache-clear`
+        # deletes, and it will only delete one carrying mtest's ownership
+        # marker. State is written whether or not the cache is enabled, so this
+        # is a path that can create the directory on its own — and a directory
+        # created without the marker is one mtest could not later prove is its.
+        ensure_cache_root(root)
         var created = create_unique_temp(template)
         temp = created.path.copy()
         owned_fd = created.fd
@@ -630,6 +637,27 @@ def main():
         exit(EXIT_USAGE_ERROR)
 
     var config = resolved.config.copy()
+
+    # `--cache-clear` runs HERE: after configuration is resolved (so a usage
+    # error never reaches a deletion) and before the last-run state is read,
+    # because that state file lives inside the directory being deleted. Reading
+    # it first would hand the session records that no longer exist on disk.
+    # A refusal is a pre-session configuration error, so it takes the same shape
+    # as a failed `_load_config`: the framed diagnostic to stderr, exit 4.
+    var state_cleared = False
+    if config.cache_clear:
+        # Asked BEFORE the removal, so the warning the session emits under
+        # `--lf`/`--ff` claims only what actually happened: with no state file
+        # there was nothing to clear, and the session's own `lf-empty` warning
+        # already says the selection fell back.
+        var had_state = exists(_state_path(root))
+        var clear_failure = clear_cache_root(root)
+        if clear_failure:
+            _eprintln(clear_failure.value())
+            exit(EXIT_USAGE_ERROR)
+        state_cleared = had_state
+    resolved.state_cleared = state_cleared
+
     var state_enabled = resolved.active_keys.state and resolved.state
     var previous_state = LastRunState.empty()
     if state_enabled:

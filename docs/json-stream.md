@@ -81,7 +81,7 @@ consumer never sees a `progress` record and never a blank line in its place.
 
 | field | type | notes |
 |---|---|---|
-| `warning_kind` | string | e.g. `stale-exclusion`, `compile-kill-residual`, `lf-stale`, `lf-empty` |
+| `warning_kind` | string | e.g. `stale-exclusion`, `compile-kill-residual`, `lf-stale`, `lf-empty`, `cache-off`, `cache-publish`, `cache-clear`, `cache-rebuild` |
 | `warning_pattern` | string | the offending pattern / detail |
 
 `warning_kind` is an open vocabulary. Consumers must accept unknown strings as
@@ -224,6 +224,14 @@ The single terminal record (§8).
 | `exit_code` | int | the exit code resolved at session end; the process exit is authoritative and may be escalated afterward (§9) |
 | `test_counts` | object | `{passed,failed,skipped,deselected}` → int |
 | `flaky_files` | int | files that passed only after a retry |
+| `built_files` | int | files admitted at a first-attempt compile, compile failures included; retries, probes and precompile steps never count |
+| `cached_files` | int | files admitted from a build-cache hit |
+
+`built_files + cached_files` equals the run's first-attempt compile admissions,
+gates included. `cached_files` alone is `0` when the cache served nothing — a run
+with the cache off, and every cold store; the compiles those runs admit are
+counted in `built_files` like any other. Both are `0` only for a run that
+compiled nothing at all.
 
 `summary` is a stable, fully-enumerated object of the 13 outcome tokens in
 discriminant order:
@@ -457,7 +465,10 @@ fields that legitimately vary run to run.
   `stderr_stream_omitted_bytes`, `compiler_output_omitted_bytes`,
   `detail_omitted_bytes`, `build_argv`/`attempt_argv`/`casualties` byte content
   and their `*_omitted` counts;
-- the `generator` string (carries the version label).
+- the `generator` string (carries the version label);
+- the build-cache split `built_files`/`cached_files` — their SUM is stable for
+  identical inputs (it is the first-attempt compile admission count), but how it
+  divides depends on what the store already held when the run started.
 
 The excluded set is exactly the run-to-run-variable surface; everything else is
 byte-stable for identical inputs.

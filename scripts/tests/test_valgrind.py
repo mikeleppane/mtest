@@ -22,6 +22,36 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
+def valgrind_writing_its_log(
+    result: subprocess.CompletedProcess[str], log_text: str = ""
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """Build a `valgrind` stand-in that materializes its `--log-file` target.
+
+    The real `valgrind()` hands the CLI lane's Memcheck diagnostics to a file
+    rather than to the pipe, so a bare `return_value` mock leaves `check_cli`
+    with no log to read. Writing the file is what keeps these tests exercising
+    the same two-channel shape production runs on.
+
+    Args:
+        result: What the stand-in returns, standing for the client's own run.
+        log_text: What Valgrind is pretended to have written to its log.
+
+    Returns:
+        A callable usable as `patch.object(..., side_effect=...)`, so the mock
+        still records the arguments each call site passed.
+    """
+
+    def fake(
+        _command: list[str], _env: dict[str, str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        log_file = kwargs.get("log_file")
+        if isinstance(log_file, Path):
+            log_file.write_text(log_text, encoding="utf-8")
+        return result
+
+    return fake
+
+
 class ValgrindCheckTests(unittest.TestCase):
     def test_repository_root_is_exact(self) -> None:
         self.assertEqual(valgrind_check.ROOT, Path(__file__).resolve().parents[2])
@@ -358,7 +388,9 @@ class ValgrindCliProbeTests(unittest.TestCase):
                     valgrind_check, "run", return_value=completed
                 ) as mocked_run,
                 patch.object(
-                    valgrind_check, "valgrind", return_value=wrapped
+                    valgrind_check,
+                    "valgrind",
+                    side_effect=valgrind_writing_its_log(wrapped),
                 ) as mocked_valgrind,
                 patch.object(valgrind_check, "check_cli_provenance"),
                 patch.object(
@@ -383,6 +415,14 @@ class ValgrindCliProbeTests(unittest.TestCase):
                 mocked_valgrind.call_args_list[0].kwargs["flags"],
                 valgrind_check.CLI_VALGRIND_FLAGS,
             )
+            # The Memcheck channel goes to its own file, and that file has to
+            # keep the `.log` suffix: the workflow uploads this lane's artifact
+            # as `build/safety/valgrind/*.log`, so any other name would drop
+            # Valgrind's diagnostics out of the uploaded evidence entirely.
+            log_file = mocked_valgrind.call_args_list[0].kwargs["log_file"]
+            self.assertEqual(log_file.parent, out)
+            self.assertEqual(log_file.suffix, ".log")
+            self.assertTrue(log_file.is_file())
 
     def test_check_cli_actually_calls_the_provenance_check(self) -> None:
         """The provenance control must be ON the call path, not merely defined.
@@ -393,6 +433,10 @@ class ValgrindCliProbeTests(unittest.TestCase):
         "did it really run" failure the control itself exists to catch, one
         level up. Driving the real `check_cli` with an unwrapped-looking log
         and requiring the rejection is what pins the wiring.
+
+        The banner-less text is planted in the VALGRIND log, not in the
+        client's stdout, so this also pins which channel provenance judges: it
+        is the only one that can carry a banner.
         """
         completed = subprocess.CompletedProcess(args=["mojo"], returncode=0, stdout="")
         unwrapped = subprocess.CompletedProcess(
@@ -408,7 +452,13 @@ class ValgrindCliProbeTests(unittest.TestCase):
                 patch.object(valgrind_check, "CLI_SCRATCH", out / "cli"),
                 patch.object(valgrind_check, "CLI_HOME", out / "home"),
                 patch.object(valgrind_check, "run", return_value=completed),
-                patch.object(valgrind_check, "valgrind", return_value=unwrapped),
+                patch.object(
+                    valgrind_check,
+                    "valgrind",
+                    side_effect=valgrind_writing_its_log(
+                        unwrapped, "no Memcheck banner in this log either\n"
+                    ),
+                ),
                 patch.object(
                     valgrind_check, "check_cli_probe_output", return_value="ok"
                 ),
@@ -502,6 +552,213 @@ class ValgrindCliProvenanceTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(SystemExit, "product allocation"):
             valgrind_check.check_cli_provenance(valgrind_check.CLI_PROBE_EXIT, polluted)
+
+
+class ValgrindCliChannelSeparationTests(unittest.TestCase):
+    r"""Valgrind's own diagnostics must never be judged as client output.
+
+    `run` merges the client's stderr into its stdout, and Valgrind writes its
+    diagnostics to stderr, so an unredirected wrapped run hands
+    `check_cli_probe_output` one string holding both channels. That gate's
+    subject is what a HOSTILE child can make mtest's console emit, and Memcheck
+    prints demangled symbol names verbatim: the 1.0.0b2 toolchain mangles a
+    parameterized `_Global` type name with a literal ESC byte, so Valgrind's own
+    frame lines failed the raw-control-byte scan for bytes mtest never wrote.
+
+    Separating the channels is the fix under test here. Filtering `^==\d+== `
+    lines out before the scan is not: a hostile child that printed
+    `==999== <ESC>[2J` would walk straight through such a filter, which is the
+    exact escape hatch this gate exists to close. A client cannot write into
+    Valgrind's private log no matter what bytes it emits.
+    """
+
+    MANGLED_GLOBAL_FRAME = (
+        "==1==    by 0x4081915: std::ffi::__init__::_Global::get_or_create_ptr(),"
+        'StorageType=[typevalue<#kgen.instref<\x1b"mtest::session::store::'
+        '_ToolchainDigest">>],name={ #interp.memref<16, '
+        '"mtest_store_toolchain_digest\\00" string> } (__init__.mojo:939)\n'
+        "==1==    by 0x40EF45F: _toolchain_identity (store.mojo:790)\n"
+    )
+    """Two frames copied from the CI log this defect was diagnosed from.
+
+    The ESC is the real payload, in the real position: immediately before the
+    quoted type name inside `#kgen.instref<...>`. The frames name `store.mojo`
+    rather than `src/mtest/session/store.mojo`, exactly as Memcheck rendered
+    them, which is why `check_cli_provenance`'s product-frame rejection reads
+    this record as a runtime allocation and passes it."""
+
+    CLIENT_STDOUT = (
+        "mtest 0.6.0 (fake_hostile_mojo.py)\n"
+        "FAIL           hostile/test_hostile_report.mojo  0.03s\n"
+        f"{valgrind_check.CLI_PROBE_ESCAPED_LINE}\n"
+        "===== 0 passed, 1 failed, 0 skipped, builds: 1, cached: 0 "
+        "(0 excluded, 0 not run) in 1.2s =====\n"
+    )
+    """What the console legitimately renders: every control byte escaped."""
+
+    MEMCHECK_LOG = ValgrindCliProvenanceTests.CLEAN.replace(
+        "==1==    by 0x2: runtime_init (libmojo.so)\n",
+        "==1==    by 0x2: runtime_init (libmojo.so)\n" + MANGLED_GLOBAL_FRAME,
+    )
+    """A log that passes provenance on every count and still carries the ESC."""
+
+    def _fake_run(self, client_stdout: str) -> Callable[..., object]:
+        """Stand in for `run`, reproducing both capture shapes faithfully.
+
+        With `--log-file` in the argv, Valgrind writes its diagnostics to that
+        file and the pipe carries the client alone; without it, `run`'s
+        `stderr=subprocess.STDOUT` returns both channels as one string. Driving
+        the real `check_cli` through this is what makes the test sensitive to
+        the wiring rather than to either checker in isolation.
+
+        Args:
+            client_stdout: What the wrapped client itself printed.
+
+        Returns:
+            A `run` replacement. Non-`valgrind` commands (the CLI build) return
+            a clean, empty result.
+        """
+
+        def fake(
+            command: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            if command[0] != "valgrind":
+                return subprocess.CompletedProcess(
+                    args=command, returncode=0, stdout=""
+                )
+            redirected = [arg for arg in command if arg.startswith("--log-file=")]
+            if not redirected:
+                return subprocess.CompletedProcess(
+                    args=command,
+                    returncode=valgrind_check.CLI_PROBE_EXIT,
+                    stdout=client_stdout + self.MEMCHECK_LOG,
+                )
+            target = Path(redirected[0].removeprefix("--log-file="))
+            target.write_text(self.MEMCHECK_LOG, encoding="utf-8")
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=valgrind_check.CLI_PROBE_EXIT,
+                stdout=client_stdout,
+            )
+
+        return fake
+
+    def _drive_check_cli(self, client_stdout: str) -> str:
+        """Run the real `check_cli` over the two-channel stand-in.
+
+        Args:
+            client_stdout: What the wrapped client itself printed.
+
+        Returns:
+            The diagnostic `check_cli` failed with. It always fails: the probe
+            writes no state file, NDJSON, or JUnit report under a stand-in, and
+            those assertions all sit AFTER the raw-byte scan, which is what
+            makes the exact message the informative result.
+        """
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            out = Path(raw_tmp)
+            with (
+                patch.object(valgrind_check, "OUT", out),
+                patch.object(valgrind_check, "CLI_BINARY", out / "mtest"),
+                patch.object(valgrind_check, "CLI_SCRATCH", out / "cli"),
+                patch.object(valgrind_check, "CLI_HOME", out / "home"),
+                patch.object(valgrind_check, "run", self._fake_run(client_stdout)),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                valgrind_check.check_cli({})
+        return str(raised.exception)
+
+    def test_a_mangled_type_name_in_the_memcheck_log_is_not_a_client_byte(
+        self,
+    ) -> None:
+        """The reported false positive: Valgrind's ESC read as mtest's."""
+        message = self._drive_check_cli(self.CLIENT_STDOUT)
+
+        self.assertNotIn("raw ESC", message)
+        # Naming the state-file diagnostic is what proves the run reached the
+        # far side of the raw-byte scan. A test that only asserted the absence
+        # of "raw ESC" would also pass if `check_cli` had failed earlier, for
+        # instance in the provenance check, and never scanned anything at all.
+        self.assertIn("wrote no state file", message)
+
+    def test_a_raw_escape_from_the_client_is_still_rejected(self) -> None:
+        """The gate the fix must not weaken, driven through the same path."""
+        hostile = self.CLIENT_STDOUT + "    | \x1b[2Jcleared-your-terminal\n"
+
+        message = self._drive_check_cli(hostile)
+
+        self.assertIn("emitted a raw ESC byte", message)
+
+    def test_the_probe_run_is_the_only_redirected_lane(self) -> None:
+        """Redirection is scoped to the CLI probe; every other lane is untouched.
+
+        The controls, the native suites, and the seventeen product suites keep
+        the combined capture their assertions read, so this stays one lane's
+        change rather than a rewrite of how the gate captures output.
+        """
+        completed = subprocess.CompletedProcess(
+            args=["valgrind"], returncode=0, stdout=""
+        )
+        recorded: list[list[str]] = []
+
+        def recorder(command: list[str], **_kwargs: object) -> object:
+            recorded.append(command)
+            return completed
+
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            out = Path(raw_tmp)
+            with (
+                patch.object(valgrind_check, "OUT", out),
+                patch.object(valgrind_check, "run", recorder),
+            ):
+                valgrind_check.valgrind(["prog"], {}, quiet_child=True)
+                valgrind_check.valgrind(
+                    ["prog"], {}, quiet_child=True, log_file=out / "probe.log"
+                )
+
+        plain, redirected = recorded
+        self.assertFalse([arg for arg in plain if arg.startswith("--log-file")])
+        self.assertIn(f"--log-file={out / 'probe.log'}", redirected)
+        # Measured on valgrind-3.27.1: without this flag a fork child inherits
+        # the log and writes its own records into the same file, since the
+        # value carries no `%p`. The CLI lane is the one that forks.
+        self.assertIn("--child-silent-after-fork=yes", redirected)
+
+    def test_a_startup_failure_written_to_the_redirected_log_still_fails(
+        self,
+    ) -> None:
+        """The startup diagnostic must follow the log, or it silently retires.
+
+        Measured on valgrind-3.27.1: a fatal raised after command-line parsing
+        — where the mandatory-redirection failure this probe exists for happens
+        — is written to `--log-file` and leaves the wrapped process's pipe
+        empty. Scanning `result.stdout` alone would turn every redirected
+        startup failure into a confusing downstream rejection instead.
+        """
+        fatal = (
+            "valgrind:  Fatal error at startup: a function redirection\n"
+            "valgrind:  Possible fixes: install libc6-dbg\n"
+        )
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            out = Path(raw_tmp)
+            log = out / "probe.log"
+
+            def fake(command: list[str], **_kwargs: object) -> object:
+                log.write_text(fatal, encoding="utf-8")
+                return subprocess.CompletedProcess(
+                    args=command, returncode=1, stdout=""
+                )
+
+            with (
+                patch.object(valgrind_check, "OUT", out),
+                patch.object(valgrind_check, "run", fake),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                valgrind_check.valgrind(["prog"], {}, quiet_child=True, log_file=log)
+
+            self.assertEqual((out / "startup-failure.log").read_text(), fatal)
+
+        self.assertIn("install libc6-dbg", str(raised.exception))
 
 
 class ValgrindMainProbeRosterTests(unittest.TestCase):

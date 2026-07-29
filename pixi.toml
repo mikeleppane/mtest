@@ -339,6 +339,34 @@ depends-on = ["build-bin"]
 cmd = "python -m scripts.e2e"
 depends-on = ["build-bin"]
 
+# Adversarial cache-protocol gate: drive REAL `build/mtest` processes against
+# throwaway projects — concurrently, and under the test-only `MTEST_STORE_FAULT`
+# publication fault seam — and assert the store's protocol properties from the
+# outside. Deliberately NOT part of `harness-check`: that lane is hermetic and
+# dependency-free (fake compilers, no `mojo`, no built binary), while every
+# scenario here spawns a real per-file `mojo build`, hence the `build-bin` edge
+# and its position beside `e2e` in the `ci` chain. It is also the ONLY coverage
+# `--no-cache` and `--cache-clear` have that is not reading: their wiring lives
+# in private defs of the `src/main.mojo` executable target, which nothing under
+# `tests/` can import.
+[tasks.cache-protocol-check]
+cmd = "python -m scripts.tests.test_cache_protocol"
+depends-on = ["build-bin"]
+
+# Layer 2 of the build-artifact cache: stamps `scripts/build/production_build.sh`'s
+# own precompile stage against its inputs (the script itself, the exact stage
+# command lines, and every file under src/mtest + vendor/mojo-toml), so a second
+# `pixi run build` with nothing changed skips re-running `mojo precompile`
+# entirely. That skip is the only way two builds can leave `build/mtest.mojopkg`
+# byte-identical: `mojo precompile` is not byte-reproducible on this toolchain
+# (see production_build.sh), so an unstamped re-run rewrites the package with
+# different bytes every time even when nothing changed. No `depends-on`: every
+# scenario copies its own throwaway `scripts/build` + `src/mtest` +
+# `vendor/mojo-toml` sandbox and runs the script there directly, never against
+# this checkout's own `build/`.
+[tasks.build-stamp-check]
+cmd = "python -m scripts.tests.test_build_stamp"
+
 # The cheap hosted-CI release barrier. Every non-behavioral member of the local
 # floor stays in its exact fail-fast order; GitHub releases the independent
 # behavioral and memory-safety lanes only after this aggregate passes.
@@ -378,6 +406,8 @@ depends-on = [
     "assertions-check",
     "dogfood-check",
     "e2e",
+    "cache-protocol-check",
+    "build-stamp-check",
     "contract-check-strict",
     "ci-memory",
 ]

@@ -303,6 +303,14 @@ struct SessionFinishedPayload(EventPayload):
     """The authoritative per-test totals for the whole run."""
     var flaky_files: Int
     """How many files passed only after a retry, run-wide."""
+    var built_files: Int
+    """How many files were admitted at a FIRST-ATTEMPT compile, compile failures
+    included. Retries, probes and precompile steps never count here."""
+    var cached_files: Int
+    """How many files were admitted from a build-cache hit.
+
+    With `built_files` this partitions the first-attempt compile admissions:
+    `built_files + cached_files == first-attempt compile admissions`."""
 
 
 @fieldwise_init
@@ -774,8 +782,18 @@ struct Event(Copyable, Movable):
         exit_code: Int,
         test_counts: TestCounts = TestCounts.zeros(),
         flaky_files: Int = 0,
+        built_files: Int = 0,
+        cached_files: Int = 0,
     ) -> Event:
         """The run ended.
+
+        The two build-cache counters partition the run's first-attempt compile
+        admissions: `built_files` counts an admission that reached the compiler,
+        compile FAILURES included, and `cached_files` counts one served from the
+        store. A retry, a probe and a precompile step never touch either, so
+        `built_files + cached_files == first-attempt compile admissions` holds
+        for every run, gates included. Both default to zero, which is what a
+        caller with no cache in play passes.
 
         Args:
             summary: The per-outcome tally, including excluded and not-run.
@@ -784,13 +802,22 @@ struct Event(Copyable, Movable):
             exit_code: The process exit code the session resolved.
             test_counts: The authoritative per-test totals for the whole run.
             flaky_files: How many files passed only after a retry, run-wide.
+            built_files: How many files were admitted at a first-attempt
+                compile, compile failures included.
+            cached_files: How many files were admitted from a cache hit.
 
         Returns:
             A SESSION_FINISHED event.
         """
         return Event(
             SessionFinishedPayload(
-                summary^, wall_time_seconds, exit_code, test_counts, flaky_files
+                summary^,
+                wall_time_seconds,
+                exit_code,
+                test_counts,
+                flaky_files,
+                built_files,
+                cached_files,
             )
         )
 

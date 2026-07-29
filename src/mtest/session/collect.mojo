@@ -36,8 +36,20 @@ from mtest.session.effective_settings import (
     _compat_resolved_config,
     effective_file_settings,
 )
-from mtest.session.precompile import _run_precompile
+from mtest.session.precompile import (
+    _run_precompile,
+    precompile_out_dir,
+    precompile_out_path,
+)
 from mtest.session.shard import partition
+from mtest.session.store import (
+    CacheContext,
+    collect_env_base,
+    finalize_includes,
+    precompile_key,
+    precompile_probe,
+    precompile_publish,
+)
 
 
 @fieldwise_init
@@ -57,6 +69,30 @@ struct CollectResult(Copyable, Movable):
     var code: Int
     """The resolved exit code: 2 on an interrupt, 3 on drift or an internal
     error, 1 on a failing file, 5 when nothing was collectable, else 0."""
+
+
+def _cache_off_diagnostic(
+    mut ctx: CacheContext, config: RunnerConfig
+) -> String:
+    """The one line collect prints when it is listing without its cache.
+
+    Collect drives no reporter — `main` prints its diagnostics to stderr — so
+    the `cache-off` warning a run emits as an event reaches a collect user as a
+    diagnostic line instead. The condition and the once-only latch are the run
+    path's, exactly: a context that is off, has not said so, and was not turned
+    off by the user asking for it.
+
+    Args:
+        ctx: The session's cache state; `warned` is set when a line is produced.
+        config: The run's config, read for `no_cache`.
+
+    Returns:
+        The diagnostic line, or `""` when there is nothing to say.
+    """
+    if ctx.enabled or ctx.warned or config.no_cache:
+        return String("")
+    ctx.warned = True
+    return String("collect: cache-off: ") + ctx.disable_reason
 
 
 def _collect_phrase(fr: FileResult) -> String:
@@ -131,6 +167,16 @@ def run_collect(
         )
 
     var reg = BuildRegistry()
+    # The same cache lifecycle a run has, around the same loop: the base is
+    # established before the first child that could build, `--no-cache` is
+    # answered here so no store directory is ever created behind the user's
+    # back, and the include walks close after the precompile steps have widened
+    # the include set.
+    var ctx: CacheContext
+    if config.no_cache:
+        ctx = CacheContext.disabled("--no-cache")
+    else:
+        ctx = collect_env_base(runtime, config, root)
     var includes = config.include_paths.copy()
     var node_ids = List[String]()
     var diags = List[String]()
@@ -150,10 +196,25 @@ def run_collect(
     # Precompile steps first, widening the include set so a file importing a
     # precompiled package can build for its probe. A failed or unspawnable step
     # is a machinery-class abort (exit 3): collection cannot proceed honestly.
+    # The same stamp seam `run_session` has, around the same loop: an unchanged
+    # step is skipped and only widens the include set, and every earlier step's
+    # output is an input to the next one's key.
+    var prior_outputs = List[String]()
     for pc in config.precompiles:
         if interrupt_requested():
             interrupted = True
             break
+        var out_path = precompile_out_path(pc.src, pc.out)
+        var key = precompile_key(
+            ctx, root, pc.src, includes, prior_outputs, out_path
+        )
+        var skip = False
+        if key:
+            skip = precompile_probe(root, key.value(), out_path)
+        if skip:
+            includes.append(precompile_out_dir(out_path))
+            prior_outputs.append(out_path)
+            continue
         try:
             var pr = _run_precompile(
                 runtime, config, root, pc.src, pc.out, includes
@@ -169,7 +230,11 @@ def run_collect(
                 )
                 internal = True
                 break
+            # First-attempt outputs only, exactly as in `run_session`.
+            if key and pr.attempts_used == 1:
+                precompile_publish(root, key.value(), out_path)
             includes.append(pr.out_dir)
+            prior_outputs.append(out_path)
         except:
             # `_run_precompile`'s own machinery (e.g. the output directory could
             # not be created) raised rather than returning a result. Mirror
@@ -187,6 +252,11 @@ def run_collect(
             internal = True
             break
 
+    finalize_includes(ctx, root, includes)
+    var cache_off_line = _cache_off_diagnostic(ctx, config)
+    if cache_off_line != "":
+        diags.append(cache_off_line)
+
     if not (interrupted or internal):
         for ri in range(len(disc.run_files)):
             if interrupt_requested():
@@ -197,7 +267,7 @@ def run_collect(
             var bo: _BuildOutcome
             try:
                 bo = _build_for_selection(
-                    runtime, config, settings, root, rel, includes, reg
+                    runtime, config, settings, root, rel, includes, reg, ctx
                 )
             except:
                 diags.append(
@@ -207,6 +277,15 @@ def run_collect(
                 )
                 internal = True
                 break
+            if bo.cache_warning != "":
+                # The build itself succeeded; only its publication did not, so
+                # this is a note beside the listing and never a failing file.
+                diags.append(
+                    "collect: "
+                    + escape_one_line(rel)
+                    + ": cache-publish: "
+                    + bo.cache_warning
+                )
             if bo.terminal:
                 if bo.result.interrupted:
                     interrupted = True
@@ -278,6 +357,13 @@ def run_collect(
                 drift = True
             else:
                 any_failing = True
+
+    # A context that only went off while listing — a store that could not be
+    # created, a source that would not read — says so now. The latch on the
+    # context makes this a no-op when the line above already went out.
+    var late_cache_off = _cache_off_diagnostic(ctx, config)
+    if late_cache_off != "":
+        diags.append(late_cache_off)
 
     sort(node_ids)
 

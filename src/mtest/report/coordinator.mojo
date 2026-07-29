@@ -86,8 +86,21 @@ trait ReportCoordinator:
         """
         ...
 
-    def finalize_junit(mut self) -> JunitFinalizeResult:
+    def finalize_junit(
+        mut self, built_files: Int, cached_files: Int
+    ) -> JunitFinalizeResult:
         """Publish the JUnit artifact: assemble, verify-write, atomic-rename.
+
+        The two build-cache counters ride this call rather than an event: the
+        JUnit reporter has no `SESSION_FINISHED` branch, so a run-wide terminal
+        fact can only reach it through the finalize seam. They partition the
+        run's first-attempt compile admissions — `built_files` counts those that
+        reached the compiler, compile FAILURES included, `cached_files` those
+        served from the store — and both zero states nothing in the document.
+
+        Args:
+            built_files: First-attempt compile admissions, failures included.
+            cached_files: Cache-hit admissions.
 
         Returns:
             The finalize result, so the session can report a finalization
@@ -305,9 +318,16 @@ struct StandardReportCoordinator(ReportCoordinator):
         """
         self.junit.note_not_run(selected_paths)
 
-    def finalize_junit(mut self) -> JunitFinalizeResult:
-        """Publish the JUnit artifact."""
-        return self.junit.finalize()
+    def finalize_junit(
+        mut self, built_files: Int, cached_files: Int
+    ) -> JunitFinalizeResult:
+        """Publish the JUnit artifact, naming the run's cache counters.
+
+        Args:
+            built_files: First-attempt compile admissions, failures included.
+            cached_files: Cache-hit admissions.
+        """
+        return self.junit.finalize(built_files, cached_files)
 
     def annotation_tail(self) -> List[String]:
         """Render the annotation tail. Allocates the returned list."""
@@ -455,9 +475,16 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
         """
         self.junit.note_not_run(selected_paths)
 
-    def finalize_junit(mut self) -> JunitFinalizeResult:
-        """Publish the JUnit artifact."""
-        return self.junit.finalize()
+    def finalize_junit(
+        mut self, built_files: Int, cached_files: Int
+    ) -> JunitFinalizeResult:
+        """Publish the JUnit artifact, naming the run's cache counters.
+
+        Args:
+            built_files: First-attempt compile admissions, failures included.
+            cached_files: Cache-hit admissions.
+        """
+        return self.junit.finalize(built_files, cached_files)
 
     def annotation_tail(self) -> List[String]:
         """Render the annotation tail. Allocates the returned list."""

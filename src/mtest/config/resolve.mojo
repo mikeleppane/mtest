@@ -208,6 +208,15 @@ struct ResolvedConfig(Copyable, Movable):
     var last_run_state: LastRunState
     """The parsed prior failures supplied by main, empty before state loading."""
 
+    var state_cleared: Bool
+    """Whether `--cache-clear` just deleted the last-run state this run would
+    otherwise have read.
+
+    Supplied by main alongside `last_run_state`, because only main knows whether
+    the state file was there when it removed the cache directory. The session
+    turns it into one warning under `--lf`/`--ff`; every other caller leaves it
+    False and sees the event stream it always saw."""
+
 
 def validate_resolved_config(config: ResolvedConfig) -> Optional[String]:
     """Validate cross-key constraints over command-active resolved values.
@@ -460,4 +469,5 @@ def resolve_config(
         config_file="",
         state_warnings=[],
         last_run_state=LastRunState.empty(),
+        state_cleared=False,
     )

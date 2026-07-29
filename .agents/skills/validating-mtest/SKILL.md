@@ -33,12 +33,19 @@ Two techniques defeat it, and the validator is built on them:
   the check discriminates on the contract's hardest guarantee instead of on
   informal text.
 
+The **build cache (§8.5) is the newest instance of that same defect**, and the
+sharpest: *a stale cache hit is a green run that never compiled the code under
+test.* The right test set runs, the summary is plausible, the exit code is 0 —
+and the binary is the one built before the edit. Hunt it the same way: edit an
+input, assert the *counters* say a rebuild happened, and make the edit a poison
+one so a wrong reuse flips the exit code instead of merely looking fast.
+
 ## When to use
 
 - Acceptance/QA pass over the CLI from a user's perspective.
 - Before a release, or after re-pinning Mojo (`transcripts` change → re-validate).
-- After any change to `cli`, `discover`, `select`, `session`, `protocol`, or
-  `report` — confirm no user-facing promise regressed.
+- After any change to `cli`, `discover`, `select`, `session`, `cache`,
+  `protocol`, or `report` — confirm no user-facing promise regressed.
 
 Not for: internal unit correctness (`pixi run test`) or protocol-snapshot
 drift (`pixi run transcripts-check`).
@@ -118,6 +125,32 @@ A false finding wastes everyone's time. Most come from the harness, not mtest:
   artifact, **not** a COMPILE-ERROR bug. `scripts/harness/selfhost.py` passes it
   as `--build-arg=-Xlinker --build-arg=<native object>` on every self-hosted
   invocation.
+- **`.mtest-cache/` survives your scaffold.** The store lives in the invocation
+  root, so a scaffold you reuse — or a repo checkout you run in twice — starts
+  its second run warm. A run that never compiled is a run whose compile-time
+  behavior you did not observe: a COMPILE-ERROR probe, a `--compile-timeout`
+  probe, or anything asserting build diagnostics silently stops testing what it
+  names once the file is in the store. Scaffold a fresh root per scenario, or
+  `--cache-clear`.
+- **Never time a run against a warm store, and never call time evidence.** The
+  compiler keeps a module cache of its own, so an uncached rebuild can finish as
+  fast as a hit. The **counters** are the observable: `builds: N, cached: M` on
+  the band, `built_files`/`cached_files` on the `--json` `session_finished`
+  record. Their SUM is the run's first-attempt compile admissions (compile
+  failures included, gates included; retries, `collect` probes, and precompile
+  steps excluded) and is stable for identical inputs; how it *divides* depends
+  on what the store held at start, so a check pinning `built_files` alone is
+  warmth-dependent and will flap. `--no-cache` is how you take a measurement
+  with the store out of the picture — it neither reads nor writes, so unlike
+  `--cache-clear` it leaves the next run just as warm as it found it.
+- **`--cache-clear` also deletes `lastrun`.** A paired scenario that clears the
+  store between halves has destroyed the `--lf`/`--ff` state along with it, and
+  the clearing run repopulates the store on its way out.
+- **A `cache-off` warning is contract, not noise** — an event on the stream, a
+  line ahead of the first file on the console, a `collect: cache-off: ...` line
+  on stderr under `collect`. Never filter it, never read it as a failure, but do
+  notice it: a scenario that meant to exercise the cache and got a `cache-off`
+  proved nothing about the cache.
 
 **Reproduce before you report.** Re-run a suspected finding cleanly (fresh CWD,
 direct exit capture, correct build) before writing it up. The original pass
@@ -146,13 +179,21 @@ Every row below is a check in `scripts/qa/contract.py` unless marked *(manual)*.
 | precompile | success auto-adds `-I` (import resolves, PASS); failure → `PRECOMPILE-ERROR` + casualty files listed | 8.3,10 |
 | interrupt | SIGINT to **mtest only** → exit 2, partial summary, **child tree freed** (tests mtest's own teardown, not a direct signal) | 9,24.2 |
 | color | `--color never`→no ANSI, `always`→ANSI, and the flag **wins over `NO_COLOR`** | 15.1 |
+| build cache *(manual)* | edit a source → `cached` drops and the **new** behavior runs (poison the edit so a stale hit exits 1); `touch` alone → still a hit; a new `mojo` or an edit under an `-I` root → everything rebuilds; unclassifiable `--build-arg` → one `cache-off` warning, exit unchanged; `--no-cache` writes no store at all; `--cache-clear` on a symlinked or unmarked `.mtest-cache` → 4 with the tree untouched | 8.5,9 |
 
 Still worth a *manual* probe beyond the oracle: `--collect-only` alias
 equivalence; exclusion winning over `--gate`/explicit operand (§12); valid
-`--build-arg` actually forwarding; and the deepest honesty case — a **new**
+`--build-arg` actually forwarding; the whole build-cache row above, which the
+oracle does not encode at all today; and the deepest honesty case — a **new**
 protocol drift after a Mojo re-pin must route to exit 3, never launder into a
 verdict (the `drift/` scaffold shows the shape; `e2e/hostile` and
 `e2e/chameleon` have more).
+
+The cache row is worth building as a *paired* run rather than a single one: the
+same scenario twice over one root, asserting the exact counters both times.
+Cold then warm proves reuse happens; cold, edit, warm proves it stops happening
+when it must. Only the second pair can catch a stale hit, and only the counters
+plus a poisoned edit make it fail loudly instead of quietly passing.
 
 ## Triage — classify every finding
 
@@ -186,11 +227,30 @@ Severity by user impact: silent-wrong > wrong-exit-code > confusing-output.
   missing binary rather than silently validating old code, but only if you
   pass it; without it, `contract-check` rebuilds first.
 - A safety-critical check SKIPped and the suite still exited 0 — run `--strict`.
+- A run you called green whose band said `builds: 0` — nothing was compiled, so
+  it says nothing about the code you just changed. Check the counters before
+  you believe any result about compile-time behavior.
+- You edited a source, reran, and the outcome did not change — before filing it,
+  confirm `builds` moved. An unchanged verdict from an unchanged binary is a
+  cache finding, not a runner finding, and it is the one that matters most.
+- You compared two wall-clock numbers and concluded something about the cache.
+  Timings here are confounded by the compiler's own module cache; the counters
+  are the observable.
+- A scenario reused a scaffold root and the second run reported `cached: N` —
+  its build-side assertions stopped executing at that point. Fresh root, or
+  `--cache-clear`.
+- A cache condition changed a verdict or an exit code. §8.5 promises it never
+  does: a cache that cannot be trusted must cost a rebuild, never a run. This
+  one is always a BUG, at the top of the severity order.
 
 ## Complementary gates (do not reinvent)
 
 `pixi run e2e` (known-outcome fixture tree), `pixi run test` (exhaustive Mojo
 unit + integration), `pixi run dogfood-check` (three focused real-pipeline
-probes), and `pixi run transcripts-check` (protocol pin). This skill is the
-black-box, user-perspective layer **on top** of those; if it and `e2e` ever
-disagree about a promise, that disagreement is itself a finding.
+probes), `pixi run transcripts-check` (protocol pin), and `pixi run
+cache-protocol-check` (real `build/mtest` processes against throwaway projects,
+concurrently and under the publication fault seam — the store's protocol
+properties asserted from outside, and the only non-reading coverage `--no-cache`
+and `--cache-clear` have). This skill is the black-box, user-perspective layer
+**on top** of those; if it and `e2e` ever disagree about a promise, that
+disagreement is itself a finding.

@@ -47,6 +47,11 @@ comptime _ELISION: StaticString = "…"
 """The visible marker placed between a kept head window and tail window."""
 comptime _TIME_CEIL = 9223372036854775807
 """The saturation ceiling (2**63 - 1) for the millisecond scaling in `time`."""
+comptime CACHE_SUITE_NAME: StaticString = "mtest::cache"
+"""The suite key of the synthetic, zero-row suite carrying the cache counters.
+
+Session-level like `mtest::precompile`, and deliberately not a path, so it can
+never collide with a real file's suite key."""
 
 
 @fieldwise_init
@@ -454,6 +459,58 @@ def render_suite(suite: JunitSuite) -> RenderedSuite:
         )
     body += "</testsuite>"
     return RenderedSuite(suite.name.copy(), body^, n, failures, errors, skipped)
+
+
+def render_cache_suite(built_files: Int, cached_files: Int) -> RenderedSuite:
+    """Render the run-wide build-cache counters as a zero-row property suite.
+
+    junit-10 gives `<testsuites>` no `<properties>` child at all — its content
+    model is a bare sequence of `<testsuite>` — so a run-wide fact can only be
+    stated inside a suite. This renders the one suite that carries no rows: a
+    `mtest::cache` `<testsuite>` with `tests="0"` whose whole body is the
+    `<properties>` block, which the schema does allow as a `<testsuite>` child.
+    Carrying no `<testcase>`, it contributes zero to every count the assembler
+    sums and to every arithmetic invariant the oracle recomputes.
+
+    The two counters partition the run's first-attempt compile admissions:
+    `mtest.built_files` counts admissions that reached the compiler, compile
+    FAILURES included, and `mtest.cached_files` counts those served from the
+    store. Retries, probes and precompile steps never count.
+
+    Args:
+        built_files: First-attempt compile admissions, failures included.
+        cached_files: Cache-hit admissions.
+
+    Returns:
+        The rendered fragment, keyed `mtest::cache`, with all four counts zero.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.junit import render_cache_suite
+
+    var frag = render_cache_suite(3, 98)  # frag.tests == 0
+    ```
+    """
+    var body = (
+        '<testsuite name="'
+        + xml_escape_attribute(String(CACHE_SUITE_NAME))
+        + '" tests="0" failures="0" errors="0" skipped="0" time="'
+        + format_seconds(0.0)
+        + '"><properties>'
+    )
+    body += (
+        '<property name="mtest.built_files" value="'
+        + String(built_files)
+        + '"/>'
+    )
+    body += (
+        '<property name="mtest.cached_files" value="'
+        + String(cached_files)
+        + '"/>'
+    )
+    body += "</properties></testsuite>"
+    return RenderedSuite(String(CACHE_SUITE_NAME), body^, 0, 0, 0, 0)
 
 
 def assemble(root_name: String, frags: List[RenderedSuite]) -> String:

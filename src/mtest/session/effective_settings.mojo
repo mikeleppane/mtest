@@ -54,6 +54,7 @@ def _compat_resolved_config(config: RunnerConfig) -> ResolvedConfig:
         "",
         List[String](),
         LastRunState.empty(),
+        False,
     )
 
 

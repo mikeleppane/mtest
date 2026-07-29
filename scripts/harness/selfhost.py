@@ -260,6 +260,18 @@ timeout, precompile error, flaky. It is a capture rather than a skip so that a
 nonzero abnormal count is *named* instead of silently swallowed.
 """
 
+CACHE_COUNTS_RE = re.compile(r",\s*builds:\s*\d+,\s*cached:\s*\d+")
+"""The build-cache accounting mtest appends to the same band.
+
+Not an abnormal outcome and never a failure: `builds` counts first-attempt
+compiles and `cached` counts artifact-store hits, so a green lane reports
+`builds: N, cached: 0` against a cold store and `builds: 0, cached: N` against a
+warm one. Neither pair is pinnable -- whether this lane's own store is populated
+depends on what ran before it -- so the segment is removed before the abnormal
+check rather than asserted, and only genuine abnormal outcome counts survive to
+be named.
+"""
+
 VERDICT_ROW_RE = re.compile(
     r"^(?P<verdict>[A-Z][A-Z-]{2,})\s+(?P<path>\S+\.mojo)(?=\s|$)",
     re.MULTILINE,
@@ -951,7 +963,7 @@ def _reconcile_totals(output: str, inventory: Inventory, failures: list[str]) ->
     deselected = summary.group("deselected")
     if deselected is not None and int(deselected) != 0:
         failures.append(f"[console] mtest reported {deselected} deselected; must be 0")
-    abnormal = summary.group("abnormal").strip()
+    abnormal = CACHE_COUNTS_RE.sub("", summary.group("abnormal")).strip()
     if abnormal:
         failures.append(
             f"[console] mtest's summary carries abnormal file counts: {abnormal!r}; "

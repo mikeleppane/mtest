@@ -98,6 +98,52 @@ class AsanCheckTests(unittest.TestCase):
                 f"found {generated_wrappers}",
             )
 
+    def test_a_suite_build_gets_the_compile_budget_not_the_run_budget(self) -> None:
+        """Compiling a suite and running it are budgeted separately.
+
+        A `mojo build` of a suite that imports `mtest.session` compiles the whole
+        session and cache closure, which is minutes of work on a two-core hosted
+        runner; the built binary is expected to finish in seconds. Sharing one
+        budget forces a choice between killing a healthy compiler and letting a
+        hung binary sit. These are separate numbers on purpose.
+        """
+        source = asan_check.ROOT / "tests" / "unit" / "test_config.mojo"
+        expected = asan_check.test_count(source)
+        results = [
+            subprocess.CompletedProcess(args=["mojo"], returncode=0, stdout=""),
+            subprocess.CompletedProcess(args=["nm"], returncode=0, stdout="__asan_"),
+            subprocess.CompletedProcess(
+                args=["test_config"],
+                returncode=0,
+                stdout=f"{expected} tests run: {expected} passed\n",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            with (
+                patch.object(asan_check, "OUT", Path(raw_tmp)),
+                patch.object(asan_check, "run", side_effect=results) as mocked_run,
+            ):
+                asan_check.compile_and_run_test(source, {})
+
+            self.assertEqual(
+                mocked_run.call_args_list[0].kwargs.get("timeout"),
+                asan_check.BUILD_TIMEOUT,
+                "the suite build must carry the compile budget",
+            )
+            self.assertIsNone(
+                mocked_run.call_args_list[2].kwargs.get("timeout"),
+                "running the built binary must keep the tighter default budget",
+            )
+
+    def test_every_mojo_build_shares_one_compile_budget(self) -> None:
+        """One number covers every compile in the lane, so growth trips none of them.
+
+        The budget is a guard against a wedged compiler, not a performance
+        assertion, so it is sized well above the slowest observed build rather
+        than tuned per call site.
+        """
+        self.assertGreater(asan_check.BUILD_TIMEOUT, 180)
+
     def test_production_smoke_builds_only_the_exec_probe(self) -> None:
         results = [
             subprocess.CompletedProcess(args=["mojo"], returncode=0, stdout=""),

@@ -165,6 +165,19 @@ CLI_HOME = OUT / "cli-home"
 """The probe's `HOME`. Separate from `clean_environment`'s, because the CLI
 writes below its invocation root and a shared empty home would mix the two."""
 
+CLI_MEMCHECK_LOG_NAME = "cli-reporters.memcheck.log"
+"""The file Valgrind's own diagnostics for the CLI probe are redirected to.
+
+A sibling of `cli-reporters.log`, and keeping the `.log` suffix, because the
+workflow uploads this lane's evidence as `build/safety/valgrind/*.log`: the two
+channels have to land next to each other and both match that glob, or a human
+debugging from the artifact alone loses half the story.
+
+A bare name rather than an `OUT`-derived `Path` like its neighbours above, so it
+follows a patched `OUT` in the unit tests. Those drive `check_cli` with a
+stand-in Valgrind, and a fixed absolute path would have them writing into the
+real artifact tree — the one a concurrent gate run is using."""
+
 HOSTILE_BUILD_STANDIN = (
     ROOT / "scripts" / "fixtures" / "toolchain" / "fake_hostile_mojo.py"
 )
@@ -323,6 +336,31 @@ def require(condition: bool, message: str) -> None:
         fail(message)
 
 
+def read_valgrind_log(path: Path) -> str:
+    """Read a `--log-file` target, tolerating bytes Valgrind copied verbatim.
+
+    Memcheck prints demangled symbol names exactly as the object file spells
+    them, and the pinned toolchain mangles a parameterized `_Global` type name
+    with control bytes in it, so this file is not guaranteed to be clean UTF-8.
+    Replacing what will not decode keeps a hostile or merely odd symbol name
+    from turning a real Memcheck finding into a `UnicodeDecodeError` traceback
+    with no diagnostic attached. Nothing is lost: every marker the callers match
+    is plain ASCII, and a replacement character can neither create nor destroy
+    one.
+
+    Args:
+        path: The log Valgrind was told to write.
+
+    Returns:
+        The log's text.
+
+    Raises:
+        OSError: The log is unreadable. Callers require its existence first, so
+            reaching this means the file was removed mid-run.
+    """
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
 def clean_environment() -> dict[str, str]:
     """Return an environment that cannot import user Valgrind configuration."""
     env = os.environ.copy()
@@ -421,6 +459,7 @@ def valgrind(
     quiet_child: bool,
     flags: tuple[str, ...] = VALGRIND_FLAGS,
     cwd: Path | None = None,
+    log_file: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the locked Memcheck command, optionally omitting fork-child reports.
 
@@ -432,19 +471,74 @@ def valgrind(
     findings remain visible. A second unsilenced pass audits invalid and
     undefined accesses in the pre-exec fork child without treating its COW
     allocations and inherited descriptors as ownership leaks.
+
+    Args:
+        command: The client argv to wrap.
+        env: The Valgrind-clean environment.
+        quiet_child: Suppress reports from the pre-exec fork copy. Required
+            alongside `log_file`, and asserted below, for the reason given
+            there.
+        flags: The locked Memcheck flag set for this lane.
+        cwd: The client's working directory.
+        log_file: Where to send Valgrind's OWN diagnostics, leaving the returned
+            `stdout` holding the client's output alone. `None`, the default,
+            keeps the single combined capture every lane but the CLI probe
+            asserts against. See `check_cli` for why exactly one lane needs the
+            split.
+
+    Returns:
+        The completed run. Its `stdout` is the combined capture by default and
+        the client's own output when `log_file` is set.
+
+    Raises:
+        SystemExit: Valgrind reported a fatal startup error on either channel.
     """
     selected_flags = list(flags)
     if quiet_child:
         selected_flags.append("--child-silent-after-fork=yes")
+    if log_file is not None:
+        # Measured on valgrind-3.27.1: a value with no `%p` in it is ONE file,
+        # and a fork child inherits it and appends its own records. Only
+        # `--child-silent-after-fork=yes` keeps the log to the parent alone, so
+        # a redirected run without it would judge the transient pre-exec copy's
+        # inherited allocations as the parent's.
+        require(
+            quiet_child,
+            f"redirecting Valgrind's log to {log_file} requires quiet_child: "
+            "an unsilenced fork child writes its own records into the same "
+            "file, which the parent's assertions would then read as theirs",
+        )
+        # `%p`, `%q{VAR}` and `%%` are filename format specifiers to Valgrind,
+        # so a checkout below a path containing `%` would send the log
+        # somewhere this gate never looks. Name that here, where it is fixable,
+        # rather than downstream as an inexplicably absent Memcheck banner.
+        require(
+            "%" not in str(log_file),
+            f"Valgrind log path {log_file} contains '%', which Valgrind reads "
+            "as a filename format specifier: check the repository out below a "
+            "path with no '%' in it",
+        )
+        selected_flags.append(f"--log-file={log_file}")
     result = run(["valgrind", *selected_flags, *command], env=env, cwd=cwd)
+    # Startup failures arrive on whichever channel was open when they happened,
+    # so both are scanned. Measured on valgrind-3.27.1: a command-line error is
+    # reported before the log file is opened and lands on stderr, captured here
+    # in `result.stdout`; every fatal after that point — including the
+    # mandatory-redirection failure this probe exists for, which the loader
+    # raises while translating — is written to the log and leaves the pipe
+    # empty. Reading only `result.stdout` would retire this diagnostic for
+    # every redirected run.
+    diagnostics = result.stdout
+    if log_file is not None and log_file.is_file():
+        diagnostics += read_valgrind_log(log_file)
     startup_failure = re.search(
-        r"(?m)^valgrind:\s+Fatal error at startup:", result.stdout
+        r"(?m)^valgrind:\s+Fatal error at startup:", diagnostics
     )
     if startup_failure is not None:
-        (OUT / "startup-failure.log").write_text(result.stdout)
+        (OUT / "startup-failure.log").write_text(diagnostics)
         require(
             False,
-            f"Valgrind failed to start for {' '.join(command)}:\n{result.stdout}",
+            f"Valgrind failed to start for {' '.join(command)}:\n{diagnostics}",
         )
     return result
 
@@ -722,7 +816,10 @@ def check_cli_provenance(returncode: int, log: str) -> None:
 
     Args:
         returncode: What the `valgrind` invocation returned.
-        log: The probe's complete combined output.
+        log: Valgrind's own diagnostics for the probe, and only those. Every
+            marker below is something Valgrind prints, so handing this the
+            client's output instead would make each `require` a claim about the
+            wrong process.
 
     Raises:
         SystemExit: The log carries no Memcheck provenance, reports findings,
@@ -857,14 +954,33 @@ def check_cli_probe_output(
 
 
 def check_cli(env: dict[str, str]) -> None:
-    """Source-build the real CLI and drive the fixed reporter run in Memcheck.
+    r"""Source-build the real CLI and drive the fixed reporter run in Memcheck.
+
+    This is the one lane that splits the two output channels, because it is the
+    one lane whose assertions are about what the CLIENT printed. `run` merges
+    the client's stderr into its stdout and Valgrind writes its diagnostics to
+    stderr, so a combined capture makes every `==<pid>==` frame line
+    indistinguishable from something mtest emitted. That is fatal here
+    specifically: `check_cli_probe_output` scans for raw control bytes to prove
+    a hostile child cannot address the terminal through mtest, and Memcheck
+    prints demangled symbol names verbatim — the pinned toolchain mangles a
+    parameterized `_Global` type name with a literal ESC in it, so Valgrind's
+    own leak records failed that scan for bytes the console never wrote.
+
+    Filtering `^==\d+== ` lines out before the scan would silence the same
+    symptom and hand an attacker the escape hatch this gate exists to close: a
+    hostile child that printed `==999== <ESC>[2J` would pass straight through
+    the filter, terminal sequence and all. Channel separation has no such hole,
+    because a client cannot write into Valgrind's private log whatever bytes it
+    emits.
 
     Args:
         env: The Valgrind-clean environment.
 
     Raises:
-        SystemExit: The build failed, the probe carries no Memcheck provenance,
-            Memcheck reported a finding, or an artifact was rejected.
+        SystemExit: The build failed, Valgrind wrote no log, the probe carries
+            no Memcheck provenance, Memcheck reported a finding, or an artifact
+            was rejected.
     """
     compiled = run(
         [
@@ -892,15 +1008,24 @@ def check_cli(env: dict[str, str]) -> None:
     CLI_HOME.mkdir(parents=True, exist_ok=True)
     probe_env = dict(env)
     probe_env["HOME"] = str(CLI_HOME)
+    memcheck_log = OUT / CLI_MEMCHECK_LOG_NAME
     result = valgrind(
         cli_probe_command(CLI_BINARY, CLI_SCRATCH),
         probe_env,
         quiet_child=True,
         flags=CLI_VALGRIND_FLAGS,
         cwd=CLI_SCRATCH,
+        log_file=memcheck_log,
     )
+    # Written before anything is judged, so a rejection below still leaves both
+    # channels in the uploaded artifact.
     (OUT / "cli-reporters.log").write_text(result.stdout)
-    check_cli_provenance(result.returncode, result.stdout)
+    require(
+        memcheck_log.is_file(),
+        f"Valgrind wrote no log at {memcheck_log}: the CLI probe's Memcheck "
+        "channel is missing, so nothing it found can be judged",
+    )
+    check_cli_provenance(result.returncode, read_valgrind_log(memcheck_log))
     detail = check_cli_probe_output(
         result.returncode, result.stdout, CLI_SCRATCH, "Valgrind"
     )

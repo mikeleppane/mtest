@@ -69,9 +69,21 @@ from mtest.select.failure_selection import (
 from mtest.session.pipeline import PipelineHalt, RunPipeline
 from mtest.session.pool import _run_pool_batch, resolve_worker_plan
 from mtest.session.pool_plan import partition_effective_serial, stale_serials
-from mtest.session.precompile import _run_precompile
+from mtest.session.precompile import (
+    _run_precompile,
+    precompile_out_dir,
+    precompile_out_path,
+)
 from mtest.session.selection import _run_selection
 from mtest.session.shard import partition
+from mtest.session.store import (
+    CacheContext,
+    collect_env_base,
+    finalize_includes,
+    precompile_key,
+    precompile_probe,
+    precompile_publish,
+)
 
 
 def _flush_console[
@@ -99,6 +111,38 @@ def _flush_console[
     if chunk.byte_length() == 0:
         return
     print(chunk, end="", file=FileDescriptor(console_fd), flush=True)
+
+
+def _warn_cache_off[
+    C: ReportCoordinator
+](mut ctx: CacheContext, config: RunnerConfig, mut reporter: C):
+    """Say once, and only once, that this run is building without its cache.
+
+    The warning is latched on the context rather than on a local, so the two
+    places that ask — right after the key prefix is finalized, and again once the
+    run has settled — cannot both fire. The first covers everything known before
+    any file is built (an unrecognized build argument, an unreadable include
+    root, a compiler that will not answer `--version`); the second covers a
+    context that only went off mid-run, when a store proved unusable or a source
+    would not read.
+
+    `--no-cache` says nothing: the user turned the cache off, and reporting back
+    that it is off is noise. That is why `CacheContext.disabled` presets
+    `warned`, and why this checks the flag as well — the two agree, and either
+    one alone would be enough.
+
+    Parameters:
+        C: The report coordinator the warning is fanned to.
+
+    Args:
+        ctx: The session's cache state; `warned` is set when the warning fires.
+        config: The run's config, read for `no_cache`.
+        reporter: The coordinator the warning is handed to.
+    """
+    if ctx.enabled or ctx.warned or config.no_cache:
+        return
+    reporter.handle(Event.warning("cache-off", ctx.disable_reason))
+    ctx.warned = True
 
 
 @fieldwise_init
@@ -250,6 +294,18 @@ def run_session[
     )
     for warning in resolved.state_warnings:
         reporter.handle(Event.warning("state-malformed-line", warning))
+    # `--cache-clear` deleted the last-run state before this session started, so
+    # a reselection flag that survived the same command line has nothing left to
+    # select from. Said here rather than from main because this is where a
+    # reporter exists, and gated on the plumbed flag rather than on the config
+    # so an ordinary `--lf` run's event stream is unchanged.
+    if resolved.state_cleared and (config.last_failed or config.failed_first):
+        reporter.handle(
+            Event.warning(
+                "cache-clear",
+                "last-run state was just cleared; running the full selection",
+            )
+        )
     if config.last_failed:
         if not resolved.state:
             reporter.handle(
@@ -366,6 +422,18 @@ def run_session[
     # Collected as verdicts land; feeds no count, no multiset, no exit code.
     var crash_files = List[_CrashFile]()
 
+    # The build cache's session state, established BEFORE the first child that
+    # could build anything. `--no-cache` is answered here and nowhere later:
+    # every store operation from `store_build_target` onward creates
+    # `.mtest-cache/` and its ownership marker as a side effect, so a gate placed
+    # any further down would still leave behind the directory the user asked
+    # this run not to touch.
+    var ctx: CacheContext
+    if config.no_cache:
+        ctx = CacheContext.disabled("--no-cache")
+    else:
+        ctx = collect_env_base(runtime, config, root)
+
     # Precompile steps, in listed order. Each success widens the include set.
     var includes = config.include_paths.copy()
     # Every selected file (gates first, then the run set) depends on the
@@ -374,6 +442,10 @@ def run_session[
     var casualty_files = disc.gate_files.copy()
     for f in disc.run_files:
         casualty_files.append(String(f))
+    # Every earlier step's package is an input to the next one, so the key of a
+    # step carries them explicitly. Skipped steps land here too: their output is
+    # on disk and on the include path exactly as a step that ran.
+    var prior_outputs = List[String]()
     for pc in config.precompiles:
         if interrupt_requested():
             interrupted = True
@@ -381,6 +453,24 @@ def run_session[
         if reporter.stream_failed():
             stream_dead = True
             break
+        var out_path = precompile_out_path(pc.src, pc.out)
+        # Keyed from `ctx.base`, never from `ctx.prefix`: the include walks that
+        # make up `prefix` are exactly what THIS step's output changes.
+        var key = precompile_key(
+            ctx, root, pc.src, includes, prior_outputs, out_path
+        )
+        var skip = False
+        if key:
+            skip = precompile_probe(root, key.value(), out_path)
+        if skip:
+            # The package on disk is already the one this key names. The step
+            # contributes nothing but its include directory — and no counter:
+            # `built_files` and `cached_files` count first-attempt TEST FILE
+            # compile admissions, and a precompile step sits outside that
+            # invariant whether it runs or not.
+            includes.append(precompile_out_dir(out_path))
+            prior_outputs.append(out_path)
+            continue
         try:
             var pr = _run_precompile(
                 runtime, config, root, pc.src, pc.out, includes
@@ -417,13 +507,28 @@ def run_session[
                     )
                 )
                 break
+            # Only a FIRST-ATTEMPT output is stamped, exactly as only a
+            # first-attempt build is published: a step that succeeded on a retry
+            # emitted `precompile-succeeded-after-retry` because its package is
+            # suspect, and stamping it would let every later run skip straight
+            # past that suspicion instead of rebuilding it once.
+            if key and pr.attempts_used == 1:
+                precompile_publish(root, key.value(), out_path)
             includes.append(pr.out_dir)
+            prior_outputs.append(out_path)
         except:
             reporter.handle(
                 Event.internal_error("precompile", config.mojo_path, 0)
             )
             internal_error = True
             break
+
+    # The include set is complete only now: every precompile step that succeeded
+    # added its output directory to it, and a file built later can import from
+    # there. Absorbing the roots' contents here — after the loop, before the
+    # first gate — is what makes one prefix serve every per-file key.
+    finalize_includes(ctx, root, includes)
+    _warn_cache_off(ctx, config, reporter)
 
     var gate_abort = False
     var proceed = not (
@@ -457,7 +562,14 @@ def run_session[
             cores,
             True,
             console_fd,
+            ctx,
         )
+        # The batch's cache admissions, folded onto the session's one context
+        # here rather than counted there: the gate, parallel, and serial batches
+        # each account for themselves, and every fold happens long before the
+        # terminal artifacts read the totals.
+        ctx.built_files += gb.built_files
+        ctx.cached_files += gb.cached_files
         run_outcomes.extend(gb.run_outcomes.copy())
         test_totals.passed += gb.test_totals.passed
         test_totals.failed += gb.test_totals.failed
@@ -492,6 +604,7 @@ def run_session[
                     root,
                     disc.gate_files[gi],
                     includes,
+                    ctx,
                 )
                 if fr.interrupted:
                     interrupted = True
@@ -568,6 +681,7 @@ def run_session[
             reporter,
             summary,
             reg,
+            ctx,
         )
         run_outcomes.extend(sel.run_outcomes.copy())
         test_totals.passed += sel.test_totals.passed
@@ -616,7 +730,10 @@ def run_session[
             cores,
             False,
             console_fd,
+            ctx,
         )
+        ctx.built_files += rb.built_files
+        ctx.cached_files += rb.cached_files
         run_outcomes.extend(rb.run_outcomes.copy())
         test_totals.passed += rb.test_totals.passed
         test_totals.failed += rb.test_totals.failed
@@ -657,9 +774,12 @@ def run_session[
                 cores,
                 False,
                 console_fd,
+                ctx,
                 serial=True,
                 initial_failing=_failing_count(rb.run_outcomes),
             )
+            ctx.built_files += sb.built_files
+            ctx.cached_files += sb.cached_files
             run_outcomes.extend(sb.run_outcomes.copy())
             test_totals.passed += sb.test_totals.passed
             test_totals.failed += sb.test_totals.failed
@@ -715,6 +835,7 @@ def run_session[
                     root,
                     disc.run_files[ri],
                     includes,
+                    ctx,
                 )
                 if fr.interrupted:
                     interrupted = True
@@ -831,7 +952,25 @@ def run_session[
     # failure. A latched junit SPOOL failure did NOT abort the run mid-flight (the
     # deliberate asymmetry vs the stream's fatal abort); it surfaces NOW.
     reporter.note_not_run(casualty_files)
-    var junit_fin = reporter.finalize_junit()
+    # A context that only went off mid-run — a store that could not be created,
+    # a source that would not read — has had no chance to say so yet. It says so
+    # here, before either terminal artifact is sealed. The latch on the context
+    # makes this a no-op whenever the warning already fired up top.
+    _warn_cache_off(ctx, config, reporter)
+
+    # The run-wide build-cache accounting, stated once and read by BOTH terminal
+    # artifacts below: the JUnit finalize (which has no event to ride, so the
+    # counters travel on the call) and the SessionFinished payload. The build
+    # seams keep the counts on the session's one `CacheContext` and they are
+    # folded HERE, ahead of both, so the XML and the JSON stream can never carry
+    # different numbers. The rule those seams obey: `built_files` counts a
+    # FIRST-ATTEMPT compile admission, compile FAILURES included; `cached_files`
+    # a cache-hit admission; retries, probes and precompile steps count as
+    # neither. So `built_files + cached_files == first-attempt compile
+    # admissions`, gates included.
+    var built_files = ctx.built_files
+    var cached_files = ctx.cached_files
+    var junit_fin = reporter.finalize_junit(built_files, cached_files)
     var finalize_failed = junit_fin.failed
     if finalize_failed:
         # Loudly report the finalization failure — the console shows it and the
@@ -866,6 +1005,8 @@ def run_session[
             code,
             test_counts=test_totals,
             flaky_files=flaky_files,
+            built_files=built_files,
+            cached_files=cached_files,
         )
     )
 

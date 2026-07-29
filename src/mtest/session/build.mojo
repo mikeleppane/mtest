@@ -8,9 +8,17 @@ outcome through the same `resolve_report`/`classify` machinery the default run
 path uses, so a crash, a deadline kill, a truncated capture, or an off-grammar
 report resolves identically here and there.
 
-It sits above `file_result` and `scratch` and below the selection sub-session,
-`collect`, and the crash-attribution post-pass, all of which consume the build
-and the universe it produces.
+This is also the FIRST of the three build seams into the artifact store. A
+first-attempt compile under an enabled `CacheContext` keys the file, probes the
+store, and either serves the stored binary (compiling nothing) or compiles
+straight into a staging directory and publishes it atomically. Everything else —
+a disabled context, a recovery rebuild — builds into `build/bin` exactly as
+before, because a retry's binary is invocation-private and must never enter a
+store other runs read.
+
+It sits above `file_result`, `scratch`, and `store`, and below the selection
+sub-session, `collect`, and the crash-attribution post-pass, all of which consume
+the build and the universe it produces.
 """
 from mtest.cache import BuildProduct, BuildRegistry
 from mtest.config import RunnerConfig, lossy_utf8
@@ -32,6 +40,19 @@ from mtest.session.classify import resolve_report
 from mtest.session.effective_settings import EffectiveFileSettings
 from mtest.session.file_result import FileResult
 from mtest.session.scratch import _ensure_dir, _mangle
+from mtest.session.store import (
+    CacheContext,
+    FileKey,
+    PROBE_HIT,
+    PUB_FAILED,
+    StoreBuildTarget,
+    _rewrite_output,
+    file_key,
+    remove_tree_no_follow,
+    store_build_target,
+    store_probe,
+    store_publish,
+)
 from mtest.session.verdict import build_verdict
 
 
@@ -64,11 +85,58 @@ struct _BuildOutcome(Copyable, Movable):
     """Whether a terminal `FileResult` was produced (compile error/internal)."""
     var result: FileResult
     """The terminal `FileResult` to replay when `terminal`."""
+    var from_store: Bool
+    """Whether `binary` is an artifact the store served rather than one this
+    call compiled.
+
+    The caller needs it for one decision: a binary the store validated can be
+    removed before this process executes it, because publishing a generation
+    reaps that source's older ones and a second run over the checkout can
+    publish at any moment. A run that cannot spawn a binary in that position is
+    a file to compile, not an internal error.
+    """
+    var cache_warning: String
+    """Why this build could not be published, or empty when nothing went wrong.
+
+    The caller's channel for the one thing this function can discover and cannot
+    report itself: it holds no reporter, and `collect` has no event seam at all.
+    A publication failure is never a verdict — the binary that was just built is
+    still the binary that runs — so it travels beside the outcome rather than
+    inside it.
+    """
 
 
 def _blank_file_result() -> FileResult:
     """A placeholder `FileResult` for the non-terminal `_BuildOutcome` path."""
     return FileResult.interrupt()
+
+
+def _no_staging() -> StoreBuildTarget:
+    """The staging target meaning "this build is not going into the store"."""
+    return StoreBuildTarget(String(""), String(""))
+
+
+def _discard_staging(root: String, target: StoreBuildTarget):
+    """Remove a staging directory whose build produced nothing worth keeping.
+
+    Called only where the compile did NOT yield a binary this session will run —
+    a compile error, a timeout kill, a spawn failure, an interrupt. A staged
+    directory left behind on those paths is pure debris: it is named after this
+    process, so no later run can ever adopt or reap it.
+
+    Args:
+        root: The invocation root.
+        target: The staging target; a target that was never staged is a no-op.
+    """
+    if not target.ok():
+        return
+    try:
+        remove_tree_no_follow(root + "/" + target.tmp_dir_rel)
+    except:
+        # A staging directory that will not die is litter under a directory
+        # mtest owns; failing the run over it is exactly the "cache condition
+        # breaks an otherwise green run" the design forbids.
+        pass
 
 
 def _build_for_selection(
@@ -79,7 +147,9 @@ def _build_for_selection(
     rel: String,
     include_paths: List[String],
     mut reg: BuildRegistry,
+    mut ctx: CacheContext,
     attempts_used: Int = 1,
+    recovering: Bool = False,
 ) raises -> _BuildOutcome:
     """Build `rel` into the registry once, or produce a terminal result.
 
@@ -89,6 +159,14 @@ def _build_for_selection(
     the registry holds the fresh build, and the binary and canonical paths ride
     back for the probe and the run to share.
 
+    The artifact store is consulted on a FIRST attempt under an enabled context,
+    and only there. A hit compiles nothing: the stored binary, its recorded
+    command line, and its original build duration ride back exactly as a fresh
+    build's would, and the `--skip-all` probe still runs on it downstream. A miss
+    compiles into a staging directory inside the store and publishes it
+    atomically; a publication that fails leaves the staged binary alive, because
+    that binary is the one this session is about to run.
+
     Args:
         runtime: The exec runtime supervising the build spawn.
         config: The resolved runner configuration.
@@ -97,7 +175,19 @@ def _build_for_selection(
         rel: The root-relative path of the file to build.
         include_paths: Directories passed to the compiler as `-I`.
         reg: The build registry that records the build or compile error.
+        ctx: The session's cache state. Its counters are advanced here — one
+            `built_files` per first-attempt compile admission (compile failures
+            included), one `cached_files` per hit — and it is switched off if
+            this file proves the store unusable.
         attempts_used: The current file attempt, for a terminal recovery build.
+            It is the CRASH-class attempt number and is 1 on a stale-name
+            recovery too, so it never decides whether the store is consulted.
+        recovering: Whether this is the stale-name recover-once rebuild rather
+            than the file's first compile. A recovery rebuild is
+            invocation-private: it never keys, probes, publishes, or counts. It
+            exists precisely to obtain a binary the store's answer would not
+            give — serving the generation this session just published would make
+            the rebuild a no-op and the recovery a lie.
 
     Returns:
         The build outcome, terminal or ready-to-probe.
@@ -106,11 +196,63 @@ def _build_for_selection(
         Error: If the build output directory cannot be made, or if
             canonicalizing the source path after a successful build fails. The
             registry writes are non-raising, and the build spawn is caught here
-            and turned into a terminal internal-error result.
+            and turned into a terminal internal-error result. Nothing in the
+            cache path raises: an unusable store costs a rebuild, never a run.
     """
+    # `build/bin` is created unconditionally, exactly as before: a recovery
+    # rebuild lands there, and so does every build under a disabled cache — and
+    # a compile error's reproduce line names it (see the failing branch below),
+    # so it has to be a directory a user can actually build into.
     _ensure_dir(root + "/build/bin")
     var mangled = _mangle(rel)
-    var out_bin = String("build/bin/") + mangled
+    var plain_out = String("build/bin/") + mangled
+    var out_bin = plain_out
+    var first_attempt = not recovering
+    var target = _no_staging()
+    var key = Optional[FileKey](None)
+    var cache_warning = String("")
+
+    if ctx.enabled and first_attempt:
+        key = file_key(ctx, root, rel)
+        if not key:
+            # A source that will not read is about to fail its build anyway, and
+            # a key that cannot cover its own source must never be written.
+            ctx.disable("cannot read the test file '" + rel + "'")
+        else:
+            var hit = store_probe(root, key.value())
+            if hit.kind == PROBE_HIT:
+                var stored = source_identity_key(root, rel)
+                reg.record_build(BuildProduct.built(rel, hit.bin_rel, stored))
+                ctx.cached_files += 1
+                # The stored build's own duration, not zero: the SLOW token must
+                # read the same on a warm run as it did on the cold one.
+                return _BuildOutcome(
+                    True,
+                    hit.bin_rel,
+                    stored,
+                    hit.argv.copy(),
+                    hit.build_seconds,
+                    False,
+                    _blank_file_result(),
+                    True,
+                    String(""),
+                )
+            target = store_build_target(root, mangled)
+            if target.ok():
+                # Compile straight into the store, so publication is one
+                # `rename(2)` and never a copy of a binary that could differ
+                # from the one that was digested.
+                out_bin = target.out_rel
+            else:
+                # Cache off for the session: a store that cannot be staged into
+                # once will not stage the next file either, and probing on would
+                # spend a digest per file for a hit that can never be published.
+                ctx.disable(
+                    "the cache could not create its store directory under"
+                    " '.mtest-cache'"
+                )
+                key = Optional[FileKey](None)
+
     var build_argv = List[String]()
     build_argv.append(config.mojo_path)
     build_argv.append("build")
@@ -122,6 +264,14 @@ def _build_for_selection(
         build_argv.append(p)
     for a in config.build_args:
         build_argv.append(a)
+
+    if first_attempt:
+        # ADMISSION, and the only place either counter moves on this path: the
+        # file is about to be compiled for the first time, so it is a built
+        # file whatever the compiler goes on to say about it. Counting after the
+        # spawn would quietly drop every compile error out of the accounting and
+        # break `built_files + cached_files == first-attempt admissions`.
+        ctx.built_files += 1
 
     var bres: ProcessResult
     try:
@@ -135,6 +285,7 @@ def _build_for_selection(
             ),
         )
     except:
+        _discard_staging(root, target)
         return _BuildOutcome(
             False,
             "",
@@ -145,14 +296,26 @@ def _build_for_selection(
             FileResult.internal(
                 Event.internal_error("build", config.mojo_path, 0)
             ),
+            False,
+            String(""),
         )
     var bdur = Float64(bres.duration_ms) / 1000.0
     if interrupt_requested():
+        _discard_staging(root, target)
         return _BuildOutcome(
-            False, "", "", List[String](), 0.0, True, FileResult.interrupt()
+            False,
+            "",
+            "",
+            List[String](),
+            0.0,
+            True,
+            FileResult.interrupt(),
+            False,
+            String(""),
         )
     var bterm = bres.termination
     if bterm.is_spawn_failed():
+        _discard_staging(root, target)
         return _BuildOutcome(
             False,
             "",
@@ -163,6 +326,8 @@ def _build_for_selection(
             FileResult.internal(
                 Event.internal_error("build", config.mojo_path, bterm.value)
             ),
+            False,
+            String(""),
         )
     var bsignal = build_verdict(bterm)
     if bsignal.is_failing():
@@ -172,11 +337,20 @@ def _build_for_selection(
         if bsignal == Outcome.COMPILE_TIMEOUT:
             bto = settings.compile_timeout_secs
         reg.record_compile_error(rel, lossy_utf8(bres.stderr_bytes))
+        # The reproduce line names `build/bin`, never the staging directory the
+        # compile actually wrote to. A failed build publishes nothing, so that
+        # directory is deleted on the next line and a line naming it would be a
+        # line no user could ever run; `build/bin/<mangled>` is where an
+        # uncached build puts this file's binary and is live either way. This is
+        # the same liberty `store_publish` takes on success, for the same
+        # reason: record the path the artifact can be reached at.
+        var shown_argv = _rewrite_output(build_argv, out_bin, plain_out)
+        _discard_staging(root, target)
         var ev = Event.file_finished(
             rel,
             bsignal,
             0.0,
-            build_argv.copy(),
+            shown_argv.copy(),
             bdur,
             List[UInt8](),
             bres.stderr_bytes.copy(),
@@ -188,15 +362,38 @@ def _build_for_selection(
             False,
             "",
             "",
-            build_argv^,
+            shown_argv^,
             bdur,
             True,
             FileResult.ran_with(ev^, bsignal),
+            False,
+            String(""),
         )
     var canonical = source_identity_key(root, rel)
-    reg.record_build(BuildProduct.built(rel, out_bin, canonical))
+    var final_bin = out_bin
+    var recorded_argv = build_argv.copy()
+    if target.ok() and key:
+        var pub = store_publish(root, key.value(), target, bdur, build_argv)
+        # The rule with no exceptions: run `bin_rel`, record `argv`. On PUB_OK
+        # the staging directory this build's own argv names is already gone; on
+        # PUB_ADOPTED the live binary belongs to a generation this run never
+        # built and whose command line it therefore cannot reconstruct; on
+        # PUB_FAILED both are this run's own staging path, which is still there.
+        final_bin = pub.bin_rel
+        recorded_argv = pub.argv.copy()
+        if pub.kind == PUB_FAILED:
+            cache_warning = pub.warning
+    reg.record_build(BuildProduct.built(rel, final_bin, canonical))
     return _BuildOutcome(
-        True, out_bin, canonical, build_argv^, bdur, False, _blank_file_result()
+        True,
+        final_bin,
+        canonical,
+        recorded_argv^,
+        bdur,
+        False,
+        _blank_file_result(),
+        False,
+        cache_warning^,
     )
 
 
