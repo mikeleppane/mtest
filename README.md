@@ -867,12 +867,18 @@ PASS           e2e/matrix/test_beta.mojo       0.02s
 
 `builds` counts files compiled for the first time this run — compile failures
 included, because a file that failed to compile was still built. `cached` counts
-files served from the store. Retries, `collect` probes, and precompile steps
-never touch either. Their sum is the run's first-attempt compile count, so
-`builds: 0, cached: N` is the only shape that means nothing was compiled. The
-pair appears on the band only when the run admitted at least one compile, and
-the same two numbers are `built_files` and `cached_files` on the `--json`
+files served from the store. Their sum is the run's first-attempt compile count.
+The pair appears on the band only when the run admitted at least one compile,
+and the same two numbers are `built_files` and `cached_files` on the `--json`
 stream's `session_finished` record.
+
+What the counters do *not* claim is that `builds: 0` means no compiler ran.
+Three paths compile without admitting a first attempt, and none of them moves
+either counter: a crash-class retry, a configured precompile step, and the
+rebuild that recovers a file whose stored binary would not start. So
+`builds: 0, cached: N` means nothing was compiled *to produce a verdict* — the
+work the counters are about — and a run showing it can still have spawned the
+compiler. Use `-v` if you need to see every command a run actually issued.
 
 Read the counters, not the clock. Both runs above finish in about a second
 because the files are tiny and `mojo` keeps a module cache of its own; the
@@ -982,6 +988,18 @@ PASS           e2e/matrix/test_beta.mojo       0.02s
 state together — and *then* runs, so the session that clears the store also
 repopulates it. Both flags are CLI-only and are never read from `mtest.toml`.
 
+The two combine rather than conflict. `--cache-clear --no-cache` deletes the
+store and then runs without repopulating it, which is how you get back to a
+genuinely empty cache; `--cache-clear` alone leaves a fresh one behind.
+
+That flag is also the only thing that shrinks the store. Publishing a binary
+removes the older ones for *that* source, so an edit-and-rerun loop stays flat,
+but there is no size cap and no expiry. Artifacts of tests you renamed or
+deleted stay forever, and a build killed mid-compile — a timeout, a `Ctrl-C`,
+a CI runner going away — leaves its half-staged directory behind. On a laptop
+this is noise. On a CI checkout that lives for months it is worth clearing
+periodically, or just `rm -rf .mtest-cache`: nothing in there cannot be rebuilt.
+
 Deletion is guarded, because `.mtest-cache` is a path anything could be sitting
 at. mtest writes a `CACHEDIR.TAG` marker whenever it creates that directory, and
 `--cache-clear` refuses whatever it cannot prove is its own — a symlink, a
@@ -1006,6 +1024,15 @@ one it finds, nor over one that is already there. A directory that was already
 there is therefore refused until you remove it yourself; a run that marked it
 would be manufacturing the proof this guard exists to ask for. Nothing under
 `build/` is ever deleted.
+
+Two outcomes are not refusals and are worth knowing about. A cache directory
+mtest cannot characterize at all — a parent it may not search — is treated like
+an absent one: nothing is deleted, no diagnostic is printed, and the run that
+follows is simply cold. And once the guards pass, deletion can still fail
+partway, on an unwritable entry or against another mtest writing into the store
+at the same moment. That is the one case that leaves the tree changed; it exits
+`4` and its diagnostic says the cache is now partial and hands you the `rm -rf`
+to finish.
 
 ### The store is yours to throw away
 

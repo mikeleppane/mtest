@@ -342,12 +342,20 @@ output file's digest to match (§8.3).
 
 A failed build's reproduce line and diagnostics name `build/bin/<mangled>` as
 the output path, never the cache's staging directory: the reproduce line is a
-command a user runs, and a build that publishes nothing has its staging
-directory deleted before the verdict is even emitted. A build that succeeds
-records the artifact path it was published to, and a hit reports the path
-recorded with the artifact — that is the output path `-v` prints (§15.1) and the
-`--json` stream reports (§15.4), and unlike a staging directory it is still
-there when the run ends.
+command a user runs, and a build that fails has its staging directory deleted
+before the verdict is even emitted. A build that succeeds records the artifact
+path it was published to, and a hit reports the path recorded with the
+artifact — that is the output path `-v` prints (§15.1) and the `--json` stream
+reports (§15.4), and unlike a staging directory it is still there when the run
+ends.
+
+The single exception is a build that succeeded and could not be published. Its
+binary is real and the run needs it, so the staging directory survives the
+session and the recorded output path names it — a live `.mtest-cache/.tmp-…`
+component. That path is accurate for the run that emitted it and is not
+promised beyond it: no later run reads a staging directory, so the file is
+rebuilt next time. The directory itself is left behind (§8.5.2). The
+`cache-publish` warning marks every such run.
 
 `--no-cache` neither reads nor writes the store. Its gate sits before any
 staging, so a run that asked for no cache creates no store directory and leaves
@@ -383,18 +391,25 @@ a binary that no longer matches its source — and not against a hostile process
 running as the same user on the same machine. Anyone with that access can
 already change what a build produces by simpler means than deceiving the key:
 they can edit the sources, replace the compiler, or point `MODULAR_HOME`
-somewhere else. The four boundaries below follow from that scope. They are
+somewhere else. The five boundaries below follow from that scope. They are
 stated so a reader can tell them from defects, and each is a deliberate
 non-goal, not an omission awaiting a fix.
 
-- **A keyed input mutated while the compiler is running.** The key is taken
-  before the compile, and publication re-verifies the entry source only. A helper
-  swapped after the key is taken and restored before publication is therefore
-  compiled into a binary published under the pre-change key, and a later run over
-  the restored helper hits it. Re-verifying the whole input set at publication
-  would narrow that window without closing it — the compiler has already read the
-  files by then — so the guard stays on the one input whose change is both cheap
-  to detect and most likely to be a genuine mistake: the test file itself.
+- **A session-wide input mutated while the compiler is running.** The key is
+  taken before the compile, and publication re-verifies the test file and the
+  directory it sits in — the inputs a developer edits, and the ones a build
+  reaches through a bare import. What publication does not re-verify is the
+  inputs sampled once for the whole session: the contents of the `-I` roots, and
+  the toolchain. Their window is correspondingly wider — the whole run rather
+  than one compile — so an include-root library swapped mid-run and restored
+  afterwards can be compiled into a binary published under the pre-change key,
+  and a later run over the restored tree hits it.
+
+  Re-walking every include root at every publication would narrow that window
+  without closing it — the compiler has already read the files by then — at a
+  cost that scales with the size of the include trees times the number of files
+  compiled. The per-file re-walk is bounded by one directory and is paid only on
+  a miss, which is why it is worth doing and the session-wide one is not.
 
 - **`PATH`, and the rest of the inherited environment.** Five variables are
   keyed, and they are named in full above; every other variable the compiler
@@ -435,6 +450,32 @@ non-goal, not an omission awaiting a fix.
   mtest, not to running it: the per-file cache key described above digests the
   resolved compiler's own contents and does separate two such binaries.
 
+#### 8.5.2 The store grows; nothing shrinks it but `--cache-clear`
+
+There is no size cap, no age limit, and no eviction. Publishing an artifact
+removes the older generations of **that source**, which is what keeps an
+edit-and-rerun loop from growing without bound, but it is the only reclamation
+mtest performs. Four things accumulate:
+
+- **Generations of sources that no longer exist.** Reaping only ever considers
+  the source being published, so renaming or deleting a test file strands its
+  artifacts permanently.
+- **Staging directories from builds that were killed.** A `.tmp-` directory is
+  skipped by both reapers by construction — a concurrent process may be
+  compiling into one — and a build ended by SIGKILL or a deadline leaves a full
+  binary behind. Only the batch that created a staging directory can remove it,
+  and a batch that dies does not.
+- **Staging directories from failed publications.** The staged binary is what
+  the run is executing, so it cannot be removed while the run needs it, and the
+  session does not come back for it afterwards.
+- **Binaries too large to publish.** The 512 MiB per-artifact cap bounds one
+  generation, not the store.
+
+For a workstation this is noise. For a long-lived CI checkout that never clears,
+it is a slow disk-exhaustion path — and an exhausted disk fails a run the cache
+was supposed to make faster. `--cache-clear` is the remedy, and `.mtest-cache`
+is safe to delete by hand at any time: it holds nothing that cannot be rebuilt.
+
 ---
 
 ## 9. Run and collect exit codes
@@ -451,7 +492,7 @@ grow:
 | 1 | at least one selected outcome is FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, or PRECOMPILE-ERROR |
 | 2 | interrupted (SIGINT/SIGTERM); a partial summary is printed |
 | 3 | internal `mtest` error — including protocol drift (a report present but off-grammar) and an environment/I-O failure such as a runtime report-destination open/write failure (a `--json` destination that cannot be opened at session start, or whose stream write later fails — a fatal abort; or a `--junit-xml` target that cannot be created at session start, or whose report cannot be finalized and renamed onto PATH) |
-| 4 | pre-run usage error (unknown flag, bad value, nonexistent path, unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout, or a `--cache-clear` target mtest cannot prove it owns or cannot delete, §8.5) — detected **before any test runs** |
+| 4 | pre-run usage error (unknown flag, bad value, nonexistent path, unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout, or a `--cache-clear` target mtest can see and cannot prove it owns, or can prove and cannot delete, §8.5 — a target it cannot characterize at all is treated as absent and exits `0`) — detected **before any test runs** |
 | 5 | no tests collected (empty walk, `-k` matched nothing, everything excluded) |
 
 **Precedence** when outcomes mix. A usage error aborts before the run with 4.
@@ -769,6 +810,12 @@ events, never from a parse of the console text.
   casualty, or an interrupt/`--maxfail`/gate-abort skip — appears as a
   synthesized `[not-run]` skipped testcase, so the report is total over the
   selected set.
+- **Session properties.** The build-cache counters ride one synthesized
+  `mtest::cache` `<testsuite>` with all four aggregate counts zero, whose whole
+  body is a `<properties>` block naming `built_files` and `cached_files`. It is
+  session-level rather than a path, like `mtest::precompile`, and it carries no
+  `<testcase>`, so it adds nothing to the root aggregates. Its values are the
+  one part of the document that tracks store history rather than inputs (§17).
 - **Retries and flakiness** ride Surefire chronology in the `[attempts]` row: a
   flaky pass carries one `<flakyFailure>` per earlier failed attempt (in attempt
   order); a rerun-exhausted failure carries the FIRST failed attempt as the
@@ -991,6 +1038,18 @@ each below states its actual promise, scoped precisely:
   flags, casualty lists, totals, and the final exit code — never byte order and
   never a duration or byte-payload field. Two runs' raw streams may differ line
   for line while still agreeing on that projection.
+
+The build cache is the one thing that varies with history rather than with
+inputs, and both projections carve it out:
+
+- `session_finished`'s `built_files` and `cached_files` are counts, but they are
+  outside the `--json` projection. Their SUM is stable for identical inputs — it
+  is the first-attempt compile admission count — while the split records what
+  the store happened to hold when the run started, so a cold run and a warm one
+  over the same tree divide it differently.
+- `--junit-xml`'s `mtest::cache` property suite (§15.2) reports that same split
+  and is outside the structural promise for the same reason. The document's
+  shape, node ids, classifications, and test aggregates are unaffected.
 
 §17 carries no byte-identity claim over anything wall-clock- or payload-bearing:
 not `--junit-xml`'s `time` or embedded captured/diagnostic text, and not
