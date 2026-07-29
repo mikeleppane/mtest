@@ -864,10 +864,10 @@ def check_cli_probe_output(
 ) -> str:
     """Judge one instrumented CLI reporter run and both artifacts it wrote.
 
-    Every rejection names one cause. The two machine formats are handed to the
-    project's existing strict oracles (the NDJSON stream consumer and the
-    xmllint plus arithmetic JUnit checker) rather than parsed here, so this gate
-    cannot accept an artifact the report gates would reject.
+    Every rejection names one cause. The two machine formats go to the project's
+    existing strict oracles (the NDJSON stream consumer and the xmllint plus
+    arithmetic JUnit checker) rather than being parsed here, so this gate cannot
+    accept an artifact the report gates would reject.
 
     Args:
         returncode: The client's exit code.
