@@ -183,20 +183,23 @@ network contract: rattler-build solves against the pinned Modular and
 conda-forge channels, and nothing uploads or authenticates. Do not describe
 those jobs as hermetic or fold them into the Valgrind exception.
 
-Two hosted lanes — `classified suite` and `end-to-end tests` — trade part of this
-for speed, and knowingly. They restore the
-build-artifact store and the precompiled package from an earlier run, so their
-inputs are no longer this checkout and the locked toolchain alone. What holds
-the property up instead is the store's own key, which frames the toolchain,
-the environment, the invocation root, the build arguments, the include-root
-contents, and the file's own bytes; `store_probe` re-verifies `meta.key_full`
-and refuses a binary that is not a real file inside its generation, is not
-executable, or does not digest to `meta`. A stale entry is therefore a cache
-miss, never a wrong pass. Both preflights still compile cold, `cache protocol`
-on both platforms is the deliberate cold witness for the from-scratch path,
-and `build stamp` is the gate proving the precompile stamp this leans on
-refuses a stale one. Widening the cached-lane set is an Ask-first decision,
-like the Valgrind exception.
+**Do not restore the build-artifact store across hosted runs.** It was tried
+and reverted, and the failure is worth recording because the key looks
+complete until you ask what it does not frame. `KeyBuilder` frames the
+compiler, the toolchain libraries, the environment, the invocation root, the
+build arguments, the include-root contents, and the file's own bytes — and
+nothing about the host CPU. That is exactly right on one machine, where the
+CPU cannot change between two builds. Hosted runners are not one machine: a
+binary compiled on a runner with a wider instruction set, restored onto one
+without it, is a valid cache hit that dies with SIGILL the moment it executes.
+Observed, not theorised — cached e2e binaries crashed with `signal 4` in
+frames pointing into `.mtest-cache/build-v1/`.
+
+The lesson generalises past the cache. "A stale entry is a miss, never a wrong
+pass" holds only for the inputs the key actually frames; `store_probe`
+re-verifies the digest and refuses a binary that will not start, and neither
+check can notice that a byte-perfect binary is illegal on this host. Anything
+that moves a compiled artifact between machines has to frame the machine.
 
 ## Toolchain and verification
 

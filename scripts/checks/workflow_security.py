@@ -46,9 +46,6 @@ CODEQL_ACTION_SHA = "e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81"
 UPLOAD_ARTIFACT_ACTION_SHA = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 """Reviewed immutable actions/upload-artifact v7.0.1 revision."""
 
-CACHE_ACTION_SHA = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
-"""Reviewed immutable actions/cache v6.1.0 revision."""
-
 SETUP_UV_ACTION_SHA = "c771a70e6277c0a99b617c7a806ffedaca235ff9"
 """Reviewed immutable astral-sh/setup-uv v9.0.0 revision."""
 
@@ -62,7 +59,6 @@ ACTION_USE_RE = re.compile(
 """An external action pinned by commit with a human-readable version."""
 
 REVIEWED_ACTION_PINS = {
-    "actions/cache": {(CACHE_ACTION_SHA, "v6.1.0")},
     "actions/checkout": {(CHECKOUT_ACTION_SHA, "v7.0.1")},
     "actions/download-artifact": {(DOWNLOAD_ARTIFACT_ACTION_SHA, "v8.0.1")},
     "actions/upload-artifact": {(UPLOAD_ARTIFACT_ACTION_SHA, "v7.0.1")},
