@@ -815,8 +815,7 @@ class IncludeRootTests(ProtocolScenario):
 
 
 class SiblingSearchPathTests(ProtocolScenario):
-    """The test file's own directory is a search path, so its contents are
-    inputs.
+    """A test file's own directory is a search path, so its contents are inputs.
 
     `mojo build tests/test_x.mojo` resolves a bare `from helper import ...`
     against `tests/`, with no `-I` involved and nothing reported afterwards
@@ -866,9 +865,7 @@ class SiblingSearchPathTests(ProtocolScenario):
         (tests / "test_helpers.mojo").write_text(
             FIXTURE_SUITE_SOURCE.format(value=7), encoding="utf-8"
         )
-        (tests / "test_session.mojo").write_text(
-            READS_FIXTURE_SOURCE, encoding="utf-8"
-        )
+        (tests / "test_session.mojo").write_text(READS_FIXTURE_SOURCE, encoding="utf-8")
 
         self.run_ok(["--json", "cold.ndjson", "tests"])
         self.run_ok(["--json", "warm.ndjson", "tests"])
@@ -1127,7 +1124,7 @@ class EarlyStopCounterTests(ProtocolScenario):
 
         records = self.stream("warm.ndjson")
         started = {
-            record["path"]
+            str(record["path"])
             for record in records
             if record.get("event") == "file_started"
         }
@@ -1138,9 +1135,7 @@ class EarlyStopCounterTests(ProtocolScenario):
         # exactly when it is dispatched, so the two counts are the same number
         # seen from two sides. A store answer taken earlier than the dispatch
         # shows up here as a cache count with no file behind it.
-        self.assertEqual(
-            cached, len(started), msg=f"started={sorted(started)}"
-        )
+        self.assertEqual(cached, len(started), msg=f"started={sorted(started)}")
 
 
 class CacheClearTests(ProtocolScenario):
