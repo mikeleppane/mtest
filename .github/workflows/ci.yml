@@ -61,13 +61,149 @@ jobs:
       - name: Mojo version
         run: pixi run mojo-version
 
-      # The exact cheap fail-fast barrier: identity and static policy, native
-      # audit, package compilation, JUnit tooling, and transcript fidelity.
-      - name: Static and transcript preflight
-        run: pixi run ci-preflight
+      # THE BARRIER, AND NOTHING ELSE. This is the one job every behavioral
+      # matrix cell waits on, so what belongs here is exactly the gates that
+      # make the rest of the run worthless when they are red: a version
+      # identity that disagrees with itself, an unformatted tree, a harness
+      # whose own self-tests fail, a policy violation, a release driver that
+      # broke, an undocumented unsafe operation, or JUnit tooling that has
+      # stopped rejecting a broken artifact. Every member is pure Python over
+      # this tree or `mojo format` over it; not one of them compiles a package,
+      # links a binary, or runs one. `Linux / compiled oracles` below carries
+      # every member that does, and carries them off this critical path.
+      #
+      # This is `ci-preflight`'s membership in `ci-preflight`'s order, split
+      # across two jobs and not otherwise changed: every member still runs
+      # hosted, still blocks, and still runs after the same members it ran
+      # after before, because that job depends on this one.
+      #
+      # Named one task per step rather than through an aggregate. Expressing
+      # this subset would take a new task in pixi.toml, and it is also how it
+      # reads best: `ci-preflight` already spells its three tooling groups out
+      # one line each instead of routing through `harness-check`, for the
+      # reason written there -- Pixi attributes a failure to the task it was
+      # running, and the job every lane waits on has to report WHICH gate went
+      # red. Steps buy the same thing one level up, because GitHub reports a
+      # failed job by the name of the step that failed.
+      - name: Version identity
+        run: pixi run version-check
+
+      - name: Formatting
+        run: pixi run fmt-check
+
+      - name: Harness self-tests
+        run: pixi run harness-unit-check
+
+      - name: Repository policy
+        run: pixi run repo-policy-check
+
+      - name: Release tooling
+        run: pixi run release-tooling-check
+
+      - name: Unsafe-operation inventory
+        run: pixi run safety-check
+
+      # Ahead of `junit-render-check`, which puts mtest's own emitted document
+      # through the same oracle and runs in the compiled job below: the tooling
+      # has to be proven to still reject a broken artifact before a verdict
+      # from it means anything. The split preserves that order rather than
+      # relying on it, because that job cannot start until this one is green.
+      - name: JUnit tooling
+        run: pixi run junit-check
+
+  # Everything `ci-preflight` runs that needs a real compiler, moved off the
+  # barrier and run BESIDE the behavioral matrix instead of in front of it.
+  # Nothing here was ever a dependency of anything else in the preflight, and
+  # nothing here produces an artifact another job consumes -- jobs share no
+  # filesystem, this workflow uploads no build output, and every matrix lane
+  # already compiles what it needs through its own task edges. So the
+  # compile-and-link work and the slowest oracles sat ahead of nine cells for
+  # ordering reasons alone.
+  #
+  # ONE JOB, NOT SEVERAL. These members are as independent of each other as
+  # they were of the barrier, so splitting further really would run them more
+  # in parallel. It would not shorten the run: the critical path is this
+  # workflow's longest chain, the barrier plus the widest behavioral lane, and
+  # that lane compiles the entire classified corpus while this job compiles the
+  # package, one binary, the protocol fixtures, and the ABI probe's co-linked
+  # groups. A further split shortens a chain that is not the longest one, and
+  # charges a `setup-pixi` install and a required status-check context for it.
+  #
+  # It takes the barrier as a dependency for the same reason the matrix does,
+  # and that is what keeps the property the old single job had: nothing
+  # expensive starts until the cheap gates are green. What changed is that the
+  # expensive things now run beside each other instead of in sequence.
+  linux-compiled-oracles:
+    name: Linux / compiled oracles
+    runs-on: ubuntu-24.04
+    needs: linux-preflight
+    # The matrix's wide tier rather than the barrier's, because what this job
+    # does is compiler work -- the kind that tier was sized against -- at
+    # strictly less volume than the lane it was sized for. Fitting a narrower
+    # ceiling to what this job costs is the thing the tier reasoning on
+    # `linux-preflight` rules out.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
+        with:
+          locked: true
+          cache: true
+
+      - name: Tool provenance
+        run: |
+          pixi run mojo-version
+          pixi run clang --version
+
+      # `native-check` owns `postfork-check` through a dependency edge. Pixi
+      # runs a shared node once per invocation, which is why `ci-preflight` can
+      # name both; across two `pixi run` calls it would run the audit twice.
+      - name: Audit native adapter
+        run: pixi run native-check
+
+      # The package-compiles gate, named on its own and ahead of the three
+      # checkers that pull it, exactly as `ci-preflight` writes it and for that
+      # list's stated reason: an empty-but-broken package has to fail HERE,
+      # under a step named for it, rather than inside whichever consumer
+      # happened to run first. Nothing restores a package into this job, and
+      # the precompile stamp turns each consumer's repeat `build` into a skip,
+      # so this is one cold compile of these sources at this toolchain.
+      - name: Compile the package
+        run: pixi run build
+
+      - name: README CLI reference
+        run: pixi run readme-help-check
+
+      - name: Rendered JUnit document
+        run: pixi run junit-render-check
+
+      - name: Protocol snapshots
+        run: pixi run transcripts-check
+
+      - name: Cross-module ABI probe
+        run: pixi run abi-probe-check
+
+      # Last, where `ci-preflight` puts it and for that task's reason: a
+      # nonzero exit here indicts the toolchain pin for review rather than
+      # indicting the tree, which reads correctly only once every gate that
+      # does indict the tree has passed.
+      - name: Coverage tripwire
+        run: pixi run coverage-capability
 
   linux-test-matrix:
     name: Linux / ${{ matrix.lane }}
+    # The barrier only. `Linux / compiled oracles` is blocking and runs beside
+    # this matrix instead of in front of it, which costs one thing and no
+    # verdict: a commit whose package does not compile now burns nine cells
+    # discovering that in parallel, where before one job discovered it first.
+    # No lane ever consumed what the preflight built -- runners share nothing
+    # -- so every cell already compiles what it needs through its own task
+    # edges, and a package that does not compile reddens each of them on its
+    # own evidence.
     needs: linux-preflight
     strategy:
       # Each lane is an independent gate over the same commit, not a sample of
@@ -285,9 +421,16 @@ jobs:
       # and it re-digests the artifacts themselves -- so a restored package is
       # used only where it is a compile of exactly these sources at exactly this
       # toolchain, and is otherwise built straight over. No gate moves: `build`
-      # is the package-compiles gate, both preflight jobs are uncached, and this
-      # matrix cannot start until its platform's preflight has compiled the
-      # package from scratch for this commit.
+      # is the package-compiles gate, nothing restores a package into the jobs
+      # that run it cold, and every one of those is blocking. What no longer
+      # holds is the ORDER -- this matrix used to be unable to start until its
+      # platform's preflight had compiled the package from scratch for this
+      # commit, and now `Linux / compiled oracles` does that beside it while
+      # macOS has no preflight build at all. The ordering was never what made a
+      # restored package safe here; the stamp is. And a cold compile of these
+      # sources stays under test for this commit on BOTH platforms whatever the
+      # preflights do, because `strict contract` and `cache protocol` are
+      # blocking lanes that reach `build-bin` and carry no `store_cache`.
       #
       # WHAT STAYS COLD. `cache protocol`, on both platforms, is the deliberate
       # cold witness: absent from the rows above, driving real `build/mtest`
@@ -455,17 +598,36 @@ jobs:
           pixi run mojo-version
           pixi run clang --version
 
-      # native-check owns postfork-check. build-bin owns build and
-      # build-native, so invoking those dependencies separately would repeat
-      # work without strengthening the gate.
+      # The whole barrier on this platform, and the only `ci-preflight` member
+      # whose answer is platform-specific at all: every other member reads this
+      # tree rather than this runner, so a second hosted copy would ask the same
+      # question of the same bytes. `native-check` owns `postfork-check`, so
+      # naming that separately would repeat the audit without strengthening the
+      # gate.
+      #
+      # A `build-bin` step and a `./build/mtest --help` smoke used to follow.
+      # They were DUPLICATED WORK IN FRONT OF THE MATRIX rather than a barrier:
+      # jobs share no filesystem and this workflow uploads no build output, and
+      # five of the seven cells below reach `build-bin` through their own task
+      # edges, so each compiled and linked again regardless. The preflight's
+      # copy delayed every cell and was consumed by none.
+      #
+      # The smoke was the only `./build/mtest --help` on this platform outside a
+      # lane that rebuilds -- and it was the weakest form of coverage two
+      # blocking macOS jobs already carry. `macOS arm64 / strict contract` runs
+      # the documented-CLI oracle `--strict`, where a SKIP fails, and
+      # `help: --help -> stdout, exit 0` is one of its roster entries, asserted
+      # against the binary its own `build-bin` edge just linked. `macOS arm64 /
+      # packaged artifact` then probes `--help` through the INSTALLED artifact
+      # with the dev environment off PATH and this platform's loader search path
+      # emptied, which is a stronger claim than the smoke ever made.
+      #
+      # What is given up: a macOS-only compile break now reddens the cells that
+      # hit it instead of one job ahead of them. That is runner time on a run
+      # that was already lost, not a verdict -- no cell's evidence came from the
+      # preflight's binary, because no cell could reach it.
       - name: Audit native adapter
         run: pixi run native-check
-
-      - name: Build executable
-        run: pixi run build-bin
-
-      - name: Smoke-test executable
-        run: ./build/mtest --help
 
   macos-test-matrix:
     name: macOS arm64 / ${{ matrix.lane }}
@@ -575,7 +737,12 @@ jobs:
       # The same gate the Linux package job runs, resolved for osx-arm64: the
       # recipe builds into a local channel, the exact artifact is installed
       # into fresh scratch environments, and the installed binary is executed.
-      # It waits on the macOS preflight because a packaged artifact is only
-      # worth consuming once the source build for this platform is green.
+      # It waits on the macOS preflight because the recipe build compiles the
+      # very adapter that job audits, and a packaged artifact is only worth
+      # consuming once that audit is green. The edge survives the preflight
+      # losing its `build-bin` step: `package-check` builds from source inside
+      # rattler-build's isolated environment and never reads anything the
+      # preflight produced, so what it waits for is that verdict, never an
+      # artifact.
       - name: Package check
         run: pixi run package-check
