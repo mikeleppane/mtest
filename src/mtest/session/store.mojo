@@ -1386,6 +1386,67 @@ def _toolchain_identity(path: String) -> Optional[_ToolchainDigest]:
     return Optional(fresh^)
 
 
+@fieldwise_init
+struct _LibListing(Copyable, Movable):
+    """A toolchain library directory's entries, or which of two absences it is.
+
+    The two absences are not interchangeable. A toolchain that ships no library
+    directory keys perfectly well — the compiler's own digest still identifies
+    it, and the `--mojo <wrapper>` shape puts the compiler somewhere nothing
+    else looks like a toolchain. A library directory that exists but will not
+    open is a build input this key cannot represent, and the cache has to go
+    off. `isdir` answers False to both, which is why this type exists.
+    """
+
+    var readable: Bool
+    """Whether `names` describes the directory. False in both other states."""
+
+    var absent: Bool
+    """Whether the directory is provably not there. Read only when `readable`
+    is False; False there means the question could not be answered at all,
+    which resolves the same way as unreadable."""
+
+    var names: List[String]
+    """The directory's entries in byte order; empty unless `readable`."""
+
+
+def _toolchain_lib_listing(bin_dir: String) -> _LibListing:
+    """List `<bin_dir>/../lib/mojo`, separating "not there" from "cannot read".
+
+    `lstat` cannot make that separation: it raises both for a path that is not
+    there and for one whose parent this process may not search. A listing of
+    the PARENT can, because a listing that comes back is itself proof the
+    parent was readable, and the name either appears in it or does not. So the
+    walk up happens only when the directory below refused, and it stops at the
+    directory the compiler was just read out of.
+
+    Args:
+        bin_dir: The directory holding the resolved compiler.
+
+    Returns:
+        The entries, or which absence this is.
+    """
+    var lib_root = bin_dir + "/../lib"
+    var listed = _list_sorted(lib_root + "/mojo")
+    if listed:
+        return _LibListing(True, False, listed.value().copy())
+    var parent = _list_sorted(lib_root)
+    if parent:
+        return _LibListing(
+            False, not _names_contain(parent.value(), "mojo"), List[String]()
+        )
+    var grandparent = _list_sorted(bin_dir + "/..")
+    if grandparent:
+        return _LibListing(
+            False,
+            not _names_contain(grandparent.value(), "lib"),
+            List[String](),
+        )
+    # Not even the toolchain's own prefix would list. Nothing here is provable,
+    # and an unprovable input is a disabled cache.
+    return _LibListing(False, False, List[String]())
+
+
 def collect_env_base(
     mut runtime: ExecRuntime, config: RunnerConfig, root: String
 ) -> CacheContext:
@@ -1490,25 +1551,30 @@ def collect_env_base(
     ctx.base.feed(TAG_TOOLCHAIN_VERSION, version.stdout_bytes)
 
     # --- Frame 4: toolchain libraries. --------------------------------------
-    var lib_dir = dirname(compiler) + "/../lib/mojo"
-    if not isdir(lib_dir):
+    var bin_dir = dirname(compiler)
+    var lib_dir = bin_dir + "/../lib/mojo"
+    # `_toolchain_lib_listing`, never `isdir`: `isdir` folds "not there" and
+    # "cannot be read" into one False, and those two answers lead in opposite
+    # directions here.
+    var listing = _toolchain_lib_listing(bin_dir)
+    if not listing.readable:
+        if not listing.absent:
+            ctx.disable(
+                "cannot list the toolchain libraries at '" + lib_dir + "'"
+            )
+            return ctx^
         # A layout this module does not recognize is not an error: the compiler
         # digest still identifies the toolchain. The absence is recorded so a
         # later layout change cannot silently match a key built without it.
         ctx.base.feed_str(TAG_TOOLCHAIN_LIB_COUNT, _ABSENT_MARK)
     else:
+        # Already in byte order out of `_list_sorted`, and filtering preserves
+        # order, so the frame sequence is the same in any checkout.
         var libs = List[String]()
-        try:
-            for entry in listdir(lib_dir):
-                var name = String(entry)
-                if name.endswith(".mojoc") or name.endswith(".mojopkg"):
-                    libs.append(name^)
-        except:
-            ctx.disable(
-                "cannot list the toolchain libraries at '" + lib_dir + "'"
-            )
-            return ctx^
-        _sort_bytewise(libs)
+        for entry in listing.names:
+            var name = String(entry)
+            if name.endswith(".mojoc") or name.endswith(".mojopkg"):
+                libs.append(name^)
         ctx.base.feed_str(TAG_TOOLCHAIN_LIB_COUNT, String(len(libs)))
         for lib in libs:
             var lib_name = String(lib)

@@ -648,6 +648,52 @@ def test_env_base_disables_on_unresolvable_compiler() raises:
     )
 
 
+def test_env_base_frames_a_toolchain_without_a_library_directory() raises:
+    """A layout with no `lib/mojo` beside the compiler keys, it does not fail.
+
+    A `--mojo` spelling that names a wrapper script somewhere else in the tree
+    is the ordinary case here, and nothing beside it looks like a toolchain.
+    The compiler's own digest still identifies it, so the absence is a fact to
+    record rather than a reason to switch the cache off.
+    """
+    var root = temp_root()
+    var stub = _executable_stub(root, "tc/bin/mojo")
+    var config = base_config()
+    config.mojo_path = stub
+    var ctx = _env_base(config^, root)
+    assert_true(ctx.enabled, "cache off: " + ctx.disable_reason)
+
+
+def test_env_base_disables_when_the_toolchain_libraries_cannot_be_read() raises:
+    """A library directory that will not open is a question, not an absence.
+
+    The two have to lead in opposite directions: a toolchain with no library
+    directory keys perfectly well, while one whose libraries this process
+    cannot read is a build input the key cannot represent, so the cache goes
+    off. A single `isdir` answers False to both, which let an unreadable
+    directory key as though the toolchain shipped no libraries at all.
+
+    The path is closed at the PARENT, which is what makes the case sharp: the
+    directory can then be neither listed nor even stat'd, so nothing about the
+    path itself can separate it from a directory that was never there.
+    """
+    var root = temp_root()
+    var stub = _executable_stub(root, "tc/bin/mojo")
+    write_file(root, "tc/lib/mojo/std.mojopkg", "# stands in for a library")
+    var config = base_config()
+    config.mojo_path = stub
+    _chmod("000", root + "/tc/lib")
+    var ctx = _env_base(config^, root)
+    _chmod("755", root + "/tc/lib")
+    assert_false(
+        ctx.enabled, "an unreadable library directory must disable the cache"
+    )
+    assert_true(
+        "lib/mojo" in ctx.disable_reason,
+        "reason did not name the directory: " + ctx.disable_reason,
+    )
+
+
 def test_env_base_disables_on_missing_arg_file() raises:
     var root = temp_root()
     var config = base_config()
