@@ -183,6 +183,14 @@ struct _PipelineFile(Copyable, Movable):
     executed."""
     var rebuilt_once: Bool
     """Whether the stale-name recover-once budget has been spent."""
+    var store_rebuilt_once: Bool
+    """Whether the cached-binary recover-once budget has been spent.
+
+    Separate from `rebuilt_once` because the two answer different failures: a
+    suite that refuses a name it listed, and a cached binary that was removed
+    between the store validating it and this process executing it. Sharing one
+    budget would let either exhaust the other's.
+    """
     var attempt: Int
     """The 1-based crash-class attempt this file's next run would be."""
     var attempts_planned: Int
@@ -251,6 +259,7 @@ struct RunPipeline(Movable):
             self._files.append(
                 _PipelineFile(
                     FileStage.NEEDS_BUILD,
+                    False,
                     False,
                     False,
                     False,
@@ -477,6 +486,31 @@ struct RunPipeline(Movable):
         if self._files[index].rebuilt_once:
             return False
         self._files[index].rebuilt_once = True
+        self._files[index].stage = FileStage.NEEDS_REBUILD
+        return True
+
+    def admit_store_rebuild(mut self, index: Int) -> Bool:
+        """Spend the cached-binary recover-once budget, if it is still unspent.
+
+        A binary the artifact store validated was gone by the time this process
+        tried to execute it, which a concurrent run publishing another key for
+        the same source can do at any moment. Compiling the file is the honest
+        answer — a cache condition must never fail a run that would otherwise
+        pass — and it is worth exactly one attempt: a second failure is about
+        something other than the cache.
+
+        Args:
+            index: The affected file's index.
+
+        Returns:
+            True when the budget was available and the file moved to
+            `NEEDS_REBUILD`; False when it was already spent and the driver
+            must resolve the failure itself.
+        """
+        self._files[index].in_flight = False
+        if self._files[index].store_rebuilt_once:
+            return False
+        self._files[index].store_rebuilt_once = True
         self._files[index].stage = FileStage.NEEDS_REBUILD
         return True
 

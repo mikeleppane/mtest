@@ -1915,6 +1915,37 @@ def _discard(path: String):
         pass
 
 
+def cache_rebuild_note(rel: String) -> String:
+    """Why a validated cache hit is being compiled after all.
+
+    The store deletes a source's older generations when it publishes a new one,
+    so a second run over the same checkout — another terminal, another shard
+    with different build arguments — can remove a generation this run has
+    already validated and is about to execute. The reader's answer is to build
+    the file, because a cache condition must never fail a run that would
+    otherwise pass; this is the sentence that says so.
+
+    Args:
+        rel: The test file's root-relative path.
+
+    Returns:
+        One sentence, ready for a `cache-rebuild` warning.
+
+    Examples:
+
+    ```mojo
+    from mtest.session.store import cache_rebuild_note
+
+    var note = cache_rebuild_note("tests/test_a.mojo")
+    ```
+    """
+    var note = String("the cached binary for '") + rel
+    note += "' was gone before it could run, so the file is being rebuilt."
+    note += " Another mtest run over this checkout publishing a different key"
+    note += " for the same file removes that file's older entries."
+    return note^
+
+
 def _ownership_proof_failure(root: String) -> Optional[String]:
     """Why `<root>/.mtest-cache` is not provably mtest's, or nothing if it is.
 

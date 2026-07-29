@@ -92,6 +92,7 @@ from mtest.session.store import (
     PUB_FAILED,
     StoreBuildTarget,
     _rewrite_output,
+    cache_rebuild_note,
     file_key,
     store_build_target,
     store_probe,
@@ -232,6 +233,24 @@ struct _PoolFile(Movable):
     var had_retry: Bool
     var started_emitted: Bool
     var dispatch_ns: Int
+    var store_hit: Bool
+    """Whether this file's binary came from the store rather than a compile.
+
+    Read when the RUN spawn fails. Publishing a generation deletes that
+    source's older ones, so a concurrent run over the same checkout — two
+    terminals, or two shards with different build arguments — can remove a
+    generation this batch validated and was about to execute. A binary that is
+    no longer there is a reason to compile the file, not an internal error over
+    a run that was otherwise fine.
+    """
+    var store_rebuilt: Bool
+    """Whether this file already fell back from the store to a compile.
+
+    Once per file, so a binary that will not spawn for any other reason still
+    reaches the internal-error path instead of looping. The fallback charges
+    neither counter: the file was admitted as a cache hit, and one file is one
+    admission.
+    """
     var hit_uncounted: Bool
     """A cache hit this batch has not yet charged to `cached_files`.
 
@@ -268,7 +287,31 @@ struct _PoolFile(Movable):
         self.had_retry = False
         self.started_emitted = False
         self.dispatch_ns = 0
+        self.store_hit = False
+        self.store_rebuilt = False
         self.hit_uncounted = False
+
+
+def _degrade_hit_to_rebuild(mut file: _PoolFile):
+    """Send a file whose cached binary would not start back to the compiler.
+
+    The rebuild is invocation-private: the key was dropped when the store
+    answered, so nothing is staged and nothing is published, and the binary
+    lands where an uncached build puts it. It charges neither counter either —
+    the file was admitted as a cache hit, and one file is one admission — so the
+    warning is what keeps the compile visible.
+
+    Args:
+        file: The file to move back to the build phase. Its `store_rebuilt`
+            latch is set, so this can happen at most once per file.
+    """
+    file.store_hit = False
+    file.store_rebuilt = True
+    file.out_bin = file.plain_out
+    file.pre_events.append(
+        Event.warning("cache-rebuild", cache_rebuild_note(file.rel))
+    )
+    file.phase = _PENDING_BUILD
 
 
 def _emit_progress[
@@ -570,6 +613,7 @@ def _run_pool_batch[
                     pf.bterm = Termination.exited(0)
                     pf.build_stderr = List[UInt8]()
                     pf.hit_uncounted = True
+                    pf.store_hit = True
                 else:
                     # Owed a publication, claimed at the first build dispatch.
                     # The staging directory is NOT created here: a batch that
@@ -685,6 +729,22 @@ def _run_pool_batch[
                             picked,
                         )
                     except:
+                        if (
+                            state[picked].store_hit
+                            and not state[picked].store_rebuilt
+                        ):
+                            # The dispatch could not start a binary the store
+                            # served. The other half of the same degradation
+                            # the completion handler performs, on the other
+                            # half of the ways a run fails to start: compile the
+                            # file and try again rather than abandon the batch
+                            # over an artifact this run did not build. If the
+                            # dispatch is broken for some reason of its own the
+                            # rebuilt file fails here a second time, and the
+                            # `store_rebuilt` latch sends it to the machinery
+                            # fault it always was.
+                            _degrade_hit_to_rebuild(state[picked])
+                            continue
                         machinery_fault = True
                         machinery_fault_step = "run"
                         machinery_fault_program = state[picked].out_bin
@@ -703,15 +763,23 @@ def _run_pool_batch[
                 else:
                     # THE first-attempt predicate for this seam. `attempt`
                     # starts at 1 and is bumped by exactly the two edges that
-                    # re-enter a slot: the compile-kill rebuild (which returns
-                    # here with a fresh `_retry_out_bin` under `build/bin`) and
-                    # the run-crash re-run (which returns to `_PENDING_RUN` and
-                    # never reaches this branch). So `attempt == 1` read HERE is
-                    # exactly "this file is being compiled for the first time" —
-                    # and it is the only such test, because a rebuild that
-                    # staged and published would write a quarantined retry's
-                    # binary into a store other runs read.
-                    var first_build = state[picked].attempt == 1
+                    # re-enter a slot as a RETRY: the compile-kill rebuild
+                    # (which returns here with a fresh `_retry_out_bin` under
+                    # `build/bin`) and the run-crash re-run (which returns to
+                    # `_PENDING_RUN` and never reaches this branch). The third
+                    # edge back into this branch is not a retry and does not
+                    # touch `attempt`: a cache hit whose binary vanished before
+                    # it could run falls back to compiling the file, and
+                    # `store_rebuilt` is what keeps that fallback from reading
+                    # as a first compile. Both halves matter, because a rebuild
+                    # that staged and published would write an
+                    # invocation-private binary into a store other runs read,
+                    # and one that counted would charge a file admitted once
+                    # twice.
+                    var first_build = (
+                        state[picked].attempt == 1
+                        and not state[picked].store_rebuilt
+                    )
                     if first_build and state[picked].key:
                         var target = store_build_target(
                             root, state[picked].mangled
@@ -1018,13 +1086,23 @@ def _run_pool_batch[
         else:
             # A completed run.
             if term.is_spawn_failed():
-                reporter.handle(
-                    Event.internal_error("run", state[i].out_bin, term.value)
-                )
-                result.internal_error = True
-                stop_scheduling = True
-                pipeline.halt_internal_error()
-                state[i].phase = _DONE
+                if state[i].store_hit and not state[i].store_rebuilt:
+                    # The store validated this generation and then something
+                    # removed it before the exec — a concurrent run publishing
+                    # another key for the same source reaps that source's older
+                    # generations. Compile the file instead of failing a run
+                    # whose only fault was that its binary was cached.
+                    _degrade_hit_to_rebuild(state[i])
+                else:
+                    reporter.handle(
+                        Event.internal_error(
+                            "run", state[i].out_bin, term.value
+                        )
+                    )
+                    result.internal_error = True
+                    stop_scheduling = True
+                    pipeline.halt_internal_error()
+                    state[i].phase = _DONE
             else:
                 var rdur = Float64(res.duration_ms) / 1000.0
                 var source_path = source_identity_key(root, state[i].rel)

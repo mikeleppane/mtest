@@ -1034,8 +1034,17 @@ winner's entry and adopts it.
 Before a stored binary is run, the store re-checks that its directory is a real
 directory and not a symlink, that its record parses, that the record names the
 *whole* key and not just the half the directory name carries, and that the
-binary on disk still digests to what the record says. Any check that fails
-deletes the entry, and the file is rebuilt.
+binary on disk still digests to what the record says. A check that fails is a
+miss, and the file is rebuilt; the entry is deleted too, unless it is something
+the cache did not create — a symlink planted at a generation's path is refused
+and left where it is, because deleting it would destroy evidence that something
+else is writing into the store.
+
+Those checks happen before the binary is executed, and a second mtest run over
+the same checkout can delete a validated entry in between — publishing an entry
+removes that file's older ones. A run that cannot execute a binary the cache
+served compiles the file instead and says so with a `cache-rebuild` warning,
+rather than failing a run whose only fault was a cache hit.
 
 That is the shape of every decision here. A key that errs in the conservative
 direction costs one rebuild; there is no direction in which it costs a wrong

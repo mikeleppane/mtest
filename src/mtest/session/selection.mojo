@@ -83,7 +83,7 @@ from mtest.session.pipeline import (
     StepKind,
 )
 from mtest.session.retry_class import retry_classify
-from mtest.session.store import CacheContext
+from mtest.session.store import CacheContext, cache_rebuild_note
 
 
 comptime _STALE_NAME_PHRASE = "test not found in suite:"
@@ -201,6 +201,13 @@ struct _Collected(Copyable, Movable):
     var had_crash_retry: Bool
     """Whether an earlier attempt was crash-class, which promotes a late pass
     to FLAKY."""
+    var from_store: Bool
+    """Whether `binary` is an artifact the store served rather than one this
+    run compiled.
+
+    Cleared by the rebuild that follows a binary going missing, so the fallback
+    happens at most once and a second failure to spawn is resolved as the
+    machinery fault it then is."""
 
 
 def _blank_collected(
@@ -230,6 +237,7 @@ def _blank_collected(
         List[String](),
         0.0,
         List[Event](),
+        False,
         False,
     )
 
@@ -1030,6 +1038,7 @@ def _run_selection[
             collected[i].canonical = bo.canonical
             collected[i].build_argv = bo.build_argv.copy()
             collected[i].bdur = bo.bdur
+            collected[i].from_store = bo.from_store
             pipeline.record_build_ready(i)
             continue
 
@@ -1058,6 +1067,20 @@ def _run_selection[
                 pipeline.halt_interrupted()
                 continue
             if po.internal_error:
+                if collected[i].from_store and pipeline.admit_store_rebuild(i):
+                    # The store validated this binary and something removed it
+                    # before this process could execute it, which a concurrent
+                    # run publishing another key for the same source does as a
+                    # matter of course. Compile the file and probe it again
+                    # rather than fail a run whose only fault was a cache hit.
+                    collected[i].from_store = False
+                    collected[i].pre_stream.append(
+                        Event.warning(
+                            "cache-rebuild",
+                            cache_rebuild_note(collected[i].rel),
+                        )
+                    )
+                    continue
                 reporter.handle(po.result.event)
                 pipeline.halt_internal_error()
                 continue
@@ -1221,6 +1244,16 @@ def _run_selection[
             continue
         var rterm = rres.termination
         if rterm.is_spawn_failed():
+            if collected[i].from_store and pipeline.admit_store_rebuild(i):
+                # Same window as the probe step's, one step later: the binary
+                # survived the probe and was reaped before the run.
+                collected[i].from_store = False
+                collected[i].pre_stream.append(
+                    Event.warning(
+                        "cache-rebuild", cache_rebuild_note(collected[i].rel)
+                    )
+                )
+                continue
             reporter.handle(
                 Event.internal_error("run", collected[i].binary, rterm.value)
             )

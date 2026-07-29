@@ -98,6 +98,7 @@ so it writes this rather than paying for a compile.
 comptime _OP_PIPE_STDOUT = 11
 """`MTEST_EXEC_OP_PIPE_STDOUT`: the child's stdout pipe, opened per dispatch."""
 
+
 comptime _EIO = 5
 """`EIO`, the errno a faulted native adapter operation reports."""
 
@@ -108,6 +109,19 @@ Three children are dispatched, in this order: `<compiler> --version` (the cache
 key's toolchain-version frame), the build, then the run. The case that uses this
 does not trust the arithmetic — it asserts the faulted step is `"run"`, so a
 miscount fails loudly instead of quietly measuring the build spawn.
+"""
+
+
+comptime _WARM_RUN_SPAWN_OCCURRENCE = 2
+"""Which stdout-pipe open is the RUN dispatch of a one-file WARM session.
+
+Two children are dispatched, in this order: `<compiler> --version`, which feeds
+the key's toolchain-version frame and is not memoized across sessions, and the
+run of the stored binary. There is no build, which is what a warm run means.
+The cases that use this do not trust the arithmetic — they assert the
+`cache-rebuild` warning only a failed cache-hit run can produce, so a fault that
+landed on the `--version` child fails loudly rather than passing over a run that
+never reached the store.
 """
 
 
@@ -770,6 +784,96 @@ def test_run_spawn_failure_never_names_a_deleted_staging_path() raises:
     )
 
 
+def test_a_cached_binary_that_will_not_start_costs_a_rebuild() raises:
+    """A validated artifact this process cannot start rebuilds, not fails.
+
+    Publishing an artifact deletes that source's older ones, so a second run
+    over the same checkout — another terminal, another shard with different
+    build arguments — can remove an artifact this run has already validated, in
+    the window between the probe and the exec. Resolving that to an internal
+    error turns an unrelated concurrent invocation into exit 3 on a run that
+    would otherwise have passed.
+
+    The removal belongs to another process and cannot be timed from here, so the
+    fault adapter fails the dispatch instead. Both leave the driver holding the
+    same fact: a run that could not start on a binary the cache served rather
+    than one this run compiled.
+    """
+    var root = temp_root()
+    write_file(root, "tests/test_ok.mojo", SRC_PASS)
+
+    var cold = run_recording_session(base_config(), root)
+    assert_equal(cold.code, 0, "the cold run must pass")
+    assert_equal(cold.built_files, 1, "the cold run compiles the one file")
+
+    var comp = _recorder()
+    var code: Int
+    _configure_fault(_OP_PIPE_STDOUT, _WARM_RUN_SPAWN_OCCURRENCE, _EIO)
+    try:
+        code = run_session(base_config(), root, comp)
+    finally:
+        _reset_faults()
+
+    assert_equal(
+        code, 0, "a cached binary that will not start must cost a rebuild"
+    )
+    ref rec = comp.composite.reporters[0]
+    assert_true(
+        _saw_warning_kind(rec, "cache-rebuild"),
+        (
+            "the rebuild must be announced; its absence would also mean the"
+            " fault landed on a spawn other than the cached run"
+        ),
+    )
+    var totals = _counters(rec)
+    assert_equal(totals.cached_files, 1, "the file was admitted as a hit")
+    assert_equal(
+        totals.built_files,
+        0,
+        (
+            "the recovery compile is not a second admission: one file is one"
+            " admission, exactly as a stale-name recovery rebuild is not one"
+        ),
+    )
+
+
+def test_a_pooled_cached_binary_that_will_not_start_costs_a_rebuild() raises:
+    """The same degradation in the pool, whose dispatch is a separate seam.
+
+    The pool admits a hit straight into its run phase and resolves a run that
+    will not start in two places of its own, so the sequential driver being
+    right says nothing about this one.
+    """
+    var root = temp_root()
+    write_file(root, "tests/test_ok.mojo", SRC_PASS)
+    var config = base_config()
+    config.workers = 2
+
+    var cold = run_recording_session(config.copy(), root)
+    assert_equal(cold.code, 0, "the cold run must pass")
+    assert_equal(cold.built_files, 1, "the cold run compiles the one file")
+
+    var comp = _recorder()
+    var code: Int
+    _configure_fault(_OP_PIPE_STDOUT, _WARM_RUN_SPAWN_OCCURRENCE, _EIO)
+    try:
+        code = run_session(config^, root, comp)
+    finally:
+        _reset_faults()
+
+    assert_equal(
+        code, 0, "a cached binary that will not start must cost a rebuild"
+    )
+    ref rec = comp.composite.reporters[0]
+    assert_true(
+        _saw_warning_kind(rec, "cache-rebuild"),
+        "the pool must announce the rebuild the same way",
+    )
+    var totals = _counters(rec)
+    assert_equal(totals.cached_files, 1, "the file was admitted as a hit")
+    assert_equal(totals.built_files, 0, "and admitted exactly once")
+
+
 def test_gate_file_is_cached_like_any_other() raises:
     """A gate runs through the same seam, so it keys, publishes, and hits.
 
@@ -959,9 +1063,11 @@ def test_cache_clear_refuses_unmarked() raises:
     """An unmarked `.mtest-cache` is refused, and the refusal is actionable.
 
     No "but everything in it looks like ours" exception exists on purpose: that
-    heuristic is exactly how a directory somebody else created gets deleted. The
-    price is that a checkout whose cache predates the marker refuses once, so the
-    text has to say so and hand over the manual removal.
+    heuristic is exactly how a directory somebody else created gets deleted, and
+    neither does a run write the marker into a directory it merely found — that
+    would manufacture the proof one invocation later. So the refusal is
+    permanent until the user acts, and the text has to say so and hand over the
+    manual removal rather than name a run that would fix it.
     """
     var root = temp_root()
     write_file(root, ".mtest-cache/build-v1/somebody_elses", "stray")
@@ -973,8 +1079,16 @@ def test_cache_clear_refuses_unmarked() raises:
         "the refusal must name the marker it looked for: " + diagnostic,
     )
     assert_true(
+        "never into one it finds" in diagnostic,
+        ("the refusal must say why no later run can fix it: " + diagnostic),
+    )
+    assert_false(
         "run mtest once" in diagnostic,
-        "the refusal must say a cache-enabled run writes it: " + diagnostic,
+        (
+            "the refusal must not name a run as the way out; a run that marked"
+            " this directory would manufacture the proof: "
+            + diagnostic
+        ),
     )
     assert_true(
         "rm -rf .mtest-cache" in diagnostic,

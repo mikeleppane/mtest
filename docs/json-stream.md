@@ -81,7 +81,7 @@ consumer never sees a `progress` record and never a blank line in its place.
 
 | field | type | notes |
 |---|---|---|
-| `warning_kind` | string | e.g. `stale-exclusion`, `compile-kill-residual`, `lf-stale`, `lf-empty`, `cache-off` |
+| `warning_kind` | string | e.g. `stale-exclusion`, `compile-kill-residual`, `lf-stale`, `lf-empty`, `cache-off`, `cache-publish`, `cache-clear`, `cache-rebuild` |
 | `warning_pattern` | string | the offending pattern / detail |
 
 `warning_kind` is an open vocabulary. Consumers must accept unknown strings as

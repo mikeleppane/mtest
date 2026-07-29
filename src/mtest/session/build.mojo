@@ -85,6 +85,16 @@ struct _BuildOutcome(Copyable, Movable):
     """Whether a terminal `FileResult` was produced (compile error/internal)."""
     var result: FileResult
     """The terminal `FileResult` to replay when `terminal`."""
+    var from_store: Bool
+    """Whether `binary` is an artifact the store served rather than one this
+    call compiled.
+
+    The caller needs it for one decision: a binary the store validated can be
+    removed before this process executes it, because publishing a generation
+    reaps that source's older ones and a second run over the checkout can
+    publish at any moment. A run that cannot spawn a binary in that position is
+    a file to compile, not an internal error.
+    """
     var cache_warning: String
     """Why this build could not be published, or empty when nothing went wrong.
 
@@ -224,6 +234,7 @@ def _build_for_selection(
                     hit.build_seconds,
                     False,
                     _blank_file_result(),
+                    True,
                     String(""),
                 )
             target = store_build_target(root, mangled)
@@ -285,6 +296,7 @@ def _build_for_selection(
             FileResult.internal(
                 Event.internal_error("build", config.mojo_path, 0)
             ),
+            False,
             String(""),
         )
     var bdur = Float64(bres.duration_ms) / 1000.0
@@ -298,6 +310,7 @@ def _build_for_selection(
             0.0,
             True,
             FileResult.interrupt(),
+            False,
             String(""),
         )
     var bterm = bres.termination
@@ -313,6 +326,7 @@ def _build_for_selection(
             FileResult.internal(
                 Event.internal_error("build", config.mojo_path, bterm.value)
             ),
+            False,
             String(""),
         )
     var bsignal = build_verdict(bterm)
@@ -352,6 +366,7 @@ def _build_for_selection(
             bdur,
             True,
             FileResult.ran_with(ev^, bsignal),
+            False,
             String(""),
         )
     var canonical = source_identity_key(root, rel)
@@ -377,6 +392,7 @@ def _build_for_selection(
         bdur,
         False,
         _blank_file_result(),
+        False,
         cache_warning^,
     )
 

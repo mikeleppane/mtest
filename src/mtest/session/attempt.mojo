@@ -71,6 +71,7 @@ from mtest.session.store import (
     PROBE_HIT,
     PUB_FAILED,
     _rewrite_output,
+    cache_rebuild_note,
     file_key,
     store_build_target,
     store_probe,
@@ -824,6 +825,15 @@ def _run_one(
     # asked about a key this call is genuinely about to build or run.
     var key = Optional[FileKey](None)
     var target = _no_staging()
+    # Whether this file is about to run a binary the store served, and whether
+    # it has already fallen back from one. Publishing a generation deletes that
+    # source's older ones, so a second run over this checkout can remove the
+    # generation this one validated between the probe and the exec. A binary
+    # that is no longer there is a reason to compile the file, not an internal
+    # error — and once, so a binary that will not spawn for any other reason
+    # still reaches the internal-error path rather than looping.
+    var store_hit = False
+    var store_rebuilt = False
     if ctx.enabled:
         key = file_key(ctx, root, rel)
         if not key:
@@ -843,6 +853,7 @@ def _run_one(
                 prior_build_argv = hit.argv.copy()
                 prior_bterm = Termination.exited(0)
                 prior_bdur = hit.build_seconds
+                store_hit = True
                 ctx.cached_files += 1
                 # Nothing staged, so nothing to publish: the generation this
                 # binary came from is already the store's.
@@ -971,6 +982,25 @@ def _run_one(
             target = _no_staging()
 
         if att.control == 1:
+            var ie_step = String(
+                att.internal_event.data[InternalErrorPayload].step
+            )
+            if store_hit and not store_rebuilt and ie_step == "run":
+                # The store's binary would not spawn. Compile the file rather
+                # than fail a run whose only fault was that its binary was
+                # cached. This is not a retry: `attempt_index` does not move,
+                # no attempt is reported, and the file was already admitted as
+                # a cache hit, so neither counter moves either. The key was
+                # dropped at the hit, so the rebuild stages and publishes
+                # nothing — it lands in `build/bin` like every uncached build.
+                store_hit = False
+                store_rebuilt = True
+                do_build = True
+                out_bin = plain_out
+                attempt_events.append(
+                    Event.warning("cache-rebuild", cache_rebuild_note(rel))
+                )
+                continue
             _cleanup_quarantine(root, quarantine_dirs)
             return FileResult.internal(att.internal_event.copy())
         if att.control == 2:
