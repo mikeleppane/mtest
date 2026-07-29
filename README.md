@@ -880,8 +880,8 @@ counters are what tell you whether a compile happened.
 
 ### What invalidates an entry
 
-Each cached binary is keyed by a digest over everything that could change the
-bytes the compiler produces:
+Each cached binary is keyed by a digest over the compile inputs mtest names —
+everything an ordinary edit, upgrade, or move can reach:
 
 - the resolved `mojo` executable — its canonical path, its contents, and its
   `--version` output — plus the `.mojopkg` and `.mojoc` files in its library
@@ -1047,8 +1047,15 @@ served compiles the file instead and says so with a `cache-rebuild` warning,
 rather than failing a run whose only fault was a cache hit.
 
 That is the shape of every decision here. A key that errs in the conservative
-direction costs one rebuild; there is no direction in which it costs a wrong
-verdict.
+direction costs one rebuild, and no ordinary mistake — an edit, a toolchain
+upgrade, an interrupted run, a store damaged from outside — costs a wrong
+verdict. What that scope excludes is a hostile process running as you on your
+machine: a compiler interposed through `LD_PRELOAD`, a helper swapped out
+underneath a compile that is already running, a symlink raced into the path
+`--cache-clear` is walking. Anyone who can do those can change your build far
+more easily by editing it. [§8.5.1 of the command-line
+contract](docs/cli-contract.md#851-what-the-cache-does-not-defend-against)
+states each boundary and why it is drawn there.
 
 ## CLI reference
 

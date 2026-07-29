@@ -373,6 +373,52 @@ to the full set. Nothing under `build/` is ever deleted: test binaries no longer
 land there, and configured precompile outputs are user-visible products rather
 than cache state.
 
+#### 8.5.1 What the cache does not defend against
+
+The cache defends against developer mistakes — an edit whose rebuild is skipped,
+a binary that no longer matches its source — and not against a hostile process
+running as the same user on the same machine. Anyone with that access can
+already change what a build produces by simpler means than deceiving the key:
+they can edit the sources, replace the compiler, or point `MODULAR_HOME`
+somewhere else. The four boundaries below follow from that scope. They are
+stated so a reader can tell them from defects, and each is a deliberate
+non-goal, not an omission awaiting a fix.
+
+- **A keyed input mutated while the compiler is running.** The key is taken
+  before the compile, and publication re-verifies the entry source only. A helper
+  swapped after the key is taken and restored before publication is therefore
+  compiled into a binary published under the pre-change key, and a later run over
+  the restored helper hits it. Re-verifying the whole input set at publication
+  would narrow that window without closing it — the compiler has already read the
+  files by then — so the guard stays on the one input whose change is both cheap
+  to detect and most likely to be a genuine mistake: the test file itself.
+
+- **The loader and SDK environment.** `MODULAR_HOME` and `MODULAR_CACHE_DIR` are
+  keyed because they change where the toolchain reads its own inputs from.
+  `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES`, and every other
+  loader or SDK variable the compiler child inherits are not. Keying the whole
+  inherited environment would invalidate every entry on variables that cannot
+  reach a compiled byte — a terminal width, a shell's session id — which is a
+  cache that never hits; keying a curated list of the dangerous ones would be a
+  guess that goes stale with the next platform. Interposing on the compiler is
+  the hostile case the scope above excludes.
+
+- **A symlink raced into `--cache-clear`'s path.** The deletion characterizes
+  each name with `lstat` and then walks that name, so a concurrent process
+  running as the same user can replace a directory with a symlink between those
+  two operations and redirect the walk. Closing this needs `openat`/`unlinkat`
+  over descriptors, which the pinned toolchain does not expose. Every step still
+  refuses what it can see — a symlinked root is never removed and never followed,
+  and a child symlink is unlinked rather than descended — and the target is
+  always `$PWD/.mtest-cache`, which is a narrowing rather than a proof.
+
+- **Two compilers with one version banner.** The stamp that lets mtest's own
+  `pixi run build` skip an unchanged precompile stage identifies the toolchain by
+  `mojo --version` and `pixi.lock`, so two different compiler binaries that print
+  the same banner under the same lockfile share a stamp. This applies to building
+  mtest, not to running it: the per-file cache key described above digests the
+  resolved compiler's own contents and does separate two such binaries.
+
 ---
 
 ## 9. Run and collect exit codes
