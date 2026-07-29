@@ -1159,6 +1159,30 @@ class CacheClearTests(ProtocolScenario):
         # hatch, so the stray file is exactly as it was.
         self.assertEqual(stray.read_bytes(), b"not mtest's\n")
 
+    def test_an_ordinary_run_does_not_adopt_a_directory_it_found(self) -> None:
+        # The refusal above tells the reader to delete the directory
+        # themselves. If an ordinary run wrote the marker into a directory it
+        # merely found, that refusal would be one invocation deep: run mtest,
+        # get the marker for free, and the next `--cache-clear` would delete
+        # somebody else's tree with the proof mtest had just manufactured.
+        cache_root = self.root / CACHE_ROOT_REL
+        cache_root.mkdir()
+        stray = cache_root / "keep-me.txt"
+        stray.write_bytes(b"not mtest's\n")
+
+        self.run_ok(["tests"])
+
+        self.assertFalse(
+            (self.root / TAG_REL).exists(),
+            msg="an ordinary run marked a directory it did not create",
+        )
+
+        completed = run_mtest(self.root, ["--cache-clear", "tests"])
+
+        self.assertEqual(completed.returncode, 4, msg=completed.stderr)
+        self.assertIn("CACHEDIR.TAG", completed.stderr)
+        self.assertEqual(stray.read_bytes(), b"not mtest's\n")
+
     def test_a_cachedir_tag_mtest_did_not_write_is_refused_intact(self) -> None:
         # The convention's real signature line, which is the point: `CACHEDIR.TAG`
         # is a published standard, and its documentation tells users and backup

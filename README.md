@@ -994,11 +994,13 @@ There is deliberately no "but its contents look like ours" override: that
 heuristic is exactly how a directory somebody else created gets deleted. Nor is
 the marker's presence enough — `CACHEDIR.TAG` is a shared convention that backup
 tools and users write themselves, so mtest compares the whole file against the
-text it writes. The diagnostic always hands over the manual `rm -rf`. A missing
-marker is one-shot: a single run writes it, cache enabled or not, because every
-`.mtest-cache/` mtest creates gets one. A marker mtest did not write is never
-overwritten and stays refused until you remove the directory yourself. Nothing
-under `build/` is ever deleted.
+text it writes. The diagnostic always hands over the manual `rm -rf`. mtest writes
+the marker only into a `.mtest-cache/` it created itself — cache enabled or not,
+since the directory is made for the last-run state either way — and never into
+one it finds, nor over one that is already there. A directory that was already
+there is therefore refused until you remove it yourself; a run that marked it
+would be manufacturing the proof this guard exists to ask for. Nothing under
+`build/` is ever deleted.
 
 ### The store is yours to throw away
 

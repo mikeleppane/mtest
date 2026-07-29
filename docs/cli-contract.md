@@ -347,7 +347,11 @@ behind no artifact a later run could trust. It does still create `.mtest-cache`
 itself, because the last-run state lives there and is written whatever the cache
 is doing — and every `.mtest-cache` mtest creates carries the `CACHEDIR.TAG`
 ownership marker, so a directory left by a `--no-cache` run is one
-`--cache-clear` can still prove it owns and delete.
+`--cache-clear` can still prove it owns and delete. The marker goes only into a
+directory mtest created: an existing `.mtest-cache` is used as it is and left
+unmarked, since writing the marker into a directory somebody else made would
+manufacture the ownership proof `--cache-clear` demands rather than establish
+it.
 
 `--cache-clear` deletes `.mtest-cache` — the artifacts and the last-run state
 together — and then runs the session normally, which legitimately repopulates

@@ -79,9 +79,11 @@ symlinked root and unlinks child symlinks rather than descending them. The cache
 deletes only what it owns, and it proves ownership with the `CACHEDIR.TAG`
 marker written at `CACHE_ROOT_DIR` — above the store, because `--cache-clear`
 deletes the whole owned directory and that is what must be proven mtest's.
-`ensure_cache_root` writes that marker on EVERY path that creates the directory,
-including the one that only wants somewhere to keep last-run state, and the
-proof is the marker's whole text: `CACHEDIR.TAG` is a shared convention, so a
+`ensure_cache_root` writes that marker on EVERY path that CREATES the directory,
+including the one that only wants somewhere to keep last-run state, and on no
+other path: a directory that was already there was made by somebody else, and
+marking it would manufacture the very proof the deletion demands. The proof is
+the marker's whole text, since `CACHEDIR.TAG` is a shared convention and a
 marker somebody else wrote says nothing about who owns the directory.
 
 **The publication fault seam — TEST ONLY.** `store_publish` reads the
@@ -1595,7 +1597,7 @@ def _cachedir_tag_text() -> String:
 
 
 def ensure_cache_root(root: String) raises:
-    """Create `<root>/.mtest-cache` and, once, the ownership marker inside it.
+    """Create `<root>/.mtest-cache`, marking it only if this call made it.
 
     EVERY creation of that directory goes through here, not just the store's.
     The last-run reselection state lives in it too and is written whether or not
@@ -1603,16 +1605,24 @@ def ensure_cache_root(root: String) raises:
     still has the directory — and if the marker were tied to staging, that
     directory would be unmarked and `--cache-clear` would refuse to delete a
     tree mtest itself had just created, blaming an older mtest that was never
-    there. The directory mtest makes is always a directory mtest can prove it
-    owns.
+    there. Every directory mtest makes is one mtest can prove it owns.
+
+    The converse is what makes that proof worth anything, and it is why the
+    `mkdir` here is exclusive rather than an "ensure it exists". A `.mtest-cache`
+    that was ALREADY THERE was made by something else — an older mtest, another
+    tool, or the user — and marking it would hand `clear_cache_root` a proof of
+    ownership this process invented, one invocation after that same function
+    refused to delete the directory for want of it. So an existing directory is
+    used as-is and left unmarked, and `--cache-clear` keeps refusing it until the
+    user removes it themselves.
 
     The marker is written to a unique temporary file in its own directory and
     renamed onto its final name, so a concurrent run can never observe a
     half-written tag — and `--cache-clear`, whose entire safety argument rests on
-    the marker's contents, can never be defeated by a torn write. An existing
-    marker is left exactly as it is, whatever it holds: rewriting one mtest did
-    not write would manufacture the proof of ownership `clear_cache_root`
-    demands.
+    the marker's contents, can never be defeated by a torn write. A directory
+    whose marker cannot be written is removed again rather than left behind
+    unmarked, since an unmarked directory is one no later run can ever prove is
+    mtest's.
 
     Args:
         root: The invocation root the cache directory hangs under.
@@ -1631,28 +1641,48 @@ def ensure_cache_root(root: String) raises:
     ensure_cache_root("/repo")  # /repo/.mtest-cache now carries CACHEDIR.TAG
     ```
     """
-    _ensure_dir(root + "/" + CACHE_ROOT_DIR)
-    var tag = root + "/" + CACHEDIR_TAG_REL
-    if exists(tag):
+    var cache_root = root + "/" + CACHE_ROOT_DIR
+    # `mkdir` rather than `_ensure_dir`, because "did this call create it?" is
+    # the whole question and `makedirs(exist_ok=True)` cannot answer it. The
+    # exclusive create is also the arbiter between two mtest processes over one
+    # checkout: exactly one of them sees success and writes the marker, and the
+    # loser falls through to `_ensure_dir`, which no-ops on the directory that
+    # now exists and still raises on a parent that will not take one.
+    var created = True
+    try:
+        mkdir(cache_root)
+    except:
+        created = False
+    if not created:
+        _ensure_dir(cache_root)
         return
-    var created = create_unique_temp(
-        root + "/" + CACHE_ROOT_DIR + "/CACHEDIR.TAG.XXXXXX"
-    )
+    var tag = root + "/" + CACHEDIR_TAG_REL
+    var temp = create_unique_temp(cache_root + "/CACHEDIR.TAG.XXXXXX")
     var wrote = True
     try:
-        write_all_fd(created.fd, _cachedir_tag_text())
+        write_all_fd(temp.fd, _cachedir_tag_text())
     except:
         wrote = False
     # The descriptor is discharged exactly once whether or not the write
     # succeeded; a failed write leaves only an empty temporary file behind.
-    close_checked_fd(created.fd)
+    close_checked_fd(temp.fd)
     if not wrote:
+        # Undo the creation. Leaving an unmarked directory would poison the
+        # path permanently: no later run creates it, so no later run marks it,
+        # and `--cache-clear` would refuse it forever over one transient write
+        # failure. Both removals are best-effort — if they fail the next run
+        # simply finds the directory and treats it as somebody else's.
+        _discard(temp.path)
+        try:
+            rmdir(cache_root)
+        except:
+            pass
         raise Error(
             "session: could not write the cache ownership marker at '"
             + tag
             + "'"
         )
-    rename_path(created.path, tag)
+    rename_path(temp.path, tag)
 
 
 def _ensure_store(root: String) raises:
@@ -1789,13 +1819,13 @@ def _ownership_proof_failure(root: String) -> Optional[String]:
         writes. Never raises: an unprovable directory is a refusal, not an
         error.
 
-        The two shapes carry different remedies on purpose. A MISSING marker is
-        written by the next cache-enabled run, so that run is the way out. A
-        marker that is present but not mtest's is not — mtest writes the marker
-        only when it creates the directory and never overwrites one it finds,
-        precisely because overwriting it would manufacture the proof this
-        function exists to demand — so the only way out is the user's own
-        deletion.
+        The two shapes are different facts with one remedy. mtest writes the
+        marker only when it creates the directory itself, and neither writes one
+        into a directory it finds nor overwrites one that is already there —
+        either would manufacture the proof this function exists to demand. So a
+        missing marker and a foreign marker both mean the same thing: nothing a
+        later run does can make this directory provably mtest's, and the way out
+        is the user's own deletion.
     """
     var tag = root + "/" + CACHEDIR_TAG_REL
     var quoted = String("the ownership marker '") + CACHEDIR_TAG_REL + "' "
@@ -1810,12 +1840,12 @@ def _ownership_proof_failure(root: String) -> Optional[String]:
     try:
         kind = Int(lstat(tag).st_mode) & _S_IFMT
     except:
-        var absent = quoted + "is missing. mtest writes that marker whenever"
+        var absent = quoted + "is missing. mtest writes that marker only when"
         absent += " it creates '"
         absent += CACHE_ROOT_DIR
-        absent += "', so a cache directory left by an older mtest refuses"
-        absent += " exactly once: run mtest once with the cache enabled to"
-        absent += " write the marker, or"
+        absent += "' itself and never into one it finds, so a directory left"
+        absent += " by an older mtest or by another tool stays refused until"
+        absent += " you"
         absent += manual
         return Optional[String](absent^)
 
