@@ -54,7 +54,12 @@ from mtest.session.store import (
 
 from cache_fixtures import (
     RecordedRun,
+    base_digest,
+    chmod_path,
     dir_listing,
+    env_base,
+    executable_stub,
+    make_executable,
     run_recording_session,
     write_bytes,
 )
@@ -114,78 +119,9 @@ def test_rejects_over_cap() raises:
         _ = read_regular_file_bytes(root + "/blob.bin", 3)
 
 
-def _chmod(mode: String, path: String) raises:
-    """Set `path`'s mode through a supervised `chmod` child.
-
-    The platform layer carries no permissions primitive
-    (`grep -rn "chmod\\|permissions" src/mtest/platform/` finds nothing) and the
-    pinned `std.os` exposes no `chmod` either, so the bit has to come from a
-    real process. `mtest.exec` already owns every fork/exec in the tree, which
-    makes a supervised spawn the natural fallback — cheaper than a
-    foreign declaration written only for the tests.
-
-    The runtime is closed in a `finally`. Without it a raising `run_supervised`
-    would leave mtest's process-global signal dispositions owned by a runtime
-    nobody can close, and every later test in this file that opens one would
-    fail on "a runtime is already active".
-
-    Args:
-        mode: The mode argument to pass to `chmod`, e.g. `"755"` or `"000"`.
-        path: The file or directory to change.
-
-    Raises:
-        Error: If the child did not exit, or exited non-zero.
-    """
-    var argv: List[String] = ["chmod", mode, path]
-    var runtime = ExecRuntime()
-    runtime.open()
-    var result: ProcessResult
-    try:
-        result = run_supervised(runtime, ProcessSpec.command(argv^, 30000))
-    finally:
-        runtime.close()
-    if not result.termination.is_exited() or result.termination.value != 0:
-        raise Error("test setup: chmod " + mode + " failed for '" + path + "'")
-
-
-def _make_executable(path: String) raises:
-    """Give `path` the execute bit.
-
-    Args:
-        path: The file to make owner/group/other executable.
-
-    Raises:
-        Error: If the child did not exit, or exited non-zero.
-    """
-    _chmod("755", path)
-
-
-def _executable_stub(root: String, rel: String) raises -> String:
-    """Write a trivial executable shell script at `root/rel` and return its path.
-
-    Args:
-        root: The scratch directory the relative path is resolved against.
-        rel: The path relative to `root`; parent directories are created.
-
-    Returns:
-        The absolute (but not canonicalized) path of the stub.
-
-    Raises:
-        Error: If the file cannot be written or the execute bit cannot be set.
-    """
-    var source = String("#!/bin/sh\nexit 0\n")
-    var data = List[UInt8]()
-    for b in source.as_bytes():
-        data.append(b)
-    write_bytes(root, rel, data)
-    var full = root + "/" + rel
-    _make_executable(full)
-    return full^
-
-
 def test_resolve_absolute_path() raises:
     var root = temp_root()
-    var stub = _executable_stub(root, "bin/stub")
+    var stub = executable_stub(root, "bin/stub")
     var found = resolve_executable(stub)
     assert_true(Bool(found))
     assert_equal(found.value(), realpath(stub))
@@ -193,8 +129,8 @@ def test_resolve_absolute_path() raises:
 
 def test_resolve_via_path_order() raises:
     var root = temp_root()
-    var first = _executable_stub(root, "a/tool")
-    var second = _executable_stub(root, "b/tool")
+    var first = executable_stub(root, "a/tool")
+    var second = executable_stub(root, "b/tool")
     var forward = resolve_executable("tool", root + "/a:" + root + "/b")
     assert_true(Bool(forward))
     assert_equal(forward.value(), realpath(first))
@@ -206,7 +142,7 @@ def test_resolve_via_path_order() raises:
 def test_resolve_skips_non_executable_candidate() raises:
     var root = temp_root()
     write_bytes(root, "a/tool", [UInt8(35), UInt8(10)])
-    var second = _executable_stub(root, "b/tool")
+    var second = executable_stub(root, "b/tool")
     var found = resolve_executable("tool", root + "/a:" + root + "/b")
     assert_true(Bool(found))
     assert_equal(found.value(), realpath(second))
@@ -221,7 +157,7 @@ def test_resolve_missing_returns_none() raises:
 
 def test_resolve_traverses_empty_path_entries() raises:
     var root = temp_root()
-    var only = _executable_stub(root, "b/tool")
+    var only = executable_stub(root, "b/tool")
     # An empty component is the cwd entry. Asserting that it RESOLVES to cwd
     # would need an executable inside the test's own working directory, which
     # is the repo checkout — writing one there would dirty the tree the fmt
@@ -236,7 +172,7 @@ def test_resolve_traverses_empty_path_entries() raises:
 def test_resolve_without_environment_path_is_fail_closed() raises:
     var root = temp_root()
     # The stub (and its `chmod` child) is built while PATH is still intact.
-    var stub = _executable_stub(root, "b/tool")
+    var stub = executable_stub(root, "b/tool")
     var saved = getenv("PATH", "")
     var bare = Optional[String](None)
     var slashed = Optional[String](None)
@@ -423,7 +359,7 @@ def test_walk_disables_on_unlistable_subdir() raises:
     write_file(root, "inc/p/__init__.mojo", "# i")
     write_file(root, "inc/p/mod.mojo", "# m")
     var kb = KeyBuilder()
-    _chmod("000", root + "/inc/p")
+    chmod_path("000", root + "/inc/p")
     # No `try`/`finally`: `walk_include_root` is non-raising by contract, so the
     # restore below is unconditionally reached.
     #
@@ -431,7 +367,7 @@ def test_walk_disables_on_unlistable_subdir() raises:
     # would key this tree exactly like one with no `p` at all. `listdir` raises
     # instead, and the walk refuses.
     var outcome = walk_include_root(root, "inc", kb, "")
-    _chmod("755", root + "/inc/p")
+    chmod_path("755", root + "/inc/p")
     assert_false(outcome.ok, "an unreadable package did not disable the cache")
     assert_true(
         "p" in outcome.reason,
@@ -449,9 +385,9 @@ def test_walk_disables_on_unsearchable_subdir() raises:
     # entry inside fails. Under `isdir`/`isfile` every entry would answer "not a
     # directory, not a source file" and the package would frame NOTHING while
     # the walk reported success — the same stale-hit hole, one level down.
-    _chmod("644", root + "/inc/p")
+    chmod_path("644", root + "/inc/p")
     var outcome = walk_include_root(root, "inc", kb, "")
-    _chmod("755", root + "/inc/p")
+    chmod_path("755", root + "/inc/p")
     assert_false(
         outcome.ok, "an unsearchable package did not disable the cache"
     )
@@ -474,137 +410,7 @@ comptime _HEX64 = (
 """A well-formed 64-character digest rendering, standing in for a real one."""
 
 
-def test_toolchain_memo_starts_matching_nothing() raises:
-    # The empty slot every process starts with. If it ever matched, the first
-    # lookup in a process would answer with a digest nobody computed.
-    var empty = _ToolchainMemo()
-    assert_false(empty.matches("/usr/bin/mojo", 141))
-    assert_false(empty.matches("", 0))
-
-
-def test_toolchain_memo_round_trips_a_stored_digest() raises:
-    var stored = _ToolchainMemo.of("/usr/bin/mojo", 141, _HEX64)
-    assert_true(stored, "a plain path and digest were refused")
-    var memo = stored.value().copy()
-    assert_true(memo.matches("/usr/bin/mojo", 141))
-    # The rebuilt string is the property a hit rests on: a memoized run and a
-    # cold run must frame identical bytes, so the digest has to come back
-    # character for character.
-    assert_equal(memo.sha_hex(), _HEX64)
-
-
-def test_toolchain_memo_discriminates_path_and_size() raises:
-    var memo = _ToolchainMemo.of("/usr/bin/mojo", 141, _HEX64).value().copy()
-    # Size is the field that catches a toolchain swap changing the binary's
-    # length; path is the field that catches a different compiler entirely.
-    assert_false(memo.matches("/usr/bin/mojo", 142))
-    assert_false(memo.matches("/usr/local/bin/mojo", 141))
-    # A prefix and an extension of the stored path are both misses: the
-    # comparison is on the whole path, not on what fits.
-    assert_false(memo.matches("/usr/bin/moj", 141))
-    assert_false(memo.matches("/usr/bin/mojoo", 141))
-
-
-def test_toolchain_memo_refuses_what_it_cannot_hold_exactly() raises:
-    # Every refusal costs one recomputation and nothing else. Truncating instead
-    # is what would be dangerous: two compilers sharing a long prefix would
-    # start matching each other.
-    var long_path = String("/")
-    while long_path.byte_length() <= _MEMO_PATH_CAP:
-        long_path += "abcdefgh"
-    assert_false(
-        Bool(_ToolchainMemo.of(long_path, 141, _HEX64)),
-        "an over-long path was stored rather than refused",
-    )
-    assert_false(
-        Bool(_ToolchainMemo.of("", 141, _HEX64)),
-        "an empty path was stored, forging the empty-slot marker",
-    )
-    assert_false(
-        Bool(_ToolchainMemo.of("/usr/bin/mojo", 141, "abc")),
-        "a short digest was stored rather than refused",
-    )
-    assert_false(
-        Bool(_ToolchainMemo.of("/usr/bin/mojo", 141, _HEX64 + "0")),
-        "an over-long digest was stored rather than refused",
-    )
-    # The longest path that still fits is stored, so the refusal is a boundary
-    # and not an off-by-one that quietly shrinks the memo.
-    var exact = String("/")
-    while exact.byte_length() < _MEMO_PATH_CAP:
-        exact += "a"
-    var stored = _ToolchainMemo.of(exact, 141, _HEX64)
-    assert_true(stored, "a path of exactly the capacity was refused")
-    assert_true(stored.value().matches(exact, 141))
-
-
-def test_toolchain_identity_memoizes_the_same_answer() raises:
-    # The end-to-end property, over the real compiler: the second call must
-    # answer identically to the first. A memo that returned anything else would
-    # move the key bytes between two sessions of one process.
-    var resolved = resolve_executable("mojo")
-    assert_true(resolved, "the pinned compiler did not resolve")
-    var path = resolved.value()
-    var first = _toolchain_identity(path)
-    var second = _toolchain_identity(path)
-    assert_true(first, "the compiler could not be read")
-    assert_true(second, "the memoized lookup failed")
-    assert_equal(first.value().path, second.value().path)
-    assert_equal(first.value().size, second.value().size)
-    assert_equal(first.value().sha_hex, second.value().sha_hex)
-
-
 # --- CacheContext: construction, disabling, and the env base -----------------
-
-
-def _env_base(config: RunnerConfig, root: String) raises -> CacheContext:
-    """Collect an env base over a runtime this helper opens and closes.
-
-    No `try`/`finally` is needed and none is written: `collect_env_base` is
-    non-raising by contract — every failure it can meet becomes a disabled
-    context — so there is no path on which `runtime.close()` is skipped. That
-    contract is what keeps this helper from repeating `_make_executable`'s
-    shape above, where a raising `run_supervised` would leak an open runtime
-    into every later test in this file.
-
-    Args:
-        config: The config to key.
-        root: The invocation root.
-
-    Returns:
-        The collected context.
-    """
-    var runtime = ExecRuntime()
-    runtime.open()
-    var ctx = collect_env_base(runtime, config, root)
-    runtime.close()
-    return ctx^
-
-
-def test_a_relative_compiler_resolves_against_the_run_root() raises:
-    """The key must name the compiler the build child will actually execute.
-
-    A spelling containing `/` is never PATH-searched — it is taken verbatim
-    against a working directory — and the two processes involved do not share
-    one. The build child `chdir`s to the run root before `execve`, while mtest
-    resolves in its own. Against a root that is not mtest's own directory,
-    `tools/mojo` therefore named one file in the key and ran another.
-
-    The observable form of the divergence: the compiler exists under the root
-    and nowhere near mtest's working directory, so resolving in the wrong place
-    finds nothing at all and turns the cache off.
-    """
-    var root = temp_root()
-    _ = _executable_stub(root, "tools/mojo")
-    var config = base_config()
-    config.mojo_path = String("tools/mojo")
-
-    var ctx = _env_base(config^, root)
-    assert_true(
-        ctx.enabled,
-        "the cache was disabled over a compiler that is right there: "
-        + ctx.disable_reason,
-    )
 
 
 def test_disable_keeps_the_first_reason() raises:
@@ -636,263 +442,6 @@ def test_tag_namespace_is_frame_safe() raises:
         assert_false(tag.endswith(".sha"), "reserved suffix in '" + tag + "'")
         for j in range(i + 1, len(tags)):
             assert_not_equal(tag, tags[j], "duplicate tag '" + tag + "'")
-
-
-def test_env_base_enabled_for_default_config() raises:
-    var root = temp_root()
-    var ctx = _env_base(base_config(), root)
-    assert_true(ctx.enabled, "cache off: " + ctx.disable_reason)
-    assert_equal(ctx.disable_reason, "")
-    assert_false(ctx.warned)
-    assert_equal(ctx.built_files, 0)
-    assert_equal(ctx.cached_files, 0)
-    assert_equal(len(ctx.extra_walk_dirs), 0)
-
-
-def test_env_base_disables_on_unknown_arg() raises:
-    var root = temp_root()
-    var config = base_config()
-    config.build_args = ["--sysroot=/x"]
-    var ctx = _env_base(config^, root)
-    assert_false(ctx.enabled)
-    # The reason names the token, because that is the thing the user can remove.
-    assert_true(
-        "--sysroot=/x" in ctx.disable_reason,
-        "reason did not name the token: " + ctx.disable_reason,
-    )
-
-
-def test_env_base_disables_on_unresolvable_compiler() raises:
-    var root = temp_root()
-    var config = base_config()
-    config.mojo_path = "mtest-absent-compiler"
-    var ctx = _env_base(config^, root)
-    assert_false(ctx.enabled)
-    assert_true(
-        "mtest-absent-compiler" in ctx.disable_reason,
-        "reason did not name the compiler: " + ctx.disable_reason,
-    )
-
-
-def test_env_base_frames_a_toolchain_without_a_library_directory() raises:
-    """A layout with no `lib/mojo` beside the compiler keys, it does not fail.
-
-    A `--mojo` spelling that names a wrapper script somewhere else in the tree
-    is the ordinary case here, and nothing beside it looks like a toolchain.
-    The compiler's own digest still identifies it, so the absence is a fact to
-    record rather than a reason to switch the cache off.
-    """
-    var root = temp_root()
-    var stub = _executable_stub(root, "tc/bin/mojo")
-    var config = base_config()
-    config.mojo_path = stub
-    var ctx = _env_base(config^, root)
-    assert_true(ctx.enabled, "cache off: " + ctx.disable_reason)
-
-
-def test_env_base_disables_when_the_toolchain_libraries_cannot_be_read() raises:
-    """A library directory that will not open is a question, not an absence.
-
-    The two have to lead in opposite directions: a toolchain with no library
-    directory keys perfectly well, while one whose libraries this process
-    cannot read is a build input the key cannot represent, so the cache goes
-    off. A single `isdir` answers False to both, which let an unreadable
-    directory key as though the toolchain shipped no libraries at all.
-
-    The path is closed at the PARENT, which is what makes the case sharp: the
-    directory can then be neither listed nor even stat'd, so nothing about the
-    path itself can separate it from a directory that was never there.
-    """
-    var root = temp_root()
-    var stub = _executable_stub(root, "tc/bin/mojo")
-    write_file(root, "tc/lib/mojo/std.mojopkg", "# stands in for a library")
-    var config = base_config()
-    config.mojo_path = stub
-    _chmod("000", root + "/tc/lib")
-    var ctx = _env_base(config^, root)
-    _chmod("755", root + "/tc/lib")
-    assert_false(
-        ctx.enabled, "an unreadable library directory must disable the cache"
-    )
-    assert_true(
-        "lib/mojo" in ctx.disable_reason,
-        "reason did not name the directory: " + ctx.disable_reason,
-    )
-
-
-def test_env_base_frames_every_entry_of_the_library_directory() raises:
-    """What ships beside the compiler's packages is toolchain too.
-
-    Framing only the two extensions the packages happen to use left the shared
-    objects, resource files, and anything else a toolchain drops in that
-    directory outside the key, so replacing one of them left every stored
-    generation valid. An extension list is also a guess that goes stale the
-    next time the toolchain ships something new.
-    """
-    var root = temp_root()
-    var stub = _executable_stub(root, "tc/bin/mojo")
-    write_file(root, "tc/lib/mojo/std.mojopkg", "# stands in for a package")
-    write_file(root, "tc/lib/mojo/libsupport.so", "# one")
-    var config = base_config()
-    config.mojo_path = stub
-    var before = _env_base(config^, root)
-    assert_true(before.enabled, "cache off: " + before.disable_reason)
-
-    # A different length as well as different bytes: the content digest is
-    # memoized per process on the directory's total byte count, so a
-    # same-length edit inside one process is the case that memo does not see.
-    write_file(root, "tc/lib/mojo/libsupport.so", "# two, and longer")
-    var second = base_config()
-    second.mojo_path = stub
-    var after = _env_base(second^, root)
-    assert_true(after.enabled, "cache off: " + after.disable_reason)
-    assert_not_equal(
-        _base_digest(before),
-        _base_digest(after),
-        "a library outside the package extensions must still be keyed",
-    )
-
-    # An entry appearing moves the key without anything being read: names and
-    # types are framed on every collection.
-    write_file(root, "tc/lib/mojo/extra.dat", "# three")
-    var third = base_config()
-    third.mojo_path = stub
-    var grown = _env_base(third^, root)
-    assert_true(grown.enabled, "cache off: " + grown.disable_reason)
-    assert_not_equal(_base_digest(after), _base_digest(grown))
-
-
-def test_env_base_frames_the_compiler_selection_environment() raises:
-    """A variable that picks a tool the compiler invokes belongs in the key.
-
-    `MODULAR_NVPTX_COMPILER_PATH` selects the NVIDIA assembler, and a build
-    child inherits it. Two runs that differ only there are not the same build,
-    so a warm entry from one of them must not answer for the other.
-    """
-    var root = temp_root()
-    var name = String("MODULAR_NVPTX_COMPILER_PATH")
-    var was_set = getenv(name, "\x01unset") != "\x01unset"
-    var saved = getenv(name, "")
-    var digests = List[String]()
-    try:
-        _ = unsetenv(name)
-        digests.append(_base_digest(_env_base(base_config(), root)))
-        _ = setenv(name, "/opt/ptxas-here", True)
-        digests.append(_base_digest(_env_base(base_config(), root)))
-        _ = setenv(name, "/opt/ptxas-there", True)
-        digests.append(_base_digest(_env_base(base_config(), root)))
-    finally:
-        if was_set:
-            _ = setenv(name, saved, True)
-        else:
-            _ = unsetenv(name)
-    assert_equal(len(digests), 3)
-    assert_not_equal(digests[0], digests[1])
-    assert_not_equal(digests[0], digests[2])
-    assert_not_equal(digests[1], digests[2])
-
-
-def test_env_base_disables_on_missing_arg_file() raises:
-    var root = temp_root()
-    var config = base_config()
-    config.build_args = ["-Xlinker", "absent.o"]
-    var ctx = _env_base(config^, root)
-    assert_false(ctx.enabled)
-    assert_true(
-        "absent.o" in ctx.disable_reason,
-        "reason did not name the token: " + ctx.disable_reason,
-    )
-
-
-def _base_digest(ctx: CacheContext) raises -> String:
-    """The full key of `ctx.base`, taken from a fork so `ctx` stays usable."""
-    var forked = ctx.base.copy()
-    return forked^.digest_full()
-
-
-def test_env_base_digest_is_stable_across_calls() raises:
-    var root = temp_root()
-    var first = _env_base(base_config(), root)
-    var second = _env_base(base_config(), root)
-    assert_true(first.enabled, "cache off: " + first.disable_reason)
-    assert_true(second.enabled, "cache off: " + second.disable_reason)
-    # THE property every future cache hit rests on. If two collections over
-    # unchanged inputs ever disagree — an unsorted listing, an absolute path
-    # leaking into a frame, a memo returning something other than what it
-    # replaced — the cache degrades to a rebuild every time and nothing else in
-    # the suite would notice.
-    assert_equal(_base_digest(first), _base_digest(second))
-
-
-def test_env_base_digest_moves_with_build_args() raises:
-    var root = temp_root()
-    var plain = _env_base(base_config(), root)
-    var one = base_config()
-    one.build_args = ["-O2"]
-    var flagged = _env_base(one^, root)
-    assert_true(flagged.enabled, "cache off: " + flagged.disable_reason)
-    assert_not_equal(_base_digest(plain), _base_digest(flagged))
-
-    var forward = base_config()
-    forward.build_args = ["-O2", "--no-optimization"]
-    var backward = base_config()
-    backward.build_args = ["--no-optimization", "-O2"]
-    # Frame ORDER inside field 7: the same two flags in the other order are a
-    # different command line and must be a different key.
-    assert_not_equal(
-        _base_digest(_env_base(forward^, root)),
-        _base_digest(_env_base(backward^, root)),
-    )
-
-
-def test_env_base_digest_moves_with_environment() raises:
-    var root = temp_root()
-    # `MODULAR_HOME` relocates the compiler's module cache, so it is keyed. It
-    # is restored exactly, including the "was not set at all" case, which is a
-    # different fact from "set to the empty string" and keys differently.
-    var was_set = getenv("MODULAR_HOME", "\x01unset") != "\x01unset"
-    var saved = getenv("MODULAR_HOME", "")
-    # Collected into a list rather than three pre-declared strings so the
-    # `finally` restore is never skipped and no dead initializer is needed.
-    var digests = List[String]()
-    try:
-        _ = setenv("MODULAR_HOME", "/tmp/mtest-modular-here", True)
-        digests.append(_base_digest(_env_base(base_config(), root)))
-        _ = setenv("MODULAR_HOME", "/tmp/mtest-modular-there", True)
-        digests.append(_base_digest(_env_base(base_config(), root)))
-        _ = unsetenv("MODULAR_HOME")
-        digests.append(_base_digest(_env_base(base_config(), root)))
-    finally:
-        if was_set:
-            _ = setenv("MODULAR_HOME", saved, True)
-        else:
-            _ = unsetenv("MODULAR_HOME")
-    assert_equal(len(digests), 3)
-    assert_not_equal(digests[0], digests[1])
-    assert_not_equal(digests[0], digests[2])
-    assert_not_equal(digests[1], digests[2])
-
-
-def test_env_base_digest_moves_with_root() raises:
-    var here = temp_root()
-    var there = temp_root()
-    # Field 6 is the CANONICAL root, so two runs of the same sources from two
-    # checkouts do not share a generation.
-    assert_not_equal(
-        _base_digest(_env_base(base_config(), here)),
-        _base_digest(_env_base(base_config(), there)),
-    )
-
-
-def test_env_base_records_include_dir_args() raises:
-    var root = temp_root()
-    write_file(root, "extra/top.mojo", "# a")
-    var config = base_config()
-    config.build_args = ["-I", "extra"]
-    var ctx = _env_base(config^, root)
-    assert_true(ctx.enabled, "cache off: " + ctx.disable_reason)
-    assert_equal(len(ctx.extra_walk_dirs), 1)
-    assert_equal(ctx.extra_walk_dirs[0], "extra")
 
 
 # --- CacheContext: finalize_includes -----------------------------------------
@@ -1024,7 +573,7 @@ def _stage_binary(
     if not target.ok():
         raise Error("test: store_build_target produced no staging directory")
     write_bytes(root, target.out_rel, payload)
-    _make_executable(root + "/" + target.out_rel)
+    make_executable(root + "/" + target.out_rel)
     return target^
 
 
@@ -1200,7 +749,7 @@ def test_probe_rejects_a_bin_that_lost_its_execute_bit() raises:
     # An archive restore, a `docker COPY`, or a `chmod -R` over the checkout
     # drops the mode bits while leaving every byte intact, so the content digest
     # still matches and only the permission has moved.
-    _chmod("600", root + "/" + key.gen_dir + "/bin")
+    chmod_path("600", root + "/" + key.gen_dir + "/bin")
 
     # A generation that cannot be spawned is not a usable generation. Reporting
     # it as a hit hands the runner a path it cannot execute, which surfaces as an
@@ -1392,7 +941,7 @@ def test_probe_refuses_a_symlinked_binary_inside_a_generation() raises:
     # record still names this key and still records the digest of the bytes the
     # link resolves to.
     write_bytes(root, "outside/bin", [UInt8(3)])
-    _chmod("755", root + "/outside/bin")
+    chmod_path("755", root + "/outside/bin")
     remove(root + "/" + key.gen_dir + "/bin")
     symlink(root + "/outside/bin", root + "/" + key.gen_dir + "/bin")
     assert_equal(store_probe(root, key).kind, PROBE_MISS)
@@ -2319,13 +1868,13 @@ def test_precompile_key_disables_on_an_unwalkable_include_root() raises:
     var no_dirs = List[String]()
     var includes: List[String] = ["inc"]
     var ctx = CacheContext()
-    _chmod("000", root + "/inc")
+    chmod_path("000", root + "/inc")
     # No `try`/`finally`: `precompile_key` is non-raising by contract, so the
     # restore below is unconditionally reached.
     var key = precompile_key(
         ctx, root, "pkg", includes, no_dirs, "build/pkg.mojopkg"
     )
-    _chmod("755", root + "/inc")
+    chmod_path("755", root + "/inc")
     assert_false(Bool(key))
     assert_false(ctx.enabled)
     assert_true(

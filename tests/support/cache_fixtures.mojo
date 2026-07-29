@@ -18,6 +18,7 @@ from std.os import listdir, makedirs
 from std.os.path import dirname, exists, isdir
 
 from mtest.config import RunnerConfig
+from mtest.exec import ExecRuntime, ProcessResult, ProcessSpec, run_supervised
 from mtest.model import EventKind, SessionFinishedPayload, WarningPayload
 from mtest.report import (
     CompositeReporter,
@@ -25,6 +26,7 @@ from mtest.report import (
     RecordingReporter,
 )
 from mtest.session import run_session
+from mtest.session.store import CacheContext, collect_env_base
 
 
 def write_bytes(root: String, rel: String, data: List[UInt8]) raises:
@@ -65,6 +67,168 @@ def write_bytes(root: String, rel: String, data: List[UInt8]) raises:
         makedirs(parent)
     with open(full, "w") as f:
         f.write_bytes(Span(data))
+
+
+def chmod_path(mode: String, path: String) raises:
+    """Set `path`'s mode through a supervised `chmod` child.
+
+    The platform layer carries no permissions primitive
+    (`grep -rn "chmod\\|permissions" src/mtest/platform/` finds nothing) and the
+    pinned `std.os` exposes no `chmod` either, so the bit has to come from a
+    real process. `mtest.exec` already owns every fork/exec in the tree, which
+    makes a supervised spawn the natural fallback — cheaper than a foreign
+    declaration written only for the tests.
+
+    The runtime is closed in a `finally`. Without it a raising `run_supervised`
+    would leave mtest's process-global signal dispositions owned by a runtime
+    nobody can close, and every later test in the same suite that opens one
+    would fail on "a runtime is already active".
+
+    Args:
+        mode: The mode argument to pass to `chmod`, e.g. `"755"` or `"000"`.
+        path: The file or directory to change.
+
+    Raises:
+        Error: If the child did not exit, or exited non-zero.
+
+    Examples:
+
+    ```mojo
+    from cache_fixtures import chmod_path
+
+    chmod_path("000", "/tmp/unreadable")
+    ```
+    """
+    var argv: List[String] = ["chmod", mode, path]
+    var runtime = ExecRuntime()
+    runtime.open()
+    var result: ProcessResult
+    try:
+        result = run_supervised(runtime, ProcessSpec.command(argv^, 30000))
+    finally:
+        runtime.close()
+    if not result.termination.is_exited() or result.termination.value != 0:
+        raise Error("test setup: chmod " + mode + " failed for '" + path + "'")
+
+
+def make_executable(path: String) raises:
+    """Give `path` the execute bit.
+
+    Args:
+        path: The file to make owner/group/other executable.
+
+    Raises:
+        Error: If the child did not exit, or exited non-zero.
+
+    Examples:
+
+    ```mojo
+    from cache_fixtures import make_executable
+
+    make_executable("/tmp/tc/bin/mojo")
+    ```
+    """
+    chmod_path("755", path)
+
+
+def executable_stub(root: String, rel: String) raises -> String:
+    """Write a trivial executable shell script at `root/rel` and return its path.
+
+    A stand-in toolchain: the tests that key a compiler need a real file with
+    the execute bit, not the several-hundred-megabyte one on PATH, and hashing
+    a two-line script is what keeps those cases cheap.
+
+    Args:
+        root: The scratch directory the relative path is resolved against.
+        rel: The path relative to `root`; parent directories are created.
+
+    Returns:
+        The absolute (but not canonicalized) path of the stub.
+
+    Raises:
+        Error: If the file cannot be written or the execute bit cannot be set.
+
+    Examples:
+
+    ```mojo
+    from cache_fixtures import executable_stub
+    from tmptree import temp_root
+
+    var root = temp_root()
+    var mojo = executable_stub(root, "tc/bin/mojo")
+    ```
+    """
+    var source = String("#!/bin/sh\nexit 0\n")
+    var data = List[UInt8]()
+    for b in source.as_bytes():
+        data.append(b)
+    write_bytes(root, rel, data)
+    var full = root + "/" + rel
+    make_executable(full)
+    return full^
+
+
+def env_base(config: RunnerConfig, root: String) raises -> CacheContext:
+    """Collect an env base over a runtime this helper opens and closes.
+
+    No `try`/`finally` is needed and none is written: `collect_env_base` is
+    non-raising by contract — every failure it can meet becomes a disabled
+    context — so there is no path on which `runtime.close()` is skipped. That
+    contract is what keeps this helper from repeating `chmod_path`'s shape
+    above, where a raising `run_supervised` would leak an open runtime into
+    every later test in the suite.
+
+    Args:
+        config: The config to key.
+        root: The invocation root.
+
+    Returns:
+        The collected context.
+
+    Raises:
+        Error: If the exec runtime cannot be opened or closed.
+
+    Examples:
+
+    ```mojo
+    from cache_fixtures import env_base
+    from session_fixtures import base_config
+    from tmptree import temp_root
+
+    var ctx = env_base(base_config(), temp_root())
+    ```
+    """
+    var runtime = ExecRuntime()
+    runtime.open()
+    var ctx = collect_env_base(runtime, config, root)
+    runtime.close()
+    return ctx^
+
+
+def base_digest(ctx: CacheContext) raises -> String:
+    """The full key of `ctx.base`, taken from a fork so `ctx` stays usable.
+
+    Args:
+        ctx: The collected context whose base key is wanted.
+
+    Returns:
+        The base key's full hex digest.
+
+    Raises:
+        Error: If the digest cannot be finalized.
+
+    Examples:
+
+    ```mojo
+    from cache_fixtures import base_digest, env_base
+    from session_fixtures import base_config
+    from tmptree import temp_root
+
+    var key = base_digest(env_base(base_config(), temp_root()))
+    ```
+    """
+    var forked = ctx.base.copy()
+    return forked^.digest_full()
 
 
 def dir_listing(path: String) raises -> List[String]:
