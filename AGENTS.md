@@ -211,7 +211,8 @@ pixi run py-fmt            # ruff's safe lint fixes, then format Python in place
 pixi run py-check          # ruff format/lint and mypy --strict over scripts/ and
                            #   tests/fixtures/exec/ (needs `uv`; see below)
 pixi run version-check     # manifest, CLI, and shipped-version identity
-pixi run harness-unit-check     # harness self-tests: runner, watchdog, comparators
+pixi run harness-unit-check     # harness self-tests: runner, watchdog, comparators,
+                                #   and the two memory-lane oracles (no tools needed)
 pixi run repo-policy-check      # layout, workflow security, tool pins, annotations
 pixi run release-tooling-check  # attestations, release, publication, public verify
 pixi run harness-check     # the aggregate of the three groups above
