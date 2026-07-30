@@ -88,12 +88,12 @@ marking it would manufacture the very proof the deletion demands. The proof is
 the marker's whole text, since `CACHEDIR.TAG` is a shared convention and a
 marker somebody else wrote says nothing about who owns the directory.
 
-**The publication fault seam — TEST ONLY.** `store_publish` reads the
-environment variable `MTEST_STORE_FAULT` exactly ONCE per call, through the same
-`_env_value` accessor `MODULAR_HOME` goes through, and what it reads never
-reaches a `KeyBuilder`: the seam is not a key input, not a config field, and not
-part of the tag namespace. Absent or empty — the only shape any real invocation
-has — means no effect at all, and so does any value outside the two names below.
+**The store fault seam — TEST ONLY.** The store reads the environment variable
+`MTEST_STORE_FAULT` through the same `_env_value` accessor `MODULAR_HOME` goes
+through, and what it reads never reaches a `KeyBuilder`: the seam is not a key
+input, not a config field, and not part of the tag namespace. Absent or empty
+— the only shape any real invocation has — means no effect at all, and so does
+any value outside the three names below.
 
 It exists because the two publication windows worth faulting are inside mtest's
 own process, AFTER the compiler child has exited, so no fake compiler can reach
@@ -102,9 +102,12 @@ directory that was never flushed; `before-rename` abandons it after step 4 and
 before step 5, so the generation is fully durable and simply never committed.
 Both take the ordinary `PUB_FAILED` path — the staged binary stays alive and the
 session keeps running it — so the seam introduces no state and no control flow
-the protocol does not already have. `scripts/tests/test_cache_protocol.py` drives
-both windows and asserts the property they exist to demonstrate: an interrupted
-publication leaves no generation a later run could probe.
+the protocol does not already have. `unreadable-replacement` moves the
+test-prepared replacement into the final name after unreadable detection and
+before quarantine, pinning that the atomic move reconciles the object it
+actually moved. `scripts/tests/test_cache_protocol.py` drives the two
+publication windows and asserts the property they exist to demonstrate: an
+interrupted publication leaves no generation a later run could probe.
 """
 from std.ffi import _Global
 from std.os import getenv, listdir, lstat, mkdir, rmdir, stat, unlink
@@ -2169,32 +2172,61 @@ def _discard(path: String):
         pass
 
 
+comptime STORE_FAULT_ENV = "MTEST_STORE_FAULT"
+"""The test-only store fault seam's environment variable."""
+
+comptime _FAULT_UNREADABLE_REPLACEMENT = "unreadable-replacement"
+"""Move the test-prepared replacement between detection and quarantine."""
+
+
 def _discard_unreadable_generation(gen_abs: String, store_abs: String):
-    """Remove an unreadable generation, moving undeletable litter aside.
+    """Remove an unreadable generation without racing a replacement.
 
     A failed read invalidates the generation even when it was a transient
     `EACCES`: the store cannot validate an artifact it cannot read, and its
     established rule is to discard every failed validation before rebuilding.
-    It re-lists the final path immediately before moving it: a concurrent
-    publisher may already have installed a readable replacement, which this
-    helper must leave runnable. After an atomic move, normal deletion remains
-    the first choice. If permission bits prevent that deletion, the unique
-    inert `.tmp-` name keeps the unreadable directory as cache litter that no
-    probe, publisher, or reaper serves.
+    The generation's device/inode pair is captured before the unreadable list.
+    The final pathname then moves atomically to a private name, and that moved
+    directory's identity decides the result: the observed unreadable directory
+    is discarded; a readable replacement that arrived meanwhile is restored.
+    Restoring uses directory `rename(2)`, which refuses to replace a nonempty
+    newer generation, so a later publisher remains runnable. An undeletable
+    original remains inert `.tmp-` litter that no probe, publisher, or reaper
+    serves.
 
     Args:
         gen_abs: The unreadable generation's absolute path.
         store_abs: The containing store directory's absolute path.
     """
+    var observed_dev: Int
+    var observed_ino: Int
     var kind: Int
     try:
-        kind = Int(lstat(gen_abs).st_mode) & _S_IFMT
+        var observed = lstat(gen_abs)
+        observed_dev = Int(observed.st_dev)
+        observed_ino = Int(observed.st_ino)
+        kind = Int(observed.st_mode) & _S_IFMT
     except:
         return
     if kind != _S_IFDIR:
         return
     if _list_sorted(gen_abs):
         return
+
+    # This names one test-only interleaving: a peer has prepared a valid
+    # generation in the store and publishes it after this helper observed the
+    # unreadable directory. Production runs never set the fault, so no extra
+    # filesystem mutation occurs outside the existing quarantine protocol.
+    var requested = _env_value(STORE_FAULT_ENV)
+    if requested and requested.value() == _FAULT_UNREADABLE_REPLACEMENT:
+        try:
+            rename_path(
+                store_abs + "/" + _TMP_PREFIX + "unreadable-replacement",
+                gen_abs,
+            )
+        except:
+            pass
+
     var tombstone_path = String("")
     try:
         var tombstone = create_unique_temp(
@@ -2203,19 +2235,33 @@ def _discard_unreadable_generation(gen_abs: String, store_abs: String):
         tombstone_path = tombstone.path.copy()
         close_checked_fd(tombstone.fd)
         unlink(tombstone_path)
-        # A prior healer may have moved the damaged directory aside while this
-        # call claimed its unique destination. A readable replacement at the
-        # final name belongs to the publisher that installed it, not to this
-        # cleanup path.
-        if _list_sorted(gen_abs):
-            _discard(tombstone_path)
-            return
         rename_path(gen_abs, tombstone_path)
     except:
         if tombstone_path != "":
             _discard(tombstone_path)
         return
-    _discard(tombstone_path)
+    var moved_dev: Int
+    var moved_ino: Int
+    try:
+        var moved = lstat(tombstone_path)
+        moved_dev = Int(moved.st_dev)
+        moved_ino = Int(moved.st_ino)
+    except:
+        return
+    if moved_dev == observed_dev and moved_ino == observed_ino:
+        _discard(tombstone_path)
+        return
+    if not _list_sorted(tombstone_path):
+        _discard(tombstone_path)
+        return
+    # A valid replacement raced in after the unreadable observation. If another
+    # publisher has already filled `gen_abs`, this directory-to-directory rename
+    # fails because that generation contains `meta` and `bin`; retain this
+    # private duplicate rather than overwrite a newer final generation.
+    try:
+        rename_path(tombstone_path, gen_abs)
+    except:
+        pass
 
 
 def cache_rebuild_note(rel: String) -> String:
@@ -3113,14 +3159,6 @@ def _publish_failed(
         PUB_FAILED, String(target.out_rel), argv.copy(), warning
     )
 
-
-comptime STORE_FAULT_ENV = "MTEST_STORE_FAULT"
-"""The test-only publication fault seam's environment variable.
-
-Read once per `store_publish` call and never fed to a `KeyBuilder`. See the
-module docstring's "The publication fault seam" note for why the seam exists
-and what each recognized value abandons.
-"""
 
 comptime _FAULT_BEFORE_FSYNC = "before-fsync"
 """Abandon the publication before the durability flush."""

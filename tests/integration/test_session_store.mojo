@@ -53,6 +53,7 @@ from mtest.session.store import (
     PRECOMPILE_SUBDIR,
     PUB_FAILED,
     PUB_OK,
+    STORE_FAULT_ENV,
     STORE_DIR,
     CacheContext,
     FileKey,
@@ -839,6 +840,40 @@ def test_unreadable_healer_leaves_a_readable_replacement_alone() raises:
     _discard_unreadable_generation(
         root + "/" + key.gen_dir, root + "/" + STORE_DIR
     )
+    assert_equal(store_probe(root, key).kind, PROBE_HIT)
+
+
+def test_unreadable_healer_restores_a_replacement_raced_before_quarantine() raises:
+    var root = temp_root()
+    var rel = String("tests/test_raced_replacement.mojo")
+    var key = _fixture_key(root, rel, "# raced replacement\n")
+    var target = _stage_binary(root, [UInt8(10), UInt8(11), UInt8(12)])
+    assert_equal(
+        store_publish(
+            root, key, target, 1.0, _build_argv(rel, target.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    var store_abs = root + "/" + STORE_DIR
+    var replacement = store_abs + "/.tmp-unreadable-replacement"
+    rename_path(root + "/" + key.gen_dir, replacement)
+    makedirs(root + "/" + key.gen_dir)
+    chmod_path("000", root + "/" + key.gen_dir)
+
+    # The fault installs the valid replacement after the helper has observed
+    # the unreadable directory but before the helper claims its quarantine.
+    # That exact interleaving used to move the replacement into a tombstone and
+    # immediately delete it.
+    var saved = getenv(STORE_FAULT_ENV, "")
+    var was_set = getenv(STORE_FAULT_ENV, "\x01unset") != "\x01unset"
+    try:
+        _ = setenv(STORE_FAULT_ENV, "unreadable-replacement", True)
+        _discard_unreadable_generation(root + "/" + key.gen_dir, store_abs)
+    finally:
+        if was_set:
+            _ = setenv(STORE_FAULT_ENV, saved, True)
+        else:
+            _ = unsetenv(STORE_FAULT_ENV)
     assert_equal(store_probe(root, key).kind, PROBE_HIT)
 
 
