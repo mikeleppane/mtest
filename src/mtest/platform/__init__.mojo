@@ -24,7 +24,7 @@ The public surface is re-exported here so callers write
 `from mtest.platform import create_unique_temp, rename_path, ...`.
 """
 from mtest.platform.executable import is_executable_file, resolve_executable
-from mtest.platform.fs import rename_path
+from mtest.platform.fs import rename_path, set_permissions
 from mtest.platform.process import process_id
 from mtest.platform.regular_file import (
     BoundedRegularFileRead,

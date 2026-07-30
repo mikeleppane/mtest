@@ -10,7 +10,6 @@ The clear is a session-independent operation, so most cases here write the
 `CACHEDIR.TAG` marker by hand rather than paying for a compile to get one. The
 two that need a real session say why.
 """
-from std.ffi import external_call
 from std.os import makedirs, remove
 from std.os.path import exists, islink
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
@@ -29,7 +28,7 @@ from mtest.report import (
     RecordingCoordinator,
     RecordingReporter,
 )
-from mtest.platform.cstring import c_string_bytes
+from mtest.platform import set_permissions
 from mtest.session import run_session
 from mtest.session.store import clear_cache_root
 
@@ -64,42 +63,6 @@ Only `test_cache_clear_deletes_a_store_a_real_session_wrote` needs the marker a
 session actually writes; every other clear case only needs a marker to be there,
 so it writes this rather than paying for a compile.
 """
-
-
-def _chmod(path: String, mode: Int) raises:
-    """Set `path`'s permission bits.
-
-    The pinned `std.os` exposes no `chmod`, and the partial-delete refusal
-    cannot be reached without one: that path only opens when the removal fails
-    on a child the process genuinely may not unlink, which is a permission fact
-    and not something a fault injector can stand in for.
-
-    Args:
-        path: An existing path whose mode is replaced.
-        mode: The POSIX permission bits, for example `0o500`.
-
-    Raises:
-        Error: If `chmod` reports a failure.
-    """
-    var c = c_string_bytes(path)
-    # SAFETY: libc `chmod` has the exact ABI `int chmod(const char*, mode_t)` on
-    # both Linux and Darwin — a fixed arity of two with no variadic tail, so the
-    # NON-variadic call `external_call` emits is the correct one on every target
-    # this suite builds for. The pointer names a complete, fully initialized,
-    # NUL-terminated byte copy this function uniquely owns: `c_string_bytes`
-    # allocates it here, nothing else holds a reference, and `c` stays a live
-    # local that is consumed only after the call returns, so the pointer is valid
-    # for the whole synchronous call and aliases nothing. It does not escape —
-    # `chmod` reads the path and retains nothing past its return — and the callee
-    # writes through it not at all. The mode is a plain scalar widened to the
-    # `unsigned int` Linux uses; Darwin's narrower `mode_t` reads the same low
-    # bits from the same register, and every value passed here fits in nine bits.
-    # Nothing is allocated for the callee to free, and the result is a plain
-    # status; `errno` is never read, so no ordering constraint against the
-    # release of `c` exists.
-    var rc = external_call["chmod", Int32](c.unsafe_ptr(), UInt32(mode))
-    _ = c^
-    assert_equal(rc, Int32(0), "could not chmod " + path)
 
 
 def _clear_diagnostic(root: String) -> String:
@@ -334,12 +297,12 @@ def test_cache_clear_reports_a_partial_delete() raises:
     var locked = root + "/" + _STORE_DIR + "/tests_stest_uok_h00"
     # `r-x`: the walk can still list and characterize the generation, so it
     # reaches the `unlink` that the missing write bit denies.
-    _chmod(locked, 0o500)
+    set_permissions(locked, 0o500)
 
     var diagnostic = _clear_diagnostic(root)
     # Restored BEFORE the first assertion, so a failing case still leaves a
     # removable temp tree behind rather than an undeletable one.
-    _chmod(locked, 0o700)
+    set_permissions(locked, 0o700)
 
     assert_true(
         diagnostic != "",

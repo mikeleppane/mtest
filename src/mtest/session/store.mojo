@@ -145,6 +145,7 @@ from mtest.platform import (
     read_regular_file_bytes,
     rename_path,
     resolve_executable,
+    set_permissions,
     write_all_fd,
 )
 from mtest.session.scratch import _ensure_dir, _mangle
@@ -2240,6 +2241,15 @@ def _discard_unreadable_generation(gen_abs: String, store_abs: String):
     if kind != _S_IFDIR:
         return
     if _list_sorted(gen_abs):
+        return
+
+    # Darwin refuses to rename a write-disabled directory even within one
+    # parent. Restoring owner access makes the observed cache-owned directory
+    # movable; if a replacement arrived meanwhile, identity reconciliation
+    # below restores that replacement after the atomic move.
+    try:
+        set_permissions(gen_abs, 0o700)
+    except:
         return
 
     # This names one test-only interleaving: a peer has prepared a valid

@@ -1,26 +1,50 @@
-"""The atomic filesystem promotion primitive: `rename_path`.
+"""Atomic filesystem promotion and permission replacement.
 
-Part of the narrow platform-I/O boundary. Two callers publish a file by
-replacing another indivisibly: the precompile step promotes a package onto its
-output path only once the compiler exited 0, so a killed or crashed attempt can
-never damage a good package an earlier run left behind, and the JUnit reporter
-promotes its assembled document onto the `--junit-xml` target, so a prior report
-survives a run that dies mid-write. A copy would leave a window in which the
-destination is half a file. `rename(2)` has no such window: within one directory
-it either replaces the destination completely or leaves it entirely alone, with
-no intermediate state a concurrent reader (or a SIGKILLed mtest) can observe.
+Part of the narrow platform-I/O boundary. `rename_path` lets publishers replace
+a file indivisibly, and `set_permissions` lets cache cleanup make a damaged
+directory movable before Darwin's `rename(2)` write-permission check.
 
-The standard library has no rename at the pinned toolchain. `std.os` offers
-`link`, `unlink`, `remove`, `rmdir`, `makedirs`, and `listdir`, but nothing that
-moves a path, and `link` followed by `unlink` is not a substitute: `link` refuses
-an existing destination, so it cannot replace one, and the two-call sequence is
-interruptible where the single syscall is not. That leaves one foreign call,
-proven here and shared by both callers, instead of one identical copy per
-caller.
+The pinned standard library exposes neither operation. Each stays one foreign
+call, proven here and shared by every caller instead of being redeclared in
+session or tests.
 """
 from std.ffi import external_call
 
 from mtest.platform.cstring import c_string_bytes
+
+
+def set_permissions(path: String, mode: Int) raises:
+    """Replace `path`'s POSIX permission bits.
+
+    Allocates only the transient NUL-terminated path bytes used by `chmod(2)`.
+
+    Args:
+        path: An existing path whose permission bits are replaced.
+        mode: The POSIX permission bits, limited to values representable by
+            Darwin's `mode_t`.
+
+    Raises:
+        Error: If `chmod` reports a failure.
+    """
+    var c = c_string_bytes(path)
+    # SAFETY: libc `chmod` has the exact ABI `int chmod(const char*, mode_t)` on
+    # both Linux and Darwin — a fixed arity of two with no variadic tail, so the
+    # non-variadic call `external_call` emits is correct on both targets. The
+    # pointer names a complete, initialized, NUL-terminated byte copy uniquely
+    # owned by this function; `c` remains live through the synchronous call and
+    # is consumed only afterward. `chmod` reads the path, retains no pointer,
+    # and writes through none. The mode is passed in the same UInt32 register
+    # shape already used repo-wide: Linux reads its full `mode_t`, while
+    # Darwin's UInt16 `mode_t` reads the same low bits. Callers pass only the
+    # nine POSIX permission bits, so the narrowing preserves the complete
+    # value. The callee allocates and retains nothing, and every path releases
+    # `c` after the scalar result is captured.
+    var rc = external_call["chmod", Int32](c.unsafe_ptr(), UInt32(mode))
+    _ = c^
+    if rc != 0:
+        raise Error(
+            "platform: chmod failed for '" + path + "' to mode " + String(mode)
+        )
 
 
 def rename_path(src: String, dst: String) raises:
