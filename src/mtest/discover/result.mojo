@@ -49,8 +49,9 @@ struct DiscoveryResult(Copyable, Movable):
 
     var skipped_links: List[String]
     """Every symlink a walk refused, root-relative and sorted: a symlinked
-    directory (not descended, for cycle safety) or a dangling `test_*.mojo`
-    link. The session warns once per entry — a dropped selection is never
+    directory (not descended, for cycle safety) or a `test_*.mojo` link that
+    resolves to no usable file — deleted, unreachable, or a FIFO, socket, or
+    device. The session warns once per entry — a dropped selection is never
     silent."""
 
     var skipped_nonregular: List[String]

@@ -94,7 +94,9 @@ struct WalkResult(Copyable, Movable):
 
     var skipped_links: List[String]
     """Root-relative symlinks the walk refused: a symlinked directory (cycle
-    safety) or a dangling `test_*.mojo` link (unusable). Never silent."""
+    safety), or a `test_*.mojo` link resolving to no usable file — a deleted
+    target, a target the process cannot reach, or one that is neither a
+    directory nor a regular file. Never silent."""
 
     var skipped_nonregular: List[String]
     """Root-relative test-named entries that are neither regular files nor
