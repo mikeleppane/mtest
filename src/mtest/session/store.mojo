@@ -107,9 +107,11 @@ test-prepared replacement into the final name after unreadable detection and
 before quarantine, pinning that the atomic move reconciles the object it
 actually moved. `unreadable-tombstone-lstat` faults identity inspection after
 that move, so the helper has to restore rather than strand its only generation
-under a tombstone. `published-absent` moves a just-committed generation aside
-before the caller executes it, pinning the driver contract for the otherwise
-unavoidable pathname gap in a concurrent quarantine.
+under a tombstone. `unreadable-prepare-failure` faults Darwin's permission
+preparation, pinning that quarantine still gets its own authoritative attempt.
+`published-absent` moves a just-committed generation aside before the caller
+executes it, pinning the driver contract for the otherwise unavoidable pathname
+gap in a concurrent quarantine.
 `scripts/tests/test_cache_protocol.py` drives the two
 publication windows and asserts the property they exist to demonstrate: an
 interrupted publication leaves no generation a later run could probe.
@@ -140,12 +142,12 @@ from mtest.platform import (
     create_unique_temp,
     fsync_path,
     is_executable_file,
+    prepare_directory_for_rename,
     process_id,
     read_bounded_regular_file,
     read_regular_file_bytes,
     rename_path,
     resolve_executable,
-    set_permissions,
     write_all_fd,
 )
 from mtest.session.scratch import _ensure_dir, _mangle
@@ -2190,6 +2192,10 @@ comptime _FAULT_UNREADABLE_TOMBSTONE_LSTAT = "unreadable-tombstone-lstat"
 """Fail the post-move identity read after the original reaches its tombstone."""
 
 
+comptime _FAULT_UNREADABLE_PREPARE_FAILURE = "unreadable-prepare-failure"
+"""Fail permission preparation before the quarantine rename."""
+
+
 def _restore_tombstone(tombstone_path: String, gen_abs: String):
     """Put a moved generation back unless a newer nonempty one occupies it.
 
@@ -2243,20 +2249,24 @@ def _discard_unreadable_generation(gen_abs: String, store_abs: String):
     if _list_sorted(gen_abs):
         return
 
+    var requested = _env_value(STORE_FAULT_ENV)
     # Darwin refuses to rename a write-disabled directory even within one
-    # parent. Restoring owner access makes the observed cache-owned directory
-    # movable; if a replacement arrived meanwhile, identity reconciliation
-    # below restores that replacement after the atomic move.
+    # parent. The platform helper opens and identity-checks the observed
+    # cache-owned directory before changing its mode, so no pathname
+    # replacement can redirect the mutation. A preparation failure does not
+    # suppress the rename: Linux needs no preparation, and Darwin's rename
+    # remains the authoritative attempt.
     try:
-        set_permissions(gen_abs, 0o700)
+        if requested and requested.value() == _FAULT_UNREADABLE_PREPARE_FAILURE:
+            raise Error("test-only unreadable preparation fault")
+        prepare_directory_for_rename(gen_abs, observed_dev, observed_ino)
     except:
-        return
+        pass
 
     # This names one test-only interleaving: a peer has prepared a valid
     # generation in the store and publishes it after this helper observed the
     # unreadable directory. Production runs never set the fault, so no extra
     # filesystem mutation occurs outside the existing quarantine protocol.
-    var requested = _env_value(STORE_FAULT_ENV)
     if requested and requested.value() == _FAULT_UNREADABLE_REPLACEMENT:
         try:
             rename_path(

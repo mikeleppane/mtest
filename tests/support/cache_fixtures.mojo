@@ -72,12 +72,11 @@ def write_bytes(root: String, rel: String, data: List[UInt8]) raises:
 def chmod_path(mode: String, path: String) raises:
     """Set `path`'s mode through a supervised `chmod` child.
 
-    The platform layer carries no permissions primitive
-    (`grep -rn "chmod\\|permissions" src/mtest/platform/` finds nothing) and the
-    pinned `std.os` exposes no `chmod` either, so the bit has to come from a
-    real process. `mtest.exec` already owns every fork/exec in the tree, which
-    makes a supervised spawn the natural fallback — cheaper than a foreign
-    declaration written only for the tests.
+    Store tests use string modes including `"000"` to create damage before
+    invoking production code. Running the real utility keeps that setup
+    independent of the platform permission wrapper whose behavior some of
+    those tests exercise. `mtest.exec` already owns every fork/exec in the tree,
+    so the child is supervised like every other test process.
 
     The runtime is closed in a `finally`. Without it a raising `run_supervised`
     would leave mtest's process-global signal dispositions owned by a runtime

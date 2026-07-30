@@ -25,8 +25,18 @@ the transparent wrapper `session_fixtures.base_config` names, on purpose: their
 subject is the store's own behavior rather than the pinned toolchain's layout,
 and a stub or a wrapper proves that just as well for nothing.
 """
-from std.os import getenv, makedirs, remove, setenv, symlink, unsetenv
+from std.os import (
+    getenv,
+    link,
+    lstat,
+    makedirs,
+    remove,
+    setenv,
+    symlink,
+    unsetenv,
+)
 from std.os.path import exists, isdir, islink, realpath
+from std.sys.info import CompilationTarget
 from std.testing import (
     TestSuite,
     assert_equal,
@@ -40,10 +50,12 @@ from mtest.cache import ImportScan, KeyBuilder, scan_imports
 from mtest.config import Precompile, RunnerConfig
 from mtest.exec import ExecRuntime, ProcessResult, ProcessSpec, run_supervised
 from mtest.platform import (
+    prepare_directory_for_rename,
     read_bounded_regular_file,
     read_regular_file_bytes,
     rename_path,
     resolve_executable,
+    set_permissions,
 )
 from mtest.session.scratch import _mangle
 from mtest.session.store import (
@@ -821,6 +833,77 @@ def test_probe_heals_an_unreadable_generation() raises:
     assert_equal(store_probe(root, key).kind, PROBE_HIT)
 
 
+def test_permission_repair_never_follows_a_replaced_symlink() raises:
+    var root = temp_root()
+    var outside = root + "/outside"
+    makedirs(outside)
+    set_permissions(outside, 0o755)
+    var replacement = root + "/replacement"
+    makedirs(replacement)
+    var observed = lstat(replacement)
+    rename_path(replacement, root + "/old-observed")
+    symlink(outside, replacement)
+
+    # A peer can replace the observed cache directory before Darwin opens it
+    # for repair. The all-components no-follow open must reject the replacement
+    # rather than chmod its target.
+    try:
+        prepare_directory_for_rename(
+            replacement, Int(observed.st_dev), Int(observed.st_ino)
+        )
+    except:
+        pass
+    assert_equal(Int(lstat(outside).st_mode) & 0o777, 0o755)
+
+
+def test_permission_repair_rejects_a_symlinked_ancestor() raises:
+    var root = temp_root()
+    var ancestor = root + "/ancestor"
+    var generation = ancestor + "/generation"
+    makedirs(generation)
+    set_permissions(generation, 0o755)
+    var observed = lstat(generation)
+    var moved_ancestor = root + "/moved-ancestor"
+    rename_path(ancestor, moved_ancestor)
+    symlink(moved_ancestor, ancestor)
+
+    # The final component still resolves to the originally observed directory,
+    # so final-only O_NOFOLLOW plus the identity check would accept it.
+    # O_NOFOLLOW_ANY must reject the substituted ancestor before fchmod.
+    try:
+        prepare_directory_for_rename(
+            generation, Int(observed.st_dev), Int(observed.st_ino)
+        )
+    except:
+        pass
+    assert_equal(
+        Int(lstat(moved_ancestor + "/generation").st_mode) & 0o777, 0o755
+    )
+
+
+def test_permission_repair_never_mutates_a_hard_link_replacement() raises:
+    var root = temp_root()
+    var outside = root + "/outside.bin"
+    write_bytes(root, "outside.bin", [UInt8(1)])
+    set_permissions(outside, 0o644)
+    var replacement = root + "/replacement"
+    makedirs(replacement)
+    var observed = lstat(replacement)
+    rename_path(replacement, root + "/old-observed")
+    link(outside, replacement)
+
+    # O_DIRECTORY rejects the hard-linked regular file before fchmod. Even
+    # though its inode is shared with a path outside the cache, that outside
+    # object's mode must remain untouched.
+    try:
+        prepare_directory_for_rename(
+            replacement, Int(observed.st_dev), Int(observed.st_ino)
+        )
+    except:
+        pass
+    assert_equal(Int(lstat(outside).st_mode) & 0o777, 0o644)
+
+
 def test_unreadable_healer_leaves_a_readable_replacement_alone() raises:
     var root = temp_root()
     var rel = String("tests/test_replacement.mojo")
@@ -912,6 +995,43 @@ def test_unreadable_healer_restores_after_tombstone_inspection_failure() raises:
     )
     chmod_path("755", final_abs)
     assert_equal(store_probe(root, key).kind, PROBE_HIT)
+
+
+def test_unreadable_healer_still_quarantines_after_preparation_failure() raises:
+    comptime if CompilationTarget.is_macos():
+        # Darwin is the platform that needs successful preparation to rename a
+        # mode-000 directory. Linux isolates the separate contract under test:
+        # a failed preparation must not suppress a rename the parent permits.
+        return
+
+    var root = temp_root()
+    var store_abs = root + "/" + STORE_DIR
+    var final_rel = (
+        STORE_DIR + "/tests_stest_empty_h00000000000000000000000000000000"
+    )
+    var final_abs = root + "/" + final_rel
+    makedirs(final_abs)
+    write_bytes(root, final_rel + "/damage", [UInt8(1)])
+    set_permissions(final_abs, 0o000)
+
+    # Linux authorizes this rename through the writable parent even though the
+    # directory itself cannot be listed. Faulting the best-effort preparation
+    # proves its error never suppresses that authoritative rename attempt.
+    var saved = getenv(STORE_FAULT_ENV, "")
+    var was_set = getenv(STORE_FAULT_ENV, "\x01unset") != "\x01unset"
+    try:
+        _ = setenv(STORE_FAULT_ENV, "unreadable-prepare-failure", True)
+        _discard_unreadable_generation(final_abs, store_abs)
+    finally:
+        if was_set:
+            _ = setenv(STORE_FAULT_ENV, saved, True)
+        else:
+            _ = unsetenv(STORE_FAULT_ENV)
+    if exists(final_abs):
+        # Restore before asserting so a regression still leaves a removable
+        # temporary tree rather than an inaccessible one.
+        set_permissions(final_abs, 0o700)
+    assert_false(exists(final_abs))
 
 
 def test_probe_rejects_wrong_key_meta() raises:
