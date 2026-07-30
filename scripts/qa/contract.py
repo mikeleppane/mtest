@@ -1172,14 +1172,17 @@ class Runner:
             "    assert_equal(1, 2)  # POISON: a descended directory runs this\n" + MAIN
         )
 
-        r = self.mtest(["-I", "build", "probes_shape"])
+        # Overlapping operands walk the tree twice, so the announcement must
+        # still arrive exactly once: a doubled warning is its own dishonesty.
+        r = self.mtest(["-I", "build", "probes_shape", "probes_shape"])
         both = r.stdout + r.stderr
         warned = [ln for ln in both.splitlines() if "skipped-nonregular" in ln]
         dir_ok = (
             r.returncode == 0
             and "1 passed" in both
             and "test_inside" not in both
-            and any("test_shape.mojo" in ln for ln in warned)
+            and len(warned) == 1
+            and "test_shape.mojo" in warned[0]
         )
         if not dir_ok:
             self.record(
@@ -1220,8 +1223,9 @@ class Runner:
         ok = (
             r2.returncode == 0
             and "1 passed" in both2
-            and any("test_pipe.mojo" in ln for ln in warned2)
-            and not any("events.fifo" in ln for ln in warned2)
+            and len(warned2) == 1
+            and "test_pipe.mojo" in warned2[0]
+            and "events.fifo" not in both2
         )
         self.record(
             PASS if ok else FAIL,
