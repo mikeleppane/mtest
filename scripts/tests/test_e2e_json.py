@@ -52,6 +52,17 @@ def _policy_tokens(source: str) -> tuple[str, ...]:
     return tuple(match.group(0) for match in _POLICY_TOKEN.finditer(spliced))
 
 
+def _contains_policy_tokens(source: str, required: str) -> bool:
+    """Return whether ``source`` contains ``required`` as consecutive tokens."""
+    source_tokens = _policy_tokens(source)
+    required_tokens = _policy_tokens(required)
+    width = len(required_tokens)
+    return any(
+        source_tokens[offset : offset + width] == required_tokens
+        for offset in range(len(source_tokens) - width + 1)
+    )
+
+
 def _apple_preprocessor_blocks(source: str) -> tuple[str, ...]:
     """Return complete ``#if defined(__APPLE__)`` blocks by directive depth."""
     lines = source.splitlines()
@@ -120,16 +131,21 @@ def _check_e2e_interposer_source_policy(source: str) -> None:
     active_apple = active_source(apple_branch)
     active_other = active_source(other_branch)
     active_tail = active_source(tail)
-    active_apple_lines = {line.strip() for line in active_apple.splitlines()}
-    apple_required = {
-        "struct iovec vector = {(void *)buffer, count};",
+    apple_required = (
+        "struct iovec vector = {.iov_base = NULL, .iov_len = count};",
+        (
+            "_Static_assert(sizeof(vector.iov_base) == sizeof(buffer), "
+            '"qualified void pointers must share a representation");'
+        ),
+        "memcpy(&vector.iov_base, &buffer, sizeof(vector.iov_base));",
         "return writev(fd, &vector, 1);",
         "DYLD_INTERPOSE(mtest_faulting_write, write)",
-    }
+    )
     apple_forbidden = (
         "RTLD_NEXT",
         "mtest_real_write",
         "__interpose",
+        "(void *)buffer",
         "return write(fd, buffer, count);",
         "ssize_t write(int fd, const void *buffer, size_t count)",
     )
@@ -138,9 +154,13 @@ def _check_e2e_interposer_source_policy(source: str) -> None:
         'dlsym(RTLD_NEXT, "write")',
         "ssize_t write(int fd, const void *buffer, size_t count)",
     )
-    if not apple_required.issubset(active_apple_lines):
+    if any(
+        not _contains_policy_tokens(active_apple, required)
+        for required in apple_required
+    ):
         raise AssertionError(
-            "Darwin E2E interposer must use DYLD_INTERPOSE and writev forwarding"
+            "Darwin E2E interposer must preserve const pointer representation "
+            "and use DYLD_INTERPOSE with writev forwarding"
         )
     if any(fragment in active_apple for fragment in apple_forbidden):
         raise AssertionError(
@@ -180,6 +200,11 @@ def check_e2e_interposer_source_policy() -> None:
         ),
         "commented Darwin call-through": source.replace(
             call_through, "// " + call_through, 1
+        ),
+        "qualifier-dropping Darwin pointer cast": source.replace(
+            "    memcpy(&vector.iov_base, &buffer, sizeof(vector.iov_base));",
+            "    vector.iov_base = (void *)buffer;",
+            1,
         ),
         "exported Darwin write wrapper": source.replace(
             registration + "\n", registration + "\n\n" + wrapper, 1

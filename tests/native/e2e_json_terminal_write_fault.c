@@ -56,7 +56,15 @@ static ssize_t mtest_faulting_write(int fd, const void *buffer, size_t count) {
         errno = EIO;
         return -1;
     }
-    struct iovec vector = {(void *)buffer, count};
+    struct iovec vector = {.iov_base = NULL, .iov_len = count};
+    _Static_assert(sizeof(vector.iov_base) == sizeof(buffer),
+                   "qualified void pointers must share a representation");
+    /*
+     * POSIX declares iov_base as void * even though writev only reads it.
+     * C17 gives qualified and unqualified pointers the same representation,
+     * so copying that representation avoids claiming the buffer is writable.
+     */
+    memcpy(&vector.iov_base, &buffer, sizeof(vector.iov_base));
     return writev(fd, &vector, 1);
 }
 
