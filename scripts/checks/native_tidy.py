@@ -91,6 +91,7 @@ def translation_units(root: Path = ROOT) -> tuple[TranslationUnit, ...]:
         raise SystemExit("clang-tidy-check: native test unit inventory is empty")
     return (
         TranslationUnit(production[0], testing=False),
+        TranslationUnit(production[0], testing=True),
         *(TranslationUnit(source, testing=True) for source in tests),
     )
 

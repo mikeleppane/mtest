@@ -2513,6 +2513,7 @@ int32_t mtest_exec_process_abort(uint64_t handle, uint32_t grace_ms,
 }
 
 #if MTEST_EXEC_TESTING
+// NOLINTBEGIN(clang-analyzer-unix.Malloc,clang-analyzer-core.UndefinedBinaryOperatorResult)
 static volatile uint8_t mtest_sanitizer_sink;
 
 __attribute__((noinline)) void mtest_exec_test_asan_oob(void) {
@@ -2574,4 +2575,5 @@ __attribute__((noinline)) void mtest_exec_test_memcheck_fd_leak(void) {
     }
     mtest_sanitizer_sink = (uint8_t)fd;
 }
+// NOLINTEND(clang-analyzer-unix.Malloc,clang-analyzer-core.UndefinedBinaryOperatorResult)
 #endif

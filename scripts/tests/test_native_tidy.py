@@ -15,6 +15,7 @@ from scripts.checks import native_abi, native_tidy
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_TIDY_UNITS = (
     ("native/mtest_exec_native.c", False),
+    ("native/mtest_exec_native.c", True),
     ("tests/native/e2e_config_open_fault.c", True),
     ("tests/native/e2e_json_terminal_write_fault.c", True),
     ("tests/native/e2e_state_persistence_fault.c", True),
@@ -77,6 +78,7 @@ class NativeTidyTests(unittest.TestCase):
             units,
             (
                 native_tidy.TranslationUnit(sources[0], testing=False),
+                native_tidy.TranslationUnit(sources[0], testing=True),
                 native_tidy.TranslationUnit(new_source, testing=True),
             ),
         )
@@ -129,6 +131,34 @@ class NativeTidyTests(unittest.TestCase):
             "SystemHeaders: false\n"
             "FormatStyle: file\n",
         )
+
+    def test_negative_control_suppressions_are_exact_and_block_scoped(self) -> None:
+        source = (ROOT / "native" / "mtest_exec_native.c").read_text(encoding="ascii")
+        sink = source.index("static volatile uint8_t mtest_sanitizer_sink;")
+        block_start = source.rindex(
+            "#if MTEST_EXEC_TESTING",
+            0,
+            sink,
+        )
+        block_end = source.index("#endif", block_start) + len("#endif")
+        block = source[block_start:block_end]
+        begin = (
+            "// NOLINTBEGIN(clang-analyzer-unix.Malloc,"
+            "clang-analyzer-core.UndefinedBinaryOperatorResult)"
+        )
+        end = (
+            "// NOLINTEND(clang-analyzer-unix.Malloc,"
+            "clang-analyzer-core.UndefinedBinaryOperatorResult)"
+        )
+        self.assertEqual(block.count(begin), 1)
+        self.assertEqual(block.count(end), 1)
+        self.assertLess(block.index(begin), block.index("mtest_exec_test_asan_oob"))
+        self.assertGreater(
+            block.index(end),
+            block.index("mtest_exec_test_memcheck_fd_leak"),
+        )
+        outside = source[:block_start] + source[block_end:]
+        self.assertNotIn("NOLINT", outside)
 
     def test_linux_compiler_context_is_exact(self) -> None:
         self.assertEqual(
