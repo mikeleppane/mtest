@@ -326,12 +326,16 @@ persisted across CI runs: moving compiled artifacts into shared state could
 reuse a binary built for a different host CPU. It is never shared between
 machines.
 
-Each artifact is an immutable directory named `<mangled>_h<digest>`, holding the
-binary and a record of the key that produced it. A build compiles into a private
-staging directory beside it and is published with one `rename(2)`, so a key and
-a binary are never observably paired with anything but each other, and an
-interrupted publication leaves nothing a later run can adopt. Two runs that race
-for one key are not an error: the loser adopts the winner's artifact.
+Each artifact is a directory named `<mangled>_h<digest>`, holding the binary, a
+record of the key that produced it, and a record of where it sits in its
+source's recency order. The binary and the key record are immutable once
+published; the recency record is the one file publication may rewrite
+afterwards, to place the generation relative to siblings that appeared while it
+was being built. A build compiles into a private staging directory
+beside it and is published with one `rename(2)`, so a key and a binary are never
+observably paired with anything but each other, and an interrupted publication
+leaves nothing a later run can adopt. Two runs that race for one key are not an
+error: the loser adopts the winner's artifact.
 
 The key is derived from the compile inputs, never from configuration text. It
 covers the resolved compiler and every entry in `<resolved compiler
@@ -342,12 +346,16 @@ physical invocation root, the build arguments, every
 file named by a build argument, the walked contents of every `-I` root, the
 walked contents of the directory the test file sits in, and the test file itself
 — by CONTENT, so a modification time that moves without the bytes changing
-rebuilds nothing. A branch switch and back hits only for files whose bytes are
-identical across branches; differing files replace their one live generation
-and recompile when switched back. That directory is in the key because the
-compiler resolves a bare `from helper import ...` against the source file's own
-directory, with no `-I` involved: a helper beside a test is a build input
-nothing else covers.
+rebuilds nothing. A file whose bytes are identical across two branches hits on
+every switch. A file that differs keeps the generations of both states once it
+has been compiled in both, so switching it between exactly two states hits both
+ways from the second cycle on, provided every writer of that store is at this
+version. A third state evicts the lowest-ranked of the three, which without
+concurrent publishers is the oldest; and a configured precompile output that
+moves can move the complete key, which no retention bound restores. That
+directory is in the key because the compiler resolves a bare
+`from helper import ...` against the source file's own directory, with no `-I`
+involved: a helper beside a test is a build input nothing else covers.
 The keyed `-I` spelling is exact — `-I lib` and `-I ./lib` differ — while the
 named directory's contents are walked and digested. Symlink resolution remains
 canonicalized. A wrapper script therefore relocates the keyed library directory
@@ -369,9 +377,9 @@ restore that drops mode bits leaves the content intact — and reports the
 recorded build duration so the SLOW annotation reads the same warm as cold. An
 artifact that fails either check is deleted and rebuilt, so a store damaged from
 outside heals on the next run rather than failing every one after it. Publishing
-an artifact removes that source's older ones, and damage can quarantine one, so
-a second run over the same checkout can replace or quarantine a generation in
-the window between the check and execution. The same race can reach a generation
+an artifact removes that source's generations beyond the two newest, and damage
+can quarantine one, so a second run over the same checkout can replace or
+quarantine a generation in the window between the check and execution. The same race can reach a generation
 this run just published. A run that cannot execute a stored artifact compiles
 the file instead, emitting a `cache-rebuild` warning, and the compile is a
 recovery rather than a second admission — it moves neither counter (§15.4).
@@ -585,9 +593,23 @@ about the build window, and exactly where that proof stops.
 #### 8.5.2 The store grows; nothing shrinks it but `--cache-clear`
 
 There is no size cap, no age limit, and no eviction. Publishing an artifact
-removes the older generations of **that source**, which is what keeps an
-edit-and-rerun loop from growing without bound, but it is the only reclamation
-mtest performs. Four things accumulate:
+removes the generations of **that source** beyond the two newest, which is what
+keeps an edit-and-rerun loop from growing without bound, but it is the only
+reclamation mtest performs.
+
+Two live generations per source is a best-effort target rather than a hard
+bound on the store. Each retained binary is capped at 512 MiB, and three things
+loosen the target itself. Nothing here takes a lock: concurrent publishers can
+leave a source holding more than two for a while, because a deletion whose
+victim turns out to have been republished under the same name is skipped rather
+than forced, and the next publication that is not racing reaps the excess. A
+generation whose recency record is damaged or absent reads as the oldest there
+is, so it is the first thing reaped rather than something that lingers. And the
+two-generation promise holds only once every writer of a store is at this
+version: an older binary's publication still deletes every other generation of
+the source it publishes. Per-checkout stores make one writer the normal case.
+
+Four things accumulate:
 
 - **Generations of sources that no longer exist.** Reaping only ever considers
   the source being published, so renaming or deleting a test file strands its

@@ -97,9 +97,9 @@ any value outside the five names below.
 
 It exists because the two publication windows worth faulting are inside mtest's
 own process, AFTER the compiler child has exited, so no fake compiler can reach
-them. `before-fsync` abandons the publication before step 4, leaving a staging
-directory that was never flushed; `before-rename` abandons it after step 4 and
-before step 5, so the generation is fully durable and simply never committed.
+them. `before-fsync` abandons the publication before step 5, leaving a staging
+directory that was never flushed; `before-rename` abandons it after step 5 and
+before step 6, so the generation is fully durable and simply never committed.
 Both take the ordinary `PUB_FAILED` path — the staged binary stays alive and the
 session keeps running it — so the seam introduces no state and no control flow
 the protocol does not already have. `unreadable-replacement` moves the
@@ -3326,10 +3326,10 @@ def store_build_target(root: String, mangled: String) -> StoreBuildTarget:
     - still free of `_h`, since `_mangle` escapes literal `_` as `_u` and this
       name adds only `-` and decimal digits, so a staging directory can never be
       read as the generation `<mangled>_h<digest32>`;
-    - still keyed by the `.tmp-` prefix alone in `_reap_siblings`, which tests
-      that prefix BEFORE the mangled-name prefix, so this source's own live
-      staging directory is skipped rather than deleted out from under a
-      concurrent process compiling into it.
+    - still keyed by the `.tmp-` prefix alone in `_sibling_generations`, which
+      tests that prefix BEFORE the mangled-name prefix, so this source's own
+      live staging directory never enters the ranking and is skipped rather
+      than deleted out from under a concurrent process compiling into it.
 
     Name length stays comfortable: the decoration around the mangled name is
     `.tmp-` plus three dash-separated decimal fields, about 37 bytes at the
@@ -3433,7 +3433,7 @@ def store_probe(root: String, key: FileKey) -> ProbeResult:
 
     This is the function where a mistake serves a stale or corrupt binary and
     reports a green run that never happened, so every question resolves toward
-    MISS. A hit has proven all six of:
+    MISS. A hit has proven all seven of:
 
     1. The generation path is a real directory — characterized NO-FOLLOW and
        first, because everything after it reads through that path.
@@ -3822,23 +3822,192 @@ def _has_digest32_tail(name: String, start: Int) -> Bool:
     return True
 
 
-def _reap_siblings(root: String, key: FileKey):
-    """Delete this source's other generations, keeping one live per file.
+comptime _RETAIN_GENERATIONS = 2
+"""Live generations kept per source.
 
-    An editing loop produces a new key per edit, and without this every one of
-    them would keep its binary forever. A sibling has to look like something
-    this store wrote, which is three things and not one: the mangled source
-    name, the `_h` separator that no mangled name can contain, and then exactly
-    the 32 hex digits `generation_name` puts there. Matching the first two
-    alone would delete any directory somebody else parked in the store under a
-    name that merely starts like one of this source's builds. Staging
-    directories are skipped by name as well: one of them may belong to a
-    concurrent process that is compiling into it right now.
+One made the ordinary alternation — switching a file between two states, which
+is what a branch switch and back does — recompile in both directions forever.
+Two make it hit from the second cycle on while an editing loop stays bounded.
+Not configurable: the number is a property of the alternation it exists to
+serve, not a preference."""
+
+comptime _SEQ_NAME = "seq"
+"""The recency record inside a generation.
+
+Canonical nonnegative decimal, at most `_SEQ_MAX_DIGITS` of them, exactly one
+trailing newline. Written into staging before the rename so a visible
+generation always carries one, and corrected after the rename when a sibling
+is at least as new, so sequence order tracks VISIBILITY order. Every deviation
+from the format reads as 0 — oldest, first out — which is the compatibility
+rule for generations written before the record existed and the damage rule in
+one. Never a `meta` line: that parser is strict, and no cache hit ever reads
+this file, which is what keeps the record invisible to every binary that
+predates it."""
+
+comptime _SEQ_CAP = 32
+"""Largest recency record this store will read, in bytes. Anything above it is
+not a record this store wrote, and is not read at all."""
+
+comptime _SEQ_MAX_DIGITS = 15
+"""Most digits a recency record may carry.
+
+Fifteen keeps `max + 1` far inside `Int` and keeps damage convergent: a
+damaged-but-parseable large value is still read by ALLOCATION, so the next
+publication allocates above it and the damaged generation stops being newest.
+"""
+
+comptime _SEQ_MAX = 999999999999999
+"""The `_SEQ_MAX_DIGITS`-digit maximum a recency record can express.
+
+Allocation and correction saturate here rather than write a sixteen-digit
+record, which this module's own parser would read as 0. Reaching it needs a
+planted record — publication increments by one, so a store would have to
+publish a thousand million million generations of one source to arrive here on
+its own — and the whole cost is rebuilds, never a wrong binary served.
+
+The cost is worth stating in full, because it is broader than the planted
+generation itself. Once ANY generation of a source carries this value, every
+later generation of that source saturates here too, so the records all tie and
+ranking falls back to comparing names: retention then keeps the generation just
+published and the greatest-named sibling rather than the two newest. It stays
+bounded at `_RETAIN_GENERATIONS` — `_own_ranks_above` is what guarantees that —
+and the planted generation is retained for as long as it sits there."""
+
+
+def _read_seq(path: String) -> Int:
+    """Read a generation's recency record, or 0 for anything that is not one.
+
+    Args:
+        path: The record's path.
+
+    Returns:
+        The recorded value, or 0 — "oldest" — for every deviation from the
+        format: absent, unreadable, not a regular file, over `_SEQ_CAP` bytes,
+        empty, signed, zero-padded, not decimal, not terminated by exactly one
+        newline, or longer than `_SEQ_MAX_DIGITS`. Total by construction: a
+        caller ranking generations must be handed a number, never an error it
+        would have to turn into a policy decision of its own.
+    """
+    var kind: Int
+    var size: Int
+    try:
+        var info = lstat(path)
+        kind = Int(info.st_mode) & _S_IFMT
+        size = Int(info.st_size)
+    except:
+        return 0
+    if kind != _S_IFREG or size > _SEQ_CAP:
+        return 0
+    var data: List[UInt8]
+    try:
+        data = read_regular_file_bytes(path, _SEQ_CAP)
+    except:
+        return 0
+    var digits = len(data) - 1
+    if digits < 1 or digits > _SEQ_MAX_DIGITS:
+        return 0
+    if data[digits] != UInt8(ord("\n")):
+        return 0
+    # Canonical: one representation per value, so two writers that agree on a
+    # number cannot disagree about which record is newer.
+    if digits > 1 and data[0] == UInt8(ord("0")):
+        return 0
+    var value = 0
+    for i in range(digits):
+        var b = data[i]
+        if b < UInt8(ord("0")) or b > UInt8(ord("9")):
+            return 0
+        value = value * 10 + (Int(b) - ord("0"))
+    return value
+
+
+def _write_seq(path: String, value: Int) raises:
+    """Write a recency record in the one format `_read_seq` accepts.
+
+    Args:
+        path: The record's path.
+        value: The sequence to record; at most `_SEQ_MAX`.
+
+    Raises:
+        Error: If the file cannot be created or written.
+    """
+    with open(path, "w") as f:
+        f.write(String(value) + "\n")
+
+
+comptime _SEQ_TMP_NAME = "seq-next"
+"""Where a corrected recency record is written before it replaces `seq`.
+
+Inside the generation, so the replacement is one `rename(2)` within a single
+directory. Rewriting `seq` in place would truncate it first, and a concurrent
+reaper reading that window gets 0 — which is exactly the value a stale listing
+already holds for a record it could not read, so re-reading it would CONFIRM
+the stale ranking rather than refute it, and the identity guard would wave
+through a deletion it exists to stop. Only the process that published a
+generation ever corrects it, so this name has exactly one writer."""
+
+
+def _replace_seq(gen_abs: String, value: Int) raises:
+    """Put `value` in a published generation's record, atomically.
+
+    A reader sees the old record or the new one, never a partial write, which
+    the in-place rewrite this replaced could not promise. The rename also
+    REPLACES whatever occupies the record's name rather than writing through
+    it, so a symlink planted at `seq` between the rename and this correction is
+    overwritten instead of followed.
+
+    Args:
+        gen_abs: The generation directory, absolute.
+        value: The corrected sequence.
+
+    Raises:
+        Error: If the record cannot be written, flushed, or renamed into place.
+    """
+    var tmp_abs = gen_abs + "/" + _SEQ_TMP_NAME
+    _write_seq(tmp_abs, value)
+    fsync_path(tmp_abs)
+    rename_path(tmp_abs, gen_abs + "/" + _SEQ_NAME)
+
+
+@fieldwise_init
+struct _GenRecord(Copyable, Movable):
+    """One generation of a source, as a single listing saw it."""
+
+    var name: String
+    """The generation directory's name inside the store."""
+
+    var seq: Int
+    """Its recency record, as `_read_seq` parsed it."""
+
+    var ino: Int
+    """Its directory's inode number, from a no-follow `lstat`. Generation names
+    are deterministic, so the name alone cannot tell one publication's
+    directory from a later one's at the same name."""
+
+
+def _sibling_generations(root: String, key: FileKey) -> List[_GenRecord]:
+    """Every OTHER generation of this source, with its recency and identity.
+
+    A sibling has to look like something this store wrote, which is three
+    things and not one: the mangled source name, the `_h` separator that no
+    mangled name can contain, and then exactly the 32 hex digits
+    `generation_name` puts there. Matching the first two alone would collect
+    any directory somebody else parked in the store under a name that merely
+    starts like one of this source's builds. Staging directories are skipped by
+    name as well: one of them may belong to a concurrent process that is
+    compiling into it right now.
 
     Args:
         root: The invocation root.
-        key: The key just published; its own generation is kept.
+        key: The key whose siblings are wanted; its own generation is excluded.
+
+    Returns:
+        One record per match, in listing order. An entry that vanished between
+        the listing and its `lstat` contributes nothing — there is neither
+        anything to rank nor anything to delete. Never raises: an unreadable
+        store yields no records, and the caller keeps whatever it has.
     """
+    var out = List[_GenRecord]()
     var prefix = _mangle(key.src_rel) + "_h"
     var store_abs = root + "/" + STORE_DIR
     var names = List[String]()
@@ -3846,7 +4015,7 @@ def _reap_siblings(root: String, key: FileKey):
         for entry in listdir(store_abs):
             names.append(String(entry))
     except:
-        return
+        return out^
     for entry in names:
         var name = String(entry)
         if name == key.gen_name or name.startswith(_TMP_PREFIX):
@@ -3855,7 +4024,211 @@ def _reap_siblings(root: String, key: FileKey):
             continue
         if not _has_digest32_tail(name, prefix.byte_length()):
             continue
-        _discard(store_abs + "/" + name)
+        var gen_abs = store_abs + "/" + name
+        var ino: Int
+        try:
+            ino = Int(lstat(gen_abs).st_ino)
+        except:
+            continue
+        var seq = _read_seq(gen_abs + "/" + _SEQ_NAME)
+        out.append(_GenRecord(name.copy(), seq, ino))
+    return out^
+
+
+def _ranks_above(a: _GenRecord, b: _GenRecord) -> Bool:
+    """Whether `a` is newer than `b` in the store's recency order.
+
+    Args:
+        a: The candidate.
+        b: The generation it is compared against.
+
+    Returns:
+        True iff `a` carries the higher record, or the same record and the
+        greater name. Names are unique within one listing, so this is a TOTAL
+        order and "the top `_RETAIN_GENERATIONS`" is never ambiguous — two
+        generations that predate the record both read 0 and are still ranked
+        against each other deterministically.
+    """
+    if a.seq != b.seq:
+        return a.seq > b.seq
+    return a.name > b.name
+
+
+def _own_ranks_above(own: _GenRecord, other: _GenRecord) -> Bool:
+    """Whether the generation just published outranks `other`.
+
+    The same order as `_ranks_above` except that a TIE goes to `own`. Records
+    tie only where the order has saturated at `_SEQ_MAX` or where a correction
+    could not be written, and in both cases `own` is the generation that just
+    became visible, so it IS the newer of the two. Ranking it by name there
+    instead would let a publication whose name happens to sort low rank itself
+    out of the top `_RETAIN_GENERATIONS` while still refusing to delete itself,
+    which leaves the source one generation over the target permanently rather
+    than until the next publication.
+
+    Args:
+        own: The generation just published.
+        other: A sibling it is compared against.
+
+    Returns:
+        True iff `own` carries the higher record, or the same one.
+    """
+    if own.seq != other.seq:
+        return own.seq > other.seq
+    return True
+
+
+def _discard_ranked_out(store_abs: String, record: _GenRecord):
+    """Delete a ranked-out generation unless it is no longer the one ranked.
+
+    Generation names are deterministic, so between the listing that ranked this
+    record out and this deletion another run can publish a NEW generation at
+    the same name. Deleting that costs the other run a rebuild of work it had
+    already finished. Re-reading the directory's inode and its recency record
+    immediately before the removal, and skipping the deletion when either
+    moved, is what spares a freshly republished generation from a stale
+    listing.
+
+    What this protects is a generation REPUBLISHED under the same name, which
+    is the case a deterministic naming scheme makes likely. It does not protect
+    a generation that has not changed yet: one sitting between its own rename
+    and its own correction still carries the number it allocated, so a rival
+    ranking it out sees an inode and a record that both match, and deletes it.
+    Nothing here takes a lock, and the window between these checks and the
+    removal beneath them stays open too. The worst a lost race costs is one
+    rebuild — the publisher's `PUB_OK` names a path that has just gone, the run
+    fails to spawn it, and the session rebuilds the file with a warning rather
+    than failing. Never a wrong binary.
+
+    Args:
+        store_abs: The store directory, absolute.
+        record: The generation as the ranking listing saw it.
+    """
+    var gen_abs = store_abs + "/" + record.name
+    var ino: Int
+    try:
+        ino = Int(lstat(gen_abs).st_ino)
+    except:
+        # Gone already, or unreachable. Either way there is nothing here that
+        # this reaper is entitled to remove.
+        return
+    if ino != record.ino:
+        return
+    if _read_seq(gen_abs + "/" + _SEQ_NAME) != record.seq:
+        return
+    _discard(gen_abs)
+
+
+def _correct_visibility_seq(root: String, key: FileKey):
+    """Rank this generation above every sibling visible to it right now.
+
+    A publisher allocates its recency record before it stages, and can rename
+    long afterwards, so the record it allocated describes the store as it was
+    BEFORE its own generation existed. Ranking on that alone would let a late
+    publisher call itself the oldest generation of its source and, keeping the
+    newest few, delete a generation that finished ahead of it. Re-listing after
+    the rename and rewriting the record above the highest sibling is what
+    dissolves that: a publisher is always ranked above everything it can see
+    when it corrects, so it never evicts a rival on the strength of a number it
+    chose before that rival existed.
+
+    **What this orders, exactly.** Publications end up ordered by when they
+    CORRECTED, which is not the same as when they became visible: two
+    publishers that rename in one order can correct in the other, and then the
+    one that became visible first outranks the one that became visible second.
+    Nothing is lost while both are retained; the cost surfaces one publication
+    later, when the lower-ranked of the two is reaped even though it was the
+    newer to appear. That is one rebuild if someone returns to its state, and
+    it is the price of having no lock. Ordering by rename time instead would
+    take one, because the record has to be inside the directory the rename
+    commits and so cannot be written any earlier.
+
+    The rewrite goes through `_replace_seq`, so a concurrent reader sees the
+    old record or the new one and never a partial write. It runs exactly once,
+    with no re-check loop, so a store under continuous publication cannot
+    livelock here.
+
+    Args:
+        root: The invocation root.
+        key: The key whose generation has just been renamed into place.
+    """
+    var gen_abs = root + "/" + key.gen_dir
+    var mine = _read_seq(gen_abs + "/" + _SEQ_NAME)
+    var highest = 0
+    for record in _sibling_generations(root, key):
+        if record.seq > highest:
+            highest = record.seq
+    if highest < mine:
+        return
+    var corrected = highest + 1
+    if corrected > _SEQ_MAX:
+        corrected = _SEQ_MAX
+    try:
+        _replace_seq(gen_abs, corrected)
+    except:
+        # Best-effort: the generation is published and valid either way, and an
+        # uncorrected record risks only this generation ageing out early. Clear
+        # the staging name so a failed correction leaves no residue inside a
+        # generation a later run will list.
+        _discard(gen_abs + "/" + _SEQ_TMP_NAME)
+
+
+def _reap_siblings(root: String, key: FileKey):
+    """Keep this source's newest few generations and discard the rest.
+
+    An editing loop produces a new key per edit, and without this every one of
+    them would keep its binary forever. Keeping exactly one made the ordinary
+    alternation — a file switched between two states and back — recompile in
+    both directions, so `_RETAIN_GENERATIONS` of them survive, ranked by the
+    recency record `_correct_visibility_seq` has just put in visibility order.
+
+    Two properties are worth stating exactly.
+
+    **The generation just published is never discarded here.** The caller is
+    about to run the binary inside it. The correction above normally makes it
+    the newest anyway; when a race means it is not, it is kept regardless and
+    the store transiently holds one more than `_RETAIN_GENERATIONS`.
+
+    **There is no lock.** Racing publishers are ordinary — different build
+    arguments key differently against the same unchanged tree — so under a race
+    the store may transiently hold more than `_RETAIN_GENERATIONS`, because
+    every deletion whose victim changed identity is skipped. A race can also
+    cost a rival one rebuild: the check-to-delete window is one, and a
+    generation between its own rename and its own correction is another, since
+    it is visible carrying only the number it allocated and nothing about it
+    has changed for the guard to notice. What can never happen is a wrong
+    binary served — the probe revalidates key and digest by pathname and reads
+    no recency record — and no ranking can reach a generation this store did
+    not write. Once publications quiesce, the next publication reaps to exactly
+    the top `_RETAIN_GENERATIONS`.
+
+    Args:
+        root: The invocation root.
+        key: The key just published; its own generation is kept.
+    """
+    var store_abs = root + "/" + STORE_DIR
+    var records = _sibling_generations(root, key)
+    var gen_abs = root + "/" + key.gen_dir
+    var own_ino: Int
+    try:
+        own_ino = Int(lstat(gen_abs).st_ino)
+    except:
+        own_ino = 0
+    var own = _GenRecord(
+        String(key.gen_name), _read_seq(gen_abs + "/" + _SEQ_NAME), own_ino
+    )
+    # A few generations per source, so counting how many rank above each one
+    # beats sorting: no comparator threading, and the survivors are named by
+    # the same total order that decided them.
+    for i in range(len(records)):
+        var newer = 0
+        if _own_ranks_above(own, records[i]):
+            newer += 1
+        for j in range(len(records)):
+            if i != j and _ranks_above(records[j], records[i]):
+                newer += 1
+        if newer >= _RETAIN_GENERATIONS:
+            _discard_ranked_out(store_abs, records[i])
 
 
 def store_publish(
@@ -3906,16 +4279,23 @@ def store_publish(
        Nor does this re-prove the session-wide inputs: include-root contents and
        the toolchain are sampled once per session, so their window is the whole
        run rather than one compile, and no publication can re-check them.
-    2. Rewrite the recorded command line's `-o` to the FINAL generation path,
+    2. Allocate this generation's place in its source's recency order, one
+       above the highest record any sibling carries right now. Provisional,
+       because a rival can become visible between here and the rename.
+    3. Rewrite the recorded command line's `-o` to the FINAL generation path,
        so the reproduce line names something that exists after publication.
-    3. Digest the staged binary and write `meta` beside it.
-    4. `fsync` the binary, the record, and the staging directory, so a machine
-       crash cannot leave a committed directory entry pointing at bytes that
-       never reached the disk.
-    5. `rename(2)` the staging directory onto the generation path. One syscall,
+    4. Digest the staged binary and write `meta` and the recency record beside
+       it, so a generation always carries its place in the order the moment it
+       becomes visible.
+    5. `fsync` the binary, both records, and the staging directory, so a
+       machine crash cannot leave a committed directory entry pointing at bytes
+       that never reached the disk.
+    6. `rename(2)` the staging directory onto the generation path. One syscall,
        no half-published state, no window a concurrent reader can observe.
-    6. On success, flush the store directory and reap this source's superseded
-       generations.
+    7. On success, flush the store directory, correct the recency record above
+       every sibling now visible — which is what makes the order a ranking of
+       visibility rather than of allocation — and reap this source's
+       generations down to the newest few.
 
     A rename that fails with the target already present means another run got
     there first. That winner is then fully RE-PROBED — key match and binary
@@ -4026,7 +4406,20 @@ def store_publish(
             target, argv, "a source beside '" + key.src_rel + "' changed"
         )
 
-    # --- Steps 2 and 3: digest the artifact and record it. ------------------
+    # --- Step 2: allocate this generation's place in the recency order. -----
+    # One listing, taken before anything is staged into place, because the
+    # record has to be inside the directory the rename commits and so cannot be
+    # written after it. What this listing cannot see is a rival that renames
+    # between here and Step 6; the correction after the rename is what answers
+    # that, and it is why this value is only provisional.
+    var provisional = 1
+    for record in _sibling_generations(root, key):
+        if record.seq >= provisional:
+            provisional = record.seq + 1
+    if provisional > _SEQ_MAX:
+        provisional = _SEQ_MAX
+
+    # --- Steps 3 and 4: digest the artifact and record it. ------------------
     var bin_bytes: List[UInt8]
     try:
         bin_bytes = read_regular_file_bytes(bin_abs, _BIN_CAP)
@@ -4054,13 +4447,30 @@ def store_publish(
             argv,
             "could not write the cache record for '" + key.src_rel + "'",
         )
+    # The recency record joins the generation before the rename, so a visible
+    # generation always carries one. A staging write that fails refuses the
+    # publication rather than committing a generation nothing can rank: an
+    # unranked generation reads as the oldest there is and would be reaped
+    # ahead of work that really is older, and the caller still runs the binary
+    # it just built either way.
+    try:
+        _write_seq(tmp_abs + "/" + _SEQ_NAME, provisional)
+    except:
+        return _publish_failed(
+            target,
+            argv,
+            "could not write the cache recency record for '"
+            + key.src_rel
+            + "'",
+        )
 
-    # --- Step 4: durability before the commit. ------------------------------
+    # --- Step 5: durability before the commit. ------------------------------
     if fault == _FAULT_BEFORE_FSYNC:
         return _fault_abandoned(target, argv, _FAULT_BEFORE_FSYNC, key.src_rel)
     try:
         fsync_path(bin_abs)
         fsync_path(tmp_abs + "/" + _META_NAME)
+        fsync_path(tmp_abs + "/" + _SEQ_NAME)
         fsync_path(tmp_abs)
     except:
         return _publish_failed(
@@ -4069,7 +4479,7 @@ def store_publish(
             "could not flush the cache generation for '" + key.src_rel + "'",
         )
 
-    # --- Step 5: the commit. ------------------------------------------------
+    # --- Step 6: the commit. ------------------------------------------------
     if fault == _FAULT_BEFORE_RENAME:
         return _fault_abandoned(target, argv, _FAULT_BEFORE_RENAME, key.src_rel)
     try:
@@ -4097,7 +4507,7 @@ def store_publish(
             "could not publish the cached build for '" + key.src_rel + "'",
         )
 
-    # --- Step 6: make the commit durable, then reap. ------------------------
+    # --- Step 7: make the commit durable, correct the order, then reap. -----
     # Best-effort: the rename already succeeded, and refusing to report a
     # published generation because its parent directory would not flush would
     # cost a rebuild for no gain in safety.
@@ -4105,6 +4515,7 @@ def store_publish(
         fsync_path(root + "/" + STORE_DIR)
     except:
         pass
+    _correct_visibility_seq(root, key)
     _reap_siblings(root, key)
     if fault == _FAULT_PUBLISHED_ABSENT:
         _fault_hide_published_generation(
@@ -4142,9 +4553,10 @@ comptime PRECOMPILE_SUBDIR = "precompile"
 """The stamp directory, inside `STORE_DIR`.
 
 A sibling of the generations rather than a name among them: a generation is a
-DIRECTORY holding `bin` and `meta`, a stamp is a single file, and `_reap_siblings`
-walks `STORE_DIR` deleting by mangled-name prefix. Keeping the two namespaces
-apart means neither reaper can ever reach the other's records.
+DIRECTORY holding `bin`, `meta`, and `seq`, a stamp is a single file, and
+`_reap_siblings` walks `STORE_DIR` ranking and deleting by mangled-name prefix.
+Keeping the two namespaces apart means neither reaper can ever reach the
+other's records.
 """
 
 

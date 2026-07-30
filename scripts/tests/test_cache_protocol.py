@@ -3,7 +3,7 @@
 
 Every other cache test in this repository runs inside one process: the Mojo
 suites call `store_probe`, `store_publish`, and `clear_cache_root` directly,
-one call at a time. Four properties are invisible from there.
+one call at a time. Five properties are invisible from there.
 
 - Concurrency. The publication protocol is about two processes racing for one
   generation directory. A single-process test can simulate the losing branch
@@ -27,6 +27,14 @@ one call at a time. Four properties are invisible from there.
   `defaults.no_cache` or `defaults.cache_clear` from the resolution projection
   turns those flags into no-ops that every other gate still reports green;
   `NoCacheTests` and `CacheClearTests` are what goes red.
+- Generation retention as a user meets it. That the store keeps the two newest
+  generations of a source is perfectly visible in one process. What is not is
+  the alternation it exists for: switching a file between two states costs
+  real keys, real compiles, and a store the session itself wrote, so only a
+  chain of real runs can show the second cycle compiling nothing. Nor can one
+  process show two publishers of DIFFERENT keys each keeping its generation
+  instead of reaping the other's. `RetentionTests` covers the first and
+  `ConcurrencyTests` the second.
 
 These are pinning tests. Every scenario except the two fault ones landed after
 the behavior it describes and passed on first run. The fault scenarios are the
@@ -81,6 +89,25 @@ def test_{name}() raises:
 
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
+"""
+
+VARIANT_TEST_SOURCE = """\
+from std.testing import assert_equal, TestSuite
+
+
+def test_{name}() raises:
+    assert_equal({value}, {value})
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()
+"""
+"""The scaffold's suite at a chosen constant: other bytes, same verdict.
+
+`value=1` reproduces `TEST_SOURCE` exactly, so a scenario can move a file
+between states and back to the bytes the scaffold wrote without spelling those
+bytes out a second time. Same file, same test count, same exit code, different
+key — which is what a branch switch does to a file that differs.
 """
 
 HELPER_SOURCE = """\
@@ -613,19 +640,32 @@ class ConcurrencyTests(ProtocolScenario):
         self.assertEqual(counters(self.root / "low.ndjson")[1], 0)
         self.assertEqual(counters(self.root / "high.ndjson")[1], 0)
 
-        # Publishing reaps this source's superseded generations, so which of
-        # the two survives a concurrent finish is a race. Settle each in turn
-        # and read the record it left: whatever the race did, a generation's
-        # `meta` must describe the build that produced it and no other.
-        self.run_ok(low)
-        self.assertIn(low_gen, generations(self.root))
+        # Two live generations per source, so this race costs neither runner:
+        # each publisher keeps the two newest of its source and there are
+        # exactly two, whichever order they landed in. Retaining one meant the
+        # loser of every finish lost its generation to the winner's reap, so
+        # two CI configurations sharing a checkout warmed nothing, ever.
+        after_race = generations(self.root)
+        self.assertEqual(after_race, sorted([low_gen, high_gen]), msg=str(self.root))
+
+        # Both are hits next time, in both directions. This is the assertion a
+        # reap that ranked itself newest without looking at what became visible
+        # first would fail: the straggler would have deleted the other.
+        self.run_ok(["--build-arg=-O0", "--json", "low-again.ndjson", "tests"])
+        self.assertEqual(counters(self.root / "low-again.ndjson"), (0, 1))
+        self.run_ok(["--build-arg=-O1", "--json", "high-again.ndjson", "tests"])
+        self.assertEqual(counters(self.root / "high-again.ndjson"), (0, 1))
+        # Serving a generation neither publishes nor reaps, so the store is
+        # exactly what the race left.
+        self.assertEqual(generations(self.root), after_race)
+
+        # Whatever the race did, a generation's `meta` describes the build that
+        # produced it and no other.
         low_meta = meta_argv(self.root, low_gen)
         self.assertIn("-O0", low_meta)
         self.assertNotIn("-O1", low_meta)
         self.assertEqual(output_generation(low_meta), low_gen)
 
-        self.run_ok(high)
-        self.assertIn(high_gen, generations(self.root))
         high_meta = meta_argv(self.root, high_gen)
         self.assertIn("-O1", high_meta)
         self.assertNotIn("-O0", high_meta)
@@ -897,9 +937,14 @@ class ToolchainIdentityTests(ProtocolScenario):
         self.run_ok(["--mojo", str(wrapper), "--json", "moved.ndjson", "tests"])
 
         self.assertEqual(counters(self.root / "moved.ndjson"), (1, 0))
+        (before,) = first_generation
         second_generation = generations(self.root)
-        self.assertEqual(len(second_generation), 1)
-        self.assertNotEqual(second_generation, first_generation)
+        # The predecessor is RETAINED, not replaced. A toolchain switched and
+        # switched back is the ordinary case, so the store keeps the two newest
+        # generations of a source: exactly these two names, and no third.
+        moved = [name for name in second_generation if name != before]
+        self.assertEqual(len(moved), 1, msg=str(second_generation))
+        self.assertEqual(second_generation, sorted([before, moved[0]]))
 
 
 class IncludeRootTests(ProtocolScenario):
@@ -934,6 +979,81 @@ class IncludeRootTests(ProtocolScenario):
         # that it is mtest's, or `--cache-clear` would refuse to delete a tree
         # this same run had just made.
         self.assertTrue((self.root / TAG_REL).is_file(), msg="marker missing")
+
+
+class RetentionTests(ProtocolScenario):
+    """Two live generations per source, over real compiles and a real store.
+
+    A store keeping one generation per source recompiles a file every time it
+    moves between two states, in both directions and forever, because
+    publishing either state reaps the other. Switching a branch and switching
+    back does exactly that to every file that differs. Keeping the two newest
+    bounds the store the same way while making the second cycle free.
+    """
+
+    def _write(self, value: int) -> None:
+        """Put the scaffolded suite into one of its interchangeable states."""
+        (self.root / "tests" / "test_alpha.mojo").write_text(
+            VARIANT_TEST_SOURCE.format(name="alpha", value=value), encoding="utf-8"
+        )
+
+    def test_alternating_between_two_states_stops_compiling(self) -> None:
+        # The scaffold already wrote state 1, and the variant at `value=1` is
+        # the same bytes — asserted, because the whole scenario reads as a
+        # cache success if "restoring" quietly wrote something else.
+        source = self.root / "tests" / "test_alpha.mojo"
+        self.assertEqual(
+            source.read_text(encoding="utf-8"),
+            VARIANT_TEST_SOURCE.format(name="alpha", value=1),
+        )
+
+        self.run_ok(["--json", "cold.ndjson", "tests"])
+        self.assertEqual(counters(self.root / "cold.ndjson"), (1, 0))
+        (first_gen,) = generations(self.root)
+
+        self._write(2)
+        self.run_ok(["--json", "edited.ndjson", "tests"])
+        self.assertEqual(counters(self.root / "edited.ndjson"), (1, 0))
+        both = generations(self.root)
+        self.assertEqual(len(both), 2, msg=str(both))
+        self.assertIn(first_gen, both)
+        (second_gen,) = [name for name in both if name != first_gen]
+
+        # Back to the first state. The generation the cold run published is
+        # still live, so this compiles nothing — the property the whole change
+        # exists for.
+        self._write(1)
+        self.run_ok(["--json", "back.ndjson", "tests"])
+        self.assertEqual(counters(self.root / "back.ndjson"), (0, 1))
+        self.assertEqual(generations(self.root), both)
+
+        # And forward again. Serving neither publishes nor reaps, so the
+        # alternation is free in both directions from here on.
+        self._write(2)
+        self.run_ok(["--json", "forward.ndjson", "tests"])
+        self.assertEqual(counters(self.root / "forward.ndjson"), (0, 1))
+        self.assertEqual(generations(self.root), both)
+
+        # A third state evicts exactly one, and it is the oldest by
+        # PUBLICATION: recency is the order generations became visible, not the
+        # order they were last served. Bounded, and bounded at the right two.
+        self._write(3)
+        self.run_ok(["--json", "third.ndjson", "tests"])
+        self.assertEqual(counters(self.root / "third.ndjson"), (1, 0))
+        settled = generations(self.root)
+        self.assertEqual(len(settled), 2, msg=str(settled))
+        self.assertIn(second_gen, settled)
+        self.assertNotIn(first_gen, settled)
+
+        # The evicted state is the only one that rebuilds; the retained one is
+        # still served. Two runs, so a store that had quietly kept nothing
+        # would be caught by the second rather than passing on the first.
+        self._write(1)
+        self.run_ok(["--json", "evicted.ndjson", "tests"])
+        self.assertEqual(counters(self.root / "evicted.ndjson"), (1, 0))
+        self._write(3)
+        self.run_ok(["--json", "retained.ndjson", "tests"])
+        self.assertEqual(counters(self.root / "retained.ndjson"), (0, 1))
 
 
 class SiblingSearchPathTests(ProtocolScenario):

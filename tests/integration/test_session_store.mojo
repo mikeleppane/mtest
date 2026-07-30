@@ -72,8 +72,17 @@ from mtest.session.store import (
     FileKey,
     StoreBuildTarget,
     _MEMO_PATH_CAP,
+    _RETAIN_GENERATIONS,
+    _SEQ_MAX,
+    _SEQ_NAME,
+    _GenRecord,
     _ToolchainMemo,
+    _correct_visibility_seq,
+    _discard_ranked_out,
     _discard_unreadable_generation,
+    _read_seq,
+    _reap_siblings,
+    _sibling_generations,
     _toolchain_identity,
     cache_key_tags,
     clear_cache_root,
@@ -620,6 +629,27 @@ def _stage_binary(
     write_bytes(root, target.out_rel, payload)
     make_executable(root + "/" + target.out_rel)
     return target^
+
+
+def _plant_generation(root: String, gen_dir: String, seq: Int) raises:
+    """Put a generation carrying `seq` where another run published one.
+
+    Reaping ranks and deletes by NAME and recency record; it never opens `bin`
+    or `meta`. Standing a generation up directly is therefore how a test can
+    place a rival at an exact point in the recency order without racing a
+    second publisher for it.
+
+    Args:
+        root: The invocation root.
+        gen_dir: The generation's root-relative directory.
+        seq: The recency record to write, in the store's own format.
+
+    Raises:
+        Error: If any of the three files cannot be written.
+    """
+    write_bytes(root, gen_dir + "/bin", [UInt8(9)])
+    write_bytes(root, gen_dir + "/meta", [UInt8(110)])
+    write_file(root, gen_dir + "/" + _SEQ_NAME, String(seq) + "\n")
 
 
 def _build_argv(rel: String, out_rel: String) -> List[String]:
@@ -1232,18 +1262,29 @@ def test_publish_reaps_stale_sibling() raises:
         ).kind,
         PUB_OK,
     )
-    var new = _fixture_key(root, rel, "# two\n")
-    assert_not_equal(old.gen_name, new.gen_name)
+    var middle = _fixture_key(root, rel, "# two\n")
+    assert_not_equal(old.gen_name, middle.gen_name)
     var second = _stage_binary(root, [UInt8(2)])
     assert_equal(
         store_publish(
-            root, new, second, 1.0, _build_argv(rel, second.out_rel)
+            root, middle, second, 1.0, _build_argv(rel, second.out_rel)
         ).kind,
         PUB_OK,
     )
-    # One live generation per source file: an editing loop must not grow the
-    # store without bound.
+    var new = _fixture_key(root, rel, "# three\n")
+    assert_not_equal(middle.gen_name, new.gen_name)
+    var third = _stage_binary(root, [UInt8(3)])
+    assert_equal(
+        store_publish(
+            root, new, third, 1.0, _build_argv(rel, third.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    # A bounded number of live generations per source file: an editing loop
+    # must not grow the store without bound, and the ones that survive are the
+    # newest by name, not merely the right count.
     assert_false(isdir(root + "/" + old.gen_dir))
+    assert_true(isdir(root + "/" + middle.gen_dir))
     assert_true(isdir(root + "/" + new.gen_dir))
 
 
@@ -1339,6 +1380,363 @@ def test_reaping_leaves_a_name_this_store_could_not_have_written() raises:
         isdir(root + "/" + short),
         "a name with a short digest after `_h` was reaped as a generation",
     )
+
+
+def test_the_top_two_of_three_generations_survive() raises:
+    """A third publication for one source keeps exactly the two newest.
+
+    Publish contents A, then B, then C. Exactly B's and C's generation
+    directories survive, by exact name; A's is gone. One live generation per
+    source made every branch switch recompile both directions; two make the
+    alternation hit while an editing loop stays bounded.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_retain.mojo")
+    var oldest = _fixture_key(root, rel, "# one\n")
+    var first = _stage_binary(root, [UInt8(1)])
+    assert_equal(
+        store_publish(
+            root, oldest, first, 1.0, _build_argv(rel, first.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    var middle = _fixture_key(root, rel, "# two\n")
+    var second = _stage_binary(root, [UInt8(2)])
+    assert_equal(
+        store_publish(
+            root, middle, second, 1.0, _build_argv(rel, second.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    var newest = _fixture_key(root, rel, "# three\n")
+    var third = _stage_binary(root, [UInt8(3)])
+    assert_equal(
+        store_publish(
+            root, newest, third, 1.0, _build_argv(rel, third.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    assert_not_equal(oldest.gen_name, middle.gen_name)
+    assert_not_equal(middle.gen_name, newest.gen_name)
+    # Exact names, never a count: a bound that held while the wrong two
+    # survived would be no bound at all.
+    assert_false(
+        isdir(root + "/" + oldest.gen_dir),
+        "the oldest generation outlived both of its successors",
+    )
+    assert_true(
+        isdir(root + "/" + middle.gen_dir),
+        "the second-newest generation was reaped",
+    )
+    assert_true(isdir(root + "/" + newest.gen_dir))
+
+
+def test_alternating_content_hits_both_ways() raises:
+    """Publish A, publish B; probe A's key and B's key: both HIT."""
+    var root = temp_root()
+    var rel = String("tests/test_alternate.mojo")
+    var one = _fixture_key(root, rel, "# one\n")
+    var first = _stage_binary(root, [UInt8(1)])
+    assert_equal(
+        store_publish(
+            root, one, first, 1.0, _build_argv(rel, first.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    var two = _fixture_key(root, rel, "# two\n")
+    var second = _stage_binary(root, [UInt8(2)])
+    assert_equal(
+        store_publish(
+            root, two, second, 1.0, _build_argv(rel, second.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    # Switching a file between two states and back is the ordinary route, and
+    # the second cycle has to compile nothing in either direction.
+    assert_equal(
+        store_probe(root, one).kind,
+        PROBE_HIT,
+        "the superseded generation was reaped, so going back rebuilds",
+    )
+    assert_equal(store_probe(root, two).kind, PROBE_HIT)
+
+
+def test_a_straggler_ranks_globally_not_selfishly() raises:
+    """A late-renaming early-allocated publisher must not evict newer.
+
+    A publisher that allocated its recency record into an empty store and
+    renamed last would rank itself oldest and, keeping the top two, delete the
+    generation that really is newest. Correcting the record against what is
+    VISIBLE after the rename is what makes the two questions agree.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_straggler.mojo")
+    # Published into an empty store, so it allocated the lowest record there is.
+    var straggler = _fixture_key(root, rel, "# straggler\n")
+    var staged = _stage_binary(root, [UInt8(1)])
+    assert_equal(
+        store_publish(
+            root, straggler, staged, 1.0, _build_argv(rel, staged.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    # Two rivals that became visible while this one was still compiling.
+    var middle = _fixture_key(root, rel, "# middle\n")
+    var newest = _fixture_key(root, rel, "# newest\n")
+    _plant_generation(root, middle.gen_dir, 2)
+    _plant_generation(root, newest.gen_dir, 3)
+    # Exactly what publication does once its own rename has landed.
+    _correct_visibility_seq(root, straggler)
+    _reap_siblings(root, straggler)
+    assert_true(
+        isdir(root + "/" + straggler.gen_dir),
+        "the generation just published was reaped by its own publication",
+    )
+    assert_true(
+        isdir(root + "/" + newest.gen_dir),
+        "a strictly newer generation was evicted by a late publisher",
+    )
+    assert_false(
+        isdir(root + "/" + middle.gen_dir),
+        "three generations of one source survived a publication",
+    )
+
+
+def test_a_discard_is_skipped_when_the_sibling_was_republished() raises:
+    """A ranked-out name whose generation changed under the reaper is spared.
+
+    Generation names are deterministic, so the directory a listing ranked out
+    can be a DIFFERENT, freshly published generation by the time the deletion
+    runs. Re-reading the victim's identity immediately before removing it is
+    what keeps a paused reaper from deleting a rival's new work.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_guard.mojo")
+    var mine = _fixture_key(root, rel, "# mine\n")
+    var rival = _fixture_key(root, rel, "# rival\n")
+    _plant_generation(root, rival.gen_dir, 1)
+    # The listing a reaper ranks from, read before the rival republishes.
+    var stale = _sibling_generations(root, mine)
+    assert_equal(len(stale), 1)
+    assert_equal(stale[0].name, rival.gen_name)
+    assert_equal(stale[0].seq, 1)
+    # The rival republishes at the same deterministic name.
+    remove_tree_no_follow(root + "/" + rival.gen_dir)
+    _plant_generation(root, rival.gen_dir, 7)
+    _discard_ranked_out(root + "/" + STORE_DIR, stale[0])
+    assert_true(
+        isdir(root + "/" + rival.gen_dir),
+        "a republished generation was deleted from a stale listing",
+    )
+    # The guard narrows the window; it does not stop the reaper reaping. A
+    # record that still describes what is on disk is discarded as before.
+    var fresh = _sibling_generations(root, mine)
+    assert_equal(len(fresh), 1)
+    assert_equal(fresh[0].seq, 7)
+    _discard_ranked_out(root + "/" + STORE_DIR, fresh[0])
+    assert_false(isdir(root + "/" + rival.gen_dir))
+
+
+def test_a_saturated_order_still_converges_to_the_retained_count() raises:
+    """A planted maximum record must not stop the store converging.
+
+    Once any generation of a source carries the largest value the format can
+    express, every later one saturates there too and the order collapses to a
+    comparison of names. Retention still has to end at the retained count: a
+    publication whose name happens to sort lowest would otherwise rank itself
+    out, refuse to delete itself, and leave the source one generation over the
+    target for good rather than transiently.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_saturated.mojo")
+    var bodies: List[String] = ["# one\n", "# two\n", "# three\n"]
+    var keys = List[FileKey]()
+    for body in bodies:
+        keys.append(_fixture_key(root, rel, body))
+    # Rank the three deterministic names, so the scenario does not depend on
+    # which digest a given body happens to produce.
+    var hi = 0
+    var lo = 0
+    for i in range(1, len(keys)):
+        if keys[i].gen_name > keys[hi].gen_name:
+            hi = i
+        if keys[i].gen_name < keys[lo].gen_name:
+            lo = i
+    var mid = 3 - hi - lo
+    assert_not_equal(hi, lo)
+    assert_not_equal(mid, hi)
+    assert_not_equal(mid, lo)
+
+    _plant_generation(root, keys[hi].gen_dir, _SEQ_MAX)
+    # The lowest-named generation publishes LAST, which is the ordering that
+    # leaves it ranked below both saturated siblings. Each body is re-keyed
+    # immediately before its publication: the keys above have been overtaken by
+    # the writes that produced the later ones, and publishing against a key
+    # whose inputs have since moved is refused on purpose.
+    var publication_order: List[Int] = [mid, lo]
+    for idx in publication_order:
+        var key = _fixture_key(root, rel, bodies[idx])
+        assert_equal(
+            key.gen_name,
+            keys[idx].gen_name,
+            "the same bytes keyed to a different generation",
+        )
+        var target = _stage_binary(root, [UInt8(idx + 1)])
+        assert_equal(
+            store_publish(
+                root, key, target, 1.0, _build_argv(rel, target.out_rel)
+            ).kind,
+            PUB_OK,
+        )
+
+    var survivors = dir_listing(root + "/" + STORE_DIR)
+    assert_equal(
+        len(survivors),
+        _RETAIN_GENERATIONS,
+        "a saturated order left the source permanently over the target",
+    )
+    # The generation just published is one of them — the caller is running the
+    # binary inside it — and the planted maximum is the other.
+    assert_true(isdir(root + "/" + keys[lo].gen_dir))
+    assert_true(isdir(root + "/" + keys[hi].gen_dir))
+    assert_false(isdir(root + "/" + keys[mid].gen_dir))
+
+
+def test_a_ranked_out_generation_whose_inode_moved_is_spared() raises:
+    """The identity guard's inode half, on its own.
+
+    A directory replaced between the listing and the deletion can come back
+    carrying the same recency record, so the record half of the guard would
+    wave it through. Only the inode distinguishes the two, and testing the two
+    halves together cannot say whether both are wired.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_inode_guard.mojo")
+    var mine = _fixture_key(root, rel, "# mine\n")
+    var rival = _fixture_key(root, rel, "# rival\n")
+    _plant_generation(root, rival.gen_dir, 4)
+    var seen = _sibling_generations(root, mine)
+    assert_equal(len(seen), 1)
+    assert_equal(seen[0].seq, 4)
+    # The record still describes what is on disk; only the inode is wrong. The
+    # directory is untouched, so nothing but the inode check can spare it.
+    var moved = _GenRecord(seen[0].name, seen[0].seq, seen[0].ino + 1)
+    _discard_ranked_out(root + "/" + STORE_DIR, moved)
+    assert_true(
+        isdir(root + "/" + rival.gen_dir),
+        "a generation whose inode no longer matches the listing was deleted",
+    )
+    # And the unmodified record still reaps, so the guard did not simply
+    # switch reaping off.
+    _discard_ranked_out(root + "/" + STORE_DIR, seen[0])
+    assert_false(isdir(root + "/" + rival.gen_dir))
+
+
+def test_publication_records_a_generations_place_in_the_order() raises:
+    """Each publication ranks itself above every generation already visible.
+
+    The record is what makes retention keep the NEWEST few rather than an
+    arbitrary few, and it is allocated from the store rather than from a clock,
+    so two generations can never claim the same place.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_order.mojo")
+    var one = _fixture_key(root, rel, "# one\n")
+    var first = _stage_binary(root, [UInt8(1)])
+    assert_equal(
+        store_publish(
+            root, one, first, 1.0, _build_argv(rel, first.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    # An empty store seeds the highest record at 0, so the first generation of
+    # a source is 1 and never collides with a generation carrying none.
+    assert_equal(_read_seq(root + "/" + one.gen_dir + "/" + _SEQ_NAME), 1)
+    var two = _fixture_key(root, rel, "# two\n")
+    var second = _stage_binary(root, [UInt8(2)])
+    assert_equal(
+        store_publish(
+            root, two, second, 1.0, _build_argv(rel, second.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    assert_equal(_read_seq(root + "/" + two.gen_dir + "/" + _SEQ_NAME), 2)
+    assert_equal(_read_seq(root + "/" + one.gen_dir + "/" + _SEQ_NAME), 1)
+    # The retained count is the constant, not a number this test invented.
+    assert_equal(_RETAIN_GENERATIONS, 2)
+
+
+def test_a_generation_without_a_recency_record_reads_as_oldest() raises:
+    """A generation carrying no record ranks first out.
+
+    That is the whole of the compatibility story: generations published before
+    the record existed read as the oldest there is, so they are what the next
+    publication reaps rather than something it has to reason about.
+    """
+    var root = temp_root()
+    assert_equal(_read_seq(root + "/absent/" + _SEQ_NAME), 0)
+
+
+def test_a_damaged_recency_record_reads_as_oldest() raises:
+    """Every deviation from the one canonical format reads as 0.
+
+    A record is ranking input, so a parser that raised would turn damage inside
+    the cache into a failed run, and one that guessed at a near-miss would turn
+    it into a wrong order. Reading damage as "oldest" converges instead: the
+    generation ages out and is rebuilt once.
+    """
+    var root = temp_root()
+    write_file(root, "empty/" + _SEQ_NAME, "")
+    write_file(root, "unterminated/" + _SEQ_NAME, "5")
+    write_file(root, "twice/" + _SEQ_NAME, "5\n\n")
+    write_file(root, "padded/" + _SEQ_NAME, "05\n")
+    write_file(root, "signed/" + _SEQ_NAME, "+5\n")
+    write_file(root, "negative/" + _SEQ_NAME, "-5\n")
+    write_file(root, "leading_space/" + _SEQ_NAME, " 5\n")
+    write_file(root, "trailing_space/" + _SEQ_NAME, "5 \n")
+    write_file(root, "sixteen_digits/" + _SEQ_NAME, "1000000000000000\n")
+    write_bytes(
+        root, "not_utf8/" + _SEQ_NAME, [UInt8(0xC3), UInt8(0x28), UInt8(10)]
+    )
+    # Past the byte cap, so it is characterized and then not read at all.
+    write_file(root, "oversized/" + _SEQ_NAME, String("9") * 40 + "\n")
+    makedirs(root + "/directory/" + _SEQ_NAME)
+    var damaged: List[String] = [
+        "empty",
+        "unterminated",
+        "twice",
+        "padded",
+        "signed",
+        "negative",
+        "leading_space",
+        "trailing_space",
+        "sixteen_digits",
+        "not_utf8",
+        "oversized",
+        "directory",
+    ]
+    for name in damaged:
+        assert_equal(
+            _read_seq(root + "/" + name + "/" + _SEQ_NAME),
+            0,
+            "'" + name + "' was accepted as a recency record",
+        )
+
+
+def test_the_boundary_recency_records_are_read_whole() raises:
+    """Zero, one, and the format's maximum are values, not deviations.
+
+    The digit cap is what keeps `max + 1` from overflowing, so the largest
+    value the format can express has to parse exactly rather than fall into the
+    damage case beside it.
+    """
+    var root = temp_root()
+    write_file(root, "zero/" + _SEQ_NAME, "0\n")
+    assert_equal(_read_seq(root + "/zero/" + _SEQ_NAME), 0)
+    write_file(root, "one/" + _SEQ_NAME, "1\n")
+    assert_equal(_read_seq(root + "/one/" + _SEQ_NAME), 1)
+    write_file(root, "max/" + _SEQ_NAME, String(_SEQ_MAX) + "\n")
+    assert_equal(_read_seq(root + "/max/" + _SEQ_NAME), _SEQ_MAX)
 
 
 def test_publish_refuses_a_source_changed_mid_compile() raises:
