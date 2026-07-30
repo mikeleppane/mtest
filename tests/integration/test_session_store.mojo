@@ -844,12 +844,12 @@ def test_permission_repair_never_follows_a_replaced_symlink() raises:
     rename_path(replacement, root + "/old-observed")
     symlink(outside, replacement)
 
-    # A peer can replace the observed cache directory before Darwin opens it
-    # for repair. The all-components no-follow open must reject the replacement
+    # A peer can replace the observed cache directory before Darwin prepares it
+    # for repair. The anchored no-follow lookup must reject the replacement
     # rather than chmod its target.
     try:
         prepare_directory_for_rename(
-            replacement, Int(observed.st_dev), Int(observed.st_ino)
+            root, "replacement", Int(observed.st_dev), Int(observed.st_ino)
         )
     except:
         pass
@@ -872,7 +872,10 @@ def test_permission_repair_rejects_a_symlinked_ancestor() raises:
     # O_NOFOLLOW_ANY must reject the substituted ancestor before fchmod.
     try:
         prepare_directory_for_rename(
-            generation, Int(observed.st_dev), Int(observed.st_ino)
+            root,
+            "ancestor/generation",
+            Int(observed.st_dev),
+            Int(observed.st_ino),
         )
     except:
         pass
@@ -892,12 +895,12 @@ def test_permission_repair_never_mutates_a_hard_link_replacement() raises:
     rename_path(replacement, root + "/old-observed")
     link(outside, replacement)
 
-    # O_DIRECTORY rejects the hard-linked regular file before fchmod. Even
-    # though its inode is shared with a path outside the cache, that outside
-    # object's mode must remain untouched.
+    # The anchored identity check rejects the hard-linked regular file before
+    # fchmodat. Even though its inode is shared with a path outside the cache,
+    # that outside object's mode must remain untouched.
     try:
         prepare_directory_for_rename(
-            replacement, Int(observed.st_dev), Int(observed.st_ino)
+            root, "replacement", Int(observed.st_dev), Int(observed.st_ino)
         )
     except:
         pass
@@ -920,7 +923,7 @@ def test_unreadable_healer_leaves_a_readable_replacement_alone() raises:
     # detecting probe has returned. The healer must re-check the final name and
     # leave that readable replacement runnable rather than moving it aside.
     _discard_unreadable_generation(
-        root + "/" + key.gen_dir, root + "/" + STORE_DIR
+        root + "/" + key.gen_dir, root + "/" + STORE_DIR, key.gen_name
     )
     assert_equal(store_probe(root, key).kind, PROBE_HIT)
 
@@ -950,7 +953,9 @@ def test_unreadable_healer_restores_a_replacement_raced_before_quarantine() rais
     var was_set = getenv(STORE_FAULT_ENV, "\x01unset") != "\x01unset"
     try:
         _ = setenv(STORE_FAULT_ENV, "unreadable-replacement", True)
-        _discard_unreadable_generation(root + "/" + key.gen_dir, store_abs)
+        _discard_unreadable_generation(
+            root + "/" + key.gen_dir, store_abs, key.gen_name
+        )
     finally:
         if was_set:
             _ = setenv(STORE_FAULT_ENV, saved, True)
@@ -982,7 +987,9 @@ def test_unreadable_healer_restores_after_tombstone_inspection_failure() raises:
     var was_set = getenv(STORE_FAULT_ENV, "\x01unset") != "\x01unset"
     try:
         _ = setenv(STORE_FAULT_ENV, "unreadable-tombstone-lstat", True)
-        _discard_unreadable_generation(final_abs, root + "/" + STORE_DIR)
+        _discard_unreadable_generation(
+            final_abs, root + "/" + STORE_DIR, key.gen_name
+        )
     finally:
         if was_set:
             _ = setenv(STORE_FAULT_ENV, saved, True)
@@ -1021,7 +1028,11 @@ def test_unreadable_healer_still_quarantines_after_preparation_failure() raises:
     var was_set = getenv(STORE_FAULT_ENV, "\x01unset") != "\x01unset"
     try:
         _ = setenv(STORE_FAULT_ENV, "unreadable-prepare-failure", True)
-        _discard_unreadable_generation(final_abs, store_abs)
+        _discard_unreadable_generation(
+            final_abs,
+            store_abs,
+            "tests_stest_empty_h00000000000000000000000000000000",
+        )
     finally:
         if was_set:
             _ = setenv(STORE_FAULT_ENV, saved, True)

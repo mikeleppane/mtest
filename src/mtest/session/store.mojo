@@ -2215,7 +2215,9 @@ def _restore_tombstone(tombstone_path: String, gen_abs: String):
         pass
 
 
-def _discard_unreadable_generation(gen_abs: String, store_abs: String):
+def _discard_unreadable_generation(
+    gen_abs: String, store_abs: String, gen_name: String
+):
     """Remove an unreadable generation without racing a replacement.
 
     A failed read invalidates the generation even when it was a transient
@@ -2233,6 +2235,7 @@ def _discard_unreadable_generation(gen_abs: String, store_abs: String):
     Args:
         gen_abs: The unreadable generation's absolute path.
         store_abs: The containing store directory's absolute path.
+        gen_name: The generation's one-component name within `store_abs`.
     """
     var observed_dev: Int
     var observed_ino: Int
@@ -2251,15 +2254,17 @@ def _discard_unreadable_generation(gen_abs: String, store_abs: String):
 
     var requested = _env_value(STORE_FAULT_ENV)
     # Darwin refuses to rename a write-disabled directory even within one
-    # parent. The platform helper opens and identity-checks the observed
-    # cache-owned directory before changing its mode, so no pathname
-    # replacement can redirect the mutation. A preparation failure does not
+    # parent. The platform helper opens the canonical store as an anchor, then
+    # identity-checks and changes the observed one-component generation without
+    # following any path below that anchor. A preparation failure does not
     # suppress the rename: Linux needs no preparation, and Darwin's rename
     # remains the authoritative attempt.
     try:
         if requested and requested.value() == _FAULT_UNREADABLE_PREPARE_FAILURE:
             raise Error("test-only unreadable preparation fault")
-        prepare_directory_for_rename(gen_abs, observed_dev, observed_ino)
+        prepare_directory_for_rename(
+            store_abs, gen_name, observed_dev, observed_ino
+        )
     except:
         pass
 
@@ -3063,7 +3068,9 @@ def store_probe(root: String, key: FileKey) -> ProbeResult:
     # removed, so simply treating its unreadable record as a normal miss would
     # leave the final name occupied and make every later publish fail.
     if not _list_sorted(gen_abs):
-        _discard_unreadable_generation(gen_abs, root + "/" + STORE_DIR)
+        _discard_unreadable_generation(
+            gen_abs, root + "/" + STORE_DIR, key.gen_name
+        )
         return _probe_miss()
 
     # --- Checks 2 and 3: the record parses and names THIS key. --------------

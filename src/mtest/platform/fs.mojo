@@ -11,18 +11,24 @@ being redeclared in session or tests.
 """
 from std.ffi import external_call
 from std.memory import alloc, memset_zero
+from std.os.path import realpath
 from std.sys.info import CompilationTarget
 
 from mtest.platform.cstring import c_string_bytes
-from mtest.platform.stream import errno_now
+from mtest.platform.stream import close_fd, errno_now
 
 
 comptime _EINTR = 4
 comptime _STAT_BYTES = 144
 comptime _S_IFMT = 0o170000
 comptime _S_IFDIR = 0o40000
-comptime _DARWIN_AT_FDCWD = -2
 comptime _DARWIN_AT_SYMLINK_NOFOLLOW_ANY = 0x0800
+comptime _DARWIN_ANCHOR_OPEN_FLAGS = (
+    0x40000000  # O_EXEC, making O_SEARCH with O_DIRECTORY
+    | 0x00100000  # O_DIRECTORY
+    | 0x01000000  # O_CLOEXEC
+    | 0x20000000  # O_NOFOLLOW_ANY
+)
 
 
 def set_permissions(path: String, mode: Int) raises:
@@ -66,18 +72,20 @@ def set_permissions(path: String, mode: Int) raises:
 
 
 def prepare_directory_for_rename(
-    path: String, expected_dev: Int, expected_ino: Int
+    anchor: String, relative: String, expected_dev: Int, expected_ino: Int
 ) raises:
     """Make one observed directory movable where Darwin requires owner access.
 
     Linux rename authorization comes entirely from the parent directory, so
-    this is a no-op there. On Darwin `fstatat` rejects a symlink in any path
-    component and checks the directory's device/inode pair against the
-    observation before `fchmodat` grants owner-only `0700` through the same
-    no-follow-any path policy.
+    this is a no-op there. On Darwin the accessible store directory is
+    canonicalized and opened as an anchor. `fstatat` then rejects a symlink in
+    any component below that anchor and checks the directory's device/inode pair
+    against the observation before `fchmodat` grants owner-only `0700` through
+    the same relative no-follow-any path policy.
 
     Args:
-        path: The observed directory that will next be renamed.
+        anchor: An accessible directory containing the observed directory.
+        relative: The observed directory's path relative to `anchor`.
         expected_dev: The device captured before the failed directory read.
         expected_ino: The inode captured before the failed directory read.
 
@@ -87,7 +95,42 @@ def prepare_directory_for_rename(
             the rename because its authorization can differ.
     """
     comptime if CompilationTarget.is_macos():
-        var c = c_string_bytes(path)
+        var canonical_anchor = realpath(anchor)
+        var anchor_c = c_string_bytes(canonical_anchor)
+        var raw_fd: Int32
+        var open_errno = 0
+        while True:
+            # SAFETY: Darwin libc `open` has ABI
+            # `int open(const char*, int, ...)`. No creation flag is set, so
+            # libc reads no variadic mode. `anchor_c` uniquely owns a complete
+            # initialized NUL-terminated canonical path and stays live through
+            # the synchronous call. O_SEARCH requests only directory search,
+            # O_NOFOLLOW_ANY rejects any unexpected remaining symlink,
+            # O_DIRECTORY requires the anchor type, and O_CLOEXEC prevents
+            # descriptor escape. Success transfers one descriptor here;
+            # failure owns none, and libc retains no pointer on either path.
+            raw_fd = external_call["open", Int32](
+                anchor_c.unsafe_ptr().bitcast[NoneType](),
+                Int32(_DARWIN_ANCHOR_OPEN_FLAGS),
+                UInt32(0),
+            )
+            if raw_fd >= 0:
+                break
+            open_errno = errno_now()
+            if open_errno != _EINTR:
+                break
+        _ = anchor_c^
+        if raw_fd < 0:
+            raise Error(
+                "platform: could not open damaged-directory anchor '"
+                + anchor
+                + "' (errno "
+                + String(open_errno)
+                + ")"
+            )
+        var fd = Int(raw_fd)
+        var path = anchor + "/" + relative
+        var c = c_string_bytes(relative)
         # SAFETY: this allocation owns 144 initialized bytes aligned to eight,
         # the guarded Darwin arm64 `struct stat` size and alignment. It remains
         # live until every field read completes and is freed on every path.
@@ -100,12 +143,12 @@ def prepare_directory_for_rename(
             # `int fstatat(int, const char*, struct stat*, int)`. `c` uniquely
             # owns a complete initialized NUL-terminated path and stays live
             # through the synchronous call. `stat_storage` is the complete
-            # writable Darwin struct region. AT_FDCWD selects the absolute path
-            # and AT_SYMLINK_NOFOLLOW_ANY rejects a symlink in any component.
-            # The call writes only within the allocation, retains no pointer,
-            # and owns neither resource.
+            # writable Darwin struct region. `fd` is the live canonical anchor
+            # descriptor and AT_SYMLINK_NOFOLLOW_ANY rejects a symlink in any
+            # relative component. The call writes only within the allocation,
+            # retains no pointer, and owns neither resource.
             stat_rc = external_call["fstatat", Int32](
-                Int32(_DARWIN_AT_FDCWD),
+                Int32(fd),
                 c.unsafe_ptr(),
                 stat_storage.bitcast[NoneType](),
                 Int32(_DARWIN_AT_SYMLINK_NOFOLLOW_ANY),
@@ -120,6 +163,7 @@ def prepare_directory_for_rename(
             # no pointer, so this sole owner frees the complete allocation once.
             stat_storage.free()
             _ = c^
+            _ = close_fd(fd)
             raise Error(
                 "platform: fstatat failed for damaged directory '"
                 + path
@@ -146,6 +190,7 @@ def prepare_directory_for_rename(
             or opened_ino != expected_ino
         ):
             _ = c^
+            _ = close_fd(fd)
             raise Error("platform: damaged directory identity changed")
 
         var chmod_rc: Int32
@@ -156,12 +201,13 @@ def prepare_directory_for_rename(
             # unique live owner of the complete initialized path. Darwin arm64
             # passes both UInt16 `mode_t` and UInt32 in the same `w2` register;
             # the callee reads the low 16 bits and `0700` fits there exactly.
-            # AT_FDCWD selects the absolute path and
+            # `fd` is the live canonical anchor descriptor, and
             # AT_SYMLINK_NOFOLLOW_ANY makes the kernel reject a symlink in any
-            # component during the same lookup that selects the vnode to
-            # modify. The synchronous call retains no pointer and owns nothing.
+            # relative component during the same lookup that selects the vnode
+            # to modify. The synchronous call retains no pointer and owns
+            # nothing.
             chmod_rc = external_call["fchmodat", Int32](
-                Int32(_DARWIN_AT_FDCWD),
+                Int32(fd),
                 c.unsafe_ptr(),
                 UInt32(0o700),
                 Int32(_DARWIN_AT_SYMLINK_NOFOLLOW_ANY),
@@ -172,6 +218,7 @@ def prepare_directory_for_rename(
             if chmod_errno != _EINTR:
                 break
         _ = c^
+        var close_rc = close_fd(fd)
         if chmod_rc != 0:
             raise Error(
                 "platform: fchmodat failed for damaged directory '"
@@ -179,6 +226,10 @@ def prepare_directory_for_rename(
                 + "' (errno "
                 + String(chmod_errno)
                 + ")"
+            )
+        if close_rc != 0:
+            raise Error(
+                "platform: close failed after directory permission repair"
             )
 
 
