@@ -211,6 +211,20 @@ class ElfSectionParserTests(unittest.TestCase):
             (),
         )
 
+    def test_unrecognized_output_is_rejected(self) -> None:
+        with self.assertRaisesRegex(BuildProfileError, r"no recognized \.text section"):
+            parse_elf_debug_sections("not readelf output\n")
+
+    def test_section_header_without_rows_is_rejected(self) -> None:
+        header_only = (
+            "There are 31 section headers, starting at offset 0x1234:\n"
+            "\n"
+            "Section Headers:\n"
+            "  [Nr] Name              Type\n"
+        )
+        with self.assertRaisesRegex(BuildProfileError, r"no recognized \.text section"):
+            parse_elf_debug_sections(header_only)
+
 
 class MachoMinimumVersionParserTests(unittest.TestCase):
     """Both current and legacy Mach-O deployment commands are understood."""

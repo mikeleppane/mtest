@@ -144,10 +144,18 @@ def parse_llvm_target_attributes(text: str) -> tuple[tuple[str, str], ...]:
 def parse_elf_debug_sections(text: str) -> tuple[str, ...]:
     """Return `.debug_*` section names from `readelf -S` output."""
     sections: list[str] = []
+    has_text = False
     for line in text.splitlines():
         match = _ELF_SECTION.match(line)
-        if match is not None and match.group(1).startswith(".debug_"):
-            sections.append(match.group(1))
+        if match is None:
+            continue
+        name = match.group(1)
+        if name == ".text":
+            has_text = True
+        if name.startswith(".debug_"):
+            sections.append(name)
+    if not has_text:
+        raise BuildProfileError("ELF output contains no recognized .text section")
     return tuple(sections)
 
 
