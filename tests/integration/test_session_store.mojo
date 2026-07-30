@@ -2656,9 +2656,9 @@ def test_env_base_disables_on_missing_arg_file() raises:
     config.build_args = ["-Xlinker", "absent.o"]
     var ctx = env_base(config^, root)
     assert_false(ctx.enabled)
-    assert_true(
-        "absent.o" in ctx.disable_reason,
-        "reason did not name the token: " + ctx.disable_reason,
+    assert_equal(
+        ctx.disable_reason,
+        "cache cannot characterize -Xlinker argument 'absent.o'",
     )
 
 

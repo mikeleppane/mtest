@@ -1826,12 +1826,12 @@ def collect_env_base(
                     _absolute(root, row.value), _BIN_CAP
                 )
             except:
-                # The grammar took this token for a file; it is not one this run
-                # can read, so what it contributes to the build is unknown.
+                # `-Xlinker` accepts linker options as well as paths. A token
+                # this cache cannot digest leaves its build effect unknown.
                 ctx.disable(
-                    "build argument '"
+                    "cache cannot characterize -Xlinker argument '"
                     + row.value
-                    + "' does not name a readable file"
+                    + "'"
                 )
                 return ctx^
             ctx.base.feed_file(
