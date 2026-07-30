@@ -77,16 +77,16 @@ that won a rename race, because adopting an unvalidated winner is how a single
 corrupt generation spreads to every process that loses to it.
 
 Deletion inside the store goes through `remove_tree_no_follow`, which refuses a
-symlinked root and unlinks child symlinks rather than descending them. The cache
-deletes only what it owns, and it proves ownership with the `CACHEDIR.TAG`
-marker written at `CACHE_ROOT_DIR` — above the store, because `--cache-clear`
-deletes the whole owned directory and that is what must be proven mtest's.
+symlinked root and unlinks child symlinks rather than descending them. The
+`CACHEDIR.TAG` marker at `CACHE_ROOT_DIR` authorizes `--cache-clear` deletion
+when its whole text matches — above the store, because that flag deletes the
+whole cache root.
 `ensure_cache_root` writes that marker on EVERY path that CREATES the directory,
 including the one that only wants somewhere to keep last-run state, and on no
 other path: a directory that was already there was made by somebody else, and
-marking it would manufacture the very proof the deletion demands. The proof is
-the marker's whole text, since `CACHEDIR.TAG` is a shared convention and a
-marker somebody else wrote says nothing about who owns the directory.
+marking it would manufacture deletion authority for a directory this invocation
+did not create. The whole marker text matters because `CACHEDIR.TAG` is a
+shared convention and its presence says nothing about who owns the directory.
 
 **The store fault seam — TEST ONLY.** The store reads the environment variable
 `MTEST_STORE_FAULT` through the same `_env_value` accessor `MODULAR_HOME` goes
@@ -1902,19 +1902,19 @@ def finalize_includes(
     ctx.include_unscannable = scan.unscannable
 
 
-# --- The owned store: layout and the ownership marker. -----------------------
+# --- The store: layout and the deletion-authorization marker. ----------------
 
 comptime CACHE_ROOT_DIR = ".mtest-cache"
-"""The whole directory mtest owns, relative to the invocation root.
+"""The whole cache directory, relative to the invocation root.
 
 `STORE_DIR` lives inside it, and so does the last-run reselection state, which
-is why the ownership marker sits HERE rather than beside the generations:
-`--cache-clear` deletes this directory, so this is the directory whose ownership
-has to be provable before anything is removed.
+is why the deletion-authorization marker sits HERE rather than beside the
+generations: `--cache-clear` deletes this directory, so the marker has to
+authorize deleting this whole tree.
 """
 
 comptime CACHEDIR_TAG_REL = ".mtest-cache/CACHEDIR.TAG"
-"""The ownership marker, relative to the invocation root.
+"""The deletion-authorization marker, relative to the invocation root.
 
 Spelled out rather than composed from `CACHE_ROOT_DIR`, because the pinned
 toolchain's `comptime` bindings are literals; the two must agree, and
@@ -1926,7 +1926,7 @@ comptime CACHEDIR_TAG_SIGNATURE = "Signature: 8a477f597d28d172789f06886806bc55"
 
 Backup and archiving tools recognize this exact byte string and skip the
 directory holding it — which is correct for a build cache, and a free side
-effect of the marker mtest needs anyway to prove the directory is its own.
+effect of the marker that authorizes `--cache-clear` deletion.
 """
 
 comptime _BIN_NAME = "bin"
@@ -1964,8 +1964,8 @@ def _cachedir_tag_text() -> String:
     """The marker file's full contents.
 
     Returns:
-        The standard signature line, then two comment lines naming mtest as the
-        owner and the convention as the reference.
+        The standard signature line, then two comment lines naming the cache
+        creator and the convention as the reference.
     """
     var out = String(CACHEDIR_TAG_SIGNATURE) + "\n"
     out += "# This file is a cache directory tag created by mtest.\n"
@@ -1983,13 +1983,14 @@ def ensure_cache_root(root: String) raises:
     still has the directory — and if the marker were tied to staging, that
     directory would be unmarked and `--cache-clear` would refuse to delete a
     tree mtest itself had just created, blaming an older mtest that was never
-    there. Every directory mtest makes is one mtest can prove it owns.
+    there. Every directory mtest makes carries the marker that authorizes its
+    `--cache-clear` deletion.
 
-    The converse is what makes that proof worth anything, and it is why the
+    The converse is what makes that authorization meaningful, and it is why the
     `mkdir` here is exclusive rather than an "ensure it exists". A `.mtest-cache`
     that was ALREADY THERE was made by something else — an older mtest, another
-    tool, or the user — and marking it would hand `clear_cache_root` a proof of
-    ownership this process invented, one invocation after that same function
+    tool, or the user — and marking it would hand `clear_cache_root` deletion
+    authority this process invented, one invocation after that same function
     refused to delete the directory for want of it. So an existing directory is
     used as-is and left unmarked, and `--cache-clear` keeps refusing it until the
     user removes it themselves.
@@ -1999,8 +2000,7 @@ def ensure_cache_root(root: String) raises:
     half-written tag — and `--cache-clear`, whose entire safety argument rests on
     the marker's contents, can never be defeated by a torn write. A directory
     whose marker cannot be written is removed again rather than left behind
-    unmarked, since an unmarked directory is one no later run can ever prove is
-    mtest's.
+    unmarked, since no later run can authorize `--cache-clear` deletion there.
 
     Args:
         root: The invocation root the cache directory hangs under.
@@ -2056,7 +2056,8 @@ def ensure_cache_root(root: String) raises:
         except:
             pass
         raise Error(
-            "session: could not write the cache ownership marker at '"
+            "session: could not write the cache deletion-authorization marker"
+            " at '"
             + tag
             + "'"
         )
@@ -2331,16 +2332,18 @@ def cache_rebuild_note(rel: String) -> String:
     return note^
 
 
-def _ownership_proof_failure(root: String) -> Optional[String]:
-    """Why `<root>/.mtest-cache` is not provably mtest's, or nothing if it is.
+def _deletion_authorization_failure(root: String) -> Optional[String]:
+    """Why `<root>/.mtest-cache` does not authorize `--cache-clear` deletion.
 
-    The proof is the whole marker file, not its presence and not its first line.
+    Authorization is the whole marker file, not its presence and not its first
+    line.
     `CACHEDIR.TAG` is a published convention: the signature line is a fixed byte
     string shared by every tool that marks a cache directory, and users are
     actively encouraged to drop one into any directory they want backup tools to
     skip. A marker that merely exists, or that merely carries the convention's
     signature, therefore says somebody marked this as a cache — not that mtest
-    created it. Only the exact text `_cachedir_tag_text` writes says that.
+    created it. Only the exact text `_cachedir_tag_text` writes authorizes this
+    deletion.
 
     Args:
         root: The invocation root the cache directory hangs under.
@@ -2348,19 +2351,21 @@ def _ownership_proof_failure(root: String) -> Optional[String]:
     Returns:
         What failed and what to do about it, ready to finish a refusal, or
         `None` when the marker is a regular file holding exactly what mtest
-        writes. Never raises: an unprovable directory is a refusal, not an
+        writes. Never raises: an unauthorized deletion is a refusal, not an
         error.
 
         The two shapes are different facts with one remedy. mtest writes the
         marker only when it creates the directory itself, and neither writes one
         into a directory it finds nor overwrites one that is already there —
-        either would manufacture the proof this function exists to demand. So a
+        either would manufacture deletion authority this function exists to
+        demand. So a
         missing marker and a foreign marker both mean the same thing: nothing a
-        later run does can make this directory provably mtest's, and the way out
+        later run does can authorize deletion of this directory, and the way out
         is the user's own deletion.
     """
     var tag = root + "/" + CACHEDIR_TAG_REL
-    var quoted = String("the ownership marker '") + CACHEDIR_TAG_REL + "' "
+    var quoted = String("the deletion-authorization marker '")
+    quoted += CACHEDIR_TAG_REL + "' "
     var manual = String(" delete the directory yourself with 'rm -rf ")
     manual += CACHE_ROOT_DIR
     manual += "'"
@@ -2409,8 +2414,7 @@ def _ownership_proof_failure(root: String) -> Optional[String]:
 
 
 def clear_cache_root(root: String) -> Optional[String]:
-    """Delete `<root>/.mtest-cache` whole, but only where mtest can prove it
-    owns it.
+    """Delete `<root>/.mtest-cache` whole when its marker authorizes deletion.
 
     `--cache-clear`'s entire implementation, and the one place in mtest that
     removes a directory the USER named rather than one mtest invented. Three
@@ -2418,13 +2422,13 @@ def clear_cache_root(root: String) -> Optional[String]:
 
     1. The path is characterized `lstat`-no-follow FIRST. A symlink is REFUSED,
        never removed and never followed — following it would delete whatever it
-       points at, which is outside the tree mtest owns.
+       points at, which is outside the named cache root.
     2. The directory must hold the `CACHEDIR.TAG` marker mtest writes when it
        creates the directory — as a regular file, holding exactly the text mtest
        writes. Presence alone proves nothing: `CACHEDIR.TAG` is a published
        convention whose signature line every cache-marking tool writes, and
        users add one by hand to keep backups out, so a marker somebody else
-       wrote would otherwise hand mtest deletion rights over their directory.
+       wrote does not authorize deleting their directory.
        There is deliberately no "but its contents look like ours" exception
        either: that heuristic is exactly how a directory somebody else created
        gets deleted. A checkout whose cache predates the marker therefore
@@ -2432,7 +2436,7 @@ def clear_cache_root(root: String) -> Optional[String]:
        removal.
     3. Removal itself goes through `remove_tree_no_follow`, which unlinks child
        symlinks rather than descending them, so the blast radius stays inside
-       the proven directory.
+       the authorized directory.
 
     An ABSENT cache root is success, not a diagnostic: there is nothing to
     clear, which is the ordinary shape of a first run. A root that cannot be
@@ -2483,11 +2487,11 @@ def clear_cache_root(root: String) -> Optional[String]:
         symlink_note += " points at; remove or repoint the link yourself, then"
         symlink_note += " rerun"
         return Optional[String](symlink_note^)
-    var unproven = _ownership_proof_failure(root)
-    if unproven:
+    var authorization_failure = _deletion_authorization_failure(root)
+    if authorization_failure:
         var unmarked_note = String("cache-clear: ") + cache_root
         unmarked_note += ": refusing to delete a directory mtest cannot prove"
-        unmarked_note += " it owns — " + unproven.value()
+        unmarked_note += " it owns — " + authorization_failure.value()
         return Optional[String](unmarked_note^)
     try:
         remove_tree_no_follow(cache_root)
@@ -4047,7 +4051,7 @@ def precompile_publish(root: String, key: FileKey, out_path: String):
     over an unchanged tree can skip it. The record is written to a unique
     temporary file and renamed onto its name, so a concurrent probe reads either
     the old stamp or the new one and never a half-written record — the same
-    discipline the ownership marker and every generation use.
+    discipline the deletion-authorization marker and every generation use.
 
     Superseded stamps for this same source are reaped first, so an editing loop
     leaves one stamp per step rather than one per edit.

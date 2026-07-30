@@ -54,8 +54,8 @@ comptime _MARKER_TEXT = (
 )
 """A hand-written `CACHEDIR.TAG` body, for cases with no session to write one.
 
-Byte-identical to what the store writes, and it has to be: the clear proves
-ownership by comparing the whole marker, so a fixture that abbreviated it would
+Byte-identical to what the store writes, and it has to be: the clear authorizes
+deletion by comparing the whole marker, so a fixture that abbreviated it would
 be refused. The signature line alone would not do — it is the cachedir
 convention's, shared by every tool that marks a cache directory, so a marker
 carrying only that says nothing about who created this one.
@@ -166,7 +166,7 @@ def _saw_warning_kind(rec: RecordingReporter, kind: String) raises -> Bool:
     return False
 
 
-def test_cache_clear_removes_owned_store() raises:
+def test_cache_clear_removes_marked_store() raises:
     """A marked `.mtest-cache` is deleted whole — store, marker, and lastrun."""
     var root = temp_root()
     write_file(root, ".mtest-cache/CACHEDIR.TAG", _MARKER_TEXT)
@@ -175,7 +175,7 @@ def test_cache_clear_removes_owned_store() raises:
     write_file(root, ".mtest-cache/lastrun", "v1\n")
 
     var diagnostic = _clear_diagnostic(root)
-    assert_equal(diagnostic, "", "clearing an owned store must not refuse")
+    assert_equal(diagnostic, "", "clearing an authorized store must not refuse")
     assert_false(
         exists(root + "/" + _CACHE_ROOT),
         "--cache-clear deletes the whole directory, not just the generations",
@@ -230,6 +230,10 @@ def test_cache_clear_refuses_unmarked() raises:
         "the refusal must name the marker it looked for: " + diagnostic,
     )
     assert_true(
+        "deletion-authorization marker" in diagnostic,
+        "the refusal must name the marker's deletion authority: " + diagnostic,
+    )
+    assert_true(
         "never into one it finds" in diagnostic,
         ("the refusal must say why no later run can fix it: " + diagnostic),
     )
@@ -259,8 +263,8 @@ def test_cache_clear_refuses_a_marker_it_did_not_write() raises:
     scripts are actively encouraged to drop one into any directory they want
     backups to skip. So a marker's mere presence — even a marker leading with
     the standard signature — says only that somebody marked this as a cache, not
-    that mtest created it. Ownership is proven against the whole text mtest
-    writes, or the deletion does not happen.
+    that mtest created it. The whole text mtest writes authorizes deletion, or
+    the deletion does not happen.
     """
     var root = temp_root()
     write_file(root, ".mtest-cache/CACHEDIR.TAG", "Signature: deadbeef\n")
@@ -287,7 +291,7 @@ def test_cache_clear_refuses_a_marker_it_did_not_write() raises:
 def test_cache_clear_refuses_a_marker_that_is_not_a_regular_file() raises:
     """A directory named `CACHEDIR.TAG` is not the marker mtest writes.
 
-    The cheapest way to defeat an ownership proof is to satisfy it with the
+    The cheapest way to defeat a deletion check is to satisfy it with the
     wrong kind of object: a bare existence test accepts a directory, a symlink,
     a socket, or a device node at the marker's path, and each of those
     authorizes deleting a tree mtest never created.
@@ -388,11 +392,16 @@ def test_cache_clear_deletes_a_store_a_real_session_wrote() raises:
     assert_equal(first.built_files, 1, "the cold run compiles the one file")
     assert_true(
         exists(root + "/.mtest-cache/CACHEDIR.TAG"),
-        "a cache-enabled session must have written the ownership marker",
+        (
+            "a cache-enabled session must have written the"
+            " deletion-authorization marker"
+        ),
     )
 
     assert_equal(
-        _clear_diagnostic(root), "", "a store mtest wrote is a store it owns"
+        _clear_diagnostic(root),
+        "",
+        "a store with the marker authorizes deletion",
     )
     assert_false(
         exists(root + "/" + _CACHE_ROOT), "the cleared store must be gone"

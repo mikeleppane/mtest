@@ -979,7 +979,7 @@ changes a verdict.
 staging, so the run creates no `build-v1/` and leaves no artifact a later run
 could trust; it also emits no `cache-off` warning, because you asked for it.
 (`.mtest-cache/` itself is still created, for the last-run state, and carries
-the ownership marker like any other directory mtest makes.) This is how you get
+the deletion-authorization marker like any other directory mtest makes.) This is how you get
 a measurement with the store out of the picture:
 
 ```console
@@ -1011,8 +1011,8 @@ periodically, or just `rm -rf .mtest-cache`: nothing in there cannot be rebuilt.
 
 Deletion is guarded, because `.mtest-cache` is a path anything could be sitting
 at. mtest writes a `CACHEDIR.TAG` marker whenever it creates that directory, and
-`--cache-clear` refuses whatever it cannot prove is its own — a symlink, a
-directory with no marker, or a marker mtest did not write — as a pre-run usage
+`--cache-clear` refuses whatever the marker does not authorize it to delete — a symlink, a
+directory with no marker, or a marker whose whole text does not match — as a pre-run usage
 error, exit `4`, with the tree untouched:
 
 ```console
@@ -1031,7 +1031,7 @@ the marker only into a `.mtest-cache/` it created itself — cache enabled or no
 since the directory is made for the last-run state either way — and never into
 one it finds, nor over one that is already there. A directory that was already
 there is therefore refused until you remove it yourself; a run that marked it
-would be manufacturing the proof this guard exists to ask for. Nothing under
+would be manufacturing the deletion authority this guard exists to ask for. Nothing under
 `build/` is ever deleted.
 
 Two outcomes are not refusals and are worth knowing about. A cache directory
@@ -1047,7 +1047,7 @@ to finish.
 
 ```text
 .mtest-cache/
-├── CACHEDIR.TAG                                       # ownership marker
+├── CACHEDIR.TAG                                       # deletion-authorization marker
 ├── lastrun                                            # --lf/--ff state
 └── build-v1/
     ├── e2e_smatrix_stest_ualpha_h8a5ff16933785.../

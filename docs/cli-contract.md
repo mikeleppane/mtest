@@ -362,12 +362,11 @@ staging, so a run that asked for no cache creates no store directory and leaves
 behind no artifact a later run could trust. It does still create `.mtest-cache`
 itself, because the last-run state lives there and is written whatever the cache
 is doing — and every `.mtest-cache` mtest creates carries the `CACHEDIR.TAG`
-ownership marker, so a directory left by a `--no-cache` run is one
-`--cache-clear` can still prove it owns and delete. The marker goes only into a
+deletion-authorization marker, so a directory left by a `--no-cache` run is one
+`--cache-clear` can still delete. The marker goes only into a
 directory mtest created: an existing `.mtest-cache` is used as it is and left
 unmarked, since writing the marker into a directory somebody else made would
-manufacture the ownership proof `--cache-clear` demands rather than establish
-it.
+manufacture `--cache-clear` deletion authority.
 
 `--cache-clear` deletes `.mtest-cache` — the artifacts and the last-run state
 together — and then runs the session normally, which legitimately repopulates
@@ -375,7 +374,7 @@ the store. Before deleting, the path is characterized without following
 symlinks and must be a real directory carrying the `CACHEDIR.TAG` marker mtest
 writes when it creates `.mtest-cache` — as a regular file holding exactly the
 text mtest writes, because `CACHEDIR.TAG` is a shared convention and a marker
-somebody else wrote proves nothing about who owns the directory. A symlink, a
+somebody else wrote does not authorize deleting the directory. A symlink, a
 missing or foreign marker, or a deletion that fails partway is a pre-session
 usage error (exit 4) with a diagnostic that names the manual removal, and there
 is deliberately no "its contents look like ours" override. Combined with `--lf`/`--ff`, a warning
@@ -1585,8 +1584,8 @@ code exist today. Section 27 separately covers the reachable `config show` and
   including mutually exclusive config controls; a selected config that is
   missing, unreadable, malformed, or invalid; a syntactically invalid `--json`
   or `--junit-xml` destination; the `--json -`/annotations stdout conflict; and
-  a `--cache-clear` target that is a symlink, carries no ownership marker mtest
-  can prove it wrote, or cannot be deleted (§8.5), all detected pre-run.
+  a `--cache-clear` target that is a symlink, carries no deletion-authorization
+  marker, or cannot be deleted (§8.5), all detected pre-run.
 
 **`--json` reachability.** `--json PATH|-` is served (§15.4): it is parsed into a
 live event-stream reporter composed beside the console. Its destination is

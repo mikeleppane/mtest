@@ -629,13 +629,12 @@ def _near(a: Float64, b: Float64) -> Bool:
 
 
 def test_staging_directory_name_carries_the_mangled_source() raises:
-    # A first-attempt cached build is compiled into staging AND RUN from
-    # staging: the rename into a generation happens only after the file's
-    # verdict is settled. So the staged path is the only name a live test child
-    # has, and anything identifying that child from outside the process — the
-    # release contract's SIGINT probe, a `ps` a human reads during a hang — has
-    # nothing else to match on. A name built from pid and clock alone hid every
-    # running child from `pgrep`.
+    # The compiler child writes to staging for the whole first-attempt build.
+    # Publication normally finishes before the test child starts, so the test
+    # child runs there only when publication fails. Anything identifying either
+    # live child from outside the process — the release contract's SIGINT probe,
+    # a `ps` a human reads during a hang — has only that path to go on. A name
+    # built from pid and clock alone hid every running child from `pgrep`.
     var root = temp_root()
     var mangled = _mangle("irq/test_1hang.mojo")
     assert_equal(mangled, "irq_stest_u1hang")
@@ -664,9 +663,9 @@ def test_marker_written_at_mtest_cache_root() raises:
     assert_true(target.ok())
     assert_true(isdir(root + "/" + STORE_DIR))
     assert_true(isdir(root + "/" + target.tmp_dir_rel))
-    # The tag marks the WHOLE owned directory, not just the store, because that
-    # is the directory `--cache-clear` deletes and the marker is what proves the
-    # directory is mtest's before anything is removed.
+    # The tag covers the WHOLE cache root, not just the store, because that is
+    # the directory `--cache-clear` deletes and the marker authorizes deletion
+    # of that whole tree.
     var tag = read_bounded_regular_file(
         root + "/.mtest-cache/CACHEDIR.TAG", 4096
     )
@@ -678,7 +677,7 @@ def test_marker_written_at_mtest_cache_root() raises:
 
 
 def test_a_cache_root_made_for_state_alone_is_still_marked() raises:
-    """The directory mtest creates is always one mtest can prove it owns.
+    """A directory mtest creates carries the marker authorizing its deletion.
 
     `.mtest-cache` holds the last-run reselection state as well as the store,
     and the state is written whether the cache is on or off — so the directory
@@ -703,8 +702,8 @@ def test_a_cache_root_made_for_state_alone_is_still_marked() raises:
         tag.text.startswith("Signature: 8a477f597d28d172789f06886806bc55"),
         "the tag did not lead with the standard signature: " + tag.text,
     )
-    # The ownership proof and the marker writer have to agree byte for byte, or
-    # the directory is marked and still unclearable.
+    # The deletion check and marker writer have to agree byte for byte, or the
+    # directory is marked and still unclearable.
     assert_false(
         Bool(clear_cache_root(root)),
         "a directory mtest marked itself must clear without a refusal",
