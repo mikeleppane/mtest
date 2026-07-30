@@ -59,6 +59,7 @@ from mtest.session.store import (
     StoreBuildTarget,
     _MEMO_PATH_CAP,
     _ToolchainMemo,
+    _discard_unreadable_generation,
     _toolchain_identity,
     cache_key_tags,
     clear_cache_root,
@@ -816,6 +817,27 @@ def test_probe_heals_an_unreadable_generation() raises:
             root, key, replacement, 1.0, _build_argv(rel, replacement.out_rel)
         ).kind,
         PUB_OK,
+    )
+    assert_equal(store_probe(root, key).kind, PROBE_HIT)
+
+
+def test_unreadable_healer_leaves_a_readable_replacement_alone() raises:
+    var root = temp_root()
+    var rel = String("tests/test_replacement.mojo")
+    var key = _fixture_key(root, rel, "# replacement\n")
+    var target = _stage_binary(root, [UInt8(7), UInt8(8), UInt8(9)])
+    assert_equal(
+        store_publish(
+            root, key, target, 1.0, _build_argv(rel, target.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+
+    # A concurrent publisher may replace the unreadable directory after the
+    # detecting probe has returned. The healer must re-check the final name and
+    # leave that readable replacement runnable rather than moving it aside.
+    _discard_unreadable_generation(
+        root + "/" + key.gen_dir, root + "/" + STORE_DIR
     )
     assert_equal(store_probe(root, key).kind, PROBE_HIT)
 

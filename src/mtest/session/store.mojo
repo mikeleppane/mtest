@@ -2175,16 +2175,17 @@ def _discard_unreadable_generation(gen_abs: String, store_abs: String):
     A failed read invalidates the generation even when it was a transient
     `EACCES`: the store cannot validate an artifact it cannot read, and its
     established rule is to discard every failed validation before rebuilding.
-    Normal deletion remains the first choice. If permission bits prevent that
-    deletion, a unique inert `.tmp-` name releases the final generation name
-    for the rebuilt artifact; the unreadable directory then remains only as
-    cache litter that no probe, publisher, or reaper serves.
+    It re-lists the final path immediately before moving it: a concurrent
+    publisher may already have installed a readable replacement, which this
+    helper must leave runnable. After an atomic move, normal deletion remains
+    the first choice. If permission bits prevent that deletion, the unique
+    inert `.tmp-` name keeps the unreadable directory as cache litter that no
+    probe, publisher, or reaper serves.
 
     Args:
         gen_abs: The unreadable generation's absolute path.
         store_abs: The containing store directory's absolute path.
     """
-    _discard(gen_abs)
     var kind: Int
     try:
         kind = Int(lstat(gen_abs).st_mode) & _S_IFMT
@@ -2192,15 +2193,29 @@ def _discard_unreadable_generation(gen_abs: String, store_abs: String):
         return
     if kind != _S_IFDIR:
         return
+    if _list_sorted(gen_abs):
+        return
+    var tombstone_path = String("")
     try:
         var tombstone = create_unique_temp(
             store_abs + "/" + _TMP_PREFIX + "unreadable.XXXXXX"
         )
+        tombstone_path = tombstone.path.copy()
         close_checked_fd(tombstone.fd)
-        unlink(tombstone.path)
-        rename_path(gen_abs, tombstone.path)
+        unlink(tombstone_path)
+        # A prior healer may have moved the damaged directory aside while this
+        # call claimed its unique destination. A readable replacement at the
+        # final name belongs to the publisher that installed it, not to this
+        # cleanup path.
+        if _list_sorted(gen_abs):
+            _discard(tombstone_path)
+            return
+        rename_path(gen_abs, tombstone_path)
     except:
-        pass
+        if tombstone_path != "":
+            _discard(tombstone_path)
+        return
+    _discard(tombstone_path)
 
 
 def cache_rebuild_note(rel: String) -> String:
