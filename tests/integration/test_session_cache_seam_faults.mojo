@@ -69,6 +69,15 @@ comptime _EIO = 5
 comptime _FAULT_PUBLISHED_ABSENT = "published-absent"
 """Hide a newly published generation just before this session executes it."""
 
+
+comptime _CACHE_REBUILD_PATTERN = (
+    "the stored binary for 'tests/test_ok.mojo' could not be started, so the"
+    " file is being rebuilt. Another mtest run may have replaced or quarantined"
+    " that generation."
+)
+"""The exact cause-neutral warning shared by warm and fresh recovery."""
+
+
 comptime _RUN_SPAWN_OCCURRENCE = 3
 """Which stdout-pipe open is the RUN spawn of a one-file cached session.
 
@@ -86,9 +95,9 @@ Two children are dispatched, in this order: `<compiler> --version`, which feeds
 the key's toolchain-version frame and is not memoized across sessions, and the
 run of the stored binary. There is no build, which is what a warm run means.
 The cases that use this do not trust the arithmetic — they assert the
-`cache-rebuild` warning only a failed cache-hit run can produce, so a fault that
-landed on the `--version` child fails loudly rather than passing over a run that
-never reached the store.
+`cache-rebuild` warning produced by the run dispatch, so a fault that landed on
+the `--version` child fails loudly rather than passing over a run that never
+reached the store.
 """
 
 
@@ -137,6 +146,27 @@ def _saw_warning_kind(rec: RecordingReporter, kind: String) raises -> Bool:
             if e.data[WarningPayload].warning_kind == kind:
                 return True
     return False
+
+
+def _warning_pattern(rec: RecordingReporter, kind: String) raises -> String:
+    """The pattern of the one warning carrying `kind`.
+
+    Args:
+        rec: The recorder to read back.
+        kind: The warning kind to find.
+
+    Returns:
+        The matching warning pattern.
+
+    Raises:
+        Error: If no warning carries `kind`.
+    """
+    for i in range(rec.count()):
+        var e = rec.event_at(i)
+        if e.kind == EventKind.WARNING:
+            if e.data[WarningPayload].warning_kind == kind:
+                return e.data[WarningPayload].warning_pattern
+    raise Error("no warning carried kind '" + kind + "'")
 
 
 # --- Injected dispatch faults: a spawn this process could not make. ----------
@@ -250,6 +280,7 @@ def test_a_cached_binary_that_will_not_start_costs_a_rebuild() raises:
             " fault landed on a spawn other than the cached run"
         ),
     )
+    assert_equal(_warning_pattern(rec, "cache-rebuild"), _CACHE_REBUILD_PATTERN)
     var totals = _counters(rec)
     assert_equal(totals.cached_files, 1, "the file was admitted as a hit")
     assert_equal(
@@ -294,6 +325,7 @@ def test_a_pooled_cached_binary_that_will_not_start_costs_a_rebuild() raises:
         _saw_warning_kind(rec, "cache-rebuild"),
         "the pool must announce the rebuild the same way",
     )
+    assert_equal(_warning_pattern(rec, "cache-rebuild"), _CACHE_REBUILD_PATTERN)
     var totals = _counters(rec)
     assert_equal(totals.cached_files, 1, "the file was admitted as a hit")
     assert_equal(totals.built_files, 0, "and admitted exactly once")
@@ -329,6 +361,7 @@ def test_a_freshly_published_binary_that_vanishes_rebuilds_sequentially() raises
         _saw_warning_kind(rec, "cache-rebuild"),
         "the publish-to-exec recovery must be visible",
     )
+    assert_equal(_warning_pattern(rec, "cache-rebuild"), _CACHE_REBUILD_PATTERN)
     var totals = _counters(rec)
     assert_equal(totals.built_files, 1, "the cold admission stays singular")
     assert_equal(totals.cached_files, 0, "the session never had a warm hit")
@@ -360,6 +393,7 @@ def test_a_freshly_published_binary_that_vanishes_rebuilds_in_pool() raises:
         _saw_warning_kind(rec, "cache-rebuild"),
         "the pool publish-to-exec recovery must be visible",
     )
+    assert_equal(_warning_pattern(rec, "cache-rebuild"), _CACHE_REBUILD_PATTERN)
     var totals = _counters(rec)
     assert_equal(totals.built_files, 1, "the cold admission stays singular")
     assert_equal(totals.cached_files, 0, "the pool never had a warm hit")

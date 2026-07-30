@@ -38,7 +38,7 @@ from tmptree import link_dir, temp_root
 
 
 comptime _CACHE_ROOT = ".mtest-cache"
-"""The whole directory mtest owns, relative to a run root."""
+"""The cache root whose exact marker authorizes deletion."""
 
 
 comptime _STORE_DIR = ".mtest-cache/build-v1"
@@ -158,10 +158,17 @@ def test_cache_clear_refuses_symlink() raises:
     link_dir(root, "victim", _CACHE_ROOT)
 
     var diagnostic = _clear_diagnostic(root)
-    assert_true(diagnostic != "", "a symlinked cache root must be refused")
-    assert_true(
-        "symlink" in diagnostic,
-        "the refusal must say what it refused: " + diagnostic,
+    assert_equal(
+        diagnostic,
+        (
+            "cache-clear: "
+            + root
+            + "/.mtest-cache: refusing to delete a symlink — only a real cache"
+            " directory carrying mtest's exact deletion-authorization marker"
+            " may be deleted, and following this link would delete whatever it"
+            " points at; remove or repoint the link yourself, then rerun"
+        ),
+        "the refusal must state the marker's exact deletion authority",
     )
     assert_true(
         exists(root + "/victim/precious.txt"),

@@ -1032,7 +1032,7 @@ error, exit `4`, with the tree untouched:
 
 ```console
 $ mtest --cache-clear tests
-cache-clear: /tmp/demo/.mtest-cache: refusing to delete a symlink — mtest deletes only the cache directory it created, and following this link would delete whatever it points at; remove or repoint the link yourself, then rerun
+cache-clear: /tmp/demo/.mtest-cache: refusing to delete a symlink — only a real cache directory carrying mtest's exact deletion-authorization marker may be deleted, and following this link would delete whatever it points at; remove or repoint the link yourself, then rerun
 $ echo $?
 4
 ```
@@ -1098,10 +1098,10 @@ and left where it is, because deleting it would destroy evidence that something
 else is writing into the store.
 
 Those checks happen before the binary is executed, and a second mtest run over
-the same checkout can delete a validated entry in between — publishing an entry
-removes that file's older ones. A run that cannot execute a binary the cache
-served compiles the file instead and says so with a `cache-rebuild` warning,
-rather than failing a run whose only fault was a cache hit.
+the same checkout can replace or quarantine a generation in between. The same
+race can reach a generation this run just published. A run that cannot execute
+a stored binary compiles the file instead and says so with a `cache-rebuild`
+warning, rather than failing a run whose only fault was the cache.
 
 That is the shape of every decision here. A key that errs in the conservative
 direction costs one rebuild, and no ordinary mistake — an edit, a toolchain

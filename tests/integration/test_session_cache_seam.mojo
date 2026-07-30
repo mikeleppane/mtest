@@ -79,6 +79,14 @@ comptime _FAULT_PUBLISHED_ABSENT = "published-absent"
 """Hide a newly published generation just before this session executes it."""
 
 
+comptime _CACHE_REBUILD_WARNING = (
+    "cache-rebuild:the stored binary for 'tests/test_ok.mojo' could not be"
+    " started, so the file is being rebuilt. Another mtest run may have"
+    " replaced or quarantined that generation."
+)
+"""The exact cause-neutral warning from a vanished fresh generation."""
+
+
 def _saw_cache_off(warnings: List[String]) -> Bool:
     """Whether the run emitted the once-per-session cache-off warning.
 
@@ -229,9 +237,11 @@ def test_selection_rebuilds_a_freshly_published_binary_that_vanishes() raises:
     assert_equal(run.cached_files, 0, "the selection run had no warm hit")
     var saw_rebuild = False
     for warning in run.warnings:
-        if String(warning).startswith("cache-rebuild:"):
+        if String(warning) == _CACHE_REBUILD_WARNING:
             saw_rebuild = True
-    assert_true(saw_rebuild, "the selection rebuild must be visible")
+    assert_true(
+        saw_rebuild, "the selection rebuild must carry the exact shared detail"
+    )
 
 
 def test_unknown_build_arg_warns_and_disables() raises:

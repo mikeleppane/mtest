@@ -332,11 +332,13 @@ restore that drops mode bits leaves the content intact — and reports the
 recorded build duration so the SLOW annotation reads the same warm as cold. An
 artifact that fails either check is deleted and rebuilt, so a store damaged from
 outside heals on the next run rather than failing every one after it. Publishing
-an artifact removes that source's older ones, so a second run over the same
-checkout can delete a validated artifact in the window between the check and the
-execution; a run that cannot execute an artifact the cache served compiles the
-file instead, emitting a `cache-rebuild` warning, and the compile is a recovery
-rather than a second admission — it moves neither counter (§15.4). Anything the key cannot characterize honestly — an
+an artifact removes that source's older ones, and damage can quarantine one, so
+a second run over the same checkout can replace or quarantine a generation in
+the window between the check and execution. The same race can reach a generation
+this run just published. A run that cannot execute a stored artifact compiles
+the file instead, emitting a `cache-rebuild` warning, and the compile is a
+recovery rather than a second admission — it moves neither counter (§15.4).
+Anything the key cannot characterize honestly — an
 unclassifiable `--build-arg`, an include tree that cannot be walked, a store
 that cannot be created — turns the cache off for the whole session with one
 warning and builds normally. No cache condition ever fails a run that would
