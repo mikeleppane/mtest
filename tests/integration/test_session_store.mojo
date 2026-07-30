@@ -792,6 +792,34 @@ def test_probe_rejects_a_bin_that_lost_its_execute_bit() raises:
     assert_equal(store_probe(root, key).kind, PROBE_MISS)
 
 
+def test_probe_heals_an_unreadable_generation() raises:
+    var root = temp_root()
+    var rel = String("tests/test_unreadable.mojo")
+    var key = _fixture_key(root, rel, "# unreadable\n")
+    var first = _stage_binary(root, [UInt8(1), UInt8(2), UInt8(3)])
+    assert_equal(
+        store_publish(
+            root, key, first, 1.0, _build_argv(rel, first.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+
+    # A cache directory can survive a permissions-damaging archive restore or
+    # manual repair. It must not occupy this generation's final name forever:
+    # the first probe misses, then the replacement publishes and the next probe
+    # hits as if the unreadable directory had never existed.
+    chmod_path("000", root + "/" + key.gen_dir)
+    assert_equal(store_probe(root, key).kind, PROBE_MISS)
+    var replacement = _stage_binary(root, [UInt8(4), UInt8(5), UInt8(6)])
+    assert_equal(
+        store_publish(
+            root, key, replacement, 1.0, _build_argv(rel, replacement.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    assert_equal(store_probe(root, key).kind, PROBE_HIT)
+
+
 def test_probe_rejects_wrong_key_meta() raises:
     var root = temp_root()
     var rel = String("tests/test_collide.mojo")

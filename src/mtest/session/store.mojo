@@ -2169,6 +2169,40 @@ def _discard(path: String):
         pass
 
 
+def _discard_unreadable_generation(gen_abs: String, store_abs: String):
+    """Remove an unreadable generation, moving undeletable litter aside.
+
+    A failed read invalidates the generation even when it was a transient
+    `EACCES`: the store cannot validate an artifact it cannot read, and its
+    established rule is to discard every failed validation before rebuilding.
+    Normal deletion remains the first choice. If permission bits prevent that
+    deletion, a unique inert `.tmp-` name releases the final generation name
+    for the rebuilt artifact; the unreadable directory then remains only as
+    cache litter that no probe, publisher, or reaper serves.
+
+    Args:
+        gen_abs: The unreadable generation's absolute path.
+        store_abs: The containing store directory's absolute path.
+    """
+    _discard(gen_abs)
+    var kind: Int
+    try:
+        kind = Int(lstat(gen_abs).st_mode) & _S_IFMT
+    except:
+        return
+    if kind != _S_IFDIR:
+        return
+    try:
+        var tombstone = create_unique_temp(
+            store_abs + "/" + _TMP_PREFIX + "unreadable.XXXXXX"
+        )
+        close_checked_fd(tombstone.fd)
+        unlink(tombstone.path)
+        rename_path(gen_abs, tombstone.path)
+    except:
+        pass
+
+
 def cache_rebuild_note(rel: String) -> String:
     """Why a validated cache hit is being compiled after all.
 
@@ -2853,13 +2887,16 @@ def store_probe(root: String, key: FileKey) -> ProbeResult:
     6. `bin` is readable.
     7. `bin`'s content digest equals the digest `meta` recorded.
 
-    Any failed check deletes the generation, so a corruption cannot be re-read
-    on the next probe and the next build republishes cleanly — and the removal
-    unlinks a child symlink rather than descending it, so refusing a linked
-    `bin` never reaches whatever it pointed at. The one deliberate exception is
-    a SYMLINK at the generation path itself: that is refused and left exactly
-    where it is, because a link the cache did not create is not the cache's to
-    delete.
+    Any failed check discards the generation, so a corruption cannot be re-read
+    on the next probe and the next build republishes cleanly. A failed root
+    listing is the unreadable case: ordinary deletion is attempted first, then
+    an undeletable directory is moved to an inert temporary name so it cannot
+    block publication. A transient `EACCES` gets the same treatment because an
+    artifact the store cannot validate must never be served. The removal unlinks
+    a child symlink rather than descending it, so refusing a linked `bin` never
+    reaches whatever it pointed at. The one deliberate exception is a SYMLINK
+    at the generation path itself: that is refused and left exactly where it
+    is, because a link the cache did not create is not the cache's to delete.
 
     Args:
         root: The invocation root.
@@ -2896,6 +2933,16 @@ def store_probe(root: String, key: FileKey) -> ProbeResult:
         # A plain file (or a device, or a socket) where a generation belongs is
         # not a generation, and it occupies the name the next publish needs.
         _discard(gen_abs)
+        return _probe_miss()
+
+    # `lstat` above established that this path is a real directory. A failed
+    # listing therefore means unreadable rather than absent — the same
+    # distinction `_toolchain_lib_listing` preserves for key inputs. Do this
+    # before trying `meta`: an unreadable generation cannot be recursively
+    # removed, so simply treating its unreadable record as a normal miss would
+    # leave the final name occupied and make every later publish fail.
+    if not _list_sorted(gen_abs):
+        _discard_unreadable_generation(gen_abs, root + "/" + STORE_DIR)
         return _probe_miss()
 
     # --- Checks 2 and 3: the record parses and names THIS key. --------------
