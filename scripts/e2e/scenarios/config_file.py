@@ -1553,7 +1553,12 @@ def _intervals(path: str, kind: str) -> dict[str, tuple[float, float]]:
 
 
 def s_config_overrides(context: ScenarioContext) -> str:
-    """Config override timeout kills and serial pins drain after parallel work."""
+    """Config override timeout kills and serial pins drain after parallel work.
+
+    The serial-order proof reads build windows emitted by the fake compiler, so
+    its invocation disables the persistent artifact store. Otherwise a second
+    harness run can serve every product from cache and leave no build log.
+    """
     with tempfile.TemporaryDirectory(prefix="mtest-config-overrides-") as raw:
         tmp = Path(raw)
         timeout_config = tmp / "timeout.toml"
@@ -1625,7 +1630,7 @@ def s_config_overrides(context: ScenarioContext) -> str:
             encoding="utf-8",
         )
         serial = context.runner.run_mtest(
-            ["--config", os.fspath(serial_config)],
+            ["--config", os.fspath(serial_config), "--no-cache"],
             timeout=240.0,
             env_overrides={
                 "MTEST_WINDOW_LOG": build_log,

@@ -379,11 +379,21 @@ def s_single_build(context: ScenarioContext) -> str:
     builds each file once and Phase 2 (run the selected subset) reuses that
     binary, and the wrapper's log is the independent witness: exactly one
     `mojo build <file>` line per file.
+
+    `--no-cache` keeps both builds observable through the logging wrapper when
+    an earlier harness run populated the persistent artifact store.
     """
     log_path = _mojo_log_path()
     try:
         run = context.runner.run_mtest(
-            ["--mojo", LOGGING_MOJO, "-k", "one", "e2e/matrix"],
+            [
+                "--mojo",
+                LOGGING_MOJO,
+                "-k",
+                "one",
+                "e2e/matrix",
+                "--no-cache",
+            ],
             env_overrides={"MTEST_MOJO_LOG": log_path},
         )
         expect_exit(run, 0)
