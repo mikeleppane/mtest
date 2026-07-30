@@ -932,20 +932,24 @@ invalidates everything in it.
 
 Build inputs must remain stable while a compiler invocation runs; mutation
 during compilation is unsupported. Publication refuses to store a build whose
-inputs did not hold still: every input the key sampled is re-checked first — by
-content, and by the filesystem identity and change times it had when it was
-keyed — so an input you edited and left edited is caught, and so is one you
-edited and *undid* while the compiler was reading it, where both content samples
-agree and the stored binary would have come from bytes that are no longer
-anywhere. Nothing is published, a `cache-publish` warning names the input, the
-run itself stays green, and the file is rebuilt next run. A configured
-precompile step is covered the same way: its inputs are re-checked before it is
-stamped, and a step whose inputs moved is simply left unstamped and runs again.
+own inputs did not hold still: the test file, the files beside it, the
+directories the walk covered, and both ends of a symlinked input are re-checked
+against the filesystem identity and change times they had when they were keyed
+— and the test file and its directory against their content as well. So an
+input you edited and left edited is caught, and so is one you edited and *undid*
+while the compiler was reading it, where both content samples agree and the
+stored binary would have come from bytes that are no longer anywhere. Nothing is
+published, a `cache-publish` warning names the input, the run itself stays
+green, and the file is rebuilt next run. A configured precompile step is covered
+the same way: its source, include roots, and the earlier steps' packages it
+consumes are re-checked before it is stamped, and a step whose inputs moved is
+left unstamped and runs again.
 
-What is left over — a mutate-and-restore finishing inside one filesystem
-timestamp tick, a persistent mid-session edit that a later file in the same
-directory hits, and the `-I` roots and toolchain that are sampled once per
-session — is stated in full in [the CLI
+That covers a build's own inputs, not everything in its key: the toolchain, the
+`-I` root contents, and files named by build arguments are sampled once per
+session. Those, along with a mutate-and-restore finishing inside one filesystem
+timestamp tick and a persistent mid-session edit that a later file in the same
+directory hits, are stated in full in [the CLI
 contract](docs/cli-contract.md) under the cache's non-goals. If you edited
 during a slow compile and changed your mind, `--no-cache` compiles from what is
 on disk and `--cache-clear` discards what was stored.

@@ -461,16 +461,24 @@ about the build window, and exactly where that proof stops.
   stable while a compiler invocation runs; mutation during compilation is
   unsupported, and that rule is the contract rather than something the cache
   detects for you. What publication does with an ordinary violation of it is
-  the useful part. Every input a key sampled is re-checked before anything is
-  stored — the test file, the framed files in its directory, each directory the
-  walk descended, both ends of every symlink among them, and a configured
-  precompile step's source, its include roots, and the earlier steps' outputs it
-  consumes — by identity (device, inode, size), by change times (mtime and
-  ctime), and by content. An input that moved in any of those senses refuses
-  publication. On the test-file route nothing is stored, one `cache-publish`
-  warning names the input, the verdict is reported normally, and the file is
-  rebuilt next run. On the precompile route the step is left unstamped, silently,
-  and runs again next session.
+  the useful part. The inputs a build's OWN key sampled are re-checked before
+  anything is stored, by identity (device, inode, size) and by change times
+  (mtime and ctime): the test file, the framed files in its directory, each
+  directory the walk descended, and, for a symlinked input, both its own name
+  and the file its name finally resolves to; on the precompile route, the
+  step's source, the directory a single-file source sits in, each of its
+  include roots, and the earlier steps' outputs it consumes. The test-file
+  route additionally re-reads the source and re-walks its directory and
+  compares CONTENT, as it always has. An input that moved in any of those
+  senses refuses publication: on the test-file route nothing is stored, one
+  `cache-publish` warning names the input, the verdict is reported normally,
+  and the file is rebuilt next run; on the precompile route the step is left
+  unstamped, silently, and runs again next session.
+
+  What is re-checked is a build's own inputs, not everything in its key. The
+  session-scoped frames — the toolchain, the `-I` root contents, and any file
+  named by a build argument such as `-Xlinker foo.o` — are sampled once for the
+  whole run and are listed among the limits below.
 
   Comparing identity and times rather than content alone is what covers the edit
   that is undone. An input edited during a slow compile and edited BACK before
@@ -502,12 +510,29 @@ about the build window, and exactly where that proof stops.
     to its membership. A configured precompile step legitimately creates its
     package inside an include root it was given, so that directory's membership
     changes while the step runs, by design.
-  - The `-I` root contents and the toolchain are sampled once for the whole
-    session rather than per build, so no publication re-checks them. Re-walking
-    every include root at every publication would narrow that without closing
-    it, at a cost scaling with include-tree size times files compiled; the
-    per-file directory re-walk is bounded by one directory and paid only on a
-    miss, which is why it is worth doing and the session-wide one is not.
+  - The `-I` root contents, the toolchain, and any file named by a build
+    argument (`-Xlinker foo.o`) are sampled once for the whole session rather
+    than per build, so no publication re-checks them. Re-walking every include
+    root at every publication would narrow that without closing it, at a cost
+    scaling with include-tree size times files compiled; the per-file directory
+    re-walk is bounded by one directory and paid only on a miss, which is why it
+    is worth doing and the session-wide one is not.
+  - **A symlink CHAIN.** An input's own name and the file that name finally
+    resolves to are both recorded; the intermediate links a chain passes
+    through are not. A middle link repointed and repointed back around a
+    compile moves neither end.
+  - **A directory that becomes a package and stops again.** A subdirectory with
+    no `__init__` is not on the compiler's path, so the walk neither frames its
+    files nor holds it to its membership. Creating an `__init__` in it during a
+    compile and deleting it afterwards puts its modules in the build and leaves
+    the tree looking as it did. Holding every non-package subdirectory to its
+    membership instead would refuse publication whenever anything at all
+    appeared in one, which is a far commoner event than this.
+  - **An include root that did not exist when the step was keyed.** Its absence
+    is part of the key, but an absence cannot be re-stat'd into a record: a
+    root created during the step, consumed, and removed again leaves the key's
+    "absent" true at both ends. A root created and LEFT is caught, by the key
+    itself, on the next session.
   - A directory's walk is memoized once per session, and a hit publishes
     nothing, so nothing re-checks anything on a hit. A helper edited
     PERSISTENTLY in the middle of a session can therefore leave a later file in
