@@ -148,21 +148,40 @@ run, build, selection, state, or reporter flag is an argv applicability error
   configured paths are used when present; otherwise the default is `tests/` if
   it exists, else `.`. Configured paths are files or directories, not node ids.
 
-**Walk totality.** A directory walk characterizes every entry it lists, and an
-entry it cannot run is never lost in silence. A symlink to a regular
+**Walk totality.** A directory walk characterizes every entry it lists, and no
+`test_*.mojo` entry it cannot run is dropped in silence. A symlink to a regular
 `test_*.mojo` file is collected under the link's own path; a symlinked
 directory is never descended (lexical normalization cannot detect a cycle) and
-a dangling `test_*.mojo` link is refused. Any other test-named entry that is
-not a regular file — a directory wearing a `test_*.mojo` name, or a FIFO,
-socket, or device sitting where a test file is expected — is skipped and never
-descended. A **run** reports each such skip as a warning: kind
-`skipped-symlink` for a refused link, `skipped-nonregular` for the rest.
-(`collect` lists files and emits no discovery warnings, for either kind.) An
-entry the walk cannot characterize at all — the shape a directory this process
-may read but not search produces — is a usage error (exit 4, §9) rather than a
-subtree quietly reported as empty. A FIFO, socket, or device whose name does
-not match `test_*.mojo` cannot hide a test and is passed over silently, like
-any other non-matching name.
+a `test_*.mojo` link that resolves to no usable file is refused. Any other
+test-named entry that is not a regular file — a directory wearing a
+`test_*.mojo` name, or a FIFO, socket, or device sitting where a test file is
+expected — is skipped and never descended. A **run** reports each such skip as
+a warning, once per entry: kind `skipped-symlink` for a refused link,
+`skipped-nonregular` for the rest. (`collect` lists files and emits no
+discovery warnings, for either kind.) An entry the walk cannot characterize at
+all — the shape a directory this process may read but not search produces — is
+a usage error (exit 4, §9) rather than a subtree quietly reported as empty. A
+FIFO, socket, or device whose name does not match `test_*.mojo` cannot hide a
+test and is passed over silently, like any other non-matching name.
+
+Two bounds on that guarantee, stated rather than implied:
+
+- **Symlink targets are typed by following the link**, and a target that was
+  deleted cannot be told apart from one that exists but cannot be reached (a
+  parent directory that is readable but not searchable). Both resolve to
+  nothing. A `test_*.mojo` link is therefore reported in both cases — the
+  selection is never silently lost — but a link whose name does not match the
+  pattern is passed over in both cases, so the `skipped-symlink` warning that
+  a *reachable* directory symlink would have produced does not appear. No test
+  changes hands either way: a directory symlink is never descended. The same
+  ambiguity applies to the default `tests/` probe: when `tests` is a symlink
+  whose target cannot be reached, the default operand falls back to `.` as it
+  does when `tests` does not exist.
+- **An explicit directory operand is walked whatever it is named** (§5's rule
+  that naming a path selects it directly). So `mtest tests tests/test_shape.mojo`
+  both warns `skipped-nonregular: tests/test_shape.mojo` — the walk of `tests`
+  refused that entry — and runs the files under it, because the second operand
+  named it directly. Both statements are true of their own operand.
 
 **Node-id canonicalization.** Every node id is canonicalized to **root-relative**
 form. That canonical form is the single basis for `-k` matching, `collect`
