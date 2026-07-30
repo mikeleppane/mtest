@@ -375,7 +375,7 @@ jobs:
 
   macos-preflight:
     name: macOS arm64 / preflight
-    runs-on: macos-15
+    runs-on: macos-26
     # The Linux preflight's tier: same locked Pixi install, same cheap barrier.
     timeout-minutes: 15
     steps:
@@ -417,7 +417,7 @@ jobs:
       matrix:
         include:
           # As on the Linux matrix, a row carries only the keys it uses, and
-          # `lane` is an externally configured required-check name. A macos-15
+          # `lane` is an externally configured required-check name. A macos-26
           # arm64 runner has 3 vCPUs, so `auto` (cores // 2) would give exactly
           # 1 worker. See DEFAULT_WORKERS in scripts/harness/selfhost.py.
           - lane: classified suite
@@ -437,7 +437,7 @@ jobs:
             task: build-stamp-check
           - lane: strict contract
             task: contract-check-strict
-    runs-on: macos-15
+    runs-on: macos-26
     # The Linux matrix's wide tier, flat because this platform has no memory
     # lanes.
     timeout-minutes: 40
@@ -465,7 +465,7 @@ jobs:
   macos-package:
     name: macOS arm64 / packaged artifact
     needs: macos-preflight
-    runs-on: macos-15
+    runs-on: macos-26
     # The Linux package job's tier, for the same external-channel solve.
     timeout-minutes: 20
     steps:

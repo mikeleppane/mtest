@@ -25,7 +25,7 @@ jobs:
         include:
           - runner: ubuntu-24.04
             name: Linux
-          - runner: macos-15
+          - runner: macos-26
             name: macOS arm64
     runs-on: ${{ matrix.runner }}
     steps:

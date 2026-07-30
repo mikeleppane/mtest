@@ -419,6 +419,15 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "permission",
         )
 
+    def test_community_macos_runner_cannot_float(self) -> None:
+        for workflow_name in ("community-publish.yml", "community-verify.yml"):
+            workflow = self._workflow(workflow_name)
+            self._reject(
+                workflow_name,
+                workflow.replace("runner: macos-26", "runner: macos-latest", 1),
+                "macos-26|platform matrix",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
