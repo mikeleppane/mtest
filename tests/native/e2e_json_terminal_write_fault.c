@@ -2,15 +2,14 @@
 
 #if defined(__APPLE__)
 #define MTEST_PRELOAD_VARIABLE "DYLD_INSERT_LIBRARIES"
-#define DYLD_INTERPOSE(_replacement, _replacee) \
-    __attribute__((used)) static struct { \
-        const void *replacement; \
-        const void *replacee; \
-    } _interpose_##_replacee \
-        __attribute__((section("__DATA,__interpose,interposing"))) = { \
-            (const void *)(unsigned long)&_replacement, \
-            (const void *)(unsigned long)&_replacee, \
-        };
+#define DYLD_INTERPOSE(_replacement, _replacee)                                                    \
+    __attribute__((used)) static struct {                                                          \
+        const void *replacement;                                                                   \
+        const void *replacee;                                                                      \
+    } _interpose_##_replacee __attribute__((section("__DATA,__interpose,interposing"))) = {        \
+        (const void *)(unsigned long)&_replacement,                                                \
+        (const void *)(unsigned long)&_replacee,                                                   \
+    };
 #else
 #define MTEST_PRELOAD_VARIABLE "LD_PRELOAD"
 #include <dlfcn.h>
@@ -72,10 +71,8 @@ static mtest_write_fn mtest_real_write;
 __attribute__((constructor)) static void mtest_resolve_real_write(void) {
     void *symbol = dlsym(RTLD_NEXT, "write");
 
-    _Static_assert(
-        sizeof(mtest_real_write) == sizeof(symbol),
-        "function and object pointers must share a representation"
-    );
+    _Static_assert(sizeof(mtest_real_write) == sizeof(symbol),
+                   "function and object pointers must share a representation");
     memcpy(&mtest_real_write, &symbol, sizeof(mtest_real_write));
 }
 

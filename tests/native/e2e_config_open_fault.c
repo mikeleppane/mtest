@@ -2,15 +2,14 @@
 
 #if defined(__APPLE__)
 #define MTEST_PRELOAD_VARIABLE "DYLD_INSERT_LIBRARIES"
-#define DYLD_INTERPOSE(_replacement, _replacee) \
-    __attribute__((used)) static struct { \
-        const void *replacement; \
-        const void *replacee; \
-    } _interpose_##_replacee \
-        __attribute__((section("__DATA,__interpose,interposing"))) = { \
-            (const void *)(unsigned long)&_replacement, \
-            (const void *)(unsigned long)&_replacee, \
-        };
+#define DYLD_INTERPOSE(_replacement, _replacee)                                                    \
+    __attribute__((used)) static struct {                                                          \
+        const void *replacement;                                                                   \
+        const void *replacee;                                                                      \
+    } _interpose_##_replacee __attribute__((section("__DATA,__interpose,interposing"))) = {        \
+        (const void *)(unsigned long)&_replacement,                                                \
+        (const void *)(unsigned long)&_replacee,                                                   \
+    };
 #else
 #define MTEST_PRELOAD_VARIABLE "LD_PRELOAD"
 #include <dlfcn.h>
@@ -44,9 +43,7 @@ static int mtest_swapped;
  */
 #if defined(__APPLE__)
 
-static int mtest_pass_open(
-    const char *path, int flags, mode_t mode, int has_mode
-) {
+static int mtest_pass_open(const char *path, int flags, mode_t mode, int has_mode) {
     if (has_mode) {
         return open(path, flags, mode);
     }
@@ -67,9 +64,7 @@ static void mtest_copy_symbol(void *target, size_t target_size, const char *name
     }
 }
 
-static int mtest_pass_open(
-    const char *path, int flags, mode_t mode, int has_mode
-) {
+static int mtest_pass_open(const char *path, int flags, mode_t mode, int has_mode) {
     if (mtest_real_open == NULL) {
         errno = EIO;
         return -1;
@@ -92,17 +87,12 @@ __attribute__((constructor)) static void mtest_initialize_fault(void) {
 
 /* Return 0 to continue to the real open, or -1 with errno already set. */
 static int mtest_apply_swap(const char *path, int flags) {
-    if (
-        mtest_swapped || path == NULL || mtest_swap_path == NULL
-        || strcmp(path, mtest_swap_path) != 0
-    ) {
+    if (mtest_swapped || path == NULL || mtest_swap_path == NULL ||
+        strcmp(path, mtest_swap_path) != 0) {
         return 0;
     }
     mtest_swapped = 1;
-    if (
-        (flags & O_NONBLOCK) == 0
-        || (flags & O_CLOEXEC) == 0
-    ) {
+    if ((flags & O_NONBLOCK) == 0 || (flags & O_CLOEXEC) == 0) {
         errno = EINVAL;
         return -1;
     }

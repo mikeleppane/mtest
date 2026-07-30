@@ -59,10 +59,7 @@ enum mtest_exec_group_action {
     MTEST_EXEC_GROUP_KILL = 2
 };
 
-enum mtest_exec_group_state {
-    MTEST_EXEC_GROUP_PRESENT = 1,
-    MTEST_EXEC_GROUP_GONE = 2
-};
+enum mtest_exec_group_state { MTEST_EXEC_GROUP_PRESENT = 1, MTEST_EXEC_GROUP_GONE = 2 };
 
 enum mtest_exec_observe_state {
     MTEST_EXEC_LEADER_NOT_WAITABLE = 0,
@@ -206,13 +203,16 @@ _Static_assert(offsetof(struct mtest_exec_process_spec, cwd) == 16, "spec.cwd");
 _Static_assert(offsetof(struct mtest_exec_process_spec, flags) == 32, "spec.flags");
 _Static_assert(offsetof(struct mtest_exec_process_spec, reserved) == 36, "spec.reserved");
 _Static_assert(offsetof(struct mtest_exec_process_spec, env_extra) == 40, "spec.env_extra");
-_Static_assert(offsetof(struct mtest_exec_process_spec, env_extra_count) == 48, "spec.env_extra_count");
+_Static_assert(offsetof(struct mtest_exec_process_spec, env_extra_count) == 48,
+               "spec.env_extra_count");
 _Static_assert(sizeof(struct mtest_exec_error) == 32, "error size");
 _Static_assert(_Alignof(struct mtest_exec_error) == 8, "error alignment");
 _Static_assert(offsetof(struct mtest_exec_error, operation) == 0, "error operation");
 _Static_assert(offsetof(struct mtest_exec_error, error_number) == 4, "error errno");
-_Static_assert(offsetof(struct mtest_exec_error, cleanup_operation) == 8, "error cleanup operation");
-_Static_assert(offsetof(struct mtest_exec_error, cleanup_error_number) == 12, "error cleanup errno");
+_Static_assert(offsetof(struct mtest_exec_error, cleanup_operation) == 8,
+               "error cleanup operation");
+_Static_assert(offsetof(struct mtest_exec_error, cleanup_error_number) == 12,
+               "error cleanup errno");
 _Static_assert(offsetof(struct mtest_exec_error, detail) == 16, "error detail");
 _Static_assert(offsetof(struct mtest_exec_error, subject) == 24, "error subject");
 _Static_assert(sizeof(struct mtest_exec_process_ref) == 16, "process ref size");
@@ -278,29 +278,42 @@ MTEST_EXEC_EXPORT int32_t mtest_exec_interrupt_count(void);
        then reject a duplicate handle in the set (EINVAL) and a stale/invalid
        handle (EINVAL, error.detail = the offending index); then poll. The
        zeroing is guaranteed on these later error paths. */
-MTEST_EXEC_EXPORT int32_t mtest_exec_poll_set(
-    const uint64_t *handles,
-    uint64_t count,
-    int32_t timeout_ms,
-    struct mtest_exec_poll_result *results,
-    struct mtest_exec_error *error
-);
+MTEST_EXEC_EXPORT int32_t mtest_exec_poll_set(const uint64_t *handles, uint64_t count,
+                                              int32_t timeout_ms,
+                                              struct mtest_exec_poll_result *results,
+                                              struct mtest_exec_error *error);
 /* Report the RLIMIT_NOFILE soft limit into *soft_limit. RLIM_INFINITY is
    reported as MTEST_EXEC_FD_LIMIT_UNBOUNDED (UINT64_MAX). */
-MTEST_EXEC_EXPORT int32_t mtest_exec_fd_limit(
-    uint64_t *soft_limit, struct mtest_exec_error *error
-);
-MTEST_EXEC_EXPORT int32_t mtest_exec_monotonic_ms(int64_t *milliseconds, struct mtest_exec_error *error);
-MTEST_EXEC_EXPORT int32_t mtest_exec_process_open(const struct mtest_exec_process_spec *spec, struct mtest_exec_process_ref *process, struct mtest_exec_error *error);
-MTEST_EXEC_EXPORT int32_t mtest_exec_process_poll(uint64_t handle, int32_t timeout_ms, struct mtest_exec_poll_result *result, struct mtest_exec_error *error);
-MTEST_EXEC_EXPORT int32_t mtest_exec_process_read(uint64_t handle, uint32_t channel, uint8_t *buffer, uint64_t capacity, struct mtest_exec_read_result *result, struct mtest_exec_error *error);
-MTEST_EXEC_EXPORT int32_t mtest_exec_process_setup_drain(uint64_t handle, struct mtest_exec_setup_state *state, struct mtest_exec_error *error);
-MTEST_EXEC_EXPORT int32_t mtest_exec_process_channel_close(uint64_t handle, uint32_t channel, struct mtest_exec_error *error);
-MTEST_EXEC_EXPORT int32_t mtest_exec_process_group(uint64_t handle, uint32_t action, struct mtest_exec_group_result *result, struct mtest_exec_error *error);
-MTEST_EXEC_EXPORT int32_t mtest_exec_process_observe(uint64_t handle, struct mtest_exec_observe_result *result, struct mtest_exec_error *error);
-MTEST_EXEC_EXPORT int32_t mtest_exec_process_reap(uint64_t handle, struct mtest_exec_reap_result *result, struct mtest_exec_error *error);
+MTEST_EXEC_EXPORT int32_t mtest_exec_fd_limit(uint64_t *soft_limit, struct mtest_exec_error *error);
+MTEST_EXEC_EXPORT int32_t mtest_exec_monotonic_ms(int64_t *milliseconds,
+                                                  struct mtest_exec_error *error);
+MTEST_EXEC_EXPORT int32_t mtest_exec_process_open(const struct mtest_exec_process_spec *spec,
+                                                  struct mtest_exec_process_ref *process,
+                                                  struct mtest_exec_error *error);
+MTEST_EXEC_EXPORT int32_t mtest_exec_process_poll(uint64_t handle, int32_t timeout_ms,
+                                                  struct mtest_exec_poll_result *result,
+                                                  struct mtest_exec_error *error);
+MTEST_EXEC_EXPORT int32_t mtest_exec_process_read(uint64_t handle, uint32_t channel,
+                                                  uint8_t *buffer, uint64_t capacity,
+                                                  struct mtest_exec_read_result *result,
+                                                  struct mtest_exec_error *error);
+MTEST_EXEC_EXPORT int32_t mtest_exec_process_setup_drain(uint64_t handle,
+                                                         struct mtest_exec_setup_state *state,
+                                                         struct mtest_exec_error *error);
+MTEST_EXEC_EXPORT int32_t mtest_exec_process_channel_close(uint64_t handle, uint32_t channel,
+                                                           struct mtest_exec_error *error);
+MTEST_EXEC_EXPORT int32_t mtest_exec_process_group(uint64_t handle, uint32_t action,
+                                                   struct mtest_exec_group_result *result,
+                                                   struct mtest_exec_error *error);
+MTEST_EXEC_EXPORT int32_t mtest_exec_process_observe(uint64_t handle,
+                                                     struct mtest_exec_observe_result *result,
+                                                     struct mtest_exec_error *error);
+MTEST_EXEC_EXPORT int32_t mtest_exec_process_reap(uint64_t handle,
+                                                  struct mtest_exec_reap_result *result,
+                                                  struct mtest_exec_error *error);
 MTEST_EXEC_EXPORT int32_t mtest_exec_process_close(uint64_t handle, struct mtest_exec_error *error);
-MTEST_EXEC_EXPORT int32_t mtest_exec_process_abort(uint64_t handle, uint32_t grace_ms, struct mtest_exec_error *error);
+MTEST_EXEC_EXPORT int32_t mtest_exec_process_abort(uint64_t handle, uint32_t grace_ms,
+                                                   struct mtest_exec_error *error);
 
 #ifdef __cplusplus
 }
