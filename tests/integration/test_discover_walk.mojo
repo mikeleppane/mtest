@@ -2,8 +2,10 @@
 
 Each test builds a real temp tree, runs `discover` against it as the root, and
 asserts the exact sorted `run_files` list before tearing the tree down. Covers
-the `test_*.mojo` pattern, per-directory sort order, and symlinked-directory
-non-traversal.
+the `test_*.mojo` pattern, per-directory sort order, symlinks by kind, the loud
+channel carrying test-named entries that are not runnable files, the refusal of
+a tree that cannot be characterized, and the dedup-and-sort discipline both
+loud channels share.
 """
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
@@ -204,6 +206,47 @@ def test_an_excluded_nonregular_path_still_warns() raises:
     assert_paths(result.run_files, ["tests/test_plain.mojo"])
     assert_paths(result.skipped_nonregular, ["tests/test_shape.mojo"])
     assert_paths(result.stale_excludes, ["tests/test_shape.mojo"])
+    remove_tree(root)
+
+
+def test_a_test_named_link_whose_target_is_unreachable_is_loud() raises:
+    """A link mtest cannot resolve still names itself, whatever the cause.
+
+    Target typing follows the link, and a target inside a directory this
+    process may read but not search is indistinguishable from one that was
+    deleted: both resolve to nothing. A `test_*.mojo` link is reported either
+    way, so the selection the user believes is running never goes quiet.
+    """
+    var root = temp_root()
+    touch(root, "tests/test_plain.mojo")
+    touch(root, "blocked/inner/test_target.mojo")
+    link_dir(root, "blocked/inner/test_target.mojo", "tests/test_linked.mojo")
+    set_permissions(root + "/blocked", 0o644)
+    var result = discover(_config_paths(["tests"]), root)
+    set_permissions(root + "/blocked", 0o755)
+    assert_paths(result.run_files, ["tests/test_plain.mojo"])
+    assert_paths(result.skipped_links, ["tests/test_linked.mojo"])
+    assert_equal(len(result.skipped_nonregular), 0)
+    remove_tree(root)
+
+
+def test_overlapping_operands_report_each_entry_once_in_order() raises:
+    """Two walks over one tree warn once per entry, sorted, never doubled.
+
+    Overlapping operands walk the same subtree twice, so an entry reachable
+    from both would otherwise be announced twice; and entries are created in
+    reverse order here, so a channel that merely accumulated would report them
+    out of order.
+    """
+    var root = temp_root()
+    touch(root, "tests/test_z.mojo/test_in_z.mojo")
+    touch(root, "tests/test_a.mojo/test_in_a.mojo")
+    touch(root, "tests/test_plain.mojo")
+    var result = discover(_config_paths(["tests", "tests"]), root)
+    assert_paths(result.run_files, ["tests/test_plain.mojo"])
+    assert_paths(
+        result.skipped_nonregular, ["tests/test_a.mojo", "tests/test_z.mojo"]
+    )
     remove_tree(root)
 
 
