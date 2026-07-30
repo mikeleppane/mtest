@@ -42,7 +42,9 @@ def _run(command: list[str], *, timeout: float) -> subprocess.CompletedProcess[s
         for signal_number in (signal.SIGTERM, signal.SIGKILL):
             try:
                 os.killpg(process.pid, signal_number)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
+                # Darwin reports EPERM for an owned group containing only
+                # zombies. Like ESRCH, that means there is nothing to signal.
                 break
             time.sleep(0.1)
         stdout, stderr = process.communicate()
@@ -92,6 +94,8 @@ def check_main_open_failure() -> str:
             [
                 "mojo",
                 "build",
+                "--Werror",
+                "--no-optimization",
                 "-I",
                 "build",
                 str(MAIN_SOURCE),

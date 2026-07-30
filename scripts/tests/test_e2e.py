@@ -438,6 +438,45 @@ class E2EFaultTopologyTests(unittest.TestCase):
         helper_compile = commands[0]
         self.assertEqual(helper_compile.count("-DMTEST_EXEC_TESTING=1"), 1)
         self.assertNotIn("-DMTEST_EXEC_TESTING=0", helper_compile)
+        main_compile = commands[1]
+        self.assertEqual(
+            main_compile[:4],
+            ["mojo", "build", "--Werror", "--no-optimization"],
+        )
+        self.assertEqual(main_compile.count("--Werror"), 1)
+        self.assertEqual(main_compile.count("--no-optimization"), 1)
+
+    def test_main_open_timeout_preserves_diagnosis_for_darwin_eperm(self) -> None:
+        """A zombie-only Darwin group must not mask the timeout diagnosis."""
+        command = ["mojo", "build", "src/main.mojo"]
+        process = mock.Mock()
+        process.pid = 123
+        process.returncode = -int(signal.SIGTERM)
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(command, 1.0),
+            ("captured stdout\n", "captured stderr\n"),
+        ]
+
+        with (
+            mock.patch(
+                "scripts.e2e.main_open.subprocess.Popen",
+                return_value=process,
+            ),
+            mock.patch(
+                "scripts.e2e.main_open.os.killpg",
+                side_effect=PermissionError(1, "Operation not permitted"),
+            ) as killpg,
+            mock.patch("scripts.e2e.main_open.time.sleep") as sleep,
+            self.assertRaises(main_open.MainOpenCheckError) as raised,
+        ):
+            main_open._run(command, timeout=1.0)
+
+        self.assertIn("command timed out after 1s", str(raised.exception))
+        self.assertIn("captured stdout", str(raised.exception))
+        self.assertIn("captured stderr", str(raised.exception))
+        killpg.assert_called_once_with(123, signal.SIGTERM)
+        sleep.assert_not_called()
+        self.assertEqual(process.communicate.call_count, 2)
 
     def test_scenarios_receive_an_explicit_immutable_context(self) -> None:
         registry = tuple(e2e_main.SCENARIOS)
