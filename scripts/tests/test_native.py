@@ -20,6 +20,37 @@ from scripts.checks import native as native_check
 from scripts.checks import native_abi
 
 
+EXPECTED_WARNING_FLAGS = (
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-Wpedantic",
+    "-Wconversion",
+    "-Wsign-conversion",
+    "-Wshadow",
+    "-Wstrict-prototypes",
+    "-Wmissing-prototypes",
+    "-Wformat=2",
+    "-Wundef",
+    "-Wcast-qual",
+    "-Wwrite-strings",
+    "-Wvla",
+    "-Wimplicit-fallthrough",
+    "-Wdouble-promotion",
+    "-Wnull-dereference",
+    "-Wswitch-enum",
+    "-Wswitch-default",
+    "-Wcast-align",
+    "-Wbad-function-cast",
+    "-Wmissing-noreturn",
+    "-Wredundant-decls",
+    "-Walloca",
+    "-Warray-bounds",
+    "-Wconditional-uninitialized",
+    "-Wunreachable-code-aggressive",
+)
+
+
 class NativeCheckCommandTests(unittest.TestCase):
     """Keep Darwin lifecycle links independent of the pinned Clang driver."""
 
@@ -34,6 +65,33 @@ class NativeCheckCommandTests(unittest.TestCase):
     def test_strict_inventory_requires_strong_stack_protection(self) -> None:
         self.assertIn("-fstack-protector-strong", native_abi.STRICT_FLAGS)
         self.assertNotIn("-fstack-protector", native_abi.STRICT_FLAGS)
+
+    def test_curated_warning_inventory_is_exact_and_ordered(self) -> None:
+        self.assertEqual(
+            tuple(flag for flag in native_abi.STRICT_FLAGS if flag.startswith("-W")),
+            EXPECTED_WARNING_FLAGS,
+        )
+
+    def test_curated_warning_inventory_rejects_removal_and_addition(self) -> None:
+        original = native_abi.STRICT_FLAGS_FILE.read_text(encoding="utf-8")
+        mutations = (
+            original.replace("-Wextra\n", "", 1),
+            original.replace("-Wextra\n", "-Wextra\n-Wunknown-warning\n", 1),
+        )
+        for index, text in enumerate(mutations):
+            with tempfile.TemporaryDirectory(
+                prefix=f"mtest-warning-flags-{index}-"
+            ) as raw_tmp:
+                inventory = Path(raw_tmp) / "native_strict_flags.txt"
+                inventory.write_text(text, encoding="utf-8")
+                with (
+                    self.subTest(mutation=index),
+                    self.assertRaisesRegex(
+                        SystemExit,
+                        "curated warning flags differ",
+                    ),
+                ):
+                    native_abi.load_strict_flags(inventory)
 
     def test_linux_stack_check_names_every_protected_function(self) -> None:
         disassembly = """
@@ -519,7 +577,12 @@ address  pcrel length extern type    scattered symbolnum/value
             "CPPFLAGS": "-DPOISON_CPPFLAGS",
         }
         with mock.patch.dict(os.environ, poison):
-            adapter_command = native_build.testing_compile_command("clang", profile)
+            adapter_command = native_abi.variant_compile_command(
+                "clang",
+                native_abi.TESTING_OBJECT,
+                testing=True,
+                profile=profile,
+            )
             lifecycle_command = native_check.test_compile_command(
                 "clang",
                 native_check.TEST_SOURCES[0],

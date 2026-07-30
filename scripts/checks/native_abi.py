@@ -36,6 +36,36 @@ CANARY_SOURCE = ROOT / "tests" / "native" / "stack_protector_canary.c"
 # read one identical inventory and cannot drift.
 STRICT_FLAGS_FILE = ROOT / "scripts" / "build" / "native_strict_flags.txt"
 
+CURATED_WARNING_FLAGS = (
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-Wpedantic",
+    "-Wconversion",
+    "-Wsign-conversion",
+    "-Wshadow",
+    "-Wstrict-prototypes",
+    "-Wmissing-prototypes",
+    "-Wformat=2",
+    "-Wundef",
+    "-Wcast-qual",
+    "-Wwrite-strings",
+    "-Wvla",
+    "-Wimplicit-fallthrough",
+    "-Wdouble-promotion",
+    "-Wnull-dereference",
+    "-Wswitch-enum",
+    "-Wswitch-default",
+    "-Wcast-align",
+    "-Wbad-function-cast",
+    "-Wmissing-noreturn",
+    "-Wredundant-decls",
+    "-Walloca",
+    "-Warray-bounds",
+    "-Wconditional-uninitialized",
+    "-Wunreachable-code-aggressive",
+)
+
 PRODUCTION_SYMBOLS = {
     "mtest_exec_fd_limit",
     "mtest_exec_interrupt_count",
@@ -103,6 +133,19 @@ def load_strict_flags(path: Path = STRICT_FLAGS_FILE) -> tuple[str, ...]:
     if "-fstack-protector" in flags:
         raise SystemExit(
             f"native-abi-check: forbidden weak flag -fstack-protector: {path}"
+        )
+    warning_flags = tuple(flag for flag in flags if flag.startswith("-W"))
+    if warning_flags != CURATED_WARNING_FLAGS:
+        missing = tuple(
+            flag for flag in CURATED_WARNING_FLAGS if flag not in warning_flags
+        )
+        unexpected = tuple(
+            flag for flag in warning_flags if flag not in CURATED_WARNING_FLAGS
+        )
+        raise SystemExit(
+            "native-abi-check: curated warning flags differ: "
+            f"missing={missing}, unexpected={unexpected}, "
+            f"got={warning_flags}: {path}"
         )
     return flags
 

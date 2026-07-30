@@ -8,26 +8,13 @@ import platform
 import subprocess
 import sys
 
-from scripts.build.profiles import ProductionProfile, host_profile, load_profiles
+from scripts.build.profiles import host_profile, load_profiles
 from scripts.checks import native_abi as native_abi_check
 
 
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = native_abi_check.PRODUCTION_OBJECT
 TEST_OUTPUT = native_abi_check.TESTING_OBJECT
-
-
-def testing_compile_command(
-    cc: str,
-    profile: ProductionProfile,
-) -> list[str]:
-    """Return the testing-object command without ambient compiler flags."""
-    return native_abi_check.variant_compile_command(
-        cc,
-        TEST_OUTPUT,
-        testing=True,
-        profile=profile,
-    )
 
 
 def main() -> int:
