@@ -555,6 +555,8 @@ class BuildStampTests(unittest.TestCase):
         try:
             build = sandbox / "build"
             build.mkdir(exist_ok=True)
+            capture_tmp = build / "capture-tmp"
+            capture_tmp.mkdir()
             legacy_bytes = {
                 LEGACY_PACKAGES[0]: b"legacy-toml-package\n",
                 LEGACY_PACKAGES[1]: b"legacy-mtest-package\n",
@@ -575,6 +577,7 @@ class BuildStampTests(unittest.TestCase):
             result = source_call(
                 sandbox,
                 "_resolve_digest_cmd\n"
+                "TMPDIR=build/capture-tmp\n"
                 'injection_marker="build/.midstream-read-failure-injected"\n'
                 "stamp_reads=0\n"
                 "read() {\n"
@@ -612,8 +615,57 @@ class BuildStampTests(unittest.TestCase):
                 self.assertEqual((sandbox / relative).read_bytes(), contents)
                 self.assertIn(relative.as_posix(), result.stderr)
             self.assertIn("move or remove", result.stderr)
+            self.assertEqual(list(capture_tmp.iterdir()), [])
         finally:
             shutil.rmtree(sandbox, ignore_errors=True)
+
+    def test_nul_in_legacy_stamp_never_authorizes_ownership(self) -> None:
+        """Embedded or trailing NUL bytes must not normalize into valid rows."""
+        legacy_bytes = {
+            LEGACY_PACKAGES[0]: b"legacy-toml-package\n",
+            LEGACY_PACKAGES[1]: b"legacy-mtest-package\n",
+        }
+        head = hashlib.sha256(b"legacy-inputs").hexdigest().encode("ascii")
+        toml_hash = hashlib.sha256(legacy_bytes[LEGACY_PACKAGES[0]]).hexdigest()
+        mtest_hash = hashlib.sha256(legacy_bytes[LEGACY_PACKAGES[1]]).hexdigest()
+        valid_stamp = (
+            b"in:"
+            + head
+            + b"\n"
+            + f"out:{LEGACY_PACKAGES[0]} {toml_hash}\n".encode()
+            + f"out:{LEGACY_PACKAGES[1]} {mtest_hash}\n".encode()
+        )
+        cases = (
+            ("embedded NUL", valid_stamp.replace(b"build/toml", b"build/\0toml")),
+            ("trailing NUL", valid_stamp + b"\0"),
+        )
+        for label, stamp_bytes in cases:
+            with self.subTest(case=label):
+                sandbox = sandbox_tree()
+                try:
+                    build = sandbox / "build"
+                    build.mkdir(exist_ok=True)
+                    capture_tmp = build / "capture-tmp"
+                    capture_tmp.mkdir()
+                    for relative, contents in legacy_bytes.items():
+                        (sandbox / relative).write_bytes(contents)
+                    (build / ".precompile.stamp").write_bytes(stamp_bytes)
+
+                    result = source_call(
+                        sandbox,
+                        "_resolve_digest_cmd\n"
+                        "TMPDIR=build/capture-tmp\n"
+                        "remove_owned_legacy_packages\n",
+                    )
+
+                    self.assertNotEqual(result.returncode, 0)
+                    for relative, contents in legacy_bytes.items():
+                        self.assertEqual((sandbox / relative).read_bytes(), contents)
+                        self.assertIn(relative.as_posix(), result.stderr)
+                    self.assertIn("move or remove", result.stderr)
+                    self.assertEqual(list(capture_tmp.iterdir()), [])
+                finally:
+                    shutil.rmtree(sandbox, ignore_errors=True)
 
     def test_unowned_legacy_package_blocks_a_warm_stamp_hit(self) -> None:
         """An unproven legacy package must not shadow valid current outputs."""

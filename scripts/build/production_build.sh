@@ -201,16 +201,45 @@ _precompile_write_stamp() {
   } >"$stamp"
 }
 
-# Captures every stamp byte in memory before the ownership parser sees any of
-# them. `cat`'s status proves that its read reached EOF; a post-open read error
-# therefore rejects the stamp even if all three valid rows arrived first. The
-# final non-newline byte only prevents command substitution from trimming the
-# stamp's trailing newlines. It is removed by position, never searched for or
-# treated as a probabilistic end marker.
-_capture_complete_stamp() {
-  cat -- "$1" || return 1
+# Copies the stamp completely into a private file before inspecting it. `cat`'s
+# checked status proves the original read reached EOF, and the checked
+# `tr | cmp` pipeline rejects any NUL before bytes enter a Bash variable (whose
+# command substitution would otherwise discard NUL). Only then is the private
+# snapshot emitted for parsing.
+#
+# The subshell-local EXIT trap covers every branch after `mktemp`, including a
+# signal or a failed explicit removal. `mktemp`, `tr`, and `cmp` are system
+# utilities on both supported hosts; this keeps the recipe free of Python and
+# new package dependencies.
+_capture_complete_stamp() (
+  local source="$1"
+  local snapshot=""
+  local capture_status=1
+  snapshot="$(mktemp "${TMPDIR:-/tmp}/mtest-legacy-stamp.XXXXXX")" || return 1
+  trap 'rm -f -- "$snapshot"' EXIT
+  trap 'exit 1' HUP INT TERM
+
+  if cat -- "$source" >"$snapshot"; then
+    if LC_ALL=C tr -d '\000' <"$snapshot" | cmp -s "$snapshot" -; then
+      if cat -- "$snapshot"; then
+        capture_status=0
+      fi
+    fi
+  fi
+
+  if rm -f -- "$snapshot"; then
+    snapshot=""
+    trap - EXIT HUP INT TERM
+  else
+    capture_status=1
+  fi
+
+  [[ $capture_status -eq 0 ]] || return 1
+  # Preserve trailing newlines through command substitution. This framing byte
+  # is removed by position, never searched for or treated as an ownership
+  # sentinel.
   printf 'x'
-}
+)
 
 remove_owned_legacy_packages() {
   local legacy_toml="build/toml.mojopkg"
