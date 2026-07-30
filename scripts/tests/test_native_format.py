@@ -56,6 +56,46 @@ class NativeFormatTests(unittest.TestCase):
         ):
             native_format.require_clang_format()
 
+    def test_new_tracked_c_flows_through_format_and_ascii_checks(self) -> None:
+        sources = (
+            ROOT / "native" / "mtest_exec_native.c",
+            ROOT / "tests" / "native" / "new_fault_driver.c",
+        )
+        completed = subprocess.CompletedProcess(["clang-format"], 0, "", "")
+        with (
+            mock.patch.object(native_format, "require_clang_format"),
+            mock.patch.object(
+                native_format,
+                "tracked_native_sources",
+                return_value=sources,
+            ),
+            mock.patch.object(native_format, "require_ascii") as require_ascii_check,
+            mock.patch.object(
+                native_format,
+                "run",
+                return_value=completed,
+            ) as run,
+        ):
+            self.assertEqual(native_format.main(), 0)
+
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "clang-format",
+                "-i",
+                "--style=file",
+                "--fallback-style=none",
+                *(str(source) for source in sources),
+            ],
+        )
+        self.assertEqual(
+            require_ascii_check.call_args_list,
+            [
+                mock.call(sources, label="native-format"),
+                mock.call(sources, label="native-format"),
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

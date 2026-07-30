@@ -206,7 +206,10 @@ that moves a compiled artifact between machines has to frame the machine.
 The verification tasks are:
 
 ```text
-pixi run fmt               # format Mojo in place (run locally before committing)
+pixi run mojo-fmt          # format Mojo in place
+pixi run native-fmt        # format tracked native C and headers in place
+pixi run fmt               # run both source formatters before committing
+pixi run fmt-check         # format both languages, then reject any tree diff
 pixi run py-fmt            # ruff's safe lint fixes, then format Python in place
 pixi run py-check          # ruff format/lint and mypy --strict over scripts/ and
                            #   tests/fixtures/exec/ (needs `uv`; see below)
@@ -219,7 +222,8 @@ pixi run harness-check     # the aggregate of the three groups above
 pixi run coverage-capability  # tripwire: the pinned toolchain must have no coverage
 pixi run safety-check      # inventory every unsafe Mojo operation and local proof
 pixi run postfork-check    # audit production/testing post-fork call graphs
-pixi run native-check      # verify native ABI/layout/exports and lifecycle
+pixi run clang-tidy-check  # parse-smoke and analyze every native C unit
+pixi run native-check      # own native analysis, ABI/layout/exports, and lifecycle
 pixi run junit-check       # validate the committed JUnit oracle and checker
 pixi run build             # the package-compiles gate
 pixi run readme-help-check # compare README help with the real binary
@@ -267,20 +271,26 @@ environment, about the CodeQL findings, or about ruff and mypy — all three of
 which hosted CI does block on. The required GitHub checks are the
 authoritative exhaustive merge verdict.
 
-`fmt-check` formats each real Mojo source under `src`, `companions`, `tests`,
-and `e2e` in a separate deterministic, no-symlink-following invocation, then
-runs `git diff --exit-code`, so it fails on any unstaged change, including one
-made after a long check started. Stage the work first, then gate: a result
-produced against different bytes than you commit is not a result. Reading
-outcomes works the same way, since a background wrapper's exit status is the
-wrapper's and not the gate's, so read the gate's own marker.
+`fmt-check` runs `mojo-fmt` and `native-fmt`, then `git diff --exit-code`.
+`mojo-fmt` formats each real Mojo source under `src`, `companions`, `tests`,
+and `e2e` in a separate deterministic, no-symlink-following invocation;
+`native-fmt` formats the complete tracked C/header inventory with pinned
+ClangFormat. The aggregate therefore mutates first and fails on any remaining
+tree diff, including an unstaged change made after a long check started. Stage
+the work first, then gate: a result produced against different bytes than you
+commit is not a result. Reading outcomes works the same way, since a background
+wrapper's exit status is the wrapper's and not the gate's, so read the gate's
+own marker.
 
 `pixi run ci-preflight` chains `version-check -> fmt-check ->
 harness-unit-check -> repo-policy-check -> abi-probe-check ->
-release-tooling-check -> safety-check -> postfork-check -> native-check ->
-junit-check -> build -> readme-help-check -> junit-render-check ->
-transcripts-check -> coverage-capability` in that exact fail-fast order. The
-three `*-check` groups replaced a single two-dozen-command `harness-check`
+release-tooling-check -> safety-check -> postfork-check -> clang-tidy-check ->
+native-check -> junit-check -> build -> readme-help-check ->
+junit-render-check -> transcripts-check -> coverage-capability` in that exact
+fail-fast order. Here `fmt-check` owns `mojo-fmt` plus `native-fmt`, and
+`native-check` owns `clang-tidy-check`; the expanded names make those dependency
+edges visible. The three `*-check` groups replaced a single two-dozen-command
+`harness-check`
 chain, which survives as their aggregate: a red hosted preflight names the
 group that failed instead of reporting that something in the tooling broke. The `pixi run ci` floor is serial:
 `ci-preflight -> test -> assertions-check -> dogfood-check -> e2e ->
@@ -527,8 +537,9 @@ that area, and append new entries there.
 The six that come up most often:
 
 - `mojo run` masks crash exit codes to `1`. Build, then execute the binary.
-- `fmt-check` reformats in place and ends in `git diff --exit-code`, so any
-  unstaged diff it leaves behind reds the gate. Stage first, then gate.
+- `fmt-check` reformats Mojo and tracked native C/headers in place and ends in
+  `git diff --exit-code`, so any unstaged diff it leaves behind reds the gate.
+  Stage first, then gate.
 - Never run two builds against the shared `build/` tree at once; a racing
   build corrupts `build/mtest.mojopkg` and reads as a real regression.
 - `fn` is fully removed from the pinned toolchain, including as a

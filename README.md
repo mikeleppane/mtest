@@ -1472,9 +1472,12 @@ The tasks:
 
 | Task | What it does |
 |------|--------------|
-| `pixi run fmt` | format Mojo in place |
+| `pixi run fmt` | format Mojo plus every tracked native C source and header in place |
+| `pixi run fmt-check` | run both formatters, then reject any resulting tree diff |
 | `pixi run py-fmt` | apply ruff's safe lint fixes to the Python tooling, then format it in place |
 | `pixi run py-check` | ruff format/lint and `mypy --strict` over the Python tooling (needs `uv`; not part of `ci`) |
+| `pixi run clang-tidy-check` | run the focused pinned Clang parse-smoke and analyzer loop over every native C translation unit |
+| `pixi run native-check` | own the native verdict: Clang-Tidy and post-fork analysis, ABI/layout/export checks, and lifecycle tests |
 | `pixi run build` | precompile the vendored TOML parser and `src/mtest` to `build/toml.mojoc` and `build/mtest.mojoc`, the compile gate |
 | `pixi run build-bin` | link the runnable binary at `build/mtest` |
 | `pixi run test` | run every classified unit and integration module through `build/mtest` itself, then reconcile its report against an inventory derived from the sources on disk |
@@ -1494,8 +1497,9 @@ The tasks:
 uses the focused tasks above, and the required hosted checks are the merge
 verdict. The floor opens with a fail-fast preflight (version, formatting,
 harness self-tests, repository policy, release tooling, unsafe-Mojo inventory,
-post-fork audit, native ABI, JUnit oracle, build, rendered-JUnit, transcript,
-ABI-probe, and coverage-tripwire checks) and closes with `ci-memory`, so a
+post-fork and Clang-Tidy analysis, native ABI, JUnit oracle, build,
+rendered-JUnit, transcript, ABI-probe, and coverage-tripwire checks) and closes
+with `ci-memory`, so a
 green local run covers memory safety instead of deferring it.
 On Linux that is ASan/LSan then Memcheck; elsewhere it reports the two lanes as
 uncovered and names the Linux cells that own them. Hosted CI runs the
