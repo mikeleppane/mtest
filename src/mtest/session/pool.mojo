@@ -243,13 +243,23 @@ struct _PoolFile(Movable):
     no longer there is a reason to compile the file, not an internal error over
     a run that was otherwise fine.
     """
+    var published_store_artifact: Bool
+    """Whether this session just published or adopted this RUN binary.
+
+    A cache-quarantine helper can move a valid final generation away from its
+    pathname between publication and exec. Only a completed child
+    `SpawnFailed` proves that pathname-level failure; a native dispatch raise
+    remains machinery, and is deliberately recoverable only for a warm hit.
+    The cold build was already admitted to `built_files`, so its one bounded
+    fallback must not charge it again.
+    """
     var store_rebuilt: Bool
-    """Whether this file already fell back from the store to a compile.
+    """Whether this file already fell back from a store artifact to a compile.
 
     Once per file, so a binary that will not spawn for any other reason still
     reaches the internal-error path instead of looping. The fallback charges
-    neither counter: the file was admitted as a cache hit, and one file is one
-    admission.
+    neither counter: the file was already admitted as a cache hit or cold
+    build, and one file is one admission.
     """
     var hit_uncounted: Bool
     """A cache hit this batch has not yet charged to `cached_files`.
@@ -288,24 +298,27 @@ struct _PoolFile(Movable):
         self.started_emitted = False
         self.dispatch_ns = 0
         self.store_hit = False
+        self.published_store_artifact = False
         self.store_rebuilt = False
         self.hit_uncounted = False
 
 
-def _degrade_hit_to_rebuild(mut file: _PoolFile):
-    """Send a file whose cached binary would not start back to the compiler.
+def _degrade_store_artifact_to_rebuild(mut file: _PoolFile):
+    """Send a file whose store binary would not start back to the compiler.
 
     The rebuild is invocation-private: the key was dropped when the store
-    answered, so nothing is staged and nothing is published, and the binary
-    lands where an uncached build puts it. It charges neither counter either —
-    the file was admitted as a cache hit, and one file is one admission — so the
-    warning is what keeps the compile visible.
+    answered or the first build settled, so nothing is staged and nothing is
+    published, and the binary lands where an uncached build puts it. It charges
+    neither counter either — the file was already admitted as a cache hit or a
+    first cold build, and one file is one admission — so the warning is what
+    keeps the compile visible.
 
     Args:
         file: The file to move back to the build phase. Its `store_rebuilt`
             latch is set, so this can happen at most once per file.
     """
     file.store_hit = False
+    file.published_store_artifact = False
     file.store_rebuilt = True
     file.out_bin = file.plain_out
     file.pre_events.append(
@@ -755,7 +768,7 @@ def _run_pool_batch[
                             # rebuilt file fails here a second time, and the
                             # `store_rebuilt` latch sends it to the machinery
                             # fault it always was.
-                            _degrade_hit_to_rebuild(state[picked])
+                            _degrade_store_artifact_to_rebuild(state[picked])
                             continue
                         machinery_fault = True
                         machinery_fault_step = "run"
@@ -1088,6 +1101,12 @@ def _run_pool_batch[
                             state[i].pre_events.append(
                                 Event.warning("cache-publish", pub.warning)
                             )
+                        else:
+                            # This session now executes a store generation of
+                            # its own. A concurrent unreadable-generation
+                            # quarantine can temporarily remove its pathname;
+                            # a completed SpawnFailed below rebuilds once.
+                            state[i].published_store_artifact = True
                         # Settled either way: the directory is renamed, deleted,
                         # or the live home of the binary this batch keeps
                         # running. None of those is the batch's to sweep, and
@@ -1098,13 +1117,17 @@ def _run_pool_batch[
         else:
             # A completed run.
             if term.is_spawn_failed():
-                if state[i].store_hit and not state[i].store_rebuilt:
-                    # The store validated this generation and then something
-                    # removed it before the exec — a concurrent run publishing
-                    # another key for the same source reaps that source's older
-                    # generations. Compile the file instead of failing a run
-                    # whose only fault was that its binary was cached.
-                    _degrade_hit_to_rebuild(state[i])
+                if (
+                    state[i].store_hit or state[i].published_store_artifact
+                ) and not state[i].store_rebuilt:
+                    # The store served this generation or this session just
+                    # published it, and something removed it before exec. The
+                    # latter is the temporary pathname gap a concurrent
+                    # unreadable-generation quarantine creates. Compile the
+                    # file instead of failing a run whose only fault was that
+                    # store artifact; the bounded fallback preserves its
+                    # original admission accounting.
+                    _degrade_store_artifact_to_rebuild(state[i])
                 else:
                     reporter.handle(
                         Event.internal_error(

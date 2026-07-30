@@ -877,6 +877,44 @@ def test_unreadable_healer_restores_a_replacement_raced_before_quarantine() rais
     assert_equal(store_probe(root, key).kind, PROBE_HIT)
 
 
+def test_unreadable_healer_restores_after_tombstone_inspection_failure() raises:
+    """A failed identity read puts the moved generation back at its final path.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_tombstone_lstat.mojo")
+    var key = _fixture_key(root, rel, "# tombstone lstat\n")
+    var target = _stage_binary(root, [UInt8(13), UInt8(14), UInt8(15)])
+    assert_equal(
+        store_publish(
+            root, key, target, 1.0, _build_argv(rel, target.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+
+    # The helper has already moved this directory when its identity inspection
+    # faults. It must restore the original rather than strand the only
+    # generation under a private tombstone and leave the final path absent.
+    var final_abs = root + "/" + key.gen_dir
+    chmod_path("000", final_abs)
+    var saved = getenv(STORE_FAULT_ENV, "")
+    var was_set = getenv(STORE_FAULT_ENV, "\x01unset") != "\x01unset"
+    try:
+        _ = setenv(STORE_FAULT_ENV, "unreadable-tombstone-lstat", True)
+        _discard_unreadable_generation(final_abs, root + "/" + STORE_DIR)
+    finally:
+        if was_set:
+            _ = setenv(STORE_FAULT_ENV, saved, True)
+        else:
+            _ = unsetenv(STORE_FAULT_ENV)
+
+    assert_true(
+        isdir(final_abs),
+        "the identity-read failure must not leave the final generation absent",
+    )
+    chmod_path("755", final_abs)
+    assert_equal(store_probe(root, key).kind, PROBE_HIT)
+
+
 def test_probe_rejects_wrong_key_meta() raises:
     var root = temp_root()
     var rel = String("tests/test_collide.mojo")

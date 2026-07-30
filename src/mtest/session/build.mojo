@@ -86,14 +86,14 @@ struct _BuildOutcome(Copyable, Movable):
     var result: FileResult
     """The terminal `FileResult` to replay when `terminal`."""
     var from_store: Bool
-    """Whether `binary` is an artifact the store served rather than one this
-    call compiled.
+    """Whether `binary` is an artifact now owned by the store.
 
-    The caller needs it for one decision: a binary the store validated can be
-    removed before this process executes it, because publishing a generation
-    reaps that source's older ones and a second run over the checkout can
-    publish at any moment. A run that cannot spawn a binary in that position is
-    a file to compile, not an internal error.
+    This covers a warm hit and a generation this call just published or adopted.
+    The caller needs it for one decision: a store generation can be removed or
+    briefly quarantined before this process executes it, because publishing a
+    generation reaps that source's older ones and a second run over the checkout
+    can publish at any moment. A run that cannot spawn a binary in that position
+    is a file to compile, not an internal error.
     """
     var cache_warning: String
     """Why this build could not be published, or empty when nothing went wrong.
@@ -211,6 +211,7 @@ def _build_for_selection(
     var target = _no_staging()
     var key = Optional[FileKey](None)
     var cache_warning = String("")
+    var from_store = False
 
     if ctx.enabled and first_attempt:
         key = file_key(ctx, root, rel)
@@ -383,6 +384,11 @@ def _build_for_selection(
         recorded_argv = pub.argv.copy()
         if pub.kind == PUB_FAILED:
             cache_warning = pub.warning
+        else:
+            # Publication or adoption puts the path this selection driver will
+            # probe under store ownership. The probe's bounded recovery must
+            # cover the same quarantine pathname gap as a warm hit.
+            from_store = True
     reg.record_build(BuildProduct.built(rel, final_bin, canonical))
     return _BuildOutcome(
         True,
@@ -392,7 +398,7 @@ def _build_for_selection(
         bdur,
         False,
         _blank_file_result(),
-        False,
+        from_store,
         cache_warning^,
     )
 

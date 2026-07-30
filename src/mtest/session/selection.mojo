@@ -202,9 +202,9 @@ struct _Collected(Copyable, Movable):
     """Whether an earlier attempt was crash-class, which promotes a late pass
     to FLAKY."""
     var from_store: Bool
-    """Whether `binary` is an artifact the store served rather than one this
-    run compiled.
+    """Whether `binary` is an artifact now owned by the store.
 
+    This covers a warm hit and a generation this run just published or adopted.
     Cleared by the rebuild that follows a binary going missing, so the fallback
     happens at most once and a second failure to spawn is resolved as the
     machinery fault it then is."""
@@ -1068,11 +1068,12 @@ def _run_selection[
                 continue
             if po.internal_error:
                 if collected[i].from_store and pipeline.admit_store_rebuild(i):
-                    # The store validated this binary and something removed it
-                    # before this process could execute it, which a concurrent
-                    # run publishing another key for the same source does as a
-                    # matter of course. Compile the file and probe it again
-                    # rather than fail a run whose only fault was a cache hit.
+                    # The store served this binary or this run just published
+                    # it, and something removed it before execution. A
+                    # concurrent run can reap an older generation, and an
+                    # unreadable-generation quarantine creates a brief path
+                    # gap even for a fresh publication. Compile and probe
+                    # again rather than fail a run over that store artifact.
                     collected[i].from_store = False
                     collected[i].pre_stream.append(
                         Event.warning(
@@ -1246,7 +1247,8 @@ def _run_selection[
         if rterm.is_spawn_failed():
             if collected[i].from_store and pipeline.admit_store_rebuild(i):
                 # Same window as the probe step's, one step later: the binary
-                # survived the probe and was reaped before the run.
+                # survived the probe and was reaped or quarantined before the
+                # run.
                 collected[i].from_store = False
                 collected[i].pre_stream.append(
                     Event.warning(

@@ -34,7 +34,7 @@ A case belongs here if what it proves is about a SEAM — which path built the
 file, what it counted, what it published, and in which order.
 """
 from std.ffi import external_call
-from std.os import getenv, makedirs, remove
+from std.os import getenv, makedirs, remove, setenv, unsetenv
 from std.os.path import exists, isdir
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
@@ -55,9 +55,9 @@ from mtest.report import (
 )
 from mtest.platform import read_bounded_regular_file, read_regular_file_bytes
 from mtest.session import run_session
-from mtest.session.store import PRECOMPILE_SUBDIR
+from mtest.session.store import PRECOMPILE_SUBDIR, STORE_FAULT_ENV
 
-from cache_fixtures import dir_listing, run_recording_session
+from cache_fixtures import RecordedRun, dir_listing, run_recording_session
 from session_fixtures import (
     SRC_CHAMELEON,
     SRC_COMPILE_ERROR,
@@ -73,6 +73,10 @@ comptime _STORE_DIR = ".mtest-cache/build-v1"
 
 comptime _OP_PIPE_STDOUT = 11
 """`MTEST_EXEC_OP_PIPE_STDOUT`: the child's stdout pipe, opened per dispatch."""
+
+
+comptime _FAULT_PUBLISHED_ABSENT = "published-absent"
+"""Hide a newly published generation just before this session executes it."""
 
 
 def _saw_cache_off(warnings: List[String]) -> Bool:
@@ -197,6 +201,37 @@ def test_selection_second_run_hits_cache() raises:
         second.cached_files, 1, "the warm run is served from the store"
     )
     assert_equal(second.built_files, 0, "the warm run compiles nothing")
+
+
+def test_selection_rebuilds_a_freshly_published_binary_that_vanishes() raises:
+    """The selection probe recovers a publish-to-exec cache ENOENT once."""
+    var root = temp_root()
+    write_file(root, "tests/test_ok.mojo", SRC_PASS)
+    var config = base_config()
+    config.keyword = "test"  # forces the selection build/probe/run driver
+
+    var saved = getenv(STORE_FAULT_ENV, "")
+    var was_set = getenv(STORE_FAULT_ENV, "\x01unset") != "\x01unset"
+    var run: RecordedRun
+    try:
+        _ = setenv(STORE_FAULT_ENV, _FAULT_PUBLISHED_ABSENT, True)
+        run = run_recording_session(config, root)
+    finally:
+        if was_set:
+            _ = setenv(STORE_FAULT_ENV, saved, True)
+        else:
+            _ = unsetenv(STORE_FAULT_ENV)
+
+    assert_equal(
+        run.code, 0, "a vanished fresh selection artifact must rebuild"
+    )
+    assert_equal(run.built_files, 1, "the cold admission stays singular")
+    assert_equal(run.cached_files, 0, "the selection run had no warm hit")
+    var saw_rebuild = False
+    for warning in run.warnings:
+        if String(warning).startswith("cache-rebuild:"):
+            saw_rebuild = True
+    assert_true(saw_rebuild, "the selection rebuild must be visible")
 
 
 def test_unknown_build_arg_warns_and_disables() raises:

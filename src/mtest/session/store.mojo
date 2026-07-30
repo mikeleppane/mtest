@@ -93,7 +93,7 @@ marker somebody else wrote says nothing about who owns the directory.
 through, and what it reads never reaches a `KeyBuilder`: the seam is not a key
 input, not a config field, and not part of the tag namespace. Absent or empty
 — the only shape any real invocation has — means no effect at all, and so does
-any value outside the three names below.
+any value outside the five names below.
 
 It exists because the two publication windows worth faulting are inside mtest's
 own process, AFTER the compiler child has exited, so no fake compiler can reach
@@ -105,7 +105,12 @@ session keeps running it — so the seam introduces no state and no control flow
 the protocol does not already have. `unreadable-replacement` moves the
 test-prepared replacement into the final name after unreadable detection and
 before quarantine, pinning that the atomic move reconciles the object it
-actually moved. `scripts/tests/test_cache_protocol.py` drives the two
+actually moved. `unreadable-tombstone-lstat` faults identity inspection after
+that move, so the helper has to restore rather than strand its only generation
+under a tombstone. `published-absent` moves a just-committed generation aside
+before the caller executes it, pinning the driver contract for the otherwise
+unavoidable pathname gap in a concurrent quarantine.
+`scripts/tests/test_cache_protocol.py` drives the two
 publication windows and asserts the property they exist to demonstrate: an
 interrupted publication leaves no generation a later run could probe.
 """
@@ -2179,6 +2184,29 @@ comptime _FAULT_UNREADABLE_REPLACEMENT = "unreadable-replacement"
 """Move the test-prepared replacement between detection and quarantine."""
 
 
+comptime _FAULT_UNREADABLE_TOMBSTONE_LSTAT = "unreadable-tombstone-lstat"
+"""Fail the post-move identity read after the original reaches its tombstone."""
+
+
+def _restore_tombstone(tombstone_path: String, gen_abs: String):
+    """Put a moved generation back unless a newer nonempty one occupies it.
+
+    Directory `rename(2)` refuses to replace a nonempty target, so a publisher
+    that filled `gen_abs` after quarantine claimed the original is never
+    overwritten. Failure leaves the tombstone as inert store-owned litter,
+    which is safer than deleting a binary another process may have begun to
+    execute.
+
+    Args:
+        tombstone_path: The private pathname holding the moved generation.
+        gen_abs: Its public generation pathname.
+    """
+    try:
+        rename_path(tombstone_path, gen_abs)
+    except:
+        pass
+
+
 def _discard_unreadable_generation(gen_abs: String, store_abs: String):
     """Remove an unreadable generation without racing a replacement.
 
@@ -2243,10 +2271,18 @@ def _discard_unreadable_generation(gen_abs: String, store_abs: String):
     var moved_dev: Int
     var moved_ino: Int
     try:
+        if requested and requested.value() == _FAULT_UNREADABLE_TOMBSTONE_LSTAT:
+            raise Error("test-only tombstone identity fault")
         var moved = lstat(tombstone_path)
         moved_dev = Int(moved.st_dev)
         moved_ino = Int(moved.st_ino)
     except:
+        # Moving the final path above created a temporary absence. If inspecting
+        # the moved object fails, restoration is the only safe conservative
+        # answer: leaving it private would make a cache cleanup turn into a
+        # spawn-time ENOENT for another session. `_restore_tombstone` refuses to
+        # overwrite a newer nonempty generation a publisher may have installed.
+        _restore_tombstone(tombstone_path, gen_abs)
         return
     if moved_dev == observed_dev and moved_ino == observed_ino:
         _discard(tombstone_path)
@@ -3167,6 +3203,10 @@ comptime _FAULT_BEFORE_RENAME = "before-rename"
 """Abandon the publication after the flush and before the commit rename."""
 
 
+comptime _FAULT_PUBLISHED_ABSENT = "published-absent"
+"""Hide a newly committed generation before its caller executes it."""
+
+
 def _store_fault() -> String:
     """The publication fault requested for this call, or the empty string.
 
@@ -3213,6 +3253,27 @@ def _fault_abandoned(
         + src_rel
         + "'",
     )
+
+
+def _fault_hide_published_generation(final_abs: String, store_abs: String):
+    """Move a committed generation to inert litter for the driver fault seam.
+
+    Args:
+        final_abs: The newly committed generation directory.
+        store_abs: Its containing store directory.
+    """
+    var hidden = String("")
+    try:
+        var temp = create_unique_temp(
+            store_abs + "/" + _TMP_PREFIX + "published-absent.XXXXXX"
+        )
+        hidden = temp.path.copy()
+        close_checked_fd(temp.fd)
+        unlink(hidden)
+        rename_path(final_abs, hidden)
+    except:
+        if hidden != "":
+            _discard(hidden)
 
 
 def _rewrite_output(
@@ -3542,6 +3603,10 @@ def store_publish(
     except:
         pass
     _reap_siblings(root, key)
+    if fault == _FAULT_PUBLISHED_ABSENT:
+        _fault_hide_published_generation(
+            root + "/" + key.gen_dir, root + "/" + STORE_DIR
+        )
     return PublishResult(PUB_OK, final_bin_rel^, recorded^, String(""))
 
 
