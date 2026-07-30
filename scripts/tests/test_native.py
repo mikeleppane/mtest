@@ -57,35 +57,58 @@ class NativeCheckCommandTests(unittest.TestCase):
 
     def test_darwin_stack_check_names_every_protected_function(self) -> None:
         disassembly = """
+(__TEXT,__text) section
 _mtest_exec_runtime_open:
-0000000000000010 bl ___stack_chk_fail
+0000000000000000 stp x29, x30, [sp, #-0x10]!
+0000000000000004 bl 0x0000000000000004
+0000000000000008 ret
 _mtest_exec_process_close:
-0000000000000020 ret
+000000000000000c ret
 _mtest_exec_process_poll:
-0000000000000030 bl ___stack_chk_fail
+0000000000000010 stp x29, x30, [sp, #-0x10]!
+0000000000000014 bl 0x0000000000000014
+0000000000000018 ret
+"""
+        relocations = """
+Relocation information (__TEXT,__text) 2 entries
+address  pcrel length extern type    scattered symbolnum/value
+00000004 True  long   True   BR26    False     ___stack_chk_fail
+00000014 True  long   True   BR26    False     ___stack_chk_fail
 """
         self.assertEqual(
             native_abi.protected_function_names(
                 disassembly,
                 symbol="___stack_chk_fail",
                 platform="darwin",
+                relocations=relocations,
             ),
             ("mtest_exec_process_poll", "mtest_exec_runtime_open"),
         )
 
-    def test_symbol_outside_function_region_is_not_artifact_evidence(self) -> None:
+    def test_darwin_relocations_map_at_function_range_boundaries(self) -> None:
         disassembly = """
-___stack_chk_fail
-_mtest_exec_process_close:
-0000000000000020 ret
+(__TEXT,__text) section
+_mtest_exec_first:
+0000000000000000 nop
+0000000000000004 bl 0x0000000000000004
+_mtest_exec_second:
+0000000000000008 bl 0x0000000000000008
+000000000000000c ret
+"""
+        relocations = """
+Relocation information (__TEXT,__text) 2 entries
+address  pcrel length extern type    scattered symbolnum/value
+00000004 True  long   True   BR26    False     ___stack_chk_fail
+00000008 True  long   True   BR26    False     ___stack_chk_fail
 """
         self.assertEqual(
             native_abi.protected_function_names(
                 disassembly,
                 symbol="___stack_chk_fail",
                 platform="darwin",
+                relocations=relocations,
             ),
-            (),
+            ("mtest_exec_first", "mtest_exec_second"),
         )
 
     def test_stack_symbol_must_be_a_complete_disassembly_token(self) -> None:
@@ -102,33 +125,180 @@ _mtest_exec_process_close:
             (),
         )
 
-    def test_empty_protected_set_names_every_parsed_function(self) -> None:
+    def test_darwin_non_text_target_relocation_is_rejected(self) -> None:
         disassembly = """
+(__TEXT,__text) section
 _mtest_exec_process_open:
-0000000000000010 ret
-_mtest_exec_process_close:
-0000000000000020 ret
+0000000000000000 bl 0x0000000000000000
+"""
+        relocations = """
+Relocation information (__DATA,__data) 1 entries
+address  pcrel length extern type    scattered symbolnum/value
+00000000 True  long   True   BR26    False     ___stack_chk_fail
 """
         with self.assertRaisesRegex(
             SystemExit,
-            "no function region references ___stack_chk_fail.*"
+            r"stack-check relocation.*outside \(__TEXT,__text\)",
+        ):
+            native_abi.protected_function_names(
+                disassembly,
+                symbol="___stack_chk_fail",
+                platform="darwin",
+                relocations=relocations,
+            )
+
+    def test_darwin_malformed_section_cannot_inherit_text_context(self) -> None:
+        disassembly = """
+(__TEXT,__text) section
+_mtest_exec_process_open:
+0000000000000000 bl 0x0000000000000000
+"""
+        relocations = """
+Relocation information (__TEXT,__text) 1 entries
+address  pcrel length extern type    scattered symbolnum/value
+Relocation information (__DATA,__data): 1 entries
+00000000 True  long   True   BR26    False     ___stack_chk_fail
+"""
+        with self.assertRaisesRegex(
+            SystemExit,
+            r"unparsed Darwin relocation section header.*__DATA,__data",
+        ):
+            native_abi.protected_function_names(
+                disassembly,
+                symbol="___stack_chk_fail",
+                platform="darwin",
+                relocations=relocations,
+            )
+
+    def test_darwin_partial_stack_symbol_is_not_artifact_evidence(self) -> None:
+        disassembly = """
+(__TEXT,__text) section
+_mtest_exec_process_open:
+0000000000000000 bl 0x0000000000000000
+"""
+        relocations = """
+Relocation information (__TEXT,__text) 1 entries
+address  pcrel length extern type    scattered symbolnum/value
+00000000 True  long   True   BR26    False     ___stack_chk_fail_probe
+"""
+        self.assertEqual(
+            native_abi.protected_function_names(
+                disassembly,
+                symbol="___stack_chk_fail",
+                platform="darwin",
+                relocations=relocations,
+            ),
+            (),
+        )
+
+    def test_darwin_raw_target_in_unparsed_relocation_fails_closed(self) -> None:
+        disassembly = """
+(__TEXT,__text) section
+_mtest_exec_process_open:
+0000000000000000 bl 0x0000000000000000
+"""
+        relocations = """
+Relocation information (__TEXT,__text) 1 entries
+address  pcrel length extern type    scattered symbolnum/value
+00000000 True long True BR26 ___stack_chk_fail
+"""
+        with self.assertRaisesRegex(
+            SystemExit,
+            r"unparsed Darwin relocation.*___stack_chk_fail.*00000000",
+        ):
+            native_abi.protected_function_names(
+                disassembly,
+                symbol="___stack_chk_fail",
+                platform="darwin",
+                relocations=relocations,
+            )
+
+    def test_darwin_target_relocation_address_must_match_a_function(self) -> None:
+        disassembly = """
+(__TEXT,__text) section
+_mtest_exec_process_open:
+0000000000000000 bl 0x0000000000000000
+0000000000000004 ret
+"""
+        relocations = """
+Relocation information (__TEXT,__text) 1 entries
+address  pcrel length extern type    scattered symbolnum/value
+00000020 True  long   True   BR26    False     ___stack_chk_fail
+"""
+        with self.assertRaisesRegex(
+            SystemExit,
+            r"relocation address 0x20.*does not map.*mtest_exec_process_open",
+        ):
+            native_abi.protected_function_names(
+                disassembly,
+                symbol="___stack_chk_fail",
+                platform="darwin",
+                relocations=relocations,
+            )
+
+    def test_darwin_ambiguous_function_ranges_fail_closed(self) -> None:
+        disassembly = """
+(__TEXT,__text) section
+_mtest_exec_first:
+0000000000000000 bl 0x0000000000000000
+_mtest_exec_alias:
+0000000000000000 bl 0x0000000000000000
+"""
+        relocations = """
+Relocation information (__TEXT,__text) 1 entries
+address  pcrel length extern type    scattered symbolnum/value
+00000000 True  long   True   BR26    False     ___stack_chk_fail
+"""
+        with self.assertRaisesRegex(
+            SystemExit,
+            r"ambiguous Darwin function start 0x0.*"
+            r"mtest_exec_alias, mtest_exec_first",
+        ):
+            native_abi.protected_function_names(
+                disassembly,
+                symbol="___stack_chk_fail",
+                platform="darwin",
+                relocations=relocations,
+            )
+
+    def test_empty_protected_set_names_every_parsed_function(self) -> None:
+        disassembly = """
+(__TEXT,__text) section
+_mtest_exec_process_open:
+0000000000000000 ret
+_mtest_exec_process_close:
+0000000000000004 ret
+"""
+        relocations = """
+Relocation information (__TEXT,__text) 1 entries
+address  pcrel length extern type    scattered symbolnum/value
+00000000 True  long   True   BR26    False     ___stack_chk_fail_probe
+"""
+        with self.assertRaisesRegex(
+            SystemExit,
+            "no stack-check relocations mapped to functions.*"
             "mtest_exec_process_close, mtest_exec_process_open",
         ):
             native_abi.require_protected_functions(
                 disassembly,
                 symbol="___stack_chk_fail",
                 platform="darwin",
+                relocations=relocations,
             )
 
     def test_disassembly_drift_reports_that_no_functions_were_parsed(self) -> None:
         with self.assertRaisesRegex(
             SystemExit,
-            "no function region references ___stack_chk_fail.*parsed functions: <none>",
+            "Darwin disassembly parsed no function ranges",
         ):
             native_abi.require_protected_functions(
-                "___stack_chk_fail\n",
+                "(__TEXT,__text) section\n",
                 symbol="___stack_chk_fail",
                 platform="darwin",
+                relocations=(
+                    "Relocation information (__TEXT,__text) 0 entries\n"
+                    "address pcrel length extern type scattered symbolnum/value\n"
+                ),
             )
 
     def test_main_reports_sorted_stack_protected_functions(self) -> None:

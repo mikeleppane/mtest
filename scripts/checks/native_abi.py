@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from itertools import pairwise
 import os
 from pathlib import Path
 import platform
@@ -274,13 +275,182 @@ def _protected_names(regions: dict[str, str], symbol: str) -> tuple[str, ...]:
     )
 
 
+def _darwin_function_ranges(
+    disassembly: str,
+) -> tuple[tuple[int, int, str], ...]:
+    """Return strict ARM64 function address ranges from ``otool -tvV``."""
+    lines = disassembly.splitlines()
+    section_headers = [
+        index
+        for index, line in enumerate(lines)
+        if line.strip() == "(__TEXT,__text) section"
+    ]
+    require(
+        len(section_headers) == 1,
+        "Darwin disassembly expected exactly one (__TEXT,__text) section",
+    )
+    text_lines = lines[section_headers[0] + 1 :]
+    label = re.compile(r"^_(?P<name>[A-Za-z_$][A-Za-z0-9_.$]*):$")
+    instruction = re.compile(r"^(?P<address>[0-9A-Fa-f]{8,16})\s+")
+    labels: list[tuple[int, str]] = []
+    for index, line in enumerate(text_lines):
+        match = label.fullmatch(line.strip())
+        if match is not None:
+            labels.append((index, match.group("name")))
+
+    require(bool(labels), "Darwin disassembly parsed no function ranges")
+    ranges: list[tuple[int, int, str]] = []
+    names: set[str] = set()
+    for position, (start_line, name) in enumerate(labels):
+        require(name not in names, f"duplicate disassembly function label: {name}")
+        names.add(name)
+        end_line = (
+            labels[position + 1][0] if position + 1 < len(labels) else len(text_lines)
+        )
+        addresses = [
+            int(match.group("address"), 16)
+            for line in text_lines[start_line + 1 : end_line]
+            if (match := instruction.match(line.strip())) is not None
+        ]
+        require(
+            bool(addresses),
+            f"Darwin function {name} has no parsed instructions",
+        )
+        require(
+            addresses == sorted(set(addresses)),
+            f"Darwin function {name} has non-increasing instruction addresses",
+        )
+        ranges.append((addresses[0], addresses[-1] + 4, name))
+
+    by_start: dict[int, list[str]] = {}
+    for start, _, name in ranges:
+        by_start.setdefault(start, []).append(name)
+    for start, aliases in by_start.items():
+        require(
+            len(aliases) == 1,
+            f"ambiguous Darwin function start 0x{start:x}: "
+            + ", ".join(sorted(aliases)),
+        )
+
+    ordered = tuple(sorted(ranges))
+    for previous, current in pairwise(ordered):
+        require(
+            previous[1] <= current[0],
+            "ambiguous Darwin function ranges: "
+            f"{previous[2]} [0x{previous[0]:x},0x{previous[1]:x}) overlaps "
+            f"{current[2]} [0x{current[0]:x},0x{current[1]:x})",
+        )
+    return ordered
+
+
+def _darwin_target_relocation_addresses(
+    relocations: str,
+    *,
+    symbol: str,
+) -> tuple[int, ...]:
+    """Return exact external ARM64 branch relocations to ``symbol``."""
+    section_header = re.compile(
+        r"^Relocation information "
+        r"\((?P<segment>[^,()\s]+),(?P<section>[^,()\s]+)\) "
+        r"[0-9]+ entries$"
+    )
+    relocation = re.compile(
+        r"^(?P<address>[0-9A-Fa-f]{8,16})\s+"
+        r"(?P<pcrel>True|False)\s+"
+        r"(?P<length>byte|word|long|quad)\s+"
+        r"(?P<extern>True|False)\s+"
+        r"(?P<type>[A-Z0-9_]+)\s+"
+        r"(?P<scattered>True|False)\s+"
+        r"(?P<symbol>\S+)$"
+    )
+    current_section: tuple[str, str] | None = None
+    addresses: list[int] = []
+    for raw_line in relocations.splitlines():
+        line = raw_line.strip()
+        header_match = section_header.fullmatch(line)
+        if header_match is not None:
+            current_section = (
+                header_match.group("segment"),
+                header_match.group("section"),
+            )
+            continue
+        if line.startswith("Relocation information "):
+            raise SystemExit(
+                f"native-abi-check: unparsed Darwin relocation section header: {line}"
+            )
+        if not _references_symbol(line, symbol):
+            continue
+        require(
+            current_section == ("__TEXT", "__text"),
+            f"stack-check relocation for {symbol} is outside (__TEXT,__text): {line}",
+        )
+        match = relocation.fullmatch(line)
+        if match is None:
+            raise SystemExit(
+                f"native-abi-check: unparsed Darwin relocation for {symbol}: {line}"
+            )
+        require(
+            match.group("pcrel") == "True"
+            and match.group("length") == "long"
+            and match.group("extern") == "True"
+            and match.group("type") == "BR26"
+            and match.group("scattered") == "False"
+            and match.group("symbol") == symbol,
+            f"Darwin relocation for {symbol} is not exact external BR26: {line}",
+        )
+        address = int(match.group("address"), 16)
+        require(
+            address not in addresses,
+            f"duplicate Darwin relocation address for {symbol}: 0x{address:x}",
+        )
+        addresses.append(address)
+    return tuple(sorted(addresses))
+
+
+def _darwin_protected_names(
+    disassembly: str,
+    relocations: str,
+    *,
+    symbol: str,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Map exact stack-check relocation addresses to Darwin function names."""
+    ranges = _darwin_function_ranges(disassembly)
+    protected: set[str] = set()
+    parsed = tuple(sorted(name for _, _, name in ranges))
+    for address in _darwin_target_relocation_addresses(
+        relocations,
+        symbol=symbol,
+    ):
+        matches = [name for start, end, name in ranges if start <= address < end]
+        require(
+            len(matches) == 1,
+            f"Darwin relocation address 0x{address:x} for {symbol} does not "
+            "map to exactly one function; parsed functions: " + ", ".join(parsed),
+        )
+        protected.add(matches[0])
+    return tuple(sorted(protected)), parsed
+
+
 def protected_function_names(
     disassembly: str,
     *,
     symbol: str,
     platform: str,
+    relocations: str | None = None,
 ) -> tuple[str, ...]:
     """Return every normalized function region that references ``symbol``."""
+    if platform == "darwin":
+        if relocations is None:
+            raise SystemExit(
+                "native-abi-check: Darwin stack-protector evidence requires "
+                "otool -rv relocations"
+            )
+        protected, _ = _darwin_protected_names(
+            disassembly,
+            relocations,
+            symbol=symbol,
+        )
+        return protected
     regions = _function_regions(disassembly, platform_name=platform)
     return _protected_names(regions, symbol)
 
@@ -290,8 +460,27 @@ def require_protected_functions(
     *,
     symbol: str,
     platform: str,
+    relocations: str | None = None,
 ) -> tuple[str, ...]:
     """Require and return nonempty stack-protector artifact evidence."""
+    if platform == "darwin":
+        if relocations is None:
+            raise SystemExit(
+                "native-abi-check: Darwin stack-protector evidence requires "
+                "otool -rv relocations"
+            )
+        protected, parsed_names = _darwin_protected_names(
+            disassembly,
+            relocations,
+            symbol=symbol,
+        )
+        parsed = ", ".join(parsed_names) if parsed_names else "<none>"
+        require(
+            bool(protected),
+            "production Darwin relocations have no stack-check relocations "
+            f"mapped to functions for {symbol}; parsed functions: {parsed}",
+        )
+        return protected
     regions = _function_regions(disassembly, platform_name=platform)
     protected = _protected_names(regions, symbol)
     parsed = ", ".join(sorted(regions)) if regions else "<none>"
@@ -304,7 +493,7 @@ def require_protected_functions(
 
 
 def disassembly(object_path: Path) -> str:
-    """Return platform disassembly with relocation/symbol references."""
+    """Return platform disassembly used for function-range evidence."""
     if sys.platform == "linux":
         command = [os.environ.get("OBJDUMP", "objdump"), "-dr", str(object_path)]
     elif sys.platform == "darwin":
@@ -317,6 +506,21 @@ def disassembly(object_path: Path) -> str:
     require(
         proc.returncode == 0,
         f"disassembly failed for {object_path}:\n{proc.stdout}",
+    )
+    return proc.stdout
+
+
+def darwin_relocations(object_path: Path) -> str:
+    """Return Darwin relocation records used for external-call evidence."""
+    require(
+        sys.platform == "darwin",
+        f"Darwin relocations requested on unsupported platform {sys.platform}",
+    )
+    command = [os.environ.get("OTOOL", "otool"), "-rv", str(object_path)]
+    proc = run(command)
+    require(
+        proc.returncode == 0,
+        f"relocation inspection failed for {object_path}:\n{proc.stdout}",
     )
     return proc.stdout
 
@@ -353,6 +557,9 @@ def verify_stack_protector(
         disassembly(production),
         symbol=symbol,
         platform=sys.platform,
+        relocations=(
+            darwin_relocations(production) if sys.platform == "darwin" else None
+        ),
     )
     with tempfile.TemporaryDirectory(prefix="mtest-stack-canary-") as raw_tmp:
         tmp = Path(raw_tmp)
