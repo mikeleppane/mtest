@@ -931,15 +931,31 @@ invocation root is in the key, though, so moving or renaming the checkout
 invalidates everything in it.
 
 Build inputs must remain stable while a compiler invocation runs; mutation
-during compilation is unsupported. Test-file publication re-checks inputs after
-compilation, catching an input you edited and left edited: it publishes nothing
-and rebuilds next run. It cannot catch one you edited and undid *while the
-compiler was reading it*: both checks agree, and the stored binary came from
-bytes that are no longer anywhere. Configured precompile-step inputs are sampled
-once, so their unsupported mutation window spans the whole step. If you edited
+during compilation is unsupported. Publication refuses to store a build whose
+inputs did not hold still: every input the key sampled is re-checked first — by
+content, and by the filesystem identity and change times it had when it was
+keyed — so an input you edited and left edited is caught, and so is one you
+edited and *undid* while the compiler was reading it, where both content samples
+agree and the stored binary would have come from bytes that are no longer
+anywhere. Nothing is published, a `cache-publish` warning names the input, the
+run itself stays green, and the file is rebuilt next run. A configured
+precompile step is covered the same way: its inputs are re-checked before it is
+stamped, and a step whose inputs moved is simply left unstamped and runs again.
+
+What is left over — a mutate-and-restore finishing inside one filesystem
+timestamp tick, a persistent mid-session edit that a later file in the same
+directory hits, and the `-I` roots and toolchain that are sampled once per
+session — is stated in full in [the CLI
+contract](docs/cli-contract.md) under the cache's non-goals. If you edited
 during a slow compile and changed your mind, `--no-cache` compiles from what is
-on disk and `--cache-clear` discards what was stored. The full statement is in
-[the CLI contract](docs/cli-contract.md) under the cache's non-goals.
+on disk and `--cache-clear` discards what was stored.
+
+The store pays for itself from about three test files upward. Its fixed
+per-session cost — mostly digesting the compiler and the library directory
+beside it — barely grows with the suite, so on a one- or two-file suite a warm
+run can be slower than `--no-cache`, and from three files up it wins by more the
+larger the suite gets. That is one machine with the compiler's own cache already
+warm; CI compiles cold, which moves the crossover further in the cache's favour.
 
 There is no import-graph analysis. One edit under an `-I` root invalidates every
 file keyed over that root, and one edit beside a test file invalidates every test
