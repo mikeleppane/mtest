@@ -166,7 +166,11 @@ class DarwinDependencyClosureTests(unittest.TestCase):
             path.write_bytes(b"Mach-O fixture\n")
 
     @staticmethod
-    def _loads(version: str = "14.0", *rpaths: str) -> str:
+    def _loads(
+        version: str = "14.0",
+        *rpaths: str,
+        platform: str = "1",
+    ) -> str:
         return "".join(
             "          cmd LC_RPATH\n"
             "      cmdsize 48\n"
@@ -174,7 +178,7 @@ class DarwinDependencyClosureTests(unittest.TestCase):
             for rpath in rpaths
         ) + (
             "          cmd LC_BUILD_VERSION\n"
-            "     platform 1\n"
+            f"     platform {platform}\n"
             f"        minos {version}\n"
             "          sdk 26.0\n"
         )
@@ -190,16 +194,31 @@ class DarwinDependencyClosureTests(unittest.TestCase):
         self,
         dependencies: dict[Path, str],
         loads: dict[Path, str],
+        *,
+        architectures: dict[Path, tuple[str, ...]] | None = None,
     ) -> mock.Mock:
         runner = mock.Mock()
 
         def fake_run(
             argv: list[str], **_kwargs: object
         ) -> subprocess.CompletedProcess[str]:
-            """Return one exact `otool` fixture for the requested file."""
+            """Return one exact Mach-O tool fixture for the requested file."""
             runner(argv)
-            path = Path(argv[2]).resolve()
-            output = dependencies[path] if argv[1] == "-L" else loads[path]
+            path = Path(argv[-1]).resolve()
+            if argv[0] == "lipo":
+                output = " ".join((architectures or {}).get(path, ("arm64",))) + "\n"
+            elif "-L" in argv:
+                output = dependencies[path]
+            elif "-l" in argv:
+                output = loads[path]
+            else:
+                output = (
+                    "Mach header\n"
+                    "      magic  cputype cpusubtype  caps    filetype ncmds "
+                    "sizeofcmds      flags\n"
+                    "MH_MAGIC_64    ARM64        ALL  0x00       DYLIB    20 "
+                    "2048   NOUNDEFS DYLDLINK TWOLEVEL\n"
+                )
             return subprocess.CompletedProcess(argv, 0, output, "")
 
         with mock.patch.object(subprocess, "run", side_effect=fake_run):
@@ -231,11 +250,143 @@ class DarwinDependencyClosureTests(unittest.TestCase):
 
         runner = self._run_with(dependencies, loads)
 
-        inspected = [Path(call.args[0][2]).resolve() for call in runner.call_args_list]
+        inspected = [
+            Path(call.args[0][-1]).resolve()
+            for call in runner.call_args_list
+            if call.args[0][0] == "otool" and call.args[0][-2] in ("-L", "-l")
+        ]
         self.assertEqual(inspected.count(self.mtest), 2)
         self.assertEqual(inspected.count(self.lib_a), 2)
         self.assertEqual(inspected.count(self.lib_b), 2)
         self.assertNotIn(self.shadow_a, inspected)
+
+    def test_rpath_skips_wrong_architecture_before_a_loadable_candidate(
+        self,
+    ) -> None:
+        dependencies = {
+            self.mtest: self._dependencies(self.mtest, "@rpath/libA.dylib"),
+            self.lib_a: self._dependencies(self.lib_a),
+            self.shadow_a: self._dependencies(self.shadow_a),
+        }
+        loads = {
+            self.mtest: self._loads(
+                "14.0",
+                "@executable_path/../lib/first",
+                "@executable_path/../lib/second",
+            ),
+            self.lib_a: self._loads("14.0"),
+            self.shadow_a: self._loads("14.1"),
+        }
+
+        with self.assertRaisesRegex(
+            PackageCheckError,
+            r"lib/second/libA\.dylib.*14\.1.*14\.0",
+        ):
+            self._run_with(
+                dependencies,
+                loads,
+                architectures={
+                    self.lib_a: ("x86_64",),
+                    self.shadow_a: ("arm64",),
+                },
+            )
+
+    def test_rpath_skips_non_macos_platform_before_a_loadable_candidate(
+        self,
+    ) -> None:
+        dependencies = {
+            self.mtest: self._dependencies(self.mtest, "@rpath/libA.dylib"),
+            self.lib_a: self._dependencies(self.lib_a),
+            self.shadow_a: self._dependencies(self.shadow_a),
+        }
+        loads = {
+            self.mtest: self._loads(
+                "14.0",
+                "@executable_path/../lib/first",
+                "@executable_path/../lib/second",
+            ),
+            self.lib_a: self._loads("14.0", platform="2"),
+            self.shadow_a: self._loads("14.1"),
+        }
+
+        with self.assertRaisesRegex(
+            PackageCheckError,
+            r"lib/second/libA\.dylib.*14\.1.*14\.0",
+        ):
+            self._run_with(dependencies, loads)
+
+    def test_rpath_rejects_malformed_architecture_metadata(self) -> None:
+        dependencies = {
+            self.mtest: self._dependencies(self.mtest, "@rpath/libA.dylib"),
+            self.lib_a: self._dependencies(self.lib_a),
+        }
+        loads = {
+            self.mtest: self._loads(
+                "14.0",
+                "@executable_path/../lib/first",
+            ),
+            self.lib_a: self._loads("14.0"),
+        }
+
+        with self.assertRaisesRegex(
+            PackageCheckError,
+            r"malformed.*architecture.*lib/first/libA\.dylib",
+        ):
+            self._run_with(
+                dependencies,
+                loads,
+                architectures={self.lib_a: ("arm64???",)},
+            )
+
+    def test_rpath_rejects_missing_platform_metadata(self) -> None:
+        dependencies = {
+            self.mtest: self._dependencies(self.mtest, "@rpath/libA.dylib"),
+            self.lib_a: self._dependencies(self.lib_a),
+        }
+        loads = {
+            self.mtest: self._loads(
+                "14.0",
+                "@executable_path/../lib/first",
+            ),
+            self.lib_a: (
+                "          cmd LC_BUILD_VERSION\n"
+                "        minos 14.0\n"
+                "          sdk 26.0\n"
+            ),
+        }
+
+        with self.assertRaisesRegex(
+            PackageCheckError,
+            r"missing platform.*lib/first/libA\.dylib",
+        ):
+            self._run_with(dependencies, loads)
+
+    def test_rpath_rejects_incompatible_candidate_that_escapes_prefix(
+        self,
+    ) -> None:
+        outside = self.prefix.parent / "outside.dylib"
+        outside.write_bytes(b"foreign Mach-O fixture\n")
+        self.lib_a.unlink()
+        self.lib_a.symlink_to(outside)
+        dependencies = {
+            self.mtest: self._dependencies(self.mtest, "@rpath/libA.dylib"),
+            self.shadow_a: self._dependencies(self.shadow_a),
+        }
+        loads = {
+            self.mtest: self._loads(
+                "14.0",
+                "@executable_path/../lib/first",
+                "@executable_path/../lib/second",
+            ),
+            self.shadow_a: self._loads("14.0"),
+        }
+
+        with self.assertRaisesRegex(PackageCheckError, "escapes.*scratch prefix"):
+            self._run_with(
+                dependencies,
+                loads,
+                architectures={outside: ("x86_64",)},
+            )
 
     def test_prefix_escape_is_rejected(self) -> None:
         outside = self.prefix.parent / "outside.dylib"
@@ -284,7 +435,7 @@ class DarwinDependencyClosureTests(unittest.TestCase):
             return subprocess.CompletedProcess(
                 argv,
                 0,
-                dependencies if argv[1] == "-L" else loads,
+                dependencies if "-L" in argv else loads,
                 "",
             )
 
