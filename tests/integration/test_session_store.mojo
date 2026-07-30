@@ -37,6 +37,7 @@ from std.os import (
 )
 from std.os.path import exists, isdir, islink, realpath
 from std.sys.info import CompilationTarget
+from std.time import sleep
 from std.testing import (
     TestSuite,
     assert_equal,
@@ -640,6 +641,77 @@ def _near(a: Float64, b: Float64) -> Bool:
     return d < 1.0e-6
 
 
+def _mutate_until_witnessed(path: String, data: String) raises:
+    """Write `data` to `path` and prove the filesystem recorded a change.
+
+    Timestamps may be quantized to multi-millisecond ticks, so a write landing
+    in the same tick as a prior capture is invisible to a metadata comparison.
+    Rewrite-and-wait until `lstat` shows movement against the state before this
+    call, so every mutation here is one the publication guard can actually see —
+    a fixture that mutates microseconds after the key was taken passes on a
+    fine-grained filesystem and fails on a coarse one.
+
+    Args:
+        path: The absolute path to rewrite.
+        data: The bytes to leave there. Rewriting the SAME bytes is the
+            interesting case and works: size holds still while `ctime` moves.
+
+    Raises:
+        Error: If the path cannot be written, or if a second of rewriting never
+            moved a single field — which would mean the comparison this suite
+            relies on cannot see writes at all.
+    """
+    var before = lstat(path)
+    for _ in range(200):
+        with open(path, "w") as f:
+            f.write(data)
+        var now = lstat(path)
+        if (
+            Int(now.st_ctimespec.tv_sec) != Int(before.st_ctimespec.tv_sec)
+            or Int(now.st_ctimespec.tv_subsec)
+            != Int(before.st_ctimespec.tv_subsec)
+            or Int(now.st_size) != Int(before.st_size)
+        ):
+            return
+        sleep(0.005)
+    raise Error("test: the filesystem never recorded the mutation")
+
+
+def _churn_until_witnessed(dir_abs: String, file_abs: String) raises:
+    """Create and remove `file_abs` until `dir_abs`'s own times record it.
+
+    The membership case has no file record to compare — the entry is gone by
+    the time anything looks — so the directory's times are the only evidence,
+    and they are subject to the same tick quantization a file's are. Repeat the
+    create-and-remove until the directory moved against its state before this
+    call.
+
+    Args:
+        dir_abs: The absolute directory whose membership churns.
+        file_abs: The absolute path created and removed inside it.
+
+    Raises:
+        Error: If the directory never recorded the churn.
+    """
+    var before = lstat(dir_abs)
+    for _ in range(200):
+        with open(file_abs, "w") as f:
+            f.write("# transient\n")
+        remove(file_abs)
+        var now = lstat(dir_abs)
+        if (
+            Int(now.st_ctimespec.tv_sec) != Int(before.st_ctimespec.tv_sec)
+            or Int(now.st_ctimespec.tv_subsec)
+            != Int(before.st_ctimespec.tv_subsec)
+            or Int(now.st_mtimespec.tv_sec) != Int(before.st_mtimespec.tv_sec)
+            or Int(now.st_mtimespec.tv_subsec)
+            != Int(before.st_mtimespec.tv_subsec)
+        ):
+            return
+        sleep(0.005)
+    raise Error("test: the filesystem never recorded the membership change")
+
+
 def test_staging_directory_name_carries_the_mangled_source() raises:
     # The compiler child writes to staging for the whole first-attempt build.
     # Publication normally finishes before the test child starts, so the test
@@ -1069,6 +1141,7 @@ def test_probe_rejects_wrong_key_meta() raises:
         src_dir=key.src_dir,
         dir_sha=key.dir_sha,
         dir_full=key.dir_full,
+        input_witnesses=key.input_witnesses.copy(),
     )
     assert_equal(store_probe(root, collided).kind, PROBE_MISS)
     assert_false(isdir(root + "/" + key.gen_dir))
@@ -1281,8 +1354,15 @@ def test_publish_refuses_a_source_changed_mid_compile() raises:
     # it would serve it to a later run whose key still says "before".
     assert_equal(pub.kind, PUB_FAILED)
     assert_true(
-        "source changed" in pub.warning,
+        "changed while the build ran" in pub.warning,
         "the warning did not name the cause: " + pub.warning,
+    )
+    # The entry source by name. A guard that refused on the directory instead
+    # would also produce PUB_FAILED, and this case would stop discriminating
+    # the two inputs it exists to tell apart.
+    assert_true(
+        rel in pub.warning,
+        "the warning did not name the input: " + pub.warning,
     )
     assert_false(isdir(root + "/" + key.gen_dir))
     assert_equal(pub.bin_rel, target.out_rel)
@@ -1317,7 +1397,8 @@ def test_publish_refuses_a_helper_changed_mid_compile() raises:
     # re-read that file would report PUB_OK here and this test would pass on
     # the wrong mechanism if it checked the kind alone.
     assert_true(
-        "changed" in pub.warning and "beside" in pub.warning,
+        "changed while the build ran" in pub.warning
+        and "helper.mojo" in pub.warning,
         "the warning did not name the cause: " + pub.warning,
     )
     assert_false(isdir(root + "/" + key.gen_dir))
@@ -1345,6 +1426,281 @@ def test_publish_accepts_an_untouched_directory() raises:
     )
     assert_equal(pub.kind, PUB_OK, "warning: " + pub.warning)
     assert_true(isdir(root + "/" + key.gen_dir))
+
+
+def test_publish_refuses_a_helper_restored_after_an_edit() raises:
+    """An edit-and-undo across the build window must not publish.
+
+    Both content samples agree — the bytes were restored — but the binary was
+    built while the helper held OTHER bytes, and every later run over the
+    restored tree would hit that binary. Identity and change times cannot be
+    restored from userspace, so publication refuses on those instead.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_undo_helper.mojo")
+    write_file(root, "tests/helper.mojo", "# before\n")
+    var key = _fixture_key(root, rel, "# entry\n")
+    var target = _stage_binary(root, [UInt8(1)])
+    var helper = root + "/tests/helper.mojo"
+    _mutate_until_witnessed(helper, "# other\n")
+    _mutate_until_witnessed(helper, "# before\n")
+
+    var pub = store_publish(
+        root, key, target, 1.0, _build_argv(rel, target.out_rel)
+    )
+    assert_equal(pub.kind, PUB_FAILED)
+    # The helper by its whole label, not a substring of it: `helper.mojo`
+    # also occurs inside `test_uses_helper.mojo`, so a bare membership test
+    # would be satisfied by a warning naming the entry source instead.
+    assert_equal(pub.warning, "'tests/helper.mojo' changed while the build ran")
+    assert_false(isdir(root + "/" + key.gen_dir))
+    # A refusal is never a failure of the run: the caller keeps running exactly
+    # what it built.
+    assert_equal(pub.bin_rel, target.out_rel)
+    assert_true(exists(root + "/" + target.out_rel))
+
+
+def test_publish_refuses_a_source_restored_after_an_edit() raises:
+    """The entry source gets the same treatment as its helpers."""
+    var root = temp_root()
+    var rel = String("tests/test_undo_source.mojo")
+    var key = _fixture_key(root, rel, "# entry\n")
+    var target = _stage_binary(root, [UInt8(1)])
+    var source = root + "/" + rel
+    _mutate_until_witnessed(source, "# other\n")
+    _mutate_until_witnessed(source, "# entry\n")
+
+    var pub = store_publish(
+        root, key, target, 1.0, _build_argv(rel, target.out_rel)
+    )
+    assert_equal(pub.kind, PUB_FAILED)
+    assert_equal(pub.warning, "'" + rel + "' changed while the build ran")
+    assert_false(isdir(root + "/" + key.gen_dir))
+
+
+def test_publish_refuses_a_helper_replaced_with_identical_bytes() raises:
+    """Write-temp-and-rename-over changes identity while the bytes agree.
+
+    The everyday shape of an editor saving a file. Content re-sampling cannot
+    see it at all — the bytes never differ — and no timestamp tick can hide it,
+    because the name resolves to a different inode afterwards.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_replaced.mojo")
+    write_file(root, "tests/helper.mojo", "# same\n")
+    var key = _fixture_key(root, rel, "# entry\n")
+    var target = _stage_binary(root, [UInt8(1)])
+    write_file(root, "tests/helper.mojo.tmp", "# same\n")
+    rename_path(root + "/tests/helper.mojo.tmp", root + "/tests/helper.mojo")
+
+    var pub = store_publish(
+        root, key, target, 1.0, _build_argv(rel, target.out_rel)
+    )
+    assert_equal(pub.kind, PUB_FAILED)
+    # The rename also moves the DIRECTORY's times, so a guard that only held
+    # directories would refuse here too and this case would stop testing the
+    # identity comparison it is named for.
+    assert_equal(pub.warning, "'tests/helper.mojo' changed while the build ran")
+    assert_false(isdir(root + "/" + key.gen_dir))
+
+
+def test_publish_refuses_a_retargeted_and_restored_helper_link() raises:
+    """A symlinked helper repointed mid-build and repointed back.
+
+    Both targets keep their own stat, and the bytes behind the link are the
+    original ones again by the time publication looks, so a sample that
+    followed the link would agree with the key. The link's OWN identity moved.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_relink.mojo")
+    write_file(root, "tests/helper_a.mojo", "# a\n")
+    write_file(root, "tests/helper_b.mojo", "# b\n")
+    symlink(root + "/tests/helper_a.mojo", root + "/tests/helper.mojo")
+    var key = _fixture_key(root, rel, "# entry\n")
+    var target = _stage_binary(root, [UInt8(1)])
+    remove(root + "/tests/helper.mojo")
+    symlink(root + "/tests/helper_b.mojo", root + "/tests/helper.mojo")
+    remove(root + "/tests/helper.mojo")
+    symlink(root + "/tests/helper_a.mojo", root + "/tests/helper.mojo")
+
+    var pub = store_publish(
+        root, key, target, 1.0, _build_argv(rel, target.out_rel)
+    )
+    assert_equal(pub.kind, PUB_FAILED)
+    # Removing and recreating the link moves the directory's times as well, so
+    # only the LINK's own label proves the no-follow record is what refused.
+    assert_equal(pub.warning, "'tests/helper.mojo' changed while the build ran")
+    assert_false(isdir(root + "/" + key.gen_dir))
+
+
+def test_publish_refuses_a_retargeted_and_restored_source_dir_link() raises:
+    """The walked directory itself was reached through a link that moved.
+
+    Everything the walk framed is reached BY FOLLOWING that link, so a link
+    repointed at another tree and repointed back hands the compiler a whole
+    different directory while both targets hold still. The followed record
+    reproduces exactly — it describes the restored target — and only the walk
+    root's own identity moved.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_dir_link.mojo")
+    write_file(root, "real_tests/helper.mojo", "# a\n")
+    write_file(root, "other_tests/helper.mojo", "# b\n")
+    symlink(root + "/real_tests", root + "/tests")
+    var key = _fixture_key(root, rel, "# entry\n")
+    var target = _stage_binary(root, [UInt8(1)])
+    remove(root + "/tests")
+    symlink(root + "/other_tests", root + "/tests")
+    remove(root + "/tests")
+    symlink(root + "/real_tests", root + "/tests")
+
+    var pub = store_publish(
+        root, key, target, 1.0, _build_argv(rel, target.out_rel)
+    )
+    assert_equal(pub.kind, PUB_FAILED)
+    assert_equal(pub.warning, "'tests' changed while the build ran")
+    assert_false(isdir(root + "/" + key.gen_dir))
+
+
+def test_publish_refuses_an_edit_behind_a_stable_helper_link() raises:
+    """The bytes behind a link moved while the link itself did not.
+
+    The counterpart of the retargeting case, and the only shape that isolates
+    the FOLLOWED record. The link's own identity is untouched, its directory's
+    membership is untouched, and the target lives outside the walked directory
+    so it has no record of its own — the walk read it only by following the
+    link. Nothing but the followed sample can refuse this.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_behind_link.mojo")
+    write_file(root, "outside/helper_a.mojo", "# a\n")
+    # The entry source first: it is what creates `tests/` for the link to
+    # land in. `_fixture_key` rewrites the same bytes there a moment later.
+    write_file(root, rel, "# entry\n")
+    symlink(root + "/outside/helper_a.mojo", root + "/tests/helper.mojo")
+    var key = _fixture_key(root, rel, "# entry\n")
+    var target = _stage_binary(root, [UInt8(1)])
+    var behind = root + "/outside/helper_a.mojo"
+    _mutate_until_witnessed(behind, "# other\n")
+    _mutate_until_witnessed(behind, "# a\n")
+
+    var pub = store_publish(
+        root, key, target, 1.0, _build_argv(rel, target.out_rel)
+    )
+    assert_equal(pub.kind, PUB_FAILED)
+    assert_equal(pub.warning, "'tests/helper.mojo' changed while the build ran")
+    assert_false(isdir(root + "/" + key.gen_dir))
+
+
+def test_publish_refuses_a_file_that_came_and_went() raises:
+    """A source created beside the test mid-build and deleted again.
+
+    No file record exists for it — it was absent when the key was taken and
+    absent again when publication looked — and the content re-walk therefore
+    agrees with the key-time walk exactly. The DIRECTORY's own times moved, and
+    that is the only evidence there is.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_transient.mojo")
+    var key = _fixture_key(root, rel, "# entry\n")
+    var target = _stage_binary(root, [UInt8(1)])
+    _churn_until_witnessed(root + "/tests", root + "/tests/transient.mojo")
+    assert_false(exists(root + "/tests/transient.mojo"))
+
+    var pub = store_publish(
+        root, key, target, 1.0, _build_argv(rel, target.out_rel)
+    )
+    assert_equal(pub.kind, PUB_FAILED)
+    # No file moved, so the directory is the only input that CAN be named —
+    # the other side of the pairing every case above asserts.
+    assert_equal(pub.warning, "'tests' changed while the build ran")
+    assert_false(isdir(root + "/" + key.gen_dir))
+
+
+def test_publish_accepts_an_untouched_tree_with_witness() raises:
+    """The no-op control: nothing moved, publication proceeds.
+
+    A capture that could not reproduce itself over a held-still tree would
+    refuse every publication and turn the cache into a pure cost. The tree here
+    holds the shapes the capture treats specially — a helper, a symlinked
+    helper, and a package subdirectory the walk recurses into — so a record
+    that cannot be re-taken for any of them fails here rather than in the
+    field.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_untouched.mojo")
+    write_file(root, "tests/helper_a.mojo", "# a\n")
+    symlink(root + "/tests/helper_a.mojo", root + "/tests/helper.mojo")
+    write_file(root, "tests/pkg/__init__.mojo", "")
+    write_file(root, "tests/pkg/mod.mojo", "# mod\n")
+    var key = _fixture_key(root, rel, "# entry\n")
+    var target = _stage_binary(root, [UInt8(1)])
+
+    var pub = store_publish(
+        root, key, target, 1.0, _build_argv(rel, target.out_rel)
+    )
+    assert_equal(pub.kind, PUB_OK, "warning: " + pub.warning)
+    assert_true(isdir(root + "/" + key.gen_dir))
+
+
+def test_publish_succeeds_for_a_test_file_at_the_invocation_root() raises:
+    """A cold store must not read as churn in the directory it is created in.
+
+    A test file sitting at the invocation root makes that root the walked
+    directory, and `.mtest-cache` is created inside it. Created AFTER the key,
+    that is a new entry beside the source and moves the directory's times, so
+    the run refuses its own publication — every file of the session under the
+    pool, where all of them are keyed before the first staging. It also
+    self-heals on the next run, which is exactly what makes it easy to miss.
+    """
+    var root = temp_root()
+    var rel = String("test_flat.mojo")
+    var key = _fixture_key(root, rel, "# flat\n")
+    var target = _stage_binary(root, [UInt8(1)])
+
+    var pub = store_publish(
+        root, key, target, 1.0, _build_argv(rel, target.out_rel)
+    )
+    assert_equal(pub.kind, PUB_OK, "warning: " + pub.warning)
+    assert_true(isdir(root + "/" + key.gen_dir))
+
+
+def test_a_later_sibling_key_carries_the_directory_witness() raises:
+    """Two siblings share one memoized walk; both keys must carry it.
+
+    The directory is walked once per session and every file in it forks that
+    one result, so a witness recorded into the walk but not copied out to each
+    key would protect the first file and silently leave every later one on the
+    old behavior.
+    """
+    var root = temp_root()
+    var ctx = CacheContext()
+    write_file(root, "tests/helper.mojo", "# before\n")
+    write_file(root, "tests/test_one.mojo", "# one\n")
+    write_file(root, "tests/test_two.mojo", "# two\n")
+    var first = file_key(ctx, root, "tests/test_one.mojo")
+    assert_true(Bool(first))
+    var second = file_key(ctx, root, "tests/test_two.mojo")
+    assert_true(Bool(second))
+    var key = second.value().copy()
+    var target = _stage_binary(root, [UInt8(1)])
+    var helper = root + "/tests/helper.mojo"
+    _mutate_until_witnessed(helper, "# other\n")
+    _mutate_until_witnessed(helper, "# before\n")
+
+    var pub = store_publish(
+        root,
+        key,
+        target,
+        1.0,
+        _build_argv("tests/test_two.mojo", target.out_rel),
+    )
+    assert_equal(pub.kind, PUB_FAILED)
+    assert_true(
+        "changed while the build ran" in pub.warning,
+        "the warning did not name the cause: " + pub.warning,
+    )
+    assert_false(isdir(root + "/" + key.gen_dir))
 
 
 def test_file_key_tracks_the_source_and_misses_a_vanished_one() raises:
@@ -2332,6 +2688,172 @@ def test_precompile_publish_reaps_the_steps_stale_stamps() raises:
     var stamps = dir_listing(root + "/" + STORE_DIR + "/" + PRECOMPILE_SUBDIR)
     assert_equal(len(stamps), 1, "the superseded stamp was not reaped")
     assert_equal(stamps[0], second.gen_name)
+
+
+def _stamp_exists(root: String, key: FileKey) raises -> Bool:
+    """Whether the step's stamp was written at all.
+
+    The sharper question than `precompile_probe`, which also answers False for
+    a stamp that exists and disagrees — a step that was never stamped and one
+    stamped against the wrong output are different outcomes.
+
+    Args:
+        root: The invocation root.
+        key: The step's key.
+
+    Returns:
+        True if a stamp file sits at this key's stamp path.
+    """
+    return exists(root + "/" + precompile_stamp_rel(key.gen_name))
+
+
+def test_a_stamp_is_withheld_when_a_step_source_churned() raises:
+    """A restored single-file source must not stamp the step as clean.
+
+    The stamp records the pre-build key and digests only the OUTPUT, so an
+    input edited while the step ran and restored afterwards matched the stamp
+    forever — and every dependent binary compiled against the stale package,
+    on every later session, with nothing to notice it.
+    """
+    var root = temp_root()
+    write_file(root, "lib/helper.mojo", "# one\n")
+    var out_path = String("build/helper.mojopkg")
+    write_bytes(root, out_path, [UInt8(1)])
+    var no_dirs = List[String]()
+    var ctx = CacheContext()
+    var key = _step_key(
+        ctx, root, "lib/helper.mojo", no_dirs, no_dirs, out_path
+    )
+    var source = root + "/lib/helper.mojo"
+    _mutate_until_witnessed(source, "# other\n")
+    _mutate_until_witnessed(source, "# one\n")
+
+    precompile_publish(root, key, out_path)
+    assert_false(
+        _stamp_exists(root, key),
+        "a step whose source churned was stamped as clean",
+    )
+    assert_false(precompile_probe(root, key, out_path))
+
+
+def test_a_stamp_is_withheld_when_a_dir_source_file_churned() raises:
+    """Same, for a file inside a directory-shaped step source."""
+    var root = _pkg_root()
+    var out_path = String("build/pkg.mojopkg")
+    write_bytes(root, out_path, [UInt8(1)])
+    var no_dirs = List[String]()
+    var ctx = CacheContext()
+    var key = _step_key(ctx, root, "pkg", no_dirs, no_dirs, out_path)
+    var inner = root + "/pkg/__init__.mojo"
+    var original = String("def helper() -> Int:\n    return 1\n")
+    _mutate_until_witnessed(inner, "def helper() -> Int:\n    return 9\n")
+    _mutate_until_witnessed(inner, original)
+
+    precompile_publish(root, key, out_path)
+    assert_false(
+        _stamp_exists(root, key),
+        "a step whose package source churned was stamped as clean",
+    )
+
+
+def test_a_stamp_is_withheld_when_an_include_file_churned() raises:
+    """Same, for a file under one of the step's include roots."""
+    var root = _pkg_root()
+    write_file(root, "inc/lib.mojo", "# lib\n")
+    var out_path = String("build/pkg.mojopkg")
+    write_bytes(root, out_path, [UInt8(1)])
+    var no_dirs = List[String]()
+    var includes: List[String] = ["inc"]
+    var ctx = CacheContext()
+    var key = _step_key(ctx, root, "pkg", includes, no_dirs, out_path)
+    var included = root + "/inc/lib.mojo"
+    _mutate_until_witnessed(included, "# other\n")
+    _mutate_until_witnessed(included, "# lib\n")
+
+    precompile_publish(root, key, out_path)
+    assert_false(
+        _stamp_exists(root, key),
+        "a step whose include root churned was stamped as clean",
+    )
+
+
+def test_a_stamp_is_withheld_when_a_prior_output_churned() raises:
+    """Same, for an earlier step's output this step consumes.
+
+    An earlier step's package is on this step's include path, so it is an
+    input of this step however it was produced.
+    """
+    var root = _pkg_root()
+    var out_path = String("build/pkg.mojopkg")
+    write_bytes(root, out_path, [UInt8(1)])
+    write_file(root, "build/earlier.mojopkg", "# earlier\n")
+    var no_dirs = List[String]()
+    var priors: List[String] = ["build/earlier.mojopkg"]
+    var ctx = CacheContext()
+    var key = _step_key(ctx, root, "pkg", no_dirs, priors, out_path)
+    var earlier = root + "/build/earlier.mojopkg"
+    _mutate_until_witnessed(earlier, "# other\n")
+    _mutate_until_witnessed(earlier, "# earlier\n")
+
+    precompile_publish(root, key, out_path)
+    assert_false(
+        _stamp_exists(root, key),
+        "a step whose prior output churned was stamped as clean",
+    )
+
+
+def test_a_stamp_is_written_for_an_untouched_step() raises:
+    """The no-op control: capture alone must not break stamping.
+
+    All four input classes are present and none of them moves, so a capture
+    that cannot reproduce itself would leave every configured step permanently
+    unstamped and recompiling — the failure mode that costs the most and
+    announces itself the least.
+    """
+    var root = _pkg_root()
+    write_file(root, "inc/lib.mojo", "# lib\n")
+    write_file(root, "build/earlier.mojopkg", "# earlier\n")
+    var out_path = String("build/pkg.mojopkg")
+    write_bytes(root, out_path, [UInt8(1)])
+    var includes: List[String] = ["inc"]
+    var priors: List[String] = ["build/earlier.mojopkg"]
+    var ctx = CacheContext()
+    var key = _step_key(ctx, root, "pkg", includes, priors, out_path)
+
+    precompile_publish(root, key, out_path)
+    assert_true(_stamp_exists(root, key), "an untouched step was not stamped")
+    assert_true(precompile_probe(root, key, out_path))
+
+
+def test_a_stamp_is_written_when_a_step_writes_into_its_include_root() raises:
+    """A step's own output lands in a directory its own walks cover.
+
+    That is the ordinary shape — `-I build` with a step that produces
+    `build/*.mojopkg`, and every step after the first is given the previous
+    step's output directory. The step therefore changes that directory's
+    membership while it runs, by design, so the directory cannot be held to a
+    membership claim: doing so would leave every such step unstamped and
+    recompiling on every run, forever and silently. Its FILES are still held to
+    theirs, which is where an actual input would show up.
+    """
+    var root = _pkg_root()
+    var out_path = String("build/pkg.mojopkg")
+    var includes: List[String] = ["build"]
+    var no_dirs = List[String]()
+    # An earlier step's package, already in the include root the walk frames.
+    write_file(root, "build/earlier.mojopkg", "# earlier\n")
+    var ctx = CacheContext()
+    var key = _step_key(ctx, root, "pkg", includes, no_dirs, out_path)
+
+    # The step runs and creates its output inside that include root, which is
+    # what moves the directory's times.
+    write_bytes(root, out_path, [UInt8(1)])
+    precompile_publish(root, key, out_path)
+    assert_true(
+        _stamp_exists(root, key),
+        "a step that wrote its output into its own include root was refused",
+    )
+    assert_true(precompile_probe(root, key, out_path))
 
 
 # --- Configured precompile steps: the invocation oracle ----------------------

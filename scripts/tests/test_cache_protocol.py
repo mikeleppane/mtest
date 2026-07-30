@@ -3,7 +3,7 @@
 
 Every other cache test in this repository runs inside one process: the Mojo
 suites call `store_probe`, `store_publish`, and `clear_cache_root` directly,
-one call at a time. Three properties are invisible from there.
+one call at a time. Four properties are invisible from there.
 
 - Concurrency. The publication protocol is about two processes racing for one
   generation directory. A single-process test can simulate the losing branch
@@ -15,6 +15,12 @@ one call at a time. Three properties are invisible from there.
   `src/mtest/session/store.mojo` therefore carries a test-only seam,
   `MTEST_STORE_FAULT`, which these scenarios drive from the environment; see
   that module's docstring for what each value abandons.
+- The build window itself. Whether publication refuses an input that was
+  rewritten while the real compiler read it and restored before publication
+  cannot be shown by calling `store_publish` around a fake build: the property
+  is about a mutation that overlaps a genuine compile, so it takes a real
+  compiler driven through a wrapper that does the rewriting.
+  `PublicationWindowTests` is that scenario.
 - The wiring in `src/main.mojo`. `_resolution_defaults` and the
   `--cache-clear` branch are private defs in the executable target, and
   nothing under `tests/` can import `main.mojo`. A regression that drops
@@ -687,6 +693,139 @@ class PublicationFaultTests(ProtocolScenario):
         self.assertEqual(counters(self.root / "odd.ndjson"), (1, 0))
         self.assertEqual(warnings_of(self.stream("odd.ndjson"), "cache-publish"), [])
         self.assertEqual(len(generations(self.root)), 1)
+
+
+TRANSIENT_HELPER_SOURCE = """\
+# rewritten while the compiler read it
+def helper_value() -> Int:
+    return 7
+"""
+"""The bytes the compiler actually reads, in place of the helper's own.
+
+Byte-different from `HELPER_SOURCE.format(value=7)` and behaviorally identical,
+so the binary built from them still PASSES. That is the point: the run has to
+stay green while its publication is refused, or the scenario would be proving
+that a cache condition can fail a run.
+"""
+
+MUTATING_WRAPPER = """\
+#!/bin/sh
+# Anything that is not a build goes straight through, untouched. mtest runs
+# `--version` before any key exists and under a deadline of its own, so a
+# wrapper that did its work there would be answering the wrong question.
+case "$1" in
+  build) ;;
+  *) exec "{real}" "$@" ;;
+esac
+# The helper holds other bytes for exactly as long as the compiler runs. The
+# backup lives outside the walked directory, so the only thing that moves is
+# the helper itself, and both writes truncate in place rather than replacing
+# the name -- the refusal has to come from the change times, not from an inode
+# a rename would have handed over.
+cp "{helper}" "{backup}"
+cat > "{helper}" <<'MTEST_TRANSIENT_EOF'
+{transient}MTEST_TRANSIENT_EOF
+"{real}" "$@"
+rc=$?
+cat "{backup}" > "{helper}"
+rm -f "{backup}"
+exit $rc
+"""
+"""A `--mojo` wrapper that rewrites one build input across a real compile."""
+
+PASSTHROUGH_WRAPPER = """\
+#!/bin/sh
+exec "{real}" "$@"
+"""
+"""The same wrapper with the rewriting removed, for the control."""
+
+
+class PublicationWindowTests(ProtocolScenario):
+    """An input rewritten while the real compiler read it, and put back.
+
+    The window the two content samples cannot see. Both of them read the
+    helper's original bytes -- one before the build, one after -- while the
+    binary was compiled from bytes that are no longer anywhere on disk. Nothing
+    short of a real compile can produce that overlap, which is why this lives
+    out here with a compiler wrapper rather than in a Mojo suite.
+    """
+
+    def _stand_up(self, template: str) -> tuple[Path, Path, str]:
+        """Write the importing suite, its helper, and one `--mojo` wrapper.
+
+        Args:
+            template: `MUTATING_WRAPPER` or `PASSTHROUGH_WRAPPER`.
+
+        Returns:
+            The wrapper path, the helper path, and the helper's original text.
+        """
+        real = shutil.which("mojo")
+        self.assertIsNotNone(real)
+        tests = self.root / "tests"
+        (tests / "test_alpha.mojo").unlink()
+        (tests / "test_reads_helper.mojo").write_text(
+            READS_HELPER_SOURCE, encoding="utf-8"
+        )
+        helper = tests / "helper.mojo"
+        original = HELPER_SOURCE.format(value=7)
+        helper.write_text(original, encoding="utf-8")
+        wrapper = self.root / "mojo-wrapper"
+        wrapper.write_text(
+            template.format(
+                real=real,
+                helper=helper,
+                backup=self.root / "helper-backup",
+                transient=TRANSIENT_HELPER_SOURCE,
+            ),
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+        return wrapper, helper, original
+
+    def test_an_input_rewritten_across_the_build_is_not_published(self) -> None:
+        wrapper, helper, original = self._stand_up(MUTATING_WRAPPER)
+
+        completed = self.run_ok(
+            ["--mojo", str(wrapper), "--json", "window.ndjson", "tests"]
+        )
+
+        # Green, and the file counts as built: a refused publication is not a
+        # failure of the run, and the caller keeps running what it compiled.
+        self.assertNotIn("INTERNAL-ERROR", completed.stdout)
+        self.assertEqual(counters(self.root / "window.ndjson"), (1, 0))
+        published = warnings_of(self.stream("window.ndjson"), "cache-publish")
+        self.assertEqual(len(published), 1, msg=f"warnings={published!r}")
+        self.assertIn("changed while the build ran", published[0])
+        self.assertIn("tests/helper.mojo", published[0])
+        # Nothing was stored, so nothing can be served later.
+        self.assertEqual(generations(self.root), [])
+        # The tree looks untouched, which is precisely why content re-sampling
+        # could not refuse this and something else had to.
+        self.assertEqual(helper.read_text(encoding="utf-8"), original)
+
+        # And the next run rebuilds rather than hitting: there is nothing in the
+        # store, so no session can serve bytes no sample ever saw.
+        self.run_ok(["--mojo", str(wrapper), "--json", "again.ndjson", "tests"])
+        self.assertEqual(counters(self.root / "again.ndjson"), (1, 0))
+        self.assertEqual(generations(self.root), [])
+
+    def test_the_same_wrapper_without_the_rewrite_publishes_and_hits(
+        self,
+    ) -> None:
+        # The control. Capturing a record for every keyed input is worthless if
+        # the records cannot reproduce themselves over a tree that held still:
+        # that failure publishes nothing, ever, and looks like a slow cache
+        # rather than a broken one.
+        wrapper, _, _ = self._stand_up(PASSTHROUGH_WRAPPER)
+        argv = ["--mojo", str(wrapper), "tests"]
+
+        self.run_ok([*argv, "--json", "cold.ndjson"])
+        self.assertEqual(counters(self.root / "cold.ndjson"), (1, 0))
+        self.assertEqual(warnings_of(self.stream("cold.ndjson"), "cache-publish"), [])
+        self.assertEqual(len(generations(self.root)), 1)
+
+        self.run_ok([*argv, "--json", "warm.ndjson"])
+        self.assertEqual(counters(self.root / "warm.ndjson"), (0, 1))
 
 
 class UnrunnableGenerationTests(ProtocolScenario):

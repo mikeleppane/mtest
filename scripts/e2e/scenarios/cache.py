@@ -2,9 +2,12 @@
 
 The cache's claim is about the SECOND invocation, so only two real processes
 over one tree can settle it: run the suite, run it again, get the same verdicts
-for none of the compile cost. The Mojo suites and
-`scripts/tests/test_cache_protocol.py` both drive the store from inside a single
-process, so neither can show that.
+for none of the compile cost. The Mojo suites drive the store from inside a
+single process and cannot show that at all.
+`scripts/tests/test_cache_protocol.py` does spawn real runs, but each of its
+scenarios stands up a project of its own to probe one adversarial property;
+what lives here is the ordinary user's two runs over the ordinary tree, and the
+verdicts and counters they are owed.
 
 These scenarios run in a throwaway project of their own. The store lives under
 the invocation root, so a scenario run from the repository root would inherit

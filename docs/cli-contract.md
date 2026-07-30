@@ -381,6 +381,15 @@ that cannot be created — turns the cache off for the whole session with one
 warning and builds normally. No cache condition ever fails a run that would
 otherwise pass.
 
+The store pays for itself from about three test files upward. A session's fixed
+cost — chiefly digesting the compiler and every entry of the library directory
+beside it — is nearly constant in suite size, so on a one- or two-file suite a
+warm run can be slower than the same run with `--no-cache`, while from three
+files up the compile it saves exceeds that fixed cost and the margin widens with
+the suite. Those measurements are one machine with the compiler's own cache
+already warm; CI compiles cold, which raises every compile-bearing run and moves
+the crossover further in the cache's favour.
+
 `--compile-timeout` bounds only a compile that happens. A warm hit performs no
 compile and therefore cannot produce COMPILE-TIMEOUT; use `--no-cache` when the
 compile deadline itself must be exercised.
@@ -443,40 +452,95 @@ as the same user that is actively trying to deceive it. Anyone with that access
 can already change what a build produces by simpler means: edit the sources,
 replace the compiler, point `MODULAR_HOME` somewhere else.
 
-Five boundaries follow. Four are deliberate non-goals that follow from that
-scope. The first is not: it is a known gap, reachable by ordinary work, that
-this design cannot close without compiling from a snapshot, and it is listed
-first because a reader deciding whether to trust a warm run needs it before
-anything else here.
+Five boundaries follow, all of them deliberate non-goals that follow from that
+scope. The first is listed first because a reader deciding whether to trust a
+warm run needs it before anything else here: it states what publication proves
+about the build window, and exactly where that proof stops.
 
-- **An input edited and edited back while the compiler is running.** Build
-  inputs must remain stable while a compiler invocation runs; mutation during
-  compilation is unsupported. Test-file publication re-checks its inputs after
-  compilation, so an input that is DIFFERENT at publication is caught: nothing
-  is published, a `cache-publish` warning is emitted, and the file is rebuilt
-  next run. What those two samples cannot see is an input that changed and
-  changed back while the compiler was reading it. Both samples agree, the
-  binary came from bytes neither of them saw, and no warning is emitted because
-  as far as the guard can tell nothing moved. A later run over the restored tree
-  hits that binary.
+- **An input mutated while the compiler is running.** Build inputs must remain
+  stable while a compiler invocation runs; mutation during compilation is
+  unsupported, and that rule is the contract rather than something the cache
+  detects for you. What publication does with an ordinary violation of it is
+  the useful part. The inputs a build's OWN key sampled are re-checked before
+  anything is stored, by identity (device, inode, size) and by change times
+  (mtime and ctime): the test file, the framed files in its directory, each
+  directory the walk descended, and, for a symlinked input, both its own name
+  and the file its name finally resolves to; on the precompile route, the
+  step's source, the directory a single-file source sits in, each of its
+  include roots, and the earlier steps' outputs it consumes. The test-file
+  route additionally re-reads the source and re-walks its directory and
+  compares CONTENT, as it always has. An input that moved in any of those
+  senses refuses publication: on the test-file route nothing is stored, one
+  `cache-publish` warning names the input, the verdict is reported normally,
+  and the file is rebuilt next run; on the precompile route the step is left
+  unstamped, silently, and runs again next session.
 
-  This is reachable by ordinary work — editing a helper during a slow compile
-  and undoing it — and it is a real gap, not a theoretical one. Closing it takes
-  compiling from a snapshot rather than from the live tree, so that what the
-  compiler reads is what was keyed by construction. Sampling more often only
-  narrows the window. Until that changes, the guarantee is: **a persistent edit
-  during a build is caught; an edit-and-undo inside the compile window is not.**
-  If you suspect it, `--no-cache` compiles from what is on disk, and
+  What is re-checked is a build's own inputs, not everything in its key. The
+  session-scoped frames — the toolchain, the `-I` root contents, and any file
+  named by a build argument such as `-Xlinker foo.o` — are sampled once for the
+  whole run and are listed among the limits below.
+
+  Comparing identity and times rather than content alone is what covers the edit
+  that is undone. An input edited during a slow compile and edited BACK before
+  publication — the ordinary shape of changing your mind — leaves both content
+  samples agreeing about bytes the compiler never read, and once published, every
+  later run over the restored tree would hit that binary. The undo cannot restore
+  the metadata: `ctime` moves forward on any write and cannot be set backwards
+  from userspace, and a file written afresh under the same name lands on a
+  different inode. A file created beside a test and deleted again leaves no file
+  to compare at all, which is why each walked directory contributes a record of
+  its own — its times move on the membership change.
+
+  The window is honest about its own length. It runs from the moment an input is
+  keyed to the moment its build is published, and under the parallel pool that is
+  longer than one compile: every selected file is keyed during session seeding,
+  before the first compile starts. So a shared helper edited halfway through a
+  session refuses every publication in that directory that had not happened yet,
+  and those files are rebuilt on the next run. That is the deliberate direction;
+  the alternative was a possible false green.
+
+  What is left uncovered, and why:
+
+  - Deliberate metadata restoration by a process running as this user — the
+    scope above.
+  - A mutate-and-restore that completes inside a single filesystem timestamp
+    tick without changing the size, and coarse-timestamp filesystems generally,
+    where that tick is large.
+  - A directory a build writes its own output into is held to its files but not
+    to its membership. A configured precompile step legitimately creates its
+    package inside an include root it was given, so that directory's membership
+    changes while the step runs, by design.
+  - The `-I` root contents, the toolchain, and any file named by a build
+    argument (`-Xlinker foo.o`) are sampled once for the whole session rather
+    than per build, so no publication re-checks them. Re-walking every include
+    root at every publication would narrow that without closing it, at a cost
+    scaling with include-tree size times files compiled; the per-file directory
+    re-walk is bounded by one directory and paid only on a miss, which is why it
+    is worth doing and the session-wide one is not.
+  - **A symlink CHAIN.** An input's own name and the file that name finally
+    resolves to are both recorded; the intermediate links a chain passes
+    through are not. A middle link repointed and repointed back around a
+    compile moves neither end.
+  - **A directory that becomes a package and stops again.** A subdirectory with
+    no `__init__` is not on the compiler's path, so the walk neither frames its
+    files nor holds it to its membership. Creating an `__init__` in it during a
+    compile and deleting it afterwards puts its modules in the build and leaves
+    the tree looking as it did. Holding every non-package subdirectory to its
+    membership instead would refuse publication whenever anything at all
+    appeared in one, which is a far commoner event than this.
+  - **An include root that did not exist when the step was keyed.** Its absence
+    is part of the key, but an absence cannot be re-stat'd into a record: a
+    root created during the step, consumed, and removed again leaves the key's
+    "absent" true at both ends. A root created and LEFT is caught, by the key
+    itself, on the next session.
+  - A directory's walk is memoized once per session, and a hit publishes
+    nothing, so nothing re-checks anything on a hit. A helper edited
+    PERSISTENTLY in the middle of a session can therefore leave a later file in
+    that directory probing a key computed against the old helper and hitting a
+    generation built against it. This one is a gap rather than a non-goal.
+
+  If you suspect any of these, `--no-cache` compiles from what is on disk and
   `--cache-clear` discards anything already stored.
-
-  Configured precompile-step inputs are sampled once, so their unsupported
-  mutation window spans the whole step; they do not receive the test-file
-  publication re-check. The `-I` root contents and the toolchain are likewise
-  sampled once for the whole session rather than per build. Re-walking every
-  include root at every publication would narrow that without closing it, at a
-  cost scaling with include-tree size times files compiled; the per-file
-  directory re-walk is bounded by one directory and paid only on a miss, which
-  is why it is worth doing and the session-wide one is not.
 
 - **`PATH`, and the rest of the inherited environment.** Five variables are
   keyed, and they are named in full above; every other variable the compiler
