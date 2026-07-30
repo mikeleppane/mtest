@@ -118,7 +118,7 @@ interrupted publication leaves no generation a later run could probe.
 """
 from std.ffi import _Global
 from std.os import getenv, listdir, lstat, mkdir, rmdir, stat, unlink
-from std.os.path import dirname, exists, isdir, realpath
+from std.os.path import dirname, exists, isdir, islink, realpath
 from std.time import perf_counter_ns
 
 from mtest.cache import (
@@ -753,14 +753,178 @@ def _has_init(names: List[String]) -> Bool:
     return False
 
 
+@fieldwise_init
+struct _StatWitness(Copyable, Movable):
+    """One keyed input's filesystem identity and change times at key time.
+
+    Captured beside the read that keyed the input, compared again at
+    publication. Never part of the key: content decides what a build IS, while
+    these decide whether the tree HELD STILL while the compiler read it.
+    Userspace can restore bytes and backdate an mtime, but `ctime` only moves
+    forward, so an edit and its undo across the build window move at least one
+    field even though both content samples agree.
+
+    `follow` records which stat the capture used, so the re-check repeats
+    exactly it. An entry's own no-follow identity catches a name replaced or
+    repointed; a link's followed target catches the bytes behind a name that
+    never moved; a directory's record catches an entry that came and went,
+    leaving no file to compare.
+    """
+
+    var path: String
+    """The absolute path to re-stat.
+
+    Walk-relative names cannot be re-resolved from the invocation root, so the
+    capture site supplies the full path it actually read.
+    """
+
+    var label: String
+    """The user-facing name, carried into any refusal message."""
+
+    var follow: Bool
+    """True when the capture followed symlinks (`stat`); False for the entry's
+    own identity (`lstat`)."""
+
+    var dev: Int
+    """The device the entry lived on."""
+
+    var ino: Int
+    """The entry's inode number; a replaced name lands on a different one."""
+
+    var size: Int
+    """The entry's size in bytes."""
+
+    var mtime_sec: Int
+    """Whole seconds of the last content modification."""
+
+    var mtime_subsec: Int
+    """Sub-second part of the last content modification."""
+
+    var ctime_sec: Int
+    """Whole seconds of the last metadata change."""
+
+    var ctime_subsec: Int
+    """Sub-second part of the last metadata change."""
+
+
+def _witness_of(
+    path: String, label: String, follow: Bool
+) raises -> _StatWitness:
+    """Capture one witness record for `path`.
+
+    Args:
+        path: The absolute path to stat.
+        label: The user-facing name carried into any refusal message.
+        follow: Whether to follow symlinks (`stat`) or record the entry's own
+            identity (`lstat`).
+
+    Returns:
+        The record.
+
+    Raises:
+        Error: If the path cannot be stat'd.
+    """
+    var st = stat(path) if follow else lstat(path)
+    return _StatWitness(
+        String(path),
+        String(label),
+        follow,
+        Int(st.st_dev),
+        Int(st.st_ino),
+        Int(st.st_size),
+        Int(st.st_mtimespec.tv_sec),
+        Int(st.st_mtimespec.tv_subsec),
+        Int(st.st_ctimespec.tv_sec),
+        Int(st.st_ctimespec.tv_subsec),
+    )
+
+
+def _witness_entry(
+    path: String, label: String, mut witnesses: List[_StatWitness]
+) raises:
+    """Record an input's own identity, plus its target's when it is a link.
+
+    Both are needed and neither implies the other. A link repointed and
+    repointed back leaves its target's stat untouched, so the followed sample
+    alone would agree with the key; a target edited and edited back through a
+    stable link leaves the link's own inode untouched, so the no-follow sample
+    alone would agree.
+
+    Args:
+        path: The absolute path that was, or is about to be, read.
+        label: The user-facing name for both records.
+        witnesses: The list both records are appended to.
+
+    Raises:
+        Error: If either stat fails.
+    """
+    witnesses.append(_witness_of(path, label, False))
+    if islink(path):
+        witnesses.append(_witness_of(path, label, True))
+
+
+def _witness_moved(before: _StatWitness, now: _StatWitness) -> Bool:
+    """Whether any identity or change-time field differs.
+
+    Args:
+        before: The record taken when the input was keyed.
+        now: The record taken at publication, by the same stat flavor.
+
+    Returns:
+        True if the input cannot be the one the key describes.
+    """
+    return (
+        before.dev != now.dev
+        or before.ino != now.ino
+        or before.size != now.size
+        or before.mtime_sec != now.mtime_sec
+        or before.mtime_subsec != now.mtime_subsec
+        or before.ctime_sec != now.ctime_sec
+        or before.ctime_subsec != now.ctime_subsec
+    )
+
+
+def _witness_label(label_root: String, rel: String) -> String:
+    """The user-facing name of a walked entry, relative to the invocation root.
+
+    A walk names its entries relative to the directory being walked, which is
+    the right spelling for a walk's own diagnostics and the wrong one for a
+    refusal a user has to act on: several include roots can each hold a
+    `helper.mojo`. Prefixing the walk root's spelling names exactly one file.
+
+    Args:
+        label_root: The walk root's spelling, or empty when the walk root is
+            the invocation root itself.
+        rel: The entry's path relative to the walk root.
+
+    Returns:
+        The composed name.
+    """
+    return String(rel) if label_root == "" else label_root + "/" + rel
+
+
+def _append_witnesses(mut dst: List[_StatWitness], src: List[_StatWitness]):
+    """Copy every record of `src` onto the end of `dst`.
+
+    Args:
+        dst: The list to grow.
+        src: The records to copy; a memoized directory walk's list is reused by
+            every file in that directory, so it is copied rather than moved.
+    """
+    for i in range(len(src)):
+        dst.append(src[i].copy())
+
+
 def _walk_into(
     abs_dir: String,
     rel_prefix: String,
+    label_root: String,
     var names: List[String],
     mut kb: KeyBuilder,
     exclude_abs: String,
     mut scan: _SourceDirScan,
     at_top: Bool,
+    mut witnesses: List[_StatWitness],
 ) -> WalkOutcome:
     """Feed one directory's contributions, recursing into package subdirectories.
 
@@ -769,6 +933,9 @@ def _walk_into(
         rel_prefix: The path of `abs_dir` relative to the walked include root;
             empty at the top. Frames name files by this prefix, never by an
             absolute path, so the same tree keys alike in any checkout.
+        label_root: The walk root's own spelling relative to the invocation
+            root, or empty when they are the same directory. Used only to name
+            witness records for a human; it never reaches a frame.
         names: `abs_dir`'s entries, already sorted — passed in because the
             caller had to list the directory to decide it was a package, and
             listing it twice would invite a mid-walk race between the two.
@@ -780,6 +947,10 @@ def _walk_into(
         at_top: Whether this is the walked root itself rather than a package
             inside it. Only the root's own entries are omitted: a bare import
             resolves against the directory, not into the packages under it.
+        witnesses: Grown with one record per framed file — two when the entry
+            is a symlink — and one per package directory descended into. The
+            records never reach `kb`; publication compares them against the
+            tree to decide whether it held still while the compiler read it.
 
     Returns:
         A successful outcome once every reachable input is framed, or a failure
@@ -820,6 +991,22 @@ def _walk_into(
         var is_dir = kind == _S_IFDIR or (is_link and isdir(full))
 
         if is_dir:
+            # Captured BEFORE the listing, and kept only if this directory
+            # turns out to be one the walk descends. A directory's own times
+            # are the only evidence of an entry that came and went, and a
+            # create-and-remove finishing between the listing and the capture
+            # would leave those times already settled — so the capture has to
+            # precede the read it covers, even at the price of one stat on a
+            # directory that is then skipped.
+            var dir_record: Optional[_StatWitness]
+            try:
+                dir_record = Optional(
+                    _witness_of(full, _witness_label(label_root, rel), True)
+                )
+            except:
+                return WalkOutcome.failure(
+                    "cannot read the directory '" + rel + "'"
+                )
             var listing = _list_sorted(full)
             if not listing:
                 return WalkOutcome.failure(
@@ -845,8 +1032,17 @@ def _walk_into(
                     + "' is reached through a directory symlink, which the"
                     " cache cannot walk safely"
                 )
+            witnesses.append(dir_record.value().copy())
             var inner = _walk_into(
-                full, rel, sub^, kb, exclude_abs, scan, False
+                full,
+                rel,
+                label_root,
+                sub^,
+                kb,
+                exclude_abs,
+                scan,
+                False,
+                witnesses,
             )
             if not inner.ok:
                 return inner^
@@ -859,6 +1055,16 @@ def _walk_into(
             # Framing it here as well would make editing any one file in a
             # directory rebuild every test that lives beside it.
             continue
+        # Before the read, not after it: a capture taken afterwards would let an
+        # edit that landed between the read and the capture masquerade as the
+        # state the key describes. `_walk_into` never raises, so a capture that
+        # fails becomes a walk failure — and it becomes the same one an
+        # unreadable file produces, because everything that defeats the capture
+        # (a vanished entry, a dangling link) defeats the read as well.
+        try:
+            _witness_entry(full, _witness_label(label_root, rel), witnesses)
+        except:
+            return WalkOutcome.failure("cannot read the file '" + rel + "'")
         var data: List[UInt8]
         try:
             data = read_regular_file_bytes(full, _WALK_FILE_CAP)
@@ -947,7 +1153,8 @@ def walk_include_root(
     ```
     """
     var scan = _SourceDirScan.inert()
-    return _walk_include_root_scanned(root, dir, kb, exclude, scan)
+    var witnesses = List[_StatWitness]()
+    return _walk_include_root_scanned(root, dir, kb, exclude, scan, witnesses)
 
 
 def _walk_include_root_scanned(
@@ -956,8 +1163,9 @@ def _walk_include_root_scanned(
     mut kb: KeyBuilder,
     exclude: String,
     mut scan: _SourceDirScan,
+    mut witnesses: List[_StatWitness],
 ) -> WalkOutcome:
-    """`walk_include_root`, with the walk's scan handed back to the caller.
+    """`walk_include_root`, with the walk's scan and witnesses handed back.
 
     Args:
         root: The invocation root; `dir` and `exclude` resolve against it.
@@ -966,22 +1174,43 @@ def _walk_include_root_scanned(
         exclude: One path to skip wherever the walk meets it, or empty.
         scan: Inert to frame the root and learn nothing, collecting to record
             what its sources import.
+        witnesses: Grown with this walk's stat records; see `_StatWitness`.
+            Callers with nothing to publish pass a list they discard.
 
     Returns:
         Exactly what `walk_include_root` returns. Never raises.
     """
     var abs_dir = _absolute(root, dir)
+    # The walk root's own record, taken before its listing for the reason every
+    # directory record is taken before one.
+    try:
+        witnesses.append(_witness_of(abs_dir, dir, True))
+    except:
+        return WalkOutcome.failure("'" + dir + "' is not a readable directory")
     var listing = _list_sorted(abs_dir)
     if not listing:
         return WalkOutcome.failure("'" + dir + "' is not a readable directory")
     var exclude_abs = String("") if exclude == "" else _absolute(root, exclude)
+    var label_root = String("") if dir == "." else String(dir)
     return _walk_into(
-        abs_dir, "", listing.value().copy(), kb, exclude_abs, scan, True
+        abs_dir,
+        "",
+        label_root,
+        listing.value().copy(),
+        kb,
+        exclude_abs,
+        scan,
+        True,
+        witnesses,
     )
 
 
 def _walk_source_dir(
-    root: String, dir: String, mut kb: KeyBuilder, mut scan: _SourceDirScan
+    root: String,
+    dir: String,
+    mut kb: KeyBuilder,
+    mut scan: _SourceDirScan,
+    mut witnesses: List[_StatWitness],
 ) -> WalkOutcome:
     """Feed a test file's own directory, omitting the test files in it.
 
@@ -996,12 +1225,17 @@ def _walk_source_dir(
         kb: The builder to feed.
         scan: Overwritten with this directory's omissions and the verdict on
             them. Meaningful only when the walk succeeds.
+        witnesses: Grown with this walk's stat records; see `_StatWitness`.
 
     Returns:
         The same outcomes `walk_include_root` returns, for the same reasons.
         Never raises.
     """
     var abs_dir = _absolute(root, dir)
+    try:
+        witnesses.append(_witness_of(abs_dir, dir, True))
+    except:
+        return WalkOutcome.failure("'" + dir + "' is not a readable directory")
     var listing = _list_sorted(abs_dir)
     if not listing:
         return WalkOutcome.failure("'" + dir + "' is not a readable directory")
@@ -1015,7 +1249,18 @@ def _walk_source_dir(
             continue
         if _is_source_name(name) and is_discovered_test_name(name):
             scan.skip_modules.append(_module_name(name))
-    return _walk_into(abs_dir, "", names^, kb, String(""), scan, True)
+    var label_root = String("") if dir == "." else String(dir)
+    return _walk_into(
+        abs_dir,
+        "",
+        label_root,
+        names^,
+        kb,
+        String(""),
+        scan,
+        True,
+        witnesses,
+    )
 
 
 @fieldwise_init
@@ -1047,6 +1292,18 @@ struct _SourceDirMemo(Copyable, Movable):
     var needs_full: Bool
     """True when something the omitting walk framed makes the omission unsafe
     for every file here, so `digest` must not be used at all."""
+
+    var witnesses: List[_StatWitness]
+    """The omitting walk's stat records, one per framed file and descended
+    directory.
+
+    Memoized with the digest and copied into every key that uses that digest:
+    the walk runs once per directory per session, and a record that stayed here
+    would protect the first file in the directory and no other.
+    """
+
+    var full_witnesses: List[_StatWitness]
+    """The unomitted walk's stat records, empty until that walk runs."""
 
 
 struct CacheContext(Movable):
@@ -1893,8 +2150,12 @@ def finalize_includes(
     for entry in dirs:
         var dir = String(entry)
         ctx.prefix.feed_str(TAG_INCLUDE, dir)
+        # A session include root's contents are sampled once per session, so
+        # their window is the whole run and no publication can re-check them;
+        # the records this walk offers have nothing to be compared against.
+        var unwitnessed = List[_StatWitness]()
         var outcome = _walk_include_root_scanned(
-            root, dir, ctx.prefix, "", scan
+            root, dir, ctx.prefix, "", scan, unwitnessed
         )
         if not outcome.ok:
             # The walk's own words, not a generic "unreadable": a symlinked
@@ -2605,6 +2866,17 @@ struct FileKey(Copyable, Movable):
     directory, so the guard has to repeat the one the key actually used.
     """
 
+    var input_witnesses: List[_StatWitness]
+    """Every keyed input's filesystem identity and change times at key time.
+
+    NOT part of the key, and deliberately: the key says what a build IS, and
+    two runs over the same bytes must agree on it however their inodes and
+    timestamps differ. These say whether the tree held still while the compiler
+    read it, which is a question only publication asks. They ride here because
+    this is the one value that already travels from keying to every publication
+    site.
+    """
+
 
 def _source_dir(rel: String) -> String:
     """The directory the compiler resolves `rel`'s bare imports against.
@@ -2643,7 +2915,8 @@ def _source_dir_entry(mut ctx: CacheContext, root: String, dir: String) -> Int:
             return i
     var kb = KeyBuilder()
     var scan = _SourceDirScan.inert()
-    var outcome = _walk_source_dir(root, dir, kb, scan)
+    var witnesses = List[_StatWitness]()
+    var outcome = _walk_source_dir(root, dir, kb, scan, witnesses)
     if not outcome.ok:
         ctx.disable("test directory '" + dir + "': " + outcome.reason)
         return -1
@@ -2670,6 +2943,8 @@ def _source_dir_entry(mut ctx: CacheContext, root: String, dir: String) -> Int:
             String(""),
             scan.skip_modules.copy(),
             needs_full,
+            witnesses^,
+            List[_StatWitness](),
         )
     )
     return len(ctx.source_dirs) - 1
@@ -2695,12 +2970,15 @@ def _source_dir_full_digest(
         return Optional(String(ctx.source_dirs[index].full_digest))
     var dir = String(ctx.source_dirs[index].dir)
     var kb = KeyBuilder()
-    var outcome = walk_include_root(root, dir, kb, "")
+    var scan = _SourceDirScan.inert()
+    var witnesses = List[_StatWitness]()
+    var outcome = _walk_include_root_scanned(root, dir, kb, "", scan, witnesses)
     if not outcome.ok:
         ctx.disable("test directory '" + dir + "': " + outcome.reason)
         return None
     var digest = kb^.digest_full()
     ctx.source_dirs[index].full_digest = String(digest)
+    ctx.source_dirs[index].full_witnesses = witnesses^
     return Optional(digest^)
 
 
@@ -2774,9 +3052,19 @@ def file_key(
         ctx.disable("cannot read the test file 'tests/test_a.mojo'")
     ```
     """
+    var witnesses = List[_StatWitness]()
+    # Captured before the read, so nothing that happens after this point can
+    # pass itself off as the state the key describes. A capture that fails is a
+    # source that cannot be characterized, which is the same `None` an
+    # unreadable one produces.
+    var src_abs = _absolute(root, rel)
+    try:
+        _witness_entry(src_abs, rel, witnesses)
+    except:
+        return None
     var data: List[UInt8]
     try:
-        data = read_regular_file_bytes(_absolute(root, rel), _WALK_FILE_CAP)
+        data = read_regular_file_bytes(src_abs, _WALK_FILE_CAP)
     except:
         return None
     var dir = _source_dir(rel)
@@ -2799,8 +3087,10 @@ def file_key(
         if not full:
             return None
         walk_digest = full.value()
+        _append_witnesses(witnesses, ctx.source_dirs[index].full_witnesses)
     else:
         walk_digest = String(ctx.source_dirs[index].digest)
+        _append_witnesses(witnesses, ctx.source_dirs[index].witnesses)
     var src_sha = sha256_hex(data)
     var kb = ctx.prefix.copy()
     kb.feed_str(TAG_SOURCE_DIR, dir)
@@ -2825,6 +3115,7 @@ def file_key(
             dir^,
             walk_digest^,
             use_full,
+            witnesses^,
         )
     )
 
@@ -3429,30 +3720,43 @@ def store_publish(
 
     The protocol, in order:
 
-    1. **The publication guard.** Re-digest the SOURCE and re-walk its
-       DIRECTORY, and compare both to what the key was built from. An input
-       edited while its compile was in flight produced a binary this key does
-       not describe, and publishing it would serve those bytes to every later
-       run whose key still names the old snapshot. The guard covers the whole
-       directory the compiler resolves bare imports against, not the entry
-       source alone, because a helper beside a test is as much a build input as
-       the test. Nothing is published; the caller runs what it built.
+    1. **The publication guard**, in two halves. First re-stat every input the
+       key sampled — the entry source, the framed files beside it, each
+       directory the walk descended, and both ends of every symlink among them
+       — and compare each against the identity and change times captured when
+       it was keyed. Then re-digest the SOURCE and re-walk its DIRECTORY and
+       compare both to what the key was built from. An input that moved in
+       either sense produced a binary this key does not describe, and
+       publishing it would serve those bytes to every later run whose key still
+       names the old snapshot. The guard covers the whole directory the compiler
+       resolves bare imports against, not the entry source alone, because a
+       helper beside a test is as much a build input as the test. Nothing is
+       published; the caller runs what it built.
 
-       The cost is a second walk of one directory, and it is paid only on a
-       miss, where a compile has already been paid for.
+       The cost is one stat per input plus a second walk of one directory, and
+       it is paid only on a miss, where a compile has already been paid for.
 
-       **What this proves, exactly.** Two samples — one before the build, one
-       after — detect an input that is DIFFERENT at publication. They cannot
-       detect one that changed and changed back while the compiler was reading
-       it: both samples agree, and the binary came from bytes neither of them
-       saw. Closing that would take a snapshot the compiler reads from instead
-       of the live tree; sampling more often only narrows it. So the honest
-       claim is a persistent edit is caught and an edit-and-undo inside the
-       compile window is not (§8.5.1).
+       **What this proves, exactly.** Content re-sampling alone detects an input
+       that is DIFFERENT at publication and nothing else: an input edited and
+       edited back while the compiler was reading it leaves both samples
+       agreeing about bytes neither of them saw. The stat comparison is what
+       closes that, and it closes it because the undo is itself a metadata
+       event — userspace can restore bytes and backdate an mtime, but `ctime`
+       only moves forward, and a name written afresh lands on a new inode. A
+       file created beside the test and deleted again leaves no file to compare
+       at all, which is why each walked directory contributes a record of its
+       own: its times move on the membership change.
 
-       Nor does this re-prove the session-wide inputs: include-root contents
-       and the toolchain are sampled once per session, so their window is the
-       whole run rather than one compile.
+       What remains outside it: deliberate metadata restoration by a process
+       running as this user, a mutate-and-restore that completes inside one
+       filesystem timestamp tick without changing the size, and coarse-timestamp
+       filesystems generally. The stability rule — build inputs hold still while
+       a compiler invocation runs — is still the contract; this turns its
+       accidental violations into refused publications (§8.5.1).
+
+       Nor does this re-prove the session-wide inputs: include-root contents and
+       the toolchain are sampled once per session, so their window is the whole
+       run rather than one compile, and no publication can re-check them.
     2. Rewrite the recorded command line's `-o` to the FINAL generation path,
        so the reproduce line names something that exists after publication.
     3. Digest the staged binary and write `meta` beside it.
@@ -3514,6 +3818,29 @@ def store_publish(
     var final_bin_rel = key.gen_dir + "/" + _BIN_NAME
 
     # --- Step 1: the publication guard. -------------------------------------
+    # The witness comes first. Content proves what the build read only if the
+    # tree held still while it read it, and an input edited and edited back
+    # leaves both content samples agreeing about bytes the compiler never saw.
+    # Identity and change times cannot be restored from userspace, so comparing
+    # them against their key-time values refuses that publication — and it is
+    # the cheap check as well, so it runs before the re-read and the re-walk.
+    for i in range(len(key.input_witnesses)):
+        var before = key.input_witnesses[i].copy()
+        var moved: Bool
+        try:
+            moved = _witness_moved(
+                before, _witness_of(before.path, before.label, before.follow)
+            )
+        except:
+            # An input that will not stat at all is one this publication cannot
+            # vouch for, which is the same answer a moved one gets.
+            moved = True
+        if moved:
+            return _publish_failed(
+                target,
+                argv,
+                "'" + before.label + "' changed while the build ran",
+            )
     var fresh: List[UInt8]
     try:
         fresh = read_regular_file_bytes(
@@ -3536,11 +3863,17 @@ def store_publish(
     # snapshot the key names rather than merely starting from the same file.
     var dir_kb = KeyBuilder()
     var dir_outcome: WalkOutcome
+    # This walk wants content only: the witness above already compared every
+    # record this walk would take, against the values captured at key time
+    # rather than against a second capture from the same moment.
+    var unwitnessed = List[_StatWitness]()
     if key.dir_full:
         dir_outcome = walk_include_root(root, key.src_dir, dir_kb, "")
     else:
         var scan = _SourceDirScan.inert()
-        dir_outcome = _walk_source_dir(root, key.src_dir, dir_kb, scan)
+        dir_outcome = _walk_source_dir(
+            root, key.src_dir, dir_kb, scan, unwitnessed
+        )
     if not dir_outcome.ok:
         return _publish_failed(
             target,
@@ -3916,6 +4249,7 @@ def precompile_key(
     if not _feed_prior_outputs(ctx, root, src, prior_outputs, kb):
         return None
 
+    var witnesses = List[_StatWitness]()
     # Two finalizations of one state: `digest32` is a true prefix of
     # `digest_full`, so the fork reads one digest at two lengths.
     var forked = kb.copy()
@@ -3940,6 +4274,7 @@ def precompile_key(
             String(""),
             String(""),
             False,
+            witnesses^,
         )
     )
 
