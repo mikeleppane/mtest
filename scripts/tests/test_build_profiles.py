@@ -19,7 +19,7 @@ from scripts.build.profiles import (
 
 ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION_BUILD = ROOT / "scripts" / "build" / "production_build.sh"
-TASK5_SELECTOR_ARRAYS = (
+PROFILE_SELECTOR_ARRAYS = (
     "current_c_flags",
     "seen_names",
     "seen_platform_systems",
@@ -129,19 +129,19 @@ def braced_parameter_expansions(source: str) -> tuple[tuple[int, str], ...]:
     return tuple(expansions)
 
 
-def task5_array_expansion_violations(source: str) -> tuple[str, ...]:
-    """Return non-indexed parameter expansions of Task 5 local arrays."""
+def selector_array_expansion_violations(source: str) -> tuple[str, ...]:
+    """Return non-indexed parameter expansions of profile-selector arrays."""
     source = shell_expansion_scan_text(source)
     violations: list[tuple[int, str]] = []
     for start, expansion in braced_parameter_expansions(source):
         body = expansion[2:-1]
-        for name in TASK5_SELECTOR_ARRAYS:
+        for name in PROFILE_SELECTOR_ARRAYS:
             if body == f"{name}[index]":
                 break
             if re.match(rf"^[#!]?{re.escape(name)}(?:$|[^A-Za-z0-9_])", body):
                 violations.append((start, expansion))
                 break
-    names = "|".join(re.escape(name) for name in TASK5_SELECTOR_ARRAYS)
+    names = "|".join(re.escape(name) for name in PROFILE_SELECTOR_ARRAYS)
     violations.extend(
         (match.start(), match.group(0))
         for match in re.finditer(rf"\$(?:{names})(?![A-Za-z0-9_])", source)
@@ -258,7 +258,7 @@ class ProductionProfileTests(unittest.TestCase):
         start = source.index("select_profile() {")
         end = source.index("\nstage_precompile() {", start)
         selector = source[start:end]
-        self.assertEqual(task5_array_expansion_violations(selector), ())
+        self.assertEqual(selector_array_expansion_violations(selector), ())
         for count in (
             "current_c_flag_count",
             "seen_name_count",
@@ -286,23 +286,23 @@ class ProductionProfileTests(unittest.TestCase):
         for sample in samples:
             with self.subTest(sample=sample):
                 self.assertEqual(
-                    task5_array_expansion_violations(f'printf "%s" "{sample}"'),
+                    selector_array_expansion_violations(f'printf "%s" "{sample}"'),
                     (sample,),
                 )
 
     def test_selector_array_scanner_allows_exact_indexed_reads(self) -> None:
-        for name in TASK5_SELECTOR_ARRAYS:
+        for name in PROFILE_SELECTOR_ARRAYS:
             with self.subTest(name=name):
                 self.assertEqual(
-                    task5_array_expansion_violations(f'"${{{name}[index]}}"'),
+                    selector_array_expansion_violations(f'"${{{name}[index]}}"'),
                     (),
                 )
 
     def test_selector_array_scanner_ignores_indexed_assignments(self) -> None:
-        for name in TASK5_SELECTOR_ARRAYS:
+        for name in PROFILE_SELECTOR_ARRAYS:
             with self.subTest(name=name):
                 self.assertEqual(
-                    task5_array_expansion_violations(f'{name}[index]="$value"'),
+                    selector_array_expansion_violations(f'{name}[index]="$value"'),
                     (),
                 )
 
@@ -315,19 +315,19 @@ class ProductionProfileTests(unittest.TestCase):
         )
         for sample in samples:
             with self.subTest(sample=sample):
-                self.assertEqual(task5_array_expansion_violations(sample), ())
+                self.assertEqual(selector_array_expansion_violations(sample), ())
 
     def test_selector_array_scanner_splices_executed_continuations(self) -> None:
         sample = '"${seen_' + "\\\n" + 'names[@]}"'
         self.assertEqual(
-            task5_array_expansion_violations(sample),
+            selector_array_expansion_violations(sample),
             ("${seen_names[@]}",),
         )
 
     def test_selector_array_scanner_keeps_hash_inside_shell_word(self) -> None:
         sample = "printf prefix#${seen_names[@]}"
         self.assertEqual(
-            task5_array_expansion_violations(sample),
+            selector_array_expansion_violations(sample),
             ("${seen_names[@]}",),
         )
 
