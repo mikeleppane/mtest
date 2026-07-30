@@ -1576,17 +1576,56 @@ def _macho_targets_macos(text: str, path: Path) -> bool:
     return platforms[0] == "1"
 
 
+_MACHO_DEPENDENCY_COMMANDS = frozenset(
+    {
+        "LC_LOAD_DYLIB",
+        "LC_LOAD_WEAK_DYLIB",
+        "LC_REEXPORT_DYLIB",
+        "LC_LOAD_UPWARD_DYLIB",
+        "LC_LAZY_LOAD_DYLIB",
+    }
+)
+
+
 def _macho_dependencies(text: str) -> tuple[str, ...]:
-    """Return `otool -L` dependency spellings in loader order."""
+    """Return dependency-bearing dylib names from `otool -l` in load order."""
     dependencies: list[str] = []
-    for line in text.splitlines()[1:]:
-        stripped = line.strip()
-        if not stripped:
+    command = ""
+    dependency_name: str | None = None
+
+    def finish_command() -> None:
+        if command in _MACHO_DEPENDENCY_COMMANDS:
+            if dependency_name is None:
+                raise PackageCheckError(f"Mach-O {command} is missing its name")
+            dependencies.append(dependency_name)
+
+    for line in text.splitlines():
+        command_match = re.match(r"^\s*cmd\s+(LC_[A-Z0-9_]+)\s*$", line)
+        if command_match is not None:
+            finish_command()
+            command = command_match.group(1)
+            dependency_name = None
+            if (
+                command.endswith("_DYLIB")
+                and command not in _MACHO_DEPENDENCY_COMMANDS
+                and command != "LC_ID_DYLIB"
+            ):
+                raise PackageCheckError(f"unsupported Mach-O dylib command {command}")
             continue
-        dependency, separator, _metadata = stripped.partition(" (")
-        if not separator or not dependency:
-            raise PackageCheckError(f"malformed `otool -L` row: {line!r}")
-        dependencies.append(dependency)
+        if command not in _MACHO_DEPENDENCY_COMMANDS:
+            continue
+        if re.match(r"^\s*name(?:\s|$)", line) is None:
+            continue
+        name_match = re.match(r"^\s*name\s+(.+?)\s+\(offset\s+\d+\)\s*$", line)
+        if name_match is None:
+            raise PackageCheckError(f"Mach-O {command} is missing its name")
+        if dependency_name is not None:
+            raise PackageCheckError(f"Mach-O {command} repeats its name")
+        parsed_name = name_match.group(1)
+        if not parsed_name.strip():
+            raise PackageCheckError(f"Mach-O {command} is missing its name")
+        dependency_name = parsed_name
+    finish_command()
     return tuple(dependencies)
 
 
@@ -1775,10 +1814,10 @@ def audit_installed_dependency_closure(
             return
         visited.add(path)
 
-        dependencies = _macho_dependencies(_run_otool("-L", path))
         loads = dependency_loads.get(path)
         if loads is None:
             loads = _run_otool("-l", path)
+        dependencies = _macho_dependencies(loads)
         local_runpaths = tuple(
             _expand_dyld_path(
                 spelling,

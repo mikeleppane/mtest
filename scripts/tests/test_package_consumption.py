@@ -184,9 +184,14 @@ class DarwinDependencyClosureTests(unittest.TestCase):
         )
 
     @staticmethod
-    def _dependencies(path: Path, *dependencies: str) -> str:
-        return f"{path}:\n" + "".join(
-            f"\t{dependency} (compatibility version 1.0.0, current version 1.0.0)\n"
+    def _dependency_loads(*dependencies: str) -> str:
+        return "".join(
+            "          cmd LC_LOAD_DYLIB\n"
+            "      cmdsize 56\n"
+            f"         name {dependency} (offset 24)\n"
+            "   time stamp 2 Thu Jan  1 00:00:02 1970\n"
+            "      current version 1.0.0\n"
+            "compatibility version 1.0.0\n"
             for dependency in dependencies
         )
 
@@ -208,9 +213,9 @@ class DarwinDependencyClosureTests(unittest.TestCase):
             if argv[0] == "lipo":
                 output = " ".join((architectures or {}).get(path, ("arm64",))) + "\n"
             elif "-L" in argv:
-                output = dependencies[path]
+                raise AssertionError("dependency closure must not invoke `otool -L`")
             elif "-l" in argv:
-                output = loads[path]
+                output = dependencies[path] + loads[path]
             else:
                 output = (
                     "Mach header\n"
@@ -228,12 +233,158 @@ class DarwinDependencyClosureTests(unittest.TestCase):
             )
         return runner
 
+    def test_dependency_loads_exclude_the_dylib_identity(self) -> None:
+        loads = (
+            "Load command 0\n"
+            "          cmd LC_ID_DYLIB\n"
+            "      cmdsize 56\n"
+            "         name @rpath/libSelf.dylib (offset 24)\n"
+            "   time stamp 2 Thu Jan  1 00:00:02 1970\n"
+            "      current version 1.0.0\n"
+            "compatibility version 1.0.0\n"
+            "Load command 1\n"
+            "          cmd LC_LOAD_DYLIB\n"
+            "      cmdsize 56\n"
+            "         name @rpath/libActual.dylib (offset 24)\n"
+            "   time stamp 2 Thu Jan  1 00:00:02 1970\n"
+            "      current version 1.0.0\n"
+            "compatibility version 1.0.0\n"
+        )
+
+        self.assertEqual(
+            package_consumption._macho_dependencies(loads),
+            ("@rpath/libActual.dylib",),
+        )
+
+    def test_dependency_loads_preserve_every_supported_command_family(
+        self,
+    ) -> None:
+        commands = (
+            "LC_LOAD_DYLIB",
+            "LC_LOAD_WEAK_DYLIB",
+            "LC_REEXPORT_DYLIB",
+            "LC_LOAD_UPWARD_DYLIB",
+            "LC_LAZY_LOAD_DYLIB",
+        )
+        loads = "".join(
+            "Load command 1\n"
+            f"          cmd {command}\n"
+            "      cmdsize 56\n"
+            f"         name @rpath/{index}.dylib (offset 24)\n"
+            for index, command in enumerate(commands)
+        )
+
+        self.assertEqual(
+            package_consumption._macho_dependencies(loads),
+            tuple(f"@rpath/{index}.dylib" for index in range(len(commands))),
+        )
+
+    def test_dependency_loads_reject_malformed_command_blocks(self) -> None:
+        cases = (
+            (
+                (
+                    "          cmd LC_LOAD_DYLIB\n"
+                    "      cmdsize 56\n"
+                    "          cmd LC_BUILD_VERSION\n"
+                ),
+                "LC_LOAD_DYLIB is missing its name",
+            ),
+            (
+                (
+                    "          cmd LC_LOAD_WEAK_DYLIB\n"
+                    "      cmdsize 56\n"
+                    "         name ?(bad offset 24)\n"
+                ),
+                "LC_LOAD_WEAK_DYLIB is missing its name",
+            ),
+            (
+                (
+                    "          cmd LC_LOAD_UPWARD_DYLIB\n"
+                    "      cmdsize 56\n"
+                    "         name     (offset 24)\n"
+                ),
+                "LC_LOAD_UPWARD_DYLIB is missing its name",
+            ),
+            (
+                (
+                    "          cmd LC_REEXPORT_DYLIB\n"
+                    "      cmdsize 56\n"
+                    "         name @rpath/one.dylib (offset 24)\n"
+                    "         name @rpath/two.dylib (offset 24)\n"
+                ),
+                "LC_REEXPORT_DYLIB repeats its name",
+            ),
+            (
+                (
+                    "          cmd LC_PREBOUND_DYLIB\n"
+                    "      cmdsize 56\n"
+                    "         name @rpath/old.dylib (offset 24)\n"
+                ),
+                "unsupported Mach-O dylib command LC_PREBOUND_DYLIB",
+            ),
+        )
+        for loads, message in cases:
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(PackageCheckError, message),
+            ):
+                package_consumption._macho_dependencies(loads)
+
+    def test_closure_ignores_an_absolute_dylib_identity(self) -> None:
+        outside_id = self.prefix.parent / "identity-only.dylib"
+        outside_id.write_bytes(b"not a dependency\n")
+        root_loads = (
+            self._loads("14.0", "@executable_path/../lib/first")
+            + "          cmd LC_LOAD_DYLIB\n"
+            "      cmdsize 56\n"
+            "         name @rpath/libA.dylib (offset 24)\n"
+        )
+        library_loads = (
+            self._loads("14.0") + "          cmd LC_ID_DYLIB\n"
+            "      cmdsize 80\n"
+            f"         name {outside_id} (offset 24)\n"
+        )
+        loads = {
+            self.mtest: root_loads,
+            self.lib_a: library_loads,
+        }
+        commands: list[list[str]] = []
+
+        def fake_run(
+            argv: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            commands.append(argv)
+            path = Path(argv[-1]).resolve()
+            if argv[0] == "lipo":
+                output = "arm64\n"
+            elif "-hv" in argv:
+                output = (
+                    "Mach header\n"
+                    "      magic  cputype cpusubtype  caps    filetype ncmds "
+                    "sizeofcmds      flags\n"
+                    "MH_MAGIC_64    ARM64        ALL  0x00       DYLIB    20 "
+                    "2048   NOUNDEFS DYLDLINK TWOLEVEL\n"
+                )
+            elif "-l" in argv:
+                output = loads[path]
+            else:
+                raise AssertionError(f"unexpected Mach-O command: {argv}")
+            return subprocess.CompletedProcess(argv, 0, output, "")
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            audit_installed_dependency_closure(
+                self.mtest,
+                package_platform("darwin", "arm64"),
+            )
+
+        self.assertFalse(any("-L" in command for command in commands))
+        self.assertFalse(any(Path(command[-1]) == outside_id for command in commands))
+
     def test_walks_ordered_inherited_runpaths_and_terminates_a_cycle(self) -> None:
         dependencies = {
-            self.mtest: self._dependencies(self.mtest, "@rpath/libA.dylib"),
-            self.lib_a: self._dependencies(self.lib_a, "@rpath/libB.dylib"),
-            self.lib_b: self._dependencies(
-                self.lib_b,
+            self.mtest: self._dependency_loads("@rpath/libA.dylib"),
+            self.lib_a: self._dependency_loads("@rpath/libB.dylib"),
+            self.lib_b: self._dependency_loads(
                 "@loader_path/libA.dylib",
                 "@executable_path/../lib/first/libA.dylib",
             ),
@@ -255,18 +406,18 @@ class DarwinDependencyClosureTests(unittest.TestCase):
             for call in runner.call_args_list
             if call.args[0][0] == "otool" and call.args[0][-2] in ("-L", "-l")
         ]
-        self.assertEqual(inspected.count(self.mtest), 2)
-        self.assertEqual(inspected.count(self.lib_a), 2)
-        self.assertEqual(inspected.count(self.lib_b), 2)
+        self.assertEqual(inspected.count(self.mtest), 1)
+        self.assertEqual(inspected.count(self.lib_a), 1)
+        self.assertEqual(inspected.count(self.lib_b), 1)
         self.assertNotIn(self.shadow_a, inspected)
 
     def test_rpath_skips_wrong_architecture_before_a_loadable_candidate(
         self,
     ) -> None:
         dependencies = {
-            self.mtest: self._dependencies(self.mtest, "@rpath/libA.dylib"),
-            self.lib_a: self._dependencies(self.lib_a),
-            self.shadow_a: self._dependencies(self.shadow_a),
+            self.mtest: self._dependency_loads("@rpath/libA.dylib"),
+            self.lib_a: self._dependency_loads(),
+            self.shadow_a: self._dependency_loads(),
         }
         loads = {
             self.mtest: self._loads(
@@ -295,9 +446,9 @@ class DarwinDependencyClosureTests(unittest.TestCase):
         self,
     ) -> None:
         dependencies = {
-            self.mtest: self._dependencies(self.mtest, "@rpath/libA.dylib"),
-            self.lib_a: self._dependencies(self.lib_a),
-            self.shadow_a: self._dependencies(self.shadow_a),
+            self.mtest: self._dependency_loads("@rpath/libA.dylib"),
+            self.lib_a: self._dependency_loads(),
+            self.shadow_a: self._dependency_loads(),
         }
         loads = {
             self.mtest: self._loads(
@@ -317,8 +468,8 @@ class DarwinDependencyClosureTests(unittest.TestCase):
 
     def test_rpath_rejects_malformed_architecture_metadata(self) -> None:
         dependencies = {
-            self.mtest: self._dependencies(self.mtest, "@rpath/libA.dylib"),
-            self.lib_a: self._dependencies(self.lib_a),
+            self.mtest: self._dependency_loads("@rpath/libA.dylib"),
+            self.lib_a: self._dependency_loads(),
         }
         loads = {
             self.mtest: self._loads(
@@ -340,8 +491,8 @@ class DarwinDependencyClosureTests(unittest.TestCase):
 
     def test_rpath_rejects_missing_platform_metadata(self) -> None:
         dependencies = {
-            self.mtest: self._dependencies(self.mtest, "@rpath/libA.dylib"),
-            self.lib_a: self._dependencies(self.lib_a),
+            self.mtest: self._dependency_loads("@rpath/libA.dylib"),
+            self.lib_a: self._dependency_loads(),
         }
         loads = {
             self.mtest: self._loads(
@@ -369,8 +520,8 @@ class DarwinDependencyClosureTests(unittest.TestCase):
         self.lib_a.unlink()
         self.lib_a.symlink_to(outside)
         dependencies = {
-            self.mtest: self._dependencies(self.mtest, "@rpath/libA.dylib"),
-            self.shadow_a: self._dependencies(self.shadow_a),
+            self.mtest: self._dependency_loads("@rpath/libA.dylib"),
+            self.shadow_a: self._dependency_loads(),
         }
         loads = {
             self.mtest: self._loads(
@@ -391,7 +542,7 @@ class DarwinDependencyClosureTests(unittest.TestCase):
     def test_prefix_escape_is_rejected(self) -> None:
         outside = self.prefix.parent / "outside.dylib"
         outside.write_bytes(b"foreign Mach-O fixture\n")
-        dependencies = self._dependencies(self.mtest, str(outside))
+        dependencies = self._dependency_loads(str(outside)) + self._loads("14.0")
         with (
             mock.patch.object(
                 subprocess,
@@ -426,7 +577,7 @@ class DarwinDependencyClosureTests(unittest.TestCase):
         run_otool.assert_not_called()
 
     def test_missing_rpath_match_is_rejected(self) -> None:
-        dependencies = self._dependencies(self.mtest, "@rpath/missing.dylib")
+        dependencies = self._dependency_loads("@rpath/missing.dylib")
         loads = self._loads("14.0", "@executable_path/../lib/first")
 
         def fake_run(
@@ -435,7 +586,7 @@ class DarwinDependencyClosureTests(unittest.TestCase):
             return subprocess.CompletedProcess(
                 argv,
                 0,
-                dependencies if "-L" in argv else loads,
+                dependencies + loads,
                 "",
             )
 
@@ -450,8 +601,8 @@ class DarwinDependencyClosureTests(unittest.TestCase):
 
     def test_newer_dependency_minimum_names_its_relative_path(self) -> None:
         dependencies = {
-            self.mtest: self._dependencies(self.mtest, "@rpath/libA.dylib"),
-            self.lib_a: self._dependencies(self.lib_a),
+            self.mtest: self._dependency_loads("@rpath/libA.dylib"),
+            self.lib_a: self._dependency_loads(),
         }
         loads = {
             self.mtest: self._loads("14.0", "@executable_path/../lib/first"),
