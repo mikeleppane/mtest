@@ -41,10 +41,10 @@ mojo-version = "mojo --version"
 # covers.
 version-check = "python -m scripts.checks.version"
 
-# Precompile the src/mtest package into build/mtest.mojopkg. The
-# package-compiles GATE: an empty-but-broken package fails here before any test
-# does. `mojo package` does not exist in 1.0.0b2; `mojo precompile` produces the
-# same artifact.
+# Precompile the vendored TOML parser and src/mtest into build/toml.mojoc and
+# build/mtest.mojoc. The package-compiles GATE: an empty-but-broken package
+# fails here before any test does. `mojo package` does not exist in 1.0.0b2;
+# `mojo precompile` produces the compiled artifacts.
 build = "bash scripts/build/mojo_package.sh"
 
 # Compile the exec-private C adapter to the one production object linked into
@@ -406,7 +406,7 @@ depends-on = ["build-bin"]
 # `scripts/build/production_build.sh` against its inputs (the script, the exact
 # stage command lines, and every file under src/mtest + vendor/mojo-toml), so a
 # second `pixi run build` with nothing changed skips `mojo precompile` entirely.
-# That skip is the only way two builds can leave `build/mtest.mojopkg`
+# That skip is the only way two builds can leave `build/mtest.mojoc`
 # byte-identical, because `mojo precompile` is not byte-reproducible on this
 # toolchain (see production_build.sh). No `depends-on`: every scenario copies
 # its own throwaway sandbox and runs the script there, never against this
@@ -484,7 +484,7 @@ valgrind = "==3.27.1"
 # last in `ci` because it is the broadest and slowest member, and it needs
 # nothing from the earlier ones: both lanes compile the suites and the CLI from
 # source with `-I src` so every frame is instrumented, and neither reads
-# `build/mtest.mojopkg` or `build/mtest`. So `pixi run ci-memory` standalone is
+# `build/mtest.mojoc` or `build/mtest`. So `pixi run ci-memory` standalone is
 # identical to how `ci` reaches it, unlike `contract-check-strict` above.
 [target.linux-64.tasks]
 ci-memory = { depends-on = ["asan-check", "valgrind-check"] }

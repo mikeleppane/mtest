@@ -8,14 +8,14 @@
 # instead of re-optimizing the whole source tree per run.
 #
 # It delegates to the single production-build authority's precompile stage
-# (scripts/build/production_build.sh) so the .mojopkg is built by exactly ONE
+# (scripts/build/production_build.sh) so the .mojoc files are built by exactly ONE
 # definition shared with the packaged recipe build. Kept as its own named
 # entrypoint because `pixi run build` invokes it directly, and the four `test*`
 # tasks reach it through their `build-bin` dependency.
 #
 # NOTE: mojo 1.0.0b2 has no `mojo package` subcommand -- only `mojo precompile`,
-# which produces the same .mojopkg. The outputs must be named toml.mojopkg and
-# mtest.mojopkg so `-I build` resolves both package imports.
+# which produces the compiled packages. The checkout-owned outputs are
+# toml.mojoc and mtest.mojoc so `-I build` resolves both package imports.
 #
 # Usage:  pixi run build
 set -euo pipefail

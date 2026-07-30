@@ -209,7 +209,7 @@ class BuiltArtifact:
 # rattler-build sandbox): the precompiled package the probes import against and
 # the test-variant native object linked into each probe build, the same pair
 # scripts/harness/dogfood.py uses for `pixi run dogfood-check`.
-MOJOPKG_INCLUDE_DIR = REPO_ROOT / "build"
+CHECKOUT_PACKAGE_INCLUDE_DIR = REPO_ROOT / "build"
 NATIVE_TEST_OBJECT = REPO_ROOT / "build" / "native" / "mtest_exec_native_test.o"
 
 PIXI_VERSION_RE = re.compile(r'(?m)^version = "([^"]*)"')
@@ -1610,9 +1610,10 @@ def stage_suite_run_with_installed_binary(mtest_bin: Path) -> None:
             all selected and green.
     """
     _banner("stage dogfood -- toolchain-threaded run with the INSTALLED binary")
-    if not MOJOPKG_INCLUDE_DIR.joinpath("mtest.mojopkg").is_file():
+    if not CHECKOUT_PACKAGE_INCLUDE_DIR.joinpath("mtest.mojoc").is_file():
+        package_path = CHECKOUT_PACKAGE_INCLUDE_DIR / "mtest.mojoc"
         raise PackageCheckError(
-            f"{MOJOPKG_INCLUDE_DIR / 'mtest.mojopkg'} missing -- run `pixi run build` "
+            f"{package_path} missing -- run `pixi run build` "
             "(the package-check pixi task depends on it)"
         )
     if not NATIVE_TEST_OBJECT.is_file():

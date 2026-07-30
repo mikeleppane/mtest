@@ -934,12 +934,47 @@ def check_vendored_toml_layout(repo_root: Path = REPO_ROOT) -> None:
     build_source = (repo_root / "scripts" / "build" / "production_build.sh").read_text(
         encoding="utf-8"
     )
-    required_commands = (
-        "mojo precompile vendor/mojo-toml/toml -o build/toml.mojopkg",
-        "mojo precompile -I build src/mtest -o build/mtest.mojopkg",
-        "mojo build -I build src/main.mojo -o build/mtest",
+    expected_precompile_arrays = (
+        (
+            "PRECOMPILE_CMD_TOML",
+            (
+                "mojo",
+                "precompile",
+                "--Werror",
+                "vendor/mojo-toml/toml",
+                "-o",
+                "build/toml.mojoc",
+            ),
+        ),
+        (
+            "PRECOMPILE_CMD_MTEST",
+            (
+                "mojo",
+                "precompile",
+                "--Werror",
+                "-I",
+                "build",
+                "src/mtest",
+                "-o",
+                "build/mtest.mojoc",
+            ),
+        ),
     )
-    if any(command not in build_source for command in required_commands):
+    for name, expected in expected_precompile_arrays:
+        definitions = re.findall(
+            rf"(?ms)^{re.escape(name)}=\(\s*(.*?)^\s*\)\s*$",
+            build_source,
+        )
+        actual_command = (
+            tuple(shlex.split(definitions[0])) if len(definitions) == 1 else ()
+        )
+        if actual_command != expected:
+            raise AssertionError(
+                "production build does not compile and link the vendored TOML "
+                f"package with the required warning-free .mojoc arrays: "
+                f"{name} expected={expected!r}, got={actual_command!r}"
+            )
+    if "mojo build -I build src/main.mojo -o build/mtest" not in build_source:
         raise AssertionError(
             "production build does not compile and link the vendored TOML package"
         )

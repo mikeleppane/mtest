@@ -1475,7 +1475,7 @@ The tasks:
 | `pixi run fmt` | format Mojo in place |
 | `pixi run py-fmt` | apply ruff's safe lint fixes to the Python tooling, then format it in place |
 | `pixi run py-check` | ruff format/lint and `mypy --strict` over the Python tooling (needs `uv`; not part of `ci`) |
-| `pixi run build` | precompile `src/mtest` to `build/mtest.mojopkg`, the compile gate |
+| `pixi run build` | precompile the vendored TOML parser and `src/mtest` to `build/toml.mojoc` and `build/mtest.mojoc`, the compile gate |
 | `pixi run build-bin` | link the runnable binary at `build/mtest` |
 | `pixi run test` | run every classified unit and integration module through `build/mtest` itself, then reconcile its report against an inventory derived from the sources on disk |
 | `pixi run test-file -- PATH` | the same, focused on one module |

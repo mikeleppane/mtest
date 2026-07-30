@@ -46,6 +46,55 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
                 check()
 
 
+class ProductionPrecompileLayoutTests(unittest.TestCase):
+    """The offline build keeps both checkout-owned package arrays exact."""
+
+    BUILD_SOURCE = """\
+#!/usr/bin/env bash
+PRECOMPILE_CMD_TOML=(
+  mojo precompile --Werror vendor/mojo-toml/toml -o build/toml.mojoc
+)
+PRECOMPILE_CMD_MTEST=(
+  mojo precompile --Werror -I build src/mtest -o build/mtest.mojoc
+)
+mojo build -I build src/main.mojo -o build/mtest
+"""
+
+    def _repo(self, build_source: str) -> Path:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        shutil.copytree(
+            layout.REPO_ROOT / "vendor" / "mojo-toml",
+            root / "vendor" / "mojo-toml",
+        )
+        production = root / "scripts" / "build" / "production_build.sh"
+        production.parent.mkdir(parents=True)
+        production.write_text(build_source, encoding="utf-8")
+        return root
+
+    def test_warning_free_mojoc_precompile_arrays_are_accepted(self) -> None:
+        repo = self._repo(self.BUILD_SOURCE)
+
+        layout.check_vendored_toml_layout(repo)
+
+    def test_each_precompile_array_requires_werror_and_mojoc(self) -> None:
+        mutations = (
+            ("toml warning policy", "precompile --Werror vendor", "precompile vendor"),
+            ("mtest warning policy", "precompile --Werror -I", "precompile -I"),
+            ("toml output", "toml.mojoc", "toml.mojopkg"),
+            ("mtest output", "mtest.mojoc", "mtest.mojopkg"),
+        )
+        for label, current, broken in mutations:
+            with (
+                self.subTest(mutation=label),
+                self.assertRaisesRegex(
+                    AssertionError,
+                    "production build does not compile and link",
+                ),
+            ):
+                repo = self._repo(self.BUILD_SOURCE.replace(current, broken))
+                layout.check_vendored_toml_layout(repo)
+
+
 class AssertionCompanionLayoutTests(unittest.TestCase):
     """The companion contract is reconciled from disk, never from a list.
 

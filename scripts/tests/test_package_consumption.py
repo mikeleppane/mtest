@@ -668,7 +668,7 @@ class CallSiteTests(unittest.TestCase):
         installed.write_text("", encoding="utf-8")
         include = self.root / "include"
         include.mkdir(parents=True, exist_ok=True)
-        (include / "mtest.mojopkg").write_text("", encoding="utf-8")
+        (include / "mtest.mojoc").write_text("", encoding="utf-8")
         native = self.root / "mtest_exec_native_test.o"
         native.write_text("", encoding="utf-8")
         verify = mock.Mock(return_value=0)
@@ -676,7 +676,7 @@ class CallSiteTests(unittest.TestCase):
         with (
             mock.patch.multiple(
                 package_consumption,
-                MOJOPKG_INCLUDE_DIR=include,
+                CHECKOUT_PACKAGE_INCLUDE_DIR=include,
                 NATIVE_TEST_OBJECT=native,
             ),
             mock.patch.object(dogfood, "verify", verify),
@@ -693,14 +693,14 @@ class CallSiteTests(unittest.TestCase):
         installed.write_text("", encoding="utf-8")
         include = self.root / "include"
         include.mkdir(parents=True, exist_ok=True)
-        (include / "mtest.mojopkg").write_text("", encoding="utf-8")
+        (include / "mtest.mojoc").write_text("", encoding="utf-8")
         native = self.root / "mtest_exec_native_test.o"
         native.write_text("", encoding="utf-8")
 
         with (
             mock.patch.multiple(
                 package_consumption,
-                MOJOPKG_INCLUDE_DIR=include,
+                CHECKOUT_PACKAGE_INCLUDE_DIR=include,
                 NATIVE_TEST_OBJECT=native,
             ),
             mock.patch.object(dogfood, "verify", mock.Mock(return_value=1)),

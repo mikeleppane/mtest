@@ -19,9 +19,10 @@
 # the flags are defined in exactly one place.
 #
 # NOTE: mojo 1.0.0b2 has no `mojo package` subcommand -- only `mojo precompile`,
-# which produces the same .mojopkg. The vendored parser is precompiled first;
-# then `-I build` resolves it while precompiling mtest and resolves both
-# packages while linking main.
+# which produces a compiled package. Checkout-owned artifacts use the supported
+# .mojoc extension; the vendored parser is precompiled first, then `-I build`
+# resolves it while precompiling mtest and resolves both packages while linking
+# main.
 #
 # Usage:  production_build.sh [precompile|native|link|all]   (default: all)
 # The test-only native variant and its symbol verification are dev/CI artifacts
@@ -39,15 +40,19 @@ cd "$repo_root"
 # string) so they can be both EXECUTED and RENDERED into the input digest
 # below from one definition -- a hand-duplicated command line in the digest
 # input could drift from the one actually run and never be noticed.
-PRECOMPILE_CMD_TOML=(mojo precompile vendor/mojo-toml/toml -o build/toml.mojopkg)
-PRECOMPILE_CMD_MTEST=(mojo precompile -I build src/mtest -o build/mtest.mojopkg)
+PRECOMPILE_CMD_TOML=(
+  mojo precompile --Werror vendor/mojo-toml/toml -o build/toml.mojoc
+)
+PRECOMPILE_CMD_MTEST=(
+  mojo precompile --Werror -I build src/mtest -o build/mtest.mojoc
+)
 
 # The precompile stage's stamp: proves nothing feeding `mojo precompile`
 # changed since the last successful run, so a second `pixi run build` can skip
 # it entirely. `mojo precompile` is NOT byte-reproducible on this toolchain
 # (two identical inputs measured at 43fcef41... and eb81d1f7... on this
 # branch), so re-running the stage on unchanged inputs would rewrite the
-# .mojopkg with different bytes for no reason -- the stamp is what makes a
+# .mojoc with different bytes for no reason -- the stamp is what makes a
 # second build a no-op instead of a fresh, differently-byte-identical one.
 PRECOMPILE_STAMP="build/.precompile.stamp"
 
@@ -59,7 +64,7 @@ PRECOMPILE_STAMP="build/.precompile.stamp"
 # would otherwise touch -- the same hazard Layer 1's file cache already
 # guards against by digesting the compiler binary's own content into every
 # key. Skipping either one would leave `pixi run build` able to ship a
-# `build/mtest.mojopkg` compiled by a DIFFERENT compiler than the one the
+# `build/mtest.mojoc` compiled by a DIFFERENT compiler than the one the
 # stamp was written under, while reporting a match.
 PIXI_LOCK_REL="pixi.lock"
 
@@ -159,11 +164,11 @@ _precompile_stamp_valid() {
         path="${rest%% *}"
         recorded="${rest#* }"
         case "$path" in
-          build/toml.mojopkg)
+          build/toml.mojoc)
             [[ $seen_toml -eq 0 ]] || return 1 # duplicate out row
             seen_toml=1
             ;;
-          build/mtest.mojopkg)
+          build/mtest.mojoc)
             [[ $seen_mtest -eq 0 ]] || return 1 # duplicate out row
             seen_mtest=1
             ;;
@@ -187,13 +192,92 @@ _precompile_stamp_valid() {
 _precompile_write_stamp() {
   local stamp="$1" input_digest="$2"
   local h_toml h_mtest
-  h_toml="$(_hash_file build/toml.mojopkg)" || return 1
-  h_mtest="$(_hash_file build/mtest.mojopkg)" || return 1
+  h_toml="$(_hash_file build/toml.mojoc)" || return 1
+  h_mtest="$(_hash_file build/mtest.mojoc)" || return 1
   {
     printf 'in:%s\n' "$input_digest"
-    printf 'out:build/toml.mojopkg %s\n' "$h_toml"
-    printf 'out:build/mtest.mojopkg %s\n' "$h_mtest"
+    printf 'out:build/toml.mojoc %s\n' "$h_toml"
+    printf 'out:build/mtest.mojoc %s\n' "$h_mtest"
   } >"$stamp"
+}
+
+remove_owned_legacy_packages() {
+  local legacy_toml="build/toml.mojopkg"
+  local legacy_mtest="build/mtest.mojopkg"
+  local has_toml=0 has_mtest=0
+  [[ -e "$legacy_toml" || -L "$legacy_toml" ]] && has_toml=1
+  [[ -e "$legacy_mtest" || -L "$legacy_mtest" ]] && has_mtest=1
+  [[ $has_toml -eq 1 || $has_mtest -eq 1 ]] || return 0
+
+  local owned=1
+  local seen_toml=0 seen_mtest=0 out_ok=0
+  local first=1
+  local line head_digest rest path recorded actual
+  if [[ ${#DIGEST_CMD[@]} -eq 0 || ! -f "$PRECOMPILE_STAMP" ]]; then
+    owned=0
+  else
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      if [[ $first -eq 1 ]]; then
+        first=0
+        head_digest="${line#in:}"
+        if [[ "$line" != in:* || ${#head_digest} -ne 64 || "$head_digest" == *[!0-9a-f]* ]]; then
+          owned=0
+        fi
+        continue
+      fi
+      case "$line" in
+        out:*)
+          rest="${line#out:}"
+          if [[ "$rest" != *" "* ]]; then
+            owned=0
+            continue
+          fi
+          path="${rest%% *}"
+          recorded="${rest#* }"
+          if [[ ${#recorded} -ne 64 || "$recorded" == *[!0-9a-f]* ]]; then
+            owned=0
+            continue
+          fi
+          case "$path" in
+            "$legacy_toml")
+              [[ $seen_toml -eq 0 ]] || owned=0
+              seen_toml=1
+              ;;
+            "$legacy_mtest")
+              [[ $seen_mtest -eq 0 ]] || owned=0
+              seen_mtest=1
+              ;;
+            *)
+              owned=0
+              ;;
+          esac
+          if actual="$(_hash_file "$path")"; then
+            [[ "$actual" == "$recorded" ]] || owned=0
+          else
+            owned=0
+          fi
+          out_ok=$((out_ok + 1))
+          ;;
+        *)
+          owned=0
+          ;;
+      esac
+    done <"$PRECOMPILE_STAMP"
+  fi
+
+  if [[ $owned -eq 1 && $out_ok -eq 2 && $seen_toml -eq 1 && $seen_mtest -eq 1 ]]; then
+    rm -f -- build/toml.mojopkg build/mtest.mojopkg
+    return 0
+  fi
+
+  local ambiguous=""
+  [[ $has_toml -eq 1 ]] && ambiguous="$legacy_toml"
+  if [[ $has_mtest -eq 1 ]]; then
+    [[ -n "$ambiguous" ]] && ambiguous="$ambiguous, "
+    ambiguous="${ambiguous}${legacy_mtest}"
+  fi
+  echo "production-build: legacy package path is not proven to be an owned checkout artifact: $ambiguous; move or remove it before building" >&2
+  return 1
 }
 
 read_strict_flags() {
@@ -214,6 +298,7 @@ read_strict_flags() {
 stage_precompile() {
   mkdir -p build
   _resolve_digest_cmd
+  remove_owned_legacy_packages
   local input_digest=""
   local mojo_version=""
   local can_stamp=1
@@ -236,14 +321,14 @@ stage_precompile() {
   if [[ $can_stamp -eq 1 ]]; then
     input_digest="$(_precompile_input_digest "$mojo_version")"
     if _precompile_stamp_valid "$PRECOMPILE_STAMP" "$input_digest"; then
-      echo "==> precompile stage skipped (stamp matches build/toml.mojopkg, build/mtest.mojopkg)"
+      echo "==> precompile stage skipped (stamp matches build/toml.mojoc, build/mtest.mojoc)"
       return 0
     fi
   fi
 
-  echo "==> precompiling vendor/mojo-toml/toml -> build/toml.mojopkg"
+  echo "==> precompiling vendor/mojo-toml/toml -> build/toml.mojoc"
   "${PRECOMPILE_CMD_TOML[@]}"
-  echo "==> precompiling src/mtest -> build/mtest.mojopkg"
+  echo "==> precompiling src/mtest -> build/mtest.mojoc"
   "${PRECOMPILE_CMD_MTEST[@]}"
 
   if [[ $can_stamp -eq 1 ]]; then

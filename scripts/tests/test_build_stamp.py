@@ -3,7 +3,7 @@
 
 `scripts/build/production_build.sh`'s `stage_precompile` runs `mojo precompile`
 twice (the vendored TOML parser, then `src/mtest`) to produce
-`build/toml.mojopkg` and `build/mtest.mojopkg`. `mojo precompile` is NOT
+`build/toml.mojoc` and `build/mtest.mojoc`. `mojo precompile` is NOT
 byte-reproducible on this toolchain: two identical inputs measured at
 `43fcef41...` and `eb81d1f7...` on this branch. A naive re-run therefore
 rewrites both packages with different bytes on every `pixi run build`, changed
@@ -30,6 +30,7 @@ touch.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 from pathlib import Path
 import shlex
@@ -68,6 +69,13 @@ stage. Pinned so a wording change in the script fails here too."""
 BYPASS_NOTICE = "no sha256sum or shasum on PATH"
 """Substring of the notice `stage_precompile` prints when neither digest tool
 is available and it builds unconditionally instead of stamping."""
+
+TOML_PACKAGE = Path("build/toml.mojoc")
+MTEST_PACKAGE = Path("build/mtest.mojoc")
+LEGACY_PACKAGES = (
+    Path("build/toml.mojopkg"),
+    Path("build/mtest.mojopkg"),
+)
 
 
 def require_mojo() -> None:
@@ -155,7 +163,7 @@ def source_call(sandbox: Path, snippet: str) -> subprocess.CompletedProcess[str]
 def fabricate_valid_state(sandbox: Path, mojo_version: str | None = None) -> None:
     """Write placeholder outputs and a stamp that is genuinely valid for them.
 
-    Writes arbitrary bytes to `build/toml.mojopkg` and `build/mtest.mojopkg`
+    Writes arbitrary bytes to `build/toml.mojoc` and `build/mtest.mojoc`
     without invoking `mojo`, then writes the stamp through the script's own
     `_precompile_input_digest` / `_precompile_write_stamp`. Every digest is
     real; only the compile is fabricated, which lets the rebuild scenarios
@@ -173,8 +181,8 @@ def fabricate_valid_state(sandbox: Path, mojo_version: str | None = None) -> Non
     """
     build = sandbox / "build"
     build.mkdir(exist_ok=True)
-    (build / "toml.mojopkg").write_bytes(b"placeholder-toml-package\n")
-    (build / "mtest.mojopkg").write_bytes(b"placeholder-mtest-package\n")
+    (sandbox / TOML_PACKAGE).write_bytes(b"placeholder-toml-package\n")
+    (sandbox / MTEST_PACKAGE).write_bytes(b"placeholder-mtest-package\n")
     version_stmt = (
         f"mojo_version={shlex.quote(mojo_version)}"
         if mojo_version is not None
@@ -331,7 +339,7 @@ class BuildStampTests(unittest.TestCase):
     """Scenarios pinning the precompile stage's stamp against its inputs."""
 
     def test_double_build_leaves_identical_package_bytes(self) -> None:
-        """Two back-to-back builds must leave `build/mtest.mojopkg` untouched.
+        """Two back-to-back builds must leave `build/mtest.mojoc` untouched.
 
         Package output is not byte-reproducible, so the only way the bytes
         can match across two builds is if the second run skipped entirely.
@@ -341,12 +349,12 @@ class BuildStampTests(unittest.TestCase):
         try:
             first = run_stage(sandbox)
             self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
-            first_bytes = (sandbox / "build/mtest.mojopkg").read_bytes()
+            first_bytes = (sandbox / MTEST_PACKAGE).read_bytes()
 
             second = run_stage(sandbox)
             self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
             self.assertIn(SKIP_LINE, second.stdout)
-            second_bytes = (sandbox / "build/mtest.mojopkg").read_bytes()
+            second_bytes = (sandbox / MTEST_PACKAGE).read_bytes()
 
             self.assertEqual(
                 first_bytes,
@@ -370,12 +378,12 @@ class BuildStampTests(unittest.TestCase):
                 "fabricated stamp was not accepted as valid -- fixture bug",
             )
 
-            (sandbox / "build/mtest.mojopkg").unlink()
+            (sandbox / MTEST_PACKAGE).unlink()
             rebuild = run_stage(sandbox)
             self.assertEqual(rebuild.returncode, 0, rebuild.stdout + rebuild.stderr)
             self.assertNotIn(SKIP_LINE, rebuild.stdout)
             self.assertIn("precompiling src/mtest", rebuild.stdout)
-            self.assertTrue((sandbox / "build/mtest.mojopkg").is_file())
+            self.assertTrue((sandbox / MTEST_PACKAGE).is_file())
         finally:
             shutil.rmtree(sandbox, ignore_errors=True)
 
@@ -394,7 +402,7 @@ class BuildStampTests(unittest.TestCase):
 
             stamp = sandbox / "build/.precompile.stamp"
             with stamp.open("a", encoding="utf-8") as handle:
-                handle.write("out:build/bogus.mojopkg deadbeef\n")
+                handle.write("out:build/bogus.mojoc deadbeef\n")
 
             rebuild = run_stage(sandbox)
             self.assertEqual(rebuild.returncode, 0, rebuild.stdout + rebuild.stderr)
@@ -432,7 +440,7 @@ class BuildStampTests(unittest.TestCase):
 
         Everything except the observed toolchain identity is byte-identical
         between the two runs. Without the toolchain in the digest, an upgraded
-        `mojo` reports a stamp match and `pixi run build` ships a `.mojopkg`
+        `mojo` reports a stamp match and `pixi run build` ships a `.mojoc`
         compiled by the OLD compiler.
         """
         require_mojo()
@@ -474,7 +482,7 @@ class BuildStampTests(unittest.TestCase):
 
                 first = run_stage(sandbox, env=env)
                 self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
-                self.assertTrue((sandbox / "build/mtest.mojopkg").is_file())
+                self.assertTrue((sandbox / MTEST_PACKAGE).is_file())
                 self.assertTrue((sandbox / "build/.precompile.stamp").is_file())
 
                 second = run_stage(sandbox, env=env)
@@ -502,8 +510,66 @@ class BuildStampTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 combined = result.stdout + result.stderr
                 self.assertIn(BYPASS_NOTICE, combined)
-                self.assertTrue((sandbox / "build/mtest.mojopkg").is_file())
+                self.assertTrue((sandbox / MTEST_PACKAGE).is_file())
                 self.assertFalse((sandbox / "build/.precompile.stamp").exists())
+        finally:
+            shutil.rmtree(sandbox, ignore_errors=True)
+
+    def test_owned_legacy_packages_are_removed_before_rebuild(self) -> None:
+        """A matching legacy stamp proves both old checkout outputs are owned."""
+        require_mojo()
+        sandbox = sandbox_tree()
+        try:
+            build = sandbox / "build"
+            build.mkdir(exist_ok=True)
+            legacy_bytes = {
+                LEGACY_PACKAGES[0]: b"legacy-toml-package\n",
+                LEGACY_PACKAGES[1]: b"legacy-mtest-package\n",
+            }
+            for relative, contents in legacy_bytes.items():
+                (sandbox / relative).write_bytes(contents)
+            stamp = build / ".precompile.stamp"
+            stamp.write_text(
+                f"in:{hashlib.sha256(b'legacy-inputs').hexdigest()}\n"
+                + "".join(
+                    f"out:{relative.as_posix()} "
+                    f"{hashlib.sha256(contents).hexdigest()}\n"
+                    for relative, contents in legacy_bytes.items()
+                ),
+                encoding="utf-8",
+            )
+
+            result = run_stage(sandbox)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse((sandbox / LEGACY_PACKAGES[0]).exists())
+            self.assertFalse((sandbox / LEGACY_PACKAGES[1]).exists())
+            self.assertTrue((sandbox / TOML_PACKAGE).is_file())
+            self.assertTrue((sandbox / MTEST_PACKAGE).is_file())
+        finally:
+            shutil.rmtree(sandbox, ignore_errors=True)
+
+    def test_unowned_legacy_package_blocks_a_warm_stamp_hit(self) -> None:
+        """An unproven legacy package must not shadow valid current outputs."""
+        require_mojo()
+        sandbox = sandbox_tree()
+        try:
+            fabricate_valid_state(sandbox)
+            toml_before = (sandbox / TOML_PACKAGE).read_bytes()
+            mtest_before = (sandbox / MTEST_PACKAGE).read_bytes()
+            ambiguous = sandbox / LEGACY_PACKAGES[1]
+            ambiguous.write_bytes(b"unowned-public-compatible-package\n")
+
+            result = run_stage(sandbox)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(LEGACY_PACKAGES[1].as_posix(), result.stderr)
+            self.assertEqual(
+                ambiguous.read_bytes(),
+                b"unowned-public-compatible-package\n",
+            )
+            self.assertEqual((sandbox / TOML_PACKAGE).read_bytes(), toml_before)
+            self.assertEqual((sandbox / MTEST_PACKAGE).read_bytes(), mtest_before)
         finally:
             shutil.rmtree(sandbox, ignore_errors=True)
 
