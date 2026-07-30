@@ -396,6 +396,69 @@ def test_sequential_second_run_hits_cache() raises:
     assert_equal(warm[0], cold[0], "the warm run replaced the generation")
 
 
+comptime _SRC_PASS_ALTERNATE = (
+    "from std.testing import TestSuite, assert_equal\n\n\n"
+    "def test_pass() raises:\n"
+    "    assert_equal(2, 1 + 1)\n\n\n"
+    "def main() raises:\n"
+    "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
+)
+"""A second passing body for one file, so an edit moves its key and nothing
+else: same file, same test count, same verdict, a different binary."""
+
+
+def test_an_edit_and_restore_cycle_ends_fully_cached() raises:
+    """The second cycle of editing a file and putting it back is free.
+
+    Switching a file between two states is what a branch switch and back does
+    to every file that differs, and it is the case a store keeping one
+    generation per source could never serve: the generation for the state being
+    returned to was reaped when the other state published. Two live generations
+    make the third run of the cycle compile nothing, with both states still
+    live for the next switch.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_cycle.mojo")
+    write_file(root, rel, SRC_PASS)
+    var config = base_config()
+
+    var cold = run_recording_session(config.copy(), root)
+    assert_equal(cold.code, 0, "the cold run must pass")
+    assert_equal(cold.built_files, 1, "the cold run compiles the one file")
+    assert_equal(cold.cached_files, 0, "nothing is stored yet")
+
+    write_file(root, rel, _SRC_PASS_ALTERNATE)
+    var edited = run_recording_session(config.copy(), root)
+    assert_equal(edited.code, 0, "the second body must pass too")
+    assert_equal(
+        edited.built_files, 1, "the edit moved the key, so it compiles"
+    )
+    assert_equal(edited.cached_files, 0, "no pre-edit generation may be served")
+
+    write_file(root, rel, SRC_PASS)
+    var restored = run_recording_session(config^, root)
+    assert_equal(restored.code, 0, "the restored body must pass")
+    assert_equal(
+        restored.built_files,
+        0,
+        (
+            "the generation the cold run published was reaped, so returning a"
+            " file to a state the store has already built recompiles it"
+        ),
+    )
+    assert_equal(
+        restored.cached_files, 1, "the restored body is served from the store"
+    )
+    # Both ends of the alternation stay live, which is what makes the NEXT
+    # switch free as well rather than merely this one.
+    var entries = dir_listing(root + "/" + _STORE_DIR)
+    assert_equal(
+        len(entries),
+        2,
+        "the store must hold both generations of the alternating file",
+    )
+
+
 def test_no_cache_never_touches_store() raises:
     """`--no-cache` on the plain path builds private, silently, stores nothing.
     """

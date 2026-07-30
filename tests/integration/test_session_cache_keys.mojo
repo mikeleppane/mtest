@@ -79,13 +79,27 @@ def test_editing_a_walked_support_file_rebuilds_every_file() raises:
         ),
     )
     assert_equal(edited.cached_files, 0, "no pre-edit generation may be served")
-    # The superseded generations are reaped as their replacements publish, so
-    # the store stays one generation per file rather than one per edit.
+    # The store keeps the two newest generations of each source, so one edit to
+    # a shared support file leaves both files holding their pre-edit and their
+    # post-edit generation: bounded per source, and no more than that.
+    var entries = dir_listing(root + "/" + _STORE_DIR)
     assert_equal(
-        len(dir_listing(root + "/" + _STORE_DIR)),
-        2,
-        "the store must hold one live generation per file",
+        len(entries),
+        4,
+        "the store must hold two live generations per file",
     )
+    var a_generations = 0
+    var b_generations = 0
+    for entry in entries:
+        var name = String(entry)
+        if name.startswith("tests_stest_ua_h"):
+            a_generations += 1
+        elif name.startswith("tests_stest_ub_h"):
+            b_generations += 1
+    # Per SOURCE, never four of one and none of the other: a count alone would
+    # pass while one file kept every edit and the other kept none.
+    assert_equal(a_generations, 2, "'tests/test_a.mojo' is not retained twice")
+    assert_equal(b_generations, 2, "'tests/test_b.mojo' is not retained twice")
 
     var settled = run_recording_session(config^, root)
     assert_equal(
