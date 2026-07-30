@@ -72,13 +72,21 @@ class NativeCheckCommandTests(unittest.TestCase):
             EXPECTED_WARNING_FLAGS,
         )
 
-    def test_curated_warning_inventory_rejects_removal_and_addition(self) -> None:
+    def test_curated_warning_inventory_rejects_weakening_mutations(self) -> None:
         original = native_abi.STRICT_FLAGS_FILE.read_text(encoding="utf-8")
         mutations = (
-            original.replace("-Wextra\n", "", 1),
-            original.replace("-Wextra\n", "-Wextra\n-Wunknown-warning\n", 1),
+            (
+                original.replace("-Wextra\n", "", 1),
+                "curated warning flags differ",
+            ),
+            (
+                original.replace("-Wextra\n", "-Wextra\n-Wunknown-warning\n", 1),
+                "curated warning flags differ",
+            ),
+            (original + "-w\n", "forbidden global warning suppression"),
+            (original + "--no-warnings\n", "forbidden global warning suppression"),
         )
-        for index, text in enumerate(mutations):
+        for index, (text, message) in enumerate(mutations):
             with tempfile.TemporaryDirectory(
                 prefix=f"mtest-warning-flags-{index}-"
             ) as raw_tmp:
@@ -86,12 +94,39 @@ class NativeCheckCommandTests(unittest.TestCase):
                 inventory.write_text(text, encoding="utf-8")
                 with (
                     self.subTest(mutation=index),
-                    self.assertRaisesRegex(
-                        SystemExit,
-                        "curated warning flags differ",
-                    ),
+                    self.assertRaisesRegex(SystemExit, message),
                 ):
                     native_abi.load_strict_flags(inventory)
+
+    def test_shell_reader_rejects_global_warning_suppression(self) -> None:
+        source = native_abi.STRICT_FLAGS_FILE.read_text(encoding="utf-8")
+        build_script = native_build.ROOT / "scripts" / "build" / "production_build.sh"
+        for suppressor in ("-w", "--no-warnings"):
+            with tempfile.TemporaryDirectory(
+                prefix="mtest-shell-warning-flags-"
+            ) as raw_tmp:
+                inventory = Path(raw_tmp) / "native_strict_flags.txt"
+                inventory.write_text(source + suppressor + "\n", encoding="utf-8")
+                completed = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; flags_file="$2"; read_strict_flags',
+                        "warning-policy-test",
+                        str(build_script),
+                        str(inventory),
+                    ],
+                    cwd=native_build.ROOT,
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                )
+                with self.subTest(suppressor=suppressor):
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertIn(
+                        "forbidden global warning suppression",
+                        completed.stderr,
+                    )
 
     def test_linux_stack_check_names_every_protected_function(self) -> None:
         disassembly = """

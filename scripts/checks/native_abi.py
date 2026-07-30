@@ -134,6 +134,12 @@ def load_strict_flags(path: Path = STRICT_FLAGS_FILE) -> tuple[str, ...]:
         raise SystemExit(
             f"native-abi-check: forbidden weak flag -fstack-protector: {path}"
         )
+    suppressors = tuple(flag for flag in flags if flag in ("-w", "--no-warnings"))
+    if suppressors:
+        raise SystemExit(
+            "native-abi-check: forbidden global warning suppression "
+            f"{suppressors}: {path}"
+        )
     warning_flags = tuple(flag for flag in flags if flag.startswith("-W"))
     if warning_flags != CURATED_WARNING_FLAGS:
         missing = tuple(

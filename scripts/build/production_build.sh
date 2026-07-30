@@ -346,6 +346,9 @@ read_strict_flags() {
     elif [[ "$trimmed" == "-fstack-protector" ]]; then
       echo "production-build: forbidden weak stack-protector flag: $flags_file" >&2
       exit 1
+    elif [[ "$trimmed" == "-w" || "$trimmed" == "--no-warnings" ]]; then
+      echo "production-build: forbidden global warning suppression: $trimmed: $flags_file" >&2
+      exit 1
     fi
     STRICT_FLAGS+=("$trimmed")
   done <"$flags_file"
